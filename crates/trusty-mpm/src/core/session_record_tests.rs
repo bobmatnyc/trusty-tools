@@ -199,3 +199,62 @@ fn two_kinds_do_not_collide() {
         Some("/tmp/s.jsonl")
     );
 }
+
+/// Why (#7278): the pm-guard cost evaluator DERIVES a subagent transcript path
+/// and so screens a `Path`, not a `&str`. Both entry points must reach the same
+/// verdict, or the guard and the statusline would disagree about the same file.
+/// Test: itself.
+#[test]
+fn screens_a_path_valued_candidate_the_same_way() {
+    let config = tempfile::tempdir().expect("temp dir");
+    let outside_dir = tempfile::tempdir().expect("temp dir");
+
+    let inside = config.path().join("in.jsonl");
+    std::fs::write(&inside, "{}\n").expect("write");
+    let outside = outside_dir.path().join("out.jsonl");
+    std::fs::write(&outside, "{}\n").expect("write");
+
+    for candidate in [&inside, &outside] {
+        assert_eq!(
+            contained_transcript_file(config.path(), candidate),
+            contained_transcript_path(config.path(), &candidate.to_string_lossy()),
+            "the two entry points must agree on {}",
+            candidate.display()
+        );
+    }
+    assert!(contained_transcript_file(config.path(), &inside).is_some());
+    assert_eq!(contained_transcript_file(config.path(), &outside), None);
+}
+
+/// Why (#7290): `FrameworkPaths::home_base()` falls back to `"."` when there is
+/// no home directory, and `FrameworkPaths::default()` inherits that fallback —
+/// so a containment boundary built from either canonicalizes to the process's
+/// working directory and silently re-scopes to `<cwd>/.claude` instead of
+/// refusing. That is not a property a unit test can observe without mutating
+/// the process's environment, which corrupts every sibling test in the binary.
+/// Reading the source of the module that OWNS the screen is what makes the rule
+/// mechanical instead of a comment nobody rereads.
+/// Test: itself.
+#[test]
+fn the_containment_screen_never_leans_on_frameworkpaths_default() {
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/core/session_record.rs"
+    ))
+    .expect("read this module's own source");
+    // The doc comment on `claude_config_dir` names both, explaining why they
+    // are refused — so only CALLS count, not the prose.
+    for banned in ["FrameworkPaths::default()", "FrameworkPaths::home_base()"] {
+        assert!(
+            !source
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .any(|l| l.contains(banned)),
+            "{banned} must never back the containment boundary (#7290)"
+        );
+    }
+    assert!(
+        source.contains("FrameworkPaths::under") && source.contains("dirs::home_dir()?"),
+        "the boundary resolver must take an explicit, fallible home directory"
+    );
+}

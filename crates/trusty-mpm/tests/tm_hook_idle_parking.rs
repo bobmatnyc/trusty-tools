@@ -19,12 +19,18 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 /// Run `tm hook` with the given stdin JSON, returning `(exit_ok, stderr)`.
-fn run_hook(stdin_json: &str) -> (bool, String) {
+///
+/// #7278: `config_dir` becomes the child's `CLAUDE_CONFIG_DIR`, which is the
+/// boundary the parking detector screens `transcript_path` against. Set on the
+/// spawned process, never on this one — a `std::env::set_var` here would leak
+/// into every other test in the binary.
+fn run_hook_in(stdin_json: &str, config_dir: &std::path::Path) -> (bool, String) {
     let bin = env!("CARGO_BIN_EXE_tm");
     let mut child = Command::new(bin)
         .args(["--url", "http://127.0.0.1:1", "hook"])
         .env_remove("TRUSTY_MPM_DISABLE_HOOKS")
         .env_remove("CLAUDE_MPM_SUB_AGENT")
+        .env("CLAUDE_CONFIG_DIR", config_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -63,12 +69,16 @@ fn run_hook(stdin_json: &str) -> (bool, String) {
 /// than looping.
 /// Test: used by `hook_flags_idle_parking_final_message_on_subagent_stop` and
 /// `hook_flags_idle_parking_on_main_stop`.
-fn run_hook_until_stderr_contains(stdin_json: &str, want: &str) -> String {
+fn run_hook_until_stderr_contains(
+    stdin_json: &str,
+    config_dir: &std::path::Path,
+    want: &str,
+) -> String {
     const DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
     let start = std::time::Instant::now();
     let mut attempts = 0usize;
     loop {
-        let (ok, stderr) = run_hook(stdin_json);
+        let (ok, stderr) = run_hook_in(stdin_json, config_dir);
         attempts += 1;
         assert!(
             ok,
@@ -86,17 +96,30 @@ fn run_hook_until_stderr_contains(stdin_json: &str, want: &str) -> String {
     }
 }
 
-/// Write a single-line JSONL transcript with one assistant message and return
-/// the temp file (kept alive by the caller so the path stays valid).
-fn transcript_with_assistant(text: &str) -> tempfile::NamedTempFile {
-    let mut f = tempfile::NamedTempFile::new().expect("create temp transcript");
+/// A directory standing in for `CLAUDE_CONFIG_DIR`, holding one transcript.
+///
+/// #7278: the detector refuses any `transcript_path` that does not canonicalize
+/// under the config directory, so the fixture has to be a DIRECTORY the child
+/// can be pointed at rather than a bare `NamedTempFile` in the system temp
+/// root. The returned `TempDir` keeps both alive.
+struct ConfigFixture {
+    dir: tempfile::TempDir,
+    transcript: std::path::PathBuf,
+}
+
+/// Write a single-line JSONL transcript with one assistant message into a fresh
+/// config-directory fixture.
+fn transcript_with_assistant(text: &str) -> ConfigFixture {
+    let dir = tempfile::tempdir().expect("create temp config dir");
+    let transcript = dir.path().join("session-2610.jsonl");
+    let mut f = std::fs::File::create(&transcript).expect("create temp transcript");
     let line = serde_json::json!({
         "type": "assistant",
         "message": { "content": [{ "type": "text", "text": text }] }
     });
     writeln!(f, "{line}").expect("write transcript line");
     f.flush().expect("flush transcript");
-    f
+    ConfigFixture { dir, transcript }
 }
 
 fn payload(event: &str, transcript_path: &std::path::Path) -> String {
@@ -116,7 +139,8 @@ fn hook_flags_idle_parking_final_message_on_subagent_stop() {
     // #6161: poll for the warning rather than racing the hook's fail-open
     // internal timeouts — see `run_hook_until_stderr_contains`.
     let stderr = run_hook_until_stderr_contains(
-        &payload("SubagentStop", tf.path()),
+        &payload("SubagentStop", &tf.transcript),
+        tf.dir.path(),
         "IDLE-PARKING WARNING (#2610)",
     );
     assert!(
@@ -129,8 +153,11 @@ fn hook_flags_idle_parking_final_message_on_subagent_stop() {
 fn hook_flags_idle_parking_on_main_stop() {
     let tf = transcript_with_assistant("Standing by for the CI run to complete.");
     // #6161: same fail-open-timeout race as the SubagentStop case above.
-    let _stderr =
-        run_hook_until_stderr_contains(&payload("Stop", tf.path()), "IDLE-PARKING WARNING (#2610)");
+    let _stderr = run_hook_until_stderr_contains(
+        &payload("Stop", &tf.transcript),
+        tf.dir.path(),
+        "IDLE-PARKING WARNING (#2610)",
+    );
 }
 
 #[test]
@@ -138,7 +165,7 @@ fn hook_stays_silent_for_clean_final_message() {
     let tf = transcript_with_assistant(
         "I ran `gh pr checks 2606 --watch --fail-fast` in the foreground; all checks passed. Done.",
     );
-    let (ok, stderr) = run_hook(&payload("SubagentStop", tf.path()));
+    let (ok, stderr) = run_hook_in(&payload("SubagentStop", &tf.transcript), tf.dir.path());
 
     assert!(ok, "hook must exit 0, stderr={stderr}");
     assert!(
@@ -152,12 +179,36 @@ fn hook_does_not_scan_non_turn_end_events() {
     // A PreToolUse/PostToolUse event must never trigger the transcript scan,
     // even if the transcript happens to contain parking language.
     let tf = transcript_with_assistant("standing by for the monitor to report back");
-    let (ok, stderr) = run_hook(&payload("PostToolUse", tf.path()));
+    let (ok, stderr) = run_hook_in(&payload("PostToolUse", &tf.transcript), tf.dir.path());
 
     assert!(ok, "hook must exit 0, stderr={stderr}");
     assert!(
         !stderr.contains("IDLE-PARKING WARNING"),
         "non-turn-end event must not scan for parking, got: {stderr:?}"
+    );
+}
+
+/// #7278: end to end, through the real binary and the real
+/// `CLAUDE_CONFIG_DIR` resolver — a transcript full of parking language that
+/// sits OUTSIDE the config directory is never opened, so no warning appears.
+///
+/// The paired positive case is `hook_flags_idle_parking_final_message_on_
+/// subagent_stop`, which uses the identical fixture text and DOES warn; without
+/// that contrast a silent run here would also be satisfied by a detector that
+/// simply stopped working. A single `run_hook_in` (not the polling helper) is
+/// correct because a negative cannot be polled for.
+#[test]
+fn hook_refuses_a_transcript_outside_the_config_dir() {
+    let tf = transcript_with_assistant(
+        "I've started a background polling monitor for the checks and will report back once green.",
+    );
+    let elsewhere = tempfile::tempdir().expect("create temp config dir");
+    let (ok, stderr) = run_hook_in(&payload("SubagentStop", &tf.transcript), elsewhere.path());
+
+    assert!(ok, "hook must exit 0 (fail-open), stderr={stderr}");
+    assert!(
+        !stderr.contains("IDLE-PARKING WARNING"),
+        "a transcript outside CLAUDE_CONFIG_DIR must never be read, got: {stderr:?}"
     );
 }
 
@@ -195,6 +246,11 @@ fn rejects_fifo_without_blocking() {
         .args(["--url", "http://127.0.0.1:1", "hook"])
         .env_remove("TRUSTY_MPM_DISABLE_HOOKS")
         .env_remove("CLAUDE_MPM_SUB_AGENT")
+        // #7278: the FIFO sits INSIDE the config directory, so the containment
+        // screen accepts it and the `stat`-before-`open` guard is what this
+        // test still exercises. Pointing elsewhere would make the screen refuse
+        // first and the FIFO guard would go untested.
+        .env("CLAUDE_CONFIG_DIR", dir.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

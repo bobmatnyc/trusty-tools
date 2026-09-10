@@ -818,7 +818,11 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
     // a missing usage record, or a disabled config all reach `Ok`.
     if caller_is_subagent {
         let cost_config = MpmConfig::load_default().agent_cost;
-        let (status, tokens) = pm_guard_cost::evaluate_agent_cost(&payload, &cost_config).await;
+        let cost = pm_guard_cost::evaluate_agent_cost(&payload, &cost_config).await;
+        // #7278: allowing without measuring stays correct, but must not read
+        // as a healthy agent at 0 tokens.
+        pm_guard_cost::warn_if_transcript_refused(session_id, &cost);
+        let (status, tokens) = (cost.status, cost.tokens);
         match status {
             // The stop keeps a narrow allowlist open so a stopped agent can
             // still save and report what it has — see

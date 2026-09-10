@@ -26,6 +26,14 @@
 //! same attacker-influenceable payload: [`is_safe_session_id`] the file NAME,
 //! [`contained_transcript_path`] the value (#7250).
 //!
+//! #7278 widened that second screen past this module's own writer. Every `tm`
+//! entry point that opens a `transcript_path` taken from a hook payload — the
+//! statusline recorder here, the Stop-hook parking detector, and the pm-guard
+//! cost evaluator — routes through [`contained_transcript_path`] /
+//! [`contained_transcript_file`], and resolves the boundary it screens against
+//! through [`claude_config_dir`]. One screen and one boundary resolver, because
+//! a second copy of either is what drifts.
+//!
 //! Test: the inline suite in `session_record_tests.rs` —
 //! `a_recorded_value_reads_back`, `rejects_a_path_traversal_session_id`,
 //! `an_unchanged_value_leaves_the_file_untouched`,
@@ -33,7 +41,8 @@
 //! `rejects_a_transcript_path_outside_the_config_dir`,
 //! `rejects_a_traversing_transcript_path`,
 //! `rejects_a_symlink_under_the_config_dir_aimed_outside_it`,
-//! `accepts_a_transcript_path_under_the_config_dir`.
+//! `accepts_a_transcript_path_under_the_config_dir`,
+//! `the_containment_screen_never_leans_on_frameworkpaths_default`.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -92,25 +101,46 @@ pub fn contained_transcript_path(
     if raw.is_empty() {
         return None;
     }
-    let raw = Path::new(raw);
-    if !raw.is_absolute() || raw.components().any(|c| c == Component::ParentDir) {
+    contained_transcript_file(claude_config_dir, Path::new(raw))
+}
+
+/// [`contained_transcript_path`] for a candidate already held as a [`Path`].
+///
+/// Why (#7278): the pm-guard cost evaluator DERIVES a subagent transcript path
+/// (`<dir>/<parent-stem>/subagents/agent-<id>.jsonl`) rather than reading one
+/// field verbatim, so it holds a `PathBuf` and not a `&str`. Round-tripping
+/// that through `to_str()` would drop a non-UTF-8 path on the floor at the
+/// screen instead of at the read — a silently different answer — and a second
+/// copy of the containment rule to avoid the round trip is exactly what the
+/// common-entry-point rule forbids. This is the one implementation; the `&str`
+/// entry point above trims and delegates here.
+/// What: the checks [`contained_transcript_path`] documents — absolute, no
+/// `..` component, canonicalizes under the canonicalized `claude_config_dir` —
+/// returning the CANONICAL path so the caller opens the file that was checked.
+/// Test: `rejects_a_transcript_path_outside_the_config_dir`,
+/// `rejects_a_traversing_transcript_path`,
+/// `rejects_a_symlink_under_the_config_dir_aimed_outside_it`,
+/// `accepts_a_transcript_path_under_the_config_dir`,
+/// `screens_a_path_valued_candidate_the_same_way`.
+pub fn contained_transcript_file(claude_config_dir: &Path, candidate: &Path) -> Option<PathBuf> {
+    if !candidate.is_absolute() || candidate.components().any(|c| c == Component::ParentDir) {
         tracing::debug!(
-            path = %raw.display(),
-            "statusline transcript_path is relative or traverses; not recorded"
+            path = %candidate.display(),
+            "transcript_path is relative or traverses; refused"
         );
         return None;
     }
     let Ok(root) = claude_config_dir.canonicalize() else {
         tracing::debug!(
             dir = %claude_config_dir.display(),
-            "Claude config directory does not resolve; transcript_path not recorded"
+            "Claude config directory does not resolve; transcript_path refused"
         );
         return None;
     };
-    let Ok(canonical) = raw.canonicalize() else {
+    let Ok(canonical) = candidate.canonicalize() else {
         tracing::debug!(
-            path = %raw.display(),
-            "statusline transcript_path does not resolve; not recorded"
+            path = %candidate.display(),
+            "transcript_path does not resolve; refused"
         );
         return None;
     };
@@ -118,11 +148,46 @@ pub fn contained_transcript_path(
         tracing::debug!(
             path = %canonical.display(),
             dir = %root.display(),
-            "statusline transcript_path resolves outside the Claude config directory; not recorded"
+            "transcript_path resolves outside the Claude config directory; refused"
         );
         return None;
     }
     Some(canonical)
+}
+
+/// The Claude config directory a payload's `transcript_path` must sit under.
+///
+/// Why (#7250, widened #7278): the boundary every containment screen in this
+/// module compares against. `CLAUDE_CONFIG_DIR` relocates it for every
+/// daemon-managed `tm` session, so a resolver that only knew `~/.claude` would
+/// refuse every legitimate managed transcript. Three call sites need this
+/// answer — the statusline recorder, the Stop-hook parking detector, and the
+/// pm-guard cost evaluator — and three copies of the fallback chain would
+/// drift apart; this is the one copy.
+///
+/// Why not [`FrameworkPaths::default`](crate::core::paths::FrameworkPaths::default)
+/// (#7290): with no home directory it resolves against `"."`, which
+/// canonicalizes to the process's working directory, so containment would
+/// silently re-scope to whatever `<cwd>/.claude` happens to be instead of
+/// refusing. A boundary that moves with the caller's cwd is not a boundary.
+/// [`FrameworkPaths::under`](crate::core::paths::FrameworkPaths::under) over an
+/// explicit `dirs::home_dir()?` is what makes "no home" a `None` the caller
+/// must handle.
+/// What: `CLAUDE_CONFIG_DIR` when set and non-blank, else `~/.claude` via
+/// `FrameworkPaths::under(dirs::home_dir()?).claude_home_dir()`. `None` when
+/// neither resolves, and every caller then refuses the path outright — that is
+/// what makes the screen fail closed.
+/// Test: `the_containment_screen_never_leans_on_frameworkpaths_default` pins
+/// the #7290 rule this resolver exists to keep; the `~/.claude` fallback shape
+/// has its own coverage in `claude_home_dir_matches_default_home`. The env-var
+/// branch is exercised end to end by `tm_hook_idle_parking`, which points
+/// `CLAUDE_CONFIG_DIR` at its fixture directory rather than mutating this
+/// process's environment.
+pub fn claude_config_dir() -> Option<PathBuf> {
+    match std::env::var_os("CLAUDE_CONFIG_DIR") {
+        Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir)),
+        _ => Some(crate::core::paths::FrameworkPaths::under(dirs::home_dir()?).claude_home_dir()),
+    }
 }
 
 /// The record's path under an explicit framework root.
