@@ -321,12 +321,16 @@ and keeps bundled in that same worktree and PR.
 worktree only once its result is accepted for implementation.
 
 🔴 **A file-mutating subagent dispatch declares `isolation: "worktree"`. That is
-the only sanctioned mechanism, and the PM never authors a `git worktree add` into
-a dispatch prompt (#5649).** The harness provisions the tree and puts the agent
-in it. A hand-rolled worktree is invisible to `tm hook --pm-guard`, which reads
-the declared `isolation` parameter and never the prompt — so an agent that made
-its own tree still counts as occupying the shared HEAD, and the next
-file-mutating dispatch is denied for a collision that does not exist.
+the only sanctioned mechanism, and the PM never tells the agent to hand-roll one
+— not a literal `git worktree add`, and not prose like "work in a worktree of
+your own" (#5649).** The harness provisions the tree and puts the agent in it. A
+hand-rolled worktree is invisible to `tm hook --pm-guard`, which reads the
+declared `isolation` parameter and never the prompt — so an agent that made its
+own tree still counts as occupying the shared HEAD, and the next file-mutating
+dispatch is denied for a collision that does not exist. The prose form recurred
+in a different project on 2026-09-09, after the literal-command form was fixed
+here — the guard cannot see either phrasing, so both are banned, regardless of
+wording.
 
 **When `isolation` is unavailable, the PM serializes.** Dispatch one
 file-mutating agent, wait for it, dispatch the next. Serializing is always
