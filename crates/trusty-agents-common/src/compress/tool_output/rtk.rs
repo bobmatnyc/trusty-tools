@@ -3,9 +3,16 @@
 //! Why: When the user has installed RTK (https://github.com/rtk-ai/rtk),
 //! delegating to it gets us the upstream implementation for free. When `rtk`
 //! is absent we fall back to the native filter chain.
-//! What: `compress_via_rtk` (subprocess), `which` (PATH probe), and the
+//! What: `compress_via_rtk` (resolves the binary through
+//! `trusty_common::bin_resolve`), `compress_via_rtk_binary` (the spawn),
+//! `rtk_pipe_argv` / `rtk_filter_for` (the `rtk pipe` invocation), and the
 //! `compress_tool_output_async` wrapper that prefers RTK then falls back.
+//!
+//! We invoke `rtk pipe`, never a subcommand: `rtk git status` EXECUTES
+//! `git status` and returns its output, discarding stdin. This module's input
+//! is output that was already captured, so only `pipe` mode is correct.
 //! Test: `compress_via_rtk_returns_none_when_binary_absent`,
+//! `rtk_pipe_argv_never_carries_the_tool_name`,
 //! `compress_tool_output_async_falls_back_when_rtk_absent` in `tool_output::tests`.
 
 use super::compress_tool_output;
@@ -46,29 +53,143 @@ impl CompressionPath {
     }
 }
 
+/// The filter names `rtk pipe -f` accepts, as of **rtk 0.48.0**.
+///
+/// Why: `rtk pipe` rejects an unrecognised `-f` name with exit 1 and no
+/// output, so the mapping must only ever emit a name from this list. The
+/// list is pinned to a version because it is rtk's, not ours: when rtk adds
+/// or renames a filter this constant goes stale silently, and a stale entry
+/// costs a hard failure rather than a missed optimisation.
+/// What: Read verbatim from `rtk pipe -f <unknown>`, which prints the full
+/// set it accepts. Re-read it after an rtk upgrade.
+/// Test: `every_pinned_filter_round_trips_from_its_spaced_form`.
+pub(super) const RTK_PIPE_FILTERS: &[&str] = &[
+    "cargo-test",
+    "pytest",
+    "go-test",
+    "go-build",
+    "ctest",
+    "tsc",
+    "vitest",
+    "grep",
+    "rg",
+    "find",
+    "fd",
+    "git-log",
+    "git-diff",
+    "git-status",
+    "log",
+    "mypy",
+    "ruff-check",
+    "ruff-format",
+    "prettier",
+    "phpunit",
+    "pest",
+    "paratest",
+    "php-test",
+    "ecs",
+    "phpstan",
+    "pint",
+];
+
+/// Longest run of leading words considered when matching a filter name.
+///
+/// Why: Every name in [`RTK_PIPE_FILTERS`] is one or two segments; three
+/// leaves headroom without letting a long command line match by accident.
+const MAX_FILTER_WORDS: usize = 3;
+
+/// Pick the `rtk pipe -f` filter for a tool name, if one applies.
+///
+/// Why: A tool name here is a whole command line (`"cargo test -p foo"`).
+/// Naming the matching filter lets rtk apply the right one instead of its
+/// generic default, and returning `None` for anything unrecognised keeps an
+/// invalid `-f` — which rtk rejects with exit 1 — unreachable.
+/// What: Joins the leading words with hyphens, longest run first, and takes
+/// the first exact match in [`RTK_PIPE_FILTERS`]. `"cargo test -p foo"` tries
+/// `cargo-test-p`, then `cargo-test` (a hit). Unrecognised yields `None`.
+/// Test: `rtk_filter_for_maps_known_tool_names`,
+/// `every_pinned_filter_round_trips_from_its_spaced_form`.
+pub(super) fn rtk_filter_for(tool_name: &str) -> Option<&'static str> {
+    let words: Vec<&str> = tool_name.split_whitespace().collect();
+    for take in (1..=words.len().min(MAX_FILTER_WORDS)).rev() {
+        let candidate = words[..take].join("-");
+        if let Some(hit) = RTK_PIPE_FILTERS.iter().find(|f| **f == candidate) {
+            return Some(hit);
+        }
+    }
+    None
+}
+
+/// Build the argv that runs `rtk` in stdin-filter mode.
+///
+/// Why: Every rtk subcommand other than `pipe` RUNS the named tool —
+/// `rtk git status` executes `git status` and prints its output, discarding
+/// whatever was piped in. This function receives output that has ALREADY been
+/// captured, so a subcommand invocation would both re-run the tool and return
+/// output unrelated to its input. `rtk pipe` is the one mode that reads stdin
+/// and filters it.
+/// What: `["pipe", "-f", <filter>]` when [`rtk_filter_for`] matches, else
+/// `["pipe"]`. The `&'static str` return makes it impossible for any part of
+/// `tool_name` to reach argv verbatim — every element is a compile-time
+/// constant.
+/// Test: `rtk_pipe_argv_never_carries_the_tool_name`,
+/// `rtk_pipe_argv_falls_back_to_bare_pipe_for_an_unknown_tool`.
+pub(super) fn rtk_pipe_argv(tool_name: &str) -> Vec<&'static str> {
+    match rtk_filter_for(tool_name) {
+        Some(filter) => vec!["pipe", "-f", filter],
+        None => vec!["pipe"],
+    }
+}
+
 /// Pipe `output` through the `rtk` CLI subprocess if installed.
 ///
 /// Why: When the user has installed RTK (https://github.com/rtk-ai/rtk),
 /// delegating to it gets us the upstream implementation for free, with
 /// updates from the source project. When `rtk` is not on `PATH` we fall
 /// back to the native filter.
-/// What: Spawns `rtk <tool_name>`, writes `output` to stdin, returns stdout.
-/// Returns `None` on any failure (missing binary, non-zero exit, stdin/stdout
-/// IO error, decode error) so the caller can fall back gracefully.
-/// Test: Covered by integration tests when `rtk` is available; unit tests
-/// only verify the `None` path when the binary is absent.
+/// What: Resolves `rtk` through `trusty_common::bin_resolve::resolve_binary`
+/// (the one binary resolver, so a launchd-spawned daemon with a minimal
+/// `PATH` still finds a Homebrew `rtk`), then delegates to
+/// [`compress_via_rtk_binary`]. An absent binary is a `debug` event — the
+/// common, expected case — while a binary that runs and fails is a `warn`.
+/// Test: `compress_via_rtk_returns_none_when_binary_absent`.
 pub async fn compress_via_rtk(tool_name: &str, output: &str) -> Option<String> {
+    // See CLAUDE.md "Common entry point": trusty-common owns binary resolution.
+    let Some(bin) = trusty_common::bin_resolve::resolve_binary("rtk") else {
+        tracing::debug!(tool = tool_name, "rtk not on PATH; using native fallback");
+        return None;
+    };
+    compress_via_rtk_binary(&bin, tool_name, output).await
+}
+
+/// Run one already-resolved `rtk` binary over `output`.
+///
+/// Why: Taking the binary as a parameter lets a test point this at a shim
+/// script that records its argv, proving the invocation shape without needing
+/// the real `rtk` on `PATH`.
+/// What: Spawns `<bin> pipe [-f <filter>]` per [`rtk_pipe_argv`], writes
+/// `output` to stdin, returns stdout. Returns `None` on any failure (spawn,
+/// non-zero exit, stdin/stdout IO error, decode error) so the caller falls
+/// back gracefully; a non-zero exit logs a `warn` carrying the status and the
+/// head of stderr rather than failing silently.
+/// Test: `rtk_binary_receives_the_pipe_invocation`,
+/// `rtk_binary_returns_none_and_warns_on_non_zero_exit`.
+pub(super) async fn compress_via_rtk_binary(
+    bin: &std::path::Path,
+    tool_name: &str,
+    output: &str,
+) -> Option<String> {
     use tokio::io::AsyncWriteExt;
     use tokio::process::Command;
 
-    // Quick existence check — if `rtk` is not on PATH, skip without spawning.
-    which("rtk")?;
+    // See: every rtk subcommand but `pipe` RUNS the named tool
+    let argv = rtk_pipe_argv(tool_name);
 
-    let mut child = Command::new("rtk")
-        .arg(tool_name)
+    let mut child = Command::new(bin)
+        .args(&argv)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .ok()?;
 
@@ -80,33 +201,35 @@ pub async fn compress_via_rtk(tool_name: &str, output: &str) -> Option<String> {
 
     let out = child.wait_with_output().await.ok()?;
     if !out.status.success() {
+        tracing::warn!(
+            tool = tool_name,
+            argv = ?argv,
+            status = %out.status,
+            stderr = %stderr_head(&out.stderr),
+            "rtk exited non-zero; falling back to native compression"
+        );
         return None;
     }
     String::from_utf8(out.stdout).ok()
 }
 
-/// Look up an executable on `PATH`. Returns the absolute path if found.
+/// First line of a subprocess's stderr, truncated for a log field.
 ///
-/// Why: Avoids depending on the `which` crate while letting us short-circuit
-/// when the binary is absent.
-/// What: Splits `$PATH` (or `;`-separated on Windows), checks `dir/name`
-/// (and `name.exe` on Windows). Returns the first existing match.
-fn which(name: &str) -> Option<std::path::PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let candidate = dir.join(name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        #[cfg(windows)]
-        {
-            let with_ext = dir.join(format!("{name}.exe"));
-            if with_ext.is_file() {
-                return Some(with_ext);
-            }
-        }
+/// Why: A failing `rtk` can emit an arbitrary amount of stderr; a log field
+/// carrying all of it is worse than one carrying the part that names the
+/// failure.
+/// What: Lossy-decodes, takes the first non-empty line, and truncates it to
+/// 200 bytes on a character boundary.
+/// Test: `stderr_head_takes_the_first_line_and_truncates`.
+pub(super) fn stderr_head(stderr: &[u8]) -> String {
+    const MAX: usize = 200;
+    let text = String::from_utf8_lossy(stderr);
+    let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let mut end = line.len().min(MAX);
+    while end > 0 && !line.is_char_boundary(end) {
+        end -= 1;
     }
-    None
+    line[..end].to_string()
 }
 
 /// Compress a tool's output, trying the RTK subprocess first and falling

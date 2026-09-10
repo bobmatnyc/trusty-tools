@@ -509,7 +509,7 @@ async fn compress_via_rtk_returns_none_when_binary_absent() {
 
 #[tokio::test]
 async fn compress_tool_output_async_falls_back_when_rtk_absent() {
-    // Force-bypass rtk by checking which() with a name guaranteed to not
+    // Force-bypass rtk by resolving a name guaranteed to not
     // exist; we test the integration via the public async wrapper.
     let mut input = String::new();
     for i in 0..10 {
@@ -519,6 +519,189 @@ async fn compress_tool_output_async_falls_back_when_rtk_absent() {
     let out = compress_tool_output_async("cargo_test", &input).await;
     // Whether rtk ran or native fallback ran, the summary must be retained.
     assert!(out.contains("test result"));
+}
+
+// ── RTK argv split ──────────────────────────────────────────────────────
+
+use super::rtk::{compress_via_rtk_binary, rtk_filter_for, rtk_pipe_argv, stderr_head};
+
+/// Write an executable `/bin/sh` shim into `dir` and return its path.
+///
+/// Why: The argv the `rtk` process actually receives is only observable from
+/// inside that process; a shim that echoes its own arguments makes it
+/// observable without needing the real `rtk` on `PATH`.
+/// What: Writes `body` to `<dir>/fake-rtk`, chmods it 0755, returns the path.
+#[cfg(unix)]
+fn write_rtk_shim(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("fake-rtk");
+    std::fs::write(&path, body).expect("write shim");
+    let mut perms = std::fs::metadata(&path).expect("stat shim").permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).expect("chmod shim");
+    path
+}
+
+#[test]
+fn rtk_pipe_argv_never_carries_the_tool_name() {
+    // Every rtk subcommand but `pipe` RUNS the named tool: `rtk git status`
+    // would execute `git status` and return its output instead of filtering
+    // the output we captured. Nothing from the tool name may reach argv as an
+    // executable position.
+    let argv = rtk_pipe_argv("git status");
+    assert_eq!(argv[0], "pipe");
+    assert!(
+        !argv.contains(&"git"),
+        "`git` must never reach argv: {argv:?}"
+    );
+    assert!(
+        !argv.contains(&"status"),
+        "`status` must never reach argv: {argv:?}"
+    );
+    assert_eq!(argv, vec!["pipe", "-f", "git-status"]);
+}
+
+#[test]
+fn rtk_pipe_argv_is_always_pipe_mode_with_a_vetted_filter() {
+    // The general invariant behind the case above: argv[0] is always `pipe`,
+    // and the only other elements are `-f` and a name rtk itself accepts.
+    for tool in [
+        "git status",
+        "cargo test -p trusty-agents-common",
+        "rm -rf /",
+        "kubectl get pods",
+        "",
+    ] {
+        let argv = rtk_pipe_argv(tool);
+        assert_eq!(argv[0], "pipe", "tool {tool:?} left pipe mode");
+        for element in &argv[1..] {
+            assert!(
+                *element == "-f" || rtk_filter_for(&element.replace('-', " ")).is_some(),
+                "tool {tool:?} put an unvetted element {element:?} in argv"
+            );
+        }
+    }
+}
+
+#[test]
+fn rtk_pipe_argv_falls_back_to_bare_pipe_for_an_unknown_tool() {
+    // rtk exits 1 on an unrecognised `-f`, so an unknown tool must omit it.
+    assert_eq!(rtk_pipe_argv("kubectl get pods"), vec!["pipe"]);
+    assert_eq!(rtk_pipe_argv(""), vec!["pipe"]);
+}
+
+#[test]
+fn rtk_filter_for_maps_known_tool_names() {
+    for (tool, expected) in [
+        ("cargo test", Some("cargo-test")),
+        ("cargo test -p trusty-agents-common", Some("cargo-test")),
+        ("git status", Some("git-status")),
+        ("git log --oneline -20", Some("git-log")),
+        ("git diff", Some("git-diff")),
+        ("go test ./...", Some("go-test")),
+        ("ruff check", Some("ruff-check")),
+        ("pytest", Some("pytest")),
+        ("grep -n needle src", Some("grep")),
+        ("tsc --noEmit", Some("tsc")),
+        // `git` alone is not a filter rtk accepts — only the two-word forms.
+        ("git", None),
+        ("kubectl get pods", None),
+        ("", None),
+    ] {
+        assert_eq!(rtk_filter_for(tool), expected, "tool name {tool:?}");
+    }
+}
+
+#[test]
+fn every_pinned_filter_round_trips_from_its_spaced_form() {
+    // Pins the whole rtk 0.48.0 list: each name, written the way a tool name
+    // spells it (spaces for hyphens), must map back to itself.
+    for filter in super::rtk::RTK_PIPE_FILTERS {
+        let spaced = filter.replace('-', " ");
+        assert_eq!(
+            rtk_filter_for(&spaced),
+            Some(*filter),
+            "filter {filter:?} did not round-trip from {spaced:?}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn rtk_binary_receives_the_pipe_invocation() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shim = write_rtk_shim(
+        dir.path(),
+        "#!/bin/sh\nfor a in \"$@\"; do echo \"arg=$a\"; done\ncat >/dev/null\n",
+    );
+    let out = compress_via_rtk_binary(&shim, "git status", "payload\n")
+        .await
+        .expect("shim exits zero, so the rtk path must be taken");
+    // One line per argv element. A subcommand invocation would print
+    // `arg=git` and `arg=status` here and would have RUN git status.
+    assert_eq!(out, "arg=pipe\narg=-f\narg=git-status\n");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn rtk_binary_omits_the_filter_flag_for_an_unknown_tool() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shim = write_rtk_shim(
+        dir.path(),
+        "#!/bin/sh\nfor a in \"$@\"; do echo \"arg=$a\"; done\ncat >/dev/null\n",
+    );
+    let out = compress_via_rtk_binary(&shim, "kubectl get pods", "payload\n")
+        .await
+        .expect("shim exits zero");
+    assert_eq!(out, "arg=pipe\n");
+}
+
+/// Round-trip a marker payload through the REAL `rtk`, when one is installed.
+///
+/// Why: Exit status alone cannot tell a filter that consumed our stdin from a
+/// subcommand that ignored it and ran a tool instead — that is exactly how the
+/// pre-fix invocation read as working. Asserting the marker survives is an
+/// output-correspondence check, which does distinguish them.
+/// What: Skips silently when `rtk` is absent. Otherwise pipes a marked payload
+/// through the public wrapper and requires both the marker back and
+/// `CompressionPath::RtkBinary`.
+#[tokio::test]
+async fn real_rtk_pipe_round_trips_a_marker_payload() {
+    if trusty_common::bin_resolve::resolve_binary("rtk").is_none() {
+        return;
+    }
+    const MARKER: &str = "RTK_PIPE_MARKER_8f3a";
+    let payload = format!("{MARKER}\nsecond line\nthird line\n");
+    // An unmapped tool name so rtk applies no filter and passes content through.
+    let (text, path) = compress_tool_output_async_with_path("kubectl get pods", &payload).await;
+    assert_eq!(
+        path,
+        CompressionPath::RtkBinary,
+        "rtk is installed, so the rtk path must have been taken; got {path:?}"
+    );
+    assert!(
+        text.contains(MARKER),
+        "rtk pipe must return OUR stdin, not another command's output; got {text:?}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn rtk_binary_returns_none_and_warns_on_non_zero_exit() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shim = write_rtk_shim(
+        dir.path(),
+        "#!/bin/sh\ncat >/dev/null\necho 'rtk: No such file or directory (os error 2)' >&2\nexit 127\n",
+    );
+    let out = compress_via_rtk_binary(&shim, "git status", "payload\n").await;
+    assert!(out.is_none(), "a non-zero rtk exit must fall back");
+}
+
+#[test]
+fn stderr_head_takes_the_first_line_and_truncates() {
+    assert_eq!(stderr_head(b"\n   \nrtk: boom\nsecond line\n"), "rtk: boom");
+    assert_eq!(stderr_head(b""), "");
+    assert_eq!(stderr_head(&vec![b'x'; 500]).len(), 200);
 }
 
 // ── CompressionPath (issue #1956 stats-logging signal) ──────────────────
