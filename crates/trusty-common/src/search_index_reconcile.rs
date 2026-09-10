@@ -41,6 +41,13 @@
 //! registration `NotConfirmed` exactly as it did before, and the extra list call
 //! carries the same ~1s cap as the create it follows.
 //!
+//! #7237 second round: a create the daemon never ANSWERS is a third case, told
+//! apart here as [`CreateOutcome::Unanswered`] and settled by
+//! [`super::confirm`]. A cold-parked index reloads inside the daemon's create
+//! handler, so the answer can arrive seconds after the client's budget elapsed —
+//! reading that silence as a refusal is what left a real session unpinned
+//! against an index that existed.
+//!
 //! Test: the `tests` module below, plus
 //! `registration_matches_an_existing_index_by_root_path` and
 //! `registration_falls_back_to_a_collision_resistant_id` in
@@ -54,6 +61,7 @@ use super::{
     registered_root_from_response,
 };
 use crate::search_rpc::{self, SearchRpcError};
+use crate::uds::UdsRpcError;
 
 /// Overall budget for the one registry read this recovery costs (#6864).
 const LIST_TIMEOUT: Duration = CREATE_TIMEOUT;
@@ -94,6 +102,13 @@ pub(super) enum CreateOutcome {
     Conflict { existing_id: Option<String> },
     /// Nothing was registered and nothing here can recover it.
     NotConfirmed,
+    /// The daemon never answered this call, so what it did is unknown (#7237).
+    ///
+    /// A timeout, a hang-up, or a read that failed part-way. It is NOT a
+    /// refusal: the request may well have been processed after the client's
+    /// budget elapsed, which is exactly what a cold-parked index's reload does.
+    /// [`super::confirm::confirm_after_no_answer`] is what settles it.
+    Unanswered,
 }
 
 /// Read one successful `search.index.create` reply as a [`CreateOutcome`].
@@ -141,19 +156,30 @@ pub(super) fn classify_create_result(
 /// the socket it is [`SearchRpcError::is_conflict`], and a transport failure
 /// carries no `SearchRpcError` at all.
 /// What: the conflict code yields `Conflict`, carrying whatever id
-/// [`existing_id_from_conflict`] can read out of the daemon's message; every
-/// other daemon refusal, and every transport or decode failure, yields
-/// `NotConfirmed`. Both are logged at warn and swallowed — this function never
-/// makes the call fallible.
+/// [`existing_id_from_conflict`] can read out of the daemon's message; a
+/// transport failure that leaves the request's fate unknown yields `Unanswered`
+/// (#7237, see [`create_left_unanswered`]); every other daemon refusal, and
+/// every decode failure, yields `NotConfirmed`. All are logged at warn and
+/// swallowed — this function never makes the call fallible.
 /// Test: `search_index_tests.rs::{a_daemon_refusal_is_not_a_registration,
 /// registration_matches_an_existing_index_by_root_path,
-/// create_rejected_by_the_daemon_withholds_the_pinnable_id}`.
+/// create_rejected_by_the_daemon_withholds_the_pinnable_id}`, plus
+/// `an_unanswered_create_is_not_a_refusal` below.
 pub(super) fn classify_create_failure(
     err: &anyhow::Error,
     index_id: &str,
     root_display: &str,
 ) -> CreateOutcome {
     let Some(refusal) = err.downcast_ref::<SearchRpcError>() else {
+        // #7237: a call the daemon never answered is not a call it refused.
+        if create_left_unanswered(err) {
+            tracing::warn!(
+                "trusty-search index registration for '{index_id}' at {root_display} went \
+                 unanswered ({err:#}); asking the registry whether the daemon registered it \
+                 anyway (#7237)"
+            );
+            return CreateOutcome::Unanswered;
+        }
         tracing::warn!("trusty-search index registration for '{index_id}' failed: {err:#}");
         return CreateOutcome::NotConfirmed;
     };
@@ -169,6 +195,35 @@ pub(super) fn classify_create_failure(
     }
     tracing::warn!("trusty-search index registration for '{index_id}' was refused: {refusal}");
     CreateOutcome::NotConfirmed
+}
+
+/// Did the create fail WITHOUT the daemon saying anything about it (#7237)?
+///
+/// Why: the split this fix turns on. A daemon that refuses says so, and the
+/// registration is over. A daemon that never answers has told us nothing — the
+/// live case is a create that waited behind a cold-parked index's 3.8 s reload
+/// and was registered 2.8 s after the client's one-second budget elapsed, so
+/// reading silence as refusal withheld the id for an index that existed.
+/// What: `true` for the three transport shapes that leave the request's fate
+/// unknown — [`UdsRpcError::Timeout`] (the client's own budget),
+/// [`UdsRpcError::NoResponse`] (the peer hung up), and [`UdsRpcError::Read`] (a
+/// read that failed after the frame was on its way). Everything else is `false`
+/// and stays `NotConfirmed`: a [`UdsRpcError::Dial`] means nothing was sent, and
+/// a [`UdsRpcError::Decode`] means the daemon answered with something this
+/// client cannot read — a reply, not a silence. `anyhow` searches the context
+/// chain, so the `with_context` `search_rpc::call_at` adds does not hide the
+/// variant.
+/// Test: `an_unanswered_create_is_not_a_refusal`,
+/// `a_dial_failure_is_not_an_unanswered_create`, plus
+/// `a_malformed_create_reply_is_not_a_registration` in `search_index_tests.rs`,
+/// which pins the decode arm end to end.
+fn create_left_unanswered(err: &anyhow::Error) -> bool {
+    matches!(
+        err.downcast_ref::<UdsRpcError>(),
+        Some(
+            UdsRpcError::Timeout { .. } | UdsRpcError::NoResponse { .. } | UdsRpcError::Read { .. }
+        )
+    )
 }
 
 /// Find-or-create `index_id` for `root`, resolving a basename collision to the
@@ -194,6 +249,14 @@ pub(super) fn create_and_reconcile(
     match best_effort_create_index(socket, index_id, root, opts) {
         CreateOutcome::Confirmed => (index_id.to_string(), IndexRegistration::Confirmed),
         CreateOutcome::NotConfirmed => (index_id.to_string(), IndexRegistration::NotConfirmed),
+        // #7237: the daemon said nothing; the registry says whether it
+        // registered the index after the client's budget elapsed.
+        CreateOutcome::Unanswered => {
+            match super::confirm::confirm_after_no_answer(socket, index_id, root) {
+                Some(resolved) => (resolved, IndexRegistration::Confirmed),
+                None => (index_id.to_string(), IndexRegistration::NotConfirmed),
+            }
+        }
         // #6864: the id is taken, or this tree is; ask which index serves it.
         CreateOutcome::Conflict { existing_id } => {
             match resolve_colliding_id(socket, index_id, root, opts, existing_id) {
@@ -238,7 +301,7 @@ fn resolve_colliding_id(
         return Some(id);
     }
 
-    if let Some(body) = fetch_index_list(socket)
+    if let Some(body) = fetch_index_list(socket, ListFailure::Warn)
         && let Some(id) = index_id_serving_root(&body, root)
     {
         tracing::info!(
@@ -259,6 +322,9 @@ fn resolve_colliding_id(
         CreateOutcome::Confirmed => Some(fresh),
         CreateOutcome::Conflict { existing_id } => existing_id,
         CreateOutcome::NotConfirmed => None,
+        // #7237: same rule as the first create — silence is settled by the
+        // registry, not read as a refusal.
+        CreateOutcome::Unanswered => super::confirm::confirm_after_no_answer(socket, &fresh, root),
     }
 }
 
@@ -322,10 +388,15 @@ pub(super) fn index_id_serving_root(body: &serde_json::Value, root: &Path) -> Op
 /// What: `search.indexes.list` with `{"details": true}`, returning the daemon's
 /// `result` on success and `None` for a refusal or a transport failure. A `None`
 /// here falls through to the fallback create rather than failing the
-/// registration.
+/// registration. `on_failure` picks the level a failure is reported at — see
+/// [`ListFailure`].
 /// Test: covered through `registration_matches_an_existing_index_by_root_path`
-/// in `search_index_tests.rs`, which serves this request from a fake daemon.
-fn fetch_index_list(socket: &Path) -> Option<serde_json::Value> {
+/// in `search_index_tests.rs`, which serves this request from a fake daemon, and
+/// through `confirm_within_treats_a_refusing_registry_as_no_answer`.
+pub(super) fn fetch_index_list(
+    socket: &Path,
+    on_failure: ListFailure,
+) -> Option<serde_json::Value> {
     match search_rpc::call_blocking(
         socket,
         search_rpc::METHOD_INDEXES_LIST,
@@ -334,10 +405,32 @@ fn fetch_index_list(socket: &Path) -> Option<serde_json::Value> {
     ) {
         Ok(body) => Some(body),
         Err(e) => {
-            tracing::warn!("trusty-search index list failed: {e:#}");
+            match on_failure {
+                ListFailure::Warn => tracing::warn!("trusty-search index list failed: {e:#}"),
+                ListFailure::Quiet => tracing::debug!("trusty-search index list failed: {e:#}"),
+            }
             None
         }
     }
+}
+
+/// How loudly [`fetch_index_list`] reports a failed read (#7237).
+///
+/// Why: the same failure means two different things to the two callers. The
+/// #6864 collision recovery reads the registry ONCE and a failure there ends the
+/// recovery, so it earns a `warn`. The #7237 confirm poll reads it repeatedly
+/// while the daemon is busy reloading, where a failed read is the expected
+/// intermediate state and a `warn` per attempt would bury the one line that
+/// actually reports the outcome.
+/// What: `Warn` logs at warn, `Quiet` at debug. Nothing else differs — both
+/// return `None`.
+/// Test: exercised through both callers; see [`fetch_index_list`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ListFailure {
+    /// This read is the last word; report a failure at warn.
+    Warn,
+    /// This read is one of several; report a failure at debug.
+    Quiet,
 }
 
 #[cfg(test)]
@@ -351,6 +444,78 @@ mod tests {
             "root_path {root:?} is already registered to index '{existing_id}'; two \
              indexes cannot share one on-disk corpus (issues #2305, #2336)"
         )
+    }
+
+    /// A create the daemon never answered is `Unanswered`, not `NotConfirmed`
+    /// (#7237).
+    ///
+    /// Why: this classification is the whole fix. `NotConfirmed` is terminal —
+    /// the caller withholds the id and stops — so a create that timed out or was
+    /// hung up on while the daemon was still working had to stop being reported
+    /// as one. Both shapes were seen live: the client's own one-second budget
+    /// (`Timeout`) and the daemon closing the connection (`NoResponse`).
+    /// What: wraps each transport error the way `search_rpc::call_at` does, with
+    /// a `with_context` layer on top, and asserts the classification survives
+    /// the context chain.
+    /// Test: itself.
+    #[test]
+    fn an_unanswered_create_is_not_a_refusal() {
+        let path = std::path::PathBuf::from("/nonexistent/trusty-search.sock");
+        let unanswered = [
+            UdsRpcError::NoResponse { path: path.clone() },
+            UdsRpcError::Timeout {
+                path: path.clone(),
+                timeout: Duration::from_secs(1),
+            },
+            UdsRpcError::Read {
+                path: path.clone(),
+                source: std::io::Error::other("truncated"),
+            },
+        ];
+        for err in unanswered {
+            let rendered = err.to_string();
+            let wrapped = anyhow::Error::new(err).context("call search.index.create");
+            assert_eq!(
+                classify_create_failure(&wrapped, "writing", "/nonexistent/writing"),
+                CreateOutcome::Unanswered,
+                "the daemon said nothing, so this is not a refusal: {rendered}"
+            );
+        }
+    }
+
+    /// A dial failure and a decode failure stay `NotConfirmed` (#7237).
+    ///
+    /// Why: the confirm poll must run only where the request may actually have
+    /// been processed. A dial that failed sent nothing, and a reply this client
+    /// cannot decode is a reply — neither is the silence
+    /// [`create_left_unanswered`] is looking for, and widening it to "any
+    /// transport error" would spend the deadline on a daemon that is plainly
+    /// down.
+    /// What: asserts both arms classify as `NotConfirmed`.
+    /// Test: itself.
+    #[test]
+    fn a_dial_failure_is_not_an_unanswered_create() {
+        let path = std::path::PathBuf::from("/nonexistent/trusty-search.sock");
+        let decode = UdsRpcError::Decode {
+            path: path.clone(),
+            source: serde_json::from_str::<serde_json::Value>("not json").unwrap_err(),
+        };
+        assert_eq!(
+            classify_create_failure(
+                &anyhow::Error::new(decode),
+                "writing",
+                "/nonexistent/writing"
+            ),
+            CreateOutcome::NotConfirmed,
+            "a reply that cannot be decoded is an answer, not a silence"
+        );
+
+        let plain = anyhow::anyhow!("the trusty-search search.index.create worker thread panicked");
+        assert_eq!(
+            classify_create_failure(&plain, "writing", "/nonexistent/writing"),
+            CreateOutcome::NotConfirmed,
+            "an error carrying no transport variant confirms nothing and polls nothing"
+        );
     }
 
     /// Why: this is the zero-request recovery — the daemon already told us which

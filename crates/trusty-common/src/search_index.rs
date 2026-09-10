@@ -91,10 +91,23 @@ use std::time::Duration;
 mod reconcile;
 use reconcile::CreateOutcome;
 
+// #7237: the bounded confirm poll for a create the daemon never answered lives
+// in its own sibling file for the same 500-SLOC reason as `reconcile` above.
+#[path = "search_index_confirm.rs"]
+mod confirm;
+
 /// Overall budget for the find-or-create call (#7237).
 ///
 /// The 1s the retired `reqwest` client carried, kept so the migration changes
 /// the transport and not what a slow daemon costs a session launch.
+///
+/// #7237 second round: this bounds the CALL, and no longer decides the OUTCOME.
+/// The daemon reloads a cold-parked index inside its create handler — 3.8 s for
+/// 32,754 chunks — so a create can be registered seconds after this elapses, and
+/// treating the elapsed budget as a refusal withheld the id for an index that
+/// existed. A create left unanswered now goes to [`confirm`], which asks the
+/// registry within its own bounded deadline. The hot-path promise is unchanged
+/// for every create the daemon answers: those still cost at most this.
 const CREATE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Overall budget for each half of the freshness-gated reindex trigger (#7237).
@@ -401,7 +414,13 @@ pub fn ensure_project_indexed_reporting(
             let (resolved, outcome) =
                 reconcile::create_and_reconcile(&socket, &index_id, &root, opts);
             index_id = resolved;
-            best_effort_trigger_reindex(&socket, &index_id);
+            // #7237: only an index the daemon has actually registered can be
+            // reindexed. Firing this unconditionally answered an unconfirmed
+            // registration with `search.index.reindex failed: unknown index`,
+            // which reads like a second, unrelated fault and is not.
+            if outcome == IndexRegistration::Confirmed {
+                best_effort_trigger_reindex(&socket, &index_id);
+            }
             outcome
         }
         None => IndexRegistration::DaemonUnreachable,
