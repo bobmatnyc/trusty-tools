@@ -59,3 +59,12 @@ Fixed
   `ssh-copy-id -i id_rsa.pub host` allow, while `cat id_rsa`, `cat id_rsa.pub.bak`
   and `cat id_rsa_credentials.pub` still deny. The exemption belongs to the read
   rule alone; copying a key file is unchanged (#7266).
+- A Bash PARAMETER EXPANSION carrying an operator no longer denies with no
+  secret named. `mkdir -p "${OUT_DIR:-build}"`, `echo "${1:-default}"`,
+  `cp "${SRC%.rs}.bak" x` and `echo ${PATH#/usr}` were all refused: the word
+  scan keeps `{` and `}` for brace alternation but cuts at `:`, `#` and `%`, so
+  every operator form left an unmatched `{VAR` that fails closed. A `${…}` span
+  is now read as its parameter name plus its operand rather than as a filename,
+  so an expansion that names a secret still denies — `cat "${F:-.env}"` and
+  `cat "${F:=id_rsa}"` do, and `cat ${F-.env}`, which the bare `-` operator hid,
+  denies now too. `${VAR}` and `$VAR` are unchanged (#7266).

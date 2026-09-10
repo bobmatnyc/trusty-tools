@@ -2922,6 +2922,59 @@ fn pm_guard_allows_a_secret_name_as_a_search_pattern_and_a_public_key() {
 }
 
 #[test]
+fn pm_guard_reads_a_parameter_expansion_as_its_operand() {
+    // #7266 round 7, critic CRITICAL 1, through the real binary. Every ALLOW
+    // row here DENIED on the round-6 binary (f40805985) with no secret named:
+    // the word scan keeps `{` and `}` for brace alternation but cuts at the
+    // expansion operators `:`, `#` and `%`, so `${OUT_DIR:-build}` left an
+    // unmatched `{OUT_DIR` that fails closed. `cat ${F-.env}` went the other
+    // way and ALLOWED, because the bare `-` operator glued onto the operand.
+    let (_dir, repo) = main_checkout_fixture();
+    for command in [
+        "mkdir -p ${OUT_DIR:-build}",
+        "echo ${1:-default}",
+        "cp ${SRC%.rs}.bak x",
+        "echo ${PATH#/usr}",
+        "echo ${HOME##*/}",
+        "echo ${LINE:2:3}",
+        "echo ${FILE//old/new}",
+        "echo ${VAR}",
+        "echo $VAR",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert!(
+            stdout.trim().is_empty(),
+            "`{command}` must be allowed: {stdout}"
+        );
+    }
+    // The operand is still SCANNED, not skipped — a fail-open on the span
+    // would reopen the shape the rule exists for.
+    for command in [
+        "cat ${F:-.env}",
+        "cat ${F:=id_rsa}",
+        "cat ${F:+server.pem}",
+        "cat ${F-.env}",
+        "cat ${F#*/}.env",
+        "rm ${SECRET:-.env}",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert_denied(&stdout);
+        assert!(
+            stdout.contains("#7266"),
+            "`{command}` must cite the issue: {stdout}"
+        );
+    }
+}
+
+#[test]
 fn pm_guard_deny_text_advertises_no_flag_escape() {
     // #7266 round 6, critic HIGH + MEDIUM: round 5's reason offered
     // `--env-file`/`-var-file`/`-state` and no such escape was ever

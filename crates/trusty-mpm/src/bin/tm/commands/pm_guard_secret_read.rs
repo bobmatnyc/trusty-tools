@@ -57,6 +57,20 @@
 //! [`PATTERN_FIRST_SEARCH_PROGRAMS`]), and an SSH PUBLIC key reads freely (see
 //! [`is_ssh_public_key_name`]).
 //!
+//! Round 7 closes one false positive of round 6's word scan. A Bash PARAMETER
+//! EXPANSION is now recognised as its own shape, distinct from the brace
+//! ALTERNATION that `{` and `}` were kept in the word for: `is_path_byte` cuts
+//! at `:`, `#` and `%`, so every operator form — `${VAR:-x}`, `${VAR:=x}`,
+//! `${VAR:?m}`, `${VAR:+x}`, `${VAR:2:3}`, `${VAR#p}`, `${VAR%%p}` — left an
+//! unmatched `{VAR` that `expand_brace_alternatives` cannot resolve and
+//! [`is_secret_read_target`] therefore failed CLOSED on.
+//! `mkdir -p "${OUT_DIR:-build}"` denied with no secret named. The span is
+//! rewritten to its parameter NAME and its OPERAND rather than skipped (see
+//! [`rewrite_parameter_expansions`]), so an expansion that names a secret still
+//! denies — `cat "${F:-.env}"` and `cat "${F:=id_rsa}"` both do, and
+//! `cat ${F-.env}`, which round 6 ALLOWED, denies now too. `${VAR}` and `$VAR`
+//! reach the same words they always did.
+//!
 //! What this costs, deliberately: naming a secret-shaped file in ANY command
 //! now denies, including one that reads nothing — `git log --grep .env`,
 //! `git commit -m "add .env.example"`, `cp .env .env.bak`. Rounds 1 to 4
@@ -65,22 +79,30 @@
 //! exception — round 5's deny text advertised `--env-file`/`-var-file`/`-state`
 //! and no such escape was ever implemented, so round 6 removed the claim rather
 //! than build it: a reference flag is one more list to enumerate, which is the
-//! shape that failed four times. The way through is to rephrase the message, to
-//! run the tool so it picks the file up itself (`docker compose up` reads
+//! shape that failed four times. `*.pem` covers a PUBLIC certificate as well as
+//! a private key, so `openssl x509 -in cert.pem -noout -text` denies; splitting
+//! the extension by what the file holds needs the file's bytes, which is the
+//! read this rule refuses. The way through is to rephrase the message, to run
+//! the tool so it picks the file up itself (`docker compose up` reads
 //! `./.env`), or to ask the operator.
 //!
 //! Residual, named rather than silently allowed: a file called exactly
 //! `secrets` or `token` with no extension and no directory in front of it is
 //! not screened (see above); a path that reaches the command only through a
 //! variable (`sed -n 1,5p "$F"`) is not resolved, because this rule reads words
-//! and not the filesystem; a GLOB whose only literal is the TAIL of an
-//! `.env.<name>` file (`Grep(glob = "*.production")`) names no family's core, a
-//! trade #7266 round 4 made to keep every ordinary extension search working;
-//! and a search program's pattern is skipped only when it is written as the
-//! first positional argument, so `rg --type md id_rsa` — pattern behind a
-//! value-taking flag — still denies. Enumerating which flags take a value is
-//! the trade refused there: a wrong entry would skip a real file operand, which
-//! is a bypass rather than a false positive.
+//! and not the filesystem; a filename COMPUTED in-line by the same command —
+//! `cat $(printf '\056env')`, `cat $(echo LmVudg== | base64 -d)`, a name
+//! assembled by arithmetic — never appears as literal path text, so no word
+//! scan can see it, an unbounded class of the same shape as the variable
+//! indirection beside it (see `DOCUMENTED_RESIDUALS`); a GLOB whose only
+//! literal is the TAIL of an `.env.<name>` file
+//! (`Grep(glob = "*.production")`) names no family's core, a trade #7266
+//! round 4 made to keep every ordinary extension search working; and a search
+//! program's pattern is skipped only when it is written as the first positional
+//! argument, so `rg --type md id_rsa` — pattern behind a value-taking flag —
+//! still denies. Enumerating which flags take a value is the trade refused
+//! there: a wrong entry would skip a real file operand, which is a bypass
+//! rather than a false positive.
 //!
 //! `git show HEAD:terraform.tfvars` is DENIED, not residual: `:` is not a path
 //! byte, so `HEAD:terraform.tfvars` cuts into `HEAD` and `terraform.tfvars`,
@@ -98,7 +120,11 @@
 //! `allows_a_secret_name_written_as_a_search_pattern`,
 //! `denies_a_secret_file_operand_of_a_search_program`,
 //! `allows_reading_an_ssh_public_key`,
-//! `the_deny_text_advertises_no_flag_escape`, and the rest of this
+//! `the_deny_text_advertises_no_flag_escape`,
+//! `allows_a_parameter_expansion_that_names_no_secret`,
+//! `denies_a_parameter_expansion_whose_operand_names_a_secret`,
+//! `splits_a_parameter_expansion_into_its_name_and_operand`,
+//! `the_documented_residuals_still_allow`, and the rest of this
 //! module's `tests` submodule. The rule is proved WIRED end to end through the
 //! real binary by `pm_guard_denies_a_line_range_read_of_a_secret_bearing_file`,
 //! `pm_guard_denies_a_read_tool_call_on_a_secret_bearing_file`,
@@ -110,8 +136,9 @@
 //! `pm_guard_still_allows_ordinary_reads_and_non_operand_mentions`,
 //! `pm_guard_denies_a_glob_or_quote_join_that_names_a_secret`,
 //! `pm_guard_denies_git_add_in_a_content_revealing_mode`,
-//! `pm_guard_allows_a_secret_name_as_a_search_pattern_and_a_public_key` and
-//! `pm_guard_deny_text_advertises_no_flag_escape` in
+//! `pm_guard_allows_a_secret_name_as_a_search_pattern_and_a_public_key`,
+//! `pm_guard_deny_text_advertises_no_flag_escape` and
+//! `pm_guard_reads_a_parameter_expansion_as_its_operand` in
 //! `tests/tm_hook_pm_guard.rs`.
 
 use std::path::Path;
@@ -199,8 +226,14 @@ const NESTED_COMMAND_MARKERS: &[&str] = &["$(", "`", "<(", ">(", "${"];
 /// [`is_secret_read_target`], which has screened a caller's PATTERN — not just
 /// a literal name — since round 3, and which the `Grep` `glob` arm has used all
 /// along.
+///
+/// `{` and `}` are kept for brace ALTERNATION, which is not the only thing a
+/// brace spells: [`rewrite_parameter_expansions`] removes every `${…}` span
+/// before this cut runs, because an expansion's operator (`:`, `#`, `%`) IS a
+/// cut and the `{VAR` it leaves behind fails closed (#7266 round 7).
 /// Test: `secret_files_named_in_finds_a_name_inside_a_program_string`,
-/// `denies_a_glob_that_expands_onto_a_secret_file`.
+/// `denies_a_glob_that_expands_onto_a_secret_file`,
+/// `allows_a_parameter_expansion_that_names_no_secret`.
 fn is_path_byte(c: char) -> bool {
     c.is_ascii_alphanumeric()
         || matches!(
@@ -470,16 +503,143 @@ fn secret_words_in_segment(segment: &str) -> Vec<String> {
     out
 }
 
+/// The operator spellings that separate a `${…}` parameter's NAME from the
+/// word the expansion can produce, longest spelling first.
+///
+/// Why: the operand is the only part of an expansion that can carry a
+/// filename, and it is only reachable once the operator in front of it is
+/// removed. Leaving the operator on glues it to the name — `${F:-.env}` scans
+/// as `-.env`, which matches no pattern and ALLOWS the very shape this rule
+/// exists to refuse (#7266 round 7).
+/// What: the `:`-guarded and bare default/assign/error/alternate forms, the
+/// `#`/`%` prefix and suffix trims, the `/` substitutions, the case and
+/// transform operators, and the bare `:` that opens a substring range. Order
+/// is significant — a two-character spelling is tried before the
+/// one-character spelling it starts with.
+/// Test: `splits_a_parameter_expansion_into_its_name_and_operand`,
+/// `allows_a_parameter_expansion_that_names_no_secret`.
+const PARAMETER_EXPANSION_OPERATORS: &[&str] = &[
+    ":-", ":=", ":?", ":+", "##", "%%", "//", ",,", "^^", "#", "%", "/", "^", ",", "@", ":", "-",
+    "=", "?", "+",
+];
+
+/// One `${…}` expansion's parameter NAME and the operand behind its operator.
+///
+/// Why: see [`PARAMETER_EXPANSION_OPERATORS`]. Both halves are returned rather
+/// than the operand alone, so a parameter whose NAME is itself a secret-shaped
+/// filename (`${id_rsa}`) keeps denying exactly as it did before round 7.
+/// What: strips a leading `#` (length) or `!` (indirection) sigil, takes the
+/// longest run of `[A-Za-z0-9_]` as the name — or one character when the
+/// parameter is a special one like `@` or `*` — then removes the first
+/// matching operator. Text after an operator this list does not carry is
+/// returned whole, so an unrecognised form is scanned rather than skipped.
+/// Test: `splits_a_parameter_expansion_into_its_name_and_operand`.
+fn split_parameter_expansion(inner: &str) -> (&str, &str) {
+    let body = inner
+        .strip_prefix('#')
+        .or_else(|| inner.strip_prefix('!'))
+        .unwrap_or(inner);
+    let name_len = body
+        .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .unwrap_or(body.len());
+    let (name, rest) = if name_len == 0 {
+        let mut chars = body.chars();
+        let taken = chars.next().map_or(0, char::len_utf8);
+        body.split_at(taken)
+    } else {
+        body.split_at(name_len)
+    };
+    for op in PARAMETER_EXPANSION_OPERATORS {
+        if let Some(operand) = rest.strip_prefix(op) {
+            return (name, operand);
+        }
+    }
+    (name, rest)
+}
+
+/// Index of the `}` closing the `{` at `open`, or `None` when nothing does.
+///
+/// What: counts nesting, so `${A:-${B}}` yields the OUTER close.
+/// Test: `splits_a_parameter_expansion_into_its_name_and_operand`.
+fn matching_close_brace(chars: &[char], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (offset, c) in chars.get(open..)?.iter().enumerate() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(open + offset);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// `text` with every `${…}` parameter expansion replaced by the words it can
+/// actually name.
+///
+/// Why: #7266 round 7, critic CRITICAL 1. [`is_path_byte`] keeps `{` and `}`
+/// for brace ALTERNATION (`cp secret.{tfvars,bak}`) but cuts at `:`, `#` and
+/// `%`, so every expansion carrying an operator left an unmatched `{VAR`
+/// behind. `expand_brace_alternatives` finds no closing brace for it, answers
+/// `None`, and [`is_secret_read_target`] fails CLOSED — so
+/// `mkdir -p "${OUT_DIR:-build}"`, `echo "${1:-default}"` and
+/// `cp "${SRC%.rs}.bak" x` were all refused with no secret named.
+///
+/// A `${…}` span is parameter expansion and a bare `{…}` group is brace
+/// alternation; only the first is rewritten here, so the alternation arm is
+/// untouched. Failing OPEN on the whole span would reopen `${x:-.env}`, so the
+/// span is not skipped — it is REWRITTEN to its name and its operand, and both
+/// are scanned. `${VAR}` and `$VAR` reach the same words they always did.
+/// What: rewrites each balanced `${…}` to ` <name> <operand> `, recursing into
+/// the operand so a nested expansion is resolved too. An UNBALANCED `${` is
+/// left exactly as it stands, which keeps that shape failing closed.
+/// Test: `allows_a_parameter_expansion_that_names_no_secret`,
+/// `denies_a_parameter_expansion_whose_operand_names_a_secret`.
+fn rewrite_parameter_expansions(text: &str) -> String {
+    if !text.contains("${") {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '$'
+            && chars.get(i + 1) == Some(&'{')
+            && let Some(close) = matching_close_brace(&chars, i + 1)
+        {
+            let inner: String = chars[i + 2..close].iter().collect();
+            let (name, operand) = split_parameter_expansion(&inner);
+            out.push(' ');
+            out.push_str(name);
+            out.push(' ');
+            out.push_str(&rewrite_parameter_expansions(operand));
+            out.push(' ');
+            i = close + 1;
+            continue;
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
 /// Every distinct word in `text` that names a secret-bearing file, in order.
 ///
 /// Why: see [`is_path_byte`] — the deny must survive a segment no lexer can
 /// read, so the scan reads bytes rather than tokens.
-/// What: cuts `text` at every non-path byte and keeps the words
-/// [`names_a_secret_file`] answers for, without repeats.
-/// Test: `secret_files_named_in_finds_a_name_inside_a_program_string`.
+/// What: rewrites every `${…}` parameter expansion first (see
+/// [`rewrite_parameter_expansions`]), then cuts `text` at every non-path byte
+/// and keeps the words [`names_a_secret_file`] answers for, without repeats.
+/// Test: `secret_files_named_in_finds_a_name_inside_a_program_string`,
+/// `allows_a_parameter_expansion_that_names_no_secret`.
 fn secret_files_named_in(text: &str) -> Vec<String> {
+    let scanned = rewrite_parameter_expansions(text);
     let mut out: Vec<String> = Vec::new();
-    for word in text.split(|c: char| !is_path_byte(c)) {
+    for word in scanned.split(|c: char| !is_path_byte(c)) {
         if word.is_empty() || !names_a_secret_file(word) {
             continue;
         }
@@ -882,7 +1042,31 @@ mod tests {
         // and a private key spelled with a `.pub` somewhere other than the end.
         "cat id_rsa_credentials.pub",
         "cat id_rsa.pub.bak",
+        // Round 7, critic CRITICAL 1's other half: an expansion whose OPERAND
+        // is the secret. Reading the span as text and failing OPEN on it would
+        // reopen every one of these. `cat ${F-.env}` ALLOWED on f40805985 —
+        // the bare `-` operator glued onto the name and matched no pattern.
+        "cat \"${F:-.env}\"",
+        "cat \"${F:=id_rsa}\"",
+        "cat \"${F:?terraform.tfvars}\"",
+        "cat \"${F:+server.pem}\"",
+        "cat ${F-.env}",
+        "cat \"${F#*/}.env\"",
+        "cat \"${DIR:-/etc}/.env\"",
+        "rm ${SECRET:-.env}",
     ];
+
+    /// Bypasses this rule DOES NOT catch, pinned so a change to one is visible.
+    ///
+    /// Why: #7266 round 7 — a filename the command COMPUTES never appears as
+    /// literal path text, so a word scan cannot see it. The class is unbounded
+    /// (every encoder, every printf escape, every arithmetic join), which is
+    /// the shape four rounds of enumeration already failed against, so it is
+    /// documented beside the variable-indirection residual rather than chased.
+    /// These rows ALLOW today. A row that starts denying is not a regression —
+    /// it is a residual that closed, and this list is what makes that visible.
+    /// Test: `the_documented_residuals_still_allow`.
+    const DOCUMENTED_RESIDUALS: &[&str] = &["cat $(printf '\\056env')"];
 
     /// Ordinary daily commands that must ALLOW.
     ///
@@ -962,6 +1146,22 @@ mod tests {
         "cat id_ed25519.pub",
         "cat id_ecdsa.pub",
         "cat id_dsa.pub",
+        // Round 7, critic CRITICAL 1: a parameter expansion carrying an
+        // operator. Every one of these DENIED on f40805985 with no secret
+        // named — `is_path_byte` cut at the operator and left `{VAR` behind.
+        "mkdir -p \"${OUT_DIR:-build}\"",
+        "echo \"${1:-default}\"",
+        "docker run -e \"FOO=${FOO:-bar}\" img",
+        "cp \"${SRC%.rs}.bak\" x",
+        "echo ${PATH#/usr}",
+        "echo ${HOME##*/}",
+        "echo \"${VERSION:=0.1.0}\"",
+        "echo \"${NAME:?name required}\"",
+        "echo \"${BRANCH:+--branch $BRANCH}\"",
+        "echo ${LINE:2:3}",
+        "echo ${FILE//old/new}",
+        "echo ${VAR}",
+        "echo $VAR",
     ];
 
     #[test]
@@ -1579,6 +1779,116 @@ mod tests {
             "git show HEAD~2:infra/terraform.tfvars",
         ] {
             assert!(eval(command).is_some(), "`{command}` must deny");
+        }
+    }
+
+    // --- #7266 round 7 -----------------------------------------------------
+
+    #[test]
+    fn allows_a_parameter_expansion_that_names_no_secret() {
+        // Critic CRITICAL 1. `${VAR:-x}` and its siblings each left an
+        // unmatched `{VAR` for `expand_brace_alternatives`, which fails closed,
+        // so the guard refused an ordinary command with no secret in it.
+        // Measured live against the round-6 binary (f40805985).
+        for command in [
+            "mkdir -p \"${OUT_DIR:-build}\"",
+            "echo \"${1:-default}\"",
+            "docker run -e \"FOO=${FOO:-bar}\" img",
+            "cp \"${SRC%.rs}.bak\" x",
+            "echo ${PATH#/usr}",
+            "echo ${HOME##*/}",
+            "echo \"${VERSION:=0.1.0}\"",
+            "echo \"${NAME:?name required}\"",
+            "echo \"${BRANCH:+--branch $BRANCH}\"",
+            "echo ${LINE:2:3}",
+            "echo ${FILE//old/new}",
+            "echo ${PREFIX^^}",
+            "echo \"${A:-${B:-fallback}}\"",
+        ] {
+            assert_eq!(eval(command), None, "`{command}` must allow");
+        }
+        // `${VAR}` and `$VAR` are unchanged by round 7 — they carry no
+        // operator, so round 6 already read them as the bare name.
+        for command in ["echo ${VAR}", "echo $VAR", "cat ${F}", "cat $F"] {
+            assert_eq!(eval(command), None, "`{command}` must allow");
+        }
+        // Brace ALTERNATION is a different shape and keeps its own answer: a
+        // group the shared expander cannot resolve still fails closed.
+        assert_eq!(eval("cp notes.{md,txt} out/"), None);
+        assert!(eval("cat secret.{tfvars,bak}").is_some());
+    }
+
+    #[test]
+    fn denies_a_parameter_expansion_whose_operand_names_a_secret() {
+        // The other half. Failing OPEN on the span — skipping it as "not a
+        // path" — would reopen every one of these, which is what the round-6
+        // critic warned a naive fix would do.
+        for command in [
+            "cat \"${F:-.env}\"",
+            "cat \"${F:=id_rsa}\"",
+            "cat \"${F:?terraform.tfvars}\"",
+            "cat \"${F:+server.pem}\"",
+            "cat \"${F#*/}.env\"",
+            "cat \"${DIR:-/etc}/.env\"",
+            "cat \"${A:-${B:-.env}}\"",
+            "rm ${SECRET:-.env}",
+        ] {
+            let reason = eval(command).unwrap_or_else(|| panic!("`{command}` must deny"));
+            assert!(reason.contains("#7266"), "{reason}");
+        }
+        // `cat ${F-.env}` ALLOWED on f40805985: the bare `-` operator glued to
+        // the operand, and `-.env` matches no pattern.
+        assert!(eval("cat ${F-.env}").is_some());
+        // A parameter whose NAME is itself a secret-shaped filename keeps the
+        // answer round 6 gave it.
+        assert!(eval("echo ${id_rsa}").is_some());
+    }
+
+    #[test]
+    fn splits_a_parameter_expansion_into_its_name_and_operand() {
+        assert_eq!(
+            split_parameter_expansion("OUT_DIR:-build"),
+            ("OUT_DIR", "build")
+        );
+        assert_eq!(split_parameter_expansion("F-.env"), ("F", ".env"));
+        assert_eq!(split_parameter_expansion("F:=id_rsa"), ("F", "id_rsa"));
+        assert_eq!(split_parameter_expansion("HOME##*/"), ("HOME", "*/"));
+        assert_eq!(split_parameter_expansion("SRC%.rs"), ("SRC", ".rs"));
+        assert_eq!(split_parameter_expansion("LINE:2:3"), ("LINE", "2:3"));
+        assert_eq!(split_parameter_expansion("VAR"), ("VAR", ""));
+        // The length and indirection sigils sit before the NAME, not before a
+        // word, so neither is read as an operator.
+        assert_eq!(split_parameter_expansion("#VAR"), ("VAR", ""));
+        assert_eq!(split_parameter_expansion("!VAR"), ("VAR", ""));
+        // A special parameter is one character and no more.
+        assert_eq!(split_parameter_expansion("@"), ("@", ""));
+        assert_eq!(split_parameter_expansion(""), ("", ""));
+        // Nesting resolves to the OUTER close, so the inner span is the
+        // operand and gets rewritten in its turn.
+        let chars: Vec<char> = "{A:-${B}}".chars().collect();
+        assert_eq!(matching_close_brace(&chars, 0), Some(8));
+        assert_eq!(
+            matching_close_brace(&"{VAR".chars().collect::<Vec<_>>(), 0),
+            None
+        );
+        // An unbalanced `${` is left as it stands, which keeps it failing
+        // closed exactly as round 6 left it.
+        assert_eq!(rewrite_parameter_expansions("cat ${VAR"), "cat ${VAR");
+        assert!(eval("cat ${VAR").is_some());
+    }
+
+    #[test]
+    fn the_documented_residuals_still_allow() {
+        // These rows are the module doc's named residuals, asserted so the
+        // gap is visible in the suite rather than only in prose. A row that
+        // begins to deny means a residual closed — update the doc, not the
+        // rule.
+        for command in DOCUMENTED_RESIDUALS {
+            assert_eq!(
+                eval(command),
+                None,
+                "documented residual `{command}` now denies — update the module doc"
+            );
         }
     }
 
