@@ -62,7 +62,10 @@ pub(crate) use main_checkout::{
     evaluate_main_checkout_destructive_command, head_move_deny_reason, main_checkout_head_move,
 };
 pub(crate) use persistence::command_is_persistence_only;
-pub(crate) use secret_file_copy::evaluate_secret_file_copy_command;
+// #7266: the second export is the shared secret-file CLASSIFIER, reached by
+// `crate::commands::pm_guard_secret_read` so a read of such a file is screened
+// against the same list a copy of one is.
+pub(crate) use secret_file_copy::{evaluate_secret_file_copy_command, is_secret_bearing_source};
 // #5791: worktree removal is PM-executed, so an agent's `git worktree remove`
 // denies. The sibling `worktree add` guard above is a different rule with a
 // different scope — that one is about WHERE a tree is provisioned, this one is
@@ -272,7 +275,10 @@ fn evaluate_bash_command_inner(command: &str, depth: usize) -> Option<&'static s
 /// `sh -c` / `bash -c` / `env -S` / `xargs` wrapper — see
 /// [`expand_shell_segments`]. Every rule in this module reads its segments from
 /// here, which is what makes one descent reach all of them.
-fn split_shell_segments(command: &str) -> Vec<String> {
+// #7266: `pub(crate)` so the read guard reads its segments from the SAME
+// splitter every rule in this module already uses — that is what makes the
+// `sh -c` descent above reach it too.
+pub(crate) fn split_shell_segments(command: &str) -> Vec<String> {
     let mut out = Vec::new();
     expand_shell_segments(command, 0, &mut out);
     out

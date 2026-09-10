@@ -2384,6 +2384,91 @@ fn tool_payload_at(
 }
 
 #[test]
+fn pm_guard_denies_a_line_range_read_of_a_secret_bearing_file() {
+    // #7266, the reported command verbatim: a line-range print is not `cat`, so
+    // an agent told "never print tfvars values" printed an ngrok authtoken with
+    // it. These run through the real binary, which is what proves the rule is
+    // WIRED — the module's own unit tests would pass with the call site absent.
+    let (_dir, repo) = main_checkout_fixture();
+    for command in [
+        "sed -n '38,46p' terraform.tfvars",
+        "sed -n '12,14p' infra/terraform.tfvars",
+        "tail -n 3 .env.production",
+        "grep -n TOKEN secrets/app.tfvars.json",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert_denied(&stdout);
+        assert!(
+            stdout.contains("#7266") && stdout.contains("secret-bearing file class"),
+            "the deny must name the issue and the file class: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_denies_a_read_tool_call_on_a_secret_bearing_file() {
+    // #7266: the harness's own `Read` takes `offset`/`limit`, the same
+    // line-range shape — and a `Read` with no range prints strictly more.
+    let (_dir, repo) = main_checkout_fixture();
+    let ranged = format!(
+        r#"{{"file_path":"{}","offset":12,"limit":3}}"#,
+        repo.join(".env").display()
+    );
+    let whole = format!(
+        r#"{{"file_path":"{}"}}"#,
+        repo.join("infra/terraform.tfvars").display()
+    );
+    for input in [ranged.as_str(), whole.as_str()] {
+        let stdout = run_pm_guard_at(
+            &tool_payload_at("Read", input, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert_denied(&stdout);
+        assert!(stdout.contains("#7266"), "must cite the issue: {stdout}");
+    }
+}
+
+#[test]
+fn pm_guard_still_allows_ordinary_reads_and_non_operand_mentions() {
+    // The other half of #7266's acceptance: the rule must not tax ordinary
+    // work. A line range of a normal file, a `cat` of a manifest, a `tfvars`
+    // string that is an argument rather than a file operand, and the safe
+    // key-name-only read the issue documents all stay allowed.
+    let (_dir, repo) = main_checkout_fixture();
+    for command in [
+        "sed -n '1,5p' README.md",
+        "cat Cargo.toml",
+        "git log --grep tfvars",
+        "grep -o '^key_[a-z_]*' terraform.tfvars",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert!(
+            stdout.trim().is_empty(),
+            "`{command}` must be allowed (empty stdout), got: {stdout}"
+        );
+    }
+    let readme = format!(r#"{{"file_path":"{}"}}"#, repo.join("README.md").display());
+    let stdout = run_pm_guard_at(
+        &tool_payload_at("Read", &readme, &repo, ""),
+        UNREACHABLE_DAEMON,
+        &repo,
+    );
+    assert!(
+        stdout.trim().is_empty(),
+        "Read of a doc must allow: {stdout}"
+    );
+}
+
+#[test]
 fn pm_guard_denies_a_source_write_in_a_main_checkout() {
     // ADR-0044 decision 1, the half that was never built: an ordinary `Write`
     // to a source file in the shared checkout passed every guard in the

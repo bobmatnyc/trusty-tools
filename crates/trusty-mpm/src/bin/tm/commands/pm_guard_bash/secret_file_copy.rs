@@ -224,7 +224,11 @@ fn expand_brace_alternatives(token: &str) -> Option<Vec<String>> {
 /// shape it could not resolve) — that residual case fails closed rather than
 /// letting an unexamined source through.
 /// Test: see [`expand_brace_alternatives`]'s test list.
-fn is_secret_bearing_source(basename: &str) -> bool {
+// #7266: `pub(crate)` so the read guard
+// (`crate::commands::pm_guard_secret_read`) screens a `sed`/`head`/`grep` READ
+// against THIS list rather than growing a second one — one classifier, two
+// rules, per the common-entry-point convention.
+pub(crate) fn is_secret_bearing_source(basename: &str) -> bool {
     match expand_brace_alternatives(basename) {
         Some(candidates) => candidates.iter().any(|c| is_secret_bearing_name(c)),
         None => true,
