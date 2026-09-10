@@ -15,11 +15,13 @@
 //! content-printing verb ([`CONTENT_PRINTING_VERBS`]), a shell input
 //! redirection, or an inline interpreter program
 //! ([`INLINE_PROGRAM_INTERPRETERS`]) names a file operand whose basename is
-//! secret-bearing, and [`evaluate_secret_file_read_tool`] denies a `Read` tool
-//! call on the same class of path — with or without an `offset`/`limit` range,
-//! since a partial read prints values exactly as a whole one does.
-//! [`evaluate_secret_file_read_command`] fails CLOSED: a segment this guard
-//! cannot lex still has its words examined, and a secret-shaped word denies.
+//! secret-bearing, and [`evaluate_secret_file_read_tool`] denies a `Read` or
+//! `Grep` tool call on the same class of path — with or without an
+//! `offset`/`limit` range, since a partial read prints values exactly as a
+//! whole one does, and `Grep` with `output_mode="content"` prints every
+//! matching line verbatim. [`evaluate_secret_file_read_command`] fails CLOSED:
+//! a segment this guard cannot lex still has its words examined, and a
+//! secret-shaped word denies.
 //!
 //! The file classifier is NOT a second list — it is
 //! [`is_secret_bearing_source`], the one
@@ -40,6 +42,12 @@
 //! closure names as the safe-read pattern. Such a pattern cannot cross the `=`
 //! that separates a key from its value, so no value can reach the transcript.
 //!
+//! The carve-out is only safe while nothing can MOVE a secret into one of
+//! those names, so [`has_transparent_source_extension`] is `pub(crate)` and
+//! `pm_guard_bash::secret_file_copy` refuses `cp terraform.tfvars secrets.rs`
+//! to any destination at all — worktree or not (#7266 fix round). Without that
+//! second half the carve-out was the bypass: copy, then read the copy.
+//!
 //! Residual bypasses, deliberate and documented rather than silently allowed:
 //! a `.yml`/`.yaml` credential manifest read by name (`secrets.yaml`) is
 //! carved out with the rest of the markup extensions; `git show
@@ -55,7 +63,8 @@
 //! module's `tests` submodule. The rule is proved WIRED — a call site this
 //! module's own tests could not miss — end to end through the real binary by
 //! `pm_guard_denies_a_line_range_read_of_a_secret_bearing_file`,
-//! `pm_guard_denies_a_read_tool_call_on_a_secret_bearing_file` and
+//! `pm_guard_denies_a_read_tool_call_on_a_secret_bearing_file`,
+//! `pm_guard_denies_a_grep_tool_call_on_a_secret_bearing_file` and
 //! `pm_guard_still_allows_ordinary_reads_and_non_operand_mentions` in
 //! `tests/tm_hook_pm_guard.rs`.
 
@@ -72,11 +81,17 @@ use crate::commands::pm_guard_bash::{is_secret_bearing_source, split_shell_segme
 /// (issue #7266 counts five spellings already).
 /// What: matched against the BASENAME of any token in a segment's argv, so a
 /// wrapper (`sudo cat`, `xargs head`) does not hide the verb.
-/// Test: `denies_every_content_printing_verb`.
+///
+/// `base64`, `basenc` and `diff` join the list in #7266's fix round: an
+/// encoder prints every byte of the file it is handed, and `diff .env
+/// /dev/null` prints every line as a deletion — both are the incident's
+/// behaviour through a verb the first list did not name.
+/// Test: `denies_every_content_printing_verb`, `denies_an_encoded_dump`,
+/// `denies_a_diff_against_dev_null`.
 const CONTENT_PRINTING_VERBS: &[&str] = &[
     "cat", "tac", "head", "tail", "sed", "awk", "gawk", "mawk", "nawk", "cut", "grep", "egrep",
     "fgrep", "rg", "less", "more", "bat", "nl", "strings", "od", "xxd", "hexdump", "paste", "fold",
-    "rev", "column", "pr",
+    "rev", "column", "pr", "base64", "basenc", "diff",
 ];
 
 /// Verbs whose FIRST positional argument is a pattern or program, not a file.
@@ -208,34 +223,73 @@ pub(crate) fn evaluate_secret_file_read_command(command: &str) -> Option<String>
     None
 }
 
-/// Classify a `Read` tool call for a secret-bearing target: `Some(reason)`
-/// denies, `None` allows.
+/// Classify a native READ tool call for a secret-bearing target:
+/// `Some(reason)` denies, `None` allows.
 ///
 /// Why: the harness's own `Read` tool takes `offset`/`limit`, which is the
 /// exact line-range shape issue #7266 reports — and a `Read` with no range is a
-/// strictly larger exposure, so BOTH deny. A tool call carries no shell to lex,
-/// so this arm reads `file_path` directly.
+/// strictly larger exposure, so BOTH deny. `Grep` is the same leak through the
+/// second native tool: with `output_mode="content"` it prints every matching
+/// line verbatim, so `Grep(pattern=".", path="terraform.tfvars")` dumps the
+/// file without a shell ever running. A tool call carries no shell to lex, so
+/// these arms read their path fields directly.
 /// What: `Some(reason)` when `tool_name` is `Read` and its `file_path`'s
-/// basename satisfies [`is_secret_read_target`]; `None` for every other tool
-/// and for a call with no readable `file_path`.
+/// basename satisfies [`is_secret_read_target`], or when `tool_name` is `Grep`
+/// and [`evaluate_grep_tool`] answers; `None` for every other tool and for a
+/// call with no readable path field.
 /// Test: `denies_a_read_tool_call_with_a_range`,
 /// `denies_a_read_tool_call_without_a_range`, `allows_a_read_of_an_ordinary_file`,
-/// `allows_every_non_read_tool`.
+/// `denies_a_grep_tool_call_on_a_secret_bearing_path`,
+/// `denies_a_grep_tool_call_whose_glob_names_a_secret`,
+/// `allows_a_grep_tool_call_over_a_directory_with_no_glob`,
+/// `allows_every_tool_that_prints_no_file_bytes`.
 pub(crate) fn evaluate_secret_file_read_tool(
     tool_name: &str,
     tool_input: Option<&serde_json::Value>,
 ) -> Option<String> {
-    if tool_name != "Read" {
-        return None;
+    match tool_name {
+        "Read" => {
+            let target = string_field(tool_input, "file_path")?;
+            is_secret_read_target(target).then(|| deny_reason(target, "the `Read` tool"))
+        }
+        "Grep" => evaluate_grep_tool(tool_input),
+        _ => None,
     }
-    let target = tool_input
-        .and_then(|v| v.get("file_path"))
+}
+
+/// Classify a `Grep` tool call: `Some(reason)` denies, `None` allows.
+///
+/// Why: `Grep` reaches a file two ways — `path` naming it directly, or `path`
+/// naming a directory with `glob` selecting it by basename pattern. Both print
+/// the matching lines under `output_mode="content"`, so both deny. The
+/// `output_mode` field is deliberately NOT consulted: it defaults to
+/// `files_with_matches` but any call may set it, and the Bash `grep` arm above
+/// likewise refuses a secret operand whatever the output flags say — a guard
+/// that reads the mode would allow the dump whenever the field is omitted from
+/// the payload this guard sees.
+/// What: denies on a secret-shaped `path`, then on a secret-shaped `glob`; a
+/// directory `path` with no `glob` is ordinary tree-wide search and allows.
+/// Fails CLOSED on a `glob` whose brace alternation [`is_secret_read_target`]
+/// cannot resolve, exactly as the copy rule does.
+/// Test: `denies_a_grep_tool_call_on_a_secret_bearing_path`,
+/// `denies_a_grep_tool_call_whose_glob_names_a_secret`,
+/// `allows_a_grep_tool_call_over_a_directory_with_no_glob`.
+fn evaluate_grep_tool(tool_input: Option<&serde_json::Value>) -> Option<String> {
+    if let Some(path) = string_field(tool_input, "path")
+        && is_secret_read_target(path)
+    {
+        return Some(deny_reason(path, "the `Grep` tool"));
+    }
+    let glob = string_field(tool_input, "glob")?;
+    is_secret_read_target(glob).then(|| deny_reason(glob, "a `Grep` glob"))
+}
+
+/// A non-empty string field of a tool-input object.
+fn string_field<'a>(tool_input: Option<&'a serde_json::Value>, key: &str) -> Option<&'a str> {
+    tool_input
+        .and_then(|v| v.get(key))
         .and_then(|v| v.as_str())
-        .filter(|p| !p.is_empty())?;
-    if !is_secret_read_target(target) {
-        return None;
-    }
-    Some(deny_reason(target, "the `Read` tool"))
+        .filter(|s| !s.is_empty())
 }
 
 /// Whether `path`'s basename is secret-bearing at THIS rule's scope.
@@ -251,7 +305,11 @@ fn is_secret_read_target(path: &str) -> bool {
 }
 
 /// Whether `basename` ends in one of [`TRANSPARENT_SOURCE_EXTENSIONS`].
-fn has_transparent_source_extension(basename: &str) -> bool {
+// #7266 fix round: `pub(crate)` so `pm_guard_bash::secret_file_copy` can refuse
+// a copy INTO exactly the names this carve-out lets a later read print. One
+// predicate decides both halves of that seam, per the common-entry-point
+// convention.
+pub(crate) fn has_transparent_source_extension(basename: &str) -> bool {
     Path::new(basename)
         .extension()
         .and_then(|e| e.to_str())
@@ -661,9 +719,12 @@ mod tests {
     }
 
     #[test]
-    fn allows_every_non_read_tool() {
+    fn allows_every_tool_that_prints_no_file_bytes() {
+        // `Grep` is deliberately absent from this list since #7266's fix round:
+        // it is the second native tool that prints file bytes, so it has its
+        // own arm above rather than a blanket allow.
         let input = serde_json::json!({"file_path": "/repo/.env"});
-        for tool in ["Write", "Edit", "Bash", "Grep", "Glob", "Task"] {
+        for tool in ["Write", "Edit", "Bash", "Glob", "Task"] {
             assert_eq!(evaluate_secret_file_read_tool(tool, Some(&input)), None);
         }
         assert_eq!(evaluate_secret_file_read_tool("Read", None), None);
@@ -671,5 +732,76 @@ mod tests {
             evaluate_secret_file_read_tool("Read", Some(&serde_json::json!({"file_path": ""}))),
             None
         );
+    }
+
+    // --- #7266 fix round: the native `Grep` tool (critic CRITICAL) ---------
+
+    #[test]
+    fn denies_a_grep_tool_call_on_a_secret_bearing_path() {
+        // `output_mode: "content"` prints every matching line verbatim, so a
+        // pattern matching everything dumps the file with no shell involved.
+        let input = serde_json::json!({
+            "pattern": ".",
+            "path": "/repo/infra/terraform.tfvars",
+            "output_mode": "content",
+        });
+        let reason = evaluate_secret_file_read_tool("Grep", Some(&input)).expect("denies");
+        assert!(reason.contains("`Grep` tool"), "{reason}");
+        assert!(reason.contains("terraform.tfvars"), "{reason}");
+        // The mode is not consulted: an omitted `output_mode` denies too.
+        let bare = serde_json::json!({"pattern": "authtoken", "path": "/repo/.env"});
+        assert!(evaluate_secret_file_read_tool("Grep", Some(&bare)).is_some());
+    }
+
+    #[test]
+    fn denies_a_grep_tool_call_whose_glob_names_a_secret() {
+        for glob in ["*.tfvars", "**/.env", "*.pem", "id_rsa*"] {
+            let input = serde_json::json!({
+                "pattern": ".",
+                "path": "/repo/infra",
+                "glob": glob,
+                "output_mode": "content",
+            });
+            let reason = evaluate_secret_file_read_tool("Grep", Some(&input))
+                .unwrap_or_else(|| panic!("glob `{glob}` must deny"));
+            assert!(reason.contains(glob), "{reason}");
+        }
+        // Fails closed on a brace group the shared classifier cannot resolve.
+        let unresolved = serde_json::json!({"pattern": ".", "glob": "notes.{md,txt"});
+        assert!(evaluate_secret_file_read_tool("Grep", Some(&unresolved)).is_some());
+    }
+
+    #[test]
+    fn allows_a_grep_tool_call_over_a_directory_with_no_glob() {
+        // Grepping a tree is ordinary work and stays allowed.
+        for input in [
+            serde_json::json!({"pattern": "TODO", "path": "/repo/crates", "output_mode": "content"}),
+            serde_json::json!({"pattern": "TODO"}),
+            serde_json::json!({"pattern": "TODO", "path": "/repo/src", "glob": "*.rs"}),
+            serde_json::json!({"pattern": "tfvars", "path": "/repo/docs", "glob": "*.md"}),
+        ] {
+            assert_eq!(
+                evaluate_secret_file_read_tool("Grep", Some(&input)),
+                None,
+                "{input}"
+            );
+        }
+    }
+
+    // --- #7266 fix round: encoder and diff verbs (critic HIGH) ------------
+
+    #[test]
+    fn denies_an_encoded_dump() {
+        for command in ["base64 .env", "basenc --base32 terraform.tfvars"] {
+            assert!(eval(command).is_some(), "`{command}` must deny");
+        }
+    }
+
+    #[test]
+    fn denies_a_diff_against_dev_null() {
+        // Every line of the left file prints as a deletion.
+        let reason = eval("diff .env /dev/null").expect("denies");
+        assert!(reason.contains(".env"), "{reason}");
+        assert_eq!(eval("diff a.rs b.rs"), None);
     }
 }

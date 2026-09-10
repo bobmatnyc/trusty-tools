@@ -2434,6 +2434,82 @@ fn pm_guard_denies_a_read_tool_call_on_a_secret_bearing_file() {
 }
 
 #[test]
+fn pm_guard_denies_a_grep_tool_call_on_a_secret_bearing_file() {
+    // #7266 fix round: the harness's native `Grep` prints matching lines
+    // verbatim under `output_mode: "content"`, so a pattern matching everything
+    // dumps the file with no shell involved — and the glob form reaches the
+    // same file through a directory path.
+    let (_dir, repo) = main_checkout_fixture();
+    let by_path = format!(
+        r#"{{"pattern":".","path":"{}","output_mode":"content"}}"#,
+        repo.join("infra/terraform.tfvars").display()
+    );
+    let by_glob = format!(
+        r#"{{"pattern":".","path":"{}","glob":"*.tfvars","output_mode":"content"}}"#,
+        repo.join("infra").display()
+    );
+    for input in [by_path.as_str(), by_glob.as_str()] {
+        let stdout = run_pm_guard_at(
+            &tool_payload_at("Grep", input, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert_denied(&stdout);
+        assert!(stdout.contains("#7266"), "must cite the issue: {stdout}");
+    }
+    // A directory with no glob is ordinary tree-wide search and stays allowed.
+    let tree = format!(
+        r#"{{"pattern":"TODO","path":"{}","output_mode":"content"}}"#,
+        repo.join("crates").display()
+    );
+    let stdout = run_pm_guard_at(
+        &tool_payload_at("Grep", &tree, &repo, ""),
+        UNREACHABLE_DAEMON,
+        &repo,
+    );
+    assert!(
+        stdout.trim().is_empty(),
+        "a directory grep with no glob must be allowed: {stdout}"
+    );
+}
+
+#[test]
+fn pm_guard_denies_a_secret_copied_to_a_source_extension_name() {
+    // #7266 fix round, the seam between the two rules: `secret_file_copy`
+    // scoped its destination check to worktree paths, so from a main checkout
+    // `cp terraform.tfvars secrets.rs` was allowed — and `cat secrets.rs` then
+    // passed the read guard's transparent-extension carve-out.
+    let (_dir, repo) = main_checkout_fixture();
+    for command in [
+        "cp terraform.tfvars secrets.rs",
+        "cat .env > notes.md",
+        "mv /Users/agent/.aws/credentials app_config.rs",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert_denied(&stdout);
+        assert!(
+            stdout.contains("#7266"),
+            "`{command}` must cite the issue: {stdout}"
+        );
+    }
+    // A copy that keeps the source's own extension is out of the rename rule's
+    // scope, and the destination is not a worktree — today's verdict is allow.
+    let stdout = run_pm_guard_at(
+        &bash_payload_at("cp terraform.tfvars backup.tfvars", &repo, ""),
+        UNREACHABLE_DAEMON,
+        &repo,
+    );
+    assert!(
+        stdout.trim().is_empty(),
+        "a same-extension backup copy outside a worktree must be allowed: {stdout}"
+    );
+}
+
+#[test]
 fn pm_guard_still_allows_ordinary_reads_and_non_operand_mentions() {
     // The other half of #7266's acceptance: the rule must not tax ordinary
     // work. A line range of a normal file, a `cat` of a manifest, a `tfvars`

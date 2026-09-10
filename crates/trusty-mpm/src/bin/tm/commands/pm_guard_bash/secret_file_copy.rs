@@ -51,6 +51,19 @@
 //! `AWS_Credentials` is exactly as real as a lowercase one, and filename
 //! casing carries no security meaning worth missing a match over.
 //!
+//! A SECOND rule, added in issue #7266's fix round, answers a different
+//! question about the same command and is deliberately not scoped to worktree
+//! destinations at all. [`laundered_source_rename`] denies a secret-shaped
+//! source reproduced under a basename whose extension the READ guard treats as
+//! ordinary source or markup — `cp terraform.tfvars secrets.rs`,
+//! `cat .env > notes.md` — wherever it lands. That carve-out
+//! ([`crate::commands::pm_guard_secret_read`]'s
+//! [`has_transparent_source_extension`]) exists so `cat crates/…/credentials.rs`
+//! stays readable, and it was a bypass in one move until this half existed:
+//! copy from a main checkout, `$HOME` or `/tmp` (all outside
+//! [`is_worktree_path`]'s scope), then read the copy. The read guard cannot
+//! tell a laundered `.rs` from a real one, so the stop has to be here.
+//!
 //! Residual bypasses, stated rather than hidden (mirrors
 //! [`super::destructive_delete`]'s own list):
 //! - `TRUSTY_MPM_DISABLE_HOOKS` and `TRUSTY_MPM_PM_UNRESTRICTED=1` short-
@@ -59,11 +72,16 @@
 //!   to this module. A `.claude/settings.json` write that sets either var is
 //!   itself unblocked by this guard, so the PM or an exempt subagent can
 //!   self-exempt via that path; tracked separately as issue #3981.
-//! - `rsync`, `install`, `tar`, `scp`, and shell-builtin redirection
-//!   (`cat secret.pem > worktree/secret.pem`) are different verbs, not
-//!   covered here. The redirection case is partially covered separately by
-//!   [`super::has_file_write_redirection`]'s PM-authorship rule, but that
-//!   rule is not scoped to secret-shaped sources.
+//! - `tar` and `scp` are different verbs, not covered by either rule.
+//!   `rsync`, `install`, `ln` and shell redirection reach the RENAME rule
+//!   ([`RENAME_VERBS`], [`redirection_target`]) but not the
+//!   worktree-destination rule above, so `rsync secret.pem worktree/` keeps
+//!   its own extension and stays allowed — closing that would need
+//!   [`COPY_VERBS`] widened, which makes `npm install <pkg> <pkg>` in a
+//!   worktree deny on a package name matching `token*`.
+//! - The redirection half of the rename rule reads a source token only when it
+//!   carries a `.` or `/`, so a bare secret-shaped WORD used as a pattern
+//!   (`grep -rn credentials src/ > out.md`) is not treated as a file.
 //! - An unparseable segment (unbalanced quotes) is skipped rather than
 //!   failing closed, unlike the sibling destructive-delete rule: every
 //!   `rm`-denylisted target is catastrophic with no legitimate use, but
@@ -96,7 +114,17 @@
 //! `denies_source_with_an_unresolved_brace_group`,
 //! `denies_secret_copy_to_a_destination_with_unresolved_variable`,
 //! `denies_every_pattern_in_the_secret_bearing_list`,
-//! `allows_non_secret_named_sources`.
+//! `allows_non_secret_named_sources`,
+//! `denies_a_secret_renamed_to_a_source_extension_outside_a_worktree`,
+//! `denies_a_secret_renamed_to_a_source_extension_by_any_copy_verb`,
+//! `denies_a_secret_redirected_into_a_markup_name`,
+//! `allows_a_secret_copy_that_keeps_its_own_extension`,
+//! `allows_a_grep_pattern_word_redirected_into_a_markup_name`,
+//! `allows_renaming_an_ordinary_source_file_the_read_guard_already_prints`.
+//! The rename rule
+//! is proved WIRED end to end by
+//! `pm_guard_denies_a_secret_copied_to_a_source_extension_name` in
+//! `tests/tm_hook_pm_guard.rs`.
 
 use std::path::Path;
 
@@ -105,6 +133,9 @@ use trusty_mpm::daemon::managed_routes::inproject::untracked_sync::glob_match;
 
 use super::{PathEnv, resolve_target_path, split_shell_segments, unresolved_target};
 use crate::commands::hook_rewrite::first_command_token;
+// #7266 fix round: the READ guard's own carve-out predicate, so this rule
+// refuses a copy INTO exactly the names that carve-out lets a later read print.
+use crate::commands::pm_guard_secret_read::has_transparent_source_extension;
 
 /// Deny reason for a `cp`/`mv` of a secret-shaped source into a worktree (#7122).
 pub(crate) const SECRET_FILE_COPY_REASON: &str = "`cp`/`mv` must not copy a secret-shaped file \
@@ -117,8 +148,22 @@ pub(crate) const SECRET_FILE_COPY_REASON: &str = "`cp`/`mv` must not copy a secr
      `--env-file`), or declare it in the operator's `untracked_sync` allowlist so the daemon \
      copies it through the gitignore-verified channel.";
 
-/// The two verbs this guard scans every segment's tokens for.
+/// The two verbs the worktree-destination rule scans every segment's tokens for.
 const COPY_VERBS: &[&str] = &["cp", "mv"];
+
+/// Verbs that can place a secret-shaped file's bytes under a NEW basename.
+///
+/// Why: the worktree-destination rule above answers only WHERE a secret lands.
+/// The rename rule below answers what it lands AS, which is a wider question
+/// with a wider verb class — `install`, `rsync` and `ln` each reproduce a file
+/// under a name the caller chooses.
+/// What: a separate list from [`COPY_VERBS`] on purpose. Widening that one
+/// would make `npm install <pkg> <pkg>` inside a worktree deny whenever a
+/// package name happens to match `token*`/`*secrets*`; the rename rule cannot
+/// misfire that way, because it fires only when the DESTINATION basename ends
+/// in a source or markup extension.
+/// Test: `denies_a_secret_renamed_to_a_source_extension_by_any_copy_verb`.
+const RENAME_VERBS: &[&str] = &["cp", "mv", "install", "rsync", "ln"];
 
 /// Filename glob patterns this guard treats as secret-bearing (issue #7122).
 ///
@@ -276,6 +321,11 @@ fn evaluate_secret_file_copy_command_in(
         let Some(argv) = shlex::split(trimmed) else {
             continue;
         };
+        // #7266 fix round: the rename rule runs FIRST and ignores the
+        // destination's scope entirely — see `laundered_source_rename`.
+        if let Some(reason) = laundered_source_rename(&argv) {
+            return Some(reason);
+        }
         let Some(verb_idx) = argv
             .iter()
             .position(|tok| COPY_VERBS.contains(&tok.strip_prefix('\\').unwrap_or(tok)))
@@ -374,6 +424,168 @@ fn positional_args(tail: &[String]) -> Vec<String> {
         out.push(tok.clone());
     }
     out
+}
+
+/// The basename of a path token, with a leading `\` quote removed.
+fn token_basename(token: &str) -> &str {
+    let token = token.strip_prefix('\\').unwrap_or(token);
+    Path::new(token)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or(token)
+}
+
+/// Whether `token`'s basename ends in an extension the READ guard treats as
+/// ordinary source or markup.
+fn names_a_transparent_source(token: &str) -> bool {
+    has_transparent_source_extension(token_basename(token))
+}
+
+/// Whether `token` names a file the READ guard would refuse to print.
+///
+/// Why: the rename rule is about moving bytes from a name that cannot be read
+/// into one that can. A source the read guard ALREADY prints is not being
+/// laundered, so `mv crates/trusty-audit/src/grounding/secrets.rs renamed.rs`
+/// — an ordinary source file whose name matches the `*secrets*` pattern — must
+/// not deny. This is [`crate::commands::pm_guard_secret_read`]'s own target
+/// predicate, expressed from its two exported halves.
+fn names_an_unreadable_secret(token: &str) -> bool {
+    let basename = token_basename(token);
+    is_secret_bearing_source(basename) && !has_transparent_source_extension(basename)
+}
+
+/// A secret-shaped file about to be reproduced under a name the read guard
+/// prints freely: `Some(reason)` denies, `None` allows (issue #7266 fix round).
+///
+/// Why: [`crate::commands::pm_guard_secret_read`] narrows its own file class by
+/// [`has_transparent_source_extension`], so `cat secrets.rs` is allowed by
+/// design — the alternative denied 24 ordinary tracked files. That carve-out
+/// held only while nothing could put a credential INTO such a name, and this
+/// module's other rule scopes its destination check to worktree paths. From a
+/// main checkout, `$HOME` or `/tmp`, `cp terraform.tfvars secrets.rs` therefore
+/// passed both rules and `cat secrets.rs` then printed the credential. Closing
+/// it on the copy side is the half that cannot be routed around: the read guard
+/// cannot tell a laundered `.rs` from a real one.
+/// What: denies when a [`RENAME_VERBS`] invocation's destination basename
+/// satisfies [`names_a_transparent_source`] and any source is secret-shaped, or
+/// when an output redirection (`> secrets.rs`, `tee secrets.rs`) writes such a
+/// name in a segment that also names a secret-shaped FILE. Destination scope is
+/// not consulted at all — a rename to a transparent name is the leak wherever
+/// it lands.
+/// Both halves require the SOURCE to be one the read guard actually refuses
+/// ([`names_an_unreadable_secret`]), so renaming an ordinary `secrets.rs` is
+/// untouched.
+/// Test: `denies_a_secret_renamed_to_a_source_extension_outside_a_worktree`,
+/// `denies_a_secret_renamed_to_a_source_extension_by_any_copy_verb`,
+/// `denies_a_secret_redirected_into_a_markup_name`,
+/// `allows_a_secret_copy_that_keeps_its_own_extension`,
+/// `allows_a_grep_pattern_word_redirected_into_a_markup_name`,
+/// `allows_renaming_an_ordinary_source_file_the_read_guard_already_prints`.
+fn laundered_source_rename(argv: &[String]) -> Option<String> {
+    renamed_by_a_copy_verb(argv).or_else(|| renamed_by_a_redirection(argv))
+}
+
+/// The [`RENAME_VERBS`] half of [`laundered_source_rename`].
+fn renamed_by_a_copy_verb(argv: &[String]) -> Option<String> {
+    let verb_idx = argv
+        .iter()
+        .position(|tok| RENAME_VERBS.contains(&tok.strip_prefix('\\').unwrap_or(tok)))?;
+    let verb = argv[verb_idx].strip_prefix('\\').unwrap_or(&argv[verb_idx]);
+    let positional = positional_args(&argv[verb_idx + 1..]);
+    let (dest, sources) = positional.split_last()?;
+    if sources.is_empty() || !names_a_transparent_source(dest) {
+        return None;
+    }
+    let source = sources
+        .iter()
+        .find(|source| names_an_unreadable_secret(source) && source.as_str() != dest.as_str())?;
+    Some(source_rename_deny_reason(
+        source,
+        dest,
+        &format!("`{verb}`"),
+    ))
+}
+
+/// The redirection half of [`laundered_source_rename`].
+///
+/// Why: `cat .env > notes.md` and `tee secrets.rs` reproduce the file through
+/// the shell rather than a copy verb. The read guard already refuses the `cat`
+/// that feeds the first shape, but a rule that depends on the neighbour firing
+/// first is not a rule.
+/// What: the source must be a secret-shaped token that also LOOKS like a path
+/// (it carries a `.` or a `/`). A bare word is excluded on purpose: `grep -rn
+/// credentials src/ > out.md` names a secret-shaped PATTERN, not a file, and
+/// denying it would tax ordinary work the read guard is careful to allow.
+fn renamed_by_a_redirection(argv: &[String]) -> Option<String> {
+    let dest = redirection_target(argv)?;
+    if !names_a_transparent_source(&dest) {
+        return None;
+    }
+    let source = argv.iter().find(|tok| is_secret_shaped_path_token(tok))?;
+    Some(source_rename_deny_reason(
+        source,
+        &dest,
+        "a shell redirection",
+    ))
+}
+
+/// Whether `token` looks like a path AND names a file the read guard refuses.
+fn is_secret_shaped_path_token(token: &str) -> bool {
+    (token.contains('.') || token.contains('/')) && names_an_unreadable_secret(token)
+}
+
+/// The file an output redirection or a `tee` in `argv` writes, if any.
+///
+/// What: answers for the separated (`> f`, `>> f`, `2> f`, `&> f`) and attached
+/// (`>f`, `>|f`) spellings, and for `tee [flags] f`. Flags between the operand
+/// marker and the file are skipped so `tee -a notes.md` resolves to the file.
+fn redirection_target(argv: &[String]) -> Option<String> {
+    let mut expect_operand = false;
+    for tok in argv {
+        if expect_operand {
+            if tok.starts_with('-') && tok.len() > 1 {
+                continue;
+            }
+            return Some(tok.clone());
+        }
+        let bare = tok.strip_prefix('\\').unwrap_or(tok);
+        if token_basename(bare) == "tee" {
+            expect_operand = true;
+            continue;
+        }
+        match redirect_tail(bare) {
+            Some("") => expect_operand = true,
+            Some(attached) => return Some(attached.to_string()),
+            None => {}
+        }
+    }
+    None
+}
+
+/// The text a redirect token carries after its operator: `Some("")` for the
+/// operator alone, `Some(target)` when the file is attached, `None` when the
+/// token is not an output redirection at all.
+fn redirect_tail(token: &str) -> Option<&str> {
+    let (fd, rest) = token.split_once('>')?;
+    if !(fd.is_empty() || fd == "&" || fd.chars().all(|c| c.is_ascii_digit())) {
+        return None;
+    }
+    let rest = rest.strip_prefix('>').unwrap_or(rest);
+    Some(rest.strip_prefix('|').unwrap_or(rest))
+}
+
+/// Deny reason for a secret-shaped source about to land under a name the read
+/// guard prints freely (issue #7266 fix round).
+fn source_rename_deny_reason(source: &str, dest: &str, how: &str) -> String {
+    format!(
+        "reproducing the secret-shaped file `{source}` as `{dest}` through {how} is refused \
+         (issue #7266) — the destination's extension is one the READ guard treats as ordinary \
+         source or markup, so `cat {dest}`, a line range of it and the `Read` tool would all \
+         print the credential the guard just refused to print from `{source}`. This holds for \
+         EVERY destination, worktree or not, because the read guard cannot tell a laundered name \
+         from a real one. Reference the file by its absolute path instead (`-var-file`, `-state`, \
+         `--env-file`), or copy it under a name that keeps its own extension."
+    )
 }
 
 #[cfg(test)]
@@ -585,5 +797,129 @@ mod tests {
                 "`{name}` shares no shape with `SECRET_BEARING_FILE_PATTERNS` and must not deny"
             );
         }
+    }
+
+    // --- #7266 fix round: the copy-to-transparent-name seam (critic CRITICAL) ---
+
+    /// Evaluate from a MAIN CHECKOUT — the cwd that made this seam reachable.
+    fn eval_outside_a_worktree(command: &str) -> Option<String> {
+        evaluate_secret_file_copy_command_in(command, Path::new("/repo"), &env())
+    }
+
+    #[test]
+    fn denies_a_secret_renamed_to_a_source_extension_outside_a_worktree() {
+        // Fails on 11c08ed44: `/repo` is not a worktree path, so the
+        // destination check above skipped the segment, and `cat secrets.rs`
+        // then passed the read guard's transparent-extension carve-out.
+        let reason = eval_outside_a_worktree("cp terraform.tfvars secrets.rs").expect("denies");
+        assert!(reason.contains("terraform.tfvars"), "{reason}");
+        assert!(reason.contains("secrets.rs"), "{reason}");
+        assert!(reason.contains("#7266"), "{reason}");
+        // The same command from $HOME and /tmp, the other two out-of-scope cwds.
+        for cwd in ["/Users/agent", "/tmp"] {
+            assert!(
+                evaluate_secret_file_copy_command_in(
+                    "cp /Users/agent/live/terraform.tfvars notes.md",
+                    Path::new(cwd),
+                    &env(),
+                )
+                .is_some(),
+                "cwd `{cwd}` must deny"
+            );
+        }
+    }
+
+    #[test]
+    fn denies_a_secret_renamed_to_a_source_extension_by_any_copy_verb() {
+        for verb in RENAME_VERBS {
+            let command = format!("{verb} /Users/agent/.aws/credentials app_config.rs");
+            assert!(
+                eval_outside_a_worktree(&command).is_some(),
+                "`{command}` must deny"
+            );
+        }
+        // A flag between the verb and the operands does not hide them.
+        assert!(eval_outside_a_worktree("install -m 600 server.pem key.rs").is_some());
+        assert!(eval_outside_a_worktree("ln -s /etc/app/.env config.ts").is_some());
+    }
+
+    #[test]
+    fn denies_a_secret_redirected_into_a_markup_name() {
+        for command in [
+            "cat .env > notes.md",
+            "cat .env >> notes.md",
+            "cat .env >notes.md",
+            "tee notes.md < .env",
+            "tee -a report.md < /repo/infra/terraform.tfvars",
+            "base64 server.pem &> dump.txt.md",
+        ] {
+            assert!(
+                eval_outside_a_worktree(command).is_some(),
+                "`{command}` must deny"
+            );
+        }
+    }
+
+    #[test]
+    fn allows_a_secret_copy_that_keeps_its_own_extension() {
+        // Today's verdict for a backup copy outside a worktree: allowed. The
+        // rename rule fires on the DESTINATION's extension, and `.tfvars` is
+        // not one the read guard prints.
+        assert_eq!(
+            eval_outside_a_worktree("cp terraform.tfvars backup.tfvars"),
+            None
+        );
+        assert_eq!(eval_outside_a_worktree("cp /repo/.env /tmp/.env.bak"), None);
+    }
+
+    #[test]
+    fn allows_a_grep_pattern_word_redirected_into_a_markup_name() {
+        // `credentials` here is a PATTERN, not a file — the read guard is
+        // careful to allow this shape and the rename rule must not tax it.
+        for command in [
+            "grep -rn credentials src/ > out.md",
+            "grep -rn secrets crates/ >> audit.md",
+            "cargo test 2> failures.md",
+        ] {
+            assert_eq!(eval_outside_a_worktree(command), None, "`{command}`");
+        }
+    }
+
+    #[test]
+    fn allows_renaming_an_ordinary_source_file_the_read_guard_already_prints() {
+        // Both sides of these renames are files `cat` prints today, so nothing
+        // is laundered. Denying them would tax the 24 tracked files whose names
+        // carry `credentials`/`secrets`/`token` — the exact over-match the read
+        // guard's carve-out exists to avoid.
+        for command in [
+            "mv crates/trusty-audit/src/grounding/secrets.rs grounding/redacted.rs",
+            "cp docs/design/UI/design-system/tokens.css tokens.scss",
+            "mv website/src/lib/theme/tokens.test.ts tokens.spec.ts",
+        ] {
+            assert_eq!(eval_outside_a_worktree(command), None, "`{command}`");
+        }
+    }
+
+    #[test]
+    fn redirection_target_reads_both_spellings() {
+        let argv = |s: &str| shlex::split(s).expect("lexes");
+        assert_eq!(
+            redirection_target(&argv("cat .env > notes.md")).as_deref(),
+            Some("notes.md")
+        );
+        assert_eq!(
+            redirection_target(&argv("cat .env >>notes.md")).as_deref(),
+            Some("notes.md")
+        );
+        assert_eq!(
+            redirection_target(&argv("tee -a notes.md")).as_deref(),
+            Some("notes.md")
+        );
+        assert_eq!(redirection_target(&argv("cat .env")), None);
+        // A `2>&1` fd-dup names no file this rule cares about.
+        assert_eq!(
+            redirection_target(&argv("cargo test 2>&1")).as_deref(),
+            Some("&1")
+        );
     }
 }
