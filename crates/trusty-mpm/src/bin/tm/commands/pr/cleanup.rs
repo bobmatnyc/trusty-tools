@@ -17,7 +17,9 @@
 use std::path::{Path, PathBuf};
 
 use trusty_mpm::client::DaemonClient;
-use trusty_mpm::core::pr_cleanup::{ClaimEnder, CleanupRegistry, CleanupRequest, RealGit};
+use trusty_mpm::core::pr_cleanup::{
+    ClaimEnder, CleanupRegistry, CleanupRequest, RealGit, RealLanding,
+};
 use trusty_mpm::session_manager::worktree_safety::inspect_dirt;
 
 use super::{EXIT_BLOCKED, EXIT_OK, RealGhRunner, repo_slug};
@@ -133,8 +135,17 @@ pub(crate) async fn run(
         dry_run: args.dry_run,
     };
 
-    let report =
-        trusty_mpm::core::pr_cleanup::run(&gh, &RealGit, &claims, &inspect_dirt, &req).await;
+    // #7275: `RealLanding` is what decides a squash-merged branch is landed;
+    // `inspect_dirt`'s ahead-of-upstream count no longer refuses on its own.
+    let report = trusty_mpm::core::pr_cleanup::run(
+        &gh,
+        &RealGit,
+        &claims,
+        &RealLanding,
+        &inspect_dirt,
+        &req,
+    )
+    .await;
     println!("{}", report.render());
     if report.failed() {
         return Ok(EXIT_BLOCKED);
