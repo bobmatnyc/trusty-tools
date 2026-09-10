@@ -23,6 +23,7 @@ use trusty_mpm::client::ManagedSessionSummary;
 use trusty_mpm::session_manager::rename::validate_session_name;
 
 use super::super::picker_delete::{confirm_is_force, confirm_is_yes, delete_route_flags};
+use super::new_session::{NewSessionFlow, NewSessionRequest, Step};
 
 /// How far `PageUp`/`PageDown` move the selection.
 const PAGE: usize = 10;
@@ -99,6 +100,13 @@ pub(crate) enum Action {
     },
     /// Re-fetch the session list from the daemon.
     Refresh,
+    /// Read the registered projects and open the new-session flow (#7395).
+    ///
+    /// The registry read is I/O, so the state machine asks for it rather than
+    /// performing it; the driver answers with [`TuiState::open_new_session`].
+    NewSession,
+    /// Create a session for this confirmed request, then attach (#7395).
+    Create(NewSessionRequest),
 }
 
 /// Which overlay, if any, is in front of the session list.
@@ -134,6 +142,8 @@ pub(crate) enum Mode {
     },
     /// The key reference.
     Help,
+    /// The new-session flow: pick a registered project, or type a path (#7395).
+    New(NewSessionFlow),
 }
 
 /// Severity of the one-line message under the table.
@@ -268,6 +278,11 @@ impl TuiState {
         if input == Input::Cancel {
             return Action::Quit;
         }
+        // #7395: the new-session flow owns a typed buffer, so it is stepped IN
+        // PLACE rather than cloned out of the mode and written back.
+        if matches!(self.mode, Mode::New(_)) {
+            return self.apply_new_session(input);
+        }
         match self.mode.clone() {
             Mode::Browse => self.apply_browse(input, sessions),
             Mode::Help => {
@@ -281,6 +296,53 @@ impl TuiState {
                 typed,
             } => self.apply_confirm(input, index, force, stop_first, typed),
             Mode::Rename { index, typed } => self.apply_rename(input, index, typed, sessions),
+            // Handled above, in place — the buffer must not be cloned.
+            Mode::New(_) => Action::Ignore,
+        }
+    }
+
+    /// Open the new-session flow over an already-fetched target list (#7395).
+    ///
+    /// Why: the registry read is the driver's to make, so the state machine
+    /// takes the answer rather than the connection. Nothing else about the
+    /// state moves — the selection, the scroll offset and the status line all
+    /// stay exactly as they were, which is what makes an Esc out of the flow a
+    /// true no-op (#7395 requirement 4).
+    /// Test: `new_session_escape_leaves_the_state_identical`.
+    pub(crate) fn open_new_session(&mut self, flow: NewSessionFlow) {
+        self.mode = Mode::New(flow);
+    }
+
+    /// Step the open new-session flow and translate its outcome.
+    ///
+    /// Why: the flow reports what happened to ITSELF; only this level knows
+    /// what that means for the surface — a rejection is a status line, a cancel
+    /// is a return to the list, a confirm is an [`Action`] for the driver.
+    /// What: the borrow of `self.mode` ends with the [`Step`], so the message
+    /// and mode writes that follow are ordinary `&mut self` calls.
+    /// Test: `new_session_key_opens_the_flow`,
+    /// `new_session_escape_leaves_the_state_identical`,
+    /// `new_session_rejects_a_path_that_is_not_a_checkout`.
+    fn apply_new_session(&mut self, input: Input) -> Action {
+        let step = match &mut self.mode {
+            Mode::New(flow) => flow.apply(input),
+            _ => return Action::Ignore,
+        };
+        match step {
+            Step::Ignore => Action::Ignore,
+            Step::Redraw => Action::Redraw,
+            Step::Reject(msg) => {
+                self.set_message(msg, Severity::Error);
+                Action::Redraw
+            }
+            Step::Cancel => {
+                self.mode = Mode::Browse;
+                Action::Redraw
+            }
+            Step::Create(request) => {
+                self.mode = Mode::Browse;
+                Action::Create(request)
+            }
         }
     }
 
@@ -306,6 +368,9 @@ impl TuiState {
             },
             Input::Char('d') => self.begin_delete(sessions),
             Input::Char('r') => self.begin_rename(sessions),
+            // #7395: the create verb the surface was missing. The driver reads
+            // the registry and hands the targets back via `open_new_session`.
+            Input::Char('n') => Action::NewSession,
             _ => Action::Ignore,
         }
     }

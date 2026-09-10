@@ -20,7 +20,13 @@
 //! classifiers; `r` calls
 //! [`rename::do_rename_request`](super::rename::do_rename_request), the exact
 //! PATCH `tm sessions rename` issues, after the daemon's own
-//! `validate_session_name`. The terminal setup, the panic-safe guard, and the
+//! `validate_session_name`; `n` (#7395) is [`new_session`], which reads the
+//! project registry through the same `GET /api/v1/projects` `tm project list`
+//! uses, registers an unregistered path through
+//! [`projects::registry::register`](super::projects::registry::register), and
+//! creates the session through
+//! [`guided_launch::launch_new_session_and_attach`](super::guided_launch::launch_new_session_and_attach)
+//! — the picker's own launch-new call. The terminal setup, the panic-safe guard, and the
 //! suspend/resume around the tmux hand-off come from
 //! [`trusty_mpm::tui::terminal`], shared with the coordinator and `project_ctl`
 //! screens. What is NOT shared is the input loop: a full-screen surface needs
@@ -43,6 +49,7 @@
 //! hand-off is verified by the tmux smoke run in the PR body.
 
 pub(crate) mod layout;
+pub(crate) mod new_session;
 pub(crate) mod render;
 pub(crate) mod state;
 
@@ -152,6 +159,40 @@ pub(crate) async fn run_session_tui(
             Action::Quit => break,
             Action::Refresh => {
                 state.set_message("refreshed", Severity::Info);
+            }
+            // #7395: read the project registry, then open the create flow over
+            // it. `continue` rather than falling through — opening an overlay
+            // changed nothing about the fleet, so it owes no re-fetch.
+            Action::NewSession => match new_session::fetch_targets(client, url).await {
+                Ok(targets) => {
+                    state.open_new_session(new_session::NewSessionFlow::new(targets));
+                    continue;
+                }
+                Err(e) => state.set_message(
+                    format!("could not list registered projects: {e}"),
+                    Severity::Error,
+                ),
+            },
+            // #7395: register (when the path was new) then create and attach,
+            // through the same functions `tm projects register` and the
+            // numbered picker's launch-new use. The alternate screen goes away
+            // first, exactly as it does for `Open` — both end in a tmux
+            // hand-off that needs the real terminal in cooked mode.
+            Action::Create(request) => {
+                let label = request.label.clone();
+                terminal::suspend(&mut terminal)?;
+                match new_session::perform(client, url, request).await {
+                    // #2678: the hand-off moved the operator's client away.
+                    Ok(outcome) if outcome.ends_interactive_loop() => return Ok(()),
+                    Ok(_) => {
+                        terminal::resume(&mut terminal)?;
+                        state.set_message(format!("new session in {label}"), Severity::Info);
+                    }
+                    Err(e) => {
+                        terminal::resume(&mut terminal)?;
+                        state.set_message(format!("new session failed: {e}"), Severity::Error);
+                    }
+                }
             }
             Action::Open(index) => {
                 // #7224 requirement 3: the alternate screen goes away BEFORE
