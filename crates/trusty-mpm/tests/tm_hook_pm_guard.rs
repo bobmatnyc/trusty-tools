@@ -2995,6 +2995,49 @@ fn pm_guard_reads_a_parameter_expansion_as_its_operand() {
 }
 
 #[test]
+fn pm_guard_allows_code_braces_in_a_heredoc_body_and_an_inline_program() {
+    // #7266 follow-up, through the real binary. Every ALLOW row here DENIED on
+    // installed tm 1.5.26/1.5.27 (squash 06a6631c2), naming a brace fragment as
+    // a secret file: `naming `{` in a `cat` command`, `naming `{p+` in a `awk`
+    // command`, `naming `{a` in a `python3` command`. The scan read a
+    // here-document body and an interpreter's inline program as argv, and
+    // `expand_brace_alternatives` fails CLOSED on a lone `{`.
+    let (_dir, repo) = main_checkout_fixture();
+    for command in [
+        "cat <<'RSEOF'\\nstruct VerbStub {\\n    cmd: String,\\n}\\nRSEOF",
+        "python3 <<'PY'\\nd = {'a': 1}\\nprint(f'{d!r}')\\nPY",
+        "awk -F'[ ;]' '{p+=$4} END {print p}' /tmp/x.txt",
+        "node -e 'console.log({a: 1})'",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert!(
+            stdout.trim().is_empty(),
+            "`{command}` names no file and must be allowed: {stdout}"
+        );
+    }
+    // The body and the program are SCANNED, not skipped, and every argv
+    // operand beside them keeps the full rule.
+    for command in [
+        "python3 <<'PY'\\nprint(open('.env').read())\\nPY",
+        "python3 -c 'print(open(\\\".env\\\").read())'",
+        "awk '{print}' .env.local",
+        "cat <<'EOF' > .env\\nAPI_KEY=1\\nEOF",
+        "cat {.env,.env.prod}",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert_denied(&stdout);
+    }
+}
+
+#[test]
 fn pm_guard_deny_text_advertises_no_flag_escape() {
     // #7266 round 6, critic HIGH + MEDIUM: round 5's reason offered
     // `--env-file`/`-var-file`/`-state` and no such escape was ever

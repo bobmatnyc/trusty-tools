@@ -62,6 +62,9 @@ pub(crate) use main_checkout::{
     evaluate_main_checkout_destructive_command, head_move_deny_reason, main_checkout_head_move,
 };
 pub(crate) use persistence::command_is_persistence_only;
+// #7266: the secret-read guard frames here-document bodies through the SAME
+// scan the write-redirection check uses, rather than growing a second parser.
+pub(crate) use heredoc::split_heredoc_bodies;
 // #7266: everything after the first export is shared with
 // `crate::commands::pm_guard_secret_read`, so a READ of a secret-bearing file
 // is screened against the same pattern list, the same brace expander and the

@@ -37,12 +37,16 @@ struct Delimiter {
 /// What: `spans` holds half-open `[start, end)` ranges covering the text
 /// between a here-document's operator line and its terminator line, terminator
 /// excluded. `frames` holds the wider separator-suppression ranges #6946 needs
-/// — see [`HeredocBodies::suppresses_separator`]. Both are empty whenever
-/// [`HeredocBodies::scan`] could not parse the command with confidence.
+/// — see [`HeredocBodies::suppresses_separator`]. `data_spans` holds the subset
+/// of `spans` whose operator line hands the body to something other than a
+/// shell, which is the subset [`split_heredoc_bodies`] may lift out of the
+/// command text (#7266). All three are empty whenever [`HeredocBodies::scan`]
+/// could not parse the command with confidence.
 /// Test: `heredoc_bodies_*`.
 pub(super) struct HeredocBodies {
     spans: Vec<(usize, usize)>,
     frames: Vec<(usize, usize)>,
+    data_spans: Vec<(usize, usize)>,
 }
 
 impl HeredocBodies {
@@ -71,6 +75,7 @@ impl HeredocBodies {
         let lines = line_spans(command);
         let mut spans = Vec::new();
         let mut frames = Vec::new();
+        let mut data_spans = Vec::new();
         let mut line = 0;
         while line < lines.len() {
             let (start, end) = lines[line];
@@ -84,6 +89,12 @@ impl HeredocBodies {
                 };
                 if body.span.0 < body.span.1 {
                     spans.push(body.span);
+                    if framing {
+                        // #7266: a body its operator line does not hand to a
+                        // shell is data, so no word in it is a path the
+                        // command opens.
+                        data_spans.push(body.span);
+                    }
                 }
                 if framing {
                     // The frame opens on the newline that ended the operator
@@ -93,7 +104,11 @@ impl HeredocBodies {
                 line = body.next_line;
             }
         }
-        Self { spans, frames }
+        Self {
+            spans,
+            frames,
+            data_spans,
+        }
     }
 
     /// The no-confidence result: every byte stays live shell syntax.
@@ -101,6 +116,7 @@ impl HeredocBodies {
         Self {
             spans: Vec::new(),
             frames: Vec::new(),
+            data_spans: Vec::new(),
         }
     }
 
@@ -134,6 +150,54 @@ impl HeredocBodies {
             .iter()
             .any(|(start, end)| idx >= *start && idx < *end)
     }
+}
+
+/// Separate `command` into the text a word scan may read as argv and the
+/// here-document BODIES it must read as program text instead (#7266).
+///
+/// Why: `crate::commands::pm_guard_secret_read` scans every word of a command
+/// for a secret-bearing filename, and it scanned here-document bodies too. A
+/// body is stdin data — `cat >> verb.rs <<'RSEOF'` carrying `struct VerbStub {`
+/// opens no file the body names — but the scan read `{` as a path word, the
+/// shared brace expander cannot resolve a lone `{`, and the guard fails CLOSED
+/// on that, so writing ordinary Rust denied with "naming `{` in a `cat`
+/// command is refused". [`super::has_file_write_redirection`] already frames
+/// bodies through [`HeredocBodies`]; this is the same framing, one
+/// implementation, for the second scanner.
+/// What: replaces the bytes of every `data_spans` body with spaces, keeping
+/// `\n` so the operator line, the terminator line, every byte offset and the
+/// whole segment structure survive unchanged, and returns those bodies' text
+/// beside it. A body whose operator line names a shell ([`line_runs_a_shell`])
+/// stays in place, because it IS shell source and its own segments must still
+/// be classified. A scan that claimed nothing returns `command` unchanged and
+/// no bodies, so an unparsable here-document keeps the whole pre-#7266 scan.
+/// Test: `splits_a_heredoc_body_out_of_the_argv_text`,
+/// `leaves_a_shell_heredoc_body_in_the_argv_text`,
+/// `splits_nothing_without_a_heredoc`.
+pub(crate) fn split_heredoc_bodies(command: &str) -> (String, Vec<String>) {
+    let bodies = HeredocBodies::scan(command);
+    if bodies.data_spans.is_empty() {
+        return (command.to_string(), Vec::new());
+    }
+    let mut argv_text = String::with_capacity(command.len());
+    let mut texts = Vec::with_capacity(bodies.data_spans.len());
+    let mut cursor = 0;
+    for &(start, end) in &bodies.data_spans {
+        argv_text.push_str(&command[cursor..start]);
+        let body = &command[start..end];
+        for c in body.chars() {
+            if c == '\n' {
+                argv_text.push('\n');
+            } else {
+                // Space per BYTE keeps offsets identical to `command`.
+                argv_text.extend(std::iter::repeat_n(' ', c.len_utf8()));
+            }
+        }
+        texts.push(body.to_string());
+        cursor = end;
+    }
+    argv_text.push_str(&command[cursor..]);
+    (argv_text, texts)
 }
 
 /// Whether a here-document operator line hands its body to a shell.
@@ -361,6 +425,39 @@ mod tests {
         let bodies = HeredocBodies::scan(command);
         let redirect = command.rfind('>').expect("redirect");
         assert!(!bodies.contains(redirect));
+    }
+
+    /// #7266: the body leaves the argv text as spaces and comes back as text.
+    #[test]
+    fn splits_a_heredoc_body_out_of_the_argv_text() {
+        let command = "cat >> verb.rs <<'RSEOF'\nstruct VerbStub {\n}\nRSEOF";
+        let (argv_text, bodies) = split_heredoc_bodies(command);
+        assert_eq!(argv_text.len(), command.len(), "byte offsets are preserved");
+        assert!(argv_text.starts_with("cat >> verb.rs <<'RSEOF'"));
+        assert!(argv_text.trim_end().ends_with("RSEOF"), "{argv_text:?}");
+        assert!(!argv_text.contains('{'), "{argv_text:?}");
+        assert_eq!(bodies, vec!["struct VerbStub {\n}\n".to_string()]);
+    }
+
+    /// #7266 fail-open check: a body the operator line hands to a shell IS
+    /// shell source, so it stays in place for the segment classifiers.
+    #[test]
+    fn leaves_a_shell_heredoc_body_in_the_argv_text() {
+        let command = "bash <<'EOF'\nls .env\nEOF";
+        let (argv_text, bodies) = split_heredoc_bodies(command);
+        assert_eq!(argv_text, command);
+        assert!(bodies.is_empty());
+    }
+
+    /// #7266: no here-document, and an unterminated one, both leave the
+    /// command byte-identical — the pre-fix scan runs unchanged.
+    #[test]
+    fn splits_nothing_without_a_heredoc() {
+        for command in ["awk '{print}' f", "cat <<EOF\nno terminator"] {
+            let (argv_text, bodies) = split_heredoc_bodies(command);
+            assert_eq!(argv_text, command);
+            assert!(bodies.is_empty(), "{command:?}");
+        }
     }
 
     /// Two here-documents opened on one line consume their bodies in order.
