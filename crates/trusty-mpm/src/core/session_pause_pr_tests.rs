@@ -325,40 +325,45 @@ fn publish_rejects_a_path_outside_the_sessions_tree() {
     );
 }
 
-/// Why: publishing off a feature branch would put unrelated commits in the PR.
-/// The refusal must be an error, not a warning — the snapshot file is already
-/// written, and a silent skip is how the old behaviour went unnoticed.
-/// Test target: the default-branch guard.
+/// Why (owner ruling, #7282 round 5): a pause is live state and publishes as
+/// its own PR, so a checkout parked on a feature branch must still produce one.
+/// The commit is built with plumbing against `origin/<default>` and the PR
+/// names its own `--head`, so the checkout's branch cannot leak into either —
+/// which is what makes refusing it unnecessary. Nothing about the feature
+/// branch may appear in the commit, the push, or the PR.
+/// Test target: the detached-HEAD guard, permitting arm.
 #[test]
-fn publish_refuses_when_not_on_the_default_branch() {
+fn a_feature_branch_checkout_still_publishes() {
     let dir = tempfile::TempDir::new().unwrap();
-    let vcs = FakeVcs::new()
-        .ok(
-            &["rev-parse", "--abbrev-ref", "HEAD"],
-            "fix/7282-something\n",
-        )
-        .ok(
-            &["rev-parse", "--abbrev-ref", "origin/HEAD"],
-            "origin/main\n",
-        );
-    let err = publish_pause_snapshot(&vcs, &request(dir.path(), snapshot_paths())).unwrap_err();
+    let vcs = happy().ok(
+        &["rev-parse", "--abbrev-ref", "HEAD"],
+        "fix/7282-something\n",
+    );
+    let out = publish_pause_snapshot(&vcs, &request(dir.path(), snapshot_paths()))
+        .unwrap()
+        .expect("a feature-branch checkout publishes");
 
+    assert_eq!(out.branch, "chore/sessions-trusty-tools-95-20260909-183015");
+    assert_eq!(out.commit, "c0ffee1");
+
+    let argv = vcs.git_argv();
+    // Parented on `origin/main`, never on the checkout's branch.
+    assert!(
+        argv.iter()
+            .any(|a| a.starts_with("commit-tree newtree9 -p base000")),
+        "{argv:?}"
+    );
+    assert!(
+        !argv.iter().any(|a| a.contains("fix/7282-something")),
+        "the checkout's branch may not reach any git step: {argv:?}"
+    );
+    // The PR opens from the chore branch, against the default branch.
+    let tm = tm_call(&vcs, 0);
     assert_eq!(
-        err,
-        PublishError::NotOnDefaultBranch {
-            expected: "main".to_string(),
-            actual: "fix/7282-something".to_string(),
-        }
+        flag_value(&tm, "--head").as_deref(),
+        Some(out.branch.as_str())
     );
-    assert!(
-        err.to_string().contains("The snapshot file was written"),
-        "{err}"
-    );
-    assert!(
-        !vcs.git_argv().iter().any(|a| a.starts_with("fetch")),
-        "nothing beyond the two branch probes may run: {:?}",
-        vcs.calls()
-    );
+    assert_eq!(flag_value(&tm, "--base").as_deref(), Some("main"));
 }
 
 /// Why: `session_context_pause` serves every managed project, so a `develop`
@@ -430,28 +435,34 @@ fn publish_falls_back_to_origin_head_for_the_default_branch() {
     );
 }
 
-/// Why: `main` stays the answer when nothing else names one, and the refusal
-/// has to say which branch it expected so the operator can fix the config.
+/// Why: `main` stays the answer when nothing else names one, and it has to
+/// reach the fetch, the parent commit and the PR base — a checkout sitting on
+/// some other branch must not become the answer by default.
 /// Test target: `resolve_default_branch`, `FALLBACK_BRANCH` arm.
 #[test]
 fn publish_falls_back_to_main_when_nothing_names_a_branch() {
     let dir = tempfile::TempDir::new().unwrap();
-    let vcs = FakeVcs::new()
+    let vcs = happy()
         .ok(&["rev-parse", "--abbrev-ref", "HEAD"], "master\n")
         .fail(
             &["rev-parse", "--abbrev-ref", "origin/HEAD"],
             "fatal: ambiguous argument 'origin/HEAD'",
         );
-    let err = publish_pause_snapshot(&vcs, &request(dir.path(), snapshot_paths())).unwrap_err();
+    let out = publish_pause_snapshot(&vcs, &request(dir.path(), snapshot_paths()))
+        .unwrap()
+        .expect("a changed tree publishes");
 
-    assert_eq!(
-        err,
-        PublishError::NotOnDefaultBranch {
-            expected: "main".to_string(),
-            actual: "master".to_string(),
-        }
+    assert_eq!(out.commit, "c0ffee1");
+    let argv = vcs.git_argv();
+    assert!(argv.contains(&"fetch origin main".to_string()), "{argv:?}");
+    assert!(
+        !argv.iter().any(|a| a.contains("master")),
+        "the checkout's branch is not a default-branch answer: {argv:?}"
     );
-    assert!(err.to_string().contains("only from `main`"), "{err}");
+    assert_eq!(
+        flag_value(&tm_call(&vcs, 0), "--base").as_deref(),
+        Some("main")
+    );
 }
 
 /// Why: when the push fails the commit already exists locally, and a person
@@ -568,6 +579,141 @@ fn publish_opens_the_pr_through_tm_pr_open() {
         "the scratch body must not outlive the publish: {}",
         body_path.display()
     );
+}
+
+// ── the explicit head branch (#7282 round 4) ─────────────────────────────
+
+/// REGRESSION (#7282 round 4): the publish reached `pr-open` and `gh pr create`
+/// aborted with "you must first push the current branch to a remote, or use the
+/// --head flag". The branch WAS pushed; what was missing is that `gh` reads the
+/// head from the checkout's current branch, which is the default branch here
+/// and never the plumbing-built chore branch. Naming both ends of the PR is the
+/// fix.
+/// Test target: the `tm pr open` argv.
+#[test]
+fn pr_open_names_the_chore_branch_as_the_head() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vcs = happy();
+    let out = publish_pause_snapshot(&vcs, &request(dir.path(), snapshot_paths()))
+        .unwrap()
+        .expect("the happy path publishes");
+
+    let open = tm_call(&vcs, 0);
+    assert_eq!(
+        flag_value(&open, "--head").as_deref(),
+        Some(out.branch.as_str()),
+        "{open:?}"
+    );
+    assert_eq!(
+        flag_value(&open, "--base").as_deref(),
+        Some("main"),
+        "{open:?}"
+    );
+}
+
+/// Why: the head must be the branch that was pushed, not a name derived a
+/// second time — a `--head` naming a ref the push never created opens nothing.
+/// Test target: push refspec and `--head`, read from the same run.
+#[test]
+fn the_pushed_branch_is_the_head_the_pr_opens_from() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vcs = happy();
+    let out = publish_pause_snapshot(&vcs, &request(dir.path(), snapshot_paths()))
+        .unwrap()
+        .expect("the happy path publishes");
+
+    let branch = &out.branch;
+    let calls = vcs.calls();
+    let push_at = calls
+        .iter()
+        .position(|c| {
+            c.program == "git"
+                && c.args.first().map(String::as_str) == Some("push")
+                && c.args
+                    .contains(&format!("refs/heads/{branch}:refs/heads/{branch}"))
+        })
+        .expect("the exact branch must be pushed");
+    let open_at = calls
+        .iter()
+        .position(|c| c.program == "tm" && c.args.first().map(String::as_str) == Some("pr"))
+        .expect("the PR must be opened");
+    assert!(
+        push_at < open_at,
+        "the push must precede pr-open: {calls:?}"
+    );
+    assert_eq!(calls[push_at].args[1], "origin", "{:?}", calls[push_at]);
+}
+
+/// Why: the live failure came from a checkout carrying 89 uncommitted changes,
+/// which `gh` warned about. The publish must not read, stage, stash, or switch
+/// anything in that checkout — its state is the caller's, and the commit is
+/// built from the allowlisted files alone. The fixture sits on a feature
+/// branch, because that is now a checkout the publish accepts (#7282 round 5)
+/// and the one where a stray `checkout` or `switch` would do the most damage.
+/// Test target: the whole command set the publish runs.
+#[test]
+fn a_dirty_checkout_is_never_read_staged_or_switched() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vcs = happy().ok(&["rev-parse", "--abbrev-ref", "HEAD"], "fix/some-work\n");
+    publish_pause_snapshot(&vcs, &request(dir.path(), snapshot_paths())).unwrap();
+
+    for argv in vcs.git_argv() {
+        let verb = argv.split(' ').next().unwrap_or_default();
+        assert!(
+            !matches!(
+                verb,
+                "add" | "stash" | "checkout" | "switch" | "status" | "commit"
+            ),
+            "the publish must not touch the checkout: `git {argv}`"
+        );
+    }
+}
+
+/// Why: a detached checkout has no branch name, so `rev-parse --abbrev-ref
+/// HEAD` answers the literal `HEAD`. That must produce the named refusal that
+/// tells a person what to do — never a publish onto a `HEAD` branch, and never
+/// a panic. This is the one checkout state the publish still refuses (#7282
+/// round 5); a feature branch is not.
+/// Test target: the detached-HEAD guard, refusing arm.
+#[test]
+fn a_detached_checkout_is_refused_by_name() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vcs = happy().ok(&["rev-parse", "--abbrev-ref", "HEAD"], "HEAD\n");
+    let err = publish_pause_snapshot(&vcs, &request(dir.path(), snapshot_paths())).unwrap_err();
+
+    assert_eq!(
+        err,
+        PublishError::NotOnDefaultBranch {
+            expected: "main".to_string(),
+            actual: "HEAD".to_string(),
+        }
+    );
+    assert!(err.to_string().contains("detached checkout"), "{err}");
+    assert!(
+        err.to_string().contains("The snapshot file was written"),
+        "{err}"
+    );
+    assert!(
+        !vcs.calls().iter().any(|c| c.program == "tm"),
+        "no PR may be opened from a detached checkout: {:?}",
+        vcs.calls()
+    );
+}
+
+/// The argv of the `n`th recorded `tm` call.
+fn tm_call(vcs: &FakeVcs, n: usize) -> Vec<String> {
+    vcs.calls()
+        .into_iter()
+        .filter(|c| c.program == "tm")
+        .map(|c| c.args)
+        .nth(n)
+        .unwrap_or_else(|| panic!("no tm call #{n}"))
+}
+
+/// The value `flag` was given in `argv`, or `None` when the flag is absent.
+fn flag_value(argv: &[String], flag: &str) -> Option<String> {
+    let at = argv.iter().position(|a| a == flag)?;
+    argv.get(at + 1).cloned()
 }
 
 /// Why: `tm pr merge --auto` refuses for reasons a person must act on — a
