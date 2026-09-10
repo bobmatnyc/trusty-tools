@@ -92,19 +92,25 @@ pub(crate) enum TakeoverVerdict {
 /// indistinguishable from its answer for a dead socket (#7312).
 /// What: `NotASocket` whenever `is_socket` is false, whatever the probe said;
 /// otherwise `TakeOver` on the one verdict the kernel proved, `Occupied` on
-/// every other.
+/// every other. `verdict` is `None` when the caller skipped the probe because
+/// the path is not a socket — a non-socket occupant costs no `connect`, since
+/// the errno one would return is the very thing that misread it.
 /// Test: `takeover_verdict_refuses_a_non_socket_even_when_the_probe_says_dead`,
+/// `takeover_verdict_refuses_a_non_socket_that_was_never_probed`,
 /// `takeover_verdict_takes_over_a_dead_socket`,
 /// `takeover_verdict_refuses_a_served_socket`,
 /// `takeover_verdict_refuses_an_inconclusive_probe`.
-pub(crate) fn classify_takeover(is_socket: bool, verdict: SocketVerdict) -> TakeoverVerdict {
+pub(crate) fn classify_takeover(
+    is_socket: bool,
+    verdict: Option<SocketVerdict>,
+) -> TakeoverVerdict {
     // #7312: bind-failure test hung the CI shard — a Linux connect to a regular
     // file answers ECONNREFUSED, so the probe alone reads it as a dead socket.
     if !is_socket {
         return TakeoverVerdict::NotASocket;
     }
     match verdict {
-        SocketVerdict::NotServing => TakeoverVerdict::TakeOver,
+        Some(SocketVerdict::NotServing) => TakeoverVerdict::TakeOver,
         _ => TakeoverVerdict::Occupied,
     }
 }
@@ -123,6 +129,8 @@ pub(crate) fn classify_takeover(is_socket: bool, verdict: SocketVerdict) -> Take
 /// Test: `bind_singleton_takes_over_a_stale_socket_file`,
 /// `bind_singleton_refuses_a_socket_someone_is_serving`,
 /// `bind_singleton_refuses_a_regular_file_and_leaves_it_on_disk`,
+/// `bind_singleton_hardened_refuses_a_symlink_to_a_dead_socket`,
+/// `bind_singleton_hardened_refuses_a_symlink_to_a_live_socket`,
 /// `bind_singleton_binds_a_fresh_path`.
 pub async fn bind_singleton_hardened(path: &Path) -> Result<UnixListener, UdsSecurityError> {
     // #7312: `lstat`, not `Path::exists` — the latter follows a symlink and
@@ -131,15 +139,22 @@ pub async fn bind_singleton_hardened(path: &Path) -> Result<UnixListener, UdsSec
     // `bind_hardened` to report, exactly as `exists()` returning false was.
     if let Ok(meta) = std::fs::symlink_metadata(path) {
         let file_type = meta.file_type();
+        let is_socket = std::os::unix::fs::FileTypeExt::is_socket(&file_type);
         // #5182 review: three-state, not `is_ok()`. On macOS a live listener
         // with a saturated accept queue answers ECONNREFUSED, and a probe that
         // simply times out proves nothing — see `uds::probe::SocketVerdict`.
         // Only a verdict the kernel proved licenses an unlink.
-        let verdict = probe_socket_verdict(path, PROBE_TIMEOUT).await;
-        match classify_takeover(
-            std::os::unix::fs::FileTypeExt::is_socket(&file_type),
-            verdict,
-        ) {
+        //
+        // #7312: a non-socket occupant is refused on its type alone, so it
+        // never reaches this connect. The decision below still refuses it on
+        // `is_socket` whatever a verdict says, so skipping the probe is a cost
+        // saving, not the rule.
+        let verdict = if is_socket {
+            Some(probe_socket_verdict(path, PROBE_TIMEOUT).await)
+        } else {
+            None
+        };
+        match classify_takeover(is_socket, verdict) {
             TakeoverVerdict::TakeOver => {
                 // A corpse from a child that died without cleaning up. Removing
                 // it is the whole point of this function; a failure to remove it

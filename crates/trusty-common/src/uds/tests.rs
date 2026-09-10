@@ -610,20 +610,8 @@ async fn bind_singleton_takes_over_a_stale_socket_file() {
     drop(dead); // tokio does not unlink on drop, so the file survives.
     assert!(sock.exists(), "the corpse must still be on disk");
 
-    // Dropping the listener closes the fd; the kernel finishes tearing the
-    // socket down afterwards, and on macOS under a loaded test binary a connect
-    // lands in that window and succeeds. Waiting for the corpse to actually
-    // read dead establishes the precondition this test assumes — the subject is
-    // the takeover, not how fast the kernel reclaims a socket.
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while probe_socket_verdict(&sock, Duration::from_millis(50)).await != SocketVerdict::NotServing
-    {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the dropped listener never stopped answering connects"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    // The subject is the takeover, not how fast the kernel reclaims a socket.
+    wait_until_corpse(&sock).await;
 
     let listener = bind_singleton_hardened(&sock)
         .await
@@ -666,7 +654,7 @@ fn takeover_verdict_refuses_a_non_socket_even_when_the_probe_says_dead() {
     // hands the decision for a regular file on the socket path. Before #7312 it
     // unlinked the file and bound over it.
     assert_eq!(
-        classify_takeover(false, SocketVerdict::NotServing),
+        classify_takeover(false, Some(SocketVerdict::NotServing)),
         TakeoverVerdict::NotASocket
     );
 }
@@ -679,7 +667,7 @@ fn takeover_verdict_refuses_a_non_socket_on_every_probe_answer() {
         SocketVerdict::Inconclusive,
     ] {
         assert_eq!(
-            classify_takeover(false, verdict),
+            classify_takeover(false, Some(verdict)),
             TakeoverVerdict::NotASocket,
             "the file type outranks the probe, got {verdict:?}"
         );
@@ -687,10 +675,28 @@ fn takeover_verdict_refuses_a_non_socket_on_every_probe_answer() {
 }
 
 #[test]
+fn takeover_verdict_refuses_a_non_socket_that_was_never_probed() {
+    // What `bind_singleton_hardened` actually passes for a non-socket: no
+    // verdict, because it does not spend a connect on one.
+    assert_eq!(
+        classify_takeover(false, None),
+        TakeoverVerdict::NotASocket,
+        "an unprobed non-socket is still refused"
+    );
+}
+
+#[test]
+fn takeover_verdict_refuses_an_unprobed_socket() {
+    // A missing verdict is never grounds to unlink. Only the one the kernel
+    // proved is.
+    assert_eq!(classify_takeover(true, None), TakeoverVerdict::Occupied);
+}
+
+#[test]
 fn takeover_verdict_takes_over_a_dead_socket() {
     // The one arm that unlinks anything, unchanged by #7312.
     assert_eq!(
-        classify_takeover(true, SocketVerdict::NotServing),
+        classify_takeover(true, Some(SocketVerdict::NotServing)),
         TakeoverVerdict::TakeOver
     );
 }
@@ -698,7 +704,7 @@ fn takeover_verdict_takes_over_a_dead_socket() {
 #[test]
 fn takeover_verdict_refuses_a_served_socket() {
     assert_eq!(
-        classify_takeover(true, SocketVerdict::Serving),
+        classify_takeover(true, Some(SocketVerdict::Serving)),
         TakeoverVerdict::Occupied
     );
 }
@@ -708,7 +714,7 @@ fn takeover_verdict_refuses_an_inconclusive_probe() {
     // The fail-open check: `Inconclusive` must never reach the unlink. A probe
     // that could not settle the question is treated as a live owner.
     assert_eq!(
-        classify_takeover(true, SocketVerdict::Inconclusive),
+        classify_takeover(true, Some(SocketVerdict::Inconclusive)),
         TakeoverVerdict::Occupied
     );
 }
@@ -745,6 +751,94 @@ async fn bind_singleton_refuses_a_regular_file_and_leaves_it_on_disk() {
         std::fs::read(&sock).expect("read the file back"),
         b"not a socket",
         "the file's contents must be untouched"
+    );
+}
+
+/// Wait for a dropped listener's socket to actually read dead.
+///
+/// Why: dropping the listener closes the fd, and the kernel finishes tearing
+/// the socket down afterwards; on macOS under a loaded test binary a connect
+/// lands in that window and succeeds. Two tests establish the same
+/// precondition, so the loop is written once.
+async fn wait_until_corpse(sock: &Path) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while probe_socket_verdict(sock, Duration::from_millis(50)).await != SocketVerdict::NotServing {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the dropped listener never stopped answering connects"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
+async fn bind_singleton_hardened_refuses_a_symlink_to_a_dead_socket() {
+    // #7312: a symlink is refused on its own type, and the dead socket it
+    // points at is NOT the corpse this function may reclaim — reclaiming
+    // through a link would unlink the link and bind a fresh socket at a path
+    // whose name still promises indirection. `verify_socket_for_connect`
+    // refuses a symlinked socket on the dialing side for the same reason.
+    //
+    // Note the target here is genuinely dead, so the probe would answer
+    // `NotServing` on BOTH platforms. Only the file-type check stops the
+    // takeover, which makes this the arm with no platform escape hatch.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("sockets");
+    let target = dir.join("dead.sock");
+    let dead = bind_hardened(&target).expect("bind the soon-to-be corpse");
+    drop(dead); // tokio does not unlink on drop, so the file survives.
+    wait_until_corpse(&target).await;
+
+    let link = dir.join("link.sock");
+    std::os::unix::fs::symlink(&target, &link).expect("symlink onto the corpse");
+
+    let err = bind_singleton_hardened(&link)
+        .await
+        .expect_err("a symlinked socket path must stop the bind");
+
+    assert!(
+        matches!(err, UdsSecurityError::NotASocketFile { ref found, .. } if found == "symlink"),
+        "expected NotASocketFile naming a symlink, got {err:?}"
+    );
+    assert!(
+        std::fs::symlink_metadata(&link).is_ok(),
+        "the symlink itself must survive"
+    );
+    assert!(
+        std::fs::symlink_metadata(&target).is_ok(),
+        "the symlink's target must survive"
+    );
+}
+
+#[tokio::test]
+async fn bind_singleton_hardened_refuses_a_symlink_to_a_live_socket() {
+    // The same refusal with an owner behind it: unlinking here would strand a
+    // live listener, which is what `AlreadyServing` exists to prevent — but the
+    // symlink is refused before the probe ever runs, so the refusal does not
+    // depend on catching the owner in the act.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("sockets");
+    let target = dir.join("live.sock");
+    let _live = bind_hardened(&target).expect("bind the live owner");
+
+    let link = dir.join("link.sock");
+    std::os::unix::fs::symlink(&target, &link).expect("symlink onto the live socket");
+
+    let err = bind_singleton_hardened(&link)
+        .await
+        .expect_err("a symlinked socket path must stop the bind");
+
+    assert!(
+        matches!(err, UdsSecurityError::NotASocketFile { ref found, .. } if found == "symlink"),
+        "expected NotASocketFile naming a symlink, got {err:?}"
+    );
+    assert!(
+        std::fs::symlink_metadata(&link).is_ok(),
+        "the symlink itself must survive"
+    );
+    assert!(
+        socket_is_serving(&target, Duration::from_millis(500)).await,
+        "the live owner must still be answering on its own path"
     );
 }
 
