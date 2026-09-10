@@ -21,7 +21,10 @@
 //! shaped record (issue #3867's schema, plus issue #3870's additive
 //! `compression_path`) to `~/.trusty-mpm/compression.jsonl` (issue #3870,
 //! epic #3866 Slice D — this doc comment's own former "will eventually
-//! consume" note is now discharged), and writes the compressed text to
+//! consume" note is now discharged), appends one `compress` savings row for a
+//! run that actually shrank its input (see
+//! [`trusty_mpm::core::savings_compress`], which is what puts bash and gate
+//! output into the `💸` statusline segment), and writes the compressed text to
 //! stdout.
 //! Test: `run_compress_shrinks_repetitive_cargo_test_output`,
 //! `log_compression_stats_pct_reduction_is_zero_for_empty_input`,
@@ -102,6 +105,9 @@ pub(crate) async fn run_compress(tool: &str) -> anyhow::Result<()> {
         duration_ms,
     )
     .await;
+    // The 💸 statusline segment folds this technique too, so the same run that
+    // writes the telemetry record also writes one savings row.
+    record_compress_savings(input.len(), compressed.len(), path.as_str());
 
     // Explicit `.flush()` (trusty-review finding, PR #1968): `write_all`
     // hands the bytes to Tokio's stdout writer but does not itself guarantee
@@ -113,6 +119,46 @@ pub(crate) async fn run_compress(tool: &str) -> anyhow::Result<()> {
     stdout.write_all(compressed.as_bytes()).await?;
     stdout.flush().await?;
     Ok(())
+}
+
+/// Append this run's savings row to the ledger the `💸` statusline segment folds.
+///
+/// Why: `tm compress` avoids sending tokens exactly the way instruction folding
+/// and bulk-read diversion do, but until this call it wrote only its own
+/// `compression.jsonl` telemetry — so the segment reported everything the
+/// harness saves EXCEPT bash and gate output. The two writes live side by side
+/// because they describe the same event and must never disagree about its byte
+/// counts.
+/// What: resolves the session id Claude Code exports and the framework root the
+/// statusline reads from — the same `--root` / `TRUSTY_MPM_ROOT` / config chain
+/// [`crate::commands::divert`] uses — then hands both byte counts and the
+/// compression-path label to
+/// [`trusty_mpm::core::savings_compress::record_compress`], which declines a
+/// passthrough run rather than writing a zero-saving row. Declines quietly with
+/// no session id or no resolvable root; never fails the compression.
+/// Test: the producer's own suite in `savings_compress_tests.rs`.
+fn record_compress_savings(bytes_before: usize, bytes_after: usize, compression_path: &str) {
+    let Some(session_id) = trusty_mpm::core::savings::claude_code_session_id() else {
+        tracing::debug!("no claude session id: writing no compress savings row");
+        return;
+    };
+    let root = match crate::commands::managed_root::resolve_managed_paths(None) {
+        Ok(paths) => paths.root,
+        Err(source) => {
+            tracing::warn!(
+                %source,
+                "cannot resolve the framework root: writing no compress savings row"
+            );
+            return;
+        }
+    };
+    trusty_mpm::core::savings_compress::record_compress(
+        &root,
+        &session_id,
+        bytes_before,
+        bytes_after,
+        compression_path,
+    );
 }
 
 /// Install a stderr-only tracing subscriber for short-lived `tm compress`

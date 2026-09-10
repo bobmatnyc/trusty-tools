@@ -9,14 +9,14 @@ it. The `💸` segment on the `tm` statusline shows what percentage of tokens
 that would otherwise have been sent, this session avoided sending.
 
 ```
-TM 1.5.18 ● | trusty-tools ⎇ main | @bobmatnyc | ✻you@example.com | Opus | ctx 41% | $12.40 | ⏳24% 📅41% | 💸34% (avg 29%)
+TM 1.5.18 ● | trusty-tools ⎇ main | @bobmatnyc | ✻you@example.com | Opus | ctx 41% | $12.40 | ⏳24% 📅41% | 💸34%/29%
 ```
 
 It has one form and one absence:
 
 | Folded total | Segment |
 |---|---|
-| At least one accepted row, with a percent to report | `💸34% (avg 29%)` |
+| At least one accepted row, with a percent to report | `💸34%/29%` |
 | Nothing recorded for this session, or every accepted row predates #7179 | *the segment is not rendered at all* |
 
 The first figure is this session. The second is the **average across sessions**
@@ -32,7 +32,7 @@ row. That is the shape the owner ruled for on 2026-09-09: after the 2026-09-08
 ruling made the figure a percentage of tokens saved, percentages no longer sum
 into a lifetime total, but they do average cleanly — and a short session that
 avoided 60 % of its tokens counts as much as a long one that avoided 10 %.
-Three sessions at 10 %, 30 % and 50 % therefore show `avg 30%`, where a pooled
+Three sessions at 10 %, 30 % and 50 % therefore show `💸10%/30%`, where a pooled
 ratio over the same rows would show 29 %.
 
 A session contributes only when it has a percentage of its own — the same rule
@@ -104,7 +104,7 @@ interpret.
 ## The techniques, and what each one measures
 
 `technique` is an open string in the ledger, so a new producer needs no schema
-change. Today two producers ship.
+change. Today three producers ship.
 
 ### `instruction-compression`
 
@@ -190,12 +190,28 @@ running Opus, the status bar had not rendered yet.
 A model the price table does not recognise declines the row and logs a warning
 rather than pricing it at a guessed rate.
 
+### `compress`
+
+Written once per `tm compress` run that actually shrank its input — the filter a
+gate chain or a bash command pipes its output through before an agent reads it.
+This is what puts bash and tool output into the segment; before it shipped, the
+`💸` figure covered prompts and diverted reads only.
+
+`tokens_saved` is the input's token count minus the compressed form's, at the
+same four-bytes-per-token divisor the other two producers use, priced at the
+session's own input rate. The row's `basis` names the `compression_path` the run
+took — `rtk_binary` or `native_fallback` — so the two mechanisms can be split
+apart later off the ledger line alone.
+
+A run whose output is under the size gate passes through unchanged and writes no
+row. That case saved nothing, and a zero-saving row would still fold its
+before-figure into the percentage and pull both it and the average down.
+
 ### Adding another producer
 
 Any call site that can compute a before/after byte or token count appends a row
-with its own `technique` string. `tm compress`, which already knows the input
-and output size of every gate log it trims, is the obvious third one. No change
-to the ledger, the fold, or the segment is required.
+with its own `technique` string. No change to the ledger, the fold, or the
+segment is required.
 
 ## The same numbers on the commit
 
@@ -330,7 +346,8 @@ under whatever framework root your `--root` flag, `TRUSTY_MPM_ROOT`, or
 ```
 
 `model_source` names where the model the row was priced at came from. For a
-`divert` row it is one of the three values in the table above; for an
+`divert` or a `compress` row — both resolve the price the same way — it is one
+of the three values in the table above; for an
 `instruction-compression` row it is always `launch-config`, because that producer
 runs at session launch, off the very chain that produced the session's `--model`
 flag. Rows written before this field existed read back with it empty and still

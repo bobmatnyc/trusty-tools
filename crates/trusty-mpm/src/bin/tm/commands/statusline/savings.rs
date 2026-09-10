@@ -23,8 +23,8 @@
 //!
 //! | Fold | Renders |
 //! |---|---|
-//! | `tokens_saved > 0`, a percent denominator, and other sessions on the ledger | `💸34% (avg 29%)` |
-//! | the same, but the ledger holds only this session | `💸34% (avg 34%)` |
+//! | `tokens_saved > 0`, a percent denominator, and other sessions on the ledger | `💸34%/29%` |
+//! | the same, but the ledger holds only this session | `💸34%/34%` |
 //! | zero fold, or no denominator at all (every row predates #7179 and no compaction tick has landed) | nothing at all |
 //!
 //! The average is the arithmetic mean of each session's OWN percentage
@@ -249,8 +249,9 @@ fn savings_root() -> Option<PathBuf> {
 /// `0%`, never a fabricated figure.
 /// What: `💸<N>%` from [`SavingsTotal::percent_saved`] against
 /// `session_actual_tokens` (#7179's session-share denominator, or its
-/// pre-ruling `tokens_before` fallback on `None`), followed by ` (avg <M>%)`
-/// when an average exists (#7074). `None` on [`SavingsTotal::is_zero`] or when
+/// pre-ruling `tokens_before` fallback on `None`), followed by `/<M>%`
+/// when an average exists (#7074, slash form since the owner's 2026-09-10
+/// ruling). `None` on [`SavingsTotal::is_zero`] or when
 /// that method itself returns `None` (no denominator on either path) — and in
 /// that case the average is not rendered on its own, because a session with no
 /// figure of its own shows neither (criterion 3).
@@ -268,7 +269,8 @@ pub(crate) fn render_savings_segment(
     }
     let pct = total.percent_saved(session_actual_tokens)?;
     Some(match average_percent {
-        Some(avg) => format!("\u{1f4b8}{pct}% (avg {avg}%)"),
+        // Owner ruling 2026-09-10: session percent, slash, average percent.
+        Some(avg) => format!("\u{1f4b8}{pct}%/{avg}%"),
         None => format!("\u{1f4b8}{pct}%"),
     })
 }
@@ -330,7 +332,7 @@ mod tests {
     fn savings_segment_renders_the_average_beside_the_session_figure() {
         assert_eq!(
             render_savings_segment(&total(5_000, 20_000), None, Some(29)).as_deref(),
-            Some("\u{1f4b8}25% (avg 29%)")
+            Some("\u{1f4b8}25%/29%")
         );
     }
 
@@ -447,7 +449,7 @@ mod tests {
         write_row(&ledger, "sess-1", 12_000, 60_000);
         assert_eq!(
             savings_segment_at(&ledger, "sess-1", |_| None).as_deref(),
-            Some("\u{1f4b8}20% (avg 20%)")
+            Some("\u{1f4b8}20%/20%")
         );
         // A different session's bar reads nothing from the same file.
         assert_eq!(savings_segment_at(&ledger, "sess-2", |_| None), None);
@@ -467,7 +469,7 @@ mod tests {
 
         assert_eq!(
             savings_segment_at(&ledger, "sess-a", |_| None).as_deref(),
-            Some("\u{1f4b8}10% (avg 30%)")
+            Some("\u{1f4b8}10%/30%")
         );
     }
 
