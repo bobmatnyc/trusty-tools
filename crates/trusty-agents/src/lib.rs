@@ -78,6 +78,7 @@ pub mod api;
 // TYPE, `izzie`/`cto-assistant` are INSTANCES of it, each with its own home.
 pub mod assistants;
 pub mod ast;
+pub mod knowledge;
 // #4652: last-human-turn timeout — the only signal that can tell a human
 // attending an instance from the assistant's own activity (owner decision D3).
 pub mod attendance;

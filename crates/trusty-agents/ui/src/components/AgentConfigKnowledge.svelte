@@ -35,6 +35,8 @@
    * Test: `AgentConfigKnowledge.test.ts`.
    */
   import { AlertCircle, Loader2 } from 'lucide-svelte';
+  import AssistantKnowledgePipeline from './AssistantKnowledgePipeline.svelte';
+  export let agentName = '';
   import { KNOWLEDGE_MCP_ENDPOINTS, type OkgStoreBinding } from '../lib/agentConfig';
 
   /** `null` until the first load resolves — "loading", not "binds nothing". */
@@ -62,6 +64,7 @@
 </script>
 
 <div class="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto">
+  {#if agentName}<AssistantKnowledgePipeline {agentName} />{/if}
   <section class="flex flex-col gap-2">
     <h3 class={heading}>Store bindings</h3>
     <p class="text-xs text-foundry-light-muted dark:text-foundry-text/60">
@@ -181,8 +184,7 @@
     <h3 class={heading}>MCP knowledge connections</h3>
     <p class="text-xs text-foundry-light-muted dark:text-foundry-text/60">
       Knowledge services reachable over MCP/OpenRPC, as <em>declared</em> in the shipped
-      <code class="font-mono">config.toml</code> defaults — not probed. Live status arrives with
-      <code class="font-mono">GET /api/agents/:name/knowledge</code> (DOC-57 §4.5).
+      <code class="font-mono">config.toml</code> defaults — not probed. Assistant pipeline status is shown above; these declarations do not verify a connection.
     </p>
     {#each KNOWLEDGE_MCP_ENDPOINTS as endpoint (endpoint.name)}
       <div class="rounded-md border border-foundry-light-border dark:border-foundry-border px-3 py-2">

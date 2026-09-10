@@ -12,6 +12,14 @@ use super::super::{SkillDef, SkillKind::Knowledge, tool_skill};
 use super::GOOGLE_OAUTH;
 
 pub(super) static TABLE: &[SkillDef] = &[
+    tool_skill(
+        "knowledge-history",
+        "Knowledge History",
+        "Inspect this Assistant's protected knowledge pipeline and request earlier monthly history.",
+        "knowledge_history",
+        Knowledge,
+        None,
+    ),
     // --- semantic + lexical search --------------------------------------
     tool_skill(
         "knowledge-search",

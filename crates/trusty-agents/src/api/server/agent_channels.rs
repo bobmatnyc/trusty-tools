@@ -109,7 +109,10 @@ fn config_path(dirs: &[PathBuf], name: &str) -> Result<PathBuf, Error> {
         .map(|(p, _)| p.with_extension("channels.json"))
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "Assistant not found"))
 }
-async fn load_at(dirs: &[PathBuf], name: &str) -> Result<(PathBuf, String, Vec<Binding>), Error> {
+pub(crate) async fn load_at(
+    dirs: &[PathBuf],
+    name: &str,
+) -> Result<(PathBuf, String, Vec<Binding>), Error> {
     let path = config_path(dirs, name)?;
     let raw = match tokio::fs::read_to_string(&path).await {
         Ok(v) => v,
@@ -339,6 +342,7 @@ pub(crate) async fn receive_slack(
         let Some(binding) = binding else {
             continue;
         };
+        super::knowledge_pipeline::intake::slack(&name, binding, event).await;
         let prompt =
             crate::listeners::wake::build_wake_prompt(event, None, Some(&binding.instructions));
         let metadata=json!({"kind":"trusty.listener-event","version":1,"listener":binding.name,"event_id":event.id,"event_type":event.event_type,"from":event.from,"subject":event.subject}).to_string();

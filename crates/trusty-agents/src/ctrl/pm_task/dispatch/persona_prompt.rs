@@ -47,6 +47,14 @@ pub(super) fn system_prompt(
     );
     let base = format!(
         "{base}{}",
+        crate::tools::knowledge_history::context(
+            persona_tool_names
+                .iter()
+                .any(|name| name == "knowledge_history")
+        )
+    );
+    let base = format!(
+        "{base}{}",
         crate::tools::channel::context(persona_tool_names.iter().any(|name| name == "channel"))
     );
     let base = format!(

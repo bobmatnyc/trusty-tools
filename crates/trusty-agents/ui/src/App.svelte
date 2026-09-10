@@ -3,6 +3,7 @@
   import { get } from 'svelte/store';
   import { createEventRefreshQueue } from './lib/eventRefreshQueue';
   import Sidebar from './components/Sidebar.svelte';
+  import KnowledgeProjectSync from './components/KnowledgeProjectSync.svelte';
   import Header from './components/Header.svelte';
   // #3894: the Chat view's whole composition (chat column + recap rail +
   // Slack mirror + the agent-configuration takeover that covers them) lives
@@ -422,6 +423,7 @@
 
 <div class="flex flex-col h-screen w-full relative bg-foundry-light-bg dark:bg-foundry-bg text-foundry-light-text dark:text-foundry-text overflow-hidden">
   <Header {activeView} {apiReady} on:switch-view={(e) => switchView(e.detail.view)} />
+  <KnowledgeProjectSync ready={apiReady} />
   <div class="flex flex-1 min-h-0 w-full overflow-hidden">
   {#if $apiAuthRequired && !apiReady}
     <main class="flex flex-1 flex-col items-center justify-center bg-foundry-light-bg dark:bg-foundry-bg px-4">

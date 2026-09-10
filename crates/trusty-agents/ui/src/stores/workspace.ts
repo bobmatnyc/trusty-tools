@@ -1,4 +1,5 @@
 import { derived, get, writable } from 'svelte/store';
+import { assistantProjectChats } from '../lib/knowledgeProjects';
 import { activeAgentId, activeProjectId } from './app';
 import { folderError, listWorkspaceRoots, type WorkspaceRoot } from '../lib/workspaceFiles';
 
@@ -31,6 +32,7 @@ function readSaved(): SavedWorkspace {
   }
 }
 const saved = writable<SavedWorkspace>(readSaved());
+export const assistantKnowledgeAttachments = derived([saved, activeAgentId], ([$saved, assistant]) => assistantProjectChats($saved, assistant));
 export const chatWorkspaceKey = derived([activeProjectId, activeAgentId], ([$project, $agent]) => JSON.stringify([$project, $agent]));
 export const projectRoots = derived(saved, value => value.projects.filter(root => root.available !== false));
 export const currentChatRoots = derived([saved, chatWorkspaceKey], ([$saved, key]) => $saved.projects.filter(root => $saved.chats[key]?.ids.includes(root.id)));

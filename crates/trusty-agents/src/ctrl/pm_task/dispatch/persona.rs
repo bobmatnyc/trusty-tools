@@ -210,6 +210,9 @@ pub async fn run_pm_task_with_persona(
         if !listener_event_turn {
             patterns.push("channel".to_owned());
             patterns.push("delegate_skill_configuration".to_owned());
+            if crate::assistants::is_assistant_role(&persona_cfg.agent.role) {
+                patterns.push("knowledge_history".to_owned());
+            }
         }
         Some(patterns)
     } else {
@@ -228,6 +231,11 @@ pub async fn run_pm_task_with_persona(
         if let Some(patterns) = effective_patterns {
             let mut registry = ToolRegistry::new();
             if persona_cfg.agent.kind == "assistant" && !listener_event_turn {
+                if crate::assistants::is_assistant_role(&persona_cfg.agent.role) {
+                    registry.register(Arc::new(
+                        crate::tools::knowledge_history::KnowledgeHistoryTool::new(persona_name),
+                    ));
+                }
                 registry.register(Arc::new(
                     crate::skills::manage::ManageSkillsTool::delegated(),
                 ));

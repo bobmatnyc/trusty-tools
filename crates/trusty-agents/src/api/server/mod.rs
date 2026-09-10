@@ -51,6 +51,7 @@ mod agent_stores;
 mod agent_subagents;
 mod auth;
 mod cancel;
+pub(crate) mod knowledge_pipeline;
 // #4278: read back the durable `persona-{agent}` chat log so the GUI can
 // rehydrate its chat view on reload.
 mod chat_history;

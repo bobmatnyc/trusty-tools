@@ -4,7 +4,7 @@ import { get, writable, type Writable } from 'svelte/store';
 vi.mock('svelte/transition', () => ({ slide: () => ({ duration: 0 }) }));
 vi.mock('../lib/projectTools', () => ({ fetchProjectTools: vi.fn().mockResolvedValue({ index: {}, available: true }), indexProject: vi.fn(), importProject: vi.fn() }));
 vi.mock('../lib/transport', () => ({ isDesktop: () => true }));
-vi.mock('../stores/app', () => ({ activeAgentId: writable(null), projects: writable([]), projectsList: writable([]), fetchProjects: vi.fn().mockResolvedValue(undefined) }));
+vi.mock('../stores/app', () => ({ activeAgentId: writable(null), projects: writable([]), projectsList: writable([]), fetchProjects: vi.fn().mockResolvedValue(undefined), tmApi: vi.fn() }));
 vi.mock('../lib/workspaceFiles', () => ({
   folderError: () => 'This folder is missing. Locate it.', listWorkspaceFiles: vi.fn(), chooseWorkspaceRoot: vi.fn(), registerWorkspaceRoot: vi.fn(), DESKTOP_FILES_MESSAGE: 'Desktop only',
 }));
@@ -14,8 +14,8 @@ vi.mock('../stores/workspace', () => ({
 }));
 import FileNavigator from './FileNavigator.svelte';
 import { activeRoot, openedFile, projectRoots, currentChatRoots, registeredWorkspaceRoots, attachRootToChat, chatWorkspaceKey, loadWorkspaceRoots } from '../stores/workspace';
-import { projectsList, fetchProjects } from '../stores/app';
-import { listWorkspaceFiles } from '../lib/workspaceFiles';
+import { projectsList, fetchProjects, tmApi } from '../stores/app';
+import { listWorkspaceFiles, chooseWorkspaceRoot } from '../lib/workspaceFiles';
 let component: ReturnType<typeof mount> | undefined;
 afterEach(async () => { if (component) await unmount(component); component = undefined; activeRoot.set(null); openedFile.set(null); document.body.innerHTML = ''; (currentChatRoots as Writable<import('../lib/workspaceFiles').WorkspaceRoot[]>).set([]); registeredWorkspaceRoots.set([]); vi.clearAllMocks(); });
 describe('file navigator asynchronous navigation', () => {
@@ -139,4 +139,46 @@ it('keeps registered choices available and displays registry refresh failures', 
   expect(document.querySelector('[role="alert"]')?.textContent).toContain('Registered projects could not be loaded');
   expect(get(registeredWorkspaceRoots)).toHaveLength(1);
   expect(loadWorkspaceRoots).not.toHaveBeenCalled();
+});
+
+async function openFolderPicker() {
+  [...document.querySelectorAll('button')].find(button => button.textContent?.includes('Add project'))!.click(); await tick();
+  const picker = [...document.querySelectorAll('button')].find(button => button.textContent?.includes('Choose folder'));
+  expect(picker, 'Add project must allow choosing an unregistered directory').toBeDefined();
+  picker!.click(); await Promise.resolve(); await tick();
+}
+it('registers a canonical chosen directory before attaching it to the chat', async () => {
+  const root = { id: 'new', name: 'New folder', path: '/canonical/new' };
+  let completeRegistration!: () => void;
+  vi.mocked(chooseWorkspaceRoot).mockResolvedValueOnce(root);
+  vi.mocked(tmApi).mockImplementationOnce(() => new Promise(resolve => { completeRegistration = () => resolve({ path: root.path }); }));
+  component = mount(FileNavigator, { target: document.body }); await tick();
+  await openFolderPicker();
+  expect(tmApi).toHaveBeenCalledWith('/api/projects', { method: 'POST', body: JSON.stringify({ path: root.path }) });
+  expect(attachRootToChat).not.toHaveBeenCalled();
+  completeRegistration(); await Promise.resolve(); await tick();
+  expect(attachRootToChat).toHaveBeenCalledWith(root);
+});
+it('cancelling the native directory picker does not register or attach anything', async () => {
+  vi.mocked(chooseWorkspaceRoot).mockResolvedValueOnce(null);
+  component = mount(FileNavigator, { target: document.body }); await tick(); await openFolderPicker();
+  expect(tmApi).not.toHaveBeenCalled(); expect(attachRootToChat).not.toHaveBeenCalled();
+});
+it('preserves the chat when project registration fails', async () => {
+  vi.mocked(chooseWorkspaceRoot).mockResolvedValueOnce({ id: 'new', name: 'New', path: '/new' });
+  vi.mocked(tmApi).mockRejectedValueOnce(new Error('Registration unavailable'));
+  component = mount(FileNavigator, { target: document.body }); await tick(); await openFolderPicker();
+  await Promise.resolve(); await tick();
+  expect(attachRootToChat).not.toHaveBeenCalled();
+  expect(document.body.textContent).toContain('Registration unavailable');
+});
+it('does not attach the chosen project to a different chat after an in-flight registration', async () => {
+  (chatWorkspaceKey as Writable<string>).set('origin');
+  vi.mocked(chooseWorkspaceRoot).mockResolvedValueOnce({ id: 'new', name: 'New', path: '/new' });
+  let completeRegistration!: () => void;
+  vi.mocked(tmApi).mockImplementationOnce(() => new Promise(resolve => { completeRegistration = () => resolve({ path: '/new' }); }));
+  component = mount(FileNavigator, { target: document.body }); await tick(); await openFolderPicker();
+  (chatWorkspaceKey as Writable<string>).set('different'); await tick();
+  completeRegistration(); await Promise.resolve(); await tick();
+  expect(attachRootToChat).not.toHaveBeenCalled();
 });

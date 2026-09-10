@@ -16,7 +16,7 @@ spec_refs:
 **Status:** Draft
 **Subsystem:** trusty-agents — agent configuration model, capability declaration, permissions surface, GUI config pane
 **Owner:** Engineering (trusty-agents) / Bob Matsuoka
-**Last-updated:** 2026-07-26
+**Last-updated:** 2026-09-09
 **Spec ID:** `SPEC-AGENTCFG-01~draft` … `SPEC-AGENTCFG-09~draft` (DOC-57)
 **Epic:** #3052 (Assistant M1)
 **Builds on:** DOC-54 [Trusty Agents Product Specification](./trusty-agents-product-spec.md) §5 (the config triple this spec supersedes) and §8.4 (the in-pane config sections); DOC-41 [Eve-Style Agent Framework](./trusty-agents-eve-style-agents-spec.md) §2.3/§2.6/§5.5 (manifest schema, no-code enforcement, user-authority singleton); DOC-42 [Agent-Bundled Skills](./agent-bundled-skills.md) (the `skills:` declaration + co-deployment model on the trusty-mpm side); DOC-23 [Learned-Autonomy Auto-Answer](./learned-autonomy-auto-answer.md) (the only designed approval/undo/audit model in the repo)
@@ -180,6 +180,11 @@ nothing about its substance.
 
 ### 4.1 Composition (NORMATIVE)
 
+**Owner revision, 2026-09-09:** §4.7 governs the managed knowledge pipeline.
+Its owner is an **Assistant**: a privileged virtual twin that interacts directly
+with the user. Specialist and delegated agents do not acquire independent OKGs.
+The earlier binding/tool/connection surfaces remain compatible.
+
 Knowledge is **one section listing everything the agent knows**. It subsumes
 DOC-54 §5.1's Stores leg and widens it to three sub-surfaces rendered as one
 pane:
@@ -198,9 +203,10 @@ harness endpoint table across three files.
 
 Unchanged wire format. `AgentStoreBinding { name, tree, index, palace }`
 (`stores/config.rs:49`), both the array-of-tables spelling and the
-`[stores] allow = [...]` shorthand (`stores/config.rs:208-235`). Exactly one
-store per agent is the norm (DOC-54 §5.1); `validate()` warns rather than fails
-on more than one (`stores/config.rs:181`).
+`[stores] allow = [...]` shorthand (`stores/config.rs:208-235`). The legacy parser still accepts multiple bindings and reports validation
+warnings. The managed pipeline in §4.7 requires exactly one protected,
+Assistant-owned OKG; it rejects ambiguous or unconfined bindings rather than
+choosing a destination or moving existing knowledge implicitly.
 
 **The posture that governs the whole section is inherited from #3878: declarative
 data only, degrade never fail.** `resolve_store_statuses` never errors; malformed
@@ -286,6 +292,111 @@ response, so the pane makes one call and cannot render a half-correlated view:
   resolved skill set (§5.5) — no orphans.
 - **C-03.4** Killing the search daemon degrades `stores[].connected` to `false`
   without changing the HTTP status code.
+
+### 4.7 Assistant-owned knowledge pipeline (owner revision, 2026-09-09)
+
+Each user-facing **Assistant** owns one protected OKG entity store, indexed by
+trusty-search. Assistant identity is resolved from the configured Assistant
+instance model, not from a name suffix, model, tool grant, or privileged tier.
+Concierge, specialists, and delegated agents do not gain a store through this
+API. Delegated work remains scoped to the owning Assistant.
+
+“Protected” means the service derives and confines the destination to the
+Assistant home, disallows deleting or rebinding it through pipeline requests,
+and never accepts a caller-supplied output path or foreign index. Existing
+private bindings are validated; shared, ambiguous, or conflicting legacy
+bindings produce a migration/configuration issue. No implicit relocation or
+replacement is permitted. This is a service ownership boundary, not protection
+against the operating-system account editing its own files.
+
+API startup provisions missing Assistant pipelines in the background, without
+delaying readiness. Provisioning narrows the validated, Assistant-owned OKG
+directory to owner-only access; it never changes an unrelated directory or
+follows a symlink. Interrupted manifest binding is recoverable on retry.
+
+Sources are the union of registered project folders attached to the Assistant's
+chats and its effective, enabled incoming-channel bindings. Registration alone
+never authorizes extraction. The API persists chat-to-project attachments;
+canonical directory identity deduplicates them. Missing directories are omitted
+from the eligible catalogue without erasing attachment history. Channel source
+identity includes the configured account, target, and deterministic filters.
+Gmail, Google Drive, Slack, and Google Calendar are channel source kinds.
+Disabled, removed, or retargeted bindings invalidate pending work. No job may
+broaden the connector's configured authorization or filters.
+
+The two indexes serve different purposes: a project's index covers its eligible
+current files; the Assistant's index covers its derived **OKG business
+entities**. A copied source document alone does not count as entity extraction.
+The pipeline is source collection → NLP entity candidates → bounded batches of
+inexpensive inference for normalization/deduplication → validated OKG entities
+with provenance → trusty-search publication. People, organizations, projects,
+products, and other business entities use the upstream OKG schema and identity
+rules. Model output is untrusted data, cannot invoke tools, and must pass schema,
+size, provenance, and ownership validation before publication. Raw indexing,
+extraction, cleanup, and publication have separate reported readiness/status.
+
+Initial entity extraction covers the preceding **one calendar month**. A fixed
+UTC initialization instant anchors half-open intervals `[start, end)`; older
+boundaries are derived from that original anchor with calendar-month arithmetic,
+including month-end clamping. An explicit history-extension request adds earlier
+months in one-month jobs; repeating or overlapping requests must not duplicate
+work. Completed coverage advances only after all pages, candidates, cleanup, and
+index publication for the interval succeed. Requested, queued, and completed
+coverage are distinct facts.
+
+Project extraction partitions current file snapshots by their captured modified
+timestamps. It does not reconstruct old versions or deleted files; raw project
+indexing is not limited to this extraction window. Provider adapters define the
+record timestamp and revision used for window membership. Ongoing incoming
+records enter the same pipeline, retain source IDs/revisions, and deduplicate
+against backfills. Late-arriving records are not discarded merely because their
+record timestamp predates arrival. Cursors, stable record revisions, and page
+exhaustion—not a result-count cap—establish complete provider coverage.
+
+The first implementation is API-first orchestration. Its authenticated routes
+are under `/api/agents/{name}/knowledge/pipeline`, retaining the existing
+`GET /knowledge` fields and `GET /stores` compatibility:
+
+| Operation | Contract |
+|---|---|
+| `GET` pipeline | Read-only protected store, policy, source readiness, persisted jobs, requested history, and dependency failures; never starts collection |
+| `POST` pipeline | Initialize/reconcile the Assistant-owned pipeline against current registered attachments and incoming bindings |
+| `PUT` pipeline `/projects` | Revisioned per-chat registered project selection; atomically update its union and reconcile sources |
+| `PATCH` pipeline | Revisioned pause/resume; pausing cannot erase knowledge or completed coverage |
+| `POST` pipeline `/backfill` | Revisioned bounded request for additional earlier months, one job per source/month |
+
+Mutations reject stale revisions, unknown fields, unregistered sources, invalid
+Assistant identities, path escapes, and non-Assistant callers. State persists
+under the owning Assistant's home with private atomic writes and a cross-process
+lock. A restart must not reset history requests or create duplicate jobs.
+Incoming record identities are durably queued before admission, then replayed
+against freshly loaded source configuration with revision checks. Source bodies
+remain with their authorized upstream provider until extraction is available.
+Requests and status return no source bodies, credentials, or inferred entities
+that have not actually been committed.
+
+The UI reflects this API: protected store, attached sources, dependency and
+indexing state, monthly requested/completed coverage, pause/resume, and history
+extension. It must not present a queued request as learned knowledge. An
+Assistant-facing history-extension capability must use the same service and
+owner scope; conversational text alone never fabricates a backfill result.
+
+Upstream collection/pagination, NLP extraction, cleanup, and OKG publication
+contracts remain coordinated through #4531, #4283, and their source-specific
+children. Claude Code owns those upstream implementations. Until a dependency
+is implemented and verified, the API reports `blocked_on_dependency` with the
+specific reason; it does not substitute document ingestion, silently skip an
+interval, or report completed entities. API-first delivery is not evidence that
+the full extraction pipeline is operational.
+
+Conformance includes Assistant/specialist isolation, immutable destination,
+source revocation and revision changes, stale-write conflicts, restart and
+concurrent mutation safety, leap-year/month-end windows, bounded history
+requests, overlapping event/backfill deduplication, unavailable dependencies,
+and unchanged legacy knowledge fields. Upstream execution acceptance additionally
+requires pagination exhaustion, changed/deleted project reconciliation, validated
+business entities, inexpensive-cleanup budget enforcement, and searchable OKG
+publication before completed coverage advances.
 
 ---
 
