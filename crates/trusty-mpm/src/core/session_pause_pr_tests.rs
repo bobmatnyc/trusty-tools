@@ -570,6 +570,133 @@ fn publish_opens_the_pr_through_tm_pr_open() {
     );
 }
 
+// ── the explicit head branch (#7282 round 4) ─────────────────────────────
+
+/// REGRESSION (#7282 round 4): the publish reached `pr-open` and `gh pr create`
+/// aborted with "you must first push the current branch to a remote, or use the
+/// --head flag". The branch WAS pushed; what was missing is that `gh` reads the
+/// head from the checkout's current branch, which is the default branch here
+/// and never the plumbing-built chore branch. Naming both ends of the PR is the
+/// fix.
+/// Test target: the `tm pr open` argv.
+#[test]
+fn pr_open_names_the_chore_branch_as_the_head() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vcs = happy();
+    let out = publish_pause_snapshot(&vcs, &request(dir.path(), snapshot_paths()))
+        .unwrap()
+        .expect("the happy path publishes");
+
+    let open = tm_call(&vcs, 0);
+    assert_eq!(
+        flag_value(&open, "--head").as_deref(),
+        Some(out.branch.as_str()),
+        "{open:?}"
+    );
+    assert_eq!(
+        flag_value(&open, "--base").as_deref(),
+        Some("main"),
+        "{open:?}"
+    );
+}
+
+/// Why: the head must be the branch that was pushed, not a name derived a
+/// second time — a `--head` naming a ref the push never created opens nothing.
+/// Test target: push refspec and `--head`, read from the same run.
+#[test]
+fn the_pushed_branch_is_the_head_the_pr_opens_from() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vcs = happy();
+    let out = publish_pause_snapshot(&vcs, &request(dir.path(), snapshot_paths()))
+        .unwrap()
+        .expect("the happy path publishes");
+
+    let branch = &out.branch;
+    let calls = vcs.calls();
+    let push_at = calls
+        .iter()
+        .position(|c| {
+            c.program == "git"
+                && c.args.first().map(String::as_str) == Some("push")
+                && c.args
+                    .contains(&format!("refs/heads/{branch}:refs/heads/{branch}"))
+        })
+        .expect("the exact branch must be pushed");
+    let open_at = calls
+        .iter()
+        .position(|c| c.program == "tm" && c.args.first().map(String::as_str) == Some("pr"))
+        .expect("the PR must be opened");
+    assert!(
+        push_at < open_at,
+        "the push must precede pr-open: {calls:?}"
+    );
+    assert_eq!(calls[push_at].args[1], "origin", "{:?}", calls[push_at]);
+}
+
+/// Why: the live failure came from a checkout carrying 89 uncommitted changes,
+/// which `gh` warned about. The publish must not read, stage, stash, or switch
+/// anything in that checkout — its state is the caller's, and the commit is
+/// built from the allowlisted files alone.
+/// Test target: the whole command set the publish runs.
+#[test]
+fn a_dirty_checkout_is_never_read_staged_or_switched() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vcs = happy();
+    publish_pause_snapshot(&vcs, &request(dir.path(), snapshot_paths())).unwrap();
+
+    for argv in vcs.git_argv() {
+        let verb = argv.split(' ').next().unwrap_or_default();
+        assert!(
+            !matches!(
+                verb,
+                "add" | "stash" | "checkout" | "switch" | "status" | "commit"
+            ),
+            "the publish must not touch the checkout: `git {argv}`"
+        );
+    }
+}
+
+/// Why: a detached checkout has no branch name, so `rev-parse --abbrev-ref
+/// HEAD` answers the literal `HEAD`. That must produce the named refusal that
+/// tells a person what to do — never a publish onto a `HEAD` branch, and never
+/// a panic.
+/// Test target: the default-branch guard, detached arm.
+#[test]
+fn a_detached_checkout_is_refused_by_name() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vcs = happy().ok(&["rev-parse", "--abbrev-ref", "HEAD"], "HEAD\n");
+    let err = publish_pause_snapshot(&vcs, &request(dir.path(), snapshot_paths())).unwrap_err();
+
+    assert_eq!(
+        err,
+        PublishError::NotOnDefaultBranch {
+            expected: "main".to_string(),
+            actual: "HEAD".to_string(),
+        }
+    );
+    assert!(
+        !vcs.calls().iter().any(|c| c.program == "tm"),
+        "no PR may be opened from a detached checkout: {:?}",
+        vcs.calls()
+    );
+}
+
+/// The argv of the `n`th recorded `tm` call.
+fn tm_call(vcs: &FakeVcs, n: usize) -> Vec<String> {
+    vcs.calls()
+        .into_iter()
+        .filter(|c| c.program == "tm")
+        .map(|c| c.args)
+        .nth(n)
+        .unwrap_or_else(|| panic!("no tm call #{n}"))
+}
+
+/// The value `flag` was given in `argv`, or `None` when the flag is absent.
+fn flag_value(argv: &[String], flag: &str) -> Option<String> {
+    let at = argv.iter().position(|a| a == flag)?;
+    argv.get(at + 1).cloned()
+}
+
 /// Why: `tm pr merge --auto` refuses for reasons a person must act on — a
 /// missing label, auto-merge disabled on the repo, a permissions gap. Dropping
 /// its stderr left `auto_merge_armed: false` as the entire report, so the PR

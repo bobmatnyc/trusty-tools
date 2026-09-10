@@ -18,7 +18,10 @@
 //! on a fresh `chore/sessions-<slug>-<ts>` branch off the project's default
 //! branch, is pushed, and the PR is opened and armed through the existing
 //! `tm pr open` / `tm pr merge --auto` path — this module spells no
-//! `gh pr create` of its own.
+//! `gh pr create` of its own. Both ends of that PR are named explicitly
+//! (`--head <chore branch> --base <default>`), because the chore branch is
+//! never checked out and `gh` would otherwise open from whatever branch the
+//! checkout happens to be on (#7282).
 //! Test: `session_pause_pr_tests.rs`.
 
 use std::path::{Path, PathBuf};
@@ -214,10 +217,14 @@ fn commit_note(branch: Option<&str>, commit: Option<&str>) -> String {
 /// `GIT_INDEX_FILE` in a per-call [`tempfile::TempDir`], commits with
 /// `commit-tree` parented on `origin/<default>`, points a fresh
 /// `chore/sessions-<slug>-<ts>` branch at it, pushes that ref, and hands the PR
-/// to `tm pr open` and `tm pr merge --auto`. Nothing here runs `git add`,
-/// `git stash`, or `git checkout`, so the working tree, HEAD, and the shared
-/// index are untouched.
+/// to `tm pr open` — naming that branch as `--head` — and `tm pr merge --auto`.
+/// Nothing here runs `git add`, `git stash`, or `git checkout`, so the working
+/// tree, HEAD, and the shared index are untouched.
 /// Test: `publish_commits_only_the_allowlisted_paths`,
+/// `pr_open_names_the_chore_branch_as_the_head`,
+/// `the_pushed_branch_is_the_head_the_pr_opens_from`,
+/// `a_dirty_checkout_is_never_read_staged_or_switched`,
+/// `a_detached_checkout_is_refused_by_name`,
 /// `publish_branch_name_carries_session_and_timestamp`,
 /// `publish_refuses_when_not_on_the_default_branch`,
 /// `publish_uses_the_configured_default_branch`,
@@ -393,6 +400,11 @@ pub fn publish_pause_snapshot<V: PauseVcs>(
                 &body_path.to_string_lossy(),
                 "--base",
                 &default,
+                // #7282: the commit was built with plumbing, so this branch is
+                // never the checkout's current one — name it or `gh` reads the
+                // checkout's branch and aborts.
+                "--head",
+                &branch,
                 "--docs-only",
                 "--rung",
                 "1",
