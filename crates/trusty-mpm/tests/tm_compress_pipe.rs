@@ -77,6 +77,107 @@ fn run_tm_compress_with(env: &[(&str, &str)], tool: &str, input: &str) -> (bool,
     )
 }
 
+/// Drop ANSI CSI sequences so a whole `field=value` pair can be asserted.
+///
+/// Why: the stats line interleaves colour escapes around `=`, so a raw
+/// `contains("exit=3")` never matches even when the field is right there
+/// (#7384). The sibling rtk test works around this by matching the value
+/// alone, which cannot distinguish `exit=3` from a `3` anywhere else.
+/// What: removes `ESC [ … <final byte>` runs; every escape `tracing`'s fmt
+/// layer emits is of that form.
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        if chars.next() != Some('[') {
+            continue;
+        }
+        for c in chars.by_ref() {
+            if ('@'..='~').contains(&c) {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Run `inner` through the pipeline shape `tm hook` rewrites a Bash call into.
+///
+/// Why: the exit status the stats line reports is the WRAPPED command's, which
+/// only a real shell can supply — asserting it against a hand-fed stdin would
+/// prove nothing about the mechanism (#7384).
+/// What: builds `{ sh -c '<inner>'; printf '\n<sentinel>\n' "$?"; } | tm
+/// compress --tool '<tool>'`, the exact string
+/// `commands::compress::wrap_command_reporting_exit` produces, and returns the
+/// filter's stdout plus its ANSI-stripped stderr. `inner` must not contain a
+/// single quote.
+fn run_wrapped_pipeline(inner: &str, tool: &str) -> (String, String) {
+    let bin = env!("CARGO_BIN_EXE_tm");
+    let script = format!(
+        "{{ sh -c '{inner}'; printf '\\n__tm_compress_exit=%s__\\n' \"$?\"; }} \
+         | '{bin}' compress --tool '{tool}'"
+    );
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(&script)
+        .env(ENV_COMPRESS_NO_RTK, "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("failed to run the rewritten pipeline");
+    (
+        String::from_utf8(output.stdout).expect("stdout is utf8"),
+        strip_ansi(&String::from_utf8_lossy(&output.stderr)),
+    )
+}
+
+#[test]
+fn tm_compress_reports_the_wrapped_commands_exit_status() {
+    // #7384: `bytes_before=0 … compression_path=rtk_binary` read identically
+    // whether the command found nothing, failed, or had its stdout dropped. The
+    // filter's OWN status is always 0, so a fix that logged that would report
+    // `exit=0` here and fail.
+    let (stdout, stderr) = run_wrapped_pipeline("printf boom; exit 3", "cargo test");
+    assert!(
+        stderr.contains("exit=3"),
+        "the stats line must carry the wrapped command's status: {stderr}"
+    );
+    assert_eq!(
+        stdout, "boom",
+        "the exit sentinel must never reach the caller's output"
+    );
+}
+
+#[test]
+fn tm_compress_reports_a_signal_killed_wrapped_command() {
+    // A signal-killed command reaches the shell as 128 + signal — 137 for
+    // SIGKILL — so it needs no separate spelling, but it does need proving.
+    let (_stdout, stderr) = run_wrapped_pipeline("kill -9 $$", "cargo test");
+    assert!(
+        stderr.contains("exit=137"),
+        "a SIGKILLed command must report 128+9: {stderr}"
+    );
+}
+
+#[test]
+fn tm_compress_reports_unknown_for_an_unwrapped_invocation() {
+    // `tm compress < file`, and any rewrite older than #7384, carry no
+    // sentinel. The field must still be present, and must not claim a status.
+    let (success, stdout, stderr) = run_tm_compress("cargo test", "ok\n");
+    assert!(success, "tm compress exited non-zero: stderr={stderr}");
+    assert_eq!(stdout, "ok\n", "an unwrapped payload passes through");
+    let stderr = strip_ansi(&stderr);
+    assert!(
+        stderr.contains("exit=unknown"),
+        "a missing sentinel must read as unknown, not as success: {stderr}"
+    );
+}
+
 fn repetitive_cargo_test_payload() -> String {
     let mut input = String::new();
     for i in 0..50 {

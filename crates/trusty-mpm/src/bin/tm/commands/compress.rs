@@ -25,12 +25,18 @@
 //! run that actually shrank its input (see
 //! [`trusty_mpm::core::savings_compress`], which is what puts bash and gate
 //! output into the `💸` statusline segment), and writes the compressed text to
-//! stdout.
+//! stdout. Two things ride on top of that: the stats line reports the WRAPPED
+//! command's exit status, which the rewritten pipeline appends as a sentinel
+//! line and [`split_exit_sentinel`] strips back off (#7384), and a compression
+//! that emptied a non-empty input hands the raw text back with a warning
+//! instead of returning nothing ([`compress_with_raw_fallback`], #7377).
 //! Test: `run_compress_shrinks_repetitive_cargo_test_output`,
 //! `log_compression_stats_pct_reduction_is_zero_for_empty_input`,
 //! `log_compression_stats_pct_reduction_can_be_negative_when_output_expands`,
 //! `native_fallback_elision_reports_a_matching_non_zero_reduction`,
 //! `run_compress_passes_through_short_output_unchanged`,
+//! `split_exit_sentinel_reads_and_strips_a_trailing_status`,
+//! `rtk_returning_nothing_falls_back_to_the_raw_output_and_warns_once`,
 //! `append_compression_record_creates_file`,
 //! `append_compression_record_appends` below; the full stdin→stdout process
 //! contract (including this function's now-async write) is exercised end to
@@ -39,7 +45,92 @@
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use trusty_agents_common::compress::compress_tool_output_async_with_path;
+use trusty_agents_common::compress::{
+    CompressionPath, RtkResolver, compress_tool_output_async_with_path_using, default_rtk_resolver,
+};
+
+/// Head of the exit-status line the rewritten pipeline appends to stdin (#7384).
+///
+/// Why: a pipeline hands its filter stdout, never the upstream command's exit
+/// status, so `bytes_before=0` read the same whether the command found nothing,
+/// failed, or had its stdout redirected away. The shell knows the status; a
+/// trailing sentinel line is the one way to carry it into a process the shell
+/// started concurrently.
+/// What: the producer is [`wrap_command_reporting_exit`], the consumer
+/// [`split_exit_sentinel`]. A wrapped command that prints this exact line
+/// itself would have it stripped and its status misreported — accepted, since
+/// the spelling is not one real output produces.
+/// Test: `split_exit_sentinel_reads_and_strips_a_trailing_status`.
+const EXIT_SENTINEL_PREFIX: &str = "__tm_compress_exit=";
+
+/// Tail of the exit-status sentinel line. See [`EXIT_SENTINEL_PREFIX`].
+const EXIT_SENTINEL_SUFFIX: &str = "__";
+
+/// Wrap a Bash command so its exit status reaches this filter (#7384).
+///
+/// Why: `commands::hook_rewrite` pipes the wrapped command into `tm compress`.
+/// `$?` cannot be read from inside that pipeline — the shell expands every
+/// argument before any element runs — so the status is appended to the stream
+/// the filter already reads, by a `printf` that runs after the command in the
+/// same brace group.
+/// What: `{ <command>; printf '\n<sentinel>\n' "$?"; }`. The whole group is one
+/// physical line, so the caller owes this function a command that cannot break
+/// it: `hook_rewrite::has_unsafe_pipe_composition` rejects `|`, `&`, `;`, `>`
+/// and `<`, and `hook_rewrite::cannot_be_brace_wrapped` rejects a `#` (which
+/// would comment out the `printf` and the closing brace) and a trailing
+/// unescaped `\` (which would escape the `;` and turn the `printf` into
+/// arguments). What reaches here is a simple command, and the group is then
+/// valid in sh, bash and zsh alike. The leading newline keeps the sentinel on
+/// its own line whether or not the command's output ended in one, and
+/// [`split_exit_sentinel`] removes exactly the bytes this adds.
+/// Test: `wrap_command_reporting_exit_round_trips_through_split`,
+/// `rewrite_appends_compress_pipe_for_plain_command`, and the process-level
+/// `tm_compress_reports_the_wrapped_commands_exit_status`.
+pub(crate) fn wrap_command_reporting_exit(command: &str) -> String {
+    format!(
+        "{{ {command}; printf '\\n{EXIT_SENTINEL_PREFIX}%s{EXIT_SENTINEL_SUFFIX}\\n' \"$?\"; }}"
+    )
+}
+
+/// Split stdin into the wrapped command's own output and its exit status.
+///
+/// Why: the sentinel is telemetry, not output — leaving it in would put a
+/// `__tm_compress_exit=0__` line in front of every agent reading a wrapped
+/// command's result (#7384).
+/// What: looks at the last line, ignoring one trailing newline. When it is a
+/// sentinel, returns everything before the newline that introduced it plus the
+/// parsed status; otherwise returns the input untouched and `None`, which is
+/// what an unwrapped invocation (`tm compress < file`) and an older rewrite
+/// both produce.
+/// Test: `split_exit_sentinel_reads_and_strips_a_trailing_status`,
+/// `split_exit_sentinel_leaves_unwrapped_input_untouched`,
+/// `wrap_command_reporting_exit_round_trips_through_split`.
+fn split_exit_sentinel(stdin_text: &str) -> (&str, Option<i32>) {
+    let body = stdin_text.strip_suffix('\n').unwrap_or(stdin_text);
+    let (head, last) = match body.rfind('\n') {
+        Some(newline) => (&body[..newline], &body[newline + 1..]),
+        None => ("", body),
+    };
+    match parse_exit_sentinel(last) {
+        Some(code) => (head, Some(code)),
+        None => (stdin_text, None),
+    }
+}
+
+/// Parse one sentinel line into a shell exit status.
+///
+/// A signal-killed command reaches the shell as `128 + signal`, so the same
+/// numeric range covers it — 137 for `SIGKILL`, no separate spelling (#7384).
+/// Values outside a shell's `0..=255` are rejected so a line that merely looks
+/// like the sentinel cannot be mistaken for one.
+/// Test: `parse_exit_sentinel_rejects_out_of_range_and_malformed_lines`.
+fn parse_exit_sentinel(line: &str) -> Option<i32> {
+    let digits = line
+        .strip_prefix(EXIT_SENTINEL_PREFIX)?
+        .strip_suffix(EXIT_SENTINEL_SUFFIX)?;
+    let code: i32 = digits.parse().ok()?;
+    (0..=255).contains(&code).then_some(code)
+}
 
 /// Run `tm compress --tool <tool>`: read stdin, compress, log stats, print.
 ///
@@ -86,13 +177,16 @@ use trusty_agents_common::compress::compress_tool_output_async_with_path;
 pub(crate) async fn run_compress(tool: &str) -> anyhow::Result<()> {
     init_stats_log_subscriber();
 
-    let mut input = String::new();
-    tokio::io::stdin().read_to_string(&mut input).await?;
+    let mut stdin_text = String::new();
+    tokio::io::stdin().read_to_string(&mut stdin_text).await?;
+    // #7384: the wrapped command's status rides in on a trailing sentinel line;
+    // strip it here so it never reaches the caller's output.
+    let (input, exit) = split_exit_sentinel(&stdin_text);
 
     let started = std::time::Instant::now();
-    let (compressed, path) = compress_tool_output_async_with_path(tool, &input).await;
+    let (compressed, path) = compress_with_raw_fallback(default_rtk_resolver(), tool, input).await;
     let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    let _pct = log_compression_stats(tool, input.len(), compressed.len(), path.as_str());
+    let _pct = log_compression_stats(tool, input.len(), compressed.len(), path.as_str(), exit);
     // #3870: durable sink, awaited (not spawned) because `tm compress` is a
     // short-lived pipe filter — see `append_compression_record`'s doc
     // comment for why a detached `tokio::spawn` would race process exit.
@@ -119,6 +213,42 @@ pub(crate) async fn run_compress(tool: &str) -> anyhow::Result<()> {
     stdout.write_all(compressed.as_bytes()).await?;
     stdout.flush().await?;
     Ok(())
+}
+
+/// Compress `input`, handing back the raw text when compression emptied it.
+///
+/// Why: the `rtk_binary` path returns whatever the subprocess printed, and rtk
+/// can exit zero having printed nothing — an 824-byte `git diff --stat` came
+/// back as 0 bytes, reported as a successful 100% reduction, and the caller
+/// lost the diff (#7377). #6986 put the same backstop inside
+/// [`trusty_agents_common::compress::compress_tool_output`], but that guard
+/// only covers the native filter chain; the rtk subprocess never reaches it.
+/// What: runs [`compress_tool_output_async_with_path_using`] against `resolve`,
+/// then returns `input` verbatim when the result is blank and the input was
+/// not. The warning carries the tool, the input size and the path that emptied
+/// it, so the fallback is visible in the same stderr stream as the stats line
+/// rather than being silently indistinguishable from a real reduction. The
+/// reported [`CompressionPath`] stays the path that actually ran.
+/// Test: `rtk_returning_nothing_falls_back_to_the_raw_output_and_warns_once`,
+/// `a_real_compression_is_not_treated_as_an_empty_result`.
+async fn compress_with_raw_fallback(
+    resolve: RtkResolver,
+    tool: &str,
+    input: &str,
+) -> (String, CompressionPath) {
+    let (compressed, path) = compress_tool_output_async_with_path_using(resolve, tool, input).await;
+    // #7377: an empty result for a non-empty input destroyed the caller's
+    // output rather than shortening it.
+    if compressed.trim().is_empty() && !input.trim().is_empty() {
+        tracing::warn!(
+            tool_name = %tool,
+            bytes_before = input.len(),
+            compression_path = %path.as_str(),
+            "compression returned no output for a non-empty input; falling back to the raw output"
+        );
+        return (input.to_string(), path);
+    }
+    (compressed, path)
 }
 
 /// Append this run's savings row to the ledger the `💸` statusline segment folds.
@@ -208,15 +338,24 @@ fn init_stats_log_subscriber() {
 /// assert the number the stats line carries. The two edge-case tests below
 /// previously proved only that logging did not panic, which left a claim of
 /// `pct_reduction=0.0` on an eliding path unfalsifiable.
+///
+/// #7384: the line also carries `exit`, the WRAPPED command's status — not
+/// this filter's, which is always 0. Without it `bytes_before=0` read
+/// identically whether the command found nothing, failed, or had its stdout
+/// dropped; a zsh `no matches found:` error was invisible on one such call.
+/// `exit=unknown` when stdin carried no sentinel, which is what an unwrapped
+/// `tm compress < file` produces.
 /// Test: `log_compression_stats_pct_reduction_is_zero_for_empty_input`,
 /// `log_compression_stats_pct_reduction_can_be_negative_when_output_expands`,
 /// `native_fallback_elision_reports_a_matching_non_zero_reduction`,
-/// exercised end-to-end via `run_compress_*` tests below.
+/// exercised end-to-end via `run_compress_*` tests below and, for the exit
+/// field, by `tm_compress_reports_the_wrapped_commands_exit_status`.
 fn log_compression_stats(
     tool_name: &str,
     bytes_before: usize,
     bytes_after: usize,
     path: &str,
+    exit: Option<i32>,
 ) -> f64 {
     // #7180: the emitted percentage is also RETURNED so a test can assert the
     // number itself, not merely that logging did not panic.
@@ -225,12 +364,15 @@ fn log_compression_stats(
     } else {
         0.0
     };
+    // #7384: `%` so the field renders as `exit=3`, not a quoted `exit="3"`.
+    let exit_status = exit.map_or_else(|| "unknown".to_string(), |code| code.to_string());
     tracing::info!(
         tool_name = %tool_name,
         bytes_before,
         bytes_after,
         pct_reduction,
         compression_path = %path,
+        exit = %exit_status,
         "tool output compressed"
     );
     pct_reduction
@@ -394,9 +536,7 @@ async fn append_compression_record(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use trusty_agents_common::compress::{
-        CompressionPath, compress_tool_output_async_with_path_using, no_rtk,
-    };
+    use trusty_agents_common::compress::no_rtk;
 
     /// Compress through the native chain, whatever the host has installed.
     ///
@@ -416,7 +556,10 @@ mod tests {
     fn log_compression_stats_pct_reduction_is_zero_for_empty_input() {
         // Guards the division-by-zero edge case: an empty tool output must
         // report 0.0% reduction, not NaN/panic.
-        assert_eq!(log_compression_stats("bash", 0, 0, "native_fallback"), 0.0);
+        assert_eq!(
+            log_compression_stats("bash", 0, 0, "native_fallback", None),
+            0.0
+        );
     }
 
     #[tokio::test]
@@ -445,7 +588,13 @@ mod tests {
         );
         assert!(compressed.len() < input.len(), "expected fewer bytes out");
 
-        let pct = log_compression_stats("grep -n", input.len(), compressed.len(), path.as_str());
+        let pct = log_compression_stats(
+            "grep -n",
+            input.len(),
+            compressed.len(),
+            path.as_str(),
+            Some(0),
+        );
         let expected = (1.0 - compressed.len() as f64 / input.len() as f64) * 100.0;
         assert!(
             (pct - expected).abs() < f64::EPSILON,
@@ -463,7 +612,7 @@ mod tests {
         // doc comment for why we don't clamp). This test only proves no
         // panic/NaN occurs for `bytes_after > bytes_before`.
         assert_eq!(
-            log_compression_stats("bash", 10, 20, "native_fallback"),
+            log_compression_stats("bash", 10, 20, "native_fallback", None),
             -100.0
         );
     }
@@ -620,5 +769,231 @@ mod tests {
     fn compression_log_path_ends_with_trusty_mpm_compression_jsonl() {
         let path = compression_log_path();
         assert!(path.ends_with(".trusty-mpm/compression.jsonl"));
+    }
+
+    // -- #7384: the wrapped command's exit status ---------------------------
+
+    #[test]
+    fn split_exit_sentinel_reads_and_strips_a_trailing_status() {
+        // The exact stream `wrap_command_reporting_exit` produces for a command
+        // whose own output already ended in a newline.
+        let (payload, exit) = split_exit_sentinel("boom\n\n__tm_compress_exit=3__\n");
+        assert_eq!(payload, "boom\n", "the sentinel must not reach the caller");
+        assert_eq!(exit, Some(3));
+
+        // A command whose output did NOT end in a newline: the newline the
+        // sentinel brought with it is the one that gets removed.
+        let (payload, exit) = split_exit_sentinel("boom\n__tm_compress_exit=0__\n");
+        assert_eq!(payload, "boom");
+        assert_eq!(exit, Some(0));
+
+        // A command that printed nothing at all.
+        let (payload, exit) = split_exit_sentinel("\n__tm_compress_exit=127__\n");
+        assert_eq!(payload, "");
+        assert_eq!(exit, Some(127));
+
+        // Signal-killed reaches the shell as 128 + signal; 137 is SIGKILL.
+        let (_, exit) = split_exit_sentinel("out\n\n__tm_compress_exit=137__\n");
+        assert_eq!(exit, Some(137));
+    }
+
+    #[test]
+    fn split_exit_sentinel_leaves_unwrapped_input_untouched() {
+        // `tm compress < file`, and any rewrite older than #7384, carry no
+        // sentinel — the payload must come back byte-for-byte.
+        for raw in ["plain output\n", "no trailing newline", "", "\n"] {
+            let (payload, exit) = split_exit_sentinel(raw);
+            assert_eq!(payload, raw, "unwrapped input must pass through: {raw:?}");
+            assert_eq!(exit, None);
+        }
+    }
+
+    #[test]
+    fn parse_exit_sentinel_rejects_out_of_range_and_malformed_lines() {
+        assert_eq!(parse_exit_sentinel("__tm_compress_exit=3__"), Some(3));
+        assert_eq!(parse_exit_sentinel("__tm_compress_exit=255__"), Some(255));
+        // A shell status is 0..=255; anything else is a line that merely looks
+        // like the sentinel.
+        assert_eq!(parse_exit_sentinel("__tm_compress_exit=256__"), None);
+        assert_eq!(parse_exit_sentinel("__tm_compress_exit=-1__"), None);
+        assert_eq!(parse_exit_sentinel("__tm_compress_exit=ok__"), None);
+        assert_eq!(parse_exit_sentinel("__tm_compress_exit=3"), None);
+        assert_eq!(parse_exit_sentinel("test result: ok. 3 passed"), None);
+    }
+
+    #[test]
+    fn wrap_command_reporting_exit_round_trips_through_split() {
+        // The producer and the consumer must agree on the exact spelling; this
+        // pins them to each other rather than to two hand-written literals.
+        let wrapped = wrap_command_reporting_exit("cargo test");
+        assert!(
+            wrapped.starts_with("{ cargo test; printf "),
+            "the command must run first inside the brace group: {wrapped}"
+        );
+        assert!(
+            wrapped.contains(EXIT_SENTINEL_PREFIX) && wrapped.contains("\"$?\""),
+            "the sentinel must carry the command's own status: {wrapped}"
+        );
+        // What the shell would emit for a command printing "out\n" and exiting 3.
+        let stream = format!("out\n\n{EXIT_SENTINEL_PREFIX}3{EXIT_SENTINEL_SUFFIX}\n");
+        assert_eq!(split_exit_sentinel(&stream), ("out\n", Some(3)));
+    }
+
+    // -- #7377: an empty compression falls back to the raw output -----------
+
+    /// Raise the process-global tracing level so the thread-local capture below
+    /// can see `warn!` (#4931).
+    ///
+    /// Why: `tracing`'s macros short-circuit on a process-global `MAX_LEVEL`
+    /// that only a GLOBAL default subscriber raises, so a `with_default`
+    /// capture records nothing unless something else in the binary happened to
+    /// install one first. `trusty_mpm::test_support::enable_event_capture` is
+    /// the library's copy of this and is not reachable from this bin target.
+    /// What: installs a bare registry once per process, then asserts the
+    /// resulting level admits `WARN` so a filtered global installed elsewhere
+    /// fails here by name instead of as an empty capture.
+    /// Test: the capture test below is vacuous without it.
+    fn enable_event_capture() {
+        static RAISE_MAX_LEVEL: std::sync::Once = std::sync::Once::new();
+        RAISE_MAX_LEVEL.call_once(|| {
+            let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+        });
+        assert!(
+            tracing::level_filters::LevelFilter::current() >= tracing::Level::WARN,
+            "the process-global tracing level is {:?}, which discards WARN before \
+             any subscriber sees it (#4931)",
+            tracing::level_filters::LevelFilter::current()
+        );
+    }
+
+    /// Collects a subscriber's output so a test can read back what was logged.
+    #[derive(Clone, Default)]
+    struct CaptureWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("capture lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+        type Writer = CaptureWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Path of this process's stub rtk. See [`empty_rtk`].
+    #[cfg(unix)]
+    fn empty_rtk_stub_path() -> PathBuf {
+        std::env::temp_dir().join(format!("tm-compress-empty-rtk-{}.sh", std::process::id()))
+    }
+
+    /// An [`RtkResolver`] naming a stub rtk that prints nothing.
+    ///
+    /// Why: [`RtkResolver`] is a plain `fn` pointer, so it cannot close over a
+    /// `TempDir` — the stub is written by the resolver itself, at a path keyed
+    /// on this process's pid so two test binaries never share one.
+    /// What: an `/bin/sh` script that drains stdin (otherwise the writer in
+    /// `compress_via_rtk_binary` takes `EPIPE`, the rtk arm reports failure,
+    /// and the native chain would answer instead) and exits zero having
+    /// written nothing — exactly the #7377 shape.
+    /// Test: `rtk_returning_nothing_falls_back_to_the_raw_output_and_warns_once`.
+    #[cfg(unix)]
+    fn empty_rtk(_name: &str) -> Option<PathBuf> {
+        use std::os::unix::fs::PermissionsExt;
+        let path = empty_rtk_stub_path();
+        std::fs::write(&path, "#!/bin/sh\ncat >/dev/null\nexit 0\n").ok()?;
+        let mut perms = std::fs::metadata(&path).ok()?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).ok()?;
+        Some(path)
+    }
+
+    /// Run `body` with a thread-local capturing subscriber, returning its
+    /// result and everything logged at `WARN` or above.
+    fn with_captured_warnings<T>(body: impl FnOnce() -> T) -> (T, String) {
+        enable_event_capture();
+        let capture = CaptureWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish();
+        let out = tracing::subscriber::with_default(subscriber, body);
+        let logged = String::from_utf8(capture.0.lock().expect("capture lock").clone())
+            .expect("the captured log must be utf-8");
+        (out, logged)
+    }
+
+    /// A `git diff --stat`-shaped payload — the input #7377 was reported on.
+    fn diff_stat_payload() -> String {
+        let mut input = String::new();
+        for i in 0..40 {
+            input.push_str(&format!(" crates/x/src/file_{i}.rs | 4 ++--\n"));
+        }
+        input.push_str(" 40 files changed, 80 insertions(+), 80 deletions(-)\n");
+        input
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rtk_returning_nothing_falls_back_to_the_raw_output_and_warns_once() {
+        // #7377: rtk exited zero having printed nothing and an 824-byte diff
+        // was reported as a successful 100% reduction. The caller must get its
+        // bytes back, and the substitution must be visible.
+        let input = diff_stat_payload();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+
+        let ((compressed, path), logged) = with_captured_warnings(|| {
+            runtime.block_on(compress_with_raw_fallback(empty_rtk, "git diff", &input))
+        });
+        let _ = std::fs::remove_file(empty_rtk_stub_path());
+
+        assert_eq!(
+            path.as_str(),
+            "rtk_binary",
+            "the stub must have been taken as the rtk arm, else this test proves \
+             nothing about #7377's path: {logged}"
+        );
+        assert_eq!(
+            compressed, input,
+            "the caller must receive the original text byte-for-byte"
+        );
+        assert_eq!(
+            logged.matches("falling back to the raw output").count(),
+            1,
+            "the fallback must be announced exactly once: {logged}"
+        );
+        assert!(
+            logged.contains("rtk_binary"),
+            "the warning must name the path that emptied the output: {logged}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_real_compression_is_not_treated_as_an_empty_result() {
+        // The other half of the guard: a compression that shortened its input
+        // must pass through untouched, with no warning and no fallback.
+        let mut input = String::new();
+        for i in 0..50 {
+            input.push_str(&format!("test mod::t{i} ... ok\n"));
+        }
+        input.push_str("test result: ok. 50 passed; 0 failed\n");
+        let (compressed, path) = compress_with_raw_fallback(no_rtk, "cargo test", &input).await;
+        assert_eq!(path.as_str(), "native_fallback");
+        assert!(
+            compressed.len() < input.len(),
+            "the guard must not have replaced a real compression"
+        );
     }
 }

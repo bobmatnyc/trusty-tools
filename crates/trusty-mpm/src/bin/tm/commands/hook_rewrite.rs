@@ -20,12 +20,16 @@
 //! `&`, `;`, `>`, `<`) since appending another pipe to those is the same class of
 //! risk (redirection in particular: piping `tm compress` after an
 //! already-redirected stdout gets it empty input for no benefit — a
-//! trusty-review finding, PR #1968), and any command whose derived tool
+//! trusty-review finding, PR #1968), any command a brace group cannot wrap —
+//! a `#`, or a trailing unescaped `\` (see [`cannot_be_brace_wrapped`]) —
+//! and any command whose derived tool
 //! name would embed shell metacharacters (see
-//! [`is_safe_tool_name`]). Otherwise it returns `Some(rewritten)` with
+//! [`is_safe_tool_name`]). Otherwise it returns `Some(rewritten)`: the command
+//! inside a brace group that reports its exit status, with
 //! `| tm compress --tool "<effective tool name>"` appended — see
 //! [`effective_tool_name`] for why the tool value is derived from the
-//! command rather than a hardcoded `"bash"`.
+//! command rather than a hardcoded `"bash"`, and
+//! [`crate::commands::compress::wrap_command_reporting_exit`] for the group.
 //! [`build_pretooluse_rewrite_response`] builds the
 //! `hookSpecificOutput.updatedInput` JSON body `tm hook` prints to stdout so
 //! Claude Code substitutes the rewritten command before executing it — this
@@ -78,7 +82,14 @@ const ORCHESTRATOR_EXCLUSIONS: &[&str] = &[
 /// trusty-review-flagged injection risk, PR #1968: the derived name is
 /// embedded verbatim inside a double-quoted shell argument below, and
 /// double quotes do not stop POSIX command substitution). Otherwise returns
-/// `Some("<command> | tm compress --tool \"<effective tool name>\"")` —
+/// `Some("{ <command>; <exit sentinel>; } | tm compress --tool \"<effective tool name>\"")` —
+/// the brace group and its trailing `printf` come from
+/// [`crate::commands::compress::wrap_command_reporting_exit`], which is what
+/// carries the wrapped command's exit status into a filter the shell started
+/// concurrently (#7384). Every guard above runs against the bare command, and
+/// [`cannot_be_brace_wrapped`] adds the two the group itself needs: a `#`
+/// comments out the group's own `printf` and closing brace, and a trailing `\`
+/// escapes its `;`. A command carrying either is forwarded unmodified —
 /// the `--tool` value comes from [`effective_tool_name`], **not** a
 /// hardcoded `"bash"`: `compress_tool_output`'s dispatch table
 /// (`trusty-agents-common::compress::tool_output`) matches filters by
@@ -113,6 +124,11 @@ pub(crate) fn rewrite_bash_command_for_compression(command: &str) -> Option<Stri
     if has_unsafe_pipe_composition(trimmed) {
         return None;
     }
+    // #7384: a comment or a trailing `\` would swallow or absorb the brace
+    // group's own `printf`, so such a command is never wrapped.
+    if cannot_be_brace_wrapped(trimmed) {
+        return None;
+    }
     let tool = effective_tool_name(trimmed);
     if !is_safe_tool_name(&tool) {
         return None;
@@ -122,7 +138,12 @@ pub(crate) fn rewrite_bash_command_for_compression(command: &str) -> Option<Stri
     if !has_filter_for(&tool) {
         return None;
     }
-    Some(format!("{trimmed} | tm compress --tool \"{tool}\""))
+    // #7384: the brace group carries the wrapped command's exit status into the
+    // filter, which a pipeline otherwise discards.
+    Some(format!(
+        "{} | tm compress --tool \"{tool}\"",
+        crate::commands::compress::wrap_command_reporting_exit(trimmed)
+    ))
 }
 
 /// Derive the `compress_tool_output` dispatch key from a Bash command.
@@ -413,6 +434,30 @@ fn has_unsafe_pipe_composition(command: &str) -> bool {
         || command.contains('<')
 }
 
+/// Whether wrapping `command` in a brace group would change what runs.
+///
+/// Why: #7384 puts the command, the exit-status `printf` and the closing `}` on
+/// ONE physical line, which two shapes break. An unquoted `#` starts a comment
+/// that swallows the rest of that line, so the group never closes — sh, bash
+/// and zsh all abort with a syntax error and the command does not run at all. A
+/// trailing unescaped `\` escapes the template's `;`, so the `printf`, its
+/// format string and `"$?"` become extra arguments to the command — no error,
+/// wrong output, status lost. [`has_unsafe_pipe_composition`] catches neither,
+/// because neither character composes anything on its own.
+/// What: rejects any `#`, and any command whose trailing run of backslashes is
+/// odd. `#` is rejected wherever it appears: `grep -c '#include' f` is quoted
+/// and would be safe, but telling that from a comment needs a shell parser, and
+/// under-rewriting is the safe side here for exactly the reason
+/// [`has_unsafe_pipe_composition`] already gives. Such a command is forwarded
+/// unmodified and simply goes uncompressed.
+/// Test: `rewrite_skips_a_command_a_brace_group_cannot_wrap`,
+/// `cannot_be_brace_wrapped_counts_trailing_backslashes`,
+/// `every_rewrite_this_module_emits_runs_correctly_in_a_real_shell`.
+fn cannot_be_brace_wrapped(command: &str) -> bool {
+    let trailing_backslashes = command.chars().rev().take_while(|c| *c == '\\').count();
+    command.contains('#') || trailing_backslashes % 2 == 1
+}
+
 /// Build the `hookSpecificOutput.updatedInput` JSON body for a `PreToolUse`
 /// Bash command rewrite.
 ///
@@ -453,12 +498,33 @@ pub(crate) fn build_pretooluse_rewrite_response(rewritten_command: &str) -> serd
 mod tests {
     use super::*;
 
+    /// The one place the whole rewritten string is spelled out.
+    ///
+    /// #7384 put the command inside a brace group with a trailing exit-status
+    /// `printf`; the producer of that group is `commands::compress`, so every
+    /// expectation below is built from it rather than from a second literal
+    /// that could drift away from what the filter parses.
+    fn expected_rewrite(command: &str, tool: &str) -> String {
+        format!(
+            "{} | tm compress --tool \"{tool}\"",
+            crate::commands::compress::wrap_command_reporting_exit(command)
+        )
+    }
+
     #[test]
     fn rewrite_appends_compress_pipe_for_plain_command() {
         let out = rewrite_bash_command_for_compression("cargo test");
         assert_eq!(
             out.as_deref(),
-            Some("cargo test | tm compress --tool \"cargo test\"")
+            Some(expected_rewrite("cargo test", "cargo test").as_str())
+        );
+        // #7384: the command still runs first and the pipe still terminates in
+        // the filter — the group only adds the status report.
+        let out = out.expect("a covered tool must be wrapped");
+        assert!(out.starts_with("{ cargo test; printf "), "{out}");
+        assert!(
+            out.ends_with("} | tm compress --tool \"cargo test\""),
+            "{out}"
         );
     }
 
@@ -471,8 +537,149 @@ mod tests {
         let out = rewrite_bash_command_for_compression("git diff HEAD~1");
         assert_eq!(
             out.as_deref(),
-            Some("git diff HEAD~1 | tm compress --tool \"git diff\"")
+            Some(expected_rewrite("git diff HEAD~1", "git diff").as_str())
         );
+    }
+
+    #[test]
+    fn cannot_be_brace_wrapped_counts_trailing_backslashes() {
+        // An ODD trailing run escapes the template's `;`; an even run is an
+        // escaped backslash and leaves the `;` alone.
+        assert!(cannot_be_brace_wrapped("ls -la \\"));
+        assert!(!cannot_be_brace_wrapped("ls -la \\\\"));
+        assert!(cannot_be_brace_wrapped("ls -la \\\\\\"));
+        // A backslash that is not at the end escapes something in the command
+        // itself and cannot reach the template's `;`.
+        assert!(!cannot_be_brace_wrapped("grep -n hi\\ there f"));
+        // `#` anywhere, quoted or not — see the function's doc comment.
+        assert!(cannot_be_brace_wrapped("cargo test # explain"));
+        assert!(cannot_be_brace_wrapped("grep -c '#include' f"));
+        assert!(!cannot_be_brace_wrapped("cargo test -p trusty-mpm"));
+    }
+
+    #[test]
+    fn rewrite_skips_a_command_a_brace_group_cannot_wrap() {
+        // #7384 round 2: both shapes reached the rewrite and both broke it —
+        // the comment swallowed the group's own `printf` and closing brace
+        // (syntax error, command never ran), the trailing backslash escaped the
+        // `;` and turned the `printf` into arguments (silently wrong output).
+        // The documented no-op is the safe answer for both.
+        for cmd in [
+            "cargo test # explain",
+            "grep -c '#include' src/lib.rs",
+            "cargo test -p x \\",
+            "git diff HEAD~1 \\",
+        ] {
+            assert_eq!(
+                rewrite_bash_command_for_compression(cmd),
+                None,
+                "a brace group cannot wrap this safely: {cmd}"
+            );
+        }
+    }
+
+    /// Whether `shell` can be spawned on this host.
+    fn shell_is_available(shell: &str) -> bool {
+        std::process::Command::new(shell)
+            .arg("-c")
+            .arg("exit 0")
+            .output()
+            .is_ok()
+    }
+
+    /// Run `script` under `shell`, returning its exit code, stdout and stderr.
+    fn run_script(shell: &str, script: &str) -> (Option<i32>, String, String) {
+        let out = std::process::Command::new(shell)
+            .arg("-c")
+            .arg(script)
+            .output()
+            .unwrap_or_else(|e| panic!("failed to run {shell}: {e}"));
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    }
+
+    /// Execute what this module emits, in a real shell, for the four shapes.
+    ///
+    /// Why: every other test here asserts the SHAPE of the rewritten string,
+    /// which is how #7384 round 1 shipped a string all three shells reject with
+    /// `unexpected end of file` — the assertions matched and the command could
+    /// never have run. This one runs it.
+    /// What: for each shape, either the rewrite exists and its brace group must
+    /// run cleanly and preserve both the command's output and the sentinel, or
+    /// the rewrite is the documented no-op and the bare command must still do
+    /// its own job with nothing from the template leaking into it. The filter
+    /// stage is swapped for `cat` — `tm` need not be installed where unit tests
+    /// run, and `tm compress`'s own behaviour is proven in `tm_compress_pipe`;
+    /// the brace group, which is what this test is about, is untouched.
+    /// Test: itself.
+    #[test]
+    fn every_rewrite_this_module_emits_runs_correctly_in_a_real_shell() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let payload = dir.path().join("payload.txt");
+        std::fs::write(&payload, "alpha\nhi there\nomega\n").expect("write payload");
+        let path = payload.display().to_string();
+        let plain = format!("grep -n hi {path}");
+
+        // (command, what its own stdout must contain when it runs bare)
+        let cases = [
+            (plain.clone(), "2:hi there"),
+            (format!("{plain} # explain"), "2:hi there"),
+            (format!("grep -c '#include' {path}"), "0"),
+            (format!("{plain} \\"), "hi there"),
+        ];
+
+        for shell in ["sh", "bash", "zsh"] {
+            if !shell_is_available(shell) {
+                // Announce the skip: a silently-skipped shell reads as a pass.
+                eprintln!(
+                    "SKIP every_rewrite_this_module_emits_runs_correctly_in_a_real_shell: no {shell} on this host"
+                );
+                continue;
+            }
+            for (command, expected) in &cases {
+                let Some(rewritten) = rewrite_bash_command_for_compression(command) else {
+                    // The no-op arm: forwarded unmodified, so it must still
+                    // work and must carry nothing from the template.
+                    let (_code, stdout, stderr) = run_script(shell, command);
+                    assert!(
+                        stdout.contains(expected),
+                        "{shell}: an un-rewritten `{command}` must still run: \
+                         stdout={stdout:?} stderr={stderr:?}"
+                    );
+                    assert!(
+                        !stdout.contains("__tm_compress_exit=")
+                            && !stderr.contains("__tm_compress_exit="),
+                        "{shell}: nothing from the template may reach an \
+                         un-rewritten command: stdout={stdout:?} stderr={stderr:?}"
+                    );
+                    continue;
+                };
+                let (group, _filter) = rewritten
+                    .split_once("| tm compress")
+                    .expect("the rewrite always ends in the compress filter stage");
+                let script = format!("{group}| cat");
+                let (code, stdout, stderr) = run_script(shell, &script);
+                assert_eq!(
+                    code,
+                    Some(0),
+                    "{shell}: the rewritten `{command}` must run cleanly: \
+                     script={script:?} stdout={stdout:?} stderr={stderr:?}"
+                );
+                assert!(
+                    stdout.starts_with(expected),
+                    "{shell}: the command's own output must survive the wrap: \
+                     stdout={stdout:?} stderr={stderr:?}"
+                );
+                assert!(
+                    stdout.ends_with("\n__tm_compress_exit=0__\n"),
+                    "{shell}: the sentinel must reach the filter intact: \
+                     stdout={stdout:?} stderr={stderr:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -585,7 +792,7 @@ mod tests {
             ("grep -n foo src/", "grep -n"),
             ("ls -la", "ls -la"),
         ] {
-            let expected = format!("{cmd} | tm compress --tool \"{tool}\"");
+            let expected = expected_rewrite(cmd, tool);
             assert_eq!(
                 rewrite_bash_command_for_compression(cmd).as_deref(),
                 Some(expected.as_str()),
