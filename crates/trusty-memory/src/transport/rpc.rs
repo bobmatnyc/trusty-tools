@@ -569,6 +569,9 @@ mod tests {
     /// Test: `every_registered_tool_is_forwarded_or_listed_unforwarded`,
     /// `dispatch_refuses_the_deliberately_unforwarded_tools_by_raw_name`.
     const UNFORWARDED_TOOLS: &[&str] = &[
+        "chat_asset_capabilities",
+        "chat_asset_put",
+        "chat_asset_get",
         // Contract-locked to the `tools/call` envelope.
         // `uds_consumer_contract.rs`'s
         // `shared_client_reaches_a_chat_tool_through_the_tools_call_envelope`

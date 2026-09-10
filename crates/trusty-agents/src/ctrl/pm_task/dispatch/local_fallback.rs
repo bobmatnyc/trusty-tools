@@ -138,6 +138,10 @@ pub(crate) async fn retry_remote(
         pm_cfg.llm.strict_tool_discipline(),
         pm_cfg.llm.use_anthropic_direct,
         &pm_cfg.llm.stop_sequences,
+        Some((
+            pm_cfg.llm.aws_profile.as_deref(),
+            pm_cfg.llm.aws_region.as_deref(),
+        )),
     )
     .await
     .inspect_err(|e| tracing::error!(error = %e, "#3766 remote fallback also failed"))

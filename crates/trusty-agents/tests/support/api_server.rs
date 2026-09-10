@@ -16,7 +16,7 @@
 //! or a 120s timeout elapses.
 //! Test: Exercised by `tests/api_e2e.rs`.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -118,10 +118,8 @@ impl ApiServer {
     /// Test: Implicit — every e2e test calls this.
     pub async fn spawn() -> Result<Self> {
         let root = tempfile::tempdir().context("create tempdir")?;
-        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let src_cfg = manifest.join(".trusty-agents");
         let dst_cfg = root.path().join(".trusty-agents");
-        copy_dir_recursive(&src_cfg, &dst_cfg).context("copy .trusty-agents")?;
+        std::fs::create_dir_all(&dst_cfg)?;
         // Isolated `$HOME` — see the `_home` field doc for why this is
         // required, not optional.
         let home = tempfile::tempdir().context("create isolated HOME tempdir")?;
@@ -132,6 +130,16 @@ impl ApiServer {
         let mut child = Command::new(&binary)
             .current_dir(root.path())
             .env("HOME", home.path())
+            .env("TAGENT_PROJECT_DIR", root.path())
+            .env("TAGENT_CONFIG_DIR", &dst_cfg)
+            .env("TAGENT_ASSISTANTS_DIR", home.path().join("assistants"))
+            .env("TRUSTY_DATA_DIR_OVERRIDE", home.path().join("data"))
+            .env(
+                "TRUSTY_MEMORY_SOCKET",
+                home.path().join("unavailable-memory.sock"),
+            )
+            .env_remove("OPEN_MPM_PROJECT_DIR")
+            .env_remove("OPEN_MPM_CONFIG_DIR")
             .arg("--api")
             .arg("--port")
             .arg(port.to_string())
@@ -444,49 +452,6 @@ fn pick_free_port() -> Result<u16> {
     let port = listener.local_addr()?.port();
     drop(listener);
     Ok(port)
-}
-
-/// Recursive directory copy that skips runtime `state/` directories.
-///
-/// Why: Mirrors `tests/support/project.rs::copy_dir_recursive` rather than
-/// pulling in `fs_extra`. Kept private to this module to avoid ordering
-/// concerns with the sibling helper. The repo's bundled `.trusty-agents/` ships
-/// with a populated `state/` (build.json, sessions, tasks.json from prior
-/// runs) which must NOT leak into test fixtures — otherwise tests that
-/// depend on a clean startup state (e.g. `test_tasks_list_starts_empty`)
-/// observe persisted tasks left over from previous developer runs (#212).
-/// What: Walks `src` with a manual stack, mirroring directories and copying
-/// files into `dst`. Top-level entries named `state` are skipped so the
-/// API server starts with no persisted task history.
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
-    if !src.exists() {
-        return Err(anyhow!("source config dir not found: {}", src.display()));
-    }
-    std::fs::create_dir_all(dst)?;
-    let mut stack: Vec<(PathBuf, PathBuf)> = vec![(src.to_path_buf(), dst.to_path_buf())];
-    while let Some((s, d)) = stack.pop() {
-        // Only skip the top-level `state/` directory directly under `.trusty-agents/`.
-        let is_top_level = s == src;
-        for entry in std::fs::read_dir(&s)? {
-            let entry = entry?;
-            let ft = entry.file_type()?;
-            let from = entry.path();
-            let name = entry.file_name();
-            if is_top_level && name == "state" {
-                // Skip persisted runtime state; tests must start clean.
-                continue;
-            }
-            let to = d.join(name);
-            if ft.is_dir() {
-                std::fs::create_dir_all(&to)?;
-                stack.push((from, to));
-            } else if ft.is_file() {
-                std::fs::copy(&from, &to)?;
-            }
-            // Symlinks/other: skip.
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

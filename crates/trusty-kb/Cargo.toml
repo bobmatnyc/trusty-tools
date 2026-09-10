@@ -48,6 +48,7 @@ name = "trusty-kb"
 path = "src/main.rs"
 
 [dependencies]
+trusty-common = { workspace = true, features = ["knowledge-document"] }
 # Shared JSON-RPC 2.0 / MCP stdio framework (run_stdio_loop + initialize_response
 # + Request/Response), extracted from `trusty_common::mcp` by ADR-0040 (#5803).
 # `trusty-common` itself is no longer a dependency: that feature was the only

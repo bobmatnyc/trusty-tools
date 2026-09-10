@@ -174,7 +174,30 @@ pub async fn reconcile_after_rescan(
     indexer: &Arc<RwLock<CodeIndexer>>,
     indexed_files: &IndexedFiles,
 ) -> Result<RescanStats, RescanError> {
-    let walked = walk_source_files(canonical_root).files;
+    reconcile_with_policy(
+        index_id,
+        canonical_root,
+        raw_root,
+        indexer,
+        indexed_files,
+        None,
+    )
+    .await
+}
+
+/// Reconcile with the current registered admission policy (#7379).
+pub(crate) async fn reconcile_with_policy(
+    index_id: &IndexId,
+    canonical_root: &Path,
+    raw_root: &Path,
+    indexer: &Arc<RwLock<CodeIndexer>>,
+    indexed_files: &IndexedFiles,
+    policy: Option<&crate::core::registry::IndexHandle>,
+) -> Result<RescanStats, RescanError> {
+    let walked = policy
+        .map(crate::service::index_admission::walk)
+        .unwrap_or_else(|| walk_source_files(canonical_root))
+        .files;
     let mut stats = RescanStats::default();
     let mut live: HashSet<PathBuf> = HashSet::with_capacity(walked.len());
 

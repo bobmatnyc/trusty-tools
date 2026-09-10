@@ -53,6 +53,8 @@ pub(super) struct ProjectResponse {
     id: String,
     name: String,
     path: String,
+    available: bool,
+    availability_reason: Option<String>,
     git_origin: Option<String>,
     last_active: Option<String>,
     open_issues_count: Option<u32>,
@@ -121,6 +123,7 @@ pub(super) async fn list_projects(
                         last_connected: None,
                         pm_count: 0,
                         is_self: false,
+                        manually_registered: false,
                         git_origin: None,
                         open_issues_count: None,
                         open_prs_count: None,
@@ -189,6 +192,17 @@ pub(super) async fn list_projects(
                 id: path_str.clone(),
                 name: entry.name.clone(),
                 path: path_str,
+                available: entry.path.is_dir() && std::fs::read_dir(&entry.path).is_ok(),
+                availability_reason: if entry.path.is_dir()
+                    && std::fs::read_dir(&entry.path).is_ok()
+                {
+                    None
+                } else {
+                    Some(
+                        "Folder is missing or unreadable; reconnect it or remove the selection."
+                            .into(),
+                    )
+                },
                 git_origin: entry.git_origin.clone(),
                 last_active: entry
                     .last_active()
@@ -429,7 +443,10 @@ pub(super) fn parse_agent_toml(raw: &str, fallback_name: &str) -> Option<serde_j
                 .collect()
         })
         .unwrap_or_default();
-    let scopes: Vec<String> = tools
+    let scopes: Vec<String> = parsed
+        .get("permissions")
+        .filter(|p| p.get("scopes").is_some())
+        .or(tools)
         .and_then(|t| t.get("scopes"))
         .and_then(|v| v.as_array())
         .map(|arr| {
@@ -474,6 +491,7 @@ pub(super) fn parse_agent_toml(raw: &str, fallback_name: &str) -> Option<serde_j
         "display_name": display_name,
         "tools_allow": tools_allow,
         "scopes": scopes,
+        "skills_allow": parsed.get("skills").and_then(|s| s.get("allow")).and_then(|v| v.as_array()).map(|v| v.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>()).unwrap_or_default(),
         "search_indexes": search_indexes,
         "hidden": hidden,
         "kind": kind,

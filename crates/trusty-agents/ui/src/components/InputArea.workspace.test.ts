@@ -53,7 +53,10 @@ it('does not submit in another directory when the attached working folder is mis
   submit();
   await tick();
   expect(transport.invoke).not.toHaveBeenCalledWith('send_message', expect.anything());
-  expect(target.textContent).toContain('Remove attachment');
+  const resolve = [...target.querySelectorAll('button')].find(button => button.textContent === 'Resolve folder')!;
+  resolve.click();
+  await tick();
+  expect(target.querySelector('[role="alert"]')).toBeNull();
 });
 
 it.each(['', '   \n'])('preserves terminal failure text when native return is blank (%j)', async result => {
@@ -68,4 +71,17 @@ it.each(['', '   \n'])('preserves terminal failure text when native return is bl
   response.resolve(result);
   await vi.waitFor(() => expect(get(isRunning)).toBe(false));
   expect(get(activeMessages).find(message => message.taskId === task)?.content).toBe('Error: Tool request failed');
+});
+
+it('forwards an attachment-only message with frozen image bytes and keeps its preview', async () => {
+  const { composerDrafts, emptyDraft } = await import('../stores/composerDrafts');
+  const { conversationKey } = await import('../stores/app');
+  const attachment = { kind: 'image' as const, name: 'chart.png', mime_type: 'image/png' as const, data_base64: 'iVBORw0KGgo=' };
+  composerDrafts.set({ [conversationKey('ctrl','izzie')]: { ...emptyDraft, items: [{id:'image',sourceBytes:8,attachment}] } });
+  await tick();
+  expect((target.querySelector('[aria-label="Send message"]') as HTMLButtonElement).disabled).toBe(false);
+  (target.querySelector('[aria-label="Send message"]') as HTMLButtonElement).click();
+  await vi.waitFor(() => expect(transport.invoke).toHaveBeenCalledWith('send_message', expect.objectContaining({ content: '', agent: 'izzie', inlineAttachments: [attachment] })));
+  expect(get(activeMessages).find(message => message.role === 'user')?.inlineAttachments).toEqual([attachment]);
+  composerDrafts.set({});
 });

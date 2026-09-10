@@ -171,6 +171,11 @@ pub(crate) async fn read(name: &str) -> Result<Value, Error> {
 }
 async fn write_at(dirs: &[PathBuf], name: &str, update: Update) -> Result<(), Error> {
     let _guard = super::AGENT_CONFIG_WRITE_LOCK.lock().await;
+    let (manifest, _) = resolve_agent_paths(dirs, name)
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "Assistant not found"))?;
+    let _process_lock = crate::knowledge::execution::mutation_guard(&manifest)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     let (path, raw, _) = load_at(dirs, name).await?;
     if revision(&raw) != update.revision {
         return Err(err(

@@ -248,30 +248,6 @@ async fn run_ctrl_inner(with_stdin: bool, ready_tx: Option<oneshot::Sender<()>>)
             if let Err(e) = initializer.initialize_if_needed().await {
                 tracing::warn!(error = %e, "ctrl: project init failed (continuing)");
             }
-
-            let session_dir = project_root
-                .join(".trusty-agents")
-                .join("sessions")
-                .join("default");
-            if let Err(e) = tokio::fs::create_dir_all(&session_dir).await {
-                tracing::warn!(error = %e, "ctrl doc seed: create session dir failed");
-                return;
-            }
-            let store = match crate::memory::open_memory_store(&session_dir) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!(error = %e, "ctrl doc seed: store open failed");
-                    return;
-                }
-            };
-            let embedder = match crate::memory::FastEmbedder::new() {
-                Ok(e) => e,
-                Err(e) => {
-                    tracing::warn!(error = %e, "ctrl doc seed: embedder unavailable");
-                    return;
-                }
-            };
-            let _ = initializer.seed_all(store.as_ref(), &embedder).await;
         });
     }
 

@@ -180,7 +180,7 @@ pub async fn run_pm_task_with_history(
             builder = builder.add_mcp_layer(section);
         }
         let q = &user_input[..200.min(user_input.len())];
-        let memories = recall_project_memories(project_path, q, 5).await;
+        let memories = recall_project_memories(&pm_cfg.agent.name, q, 5).await;
         if !memories.is_empty() {
             builder = builder.add_memory_layer(memories);
         }
@@ -339,6 +339,10 @@ pub async fn run_pm_task_with_history(
             pm_cfg.llm.strict_tool_discipline(),
             effective_use_direct,
             &pm_cfg.llm.stop_sequences,
+            Some((
+                pm_cfg.llm.aws_profile.as_deref(),
+                pm_cfg.llm.aws_region.as_deref(),
+            )),
         )
         .await;
         let mut used_remote_fallback = false;
@@ -488,6 +492,7 @@ pub async fn run_pm_task_with_history(
     registry.register(Arc::new(
         crate::skills::manage::ManageSkillsTool::concierge(),
     ));
+    registry.register(Arc::new(crate::tools::concierge::ConciergeTool::concierge()));
     registry.register(Arc::new(CreateDirTool));
     registry.register(Arc::new(
         crate::tools::web_search::BraveSearchTool::from_env(),
@@ -562,6 +567,7 @@ pub async fn run_pm_task_with_history(
         pm_cfg.llm.strict_tool_discipline(),
         pm_cfg.llm.use_anthropic_direct,
         &pm_cfg.llm.stop_sequences,
+        Some((pm_cfg.llm.aws_profile.as_deref(), pm_cfg.llm.aws_region.as_deref())),
     )
     .await
     .inspect_err(|e| {

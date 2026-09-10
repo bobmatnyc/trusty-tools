@@ -245,6 +245,10 @@ pub(crate) async fn run_ctrl_turn_via_rest(
         routed_cfg.llm.strict_tool_discipline(),
         effective_use_direct,
         &routed_cfg.llm.stop_sequences,
+        Some((
+            routed_cfg.llm.aws_profile.as_deref(),
+            routed_cfg.llm.aws_region.as_deref(),
+        )),
     )
     .await;
 

@@ -81,6 +81,8 @@ pub fn is_reserved_name(name: &str) -> bool {
             | "channel"
             | "manage_skills"
             | "delegate_skill_configuration"
+            | "ask_concierge"
+            | "platform_settings"
     )
 }
 /// Reserve the self-configuration identity against external executor collisions.

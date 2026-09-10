@@ -1,6 +1,27 @@
 use super::*;
 use crate::assistants::AssistantInstanceId;
 use chrono::TimeZone;
+#[test]
+fn assistant_projects_preserve_explicit_chat_attachments() {
+    let (_temp, store) = fixture();
+    let initial = store.initialize(now(), None).unwrap();
+    let global = store
+        .update_assistant_projects(&initial.revision, &["/project".into()], &[], now())
+        .unwrap();
+    let chat = store
+        .update_projects(&global.revision, "chat", &["/project".into()], &[], now())
+        .unwrap();
+    let cleared = store
+        .update_assistant_projects(&chat.revision, &[], &[], now())
+        .unwrap();
+    assert!(cleared.assistant_projects.is_empty());
+    assert_eq!(cleared.projects_by_chat["chat"], vec!["/project"]);
+    assert_eq!(store.status().unwrap().unwrap(), cleared);
+    assert!(matches!(
+        store.update_assistant_projects(&initial.revision, &[], &[], now()),
+        Err(KnowledgeError::Conflict)
+    ));
+}
 fn now() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 3, 31, 12, 0, 0).unwrap()
 }

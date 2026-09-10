@@ -163,3 +163,23 @@ pub(super) fn extract_text_content(content: Option<&Value>) -> String {
         Some(other) => other.to_string(),
     }
 }
+
+/// Why: native Anthropic requests cannot consume OpenAI image_url blocks.
+/// What: preserve inline bytes as base64 image sources and reject unsupported content parts.
+/// Test: `image_attachment_becomes_anthropic_base64_content`.
+pub(super) fn convert_user_content(content: Option<&Value>) -> anyhow::Result<Value> {
+    let Some(Value::Array(parts)) = content else {
+        return Ok(content.cloned().unwrap_or(Value::Null));
+    };
+    parts.iter().map(|part| {
+        match part.get("type").and_then(Value::as_str) {
+            Some("text")=>Ok(part.clone()),
+            Some("image_url")=> {
+                let url = part.pointer("/image_url/url").and_then(Value::as_str).ok_or_else(||anyhow::anyhow!("Missing image URL"))?;
+                let image = trusty_common::chat_attachments::ImageContent::from_data_url(url).map_err(anyhow::Error::msg)?;
+                Ok(serde_json::json!({"type":"image","source":{"type":"base64","media_type":image.mime_type,"data":image.data_base64}}))
+            }
+            _=>anyhow::bail!("Unsupported user content block"),
+        }
+    }).collect::<anyhow::Result<Vec<Value>>>().map(Value::Array)
+}

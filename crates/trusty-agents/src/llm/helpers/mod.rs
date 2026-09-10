@@ -73,6 +73,15 @@ pub struct ChatResponse {
 /// Test: Called with a dummy env var set; assert no panic. Real calls are
 /// integration-tested via the smoke test.
 pub fn create_client() -> Result<Client<OpenAIConfig>> {
+    create_client_inner(true)
+}
+/// Why: configured AWS and local routes must not depend on an unrelated API key.
+/// What: omit OpenRouter credential preflight for routes that never use this HTTP client.
+/// Test: `configured_keyless_clients_do_not_probe_ambient_credentials`.
+pub fn create_client_for_model(model: &str) -> Result<Client<OpenAIConfig>> {
+    create_client_inner(!(model.starts_with("bedrock/") || model.starts_with("ollama/")))
+}
+fn create_client_inner(require_credentials: bool) -> Result<Client<OpenAIConfig>> {
     // #250: Tolerate missing OPENROUTER_API_KEY when an alternative credential
     // is configured (ANTHROPIC_API_KEY for direct API; CLAUDE_CODE_OAUTH_TOKEN
     // for the claude CLI subprocess path). The downstream call sites either
@@ -80,16 +89,15 @@ pub fn create_client() -> Result<Client<OpenAIConfig>> {
     // `use_anthropic_direct=true` which bypasses this client. The base URL
     // stays OpenRouter so any OpenRouter-routed call still works when its
     // key is present.
-    let api_key = trusty_common::credentials::resolve_key("openrouter").unwrap_or_else(|| {
-        // Empty key — async-openai will only fail if the request actually
-        // tries to use it. Direct-Anthropic / claude-code paths short-circuit
-        // before then.
+    let api_key = if require_credentials {
+        trusty_common::credentials::resolve_key("openrouter").unwrap_or_default()
+    } else {
         String::new()
-    });
+    };
     // Note: this is the bare-client constructor. We don't have an agent
     // runner context here; pass `None` so claude-code is never auto-selected
     // just because OAuth is in the env.
-    if api_key.is_empty() && credentials::pick_credentials(None).is_none() {
+    if require_credentials && api_key.is_empty() && credentials::pick_credentials(None).is_none() {
         anyhow::bail!("{}", credentials::missing_credentials_error());
     }
     let base_url = std::env::var("OPENROUTER_BASE_URL")
@@ -285,47 +293,6 @@ pub fn should_retry_plain_text_turn(
         && turn < max_turns.saturating_sub(1)
 }
 
-/// Pull a `(system_prompt, first_user_message)` pair out of a typed
-/// `ChatCompletionRequestMessage` vector.
-///
-/// Why: #201 — Bedrock's Converse API takes the system prompt as a separate
-/// `system` field and an initial `messages` vector. The harness-side typed
-/// messages are an OpenAI-shaped `system + user` pair; this helper round-trips
-/// them through JSON so we don't depend on async-openai's enum being open
-/// for matching.
-/// What: Returns the first system message's text content and the first user
-/// message's text content; falls back to empty strings if either is missing.
-/// Test: `extract_system_and_first_user_basic`.
-pub(super) fn extract_system_and_first_user(
-    messages: &[ChatCompletionRequestMessage],
-) -> Result<(String, String)> {
-    let mut system = String::new();
-    let mut user = String::new();
-    for m in messages {
-        let v = serde_json::to_value(m).context("serialize message for bedrock extraction")?;
-        let role = v.get("role").and_then(|r| r.as_str()).unwrap_or("");
-        let content = v.get("content");
-        let text = match content {
-            Some(serde_json::Value::String(s)) => s.clone(),
-            Some(serde_json::Value::Array(parts)) => parts
-                .iter()
-                .filter_map(|p| p.get("text").and_then(|t| t.as_str()).map(str::to_string))
-                .collect::<Vec<_>>()
-                .join("\n"),
-            _ => String::new(),
-        };
-        match role {
-            "system" if system.is_empty() => system = text,
-            "user" if user.is_empty() => user = text,
-            _ => {}
-        }
-        if !system.is_empty() && !user.is_empty() {
-            break;
-        }
-    }
-    Ok((system, user))
-}
-
 /// Build a single assistant message carrying the model's tool calls, for
 /// injection back into the conversation before appending tool results.
 ///
@@ -407,3 +374,12 @@ pub(crate) fn chat_tool_from_schema(schema: &serde_json::Value) -> Result<ChatCo
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod configured_client_tests {
+    #[test]
+    fn configured_keyless_clients_do_not_probe_ambient_credentials() {
+        assert!(super::create_client_for_model("bedrock/fixture").is_ok());
+        assert!(super::create_client_for_model("ollama/fixture").is_ok());
+    }
+}

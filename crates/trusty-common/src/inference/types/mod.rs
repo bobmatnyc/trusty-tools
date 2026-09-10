@@ -12,6 +12,7 @@
 //! `crates/trusty-common/tests/inference_foundation.rs`.
 
 mod message;
+mod message_decode;
 mod request;
 mod response;
 mod secret;

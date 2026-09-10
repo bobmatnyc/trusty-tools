@@ -67,6 +67,18 @@
       <p>This assistant’s knowledge pipeline has not been initialized.</p>
       <button disabled={busy || !!data.store_issue} onclick={() => change('reconcile')}>Initialize knowledge</button>
     {/if}
+    {#if data.extraction && Object.keys(data.extraction).length}
+      <h4>Entity extraction</h4>
+      <ul aria-label="Extraction progress">
+        {#each Object.entries(data.extraction) as [id, checkpoint] (id)}
+          <li class="source"><strong>{status(checkpoint.status)}</strong>
+            <span>{checkpoint.attempts} attempt{checkpoint.attempts === 1 ? '' : 's'}{checkpoint.model ? ` · ${checkpoint.model}` : ''}</span>
+            {#if checkpoint.last_error}<p class="warning">{checkpoint.last_error}</p>{/if}
+            {#if checkpoint.status === 'retryable' && checkpoint.next_attempt_at}<span>Next attempt: {checkpoint.next_attempt_at}</span>{/if}
+          </li>
+        {/each}
+      </ul>
+    {/if}
     <h4>Sources</h4>
     {#if !data.sources.length}<p>No attached project or enabled receiving channel sources.</p>{/if}
     {#each data.sources as source (source.id)}

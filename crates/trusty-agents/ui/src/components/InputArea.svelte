@@ -1,4 +1,8 @@
 <script lang="ts">
+  import ChatAttachments from './ChatAttachments.svelte';
+  import { clipboardInputs } from '../lib/clipboardAttachments';
+  import { composerDrafts, emptyDraft, setDraftText, setDraftError, addClipboardInputs, retryClipboardInputs, discardPendingPaste, removeDraftAttachment, clearSubmittedDraft, preserveFailedDraft, restoreFailedDraft } from '../stores/composerDrafts';
+  import type { DraftAttachment } from '../lib/chatAttachments';
   import { ArrowUp, Paperclip, Square, X } from 'lucide-svelte';
   import {
     activeAgentId,
@@ -30,10 +34,23 @@
 
   import ModelSwitcher from './ModelSwitcher.svelte';
   import { chatProjectPath, chatFolderError, detachUnavailableChatFolders } from '../stores/workspace';
+  import { openConfigPane } from '../stores/configPane';
 
-  type SubmissionContext = { projectPath: string | null; agent: string | null; model: PickerEntry | null; speaker: string; attachments: AttachmentRef[] };
+  type SubmissionContext = { draftKey: string; draftItems: DraftAttachment[]; projectPath: string | null; agent: string | null; model: PickerEntry | null; speaker: string; attachments: AttachmentRef[] };
 
   let input = '';
+  $: draftKey = conversationKey($activeProjectId, $activeAgentId);
+  $: draft = $composerDrafts[draftKey] ?? emptyDraft;
+  $: input = draft.text;
+  function paste(event: ClipboardEvent) {
+    if (!event.clipboardData) return;
+    try {
+      const inputs = clipboardInputs(event.clipboardData);
+      if (!inputs) return;
+      event.preventDefault();
+      void addClipboardInputs(draftKey, inputs);
+    } catch (error) { event.preventDefault(); setDraftError(draftKey, String(error)); }
+  }
   let textareaEl: HTMLTextAreaElement;
   let cancelling = false;
 
@@ -51,7 +68,12 @@
   let fileInput: HTMLInputElement;
   let dragging = false;
 
-  $: disabled = (!input.trim() && pendingAttachments.length === 0) || !!$chatFolderError || uploading;
+  $: disabled =
+    (!input.trim() && pendingAttachments.length === 0 && !draft.items.length) ||
+    draft.busy > 0 ||
+    !!draft.pendingPaste ||
+    !!$chatFolderError ||
+    uploading;
 
   /**
    * Why: the upload is what turns a local `File` into something a turn can
@@ -186,6 +208,7 @@
       id: `user-${now}`,
       role: 'user',
       content: displayContent,
+      inlineAttachments: context.draftItems.map(item => item.attachment),
       timestamp: now,
       // #7370: the bubble shows the cards immediately. The server appends the
       // rendered attachment blocks to the PERSISTED turn, so a later reload
@@ -279,6 +302,7 @@
       // path by sending a non-empty `agent` value on every submission.
       const invokeArgs: Record<string, unknown> = {
         content: payloadTask,
+        ...(context.draftItems.length ? { inlineAttachments: context.draftItems.map(item => item.attachment) } : {}),
         projectPath: context.projectPath,
       };
       const selectedAgent = context.agent;
@@ -314,6 +338,7 @@
       if (mySeq !== submissionSeq) return;
       updateMessageByTask(projectId, placeholderTaskId, `Error: ${e}`);
       setProjectStatus(project.id, 'error');
+      preserveFailedDraft(context.draftKey, displayContent, context.draftItems);
     } finally {
       // Detach reconcile listener if it never fired (e.g. error before any
       // progress event); leaking listeners across submissions would compound.
@@ -353,11 +378,18 @@
   async function handleSubmit() {
     const content = input.trim();
     // #7370: an attachment alone is a valid turn — "here, look at this".
-    if ((!content && pendingAttachments.length === 0) || get(chatFolderError)) return;
+    if (
+      (!content && pendingAttachments.length === 0 && !draft.items.length) ||
+      draft.busy ||
+      draft.pendingPaste ||
+      get(chatFolderError)
+    )
+      return;
 
     const project = $activeProject;
     // Freeze all dispatch choices before listener setup or cancellation can yield.
     const context: SubmissionContext = {
+      draftKey, draftItems: structuredClone(draft.items),
       projectPath: get(chatProjectPath) ?? project.path ?? null,
       agent: get(activeAgentId), model: get(activeModelEntry),
       speaker: rosterDisplayName(get(agentRoster), get(activeAgentId)),
@@ -374,7 +406,7 @@
       if (!proceed) return;
 
       const runningId = $activeTaskId;
-      input = '';
+      clearSubmittedDraft(context.draftKey);
       if (runningId && isPendingTaskId(runningId)) {
         // Same 404-no-op race as Stop (see `handleStop`/`queueCancel`): the
         // real backend id isn't known yet, so queue instead of firing
@@ -410,6 +442,7 @@
     // twice; `context` already holds them.
     pendingAttachments = [];
     attachmentError = null;
+    clearSubmittedDraft(context.draftKey);
     await submitTask(project, content, content, context);
   }
 
@@ -478,7 +511,7 @@
   on:dragleave={() => (dragging = false)}
   on:drop={onDrop}
 >
-  {#if $chatFolderError}<p role="alert" class="mb-2 text-xs text-foundry-light-muted dark:text-foundry-text/70">{$chatFolderError} <button type="button" class="underline" on:click={detachUnavailableChatFolders}>Remove attachment</button></p>{/if}
+  {#if $chatFolderError}<p role="alert" class="mb-2 text-xs text-foundry-light-muted dark:text-foundry-text/70">{$chatFolderError} <button type="button" class="underline" on:click={() => { if (!detachUnavailableChatFolders()) openConfigPane(); }}>Resolve folder</button></p>{/if}
   <div class="flex w-full min-w-0 flex-col rounded-xl border border-foundry-light-border dark:border-foundry-border bg-foundry-light-surface dark:bg-foundry-surface shadow-sm focus-within:border-foundry-light-primary dark:focus-within:border-foundry-primary">
     <textarea
       bind:this={textareaEl}
@@ -488,6 +521,8 @@
       rows="2"
       class="w-full resize-none rounded-t-xl bg-transparent px-3 pt-3 pb-2 text-sm text-foundry-light-text dark:text-foundry-text focus:outline-none placeholder:text-foundry-light-muted dark:placeholder:text-foundry-text/40"
       on:keydown={handleKeydown}
+      on:paste={paste}
+      on:input={event => setDraftText(draftKey, event.currentTarget.value)}
     ></textarea>
     {#if attachmentError}
       <p role="alert" class="px-3 pb-1 text-xs text-red-600 dark:text-red-400">{attachmentError}</p>
@@ -510,6 +545,11 @@
         {/each}
       </ul>
     {/if}
+    <ChatAttachments attachments={draft.items.map(item => item.attachment)} remove={index => removeDraftAttachment(draftKey, draft.items[index].id)} />
+    {#if draft.busy}<p class="px-3 py-1 text-xs" role="status">Processing pasted files…</p>{/if}
+    {#if draft.error}<p class="px-3 py-1 text-xs text-red-600 dark:text-red-400" role="alert">{draft.error}</p>{/if}
+    {#if draft.pendingPaste}<div class="flex gap-3 px-3 py-1 text-xs"><button type="button" class="underline" disabled={draft.busy > 0} on:click={() => retryClipboardInputs(draftKey)}>Retry pasted files</button><button type="button" class="underline" disabled={draft.busy > 0} on:click={() => discardPendingPaste(draftKey)}>Discard failed paste</button></div>{/if}
+    {#if draft.failed}<p class="px-3 py-1 text-xs">The failed message is available to retry. <button type="button" class="underline" on:click={() => restoreFailedDraft(draftKey)}>Restore failed message</button></p>{/if}
     <div class="flex min-w-0 items-center justify-between gap-2 px-2 pb-2">
       <div class="flex min-w-0 items-center gap-2">
         <input

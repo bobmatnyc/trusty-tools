@@ -137,8 +137,7 @@ pub async fn chat(
 pub async fn chat_with_tools(
     client: &BedrockClient,
     model_id: &str,
-    system_prompt: &str,
-    user_message: &str,
+    initial_messages: Vec<trusty_common::inference::ChatMessage>,
     temperature: f32,
     max_tokens: u32,
     tools: Vec<Value>,
@@ -147,14 +146,8 @@ pub async fn chat_with_tools(
     max_turns: u32,
     stop_sequences: &[String],
 ) -> Result<(String, TokenUsage)> {
-    let system = vec![SystemContentBlock::Text(system_prompt.to_string())];
-    let mut messages: Vec<Message> = vec![
-        Message::builder()
-            .role(ConversationRole::User)
-            .content(ContentBlock::Text(user_message.to_string()))
-            .build()
-            .context("failed to build initial user message")?,
-    ];
+    let (system, mut messages) =
+        trusty_common::inference::bedrock::conversation_messages(initial_messages)?;
     // #297: Forward agent-configured stop sequences via Bedrock's
     // InferenceConfiguration.stop_sequences. The Bedrock Converse API supports
     // up to 4 stop sequences depending on the model.

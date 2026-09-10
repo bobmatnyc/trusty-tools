@@ -50,6 +50,12 @@ export interface Project {
 import type { AttachmentRef } from '../lib/attachments';
 
 export interface Message {
+  /**
+   * Prepared attachment bodies carried inline with the turn. Distinct from
+   * `attachments` below, which holds #7370's id-addressed manifest rows.
+   */
+  inlineAttachments?: import('../lib/chatAttachments').DisplayChatAttachment[];
+  attachmentAssistant?: string;
   id: string;
   // #3819: 'topic-boundary' is a non-destructive divider row inserted by
   // "+ New Task" — per Bob's continuous-per-agent-chat model there is no

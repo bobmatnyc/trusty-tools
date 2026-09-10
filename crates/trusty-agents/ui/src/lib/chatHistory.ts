@@ -50,6 +50,7 @@ import {
 
 /** One persisted message, as `trusty_common`'s `ChatMessage` serializes. */
 export interface ChatHistoryMessage {
+  attachments?: import('./chatAttachments').StoredChatAttachment[];
   role: string;
   content: string;
 }
@@ -179,6 +180,7 @@ export function historyToMessages(
   speaker: string,
   now: number,
   attachments?: Map<string, AttachmentRef>,
+  assistantId?: string,
 ): Message[] {
   const ts = page.updated_at ? Date.parse(page.updated_at) : NaN;
   const timestamp = Number.isNaN(ts) ? now : ts;
@@ -216,6 +218,9 @@ export function historyToMessages(
       timestamp,
       ...activity,
       ...(refs.length ? { attachments: refs } : {}),
+      ...(m.attachments?.length
+        ? { inlineAttachments: m.attachments, attachmentAssistant: assistantId }
+        : {}),
       ...(role === 'assistant' ? { speaker } : {}),
     };
   });
@@ -314,7 +319,7 @@ export async function rehydrateChat(
   const refs = page.messages.some((m) => parseAttachmentIds(m.content ?? '').length > 0)
     ? await fetchSessionAttachments(agentId)
     : undefined;
-  const restored = historyToMessages(page, speaker, Date.now(), refs);
+  const restored = historyToMessages(page, speaker, Date.now(), refs, agentId);
   const seeded = hydrateMessages(key, restored);
   if (seeded) rememberCursor(key, { agentId, speaker, projectId, start: page.start, hasMore: page.has_more });
   const cursor = cachedCursor(key);
@@ -356,7 +361,7 @@ export async function loadOlderChat(
       if (get(chatHistoryCursor) === cursor) chatHistoryCursor.set(next);
       return { seeded: 0, hasMore: false, reason: page.reason };
     }
-    const older = historyToMessages(page, cursor.speaker, Date.now());
+    const older = historyToMessages(page, cursor.speaker, Date.now(), undefined, cursor.agentId);
     // The cursor's own bucket, never the currently-active one — the two can
     // differ, and prepending into the active one is how a restored conversation
     // leaks into an unrelated view.
@@ -380,7 +385,7 @@ export async function refreshEventHistory(agentId:string,speaker:string,projectI
   const latestEnd=page.start+page.messages.length;
   if(end===undefined){
     if(get(isRunning))throw new Error('Incoming history refresh waits for the active task');
-    const restored=historyToMessages(page,speaker,Date.now());
+    const restored=historyToMessages(page,speaker,Date.now(),undefined,agentId);
     const existingIds=new Set((get(messages).get(key)??[]).map(m=>m.id));
     const missing=restored.filter(m=>!existingIds.has(m.id));
     prependMessages(key,missing);
@@ -397,7 +402,7 @@ export async function refreshEventHistory(agentId:string,speaker:string,projectI
     pages.unshift(page);
   }
   if(page.start>end && page.has_more)throw new Error('Incoming history is too large to refresh safely');
-  const restored=pages.flatMap(p=>historyToMessages(p,speaker,Date.now()));
+  const restored=pages.flatMap(p=>historyToMessages(p,speaker,Date.now(),undefined,agentId));
   const groups:Message[][]=[];let group:Message[]=[];let safeEnd=latestEnd;
   const finish=(tail=false)=>{if(group[0]?.eventId){if(group.some(m=>m.role==='assistant'))groups.push(group);else if(tail)safeEnd=Math.min(safeEnd,Number(group[0].id.slice('history-'.length)));}group=[];};
   for(const message of restored){if(message.role==='event'){finish();group=[message];}else if(message.role==='user'){finish();}else if(group.length){group.push(message);}}

@@ -28,6 +28,7 @@
 //! - `wing_rename(palace, wing, new_label)`         -> WingSummary
 
 pub mod bm25;
+mod chat_assets;
 pub mod chat_definitions;
 pub mod chat_ops;
 pub mod definitions;
@@ -218,6 +219,9 @@ async fn dispatch_tool_inner(state: &AppState, name: &str, args: Value) -> Resul
         "memory_send_message" => handle_memory_send_message(state, args).await,
         "upgrade" => handle_upgrade_tool(state, args).await,
         "console_metrics" => crate::console_metrics::handle_console_metrics(state, args).await,
+        "chat_asset_capabilities" | "chat_asset_put" | "chat_asset_get" => {
+            chat_assets::handle(state, name, args).await
+        }
         "chat_session_create" => handle_chat_session_create(state, args).await,
         "chat_session_add_turn" => handle_chat_session_add_turn(state, args).await,
         "chat_session_get" => handle_chat_session_get(state, args).await,

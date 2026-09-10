@@ -243,7 +243,7 @@ impl EventStore {
                 return Err(e).with_context(|| format!("failed to read {}", path.display()));
             }
         };
-        let filters = Self::load_filters_at(dir).await.unwrap_or_default();
+        let filters = Self::load_filters_at(dir).await?;
         let mut events: Vec<StoredEvent> = raw
             .lines()
             .filter(|l| !l.trim().is_empty())
@@ -359,8 +359,13 @@ impl EventStore {
     /// directly (issue #3922) — see [`Self::append_at`]'s docs for why this
     /// seam exists.
     pub(crate) async fn is_event_type_included_at(dir: &std::path::Path, event_type: &str) -> bool {
-        let filters = Self::load_filters_at(dir).await.unwrap_or_default();
-        is_included(&filters, event_type)
+        match Self::load_filters_at(dir).await {
+            Ok(filters) => is_included(&filters, event_type),
+            Err(error) => {
+                tracing::warn!(%error, "Event filters unavailable; event excluded");
+                false
+            }
+        }
     }
 }
 

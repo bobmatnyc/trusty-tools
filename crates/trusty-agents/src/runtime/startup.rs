@@ -59,8 +59,8 @@ use anyhow::Result;
 
 use super::cli_def::check_credentials_and_warn;
 use crate::{
-    agents, api, assistants, build_info, bus, ctrl, logging, mcp, memory, process_tracker,
-    registry, repl, search, session_registry, tools, workflow,
+    agents, api, assistants, build_info, bus, ctrl, logging, mcp, process_tracker, registry, repl,
+    search, session_registry, tools, workflow,
 };
 
 use build_info::BuildInfo;
@@ -485,20 +485,9 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
         }
     }
 
-    // Migrate legacy `.trusty-agents/store/` layout to the new split layout. Safe
-    // no-op if already migrated or on first run.
-    //
-    // NOTE: `agent_dir` here refers to the *runtime state* subdirectory
-    // (`.trusty-agents/state/`), NOT the repo-root `.trusty-agents/` which now holds
-    // committed bundled config (agents/, skills/, workflows/, etc.).
+    // Runtime bookkeeping is independent of the retired local memory layout.
     if let Ok(cwd) = std::env::current_dir() {
         let agent_dir = cwd.join(".trusty-agents").join("state");
-        if agent_dir.exists()
-            && let Err(e) = memory::migrate_if_needed(&agent_dir)
-        {
-            tracing::warn!(error = %e, "memory migration failed (continuing)");
-        }
-
         // #74: Clean up stale worktrees from any prior interrupted run so
         // `git worktree add` doesn't fail with "already registered" errors
         // the next time a parallel phase spins one up.

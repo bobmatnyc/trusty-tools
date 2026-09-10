@@ -353,6 +353,7 @@ mod tests {
     #[test]
     fn tool_result_becomes_user_turn() {
         let assistant_call = ChatMessage {
+            images: vec![],
             role: "assistant".into(),
             content: None,
             tool_calls: Some(vec![ToolCall {

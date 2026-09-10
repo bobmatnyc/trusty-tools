@@ -105,6 +105,25 @@ pub fn spawn_watch_loop(
     // only producer — it is the one place that sees a change at all.
     file_events: crate::core::file_events::SharedFileEventFeed,
 ) -> Result<WatcherTask> {
+    spawn_watch_loop_with_registry(
+        root_path,
+        index_id,
+        indexer,
+        indexed_files,
+        file_events,
+        None,
+    )
+}
+
+/// Live registry lookup keeps watcher policy current after Settings updates (#7379).
+pub(crate) fn spawn_watch_loop_with_registry(
+    root_path: &Path,
+    index_id: crate::core::registry::IndexId,
+    indexer: Arc<RwLock<CodeIndexer>>,
+    indexed_files: IndexedFiles,
+    file_events: crate::core::file_events::SharedFileEventFeed,
+    registry: Option<crate::core::registry::IndexRegistry>,
+) -> Result<WatcherTask> {
     let (tx, mut rx) = mpsc::unbounded_channel::<WatchEvent>();
     // Retained so a failed dropped-event reconcile can re-arm itself. See
     // `watch_rescan::schedule_rescan_retry`.
@@ -141,12 +160,17 @@ pub fn spawn_watch_loop(
                     file_events
                         .record(FileEventKind::Rescan, RESCAN_FEED_PATH)
                         .await;
-                    let outcome = crate::service::watch_rescan::reconcile_after_rescan(
+                    let policy = registry.as_ref().and_then(|r| r.get(&index_id));
+                    if registry.is_some() && policy.is_none() {
+                        continue;
+                    }
+                    let outcome = crate::service::watch_rescan::reconcile_with_policy(
                         &index_id,
                         &canonical_root,
                         &raw_root,
                         &indexer,
                         &indexed_files,
+                        policy.as_deref(),
                     )
                     .await;
                     // One decision for every way a pass can fall short. The
@@ -220,15 +244,28 @@ pub fn spawn_watch_loop(
                         &path,
                     )
                     .await;
-                    handle_modified(
-                        &path,
-                        &index_id,
-                        &canonical_root,
-                        &raw_root,
-                        &indexer,
-                        &indexed_files,
-                    )
-                    .await;
+                    if let Some(registry) = &registry {
+                        crate::service::index_admission::apply_modified(
+                            registry,
+                            &index_id,
+                            &path,
+                            &canonical_root,
+                            &raw_root,
+                            &indexer,
+                            &indexed_files,
+                        )
+                        .await;
+                    } else {
+                        handle_modified(
+                            &path,
+                            &index_id,
+                            &canonical_root,
+                            &raw_root,
+                            &indexer,
+                            &indexed_files,
+                        )
+                        .await;
+                    }
                 }
                 WatchEvent::Removed(path) => {
                     // #6524: same key `handle_removed` looks the file up by.

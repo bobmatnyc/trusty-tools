@@ -132,14 +132,14 @@ cargo run -- --version
 | `src/bus`         | Inter-project message bus over UNIX sockets.               |
 | `src/registry`    | Global project registry (`~/.trusty-agents/projects.json`).     |
 | `src/skills`      | Skill discovery and composition into agent prompts.        |
-| `src/memory`      | Local redb + usearch + fastembed vector store.             |
+| `src/memory`      | Code-index and internal context storage support; fact memory uses trusty-memory. |
 | `src/search`      | Code indexer and file watcher (tree-sitter).               |
 | `src/init`        | Project self-initialization and auto-index seeding.        |
 | `src/build_info.rs` | Persistent build counter + version string.               |
 | `src/session.rs`  | Per-run session directory management.                      |
 | `src/subprocess`  | Spawn and NDJSON-interact with sub-agent processes.        |
 | `src/perf`        | Performance telemetry stamps.                              |
-| `src/cli`         | `memory search` / `code search` sub-commands.              |
+| `src/cli`         | Code search and CLI dispatch; local memory commands are retired. |
 
 ## CLI flags
 
@@ -238,7 +238,7 @@ trusty-agents maintains per-user state outside the project tree:
 ├── sockets/              # UNIX sockets for inter-project MessageBus
 │   └── <project-id>.sock
 ├── skills/               # shared skill markdown (project skills shadow these)
-└── memory/               # shared vector/memory stores
+└── memory/               # preserved legacy local memory files
 ```
 
 Per-project state lives in `<project>/.trusty-agents/`:
@@ -326,3 +326,12 @@ or jump straight to:
 - [`docs/trusty-agents/research/`](../../docs/trusty-agents/research/) — investigation & design notes.
 - [`docs/trusty-agents/decisions/`](../../docs/trusty-agents/decisions/) — crate-specific ADRs.
 - [`docs/adr/`](../../docs/adr/) — workspace-wide architecture decisions.
+
+## Assistant memory and projects
+
+Fact memory uses `trusty-memory`, with an assistant-bound namespace and an
+optional checkbox for cross-palace reads. Saved project defaults persist in
+Settings; chats can also attach readable directories without Git. Native
+assistants use Concierge for settings and platform health. See the
+[desktop workspace guide](../../docs/trusty-agents/user/desktop-workspace.md)
+for these controls and automatic entity extraction dependencies.

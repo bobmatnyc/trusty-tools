@@ -57,10 +57,6 @@ crates/trusty-agents/src/api/server/projects.rs	load_tm_projects_from_disk_retur
 crates/trusty-agents/src/api/server/projects.rs	scan_agents_dir_parses_toml
 crates/trusty-agents/src/api/server/state.rs	app_state_persists_and_reloads_tasks
 crates/trusty-agents/src/api/server/state.rs	docs_search_*
-crates/trusty-agents/src/cli/memories_cmd/mod.rs	memory_export_includes_segment_field
-crates/trusty-agents/src/cli/memories_cmd/ops.rs	memory_export_includes_segment_field
-crates/trusty-agents/src/cli/search_cmd/format.rs	format_memory_results_json
-crates/trusty-agents/src/cli/search_cmd/format.rs	format_session_list_human
 crates/trusty-agents/src/compress/session.rs	compress_below_threshold_is_noop
 crates/trusty-agents/src/context/indexer.rs	spawn_then_drop_handle_shuts_down_cleanly
 crates/trusty-agents/src/ctrl/config.rs	apply_credential_routing_openrouter_qualifies_model
@@ -90,7 +86,6 @@ crates/trusty-agents/src/inspection/mod.rs	inspect_dry_run_python_task_picks_pyt
 crates/trusty-agents/src/llm/adapter/mod.rs	adapter_for_model_routes_ollama
 crates/trusty-agents/src/llm/adapter/mod.rs	anthropic_api_endpoint_falls_back_to_openrouter
 crates/trusty-agents/src/llm/adapter/mod.rs	ollama_api_endpoint_uses_host
-crates/trusty-agents/src/llm/helpers/mod.rs	extract_system_and_first_user_basic
 crates/trusty-agents/src/logging/mod.rs	chat_logger_rotates_when_oversized
 crates/trusty-agents/src/logging/mod.rs	chat_logger_writes_ndjson
 crates/trusty-agents/src/logging/mod.rs	cleanup_removes_old_gzipped_logs

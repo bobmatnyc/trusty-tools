@@ -74,6 +74,11 @@ pub(super) fn build_converse_messages(
     let mut current_blocks: Vec<ContentBlock> = Vec::new();
 
     for msg in &req.messages {
+        if !msg.images.is_empty() && msg.role != "user" {
+            return Err(InferenceError::Provider(
+                "Images require a user message".into(),
+            ));
+        }
         if msg.role == "system" {
             // (#2278) Flush the in-progress same-role batch BEFORE diverting
             // this entry to the system-prompt array, rather than bare
@@ -316,6 +321,25 @@ fn append_content_blocks(
                 blocks.push(ContentBlock::Text(text.clone()));
             }
         }
+    }
+    for image in &msg.images {
+        use aws_sdk_bedrockruntime::types::{ImageBlock, ImageFormat, ImageSource};
+        use base64::Engine;
+        let format = match image.mime_type.as_str() {
+            "image/png" => ImageFormat::Png,
+            "image/jpeg" => ImageFormat::Jpeg,
+            "image/webp" => ImageFormat::Webp,
+            _ => return Err(InferenceError::Provider("Unsupported image MIME".into())),
+        };
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&image.data_base64)
+            .map_err(|e| InferenceError::Provider(e.to_string()))?;
+        let block = ImageBlock::builder()
+            .format(format)
+            .source(ImageSource::Bytes(aws_smithy_types::Blob::new(bytes)))
+            .build()
+            .map_err(|e| InferenceError::Provider(e.to_string()))?;
+        blocks.push(ContentBlock::Image(block));
     }
     Ok(())
 }

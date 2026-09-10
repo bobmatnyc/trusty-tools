@@ -95,6 +95,49 @@ pub(super) async fn agent_chat_history_route(
     AxumPath(name): AxumPath<String>,
     Query(q): Query<HistoryQuery>,
 ) -> Response {
+    if crate::agents::AgentConfig::by_name_async(&name)
+        .await
+        .is_ok_and(|c| crate::assistants::is_assistant_role(&c.agent.role))
+    {
+        let owner = name.clone();
+        let policy =
+            tokio::task::spawn_blocking(move || crate::assistants::memory_policy::resolve(&owner))
+                .await;
+        return match policy {
+            Ok(Ok(policy)) => match trusty_common::memory_rpc::resolve_memory_socket() {
+                Ok(socket) => {
+                    match fetch_session(&socket, &policy.namespace, &session_id_for(&name)).await {
+                        Ok(session) => Json(page(
+                            &policy.namespace,
+                            &session_id_for(&name),
+                            &session,
+                            q.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT),
+                            q.until,
+                        ))
+                        .into_response(),
+                        Err(reason) => unavailable(
+                            Some(policy.namespace),
+                            &session_id_for(&name),
+                            &reason,
+                            None,
+                        ),
+                    }
+                }
+                Err(error) => unavailable(
+                    Some(policy.namespace),
+                    &session_id_for(&name),
+                    &error.to_string(),
+                    None,
+                ),
+            },
+            error => unavailable(
+                None,
+                &session_id_for(&name),
+                &format!("Assistant memory ownership unavailable: {error:?}"),
+                None,
+            ),
+        };
+    }
     chat_history_at(
         &crate::agents::agents_dir_candidates(),
         &name,

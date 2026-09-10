@@ -1,3 +1,10 @@
+---
+spec_refs:
+  - id: SPEC-AGENTCFG-03~draft
+    path: docs/specs/agent-config-five-sections.md
+    anchor: SPEC-AGENTCFG-03~draft
+---
+
 # DOC-54 — Trusty Agents Product Specification
 
 **Status:** Draft  
@@ -184,7 +191,15 @@ project/channel business-entity extraction, monthly history, and ongoing updates
   another Assistant's palace, selected in that Assistant's settings (#7425,
   tracked in #7428). Agent-to-agent communication (MCP tools or chat) remains
   a separate path and is not replaced by palace fan-out.
+- **Earlier cross-agent knowledge rule:** Agent-to-agent communication provided access without sharing stores. The 2026-09-10 revision below adds an explicit fact-memory read option.
 - **Configuration:** `agent.toml` lists the store name; the harness initializes/attaches it on agent startup.
+
+**Owner revision, 2026-09-10:** Fact memory uses `trusty-memory` and is bound to
+the Assistant namespace. An opt-in Settings checkbox permits explicit reads
+across palaces; writes remain in the owning namespace. Protected OKG stores
+remain independently owned. Assistant project defaults persist in Settings,
+separately from chat attachments. DOC-57 §4.1 and §4.7 govern these updated
+requirements. This revision records accepted behavior, not deployment evidence.
 
 ### 5.2 Tools (Actions): MCP allow-list
 

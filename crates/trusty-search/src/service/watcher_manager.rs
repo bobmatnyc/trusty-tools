@@ -35,7 +35,7 @@ use tokio::sync::Mutex;
 use crate::core::registry::{IndexHandle, IndexId};
 use crate::service::indexed_files::IndexedFiles;
 use crate::service::network_fs::{classify_root, MountKind};
-use crate::service::watch_loop::{spawn_watch_loop, WatcherTask};
+use crate::service::watch_loop::WatcherTask;
 
 /// Human-readable, actionable message logged (and surfaced via `/health` +
 /// `GET /indexes/:id/status`) when an index root is detected as
@@ -108,6 +108,7 @@ fn watcher_disabled() -> bool {
 #[derive(Clone, Default)]
 pub struct WatcherManager {
     inner: Arc<Mutex<HashMap<IndexId, WatcherTask>>>,
+    registry: Option<crate::core::registry::IndexRegistry>,
     /// Indexes whose watcher was refused because `root_path` was detected as
     /// network-mounted (issue #3408), keyed to the actionable message logged
     /// at spawn time. Surfaced via `/health`
@@ -122,6 +123,14 @@ impl WatcherManager {
     /// Construct an empty manager.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Bind daemon watchers to live policy updates in the shared registry.
+    pub(crate) fn with_registry(registry: crate::core::registry::IndexRegistry) -> Self {
+        Self {
+            registry: Some(registry),
+            ..Self::default()
+        }
     }
 
     /// Start watching `handle.root_path`, forwarding changes into the handle's
@@ -218,7 +227,7 @@ impl WatcherManager {
         // limit exhaustion) so `stop_for_index`/`stop_all` can never block on a
         // spawn — and (b) keeps the critical section to a bare insert.
         let indexed_files = IndexedFiles::new();
-        let task = match spawn_watch_loop(
+        let task = match crate::service::watch_loop::spawn_watch_loop_with_registry(
             &handle.root_path,
             // #3049: the watcher takes this index's teardown-lock read side.
             handle.id.clone(),
@@ -226,6 +235,7 @@ impl WatcherManager {
             indexed_files,
             // #6524: the watcher populates this index's file-change feed.
             Arc::clone(&handle.file_events),
+            self.registry.clone(),
         ) {
             Ok(task) => task,
             Err(e) => {

@@ -25,6 +25,8 @@
 //! Test: dispatch coverage lives in `tests` below; per-format extraction
 //! correctness lives in each submodule's own `#[cfg(test)]` block.
 
+mod chat_table_bounds;
+pub mod chat_tables;
 pub mod docx;
 mod ooxml;
 pub mod pdf;

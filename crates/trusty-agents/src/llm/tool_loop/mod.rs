@@ -36,8 +36,8 @@ use super::events::{
 };
 use super::helpers::{
     SCOPE_REMINDER, build_assistant_tool_call_message, extract_finish_task_summary,
-    extract_system_and_first_user, extract_xml_tool_calls, maybe_inject_qwen3_think,
-    should_retry_plain_text_turn, strip_xml_tool_noise,
+    extract_xml_tool_calls, maybe_inject_qwen3_think, should_retry_plain_text_turn,
+    strip_xml_tool_noise,
 };
 use crate::context::ContextManager;
 use crate::perf::TokenUsage;
@@ -86,6 +86,7 @@ pub async fn chat_with_tools(
         false,
         false,
         &[],
+        None,
     )
     .await
 }
@@ -136,33 +137,32 @@ pub async fn chat_with_tools_gated(
     strict_tool_discipline: bool,
     use_anthropic_direct: bool,
     stop_sequences: &[String],
+    aws_config: Option<(Option<&str>, Option<&str>)>,
 ) -> Result<(String, TokenUsage)> {
-    // #201: Bedrock-routed agents take a totally different code path — no
-    // OpenAI-compatible HTTP, no async-openai client. We extract the system
-    // prompt and the initial user message from `initial_messages`, then hand
-    // off to the Bedrock multi-turn loop. AWS profile/region come from env
-    // vars set by the in-process runner before this call (see
-    // `TAGENT_AWS_PROFILE`/`TAGENT_AWS_REGION`); falling back to SDK
-    // defaults preserves operator overrides.
+    // #7370: configured assistant AWS routing is explicit and survives concurrent turns.
     if adapter.provider() == adapter::Provider::Bedrock {
         let model_id = model.strip_prefix("bedrock/").unwrap_or(model);
-        let (system_prompt, user_message) = extract_system_and_first_user(&initial_messages)?;
+        let messages = super::inference_bridge::to_shared_messages(&initial_messages)?;
         let openai_tools = registry.openai_tools()?;
         let tools_json: Vec<serde_json::Value> = openai_tools
             .iter()
             .map(|t| serde_json::to_value(t).context("serialize tool for bedrock"))
             .collect::<Result<Vec<_>>>()?;
-        let aws_profile =
-            crate::env_compat::env_var("TAGENT_AWS_PROFILE", "OPEN_MPM_AWS_PROFILE").ok();
-        let aws_region =
-            crate::env_compat::env_var("TAGENT_AWS_REGION", "OPEN_MPM_AWS_REGION").ok();
-        let bedrock_client =
-            bedrock::build_client(aws_profile.as_deref(), aws_region.as_deref()).await?;
+        let ambient_profile = aws_config
+            .is_none()
+            .then(|| crate::env_compat::env_var("TAGENT_AWS_PROFILE", "OPEN_MPM_AWS_PROFILE").ok())
+            .flatten();
+        let ambient_region = aws_config
+            .is_none()
+            .then(|| crate::env_compat::env_var("TAGENT_AWS_REGION", "OPEN_MPM_AWS_REGION").ok())
+            .flatten();
+        let (profile, region) =
+            aws_config.unwrap_or((ambient_profile.as_deref(), ambient_region.as_deref()));
+        let bedrock_client = bedrock::build_client(profile, region).await?;
         return bedrock::chat_with_tools(
             &bedrock_client,
             model_id,
-            &system_prompt,
-            &user_message,
+            messages,
             temperature,
             max_tokens,
             tools_json,

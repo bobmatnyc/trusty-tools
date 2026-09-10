@@ -1,7 +1,11 @@
 //! Assistant-owned knowledge planning. No upstream content is read or extracted here.
+pub mod execution;
+pub mod extraction;
 mod inbox;
-mod persistence;
+pub mod inference;
+pub(crate) mod persistence;
 mod planning;
+pub mod search_binding;
 mod types;
 use crate::assistants::AssistantHome;
 use chrono::{DateTime, Utc};
@@ -86,6 +90,17 @@ impl KnowledgeStore {
         }
         Ok(())
     }
+    pub fn confirm_binding_with_legacy(
+        &self,
+        revision: &str,
+        legacy: Option<crate::stores::AgentStoreBinding>,
+    ) -> Result<KnowledgeState> {
+        self.mutate(revision, |s| {
+            s.binding_confirmed = true;
+            s.legacy_binding = legacy;
+            Ok(())
+        })
+    }
     pub fn confirm_binding(&self, revision: &str) -> Result<KnowledgeState> {
         self.mutate(revision, |s| {
             s.binding_confirmed = true;
@@ -129,7 +144,9 @@ impl KnowledgeStore {
             history_months: 1,
             paused: false,
             binding_confirmed: false,
+            legacy_binding: None,
             store,
+            assistant_projects: vec![],
             projects_by_chat: BTreeMap::new(),
             sources: vec![],
             jobs: vec![],
@@ -217,6 +234,33 @@ impl KnowledgeStore {
             Ok(())
         })
     }
+
+    /// Why: selected projects must survive chat creation and application restart.
+    /// What: update assistant selections under the same CAS lock, preserving explicit chat attachments.
+    /// Test: `assistant_projects_preserve_explicit_chat_attachments`.
+    pub fn update_assistant_projects(
+        &self,
+        revision: &str,
+        paths: &[String],
+        sources: &[SourceDescriptor],
+        now: DateTime<Utc>,
+    ) -> Result<KnowledgeState> {
+        if paths.len() > 64
+            || paths
+                .iter()
+                .any(|p| p.len() > 4096 || !std::path::Path::new(p).is_absolute())
+        {
+            return Err(KnowledgeError::BadRequest(
+                "Invalid assistant project selection".into(),
+            ));
+        }
+        self.mutate(revision, |state| {
+            state.assistant_projects = paths.to_vec();
+            state.assistant_projects.sort();
+            state.assistant_projects.dedup();
+            planning::reconcile_state(state, sources, now)
+        })
+    }
     pub fn extend_history(
         &self,
         revision: &str,
@@ -295,3 +339,8 @@ impl KnowledgeStore {
 }
 #[cfg(test)]
 mod tests;
+
+/// Stable admitted event identity, shared by replay and extraction.
+pub fn event_digest(source: &str, revision: &str, event: &str) -> String {
+    planning::digest(&[source, revision, event])
+}

@@ -45,10 +45,8 @@
 
 <div class="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto">
   <p class="text-xs text-foundry-light-muted dark:text-foundry-text/60">
-    Read-only. Granting capability from the GUI is out of scope by design (DOC-57 §7.2, PM-4); edit
-    <code class="font-mono">agent.toml</code>. Values are as <strong>declared</strong> in this
-    agent's own file — anything inherited through <code class="font-mono">extends</code> is unioned
-    at load and is not visible here yet (§7.4, PM-7).
+    Ask Concierge to update this assistant’s permissions or check platform health. Tool grants and
+    effective scopes are shown below.
   </p>
 
   <section class="flex flex-col gap-2">

@@ -77,7 +77,8 @@ pub(super) fn chat_tool_definitions(has_default: bool) -> Vec<Value> {
                     "palace":     {"type": "string"},
                     "session_id": {"type": "string"},
                     "role":       {"type": "string", "enum": ["user", "assistant", "system"]},
-                    "content":    {"type": "string"}
+                    "content":    {"type": "string"},
+                    "attachments": trusty_common::chat_attachments::stored_schema()
                 },
                 "required": chat_session_add_turn_required,
             }
@@ -168,7 +169,8 @@ pub(super) fn chat_tool_definitions(has_default: bool) -> Vec<Value> {
                     "palace":     {"type": "string"},
                     "session_id": {"type": "string"},
                     "prompt":     {"type": "string", "description": "User-side message (stored with role=user)."},
-                    "response":   {"type": "string", "description": "Assistant-side message (stored with role=assistant)."}
+                    "response":   {"type": "string", "description": "Assistant-side message (stored with role=assistant)."},
+                    "attachments": trusty_common::chat_attachments::stored_schema()
                 },
                 "required": chat_turn_append_required,
             }

@@ -81,6 +81,9 @@ pub struct ProjectEntry {
     /// Test: `register_self_project_sets_is_self_flag`.
     #[serde(default)]
     pub is_self: bool,
+    /// Explicit operator selection survives discovery noise filters (#4358).
+    #[serde(default)]
+    pub manually_registered: bool,
     /// Git origin URL (HTTPS or SSH form), e.g. `git@github.com:o/r.git`.
     ///
     /// Why: Lets project-discovery UIs render the upstream repo name and
@@ -135,6 +138,9 @@ impl ProjectEntry {
     /// Test: `is_real_project_rejects_temp_dirs` and
     /// `is_real_project_accepts_normal_dirs`.
     pub fn is_real_project(&self) -> bool {
+        if self.manually_registered {
+            return true;
+        }
         let path = &self.path;
         let path_str = path.to_string_lossy();
         // Exclude macOS/Linux temp directories.
@@ -204,7 +210,7 @@ pub fn discover_active_projects<'a>(
         .filter(|e| {
             let recent = e.last_active().map(|t| t >= cutoff).unwrap_or(false);
             let has_session = tm_session_paths.iter().any(|p| p == &e.path);
-            recent || has_session
+            recent || has_session || e.manually_registered
         })
         .collect();
     out.sort_by_key(|b| std::cmp::Reverse(b.last_active()));

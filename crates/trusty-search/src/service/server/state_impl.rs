@@ -59,7 +59,7 @@ impl SearchAppState {
         // `true` = stop requested. The receiver is polled by `run_daemon`.
         let (shutdown_tx, _) = watch::channel(false);
         Self {
-            registry,
+            registry: registry.clone(),
             // #6821: one RAM read per state, not one per `/health` poll.
             machine_tier: trusty_common::machine_tier::MachineBudget::detect().tier,
             // #6285 slice 3: one limiter and one deadline per DAEMON, not per
@@ -115,7 +115,9 @@ impl SearchAppState {
             last_queried_write_cache: Arc::new(DashMap::new()),
             // Issue #1621: empty until indexes register; populated by the
             // warm-boot restore + `POST /indexes` paths.
-            watcher_manager: crate::service::watcher_manager::WatcherManager::new(),
+            watcher_manager: crate::service::watcher_manager::WatcherManager::with_registry(
+                registry,
+            ),
             // Issue #1672: zeroed summary; populated by reconcile_stale_indexes.
             reconcile_summary: Arc::new(std::sync::Mutex::new(
                 crate::service::server::state::ReconcileSummary::default(),

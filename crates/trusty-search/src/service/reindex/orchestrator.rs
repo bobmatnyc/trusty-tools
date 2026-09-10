@@ -14,9 +14,7 @@
 //! `interactive_reindex_not_starved_by_background`.
 
 use crate::core::registry::{IndexHandle, IndexId};
-use crate::service::walker::{walk_source_files_with_options, WalkOptions};
 use dashmap::DashMap;
-use std::path::PathBuf;
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 use std::time::Instant;
@@ -77,62 +75,7 @@ pub(crate) fn spawn_reindex_awaitable(
 /// What: returns the merged `WalkResult` whose `files` are sorted and unique.
 /// Test: covered by `reindex_honours_include_paths_filter` below.
 pub(super) fn collect_files_to_index(handle: &IndexHandle) -> crate::service::walker::WalkResult {
-    let include_paths: Vec<PathBuf> = if handle.include_paths.is_empty() {
-        vec![handle.root_path.clone()]
-    } else {
-        handle.include_paths.clone()
-    };
-    let mut walked_files: Vec<PathBuf> = Vec::new();
-    let mut total_skipped_dirs: usize = 0;
-    // Issue #1372: resolve the per-index hygiene knobs onto the walk options.
-    // `data_file_max_bytes` is an `Option<u64>` on the handle's config source;
-    // it was already resolved to a concrete `u64` field on the handle, so the
-    // walker always receives a concrete cap.
-    let walk_opts = WalkOptions {
-        include_docs: handle.include_docs,
-        respect_gitignore: handle.respect_gitignore,
-        follow_links: handle.follow_links,
-        extra_skip_dirs: handle.extra_skip_dirs.clone(),
-        data_file_max_bytes: handle.data_file_max_bytes,
-    };
-    for subtree in &include_paths {
-        let w = walk_source_files_with_options(subtree, &walk_opts);
-        walked_files.extend(w.files);
-        total_skipped_dirs = total_skipped_dirs.saturating_add(w.skipped_dirs);
-    }
-
-    // Apply repo-config filters (AND-composed on top of walker's built-in ignores).
-    if !handle.exclude_globs.is_empty() {
-        let excludes = handle.exclude_globs.clone();
-        walked_files.retain(|p| !crate::core::repo_config::path_matches_any_glob(p, &excludes));
-    }
-    if !handle.extensions.is_empty() {
-        let allowed = handle.extensions.clone();
-        walked_files.retain(|p| {
-            p.extension()
-                .and_then(|e| e.to_str())
-                .map(|e| allowed.iter().any(|x| x.eq_ignore_ascii_case(e)))
-                .unwrap_or(false)
-        });
-    }
-
-    // Issue #111: `path_filter` restricts indexing to files under immediate
-    // subdirectories of `root_path` matching one of the configured glob patterns.
-    if !handle.path_filter.is_empty() {
-        let patterns = handle.path_filter.clone();
-        let root =
-            std::fs::canonicalize(&handle.root_path).unwrap_or_else(|_| handle.root_path.clone());
-        walked_files.retain(|p| crate::core::registry::path_matches_filter(p, &root, &patterns));
-    }
-
-    // De-duplicate when multiple `include_paths` overlap.
-    walked_files.sort();
-    walked_files.dedup();
-
-    crate::service::walker::WalkResult {
-        files: walked_files,
-        skipped_dirs: total_skipped_dirs,
-    }
+    crate::service::index_admission::walk(handle)
 }
 
 /// Variant of `spawn_reindex` that GC's the progress map after completion

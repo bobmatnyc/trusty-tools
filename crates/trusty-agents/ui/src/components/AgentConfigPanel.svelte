@@ -292,7 +292,7 @@
     saving = true;
     saveError = '';
     try {
-      detail = await patchAgent(agentName, { personality: personaContent });
+      detail = await patchAgent(agentName, { revision: detail?.revision, personality: personaContent });
       savedPersonaContent = personaContent;
       justSavedPersonality = true;
       if (justSavedTimer) clearTimeout(justSavedTimer);

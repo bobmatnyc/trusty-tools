@@ -299,3 +299,5 @@ pub mod agent_api {
     pub use crate::tools::agent_plugin::AgentPlugin;
     pub use crate::tools::traits::{ToolExecutionTier, ToolExecutor, ToolResult};
 }
+
+pub(crate) mod chat_attachments;

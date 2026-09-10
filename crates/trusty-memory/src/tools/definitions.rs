@@ -481,6 +481,7 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
     let metrics = tools.pop().expect("console_metrics sentinel");
     tools.extend(task_tool_definitions(has_default));
     tools.extend(chat_tool_definitions(has_default));
+    tools.extend(super::chat_assets::definitions());
     // ADR-0027 T6 (#4805) / T9 (#4809): the room and wing surfaces, each in its
     // own sibling module for the same 500-SLOC reason as the task and chat groups.
     tools.extend(room_tool_definitions(has_default));

@@ -97,6 +97,7 @@ pub struct VectorSearchTool {
     /// trusty-search daemon base URL override. `None` = discover at call time
     /// via `trusty_common::resolve_daemon_base_url` (tests inject a mock).
     search_base_url: Option<String>,
+    binding_error: Option<String>,
 }
 
 impl VectorSearchTool {
@@ -116,7 +117,14 @@ impl VectorSearchTool {
             attached_index_ids: Vec::new(),
             enforce_index_allowlist: false,
             search_base_url: None,
+            binding_error: None,
         }
+    }
+
+    /// Report a broken protected binding without preventing unrelated assistant chat.
+    pub fn with_binding_error(mut self, error: Option<String>) -> Self {
+        self.binding_error = error;
+        self
     }
 
     /// Bind this tool to the agent's own OKG store index (#3864).
@@ -401,6 +409,12 @@ impl ToolExecutor for VectorSearchTool {
     }
 
     async fn execute(&self, args: Value) -> ToolResult {
+        if let Some(error) = &self.binding_error {
+            return ToolResult::err(format!(
+                "Assistant knowledge unavailable: {error}; ask Concierge for help"
+            ));
+        }
+
         let Some(query) = args.get("query").and_then(Value::as_str) else {
             return ToolResult::err("vector_search: missing required 'query' string");
         };

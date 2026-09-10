@@ -41,7 +41,7 @@ pub(super) async fn replay(context: &Context) -> Result<(), super::Error> {
             Err((axum::http::StatusCode::CONFLICT, _)) => continue,
             Err(e) => return Err(e),
         };
-        let sources = context.sources(&state.projects_by_chat)?;
+        let sources = context.sources(&state.project_selections())?;
         let store = context.store();
         match disk(move || store.replay_inbox(&state.revision, &sources, Utc::now())).await {
             Ok(_) => return Ok(()),

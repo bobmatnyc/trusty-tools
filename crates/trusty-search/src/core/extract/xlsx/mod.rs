@@ -224,7 +224,14 @@ fn read_package_bytes(path: &Path) -> Result<Vec<u8>, ExtractError> {
 /// `test_non_zip_container_passes_preflight`,
 /// `test_unparseable_zip_is_refused_rather_than_handed_to_calamine`,
 /// `test_large_legitimate_workbook_still_extracts`.
-fn preflight_package_bounds<R: Read + Seek>(mut reader: R, cap: u64) -> Result<(), ExtractError> {
+fn preflight_package_bounds<R: Read + Seek>(reader: R, cap: u64) -> Result<(), ExtractError> {
+    preflight_bounded(reader, cap, MAX_WORKBOOK_ENTRIES)
+}
+pub(super) fn preflight_bounded<R: Read + Seek>(
+    mut reader: R,
+    cap: u64,
+    max_entries: usize,
+) -> Result<(), ExtractError> {
     // #4894: fail CLOSED on a zip this crate cannot open — waving it through
     // hands calamine's own, newer zip an unbounded package the guard never saw.
     let container_is_zip = starts_with_zip_signature(&mut reader)?;
@@ -239,9 +246,9 @@ fn preflight_package_bounds<R: Read + Seek>(mut reader: R, cap: u64) -> Result<(
         }
     };
 
-    if archive.len() > MAX_WORKBOOK_ENTRIES {
+    if archive.len() > max_entries {
         return Err(ExtractError::Xlsx(format!(
-            "workbook package holds {} entries, over the {MAX_WORKBOOK_ENTRIES} entry cap",
+            "workbook package holds {} entries, over the {max_entries} entry cap",
             archive.len()
         )));
     }

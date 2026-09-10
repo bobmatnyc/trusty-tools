@@ -319,6 +319,7 @@ fn build_converse_messages_merges_consecutive_tool_results() {
         ChatMessage::user("do two things"),
     ]);
     req.messages.push(ChatMessage {
+        images: vec![],
         role: "assistant".into(),
         content: None,
         tool_calls: Some(vec![
@@ -368,6 +369,7 @@ fn build_converse_messages_merges_consecutive_tool_results() {
 fn build_converse_messages_maps_tool_use_arguments_to_document() {
     let mut req = minimal_request(vec![ChatMessage::user("go")]);
     req.messages.push(ChatMessage {
+        images: vec![],
         role: "assistant".into(),
         content: None,
         tool_calls: Some(vec![ToolCall {
@@ -455,6 +457,7 @@ fn enforce_tool_pairing_drops_orphan_tool_result() {
 fn enforce_tool_pairing_synthesizes_placeholder_for_unanswered_tool_use() {
     let mut req = minimal_request(vec![ChatMessage::system("s"), ChatMessage::user("do it")]);
     req.messages.push(ChatMessage {
+        images: vec![],
         role: "assistant".into(),
         content: None,
         tool_calls: Some(vec![ToolCall {
@@ -502,6 +505,7 @@ fn enforce_tool_pairing_synthesizes_placeholder_for_unanswered_tool_use() {
 fn enforce_tool_pairing_leaves_valid_conversation_unchanged() {
     let mut req = minimal_request(vec![ChatMessage::system("s"), ChatMessage::user("go")]);
     req.messages.push(ChatMessage {
+        images: vec![],
         role: "assistant".into(),
         content: None,
         tool_calls: Some(vec![ToolCall {
@@ -1612,4 +1616,19 @@ async fn live_bedrock_converse_stream() {
         "the terminal Metadata tally must survive: {:?}",
         done.usage
     );
+}
+
+#[test]
+fn image_attachment_becomes_bedrock_image_block() {
+    let mut user = ChatMessage::user("Describe");
+    user.images.push(crate::chat_attachments::ImageContent {
+        mime_type: "image/png".into(),
+        data_base64: "YWJj".into(),
+    });
+    let (_, messages) = build_converse_messages(&minimal_request(vec![user.clone()])).unwrap();
+    let image = messages[0].content()[1].as_image().unwrap();
+    assert_eq!(image.format().as_str(), "png");
+    assert_eq!(image.source().unwrap().as_bytes().unwrap().as_ref(), b"abc");
+    user.role = "system".into();
+    assert!(build_converse_messages(&minimal_request(vec![user])).is_err());
 }

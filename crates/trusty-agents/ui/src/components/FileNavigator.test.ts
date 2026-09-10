@@ -6,7 +6,7 @@ vi.mock('../lib/projectTools', () => ({ fetchProjectTools: vi.fn().mockResolvedV
 vi.mock('../lib/transport', () => ({ isDesktop: () => true }));
 vi.mock('../stores/app', () => ({ activeAgentId: writable(null), projects: writable([]), projectsList: writable([]), fetchProjects: vi.fn().mockResolvedValue(undefined), tmApi: vi.fn() }));
 vi.mock('../lib/workspaceFiles', () => ({
-  folderError: () => 'This folder is missing. Locate it.', listWorkspaceFiles: vi.fn(), chooseWorkspaceRoot: vi.fn(), registerWorkspaceRoot: vi.fn(), DESKTOP_FILES_MESSAGE: 'Desktop only',
+  folderError: () => 'This folder is missing. Locate it.', listWorkspaceFiles: vi.fn(), chooseWorkspaceRoot: vi.fn(), registerWorkspaceRoot: vi.fn(), registerProjectFolder: vi.fn(), DESKTOP_FILES_MESSAGE: 'Desktop only',
 }));
 vi.mock('../stores/workspace', () => ({
   chatWorkspaceKey: writable('chat-a'), registeredWorkspaceRoots: writable([]), activeRoot: writable(null), workspaceRoots: writable([]), openedFile: writable(null), projectRoots: writable([]), currentChatRoots: writable([]), chatProjectPath: writable(null), workspaceError: writable(null),

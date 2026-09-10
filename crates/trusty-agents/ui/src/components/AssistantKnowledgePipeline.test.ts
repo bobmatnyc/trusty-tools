@@ -46,3 +46,15 @@ it('does not show an old assistant response after selection changes', async () =
   expect(document.body.textContent).not.toContain('/private/izzie/okg');
   legacy.$destroy();
 });
+
+it('shows completed extraction and retry errors without exposing output or lease internals', async () => {
+  vi.mocked(fetchAssistantKnowledge).mockResolvedValue({ ...fixture, extraction: {
+    first: { status: 'completed', attempts: 1, model: 'configured-model', output: 'private output', lease_owner: 'internal-lease' },
+    second: { status: 'retryable', attempts: 2, last_error: 'Search unavailable' },
+  }} as never);
+  component = mount(AssistantKnowledgePipeline, { target: document.body, props: { agentName: 'izzie' } }); await settle();
+  const progress = document.querySelector('[aria-label="Extraction progress"]')!;
+  expect(progress.textContent).toContain('completed');
+  expect(progress.textContent).toContain('Search unavailable');
+  expect(progress.textContent).not.toContain('private output'); expect(progress.textContent).not.toContain('internal-lease');
+});

@@ -95,6 +95,8 @@ allow = [
     # #469: memory_recall (project decisions from trusty-memory) and
     # vector_search (semantic code/doc search).
     "memory_recall",
+    "memory_remember",
+    "memory_write",
     "vector_search",
     # #472/#3656/#3700/#3732: CTO ops DB query tools — read-only SQLite over
     # ~/Duetto/cto/data/cto.db (a fixture DB ships until the real file is

@@ -613,7 +613,11 @@ fn recall_project_memories_warns_when_store_open_fails() {
         let _guard = tracing::subscriber::set_default(
             tracing_subscriber::registry().with(collector.clone()),
         );
-        rt.block_on(recall_project_memories(tmp.path(), "anything", 3))
+        rt.block_on(recall_project_memories(
+            "unconfigured-test-assistant",
+            "anything",
+            3,
+        ))
     };
 
     assert!(
@@ -626,7 +630,9 @@ fn recall_project_memories_warns_when_store_open_fails() {
         .unwrap_or_else(|e| e.into_inner())
         .clone();
     assert!(
-        warnings.iter().any(|w| w.contains("store open failed")),
+        warnings
+            .iter()
+            .any(|w| w.contains("Assistant memory unavailable")),
         "a store-open failure must be visible at WARN with its error chain; \
          captured WARN events: {warnings:?}"
     );

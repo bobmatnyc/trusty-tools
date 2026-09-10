@@ -21,13 +21,11 @@ mod spawn;
 mod tests;
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use anyhow::{Result, bail};
 use async_trait::async_trait;
 
 use crate::ipc::IpcMessage;
-use crate::memory::{AgentSession, MemoryGraph};
 use crate::session::HistoryMessage;
 use crate::tools::traits::{AgentOutput, AgentRunner, RunContext};
 
@@ -50,10 +48,6 @@ pub struct SubprocessAgentRunner {
     /// this path instead of `out_dir`. When unset, tools fall back to
     /// `TAGENT_OUT_DIR` for backward compatibility.
     code_dir: Option<PathBuf>,
-    /// Optional memory graph. When set, every successful IPC round-trip is
-    /// recorded as an `AgentSession`. Memory failures are swallowed so they
-    /// never crash the main agent loop.
-    memory: Option<Arc<MemoryGraph>>,
     /// Optional config directory forwarded via `TAGENT_CONFIG_DIR` env var
     /// to child processes so agents in different projects load the right TOML.
     config_dir: Option<PathBuf>,
@@ -80,7 +74,6 @@ impl SubprocessAgentRunner {
         Self {
             out_dir: None,
             code_dir: None,
-            memory: None,
             config_dir: None,
             project_dir: None,
             delegation_taint_allow: None,
@@ -175,21 +168,6 @@ impl SubprocessAgentRunner {
         self.delegation_taint_allow = patterns;
         self
     }
-
-    /// Builder-style constructor that attaches a memory graph for auto-capture.
-    ///
-    /// Why: Wiring memory at construction keeps the runner API otherwise
-    /// unchanged while letting callers opt in (tests, ephemeral runs can
-    /// omit it).
-    /// What: Stores the `Arc<MemoryGraph>` used by `run()` after a successful
-    /// IPC round-trip.
-    /// Test: Memory failures never fail the run — `run()` calls `.ok()` on
-    /// the record call; exercised indirectly via integration runs.
-    #[allow(dead_code)]
-    pub fn with_memory(mut self, memory: Option<Arc<MemoryGraph>>) -> Self {
-        self.memory = memory;
-        self
-    }
 }
 
 impl Default for SubprocessAgentRunner {
@@ -245,7 +223,7 @@ impl AgentRunner for SubprocessAgentRunner {
             })
             .await?
         };
-        self.handle_msg(msg, agent_name, task).await
+        self.handle_msg(msg, agent_name).await
     }
 
     async fn run_with_history(
@@ -285,58 +263,24 @@ impl AgentRunner for SubprocessAgentRunner {
             })
             .await?
         };
-        self.handle_msg(msg, agent_name, task).await
+        self.handle_msg(msg, agent_name).await
     }
 }
 
 impl SubprocessAgentRunner {
-    /// Why: Shared post-IPC handling (memory capture + output mapping) used
-    /// by both `run_with_history` and `run_with_context`. Extracted to avoid
-    /// duplicating the same match/bail/memory logic.
-    /// What: Converts an `IpcMessage::Result` into an `AgentOutput`, records
-    /// a memory session if a graph is attached, and bails on error/task
-    /// variants.
-    /// Test: Exercised indirectly through every runner integration test.
-    async fn handle_msg(
-        &self,
-        msg: IpcMessage,
-        agent_name: &str,
-        task: &str,
-    ) -> Result<AgentOutput> {
+    /// Map an IPC result or error; durable fact memory belongs to trusty-memory.
+    async fn handle_msg(&self, msg: IpcMessage, agent_name: &str) -> Result<AgentOutput> {
         match msg {
             IpcMessage::Result {
                 content,
                 summary,
                 usage,
                 ..
-            } => {
-                if let Some(memory) = &self.memory {
-                    let session = AgentSession {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        agent_name: agent_name.to_string(),
-                        workflow_run_id: crate::env_compat::env_var(
-                            "TAGENT_RUN_ID",
-                            "OPEN_MPM_RUN_ID",
-                        )
-                        .unwrap_or_default(),
-                        phase: crate::env_compat::env_var("TAGENT_PHASE", "OPEN_MPM_PHASE")
-                            .unwrap_or_else(|_| "interactive".to_string()),
-                        prompt: task.to_string(),
-                        response: content.clone(),
-                        timestamp: chrono::Utc::now(),
-                        parent_id: None,
-                        segment: None,
-                    };
-                    if let Err(e) = memory.record(session).await {
-                        tracing::warn!(error = %e, agent = %agent_name, "memory.record failed; continuing");
-                    }
-                }
-                Ok(AgentOutput {
-                    content,
-                    summary,
-                    usage: usage.unwrap_or_default(),
-                })
-            }
+            } => Ok(AgentOutput {
+                content,
+                summary,
+                usage: usage.unwrap_or_default(),
+            }),
             IpcMessage::Error { error, .. } => bail!("sub-agent '{agent_name}' error: {error}"),
             IpcMessage::Task { .. } => {
                 bail!("sub-agent '{agent_name}' returned unexpected Task message")

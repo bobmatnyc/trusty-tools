@@ -53,6 +53,7 @@ pub struct Window {
 #[serde(rename_all = "snake_case")]
 pub enum JobStatus {
     Queued,
+    Completed,
     BlockedOnDependency,
     Retryable,
     Cancelled,
@@ -91,9 +92,22 @@ pub struct KnowledgeState {
     pub paused: bool,
     #[serde(default)]
     pub binding_confirmed: bool,
+    #[serde(default)]
+    pub legacy_binding: Option<crate::stores::AgentStoreBinding>,
     pub store: ProtectedStore,
+    #[serde(default)]
+    pub assistant_projects: Vec<String>,
     pub projects_by_chat: BTreeMap<String, Vec<String>>,
     pub sources: Vec<SourceDescriptor>,
     pub jobs: Vec<KnowledgeJob>,
     pub admitted_events: Vec<String>,
+}
+
+impl KnowledgeState {
+    /// Union used only for source admission; persisted chat selections remain independent.
+    pub fn project_selections(&self) -> BTreeMap<String, Vec<String>> {
+        let mut selected = self.projects_by_chat.clone();
+        selected.insert(String::new(), self.assistant_projects.clone());
+        selected
+    }
 }

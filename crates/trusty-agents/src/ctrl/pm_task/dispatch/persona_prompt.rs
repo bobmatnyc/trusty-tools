@@ -47,6 +47,14 @@ pub(super) fn system_prompt(
     );
     let base = format!(
         "{base}{}",
+        crate::tools::concierge::context(
+            persona_tool_names
+                .iter()
+                .any(|name| name == "ask_concierge")
+        )
+    );
+    let base = format!(
+        "{base}{}",
         crate::tools::knowledge_history::context(
             persona_tool_names
                 .iter()
@@ -165,4 +173,88 @@ pub(super) fn append_cli_context(persona_cfg: &mut AgentConfig, project_path: &P
         .system_prompt
         .content
         .push_str(crate::skills::manage::context(false));
+}
+
+pub(super) struct TurnCompletion<'a> {
+    pub project_path: &'a Path,
+    pub persona_name: &'a str,
+    pub client: &'a async_openai::Client<async_openai::config::OpenAIConfig>,
+    pub persona_cfg: &'a AgentConfig,
+    pub user_input: &'a str,
+    pub turn_ctx: &'a classification::TurnContext,
+    pub workstreams_socket: &'a Path,
+}
+/// Why: typed attachment history must finish durably without duplicating the user turn.
+/// What: classify the answer, then use the turn's memory owner or the existing text-history sink.
+/// Test: `finish_turn_no_marker_returns_unchanged`; trusty-common asset_ownership_and_restart_are_enforced covers durable ownership.
+pub(super) async fn finish_turn(
+    context: TurnCompletion<'_>,
+    content: String,
+    attachment_turn: Option<&crate::chat_attachments::AttachmentTurn>,
+    activities: Vec<serde_json::Value>,
+) -> Result<String> {
+    let TurnCompletion {
+        project_path,
+        persona_name,
+        client,
+        persona_cfg,
+        user_input,
+        turn_ctx,
+        workstreams_socket,
+    } = context;
+    let display = classification::finish_turn(
+        project_path,
+        persona_name,
+        client,
+        persona_cfg,
+        user_input,
+        content,
+        turn_ctx,
+        workstreams_socket,
+    )
+    .await?;
+    if let Some(turn) = attachment_turn {
+        turn.finish(&display)
+            .await
+            .context("Reply completed, but durable chat persistence failed")?;
+    } else {
+        persona_memory::spawn_persist_turn_with_activity(
+            &persona_cfg.stores,
+            Some(workstreams_socket),
+            persona_name,
+            user_input,
+            &display,
+            activities,
+        );
+    }
+    Ok(display)
+}
+
+/// Why: provider configuration and attachment capability checks must agree before inference.
+/// What: resolve credentials, apply the configured route, and reject unsupported attachment providers.
+/// Test: `configured_keyless_provider_resolution_preserves_routing`.
+pub(super) fn resolve_provider(
+    persona_cfg: &mut AgentConfig,
+    provider: Option<&str>,
+    attachment_turn: Option<&crate::chat_attachments::AttachmentTurn>,
+    persona_name: &str,
+) -> Result<(crate::llm::credentials::LlmCredentials, bool)> {
+    let creds =
+        super::super::super::super::config::resolve_overridden_credentials(persona_cfg, provider)?;
+    let claude_cli_short_circuit =
+        super::super::super::super::config::apply_credential_routing(persona_cfg, &creds);
+    tracing::info!(
+        persona = %persona_name,
+        agent = %persona_cfg.agent.name,
+        runner = ?persona_cfg.agent.runner,
+        model = %persona_cfg.agent.model,
+        creds = creds.label(),
+        claude_cli_short_circuit,
+        use_anthropic_direct = persona_cfg.llm.use_anthropic_direct,
+        "run_pm_task_with_persona: credentials resolved"
+    );
+    if let Some(turn) = attachment_turn {
+        turn.validate_provider(persona_cfg, creds.label(), claude_cli_short_circuit)?;
+    }
+    Ok((creds, claude_cli_short_circuit))
 }

@@ -18,10 +18,9 @@ use std::sync::{Arc, Mutex};
 use crate::tools::ToolRegistry;
 
 use super::super::handlers::{
-    AddProjectTool, CreateDirTool, InitiateSelfTaskTool, ListProjectsTool, MemoryRecallTool,
-    MemoryStoreTool, MoveFileTool, PmStatusRow, PmStopHandle, RemoveProjectTool, SearchDocsTool,
-    SearchSessionsTool, SelfProjectStatusTool, SetActiveProjectTool, StartPmTool, StopTaskTool,
-    TaskStatusTool,
+    AddProjectTool, CreateDirTool, InitiateSelfTaskTool, ListProjectsTool, MoveFileTool,
+    PmStatusRow, PmStopHandle, RemoveProjectTool, SearchDocsTool, SearchSessionsTool,
+    SelfProjectStatusTool, SetActiveProjectTool, StartPmTool, StopTaskTool, TaskStatusTool,
 };
 
 /// Build the CTRL tool registry for a single LLM turn.
@@ -30,7 +29,6 @@ use super::super::handlers::{
 // fight the per-tool ownership story. Allow locally.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn build_ctrl_registry(
-    memory: Arc<Mutex<Vec<String>>>,
     pending_connect: Arc<Mutex<Option<String>>>,
     self_path: Option<PathBuf>,
     pending_self_task: Arc<Mutex<Option<String>>>,
@@ -50,10 +48,6 @@ pub(crate) async fn build_ctrl_registry(
     }));
     registry.register(Arc::new(SearchSessionsTool));
     registry.register(Arc::new(ListProjectsTool));
-    registry.register(Arc::new(MemoryStoreTool {
-        memory: memory.clone(),
-    }));
-    registry.register(Arc::new(MemoryRecallTool { memory }));
     // #185: Taskmaster needs to inspect PM task state.
     registry.register(Arc::new(TaskStatusTool {
         snapshot: task_status_snapshot,

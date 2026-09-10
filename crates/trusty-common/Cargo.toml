@@ -121,6 +121,7 @@ lanes = [
         "unconditional-only",
     ] },
     { name = "core", features = [
+        "knowledge-document",
         "memory-core",
         "embedder-test-support",
         "embedder-client",
@@ -364,6 +365,7 @@ postcard = { workspace = true, optional = true }
 # Optional: enabled by the `tickets` feature (absorbed from `trusty-tickets`).
 # base64 is used by the JIRA backend for Basic-auth encoding.
 base64 = { workspace = true, optional = true }
+image = { workspace = true, optional = true }
 # Optional: enabled by the `tickets` feature for config-file parsing. Also
 # reused by the `credentials` feature's `FileKeyStore` backend (issue #2401).
 toml = { version = "0.8", optional = true }
@@ -479,6 +481,7 @@ wiremock = { workspace = true }
 tower = { workspace = true }
 
 [features]
+knowledge-document = ["dep:serde_yaml"]
 default = []
 # #4901: names a test run that deliberately covers only the always-compiled
 # surface (banner, port, slug, data_dir, chat, tmux, …). Enables no module and
@@ -708,7 +711,9 @@ symgraph-server = ["symgraph-parser", "axum-server"]
 # implementation without every `memory-core` consumer needing to opt in to
 # `credentials` separately — the two extra deps it pulls (`toml`, `dotenvy`)
 # are negligible next to memory-core's existing footprint.
+chat-attachments = ["dep:base64", "dep:image", "dep:thiserror"]
 memory-core = [
+    "chat-attachments",
     "dep:hnsw_rs",
     "dep:git2",
     "dep:dashmap",
@@ -952,7 +957,7 @@ keyring-store = ["credentials", "dep:keyring"]
 # (`test_support::MockInferenceServer`) additionally requires `axum-server`; it
 # is not pulled in by this feature, keeping the base surface HTTP-server-free.
 # Concrete provider adapters (OpenRouter/Fireworks/Bedrock) land in #2403/#2407.
-inference-client = ["credentials"]
+inference-client = ["credentials", "chat-attachments"]
 # Enables the `inference::bedrock` adapter (issue #2407, epic #2400 Wave 2): the
 # AWS Bedrock Converse-API `BedrockAdapter` implementing `InferenceAdapter`, the
 # wire-format conversion + `cachePoint` prompt-cache translation ported from

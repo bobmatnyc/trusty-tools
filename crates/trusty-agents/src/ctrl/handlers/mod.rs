@@ -11,7 +11,6 @@
 
 pub(crate) mod docs;
 pub(crate) mod fs;
-pub(crate) mod memory;
 pub(crate) mod projects;
 pub(crate) mod registry;
 pub(crate) mod self_project;
@@ -20,7 +19,6 @@ pub(crate) mod tm_context;
 
 pub(crate) use docs::SearchDocsTool;
 pub(crate) use fs::{CreateDirTool, MoveFileTool};
-pub(crate) use memory::{MemoryRecallTool, MemoryStoreTool};
 pub(crate) use projects::{
     AddProjectTool, ListProjectsTool, RemoveProjectTool, SetActiveProjectTool,
 };

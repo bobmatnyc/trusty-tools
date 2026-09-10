@@ -2,7 +2,10 @@
 //! Why: clients need durable monthly requests and truthful dependency state.
 //! What: validates Assistant membership and source scope before touching the private pipeline.
 //! Test: `assistant_pipeline_rejects_specialists_without_creating_state`, `pipeline_projects_are_revisioned_and_registered`.
+mod project_settings;
+use project_settings::update_projects;
 mod catalog;
+mod execution;
 mod indexing;
 pub(crate) mod intake;
 #[cfg(test)]
@@ -63,9 +66,19 @@ pub(super) struct Policy {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Projects {
+    #[serde(default)]
     revision: String,
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
     chat_id: String,
     projects: Vec<String>,
+}
+
+pub(super) async fn configure_projects(name: &str, value: Value) -> Result<Value, Error> {
+    let request: Projects = serde_json::from_value(value).map_err(bad)?;
+    let Json(value) = projects(AxumPath(name.into()), Json(request)).await?;
+    Ok(value)
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -167,7 +180,7 @@ impl Context {
         if self.live {
             return Self::load(&self.name).await;
         }
-        Self::at(
+        let mut next = Self::at(
             &self.dirs,
             self.home
                 .path()
@@ -178,7 +191,9 @@ impl Context {
             self.registry_entries.clone(),
             self.listeners.clone(),
         )
-        .await
+        .await?;
+        next.search_socket = self.search_socket.clone();
+        Ok(next)
     }
 
     fn store(&self) -> KnowledgeStore {
@@ -216,10 +231,8 @@ impl Context {
             return Err(failure(StatusCode::CONFLICT, reason));
         }
         if binding.root.is_none() {
-            return Err(failure(
-                StatusCode::CONFLICT,
-                "The existing OKG uses a legacy shared-root binding. Migrate it to this Assistant's private home before enabling extraction; existing data has not been moved",
-            ));
+            // #4283: keep the legacy palace/index binding intact; extraction owns a private store.
+            return Ok(None);
         }
         let root = self
             .home
@@ -237,6 +250,9 @@ impl Context {
             return Ok(());
         }
         let _guard = super::AGENT_CONFIG_WRITE_LOCK.lock().await;
+        let _process_lock = crate::knowledge::execution::mutation_guard(&self.manifest)
+            .await
+            .map_err(|e| failure(StatusCode::SERVICE_UNAVAILABLE, e))?;
         if tokio::fs::read_to_string(&self.manifest)
             .await
             .map_err(|e| failure(StatusCode::SERVICE_UNAVAILABLE, e))?
@@ -265,7 +281,7 @@ impl Context {
     ) -> Result<Json<Value>, Error> {
         let projects = state
             .as_ref()
-            .map(|s| s.projects_by_chat.clone())
+            .map(KnowledgeState::project_selections)
             .unwrap_or_default();
         let sources = self.sources(&projects)?;
         let store_issue = self
@@ -280,8 +296,12 @@ impl Context {
                 json!({"connected":false,"reason":"Initialize this Assistant's knowledge pipeline to provision its protected store"})
             }
         };
+        let assistant_projects_status: Vec<Value> = state.as_ref().map(|s| s.assistant_projects.iter().map(|path| {
+            let available = self.projects.contains_key(path);
+            json!({"path":path,"available":available,"name":self.projects.get(path),"reason":if available { None } else { Some("Folder is missing, moved or unregistered. Reconnect it or remove the selection.") }})
+        }).collect()).unwrap_or_default();
         Ok(Json(
-            json!({"assistant":self.name,"pipeline":state,"sources":sources,"index":index,"store_issue":store_issue}),
+            json!({"assistant":self.name,"pipeline":state,"sources":sources,"index":index,"store_issue":store_issue,"assistant_projects_status":assistant_projects_status,"extraction":self.store().checkpoints().map_err(core_error)?.into_iter().map(|(key, checkpoint)| (key, checkpoint.public_status())).collect::<BTreeMap<_,_>>()}),
         ))
     }
 
@@ -296,7 +316,21 @@ impl Context {
             return Err(core_error(KnowledgeError::Conflict));
         }
         let selected = self.selected_store()?;
-        if selected.as_ref() != Some(&state.store) {
+        if state
+            .legacy_binding
+            .as_ref()
+            .is_some_and(|b| self.config.stores.bindings.first() != Some(b))
+        {
+            return Err(failure(
+                StatusCode::CONFLICT,
+                "Legacy binding changed; restore its original binding",
+            ));
+        }
+        if (state.binding_confirmed && self.config.stores.bindings.is_empty())
+            || selected
+                .as_ref()
+                .is_some_and(|selected| selected != &state.store)
+        {
             return Err(failure(
                 StatusCode::CONFLICT,
                 "Protected OKG binding changed; restore its original binding",
@@ -305,7 +339,7 @@ impl Context {
         Ok(state)
     }
     async fn reconcile(&self, state: KnowledgeState) -> Result<KnowledgeState, Error> {
-        let sources = self.sources(&state.projects_by_chat)?;
+        let sources = self.sources(&state.project_selections())?;
         let store = self.store();
         disk(move || store.reconcile(&state.revision, &sources, Utc::now())).await
     }
@@ -375,7 +409,14 @@ async fn initialize(mut context: Context, request: Reconcile) -> Result<Json<Val
             });
     }
     let store = context.store();
-    let state = disk(move || store.confirm_binding(&state.revision)).await?;
+    let legacy = context
+        .config
+        .stores
+        .bindings
+        .first()
+        .filter(|b| b.root.is_none())
+        .cloned();
+    let state = disk(move || store.confirm_binding_with_legacy(&state.revision, legacy)).await?;
     let state = context.reconcile(state).await?;
     intake::replay(&context).await?;
     let state = context.state().await?.unwrap_or(state);
@@ -386,6 +427,9 @@ pub(super) async fn patch(
     Json(request): Json<Policy>,
 ) -> Result<Json<Value>, Error> {
     let context = Context::load(&name).await?;
+    let _publication_guard = crate::knowledge::execution::mutation_guard(&context.manifest)
+        .await
+        .map_err(|e| bad(e.to_string()))?;
     let state = context.current(&request.revision).await?;
     let state = context.reconcile(state).await?;
     let store = context.store();
@@ -401,25 +445,6 @@ pub(super) async fn projects(
     let context = Context::load(&name).await?;
     update_projects(context, request).await
 }
-async fn update_projects(context: Context, request: Projects) -> Result<Json<Value>, Error> {
-    let state = context.current(&request.revision).await?;
-    let projects = catalog::validate_projects(&request.projects, &context.projects)?;
-    let mut selected = state.projects_by_chat.clone();
-    selected.insert(request.chat_id.clone(), projects.clone());
-    let sources = context.sources(&selected)?;
-    let store = context.store();
-    let state = disk(move || {
-        store.update_projects(
-            &request.revision,
-            &request.chat_id,
-            &projects,
-            &sources,
-            Utc::now(),
-        )
-    })
-    .await?;
-    context.envelope(Some(state), false).await
-}
 pub(super) async fn backfill(
     AxumPath(name): AxumPath<String>,
     Json(request): Json<Backfill>,
@@ -428,6 +453,9 @@ pub(super) async fn backfill(
         return Err(bad("Request between 1 and 12 additional months at a time"));
     }
     let context = Context::load(&name).await?;
+    let _publication_guard = crate::knowledge::execution::mutation_guard(&context.manifest)
+        .await
+        .map_err(|e| bad(e.to_string()))?;
     let state = context.current(&request.revision).await?;
     let state = context.reconcile(state).await?;
     let store = context.store();
@@ -472,16 +500,26 @@ pub(crate) async fn assistant_history(
 /// Provision eligible Assistants and replay their pending identities without delaying API readiness.
 /// A failed legacy binding remains an explicit per-Assistant issue; no extraction runs here.
 pub(super) async fn startup() {
-    let dirs = crate::agents::agents_dir_candidates();
-    for id in crate::assistants::discover_instances(&dirs) {
-        let result = async {
-            let context = Context::load(id.as_str()).await?;
-            let revision = context.state().await?.map(|s| s.revision);
-            initialize(context, Reconcile { revision }).await
+    loop {
+        let dirs = crate::agents::agents_dir_candidates();
+        for id in crate::assistants::discover_instances(&dirs) {
+            let setup = async {
+                crate::assistants::memory_grants::migrate(&dirs, id.as_str())
+                    .await
+                    .map_err(|e| failure(StatusCode::SERVICE_UNAVAILABLE, e))?;
+                let context = Context::load(id.as_str()).await?;
+                let revision = context.state().await?.map(|s| s.revision);
+                initialize(context, Reconcile { revision }).await
+            }
+            .await;
+            if let Err((status, Json(error))) = setup {
+                tracing::warn!(assistant=%id,%status,reason=%error["error"],"Assistant knowledge setup needs attention");
+                continue;
+            }
+            if let Err(error) = execution::run(id.as_str()).await {
+                tracing::warn!(assistant=%id,%error,"Automatic extraction needs attention");
+            }
         }
-        .await;
-        if let Err((status, Json(error))) = result {
-            tracing::warn!(assistant=%id, %status, reason=%error["error"], "Assistant knowledge setup needs attention");
-        }
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
     }
 }

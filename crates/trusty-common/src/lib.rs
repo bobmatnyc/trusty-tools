@@ -1438,3 +1438,9 @@ pub use tracing_init::{init_tracing, init_tracing_with_buffer, maybe_disable_col
 // OpenRouter legacy (deprecated but must remain reachable)
 #[allow(deprecated)]
 pub use openrouter_legacy::{ChatMessage, openrouter_chat, openrouter_chat_stream};
+
+/// Shared typed attachment contracts for chat and durable history.
+pub mod chat_attachments;
+
+#[cfg(feature = "knowledge-document")]
+pub mod knowledge_document;

@@ -162,6 +162,9 @@ pub async fn send_message(
     // the session's attachment route. Omitted from the body when empty so an
     // ordinary turn's payload is byte-identical to what it was.
     attachments: Option<Vec<String>>,
+    // Prepared attachment bodies carried inline with the turn. Distinct wire
+    // name from `attachments` above because the two carry different shapes.
+    inline_attachments: Option<Vec<Value>>,
 ) -> Result<String, String> {
     let port = state.port.lock().await.unwrap_or(8765);
     let client = reqwest::Client::new();
@@ -189,6 +192,10 @@ pub async fn send_message(
             "attachments".into(),
             Value::Array(ids.iter().cloned().map(Value::String).collect()),
         );
+    }
+
+    if let Some(items) = inline_attachments.filter(|items| !items.is_empty()) {
+        body.insert("inline_attachments".into(), Value::Array(items));
     }
 
     let submit_url = format!("{}/api/task", api_base(port));

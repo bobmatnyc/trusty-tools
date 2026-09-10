@@ -125,7 +125,12 @@ pub fn build_router_with_origins(
     let config_route = get(move || async move { Json(ApiClientConfig { auth_required }) });
 
     let mut router = Router::new()
-        .route("/api/task", post(submit_task))
+        .route(
+            "/api/task",
+            post(submit_task).layer(axum::extract::DefaultBodyLimit::max(
+                super::attachment_prepare::MAX_BODY_BYTES,
+            )),
+        )
         // #3063: DELETE aborts an in-flight task (cancellation/retask
         // primitive — see `cancel::cancel_task` for the full contract).
         .route("/api/task/{id}", get(get_task).delete(cancel_task))
@@ -224,6 +229,11 @@ pub fn build_router_with_origins(
             axum::routing::get(agent_knowledge_route),
         )
         .route(
+            "/api/agents/{name}/memory-policy",
+            axum::routing::get(super::assistant_settings::memory_get)
+                .patch(super::assistant_settings::memory_patch),
+        )
+        .route(
             "/api/agents/{name}/knowledge/pipeline",
             axum::routing::get(super::knowledge_pipeline::get)
                 .post(super::knowledge_pipeline::post)
@@ -269,6 +279,32 @@ pub fn build_router_with_origins(
         .route(
             "/api/agents/{name}/subagents",
             axum::routing::get(agent_subagents_route),
+        )
+        .route(
+            "/api/agents/{name}/chat-assets/{asset_id}",
+            axum::routing::get(super::assistant_operations::asset),
+        )
+        .route(
+            "/api/agents/{name}/memory/remember",
+            axum::routing::post(super::assistant_operations::remember),
+        )
+        .route(
+            "/api/agents/{name}/memory/write",
+            axum::routing::post(super::assistant_operations::write),
+        )
+        .route(
+            "/api/agents/{name}/memory/recall",
+            axum::routing::post(super::assistant_operations::recall),
+        )
+        .route(
+            "/api/agents/{name}/concierge",
+            axum::routing::post(super::assistant_operations::concierge),
+        )
+        .route(
+            "/api/chat-attachments/prepare",
+            axum::routing::post(super::attachment_prepare::prepare).layer(
+                axum::extract::DefaultBodyLimit::max(super::attachment_prepare::MAX_BODY_BYTES),
+            ),
         )
         // #4278: the durable persona chat log, so a page reload rehydrates the
         // chat view instead of discarding it. Reads the trusty-memory

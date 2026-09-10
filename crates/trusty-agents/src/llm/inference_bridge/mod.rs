@@ -44,16 +44,9 @@
 //!    (see `shared_chat_message_cache_control_still_serialises_as_block` in
 //!    `tests.rs`) to prove the seam is ready to receive it once a producer
 //!    sets it.
-//! 2. **Multi-part message content (images/audio) collapses to text-only.**
-//!    `async-openai`'s `ChatCompletionRequest*MessageContent` allows an
-//!    `Array` of content parts (text/image/audio); the shared
-//!    `tci::ChatMessage.content` is `Option<String>`. Non-text parts are
-//!    dropped. trusty-agents never constructs multi-part content today
-//!    (verified: no `ImageUrl`/`InputAudio` content-part call site exists in
-//!    this crate as of #2410) — every message is built via a builder's
-//!    `.content(<string>)`, which always produces the `Text` variant — so
-//!    this path is currently untriggered, but it is a real, if narrow, loss
-//!    of fidelity for a hypothetical future vision-capable agent.
+//! 2. User text and inline image data remain typed throughout conversion (#7370).
+//!    Image bytes are preserved in `tci::ChatMessage.images`; unsupported audio
+//!    fails conversion so a provider never receives a silently incomplete turn.
 //!
 //! Test: `inference_bridge::tests::*`.
 
@@ -84,14 +77,17 @@ use crate::perf::TokenUsage;
 /// compromises.
 /// Test: `system_message_maps_role_and_text`, `user_message_maps_role_and_text`,
 /// `assistant_message_with_tool_calls_maps_fields`, `tool_message_maps_fields`,
-/// `multi_part_user_content_collapses_to_concatenated_text`.
-pub fn to_shared_messages(messages: &[ChatCompletionRequestMessage]) -> Vec<tci::ChatMessage> {
+/// `multi_part_user_content_retains_typed_images`.
+pub fn to_shared_messages(
+    messages: &[ChatCompletionRequestMessage],
+) -> anyhow::Result<Vec<tci::ChatMessage>> {
     messages.iter().map(to_shared_message).collect()
 }
 
-fn to_shared_message(msg: &ChatCompletionRequestMessage) -> tci::ChatMessage {
-    match msg {
+fn to_shared_message(msg: &ChatCompletionRequestMessage) -> anyhow::Result<tci::ChatMessage> {
+    Ok(match msg {
         ChatCompletionRequestMessage::Developer(m) => tci::ChatMessage {
+            images: vec![],
             role: "system".to_string(),
             content: Some(developer_content_text(&m.content)),
             tool_calls: None,
@@ -100,6 +96,7 @@ fn to_shared_message(msg: &ChatCompletionRequestMessage) -> tci::ChatMessage {
             cache_control: None,
         },
         ChatCompletionRequestMessage::System(m) => tci::ChatMessage {
+            images: vec![],
             role: "system".to_string(),
             content: Some(system_content_text(&m.content)),
             tool_calls: None,
@@ -108,6 +105,7 @@ fn to_shared_message(msg: &ChatCompletionRequestMessage) -> tci::ChatMessage {
             cache_control: None,
         },
         ChatCompletionRequestMessage::User(m) => tci::ChatMessage {
+            images: user_images(&m.content)?,
             role: "user".to_string(),
             content: Some(user_content_text(&m.content)),
             tool_calls: None,
@@ -116,6 +114,7 @@ fn to_shared_message(msg: &ChatCompletionRequestMessage) -> tci::ChatMessage {
             cache_control: None,
         },
         ChatCompletionRequestMessage::Assistant(m) => tci::ChatMessage {
+            images: vec![],
             role: "assistant".to_string(),
             content: m.content.as_ref().map(assistant_content_text),
             tool_calls: m
@@ -127,6 +126,7 @@ fn to_shared_message(msg: &ChatCompletionRequestMessage) -> tci::ChatMessage {
             cache_control: None,
         },
         ChatCompletionRequestMessage::Tool(m) => tci::ChatMessage {
+            images: vec![],
             role: "tool".to_string(),
             content: Some(tool_content_text(&m.content)),
             tool_calls: None,
@@ -137,6 +137,7 @@ fn to_shared_message(msg: &ChatCompletionRequestMessage) -> tci::ChatMessage {
         // Deprecated legacy variant; trusty-agents never constructs it, but the
         // match must stay exhaustive against upstream's enum.
         ChatCompletionRequestMessage::Function(m) => tci::ChatMessage {
+            images: vec![],
             role: "function".to_string(),
             content: m.content.clone(),
             tool_calls: None,
@@ -144,7 +145,7 @@ fn to_shared_message(msg: &ChatCompletionRequestMessage) -> tci::ChatMessage {
             name: Some(m.name.clone()),
             cache_control: None,
         },
-    }
+    })
 }
 
 /// Concatenate a developer-message content value to plain text (see
@@ -179,38 +180,42 @@ fn system_content_text(content: &ChatCompletionRequestSystemMessageContent) -> S
 /// intended behaviour for now — makes that degradation loud instead.
 /// What: keeps `Text` parts, drops `ImageUrl`/`InputAudio` parts after
 /// logging how many of each were dropped.
-/// Test: `multi_part_user_content_collapses_to_concatenated_text`.
+/// Test: `multi_part_user_content_retains_typed_images`.
 fn user_content_text(content: &ChatCompletionRequestUserMessageContent) -> String {
     match content {
-        ChatCompletionRequestUserMessageContent::Text(s) => s.clone(),
-        ChatCompletionRequestUserMessageContent::Array(parts) => {
-            let (mut images, mut audio) = (0u32, 0u32);
-            let text = parts
-                .iter()
-                .filter_map(|p| match p {
-                    ChatCompletionRequestUserMessageContentPart::Text(t) => Some(t.text.as_str()),
-                    ChatCompletionRequestUserMessageContentPart::ImageUrl(_) => {
-                        images += 1;
-                        None
-                    }
-                    ChatCompletionRequestUserMessageContentPart::InputAudio(_) => {
-                        audio += 1;
-                        None
-                    }
-                })
-                .collect::<String>();
-            if images > 0 || audio > 0 {
-                tracing::warn!(
-                    images_dropped = images,
-                    audio_parts_dropped = audio,
-                    "inference_bridge: dropped non-text content part(s) — the shared \
-                     inference seam's ChatMessage.content is text-only (see \
-                     inference_bridge module doc, compromise #2)"
-                );
+        ChatCompletionRequestUserMessageContent::Text(text) => text.clone(),
+        ChatCompletionRequestUserMessageContent::Array(parts) => parts
+            .iter()
+            .filter_map(|part| match part {
+                ChatCompletionRequestUserMessageContentPart::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            })
+            .collect(),
+    }
+}
+fn user_images(
+    content: &ChatCompletionRequestUserMessageContent,
+) -> anyhow::Result<Vec<trusty_common::chat_attachments::ImageContent>> {
+    let mut out = Vec::new();
+    if let ChatCompletionRequestUserMessageContent::Array(parts) = content {
+        for part in parts {
+            match part {
+                ChatCompletionRequestUserMessageContentPart::ImageUrl(value) => {
+                    out.push(
+                        trusty_common::chat_attachments::ImageContent::from_data_url(
+                            &value.image_url.url,
+                        )
+                        .map_err(anyhow::Error::msg)?,
+                    );
+                }
+                ChatCompletionRequestUserMessageContentPart::InputAudio(_) => {
+                    anyhow::bail!("Audio attachments are unsupported")
+                }
+                _ => {}
             }
-            text
         }
     }
+    Ok(out)
 }
 
 /// Concatenate an assistant-message content value to plain text, dropping any

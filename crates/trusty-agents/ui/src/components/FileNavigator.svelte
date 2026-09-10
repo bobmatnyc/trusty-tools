@@ -5,11 +5,12 @@
   import ProjectConfiguration from './ProjectConfiguration.svelte';
   import { projects, projectsList, fetchProjects, tmApi } from '../stores/app';
   import { isDesktop } from '../lib/transport';
-  import { folderError, listWorkspaceFiles, chooseWorkspaceRoot, DESKTOP_FILES_MESSAGE, type WorkspaceEntry, type WorkspaceRoot } from '../lib/workspaceFiles';
+  import { folderError, listWorkspaceFiles, chooseWorkspaceRoot, registerWorkspaceRoot, registerProjectFolder, DESKTOP_FILES_MESSAGE, type WorkspaceEntry, type WorkspaceRoot } from '../lib/workspaceFiles';
   import { activeRoot, openedFile, registeredWorkspaceRoots, currentChatRoots, chatProjectPath, chatWorkspaceKey, workspaceError, loadWorkspaceRoots, attachRootToChat, detachRootFromChat, selectChatRoot } from '../stores/workspace';
   const desktop = isDesktop();
   let browsing = false, adding = false, choosingFolder = false, path = '', loading = false, refreshingProjects = false;
   let folderRequest = 0;
+  let folderPath = '';
   let configurationRoot: WorkspaceRoot | null = null;
   let entries: WorkspaceEntry[] = [];
   let showHidden = false;
@@ -23,7 +24,7 @@
   $: if (previousChat !== $chatWorkspaceKey) { previousChat = $chatWorkspaceKey; folderRequest++; choosingFolder = false; browsing = false; adding = false; configurationRoot = null; request++; entries = []; }
   $: projectPaths = [...new Set([...$projects, ...$projectsList].map(project => project.path).filter((path): path is string => !!path))];
   let reconciledPaths = '';
-  $: if (desktop && !refreshingProjects && JSON.stringify(projectPaths) !== reconciledPaths) {
+  $: if (!refreshingProjects && JSON.stringify(projectPaths) !== reconciledPaths) {
     reconciledPaths = JSON.stringify(projectPaths);
     void loadWorkspaceRoots(projectPaths);
   }
@@ -41,25 +42,32 @@
     } catch (cause) { if (token === request) error = folderError(cause); }
     finally { if (token === request) loading = false; }
   }
-  function browse(root: WorkspaceRoot) { activeRoot.set(root); browsing = true; showHidden = false; }
+  async function browse(root: WorkspaceRoot) {
+    const chat = $chatWorkspaceKey;
+    try {
+      const resolved = root.id.startsWith('assistant:') ? await registerWorkspaceRoot(root.path) : root;
+      if (chat !== get(chatWorkspaceKey)) return;
+      activeRoot.set(resolved); browsing = true; showHidden = false;
+    } catch (cause) { if (chat === get(chatWorkspaceKey)) error = String(cause); }
+  }
   function addProject(event: Event) {
     const root = candidates.find(root => root.id === (event.target as HTMLSelectElement).value);
     if (root) { attachRootToChat(root); adding = false; }
   }
-  async function addFolder() {
+  async function addFolder(typed = false) {
     if (choosingFolder) return;
     const chat = $chatWorkspaceKey, token = ++folderRequest;
     const current = () => token === folderRequest && chat === get(chatWorkspaceKey);
     choosingFolder = true; error = null;
     try {
       // Native registration validates and canonicalizes the chosen directory only.
-      const root = await chooseWorkspaceRoot();
+      const root = typed ? await registerProjectFolder(folderPath) : await chooseWorkspaceRoot();
       if (!root || !current()) return;
       // Global registration must succeed before the folder becomes a chat/knowledge source.
-      await tmApi('/api/projects', { method: 'POST', body: JSON.stringify({ path: root.path }) });
+      if (!typed) await tmApi('/api/projects', { method: 'POST', body: JSON.stringify({ path: root.path }) });
       if (!current()) return;
       attachRootToChat(root);
-      adding = false;
+      adding = false; folderPath = '';
       try { await fetchProjects(true); }
       catch (cause) { if (current()) error = 'Project attached, but the registered project list could not be refreshed. ' + String(cause); }
     } catch (cause) {
@@ -84,12 +92,12 @@
     if (entry.is_dir) void loadDirectory($activeRoot, entry.path);
     else openedFile.set({ root: $activeRoot, path: entry.path });
   }
-  onMount(() => { if (desktop) { void fetchProjects(true).catch(cause => { error = 'Registered projects could not be loaded. ' + String(cause); }); } });
+  onMount(() => { void fetchProjects(true).catch(cause => { error = 'Registered projects could not be loaded. ' + String(cause); }); });
   onDestroy(() => { request++; folderRequest++; });
 </script>
 <div class="navigator">
-  {#if !desktop}<p class="notice">{DESKTOP_FILES_MESSAGE}</p>
-  {:else if configurationRoot}
+  {#if !desktop}<p class="notice">{DESKTOP_FILES_MESSAGE}</p>{/if}
+  {#if configurationRoot}
     <ProjectConfiguration root={configurationRoot} onClose={() => configurationRoot = null} />
   {:else}
     {#if $workspaceError}<p class="notice error" role="alert">{$workspaceError}</p>{/if}
@@ -104,7 +112,10 @@
             {#each candidates as root (root.id)}<option value={root.id}>{root.name} — {root.path}</option>{/each}
           </select>
           {#if !candidates.length}<p class="hint">No additional registered projects with available folders.</p>{/if}
-          <button type="button" class="choose" disabled={choosingFolder} on:click={addFolder}><Folder size={14} />{choosingFolder ? 'Adding folder…' : 'Choose folder…'}</button>
+          <label for="project-folder-path">Absolute folder path on the server</label>
+          <input id="project-folder-path" type="text" bind:value={folderPath} placeholder="/Users/me/Documents/My project" />
+          <button type="button" class="choose" disabled={choosingFolder || !folderPath.trim()} on:click={() => addFolder(true)}>Add folder path</button>
+          {#if desktop}<button type="button" class="choose" disabled={choosingFolder} on:click={() => addFolder()}><Folder size={14} />{choosingFolder ? 'Adding folder…' : 'Choose folder…'}</button>{/if}
         {/if}
       </div>
       {#if error}<p class="notice error" role="alert">{error}</p>{/if}
@@ -113,13 +124,13 @@
         {#each attached as root (root.id)}
           <div class="project-item">
             <div class="project-heading">
-              <button class="project-name" type="button" title={root.path} on:click={() => browse(root)}><Folder size={15} /><span>{root.name}</span></button>
+              <button class="project-name" type="button" title={root.path} disabled={!desktop} on:click={() => browse(root)}><Folder size={15} /><span>{root.name}</span></button>
               <button type="button" aria-label={`Configure ${root.name}`} title={`Configure ${root.name}`} on:click={() => configurationRoot = root}><Settings size={15} /></button>
             </div>
             <p class="project-path" title={root.path}>{root.path}</p>
             <div class="project-actions">
               <button type="button" class:primary={$chatProjectPath === root.path} on:click={() => selectChatRoot(root)}>{$chatProjectPath === root.path ? 'Working folder' : 'Use for chat'}</button>
-              <button type="button" aria-label={`Detach ${root.name} from this chat`} on:click={() => detachRootFromChat(root.id)}>Detach</button>
+              {#if root.id.startsWith('assistant:')}<span>Saved in assistant Settings</span>{:else}<button type="button" aria-label={`Detach ${root.name} from this chat`} on:click={() => detachRootFromChat(root.id)}>Detach</button>{/if}
             </div>
           </div>
         {/each}

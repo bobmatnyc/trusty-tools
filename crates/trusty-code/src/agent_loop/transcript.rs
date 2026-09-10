@@ -194,6 +194,7 @@ impl Transcript {
             Some(tool_calls.to_vec())
         };
         self.entries.push(TranscriptEntry::fresh(ChatMessage {
+            images: vec![],
             role: "assistant".into(),
             content: text,
             tool_calls,
