@@ -6,6 +6,114 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.5.26] — 2026-09-10
+
+### Fixed
+
+- `tm ls` now deletes an errored session by stopping its runtime first, as one confirmed action, instead of refusing with a hint to run `tm session stop` in a shell. A stop the daemon rejects issues no delete at all, and the picker's status line wraps instead of clipping, so a refusal's session id is never cut mid-token.
+- `tm hook --pm-guard` now refuses any Bash command that NAMES a secret-bearing
+  file, whatever the command does with it. `sed -n '38,46p' terraform.tfvars` —
+  the command that printed a live ngrok authtoken into a transcript — denies,
+  and so do `echo "$(cat .env)"`, `dd if=.env`, `tar cf - .env`, `xxd`,
+  `base64`, `strings`, `php -r`, `deno eval`, `perl -ne`, `python -c`,
+  `cp .env /tmp/x`, `mv .env x`, a shell `< .env` redirection and a process
+  substitution. The rule keys on the FILE rather than on the verb: four earlier
+  rounds enumerated reading verbs and each list was bypassed by a verb it did
+  not name. A command this guard cannot lex denies too, because lexing is
+  consulted only to grant the allowlist below (#7266).
+- `ls`, `stat`, `file`, `test`/`[`, `rm` and `git add`/`rm`/`mv`/`status` are
+  the only commands that may name such a file — they move, delete, stage or
+  describe it, and none prints its bytes. The grant applies only when the file
+  is a direct argument of one of those programs and the segment runs no nested
+  command, so `ls $(cat .env)` still denies (#7266).
+- The harness's native `Read` and `Grep` tools are covered on the same terms. A
+  `Read` denies with or without an `offset`/`limit` range; a `Grep` denies on a
+  `path` naming a secret-bearing file and on a directory `path` whose `glob`
+  names a credential family (`*.env`, `*.netrc`, `.env*`, `id_*`). A directory
+  search with no glob, and every ordinary extension glob (`*.toml`, `*.txt`,
+  `*.log`, `*.csv`, `*.tf`, `*test*`), stay allowed (#7266).
+- `cp`/`mv`/`install`/`rsync`/`ln` and shell output redirection refuse to
+  reproduce a secret-bearing file under ANY destination name the read guard
+  would print — `cp terraform.tfvars secrets.rs`, `cp .env ./notes.txt`,
+  `cat .env > notes.md` — wherever it lands, not only inside a session worktree.
+  A brace group is expanded first, so `cp {terraform.tfvars,notes.txt}` denies
+  as the two operands bash will make of it. Copy first, read the copy after was
+  the one-move bypass this closes (#7266).
+- An ordinary source file whose name merely carries `token`, `secrets` or
+  `credentials` stays readable (`tokens.css`, `credentials.rs`), and those three
+  words used as words — `echo "no secrets here"`, `grep -rn credentials src/`,
+  `npm install token-bucket` — are not treated as filenames at all. Every
+  extension-typed family (`*.tfvars`, `.env*`, `*.pem`, `*.key`, `id_rsa*`,
+  `*.p12`, `.netrc`, …) denies, `id_rsa` included as a bare word (#7266).
+- A GLOB that expands onto a secret-bearing file denies as the file itself does.
+  `cat .en?`, `cat .e*`, `cat ./.*`, `cat id_rs?`, `cat *.p?m`, `cat id_[r]sa`
+  and `sed -n '1,5p' terraform.tfvar?` each name a real file and each was
+  allowed, because the word scan cut the command at the wildcard and screened
+  the remainder. Ordinary globbing is untouched: `cat *.toml`, `ls *.json`,
+  `rg foo src/*.rs` and `ls file?.txt` still allow (#7266).
+- A name reassembled by quoting or escaping denies. `cat '.en''v'` and
+  `cat .e\nv` both read `.env` and both were allowed, because the scan ran on
+  raw text even when the command lexed cleanly. It reads the lexer's tokens
+  now, and falls back to the raw scan only for a command no lexer can read,
+  which is still the fail-closed arm (#7266).
+- `git add` loses its exemption under `-p`/`--patch`, `-i`/`--interactive` and
+  `-e`/`--edit`, which walk the file's diff through the transcript.
+  `git add .env.example`, `git add -A` and `git add -u` are unaffected (#7266).
+- A secret-bearing NAME written as a search PATTERN no longer denies:
+  `grep -rn '\.env' docs/`, `rg 'id_rsa' --type md` and `grep -rn '\.pem'
+  README.md` find where a file is referenced and print no byte of it. Only the
+  first positional argument of `grep`/`egrep`/`fgrep`/`rg`/`ag`/`ack`/`git grep`
+  is read that way, and only when no `-e`/`-f`/`--regexp`/`--file` supplied the
+  pattern instead — so `grep -r SECRET .env`, `grep -e '\.env' .env` and
+  `rg . .env` still deny on the file operand (#7266).
+- An SSH PUBLIC key reads freely: `cat id_rsa.pub`, `cat ~/.ssh/id_rsa.pub` and
+  `ssh-copy-id -i id_rsa.pub host` allow, while `cat id_rsa`, `cat id_rsa.pub.bak`
+  and `cat id_rsa_credentials.pub` still deny. The exemption belongs to the read
+  rule alone; copying a key file is unchanged (#7266).
+- A Bash PARAMETER EXPANSION carrying an operator no longer denies with no
+  secret named. `mkdir -p "${OUT_DIR:-build}"`, `echo "${1:-default}"`,
+  `cp "${SRC%.rs}.bak" x` and `echo ${PATH#/usr}` were all refused: the word
+  scan keeps `{` and `}` for brace alternation but cuts at `:`, `#` and `%`, so
+  every operator form left an unmatched `{VAR` that fails closed. A `${…}` span
+  is now read as its parameter name plus its operand rather than as a filename,
+  so an expansion that names a secret still denies — `cat "${F:-.env}"` and
+  `cat "${F:=id_rsa}"` do, and `cat ${F-.env}`, which the bare `-` operator hid,
+  denies now too. `${VAR}` and `$VAR` are unchanged (#7266).
+- A secret name SPLIT across a `${…}` boundary denies. The expansion's operand
+  is spliced back against the literal bytes either side of the span, so
+  `cat "${F:-.en}v"`, `cat "${F:-.e}${G:-nv}"`, `cat ${F:-id_rs}a`,
+  `cat ${F:-id_}rsa` and `cat id_${F:-rsa}` each read as the file they build
+  and each denies; two adjacent spans join their operands, and an empty operand
+  leaves its neighbours contiguous. Only the parameter NAME is a word of its
+  own, so it can never glue onto a neighbour and `${id_rsa}` still denies on its
+  name. A path built out of an expansion is unaffected —
+  `mkdir -p "${OUT_DIR:-build}/logs"` and `cat "${DIR:-src}/main.rs"` allow
+  (#7266).
+- The `human_bytes` doc comment in the disk module now links `crate::daemon::doctor` and names `doctor_worktree_disk` as plain text, so rustdoc resolves the reference instead of rendering a dead link into published documentation, and the generated `tm-capabilities` doctor reference carries the current `hooks_build_tree_binary` description.
+
+### Changed
+
+- `grep -o '^key_[a-z_]*' <file>` on a secret-bearing file is no longer carved
+  out of `tm hook --pm-guard`. It was the one place a verb's FLAGS decided the
+  verdict, and a second `-e` past the checked one — `grep -o -e 'pw=.*' -e '^K'
+  .env` — reached the values (#7266).
+- The deny message no longer offers `--env-file`/`-var-file`/`-state` as a way
+  through. No such escape was ever implemented — `docker compose --env-file
+  /repo/.env up` denied exactly as it does now — so the claim was removed
+  rather than built: a list of reference flags is one more enumeration to
+  bypass, which is the shape that failed four rounds running. The message names
+  what actually works instead: run the tool so it picks the file up itself
+  (`docker compose up` reads `./.env`), or ask the operator (#7266).
+- Two limits of the read rule are now written down where the rule is, rather
+  than left to be rediscovered. A filename the command COMPUTES in-line —
+  `cat $(printf '\056env')`, a `base64 -d` of the name — never appears as
+  literal path text, so no word scan sees it; that class is unbounded, so it is
+  documented beside the variable-indirection residual and pinned by a corpus
+  row that must keep allowing. And `*.pem` covers a PUBLIC certificate as well
+  as a private key, so `openssl x509 -in cert.pem -noout -text` denies — an
+  accepted cost, since telling the two apart needs the file's bytes, which is
+  the read being refused (#7266).
+
 ## [1.5.25] — 2026-09-10
 
 ### Added
