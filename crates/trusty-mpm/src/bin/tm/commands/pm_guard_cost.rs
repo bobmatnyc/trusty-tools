@@ -24,6 +24,13 @@
 //! [`BudgetStatus::Ok`]. The PM is never a subagent and so is never evaluated
 //! at all — a bug here cannot halt orchestration.
 //!
+//! #7278 added the one thing that path was missing: the resolved transcript is
+//! screened for containment under the Claude config directory before a byte of
+//! it is read, because every candidate field comes from the payload. Fail-open
+//! is unchanged, but a REFUSAL is no longer silent — [`AgentCost`] carries it
+//! back so the caller says out loud that it allowed without measuring, rather
+//! than reporting a 0 it never read.
+//!
 //! Test: `resolves_*`/`fails_open_*` below cover path resolution and the
 //! fail-open matrix; the threshold policy is pinned in
 //! [`trusty_mpm::core::agent_cost`]'s own suite.
@@ -73,7 +80,7 @@ const RETRY_TRANSCRIPT_TAIL: u64 = 1024 * 1024;
 /// is far above a 64 KiB tail read from page cache and far below the point at
 /// which a user would notice; blowing it fails open rather than stalling.
 /// What: timeout wrapped around the tail read, passed to
-/// [`evaluate_agent_cost_within`] by the production entry point.
+/// [`evaluate_agent_cost_in`] by the production entry point.
 /// Test: `fails_open_when_the_transcript_is_missing` covers the failure branch
 /// this timeout shares;
 /// `the_production_budget_stays_far_inside_the_pretooluse_hook_timeout` pins
@@ -101,7 +108,7 @@ const EVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
 /// `resolves_a_transcript_path_already_under_subagents`,
 /// `derives_the_subagent_path_from_agent_id`,
 /// `fails_open_without_any_transcript_field`.
-pub(crate) fn resolve_agent_transcript(payload: &serde_json::Value) -> Option<PathBuf> {
+fn agent_transcript_candidate(payload: &serde_json::Value) -> Option<PathBuf> {
     let field = |k: &str| {
         payload
             .get(k)
@@ -140,6 +147,165 @@ pub(crate) fn resolve_agent_transcript(payload: &serde_json::Value) -> Option<Pa
     derived.is_file().then_some(derived)
 }
 
+/// What [`resolve_agent_transcript_in`] concluded about the payload's path.
+///
+/// Why (#7278): "no transcript" and "a transcript this guard refuses to open"
+/// were the same answer — `None` — and both reached [`evaluate_agent_cost`]'s
+/// fail-open arm as a silent `(Ok, 0)`. They are not the same event. The first
+/// is the ordinary case for a PM or a fresh agent; the second means a payload
+/// aimed the guard's read at a file outside the Claude config directory, which
+/// nothing legitimate does. Keeping them distinct is what lets the caller say
+/// so out loud instead of allowing on a number it never measured.
+/// What: `Contained` carries the CANONICAL screened path — the only variant
+/// whose bytes are ever read. `Refused` carries the candidate's own spelling,
+/// unread, for callers that need an identity string rather than a file (see
+/// [`warn_notice_key`]). `Absent` is no candidate at all.
+/// Test: `refuses_a_transcript_outside_the_config_dir`,
+/// `refuses_every_transcript_without_a_config_dir`,
+/// `fails_open_without_any_transcript_field`,
+/// `resolves_explicit_agent_transcript_path`.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum AgentTranscript {
+    /// Screened and contained — safe to read.
+    Contained(PathBuf),
+    /// A candidate the containment screen rejected. Never opened.
+    Refused(PathBuf),
+    /// No candidate field resolved to an existing file.
+    Absent,
+}
+
+impl AgentTranscript {
+    /// The path whose bytes may be read, if any.
+    fn contained(&self) -> Option<&Path> {
+        match self {
+            Self::Contained(p) => Some(p),
+            Self::Refused(_) | Self::Absent => None,
+        }
+    }
+
+    /// The path a candidate named, screened or not — for identity only.
+    ///
+    /// Why: [`warn_notice_key`] needs a per-agent string, not a file, and
+    /// derives it from the transcript's stem. A refused path still identifies
+    /// the agent, and nothing here opens it, so refusing to hand it back would
+    /// re-introduce the #4850 collision (every sibling of one parent falling
+    /// back to the shared `session_id`) for no security gain.
+    /// Test: `warn_notice_is_claimed_per_sibling_not_per_parent_session`.
+    fn candidate(&self) -> Option<&Path> {
+        match self {
+            Self::Contained(p) | Self::Refused(p) => Some(p),
+            Self::Absent => None,
+        }
+    }
+}
+
+/// [`resolve_agent_transcript_in`] against the process's own config directory.
+///
+/// What: resolves the boundary through
+/// [`trusty_mpm::core::session_record::claude_config_dir`] and delegates.
+/// Test: `refuses_a_transcript_outside_the_config_dir`.
+pub(crate) fn resolve_agent_transcript(payload: &serde_json::Value) -> AgentTranscript {
+    resolve_agent_transcript_in(
+        payload,
+        trusty_mpm::core::session_record::claude_config_dir().as_deref(),
+    )
+}
+
+/// Find the calling subagent's transcript and screen it for containment.
+///
+/// Why (#7278): [`agent_transcript_candidate`] takes three path fields straight
+/// from the `PreToolUse` payload and checked only `is_file()`, so a crafted
+/// `transcript_path` steered [`evaluate_agent_cost`]'s read — and through it the
+/// guard's halt/warn/ok decision — at any regular file the `tm` user could
+/// read. The candidate logic is unchanged; what is added is the screen between
+/// finding a path and reading it. The boundary arrives as an argument because
+/// this bin target may not write `CLAUDE_CONFIG_DIR` or `HOME` (#5544), so the
+/// rule is otherwise unassertable.
+/// What: screens the candidate with
+/// [`trusty_mpm::core::session_record::contained_transcript_file`] — absolute,
+/// no `..`, canonicalizing under the canonicalized `claude_config_dir` — and
+/// returns [`AgentTranscript::Contained`] with the canonical path on success.
+/// A candidate that fails, and every candidate when `claude_config_dir` is
+/// `None` (no boundary, so nothing to contain against — #7290), comes back as
+/// [`AgentTranscript::Refused`] and is never opened.
+/// Test: `refuses_a_transcript_outside_the_config_dir`,
+/// `refuses_a_traversing_transcript_path`,
+/// `refuses_every_transcript_without_a_config_dir`,
+/// `resolves_explicit_agent_transcript_path`,
+/// `resolves_a_transcript_path_already_under_subagents`,
+/// `derives_the_subagent_path_from_agent_id`,
+/// `fails_open_without_any_transcript_field`.
+pub(crate) fn resolve_agent_transcript_in(
+    payload: &serde_json::Value,
+    claude_config_dir: Option<&Path>,
+) -> AgentTranscript {
+    let Some(candidate) = agent_transcript_candidate(payload) else {
+        return AgentTranscript::Absent;
+    };
+    let Some(root) = claude_config_dir else {
+        return AgentTranscript::Refused(candidate);
+    };
+    match trusty_mpm::core::session_record::contained_transcript_file(root, &candidate) {
+        Some(canonical) => AgentTranscript::Contained(canonical),
+        None => AgentTranscript::Refused(candidate),
+    }
+}
+
+/// What [`evaluate_agent_cost`] measured, and what it refused to measure.
+///
+/// Why (#7278 Fail-Open Check): the evaluator used to hand back a bare
+/// `(BudgetStatus, u64)`, so a refused transcript was indistinguishable from a
+/// healthy agent at 0 tokens — the guard allowed on a number it had never read.
+/// Fail-open is still the right decision (a broken counter must not halt real
+/// work), but it has to be a decision the caller can SEE. `refused_transcript`
+/// is that signal: `Some(path)` means "allowed without measuring, because the
+/// payload named a file outside the Claude config directory".
+/// What: `status` and `tokens` as before, plus the refused candidate when one
+/// existed. `refused_transcript` is `None` on every ordinary path, including a
+/// genuinely absent transcript.
+/// Test: `refusal_is_surfaced_not_silently_allowed`,
+/// `fails_open_when_the_transcript_is_missing`,
+/// `allows_a_healthy_agent`.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct AgentCost {
+    pub(crate) status: BudgetStatus,
+    pub(crate) tokens: u64,
+    pub(crate) refused_transcript: Option<PathBuf>,
+}
+
+impl AgentCost {
+    /// The fail-open answer with nothing to report.
+    fn allow() -> Self {
+        Self {
+            status: BudgetStatus::Ok,
+            tokens: 0,
+            refused_transcript: None,
+        }
+    }
+}
+
+/// Say out loud that this call was allowed without being measured.
+///
+/// Why (#7278): the refusal is only useful if someone sees it. A loud,
+/// greppable stderr line is the same channel the idle-parking back-stop uses,
+/// so an operator reading a session log finds both the same way. It lives here
+/// rather than at the [`super::pm_guard`] call site because that file sits one
+/// line under the 500-SLOC production cap, and because the wording belongs with
+/// the type that carries the refusal.
+/// What: prints nothing on an ordinary verdict; on a refusal, names the session
+/// and the rejected path and states that the guard allowed the call anyway.
+/// Test: `refusal_is_surfaced_not_silently_allowed` pins the signal this reads.
+pub(crate) fn warn_if_transcript_refused(session_id: &str, cost: &AgentCost) {
+    if let Some(path) = &cost.refused_transcript {
+        eprintln!(
+            "trusty-mpm: AGENT-COST TRANSCRIPT REFUSED (#7278) session={session_id} \
+             path={} — the payload named a transcript outside the Claude config \
+             directory; the guard ALLOWED this call without measuring its context.",
+            path.display()
+        );
+    }
+}
+
 /// Measure and classify the calling subagent's context spend.
 ///
 /// Why: split from [`resolve_agent_transcript`] so the (I/O-bound, timeout-
@@ -149,49 +315,71 @@ pub(crate) fn resolve_agent_transcript(payload: &serde_json::Value) -> Option<Pa
 /// What: resolves the transcript, tail-reads it under [`EVAL_TIMEOUT`] —
 /// [`MAX_TRANSCRIPT_TAIL`] first, retried once at [`RETRY_TRANSCRIPT_TAIL`]
 /// when that window holds no complete usage record — extracts the newest
-/// context size, and returns `(status, context_tokens)`. Any failure returns
-/// `(`[`BudgetStatus::Ok`]`, 0)` — fail open.
+/// context size, and returns an [`AgentCost`]. Any failure returns
+/// [`AgentCost::allow`] — fail open.
 /// Test: `fails_open_when_the_transcript_is_missing`,
 /// `respects_a_disabled_config`.
 pub(crate) async fn evaluate_agent_cost(
     payload: &serde_json::Value,
     config: &AgentCostConfig,
-) -> (BudgetStatus, u64) {
-    evaluate_agent_cost_within(payload, config, EVAL_TIMEOUT).await
+) -> AgentCost {
+    // #7278: the boundary the payload's transcript_path is screened against.
+    evaluate_agent_cost_in(
+        payload,
+        config,
+        trusty_mpm::core::session_record::claude_config_dir().as_deref(),
+        EVAL_TIMEOUT,
+    )
+    .await
 }
 
-/// [`evaluate_agent_cost`] with the read deadline supplied by the caller.
+/// [`evaluate_agent_cost`] against an explicit config directory and deadline.
 ///
-/// Why (#7028): [`EVAL_TIMEOUT`] is a 200 ms *production latency* budget, and
-/// a test that reads a fixture through it is racing a wall clock rather than
+/// Why (#7278): the containment boundary is resolved from the process
+/// environment, and this bin target may not write `CLAUDE_CONFIG_DIR` or `HOME`
+/// (#5544) — so every test of the screen, and every test that must still reach
+/// the read past it, needs that directory as an argument.
+/// Why (#7028): [`EVAL_TIMEOUT`] is a 200 ms *production latency* budget, and a
+/// test that reads a fixture through it is racing a wall clock rather than
 /// exercising this module. Expiry fails open, so the loser reads as
-/// `(Ok, 0)` — indistinguishable from a resolution bug in one direction and,
-/// in `still_fails_open_when_even_the_larger_tail_has_no_record`, a false
-/// GREEN in the other. It cost `allows_a_healthy_agent` a red main on run
-/// 34407013504: that one test took 0.335 s in the `bin/tm` target while every
-/// sibling in the same process took 0.010–0.015 s, so the guard hit the
-/// deadline and reported 0 against an expected 71540. Passing the budget in
-/// lets a test whose subject is the read hold the deadline still, without
-/// moving the value that ships. What the expired arm itself answers is
-/// [`verdict`]'s to pin.
-/// What: the whole body of [`evaluate_agent_cost`]; `budget` bounds both tail
-/// reads together, exactly as [`EVAL_TIMEOUT`] does in production.
-/// Test: `reports_exceeded_for_an_over_ceiling_transcript`,
+/// [`AgentCost::allow`] — indistinguishable from a resolution bug in one
+/// direction and, in `still_fails_open_when_even_the_larger_tail_has_no_record`,
+/// a false GREEN in the other. It cost `allows_a_healthy_agent` a red main on
+/// run 34407013504: that one test took 0.335 s in the `bin/tm` target while
+/// every sibling in the same process took 0.010–0.015 s, so the guard hit the
+/// deadline and reported 0 against an expected 71540. Passing the budget in lets
+/// a test whose subject is the read hold the deadline still, without moving the
+/// value that ships. What the expired arm itself answers is [`verdict`]'s to
+/// pin.
+/// What: as [`evaluate_agent_cost`], with the boundary and the deadline
+/// supplied. A disabled config still short-circuits before any resolution, so a
+/// disabled guard touches the filesystem no more than it did. A refused
+/// transcript returns the fail-open verdict with `refused_transcript` set,
+/// having read nothing. `budget` bounds both tail reads together, exactly as
+/// [`EVAL_TIMEOUT`] does in production.
+/// Test: `refusal_is_surfaced_not_silently_allowed`,
+/// `refuses_a_transcript_outside_the_config_dir`,
+/// `reports_exceeded_for_an_over_ceiling_transcript`,
 /// `allows_a_healthy_agent`,
 /// `retries_with_a_larger_tail_when_64k_holds_no_usage_record`,
 /// `still_fails_open_when_even_the_larger_tail_has_no_record`.
-async fn evaluate_agent_cost_within(
+async fn evaluate_agent_cost_in(
     payload: &serde_json::Value,
     config: &AgentCostConfig,
+    claude_config_dir: Option<&Path>,
     budget: std::time::Duration,
-) -> (BudgetStatus, u64) {
+) -> AgentCost {
     if !config.enabled {
-        return (BudgetStatus::Ok, 0);
+        return AgentCost::allow();
     }
-    let Some(path) = resolve_agent_transcript(payload) else {
-        return (BudgetStatus::Ok, 0);
+    let resolved = resolve_agent_transcript_in(payload, claude_config_dir);
+    let Some(path) = resolved.contained() else {
+        return AgentCost {
+            refused_transcript: resolved.candidate().map(Path::to_path_buf),
+            ..AgentCost::allow()
+        };
     };
-    let measured = tokio::time::timeout(budget, read_latest_context(&path))
+    let measured = tokio::time::timeout(budget, read_latest_context(path))
         .await
         .ok()
         .flatten();
@@ -210,12 +398,18 @@ async fn evaluate_agent_cost_within(
 /// pure function that answers the same way on every machine.
 /// What: `Some` classifies via [`evaluate_cost`] and reports the measurement;
 /// `None` — timed out, unreadable, or no usage record in either window — is
-/// [`BudgetStatus::Ok`] with 0.
+/// [`AgentCost::allow`]. A transcript this function was reached for was
+/// screened and contained (#7278), so `refused_transcript` is `None` on both
+/// arms; refusal returns earlier, in [`evaluate_agent_cost_in`].
 /// Test: `an_unmeasured_read_never_denies`.
-fn verdict(measured: Option<u64>, config: &AgentCostConfig) -> (BudgetStatus, u64) {
+fn verdict(measured: Option<u64>, config: &AgentCostConfig) -> AgentCost {
     match measured {
-        Some(tokens) => (evaluate_cost(tokens, config), tokens),
-        None => (BudgetStatus::Ok, 0),
+        Some(tokens) => AgentCost {
+            status: evaluate_cost(tokens, config),
+            tokens,
+            refused_transcript: None,
+        },
+        None => AgentCost::allow(),
     }
 }
 
@@ -361,9 +555,13 @@ fn warn_notice_key(payload: &serde_json::Value) -> Option<String> {
             .filter(|s| !s.is_empty())
             .map(str::to_string)
     };
+    // #7278: identity only — `candidate()` hands back a REFUSED path too,
+    // because nothing here opens it and dropping it would re-introduce #4850's
+    // sibling collision on `session_id`.
     let raw = field("agent_id")
         .or_else(|| {
             resolve_agent_transcript(payload)
+                .candidate()
                 .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
         })
         .or_else(|| field("session_id"))?;
@@ -385,7 +583,7 @@ mod tests {
 
     /// Read deadline for every test whose subject is the READ, not the clock.
     ///
-    /// Why (#7028): see [`evaluate_agent_cost_within`]. A budget no scheduling
+    /// Why (#7028): see [`evaluate_agent_cost_in`]. A budget no scheduling
     /// stall can plausibly consume turns "did the guard measure this fixture?"
     /// back into a question about this module. It is not a licence to be slow —
     /// a genuine hang still ends the test rather than running forever.
@@ -414,6 +612,16 @@ mod tests {
         (parent, sub)
     }
 
+    /// The `Contained` answer for `path`, spelled canonically.
+    ///
+    /// #7278: the screen returns the CANONICAL path, and on macOS a temp
+    /// directory's own spelling (`/var/folders/…`) differs from it
+    /// (`/private/var/folders/…`), so a resolution test must compare against
+    /// the resolved form or it fails for the wrong reason.
+    fn contained(path: &Path) -> AgentTranscript {
+        AgentTranscript::Contained(path.canonicalize().expect("canonicalize fixture"))
+    }
+
     #[test]
     fn derives_the_subagent_path_from_agent_id() {
         // The load-bearing case: PreToolUse inside a subagent carries the
@@ -425,7 +633,10 @@ mod tests {
             "transcript_path": parent.to_str().expect("utf8"),
             "agent_id": "a1d57cf5a7f59b877",
         });
-        assert_eq!(resolve_agent_transcript(&payload).as_ref(), Some(&sub));
+        assert_eq!(
+            resolve_agent_transcript_in(&payload, Some(tmp.path())),
+            contained(&sub)
+        );
     }
 
     #[test]
@@ -437,7 +648,10 @@ mod tests {
             "agent_transcript_path": sub.to_str().expect("utf8"),
             "agent_id": "abc123",
         });
-        assert_eq!(resolve_agent_transcript(&payload).as_ref(), Some(&sub));
+        assert_eq!(
+            resolve_agent_transcript_in(&payload, Some(tmp.path())),
+            contained(&sub)
+        );
     }
 
     #[test]
@@ -449,12 +663,17 @@ mod tests {
         let payload = serde_json::json!({
             "transcript_path": sub.to_str().expect("utf8"),
         });
-        assert_eq!(resolve_agent_transcript(&payload).as_ref(), Some(&sub));
+        assert_eq!(
+            resolve_agent_transcript_in(&payload, Some(tmp.path())),
+            contained(&sub)
+        );
     }
 
     #[test]
     fn fails_open_without_any_transcript_field() {
-        // Every indeterminate payload shape must resolve to None (→ ALLOW).
+        // Every indeterminate payload shape must resolve to Absent (→ ALLOW),
+        // and Absent specifically — #7278 distinguishes "no transcript" from
+        // "a transcript this guard refuses to open", and these are the first.
         for payload in [
             serde_json::json!({}),
             serde_json::json!({"tool_name": "Bash"}),
@@ -468,24 +687,145 @@ mod tests {
                 "agent_id": "ghost",
             }),
         ] {
+            let tmp = crate::test_support::hermetic_temp_dir();
             assert_eq!(
-                resolve_agent_transcript(&payload),
-                None,
+                resolve_agent_transcript_in(&payload, Some(tmp.path())),
+                AgentTranscript::Absent,
                 "expected fail-open for {payload}"
             );
         }
     }
 
+    // ── #7278: the payload chose the path, so the guard screens it ──
+
+    /// Why (#7278): the reported attack. `resolve_agent_transcript` checked
+    /// only `is_file()`, so a `PreToolUse` payload naming any regular file the
+    /// `tm` user could read steered the guard's read — and through it its
+    /// halt/warn/ok decision. Refusing means the bytes are never touched.
+    /// Test: itself.
+    #[test]
+    fn refuses_a_transcript_outside_the_config_dir() {
+        let config = crate::test_support::hermetic_temp_dir();
+        let elsewhere = crate::test_support::hermetic_temp_dir();
+        let (_, sub) = transcript_tree(elsewhere.path(), "outside", 100_000);
+        let payload = serde_json::json!({
+            "transcript_path": sub.to_str().expect("utf8"),
+        });
+        assert_eq!(
+            resolve_agent_transcript_in(&payload, Some(config.path())),
+            AgentTranscript::Refused(sub),
+            "a transcript outside the config directory must be refused, not read"
+        );
+    }
+
+    /// Why (#7278): `..` walks out of a boundary the prefix check would
+    /// otherwise accept, so it is refused before the path is resolved at all.
+    /// Test: itself.
+    #[test]
+    fn refuses_a_traversing_transcript_path() {
+        let config = crate::test_support::hermetic_temp_dir();
+        let elsewhere = crate::test_support::hermetic_temp_dir();
+        let (_, sub) = transcript_tree(elsewhere.path(), "traverse", 100_000);
+        let traversing = config
+            .path()
+            .join("..")
+            .join(elsewhere.path().file_name().expect("temp dir name"))
+            .join(sub.strip_prefix(elsewhere.path()).expect("under fixture"));
+        let payload = serde_json::json!({
+            "transcript_path": traversing.to_str().expect("utf8"),
+        });
+        assert_eq!(
+            resolve_agent_transcript_in(&payload, Some(config.path())),
+            AgentTranscript::Refused(traversing),
+            "a `..` component must be refused"
+        );
+    }
+
+    /// Why (#7290): with no config directory there is no boundary at all, and
+    /// a resolver falling back to `FrameworkPaths::default()` would silently
+    /// re-scope containment to `<cwd>/.claude`. Refuse instead.
+    /// Test: itself.
+    #[test]
+    fn refuses_every_transcript_without_a_config_dir() {
+        let tmp = crate::test_support::hermetic_temp_dir();
+        let (_, sub) = transcript_tree(tmp.path(), "nodir", 100_000);
+        let payload = serde_json::json!({
+            "transcript_path": sub.to_str().expect("utf8"),
+        });
+        assert_eq!(
+            resolve_agent_transcript_in(&payload, None),
+            AgentTranscript::Refused(sub),
+            "no boundary means no read, even for a path that would have passed"
+        );
+    }
+
+    /// Why (#7278 Fail-Open Check): a refusal and a healthy agent at 0 tokens
+    /// used to be the same `(Ok, 0)`, so the guard allowed on a number it had
+    /// never read and nothing said so. The verdict stays ALLOW — a broken
+    /// counter must not halt real work — but the refusal now rides back with
+    /// it, and the same fixture placed INSIDE the boundary still measures, so
+    /// the contrast is the screen and not a broken fixture.
+    /// Test: itself.
+    #[tokio::test]
+    async fn refusal_is_surfaced_not_silently_allowed() {
+        let config = crate::test_support::hermetic_temp_dir();
+        let elsewhere = crate::test_support::hermetic_temp_dir();
+        let (parent, sub) = transcript_tree(elsewhere.path(), "loud", 622_200);
+        let payload = serde_json::json!({
+            "transcript_path": parent.to_str().expect("utf8"),
+            "agent_id": "loud",
+        });
+
+        let refused = evaluate_agent_cost_in(
+            &payload,
+            &opted_in_stop(),
+            Some(config.path()),
+            TEST_EVAL_BUDGET,
+        )
+        .await;
+        assert_eq!(
+            refused,
+            AgentCost {
+                status: BudgetStatus::Ok,
+                tokens: 0,
+                refused_transcript: Some(sub),
+            },
+            "an out-of-boundary transcript must allow, and say that it was refused"
+        );
+
+        // The contrast: the identical 622.2k transcript inside the boundary is
+        // measured and stopped, so the refusal above is the screen at work.
+        let measured = evaluate_agent_cost_in(
+            &payload,
+            &opted_in_stop(),
+            Some(elsewhere.path()),
+            TEST_EVAL_BUDGET,
+        )
+        .await;
+        assert_eq!(measured.tokens, 622_200);
+        assert_eq!(measured.status, BudgetStatus::Exceeded);
+        assert_eq!(measured.refused_transcript, None);
+    }
+
     #[tokio::test]
     async fn fails_open_when_the_transcript_is_missing() {
         // The core safety property: a broken counter allows the work.
+        let config = crate::test_support::hermetic_temp_dir();
         let payload = serde_json::json!({
             "transcript_path": "/tmp/definitely-not-here/p.jsonl",
             "agent_id": "ghost",
         });
-        let (status, tokens) = evaluate_agent_cost(&payload, &AgentCostConfig::default()).await;
-        assert_eq!(status, BudgetStatus::Ok);
-        assert_eq!(tokens, 0);
+        assert_eq!(
+            evaluate_agent_cost_in(
+                &payload,
+                &AgentCostConfig::default(),
+                Some(config.path()),
+                TEST_EVAL_BUDGET
+            )
+            .await,
+            AgentCost::allow(),
+            "a missing transcript is Absent, not Refused — nothing to report"
+        );
     }
 
     /// A config with the hard stop opted in. The shipped default is warn-only
@@ -506,8 +846,13 @@ mod tests {
             "transcript_path": parent.to_str().expect("utf8"),
             "agent_id": "big",
         });
-        let (status, tokens) =
-            evaluate_agent_cost_within(&payload, &opted_in_stop(), TEST_EVAL_BUDGET).await;
+        let AgentCost { status, tokens, .. } = evaluate_agent_cost_in(
+            &payload,
+            &opted_in_stop(),
+            Some(tmp.path()),
+            TEST_EVAL_BUDGET,
+        )
+        .await;
         assert_eq!(status, BudgetStatus::Exceeded);
         assert_eq!(tokens, 622_200);
         // And the reason handed back must carry the measured number.
@@ -524,9 +869,13 @@ mod tests {
             "transcript_path": parent.to_str().expect("utf8"),
             "agent_id": "big",
         });
-        let (status, tokens) =
-            evaluate_agent_cost_within(&payload, &AgentCostConfig::default(), TEST_EVAL_BUDGET)
-                .await;
+        let AgentCost { status, tokens, .. } = evaluate_agent_cost_in(
+            &payload,
+            &AgentCostConfig::default(),
+            Some(tmp.path()),
+            TEST_EVAL_BUDGET,
+        )
+        .await;
         assert_eq!(status, BudgetStatus::Warning);
         assert_eq!(tokens, 622_200);
     }
@@ -546,8 +895,8 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            evaluate_agent_cost(&payload, &disabled).await,
-            (BudgetStatus::Ok, 0)
+            evaluate_agent_cost_in(&payload, &disabled, Some(tmp.path()), TEST_EVAL_BUDGET).await,
+            AgentCost::allow()
         );
     }
 
@@ -559,11 +908,22 @@ mod tests {
             "transcript_path": parent.to_str().expect("utf8"),
             "agent_id": "small",
         });
-        let (status, tokens) =
-            evaluate_agent_cost_within(&payload, &AgentCostConfig::default(), TEST_EVAL_BUDGET)
-                .await;
-        assert_eq!(status, BudgetStatus::Ok);
-        assert_eq!(tokens, 71_540);
+        // #7028: the budget is the generous test one, so a scheduling stall on
+        // a CI runner cannot expire the read and report 0 against 71540.
+        let measured = evaluate_agent_cost_in(
+            &payload,
+            &AgentCostConfig::default(),
+            Some(tmp.path()),
+            TEST_EVAL_BUDGET,
+        )
+        .await;
+        // #7278: assert on the refusal channel too. Before it existed, a
+        // reading of 0 here was indistinguishable from a transcript the guard
+        // had declined to open — which is exactly the ambiguity that made the
+        // 0-token sighting on #7028 unattributable.
+        assert_eq!(measured.refused_transcript, None);
+        assert_eq!(measured.status, BudgetStatus::Ok);
+        assert_eq!(measured.tokens, 71_540);
     }
 
     #[test]
@@ -574,10 +934,16 @@ mod tests {
         // still stop on a measurement that genuinely arrived. Asserted on the
         // mapping because the clock cannot be raced deterministically either
         // way; see [`verdict`].
-        assert_eq!(verdict(None, &opted_in_stop()), (BudgetStatus::Ok, 0));
+        assert_eq!(verdict(None, &opted_in_stop()), AgentCost::allow());
         assert_eq!(
             verdict(Some(622_200), &opted_in_stop()),
-            (BudgetStatus::Exceeded, 622_200)
+            AgentCost {
+                status: BudgetStatus::Exceeded,
+                tokens: 622_200,
+                // #7278: reaching `verdict` at all means the transcript passed
+                // the containment screen, so neither arm can report a refusal.
+                refused_transcript: None,
+            }
         );
     }
 
@@ -639,8 +1005,13 @@ mod tests {
         // a loaded run and patched it with a retry loop; #7028 removes the race
         // instead. Both tail reads share one budget and this fixture is
         // ~600 KiB read twice, so the budget is the generous test one.
-        let (status, tokens) =
-            evaluate_agent_cost_within(&payload, &opted_in_stop(), TEST_EVAL_BUDGET).await;
+        let AgentCost { status, tokens, .. } = evaluate_agent_cost_in(
+            &payload,
+            &opted_in_stop(),
+            Some(tmp.path()),
+            TEST_EVAL_BUDGET,
+        )
+        .await;
         assert_eq!(tokens, 500_000, "the larger window must find the record");
         assert_eq!(status, BudgetStatus::Exceeded);
     }
@@ -660,8 +1031,14 @@ mod tests {
             "agent_id": "norec",
         });
         assert_eq!(
-            evaluate_agent_cost_within(&payload, &opted_in_stop(), TEST_EVAL_BUDGET).await,
-            (BudgetStatus::Ok, 0)
+            evaluate_agent_cost_in(
+                &payload,
+                &opted_in_stop(),
+                Some(tmp.path()),
+                TEST_EVAL_BUDGET
+            )
+            .await,
+            AgentCost::allow()
         );
     }
 

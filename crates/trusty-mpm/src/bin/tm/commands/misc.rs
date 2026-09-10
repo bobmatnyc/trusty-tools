@@ -376,16 +376,56 @@ pub(crate) async fn read_transcript_tail(path: &std::path::Path, max_bytes: u64)
 /// from ending their turn to "wait" for a self-spawned monitor. This is the
 /// mechanical back-stop: on a turn-end event, check what the agent actually said
 /// last and flag the stall so it can be surfaced (and later auto-nudged).
-/// What: reads `transcript_path` from the hook payload, tail-reads the transcript
-/// (bounded to `MAX_TRANSCRIPT_TAIL`) under a short `DETECT_TIMEOUT` so the
-/// hook stays within its non-blocking budget, then runs
-/// [`trusty_mpm::core::idle_parking::detect_idle_parking_in_transcript`]. Returns
-/// the matched phrase, or `None` on any missing field / timeout / I/O error /
-/// clean message. Entirely fail-open.
+/// What: resolves the Claude config directory this session runs under via
+/// [`trusty_mpm::core::session_record::claude_config_dir`] and delegates to
+/// [`detect_idle_parking_from_payload_in`].
 /// Test: the pure detection is covered by `core::idle_parking` tests;
-/// `hook_flags_idle_parking_final_message` (integration) drives this end to end.
+/// `hook_flags_idle_parking_final_message_on_subagent_stop` (integration)
+/// drives this end to end.
 async fn detect_idle_parking_from_payload(
     payload: Option<&serde_json::Value>,
+) -> Option<&'static str> {
+    // #7278: the payload's `transcript_path` is attacker-influenceable, so the
+    // boundary it is screened against is resolved here and threaded in.
+    detect_idle_parking_from_payload_in(
+        payload,
+        trusty_mpm::core::session_record::claude_config_dir().as_deref(),
+    )
+    .await
+}
+
+/// [`detect_idle_parking_from_payload`] against an explicit config directory.
+///
+/// Why (#7278): the payload's `transcript_path` arrives from the Stop /
+/// SubagentStop hook's stdin JSON and was handed to `read_transcript_tail`
+/// verbatim, so `{"hook_event_name":"Stop","transcript_path":"/etc/passwd"}`
+/// read any regular file the `tm` user could read. The screen belongs on the
+/// value, and the directory it is screened against is resolved from the
+/// process environment — which this bin target may not write (#5544), so the
+/// rule is only assertable when that directory arrives as an argument.
+/// What: refuses the path unless
+/// [`trusty_mpm::core::session_record::contained_transcript_path`] accepts it
+/// against `claude_config_dir` — absolute, no `..`, canonicalizing under the
+/// canonicalized config directory — and reads nothing at all when it does not.
+/// A `None` `claude_config_dir` refuses outright: with no directory to contain
+/// the path there is nothing to screen against. Only the accepted CANONICAL
+/// path is opened, so the read cannot re-resolve to a different file than the
+/// one that was checked. On acceptance, tail-reads the transcript (bounded to
+/// `MAX_TRANSCRIPT_TAIL`) under a short `DETECT_TIMEOUT` so the hook stays
+/// within its non-blocking budget, then runs
+/// [`trusty_mpm::core::idle_parking::detect_idle_parking_in_transcript`].
+/// Returns the matched phrase, or `None` on a refused path / missing field /
+/// timeout / I/O error / clean message. Entirely fail-open: detection is
+/// advisory, so a refusal costs a warning that would have been shown, never a
+/// blocked prompt.
+/// Test: `refuses_a_transcript_path_outside_the_config_dir`,
+/// `refuses_a_relative_transcript_path`,
+/// `refuses_a_traversing_transcript_path`,
+/// `refuses_every_transcript_path_without_a_config_dir`,
+/// `detects_parking_in_a_transcript_under_the_config_dir`.
+async fn detect_idle_parking_from_payload_in(
+    payload: Option<&serde_json::Value>,
+    claude_config_dir: Option<&std::path::Path>,
 ) -> Option<&'static str> {
     /// Cap on transcript bytes read from the tail (256 KiB is far more than one
     /// final assistant turn, yet bounds cost on a multi-MB session transcript).
@@ -393,8 +433,10 @@ async fn detect_idle_parking_from_payload(
     /// Hard ceiling on the whole detection so the hook never blocks the prompt.
     const DETECT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(300);
 
-    let path = payload?.get("transcript_path")?.as_str()?;
-    let path = std::path::PathBuf::from(path);
+    let raw = payload?.get("transcript_path")?.as_str()?;
+    // #7278: screen before any read — a refused path is never opened.
+    let path =
+        trusty_mpm::core::session_record::contained_transcript_path(claude_config_dir?, raw)?;
     let jsonl = tokio::time::timeout(
         DETECT_TIMEOUT,
         read_transcript_tail(&path, MAX_TRANSCRIPT_TAIL),
@@ -803,5 +845,125 @@ pub(crate) async fn attach_cmd(
             }
             std::process::exit(1);
         }
+    }
+}
+
+// #7278: the parking detector opens a path the hook payload chose, so these
+// cover the screen that decides whether it opens anything at all. Temp dirs
+// come from `crate::test_support::hermetic_temp_dir`, never a bare
+// `tempfile::tempdir()` — the bare constructor honors `$TMPDIR`, which a
+// sibling test may repoint.
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    /// One assistant turn whose text is unambiguous parking language, so any
+    /// `None` these tests see comes from the screen and not the detector.
+    const PARKING_TEXT: &str =
+        "I've started a background polling monitor for the checks and will report back once green.";
+
+    /// Write a one-line transcript under `dir` and return its path.
+    fn parking_transcript(dir: &Path) -> PathBuf {
+        let path = dir.join("session.jsonl");
+        let line = serde_json::json!({
+            "type": "assistant",
+            "message": { "content": [{ "type": "text", "text": PARKING_TEXT }] }
+        });
+        std::fs::write(&path, format!("{line}\n")).expect("write transcript");
+        path
+    }
+
+    fn payload(transcript_path: &str) -> serde_json::Value {
+        serde_json::json!({
+            "hook_event_name": "Stop",
+            "session_id": "sess-7278",
+            "transcript_path": transcript_path,
+        })
+    }
+
+    /// Why (#7278): the positive control. Every refusal below is only evidence
+    /// of a screen if the same fixture, moved inside the boundary, is still
+    /// detected — otherwise a broken detector would read as a passing screen.
+    /// Test: itself.
+    #[tokio::test]
+    async fn detects_parking_in_a_transcript_under_the_config_dir() {
+        let config = crate::test_support::hermetic_temp_dir();
+        let transcript = parking_transcript(config.path());
+        let payload = payload(&transcript.to_string_lossy());
+        assert!(
+            super::detect_idle_parking_from_payload_in(Some(&payload), Some(config.path()))
+                .await
+                .is_some(),
+            "an in-boundary transcript must still be scanned"
+        );
+    }
+
+    /// Why (#7278): the reported attack. A `transcript_path` naming a file the
+    /// `tm` user can read but that Claude Code never wrote must not be opened.
+    /// Test: itself.
+    #[tokio::test]
+    async fn refuses_a_transcript_path_outside_the_config_dir() {
+        let config = crate::test_support::hermetic_temp_dir();
+        let elsewhere = crate::test_support::hermetic_temp_dir();
+        let transcript = parking_transcript(elsewhere.path());
+        let payload = payload(&transcript.to_string_lossy());
+        assert_eq!(
+            super::detect_idle_parking_from_payload_in(Some(&payload), Some(config.path())).await,
+            None,
+            "a transcript outside the config directory must never be read"
+        );
+    }
+
+    /// Why (#7278): a relative path resolves against the hook process's cwd,
+    /// which the payload's author does not control but also cannot be screened
+    /// against a fixed boundary — it is refused before canonicalization.
+    /// Test: itself.
+    #[tokio::test]
+    async fn refuses_a_relative_transcript_path() {
+        let config = crate::test_support::hermetic_temp_dir();
+        let _ = parking_transcript(config.path());
+        let payload = payload("session.jsonl");
+        assert_eq!(
+            super::detect_idle_parking_from_payload_in(Some(&payload), Some(config.path())).await,
+            None,
+            "a relative transcript_path must be refused"
+        );
+    }
+
+    /// Why (#7278): `..` is the shape that walks out of a boundary the prefix
+    /// check would otherwise accept, so it is refused on its own.
+    /// Test: itself.
+    #[tokio::test]
+    async fn refuses_a_traversing_transcript_path() {
+        let config = crate::test_support::hermetic_temp_dir();
+        let elsewhere = crate::test_support::hermetic_temp_dir();
+        let transcript = parking_transcript(elsewhere.path());
+        let traversing = config
+            .path()
+            .join("..")
+            .join(elsewhere.path().file_name().expect("temp dir name"))
+            .join(transcript.file_name().expect("file name"));
+        let payload = payload(&traversing.to_string_lossy());
+        assert_eq!(
+            super::detect_idle_parking_from_payload_in(Some(&payload), Some(config.path())).await,
+            None,
+            "a `..` component must be refused before the path is resolved"
+        );
+    }
+
+    /// Why (#7290): with no config directory there is no boundary, and a
+    /// resolver that fell back to `FrameworkPaths::default()` would silently
+    /// re-scope containment to `<cwd>/.claude`. The refusal must be total.
+    /// Test: itself.
+    #[tokio::test]
+    async fn refuses_every_transcript_path_without_a_config_dir() {
+        let config = crate::test_support::hermetic_temp_dir();
+        let transcript = parking_transcript(config.path());
+        let payload = payload(&transcript.to_string_lossy());
+        assert_eq!(
+            super::detect_idle_parking_from_payload_in(Some(&payload), None).await,
+            None,
+            "no boundary means no read, even for a path that would have passed"
+        );
     }
 }
