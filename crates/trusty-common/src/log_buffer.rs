@@ -120,6 +120,23 @@ impl LogBuffer {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Remove and return every buffered line, oldest first (#7390).
+    ///
+    /// Why: [`capture_logs`] reuses ONE buffer for the whole test binary, so it
+    /// needs to empty it around each capture rather than read a tail whose age
+    /// it cannot tell. Test-only: nothing in the daemon path empties the ring.
+    /// What: drains the deque under the same poison-tolerant lock as
+    /// [`LogBuffer::push`].
+    /// Test: `capture_logs_sees_events_from_the_body_only`.
+    #[cfg(test)]
+    fn take(&self) -> Vec<String> {
+        let mut guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.drain(..).collect()
+    }
 }
 
 /// `tracing_subscriber::Layer` that mirrors every event into a [`LogBuffer`].
@@ -219,9 +236,94 @@ impl<S: tracing::Subscriber> Layer<S> for LogBufferLayer {
     }
 }
 
+/// The one capture subscriber the crate's tests install, the buffer it writes
+/// to, and the lock that gives one capturing test at a time exclusive use of it.
+///
+/// Why it is a static rather than a subscriber built per call: `tracing`'s
+/// per-callsite interest and its global maximum level are recomputed, process
+/// wide, every time a `Dispatch` is created — over the dispatchers alive at that
+/// instant. A capture subscriber that lives only for one test is therefore racing
+/// every other test that builds one, and the loser's callsites stay cached as
+/// "no subscriber wants this" while its own subscriber is installed. A build of
+/// this crate's suite failed once in six runs that way, with a `warn!` that ran
+/// producing zero captured lines (#7390). One `Dispatch` that is created once and
+/// never dropped is always in that recomputation, so the cached answer can no
+/// longer go stale. This is the tracing-subscriber exception to the crate's
+/// no-global-state rule, and it is compiled only into the test build.
+#[cfg(test)]
+static CAPTURE: std::sync::LazyLock<(tracing::Dispatch, LogBuffer, Mutex<()>)> =
+    std::sync::LazyLock::new(|| {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let buffer = LogBuffer::new(256);
+        let dispatch = tracing::Dispatch::new(
+            tracing_subscriber::registry().with(LogBufferLayer::new(buffer.clone())),
+        );
+        (dispatch, buffer, Mutex::new(()))
+    });
+
+/// Run `body` under a subscriber that captures every event, and return the
+/// captured lines alongside the body's value (#7365, #7390).
+///
+/// Why: the LEVEL a line carries is a behavioural contract in this crate — a
+/// self-healing condition reported at warn reads to an operator as a fault
+/// needing repair, which is the defect #7365 and #7390 each fixed. [`LogBuffer`]
+/// already renders the level into the line, so a level regression becomes an
+/// ordinary assertion instead of something only a human reading logs would
+/// notice. It lives here, beside the buffer it drives, so the modules under test
+/// share one capture rather than each growing a copy.
+/// What: takes [`CAPTURE`]'s lock, empties its buffer, runs `body` with
+/// [`CAPTURE`]'s dispatcher as this thread's default, and returns `body`'s value
+/// with everything the buffer collected, oldest first. Only the locked thread
+/// has that dispatcher as its default, so nothing another test logs concurrently
+/// reaches these lines. A panicking `body` poisons the lock and the next caller
+/// recovers it.
+/// Test: `capture_logs_sees_events_from_the_body_only` below, plus
+/// `search_index_reconcile.rs::{a_resolvable_conflict_is_logged_at_info_without_operator_advice,
+/// an_unrecoverable_refusal_still_warns,
+/// an_unanswered_create_the_registry_confirms_emits_no_warning}` and
+/// `search_index_confirm.rs::an_exhausted_confirm_deadline_is_still_a_warning`.
+#[cfg(test)]
+pub(crate) fn capture_logs<T>(body: impl FnOnce() -> T) -> (T, Vec<String>) {
+    let (dispatch, buffer, lock) = &*CAPTURE;
+    let _held = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _ = buffer.take();
+    let value = tracing::dispatcher::with_default(dispatch, body);
+    (value, buffer.take())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`capture_logs`] returns what the body logged, and only that (#7390).
+    ///
+    /// Why: every level assertion in this crate reads its evidence from here, so
+    /// a capture that silently returned nothing would turn a "no warnings"
+    /// assertion into one that passes for the wrong reason — which is exactly
+    /// how the shared buffer's predecessor failed one run in six. Running it
+    /// twice also pins the emptying: the second capture must not see the first
+    /// one's line.
+    /// What: captures one `warn!` and one `info!`, then captures again from a
+    /// body that logs nothing.
+    /// Test: itself.
+    #[test]
+    fn capture_logs_sees_events_from_the_body_only() {
+        let ((), lines) = capture_logs(|| {
+            tracing::warn!("first line");
+            tracing::info!("second line");
+        });
+
+        assert_eq!(lines.len(), 2, "both events must be captured: {lines:?}");
+        assert!(lines[0].contains("WARN") && lines[0].contains("first line"));
+        assert!(lines[1].contains("INFO") && lines[1].contains("second line"));
+
+        let ((), after) = capture_logs(|| {});
+        assert!(
+            after.is_empty(),
+            "the buffer is emptied per capture, saw {after:?}"
+        );
+    }
 
     #[test]
     fn capacity_evicts_oldest() {
