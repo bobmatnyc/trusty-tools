@@ -148,9 +148,12 @@ pub(crate) fn record_session_facts(session_id: &str, model_id: &str, transcript_
     let Some(root) = savings_root() else {
         return;
     };
+    // #7278: the boundary resolver moved to `core::session_record` beside the
+    // screen it feeds, so the parking detector and the pm-guard cost evaluator
+    // compare against the same directory this recorder does.
     record_session_facts_at(
         &root,
-        claude_config_dir().as_deref(),
+        trusty_mpm::core::session_record::claude_config_dir().as_deref(),
         session_id,
         model_id,
         transcript_path,
@@ -197,33 +200,6 @@ fn record_session_facts_at(
         session_id,
         &transcript.to_string_lossy(),
     );
-}
-
-/// The Claude config directory this session's transcript must sit under.
-///
-/// Why (#7250): the payload's `transcript_path` is only trustworthy relative to
-/// the config directory the session itself runs under, and `CLAUDE_CONFIG_DIR`
-/// relocates that for every daemon-managed tm session. The neighbouring
-/// [`super::account::claude_json_path`] reads the same variable but resolves a
-/// different shape — `.claude.json` sits INSIDE `CLAUDE_CONFIG_DIR` and BESIDE
-/// `~/.claude` — so the two cannot share one resolver.
-/// What: `CLAUDE_CONFIG_DIR` when set and non-blank, else `~/.claude` from
-/// [`trusty_mpm::core::paths::FrameworkPaths::claude_home_dir`] rather than a
-/// second `home.join(".claude")`. `None` when neither is available, and the
-/// caller then records no transcript path at all — that is what makes the
-/// screen fail closed. `FrameworkPaths::default()` cannot stand in here: with
-/// no home directory it resolves against `"."`, which canonicalizes to the
-/// process's working directory, so the containment check would silently
-/// re-scope to whatever `<cwd>/.claude` happens to be (#7250 critic round 2).
-/// Test: `a_transcript_path_is_not_recorded_without_a_config_dir`; the fallback
-/// resolver has its own tests (`claude_home_dir_matches_default_home`).
-fn claude_config_dir() -> Option<PathBuf> {
-    match std::env::var_os("CLAUDE_CONFIG_DIR") {
-        Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir)),
-        _ => Some(
-            trusty_mpm::core::paths::FrameworkPaths::under(dirs::home_dir()?).claude_home_dir(),
-        ),
-    }
 }
 
 /// Resolve the framework root the ledger lives under.

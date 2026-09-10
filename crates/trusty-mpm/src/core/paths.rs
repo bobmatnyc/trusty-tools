@@ -128,6 +128,15 @@ impl FrameworkPaths {
     /// `session_launch::mod.rs` writes `last-instructions.md` into — that is
     /// a bare `project_dir.join(".trusty-mpm")`, not a `FrameworkPaths` value
     /// at all.
+    ///
+    /// **Never back a path-containment check with this** (#7290). It inherits
+    /// [`home_base`](Self::home_base)'s `"."` fallback, so with no home
+    /// directory it resolves against the process's working directory and a
+    /// boundary built from it silently follows the caller's cwd instead of
+    /// refusing. A containment check takes
+    /// [`under(dirs::home_dir()?)`](Self::under) so "no home" is a `None` the
+    /// caller must handle — see
+    /// [`crate::core::session_record::claude_config_dir`].
     /// Test: `default_resolves_under_trusty_mpm`,
     /// `default_is_a_single_global_path_never_project_relative`.
     #[allow(clippy::should_implement_trait)] // Intentional: no meaningful Default without I/O.
@@ -146,6 +155,12 @@ impl FrameworkPaths {
     /// drift the common-entry-point rule forbids.
     /// What: `dirs::home_dir()`, falling back to `.` when the home directory
     /// cannot be determined — the identical resolution `default()` performs.
+    ///
+    /// **Never back a path-containment check with this** (#7290). That `.`
+    /// fallback canonicalizes to the process's working directory, so a
+    /// boundary built from it re-scopes to `<cwd>/…` rather than refusing —
+    /// the exact silent re-scope the #7250 critic round caught. A containment
+    /// check wants an explicit `dirs::home_dir()?` so "no home" answers `None`.
     /// Test: `home_base_is_what_default_resolves_against`.
     pub fn home_base() -> PathBuf {
         dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
