@@ -225,6 +225,48 @@ const SECRET_BEARING_FILE_PATTERNS: &[&str] = &[
     "*.ovpn",
 ];
 
+/// The denylist entries that match on a NAME SUBSTRING rather than on a file
+/// extension or a key-file prefix.
+///
+/// Why: `credentials`, `secrets` and `token` are ordinary English words, and
+/// since #7266 round 5 the read rule refuses a secret-shaped name under EVERY
+/// verb — so a bare word in a commit message, an `echo`, or a `grep` pattern
+/// would deny if it were read as a filename. These three entries are the only
+/// ones whose literal core is a word rather than a file spelling, so the read
+/// rule asks for them by name.
+/// What: a subset of [`SECRET_BEARING_FILE_PATTERNS`], pinned to it by
+/// `name_substring_patterns_are_denylist_entries`.
+/// Test: `name_substring_patterns_are_denylist_entries`,
+/// `matches_only_name_substring_family_separates_word_families_from_file_families`.
+const NAME_SUBSTRING_PATTERNS: &[&str] = &["*credentials*", "*secrets*", "token*"];
+
+/// Whether `name` is matched by the denylist AND only by its word-shaped
+/// families ([`NAME_SUBSTRING_PATTERNS`]).
+///
+/// Why: the read rule needs to tell `id_rsa` — a filename and nothing else —
+/// from `secrets`, which is a word an agent writes all day. The first must be
+/// screened wherever it appears; the second only when it is written as a path.
+/// What: `true` when at least one denylist pattern matches and every pattern
+/// that matches is a [`NAME_SUBSTRING_PATTERNS`] member; `false` when nothing
+/// matches, and `false` as soon as an extension- or prefix-typed family matches
+/// too (`credentials.pem` is a `*.pem`, not a word).
+/// Test: `matches_only_name_substring_family_separates_word_families_from_file_families`.
+// #7266 round 5: `pub(crate)` so the read rule reads this list rather than
+// re-listing the three word families at its own scope.
+pub(crate) fn matches_only_name_substring_family(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let mut matched = false;
+    for pattern in SECRET_BEARING_FILE_PATTERNS {
+        if glob_match(&pattern.to_ascii_lowercase(), &lower) {
+            if !NAME_SUBSTRING_PATTERNS.contains(pattern) {
+                return false;
+            }
+            matched = true;
+        }
+    }
+    matched
+}
+
 /// Whether `name` matches one of [`SECRET_BEARING_FILE_PATTERNS`], case-insensitively.
 fn is_secret_bearing_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
@@ -1185,6 +1227,51 @@ mod tests {
         // `*.json` is the one extension glob that stays denied, and it earns it:
         // `*.tfvars.json` is a credential family spelled in JSON.
         assert!(secret_pattern_overlaps("*.json"));
+    }
+
+    #[test]
+    fn name_substring_patterns_are_denylist_entries() {
+        for pattern in NAME_SUBSTRING_PATTERNS {
+            assert!(
+                SECRET_BEARING_FILE_PATTERNS.contains(pattern),
+                "`{pattern}` must be spelled exactly as its denylist entry"
+            );
+        }
+    }
+
+    #[test]
+    fn matches_only_name_substring_family_separates_word_families_from_file_families() {
+        // Word-shaped: an agent writes these in prose all day.
+        for word in [
+            "credentials",
+            "secrets",
+            "token",
+            "tokens",
+            "my-credentials",
+        ] {
+            assert!(
+                matches_only_name_substring_family(word),
+                "`{word}` is matched only by a word-shaped family"
+            );
+        }
+        // File-shaped: a spelling that is a filename and nothing else.
+        for name in [
+            "id_rsa",
+            "id_ed25519",
+            ".netrc",
+            "live.tfvars",
+            "server.pem",
+        ] {
+            assert!(
+                !matches_only_name_substring_family(name),
+                "`{name}` names a file family, not a word"
+            );
+        }
+        // A word family that ALSO hits an extension family is a file.
+        assert!(!matches_only_name_substring_family("credentials.pem"));
+        // Nothing matches at all.
+        assert!(!matches_only_name_substring_family("README"));
+        assert!(!matches_only_name_substring_family("Cargo.toml"));
     }
 
     #[test]

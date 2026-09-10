@@ -921,18 +921,31 @@ fn pm_guard_denies_secret_file_copy_into_a_worktree_from_native_subagent() {
 #[test]
 fn pm_guard_allows_secret_file_copy_outside_a_worktree_and_ordinary_copies_into_one() {
     let (_dir, repo) = main_checkout_fixture();
-    for command in [
-        // Secret-shaped source, but the destination is not a worktree.
-        "cp .env /Users/agent/backup/.env",
-        // Worktree destination, but an ordinary, non-secret source.
-        "cp README.md .claude/worktrees/agent-x/README.md",
-    ] {
-        assert_eq!(
-            run_pm_guard(&bash_payload_at(command, &repo, ""), &[]).trim(),
-            "",
-            "expected allow for: {command}"
-        );
-    }
+    // Worktree destination, but an ordinary, non-secret source.
+    assert_eq!(
+        run_pm_guard(
+            &bash_payload_at(
+                "cp README.md .claude/worktrees/agent-x/README.md",
+                &repo,
+                ""
+            ),
+            &[]
+        )
+        .trim(),
+        "",
+        "an ordinary copy into a worktree must be allowed"
+    );
+    // #7266 round 5: the #7122 COPY rule still permits a secret-shaped source
+    // whose destination is outside a worktree — its own unit test
+    // `allows_secret_copy_to_a_non_worktree_destination` proves that — but the
+    // read rule now refuses any command that NAMES such a file under a verb
+    // outside its allowlist, and `cp` is not on it. The composed guard denies.
+    let stdout = run_pm_guard(
+        &bash_payload_at("cp .env /Users/agent/backup/.env", &repo, ""),
+        &[],
+    );
+    assert_denied(&stdout);
+    assert!(stdout.contains("#7266"), "must cite the issue: {stdout}");
 }
 
 #[test]
@@ -2496,17 +2509,16 @@ fn pm_guard_denies_a_secret_copied_to_a_source_extension_name() {
             "`{command}` must cite the issue: {stdout}"
         );
     }
-    // A copy that keeps the source's own extension is out of the rename rule's
-    // scope, and the destination is not a worktree — today's verdict is allow.
+    // A copy that keeps the source's own extension is out of the RENAME rule's
+    // scope, but since #7266 round 5 the read rule refuses any command naming a
+    // secret-shaped file under a verb outside its allowlist. `cp` is not on it.
     let stdout = run_pm_guard_at(
         &bash_payload_at("cp terraform.tfvars backup.tfvars", &repo, ""),
         UNREACHABLE_DAEMON,
         &repo,
     );
-    assert!(
-        stdout.trim().is_empty(),
-        "a same-extension backup copy outside a worktree must be allowed: {stdout}"
-    );
+    assert_denied(&stdout);
+    assert!(stdout.contains("#7266"), "must cite the issue: {stdout}");
 }
 
 #[test]
@@ -2619,10 +2631,12 @@ fn pm_guard_denies_a_secret_laundered_to_an_unsuspicious_name() {
             "`{command}` must cite the issue: {stdout}"
         );
     }
-    // The carve-outs the widening must preserve.
+    // #7266 round 5: `cp .env .env.bak` and `cp /repo/.env /tmp/` were carve-outs
+    // of the COPY rule and still are — but the read rule refuses every command
+    // that names a secret-shaped file outside its verb allowlist, so the
+    // composed guard denies both. They moved to the deny arm above in spirit;
+    // what stays allowed here is work that names no secret file at all.
     for command in [
-        "cp .env .env.bak",
-        "cp /repo/.env /tmp/",
         "npm install token-bucket token-bucket",
         "grep -rn credentials src/ > out.md",
         "mv crates/trusty-audit/src/grounding/secrets.rs renamed.rs",
@@ -2643,14 +2657,22 @@ fn pm_guard_denies_a_secret_laundered_to_an_unsuspicious_name() {
 fn pm_guard_still_allows_ordinary_reads_and_non_operand_mentions() {
     // The other half of #7266's acceptance: the rule must not tax ordinary
     // work. A line range of a normal file, a `cat` of a manifest, a `tfvars`
-    // string that is an argument rather than a file operand, and the safe
-    // key-name-only read the issue documents all stay allowed.
+    // string that names no file, an extension glob, and the three word families
+    // used as English words all stay allowed.
+    //
+    // `grep -o '^key_[a-z_]*' terraform.tfvars` is deliberately NOT here any
+    // more: rounds 1 to 4 carved it out, and round 5 withdrew the carve-out
+    // because it was the one place a verb's FLAGS decided the verdict — see
+    // `denies_the_key_name_only_grep_the_earlier_rounds_carved_out`.
     let (_dir, repo) = main_checkout_fixture();
     for command in [
         "sed -n '1,5p' README.md",
         "cat Cargo.toml",
         "git log --grep tfvars",
-        "grep -o '^key_[a-z_]*' terraform.tfvars",
+        "grep -rn TODO --include=*.toml .",
+        "echo \"no secrets here\"",
+        "grep -rn credentials src/",
+        "cargo build 2>&1 | grep error",
     ] {
         let stdout = run_pm_guard_at(
             &bash_payload_at(command, &repo, ""),
@@ -2672,6 +2694,83 @@ fn pm_guard_still_allows_ordinary_reads_and_non_operand_mentions() {
         stdout.trim().is_empty(),
         "Read of a doc must allow: {stdout}"
     );
+}
+
+#[test]
+fn pm_guard_denies_every_verb_bypass_of_the_secret_file_rule() {
+    // #7266 round 5, against the real binary. Rounds 1 to 4 enumerated the
+    // verbs that print a file and were bypassed four times by a verb the list
+    // did not carry. These are the round-4 verdict's four classes plus the
+    // earlier rounds' — none of them reads through a verb this guard names, and
+    // all of them deny because the FILE decides.
+    //
+    // `bash_payload_at` interpolates the command into JSON without escaping, so
+    // every row here is spelled without a double quote. The double-quoted
+    // spellings (`echo "$(cat .env)"`, `php -r 'readfile(".env");'`) live in
+    // this module's unit corpus, `BYPASS_CORPUS`.
+    let (_dir, repo) = main_checkout_fixture();
+    for command in [
+        "echo $(cat .env)",
+        "X=$(cat .env)",
+        "dd if=.env of=/dev/stdout",
+        "tar cf - .env",
+        "php -r 'readfile(.env);'",
+        "deno eval 'Deno.readTextFileSync(.env)'",
+        "perl -ne 'print' .env",
+        "xxd .env",
+        "base64 .env",
+        "strings .env",
+        "cp .env /tmp/x",
+        "mv .env x",
+        "grep -r SECRET .env",
+        "cat id_rsa",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert_denied(&stdout);
+        assert!(
+            stdout.contains("#7266"),
+            "`{command}` must cite the issue: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_allows_the_safe_handling_verbs_on_a_secret_file() {
+    // The escape the deny needs to stay usable: an agent must still see that a
+    // secret file exists, stage it, and delete it. Every other verb denies, so
+    // this arm is what keeps the rule from being routed around.
+    let (_dir, repo) = main_checkout_fixture();
+    for command in [
+        "ls -la .env",
+        "stat .env",
+        "rm .env.bak",
+        "test -f .env",
+        "file .env",
+        "git add .env.example",
+        "git status",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert!(
+            stdout.trim().is_empty(),
+            "`{command}` must be allowed: {stdout}"
+        );
+    }
+    // The allowlist is a claim about the program, and a nested command voids it.
+    let stdout = run_pm_guard_at(
+        &bash_payload_at("ls $(cat .env)", &repo, ""),
+        UNREACHABLE_DAEMON,
+        &repo,
+    );
+    assert_denied(&stdout);
+    assert!(stdout.contains("#7266"), "must cite the issue: {stdout}");
 }
 
 #[test]

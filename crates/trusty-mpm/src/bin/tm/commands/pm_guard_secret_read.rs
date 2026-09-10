@@ -1,170 +1,151 @@
-//! `tm hook --pm-guard` — line-range and partial READS of a secret-bearing
-//! file (issue #7266).
+//! `tm hook --pm-guard` — a Bash command, `Read` or `Grep` that NAMES a
+//! secret-bearing file (issue #7266).
 //!
 //! Why: a `local-ops` agent told "never print tfvars values" printed an ngrok
-//! authtoken by running `sed -n '38,46p' terraform.tfvars` to locate an
-//! insertion line. The brief forbade `cat` by implication, and a line-range
-//! print is not `cat`, so nothing stopped it — the sibling
-//! [`super::pm_guard_bash`] `secret_file_copy` rule screens only a `cp`/`mv` of
-//! such a file INTO a worktree, never a read of one in place. Issue #7266
-//! records this as the fifth exposure of the same class through a different
-//! command each time, which is why this rule keys on the CLASS of verb that
-//! prints file bytes rather than on the spellings already seen.
+//! authtoken by running `sed -n '38,46p' terraform.tfvars`. Rounds 1 through 4
+//! answered that by enumerating the verbs that print file bytes — `cat`, `sed`,
+//! `head`, then `base64`, `diff`, then a process-substitution wrapper — and
+//! each round's critic bypassed the list with a verb it did not name:
+//! `dd if=.env`, `tar cf - .env`, `php -r 'readfile(".env")'`, `deno eval`,
+//! `perl -ne`, and `echo "$(cat .env)"`, which no lexer-based operand rule sees
+//! at all. Every round found a sibling class the previous one missed, so round
+//! 5 inverts the rule: the FILE decides, not the verb.
 //!
-//! What: [`evaluate_secret_file_read_command`] denies a Bash command when a
-//! content-printing verb ([`CONTENT_PRINTING_VERBS`]), a shell input
-//! redirection, or an inline interpreter program
-//! ([`INLINE_PROGRAM_INTERPRETERS`]) names a file operand whose basename is
-//! secret-bearing, and [`evaluate_secret_file_read_tool`] denies a `Read` or
-//! `Grep` tool call on the same class of path — with or without an
-//! `offset`/`limit` range, since a partial read prints values exactly as a
-//! whole one does, and `Grep` with `output_mode="content"` prints every
-//! matching line verbatim.
+//! What: [`evaluate_secret_file_read_command`] denies a Bash segment as soon as
+//! any word in it names a secret-bearing file, whatever the segment does with
+//! it, and [`evaluate_secret_file_read_tool`] denies a `Read` or `Grep` call on
+//! the same class of path. [`SAFE_HANDLING_VERBS`] and
+//! [`SAFE_GIT_SUBCOMMANDS`] are the only escape: a segment whose program is one
+//! of them, which runs no nested command, and whose secret-shaped words are all
+//! direct arguments of that program, is allowed. Those verbs move, delete,
+//! stage or describe a file; none of them prints its bytes.
 //!
-//! Two fallbacks decide what happens when the shell text resists lexing, and
-//! neither is a blanket refusal. A segment `shlex::split` rejects is not
-//! skipped — its words are scanned and a secret-shaped one denies — but a
-//! segment with no such word ALLOWS, so this is a word-level fallback, not
-//! "every unlexable segment is denied" (round 2's module doc claimed the
-//! latter; #7266 round 3, critic MEDIUM). Refusing every unlexable segment
-//! would cost far more ordinary work than it protects, which is the same call
-//! `pm_guard_bash::secret_file_copy` makes for the same reason. The second
-//! fallback covers process substitution: `shlex::split` yields `<(cat` and
-//! `.env)` for `diff <(cat .env) /dev/null`, so [`strip_process_substitution`]
-//! takes the wrapper off before any basename match AND a segment carrying
-//! `<(`/`>(` with a secret-shaped word in it is refused outright, since the verb
-//! inside such a wrapper need not be one [`CONTENT_PRINTING_VERBS`] names.
+//! The verb no longer needs parsing, so the reading it does no longer needs
+//! recognising. `$(cat .env)`, `dd if=.env`, `xxd .env`,
+//! `python -c 'open(".env")'` and an unlexable segment carrying `.env` all
+//! reach the same deny through the same test — [`secret_files_named_in`] cuts
+//! the raw segment at every byte a path cannot contain, so a filename hidden
+//! inside a quoted program string, a substitution or a broken command still
+//! surfaces as a word. A command this guard cannot lex therefore fails CLOSED,
+//! because lexing is only ever consulted to GRANT the allowlist, never to deny.
 //!
-//! The file classifier is NOT a second list — it is the one
-//! `pm_guard_bash::secret_file_copy` already owns, read at this rule's scope by
-//! [`is_secret_read_target`] through [`secret_pattern_overlaps`]. That
-//! predicate is what makes a caller's GLOB answerable: round 2 compared
-//! `Grep(glob = "*.env")` against the list as though it were a filename,
-//! matched nothing and allowed the dump, while `glob = "*.pem"` denied only
-//! because that entry happens to carry a `*` in the same place (#7266 round 3,
-//! critic CRITICAL 1). A glob denies when it TARGETS a credential family by
-//! name; a sound pattern-overlap test was tried in round 3 and taxed
-//! `Grep(glob = "*.toml")` and every other ordinary extension search, which is
-//! why it is not the test (#7266 round 4). A glob carrying no literal character
-//! at all is exempt on top of that, because it selects the same files a `Grep`
-//! with no glob does — see [`selects_every_name`]. The only further narrowing is
-//! [`has_transparent_source_extension`]: that list's three name-SUBSTRING
-//! patterns (`*credentials*`, `*secrets*`, `token*`) match 24 ordinary tracked
-//! files in this repository (`credentials.rs`, `tokens.css`, `secrets.rs`,
-//! `token.rs`), and a read guard that refuses `cat crates/…/credentials.rs` is
-//! a rule agents route around. Every extension-typed family in that list
-//! (`*.tfvars`, `.env*`, `*.pem`, `*.key`, `id_rsa*`, `*.p12`, …) is untouched
-//! by the narrowing, because none of those spellings ends in a source or
-//! markup extension.
+//! The file classifier is the one `pm_guard_bash::secret_file_copy` owns, read
+//! here through [`is_secret_read_target`]; round 5 adds no pattern. What it
+//! does add is a shape test, [`names_a_secret_file`]. Three denylist entries
+//! (`*credentials*`, `*secrets*`, `token*`) have an English word for a literal
+//! core, and a rule that fires under every verb would refuse
+//! `echo "no secrets here"`, `git commit -m "fix token handling"` and
+//! `grep -rn credentials src/`. A word matched only by those three
+//! (`pm_guard_bash::matches_only_name_substring_family`) counts as a file
+//! reference only when it is written as a path — `cat ./secrets` denies,
+//! `find secrets/ -name '*.md'` does not. Every other family is a filename and
+//! nothing else, so `cat id_rsa` denies on the bare word.
 //!
-//! The one sanctioned read stays allowed: [`is_key_name_only_grep`] permits a
-//! `grep -o` whose pattern is anchored at line start and can match only
-//! identifier characters (`grep -o '^key_[a-z_]*' file`), which issue #7266's
-//! closure names as the safe-read pattern. Such a pattern cannot cross the `=`
-//! that separates a key from its value, so no value can reach the transcript.
+//! What this costs, deliberately: naming a secret-shaped file in ANY command
+//! now denies, including one that reads nothing — `git log --grep .env`,
+//! `git commit -m "add .env.example"`, `cp .env .env.bak`. Rounds 1 to 4
+//! allowed those and were bypassed four times; a rule an agent can route around
+//! by renaming the verb protects nothing. Rephrasing the message, or handing
+//! the file to a tool by absolute path, is the way through.
 //!
-//! The carve-out is only safe while nothing can MOVE a secret into one of
-//! those names, so [`is_secret_read_target`] is `pub(crate)` and
-//! `pm_guard_bash::secret_file_copy` calls it to refuse
-//! `cp terraform.tfvars secrets.rs` — and, since #7266 round 3,
-//! `cp .env ./notes.txt` — to any destination basename this function does not
-//! also refuse, worktree or not. Without that second half the carve-out was the
-//! bypass: copy, then read the copy.
+//! Residual, named rather than silently allowed: a file called exactly
+//! `secrets` or `token` with no extension and no directory in front of it is
+//! not screened (see above); a path that reaches the command only through a
+//! variable (`sed -n 1,5p "$F"`) is not resolved, because this rule reads words
+//! and not the filesystem; `git show HEAD:terraform.tfvars` prints a COMMITTED
+//! copy, which no filename rule sees; and a GLOB whose only literal is the TAIL
+//! of an `.env.<name>` file (`Grep(glob = "*.production")`) names no family's
+//! core, a trade #7266 round 4 made to keep every ordinary extension search
+//! working.
 //!
-//! Residual bypasses, deliberate and documented rather than silently allowed:
-//! a `.yml`/`.yaml` credential manifest read by name (`secrets.yaml`) is
-//! carved out with the rest of the markup extensions; `git show
-//! HEAD:terraform.tfvars` prints a COMMITTED copy through a verb this rule has
-//! no opinion about; a file operand that reaches the verb only through a
-//! variable (`sed -n 1,5p "$F"`) is not resolved here — this rule reads
-//! basenames, not the filesystem; and a GLOB whose only literal is the TAIL of
-//! an `.env.<name>` file (`Grep(glob = "*.production")` reaching
-//! `.env.production`) names no credential family's literal core, so it is not
-//! screened. Closing that last one costs every ordinary extension glob, which
-//! is the round-3 trade #7266 round 4 reversed — see
-//! [`secret_pattern_overlaps`].
-//!
-//! Test: `denies_the_reported_sed_line_range`, `denies_a_tail_of_a_dotenv`,
-//! `denies_a_grep_of_a_tfvars_json`, `denies_a_read_tool_call_with_a_range`,
-//! `allows_a_sed_line_range_of_an_ordinary_file`, `allows_cat_of_a_manifest`,
-//! `allows_a_tfvars_mention_that_is_not_a_file_operand`, and the rest of this
-//! module's `tests` submodule. The rule is proved WIRED — a call site this
-//! module's own tests could not miss — end to end through the real binary by
-//! `pm_guard_denies_a_line_range_read_of_a_secret_bearing_file`,
+//! Test: `denies_the_reported_sed_line_range`,
+//! `denies_every_bypass_the_earlier_rounds_missed`,
+//! `allows_the_ordinary_command_corpus`,
+//! `allows_only_the_safe_handling_verbs`,
+//! `denies_an_unlexable_segment_that_names_a_secret`, and the rest of this
+//! module's `tests` submodule. The rule is proved WIRED end to end through the
+//! real binary by `pm_guard_denies_a_line_range_read_of_a_secret_bearing_file`,
 //! `pm_guard_denies_a_read_tool_call_on_a_secret_bearing_file`,
 //! `pm_guard_denies_a_grep_tool_call_on_a_secret_bearing_file`,
 //! `pm_guard_denies_a_grep_glob_that_can_match_a_secret`,
 //! `pm_guard_denies_a_read_through_process_substitution`,
-//! `pm_guard_denies_a_secret_laundered_to_an_unsuspicious_name` and
+//! `pm_guard_denies_every_verb_bypass_of_the_secret_file_rule`,
+//! `pm_guard_allows_the_safe_handling_verbs_on_a_secret_file` and
 //! `pm_guard_still_allows_ordinary_reads_and_non_operand_mentions` in
 //! `tests/tm_hook_pm_guard.rs`.
 
 use std::path::Path;
 
-use crate::commands::hook_rewrite::first_command_token;
+use crate::commands::hook_rewrite::{first_command_token, strip_wrapper_prefix};
 use crate::commands::pm_guard_bash::{
-    expand_brace_alternatives, secret_pattern_overlaps, split_shell_segments,
-    strip_process_substitution,
+    expand_brace_alternatives, git_subcommand, matches_only_name_substring_family,
+    secret_pattern_overlaps, split_shell_segments, strip_process_substitution,
 };
 
-/// Verbs that print a named file's bytes to the transcript.
+/// Programs that may name a secret-bearing file without printing its bytes.
 ///
-/// Why: the incident's `sed -n` is one spelling of one behaviour — reading a
-/// file and printing part of it. Naming the behaviour's whole verb class is
-/// what stops the next exposure arriving through `head`, `cut` or `xxd`
-/// (issue #7266 counts five spellings already).
-/// What: matched against the BASENAME of any token in a segment's argv, so a
-/// wrapper (`sudo cat`, `xargs head`) does not hide the verb.
-///
-/// `base64`, `basenc` and `diff` join the list in #7266's fix round: an
-/// encoder prints every byte of the file it is handed, and `diff .env
-/// /dev/null` prints every line as a deletion — both are the incident's
-/// behaviour through a verb the first list did not name.
-/// Test: `denies_every_content_printing_verb`, `denies_an_encoded_dump`,
-/// `denies_a_diff_against_dev_null`.
-const CONTENT_PRINTING_VERBS: &[&str] = &[
-    "cat", "tac", "head", "tail", "sed", "awk", "gawk", "mawk", "nawk", "cut", "grep", "egrep",
-    "fgrep", "rg", "less", "more", "bat", "nl", "strings", "od", "xxd", "hexdump", "paste", "fold",
-    "rev", "column", "pr", "base64", "basenc", "diff",
-];
+/// Why: #7266 rounds 1 to 4 listed the verbs that PRINT a file and were
+/// bypassed four times by a verb the list did not carry. Round 5 lists the
+/// verbs that do not print instead, which is a question with a short and
+/// stable answer: `ls` and `stat` report metadata, `file` reports a type,
+/// `test`/`[` answer a predicate, and `rm` deletes. None of them can put a
+/// credential in the transcript, and an agent needs all five to manage a
+/// secret file it must never read.
+/// What: matched against the BASENAME of the segment's resolved program, after
+/// `strip_wrapper_prefix` removes leading env assignments and `sudo`/`nice`
+/// noise. Anything not on this list, and not a [`SAFE_GIT_SUBCOMMANDS`] git
+/// call, denies.
+/// Test: `allows_only_the_safe_handling_verbs`,
+/// `denies_every_bypass_the_earlier_rounds_missed`.
+const SAFE_HANDLING_VERBS: &[&str] = &["ls", "stat", "rm", "test", "[", "file"];
 
-/// Verbs whose FIRST positional argument is a pattern or program, not a file.
+/// `git` subcommands that may name a secret-bearing file.
 ///
-/// Why: `grep -n TOKEN app.tfvars` and `sed -n '12,14p' f` both carry a
-/// non-file first positional; treating it as a file operand would let
-/// `grep .env README.md` deny on its pattern.
-/// Test: `allows_a_grep_whose_pattern_looks_like_a_secret_name`.
-const PATTERN_LEADING_VERBS: &[&str] = &[
-    "sed", "awk", "gawk", "mawk", "nawk", "grep", "egrep", "fgrep", "rg",
-];
+/// Why: staging, removing, renaming and status-checking a file are the git
+/// operations that touch a path without emitting its contents. `git show`,
+/// `git diff`, `git log -p` and `git cat-file` all print bytes, so git is not
+/// safe as a program — only these four subcommands are.
+/// What: compared against `pm_guard_bash::git_subcommand`'s answer, which
+/// already resolves the subcommand behind `git -C <path>` and the other global
+/// options.
+/// Test: `allows_only_the_safe_handling_verbs`,
+/// `denies_a_git_subcommand_that_prints_file_bytes`.
+const SAFE_GIT_SUBCOMMANDS: &[&str] = &["add", "rm", "mv", "status"];
 
-/// The `grep` family, whose key-name-only carve-out [`is_key_name_only_grep`] decides.
-const GREP_VERBS: &[&str] = &["grep", "egrep", "fgrep", "rg"];
-
-/// Flags whose FOLLOWING token is a pattern or script, not a file operand.
+/// Shell text that runs a SECOND command inside the segment.
 ///
-/// Why: when one of these is present the first positional is already a file,
-/// so [`file_operands`] must not drop it — `sed -n -e '1,5p' terraform.tfvars`
-/// would otherwise skip the very file it reads.
-const PATTERN_FLAGS: &[&str] = &["-e", "--expression", "--regexp", "-f", "--file"];
+/// Why: `ls $(cat .env)` has `ls` for a program and prints the file anyway.
+/// The allowlist above is a claim about what the segment's program does with
+/// its arguments, and that claim is void as soon as another command runs
+/// inside them.
+/// What: substrings checked against the raw segment; any hit withdraws the
+/// allowlist, so the segment falls through to the deny.
+/// Test: `denies_a_safe_verb_wrapping_a_substitution`.
+const NESTED_COMMAND_MARKERS: &[&str] = &["$(", "`", "<(", ">(", "${"];
 
-/// Interpreters that run their `-c`/`-e` argument as an inline program.
+/// Bytes a filename can carry, for the purpose of cutting a raw segment into
+/// candidate path words.
 ///
-/// Why: `python -c 'print(open("terraform.tfvars").read())'` prints the file
-/// through a verb no filename-operand rule sees — the path is a substring of
-/// one program token. Issue #7266 names this shape explicitly.
-/// Test: `denies_an_inline_python_program_that_opens_a_secret`.
-const INLINE_PROGRAM_INTERPRETERS: &[&str] = &[
-    "python", "python2", "python3", "ruby", "perl", "node", "php", "deno",
-];
+/// Why: the deny must not depend on lexing, because `echo "$(cat .env)"`,
+/// `php -r 'readfile(".env")'` and an unbalanced quote all defeat a lexer while
+/// still naming the file in plain text. Cutting at every byte a path cannot
+/// contain surfaces the name in all three.
+/// What: ASCII alphanumerics plus the punctuation a real path uses. A quote,
+/// `$`, `(`, `=`, `*`, `<`, `:` and whitespace are all cuts, so
+/// `if=.env`, `"$(cat .env)"` and `*.env` each yield the bare name.
+/// Test: `secret_files_named_in_finds_a_name_inside_a_program_string`.
+fn is_path_byte(c: char) -> bool {
+    c.is_ascii_alphanumeric()
+        || matches!(c, '.' | '_' | '-' | '/' | '~' | '+' | '@' | '{' | '}' | ',')
+}
 
 /// File extensions whose content is source or markup, never a credential value.
 ///
-/// Why: see the module doc — the shared classifier's `*credentials*`,
-/// `*secrets*` and `token*` patterns match 24 tracked files in this repository
-/// alone. Every extension-typed secret family in that list is unaffected,
-/// because none of `*.tfvars`, `.env*`, `*.pem`, `*.key`, `id_rsa*`, `*.p12`,
-/// `*.pfx`, `*.jks`, `*.kdbx`, `*.ovpn` or `.netrc` ends in one of these.
+/// Why: the shared classifier's `*credentials*`, `*secrets*` and `token*`
+/// patterns match 24 tracked files in this repository alone. Every
+/// extension-typed secret family is unaffected, because none of `*.tfvars`,
+/// `.env*`, `*.pem`, `*.key`, `id_rsa*`, `*.p12`, `*.pfx`, `*.jks`, `*.kdbx`,
+/// `*.ovpn` or `.netrc` ends in one of these.
 /// `.json` and `.toml` are deliberately ABSENT: `credentials.json` and
 /// `secrets.toml` are real credential-store spellings, and `*.tfvars.json` is
 /// itself a JSON secret.
@@ -175,16 +156,14 @@ const TRANSPARENT_SOURCE_EXTENSIONS: &[&str] = &[
     "sh", "bash", "zsh", "yml", "yaml", "snap", "baseline", "lock",
 ];
 
-/// Classify any tool call for a read of a secret-bearing file: `Some(reason)`
-/// denies, `None` allows.
+/// Classify any tool call for a secret-bearing file: `Some(reason)` denies,
+/// `None` allows.
 ///
 /// Why: the one entry point `pm_guard` calls, so a Bash command and a `Read`
-/// tool call are decided by the same rule and reported with the same reason —
-/// the verb that prints the bytes is the leak, whichever surface issues it.
+/// tool call are decided by the same rule and reported with the same reason.
 /// What: routes `Bash` to [`evaluate_secret_file_read_command`] over its
-/// `command` string and `Read` to [`evaluate_secret_file_read_tool`] over its
-/// `file_path`; every other tool allows.
-/// Test: see the module doc's test list.
+/// `command` string and every other tool to [`evaluate_secret_file_read_tool`].
+/// Test: `the_unified_entry_point_routes_both_surfaces`.
 pub(crate) fn evaluate_secret_file_read(
     tool_name: &str,
     tool_input: Option<&serde_json::Value>,
@@ -199,79 +178,163 @@ pub(crate) fn evaluate_secret_file_read(
     evaluate_secret_file_read_tool(tool_name, tool_input)
 }
 
-/// Classify a Bash command for a read of a secret-bearing file: `Some(reason)`
+/// Classify a Bash command that names a secret-bearing file: `Some(reason)`
 /// denies, `None` allows.
 ///
-/// Why: the one Bash entry point `pm_guard` calls, kept to the same shape as
-/// the sibling ABSOLUTE guards so the policy underneath stays testable.
-/// What: walks [`split_shell_segments`] (which already descends into an `sh -c`
-/// wrapper), and for each segment checks, in order, a process substitution, an
-/// input redirection, an inline interpreter program, then a content-printing
-/// verb's file operands. An unlexable segment falls back to a word scan and
-/// denies on a secret-shaped word rather than skipping; a segment with no such
-/// word allows.
-/// Test: see the module doc's test list.
+/// Why: the inverted rule #7266 round 5 asks for. Rounds 1 to 4 asked "is this
+/// verb one that prints a file?" and each round's critic answered with a verb
+/// the list had never heard of. This asks "does this segment name a secret
+/// file?" instead, which no new verb can change the answer to.
+/// What: walks [`split_shell_segments`] (which already descends into an
+/// `sh -c` wrapper) and, for each segment, collects every word that
+/// [`names_a_secret_file`] answers for. A segment naming none allows. A segment
+/// naming one allows only when [`segment_only_handles`] proves the segment is a
+/// [`SAFE_HANDLING_VERBS`] or [`SAFE_GIT_SUBCOMMANDS`] call taking those words
+/// as direct arguments; otherwise the first such word denies.
+/// Test: `denies_the_reported_sed_line_range`,
+/// `denies_every_bypass_the_earlier_rounds_missed`,
+/// `allows_the_ordinary_command_corpus`.
 pub(crate) fn evaluate_secret_file_read_command(command: &str) -> Option<String> {
     for segment in split_shell_segments(command) {
         let trimmed = segment.trim();
         if trimmed.is_empty() {
             continue;
         }
-        // #7266 round 3: a process substitution feeds a file to a verb this
-        // list may never name (`wc -l <(cat .env)`), and it survives lexing as
-        // two tokens the operand rules cannot read. Refuse the whole segment
-        // when it names a secret-shaped word.
-        if (trimmed.contains("<(") || trimmed.contains(">("))
-            && let Some(target) = first_secret_word(trimmed)
-        {
-            return Some(deny_reason(&target, "a process substitution"));
-        }
-        // #7266: a segment this guard cannot lex still names its words, and one
-        // of them being secret-shaped is enough to refuse.
-        let Some(argv) = shlex::split(trimmed) else {
-            if let Some(target) = first_secret_word(trimmed) {
-                return Some(deny_reason(&target, "a command this guard cannot parse"));
-            }
+        let named = secret_files_named_in(trimmed);
+        let Some(first) = named.first() else {
             continue;
         };
-        if let Some(target) = redirection_operand(&argv) {
-            return Some(deny_reason(&target, "shell input redirection"));
-        }
-        let verb = first_command_token(trimmed).map(command_basename);
-        if let Some(verb) = verb.as_deref()
-            && INLINE_PROGRAM_INTERPRETERS.contains(&verb)
-            && has_inline_program_flag(&argv)
-            && let Some(target) = first_secret_word(trimmed)
-        {
-            return Some(deny_reason(&target, &format!("an inline `{verb}` program")));
-        }
-        let Some(verb_idx) = argv
-            .iter()
-            .position(|tok| CONTENT_PRINTING_VERBS.contains(&command_basename(tok).as_str()))
-        else {
-            continue;
-        };
-        let printing_verb = command_basename(&argv[verb_idx]);
-        let tail = &argv[verb_idx + 1..];
-        let Some(target) = file_operands(&printing_verb, tail)
-            .into_iter()
-            .find(|operand| is_secret_read_target(operand))
-        else {
-            continue;
-        };
-        if is_key_name_only_grep(&printing_verb, tail) {
+        if segment_only_handles(trimmed, &named) {
             continue;
         }
-        return Some(deny_reason(&target, &format!("a `{printing_verb}` read")));
+        return Some(deny_reason(first, &describe_command(trimmed)));
     }
     None
 }
 
-/// Classify a native READ tool call for a secret-bearing target:
+/// Every distinct word in `text` that names a secret-bearing file, in order.
+///
+/// Why: see [`is_path_byte`] — the deny must survive a segment no lexer can
+/// read, so the scan reads bytes rather than tokens.
+/// What: cuts `text` at every non-path byte and keeps the words
+/// [`names_a_secret_file`] answers for, without repeats.
+/// Test: `secret_files_named_in_finds_a_name_inside_a_program_string`.
+fn secret_files_named_in(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for word in text.split(|c: char| !is_path_byte(c)) {
+        if word.is_empty() || !names_a_secret_file(word) {
+            continue;
+        }
+        if !out.iter().any(|seen| seen == word) {
+            out.push(word.to_string());
+        }
+    }
+    out
+}
+
+/// Whether one word names a file this guard refuses to let a command touch.
+///
+/// Why: the classifier alone is not enough once the rule fires under every
+/// verb. `*credentials*`, `*secrets*` and `token*` have English words for
+/// literal cores, so `echo "no secrets here"` and `grep -rn credentials src/`
+/// would deny on a bare classifier hit — over-blocking of exactly the kind
+/// #7266 round 4 had to reverse.
+/// What: takes the word's basename, requires [`is_secret_read_target`], and
+/// then requires FILE SHAPE: a leading `.`, an extension, a family that is a
+/// filename rather than a word
+/// (`pm_guard_bash::matches_only_name_substring_family`), or — for the word
+/// families — a directory written in front of it (`./secrets`, `/etc/secrets`,
+/// but not the directory `secrets/`).
+/// Test: `allows_the_ordinary_command_corpus`,
+/// `a_word_family_counts_only_when_it_is_written_as_a_path`.
+fn names_a_secret_file(word: &str) -> bool {
+    let base = command_basename(word);
+    if base.is_empty() || !is_secret_read_target(&base) {
+        return false;
+    }
+    if base.starts_with('.') || Path::new(&base).extension().is_some() {
+        return true;
+    }
+    if !matches_only_name_substring_family(&base) {
+        return true;
+    }
+    word.contains('/') && !word.ends_with('/')
+}
+
+/// Whether `segment` is a safe-verb call taking every one of `named` as a
+/// direct argument.
+///
+/// Why: the narrow escape the deny needs to stay usable — an agent must still
+/// be able to see that `.env` exists, stage `.env.example`, and delete
+/// `.env.bak`. Granting that on the PROGRAM is sound only while the program is
+/// the only thing that runs, which is why a nested command withdraws it.
+/// What: refuses on any [`NESTED_COMMAND_MARKERS`] hit, then requires
+/// `shlex::split` to succeed — so an unlexable segment can never be granted the
+/// allowlist and fails closed — then requires the resolved program to be a
+/// [`SAFE_HANDLING_VERBS`] entry, or `git` with a [`SAFE_GIT_SUBCOMMANDS`]
+/// subcommand. Finally every word in `named` must reappear as a secret-shaped
+/// word of an argument token that follows the program.
+/// Test: `allows_only_the_safe_handling_verbs`,
+/// `denies_a_safe_verb_wrapping_a_substitution`,
+/// `denies_an_unlexable_segment_that_names_a_secret`.
+fn segment_only_handles(segment: &str, named: &[String]) -> bool {
+    if NESTED_COMMAND_MARKERS.iter().any(|m| segment.contains(m)) {
+        return false;
+    }
+    let Some(argv) = shlex::split(segment) else {
+        return false;
+    };
+    let Some(start) = strip_wrapper_prefix(&argv) else {
+        return false;
+    };
+    let Some(program) = argv.get(start).map(|t| command_basename(t)) else {
+        return false;
+    };
+    let operand_start = if SAFE_HANDLING_VERBS.contains(&program.as_str()) {
+        start + 1
+    } else if program == "git" {
+        let Some(sub) = git_subcommand(segment) else {
+            return false;
+        };
+        if !SAFE_GIT_SUBCOMMANDS.contains(&sub.as_str()) {
+            return false;
+        }
+        let Some(at) = argv.iter().position(|t| *t == sub) else {
+            return false;
+        };
+        at + 1
+    } else {
+        return false;
+    };
+    let operands: Vec<String> = argv
+        .get(operand_start..)
+        .unwrap_or_default()
+        .iter()
+        .flat_map(|tok| secret_files_named_in(tok))
+        .collect();
+    named.iter().all(|n| operands.iter().any(|o| o == n))
+}
+
+/// How the deny reason names what the segment was doing.
+///
+/// What: the resolved program when the segment lexes, and an explicit
+/// "cannot parse" when it does not — that second case is the fail-closed arm,
+/// so the reason says so rather than naming a program it could not resolve.
+fn describe_command(segment: &str) -> String {
+    if shlex::split(segment).is_none() {
+        return "a command this guard cannot parse".to_string();
+    }
+    match first_command_token(segment) {
+        Some(verb) => format!("a `{verb}` command"),
+        None => "a command this guard cannot parse".to_string(),
+    }
+}
+
+/// Classify a native `Read` or `Grep` tool call for a secret-bearing target:
 /// `Some(reason)` denies, `None` allows.
 ///
-/// Why: the harness's own `Read` tool takes `offset`/`limit`, which is the
-/// exact line-range shape issue #7266 reports — and a `Read` with no range is a
+/// Why: the harness's own `Read` takes `offset`/`limit`, which is the exact
+/// line-range shape issue #7266 reports — and a `Read` with no range is a
 /// strictly larger exposure, so BOTH deny. `Grep` is the same leak through the
 /// second native tool: with `output_mode="content"` it prints every matching
 /// line verbatim, so `Grep(pattern=".", path="terraform.tfvars")` dumps the
@@ -282,7 +345,8 @@ pub(crate) fn evaluate_secret_file_read_command(command: &str) -> Option<String>
 /// and [`evaluate_grep_tool`] answers; `None` for every other tool and for a
 /// call with no readable path field.
 /// Test: `denies_a_read_tool_call_with_a_range`,
-/// `denies_a_read_tool_call_without_a_range`, `allows_a_read_of_an_ordinary_file`,
+/// `denies_a_read_tool_call_without_a_range`,
+/// `allows_a_read_of_an_ordinary_file`,
 /// `denies_a_grep_tool_call_on_a_secret_bearing_path`,
 /// `denies_a_grep_tool_call_whose_glob_names_a_secret`,
 /// `allows_a_grep_tool_call_over_a_directory_with_no_glob`,
@@ -307,10 +371,8 @@ pub(crate) fn evaluate_secret_file_read_tool(
 /// naming a directory with `glob` selecting it by basename pattern. Both print
 /// the matching lines under `output_mode="content"`, so both deny. The
 /// `output_mode` field is deliberately NOT consulted: it defaults to
-/// `files_with_matches` but any call may set it, and the Bash `grep` arm above
-/// likewise refuses a secret operand whatever the output flags say — a guard
-/// that reads the mode would allow the dump whenever the field is omitted from
-/// the payload this guard sees.
+/// `files_with_matches` but any call may set it, and a guard that read the mode
+/// would allow the dump whenever the field is omitted from the payload.
 /// What: denies on a secret-shaped `path`, then on a `glob` that TARGETS a
 /// credential family by name — [`is_secret_read_target`] decides both, reading
 /// the glob as a pattern rather than as a literal filename (#7266 round 3). A
@@ -411,197 +473,21 @@ fn command_basename(token: &str) -> String {
     strip_process_substitution(basename).to_string()
 }
 
-/// The file operands of a content-printing verb's argument tail, in order.
-///
-/// Why: `head -n 3 .env.production` and `grep -n TOKEN app.tfvars` must both
-/// resolve to the file they read and nothing else — a flag carries no path,
-/// and a pattern-leading verb's first positional is a pattern, not a file.
-/// What: skips flags (honoring a `--` end-of-flags marker), consumes the value
-/// of a [`PATTERN_FLAGS`] entry, and drops the first positional for a
-/// [`PATTERN_LEADING_VERBS`] entry only when no pattern flag already supplied
-/// the pattern.
-/// Test: `file_operands_drops_a_leading_pattern`,
-/// `file_operands_keeps_the_file_when_a_pattern_flag_is_present`.
-fn file_operands(verb: &str, tail: &[String]) -> Vec<String> {
-    let mut positional = Vec::new();
-    let mut positional_only = false;
-    let mut has_pattern_flag = false;
-    let mut skip_value = false;
-    for tok in tail {
-        if skip_value {
-            skip_value = false;
-            has_pattern_flag = true;
-            continue;
-        }
-        if !positional_only && tok == "--" {
-            positional_only = true;
-            continue;
-        }
-        if !positional_only && tok.starts_with('-') && tok.len() > 1 {
-            if PATTERN_FLAGS.contains(&tok.as_str()) {
-                skip_value = true;
-            } else if PATTERN_FLAGS.iter().any(|f| {
-                tok.starts_with(&format!("{f}="))
-                    || (!f.starts_with("--") && tok.starts_with(f) && tok.len() > f.len())
-            }) {
-                has_pattern_flag = true;
-            }
-            continue;
-        }
-        positional.push(tok.clone());
-    }
-    if !has_pattern_flag && PATTERN_LEADING_VERBS.contains(&verb) && !positional.is_empty() {
-        positional.remove(0);
-    }
-    positional
-}
-
-/// The operand of a `<` input redirection in `argv`, if any.
-///
-/// Why: `while read l; do …; done < .env` prints a secret through no
-/// content-printing verb at all — the shell opens the file.
-/// What: answers for both the separated (`< .env`) and attached (`<.env`)
-/// spellings, and only when the operand is secret-shaped.
-/// Test: `denies_shell_input_redirection_from_a_secret`.
-fn redirection_operand(argv: &[String]) -> Option<String> {
-    let mut expect_operand = false;
-    for tok in argv {
-        if expect_operand {
-            expect_operand = false;
-            if is_secret_read_target(tok) {
-                return Some(tok.clone());
-            }
-            continue;
-        }
-        let redirect = tok
-            .strip_suffix('<')
-            .is_some_and(|fd| fd.is_empty() || fd.chars().all(|c| c.is_ascii_digit()));
-        if redirect {
-            expect_operand = true;
-            continue;
-        }
-        if let Some((fd, operand)) = tok.split_once('<')
-            && (fd.is_empty() || fd.chars().all(|c| c.is_ascii_digit()))
-            && !operand.is_empty()
-            && is_secret_read_target(operand)
-        {
-            return Some(operand.to_string());
-        }
-    }
-    None
-}
-
-/// Whether `argv` carries an inline-program flag (`-c`, `-e`, or a cluster
-/// containing one).
-fn has_inline_program_flag(argv: &[String]) -> bool {
-    argv.iter().any(|tok| tok == "-c" || tok == "-e")
-}
-
-/// The first word in `segment` whose basename is secret-shaped, if any.
-///
-/// Why: an inline interpreter program and an unlexable segment both hide a path
-/// INSIDE a token (`open("terraform.tfvars")`), where no operand rule reaches
-/// it. Splitting on every character a path cannot contain surfaces it.
-/// What: cuts `segment` at any byte outside the path-ish set
-/// (alphanumerics and `. _ - / ~ + @ { } ,`) and returns the first resulting
-/// word [`is_secret_read_target`] answers for.
-/// Test: `denies_an_inline_python_program_that_opens_a_secret`,
-/// `denies_an_unlexable_segment_that_names_a_secret`.
-fn first_secret_word(segment: &str) -> Option<String> {
-    segment
-        .split(|c: char| {
-            !(c.is_ascii_alphanumeric()
-                || matches!(c, '.' | '_' | '-' | '/' | '~' | '+' | '@' | '{' | '}' | ','))
-        })
-        .filter(|w| !w.is_empty())
-        .find(|w| is_secret_read_target(w))
-        .map(str::to_string)
-}
-
-/// Whether a `grep` invocation can print only KEY NAMES, never a value.
-///
-/// Why: issue #7266's closure names `grep -o '^key_[a-z_]*' file` as the safe
-/// read, and a guard that refused the pattern it recommends would just be
-/// routed around.
-/// What: requires `-o`/`--only-matching` (so only the matched span prints) AND
-/// a pattern that [`is_key_name_only_pattern`] proves cannot cross the `=`
-/// separating a key from its value.
-/// Test: `allows_the_documented_key_name_only_grep`,
-/// `denies_a_grep_o_whose_pattern_can_match_a_value`.
-fn is_key_name_only_grep(verb: &str, tail: &[String]) -> bool {
-    if !GREP_VERBS.contains(&verb) {
-        return false;
-    }
-    let mut only_matching = false;
-    let mut pattern: Option<&str> = None;
-    let mut first_positional: Option<&str> = None;
-    let mut expect_pattern = false;
-    let mut positional_only = false;
-    for tok in tail {
-        if expect_pattern {
-            pattern = Some(tok);
-            expect_pattern = false;
-            continue;
-        }
-        if !positional_only && tok == "--" {
-            positional_only = true;
-            continue;
-        }
-        if !positional_only && tok.starts_with('-') && tok.len() > 1 {
-            if tok == "--only-matching" {
-                only_matching = true;
-            } else if tok == "-e" || tok == "--regexp" {
-                expect_pattern = true;
-            } else if let Some(rest) = tok.strip_prefix("--regexp=") {
-                pattern = Some(rest);
-            } else if !tok.starts_with("--") && tok.contains('o') {
-                only_matching = true;
-            }
-            continue;
-        }
-        if first_positional.is_none() {
-            first_positional = Some(tok);
-        }
-    }
-    let Some(pattern) = pattern.or(first_positional) else {
-        return false;
-    };
-    only_matching && is_key_name_only_pattern(pattern)
-}
-
-/// Whether a regex can match only identifier characters anchored at line start.
-///
-/// Why: such a match can never include the `=` that separates a key from its
-/// value, nor anything after it, so `grep -o` of it prints key names only.
-/// What: requires a leading `^`, a non-empty remainder, and every remaining
-/// byte in `[A-Za-z0-9_\-\[\]*+?]` — which excludes `.`, `\`, `=`, `|` and a
-/// second `^`, so neither a wildcard nor a negated class nor an alternation can
-/// reach a value.
-/// Test: `allows_the_documented_key_name_only_grep`,
-/// `denies_a_grep_o_whose_pattern_can_match_a_value`.
-fn is_key_name_only_pattern(pattern: &str) -> bool {
-    let Some(rest) = pattern.strip_prefix('^') else {
-        return false;
-    };
-    !rest.is_empty()
-        && rest.bytes().all(|b| {
-            b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'[' | b']' | b'*' | b'+' | b'?')
-        })
-}
-
-/// The deny reason, naming the file, how it was about to be read, and the
-/// sanctioned alternative (issue #7266).
+/// The deny reason, naming the file, the command that named it, and the way
+/// through (issue #7266).
 fn deny_reason(target: &str, how: &str) -> String {
     format!(
-        "reading `{target}` through {how} is refused (issue #7266) — its name is in this guard's \
+        "naming `{target}` in {how} is refused (issue #7266) — its name is in this guard's \
          secret-bearing file class (`*.tfvars`, `*.tfvars.json`, `*.tfstate*`, `.env`/`.env.*`, \
          `*.pem`, `*.key`, an SSH private key `id_rsa`/`id_dsa`/`id_ecdsa`/`id_ed25519`, \
          `.netrc`, `*.p12`/`*.pfx`/`*.jks`/`*.kdbx`, `*.ovpn`, or a name carrying \
-         `credentials`/`secrets`/`token`), and a line range redacts nothing — `sed -n '38,46p'` \
-         printed a live ngrok authtoken into a transcript exactly this way. Read only the KEY \
-         NAMES with `grep -o '^[a-z_]*' <file>`, which this guard allows, or hand the file to \
-         the tool that needs it by absolute path (`-var-file`, `-state`, `--env-file`) without \
-         printing it."
+         `credentials`/`secrets`/`token`). This rule keys on the FILE, not on the verb: four \
+         earlier rounds enumerated reading verbs and each was bypassed by one the list did not \
+         name — `sed -n '38,46p'` printed a live ngrok authtoken, then `dd if=`, `tar cf -`, \
+         `php -r`, `deno eval` and `$(cat …)` did the same. Only `ls`, `stat`, `file`, `test`, \
+         `rm` and `git add`/`rm`/`mv`/`status` may name such a file. Hand it to the tool that \
+         needs it by absolute path (`-var-file`, `-state`, `--env-file`) instead of writing its \
+         name into a command that could print it."
     )
 }
 
@@ -613,6 +499,102 @@ mod tests {
         evaluate_secret_file_read_command(command)
     }
 
+    /// Every shape a critic drove through rounds 1 to 4, plus the round-4
+    /// verdict's four new classes. All must DENY.
+    ///
+    /// Why: each round's list of reading verbs was bypassed by a verb it did
+    /// not carry, so this corpus is the standing proof that the inverted rule
+    /// no longer depends on the verb at all.
+    const BYPASS_CORPUS: &[&str] = &[
+        // Round 4's verdict, the four classes that reopened the issue.
+        "echo \"$(cat .env)\"",
+        "echo `cat .env`",
+        "X=$(cat .env)",
+        "dd if=.env of=/dev/stdout",
+        "dd if=terraform.tfvars",
+        "tar cf - .env",
+        "php -r 'readfile(\".env\");'",
+        "deno eval 'console.log(Deno.readTextFileSync(\".env\"))'",
+        "perl -ne 'print' .env",
+        "perl -pe 's/a/b/' terraform.tfvars",
+        // Round 1 to 3's classes, which must stay closed.
+        "sed -n '38,46p' terraform.tfvars",
+        "python3 -c 'print(open(\"terraform.tfvars\").read())'",
+        "xxd .env",
+        "base64 .env",
+        "basenc --base32 terraform.tfvars",
+        "strings .env",
+        "diff .env /dev/null",
+        "diff <(cat .env) /dev/null",
+        "cat <(cat .env)",
+        "wc -l <(sed -n '1,5p' /repo/.env)",
+        "cp .env /tmp/x",
+        "mv .env x",
+        "grep -r SECRET .env",
+        "while read l; do echo x; done < .env",
+        "read -r line <live.tfvars",
+        "sudo cat /etc/app/.env",
+        "sh -c \"head -n 2 live.tfvars\"",
+        "cat *.env",
+        "head -n 5 *.tfvars",
+        "awk '{print} terraform.tfvars",
+        "cat id_rsa",
+        "cat ./secrets",
+        "nl .netrc",
+        "od -c server.key",
+    ];
+
+    /// Ordinary daily commands that must ALLOW.
+    ///
+    /// Why: #7266 round 3 passed its own bypass corpus while denying
+    /// `Grep(glob = "*.toml")` and every other extension search. A deny rule's
+    /// false-positive arm is scored at bypass severity here, so this corpus is
+    /// weighted equally with [`BYPASS_CORPUS`].
+    const ORDINARY_CORPUS: &[&str] = &[
+        // Ordinary file classes, literal and globbed.
+        "cat Cargo.toml",
+        "sed -n '1,5p' README.md",
+        "head -n 20 notes.txt",
+        "tail -f build.log",
+        "cat crates/trusty-mpm/src/main.rs",
+        "grep -rn TODO --include=*.rs crates/",
+        "grep -rn TODO --include=*.toml .",
+        "grep -rn TODO --include=*.json .",
+        "grep -rn TODO --include=*.txt .",
+        "grep -rn TODO --include=*.log .",
+        "grep -rn TODO --include=*.md .",
+        "cat *.rs",
+        "ls docs/*.md",
+        // The word families, which are English words before they are filenames.
+        "echo \"no secrets here\"",
+        "grep -rn credentials src/",
+        "npm install token-bucket token-bucket",
+        "find secrets/ -name '*.md'",
+        "cargo test -p trusty-mpm token",
+        // Read-only redirection shapes (#2745).
+        "cargo check -p trusty-mpm 2>/dev/null",
+        "cargo build 2>&1 | grep error",
+        "ls -la 2>/dev/null | head -n 5",
+        // Source files that merely carry a substring pattern in the name.
+        "cat crates/trusty-agents/src/llm/credentials.rs",
+        "cat docs/design/UI/design-system/tokens.css",
+        "cat crates/trusty-audit/src/grounding/secrets.rs",
+        "cat .github/workflows/token-drift.yml",
+        "cat website/src/lib/theme/tokens.test.ts",
+        // The safe-handling verbs, on a secret file.
+        "ls -la .env",
+        "stat .env",
+        "rm .env.bak",
+        "test -f .env",
+        "[ -f .env ]",
+        "file .env",
+        "git status",
+        "git add .env.example",
+        "git -C /repo/infra add terraform.tfvars",
+        "git rm --cached .env",
+        "git mv .env.old .env.older",
+    ];
+
     #[test]
     fn denies_the_reported_sed_line_range() {
         // The exact shape from issue #7266's report.
@@ -623,30 +605,124 @@ mod tests {
     }
 
     #[test]
-    fn denies_a_tail_of_a_dotenv() {
-        let reason = eval("tail -n 3 .env.production").expect("denies");
-        assert!(reason.contains(".env.production"), "{reason}");
-    }
-
-    #[test]
-    fn denies_a_grep_of_a_tfvars_json() {
-        let reason = eval("grep -n TOKEN secrets/app.tfvars.json").expect("denies");
-        assert!(reason.contains("app.tfvars.json"), "{reason}");
-    }
-
-    #[test]
-    fn denies_every_content_printing_verb() {
-        for verb in CONTENT_PRINTING_VERBS {
-            // A pattern-leading verb's first positional is its script or
-            // pattern, not a file — `sed live.tfvars` really does read stdin —
-            // so those spellings carry one before the file operand.
-            let command = if PATTERN_LEADING_VERBS.contains(verb) {
-                format!("{verb} p live.tfvars")
-            } else {
-                format!("{verb} live.tfvars")
-            };
-            assert!(eval(&command).is_some(), "{verb} allowed `{command}`");
+    fn denies_every_bypass_the_earlier_rounds_missed() {
+        for command in BYPASS_CORPUS {
+            let reason =
+                eval(command).unwrap_or_else(|| panic!("bypass corpus row allowed: `{command}`"));
+            assert!(reason.contains("#7266"), "{reason}");
         }
+    }
+
+    #[test]
+    fn allows_the_ordinary_command_corpus() {
+        for command in ORDINARY_CORPUS {
+            assert_eq!(
+                eval(command),
+                None,
+                "ordinary corpus row denied: `{command}`"
+            );
+        }
+    }
+
+    #[test]
+    fn allows_only_the_safe_handling_verbs() {
+        // The allowlist, member by member, on the same file.
+        for verb in SAFE_HANDLING_VERBS {
+            let command = if *verb == "[" {
+                "[ -f .env ]".to_string()
+            } else if *verb == "test" {
+                "test -f .env".to_string()
+            } else {
+                format!("{verb} .env")
+            };
+            assert_eq!(eval(&command), None, "safe verb denied: `{command}`");
+        }
+        for sub in SAFE_GIT_SUBCOMMANDS {
+            let command = format!("git {sub} .env");
+            assert_eq!(eval(&command), None, "safe git call denied: `{command}`");
+        }
+        // A neighbour of each allowlisted verb, which prints bytes.
+        for command in ["lsof .env", "statx .env", "rmdir-cat .env", "filecat .env"] {
+            assert!(eval(command).is_some(), "`{command}` must deny");
+        }
+    }
+
+    #[test]
+    fn denies_a_git_subcommand_that_prints_file_bytes() {
+        for command in [
+            "git diff .env",
+            "git log -p .env",
+            "git show HEAD -- .env",
+            "git stash push .env",
+            "git -C /repo diff terraform.tfvars",
+        ] {
+            assert!(eval(command).is_some(), "`{command}` must deny");
+        }
+    }
+
+    #[test]
+    fn denies_a_safe_verb_wrapping_a_substitution() {
+        // `ls` is allowlisted, but the substitution runs a second command.
+        for command in [
+            "ls $(cat .env)",
+            "ls `cat .env`",
+            "stat <(cat .env)",
+            "rm ${SECRET:-.env}",
+        ] {
+            assert!(eval(command).is_some(), "`{command}` must deny");
+        }
+    }
+
+    #[test]
+    fn denies_an_unlexable_segment_that_names_a_secret() {
+        // An unbalanced quote makes `shlex::split` return `None`. The word scan
+        // still finds the file, and the allowlist can never be granted.
+        let reason = eval("awk '{print} terraform.tfvars").expect("denies");
+        assert!(reason.contains("terraform.tfvars"), "{reason}");
+        assert!(reason.contains("cannot parse"), "{reason}");
+        // The same shape behind an ALLOWLISTED verb still denies — lexing is
+        // consulted only to grant the escape.
+        let unlexable_safe = eval("ls -la '.env").expect("denies");
+        assert!(unlexable_safe.contains("cannot parse"), "{unlexable_safe}");
+    }
+
+    #[test]
+    fn denies_a_secret_named_in_a_later_segment() {
+        assert!(eval("cd /repo && cat .env").is_some());
+        assert!(eval("ls -la .env; cat .env").is_some());
+        assert!(eval("git status | grep -c . ; xxd id_rsa").is_some());
+    }
+
+    #[test]
+    fn a_word_family_counts_only_when_it_is_written_as_a_path() {
+        // A bare word is prose; a word with a directory in front of it is a file.
+        assert_eq!(eval("echo secrets"), None);
+        assert_eq!(eval("ls credentials"), None);
+        assert!(eval("cat ./secrets").is_some());
+        assert!(eval("cat /etc/app/credentials").is_some());
+        // A directory is not a file reference.
+        assert_eq!(eval("find secrets/ -type f"), None);
+        // A family whose spelling is a filename denies on the bare word.
+        assert!(eval("cat id_rsa").is_some());
+        assert!(eval("cat id_ed25519").is_some());
+    }
+
+    #[test]
+    fn secret_files_named_in_finds_a_name_inside_a_program_string() {
+        assert_eq!(
+            secret_files_named_in("php -r 'readfile(\".env\");'"),
+            vec![".env".to_string()]
+        );
+        assert_eq!(
+            secret_files_named_in("dd if=terraform.tfvars of=/dev/stdout"),
+            vec!["terraform.tfvars".to_string()]
+        );
+        // Repeats collapse, order is kept.
+        assert_eq!(
+            secret_files_named_in("cp .env .env.bak"),
+            vec![".env".to_string(), ".env.bak".to_string()]
+        );
+        assert!(secret_files_named_in("cargo test -p trusty-mpm").is_empty());
     }
 
     #[test]
@@ -685,52 +761,23 @@ mod tests {
     }
 
     #[test]
-    fn denies_a_read_behind_a_wrapper() {
-        assert!(eval("sudo cat /etc/app/.env").is_some());
-        assert!(eval("sh -c \"head -n 2 live.tfvars\"").is_some());
-    }
-
-    #[test]
-    fn denies_shell_input_redirection_from_a_secret() {
-        let reason = eval("while read l; do echo x; done < .env").expect("denies");
-        assert!(reason.contains("shell input redirection"), "{reason}");
-        assert!(eval("read -r line <live.tfvars").is_some());
-    }
-
-    #[test]
-    fn denies_an_inline_python_program_that_opens_a_secret() {
-        let reason = eval("python3 -c 'print(open(\"terraform.tfvars\").read())'").expect("denies");
-        assert!(reason.contains("inline `python3` program"), "{reason}");
-    }
-
-    #[test]
-    fn denies_an_unlexable_segment_that_names_a_secret() {
-        // An unbalanced quote makes `shlex::split` return `None`; the word scan
-        // still sees the file and refuses.
-        let reason = eval("awk '{print} terraform.tfvars").expect("denies");
-        assert!(reason.contains("cannot parse"), "{reason}");
-    }
-
-    #[test]
-    fn allows_a_sed_line_range_of_an_ordinary_file() {
-        assert_eq!(eval("sed -n '1,5p' README.md"), None);
-    }
-
-    #[test]
-    fn allows_cat_of_a_manifest() {
-        assert_eq!(eval("cat Cargo.toml"), None);
-    }
-
-    #[test]
-    fn allows_a_tfvars_mention_that_is_not_a_file_operand() {
-        assert_eq!(eval("git log --grep tfvars"), None);
-        assert_eq!(eval("git log --grep .env --oneline"), None);
-    }
-
-    #[test]
-    fn allows_a_grep_whose_pattern_looks_like_a_secret_name() {
-        assert_eq!(eval("grep -rn tfvars docs/"), None);
-        assert_eq!(eval("grep .env README.md"), None);
+    fn denies_the_key_name_only_grep_the_earlier_rounds_carved_out() {
+        // #7266 rounds 1 to 4 allowed `grep -o '^key_[a-z_]*' <file>` because
+        // the pattern cannot cross the `=`. Round 5 withdraws the carve-out:
+        // it was the one place where a verb's FLAGS decided the verdict, and a
+        // second `-e` past the checked one (`grep -o -e 'pw=.*' -e '^K' .env`)
+        // reached the values. The rule is the file now, so no grep spelling
+        // survives.
+        for command in [
+            "grep -o '^key_[a-z_]*' terraform.tfvars",
+            "grep -o '^[a-z_]*' .env",
+            "grep --only-matching -e '^app_id' live.tfvars",
+            "grep -o -e 'password=.*' -e '^KEY' .env",
+            "grep -o '^.*' terraform.tfvars",
+            "grep '^key_' terraform.tfvars",
+        ] {
+            assert!(eval(command).is_some(), "`{command}` must deny");
+        }
     }
 
     #[test]
@@ -744,42 +791,6 @@ mod tests {
         ] {
             assert_eq!(eval(&format!("cat {path}")), None, "denied `{path}`");
         }
-    }
-
-    #[test]
-    fn allows_the_documented_key_name_only_grep() {
-        assert_eq!(eval("grep -o '^key_[a-z_]*' terraform.tfvars"), None);
-        assert_eq!(eval("grep -o '^[a-z_]*' .env"), None);
-        assert_eq!(eval("grep --only-matching -e '^app_id' live.tfvars"), None);
-    }
-
-    #[test]
-    fn denies_a_grep_o_whose_pattern_can_match_a_value() {
-        // `^.*` is anchored but `.` reaches past the `=`.
-        assert!(eval("grep -o '^.*' terraform.tfvars").is_some());
-        // Unanchored: the match can start inside the value.
-        assert!(eval("grep -o 'token' terraform.tfvars").is_some());
-        // No `-o`: the whole matching LINE prints.
-        assert!(eval("grep '^key_' terraform.tfvars").is_some());
-    }
-
-    #[test]
-    fn file_operands_drops_a_leading_pattern() {
-        let tail: Vec<String> = ["-n", "TOKEN", "app.tfvars"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        assert_eq!(file_operands("grep", &tail), vec!["app.tfvars".to_string()]);
-    }
-
-    #[test]
-    fn file_operands_keeps_the_file_when_a_pattern_flag_is_present() {
-        let tail: Vec<String> = ["-n", "-e", "1,5p", "live.tfvars"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        assert_eq!(file_operands("sed", &tail), vec!["live.tfvars".to_string()]);
-        assert!(eval("sed -n -e '1,5p' live.tfvars").is_some());
     }
 
     #[test]
@@ -818,8 +829,6 @@ mod tests {
         );
     }
 
-    // --- #7266 fix round: the native `Grep` tool (critic CRITICAL) ---------
-
     #[test]
     fn denies_a_grep_tool_call_on_a_secret_bearing_path() {
         // `output_mode: "content"` prints every matching line verbatim, so a
@@ -854,42 +863,6 @@ mod tests {
         let unresolved = serde_json::json!({"pattern": ".", "glob": "notes.{md,txt"});
         assert!(evaluate_secret_file_read_tool("Grep", Some(&unresolved)).is_some());
     }
-
-    #[test]
-    fn allows_a_grep_tool_call_over_a_directory_with_no_glob() {
-        // Grepping a tree is ordinary work and stays allowed.
-        for input in [
-            serde_json::json!({"pattern": "TODO", "path": "/repo/crates", "output_mode": "content"}),
-            serde_json::json!({"pattern": "TODO"}),
-            serde_json::json!({"pattern": "TODO", "path": "/repo/src", "glob": "*.rs"}),
-            serde_json::json!({"pattern": "tfvars", "path": "/repo/docs", "glob": "*.md"}),
-        ] {
-            assert_eq!(
-                evaluate_secret_file_read_tool("Grep", Some(&input)),
-                None,
-                "{input}"
-            );
-        }
-    }
-
-    // --- #7266 fix round: encoder and diff verbs (critic HIGH) ------------
-
-    #[test]
-    fn denies_an_encoded_dump() {
-        for command in ["base64 .env", "basenc --base32 terraform.tfvars"] {
-            assert!(eval(command).is_some(), "`{command}` must deny");
-        }
-    }
-
-    #[test]
-    fn denies_a_diff_against_dev_null() {
-        // Every line of the left file prints as a deletion.
-        let reason = eval("diff .env /dev/null").expect("denies");
-        assert!(reason.contains(".env"), "{reason}");
-        assert_eq!(eval("diff a.rs b.rs"), None);
-    }
-
-    // --- #7266 round 3: a `Grep` glob is a PATTERN (critic CRITICAL 1) -----
 
     #[test]
     fn denies_a_grep_tool_call_whose_glob_can_match_a_secret() {
@@ -955,20 +928,26 @@ mod tests {
     }
 
     #[test]
-    fn denies_a_bash_read_whose_operand_is_a_secret_glob() {
-        assert!(eval("cat *.env").is_some());
-        assert!(eval("head -n 5 *.tfvars").is_some());
-        // A wildcard with no literal character selects what a bare tree-wide
-        // read selects, and stays allowed.
-        assert_eq!(eval("cat *.rs"), None);
+    fn allows_a_grep_tool_call_over_a_directory_with_no_glob() {
+        // Grepping a tree is ordinary work and stays allowed.
+        for input in [
+            serde_json::json!({"pattern": "TODO", "path": "/repo/crates", "output_mode": "content"}),
+            serde_json::json!({"pattern": "TODO"}),
+            serde_json::json!({"pattern": "TODO", "path": "/repo/src", "glob": "*.rs"}),
+            serde_json::json!({"pattern": "tfvars", "path": "/repo/docs", "glob": "*.md"}),
+        ] {
+            assert_eq!(
+                evaluate_secret_file_read_tool("Grep", Some(&input)),
+                None,
+                "{input}"
+            );
+        }
     }
-
-    // --- #7266 round 3: process substitution (critic CRITICAL 2) ----------
 
     #[test]
     fn denies_a_secret_read_through_process_substitution() {
-        // The critic's exact commands. `shlex::split` yields `<(cat` and
-        // `.env)`, so no operand rule saw the basename on ec8ea341d.
+        // The round-3 critic's exact commands. `shlex::split` yields `<(cat`
+        // and `.env)`, so no operand rule saw the basename on ec8ea341d.
         for command in [
             "diff <(cat .env) /dev/null",
             "cat <(cat .env)",

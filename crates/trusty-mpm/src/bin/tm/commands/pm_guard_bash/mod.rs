@@ -67,9 +67,13 @@ pub(crate) use persistence::command_is_persistence_only;
 // is screened against the same pattern list, the same brace expander and the
 // same process-substitution stripper a COPY of one is.
 pub(crate) use secret_file_copy::{
-    evaluate_secret_file_copy_command, expand_brace_alternatives, secret_pattern_overlaps,
-    strip_process_substitution,
+    evaluate_secret_file_copy_command, expand_brace_alternatives,
+    matches_only_name_substring_family, secret_pattern_overlaps, strip_process_substitution,
 };
+// #7266 round 5: the read rule allowlists `git add`/`rm`/`mv`/`status`, and the
+// subcommand behind `git -C <path> …` is already parsed here. One parser, two
+// callers, rather than a second global-option table.
+pub(crate) use shell_lex::git_subcommand;
 // #5791: worktree removal is PM-executed, so an agent's `git worktree remove`
 // denies. The sibling `worktree add` guard above is a different rule with a
 // different scope — that one is about WHERE a tree is provisioned, this one is

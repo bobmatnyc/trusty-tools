@@ -452,7 +452,7 @@ const GIT_GLOBAL_OPTS_WITH_ARG: &[&str] = &[
 /// `git_subcommand_resolves_through_command_and_nice_wrappers`,
 /// `git_is_only_a_git_command_in_command_position`,
 /// `git_in_command_position_is_still_a_git_command`.
-pub(super) fn git_subcommand(segment: &str) -> Option<String> {
+pub(crate) fn git_subcommand(segment: &str) -> Option<String> {
     let argv = shlex::split(segment)?;
     let mut i = strip_wrapper_prefix(&argv)?;
     let program = argv.get(i)?;
