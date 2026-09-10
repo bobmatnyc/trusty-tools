@@ -54,15 +54,23 @@
 //! A SECOND rule, added in issue #7266's fix round, answers a different
 //! question about the same command and is deliberately not scoped to worktree
 //! destinations at all. [`laundered_source_rename`] denies a secret-shaped
-//! source reproduced under a basename whose extension the READ guard treats as
-//! ordinary source or markup — `cp terraform.tfvars secrets.rs`,
-//! `cat .env > notes.md` — wherever it lands. That carve-out
-//! ([`crate::commands::pm_guard_secret_read`]'s
-//! [`has_transparent_source_extension`]) exists so `cat crates/…/credentials.rs`
-//! stays readable, and it was a bypass in one move until this half existed:
-//! copy from a main checkout, `$HOME` or `/tmp` (all outside
-//! [`is_worktree_path`]'s scope), then read the copy. The read guard cannot
-//! tell a laundered `.rs` from a real one, so the stop has to be here.
+//! source reproduced under ANY destination basename the READ guard does not
+//! also refuse — `cp terraform.tfvars secrets.rs`, `cp .env ./notes.txt`,
+//! `cat .env > notes.md` — wherever it lands. Round 2 scoped this to the 35
+//! extensions [`is_secret_read_target`]'s carve-out treats as transparent, and
+//! `cp .env ./notes.txt` walked straight through it (#7266 round 3, critic
+//! HIGH 3); the destination test now asks whether the read guard would refuse
+//! the NEW name, which is the property that actually matters. Copying from a
+//! main checkout, `$HOME` or `/tmp` (all outside [`is_worktree_path`]'s scope)
+//! and then reading the copy was the one-move bypass this half closes: the read
+//! guard cannot tell a laundered name from a real one, so the stop has to be
+//! here.
+//!
+//! Three shapes are deliberately left alone, because none of them renames
+//! anything: a destination that is itself unreadable (`cp .env .env.bak`), a
+//! directory destination (`cp .env /tmp/`), and a source written as a bare WORD
+//! rather than a path (`npm install token-bucket express`, `grep -rn
+//! credentials src/ > out.md`) — see [`is_written_as_a_path`].
 //!
 //! Residual bypasses, stated rather than hidden (mirrors
 //! [`super::destructive_delete`]'s own list):
@@ -79,9 +87,12 @@
 //!   its own extension and stays allowed — closing that would need
 //!   [`COPY_VERBS`] widened, which makes `npm install <pkg> <pkg>` in a
 //!   worktree deny on a package name matching `token*`.
-//! - The redirection half of the rename rule reads a source token only when it
-//!   carries a `.` or `/`, so a bare secret-shaped WORD used as a pattern
-//!   (`grep -rn credentials src/ > out.md`) is not treated as a file.
+//! - Both halves of the rename rule read a source token only when
+//!   [`is_written_as_a_path`] answers for it, so a bare secret-shaped WORD used
+//!   as a pattern or a package name (`grep -rn credentials src/ > out.md`,
+//!   `npm install token-bucket express`) is not treated as a file. A scoped npm
+//!   package (`@scope/token-bucket`) is a bare word by that test too, which is
+//!   why the test reads the basename's `.` rather than any `/` in the token.
 //! - An unparseable segment (unbalanced quotes) is skipped rather than
 //!   failing closed, unlike the sibling destructive-delete rule: every
 //!   `rm`-denylisted target is catastrophic with no legitimate use, but
@@ -133,9 +144,9 @@ use trusty_mpm::daemon::managed_routes::inproject::untracked_sync::glob_match;
 
 use super::{PathEnv, resolve_target_path, split_shell_segments, unresolved_target};
 use crate::commands::hook_rewrite::first_command_token;
-// #7266 fix round: the READ guard's own carve-out predicate, so this rule
-// refuses a copy INTO exactly the names that carve-out lets a later read print.
-use crate::commands::pm_guard_secret_read::has_transparent_source_extension;
+// #7266 fix round: the READ guard's own target predicate, so "a name the read
+// guard refuses" has ONE definition that both rules read.
+use crate::commands::pm_guard_secret_read::is_secret_read_target;
 
 /// Deny reason for a `cp`/`mv` of a secret-shaped source into a worktree (#7122).
 pub(crate) const SECRET_FILE_COPY_REASON: &str = "`cp`/`mv` must not copy a secret-shaped file \
@@ -160,9 +171,10 @@ const COPY_VERBS: &[&str] = &["cp", "mv"];
 /// What: a separate list from [`COPY_VERBS`] on purpose. Widening that one
 /// would make `npm install <pkg> <pkg>` inside a worktree deny whenever a
 /// package name happens to match `token*`/`*secrets*`; the rename rule cannot
-/// misfire that way, because it fires only when the DESTINATION basename ends
-/// in a source or markup extension.
-/// Test: `denies_a_secret_renamed_to_a_source_extension_by_any_copy_verb`.
+/// misfire that way, because since #7266 round 3 it fires only when the SOURCE
+/// is written as a path ([`is_written_as_a_path`]), which a package name is not.
+/// Test: `denies_a_secret_renamed_to_a_source_extension_by_any_copy_verb`,
+/// `allows_an_npm_install_whose_package_name_is_secret_shaped`.
 const RENAME_VERBS: &[&str] = &["cp", "mv", "install", "rsync", "ln"];
 
 /// Filename glob patterns this guard treats as secret-bearing (issue #7122).
@@ -218,6 +230,79 @@ fn is_secret_bearing_name(name: &str) -> bool {
         .any(|pattern| glob_match(&pattern.to_ascii_lowercase(), &lower))
 }
 
+/// Whether `candidate` — a caller-supplied GLOB, or a literal basename — can
+/// match a name in [`SECRET_BEARING_FILE_PATTERNS`].
+///
+/// Why: #7266 round 3, critic CRITICAL 1. [`is_secret_bearing_name`] compares a
+/// literal name against the denylist, so a caller's PATTERN was screened as if
+/// it were a filename: `Grep(glob = "*.env")` matched no entry and was allowed,
+/// while `glob = "*.pem"` was denied only because that entry happens to carry a
+/// `*` in the same place. Whether a caller can reach a secret is a question
+/// about two patterns OVERLAPPING, not about one matching the other, and the
+/// denylist's literal-only entries (`.env`, `.env.local`, `.netrc`) were the
+/// three that answered wrongly.
+/// What: `true` when some string is matched by BOTH `candidate` and one
+/// denylist entry, decided case-insensitively by [`globs_overlap`]. For a
+/// candidate carrying no wildcard this is exactly [`is_secret_bearing_name`].
+/// Test: `every_pattern_family_is_reachable_by_its_natural_glob`,
+/// `overlap_answers_where_literal_matching_did_not`.
+pub(crate) fn secret_pattern_overlaps(candidate: &str) -> bool {
+    let lower = candidate.to_ascii_lowercase();
+    SECRET_BEARING_FILE_PATTERNS.iter().any(|pattern| {
+        globs_overlap(pattern.to_ascii_lowercase().as_bytes(), lower.as_bytes())
+    })
+}
+
+/// Whether two globs can both match the same string.
+///
+/// What: a bottom-up dynamic program over the two patterns' suffixes.
+/// `dp[i][j]` answers for `a[i..]` against `b[j..]`: a `*` on either side either
+/// matches nothing (advance that side) or one character (advance the other
+/// side), and two literal positions must agree unless one is a `?`. A side that
+/// has run out is satisfiable only when the other side's remainder is all `*`.
+/// `?` is honoured on both sides even though [`glob_match`] does not implement
+/// it, so a caller glob spelled with one over-matches rather than slipping past.
+/// Test: `overlap_answers_where_literal_matching_did_not`.
+fn globs_overlap(a: &[u8], b: &[u8]) -> bool {
+    let (la, lb) = (a.len(), b.len());
+    let width = lb + 1;
+    let mut dp = vec![false; (la + 1) * width];
+    dp[la * width + lb] = true;
+    for j in (0..lb).rev() {
+        dp[la * width + j] = b[j] == b'*' && dp[la * width + j + 1];
+    }
+    for i in (0..la).rev() {
+        dp[i * width + lb] = a[i] == b'*' && dp[(i + 1) * width + lb];
+        for j in (0..lb).rev() {
+            let hit = if a[i] == b'*' || b[j] == b'*' {
+                dp[(i + 1) * width + j] || dp[i * width + j + 1]
+            } else {
+                (a[i] == b[j] || a[i] == b'?' || b[j] == b'?') && dp[(i + 1) * width + j + 1]
+            };
+            dp[i * width + j] = hit;
+        }
+    }
+    dp[0]
+}
+
+/// A token with a process-substitution wrapper removed (#7266 round 3).
+///
+/// Why: critic CRITICAL 2 — `shlex::split("diff <(cat .env) /dev/null")` yields
+/// the tokens `<(cat` and `.env)`, so every basename rule in this guard tree saw
+/// `.env)`, a name no pattern matches, while `diff .env /dev/null` denied.
+/// Stripping the wrapper is what lets the operand rules see the real path.
+/// What: removes a leading `<(`, `>(` or `(`, then every trailing `)`.
+/// Test: `strips_a_process_substitution_wrapper`,
+/// `denies_a_secret_read_through_process_substitution`.
+pub(crate) fn strip_process_substitution(token: &str) -> &str {
+    let inner = token
+        .strip_prefix("<(")
+        .or_else(|| token.strip_prefix(">("))
+        .or_else(|| token.strip_prefix('('))
+        .unwrap_or(token);
+    inner.trim_end_matches(')')
+}
+
 /// Expand a simple, non-nested `{a,b,c}` brace alternation in `token`.
 ///
 /// Why: `shlex::split` tokenizes a Bash command literally — it does not
@@ -237,7 +322,10 @@ fn is_secret_bearing_name(name: &str) -> bool {
 /// Test: `denies_brace_expanded_source_copy_into_a_worktree`,
 /// `allows_brace_expanded_source_with_no_secret_alternative`,
 /// `denies_source_with_an_unresolved_brace_group`.
-fn expand_brace_alternatives(token: &str) -> Option<Vec<String>> {
+// #7266 round 3: `pub(crate)` so the read guard expands a caller's brace group
+// with THIS expander before screening each alternative — `*.{rs,ts}` must be
+// judged as `*.rs` and `*.ts`, not as one literal whose extension is `{rs,ts}`.
+pub(crate) fn expand_brace_alternatives(token: &str) -> Option<Vec<String>> {
     let Some(start) = token.find('{') else {
         return Some(vec![token.to_string()]);
     };
@@ -426,8 +514,11 @@ fn positional_args(tail: &[String]) -> Vec<String> {
     out
 }
 
-/// The basename of a path token, with a leading `\` quote removed.
+/// The basename of a path token, with a process-substitution wrapper and a
+/// leading `\` quote removed.
 fn token_basename(token: &str) -> &str {
+    // #7266 round 3: `<(cat .env)` reaches this rule as the token `.env)`.
+    let token = strip_process_substitution(token);
     let token = token.strip_prefix('\\').unwrap_or(token);
     Path::new(token)
         .file_name()
@@ -435,10 +526,45 @@ fn token_basename(token: &str) -> &str {
         .unwrap_or(token)
 }
 
-/// Whether `token`'s basename ends in an extension the READ guard treats as
-/// ordinary source or markup.
-fn names_a_transparent_source(token: &str) -> bool {
-    has_transparent_source_extension(token_basename(token))
+/// Whether `token` lexically names a DIRECTORY, so a copy into it keeps the
+/// source's own basename and renames nothing.
+fn names_a_directory(token: &str) -> bool {
+    let trimmed = token.trim_end_matches('/');
+    token.ends_with('/') || trimmed.is_empty() || trimmed == "." || trimmed == ".."
+}
+
+/// Whether `basename` is one of the four SSH private-key families.
+///
+/// Why: those are the only credential filenames in
+/// [`SECRET_BEARING_FILE_PATTERNS`] normally written with no `.` at all, so
+/// [`is_written_as_a_path`] would otherwise read `id_rsa` as a bare word.
+fn is_ssh_private_key_name(basename: &str) -> bool {
+    let lower = basename.to_ascii_lowercase();
+    ["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"]
+        .iter()
+        .any(|family| lower.starts_with(family))
+}
+
+/// Whether `token` is written the way a FILE PATH is written.
+///
+/// Why: since #7266 round 3 the rename rule fires on every destination, so this
+/// is the only thing between it and an ordinary command whose ARGUMENT merely
+/// matches the denylist by shape — `npm install token-bucket express` and
+/// `grep -rn credentials src/ > out.md` both name a secret-shaped bare WORD
+/// that is a package name and a search pattern, not a file.
+/// What: a leading `/`, `./`, `../` or `~`, a `.` anywhere in the basename, or
+/// an SSH private-key name. A bare word carries none of those.
+/// Test: `allows_a_grep_pattern_word_redirected_into_a_markup_name`,
+/// `allows_an_npm_install_whose_package_name_is_secret_shaped`.
+fn is_written_as_a_path(token: &str) -> bool {
+    let stripped = strip_process_substitution(token);
+    let basename = token_basename(stripped);
+    stripped.starts_with('/')
+        || stripped.starts_with("./")
+        || stripped.starts_with("../")
+        || stripped.starts_with('~')
+        || basename.contains('.')
+        || is_ssh_private_key_name(basename)
 }
 
 /// Whether `token` names a file the READ guard would refuse to print.
@@ -448,10 +574,15 @@ fn names_a_transparent_source(token: &str) -> bool {
 /// laundered, so `mv crates/trusty-audit/src/grounding/secrets.rs renamed.rs`
 /// — an ordinary source file whose name matches the `*secrets*` pattern — must
 /// not deny. This is [`crate::commands::pm_guard_secret_read`]'s own target
-/// predicate, expressed from its two exported halves.
+/// predicate, called directly rather than reassembled here, so the two rules
+/// can never disagree about which names are unreadable.
 fn names_an_unreadable_secret(token: &str) -> bool {
-    let basename = token_basename(token);
-    is_secret_bearing_source(basename) && !has_transparent_source_extension(basename)
+    is_secret_read_target(token)
+}
+
+/// Whether `token` names an unreadable secret AND is written as a file path.
+fn names_an_unreadable_secret_file(token: &str) -> bool {
+    is_written_as_a_path(token) && names_an_unreadable_secret(token)
 }
 
 /// A secret-shaped file about to be reproduced under a name the read guard
@@ -466,19 +597,25 @@ fn names_an_unreadable_secret(token: &str) -> bool {
 /// passed both rules and `cat secrets.rs` then printed the credential. Closing
 /// it on the copy side is the half that cannot be routed around: the read guard
 /// cannot tell a laundered `.rs` from a real one.
-/// What: denies when a [`RENAME_VERBS`] invocation's destination basename
-/// satisfies [`names_a_transparent_source`] and any source is secret-shaped, or
-/// when an output redirection (`> secrets.rs`, `tee secrets.rs`) writes such a
-/// name in a segment that also names a secret-shaped FILE. Destination scope is
-/// not consulted at all — a rename to a transparent name is the leak wherever
-/// it lands.
+/// What: denies when a [`RENAME_VERBS`] invocation reproduces a secret-shaped
+/// source under a single destination whose basename is NOT itself one the read
+/// guard refuses, or when an output redirection (`> notes.txt`, `tee out.md`)
+/// writes such a name in a segment that also names a secret-shaped FILE.
+/// Destination SCOPE is not consulted at all — a rename out of the read guard's
+/// file class is the leak wherever it lands.
 /// Both halves require the SOURCE to be one the read guard actually refuses
-/// ([`names_an_unreadable_secret`]), so renaming an ordinary `secrets.rs` is
-/// untouched.
+/// ([`names_an_unreadable_secret`]) and written as a path
+/// ([`is_written_as_a_path`]), so renaming an ordinary `secrets.rs` and
+/// installing a `token-bucket` package are untouched. A destination that keeps
+/// a secret-shaped name (`cp .env .env.bak`) and a directory destination
+/// (`cp .env /tmp/`) rename nothing and are likewise untouched.
 /// Test: `denies_a_secret_renamed_to_a_source_extension_outside_a_worktree`,
 /// `denies_a_secret_renamed_to_a_source_extension_by_any_copy_verb`,
+/// `denies_a_secret_renamed_to_an_unsuspicious_name`,
 /// `denies_a_secret_redirected_into_a_markup_name`,
 /// `allows_a_secret_copy_that_keeps_its_own_extension`,
+/// `allows_a_secret_copy_into_a_directory`,
+/// `allows_an_npm_install_whose_package_name_is_secret_shaped`,
 /// `allows_a_grep_pattern_word_redirected_into_a_markup_name`,
 /// `allows_renaming_an_ordinary_source_file_the_read_guard_already_prints`.
 fn laundered_source_rename(argv: &[String]) -> Option<String> {
@@ -493,12 +630,22 @@ fn renamed_by_a_copy_verb(argv: &[String]) -> Option<String> {
     let verb = argv[verb_idx].strip_prefix('\\').unwrap_or(&argv[verb_idx]);
     let positional = positional_args(&argv[verb_idx + 1..]);
     let (dest, sources) = positional.split_last()?;
-    if sources.is_empty() || !names_a_transparent_source(dest) {
+    // A directory destination keeps each source's own basename, so nothing is
+    // renamed. The source COUNT is not a proxy for that: `positional_args` does
+    // not consume a flag's value, so `install -m 600 server.pem key.rs` arrives
+    // with `600` sitting among the sources.
+    if sources.is_empty() || names_a_directory(dest) {
+        return None;
+    }
+    // #7266 round 3 (critic HIGH 3): the destination test is now "is this name
+    // one the read guard also refuses", not "does it end in a source
+    // extension" — `cp .env ./notes.txt` laundered a credential just as well.
+    if names_an_unreadable_secret(dest) {
         return None;
     }
     let source = sources
         .iter()
-        .find(|source| names_an_unreadable_secret(source) && source.as_str() != dest.as_str())?;
+        .find(|source| names_an_unreadable_secret_file(source) && source.as_str() != dest.as_str())?;
     Some(source_rename_deny_reason(
         source,
         dest,
@@ -508,30 +655,27 @@ fn renamed_by_a_copy_verb(argv: &[String]) -> Option<String> {
 
 /// The redirection half of [`laundered_source_rename`].
 ///
-/// Why: `cat .env > notes.md` and `tee secrets.rs` reproduce the file through
-/// the shell rather than a copy verb. The read guard already refuses the `cat`
-/// that feeds the first shape, but a rule that depends on the neighbour firing
-/// first is not a rule.
-/// What: the source must be a secret-shaped token that also LOOKS like a path
-/// (it carries a `.` or a `/`). A bare word is excluded on purpose: `grep -rn
-/// credentials src/ > out.md` names a secret-shaped PATTERN, not a file, and
-/// denying it would tax ordinary work the read guard is careful to allow.
+/// Why: `cat .env > notes.txt` and `tee out.md` reproduce the file through the
+/// shell rather than a copy verb. The read guard already refuses the `cat` that
+/// feeds the first shape, but a rule that depends on the neighbour firing first
+/// is not a rule.
+/// What: the source must be a token [`names_an_unreadable_secret_file`] answers
+/// for. A bare word is excluded on purpose: `grep -rn credentials src/ > out.md`
+/// names a secret-shaped PATTERN, not a file, and denying it would tax ordinary
+/// work the read guard is careful to allow.
 fn renamed_by_a_redirection(argv: &[String]) -> Option<String> {
     let dest = redirection_target(argv)?;
-    if !names_a_transparent_source(&dest) {
+    if names_a_directory(&dest) || names_an_unreadable_secret(&dest) {
         return None;
     }
-    let source = argv.iter().find(|tok| is_secret_shaped_path_token(tok))?;
+    let source = argv
+        .iter()
+        .find(|tok| names_an_unreadable_secret_file(tok))?;
     Some(source_rename_deny_reason(
         source,
         &dest,
         "a shell redirection",
     ))
-}
-
-/// Whether `token` looks like a path AND names a file the read guard refuses.
-fn is_secret_shaped_path_token(token: &str) -> bool {
-    (token.contains('.') || token.contains('/')) && names_an_unreadable_secret(token)
 }
 
 /// The file an output redirection or a `tee` in `argv` writes, if any.
@@ -579,12 +723,14 @@ fn redirect_tail(token: &str) -> Option<&str> {
 fn source_rename_deny_reason(source: &str, dest: &str, how: &str) -> String {
     format!(
         "reproducing the secret-shaped file `{source}` as `{dest}` through {how} is refused \
-         (issue #7266) — the destination's extension is one the READ guard treats as ordinary \
-         source or markup, so `cat {dest}`, a line range of it and the `Read` tool would all \
-         print the credential the guard just refused to print from `{source}`. This holds for \
-         EVERY destination, worktree or not, because the read guard cannot tell a laundered name \
-         from a real one. Reference the file by its absolute path instead (`-var-file`, `-state`, \
-         `--env-file`), or copy it under a name that keeps its own extension."
+         (issue #7266) — `{dest}` is not itself a name the READ guard refuses, so `cat {dest}`, a \
+         line range of it and the `Read` tool would all print the credential the guard just \
+         refused to print from `{source}`. This holds for every destination BASENAME outside that \
+         file class, whatever its extension and whether or not it lands in a worktree, because \
+         the read guard cannot tell a laundered name from a real one. A copy that keeps a \
+         secret-shaped name (`cp .env .env.bak`) and a copy into a directory (`cp .env /tmp/`) \
+         are untouched. Reference the file by its absolute path instead (`-var-file`, `-state`, \
+         `--env-file`)."
     )
 }
 
@@ -898,6 +1044,135 @@ mod tests {
         ] {
             assert_eq!(eval_outside_a_worktree(command), None, "`{command}`");
         }
+    }
+
+    // --- #7266 round 3: pattern overlap (critic CRITICAL 1) ---------------
+
+    #[test]
+    fn every_pattern_family_is_reachable_by_its_natural_glob() {
+        // One natural caller glob per denylist family. On ec8ea341d the three
+        // literal-only entries (`.env`, `.env.local`, `.netrc`) answered
+        // `false` for every glob spelling, because a caller pattern was
+        // compared as though it were a filename.
+        let cases: &[(&str, &str)] = &[
+            ("*.tfvars", "*.tfvars"),
+            ("*.tfvars.json", "*.tfvars.json"),
+            ("*.tfstate", "*.tfstate"),
+            ("*.tfstate.backup", "*.tfstate.*"),
+            (".env", "*.env"),
+            (".env.local", "*.local"),
+            (".env.*", ".env*"),
+            ("*.pem", "*.pem"),
+            ("*.key", "*.key"),
+            ("id_rsa*", "id_*"),
+            ("id_dsa*", "id_d*"),
+            ("id_ecdsa*", "id_ec*"),
+            ("id_ed25519*", "id_ed*"),
+            ("*credentials*", "*credentials*"),
+            ("*secrets*", "*secret*"),
+            (".netrc", "*.netrc"),
+            ("*.p12", "*.p12"),
+            ("*.pfx", "*.pfx"),
+            ("*.jks", "*.jks"),
+            ("*.kdbx", "*.kdbx"),
+            ("token*", "token*"),
+            ("*.ovpn", "*.ovpn"),
+        ];
+        assert_eq!(
+            cases.len(),
+            SECRET_BEARING_FILE_PATTERNS.len(),
+            "every pattern in the denylist needs exactly one covering glob here"
+        );
+        for (pattern, glob) in cases {
+            assert!(
+                globs_overlap(pattern.as_bytes(), glob.as_bytes()),
+                "glob `{glob}` must overlap the `{pattern}` family specifically"
+            );
+            assert!(secret_pattern_overlaps(glob), "glob `{glob}` must deny");
+        }
+    }
+
+    #[test]
+    fn overlap_answers_where_literal_matching_did_not() {
+        // The two shapes the critic drove live against the round-2 binary.
+        assert!(secret_pattern_overlaps("*.env"));
+        assert!(secret_pattern_overlaps("*.netrc"));
+        assert!(!is_secret_bearing_name("*.env"), "the literal test misses it");
+        assert!(!is_secret_bearing_name("*.netrc"));
+        // An ordinary source glob overlaps `*credentials*` (via
+        // `credentials.rs`), which is why the read guard's transparent-extension
+        // narrowing runs on top of this predicate rather than instead of it.
+        assert!(secret_pattern_overlaps("*.rs"));
+        // A literal name that can reach no family stays clear.
+        assert!(!secret_pattern_overlaps("Cargo.toml"));
+        assert!(!secret_pattern_overlaps("README.md"));
+    }
+
+    #[test]
+    fn strips_a_process_substitution_wrapper() {
+        assert_eq!(strip_process_substitution("<(cat"), "cat");
+        assert_eq!(strip_process_substitution(">(tee"), "tee");
+        assert_eq!(strip_process_substitution(".env)"), ".env");
+        assert_eq!(strip_process_substitution("/repo/.env))"), "/repo/.env");
+        assert_eq!(strip_process_substitution("README.md"), "README.md");
+    }
+
+    // --- #7266 round 3: laundering to ANY destination (critic HIGH 3) ------
+
+    #[test]
+    fn denies_a_secret_renamed_to_an_unsuspicious_name() {
+        // The critic's exact bypass: `.txt` is in none of the read guard's
+        // transparent extensions, so round 2 allowed this and `cat notes.txt`
+        // afterwards.
+        let reason = eval_outside_a_worktree("cp .env ./notes.txt").expect("denies");
+        assert!(reason.contains(".env"), "{reason}");
+        assert!(reason.contains("notes.txt"), "{reason}");
+        for command in [
+            "cp .env notes.txt",
+            "mv /repo/infra/terraform.tfvars vars.bin",
+            "cp ~/.ssh/id_rsa ./deploy_key_backup",
+            "cat .env > notes.txt",
+            "tee dump.log < /repo/.env",
+        ] {
+            assert!(
+                eval_outside_a_worktree(command).is_some(),
+                "`{command}` must deny"
+            );
+        }
+    }
+
+    #[test]
+    fn allows_a_secret_copy_into_a_directory() {
+        // A directory destination keeps the source's own basename, so the read
+        // guard still refuses the copy.
+        for command in [
+            "cp /repo/.env /Users/agent/backup/",
+            "cp /repo/infra/terraform.tfvars .",
+            "mv server.pem ..",
+        ] {
+            assert_eq!(eval_outside_a_worktree(command), None, "`{command}`");
+        }
+    }
+
+    #[test]
+    fn allows_an_npm_install_whose_package_name_is_secret_shaped() {
+        // `install` is a rename verb and `token-bucket` matches `token*`, but a
+        // bare word is a package name, not a file.
+        for command in [
+            "npm install token-bucket token-bucket",
+            "npm install token-bucket express",
+            "npm install @scope/token-bucket express",
+            "npm install --save-dev secrets-manager lodash",
+        ] {
+            assert_eq!(eval_outside_a_worktree(command), None, "`{command}`");
+        }
+    }
+
+    #[test]
+    fn denies_a_secret_copied_through_process_substitution() {
+        // `shlex::split` yields `<(cat` and `.env)`; the wrapper comes off
+        // before the basename match.
+        assert!(eval_outside_a_worktree("cp <(cat .env) notes.txt").is_some());
     }
 
     #[test]

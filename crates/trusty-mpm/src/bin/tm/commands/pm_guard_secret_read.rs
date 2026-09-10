@@ -19,14 +19,32 @@
 //! `Grep` tool call on the same class of path — with or without an
 //! `offset`/`limit` range, since a partial read prints values exactly as a
 //! whole one does, and `Grep` with `output_mode="content"` prints every
-//! matching line verbatim. [`evaluate_secret_file_read_command`] fails CLOSED:
-//! a segment this guard cannot lex still has its words examined, and a
-//! secret-shaped word denies.
+//! matching line verbatim.
 //!
-//! The file classifier is NOT a second list — it is
-//! [`is_secret_bearing_source`], the one
+//! Two fallbacks decide what happens when the shell text resists lexing, and
+//! neither is a blanket refusal. A segment `shlex::split` rejects is not
+//! skipped — its words are scanned and a secret-shaped one denies — but a
+//! segment with no such word ALLOWS, so this is a word-level fallback, not
+//! "every unlexable segment is denied" (round 2's module doc claimed the
+//! latter; #7266 round 3, critic MEDIUM). Refusing every unlexable segment
+//! would cost far more ordinary work than it protects, which is the same call
+//! `pm_guard_bash::secret_file_copy` makes for the same reason. The second
+//! fallback covers process substitution: `shlex::split` yields `<(cat` and
+//! `.env)` for `diff <(cat .env) /dev/null`, so [`strip_process_substitution`]
+//! takes the wrapper off before any basename match AND a segment carrying
+//! `<(`/`>(` with a secret-shaped word in it is refused outright, since the verb
+//! inside such a wrapper need not be one [`CONTENT_PRINTING_VERBS`] names.
+//!
+//! The file classifier is NOT a second list — it is the one
 //! `pm_guard_bash::secret_file_copy` already owns, read at this rule's scope by
-//! [`is_secret_read_target`]. The only narrowing is
+//! [`is_secret_read_target`] through [`secret_pattern_overlaps`]. That overlap
+//! test is what makes a caller's GLOB answerable: round 2 compared
+//! `Grep(glob = "*.env")` against the list as though it were a filename,
+//! matched nothing and allowed the dump, while `glob = "*.pem"` denied only
+//! because that entry happens to carry a `*` in the same place (#7266 round 3,
+//! critic CRITICAL 1). A glob carrying no literal character at all is exempt,
+//! because it selects the same files a `Grep` with no glob does — see
+//! [`selects_every_name`]. The only narrowing is
 //! [`has_transparent_source_extension`]: that list's three name-SUBSTRING
 //! patterns (`*credentials*`, `*secrets*`, `token*`) match 24 ordinary tracked
 //! files in this repository (`credentials.rs`, `tokens.css`, `secrets.rs`,
@@ -43,10 +61,12 @@
 //! that separates a key from its value, so no value can reach the transcript.
 //!
 //! The carve-out is only safe while nothing can MOVE a secret into one of
-//! those names, so [`has_transparent_source_extension`] is `pub(crate)` and
-//! `pm_guard_bash::secret_file_copy` refuses `cp terraform.tfvars secrets.rs`
-//! to any destination at all — worktree or not (#7266 fix round). Without that
-//! second half the carve-out was the bypass: copy, then read the copy.
+//! those names, so [`is_secret_read_target`] is `pub(crate)` and
+//! `pm_guard_bash::secret_file_copy` calls it to refuse
+//! `cp terraform.tfvars secrets.rs` — and, since #7266 round 3,
+//! `cp .env ./notes.txt` — to any destination basename this function does not
+//! also refuse, worktree or not. Without that second half the carve-out was the
+//! bypass: copy, then read the copy.
 //!
 //! Residual bypasses, deliberate and documented rather than silently allowed:
 //! a `.yml`/`.yaml` credential manifest read by name (`secrets.yaml`) is
@@ -64,14 +84,20 @@
 //! module's own tests could not miss — end to end through the real binary by
 //! `pm_guard_denies_a_line_range_read_of_a_secret_bearing_file`,
 //! `pm_guard_denies_a_read_tool_call_on_a_secret_bearing_file`,
-//! `pm_guard_denies_a_grep_tool_call_on_a_secret_bearing_file` and
+//! `pm_guard_denies_a_grep_tool_call_on_a_secret_bearing_file`,
+//! `pm_guard_denies_a_grep_glob_that_can_match_a_secret`,
+//! `pm_guard_denies_a_read_through_process_substitution`,
+//! `pm_guard_denies_a_secret_laundered_to_an_unsuspicious_name` and
 //! `pm_guard_still_allows_ordinary_reads_and_non_operand_mentions` in
 //! `tests/tm_hook_pm_guard.rs`.
 
 use std::path::Path;
 
 use crate::commands::hook_rewrite::first_command_token;
-use crate::commands::pm_guard_bash::{is_secret_bearing_source, split_shell_segments};
+use crate::commands::pm_guard_bash::{
+    expand_brace_alternatives, secret_pattern_overlaps, split_shell_segments,
+    strip_process_substitution,
+};
 
 /// Verbs that print a named file's bytes to the transcript.
 ///
@@ -171,10 +197,11 @@ pub(crate) fn evaluate_secret_file_read(
 /// Why: the one Bash entry point `pm_guard` calls, kept to the same shape as
 /// the sibling ABSOLUTE guards so the policy underneath stays testable.
 /// What: walks [`split_shell_segments`] (which already descends into an `sh -c`
-/// wrapper), and for each segment checks, in order, an input redirection, an
-/// inline interpreter program, then a content-printing verb's file operands.
-/// An unlexable segment falls back to a word scan and denies on a secret-shaped
-/// word rather than skipping.
+/// wrapper), and for each segment checks, in order, a process substitution, an
+/// input redirection, an inline interpreter program, then a content-printing
+/// verb's file operands. An unlexable segment falls back to a word scan and
+/// denies on a secret-shaped word rather than skipping; a segment with no such
+/// word allows.
 /// Test: see the module doc's test list.
 pub(crate) fn evaluate_secret_file_read_command(command: &str) -> Option<String> {
     for segment in split_shell_segments(command) {
@@ -182,8 +209,17 @@ pub(crate) fn evaluate_secret_file_read_command(command: &str) -> Option<String>
         if trimmed.is_empty() {
             continue;
         }
-        // #7266: fail closed — a segment this guard cannot lex still names its
-        // words, and one of them being secret-shaped is enough to refuse.
+        // #7266 round 3: a process substitution feeds a file to a verb this
+        // list may never name (`wc -l <(cat .env)`), and it survives lexing as
+        // two tokens the operand rules cannot read. Refuse the whole segment
+        // when it names a secret-shaped word.
+        if (trimmed.contains("<(") || trimmed.contains(">("))
+            && let Some(target) = first_secret_word(trimmed)
+        {
+            return Some(deny_reason(&target, "a process substitution"));
+        }
+        // #7266: a segment this guard cannot lex still names its words, and one
+        // of them being secret-shaped is enough to refuse.
         let Some(argv) = shlex::split(trimmed) else {
             if let Some(target) = first_secret_word(trimmed) {
                 return Some(deny_reason(&target, "a command this guard cannot parse"));
@@ -267,12 +303,16 @@ pub(crate) fn evaluate_secret_file_read_tool(
 /// likewise refuses a secret operand whatever the output flags say — a guard
 /// that reads the mode would allow the dump whenever the field is omitted from
 /// the payload this guard sees.
-/// What: denies on a secret-shaped `path`, then on a secret-shaped `glob`; a
-/// directory `path` with no `glob` is ordinary tree-wide search and allows.
-/// Fails CLOSED on a `glob` whose brace alternation [`is_secret_read_target`]
-/// cannot resolve, exactly as the copy rule does.
+/// What: denies on a secret-shaped `path`, then on a `glob` that can MATCH a
+/// secret-bearing pattern — [`is_secret_read_target`] decides both, comparing
+/// pattern against pattern rather than treating the glob as a literal filename
+/// (#7266 round 3). A directory `path` with no `glob`, and a `glob` carrying no
+/// literal character, are ordinary tree-wide search and allow. Fails CLOSED on
+/// a `glob` whose brace alternation the shared expander cannot resolve, exactly
+/// as the copy rule does.
 /// Test: `denies_a_grep_tool_call_on_a_secret_bearing_path`,
 /// `denies_a_grep_tool_call_whose_glob_names_a_secret`,
+/// `denies_a_grep_tool_call_whose_glob_can_match_a_secret`,
 /// `allows_a_grep_tool_call_over_a_directory_with_no_glob`.
 fn evaluate_grep_tool(tool_input: Option<&serde_json::Value>) -> Option<String> {
     if let Some(path) = string_field(tool_input, "path")
@@ -292,24 +332,55 @@ fn string_field<'a>(tool_input: Option<&'a serde_json::Value>, key: &str) -> Opt
         .filter(|s| !s.is_empty())
 }
 
-/// Whether `path`'s basename is secret-bearing at THIS rule's scope.
+/// Whether `path` — a literal path OR a caller-supplied GLOB — names a file
+/// this rule refuses to print.
 ///
-/// Why: see the module doc — the shared classifier is read as-is, then narrowed
-/// by [`has_transparent_source_extension`] so an ordinary source file that
-/// merely carries `token`/`secrets`/`credentials` in its name stays readable.
+/// Why: see the module doc. The shared pattern list is read through
+/// [`secret_pattern_overlaps`] rather than a literal match, then narrowed by
+/// [`has_transparent_source_extension`] so an ordinary source file that merely
+/// carries `token`/`secrets`/`credentials` in its name stays readable.
+/// What: expands a brace group with the shared expander (failing CLOSED when it
+/// cannot), then answers `true` when ANY alternative both overlaps a
+/// secret-bearing pattern and does not end in a transparent extension.
 /// Test: `allows_reading_ordinary_source_files_that_match_a_substring_pattern`,
-/// `denies_every_extension_typed_secret_family`.
-fn is_secret_read_target(path: &str) -> bool {
+/// `denies_every_extension_typed_secret_family`,
+/// `denies_a_grep_tool_call_whose_glob_can_match_a_secret`.
+// #7266 round 3: `pub(crate)` so `pm_guard_bash::secret_file_copy`'s rename rule
+// asks THIS function whether a destination is a name the read guard refuses,
+// instead of reassembling the predicate from two exported halves — the two
+// rules can then never disagree.
+pub(crate) fn is_secret_read_target(path: &str) -> bool {
     let basename = command_basename(path);
-    is_secret_bearing_source(&basename) && !has_transparent_source_extension(&basename)
+    match expand_brace_alternatives(&basename) {
+        // A brace shape the shared expander cannot resolve: fail closed,
+        // exactly as the copy rule does.
+        None => true,
+        Some(candidates) => candidates.iter().any(|c| names_a_secret(c)),
+    }
+}
+
+/// Whether one already-brace-expanded name or glob is a secret-bearing target.
+fn names_a_secret(candidate: &str) -> bool {
+    !selects_every_name(candidate)
+        && secret_pattern_overlaps(candidate)
+        && !has_transparent_source_extension(candidate)
+}
+
+/// Whether `candidate` is a wildcard carrying no literal character at all.
+///
+/// Why: `Grep(path = <dir>, glob = "*")` selects the same files as a `Grep` with
+/// no `glob` at all, and a tree-wide `Grep` is ordinary work this rule allows.
+/// Denying the spelled-out form while allowing the omitted one would be
+/// incoherent, so a glob that names nothing in particular is treated as the
+/// no-glob case. A glob carrying even one literal character (`*.env`, `.env*`)
+/// is a targeted read and is screened.
+/// Test: `allows_a_grep_tool_call_over_a_directory_with_no_glob`.
+fn selects_every_name(candidate: &str) -> bool {
+    !candidate.is_empty() && candidate.bytes().all(|b| b == b'*' || b == b'?')
 }
 
 /// Whether `basename` ends in one of [`TRANSPARENT_SOURCE_EXTENSIONS`].
-// #7266 fix round: `pub(crate)` so `pm_guard_bash::secret_file_copy` can refuse
-// a copy INTO exactly the names this carve-out lets a later read print. One
-// predicate decides both halves of that seam, per the common-entry-point
-// convention.
-pub(crate) fn has_transparent_source_extension(basename: &str) -> bool {
+fn has_transparent_source_extension(basename: &str) -> bool {
     Path::new(basename)
         .extension()
         .and_then(|e| e.to_str())
@@ -317,14 +388,18 @@ pub(crate) fn has_transparent_source_extension(basename: &str) -> bool {
         .is_some_and(|e| TRANSPARENT_SOURCE_EXTENSIONS.contains(&e.as_str()))
 }
 
-/// The basename of a command or path token, with a leading `\` quote removed.
+/// The basename of a command or path token, with a process-substitution wrapper
+/// and a leading `\` quote removed.
 fn command_basename(token: &str) -> String {
+    // #7266 round 3: `diff <(cat .env) /dev/null` lexes to the tokens `<(cat`
+    // and `.env)`, so the wrapper comes off before any basename match.
+    let token = strip_process_substitution(token);
     let token = token.strip_prefix('\\').unwrap_or(token);
-    Path::new(token)
+    let basename = Path::new(token)
         .file_name()
         .and_then(|f| f.to_str())
-        .unwrap_or(token)
-        .to_string()
+        .unwrap_or(token);
+    strip_process_substitution(basename).to_string()
 }
 
 /// The file operands of a content-printing verb's argument tail, in order.
@@ -803,5 +878,79 @@ mod tests {
         let reason = eval("diff .env /dev/null").expect("denies");
         assert!(reason.contains(".env"), "{reason}");
         assert_eq!(eval("diff a.rs b.rs"), None);
+    }
+
+    // --- #7266 round 3: a `Grep` glob is a PATTERN (critic CRITICAL 1) -----
+
+    #[test]
+    fn denies_a_grep_tool_call_whose_glob_can_match_a_secret() {
+        // Every one of these was ALLOWED on ec8ea341d: the glob was compared
+        // to the denylist as though it were a filename, so only an entry
+        // spelled with a `*` in the same place ever matched.
+        for glob in [
+            "*.env", "*.netrc", ".env*", "*.local", "*.tfvars", "*.key", "id_*", "token*",
+            "*credentials*", "*.p12", "*.kdbx", "*.ovpn", "*.pfx", "*.jks", "*.tfstate",
+        ] {
+            let input = serde_json::json!({
+                "pattern": ".",
+                "path": "/repo/infra",
+                "glob": glob,
+                "output_mode": "content",
+            });
+            let reason = evaluate_secret_file_read_tool("Grep", Some(&input))
+                .unwrap_or_else(|| panic!("glob `{glob}` must deny"));
+            assert!(reason.contains(glob), "{reason}");
+        }
+    }
+
+    #[test]
+    fn allows_a_grep_glob_that_forces_a_transparent_extension() {
+        // These overlap `*credentials*` (via `credentials.rs`), so only the
+        // transparent-extension narrowing keeps ordinary work readable.
+        for glob in ["*.rs", "**/*.md", "*.{rs,ts}", "*", "**/*"] {
+            let input = serde_json::json!({"pattern": "TODO", "path": "/repo/src", "glob": glob});
+            assert_eq!(
+                evaluate_secret_file_read_tool("Grep", Some(&input)),
+                None,
+                "glob `{glob}` must allow"
+            );
+        }
+    }
+
+    #[test]
+    fn denies_a_bash_read_whose_operand_is_a_secret_glob() {
+        assert!(eval("cat *.env").is_some());
+        assert!(eval("head -n 5 *.tfvars").is_some());
+        // A wildcard with no literal character selects what a bare tree-wide
+        // read selects, and stays allowed.
+        assert_eq!(eval("cat *.rs"), None);
+    }
+
+    // --- #7266 round 3: process substitution (critic CRITICAL 2) ----------
+
+    #[test]
+    fn denies_a_secret_read_through_process_substitution() {
+        // The critic's exact commands. `shlex::split` yields `<(cat` and
+        // `.env)`, so no operand rule saw the basename on ec8ea341d.
+        for command in [
+            "diff <(cat .env) /dev/null",
+            "cat <(cat .env)",
+            "diff <(base64 terraform.tfvars) /dev/null",
+            "wc -l <(sed -n '1,5p' /repo/.env)",
+            "paste <(cut -d= -f2 .env)",
+        ] {
+            let reason = eval(command).unwrap_or_else(|| panic!("`{command}` must deny"));
+            assert!(reason.contains("#7266"), "{reason}");
+        }
+        // A process substitution over an ordinary file is untouched.
+        assert_eq!(eval("diff <(cat README.md) /dev/null"), None);
+    }
+
+    #[test]
+    fn command_basename_strips_a_process_substitution_wrapper() {
+        assert_eq!(command_basename("<(cat"), "cat");
+        assert_eq!(command_basename("/repo/infra/.env)"), ".env");
+        assert_eq!(command_basename(".env)"), ".env");
+        assert_eq!(command_basename("README.md"), "README.md");
     }
 }

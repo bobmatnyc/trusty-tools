@@ -62,10 +62,14 @@ pub(crate) use main_checkout::{
     evaluate_main_checkout_destructive_command, head_move_deny_reason, main_checkout_head_move,
 };
 pub(crate) use persistence::command_is_persistence_only;
-// #7266: the second export is the shared secret-file CLASSIFIER, reached by
-// `crate::commands::pm_guard_secret_read` so a read of such a file is screened
-// against the same list a copy of one is.
-pub(crate) use secret_file_copy::{evaluate_secret_file_copy_command, is_secret_bearing_source};
+// #7266: everything after the first export is shared with
+// `crate::commands::pm_guard_secret_read`, so a READ of a secret-bearing file
+// is screened against the same pattern list, the same brace expander and the
+// same process-substitution stripper a COPY of one is.
+pub(crate) use secret_file_copy::{
+    evaluate_secret_file_copy_command, expand_brace_alternatives, secret_pattern_overlaps,
+    strip_process_substitution,
+};
 // #5791: worktree removal is PM-executed, so an agent's `git worktree remove`
 // denies. The sibling `worktree add` guard above is a different rule with a
 // different scope — that one is about WHERE a tree is provisioned, this one is

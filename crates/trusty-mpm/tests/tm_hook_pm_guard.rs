@@ -2510,6 +2510,124 @@ fn pm_guard_denies_a_secret_copied_to_a_source_extension_name() {
 }
 
 #[test]
+fn pm_guard_denies_a_grep_glob_that_can_match_a_secret() {
+    // #7266 round 3, critic CRITICAL 1: the glob was screened as though it were
+    // a filename, so `*.env` and `*.netrc` matched no denylist entry and were
+    // allowed, while `*.pem` denied only because that entry happens to carry a
+    // `*` in the same place. All four deny now, and the ordinary source globs
+    // below still allow.
+    let (_dir, repo) = main_checkout_fixture();
+    for glob in ["*.env", "*.netrc", "id_*", ".env*"] {
+        let input = format!(
+            r#"{{"pattern":".","path":"{}","glob":"{glob}","output_mode":"content"}}"#,
+            repo.join("infra").display()
+        );
+        let stdout = run_pm_guard_at(
+            &tool_payload_at("Grep", &input, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert_denied(&stdout);
+        assert!(
+            stdout.contains("#7266"),
+            "glob `{glob}` must cite the issue: {stdout}"
+        );
+    }
+    for glob in ["*.rs", "*.md", "*"] {
+        let input = format!(
+            r#"{{"pattern":"TODO","path":"{}","glob":"{glob}"}}"#,
+            repo.join("crates").display()
+        );
+        let stdout = run_pm_guard_at(
+            &tool_payload_at("Grep", &input, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert!(
+            stdout.trim().is_empty(),
+            "glob `{glob}` must be allowed: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_denies_a_read_through_process_substitution() {
+    // #7266 round 3, critic CRITICAL 2: `shlex::split` yields the tokens
+    // `<(cat` and `.env)`, so no operand rule saw the basename and
+    // `diff <(cat .env) /dev/null` was allowed while `diff .env /dev/null`
+    // denied.
+    let (_dir, repo) = main_checkout_fixture();
+    for command in [
+        "diff <(cat .env) /dev/null",
+        "cat <(cat .env)",
+        "wc -l <(sed -n '1,5p' terraform.tfvars)",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert_denied(&stdout);
+        assert!(
+            stdout.contains("#7266"),
+            "`{command}` must cite the issue: {stdout}"
+        );
+    }
+    // The same shape over an ordinary file is untouched.
+    let stdout = run_pm_guard_at(
+        &bash_payload_at("diff <(cat README.md) /dev/null", &repo, ""),
+        UNREACHABLE_DAEMON,
+        &repo,
+    );
+    assert!(
+        stdout.trim().is_empty(),
+        "a process substitution over a doc must be allowed: {stdout}"
+    );
+}
+
+#[test]
+fn pm_guard_denies_a_secret_laundered_to_an_unsuspicious_name() {
+    // #7266 round 3, critic HIGH 3: round 2's rename rule fired only for the 35
+    // transparent SOURCE extensions, so `cp .env ./notes.txt` from a main
+    // checkout was allowed and `cat notes.txt` afterwards was allowed too.
+    let (_dir, repo) = main_checkout_fixture();
+    for command in [
+        "cp .env ./notes.txt",
+        "mv terraform.tfvars vars.bin",
+        "cat .env > notes.txt",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert_denied(&stdout);
+        assert!(
+            stdout.contains("#7266"),
+            "`{command}` must cite the issue: {stdout}"
+        );
+    }
+    // The carve-outs the widening must preserve.
+    for command in [
+        "cp .env .env.bak",
+        "cp /repo/.env /tmp/",
+        "npm install token-bucket token-bucket",
+        "grep -rn credentials src/ > out.md",
+        "mv crates/trusty-audit/src/grounding/secrets.rs renamed.rs",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert!(
+            stdout.trim().is_empty(),
+            "`{command}` must be allowed: {stdout}"
+        );
+    }
+}
+
+#[test]
 fn pm_guard_still_allows_ordinary_reads_and_non_operand_mentions() {
     // The other half of #7266's acceptance: the rule must not tax ordinary
     // work. A line range of a normal file, a `cat` of a manifest, a `tfvars`
