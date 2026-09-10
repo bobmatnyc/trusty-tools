@@ -629,3 +629,74 @@ fn one_surface_rule_lives_in_core_and_survives_an_override_attempt() {
         );
     }
 }
+
+// ── #7326: the retired-override signal is emitted once per launch ─────────
+
+/// Every line the resolver logged while composing `project`'s prompt `times`.
+///
+/// Why: the defect is a COUNT, and the count is only observable in the emitted
+/// events — the composed prompt is byte-identical either way. Resolving twice
+/// in one capture is the launch shape: `prepare_session` writes the stash from
+/// one resolution and the launcher builds the delivered prompt from a second.
+/// What: installs a thread-local buffering subscriber, resolves `times` times,
+/// and returns what was recorded.
+/// Test: this is test scaffolding for the two tests below.
+fn resolved_log_lines(project: &Path, times: usize) -> Vec<String> {
+    use tracing_subscriber::layer::SubscriberExt;
+
+    // #4931: `with_default` is thread-local and never raises the process-global
+    // MAX_LEVEL, so without this the capture records nothing.
+    crate::test_support::enable_event_capture();
+    let buffer = trusty_common::log_buffer::LogBuffer::new(64);
+    let subscriber = tracing_subscriber::registry().with(
+        trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+    );
+    tracing::subscriber::with_default(subscriber, || {
+        for _ in 0..times {
+            let _ =
+                resolve_pm_prompt_with_roster(project, || Some("## Delegation Authority".into()));
+        }
+    });
+    buffer.tail(64)
+}
+
+/// How many captured lines carry the retired-override signal.
+fn retired_signals(lines: &[String]) -> usize {
+    lines
+        .iter()
+        .filter(|l| l.contains("RETIRED override file is NO LONGER READ"))
+        .count()
+}
+
+#[test]
+#[serial_test::serial]
+fn the_retired_override_signal_is_emitted_once_per_launch() {
+    // #7326: one launch resolves the prompt twice, and both resolutions reached
+    // the emitter, so a project with one leftover retired file got the ERROR
+    // line twice for one launch. Against the pre-fix code this is 2.
+    let tmp = TempDir::new().unwrap();
+    write_override(tmp.path(), FILE_WORKFLOW, "leftover");
+    assert_eq!(detect_legacy_overrides(tmp.path()).len(), 1);
+
+    let lines = resolved_log_lines(tmp.path(), 2);
+    assert_eq!(
+        retired_signals(&lines),
+        1,
+        "one launch, one signal: {lines:#?}"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn two_projects_each_report_their_own_retired_file() {
+    // The dedupe is keyed by PATH, not by a process-wide `Once` — a second
+    // project's leftover file must still be reported, or the fix would silence
+    // the condition it exists to make loud.
+    let a = TempDir::new().unwrap();
+    let b = TempDir::new().unwrap();
+    write_override(a.path(), FILE_MEMORY, "leftover");
+    write_override(b.path(), FILE_MEMORY, "leftover");
+
+    assert_eq!(retired_signals(&resolved_log_lines(a.path(), 2)), 1);
+    assert_eq!(retired_signals(&resolved_log_lines(b.path(), 2)), 1);
+}
