@@ -1957,6 +1957,9 @@ const HARNESS_REFUSED_SHAPES: &[&str] = &[
     // `-C`, the `--no-pager` workaround, a `$(git …)` pathspec, and a git
     // command inside BASE-AGENT's redirect-then-echo gate idiom.
     "git diff origin/main...HEAD --stat",
+    // #7368: reported again as a too-narrow read-only-git allowlist here; this
+    // guard has no `git diff` rule to widen, so the row joins the corpus.
+    "git diff main..HEAD -- docs/",
     "git diff --cached -- crates/trusty-mpm/src/lib.rs",
     "git diff HEAD~2 HEAD -- crates/trusty-mpm/src/lib.rs",
     "git log origin/main..3350be5",
@@ -2037,4 +2040,112 @@ fn ansi_c_quoting_is_refused_by_this_guard_too() {
         unclassifiable_command(r"grep -n '\tfixture' README.md"),
         None
     );
+}
+
+/// #7368: every read-only `git diff` spelling the issue reports is allowed.
+///
+/// Why: the issue reads the refusal of `git diff main..HEAD -- docs/` as a
+/// too-narrow read-only-git allowlist here. This guard has no `git diff` rule
+/// to widen — it classifies `git` by subcommand and only `apply` denies — so
+/// the rows below already pass and the refusal belongs to the
+/// [`HARNESS_REFUSED_SHAPES`] family instead. The table is the mechanical form
+/// of that finding, and it stops a later rule from quietly denying a read.
+/// What: asserts both bands answer allow — [`unclassifiable_command`], the
+/// ABSOLUTE band a dispatched subagent reaches, and [`evaluate_bash_command`],
+/// the PM classifier.
+/// Test: itself.
+#[test]
+fn readonly_git_diff_pathspecs_are_allowed() {
+    for command in [
+        "git diff main..HEAD -- docs/",
+        "git diff origin/main..HEAD -- docs/",
+        "git diff origin/main...HEAD -- docs/",
+        "git diff --stat main..HEAD -- docs/",
+        "git diff --cached -- docs/",
+        "git diff HEAD~2 HEAD -- docs/",
+        "git --no-pager diff main..HEAD -- docs/",
+        "git -C /repo diff main..HEAD -- docs/",
+    ] {
+        assert_eq!(
+            unclassifiable_command(command),
+            None,
+            "read-only diff must stay classifiable: {command}"
+        );
+        assert_eq!(
+            evaluate_bash_command(command),
+            None,
+            "read-only diff must stay allowed: {command}"
+        );
+    }
+}
+
+/// #7374: a quoted command path with spaces gets the unquoted decision.
+///
+/// Why: the guard read `"/Applications/Google Chrome.app/…/Google Chrome"` as
+/// the fragment `Google`, because the command name was resolved by
+/// `split_whitespace`. The space-free control row is what makes this a claim
+/// about AGREEMENT rather than about one string.
+/// What: asserts the issue's literal command allows, in both quote spellings,
+/// and that the equivalent space-free path allows too.
+/// Test: itself.
+#[test]
+fn a_quoted_command_path_with_spaces_gets_the_unquoted_decision() {
+    let unquoted = "/Applications/GoogleChrome.app/Contents/MacOS/GoogleChrome --headless";
+    for command in [
+        r#""/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless"#,
+        r#"'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' --headless"#,
+    ] {
+        assert_eq!(unclassifiable_command(command), None, "{command}");
+        assert_eq!(
+            evaluate_bash_command(command),
+            evaluate_bash_command(unquoted),
+            "quoted and unquoted spellings must agree: {command}"
+        );
+        assert_eq!(evaluate_bash_command(command), None, "{command}");
+    }
+}
+
+/// #7374: no quoting spelling buys a forbidden verb an exemption.
+///
+/// Why: the fix is "resolve the program bash would exec", not "strip quotes and
+/// allow". Three spellings were slipping the deny for the same reason — a
+/// quoted path read as `My`, split quoting read as the literal `s"e"d`, a
+/// backslash-escaped space read as `my\` — and each is closed by lexing rather
+/// than by naming the spelling.
+/// What: asserts every spelling denies with its own reason, and that the
+/// false-DENY direction — a benign program under a directory named `make` —
+/// now allows.
+/// Test: itself.
+#[test]
+fn a_quoted_path_to_a_forbidden_verb_is_still_refused() {
+    for command in [
+        r#""/Applications/My Tools/sed" -i s/a/b/ f"#,
+        r#"'/Applications/My Tools/patch' -p1 x"#,
+        r#""/Applications/My Tools/awk" -i inplace '{print}' f"#,
+        // #7374 round 2: split across adjacent quote fragments, and a
+        // backslash-escaped space — both invisible to a whitespace scan.
+        r#"s"e"d -i s/a/b/ f"#,
+        r#"'se'"d" -i s/a/b/ f"#,
+        r#""se"'d' -i s/a/b/ f"#,
+        r"/opt/my\ tools/sed -i x f",
+    ] {
+        assert_eq!(
+            evaluate_bash_command(command),
+            Some(SHELL_EDIT_REASON),
+            "a quoted path must not hide the verb: {command}"
+        );
+    }
+    assert_eq!(
+        evaluate_bash_command(r#"c"u"rl http://x"#),
+        Some(NETWORK_REASON)
+    );
+    assert_eq!(
+        evaluate_bash_command(r#""/opt/My Tools/npm" test"#),
+        Some(BUILD_TEST_REASON)
+    );
+    assert_eq!(
+        evaluate_bash_command(r#"n"p"m test"#),
+        Some(BUILD_TEST_REASON)
+    );
+    assert_eq!(evaluate_bash_command(r#""/opt/make tools/echo" hi"#), None);
 }

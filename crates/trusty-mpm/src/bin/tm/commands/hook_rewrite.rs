@@ -170,7 +170,12 @@ pub(crate) fn rewrite_bash_command_for_compression(command: &str) -> Option<Stri
 /// `effective_tool_name_strips_env_and_sudo_noise`,
 /// `effective_tool_name_strips_env_command_prefix`.
 pub(crate) fn effective_tool_name(command: &str) -> String {
-    let mut tokens = command.split_whitespace();
+    // #7399 finding (b): the same lexer [`first_command_token`] uses, so the
+    // `npm test` matcher in `pm_guard_bash::classify_bash_segment` sees the
+    // program bash would exec — `"/opt/My Tools/npm" test` and `n"p"m test`
+    // both resolve to `npm test` rather than to a fragment of the path.
+    let words = shlex_words(command);
+    let mut tokens = words.iter().map(String::as_str);
     let Some(mut first) = tokens.next() else {
         return String::new();
     };
@@ -261,7 +266,7 @@ fn is_safe_tool_name(tool_name: &str) -> bool {
 /// `is_orchestrator_command_conservatively_true_for_sudo_with_flags`.
 fn is_orchestrator_command(command: &str) -> bool {
     match first_command_token(command) {
-        Some(token) => ORCHESTRATOR_EXCLUSIONS.contains(&token),
+        Some(program) => ORCHESTRATOR_EXCLUSIONS.contains(&program.as_str()),
         None => true,
     }
 }
@@ -369,13 +374,59 @@ pub(crate) fn strip_wrapper_prefix<T: AsRef<str>>(tokens: &[T]) -> Option<usize>
 /// `first_command_token_strips_command_wrapper`,
 /// `first_command_token_strips_builtin_wrapper`,
 /// `first_command_token_strips_backslash_after_sudo`,
-/// `first_command_token_strips_nice_time_nohup_exec`.
-pub(crate) fn first_command_token(command: &str) -> Option<&str> {
-    let tokens: Vec<&str> = command.split_whitespace().collect();
-    let start = strip_wrapper_prefix(&tokens)?;
-    let tok = tokens.get(start)?;
+/// `first_command_token_strips_nice_time_nohup_exec`,
+/// `first_command_token_resolves_a_quoted_path_with_spaces`,
+/// `first_command_token_resolves_a_quoted_forbidden_verb`,
+/// `first_command_token_resolves_split_quoting`,
+/// `first_command_token_keeps_the_fallback_answer_on_unbalanced_quoting`.
+///
+/// #7374/#7399: the name is resolved through [`shlex_words`], the lexer bash
+/// agrees with, so `s"e"d`, `'se'"d"` and `/opt/my\ tools/sed` all resolve to
+/// `sed`. A `split_whitespace` scan could not: it reads a quote as an ordinary
+/// character, so a verb spelled across adjacent quote fragments never matched
+/// a rule and `bash -c 's"e"d -i x f'` ran the real `sed`.
+pub(crate) fn first_command_token(command: &str) -> Option<String> {
+    program_basename(&shlex_words(command))
+}
+
+/// The command's words, lexed the way bash lexes them.
+///
+/// Why (#7374, #7399 finding (b)): quoting is not decoration — bash strips it
+/// before deciding which program to exec, so any classifier that reads the
+/// command name off a `split_whitespace` scan is reading a different command
+/// than the one that will run. `shlex` is already this crate's answer to that
+/// question (`pm_guard_bash::shell_lex::git_subcommand` resolves a git
+/// subcommand with it), so this routes the command-name decision through the
+/// same lexer rather than growing a second, weaker one.
+/// What: `shlex::split` when the command lexes. When it does not — unbalanced
+/// quoting, a trailing lone backslash — this falls back to the plain
+/// whitespace split the callers had before, never to anything wider: a command
+/// the lexer cannot read must not gain an allow it did not already have. A
+/// command that genuinely cannot be classified is refused upstream by
+/// `pm_guard_bash::unclassifiable_command`.
+/// Test: `shlex_words_lexes_split_quoting`,
+/// `shlex_words_falls_back_on_unbalanced_quoting`.
+fn shlex_words(command: &str) -> Vec<String> {
+    shlex::split(command).unwrap_or_else(|| {
+        command
+            .split_whitespace()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    })
+}
+
+/// The program name `tokens` would run, past env assignments and wrappers.
+///
+/// What: delegates the prefix-skip to [`strip_wrapper_prefix`], then returns
+/// the basename (post-`/`, post-`\`) of the token it stops at. `None` under
+/// the one condition [`strip_wrapper_prefix`] reports it — a wrapper followed
+/// by a flag-shaped token.
+/// Test: every `first_command_token_*` case reaches this.
+fn program_basename(tokens: &[String]) -> Option<String> {
+    let start = strip_wrapper_prefix(tokens)?;
+    let tok = tokens.get(start)?.as_str();
     let tok = tok.strip_prefix('\\').unwrap_or(tok);
-    Some(tok.rsplit('/').next().unwrap_or(tok))
+    Some(tok.rsplit('/').next().unwrap_or(tok).to_string())
 }
 
 /// Whether `token` looks like a `KEY=value` shell environment assignment.
@@ -827,22 +878,31 @@ mod tests {
 
     #[test]
     fn first_command_token_strips_env_assignment() {
-        assert_eq!(first_command_token("FOO=bar make build"), Some("make"));
+        assert_eq!(
+            first_command_token("FOO=bar make build").as_deref(),
+            Some("make")
+        );
     }
 
     #[test]
     fn first_command_token_strips_sudo() {
-        assert_eq!(first_command_token("sudo make install"), Some("make"));
+        assert_eq!(
+            first_command_token("sudo make install").as_deref(),
+            Some("make")
+        );
     }
 
     #[test]
     fn first_command_token_strips_path() {
-        assert_eq!(first_command_token("/usr/bin/make build"), Some("make"));
+        assert_eq!(
+            first_command_token("/usr/bin/make build").as_deref(),
+            Some("make")
+        );
     }
 
     #[test]
     fn first_command_token_plain_command() {
-        assert_eq!(first_command_token("cargo test"), Some("cargo"));
+        assert_eq!(first_command_token("cargo test").as_deref(), Some("cargo"));
     }
 
     #[test]
@@ -851,7 +911,10 @@ mod tests {
         // form) must still resolve to `make` for orchestrator-exclusion
         // matching purposes — a trusty-review-flagged gap where only
         // `sudo` was handled, not the literal `env` command.
-        assert_eq!(first_command_token("env FOO=bar make build"), Some("make"));
+        assert_eq!(
+            first_command_token("env FOO=bar make build").as_deref(),
+            Some("make")
+        );
     }
 
     #[test]
@@ -861,8 +924,11 @@ mod tests {
         // parsing this function doesn't do, so it must degrade to `None`
         // (trusty-review finding, PR #1968) rather than returning the
         // bogus token `"-u"`.
-        assert_eq!(first_command_token("sudo -u root make build"), None);
-        assert_eq!(first_command_token("env -i make build"), None);
+        assert_eq!(
+            first_command_token("sudo -u root make build").as_deref(),
+            None
+        );
+        assert_eq!(first_command_token("env -i make build").as_deref(), None);
     }
 
     #[test]
@@ -870,7 +936,7 @@ mod tests {
         // #4031 review, HIGH 3: `\rm` is the standard alias-bypass idiom —
         // Bash itself strips the backslash before exec, so this classifier
         // must too, or a resolved verb like `\rm` never matches `"rm"`.
-        assert_eq!(first_command_token("\\rm -rf /root"), Some("rm"));
+        assert_eq!(first_command_token("\\rm -rf /root").as_deref(), Some("rm"));
     }
 
     #[test]
@@ -878,12 +944,18 @@ mod tests {
         // #4031 review, HIGH 4: `command rm` runs the real `rm`, bypassing
         // any shell function/alias named `rm` — the same bypass class as a
         // leading backslash, via the POSIX `command` builtin instead.
-        assert_eq!(first_command_token("command rm -rf /root"), Some("rm"));
+        assert_eq!(
+            first_command_token("command rm -rf /root").as_deref(),
+            Some("rm")
+        );
     }
 
     #[test]
     fn first_command_token_strips_builtin_wrapper() {
-        assert_eq!(first_command_token("builtin rm -rf /root"), Some("rm"));
+        assert_eq!(
+            first_command_token("builtin rm -rf /root").as_deref(),
+            Some("rm")
+        );
     }
 
     #[test]
@@ -891,7 +963,10 @@ mod tests {
         // The two bypass idioms compose: `sudo \rm` must resolve the same
         // as `sudo rm` — the backslash strip re-runs on every token the
         // `sudo`/`env`/`command`/`builtin` arm advances to.
-        assert_eq!(first_command_token("sudo \\rm -rf /root"), Some("rm"));
+        assert_eq!(
+            first_command_token("sudo \\rm -rf /root").as_deref(),
+            Some("rm")
+        );
     }
 
     #[test]
@@ -913,11 +988,161 @@ mod tests {
             "exec rm -rf /root",
         ] {
             assert_eq!(
-                first_command_token(command),
+                first_command_token(command).as_deref(),
                 Some("rm"),
                 "expected \"rm\" for: {command}"
             );
         }
+    }
+
+    /// #7374: a quoted absolute path with spaces resolves to its own basename.
+    ///
+    /// Why: every macOS `.app` binary is spelled this way, and
+    /// `split_whitespace` cut it at the space, so the command name read as the
+    /// fragment `Google`. The unquoted, space-free spelling is the control: the
+    /// two must agree on what the program is.
+    /// Test: itself.
+    #[test]
+    fn first_command_token_resolves_a_quoted_path_with_spaces() {
+        for command in [
+            r#""/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless"#,
+            r#"'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' --headless"#,
+        ] {
+            assert_eq!(
+                first_command_token(command).as_deref(),
+                Some("Google Chrome"),
+                "expected the path's own basename for: {command}"
+            );
+        }
+        // The control: no spaces, no quotes, same shape, same kind of answer.
+        assert_eq!(
+            first_command_token("/Applications/GoogleChrome.app/Contents/MacOS/GoogleChrome -x")
+                .as_deref(),
+            Some("GoogleChrome")
+        );
+    }
+
+    /// #7374: no quoting spelling hides a forbidden verb.
+    ///
+    /// Why: the fix must not degrade to "strip the quotes and allow anything".
+    /// Quoted, split-quoted and backslash-escaped spellings all resolve to the
+    /// program bash would exec: before, `"/Applications/My Tools/sed" -i x f`
+    /// resolved to `My` and slipped the shell-edit deny. The quoted `make` row
+    /// is the same misread in the false-DENY direction. Split quoting has its
+    /// own case in `first_command_token_resolves_split_quoting`.
+    /// Test: itself.
+    #[test]
+    fn first_command_token_resolves_a_quoted_forbidden_verb() {
+        assert_eq!(
+            first_command_token(r#""/Applications/My Tools/sed" -i s/a/b/ f"#).as_deref(),
+            Some("sed")
+        );
+        assert_eq!(
+            first_command_token(r#"'/Applications/My Tools/patch' -p1 x"#).as_deref(),
+            Some("patch")
+        );
+        // The false-deny direction: the program is `echo`, never `make`.
+        assert_eq!(
+            first_command_token(r#""/opt/make tools/echo" hi"#).as_deref(),
+            Some("echo")
+        );
+        // A quoted wrapper is still a wrapper.
+        assert_eq!(
+            first_command_token(r#""sudo" rm -rf /root"#).as_deref(),
+            Some("rm")
+        );
+    }
+
+    /// #7374: a verb split across quote fragments still resolves to the verb.
+    ///
+    /// Why: this is the shape a byte-scanning splitter cannot see. `s"e"d` is
+    /// one word to any whitespace scan and contains no quote pair to unwrap, so
+    /// the name read as the literal `s"e"d` and matched no rule — while
+    /// `bash -c 's"e"d -i x f'` ran the real `sed`. Backslash-escaped spaces are
+    /// the same misread with a different escape.
+    /// Test: itself.
+    #[test]
+    fn first_command_token_resolves_split_quoting() {
+        for command in [
+            r#"s"e"d -i s/a/b/ f"#,
+            r#"'se'"d" -i s/a/b/ f"#,
+            r#""se"'d' -i s/a/b/ f"#,
+            r"/opt/my\ tools/sed -i x f",
+        ] {
+            assert_eq!(
+                first_command_token(command).as_deref(),
+                Some("sed"),
+                "split quoting must not hide the verb: {command}"
+            );
+        }
+        assert_eq!(
+            first_command_token(r#"c"u"rl http://x"#).as_deref(),
+            Some("curl")
+        );
+    }
+
+    /// #7374: unlexable quoting keeps the pre-fix answer, never a wider one.
+    ///
+    /// Why: `shlex` returns `None` on an unbalanced quote, and the fallback
+    /// must be the plain whitespace split these callers had before — a command
+    /// the lexer cannot read must not GAIN an allow. `sed -i "x` keeps its
+    /// deny; `"sed -i x` keeps the allow it already had, and is refused
+    /// upstream instead when it matters.
+    /// Test: itself.
+    #[test]
+    fn first_command_token_keeps_the_fallback_answer_on_unbalanced_quoting() {
+        assert!(shlex::split(r#"sed -i "x"#).is_none());
+        assert_eq!(
+            first_command_token(r#"sed -i "x"#).as_deref(),
+            Some("sed"),
+            "an unbalanced quote after the verb must not lose the deny"
+        );
+        assert_eq!(
+            first_command_token(r#""sed -i x"#).as_deref(),
+            Some("\"sed"),
+            "the fallback answers exactly as split_whitespace did"
+        );
+    }
+
+    /// #7374: `shlex_words` lexes what bash lexes.
+    ///
+    /// Test: itself.
+    #[test]
+    fn shlex_words_lexes_split_quoting() {
+        assert_eq!(shlex_words(r#"s"e"d -i f"#), vec!["sed", "-i", "f"]);
+        assert_eq!(
+            shlex_words(r#""/opt/a b/sed" -i f"#),
+            vec!["/opt/a b/sed", "-i", "f"]
+        );
+        assert_eq!(
+            shlex_words("git diff -- docs/"),
+            vec!["git", "diff", "--", "docs/"]
+        );
+    }
+
+    /// #7374: an unlexable command falls back to the whitespace split.
+    ///
+    /// Test: itself.
+    #[test]
+    fn shlex_words_falls_back_on_unbalanced_quoting() {
+        assert_eq!(shlex_words(r#"sed -i "x"#), vec!["sed", "-i", "\"x"]);
+    }
+
+    /// #7399 finding (b): the tool name is lexed, so `npm test` is seen.
+    ///
+    /// Why: `effective_tool_name` backs the `npm test` deny in
+    /// `pm_guard_bash::classify_bash_segment`, and it read the name off a
+    /// whitespace scan, so a quoted path or split quoting produced a fragment
+    /// and the deny never fired.
+    /// Test: itself.
+    #[test]
+    fn effective_tool_name_lexes_quoted_and_split_spellings() {
+        assert_eq!(
+            effective_tool_name(r#""/opt/My Tools/npm" test"#),
+            "npm test"
+        );
+        assert_eq!(effective_tool_name(r#"n"p"m test"#), "npm test");
+        assert_eq!(effective_tool_name(r"/opt/my\ tools/npm test"), "npm test");
     }
 
     #[test]

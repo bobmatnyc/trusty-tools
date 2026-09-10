@@ -494,7 +494,7 @@ fn evaluate_secret_file_copy_command_in(
         }
         // Same `cd`-tracking shape as the sibling ABSOLUTE guards: a
         // deliberate, partial closing of `cd worktree && cp secret .`.
-        if first_command_token(trimmed) == Some("cd") {
+        if first_command_token(trimmed).as_deref() == Some("cd") {
             if let Some(argv) = shlex::split(trimmed)
                 && let Some(dest) = argv.get(1)
             {

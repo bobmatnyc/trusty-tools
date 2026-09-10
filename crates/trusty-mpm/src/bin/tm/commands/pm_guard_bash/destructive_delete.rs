@@ -183,7 +183,7 @@ fn evaluate_destructive_delete_command_in(
         // /tmp`) is a real but narrower gap than wrapper-enumerated VERB
         // detection was, since a missed `cd` only leaves `effective_cwd`
         // stale rather than letting a delete verb through unclassified.
-        if first_command_token(trimmed) == Some("cd") {
+        if first_command_token(trimmed).as_deref() == Some("cd") {
             if let Some(argv) = shlex::split(trimmed)
                 && let Some(dest) = argv.get(1)
             {
