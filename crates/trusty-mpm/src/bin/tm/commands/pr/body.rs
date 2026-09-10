@@ -259,14 +259,29 @@ const SESSION_LINE_LABEL: &str = "Claude-Session:";
 
 /// Is `line` a session link belonging to the attribution block?
 ///
-/// Why/What/Test: see [`SESSION_LINK_PREFIX`]. A bare prefix with no session id
-/// after it is not a link, so it cannot stand in for the footer.
+/// Why: see [`SESSION_LINK_PREFIX`]. A prefix test alone accepted anything that
+/// merely STARTED with the URL, so a line of prose trailing the link — or an
+/// entire sentence after it — passed as attribution and could close a body or
+/// be skipped as section content.
+/// What: the whole line, after an optional [`SESSION_LINE_LABEL`] and the
+/// whitespace behind it, must be the prefix plus a non-empty session id of
+/// ASCII alphanumerics, `_` and `-`. Anything else — an empty id, a space, a
+/// trailing word, punctuation — is not a session link.
+/// Test: `footer_accepts_the_trailing_session_link`,
+/// `footer_accepts_a_session_link_before_the_footer`,
+/// `footer_rejects_a_session_link_with_trailing_junk`.
 fn is_session_link(line: &str) -> bool {
     let text = line.trim();
     let url = text
         .strip_prefix(SESSION_LINE_LABEL)
         .map_or(text, str::trim_start);
-    url.len() > SESSION_LINK_PREFIX.len() && url.starts_with(SESSION_LINK_PREFIX)
+    let Some(id) = url.strip_prefix(SESSION_LINK_PREFIX) else {
+        return false;
+    };
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 /// Does `body` end with the attribution block?
@@ -280,7 +295,9 @@ fn is_session_link(line: &str) -> bool {
 /// body with no footer at all is false, whatever else it ends with.
 /// Test: `footer_must_be_last_line`, `footer_accepts_the_trailing_session_link`,
 /// `footer_accepts_a_session_link_before_the_footer`,
-/// `footer_rejects_a_body_with_no_attribution_line`.
+/// `footer_rejects_a_body_with_no_attribution_line`,
+/// `footer_rejects_a_session_link_with_trailing_junk`,
+/// `footer_rejects_two_stacked_session_links`.
 fn footer_closes(body: &str) -> bool {
     let mut tail = body.lines().rev().filter(|l| !l.trim().is_empty());
     match tail.next() {
@@ -336,7 +353,8 @@ impl IssueLink {
 /// `issue_link_rejects_a_closing_keyword_outside_field_one`,
 /// `issue_link_rejects_a_negated_closing_keyword`,
 /// `issue_link_allows_prose_that_only_looks_like_a_keyword`,
-/// `issue_link_without_issue_leaves_body_alone`.
+/// `issue_link_without_issue_leaves_body_alone`,
+/// `issue_link_lands_above_a_footer_a_session_link_trails`.
 pub(crate) fn apply_issue_link(
     body: &str,
     issue: Option<u64>,
