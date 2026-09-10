@@ -2774,6 +2774,178 @@ fn pm_guard_allows_the_safe_handling_verbs_on_a_secret_file() {
 }
 
 #[test]
+fn pm_guard_denies_a_glob_or_quote_join_that_names_a_secret() {
+    // #7266 round 6, critic CRITICAL 1 and 2, through the real binary. Every
+    // one of these ALLOWED on the round-5 binary (71ad20438): the word scan cut
+    // at `*`, `?`, `[` and `]`, and it read raw text even when the segment
+    // lexed, so a wildcard or a quote join hid the name from it.
+    let (_dir, repo) = main_checkout_fixture();
+    for command in [
+        "cat .en?",
+        "cat .e*",
+        "cat ./.*",
+        "cat id_rs?",
+        "cat *.p?m",
+        "cat id_[r]sa",
+        "cat ./.*rc",
+        "sed -n '1,5p' terraform.tfvar?",
+        "cat '.en''v'",
+        "cat 'terraform'.tfvars",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert_denied(&stdout);
+        assert!(
+            stdout.contains("#7266"),
+            "`{command}` must cite the issue: {stdout}"
+        );
+    }
+    // Keeping the glob bytes in the word must not tax ordinary globbing.
+    for command in [
+        "cat *.toml",
+        "ls *.json",
+        "rg foo src/*.rs",
+        "ls -la target/*",
+        "cat ~/.bashrc",
+        "ls file?.txt",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert!(
+            stdout.trim().is_empty(),
+            "`{command}` must be allowed: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_denies_git_add_in_a_content_revealing_mode() {
+    // #7266 round 6, critic CRITICAL 3: `SAFE_GIT_SUBCOMMANDS` granted `add` on
+    // the subcommand name alone, so `git add -p .env` walked the file's diff
+    // into the transcript and ALLOWED on the round-5 binary.
+    let (_dir, repo) = main_checkout_fixture();
+    for command in [
+        "git add -p .env",
+        "git add --patch .env",
+        "git add -i .env",
+        "git add --interactive .env",
+        "git add -e .env",
+        "git add --edit terraform.tfvars",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert_denied(&stdout);
+        assert!(
+            stdout.contains("#7266"),
+            "`{command}` must cite the issue: {stdout}"
+        );
+    }
+    // Staging without printing keeps the grant.
+    for command in ["git add .env.example", "git add -A .env", "git add -u .env"] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert!(
+            stdout.trim().is_empty(),
+            "`{command}` must be allowed: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_allows_a_secret_name_as_a_search_pattern_and_a_public_key() {
+    // #7266 round 6, the two HIGH false-positive findings, through the real
+    // binary. Both DENIED on the round-5 binary (71ad20438): searching the tree
+    // FOR the name prints no byte of the file, and an SSH public key is
+    // published by definition.
+    let (_dir, repo) = main_checkout_fixture();
+    for command in [
+        "grep -rn terraform.tfvars docs/",
+        "rg id_rsa --type md",
+        r"grep -rn '\\.env' docs/",
+        r"grep -rn '\\.pem' README.md",
+        "cat id_rsa.pub",
+        "cat ~/.ssh/id_rsa.pub",
+        "ssh-copy-id -i id_rsa.pub host",
+        "cat id_ed25519.pub",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert!(
+            stdout.trim().is_empty(),
+            "`{command}` must be allowed: {stdout}"
+        );
+    }
+    let pubkey = format!(r#"{{"file_path":"{}"}}"#, repo.join("id_rsa.pub").display());
+    let stdout = run_pm_guard_at(
+        &tool_payload_at("Read", &pubkey, &repo, ""),
+        UNREACHABLE_DAEMON,
+        &repo,
+    );
+    assert!(
+        stdout.trim().is_empty(),
+        "a public key must be readable: {stdout}"
+    );
+    // The operand arm and the private half still deny.
+    for command in [
+        "grep -r SECRET .env",
+        "rg . .env",
+        "git grep SECRET .env",
+        "cat id_rsa",
+        "cat id_rsa_credentials.pub",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert_denied(&stdout);
+        assert!(
+            stdout.contains("#7266"),
+            "`{command}` must cite the issue: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_deny_text_advertises_no_flag_escape() {
+    // #7266 round 6, critic HIGH + MEDIUM: round 5's reason offered
+    // `--env-file`/`-var-file`/`-state` and no such escape was ever
+    // implemented. Round 6 removed the claim rather than build it.
+    let (_dir, repo) = main_checkout_fixture();
+    let stdout = run_pm_guard_at(
+        &bash_payload_at("cat .env", &repo, ""),
+        UNREACHABLE_DAEMON,
+        &repo,
+    );
+    assert_denied(&stdout);
+    for phantom in ["--env-file", "-var-file", "-state"] {
+        assert!(
+            !stdout.contains(phantom),
+            "the deny text still advertises `{phantom}`: {stdout}"
+        );
+    }
+    assert!(
+        stdout.contains("no flag that buys an exception"),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn pm_guard_denies_a_source_write_in_a_main_checkout() {
     // ADR-0044 decision 1, the half that was never built: an ordinary `Write`
     // to a source file in the shared checkout passed every guard in the

@@ -41,28 +41,64 @@
 //! `find secrets/ -name '*.md'` does not. Every other family is a filename and
 //! nothing else, so `cat id_rsa` denies on the bare word.
 //!
+//! Round 6 closes what round 5's word scan let through and withdraws what it
+//! took too much of. A GLOB is now kept whole in the word rather than cut at
+//! its wildcard, so `cat .en?`, `cat .e*` and `cat id_[r]sa` reach the same
+//! pattern screen the `Grep` `glob` arm uses (see [`is_path_byte`] and
+//! [`normalize_bracket_classes`]). The scan reads the LEXER'S tokens when the
+//! segment lexes, so `cat '.en''v'` and `cat .e\nv` no longer hide the name in
+//! quoting (see [`secret_words_in_segment`]); the raw byte scan stays as the
+//! fail-closed arm for a segment no lexer can read. `git add` loses its grant
+//! under `-p`/`-i`/`-e`, which print the file's diff (see
+//! [`CONTENT_REVEALING_GIT_FLAGS`]). Going the other way, a search program's
+//! first positional argument is a PATTERN and is skipped, so
+//! `grep -rn "\.env" docs/` and `rg 'id_rsa' --type md` — how an agent finds
+//! where a secret file is referenced — allow again (see
+//! [`PATTERN_FIRST_SEARCH_PROGRAMS`]), and an SSH PUBLIC key reads freely (see
+//! [`is_ssh_public_key_name`]).
+//!
 //! What this costs, deliberately: naming a secret-shaped file in ANY command
 //! now denies, including one that reads nothing — `git log --grep .env`,
 //! `git commit -m "add .env.example"`, `cp .env .env.bak`. Rounds 1 to 4
 //! allowed those and were bypassed four times; a rule an agent can route around
-//! by renaming the verb protects nothing. Rephrasing the message, or handing
-//! the file to a tool by absolute path, is the way through.
+//! by renaming the verb protects nothing. There is no flag that buys an
+//! exception — round 5's deny text advertised `--env-file`/`-var-file`/`-state`
+//! and no such escape was ever implemented, so round 6 removed the claim rather
+//! than build it: a reference flag is one more list to enumerate, which is the
+//! shape that failed four times. The way through is to rephrase the message, to
+//! run the tool so it picks the file up itself (`docker compose up` reads
+//! `./.env`), or to ask the operator.
 //!
 //! Residual, named rather than silently allowed: a file called exactly
 //! `secrets` or `token` with no extension and no directory in front of it is
 //! not screened (see above); a path that reaches the command only through a
 //! variable (`sed -n 1,5p "$F"`) is not resolved, because this rule reads words
-//! and not the filesystem; `git show HEAD:terraform.tfvars` prints a COMMITTED
-//! copy, which no filename rule sees; and a GLOB whose only literal is the TAIL
-//! of an `.env.<name>` file (`Grep(glob = "*.production")`) names no family's
-//! core, a trade #7266 round 4 made to keep every ordinary extension search
-//! working.
+//! and not the filesystem; a GLOB whose only literal is the TAIL of an
+//! `.env.<name>` file (`Grep(glob = "*.production")`) names no family's core, a
+//! trade #7266 round 4 made to keep every ordinary extension search working;
+//! and a search program's pattern is skipped only when it is written as the
+//! first positional argument, so `rg --type md id_rsa` — pattern behind a
+//! value-taking flag — still denies. Enumerating which flags take a value is
+//! the trade refused there: a wrong entry would skip a real file operand, which
+//! is a bypass rather than a false positive.
+//!
+//! `git show HEAD:terraform.tfvars` is DENIED, not residual: `:` is not a path
+//! byte, so `HEAD:terraform.tfvars` cuts into `HEAD` and `terraform.tfvars`,
+//! and `show` is not a [`SAFE_GIT_SUBCOMMANDS`] entry (round 5's doc listed it
+//! as a gap; it never was one).
 //!
 //! Test: `denies_the_reported_sed_line_range`,
 //! `denies_every_bypass_the_earlier_rounds_missed`,
 //! `allows_the_ordinary_command_corpus`,
 //! `allows_only_the_safe_handling_verbs`,
-//! `denies_an_unlexable_segment_that_names_a_secret`, and the rest of this
+//! `denies_an_unlexable_segment_that_names_a_secret`,
+//! `denies_a_glob_that_expands_onto_a_secret_file`,
+//! `denies_a_name_reassembled_by_quoting_or_escaping`,
+//! `denies_git_add_in_a_content_revealing_mode`,
+//! `allows_a_secret_name_written_as_a_search_pattern`,
+//! `denies_a_secret_file_operand_of_a_search_program`,
+//! `allows_reading_an_ssh_public_key`,
+//! `the_deny_text_advertises_no_flag_escape`, and the rest of this
 //! module's `tests` submodule. The rule is proved WIRED end to end through the
 //! real binary by `pm_guard_denies_a_line_range_read_of_a_secret_bearing_file`,
 //! `pm_guard_denies_a_read_tool_call_on_a_secret_bearing_file`,
@@ -70,16 +106,21 @@
 //! `pm_guard_denies_a_grep_glob_that_can_match_a_secret`,
 //! `pm_guard_denies_a_read_through_process_substitution`,
 //! `pm_guard_denies_every_verb_bypass_of_the_secret_file_rule`,
-//! `pm_guard_allows_the_safe_handling_verbs_on_a_secret_file` and
-//! `pm_guard_still_allows_ordinary_reads_and_non_operand_mentions` in
+//! `pm_guard_allows_the_safe_handling_verbs_on_a_secret_file`,
+//! `pm_guard_still_allows_ordinary_reads_and_non_operand_mentions`,
+//! `pm_guard_denies_a_glob_or_quote_join_that_names_a_secret`,
+//! `pm_guard_denies_git_add_in_a_content_revealing_mode`,
+//! `pm_guard_allows_a_secret_name_as_a_search_pattern_and_a_public_key` and
+//! `pm_guard_deny_text_advertises_no_flag_escape` in
 //! `tests/tm_hook_pm_guard.rs`.
 
 use std::path::Path;
 
 use crate::commands::hook_rewrite::{first_command_token, strip_wrapper_prefix};
 use crate::commands::pm_guard_bash::{
-    expand_brace_alternatives, git_subcommand, matches_only_name_substring_family,
-    secret_pattern_overlaps, split_shell_segments, strip_process_substitution,
+    any_pattern_overlaps, expand_brace_alternatives, git_subcommand,
+    matches_only_name_substring_family, secret_pattern_overlaps, split_shell_segments,
+    strip_process_substitution,
 };
 
 /// Programs that may name a secret-bearing file without printing its bytes.
@@ -112,6 +153,21 @@ const SAFE_HANDLING_VERBS: &[&str] = &["ls", "stat", "rm", "test", "[", "file"];
 /// `denies_a_git_subcommand_that_prints_file_bytes`.
 const SAFE_GIT_SUBCOMMANDS: &[&str] = &["add", "rm", "mv", "status"];
 
+/// git flags that turn a staging call into a call that PRINTS the file.
+///
+/// Why: #7266 round 6, critic CRITICAL 3 — [`SAFE_GIT_SUBCOMMANDS`] granted
+/// `add` on the subcommand name alone, and `git add -p .env` walks the file's
+/// diff hunk by hunk in the transcript. `-i` opens the same content in the
+/// interactive picker and `-e` opens the whole diff in an editor. The grant is
+/// a claim about what the subcommand does with its operands, and these three
+/// flags change that answer, so they withdraw it the way
+/// [`NESTED_COMMAND_MARKERS`] does.
+/// What: exact long spellings, plus any clustered short flag carrying `p`, `i`
+/// or `e`. `git add -A`, `git add -u` and `git add .env.example` are untouched.
+/// Test: `denies_git_add_in_a_content_revealing_mode`,
+/// `allows_only_the_safe_handling_verbs`.
+const CONTENT_REVEALING_GIT_FLAGS: &[&str] = &["--patch", "--interactive", "--edit"];
+
 /// Shell text that runs a SECOND command inside the segment.
 ///
 /// Why: `ls $(cat .env)` has `ls` for a program and prints the file anyway.
@@ -130,13 +186,112 @@ const NESTED_COMMAND_MARKERS: &[&str] = &["$(", "`", "<(", ">(", "${"];
 /// `php -r 'readfile(".env")'` and an unbalanced quote all defeat a lexer while
 /// still naming the file in plain text. Cutting at every byte a path cannot
 /// contain surfaces the name in all three.
-/// What: ASCII alphanumerics plus the punctuation a real path uses. A quote,
-/// `$`, `(`, `=`, `*`, `<`, `:` and whitespace are all cuts, so
-/// `if=.env`, `"$(cat .env)"` and `*.env` each yield the bare name.
-/// Test: `secret_files_named_in_finds_a_name_inside_a_program_string`.
+/// What: ASCII alphanumerics plus the punctuation a real path uses, INCLUDING
+/// the glob metacharacters `*`, `?`, `[` and `]`. A quote, `$`, `(`, `=`, `<`,
+/// `:` and whitespace are all cuts, so `if=.env` and `"$(cat .env)"` each yield
+/// the bare name.
+///
+/// The four glob bytes are kept in the word rather than cut at (#7266 round 6,
+/// critic CRITICAL 1). Cutting at them threw the wildcard away and left a
+/// remainder that matched nothing: `cat .en?` yielded `.en`, `cat .e*` yielded
+/// `.e`, `cat id_rs?` yielded `id_rs`, and all three ALLOWED while naming a
+/// glob the shell expands onto the real file. Kept in the word, each reaches
+/// [`is_secret_read_target`], which has screened a caller's PATTERN — not just
+/// a literal name — since round 3, and which the `Grep` `glob` arm has used all
+/// along.
+/// Test: `secret_files_named_in_finds_a_name_inside_a_program_string`,
+/// `denies_a_glob_that_expands_onto_a_secret_file`.
 fn is_path_byte(c: char) -> bool {
     c.is_ascii_alphanumeric()
-        || matches!(c, '.' | '_' | '-' | '/' | '~' | '+' | '@' | '{' | '}' | ',')
+        || matches!(
+            c,
+            '.' | '_' | '-' | '/' | '~' | '+' | '@' | '{' | '}' | ',' | '*' | '?' | '[' | ']'
+        )
+}
+
+/// A name or glob with every bracket class collapsed to a single `?`.
+///
+/// Why: [`is_path_byte`] now keeps `[` and `]` in the word, and a bracket class
+/// is the one glob shape the shared matcher does not implement — `cat id_[r]sa`
+/// reached `is_secret_bearing_name` as the literal `id_[r]sa`, matched no
+/// pattern, and ALLOWED (#7266 round 6, critic CRITICAL 1). A class matches
+/// exactly one character, so `?` is its faithful stand-in, and `?` is a
+/// WIDENING of it — every string the class reaches, `?` reaches too — which
+/// puts the approximation on the deny side.
+/// What: a balanced non-empty `[…]` becomes `?`; a stray `[` or `]` is dropped,
+/// so a malformed class falls back to the name around it (`cat .env]` still
+/// denies) rather than shielding it.
+/// Test: `normalize_bracket_classes_collapses_a_class_and_drops_a_stray`,
+/// `denies_a_glob_that_expands_onto_a_secret_file`.
+fn normalize_bracket_classes(name: &str) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    let mut out = String::with_capacity(name.len());
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '[' => match chars[i + 1..].iter().position(|c| *c == ']') {
+                Some(close) if close > 0 => {
+                    out.push('?');
+                    i += close + 2;
+                }
+                _ => i += 1,
+            },
+            ']' => i += 1,
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// The four SSH key families whose `.pub` half is a PUBLIC key.
+///
+/// Why: see [`is_ssh_public_key_name`].
+/// What: the `id_*` entries of the shared denylist, minus their trailing `*`.
+/// Test: `allows_reading_an_ssh_public_key`.
+const SSH_KEY_FAMILY_PREFIXES: &[&str] = &["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"];
+
+/// Whether `basename` is an SSH PUBLIC key, which this READ rule may print.
+///
+/// Why: #7266 round 6, critic HIGH — the shared denylist screens `id_rsa*`,
+/// which reaches `id_rsa.pub` as well as `id_rsa`. A public key is published by
+/// definition: it goes into `authorized_keys`, into a GitHub deploy key, into
+/// `ssh-copy-id -i id_rsa.pub host`. Denying a read of it costs an agent real
+/// work and protects nothing. The COPY rule (#7122) keeps the over-match on
+/// purpose — reproducing a key file into a worktree is cheap to re-do by
+/// absolute path — so this exemption lives here and does not touch
+/// [`is_secret_read_target`], which that rule calls.
+/// What: `true` when the lowercased basename starts with a
+/// [`SSH_KEY_FAMILY_PREFIXES`] entry and ends in `.pub`, and carries no OTHER
+/// family's literal core — `id_rsa_credentials.pub` is a `*credentials*` and
+/// stays denied.
+/// Test: `allows_reading_an_ssh_public_key`,
+/// `denies_a_private_key_and_a_pub_name_carrying_another_family`.
+fn is_ssh_public_key_name(basename: &str) -> bool {
+    let lower = basename.to_ascii_lowercase();
+    lower.ends_with(".pub")
+        && SSH_KEY_FAMILY_PREFIXES.iter().any(|p| lower.starts_with(p))
+        && !["credentials", "secrets", "token"]
+            .iter()
+            .any(|w| lower.contains(w))
+}
+
+/// Whether `path` names a file the READ rule refuses to print.
+///
+/// Why: the read rule's own view of [`is_secret_read_target`]. It normalises a
+/// bracket class the shared matcher cannot read, and it exempts an SSH public
+/// key. Both are read-side answers: the copy rule calls
+/// [`is_secret_read_target`] directly and is unchanged by either (#7266
+/// round 6).
+/// What: basename, then [`normalize_bracket_classes`], then
+/// [`is_ssh_public_key_name`] as an exemption, then [`is_secret_read_target`].
+/// Test: `allows_reading_an_ssh_public_key`,
+/// `denies_a_glob_that_expands_onto_a_secret_file`.
+fn denies_as_a_read_target(path: &str) -> bool {
+    let base = normalize_bracket_classes(&command_basename(path));
+    !base.is_empty() && !is_ssh_public_key_name(&base) && is_secret_read_target(&base)
 }
 
 /// File extensions whose content is source or markup, never a credential value.
@@ -200,7 +355,7 @@ pub(crate) fn evaluate_secret_file_read_command(command: &str) -> Option<String>
         if trimmed.is_empty() {
             continue;
         }
-        let named = secret_files_named_in(trimmed);
+        let named = secret_words_in_segment(trimmed);
         let Some(first) = named.first() else {
             continue;
         };
@@ -210,6 +365,109 @@ pub(crate) fn evaluate_secret_file_read_command(command: &str) -> Option<String>
         return Some(deny_reason(first, &describe_command(trimmed)));
     }
     None
+}
+
+/// Programs whose FIRST positional argument is a search pattern, not a file.
+///
+/// Why: #7266 round 6, critic HIGH — the word scan read `grep -rn "\.env"
+/// docs/` as naming `.env` and denied it, and so for `rg 'id_rsa' --type md`
+/// and `grep -rn '\.pem' README.md`. Searching the tree FOR the string is the
+/// ordinary way an agent finds where a secret file is referenced, and it prints
+/// no byte of that file. The pattern is the one argument of these programs that
+/// is never a path, so it is the one argument the scan skips.
+/// What: matched against the segment's resolved program basename, plus
+/// `git grep`. Everything after the pattern is still scanned, so
+/// `grep -r SECRET .env` denies on the operand.
+/// Test: `allows_a_secret_name_written_as_a_search_pattern`,
+/// `denies_a_secret_file_operand_of_a_search_program`.
+const PATTERN_FIRST_SEARCH_PROGRAMS: &[&str] = &["grep", "egrep", "fgrep", "rg", "ag", "ack"];
+
+/// Flags that supply a search pattern themselves, so no positional one exists.
+///
+/// Why: `grep -e '\.env' .env` and `grep -f patterns.txt .env` take every
+/// positional argument as a FILE. Skipping the first one would skip the secret
+/// operand — a bypass, not a false-positive fix.
+/// What: exact long and short spellings, plus the `--regexp=`/`--file=` joined
+/// forms; a clustered short flag carrying `e` or `f` (`grep -ne`) is caught by
+/// the character test in [`pattern_argument_index`]. Any hit withdraws the skip
+/// entirely, so the scan reads every token.
+/// Test: `denies_a_secret_file_operand_of_a_search_program`.
+const EXPLICIT_PATTERN_FLAGS: &[&str] = &["-e", "-f", "--regexp", "--file"];
+
+/// Which token of `argv`, if any, is a search PATTERN rather than a path.
+///
+/// Why: see [`PATTERN_FIRST_SEARCH_PROGRAMS`]. This is the narrowest form of
+/// the "written as a path operand" gate the word families already have — it
+/// exempts one token of one program class, and only when nothing else in the
+/// segment could have supplied the pattern.
+/// What: `None` — scan everything — unless the segment runs no nested command,
+/// resolves to a pattern-first search program (or `git grep`), and carries no
+/// [`EXPLICIT_PATTERN_FLAGS`] spelling after it. Otherwise the index of the
+/// first token after the program that does not start with `-`.
+/// Test: `allows_a_secret_name_written_as_a_search_pattern`,
+/// `denies_a_secret_file_operand_of_a_search_program`.
+fn pattern_argument_index(segment: &str, argv: &[String]) -> Option<usize> {
+    if NESTED_COMMAND_MARKERS.iter().any(|m| segment.contains(m)) {
+        return None;
+    }
+    let start = strip_wrapper_prefix(argv)?;
+    let program = command_basename(argv.get(start)?);
+    let rest_start = if PATTERN_FIRST_SEARCH_PROGRAMS.contains(&program.as_str()) {
+        start + 1
+    } else if program == "git" && git_subcommand(segment)? == "grep" {
+        argv.iter().position(|t| t == "grep")? + 1
+    } else {
+        return None;
+    };
+    let rest = argv.get(rest_start..)?;
+    let supplies_its_own_pattern = rest.iter().any(|t| {
+        EXPLICIT_PATTERN_FLAGS.contains(&t.as_str())
+            || t.starts_with("--regexp=")
+            || t.starts_with("--file=")
+            || (t.starts_with('-')
+                && !t.starts_with("--")
+                && t[1..].chars().any(|c| c == 'e' || c == 'f'))
+    });
+    if supplies_its_own_pattern {
+        return None;
+    }
+    rest.iter()
+        .position(|t| !t.starts_with('-'))
+        .map(|i| rest_start + i)
+}
+
+/// Every distinct word of one SEGMENT that names a secret-bearing file.
+///
+/// Why: #7266 round 6, critic CRITICAL 2 — the scan ran on raw text even when
+/// the segment lexed cleanly, so a quote join hid the name from it:
+/// `cat '.en''v'` cut into `.en` and `v`, `cat .e\nv` into `.e` and `nv`, and
+/// both ALLOWED while a shell reads `.env`. The lexer already knows what those
+/// words really are, so when it succeeds its TOKENS are what gets scanned.
+/// What: `shlex::split`'s tokens, each run through [`secret_files_named_in`],
+/// minus the one token [`pattern_argument_index`] identifies as a search
+/// pattern. A segment that does not lex falls back to the raw byte scan, which
+/// is the fail-CLOSED arm — [`segment_only_handles`] can never grant the
+/// allowlist to it either.
+/// Test: `denies_a_name_reassembled_by_quoting_or_escaping`,
+/// `allows_a_secret_name_written_as_a_search_pattern`,
+/// `denies_an_unlexable_segment_that_names_a_secret`.
+fn secret_words_in_segment(segment: &str) -> Vec<String> {
+    let Some(argv) = shlex::split(segment) else {
+        return secret_files_named_in(segment);
+    };
+    let pattern_at = pattern_argument_index(segment, &argv);
+    let mut out: Vec<String> = Vec::new();
+    for (index, token) in argv.iter().enumerate() {
+        if Some(index) == pattern_at {
+            continue;
+        }
+        for word in secret_files_named_in(token) {
+            if !out.contains(&word) {
+                out.push(word);
+            }
+        }
+    }
+    out
 }
 
 /// Every distinct word in `text` that names a secret-bearing file, in order.
@@ -248,8 +506,8 @@ fn secret_files_named_in(text: &str) -> Vec<String> {
 /// Test: `allows_the_ordinary_command_corpus`,
 /// `a_word_family_counts_only_when_it_is_written_as_a_path`.
 fn names_a_secret_file(word: &str) -> bool {
-    let base = command_basename(word);
-    if base.is_empty() || !is_secret_read_target(&base) {
+    let base = normalize_bracket_classes(&command_basename(word));
+    if base.is_empty() || !denies_as_a_read_target(&base) {
         return false;
     }
     if base.starts_with('.') || Path::new(&base).extension().is_some() {
@@ -302,6 +560,9 @@ fn segment_only_handles(segment: &str, named: &[String]) -> bool {
         let Some(at) = argv.iter().position(|t| *t == sub) else {
             return false;
         };
+        if git_call_reveals_content(&argv, at + 1) {
+            return false;
+        }
         at + 1
     } else {
         return false;
@@ -313,6 +574,19 @@ fn segment_only_handles(segment: &str, named: &[String]) -> bool {
         .flat_map(|tok| secret_files_named_in(tok))
         .collect();
     named.iter().all(|n| operands.iter().any(|o| o == n))
+}
+
+/// Whether the git call's arguments from `after` carry a
+/// [`CONTENT_REVEALING_GIT_FLAGS`] spelling.
+///
+/// Test: `denies_git_add_in_a_content_revealing_mode`.
+fn git_call_reveals_content(argv: &[String], after: usize) -> bool {
+    argv.get(after..).unwrap_or_default().iter().any(|t| {
+        CONTENT_REVEALING_GIT_FLAGS.contains(&t.as_str())
+            || (t.starts_with('-')
+                && !t.starts_with("--")
+                && t[1..].chars().any(|c| matches!(c, 'p' | 'i' | 'e')))
+    })
 }
 
 /// How the deny reason names what the segment was doing.
@@ -358,7 +632,7 @@ pub(crate) fn evaluate_secret_file_read_tool(
     match tool_name {
         "Read" => {
             let target = string_field(tool_input, "file_path")?;
-            is_secret_read_target(target).then(|| deny_reason(target, "the `Read` tool"))
+            denies_as_a_read_target(target).then(|| deny_reason(target, "the `Read` tool"))
         }
         "Grep" => evaluate_grep_tool(tool_input),
         _ => None,
@@ -387,12 +661,12 @@ pub(crate) fn evaluate_secret_file_read_tool(
 /// `allows_a_grep_tool_call_over_a_directory_with_no_glob`.
 fn evaluate_grep_tool(tool_input: Option<&serde_json::Value>) -> Option<String> {
     if let Some(path) = string_field(tool_input, "path")
-        && is_secret_read_target(path)
+        && denies_as_a_read_target(path)
     {
         return Some(deny_reason(path, "the `Grep` tool"));
     }
     let glob = string_field(tool_input, "glob")?;
-    is_secret_read_target(glob).then(|| deny_reason(glob, "a `Grep` glob"))
+    denies_as_a_read_target(glob).then(|| deny_reason(glob, "a `Grep` glob"))
 }
 
 /// A non-empty string field of a tool-input object.
@@ -430,11 +704,32 @@ pub(crate) fn is_secret_read_target(path: &str) -> bool {
     }
 }
 
+/// Extensions transparent to a GLOB but never to a literal name.
+///
+/// Why: #7266 round 6. `.json` is the tail of the two-part core `.tfvars.json`,
+/// so `*.json` matches that core and `ls *.json` denied the moment the word
+/// scan stopped cutting at the wildcard. That is round 4's trade again — taxing
+/// every ordinary extension search is worse than the leak it prevents — so a
+/// `.json` GLOB is an ordinary tree search here. A literal `credentials.json`
+/// or `terraform.tfvars.json` is a named target and still denies, which is why
+/// `json` cannot simply join [`TRANSPARENT_SOURCE_EXTENSIONS`].
+/// Test: `allows_a_json_glob_but_not_a_json_credential_file`.
+const GLOB_ONLY_TRANSPARENT_EXTENSIONS: &[&str] = &["json"];
+
 /// Whether one already-brace-expanded name or glob is a secret-bearing target.
 fn names_a_secret(candidate: &str) -> bool {
-    !selects_every_name(candidate)
-        && secret_pattern_overlaps(candidate)
-        && !has_transparent_source_extension(candidate)
+    if selects_every_name(candidate) || has_transparent_source_extension(candidate) {
+        return false;
+    }
+    let is_glob = candidate.bytes().any(|b| b == b'*' || b == b'?');
+    if is_glob && has_extension_in(candidate, GLOB_ONLY_TRANSPARENT_EXTENSIONS) {
+        return false;
+    }
+    // A `?` is the one metacharacter the shared name matcher does not
+    // implement, so a candidate carrying one is compared against the full
+    // denylist entries as well (#7266 round 6).
+    secret_pattern_overlaps(candidate)
+        || (candidate.contains('?') && any_pattern_overlaps(candidate))
 }
 
 /// Whether `candidate` is a wildcard carrying no literal character at all.
@@ -452,11 +747,16 @@ fn selects_every_name(candidate: &str) -> bool {
 
 /// Whether `basename` ends in one of [`TRANSPARENT_SOURCE_EXTENSIONS`].
 fn has_transparent_source_extension(basename: &str) -> bool {
+    has_extension_in(basename, TRANSPARENT_SOURCE_EXTENSIONS)
+}
+
+/// Whether `basename`'s extension, lowercased, is one of `extensions`.
+fn has_extension_in(basename: &str, extensions: &[&str]) -> bool {
     Path::new(basename)
         .extension()
         .and_then(|e| e.to_str())
         .map(|e| e.to_ascii_lowercase())
-        .is_some_and(|e| TRANSPARENT_SOURCE_EXTENSIONS.contains(&e.as_str()))
+        .is_some_and(|e| extensions.contains(&e.as_str()))
 }
 
 /// The basename of a command or path token, with a process-substitution wrapper
@@ -485,9 +785,11 @@ fn deny_reason(target: &str, how: &str) -> String {
          earlier rounds enumerated reading verbs and each was bypassed by one the list did not \
          name — `sed -n '38,46p'` printed a live ngrok authtoken, then `dd if=`, `tar cf -`, \
          `php -r`, `deno eval` and `$(cat …)` did the same. Only `ls`, `stat`, `file`, `test`, \
-         `rm` and `git add`/`rm`/`mv`/`status` may name such a file. Hand it to the tool that \
-         needs it by absolute path (`-var-file`, `-state`, `--env-file`) instead of writing its \
-         name into a command that could print it."
+         `rm` and `git add`/`rm`/`mv`/`status` may name such a file, and `git add` loses that \
+         grant under `-p`/`-i`/`-e`. There is no flag that buys an exception: run the tool so \
+         that it picks the file up itself without you writing the name (`docker compose up` \
+         reads `./.env`, `terraform apply` reads `./terraform.tfvars`), or ask the operator to \
+         read it for you."
     )
 }
 
@@ -542,6 +844,44 @@ mod tests {
         "cat ./secrets",
         "nl .netrc",
         "od -c server.key",
+        // Round 6, critic CRITICAL 1: a glob the shell expands onto the file.
+        // Every one of these ALLOWED on 71ad20438 — `is_path_byte` cut at the
+        // wildcard and left a remainder matching nothing.
+        "cat .en?",
+        "cat .e*",
+        "cat ./.*",
+        "cat id_rs?",
+        "cat *.p?m",
+        "cat id_[r]sa",
+        "cat ./.*rc",
+        "sed -n '1,5p' terraform.tfvar?",
+        "head -n 2 *.tfstat?",
+        // Round 6, critic CRITICAL 2: the name reassembled by quoting or
+        // escaping, which the raw byte scan cut into harmless halves.
+        "cat '.en''v'",
+        "cat .e\\nv",
+        "cat \".en\"v",
+        "cat 'terraform'.tfvars",
+        "sed -n '1,5p' \"terra\"form.tfvars",
+        // Round 6, critic CRITICAL 3: `git add` in a mode that prints the diff.
+        "git add -p .env",
+        "git add --patch .env",
+        "git add -i .env",
+        "git add --interactive .env",
+        "git add -e .env",
+        "git add --edit terraform.tfvars",
+        // Round 6, critic HIGH: the pattern skip must not reach a file operand.
+        "grep -r SECRET .env",
+        "grep -o pattern .env",
+        "rg . .env",
+        "grep -e '\\.env' .env",
+        "grep --regexp=SECRET .env",
+        "grep \"$(cat .env)\" src/",
+        "git grep SECRET .env",
+        // Round 6, critic HIGH: a `.pub` name carrying another family's core,
+        // and a private key spelled with a `.pub` somewhere other than the end.
+        "cat id_rsa_credentials.pub",
+        "cat id_rsa.pub.bak",
     ];
 
     /// Ordinary daily commands that must ALLOW.
@@ -593,6 +933,35 @@ mod tests {
         "git -C /repo/infra add terraform.tfvars",
         "git rm --cached .env",
         "git mv .env.old .env.older",
+        // Round 6: the glob bytes are kept in the word now, so every ordinary
+        // extension glob has to be re-proved through the pattern screen.
+        "cat *.toml",
+        "ls *.json",
+        "rg foo src/*.rs",
+        "ls -la target/*",
+        "rm -rf build/*",
+        "cat ~/.bashrc",
+        "cat [a-z]*.rs",
+        // Round 6, critic CRITICAL 3: the `git add` spellings that stage
+        // without printing.
+        "git add -A .env",
+        "git add -u .env",
+        "git add -f .env",
+        // Round 6, critic HIGH: a secret NAME written as a search pattern.
+        // Finding where a file is referenced prints no byte of it.
+        "grep -rn \"\\.env\" docs/",
+        "rg 'id_rsa' --type md",
+        "grep -rn '\\.pem' README.md",
+        "grep -rn terraform.tfvars docs/",
+        "rg '\\.tfstate' --glob '*.md'",
+        "git grep '\\.env' -- docs/",
+        // Round 6, critic HIGH: an SSH PUBLIC key is published by definition.
+        "cat id_rsa.pub",
+        "cat ~/.ssh/id_rsa.pub",
+        "ssh-copy-id -i id_rsa.pub host",
+        "cat id_ed25519.pub",
+        "cat id_ecdsa.pub",
+        "cat id_dsa.pub",
     ];
 
     #[test]
@@ -960,6 +1329,257 @@ mod tests {
         }
         // A process substitution over an ordinary file is untouched.
         assert_eq!(eval("diff <(cat README.md) /dev/null"), None);
+    }
+
+    // --- #7266 round 6 -----------------------------------------------------
+
+    #[test]
+    fn denies_a_glob_that_expands_onto_a_secret_file() {
+        // Critic CRITICAL 1. `is_path_byte` cut at `*`, `?`, `[` and `]`, so
+        // `cat .en?` reached the classifier as `.en` and ALLOWED. Measured
+        // live against the round-5 binary (71ad20438).
+        for command in [
+            "cat .en?",
+            "cat .e*",
+            "cat ./.*",
+            "cat id_rs?",
+            "cat *.p?m",
+            "cat id_[r]sa",
+        ] {
+            let reason = eval(command).unwrap_or_else(|| panic!("`{command}` must deny"));
+            assert!(reason.contains("#7266"), "{reason}");
+        }
+        // `.*rc` is DENIED and that is the pinned answer: the glob selects
+        // `.netrc` as readily as `.bashrc`, and this rule screens what a
+        // pattern can REACH, exactly as it does for `*.env`. Naming the file
+        // an agent actually wants keeps working.
+        assert!(eval("cat ./.*rc").is_some());
+        assert_eq!(eval("cat ~/.bashrc"), None);
+        // The Grep glob arm answers the same way for a bracket class.
+        let bracket = serde_json::json!({"pattern": ".", "glob": "id_[r]sa"});
+        assert!(evaluate_secret_file_read_tool("Grep", Some(&bracket)).is_some());
+    }
+
+    #[test]
+    fn allows_a_json_glob_but_not_a_json_credential_file() {
+        // Keeping the wildcard in the word made `*.json` match the two-part
+        // core `.tfvars.json`, so every json search denied. A GLOB is a tree
+        // search; a literal name is a target.
+        for command in [
+            "ls *.json",
+            "cat *.json",
+            "grep -rn TODO --include=*.json .",
+        ] {
+            assert_eq!(eval(command), None, "`{command}` must allow");
+        }
+        for command in [
+            "cat credentials.json",
+            "cat terraform.tfvars.json",
+            "cat secrets.json",
+        ] {
+            assert!(eval(command).is_some(), "`{command}` must deny");
+        }
+        let glob = serde_json::json!({"pattern": "TODO", "path": "/repo", "glob": "*.json"});
+        assert_eq!(evaluate_secret_file_read_tool("Grep", Some(&glob)), None);
+    }
+
+    #[test]
+    fn a_single_character_wildcard_reaches_the_full_denylist_entry() {
+        // The core-overlap screen reduces to "does the candidate match this
+        // core", so a candidate whose literal part sits OUTSIDE the core was
+        // unreachable: `terraform.tfvar?` names the file and matched nothing.
+        for command in [
+            "sed -n '1,5p' terraform.tfvar?",
+            "cat terraform.tfstat?",
+            "cat server.pe?",
+            "cat vault.kdb?",
+        ] {
+            assert!(eval(command).is_some(), "`{command}` must deny");
+        }
+        // An ordinary `?` glob still allows — the full-entry comparison is a
+        // two-sided overlap, not a substring test.
+        for command in ["ls file?.txt", "ls core.?", "cat notes?.md", "ls ??.rs"] {
+            assert_eq!(eval(command), None, "`{command}` must allow");
+        }
+    }
+
+    #[test]
+    fn normalize_bracket_classes_collapses_a_class_and_drops_a_stray() {
+        assert_eq!(normalize_bracket_classes("id_[r]sa"), "id_?sa");
+        assert_eq!(normalize_bracket_classes("[a-z]*.rs"), "?*.rs");
+        // A stray bracket is dropped, so a malformed class cannot shield the
+        // name around it.
+        assert_eq!(normalize_bracket_classes(".env]"), ".env");
+        assert_eq!(normalize_bracket_classes("[.env"), ".env");
+        // An empty class carries no character to stand in for.
+        assert_eq!(normalize_bracket_classes("a[]b"), "ab");
+        assert_eq!(normalize_bracket_classes("README.md"), "README.md");
+    }
+
+    #[test]
+    fn denies_a_name_reassembled_by_quoting_or_escaping() {
+        // Critic CRITICAL 2. The word scan ran on raw text even when the
+        // segment lexed, so `'` and `\` cut the name into harmless halves.
+        for command in [
+            "cat '.en''v'",
+            "cat .e\\nv",
+            "cat \".en\"v",
+            "cat 'terraform'.tfvars",
+        ] {
+            let reason = eval(command).unwrap_or_else(|| panic!("`{command}` must deny"));
+            assert!(reason.contains("#7266"), "{reason}");
+        }
+        // The raw scan is still what answers for a segment no lexer can read.
+        assert!(shlex::split("awk '{print} terraform.tfvars").is_none());
+        assert!(eval("awk '{print} terraform.tfvars").is_some());
+    }
+
+    #[test]
+    fn denies_git_add_in_a_content_revealing_mode() {
+        // Critic CRITICAL 3. `SAFE_GIT_SUBCOMMANDS` granted `add` on the
+        // subcommand name alone; `-p` walks the file's diff in the transcript.
+        for command in [
+            "git add -p .env",
+            "git add --patch .env",
+            "git add -i .env",
+            "git add --interactive .env",
+            "git add -e .env",
+            "git add --edit terraform.tfvars",
+            "git -C /repo add -p terraform.tfvars",
+        ] {
+            assert!(eval(command).is_some(), "`{command}` must deny");
+        }
+        // The staging spellings that print nothing keep the grant.
+        for command in [
+            "git add .env.example",
+            "git add -A .env",
+            "git add -u .env",
+            "git add -f .env",
+            "git add -n .env",
+        ] {
+            assert_eq!(eval(command), None, "`{command}` must allow");
+        }
+    }
+
+    #[test]
+    fn allows_a_secret_name_written_as_a_search_pattern() {
+        // Critic HIGH. Searching the tree FOR the string prints no byte of the
+        // file, and it is how an agent finds where the file is referenced.
+        for command in [
+            "grep -rn \"\\.env\" docs/",
+            "rg 'id_rsa' --type md",
+            "grep -rn '\\.pem' README.md",
+            "grep -rn terraform.tfvars docs/",
+            "git grep '\\.env' -- docs/",
+        ] {
+            assert_eq!(eval(command), None, "`{command}` must allow");
+        }
+        // Every member of the program list, on its own idiom.
+        for program in PATTERN_FIRST_SEARCH_PROGRAMS {
+            let command = format!("{program} '\\.env' docs/");
+            assert_eq!(eval(&command), None, "`{command}` must allow");
+        }
+    }
+
+    #[test]
+    fn denies_a_secret_file_operand_of_a_search_program() {
+        // The other half: only the FIRST positional argument is a pattern.
+        for command in [
+            "grep -r SECRET .env",
+            "grep -o pattern .env",
+            "rg . .env",
+            "grep -rn TODO docs/ .env",
+            "git grep SECRET .env",
+        ] {
+            assert!(eval(command).is_some(), "`{command}` must deny");
+        }
+        // A flag that supplies the pattern itself withdraws the skip, so every
+        // positional argument is read as a file again.
+        for command in [
+            "grep -e '\\.env' .env",
+            "grep --regexp=SECRET .env",
+            "grep -f patterns.txt .env",
+            "grep -ne '\\.env' .env",
+        ] {
+            assert!(eval(command).is_some(), "`{command}` must deny");
+        }
+        // A nested command withdraws it too — the "pattern" can run anything.
+        assert!(eval("grep \"$(cat .env)\" src/").is_some());
+        assert!(eval("grep `cat .env` src/").is_some());
+    }
+
+    #[test]
+    fn allows_reading_an_ssh_public_key() {
+        // Critic HIGH. A public key is published by definition; denying a read
+        // of it costs real work and protects nothing.
+        for command in [
+            "cat id_rsa.pub",
+            "cat ~/.ssh/id_rsa.pub",
+            "ssh-copy-id -i id_rsa.pub host",
+            "cat id_ed25519.pub",
+            "cat id_ecdsa.pub",
+            "cat id_dsa.pub",
+        ] {
+            assert_eq!(eval(command), None, "`{command}` must allow");
+        }
+        // Every family, through the predicate itself.
+        for prefix in SSH_KEY_FAMILY_PREFIXES {
+            assert!(is_ssh_public_key_name(&format!("{prefix}.pub")));
+            assert!(!is_ssh_public_key_name(prefix));
+        }
+        // The `Read` tool answers the same way.
+        let pubkey = serde_json::json!({"file_path": "/home/u/.ssh/id_rsa.pub"});
+        assert_eq!(evaluate_secret_file_read_tool("Read", Some(&pubkey)), None);
+    }
+
+    #[test]
+    fn denies_a_private_key_and_a_pub_name_carrying_another_family() {
+        for command in [
+            "cat id_rsa",
+            "cat ~/.ssh/id_rsa",
+            "cat id_rsa.pub.bak",
+            "cat id_rsa_credentials.pub",
+            "cat secrets.pub/id_rsa",
+        ] {
+            assert!(eval(command).is_some(), "`{command}` must deny");
+        }
+        // The glob still denies: `id_rsa*` reaches the PRIVATE half too.
+        let glob = serde_json::json!({"pattern": ".", "glob": "id_rsa*"});
+        assert!(evaluate_secret_file_read_tool("Grep", Some(&glob)).is_some());
+        // The #7122 copy rule is untouched by the exemption — it calls
+        // `is_secret_read_target`, which still answers for a `.pub` name.
+        assert!(is_secret_read_target("id_rsa.pub"));
+    }
+
+    #[test]
+    fn the_deny_text_advertises_no_flag_escape() {
+        // Critic HIGH + MEDIUM: round 5's reason offered
+        // `--env-file`/`-var-file`/`-state` and no such escape existed.
+        // Round 6 removed the claim rather than build it.
+        let reason = eval("cat .env").expect("denies");
+        for phantom in ["--env-file", "-var-file", "-state"] {
+            assert!(
+                !reason.contains(phantom),
+                "the deny text still advertises `{phantom}`: {reason}"
+            );
+        }
+        assert!(
+            reason.contains("no flag that buys an exception"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn git_show_of_a_committed_secret_is_denied_not_residual() {
+        // Round 5's module doc listed this as a gap. `:` is not a path byte,
+        // so the pathspec surfaces as its own word and `show` is not safe.
+        for command in [
+            "git show HEAD:terraform.tfvars",
+            "git show main:.env",
+            "git show HEAD~2:infra/terraform.tfvars",
+        ] {
+            assert!(eval(command).is_some(), "`{command}` must deny");
+        }
     }
 
     #[test]

@@ -34,3 +34,28 @@ Fixed
   `npm install token-bucket` — are not treated as filenames at all. Every
   extension-typed family (`*.tfvars`, `.env*`, `*.pem`, `*.key`, `id_rsa*`,
   `*.p12`, `.netrc`, …) denies, `id_rsa` included as a bare word (#7266).
+- A GLOB that expands onto a secret-bearing file denies as the file itself does.
+  `cat .en?`, `cat .e*`, `cat ./.*`, `cat id_rs?`, `cat *.p?m`, `cat id_[r]sa`
+  and `sed -n '1,5p' terraform.tfvar?` each name a real file and each was
+  allowed, because the word scan cut the command at the wildcard and screened
+  the remainder. Ordinary globbing is untouched: `cat *.toml`, `ls *.json`,
+  `rg foo src/*.rs` and `ls file?.txt` still allow (#7266).
+- A name reassembled by quoting or escaping denies. `cat '.en''v'` and
+  `cat .e\nv` both read `.env` and both were allowed, because the scan ran on
+  raw text even when the command lexed cleanly. It reads the lexer's tokens
+  now, and falls back to the raw scan only for a command no lexer can read,
+  which is still the fail-closed arm (#7266).
+- `git add` loses its exemption under `-p`/`--patch`, `-i`/`--interactive` and
+  `-e`/`--edit`, which walk the file's diff through the transcript.
+  `git add .env.example`, `git add -A` and `git add -u` are unaffected (#7266).
+- A secret-bearing NAME written as a search PATTERN no longer denies:
+  `grep -rn '\.env' docs/`, `rg 'id_rsa' --type md` and `grep -rn '\.pem'
+  README.md` find where a file is referenced and print no byte of it. Only the
+  first positional argument of `grep`/`egrep`/`fgrep`/`rg`/`ag`/`ack`/`git grep`
+  is read that way, and only when no `-e`/`-f`/`--regexp`/`--file` supplied the
+  pattern instead — so `grep -r SECRET .env`, `grep -e '\.env' .env` and
+  `rg . .env` still deny on the file operand (#7266).
+- An SSH PUBLIC key reads freely: `cat id_rsa.pub`, `cat ~/.ssh/id_rsa.pub` and
+  `ssh-copy-id -i id_rsa.pub host` allow, while `cat id_rsa`, `cat id_rsa.pub.bak`
+  and `cat id_rsa_credentials.pub` still deny. The exemption belongs to the read
+  rule alone; copying a key file is unchanged (#7266).

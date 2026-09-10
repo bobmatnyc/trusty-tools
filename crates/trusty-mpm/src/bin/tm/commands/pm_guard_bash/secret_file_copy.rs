@@ -362,6 +362,28 @@ fn globs_overlap(a: &[u8], b: &[u8]) -> bool {
     dp[0]
 }
 
+/// Whether `candidate` can name the same file as any denylist entry, comparing
+/// the two as GLOBS on both sides.
+///
+/// Why: #7266 round 6. [`secret_pattern_overlaps`] compares a candidate against
+/// each entry's wildcard-free [`pattern_literal_core`], which reduces to "does
+/// the candidate match that core" — and a candidate whose LITERAL part sits
+/// outside the core is then unreachable. `terraform.tfvar?` is `*.tfvars` with
+/// one character wildcarded, names the file exactly, and matched no core, so it
+/// ALLOWED. Comparing against the full entries answers it, which is round 3's
+/// sound-but-too-wide test; the read rule therefore asks this question only for
+/// a candidate carrying `?`, the one metacharacter
+/// [`is_secret_bearing_name`]'s matcher does not implement.
+/// What: [`globs_overlap`] against each full entry, case-insensitively.
+/// Test: `pm_guard_secret_read::tests::denies_a_glob_that_expands_onto_a_secret_file`,
+/// `single_character_wildcards_reach_the_full_entries`.
+pub(crate) fn any_pattern_overlaps(candidate: &str) -> bool {
+    let lower = candidate.to_ascii_lowercase();
+    SECRET_BEARING_FILE_PATTERNS
+        .iter()
+        .any(|pattern| globs_overlap(lower.as_bytes(), pattern.to_ascii_lowercase().as_bytes()))
+}
+
 /// A token with a process-substitution wrapper removed (#7266 round 3).
 ///
 /// Why: critic CRITICAL 2 — `shlex::split("diff <(cat .env) /dev/null")` yields
@@ -1192,6 +1214,36 @@ mod tests {
                 "glob `{glob}` must target the `{pattern}` family by name (core `{core}`)"
             );
             assert!(secret_pattern_overlaps(glob), "glob `{glob}` must deny");
+        }
+    }
+
+    #[test]
+    fn single_character_wildcards_reach_the_full_entries() {
+        // #7266 round 6: `secret_pattern_overlaps` compares against each
+        // entry's wildcard-free CORE, so a candidate whose literal part sits
+        // outside the core answers false however exactly it names the file.
+        for candidate in [
+            "terraform.tfvar?",
+            "terraform.tfstat?",
+            "server.pe?",
+            "vault.kdb?",
+        ] {
+            assert!(
+                !secret_pattern_overlaps(candidate),
+                "`{candidate}` is the gap this exists to close"
+            );
+            assert!(
+                any_pattern_overlaps(candidate),
+                "`{candidate}` must overlap"
+            );
+        }
+        // Two-sided overlap, not a substring test: an ordinary `?` glob is
+        // still unreachable from every entry.
+        for candidate in ["file?.txt", "core.?", "notes?.md", "??.rs"] {
+            assert!(
+                !any_pattern_overlaps(candidate),
+                "`{candidate}` must not overlap"
+            );
         }
     }
 
