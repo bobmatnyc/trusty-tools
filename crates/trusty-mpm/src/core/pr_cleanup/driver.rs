@@ -197,3 +197,102 @@ impl Git for RealGit {
         })
     }
 }
+
+/// Which MERGED pull request carried a worktree's work (#7275 round 3).
+///
+/// Why: every merge here is a squash, so a landed branch's commits are never
+/// ancestors of `main` and an ahead-of-upstream count reads every landed
+/// worktree as live work — seven trees were refused as holding "1–3 unpushed
+/// commit(s)" on 2026-09-09, which is the population cleanup exists to
+/// reclaim. The question that answers it is which merged pull request carried
+/// this tree, and `worktree_reclaim_pr_match::resolve_landing` already decides
+/// that by exact branch name, round stem, and head-commit ancestry. This seam
+/// exists so the engine — which is `pub` and wired from the `tm` binary — can
+/// ask through a trait its tests can fake, without exporting the matcher's own
+/// `pub(crate)` types.
+/// What: [`merged_pr`](Self::merged_pr) names the pull request, or `None` when
+/// none matches. FAIL-CLOSED: every failure — no `gh`, a timeout, an
+/// unparseable reply — answers `None`, which leaves today's refusal standing.
+/// Test: `FakeLanding` in `super::tests` drives the real matcher over #7267's
+/// `LandingProbe` fake; `cleanup_removes_a_squash_merged_worktree`.
+pub trait Landing {
+    /// The MERGED pull request that carried `worktree`, or `None`.
+    ///
+    /// `repo_root` is the main checkout, whose `origin` names the repository to
+    /// ask about — the sweep visits entries in different checkouts, so it is a
+    /// per-call input rather than state. `exact` is what the caller already
+    /// proved about this branch — the pull request whose head it matches by
+    /// name — and seeds the matcher's first rung, exactly as the reclaim sweep
+    /// seeds it from its bulk index.
+    fn merged_pr(
+        &self,
+        repo_root: &Path,
+        worktree: &Path,
+        branch: Option<&str>,
+        exact: Option<u64>,
+    ) -> Option<u64>;
+}
+
+/// Production [`Landing`] over the #7267 merged-pull-request matcher.
+///
+/// Why: one implementation of "which merged pull request carried this tree",
+/// shared with `tm session prune-worktrees --merged-prs`. A second matcher here
+/// would be the defect the repo's common-entry-point rule names.
+/// What: seeds `resolve_landing`'s first rung with the caller's `exact` answer
+/// when there is one and otherwise asks GitHub about the branch itself, then
+/// lets the round-stem and head-commit rungs widen it. Only a `Merged` verdict
+/// becomes `Some`.
+/// Test: exercised live; the policy it delegates to is unit-tested in
+/// `worktree_reclaim_pr_match_tests`.
+pub struct RealLanding;
+
+impl Landing for RealLanding {
+    fn merged_pr(
+        &self,
+        repo_root: &Path,
+        worktree: &Path,
+        branch: Option<&str>,
+        exact: Option<u64>,
+    ) -> Option<u64> {
+        resolve_merged_pr(
+            &crate::session_manager::worktree_reclaim_pr_match::GhLandingProbe,
+            repo_root,
+            worktree,
+            branch,
+            exact,
+        )
+    }
+}
+
+/// [`RealLanding`]'s whole body, over any [`LandingProbe`] (#7275 round 3).
+///
+/// Why: the seed-then-ladder shape IS the policy, so a test that drove a
+/// different shape would prove nothing about what production does. Taking the
+/// probe as a parameter lets `super::tests` run this exact code over #7267's
+/// own `LandingProbe` fake.
+/// What: `exact` becomes rung 1's settled answer; otherwise the branch's own
+/// pull requests are asked, and `resolve_landing` widens by round stem and head
+/// commit. Only `Merged` becomes `Some`.
+/// Test: `cleanup_removes_a_squash_merged_round_sibling`,
+/// `cleanup_refuses_an_ahead_tree_with_no_merged_pr`.
+///
+/// [`LandingProbe`]: crate::session_manager::worktree_reclaim_pr_match::LandingProbe
+pub(crate) fn resolve_merged_pr(
+    probe: &dyn crate::session_manager::worktree_reclaim_pr_match::LandingProbe,
+    repo_root: &Path,
+    worktree: &Path,
+    branch: Option<&str>,
+    exact: Option<u64>,
+) -> Option<u64> {
+    use crate::session_manager::worktree_reclaim::BranchPrState;
+    use crate::session_manager::worktree_reclaim_pr_match::resolve_landing;
+
+    let seed = match exact {
+        Some(pr) => BranchPrState::Merged { pr },
+        None => branch.map_or(BranchPrState::NoPr, |b| probe.state_for_head(repo_root, b)),
+    };
+    match resolve_landing(worktree, repo_root, branch, seed, probe) {
+        BranchPrState::Merged { pr } => Some(pr),
+        _ => None,
+    }
+}

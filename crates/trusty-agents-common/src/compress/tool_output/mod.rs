@@ -37,8 +37,9 @@ mod tests;
 // Re-export the full public surface so callers can keep using
 // `compress::tool_output::{...}` (and `compress::{compress_tool_output, ...}`).
 pub use rtk::{
-    CompressionPath, compress_tool_output_async, compress_tool_output_async_with_path,
-    compress_via_rtk,
+    CompressionPath, ENV_COMPRESS_NO_RTK, RtkResolver, compress_tool_output_async,
+    compress_tool_output_async_with_path, compress_tool_output_async_with_path_using,
+    compress_via_rtk, compress_via_rtk_with, default_rtk_resolver, no_rtk,
 };
 pub use source_read::is_source_file_read;
 pub use strategy::{

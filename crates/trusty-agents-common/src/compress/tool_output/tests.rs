@@ -697,6 +697,80 @@ async fn rtk_binary_returns_none_and_warns_on_non_zero_exit() {
     assert!(out.is_none(), "a non-zero rtk exit must fall back");
 }
 
+// ── The resolver seam (#7325) ───────────────────────────────────────────
+
+#[tokio::test]
+async fn no_rtk_resolver_forces_the_native_chain_on_any_host() {
+    // #7325: the assertion this seam exists for — it must hold identically on
+    // a host with rtk installed and on one without, which the default
+    // resolver cannot promise because `resolve_binary` finds a Homebrew rtk
+    // whatever PATH says.
+    let payload = "line one\nline two\n".repeat(20);
+    let (text, path) =
+        compress_tool_output_async_with_path_using(no_rtk, "kubectl get pods", &payload).await;
+    assert_eq!(path, CompressionPath::NativeFallback);
+    assert!(!text.is_empty(), "the native chain must return content");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_resolver_naming_a_missing_binary_falls_back_to_native() {
+    // Fail-open guard: the seam takes a path from the caller, so a path to a
+    // file that does not exist must NOT become a silent `rtk_binary` claim.
+    // The spawn fails, `compress_via_rtk_binary` returns None, and the path
+    // reported is the one that actually produced the bytes.
+    fn ghost(_name: &str) -> Option<std::path::PathBuf> {
+        Some(std::path::PathBuf::from(
+            "/nonexistent/definitely-not-rtk-7325",
+        ))
+    }
+    let payload = "line one\nline two\n".repeat(20);
+    let (_text, path) =
+        compress_tool_output_async_with_path_using(ghost, "kubectl get pods", &payload).await;
+    assert_eq!(
+        path,
+        CompressionPath::NativeFallback,
+        "a binary that never ran must never be reported as the rtk path"
+    );
+}
+
+#[test]
+fn value_forces_native_fallback_accepts_only_truthy_spellings() {
+    for truthy in ["1", "true", "TRUE", " yes ", "on"] {
+        assert!(
+            super::rtk::value_forces_native_fallback(Some(truthy)),
+            "{truthy:?} must force the native chain"
+        );
+    }
+    for falsy in [None, Some(""), Some("0"), Some("false"), Some("maybe")] {
+        assert!(
+            !super::rtk::value_forces_native_fallback(falsy),
+            "{falsy:?} must leave the real resolver in place"
+        );
+    }
+}
+
+#[tokio::test]
+async fn default_rtk_resolver_is_the_real_resolver_without_the_env_var() {
+    // Without `TRUSTY_COMPRESS_NO_RTK` set, production must keep reaching the
+    // real resolver — the seam must not quietly disable rtk for everyone. The
+    // test asserts agreement with `resolve_binary` rather than presence, so it
+    // holds on a host with rtk and on one without.
+    if std::env::var(ENV_COMPRESS_NO_RTK).is_ok() {
+        // Announce the skip: a silently-returning test reads as a pass.
+        eprintln!(
+            "SKIP default_rtk_resolver_is_the_real_resolver_without_the_env_var: \
+             {ENV_COMPRESS_NO_RTK} is set in this environment"
+        );
+        return;
+    }
+    assert_eq!(
+        default_rtk_resolver()("rtk"),
+        trusty_common::bin_resolve::resolve_binary("rtk"),
+        "the default resolver must be the real one"
+    );
+}
+
 #[test]
 fn stderr_head_takes_the_first_line_and_truncates() {
     assert_eq!(stderr_head(b"\n   \nrtk: boom\nsecond line\n"), "rtk: boom");

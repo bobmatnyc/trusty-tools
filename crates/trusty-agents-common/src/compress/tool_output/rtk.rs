@@ -4,16 +4,22 @@
 //! delegating to it gets us the upstream implementation for free. When `rtk`
 //! is absent we fall back to the native filter chain.
 //! What: `compress_via_rtk` (resolves the binary through
-//! `trusty_common::bin_resolve`), `compress_via_rtk_binary` (the spawn),
-//! `rtk_pipe_argv` / `rtk_filter_for` (the `rtk pipe` invocation), and the
-//! `compress_tool_output_async` wrapper that prefers RTK then falls back.
+//! `trusty_common::bin_resolve`), `compress_via_rtk_with` (the same against a
+//! caller-chosen [`RtkResolver`], #7325), `compress_via_rtk_binary` (the
+//! spawn), `rtk_pipe_argv` / `rtk_filter_for` (the `rtk pipe` invocation),
+//! and the `compress_tool_output_async` wrapper that prefers RTK then falls
+//! back.
 //!
 //! We invoke `rtk pipe`, never a subcommand: `rtk git status` EXECUTES
 //! `git status` and returns its output, discarding stdin. This module's input
 //! is output that was already captured, so only `pipe` mode is correct.
 //! Test: `compress_via_rtk_returns_none_when_binary_absent`,
 //! `rtk_pipe_argv_never_carries_the_tool_name`,
-//! `compress_tool_output_async_falls_back_when_rtk_absent` in `tool_output::tests`.
+//! `compress_tool_output_async_falls_back_when_rtk_absent`,
+//! `a_resolver_naming_a_missing_binary_falls_back_to_native`,
+//! `value_forces_native_fallback_accepts_only_truthy_spellings`,
+//! `default_rtk_resolver_is_the_real_resolver_without_the_env_var` in
+//! `tool_output::tests`.
 
 use super::compress_tool_output;
 
@@ -141,21 +147,104 @@ pub(super) fn rtk_pipe_argv(tool_name: &str) -> Vec<&'static str> {
     }
 }
 
+/// Locates the `rtk` executable for [`compress_via_rtk_with`].
+///
+/// Why: `trusty_common::bin_resolve::resolve_binary` finds a Homebrew `rtk`
+/// whatever `PATH` says — deliberately, so a launchd-spawned daemon still
+/// reaches it. That leaves a test with no way to pin native-fallback
+/// behaviour: the same assertion passes on a host without rtk and fails on a
+/// host with it (#7325). Naming the resolver lets the caller decide.
+/// What: the same signature as `resolve_binary` — a binary name in, an
+/// existing path or `None` out. A resolver that returns a path to a missing
+/// file still falls back, because [`compress_via_rtk_binary`] returns `None`
+/// when the spawn fails; the seam can only ever downgrade to the native
+/// chain, never claim `rtk_binary` for a binary that did not run.
+/// Test: `a_resolver_naming_a_missing_binary_falls_back_to_native`.
+pub type RtkResolver = fn(&str) -> Option<std::path::PathBuf>;
+
+/// Env var that forces the native fallback chain even where `rtk` is installed.
+///
+/// Why: `tm compress`'s process-level tests assert the native chain's own
+/// output — the 80-byte size gate, byte-for-byte passthrough — which rtk
+/// rewrites (it strips the trailing newline). A spawned process cannot be
+/// handed a resolver, so it reads one env var instead (#7325). It doubles as
+/// the operator escape hatch for a broken or slow local rtk.
+/// What: `1`, `true`, `yes` or `on` (case-insensitive, trimmed) select
+/// [`no_rtk`]; every other value, and an unset variable, keep the real
+/// resolver. Read once per compression call.
+/// Test: `value_forces_native_fallback_accepts_only_truthy_spellings`.
+pub const ENV_COMPRESS_NO_RTK: &str = "TRUSTY_COMPRESS_NO_RTK";
+
+/// An [`RtkResolver`] that never resolves, forcing the native fallback chain.
+///
+/// Why: a test that asserts the native chain's own output needs the same
+/// answer on a host with `rtk` installed and on one without (#7325).
+/// What: ignores the name and returns `None`, so [`compress_via_rtk_with`]
+/// takes its absent-binary arm.
+/// Test: `no_rtk_resolver_forces_the_native_chain_on_any_host`.
+pub fn no_rtk(_name: &str) -> Option<std::path::PathBuf> {
+    None
+}
+
+/// Whether a raw [`ENV_COMPRESS_NO_RTK`] value asks for the native chain.
+///
+/// Why: taking the value rather than reading the process environment keeps
+/// the spelling rules testable without `std::env::set_var`, which is
+/// process-global and races every other test in the binary.
+/// What: trims, lowercases, and accepts `1` / `true` / `yes` / `on`.
+/// Test: `value_forces_native_fallback_accepts_only_truthy_spellings`.
+pub(super) fn value_forces_native_fallback(raw: Option<&str>) -> bool {
+    matches!(
+        raw.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
+/// The [`RtkResolver`] production compression uses.
+///
+/// Why: one place decides whether this process may reach rtk, so every
+/// consumer — `tm compress`, `trusty-agents`'s `tool_loop` — honours
+/// [`ENV_COMPRESS_NO_RTK`] identically.
+/// What: [`no_rtk`] when the env var is truthy, else
+/// `trusty_common::bin_resolve::resolve_binary`.
+/// Test: `default_rtk_resolver_is_the_real_resolver_without_the_env_var`.
+pub fn default_rtk_resolver() -> RtkResolver {
+    // #7325: the one opt-out; nothing else may force the native chain.
+    if value_forces_native_fallback(std::env::var(ENV_COMPRESS_NO_RTK).ok().as_deref()) {
+        return no_rtk;
+    }
+    // See CLAUDE.md "Common entry point": trusty-common owns binary resolution.
+    trusty_common::bin_resolve::resolve_binary
+}
+
 /// Pipe `output` through the `rtk` CLI subprocess if installed.
 ///
 /// Why: When the user has installed RTK (https://github.com/rtk-ai/rtk),
 /// delegating to it gets us the upstream implementation for free, with
 /// updates from the source project. When `rtk` is not on `PATH` we fall
 /// back to the native filter.
-/// What: Resolves `rtk` through `trusty_common::bin_resolve::resolve_binary`
-/// (the one binary resolver, so a launchd-spawned daemon with a minimal
-/// `PATH` still finds a Homebrew `rtk`), then delegates to
-/// [`compress_via_rtk_binary`]. An absent binary is a `debug` event — the
-/// common, expected case — while a binary that runs and fails is a `warn`.
+/// What: Resolves `rtk` through [`default_rtk_resolver`], then delegates to
+/// [`compress_via_rtk_with`].
 /// Test: `compress_via_rtk_returns_none_when_binary_absent`.
 pub async fn compress_via_rtk(tool_name: &str, output: &str) -> Option<String> {
-    // See CLAUDE.md "Common entry point": trusty-common owns binary resolution.
-    let Some(bin) = trusty_common::bin_resolve::resolve_binary("rtk") else {
+    compress_via_rtk_with(default_rtk_resolver(), tool_name, output).await
+}
+
+/// Pipe `output` through the `rtk` binary `resolve` names, if it names one.
+///
+/// Why: the injection point [`compress_via_rtk`] wraps — see [`RtkResolver`]
+/// for why a test needs to choose the resolver (#7325).
+/// What: calls `resolve("rtk")` and delegates to [`compress_via_rtk_binary`].
+/// An absent binary is a `debug` event — the common, expected case — while a
+/// binary that runs and fails is a `warn`.
+/// Test: `compress_via_rtk_returns_none_when_binary_absent`,
+/// `a_resolver_naming_a_missing_binary_falls_back_to_native`.
+pub async fn compress_via_rtk_with(
+    resolve: RtkResolver,
+    tool_name: &str,
+    output: &str,
+) -> Option<String> {
+    let Some(bin) = resolve("rtk") else {
         tracing::debug!(tool = tool_name, "rtk not on PATH; using native fallback");
         return None;
     };
@@ -264,7 +353,29 @@ pub async fn compress_tool_output_async_with_path(
     tool_name: &str,
     output: &str,
 ) -> (String, CompressionPath) {
-    if let Some(s) = compress_via_rtk(tool_name, output).await {
+    compress_tool_output_async_with_path_using(default_rtk_resolver(), tool_name, output).await
+}
+
+/// [`compress_tool_output_async_with_path`] against a caller-chosen resolver.
+///
+/// Why: a test that pins the native chain's own output must be able to say
+/// so — passing [`no_rtk`] makes the assertion hold on a host with rtk
+/// installed and on one without, with no env mutation and no weakened
+/// assertion (#7325).
+/// What: identical to [`compress_tool_output_async_with_path`], except that
+/// `resolve` decides whether rtk is reachable. `RtkBinary` is still reported
+/// only when a subprocess actually ran and exited zero, so a resolver that
+/// names a missing file yields `NativeFallback`.
+/// Test: `no_rtk_resolver_forces_the_native_chain_on_any_host`,
+/// `a_resolver_naming_a_missing_binary_falls_back_to_native`. `trusty-mpm`'s
+/// `native_fallback_elision_reports_a_matching_non_zero_reduction` is the
+/// caller this seam was added for.
+pub async fn compress_tool_output_async_with_path_using(
+    resolve: RtkResolver,
+    tool_name: &str,
+    output: &str,
+) -> (String, CompressionPath) {
+    if let Some(s) = compress_via_rtk_with(resolve, tool_name, output).await {
         return (s, CompressionPath::RtkBinary);
     }
     (

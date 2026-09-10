@@ -1,7 +1,9 @@
 /target
 **/target/
-# #7177: worktree build output isolation
-**/target-worktree/
+# #7177: worktree build output isolation. #7275: dispatch briefs name the dir
+# `target-<issue>` as often as `target-worktree`, and an unignored one makes
+# every such worktree read dirty, which blocks `tm pr cleanup` from reclaiming it.
+**/target-*/
 **/*.rs.bk
 .env
 .env.local

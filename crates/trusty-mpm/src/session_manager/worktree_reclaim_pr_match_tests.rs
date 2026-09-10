@@ -30,7 +30,7 @@ fn root() -> &'static Path {
 }
 
 /// A [`LandingProbe`] whose every answer is stated by the test.
-struct FakeProbe {
+pub(crate) struct FakeProbe {
     /// Branch name → what GitHub says about it.
     heads: BTreeMap<String, BranchPrState>,
     /// What `git rev-parse HEAD` answers.
@@ -61,45 +61,45 @@ impl Default for FakeProbe {
 
 impl FakeProbe {
     /// State `branch`'s pull-request answer.
-    fn with_head(mut self, branch: &str, state: BranchPrState) -> Self {
+    pub(crate) fn with_head(mut self, branch: &str, state: BranchPrState) -> Self {
         self.heads.insert(branch.to_string(), state);
         self
     }
 
     /// State what the commit search returns.
-    fn with_search(mut self, rows: Vec<MergedPrHead>) -> Self {
+    pub(crate) fn with_search(mut self, rows: Vec<MergedPrHead>) -> Self {
         self.search = Ok(rows);
         self
     }
 
     /// State that the commit search FAILS.
-    fn with_search_error(mut self, reason: &str) -> Self {
+    pub(crate) fn with_search_error(mut self, reason: &str) -> Self {
         self.search = Err(reason.to_string());
         self
     }
 
     /// State what `git rev-parse HEAD` answers.
-    fn with_head_commit(mut self, answer: Result<String, String>) -> Self {
+    pub(crate) fn with_head_commit(mut self, answer: Result<String, String>) -> Self {
         self.head_commit = answer;
         self
     }
 
     /// State that the ancestry probe FAILS — what an object this checkout does
     /// not hold looks like.
-    fn with_ancestry_error(mut self, reason: &str) -> Self {
+    pub(crate) fn with_ancestry_error(mut self, reason: &str) -> Self {
         self.ancestry_error = Some(reason.to_string());
         self
     }
 
     /// State that `ancestor` is an ancestor of `descendant`.
-    fn with_ancestor(mut self, ancestor: &str, descendant: &str) -> Self {
+    pub(crate) fn with_ancestor(mut self, ancestor: &str, descendant: &str) -> Self {
         self.ancestors
             .insert((ancestor.to_string(), descendant.to_string()));
         self
     }
 
     /// Did any probe method get called?
-    fn calls(&self) -> Vec<String> {
+    pub(crate) fn calls(&self) -> Vec<String> {
         self.calls.borrow().clone()
     }
 }

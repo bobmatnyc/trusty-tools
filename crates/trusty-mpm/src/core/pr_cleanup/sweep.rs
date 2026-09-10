@@ -25,7 +25,7 @@
 use chrono::Utc;
 use tracing::{info, warn};
 
-use super::driver::{ClaimEnder, Gh, Git};
+use super::driver::{ClaimEnder, Gh, Git, Landing};
 use super::registry::{CleanupRegistry, OpenedPr};
 use super::{CleanupRequest, DirtProbe, plan};
 
@@ -83,6 +83,7 @@ pub async fn run_sweep<G: Gh, T: Git, C: ClaimEnder>(
     gh: &G,
     git: &T,
     claims: &C,
+    landing: &dyn Landing,
     probe_dirt: DirtProbe<'_>,
     registry: &CleanupRegistry,
 ) -> usize {
@@ -107,7 +108,7 @@ pub async fn run_sweep<G: Gh, T: Git, C: ClaimEnder>(
                 info!(pr = entry.pr, repo = %entry.repo, "pr cleanup sweep: skipping — {reason}");
             }
             SweepDecision::Clean => {
-                let report = super::run(gh, git, claims, probe_dirt, &req).await;
+                let report = super::run(gh, git, claims, landing, probe_dirt, &req).await;
                 if report.failed() {
                     warn!(
                         pr = entry.pr,

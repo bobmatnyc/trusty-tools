@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 
 use super::{SweepDecision, run_sweep, sweep_decision};
-use crate::core::pr_cleanup::driver::{ClaimEnder, CmdOut, Gh, Git};
+use crate::core::pr_cleanup::driver::{ClaimEnder, CmdOut, Gh, Git, Landing};
 use crate::core::pr_cleanup::plan::PrView;
 use crate::core::pr_cleanup::registry::{CleanupRegistry, OpenedPr};
 use crate::session_manager::DirtyWorktree;
@@ -27,6 +27,26 @@ fn view(state: &str) -> PrView {
         head_ref_oid: HEAD_OID.to_string(),
         merge_commit: None,
         base_ref_name: "main".to_string(),
+    }
+}
+
+/// A [`Landing`] that names no merged pull request.
+///
+/// Why: every sweep test here drives a CLEAN or a file-dirty worktree, and the
+/// #7275 ahead-count gate only consults this seam for a tree whose sole finding
+/// is that it is ahead of its upstream. Answering `None` keeps that unreachable
+/// path fail-closed if one ever does.
+struct NoLanding;
+
+impl Landing for NoLanding {
+    fn merged_pr(
+        &self,
+        _repo_root: &Path,
+        _worktree: &Path,
+        _branch: Option<&str>,
+        _exact: Option<u64>,
+    ) -> Option<u64> {
+        None
     }
 }
 
@@ -176,6 +196,8 @@ fn git_one_tree(tree: &str) -> Scripted {
                  worktree {tree}\nHEAD {HEAD_OID}\nbranch refs/heads/{BRANCH}\n\n"
             ),
         )
+        // #7275 round 4: the tree is re-read immediately before it is removed.
+        .on("rev-parse HEAD", &format!("{HEAD_OID}\n"))
         .on("git worktree remove", "")
         .on("git branch --format", "main 1111\n")
         .on("git worktree prune", "")
@@ -195,7 +217,7 @@ async fn sweep_stamps_only_a_fully_successful_run() {
 
     let gh = gh_merged();
     let git = git_nothing_left();
-    let cleaned = run_sweep(&gh, &git, &NoClaims, &clean, &reg).await;
+    let cleaned = run_sweep(&gh, &git, &NoClaims, &NoLanding, &clean, &reg).await;
 
     assert_eq!(cleaned, 1, "the newly merged PR is cleaned once");
     assert!(reg.pending().is_empty(), "and stamped so it never re-runs");
@@ -203,7 +225,7 @@ async fn sweep_stamps_only_a_fully_successful_run() {
     // A second sweep against the same registry must do nothing at all.
     let gh2 = gh_merged();
     let git2 = git_nothing_left();
-    let again = run_sweep(&gh2, &git2, &NoClaims, &clean, &reg).await;
+    let again = run_sweep(&gh2, &git2, &NoClaims, &NoLanding, &clean, &reg).await;
     assert_eq!(again, 0, "the trigger is idempotent");
     assert!(
         gh2.calls().is_empty() && git2.calls().is_empty(),
@@ -230,7 +252,7 @@ async fn sweep_leaves_a_dirty_worktree_pending() {
             unpushed_commits: 0,
         })
     };
-    let cleaned = run_sweep(&gh, &git, &NoClaims, &dirty, &reg).await;
+    let cleaned = run_sweep(&gh, &git, &NoClaims, &NoLanding, &dirty, &reg).await;
 
     assert_eq!(cleaned, 0, "a refused run is not a success");
     assert_eq!(
@@ -257,7 +279,7 @@ async fn sweep_skips_a_pr_that_has_not_merged() {
         &format!("{{\"state\":\"OPEN\",\"headRefName\":\"{BRANCH}\"}}"),
     );
     let git = Scripted::new();
-    let cleaned = run_sweep(&gh, &git, &NoClaims, &clean, &reg).await;
+    let cleaned = run_sweep(&gh, &git, &NoClaims, &NoLanding, &clean, &reg).await;
 
     assert_eq!(cleaned, 0);
     assert_eq!(reg.pending().len(), 1, "an open PR stays pending");
