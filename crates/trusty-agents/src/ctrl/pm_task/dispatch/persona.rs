@@ -21,8 +21,7 @@ use crate::tools::{AgentRunner, ToolRegistry};
 
 use super::super::super::claude_cli::run_pm_task_via_claude_cli;
 use super::super::super::config::{
-    AgentIdentity, SessionOverrides, apply_credential_routing, build_user_context_prefix,
-    resolve_overridden_credentials,
+    SessionOverrides, apply_credential_routing, resolve_overridden_credentials,
 };
 use super::super::super::handlers::{
     AddProjectTool, CreateDirTool, ListProjectsTool, MoveFileTool, RemoveProjectTool,
@@ -36,6 +35,8 @@ use super::persona_gate::{
 };
 use super::persona_memory;
 use super::persona_plugins::register_python_plugins;
+#[path = "persona_prompt.rs"]
+mod prompt;
 
 /// Run a single conversation turn against a persona agent (#254).
 ///
@@ -78,11 +79,6 @@ pub async fn run_pm_task_with_persona(
     session_id: Option<String>,
     overrides: SessionOverrides,
 ) -> Result<String> {
-    use async_openai::types::{
-        ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
-        ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
-    };
-
     let sid = session_id.unwrap_or_default();
 
     // #3223/#3224 (Trusty Agents agent roster, epic #3052): resolve
@@ -120,11 +116,27 @@ pub async fn run_pm_task_with_persona(
         "run_pm_task_with_persona: credentials resolved"
     );
     if claude_cli_short_circuit {
+        prompt::append_cli_context(&mut persona_cfg, project_path);
         // DOC-54 §9.6 note: the claude-cli subprocess path runs an entirely
         // separate execution model and is out of scope for the filterable-
         // context slice — deferred, documented in the PR body.
-        return run_pm_task_via_claude_cli(project_path, &persona_cfg, user_input, history, "")
-            .await;
+        let activity = crate::tools::activity::ActivityContext::new(&sid);
+        let result = crate::tools::activity::CLI_ACTIVITY
+            .scope(
+                activity.clone(),
+                run_pm_task_via_claude_cli(project_path, &persona_cfg, user_input, history, &sid),
+            )
+            .await?;
+        let socket = crate::memory::trusty_client::default_trusty_socket();
+        persona_memory::spawn_persist_turn_with_activity(
+            &persona_cfg.stores,
+            Some(&socket),
+            persona_name,
+            user_input,
+            &result,
+            activity.history(),
+        );
+        return Ok(result);
     }
     let persona_llm_t0 = std::time::Instant::now();
 
@@ -183,6 +195,26 @@ pub async fn run_pm_task_with_persona(
         persona_cfg.skills.allow.as_ref(),
         &skill_catalog,
     );
+    let listener_event_turn = crate::listeners::wake::LISTENER_CHAT_EVENT
+        .try_with(|_| ())
+        .is_ok()
+        || user_input.starts_with(crate::listeners::wake::ASK_FIRST_PREAMBLE);
+    let effective_patterns = crate::tools::listener_config::self_configuration_patterns(
+        effective_patterns,
+        &persona_cfg.agent.kind,
+        listener_event_turn,
+    );
+    let effective_patterns = if persona_cfg.agent.kind == "assistant" {
+        let mut patterns = effective_patterns.unwrap_or_default();
+        patterns.push("project_skill".to_owned());
+        if !listener_event_turn {
+            patterns.push("channel".to_owned());
+            patterns.push("delegate_skill_configuration".to_owned());
+        }
+        Some(patterns)
+    } else {
+        effective_patterns
+    };
     if !unresolved_skills.is_empty() {
         tracing::warn!(
             persona = %persona_name,
@@ -191,14 +223,34 @@ pub async fn run_pm_task_with_persona(
         );
     }
 
+    let skill_granted = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let (persona_registry, persona_tool_names): (ToolRegistry, Vec<String>) =
         if let Some(patterns) = effective_patterns {
             let mut registry = ToolRegistry::new();
+            if persona_cfg.agent.kind == "assistant" && !listener_event_turn {
+                registry.register(Arc::new(
+                    crate::skills::manage::ManageSkillsTool::delegated(),
+                ));
+                registry.register(Arc::new(crate::tools::channel::ChannelTool::new(
+                    persona_name,
+                )));
+            }
+            if persona_cfg.agent.kind == "assistant" {
+                registry.register(Arc::new(
+                    crate::skills::project::ProjectSkillTool::new(project_path)
+                        .with_granted(skill_granted.clone()),
+                ));
+            }
+            if persona_cfg.agent.kind == "assistant" && !listener_event_turn {
+                registry.register(Arc::new(
+                    crate::tools::listener_config::ListenerConfigTool::new(persona_name),
+                ));
+            }
             for tool in crate::tools::mcp_tools::mcp_tool_executors() {
-                registry.register(tool);
+                crate::tools::listener_config::register_external(&mut registry, tool);
             }
             for tool in crate::tools::mcp_service_tools::mcp_service_tool_executors().await {
-                registry.register(tool);
+                crate::tools::listener_config::register_external(&mut registry, tool);
             }
             // #3987: `advertised_scopes` is the UNFILTERED vocabulary every
             // endpoint published, captured here because the registry only
@@ -215,7 +267,7 @@ pub async fn run_pm_task_with_persona(
                 {
                     Ok((execs, vocabulary)) => {
                         for tool in execs {
-                            registry.register(tool);
+                            crate::tools::listener_config::register_external(&mut registry, tool);
                         }
                         advertised_scopes = vocabulary;
                     }
@@ -428,7 +480,7 @@ pub async fn run_pm_task_with_persona(
             // decided by `filter_persona_tool_names` against its
             // `[tools].allow` globs — izzie opts in, other personas don't.
             for tool in crate::tools::izzie::izzie_tools() {
-                registry.register(tool);
+                crate::tools::listener_config::register_external(&mut registry, tool);
             }
 
             // OKG builder tools — same posture as the izzie block above: added
@@ -438,7 +490,7 @@ pub async fn run_pm_task_with_persona(
             // `runtime::tool_registry::build_assistant_tier_registry`) in sync
             // is what #3745 item C fixed for izzie; do not register in only one.
             for tool in crate::tools::okg::okg_tools() {
-                registry.register(tool);
+                crate::tools::listener_config::register_external(&mut registry, tool);
             }
 
             // #4171 (epic #4167): L0-only read-only session-state tools, kept
@@ -457,12 +509,15 @@ pub async fn run_pm_task_with_persona(
                 project_path,
                 persona_cfg.agent.tier(),
             ) {
-                registry.register(tool);
+                crate::tools::listener_config::register_external(&mut registry, tool);
             }
 
             for plugin in crate::tools::agent_plugin::plugins_for_persona(persona_name) {
                 for tool in &plugin.tools {
-                    registry.register(std::sync::Arc::clone(tool));
+                    crate::tools::listener_config::register_external(
+                        &mut registry,
+                        std::sync::Arc::clone(tool),
+                    );
                 }
             }
 
@@ -509,7 +564,7 @@ pub async fn run_pm_task_with_persona(
                     crate::tools::mcp_live::live_mcp_tool_executors(project_path, &existing_names)
                         .await
                 {
-                    registry.register(tool);
+                    crate::tools::listener_config::register_external(&mut registry, tool);
                 }
             }
 
@@ -607,6 +662,10 @@ pub async fn run_pm_task_with_persona(
                 &agent_scope_patterns,
                 persona_cfg.agent.tier(),
             );
+            let kept: Vec<String> = kept
+                .into_iter()
+                .filter(|name| !listener_event_turn || name != "listener_config")
+                .collect();
             tracing::info!(
                 persona = %persona_name,
                 tools = ?kept,
@@ -619,63 +678,15 @@ pub async fn run_pm_task_with_persona(
             (ToolRegistry::new(), Vec::new())
         };
 
-    let system_prompt: String = {
-        let runner_label = match persona_cfg.agent.runner {
-            crate::agents::RunnerKind::Subprocess => "subprocess",
-            crate::agents::RunnerKind::Inline => "inline",
-            crate::agents::RunnerKind::ClaudeCode => "claude-code",
-            crate::agents::RunnerKind::InProcess => "in-process",
-        };
-        let identity = AgentIdentity {
-            agent_name: &persona_cfg.agent.name,
-            model: &persona_cfg.agent.model,
-            runner: &format!("{:?}", persona_cfg.agent.runner),
-            provider: creds.label(),
-        };
-        let base = build_user_context_prefix(&persona_cfg.system_prompt.content, &identity);
-        let base = crate::agents::prompt_builder::SystemPromptBuilder::new(base)
-            .with_agent_context(persona_cfg.agent.model.as_str(), runner_label)
-            .build();
-        // DOC-54 §9.6.3 stable assembly order: focused-mode context block
-        // (when focused) lands BEFORE the classification instruction so the
-        // prefix stays cache-stable across turns within the same focus/
-        // vocabulary state (the classification block itself only changes
-        // when a new label appears).
-        let base = match &turn_ctx.focused_context_block {
-            Some(focused_block) => format!("{base}\n\n{focused_block}"),
-            None => base,
-        };
-        // #3840 critic HIGH-2: `classification_block` is empty when
-        // `[workstreams].enabled = false` (real master switch — see
-        // `build_turn_context`); appending it unconditionally would still
-        // inject a blank `\n\n` into the prompt.
-        let base = if turn_ctx.classification_block.is_empty() {
-            base
-        } else {
-            format!("{base}\n\n{}", turn_ctx.classification_block)
-        };
-        let base = if !persona_tool_names.is_empty() {
-            format!(
-                "{}\n\n## Available tools\nYou have access to the following tools: {}.\nUse them when the user asks questions that require live data.",
-                base,
-                persona_tool_names.join(", ")
-            )
-        } else {
-            base
-        };
-        // Issue #3928: the memory block goes LAST, after every block above it.
-        // Its recall section is the only part of this prompt that changes on
-        // EVERY turn (it is keyed to the user's query), so appending it keeps
-        // the whole preceding prefix — persona body, focused-mode block,
-        // classification block, tool list — cache-stable, preserving DOC-54
-        // §9.6.3's prompt-cache-prefix property rather than busting it once
-        // per turn. It also places the recalled facts closest to the user's
-        // message, where they are most likely to be attended to.
-        match persona_memory::render_memory_block(&persona_memory) {
-            Some(block) => format!("{base}\n\n{block}"),
-            None => base,
-        }
-    };
+    *skill_granted.lock().unwrap_or_else(|p| p.into_inner()) = persona_tool_names.clone();
+    let system_prompt = prompt::system_prompt(
+        &persona_cfg,
+        creds.label(),
+        project_path,
+        &persona_tool_names,
+        &turn_ctx,
+        &persona_memory,
+    );
 
     // Chat-streaming demo: for a tools-off persona turn on an OpenRouter-routed
     // model, stream the reply token-by-token onto the event bus (relayed to the
@@ -748,37 +759,7 @@ pub async fn run_pm_task_with_persona(
         }
     }
 
-    let mut initial_messages: Vec<ChatCompletionRequestMessage> = Vec::new();
-    initial_messages.push(
-        ChatCompletionRequestSystemMessageArgs::default()
-            .content(system_prompt)
-            .build()
-            .context("failed to build persona system message")?
-            .into(),
-    );
-    for turn in history {
-        initial_messages.push(
-            ChatCompletionRequestUserMessageArgs::default()
-                .content(turn.user.clone())
-                .build()
-                .context("failed to build persona history user message")?
-                .into(),
-        );
-        initial_messages.push(
-            ChatCompletionRequestAssistantMessageArgs::default()
-                .content(turn.assistant.clone())
-                .build()
-                .context("failed to build persona history assistant message")?
-                .into(),
-        );
-    }
-    initial_messages.push(
-        ChatCompletionRequestUserMessageArgs::default()
-            .content(user_input)
-            .build()
-            .context("failed to build persona current user message")?
-            .into(),
-    );
+    let initial_messages = prompt::messages(system_prompt, history, user_input)?;
 
     let adapter = llm::adapter::adapter_for_model(&persona_cfg.agent.model);
     // #3208: NEVER collapse an empty tool list to `None` here — see
@@ -786,12 +767,13 @@ pub async fn run_pm_task_with_persona(
     // registered tool surface instead of denying dispatch.
     let allowed_tools = persona_allowed_tools(persona_tool_names.clone());
     let max_turns = persona_max_turns(!persona_tool_names.is_empty(), &persona_cfg.llm);
+    let persona_registry = Arc::new(persona_registry.with_activity_session(&sid));
     let (content, _usage) = llm::chat_with_tools_gated(
         &client,
         &persona_cfg.agent.model,
         &*adapter,
         initial_messages,
-        Arc::new(persona_registry),
+        Arc::clone(&persona_registry),
         allowed_tools,
         persona_cfg.llm.temperature,
         persona_cfg.llm.max_tokens,
@@ -823,12 +805,13 @@ pub async fn run_pm_task_with_persona(
         &workstreams_socket,
     )
     .await?;
-    persona_memory::spawn_persist_turn(
+    persona_memory::spawn_persist_turn_with_activity(
         &persona_cfg.stores,
         Some(&workstreams_socket),
         persona_name,
         user_input,
         &display,
+        persona_registry.activity_history(),
     );
     Ok(display)
 }

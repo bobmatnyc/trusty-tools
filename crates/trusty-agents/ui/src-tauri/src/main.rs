@@ -37,6 +37,7 @@ mod overlay;
 mod sidecar;
 mod sse_bridge;
 mod task_commands;
+mod workspace_files;
 
 use std::sync::Arc;
 
@@ -68,6 +69,11 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage::<SharedApi>(Arc::new(ApiServerState::default()))
         .invoke_handler(tauri::generate_handler![
+            workspace_files::workspace_register_root,
+            workspace_files::workspace_list_roots,
+            workspace_files::workspace_list_files,
+            workspace_files::workspace_read_file,
+            workspace_files::workspace_diff_file,
             ensure_api_server,
             send_message,
             cancel_task,

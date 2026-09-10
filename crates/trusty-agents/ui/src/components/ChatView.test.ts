@@ -29,7 +29,8 @@ import { resetWorkflow } from '../stores/workflow';
 import { activeProjectId, activeTaskId, addMessage, isRunning, messages } from '../stores/app';
 
 const PROJECT = 'ctrl';
-const TASK = 'task-1';
+let taskSequence = 0;
+let TASK = 'task-0';
 const STREAMED = 'The streamed answer so far';
 const REAL = 'The authoritative final narrative.';
 
@@ -47,7 +48,7 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void
 
 /** The rendered text of the assistant bubble under test. */
 function bubbleText(): string {
-  const paras = Array.from(target.querySelectorAll('p.whitespace-pre-wrap'));
+  const paras = Array.from(target.querySelectorAll('[data-assistant-body]'));
   return paras.map((p) => p.textContent ?? '').join('\n');
 }
 
@@ -62,7 +63,7 @@ function bubbleText(): string {
  * than passing silently.
  */
 function spinnerVisible(): boolean {
-  const body = target.querySelector('p.whitespace-pre-wrap');
+  const body = target.querySelector('[data-assistant-body]');
   return body?.querySelector('[role="status"]') != null;
 }
 
@@ -91,6 +92,8 @@ function pollComplete(): void {
 }
 
 beforeEach(async () => {
+  // Real submissions receive unique task IDs; terminal telemetry guards persist across conversations.
+  TASK = `chat-view-task-${++taskSequence}`;
   messages.set(new Map());
   activeProjectId.set(PROJECT);
   isRunning.set(true);
@@ -197,7 +200,7 @@ describe('task-complete race (#3759)', () => {
     emitWebEvent('task-complete', { id: TASK, narrative: '', status: 'success' });
     await rendered();
 
-    expect(bubbleText()).toContain('(no narrative)');
+    expect(bubbleText()).toContain('No response was returned.');
   });
 });
 
@@ -237,4 +240,81 @@ describe('in-bubble waiting indicator', () => {
     expect(waitingRingVisible()).toBe(false);
     expect(spinnerVisible()).toBe(false);
   });
+});
+
+it('positions user and event bubbles on the right with left-aligned text while keeping assistant prose plain', async () => {
+  addMessage(PROJECT, { id: 'user-layout', role: 'user', content: 'user example', timestamp: Date.now() });
+  addMessage(PROJECT, { id: 'event-layout', role: 'event', content: 'event example', timestamp: Date.now() });
+  addMessage(PROJECT, { id: 'system-layout', role: 'system', content: 'internal notification', timestamp: Date.now() });
+  await rendered();
+  const incoming = [...target.querySelectorAll('[data-incoming-message]')];
+  expect(incoming).toHaveLength(2);
+  for (const row of incoming) {
+    expect(row.className).toContain('justify-end');
+    const bubble = row.querySelector('.incoming-bubble');
+    expect(bubble).not.toBeNull();
+    expect(bubble?.querySelector('p')?.className).toContain('text-left');
+    expect(bubble?.querySelector('p')?.className).not.toContain('text-right');
+  }
+  const assistant = [...target.querySelectorAll('[data-assistant-body]')].find(node => node.textContent?.includes(STREAMED));
+  expect(assistant?.closest('.incoming-bubble')).toBeNull();
+});
+
+it('renders tool calls as compact expandable activity instead of assistant messages', async () => {
+  addMessage(PROJECT, { id: 'tool-layout', role: 'tool', toolName: 'Search files', activityStatus: 'complete', content: 'Found matching files', timestamp: Date.now() });
+  await rendered();
+  const tool = target.querySelector('[data-tool-activity]');
+  expect(tool?.querySelector('summary')?.textContent).toContain('Search files');
+  expect(tool?.querySelector('pre')?.textContent).toBe('Found matching files');
+  expect(tool?.closest('[data-incoming-message]')).toBeNull();
+  expect(tool?.querySelector('p.whitespace-pre-wrap')).toBeNull();
+});
+
+it('receives live tool activity and keeps its completion separate from assistant narrative', async () => {
+  emitWebEvent('task-tool-activity', { task_id: TASK, call_id: 'call-live', tool: 'read_file', status: 'running' });
+  await rendered();
+  const row = target.querySelector('[data-tool-activity]');
+  expect(row?.textContent).toContain('Read file');
+  expect(row?.querySelector('[aria-label="Running"]')).not.toBeNull();
+  emitWebEvent('task-tool-activity', { task_id: TASK, call_id: 'call-live', tool: 'read_file', status: 'complete' });
+  pollComplete(); await rendered();
+  expect(target.querySelectorAll('[data-tool-activity]')).toHaveLength(1);
+  expect(target.querySelector('[data-tool-activity]')?.textContent).toContain('Read file');
+  expect(target.querySelector('[data-tool-activity] [aria-label="Running"]')).toBeNull();
+  expect(bubbleText()).toContain(REAL);
+});
+
+it('renders assistant markdown escapes, emphasis and code without active HTML', async () => {
+  messages.set(new Map());
+  addMessage(PROJECT, { id:'formatted', role:'assistant', content:'granola\\_search **Izzie** `get_train_schedule`\n\n<script>unsafe()</script><img src="https://example.com/tracker">\n\n[local](README.md)', timestamp:Date.now() });
+  await rendered();
+  const body = target.querySelector('[data-assistant-body]')!;
+  expect(body.textContent).toContain('granola_search');
+  expect(body.textContent).not.toContain('\\_');
+  expect(body.querySelector('strong')?.textContent).toBe('Izzie');
+  expect(body.querySelector('code')?.textContent).toBe('get_train_schedule');
+  expect(body.querySelector('script,img,a,[tabindex]')).toBeNull();
+});
+
+it('explains an empty completed assistant reply without a dead ellipsis', async () => {
+  messages.set(new Map());
+  addMessage(PROJECT, { id:'empty', role:'assistant', content:'', timestamp:Date.now(), taskId:TASK });
+  isRunning.set(false); activeTaskId.set(null); await rendered();
+  expect(target.querySelector('[data-assistant-body]')?.textContent?.trim()).toBe('No response was returned.');
+  expect(spinnerVisible()).toBe(false);
+});
+
+it('explains failed tool activity when the final response is empty', async () => {
+  emitWebEvent('task-tool-activity', { task_id:TASK, call_id:'failed-display', tool:'granola_search', status:'error' });
+  emitWebEvent('task-complete', { id:TASK, narrative:'', status:'complete' });
+  await rendered();
+  expect(bubbleText()).toContain('No response was returned. One or more tool activities failed.');
+  expect(spinnerVisible()).toBe(false);
+});
+
+it('reports an explicit failed completion with no narrative', async () => {
+  emitWebEvent('task-complete', { id:TASK, narrative:'', status:'failed' });
+  await rendered();
+  expect(bubbleText()).toContain('The request failed without returning a response.');
+  expect(spinnerVisible()).toBe(false);
 });

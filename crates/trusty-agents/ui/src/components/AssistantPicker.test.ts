@@ -1,23 +1,4 @@
-// Why (#4404): the card model is pinned in `lib/assistantPicker.test.ts`; what
-// this file pins is the WIRING, and specifically the one thing a screenshot
-// cannot show — that clicking the Concierge card writes `null` to
-// `activeAgentId` rather than the literal `'ctrl'`. Both look identical in the
-// UI, but the literal routes every subsequent message through the tools-OFF
-// persona path (`handlers.rs::resolve_agent_for_chat`), silently stripping
-// Concierge's delegation capability. It also pins the #4281 contract this view
-// depends on: selection is a plain `.set()` and persistence happens by itself,
-// so a future edit that "adds a save call" is adding a second, divergent
-// persistence path rather than fixing an omission.
-//
-// `localStorage` is STUBBED rather than inherited from the host. CI runs Node
-// 20, where jsdom supplies it; Node 22+ defines its own `localStorage` global
-// that is undefined without `--localstorage-file` and shadows jsdom's. Both
-// branches of `defaultSelectionStorage` are exercised explicitly below so this
-// file asserts the same thing on either runtime — the same reasoning
-// `stores/selectedAssistant.store.test.ts` documents.
-// What: mounts the real component against the real stores, with `fetch` stubbed
-// so the mount-time catalog refresh cannot reach the network.
-// Test: this file.
+// Verify selectable instances, internal-helper exclusion, and persisted selection.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { flushSync, mount, unmount } from 'svelte';
 import { get } from 'svelte/store';
@@ -65,8 +46,7 @@ function card(label: string): HTMLButtonElement {
 const CATALOG = [
   { name: 'izzie', display_name: 'Izzie', description: 'Personal assistant' },
   { name: 'cto-assistant', display_name: 'CTO Bot' },
-  // `ctrl` is a real, non-hidden roster entry since #3819 — the duplicate-card
-  // hazard is present in the fixture, not assumed away.
+  // Stale catalogs can still return the internal helper.
   { name: CONCIERGE_AGENT_ID, display_name: 'Concierge' },
 ];
 
@@ -103,17 +83,15 @@ afterEach(() => {
 });
 
 describe('AssistantPicker — the cards', () => {
-  it('draws Concierge first and exactly once, even though ctrl is in the roster', () => {
-    const labels = cardButtons().map((b) => b.textContent ?? '');
-    expect(labels[0]).toContain('Concierge');
-    expect(labels.filter((l) => l.includes('Concierge'))).toHaveLength(1);
+  it('never offers Concierge even when the catalog includes ctrl', () => {
+    expect(target.textContent).not.toContain('Concierge');
   });
 
   it('draws a card per assistant instance', () => {
     const labels = cardButtons().map((b) => b.textContent ?? '');
     expect(labels.some((l) => l.includes('Izzie'))).toBe(true);
     expect(labels.some((l) => l.includes('CTO Bot'))).toBe(true);
-    expect(cardButtons()).toHaveLength(3);
+    expect(cardButtons()).toHaveLength(2);
   });
 
   it('offers a create action that reuses the assistant-template flow', () => {
@@ -121,12 +99,11 @@ describe('AssistantPicker — the cards', () => {
     expect(target.textContent).toContain('assistant template');
   });
 
-  it('marks the live selection so the landing view answers "who am I on"', () => {
-    // Concierge is active (`activeAgentId === null`) — the card must still read
-    // as selected, which is only true if the comparison happens on the ROSTER
-    // axis rather than on the raw null.
-    expect(card('Concierge').getAttribute('aria-pressed')).toBe('true');
-    expect(card('Izzie').getAttribute('aria-pressed')).toBe('false');
+  it('marks only an explicitly selected assistant', () => {
+    expect(cardButtons().every((b) => b.getAttribute('aria-pressed') === 'false')).toBe(true);
+    flushSync(() => activeAgentId.set('izzie'));
+    expect(card('Izzie').getAttribute('aria-pressed')).toBe('true');
+    expect(card('CTO Bot').getAttribute('aria-pressed')).toBe('false');
   });
 });
 
@@ -134,14 +111,6 @@ describe('AssistantPicker — selection', () => {
   it('selects an instance by its dispatchable id', () => {
     flushSync(() => card('Izzie').click());
     expect(get(activeAgentId)).toBe('izzie');
-  });
-
-  // THE assertion of this file — see the header comment.
-  it('selects Concierge as null, never as the ctrl literal', () => {
-    activeAgentId.set('izzie');
-    flushSync(() => card('Concierge').click());
-    expect(get(activeAgentId)).toBeNull();
-    expect(get(activeAgentId)).not.toBe(CONCIERGE_AGENT_ID);
   });
 
   // `App.svelte` moves to the chat view on this event, so a card that selected
@@ -157,7 +126,7 @@ describe('AssistantPicker — selection', () => {
         select: (e: CustomEvent<{ id: string | null }>) => seen.push(e.detail.id),
       },
     }) as unknown as Record<string, unknown>;
-    await vi.waitFor(() => expect(cardButtons().length).toBe(3));
+    await vi.waitFor(() => expect(cardButtons().length).toBe(2));
     flushSync(() => card('Izzie').click());
     expect(seen).toEqual(['izzie']);
   });
@@ -166,9 +135,8 @@ describe('AssistantPicker — selection', () => {
   it('persists through the store alone, with no picker-owned save call', () => {
     flushSync(() => card('Izzie').click());
     expect(storage.get(SELECTED_ASSISTANT_KEY)).toBe('izzie');
-    // …and Concierge round-trips through the same sentinel the codec reads.
-    flushSync(() => card('Concierge').click());
-    expect(storage.get(SELECTED_ASSISTANT_KEY)).toBe(CONCIERGE_AGENT_ID);
+    flushSync(() => card('CTO Bot').click());
+    expect(storage.get(SELECTED_ASSISTANT_KEY)).toBe('cto-assistant');
     // Exactly one key: a picker-owned key would show up here.
     expect([...storage.keys()]).toEqual([SELECTED_ASSISTANT_KEY]);
   });

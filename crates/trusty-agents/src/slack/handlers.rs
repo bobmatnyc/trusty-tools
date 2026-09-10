@@ -14,17 +14,19 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::{Result, anyhow};
-use serde_json::Value;
+use anyhow::Result;
 use tracing::{info, warn};
 
-use super::format::{MAX_SLACK_MESSAGE, markdown_to_mrkdwn, split_message};
+use super::format::markdown_to_mrkdwn;
+#[path = "send.rs"]
+mod send;
 use super::pairing::{
     PAIRING_CODE_TTL, PairOutcome, PendingPairs, SENTINEL_PAIRING_CHANNEL_ID, save_paired_channels,
     should_auto_pair, verify_pair_attempt,
 };
 use super::rbac::{SlackRbacConfig, VIRTUAL_CTO_MESSAGE, identity_from_slack_user};
 use super::{ChannelId, ChatSession, PairedChannels, SessionMap};
+pub(super) use send::{post_message, send_long_message};
 // #4853: `record_listener_event` moved to `events.rs` when this file crossed
 // the 500-SLOC cap. Re-exported here so the #3852 call site and its tests keep
 // referring to it by the path they always have.
@@ -423,7 +425,7 @@ pub(super) async fn handle_message(
     // via `tokio::spawn` — exactly like the `relay_event` mirror below —
     // with owned args, so a slow disk (the store append) never delays the
     // Slack reply itself.
-    match msg_ts {
+    match msg_ts.clone() {
         Some(ts) => {
             let from_display = rbac
                 .user(&user_id)
@@ -458,6 +460,34 @@ pub(super) async fn handle_message(
         }
     };
     let user_identity = identity_from_slack_user(&user_cfg);
+    if let Some(ts) = msg_ts {
+        let event_type = format!("message.{channel_type}");
+        let event = crate::listeners::store::StoredEvent {
+            id: format!("slack:{channel}:{ts}"),
+            listener_id: "slack".into(),
+            provider: "slack".into(),
+            event_type: event_type.clone(),
+            ts: chrono::Utc::now().to_rfc3339(),
+            from: Some(user_cfg.name.clone()),
+            subject: None,
+            snippet: Some(text.clone()),
+            included: crate::listeners::store::EventStore::is_event_type_included(&event_type)
+                .await,
+            labels: vec![],
+        };
+        let connected_project = channel_project(&sessions, &channel, &project_path).await;
+        if crate::api::server::agent_channels::receive_slack(
+            &channel,
+            &event,
+            &connected_project,
+            &user_identity,
+            user_cfg.allowed_personas.as_deref(),
+        )
+        .await
+        {
+            return Ok(());
+        }
+    }
 
     let (path, history_snapshot, active_persona) = {
         let mut map = sessions.lock().await;
@@ -560,73 +590,36 @@ pub(super) async fn handle_message(
     send_result
 }
 
-/// Post a single message via `chat.postMessage`.
-pub(super) async fn post_message(
-    bot_token: &str,
+async fn channel_project(
+    sessions: &SessionMap,
     channel: &str,
-    text: &str,
-    thread_ts: Option<&str>,
-) -> Result<()> {
-    // #4703: refuse to issue a request that cannot succeed. `chat.postMessage`
-    // without a bearer token always answers `not_authed`, and the client built
-    // here carries NO timeout — so on a network that blackholes rather than
-    // refuses, a doomed request does not fail, it HANGS, holding whichever
-    // handler called it. Failing closed locally is strictly better.
-    //
-    // This is an ERROR, not a silent `Ok(())`. Reporting success for a message
-    // that was never sent is the worse bug: `handle_message` mirrors its reply
-    // to the GUI only `if send_result.is_ok()`, so a swallowed failure would
-    // show the operator a reply the Slack channel never received.
-    // Test: `post_message_without_a_token_errors_instead_of_requesting`.
-    if bot_token.is_empty() {
-        warn!(channel, "chat.postMessage refused: no bot token configured");
-        return Err(anyhow!(
-            "chat.postMessage: no bot token configured; message not sent"
-        ));
-    }
-    let mut body = serde_json::Map::new();
-    body.insert("channel".to_string(), Value::String(channel.to_string()));
-    body.insert("text".to_string(), Value::String(text.to_string()));
-    body.insert("mrkdwn".to_string(), Value::Bool(true));
-    if let Some(ts) = thread_ts {
-        body.insert("thread_ts".to_string(), Value::String(ts.to_string()));
-    }
-    let resp = reqwest::Client::new()
-        .post("https://slack.com/api/chat.postMessage")
-        .bearer_auth(bot_token)
-        .json(&Value::Object(body))
-        .send()
+    fallback: &std::path::Path,
+) -> PathBuf {
+    sessions
+        .lock()
         .await
-        .map_err(|e| anyhow!("chat.postMessage failed: {}", e))?;
-    let status = resp.status();
-    let body: Value = resp
-        .json()
-        .await
-        .map_err(|e| anyhow!("chat.postMessage: bad json (status {status}): {e}"))?;
-    if !body.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
-        let err = body
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
-        warn!(error = %err, "chat.postMessage returned not-ok");
-    }
-    Ok(())
+        .get(channel)
+        .map(|session| session.project_path.clone())
+        .unwrap_or_else(|| fallback.to_path_buf())
 }
-
-/// Send a (possibly long) mrkdwn reply, splitting on the 3000-char boundary
-/// at newlines where possible. Thread reply attached to all chunks for
-/// coherence (Slack threads tolerate this, unlike Telegram replies).
-pub(super) async fn send_long_message(
-    bot_token: &str,
-    channel: &str,
-    thread_ts: Option<&str>,
-    text: &str,
-) -> Result<()> {
-    let chunks = split_message(text, MAX_SLACK_MESSAGE);
-    for chunk in chunks.iter() {
-        if let Err(e) = post_message(bot_token, channel, chunk, thread_ts).await {
-            warn!(channel = %channel, error = %e, "slack chunk post failed");
-        }
+#[cfg(test)]
+mod channel_tests {
+    use super::*;
+    #[tokio::test]
+    async fn agent_channels_receive_honors_connected_project() {
+        let sessions: SessionMap = Default::default();
+        let connected = PathBuf::from("/tmp/connected-project");
+        sessions.lock().await.insert(
+            "C123".into(),
+            ChatSession::new(connected.clone(), "assistant".into()),
+        );
+        assert_eq!(
+            channel_project(&sessions, "C123", std::path::Path::new("/tmp/startup")).await,
+            connected
+        );
+        assert_eq!(
+            channel_project(&sessions, "COTHER", std::path::Path::new("/tmp/startup")).await,
+            PathBuf::from("/tmp/startup")
+        );
     }
-    Ok(())
 }

@@ -49,6 +49,21 @@ const CATALOG: ModelsCatalogResponse = {
 };
 
 describe('buildPicker', () => {
+  it('keeps one live local entry when the registry also lists local', () => {
+    const picker = buildPicker({
+      ...CATALOG,
+      providers: [...CATALOG.providers, {
+        provider_id: 'local', default_model: 'registry-local',
+        context_window: 8192, credential_configured: true, reachable_today: true,
+      }],
+    });
+    expect(new Set(picker.map((entry) => entry.id)).size).toBe(picker.length);
+    expect(picker.filter((entry) => entry.id === 'local')).toEqual([{
+      id: 'local', label: 'local — llama3.2', selectable: true,
+      modelId: 'llama3.2', providerId: 'local',
+    }]);
+  });
+
   it('always includes the default entry first', () => {
     const picker = buildPicker(CATALOG);
     expect(picker[0].id).toBe(DEFAULT_PICKER_ID);

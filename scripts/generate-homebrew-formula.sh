@@ -351,6 +351,40 @@ to_class_name() {
   printf '%s' "$out"
 }
 
+# formula_depends: the Homebrew formula names this crate's formula must
+# `depends_on`, one per line, or nothing when the crate needs none.
+#
+# Why: `tm compress` shells out to `rtk` and silently falls back to a slower
+# native compressor when the binary is absent, so a tap install of trusty-mpm
+# that does not pull rtk in ships that degraded path to every user.
+# What: a crate -> dependency table. rtk is a BINARY dependency only —
+# `rtk init` / `rtk init -g` install a competing PreToolUse Bash hook, and tm
+# invokes rtk directly, so neither is ever run.
+# Test: scripts/generate-homebrew-formula-selftest.sh pass A diffs every
+#   rendered formula against the live tap bytes, so the trusty-mpm golden
+#   carries the `depends_on` line and every other golden proves its absence.
+# #7311: rtk is an install dependency; never run rtk init.
+formula_depends() {
+  case "$1" in
+    trusty-mpm) printf 'rtk\n' ;;
+    *) : ;;
+  esac
+}
+
+# Rendered as-is between `version` and the first platform block: empty for a
+# crate with no dependencies (leaving the blank line the formula already had),
+# else a blank line, the `depends_on` lines, and another blank line.
+DEPENDS_SECTION=""
+while IFS= read -r dep; do
+  [ -n "$dep" ] || continue
+  DEPENDS_SECTION="${DEPENDS_SECTION}
+  depends_on \"${dep}\""
+done <<DEPS
+$(formula_depends "$CRATE")
+DEPS
+[ -z "$DEPENDS_SECTION" ] || DEPENDS_SECTION="${DEPENDS_SECTION}
+"
+
 CLASS_NAME="$(to_class_name "$CRATE")"
 BASE_URL="https://github.com/${REPO_SLUG}/releases/download/${TAG}"
 MACOS_URL="${BASE_URL}/${CRATE}-${VERSION}-aarch64-apple-darwin.tar.gz"
@@ -374,7 +408,7 @@ class ${CLASS_NAME} < Formula
   desc "trusty-tools: ${CRATE} binary"
   homepage "https://github.com/${REPO_SLUG}"
   version "${VERSION}"
-
+${DEPENDS_SECTION}
   # macOS arm64 (Apple Silicon) pre-built binary
   on_macos do
     on_arm do

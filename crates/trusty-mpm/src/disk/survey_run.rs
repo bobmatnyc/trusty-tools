@@ -27,10 +27,12 @@ use chrono::{DateTime, Utc};
 
 use super::size_index::{DirSize, DirSizeIndex};
 use super::survey::{
-    Classification, DiskProject, DiskRoot, DiskSurvey, DiskWorktree, KeepListReport, PrRef, Reason,
-    ReasonCode, SizeNote, TierCounts, WorktreeFacts, WorktreeTier, classify_tier,
+    Classification, DiskProject, DiskRoot, DiskSurvey, DiskWorktree, GroupBy, KeepListReport,
+    PrRef, Reason, ReasonCode, SizeNote, TierCounts, WorktreeFacts, WorktreeTier, classify_tier,
+    group_by_session,
 };
 use crate::session_manager::worktree_keep_list::KeepList;
+use crate::session_manager::worktree_ownership::{SentinelOwner, read_sentinel_owner};
 use crate::session_manager::worktree_reclaim::{
     AgentStateProbe, BranchPrState, LiveClaims, ReclaimGate, ReclaimVerdict, classify,
 };
@@ -166,6 +168,9 @@ impl Measured {
 /// the time actually left, never the index's fixed 30-second ceiling, so no one
 /// measurement can outlive the survey (#6929).
 /// `project` filters to one managed project by name or by path prefix.
+/// `group_by` (#7313) asks for a second index over the same rows — see
+/// [`GroupBy`]; it folds rows already computed and starts no further probe, so
+/// it costs nothing a budget could run out of.
 /// Test: `a_survey_groups_worktrees_under_their_project_and_measures_bytes`,
 /// `a_survey_past_its_deadline_still_lists_every_worktree`,
 /// `a_deadline_that_crosses_mid_inspection_yields_a_not_inspected_row`,
@@ -177,6 +182,7 @@ pub(crate) fn run(
     probes: &DiskProbes<'_>,
     deadline: Option<Instant>,
     project: Option<&str>,
+    group_by: GroupBy,
 ) -> DiskSurvey {
     // #6929: nothing is STARTED once the budget is spent, and whatever is
     // started gets only the time actually left — no probe and no walk may
@@ -265,6 +271,13 @@ pub(crate) fn run(
     // Measured LAST: the root walk is the most expensive in the pass and the
     // least informative, so it gets whatever budget the worktrees left.
     let root_size = measure(repos_root).figure();
+    // #7313: a fold over rows that already exist. It reads no filesystem and
+    // starts no probe, so it runs after the deadline has been spent exactly as
+    // it runs before — a truncated pass groups the rows it managed to inspect.
+    let by_session = match group_by {
+        GroupBy::None => None,
+        GroupBy::Session => Some(group_by_session(&projects)),
+    };
     DiskSurvey {
         generated_at: Utc::now().to_rfc3339(),
         // #6929: a truncated pass says so, so the console renders caution
@@ -284,6 +297,7 @@ pub(crate) fn run(
             stale_bytes,
             stale_measured,
         },
+        by_session,
     }
 }
 
@@ -336,7 +350,8 @@ fn inspect(
     // asking the index for one would only produce a `NotADirectory` refusal.
     // `missing` says that on its own, so it is not a deadline artifact and
     // keeps its tier.
-    let size = if classification.tier == WorktreeTier::Missing {
+    let missing = classification.tier == WorktreeTier::Missing;
+    let size = if missing {
         None
     } else {
         match measure(&scanned.path) {
@@ -344,10 +359,91 @@ fn inspect(
             Measured::DeadlineSpent => return not_inspected(scanned),
         }
     };
-    row(scanned, classification, &verdict, &pr, &claim, size)
+    // #7313: measured AFTER the worktree total, deliberately. The worktree walk
+    // has just read every `target*` subtree into the index, so each build-dir
+    // measurement lands on a warm node instead of paying for a second walk.
+    let build_dir_bytes = if missing {
+        None
+    } else {
+        build_dir_bytes(&scanned.path, measure)
+    };
+    let owning = owning_session(&claim, &scanned.path);
+    row(
+        scanned,
+        classification,
+        &verdict,
+        &pr,
+        &claim,
+        size,
+        build_dir_bytes,
+        owning,
+    )
+}
+
+/// The session a worktree's bytes are charged to (#7313).
+///
+/// Why: a LIVE claim is the strongest evidence there is — a session is sitting
+/// in this directory right now — so it outranks the sentinel whenever both
+/// answer. The sentinel is what makes an ENDED session's leftovers attributable
+/// at all: it is written to disk at provisioning time and outlives the session
+/// record, which is exactly the "attributed to unknown" gap #7313 names.
+/// What: [`claiming_session`] first; then a tolerant sentinel read — an agent
+/// worktree is charged to the session that DISPATCHED it
+/// (`agent.parent_session_id`), not to the agent, because the agent is that
+/// session's work; a session worktree is charged to `owner_session_id`. This
+/// only reads the sentinel; nothing here writes one or adds a field to it.
+/// Test: `a_sentinel_attributes_an_ended_sessions_worktree`,
+/// `a_live_claim_outranks_the_sentinel_for_attribution`.
+fn owning_session(
+    claim: &crate::session_manager::worktree_reclaim_claim::ClaimState,
+    path: &Path,
+) -> Option<String> {
+    if let Some(session) = claiming_session(claim) {
+        return Some(session);
+    }
+    match read_sentinel_owner(path) {
+        SentinelOwner::Agent(owner, _) => Some(owner.parent_session_id.0.to_string()),
+        SentinelOwner::Known(session, _) => Some(session.to_string()),
+        SentinelOwner::Unknown => None,
+    }
+}
+
+/// Bytes held by `worktree`'s top-level `target*` directories (#7313).
+///
+/// Why: see [`DiskWorktree::build_dir_bytes`](super::survey::DiskWorktree::build_dir_bytes)
+/// for the convention and the `None` contract. The measurement goes through the
+/// caller's budgeted index rather than a walk of its own, because a second
+/// walker is the mistake #6926 exists to prevent.
+/// What: lists `worktree` one level deep, sums the directories whose name starts
+/// with `target`, and refuses to report a sum it knows is short — an unreadable
+/// directory, an entry the index gave no figure for, or a spent deadline all
+/// yield `None`.
+/// Test: `build_dir_bytes_counts_target_dirs_and_nothing_else`.
+fn build_dir_bytes(worktree: &Path, measure: &dyn Fn(&Path) -> Measured) -> Option<u64> {
+    let Ok(entries) = std::fs::read_dir(worktree) else {
+        return None;
+    };
+    let mut total = 0u64;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return None;
+        };
+        if !entry.file_name().to_string_lossy().starts_with("target") {
+            continue;
+        }
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        match measure(&entry.path()) {
+            Measured::Figure(Some(size)) => total = total.saturating_add(size.bytes),
+            Measured::Figure(None) | Measured::DeadlineSpent => return None,
+        }
+    }
+    Some(total)
 }
 
 /// Assemble one row from the facts already gathered.
+#[allow(clippy::too_many_arguments)]
 fn row(
     scanned: &ScannedWorktree,
     classification: Classification,
@@ -355,6 +451,8 @@ fn row(
     pr: &BranchPrState,
     claim: &crate::session_manager::worktree_reclaim_claim::ClaimState,
     size: Option<DirSize>,
+    build_dir_bytes: Option<u64>,
+    owning_session: Option<String>,
 ) -> DiskWorktree {
     let (gate, reason) = match verdict {
         ReclaimVerdict::Reclaimable { .. } => (None, None),
@@ -374,6 +472,8 @@ fn row(
         size: size.as_ref().map(note),
         pr: PrRef::from_state(pr),
         session: claiming_session(claim),
+        owning_session,
+        build_dir_bytes,
     }
 }
 
@@ -396,6 +496,12 @@ fn not_inspected(scanned: &ScannedWorktree) -> DiskWorktree {
         size: None,
         pr: None,
         session: None,
+        // #7313: the deadline was spent before this worktree was inspected, so
+        // nothing here was observed — including who owns it. The sentinel read
+        // is cheap, but a row that reports an owner and no tier invites the
+        // console to charge bytes it never measured to a session.
+        owning_session: None,
+        build_dir_bytes: None,
     }
 }
 

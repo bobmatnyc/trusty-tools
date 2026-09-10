@@ -86,6 +86,8 @@ struct FakePreflight {
     /// #7275: a scratch registry, so no test writes a live cleanup entry that
     /// would arm the daemon's branch-deleting sweep against an invented repo.
     registry_dir: tempfile::TempDir,
+    /// #7282: every revision `changed_paths` was asked to diff against.
+    diff_heads: std::cell::RefCell<Vec<String>>,
 }
 
 impl FakePreflight {
@@ -97,6 +99,7 @@ impl FakePreflight {
             ownership: CrateOwnership::default(),
             diff_fails: false,
             registry_dir: tempfile::tempdir().expect("registry tempdir"),
+            diff_heads: std::cell::RefCell::new(Vec::new()),
         }
     }
 
@@ -122,8 +125,9 @@ impl Preflight for FakePreflight {
     fn changelog_gate(&self, _base: &str) -> anyhow::Result<ChangelogVerdict> {
         Ok(self.changelog.clone())
     }
-    fn changed_paths(&self, _base: &str) -> anyhow::Result<Vec<String>> {
+    fn changed_paths(&self, _base: &str, head: &str) -> anyhow::Result<Vec<String>> {
         anyhow::ensure!(!self.diff_fails, "git diff exploded");
+        self.diff_heads.borrow_mut().push(head.to_string());
         Ok(self.changed.clone())
     }
     fn ownership(&self) -> CrateOwnership {
@@ -180,6 +184,7 @@ fn open_args(body_file: &str) -> PrOpenArgs {
         closes: false,
         rung: None,
         base: "main".to_string(),
+        head: None,
         docs_only: false,
         session: None,
         repo: None,
@@ -544,6 +549,188 @@ fn open_docs_only_skips_the_changelog_gate() {
     )
     .expect("docs-only plans without the gate");
     assert!(plan.argv.join(" ").contains("pr create"));
+}
+
+// ── open: the explicit head branch (#7282) ───────────────────────────────
+
+/// The value `flag` was given in `argv`, or `None` when the flag is absent.
+fn flag_value<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {
+    let at = argv.iter().position(|a| a == flag)?;
+    argv.get(at + 1).map(String::as_str)
+}
+
+/// Why: `gh pr create` reads the head from the checkout's CURRENT branch. The
+/// session-pause publisher builds its branch with git plumbing and never checks
+/// it out, so `gh` read `main`, found nothing to open, and aborted with
+/// "you must first push the current branch to a remote, or use the --head
+/// flag" (#7282 round 4). Naming the head is what makes the caller's checkout
+/// state irrelevant.
+/// Test target: `plan`'s argv assembly.
+#[test]
+fn open_argv_carries_the_explicit_head_branch() {
+    let mut args = open_args("/dev/null");
+    args.head = Some("chore/sessions-abc-20260909-233853".to_string());
+    // #7282 round 5: `--head` only plans when paired with `--docs-only`.
+    args.docs_only = true;
+    let plan = open::plan(
+        &args,
+        &full_body(),
+        Some("s"),
+        ChangelogVerdict::Skipped,
+        &ResolvedTicketing::default(),
+    )
+    .expect("a named head plans");
+
+    assert_eq!(
+        flag_value(&plan.argv, "--head"),
+        Some("chore/sessions-abc-20260909-233853"),
+        "{:?}",
+        plan.argv
+    );
+    // The base is still named too, so neither end of the PR is inferred.
+    assert_eq!(flag_value(&plan.argv, "--base"), Some("main"));
+}
+
+/// Why: no `--head` must leave `gh` inferring the head exactly as before, so
+/// every existing caller keeps its behavior.
+#[test]
+fn open_argv_omits_head_when_none_is_named() {
+    let args = open_args("/dev/null");
+    let plan = open::plan(
+        &args,
+        &full_body(),
+        Some("s"),
+        ChangelogVerdict::Pass,
+        &ResolvedTicketing::default(),
+    )
+    .expect("plans without a head");
+    assert!(!plan.argv.iter().any(|a| a == "--head"), "{:?}", plan.argv);
+}
+
+/// Why: `--head ""` reaching `gh` as an empty head produces the same confusing
+/// current-branch message this fix exists to end, so a blank reads as absent.
+#[test]
+fn open_head_is_ignored_when_blank() {
+    let mut args = open_args("/dev/null");
+    args.head = Some("   ".to_string());
+    let plan = open::plan(
+        &args,
+        &full_body(),
+        Some("s"),
+        ChangelogVerdict::Pass,
+        &ResolvedTicketing::default(),
+    )
+    .expect("a blank head plans");
+    assert!(!plan.argv.iter().any(|a| a == "--head"), "{:?}", plan.argv);
+}
+
+/// Why: the component labels come from `origin/<base>...<rev>`. Asking about
+/// `HEAD` when the PR opens from another branch describes the checkout, not the
+/// PR — an empty diff and no labels for every `--head` caller.
+/// Test target: `diff_head`, through `run`.
+#[test]
+fn open_head_drives_the_preflight_diff_revision() {
+    let (_d, path) = scratch_body(&full_body());
+    let mut args = open_args(&path.to_string_lossy());
+    args.head = Some("chore/sessions-abc".to_string());
+    // #7282 round 5: `--head` only reaches `gh` alongside `--docs-only`.
+    args.docs_only = true;
+    let gh = FakeGh::new()
+        .on("pr create", "https://github.com/o/r/pull/4242\n")
+        .on("pr edit", "");
+    let pre = FakePreflight::ok().with_diff(&["crates/trusty-mpm/src/lib.rs"]);
+    open::run(&gh, &args, &pre).expect("create succeeds");
+    assert_eq!(
+        pre.diff_heads.borrow().as_slice(),
+        ["chore/sessions-abc".to_string()]
+    );
+}
+
+/// Why: `scripts/check_changelog_fragment.sh` accepts only `--base`, `--staged`
+/// and `--file`, so the gate `tm pr open` runs can diff nothing but
+/// `origin/<base>...HEAD`. A `--head` caller standing on another branch would
+/// have that gate judge the checkout instead of the PR, and a source PR with no
+/// fragment would pass it — the changelog gate silently evaluating the wrong
+/// ref (#7282 round 5, code-critic HIGH). The refusal has to name the
+/// obligation, because the caller's next move is either `--docs-only` or a real
+/// checkout of the head.
+/// Test target: `head_docs_only_conflict`, through `plan`.
+#[test]
+fn open_head_without_docs_only_is_refused() {
+    let mut args = open_args("/dev/null");
+    args.head = Some("chore/sessions-abc".to_string());
+    let failures = open::plan(
+        &args,
+        &full_body(),
+        Some("s"),
+        ChangelogVerdict::Pass,
+        &ResolvedTicketing::default(),
+    )
+    .expect_err("--head without --docs-only must not plan");
+
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert!(
+        failures[0].contains("--head requires --docs-only"),
+        "{failures:?}"
+    );
+    assert!(
+        failures[0].contains("check_changelog_fragment.sh"),
+        "the refusal must name what cannot be checked: {failures:?}"
+    );
+    assert!(
+        failures[0].contains("chore/sessions-abc"),
+        "the refusal must name the head it is about: {failures:?}"
+    );
+}
+
+/// Why: the refusal is worth nothing if the PR opens anyway — `gh` must never
+/// be spawned, and the exit code must be the check-failed one every other
+/// pre-flight failure uses.
+/// Test target: `run`'s failure path with a `--head` and no `--docs-only`.
+#[test]
+fn open_head_without_docs_only_never_calls_gh() {
+    let (_d, path) = scratch_body(&full_body());
+    let mut args = open_args(&path.to_string_lossy());
+    args.head = Some("chore/sessions-abc".to_string());
+    let gh = FakeGh::new();
+    let code = open::run(&gh, &args, &FakePreflight::ok()).expect("a failed check is not an error");
+
+    assert_eq!(code, 2);
+    assert!(gh.calls().is_empty(), "{:?}", gh.calls());
+}
+
+/// Why: `--docs-only` is the one case where the gate's verdict cannot be wrong,
+/// because it is skipped — so the pair must still plan. This is the pause
+/// publisher's own invocation, and refusing it would break every pause.
+/// Test target: `head_docs_only_conflict`, permitting arm.
+#[test]
+fn open_head_with_docs_only_plans() {
+    let mut args = open_args("/dev/null");
+    args.head = Some("chore/sessions-abc".to_string());
+    args.docs_only = true;
+    let plan = open::plan(
+        &args,
+        &full_body(),
+        Some("s"),
+        ChangelogVerdict::Skipped,
+        &ResolvedTicketing::default(),
+    )
+    .expect("--head with --docs-only plans");
+
+    assert_eq!(flag_value(&plan.argv, "--head"), Some("chore/sessions-abc"));
+}
+
+/// Why: without `--head` the diff must still be the checkout's `HEAD`.
+#[test]
+fn open_without_head_diffs_the_checkouts_head() {
+    let (_d, path) = scratch_body(&full_body());
+    let args = open_args(&path.to_string_lossy());
+    let gh = FakeGh::new()
+        .on("pr create", "https://github.com/o/r/pull/4242\n")
+        .on("pr edit", "");
+    let pre = FakePreflight::ok().with_diff(&["crates/trusty-mpm/src/lib.rs"]);
+    open::run(&gh, &args, &pre).expect("create succeeds");
+    assert_eq!(pre.diff_heads.borrow().as_slice(), ["HEAD".to_string()]);
 }
 
 #[test]

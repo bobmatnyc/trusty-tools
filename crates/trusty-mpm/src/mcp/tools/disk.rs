@@ -20,10 +20,13 @@ use super::tool;
 /// Why: the console Disk view (DOC-73 §16.3) needs projects, their worktrees,
 /// each worktree's bytes, and each worktree's staleness tier from ONE call —
 /// the sunburst renders all four at once.
-/// What: `disk_survey`, with two optional arguments and a closed schema.
+/// What: `disk_survey`, with three optional arguments and a closed schema.
 /// `project` scopes the survey to one managed project; `budget_seconds` bounds
 /// the whole pass — git and `gh` subprocesses per worktree, and the byte walks,
-/// which are the expensive half (#6929).
+/// which are the expensive half (#6929) — capped at
+/// [`MAX_BUDGET_SECONDS`](crate::daemon::mcp_disk::MAX_BUDGET_SECONDS) because a
+/// larger figure outlives the stdio bridge that carries the answer (#7313);
+/// `group_by` adds the per-session roll-up (#7313).
 /// Test: `super::tests::disk_tools_present`,
 /// `super::tests::disk_survey_schema_round_trips`.
 pub(super) fn disk_tools() -> Vec<Value> {
@@ -46,7 +49,12 @@ pub(super) fn disk_tools() -> Vec<Value> {
          budget stops both halves, worktrees past it are still listed as \
          `review`, and a project or root past it reports `bytes: null`. \
          Worktrees are measured before projects and the root, so a \
-         budget-limited pass spends what it has on the rows a view colours.",
+         budget-limited pass spends what it has on the rows a view colours. \
+         Every row also carries `owning_session` — the live session claiming \
+         it, else the session its ownership sentinel names, so an ENDED \
+         session's leftovers are attributed rather than orphaned — and \
+         `build_dir_bytes`, the `target*` share of its total. Pass \
+         `group_by: \"session\"` for the `by_session` roll-up over those.",
         json!({
             "type": "object",
             "properties": {
@@ -57,7 +65,13 @@ pub(super) fn disk_tools() -> Vec<Value> {
                 "budget_seconds": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Stop after this many seconds — classification AND byte measurement both (#6929). Remaining worktrees are listed as `review` with an `unknown-branch-state` reason, never as `stale`; a project or root the budget was reached before reports `bytes: null`. Omit for an unbounded survey, which on a large fleet outruns any caller with a request timeout."
+                    "maximum": 55,
+                    "description": "Stop after this many seconds — classification AND byte measurement both (#6929). Remaining worktrees are listed as `review` with an `unknown-branch-state` reason, never as `stale`; a project or root the budget was reached before reports `bytes: null`. CLAMPED to 55 (#7313): the `tm serve --stdio` bridge every caller reaches this tool through gives up at 60 s, so a larger budget returns a transport error rather than a survey. A clamped request answers with `budget_clamped: true`. Omit for an unbounded survey, which on a large fleet outruns any caller with a request timeout."
+                },
+                "group_by": {
+                    "type": "string",
+                    "enum": ["session"],
+                    "description": "Add a per-session roll-up beside the project tree (#7313), as `by_session`: one entry per owning session — total bytes, `target*` build-directory bytes, worktree count, the tier split, and the worktree paths — sorted by bytes descending, with a `session_id: null` bucket for worktrees nothing attributed. A worktree is charged to the live session claiming it, else to the session its `.trusty-mpm-worktree` sentinel names, so an ENDED session's leftovers are still attributed. Omit to leave `by_session` out of the response entirely."
                 }
             },
             "additionalProperties": false

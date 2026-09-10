@@ -89,6 +89,7 @@ export interface PatchAgentBody {
    * documents the route's body, not the panel's current usage of it.
    */
   tools_allow?: string[];
+  subagents_delegate_allowed?: string[];
 }
 
 /** `PATCH /api/agents/:name`. Throws (with the server's `error` message when
@@ -492,6 +493,9 @@ export interface SubagentInProductTarget {
   /** `l0` | `l1`, resolved fail-closed server-side. */
   tier: string;
   reachable: boolean;
+  /** Eligible before the user whitelist, including role/kind/tier/floor gates. */
+  eligible?: boolean;
+  selected?: boolean;
   /** Present iff `reachable === false`. Explains which gate refused it. */
   reason: string | null;
 }
@@ -545,6 +549,7 @@ export interface SubagentInProduct {
    * `PATCH /api/agents/:name` and, behind that, by the dispatch gate.
    */
   reachable_floor: string[];
+  selected?: string[];
   targets: SubagentInProductTarget[];
   /** Roster entries excluded by the role allowlist — counted, never named. */
   role_excluded_count: number;

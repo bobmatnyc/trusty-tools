@@ -164,3 +164,32 @@ describe('KnowledgeGraphBrowser — mid-session disconnection (#4290)', () => {
     expect(normalized()).not.toContain('is not reachable right now');
   });
 });
+
+it('keeps the selected subject when an older all-triples request finishes late', async () => {
+  let finishAll!: (response: Response) => void;
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes('/kg/subjects')) return jsonResponse({ connected: true, palace: 'p', data: [{ subject: 'selected', count: 1 }] });
+    if (url.includes('/kg/all')) return new Promise<Response>(resolve => finishAll = resolve);
+    if (url.includes('/kg/count')) return jsonResponse({ connected: true, palace: 'p', data: { active: 1 } });
+    return jsonResponse({ connected: true, palace: 'p', data: [{ subject: 'selected', predicate: 'has', object: 'current value' }] });
+  }));
+  render();
+  await waitFor(() => subjectButtons().length === 1 && !!finishAll);
+  (subjectButtons()[0] as HTMLButtonElement).click();
+  await waitFor(() => panelText().includes('current value'));
+  finishAll(jsonResponse({ connected: true, palace: 'p', data: [{ subject: 'old', predicate: 'has', object: 'stale value' }] }));
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(panelText()).toContain('current value');
+  expect(panelText()).not.toContain('stale value');
+});
+
+
+it('provides an X close control for returning to chat', async () => {
+  stubRoutes({ subjects: { connected: false, palace: null, data: [] }, all: {}, count: {} });
+  const onClose = vi.fn();
+  instance = mount(KnowledgeGraphBrowser, { target, props: { agentName: 'izzie', onClose } }) as unknown as Record<string, unknown>;
+  await waitFor(() => target.querySelector('[aria-label="Close Knowledge Graph"]') !== null);
+  (target.querySelector('[aria-label="Close Knowledge Graph"]') as HTMLButtonElement).click();
+  expect(onClose).toHaveBeenCalledOnce();
+});

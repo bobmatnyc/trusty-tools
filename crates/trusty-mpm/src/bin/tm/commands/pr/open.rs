@@ -47,7 +47,7 @@ pub(crate) trait Preflight {
     fn session_name(&self) -> Option<String>;
     /// Run the changelog-fragment gate for `origin/<base>...HEAD`.
     fn changelog_gate(&self, base: &str) -> anyhow::Result<ChangelogVerdict>;
-    /// Paths `git diff --name-only origin/<base>...HEAD` reports (#7274).
+    /// Paths `git diff --name-only origin/<base>...<head>` reports (#7274).
     ///
     /// Why: the PR's component labels are the crates these paths belong to, so
     /// this probe is what makes the label derivation real. It sits behind the
@@ -55,7 +55,7 @@ pub(crate) trait Preflight {
     /// driving one fake.
     /// What: repository-relative paths. An error means the diff could not be
     /// read, which downgrades the label derivation to a warning.
-    fn changed_paths(&self, base: &str) -> anyhow::Result<Vec<String>>;
+    fn changed_paths(&self, base: &str, head: &str) -> anyhow::Result<Vec<String>>;
     /// The workspace crate ownership used to label those paths (#7274).
     fn ownership(&self) -> CrateOwnership;
     /// Where the PR just opened is recorded for post-merge cleanup (#7275).
@@ -118,6 +118,9 @@ impl Preflight for RealPreflight {
         if !script.exists() {
             return Ok(ChangelogVerdict::Skipped);
         }
+        // #7282: the script takes `--base` and always diffs it against the
+        // checkout's HEAD — it has no `--head` of its own, which is why
+        // `head_docs_only_conflict` refuses `--head` without `--docs-only`.
         let out = std::process::Command::new("bash")
             .arg(&script)
             .arg("--base")
@@ -133,17 +136,19 @@ impl Preflight for RealPreflight {
         Ok(ChangelogVerdict::Fail(text.trim().to_string()))
     }
 
-    fn changed_paths(&self, base: &str) -> anyhow::Result<Vec<String>> {
+    fn changed_paths(&self, base: &str, head: &str) -> anyhow::Result<Vec<String>> {
         let root = repo_root()?;
         // Three-dot: the changes THIS branch made, never main's own drift.
+        // #7282: `head` is the `--head` branch when one was named, so the labels
+        // describe the branch being opened rather than the checkout's HEAD.
         let out = std::process::Command::new("git")
-            .args(["diff", "--name-only", &format!("origin/{base}...HEAD")])
+            .args(["diff", "--name-only", &format!("origin/{base}...{head}")])
             .current_dir(&root)
             .output()
             .context("cannot run `git diff --name-only`")?;
         anyhow::ensure!(
             out.status.success(),
-            "`git diff --name-only origin/{base}...HEAD` failed: {}",
+            "`git diff --name-only origin/{base}...{head}` failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         );
         Ok(String::from_utf8_lossy(&out.stdout)
@@ -157,6 +162,62 @@ impl Preflight for RealPreflight {
     fn ownership(&self) -> CrateOwnership {
         CrateOwnership::resolve(std::env::current_dir().ok().as_deref())
     }
+}
+
+/// The `--head` branch, when the caller named a non-blank one.
+///
+/// Why: a blank `--head ""` must read as "not supplied" rather than reaching
+/// `gh` as an empty head, which it rejects with a message about the current
+/// branch — the exact confusion #7282 was.
+/// What: trims, and drops the empty result.
+/// Test: `open_head_is_ignored_when_blank`.
+fn head_branch(args: &PrOpenArgs) -> Option<&str> {
+    args.head
+        .as_deref()
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+}
+
+/// The refusal a `--head` earns when it is not paired with `--docs-only`.
+///
+/// Why (#7282 round 5): `scripts/check_changelog_fragment.sh` accepts only
+/// `--base`, `--staged` and `--file`, so [`Preflight::changelog_gate`] can
+/// diff nothing but `origin/<base>...HEAD` — the CHECKOUT's HEAD. A caller who
+/// names `--head other-branch` from a checkout sitting on a different branch
+/// therefore has the fragment gate judge a diff the PR does not contain, and a
+/// source PR with no fragment passes it. Until the script can diff an explicit
+/// head, refusing the pair is the only sound answer; `--docs-only` is the one
+/// case where the gate's verdict does not matter, because it is skipped.
+/// What: `Some(message)` when a non-blank `--head` was named without
+/// `--docs-only`, else `None`.
+/// Test: `open_head_without_docs_only_is_refused`,
+/// `open_head_without_docs_only_never_calls_gh`,
+/// `open_head_with_docs_only_plans`.
+fn head_docs_only_conflict(args: &PrOpenArgs) -> Option<String> {
+    let head = head_branch(args)?;
+    if args.docs_only {
+        return None;
+    }
+    Some(format!(
+        "--head requires --docs-only until the changelog gate can diff an explicit head: \
+         scripts/check_changelog_fragment.sh takes only --base, so it would judge \
+         origin/{}...HEAD — this checkout — rather than `{head}`. \
+         Run tm pr open from a checkout of `{head}` for a source PR.",
+        args.base
+    ))
+}
+
+/// The revision the pre-flight diffs against `origin/<base>`.
+///
+/// Why (#7282): the changelog gate and the component-label diff both asked
+/// about `HEAD`, which is the checkout's current branch — not the branch a
+/// `--head` caller is opening. Reading main's own state there answers "no
+/// changes" for every such PR, so the gate passes vacuously and the PR gets no
+/// component labels.
+/// What: the `--head` branch when one was named, else `HEAD`.
+/// Test: `open_head_drives_the_preflight_diff_revision`.
+fn diff_head(args: &PrOpenArgs) -> &str {
+    head_branch(args).unwrap_or("HEAD")
 }
 
 /// The repository root of the current working directory.
@@ -196,15 +257,18 @@ pub(crate) struct OpenPlan {
 /// pure function of (args, body text, session name, changelog verdict) — which
 /// is what makes "each missing field exits 2" testable without a `gh` or a
 /// repository.
-/// What: in order — the body contract and footer ([`body::validate`]), the
-/// `Refs`/`Closes` rule ([`body::apply_issue_link`]), the workstream label,
-/// and the changelog gate. Returns every failure found, not just the first,
-/// so one run fixes them all. Both labels and the assignee come from
-/// `core::policy_labels` and the resolved `agents.ticketing` block (#6918),
-/// never from constants spelled here.
+/// What: in order — the `--head`/`--docs-only` pairing
+/// ([`head_docs_only_conflict`]), the body contract and footer
+/// ([`body::validate`]), the `Refs`/`Closes` rule ([`body::apply_issue_link`]),
+/// the workstream label, and the changelog gate. Returns every failure found,
+/// not just the first, so one run fixes them all. Both labels and the assignee
+/// come from `core::policy_labels` and the resolved `agents.ticketing` block
+/// (#6918), never from constants spelled here.
 /// Test: `open_reports_each_missing_field`, `open_rejects_bad_footer`,
 /// `open_requires_a_session_name`, `open_reports_changelog_failure`,
 /// `open_docs_only_skips_the_changelog_gate`,
+/// `open_head_without_docs_only_is_refused`,
+/// `open_head_with_docs_only_plans`,
 /// `open_labels_come_from_the_policy_table`,
 /// `open_assignee_comes_from_the_ticketing_block`.
 pub(crate) fn plan(
@@ -216,6 +280,10 @@ pub(crate) fn plan(
     ticketing: &ResolvedTicketing,
 ) -> Result<OpenPlan, Vec<String>> {
     let mut failures: Vec<String> = Vec::new();
+
+    // #7282 round 5: `--head` and the changelog gate cannot both be honoured,
+    // so the pair is refused here — before `run` reaches `gh`.
+    failures.extend(head_docs_only_conflict(args));
 
     let report = body::validate(body_text);
     failures.extend(report.failures());
@@ -271,6 +339,12 @@ pub(crate) fn plan(
     }
     gh_argv.push("--base".to_string());
     gh_argv.push(args.base.clone());
+    // #7282: `gh` otherwise reads the head from the checkout's current branch,
+    // which is wrong for any caller whose branch is not checked out.
+    if let Some(head) = head_branch(args) {
+        gh_argv.push("--head".to_string());
+        gh_argv.push(head.to_string());
+    }
     gh_argv.push("--title".to_string());
     gh_argv.push(args.title.clone());
     gh_argv.push("--body".to_string());
@@ -397,7 +471,7 @@ fn apply_metadata<R: GhRunner, P: Preflight>(
 ) {
     // #7274 round 2: a failed read reaches `plan` as its own state, so the note
     // it prints names the failure rather than blaming an empty answer.
-    let read = pre.changed_paths(&args.base);
+    let read = pre.changed_paths(&args.base, diff_head(args));
     let changed = match &read {
         Ok(paths) => ChangedPaths::Read(&paths[..]),
         Err(e) => {

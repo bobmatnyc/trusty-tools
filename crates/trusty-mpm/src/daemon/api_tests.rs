@@ -1235,6 +1235,8 @@ async fn doctor_endpoint_returns_report() {
         // #3605: the base clone a live worktree resolves through.
         "base_clone",
         "gh_account",
+        // #7311: rtk is an install dependency; never run rtk init.
+        "rtk",
         // #7097: whether the issues opened this week carry the milestone,
         // project and component label the ticketing standard requires.
         "issue_audit_recent",

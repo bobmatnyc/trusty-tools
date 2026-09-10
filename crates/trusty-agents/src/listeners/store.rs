@@ -53,6 +53,8 @@ pub struct StoredEvent {
     /// field is a convenience for API responses that shouldn't need a
     /// second lookup, and is refreshed by `EventStore::read_events`.
     pub included: bool,
+    #[serde(default)]
+    pub labels: Vec<String>,
 }
 
 /// Root directory for listener event persistence: `~/.trusty-agents/events/`.
@@ -387,6 +389,7 @@ mod tests {
             subject: Some("Hello".to_string()),
             snippet: Some("snippet text".to_string()),
             included: true,
+            labels: vec![],
         }
     }
 

@@ -16,6 +16,8 @@
    * both from scratch on exit and silently discard the draft.
    * Test: `ChatPane.test.ts`.
    */
+  import KnowledgeGraphBrowser from './KnowledgeGraphBrowser.svelte';
+  import { activeAgentId } from '../stores/app';
   import ChatHeader from './ChatHeader.svelte';
   import ChatView from './ChatView.svelte';
   import InputArea from './InputArea.svelte';
@@ -24,15 +26,17 @@
   import AgentConfigOverlay from './AgentConfigOverlay.svelte';
   import { slackMirror } from '../lib/slack-mirror';
   import { configPaneOpen } from '../stores/configPane';
+  let kgOpen = false;
+  $: if (!$activeAgentId || $configPaneOpen) kgOpen = false;
 </script>
 
-<div class="relative flex flex-1 min-h-0">
+<div class="relative flex min-w-0 flex-1 min-h-0">
   <!-- #3219: RecapPanel is a persistent right rail (own scroll, AGENTS ACTIVE
        / FILES TOUCHED / TOKENS + folded recap summary), so it sits beside the
        chat+input column rather than stacked between them. -->
-  <div class="flex flex-1 min-h-0" data-chat-surface inert={$configPaneOpen}>
-    <div class="flex flex-1 flex-col min-w-0">
-      <ChatHeader />
+  <div class="flex min-w-0 flex-1 min-h-0" data-chat-surface inert={$configPaneOpen || kgOpen}>
+    <div class="flex flex-1 flex-col min-w-0 min-h-0">
+      <ChatHeader onOpenKnowledgeGraph={() => kgOpen = true} />
       <ChatView />
       <InputArea />
     </div>
@@ -43,6 +47,10 @@
       <SlackMirror />
     {/if}
   </div>
+
+  {#if kgOpen && $activeAgentId}
+    <KnowledgeGraphBrowser agentName={$activeAgentId} onClose={() => kgOpen = false} />
+  {/if}
 
   {#if $configPaneOpen}
     <AgentConfigOverlay />

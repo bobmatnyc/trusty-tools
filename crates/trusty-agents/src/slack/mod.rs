@@ -30,7 +30,7 @@ mod format;
 mod handlers;
 mod pairing;
 mod rbac;
-mod relay;
+pub(crate) mod relay;
 
 #[cfg(test)]
 mod tests;

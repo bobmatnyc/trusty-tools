@@ -71,6 +71,7 @@ async fn filter_post_persists_and_list_reflects_it() {
         subject: Some("Hi".to_string()),
         snippet: Some("snippet".to_string()),
         included: true,
+        labels: vec![],
     })
     .await
     .unwrap();

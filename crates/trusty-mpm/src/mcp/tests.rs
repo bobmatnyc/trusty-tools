@@ -232,12 +232,16 @@ impl OrchestratorBackend for MockBackend {
         &self,
         project: Option<&str>,
         budget_seconds: Option<u64>,
+        group_by: Option<&str>,
     ) -> Result<Value, String> {
         Ok(json!({
             "generated_at": "2026-09-07T00:00:00Z",
             "keep_list": { "patterns": [], "invalid": [] },
             "project_filter": project,
             "budget_seconds": budget_seconds,
+            // #7313: echoed so `dispatch_disk_survey_tool` can prove the
+            // argument reaches the backend rather than being dropped in dispatch.
+            "group_by": group_by,
             "root": {
                 "path": "/home/test/trusty-mpm-projects",
                 "bytes": 0,
@@ -1641,5 +1645,19 @@ async fn dispatch_disk_survey_tool() {
     assert!(
         text.contains("30"),
         "the budget must reach the backend: {text}"
+    );
+
+    // #7313: the third argument has its own dispatch arm to drop.
+    let grouped = dispatch(
+        &MockBackend,
+        call("disk_survey", json!({ "group_by": "session" })),
+    )
+    .await;
+    let result = grouped.result.expect("a result");
+    assert_eq!(result["isError"], false);
+    let text = result["content"][0]["text"].as_str().expect("text");
+    assert!(
+        text.contains("session"),
+        "the group_by argument must reach the backend: {text}"
     );
 }

@@ -1,82 +1,57 @@
 <script lang="ts">
-  /**
-   * Why (#4029, epic #4021): the SIXTH configuration section — "who else can
-   * this agent get to do the work". Owner decision, 2026-07-26, resolving
-   * OQ-5: *"Sub-agents is its own configuration section"*; refined 2026-07-27
-   * to require the UNION of BOTH delegation mechanisms, which no spec had
-   * previously reconciled.
-   *
-   * The two are not variants of one thing and this pane never merges them:
-   * `delegate_to_agent` is in-product (trusty-agents → trusty-agents), its
-   * target set a role allowlist crossed with the resolvable roster, then
-   * narrowed by ADR-0024's delegation KIND rule (an assistant never delegates
-   * to a peer assistant), by #4169's L0/L1 tier gate, and — since ADR-0024
-   * decision 4 — by a per-agent `[subagents].delegate_allowed` whitelist
-   * bounded by a server-owned floor;
-   * `dispatch_task` is cross-product (trusty-agents → trusty-code), the one
-   * with a real `[subagents].allowed` binding, intersected fail-closed with
-   * the bridge's own `NON_CODING_TARGETS` floor (OQ-7). Their target
-   * vocabularies do not overlap — `documentation` is an in-product role and
-   * appears nowhere else — so a single flat list could not tell an operator
-   * which enforcement layer applies to a given name.
-   *
-   * What: two labelled groups over `GET /api/agents/:name/subagents`, which
-   * resolves both through the SAME code the enforcement points call. Read-only
-   * IN THIS PANE, matching every other read-only section (DOC-57 §7.2's PM-4
-   * rationale applies at least as strongly here: delegation reach is the
-   * escalation surface #3555 and #4169 exist to close). ADR-0024 decision 4
-   * made the in-product set editable in CONFIG (and via
-   * `PATCH /api/agents/:name`, which enforces the floor server-side); this pane
-   * still only reports, so the copy says "edit agent.toml" rather than offering
-   * a control.
-   *
-   * Honesty rules, mirroring the sibling panes: `tool_registered` and
-   * `tool_granted` render separately (registered ≠ granted); an unreachable
-   * target is SHOWN with the gate's reason rather than hidden, so "why can't my
-   * assistant reach that one" is answerable; and an unresolvable config renders
-   * the denial plus the parse error, never a blank pane implying "nothing
-   * configured".
-   *
-   * That honesty extends to the PROSE, not only the cards. `allowed_roles` is
-   * the coarse, PRE-kind-gate role list: it still carries `assistant`, kept
-   * deliberately — the Rust constant `ASSISTANT_ALLOWED_DELEGATE_ROLES` names
-   * this route's report as one of the non-delegation consumers holding that
-   * entry there — so quoting it as "the targets" advertised a reachability the
-   * kind gate denies. The copy below therefore states the EFFECTIVE rule
-   * (role-eligible MINUS kind-refused) and names peer assistants as refused,
-   * so a reader can predict the cards the pane draws.
-   *
-   * #4353 adds a THIRD labelled group for the same reason the first two are
-   * kept apart: coding delegation resolves over its own vocabulary on its own
-   * code path — the reserved `coding-pm` name is recognised BEFORE the
-   * non-coding allow-set is consulted and is deliberately absent from that
-   * floor — so folding it into the cross-product list would imply
-   * `[subagents].allowed` gates it, which it does not. It lives in
-   * `AgentConfigCoding.svelte`; see that component for why the style selector
-   * renders the EFFECTIVE style rather than the requested one.
-   *
-   * DOC-57 still documents five sections; #4182 amends it. This pane cites the
-   * decision, it does not restate the spec.
-   * Test: `AgentConfigSubagents.test.ts`.
-   */
-  import type { AgentSubagents } from '../lib/agentConfig';
+  /** Editable in-product delegation whitelist. Eligibility is reported by
+   * the server using the same kind/tier/floor gates as dispatch. */
+  import { onDestroy } from 'svelte';
+  import { patchAgent, fetchAgentSubagents, type AgentSubagents } from '../lib/agentConfig';
   import AgentConfigCoding from './AgentConfigCoding.svelte';
 
   /** Loaded by the shell from `GET /api/agents/:name/subagents`; `null` while loading. */
   export let data: AgentSubagents | null = null;
   /** Non-empty when the fetch itself failed. */
   export let error = '';
+  export let agentName = '';
+  let viewData: AgentSubagents | null = null;
+  let previousData: AgentSubagents | null | undefined = undefined, previousAgent = '';
+  let selected: string[] = [];
+  let saving = false, saveError = '', notice = '';
+  let generation = 0;
+  $: if (data !== previousData || agentName !== previousAgent) {
+    previousData = data; previousAgent = agentName; generation++;
+    viewData = data; selected = selection(data); saving = false; saveError = ''; notice = '';
+  }
+  function selection(value: AgentSubagents | null): string[] {
+    return value?.in_product.selected ?? value?.in_product.targets.filter(target => (target.selected ?? target.reachable) && (value.in_product.reachable_floor ?? []).includes(target.name)).map(target => target.name) ?? [];
+  }
+  async function reload() {
+    const token = ++generation, name = agentName; saving = true; saveError = ''; notice = '';
+    try { const next = await fetchAgentSubagents(name); if (token === generation) { viewData = next; selected = selection(next); } }
+    catch (cause) { if (token === generation) saveError = 'Could not reload delegation settings. ' + String(cause); }
+    finally { if (token === generation) saving = false; }
+  }
+  async function toggle(name: string, enabled: boolean) {
+    if (saving || !agentName) return;
+    selected = enabled ? [...new Set([...selected, name])] : selected.filter(item => item !== name);
+    const token = generation, owner = agentName, next = [...selected];
+    saving = true; saveError = ''; notice = '';
+    try {
+      await patchAgent(owner, { subagents_delegate_allowed: next });
+      if (token !== generation) return;
+      const refreshed = await fetchAgentSubagents(owner);
+      if (token !== generation) return;
+      viewData = refreshed; selected = selection(refreshed); notice = 'Saved. The selected whitelist applies to new turns.';
+    } catch (cause) { if (token === generation) saveError = 'Could not confirm the saved whitelist. Your selection is still shown; reload to check. ' + String(cause); }
+    finally { if (token === generation) saving = false; }
+  }
+  onDestroy(() => generation++);
 
   // Every field is defaulted rather than assumed: an older sidecar (or a route
   // that degraded) can return a payload missing a key, and a pane that throws on
   // that shows the user nothing at all — strictly worse than showing what did
   // arrive. Same posture as `AgentConfigSkills`.
-  $: inProduct = data?.in_product ?? null;
-  $: crossProduct = data?.cross_product ?? null;
+  $: inProduct = viewData?.in_product ?? null;
+  $: crossProduct = viewData?.cross_product ?? null;
   $: inTargets = inProduct?.targets ?? [];
-  $: reachable = inTargets.filter((t) => t.reachable);
-  $: blocked = inTargets.filter((t) => !t.reachable);
-  $: unresolved = inProduct?.unresolved ?? [];
+  $: candidates = inTargets.filter(target => target.eligible ?? (target.reachable && (inProduct?.reachable_floor ?? []).includes(target.name)));
   $: crossTargets = crossProduct?.targets ?? [];
   $: crossGranted = crossTargets.filter((t) => t.granted);
   $: rejected = crossProduct?.rejected ?? [];
@@ -87,148 +62,44 @@
     'shrink-0 rounded-md bg-foundry-teal/15 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-foundry-teal';
   const offChip =
     'shrink-0 rounded-md bg-foundry-light-border/50 dark:bg-black/30 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-foundry-light-muted dark:text-foundry-text/50';
-  const tag =
-    'rounded border border-foundry-light-border dark:border-foundry-border px-1.5 py-0.5 font-mono text-[10px] text-foundry-light-text dark:text-foundry-text';
 </script>
 
 <div class="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
-  <p class="text-xs text-foundry-light-muted dark:text-foundry-text/60">
-    Who this agent can hand work to. Two independent mechanisms with two different
-    enforcement layers — they are shown separately because a name reachable through one is not
-    reachable through the other. Read-only here; edit
-    <code class="font-mono">[subagents]</code> in <code class="font-mono">agent.toml</code>. Both
-    halves are configurable and both are bounded by a server-owned floor: configuration can only
-    ever narrow a floor, never widen it.
-  </p>
-
+  <p class="text-xs text-foundry-light-muted dark:text-foundry-text/60">Choose which agents this assistant may delegate work to. Only eligible agents are offered.</p>
   {#if error}
     <p class="rounded-md border border-foundry-red/40 px-3 py-2 text-[11px] text-foundry-red">
       Could not load sub-agents: {error}
     </p>
-  {:else if !data}
+  {:else if !viewData}
     <p class="text-[11px] text-foundry-light-muted dark:text-foundry-text/40">
       Resolving sub-agents…
     </p>
   {:else}
-    {#if data.config_error}
+    {#if viewData.config_error}
       <p class="rounded-md border border-foundry-amber/40 px-3 py-2 text-[11px] text-foundry-amber">
         <code class="font-mono">agent.toml</code> could not be resolved, so no delegation grant
-        could be read — everything below is denied, fail-closed: {data.config_error}
+        could be read — everything below is denied, fail-closed: {viewData.config_error}
       </p>
     {/if}
 
-    <!-- ── In-product: delegate_to_agent ────────────────────────────────── -->
-    <section class="flex flex-col gap-2">
-      <div class="flex items-center justify-between gap-2">
-        <h3 class={heading}>
-          In-product · <code class="font-mono">{inProduct?.tool ?? 'delegate_to_agent'}</code>
-        </h3>
-        <span class={inProduct?.tool_granted ? okChip : offChip}>
-          {inProduct?.tool_granted ? 'granted' : 'not granted'}
-        </span>
-      </div>
-      <p class="text-[11px] text-foundry-light-muted dark:text-foundry-text/50">
-        Another trusty-agents agent, run in-process. A target's role must first appear in the role
-        allow-list
-        <span class="font-mono">({(inProduct?.allowed_roles ?? []).join(', ')})</span>, but
-        eligibility is not reachability. Three further gates apply, all of them narrowing: the
-        delegation kind rule refuses every <span class="font-mono">assistant</span> target —
-        assistants communicate with each other rather than delegating to one another (ADR-0024), so
-        what an assistant reaches is never a peer assistant;
-        the one-directional L0/L1 tier gate refuses an orchestration-tier target for a
-        standard-tier delegator; and this agent's own
-        <code class="font-mono">[subagents].delegate_allowed</code> whitelist must name the target,
-        intersected with the server-owned floor
-        <span class="font-mono">({(inProduct?.reachable_floor ?? []).join(', ')})</span>, which
-        configuration can narrow but never widen. This agent's own tier is
-        <code class="font-mono">{inProduct?.delegator_tier ?? 'l1'}</code>.
-      </p>
-
-      {#if inProduct?.whitelist_enforced && !inProduct?.declares_whitelist}
-        <p class="rounded-md border border-dashed border-foundry-light-border dark:border-foundry-border px-3 py-2 text-[11px] text-foundry-light-muted dark:text-foundry-text/40">
-          This agent declares no <code class="font-mono">[subagents].delegate_allowed</code>.
-          Absent grants <strong>nothing</strong> — it does not mean "all" (ADR-0024 decision 4,
-          fail-closed).
-        </p>
-      {/if}
-
+    <section class="flex flex-col gap-3" aria-label="Delegation whitelist">
+      <h3 class={heading}>Allowed agents</h3>
       {#if !inProduct?.tool_registered}
-        <p class="rounded-md border border-dashed border-foundry-light-border dark:border-foundry-border px-3 py-2 text-[11px] text-foundry-light-muted dark:text-foundry-text/40">
-          <code class="font-mono">delegate_to_agent</code> is not registered for this agent's role
-          — only assistant-tier personas get it. Nothing below is callable.
-        </p>
-      {:else if !inProduct?.tool_granted}
-        <p class="rounded-md border border-dashed border-foundry-light-border dark:border-foundry-border px-3 py-2 text-[11px] text-foundry-amber">
-          The tool is registered for this role but this agent's
-          <code class="font-mono">[tools].allow</code> does not grant it, so dispatch denies every
-          target below.
-        </p>
+        <p class="text-xs text-foundry-light-muted dark:text-foundry-text/60">Delegation is not available for this agent's role.</p>
+      {:else}
+        {#if !inProduct.tool_granted}<p class="text-xs text-foundry-amber">Delegation is not enabled in this assistant's tool permissions. The saved list will apply once delegation is enabled.</p>{/if}
+        {#if candidates.length === 0}<p class="text-xs text-foundry-light-muted dark:text-foundry-text/60">No eligible delegation agents are installed.</p>{/if}
+        {#each candidates as target (target.name)}
+          <label class="flex items-start gap-3 rounded-md border border-foundry-light-border dark:border-foundry-border px-3 py-2">
+            <input type="checkbox" class="mt-0.5" checked={selected.includes(target.name)} disabled={saving || !agentName || !!viewData.config_error} on:change={event => toggle(target.name, event.currentTarget.checked)} />
+            <span class="min-w-0"><span class="block text-xs font-semibold text-foundry-light-text dark:text-foundry-text">{target.display_name || target.name}</span><span class="block text-[11px] text-foundry-light-muted dark:text-foundry-text/60">{target.name} · {target.role}</span></span>
+          </label>
+        {/each}
+        {#if selected.length === 0}<p class="text-xs text-foundry-light-muted dark:text-foundry-text/60">No agents selected. This assistant will not delegate to other agents.</p>{/if}
       {/if}
-
-      {#if reachable.length === 0 && blocked.length === 0}
-        <p class="rounded-md border border-dashed border-foundry-light-border dark:border-foundry-border px-3 py-2 text-[11px] text-foundry-light-muted dark:text-foundry-text/40">
-          No agent with a delegatable role resolves on this host.
-        </p>
-      {/if}
-
-      {#each reachable as t (t.name)}
-        <div class="rounded-md border border-foundry-light-border dark:border-foundry-border px-3 py-2">
-          <div class="flex items-baseline justify-between gap-2">
-            <span class="text-xs font-semibold text-foundry-light-text dark:text-foundry-text">
-              {t.display_name || t.name}
-            </span>
-            <span class={okChip}>reachable</span>
-          </div>
-          <div class="mt-1.5 flex flex-wrap items-center gap-1">
-            <span class={tag} title="The agent id delegate_to_agent names">{t.name}</span>
-            <span class={tag} title="The role the allow-list gates on">{t.role}</span>
-            <span class={tag} title="Privilege tier (#4168)">tier {t.tier}</span>
-          </div>
-        </div>
-      {/each}
-
-      {#if blocked.length > 0}
-        <div class="rounded-md border border-foundry-amber/40 px-3 py-2">
-          <h4 class="font-mono text-[10px] uppercase tracking-wide text-foundry-amber">
-            Refused by the delegation gate ({blocked.length})
-          </h4>
-          {#each blocked as t (t.name)}
-            <p class="mt-1 text-[11px] text-foundry-light-muted dark:text-foundry-text/60">
-              <code class="font-mono">{t.name}</code>
-              <span class="font-mono">(tier {t.tier})</span> — {t.reason}
-            </p>
-          {/each}
-        </div>
-      {/if}
-
-      {#if unresolved.length > 0}
-        <details class="rounded-md border border-dashed border-foundry-light-border dark:border-foundry-border px-3 py-2">
-          <summary class="cursor-pointer font-mono text-[10px] uppercase tracking-wide text-foundry-light-muted dark:text-foundry-text/40">
-            {unresolved.length} agent{unresolved.length === 1 ? '' : 's'} whose config did not resolve
-          </summary>
-          {#each unresolved as u (u.name)}
-            <p class="mt-1 text-[11px] text-foundry-light-muted dark:text-foundry-text/60">
-              <code class="font-mono">{u.name}</code> — {u.reason}
-            </p>
-          {/each}
-        </details>
-      {/if}
-
-      {#if (inProduct?.role_excluded_count ?? 0) > 0}
-        <p class="text-[11px] text-foundry-light-muted dark:text-foundry-text/40">
-          {inProduct?.role_excluded_count} further agent(s) on this host are excluded by the role
-          allow-list and are not delegation targets.
-        </p>
-      {/if}
-
-      <!-- #4235: hidden agents are omitted from the target cards above, so the
-           pane says how many rather than leaving them silently missing. -->
-      {#if (inProduct?.hidden_excluded_count ?? 0) > 0}
-        <p class="text-[11px] text-foundry-light-muted dark:text-foundry-text/40">
-          {inProduct?.hidden_excluded_count} further agent(s) on this host are hidden
-          (<code class="font-mono">hidden = true</code>) and are not listed here.
-        </p>
-      {/if}
+      {#if saving}<p role="status" class="text-xs">Saving delegation settings…</p>{/if}
+      {#if notice}<p role="status" class="text-xs">{notice}</p>{/if}
+      {#if saveError}<p role="alert" class="text-xs text-foundry-amber">{saveError}</p><button type="button" class="text-left text-xs underline" disabled={saving} on:click={reload}>Reload delegation settings</button>{/if}
     </section>
 
     <!-- ── Cross-product: dispatch_task ─────────────────────────────────── -->
@@ -294,6 +165,6 @@
     </section>
 
     <!-- ── Coding: dispatch_task → the tcode project manager (#4353) ─────── -->
-    <AgentConfigCoding data={data.coding} />
+    <AgentConfigCoding data={viewData.coding} />
   {/if}
 </div>

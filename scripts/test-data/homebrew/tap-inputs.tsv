@@ -9,6 +9,13 @@
 # a test of the extracted script against itself. Do not "fix" a row to make a
 # failing render pass — a mismatch means the renderer drifted.
 #
+# ONE golden has since moved ahead of the tap on purpose: #7311 added
+# `depends_on "rtk"` to the trusty-mpm formula, so expected/trusty-mpm.rb
+# carries that line and the next trusty-mpm release publishes it. Every other
+# golden still reproduces the tap byte-for-byte, and a `depends_on` appearing in
+# any of them is renderer drift. rtk is a BINARY dependency: `rtk init` /
+# `rtk init -g` must never run, since they install a competing PreToolUse hook.
+#
 # trusty-controller is deliberately ABSENT. Its formula is a stale artifact of
 # the trusty-controller -> trusty-installer rename (#1757, ADR-0013): both
 # install `tctl`, and the tap's copy is three versions behind. It is being

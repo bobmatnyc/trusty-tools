@@ -37,18 +37,21 @@
    * banner" remains valid under this model.
    */
   import { onMount } from 'svelte';
+  import FileNavigator from './FileNavigator.svelte';
+  import { sidebarMode, openedFile } from '../stores/workspace';
   import { Loader2, Plus, ChevronRight, ChevronDown } from 'lucide-svelte';
   import {
     activeAgentId,
+    activeProjectId,
     agentRoster,
     addMessage,
+    activeConversationKey,
+    conversationKey,
     fetchAgentCatalog,
   } from '../stores/app';
+  import { rehydrateChat, resolveRehydrationTarget } from '../lib/chatHistory';
   import { fetchWorkstreams, fetchWorkstreamHistory, groupByAgent, type AgentGroup } from '../lib/workstreams';
-  import LogoMark from '../lib/icons/LogoMark.svelte';
 
-  export let apiReady = false;
-  export let apiError = '';
 
   let workstreamGroups: AgentGroup[] = [];
   let loadingWorkstreams = true;
@@ -93,6 +96,9 @@
    */
   async function resumeWorkstream(name: string, group: AgentGroup) {
     resumingName = name;
+    const projectId = $activeProjectId;
+    const targetAgent = group.agentId === 'other' ? $activeAgentId : group.agentId;
+    const { agentId, speaker } = resolveRehydrationTarget(targetAgent, $agentRoster);
     try {
       const history = await fetchWorkstreamHistory(name, 10);
       const digest = history.length
@@ -100,7 +106,8 @@
             .map((h) => `- ${h.content.split('\n')[0].slice(0, 140)}`)
             .join('\n')
         : '(no additional tagged history found)';
-      addMessage('ctrl', {
+      await rehydrateChat(agentId, speaker, projectId);
+      addMessage(conversationKey(projectId, targetAgent), {
         id: `workstream-resume-${name}-${Date.now()}`,
         role: 'system',
         content: `Resumed task "${name}" — recent tagged memory:\n${digest}`,
@@ -132,7 +139,7 @@
    * chat stream and no network request fires.
    */
   function startNewTask() {
-    addMessage('ctrl', {
+    addMessage($activeConversationKey, {
       id: `topic-boundary-${Date.now()}`,
       role: 'topic-boundary',
       content: 'New task',
@@ -145,24 +152,15 @@
   });
 </script>
 
-<aside class="flex h-full w-72 flex-col border-r border-foundry-light-border dark:border-foundry-border bg-foundry-light-surface dark:bg-foundry-surface">
-  <header class="flex flex-col gap-1 border-b border-foundry-light-border dark:border-foundry-border px-4 py-3">
-    <div class="flex items-center gap-2">
-      <LogoMark size={20} />
-    </div>
-    <div class="flex items-center gap-1 text-xs">
-      {#if apiReady}
-        <span class="inline-block h-2 w-2 rounded-full bg-foundry-teal"></span>
-        <span class="text-foundry-light-muted dark:text-foundry-text/70">API ready</span>
-      {:else if apiError}
-        <span class="inline-block h-2 w-2 rounded-full bg-red-500"></span>
-        <span class="truncate text-red-500 dark:text-red-400" title={apiError}>API error</span>
-      {:else}
-        <Loader2 class="h-3 w-3 animate-spin text-foundry-amber" />
-        <span class="text-foundry-light-muted dark:text-foundry-text/60">Starting…</span>
-      {/if}
-    </div>
-  </header>
+<aside class="flex h-full w-72 shrink-0 flex-col border-r border-foundry-light-border dark:border-foundry-border bg-foundry-light-surface dark:bg-foundry-surface">
+
+  <div class="flex shrink-0 gap-1 border-b border-foundry-light-border dark:border-foundry-border p-2" role="group" aria-label="Sidebar mode">
+    <button type="button" aria-pressed={$sidebarMode === 'history'} on:click={() => { sidebarMode.set('history'); openedFile.set(null); }} class="flex-1 rounded-md px-2 py-1.5 text-xs {$sidebarMode === 'history' ? 'bg-foundry-light-primary/10 dark:bg-foundry-primary/15 text-foundry-light-primary dark:text-foundry-primary' : 'text-foundry-light-muted dark:text-foundry-text/60'}">Chat History</button>
+    <button type="button" aria-pressed={$sidebarMode === 'projects'} on:click={() => sidebarMode.set('projects')} class="flex-1 rounded-md px-2 py-1.5 text-xs {$sidebarMode === 'projects' ? 'bg-foundry-light-primary/10 dark:bg-foundry-primary/15 text-foundry-light-primary dark:text-foundry-primary' : 'text-foundry-light-muted dark:text-foundry-text/60'}">Projects</button>
+  </div>
+  {#if $sidebarMode === 'projects'}
+    <FileNavigator />
+  {:else}
 
   <!-- #3222/#3819: "+ NEW TASK" — Foundry mockup (docs/design/gui/Foundry
        Ecosystem.dc.html:167), full-width rectangular button above TASK
@@ -245,4 +243,5 @@
   <!-- #3819: the standalone "Clear Context" footer button is removed per
        Bob — "+ New Task" (above) covers it and doubles as "start a new
        task" (fresh context). -->
+  {/if}
 </aside>

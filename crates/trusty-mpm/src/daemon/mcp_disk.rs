@@ -28,6 +28,7 @@ use serde_json::Value;
 use crate::core::trusty_tools_config::{self, TrustyToolsConfig};
 use crate::daemon::state::DaemonState;
 use crate::disk::size_index::DirSize;
+use crate::disk::survey::GroupBy;
 use crate::disk::survey_run::{self, DiskProbes, run};
 use crate::session_manager::worktree_ownership::AgentWorktreeOwner;
 use crate::session_manager::worktree_reclaim::{
@@ -36,6 +37,53 @@ use crate::session_manager::worktree_reclaim::{
 use crate::session_manager::worktree_reclaim_gh::GH_TIMEOUT;
 use crate::session_manager::worktree_registry::ScannedWorktree;
 use crate::session_manager::worktree_safety::inspect_dirt;
+
+/// The largest `budget_seconds` this tool will honour (#7313).
+///
+/// Why 55 and not "whatever the caller asked for": every MCP caller reaches the
+/// daemon through `tm serve --stdio`, whose reqwest client carries a 60-second
+/// `REQUEST_TIMEOUT` (`crate::bin::tm::commands::serve_stdio`, a path this
+/// module cannot import — the two numbers are bound instead by
+/// `the_forwarding_timeout_leaves_headroom_over_the_disk_survey_budget_clamp`
+/// in that module's own tests). A larger budget therefore cannot produce a
+/// survey the caller will ever see: the bridge gives up at 60 s and returns a
+/// transport error while the daemon keeps working, which is the #6929 failure
+/// mode over again — a 502 carrying no survey where a truncated one was
+/// available. 55 leaves five seconds for serialization and the round trip.
+/// The console already clamps on its own side (`trusty-console`'s
+/// `routes/disk.rs`); this is the same rule at the tool, for every other caller.
+/// Test: `a_budget_past_the_bridge_timeout_is_clamped`.
+pub const MAX_BUDGET_SECONDS: u64 = 55;
+
+/// Apply [`MAX_BUDGET_SECONDS`], saying whether it bit (#7313).
+///
+/// What: the budget to use, and whether the caller's figure was reduced — which
+/// the response reports as `budget_clamped`, so a caller that asked for 120 and
+/// got a partial pass can tell the clamp from a genuinely slow fleet.
+/// Test: `a_budget_past_the_bridge_timeout_is_clamped`,
+/// `a_budget_inside_the_bridge_timeout_is_untouched`.
+fn clamp_budget(requested: Option<u64>) -> (Option<u64>, bool) {
+    match requested {
+        Some(s) if s > MAX_BUDGET_SECONDS => (Some(MAX_BUDGET_SECONDS), true),
+        other => (other, false),
+    }
+}
+
+/// Read the caller's `group_by` argument (#7313).
+///
+/// Why an error rather than a silent fall-through on an unknown value: a typo
+/// would otherwise return a complete, plausible survey with the roll-up the
+/// caller asked for simply absent, and nothing in the payload saying why.
+/// Test: `an_unknown_group_by_is_rejected`.
+fn parse_group_by(group_by: Option<&str>) -> Result<GroupBy, String> {
+    match group_by {
+        None => Ok(GroupBy::None),
+        Some("session") => Ok(GroupBy::Session),
+        Some(other) => Err(format!(
+            "disk_survey: unknown `group_by` value `{other}`; the only supported value is `session`"
+        )),
+    }
+}
 
 /// Survey every managed worktree for the console Disk view (#6927).
 ///
@@ -51,14 +99,22 @@ use crate::session_manager::worktree_safety::inspect_dirt;
 /// is held for each measurement alone rather than for the whole pass.
 /// `budget_seconds` bounds the whole pass, byte walks included (#6929);
 /// worktrees past it are listed as `review`, never omitted and never `stale`,
-/// and a project or root past it reports no byte figure.
+/// and a project or root past it reports no byte figure. It is clamped to
+/// [`MAX_BUDGET_SECONDS`] (#7313) — see that constant for why a larger figure
+/// cannot produce a survey any caller receives.
+/// `group_by` (#7313) adds the per-session roll-up to the response.
 /// Test: `crate::disk::survey_tests`, and `dispatch_disk_survey_tool` for the
 /// dispatch wiring.
 pub async fn disk_survey(
     state: &Arc<DaemonState>,
     project: Option<&str>,
     budget_seconds: Option<u64>,
+    group_by: Option<&str>,
 ) -> Result<Value, String> {
+    let group_by = parse_group_by(group_by)?;
+    // #7313: clamped BEFORE the deadline is computed, so the clamp is what the
+    // pass actually runs under rather than a figure reported beside a longer one.
+    let (budget_seconds, budget_clamped) = clamp_budget(budget_seconds);
     let config = TrustyToolsConfig::load();
     let repos_root = trusty_tools_config::workspace_root(&config);
     // #6927: read FALLIBLY, separately from the lenient `load` above. A config
@@ -121,8 +177,18 @@ pub async fn disk_survey(
             &probes,
             deadline,
             project.as_deref(),
+            group_by,
         );
-        serde_json::to_value(survey).map_err(|e| format!("disk_survey: serialize error: {e}"))
+        let mut value = serde_json::to_value(survey)
+            .map_err(|e| format!("disk_survey: serialize error: {e}"))?;
+        // #7313: the clamp is a TRANSPORT fact, not a survey fact — the survey
+        // ran a full pass under whatever deadline it was handed and has nothing
+        // to say about what the caller originally asked for. Recorded here, on
+        // the response, so it stays out of `DiskSurvey`'s shape.
+        if let Value::Object(map) = &mut value {
+            map.insert("budget_clamped".to_string(), Value::Bool(budget_clamped));
+        }
+        Ok(value)
     })
     .await
     .map_err(|e| format!("disk_survey: the survey pass panicked: {e}"))?
@@ -207,6 +273,58 @@ mod tests {
     fn gh_budget_is_zero_once_the_survey_deadline_has_passed() {
         let spent = Instant::now() - Duration::from_secs(1);
         assert_eq!(gh_budget(Some(spent)), Duration::ZERO);
+    }
+
+    /// A budget past the stdio bridge's timeout is cut down to the clamp.
+    ///
+    /// Why this is a bug and not a preference: the daemon honoured a
+    /// `budget_seconds: 120` faithfully and kept surveying, while the bridge
+    /// carrying the answer gave up at 60 seconds and returned a transport
+    /// error. The caller saw no survey at all where a 55-second truncated one
+    /// was available — the #6929 failure mode, reached through the argument
+    /// rather than through a slow fleet.
+    ///
+    /// Fails before the change: `clamp_budget` did not exist and 120 was passed
+    /// through to the deadline verbatim.
+    #[test]
+    fn a_budget_past_the_bridge_timeout_is_clamped() {
+        assert_eq!(clamp_budget(Some(120)), (Some(MAX_BUDGET_SECONDS), true));
+        assert_eq!(
+            Duration::from_secs(MAX_BUDGET_SECONDS),
+            Duration::from_secs(55),
+            "the clamp the schema's `maximum` advertises"
+        );
+    }
+
+    #[test]
+    fn a_budget_inside_the_bridge_timeout_is_untouched() {
+        assert_eq!(clamp_budget(Some(30)), (Some(30), false));
+        assert_eq!(
+            clamp_budget(Some(MAX_BUDGET_SECONDS)),
+            (Some(MAX_BUDGET_SECONDS), false),
+            "the ceiling itself is not a clamp"
+        );
+        assert_eq!(clamp_budget(None), (None, false));
+    }
+
+    #[test]
+    fn group_by_session_is_the_one_accepted_value() {
+        assert_eq!(parse_group_by(None), Ok(GroupBy::None));
+        assert_eq!(parse_group_by(Some("session")), Ok(GroupBy::Session));
+    }
+
+    /// An unknown `group_by` is an error, never a silent full survey.
+    ///
+    /// Why: a typo would otherwise return a complete, plausible payload with
+    /// the roll-up simply missing and nothing saying why.
+    #[test]
+    fn an_unknown_group_by_is_rejected() {
+        let err = parse_group_by(Some("project")).expect_err("unknown values must not be accepted");
+        assert!(err.contains("project"), "{err}");
+        assert!(
+            err.contains("session"),
+            "the error must name what IS accepted: {err}"
+        );
     }
 
     #[test]

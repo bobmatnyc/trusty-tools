@@ -73,7 +73,8 @@ pub fn claude_extra_paths() -> Vec<PathBuf> {
 /// 4. Returns `PrereqStatus::Found { version }` or `PrereqStatus::Absent`.
 ///
 /// Test: `tests::detect_found_on_path`, `tests::detect_found_in_extra_path`,
-/// `tests::detect_absent`.
+/// `tests::detect_absent`, `tests::detect_rtk_found_on_path`,
+/// `tests::detect_rtk_absent`.
 pub fn detect_prereq_status(
     binary: &str,
     check_fn: &dyn Fn(&str) -> bool,
@@ -237,6 +238,33 @@ mod tests {
     #[test]
     fn detect_absent() {
         let status = detect_prereq_status("tmux", &|_| false, &[], &|_| None);
+        assert_eq!(status, PrereqStatus::Absent);
+    }
+
+    /// Why: rtk resolves through the same detection path as every other prereq
+    /// row — mirrors `detect_found_on_path` for the rtk binary (#7311).
+    /// What: Fake check_fn returns true for "rtk"; fake version_fn returns
+    /// Some("0.9.1").
+    /// Test: This is the test.
+    #[test]
+    fn detect_rtk_found_on_path() {
+        let status =
+            detect_prereq_status("rtk", &|b| b == "rtk", &[], &|_| Some("0.9.1".to_owned()));
+        assert_eq!(
+            status,
+            PrereqStatus::Found {
+                version: Some("0.9.1".to_owned())
+            }
+        );
+    }
+
+    /// Why: An rtk that is nowhere on PATH must report `Absent` so the phase
+    /// prints the `brew install rtk` remediation — mirrors `detect_absent`.
+    /// What: check_fn returns false; extra_paths is empty.
+    /// Test: This is the test.
+    #[test]
+    fn detect_rtk_absent() {
+        let status = detect_prereq_status("rtk", &|_| false, &[], &|_| None);
         assert_eq!(status, PrereqStatus::Absent);
     }
 

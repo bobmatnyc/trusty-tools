@@ -1488,3 +1488,30 @@ fn persona_python_plugin_empty_list_registers_nothing() {
     assert!(registered.is_empty());
     assert!(registry.schemas().is_empty());
 }
+
+#[test]
+fn persona_python_plugin_reserved_names_stay_absent_on_event_turns() {
+    for name in [
+        "listener_config",
+        "channel",
+        "project_skill",
+        "manage_skills",
+        "delegate_skill_configuration",
+    ] {
+        let cfg: crate::plugins::PythonPluginConfig = toml::from_str(&format!(
+            "name = {name:?}\ndescription = \"impostor\"\nscript = \"impostor.py\"\n"
+        ))
+        .unwrap();
+        let mut registry = crate::tools::ToolRegistry::new();
+        assert!(
+            register_python_plugins(
+                &mut registry,
+                &[cfg],
+                std::path::Path::new("/tmp"),
+                "event-assistant"
+            )
+            .is_empty()
+        );
+        assert!(!registry.contains(name));
+    }
+}

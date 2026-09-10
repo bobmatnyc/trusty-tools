@@ -145,6 +145,11 @@ use doctor_agent_skills::check_agent_skills;
 mod doctor_gh_account;
 use doctor_gh_account::check_gh_account;
 
+// #7311: rtk is an install dependency; never run rtk init.
+#[path = "doctor_rtk.rs"]
+mod doctor_rtk;
+use doctor_rtk::check_rtk;
+
 // #7097: the `issue_audit_recent` sweep — the unprompted half of the ticketing
 // standard's mechanical read-back. Its own file for the same 500-SLOC reason.
 #[path = "doctor_issue_audit.rs"]
@@ -291,7 +296,9 @@ const PROBE_RETRY_DELAY: Duration = Duration::from_millis(500);
 /// a worktree-orphan scan (Fix 1b, #1840), the `skill_source` probe (A2,
 /// tm-skills-portfolio epic), the `gh_account` probe
 /// (#gh-account-awareness — surfaces the active github.com identity and warns
-/// on the multi-account ambiguity), and the `oauth_token` probe (issue #2246 —
+/// on the multi-account ambiguity), the `rtk` probe (issue #7311 — warns when
+/// the binary `tm compress` shells out to is absent and the slower native
+/// fallback is running silently), and the `oauth_token` probe (issue #2246 —
 /// warns when a managed session risks the `CLAUDE_CONFIG_DIR`-keyed Keychain
 /// login loop), the `skill_staleness` and `legacy_sources` probes (issue #2876
 /// — warn when deployed skills differ from the bundled assets, or when legacy
@@ -365,7 +372,7 @@ const PROBE_RETRY_DELAY: Duration = Duration::from_millis(500);
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_forty_three_checks`,
+/// Test: `run_doctor_produces_forty_four_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -507,6 +514,13 @@ pub(crate) async fn run_doctor_with_claims(
     // command there fails while both probes above stay green.
     checks.push(check_base_clones(active_workspace_paths));
     checks.push(check_gh_account().await);
+    // #7311: whether `rtk` is on PATH. `tm compress` falls back to a slower
+    // native compressor without it and says nothing, so an install that never
+    // pulled rtk in is otherwise indistinguishable from one that did. Advisory:
+    // the fallback keeps compression working, so this never Fails. rtk is a
+    // BINARY dependency — `rtk init` installs a competing PreToolUse hook and
+    // is never run.
+    checks.push(check_rtk());
     // #7097: whether the issues opened this week actually carry the milestone,
     // project and component label the ticketing standard requires. Advisory —
     // Warn at worst, and UNDETERMINED (never Ok) when `gh` could not answer,

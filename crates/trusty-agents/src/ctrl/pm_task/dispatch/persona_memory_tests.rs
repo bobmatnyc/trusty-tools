@@ -707,3 +707,71 @@ mod mock_daemon {
         (addr, memory, state)
     }
 }
+
+#[tokio::test]
+async fn tool_activity_persistence_keeps_explicit_event_origin_and_order() {
+    let (_addr, memory, state) = mock_daemon::spawn().await;
+    let event =
+        r#"{"kind":"trusty.listener-event","version":1,"listener":"mail","event_type":"received"}"#;
+    let activities = vec![
+        serde_json::json!({"kind":"trusty.tool-activity","version":1,"call_id":"one","tool":"Read","status":"complete"}),
+    ];
+    persist_activity_turn(
+        memory.socket(),
+        "fixture-palace",
+        "persona-fixture",
+        Some(event),
+        "untrusted raw prompt",
+        "reply",
+        &activities,
+    )
+    .await
+    .unwrap();
+    let calls = state.rpc_calls();
+    assert_eq!(calls.len(), 3);
+    assert!(
+        calls
+            .iter()
+            .all(|(method, args)| method == "chat_session_add_turn"
+                && args["palace"] == "fixture-palace"
+                && args["session_id"] == "persona-fixture")
+    );
+    assert_eq!(calls[0].1["role"], "system");
+    assert_eq!(calls[0].1["content"], event);
+    assert_eq!(calls[1].1["role"], "system");
+    assert_eq!(calls[2].1["role"], "assistant");
+    assert_eq!(calls[2].1["content"], "reply");
+    assert!(
+        !serde_json::to_string(&calls)
+            .unwrap()
+            .contains("untrusted raw prompt")
+    );
+}
+
+#[tokio::test]
+async fn tool_activity_persistence_lock_serializes_independent_file_handles() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("memory.sock");
+    let first = acquire_chat_persistence_lock(&socket, "palace", "persona-one")
+        .await
+        .unwrap();
+    let identity_path = std::fs::read_dir(dir.path())
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let second = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&identity_path)
+        .unwrap();
+    assert!(fs4::FileExt::try_lock(&second).is_err());
+    let another = acquire_chat_persistence_lock(&socket, "palace", "persona-other")
+        .await
+        .unwrap();
+    drop(another);
+    drop(first);
+    fs4::FileExt::try_lock(&second).unwrap();
+    fs4::FileExt::unlock(&second).unwrap();
+}

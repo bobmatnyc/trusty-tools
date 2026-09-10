@@ -76,10 +76,12 @@ pub struct Missing {
 /// Why: Data-driven table means adding a new prereq requires no code changes
 /// in the check logic — just a new entry here.
 ///
-/// What: Three prereqs — `claude` (Claude Code / claude-mpm), `git` (project
-/// operations), and `tmux` (trusty-mpm session management).
+/// What: Four prereqs — `claude` (Claude Code / claude-mpm), `git` (project
+/// operations), `tmux` (trusty-mpm session management), and `rtk` (the binary
+/// `tm compress` shells out to; #7311).
 ///
-/// Test: `tests::prereq_table_has_expected_entries`.
+/// Test: `tests::prereq_table_has_expected_entries`,
+/// `tests::rtk_prereq_hint_forbids_rtk_init`.
 pub const PREREQS: &[Prereq] = &[
     Prereq {
         binary: "claude",
@@ -106,6 +108,13 @@ pub const PREREQS: &[Prereq] = &[
         required_for: "trusty-mpm session management",
         affects: &["trusty-mpm"],
         hint: "Install tmux: `brew install tmux` (macOS) or `apt install tmux` (Debian/Ubuntu)",
+    },
+    // #7311: rtk is an install dependency; never run rtk init.
+    Prereq {
+        binary: "rtk",
+        required_for: "tm compress (falls back to a slower native compressor without it)",
+        affects: &["trusty-mpm"],
+        hint: "install with `brew install rtk`; do not run `rtk init`, tm invokes rtk directly",
     },
 ];
 
@@ -173,8 +182,8 @@ pub fn check_and_warn_real(selected: &[String], json: bool) -> Vec<Missing> {
 mod tests {
     use super::*;
 
-    /// Why: The table must contain entries for claude, git, and tmux.
-    /// What: Asserts all three binary names are present.
+    /// Why: The table must contain entries for claude, git, tmux, and rtk.
+    /// What: Asserts all four binary names are present.
     /// Test: This is the test.
     #[test]
     fn prereq_table_has_expected_entries() {
@@ -182,6 +191,65 @@ mod tests {
         assert!(binaries.contains(&"claude"), "claude prereq missing");
         assert!(binaries.contains(&"git"), "git prereq missing");
         assert!(binaries.contains(&"tmux"), "tmux prereq missing");
+        assert!(binaries.contains(&"rtk"), "rtk prereq missing");
+    }
+
+    /// Why: An absent rtk must surface with its own remediation — mirrors
+    /// `check_returns_missing_for_injected_absent` for the tmux row.
+    /// What: Selects "trusty-mpm"; fake checker reports every binary present
+    /// except rtk; asserts rtk appears in the missing list with the install
+    /// command in its hint.
+    /// Test: This is the test.
+    // #7311: rtk is an install dependency; never run rtk init.
+    #[test]
+    fn check_returns_missing_for_absent_rtk() {
+        let selected = vec!["trusty-mpm".to_owned()];
+        let missing = check_and_warn(&selected, true, |bin| bin != "rtk");
+        let rtk_miss = missing.iter().find(|m| m.binary == "rtk");
+        assert!(rtk_miss.is_some(), "rtk should be missing");
+        assert!(
+            rtk_miss.unwrap().hint.contains("brew install rtk"),
+            "hint should name the install command"
+        );
+    }
+
+    /// Why: rtk gates trusty-mpm only, so a tga-only install must not report it.
+    /// What: Selects "tga" with an always-absent checker; asserts rtk is not in
+    /// the missing list.
+    /// Test: This is the test.
+    #[test]
+    fn check_skips_rtk_for_unrelated_selection() {
+        let missing = check_and_warn(&["tga".to_owned()], true, |_| false);
+        let binaries: Vec<&str> = missing.iter().map(|m| m.binary.as_str()).collect();
+        assert!(
+            !binaries.contains(&"rtk"),
+            "rtk should not be checked for a tga-only install"
+        );
+    }
+
+    /// Why: `rtk init` / `rtk init -g` install a competing PreToolUse Bash hook.
+    /// The prereq hint is one of the two places an operator reads about rtk, so
+    /// it must forbid them rather than leave the operator to find them.
+    /// What: Asserts the rtk row's hint carries the prohibition exactly once.
+    /// Test: This is the test.
+    // #7311: rtk is an install dependency; never run rtk init.
+    #[test]
+    fn rtk_prereq_hint_forbids_rtk_init() {
+        let rtk = PREREQS
+            .iter()
+            .find(|p| p.binary == "rtk")
+            .expect("rtk prereq row");
+        assert!(
+            rtk.hint.contains("do not run `rtk init`"),
+            "hint must forbid `rtk init`: {}",
+            rtk.hint
+        );
+        assert_eq!(
+            rtk.hint.matches("rtk init").count(),
+            1,
+            "only the prohibition may name `rtk init`: {}",
+            rtk.hint
+        );
     }
 
     /// Why: Only prereqs for selected crates should be checked.

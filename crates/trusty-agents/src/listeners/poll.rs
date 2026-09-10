@@ -323,6 +323,10 @@ async fn poll_once(
                     }
                 };
 
+                if !cfg.filter.matches_labels(&event.labels) {
+                    continue;
+                }
+
                 if let Err(e) = EventStore::append(&event).await {
                     tracing::warn!(listener = %cfg.name, error = %e, "gmail listener: failed to persist event");
                 }
@@ -432,6 +436,17 @@ fn stored_event_from_message(listener_id: &str, event_id: &str, msg: &Value) -> 
             .and_then(|v| v.as_str())
             .map(String::from),
         included: true,
+        labels: msg
+            .get("labelIds")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 
@@ -574,5 +589,14 @@ mod tests {
 
         let loaded = load_cursor("never-seen-listener").await;
         assert!(loaded.history_id.is_none());
+    }
+    #[test]
+    fn gmail_summary_preserves_labels_for_pre_wake_filtering() {
+        let event = stored_event_from_message(
+            "mail",
+            "mail:fixture",
+            &serde_json::json!({"labelIds":["INBOX","IMPORTANT"],"snippet":"fixture"}),
+        );
+        assert_eq!(event.labels, vec!["INBOX", "IMPORTANT"]);
     }
 }

@@ -30,6 +30,11 @@ import { get } from 'svelte/store';
 import { apiBase } from './api-config';
 import {
   canLoadOlderChat,
+  conversationKey,
+  activeConversationKey,
+  messages,
+  isRunning,
+  type ChatHistoryCursor,
   chatHistoryCursor,
   getCurrentApiToken,
   hydrateMessages,
@@ -53,6 +58,7 @@ export interface ChatHistoryPage {
    * empty conversation rather than an error.
    */
   available: boolean;
+  session_absent?: boolean;
   messages: ChatHistoryMessage[];
   /**
    * ABSOLUTE index of this page's first message. Passed straight back as the
@@ -126,6 +132,7 @@ export async function fetchChatHistory(
     const body = (await r.json()) as Partial<ChatHistoryPage>;
     return {
       available: body.available === true,
+      session_absent: body.session_absent === true,
       messages: Array.isArray(body.messages) ? body.messages : [],
       start: typeof body.start === 'number' ? body.start : 0,
       total: typeof body.total === 'number' ? body.total : 0,
@@ -170,13 +177,28 @@ export function historyToMessages(
   const ts = page.updated_at ? Date.parse(page.updated_at) : NaN;
   const timestamp = Number.isNaN(ts) ? now : ts;
   return page.messages.map((m, i) => {
-    const role = toRole(m.role);
+    let role = toRole(m.role);
+    let content = m.content ?? '';
+    let activity: Partial<Message> = {};
+    if (m.role === 'system') {
+      try {
+        const event = JSON.parse(content);
+        if (event?.kind === 'trusty.listener-event' && event.version === 1 && typeof event.listener === 'string' && typeof event.event_type === 'string') {
+          role = 'event';
+          if (typeof event.event_id === 'string') activity.eventId=event.event_id;
+          content = [event.listener, event.event_type, typeof event.from === 'string' ? event.from : '', typeof event.subject === 'string' ? event.subject : ''].filter(Boolean).join(' · ');
+        } else if (event?.kind === 'trusty.tool-activity' && event.version === 1 && typeof event.tool === 'string' && typeof event.call_id === 'string' && ['running','complete','error'].includes(event.status)) {
+          role='tool'; content=''; activity={toolName:event.tool.slice(0,160),toolCallId:event.call_id,activityStatus:event.status === 'running' ? 'error' : event.status};
+        }
+      } catch { /* Ordinary system content stays an ordinary banner. */ }
+    }
     return {
       // Stable and collision-free against live ids, which are uuid/task-based.
-      id: `history-${i}`,
+      id: `history-${page.start + i}`,
       role,
-      content: m.content ?? '',
+      content,
       timestamp,
+      ...activity,
       ...(role === 'assistant' ? { speaker } : {}),
     };
   });
@@ -232,28 +254,48 @@ export interface RehydrateResult {
  * `rehydrateChat_is_a_noop_when_nothing_is_persisted`,
  * `rehydrateChat_does_not_clobber_a_message_typed_during_bootstrap`.
  */
+const historyRequests = new Map<string, number>();
+const historyEnds = new Map<string, number>();
+const savedCursors = new Map<string, { anchor: Message; cursor: ChatHistoryCursor }>();
+function rememberCursor(key: string, cursor: ChatHistoryCursor) {
+  const anchor = get(messages).get(key)?.[0];
+  if (anchor) savedCursors.set(key, { anchor, cursor });
+}
+function cachedCursor(key: string): ChatHistoryCursor | null {
+  const saved = savedCursors.get(key);
+  return saved && get(messages).get(key)?.includes(saved.anchor) ? saved.cursor : null;
+}
+
 export async function rehydrateChat(
   agentId: string,
   speaker: string,
   projectId: string,
   limit = DEFAULT_HISTORY_LIMIT,
 ): Promise<RehydrateResult> {
+  const key = conversationKey(projectId, agentId);
+  const generation = (historyRequests.get(key) ?? 0) + 1;
+  historyRequests.set(key, generation);
+  const selected = () => get(activeConversationKey) === key;
+  const cached = cachedCursor(key);
+  if (cached) {
+    if (selected()) chatHistoryCursor.set(cached);
+    return { seeded: 0, hasMore: cached.hasMore };
+  }
+  if (selected()) chatHistoryCursor.set(null);
   const page = await fetchChatHistory(agentId, limit);
+  if (historyRequests.get(key) !== generation) return { seeded: 0, hasMore: cachedCursor(key)?.hasMore ?? false };
+  if (page.available) historyEnds.set(key,page.start+page.messages.length);
+  else if(page.session_absent)historyEnds.set(key,0);
   if (!page.available || page.messages.length === 0) {
-    chatHistoryCursor.set(null);
+    if (selected()) chatHistoryCursor.set(null);
     return { seeded: 0, hasMore: false, reason: page.reason };
   }
   const restored = historyToMessages(page, speaker, Date.now());
-  const seeded = hydrateMessages(projectId, restored);
-  // Only arm "load earlier" against history actually on screen. A refused seed
-  // means live messages won the bucket, so paging older into it would interleave
-  // a restored conversation with an unrelated live one.
-  chatHistoryCursor.set(
-    seeded
-      ? { agentId, speaker, projectId, start: page.start, hasMore: page.has_more }
-      : null,
-  );
-  return { seeded: seeded ? restored.length : 0, hasMore: seeded && page.has_more };
+  const seeded = hydrateMessages(key, restored);
+  if (seeded) rememberCursor(key, { agentId, speaker, projectId, start: page.start, hasMore: page.has_more });
+  const cursor = cachedCursor(key);
+  if (selected()) chatHistoryCursor.set(cursor);
+  return { seeded: seeded ? restored.length : 0, hasMore: cursor?.hasMore ?? false };
 }
 
 /**
@@ -285,20 +327,68 @@ export async function loadOlderChat(
   try {
     const page = await fetchChatHistory(cursor.agentId, limit, cursor.start);
     if (!page.available || page.messages.length === 0) {
-      chatHistoryCursor.set({ ...cursor, hasMore: false });
+      const next = { ...cursor, hasMore: false };
+      rememberCursor(conversationKey(cursor.projectId, cursor.agentId), next);
+      if (get(chatHistoryCursor) === cursor) chatHistoryCursor.set(next);
       return { seeded: 0, hasMore: false, reason: page.reason };
     }
-    const older = historyToMessages(page, cursor.speaker, Date.now()).map((m, i) => ({
-      ...m,
-      id: `history-${page.start}-${i}`,
-    }));
+    const older = historyToMessages(page, cursor.speaker, Date.now());
     // The cursor's own bucket, never the currently-active one — the two can
     // differ, and prepending into the active one is how a restored conversation
     // leaks into an unrelated view.
-    prependMessages(cursor.projectId, older);
-    chatHistoryCursor.set({ ...cursor, start: page.start, hasMore: page.has_more });
+    prependMessages(conversationKey(cursor.projectId, cursor.agentId), older);
+    const next = { ...cursor, start: page.start, hasMore: page.has_more };
+    rememberCursor(conversationKey(cursor.projectId, cursor.agentId), next);
+    if (get(chatHistoryCursor) === cursor) chatHistoryCursor.set(next);
     return { seeded: older.length, hasMore: page.has_more };
   } finally {
     loadingOlderChat.set(false);
   }
+}
+
+/** Append completed incoming event turns without replacing live drafts or task messages. */
+export async function refreshEventHistory(agentId:string,speaker:string,projectId:string):Promise<number> {
+  const key=conversationKey(projectId,agentId);
+  const end=historyEnds.get(key);
+  const pages:ChatHistoryPage[]=[];
+  let page=await fetchChatHistory(agentId,500);
+  if(!page.available)throw new Error(page.reason??'Chat history is temporarily unavailable');
+  const latestEnd=page.start+page.messages.length;
+  if(end===undefined){
+    if(get(isRunning))throw new Error('Incoming history refresh waits for the active task');
+    const restored=historyToMessages(page,speaker,Date.now());
+    const existingIds=new Set((get(messages).get(key)??[]).map(m=>m.id));
+    const missing=restored.filter(m=>!existingIds.has(m.id));
+    prependMessages(key,missing);
+    historyEnds.set(key,latestEnd);
+    const cursor={agentId,speaker,projectId,start:page.start,hasMore:page.has_more};
+    rememberCursor(key,cursor);
+    if(get(activeConversationKey)===key)chatHistoryCursor.set(cursor);
+    return missing.length;
+  }
+  pages.push(page);
+  while(page.start>end && page.has_more && pages.length<4){
+    page=await fetchChatHistory(agentId,500,page.start);
+    if(!page.available)throw new Error(page.reason??'Chat history is temporarily unavailable');
+    pages.unshift(page);
+  }
+  if(page.start>end && page.has_more)throw new Error('Incoming history is too large to refresh safely');
+  const restored=pages.flatMap(p=>historyToMessages(p,speaker,Date.now()));
+  const groups:Message[][]=[];let group:Message[]=[];let safeEnd=latestEnd;
+  const finish=(tail=false)=>{if(group[0]?.eventId){if(group.some(m=>m.role==='assistant'))groups.push(group);else if(tail)safeEnd=Math.min(safeEnd,Number(group[0].id.slice('history-'.length)));}group=[];};
+  for(const message of restored){if(message.role==='event'){finish();group=[message];}else if(message.role==='user'){finish();}else if(group.length){group.push(message);}}
+  finish(true);
+  if(get(isRunning))throw new Error('Incoming history refresh waits for the active task');
+  let added=0;
+  messages.update(map=>{
+    const list=map.get(key)??[];const next=[...list];const ids=new Set(next.map(m=>m.id));
+    for(const rows of groups){const eventId=rows[0].eventId!;
+      for(const row of rows){const index=Number(row.id.slice('history-'.length));if(index<end || ids.has(row.id))continue;
+        next.push({...row,eventId});ids.add(row.id);added++;
+      }
+    }
+    if(!added)return map;const updated=new Map(map);updated.set(key,next);return updated;
+  });
+  historyEnds.set(key,Math.max(historyEnds.get(key)??0,safeEnd));
+  return added;
 }

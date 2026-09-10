@@ -118,6 +118,13 @@
 
   type Tab = (typeof SECTIONS)[number][0];
   let tab: Tab = 'personality';
+  let listenersVisited = false;
+  let subagentsVisited = false;
+  $: if (tab === 'subagents') subagentsVisited = true;
+  let listenersDirty = false;
+  let listenersSaving = false;
+  let listenerEditor: AgentConfigListeners | undefined;
+  $: if (tab === 'listeners') listenersVisited = true;
 
   let loading = true;
   let loadError = '';
@@ -177,9 +184,10 @@
    * editor.
    */
   let confirmingExit = false;
+  let saveAndClosing = false;
   let seenExitIntent = get(configExitIntent);
 
-  $: configPaneDirty.set(personalityDirty);
+  $: configPaneDirty.set(personalityDirty || listenersDirty);
   $: if ($configExitIntent !== seenExitIntent) {
     seenExitIntent = $configExitIntent;
     confirmingExit = true;
@@ -189,7 +197,8 @@
 
   /** Exit affordances go through here, never straight to `onExit`. */
   function requestExit() {
-    if (personalityDirty) {
+    if (saveAndClosing) return;
+    if (personalityDirty || listenersDirty) {
       confirmingExit = true;
       return;
     }
@@ -203,11 +212,16 @@
   }
 
   async function saveAndExit() {
-    saveError = '';
-    if (personalityDirty) await savePersonality();
-    if (saveError) return; // stay put and show the error rather than lose the edit
-    confirmingExit = false;
-    onExit();
+    if (saveAndClosing) return;
+    saveAndClosing = true;
+    try {
+      saveError = '';
+      if (personalityDirty) await savePersonality();
+      if (!saveError && listenersDirty && !(await listenerEditor?.save())) saveError = 'Listener settings could not be saved. Keep editing to review the error.';
+      if (saveError) return;
+      confirmingExit = false;
+      onExit();
+    } finally { saveAndClosing = false; }
   }
 
   async function load(name: string) {
@@ -344,6 +358,7 @@
         class="rounded px-2.5 py-1 font-mono text-[11px] font-semibold uppercase tracking-wide transition-colors {tab === id
           ? 'bg-foundry-light-primary/20 dark:bg-foundry-primary/20 text-foundry-light-primary dark:text-foundry-primary'
           : 'text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10'}"
+        disabled={saveAndClosing}
         on:click={() => (tab = id)}
       >
         {label}
@@ -356,7 +371,7 @@
        and scrolls INSIDE it; the read-only sections scroll as a whole. A single
        shared `overflow-y-auto` here — what #3826 had — would put a second
        scrollbar around an already-scrolling textarea. -->
-  <div class="flex min-h-0 flex-1 flex-col px-4 py-3">
+  <div class="flex min-h-0 flex-1 flex-col px-4 py-3" inert={saveAndClosing}>
     {#if loading}
       <div class="flex items-center gap-2 text-sm text-foundry-light-muted dark:text-foundry-text/60">
         <Loader2 class="h-4 w-4 animate-spin" /> Loading…
@@ -383,14 +398,21 @@
       />
     {:else if tab === 'skills'}
       <AgentConfigSkills data={skills} error={skillsError} />
-    {:else if tab === 'subagents'}
-      <AgentConfigSubagents data={subagents} error={subagentsError} />
-    {:else if tab === 'listeners'}
-      <AgentConfigListeners />
+
     {:else if tab === 'permissions'}
       <AgentConfigPermissions toolsAllow={detail?.tools_allow ?? []} scopes={detail?.scopes ?? []} />
     {/if}
 
+    {#if subagentsVisited && !loading && !loadError}
+      <div data-subagents-editor class="min-h-0 flex-1 flex-col" style:display={tab === 'subagents' ? 'flex' : 'none'}>
+        <AgentConfigSubagents {agentName} data={subagents} error={subagentsError} />
+      </div>
+    {/if}
+    {#if listenersVisited && !loading && !loadError}
+      <div class="min-h-0 flex-1 flex-col" style:display={tab === 'listeners' ? 'flex' : 'none'}>
+        <AgentConfigListeners {agentName} bind:dirty={listenersDirty} bind:saving={listenersSaving} bind:this={listenerEditor} />
+      </div>
+    {/if}
     {#if saveError}
       <p class="mt-2 shrink-0 text-xs text-red-500 dark:text-red-400">{saveError}</p>
     {/if}
@@ -411,12 +433,13 @@
           Unsaved changes
         </h3>
         <p class="mb-4 text-xs leading-relaxed text-foundry-light-muted dark:text-foundry-text/60">
-          Your Personality edit has not been saved. Leaving configuration now discards it.
+          Your configuration changes have not been saved. Leaving now discards them.
         </p>
         <div class="flex flex-wrap items-center justify-end gap-2">
           <button
             type="button"
             class="rounded-md px-3 py-1.5 text-xs font-medium text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10"
+            disabled={saving || listenersSaving || saveAndClosing}
             on:click={() => (confirmingExit = false)}
           >
             Keep editing
@@ -424,6 +447,7 @@
           <button
             type="button"
             class="rounded-md border border-red-500/40 px-3 py-1.5 text-xs font-medium text-red-500 dark:text-red-400 hover:bg-red-500/10"
+            disabled={saving || listenersSaving || saveAndClosing}
             on:click={discardAndExit}
           >
             Discard changes
@@ -431,7 +455,7 @@
           <button
             type="button"
             class="inline-flex items-center gap-1.5 rounded-md bg-foundry-light-primary dark:bg-foundry-primary px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-foundry-light-primary/80 dark:hover:bg-foundry-primary/80 disabled:cursor-not-allowed disabled:opacity-50"
-            disabled={saving}
+            disabled={saving || listenersSaving || saveAndClosing}
             on:click={saveAndExit}
           >
             <Save class="h-3.5 w-3.5" /> {saving ? 'Saving…' : 'Save and close'}

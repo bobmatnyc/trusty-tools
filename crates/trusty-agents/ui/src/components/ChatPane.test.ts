@@ -36,7 +36,9 @@ function stubApi() {
     'fetch',
     vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      const json = url.includes('/persona')
+      const json = url.endsWith('/api/models')
+        ? { providers: [], local: { provider_id: 'local', default_model: 'local', available: false, reachable_today: false } }
+        : url.includes('/persona')
         ? { content: 'You are a careful assistant.', editable: true }
         : url.includes('/stores')
           ? { stores: [], issues: [] }
@@ -388,5 +390,57 @@ describe('ChatHeader — Knowledge Graph button is Concierge-only (#4290)', () =
     activeAgentId.set(null);
     await waitFor(() => kgButton() === null);
     expect(kgButton()).toBeNull();
+  });
+});
+
+describe('Knowledge Graph main-pane takeover', () => {
+  it('preserves the mounted chat, draft and scroll position and restores them with Back', async () => {
+    activeAgentId.set('izzie');
+    await waitFor(() => target.querySelector('[aria-label="Knowledge Graph"]') !== null);
+    typeInComposer('keep this draft');
+    const before = chatSurface();
+    const scroll = target.querySelector('[data-chat-scroll]') as HTMLElement;
+    scroll.scrollTop = 75;
+    (target.querySelector('[aria-label="Knowledge Graph"]') as HTMLButtonElement).click();
+    await waitFor(() => target.querySelector('[data-knowledge-takeover]') !== null);
+    const browser = target.querySelector('[data-knowledge-takeover]') as HTMLElement;
+    expect(browser.className).toContain('absolute');
+    expect(browser.className).toContain('inset-0');
+    expect(browser.className).not.toContain('fixed');
+    expect(browser.parentElement).toBe(before.parentElement);
+    expect(chatSurface()).toBe(before);
+    expect(chatIsInert()).toBe(true);
+    expect(composer().value).toBe('keep this draft');
+    [...browser.querySelectorAll('button')].find(button => button.textContent?.includes('Back to chat'))!.click();
+    await waitFor(() => target.querySelector('[data-knowledge-takeover]') === null);
+    expect(chatSurface()).toBe(before);
+    expect(chatIsInert()).toBe(false);
+    expect(composer().value).toBe('keep this draft');
+    expect(scroll.scrollTop).toBe(75);
+  });
+
+  it('ignores an old assistant response when the selected assistant changes', async () => {
+    const previousFetch = globalThis.fetch;
+    let finishOld!: (value: Response) => void;
+    const response = (data: unknown) => ({ ok: true, status: 200, json: async () => data }) as Response;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/agents/izzie/kg/subjects')) return new Promise<Response>(resolve => finishOld = resolve);
+      if (url.includes('/agents/new-agent/kg/subjects')) return Promise.resolve(response({ connected: false, palace: null, reason: 'new agent graph', data: [] }));
+      return previousFetch(input, init);
+    }));
+    activeAgentId.set('izzie');
+    await waitFor(() => target.querySelector('[aria-label="Knowledge Graph"]') !== null);
+    (target.querySelector('[aria-label="Knowledge Graph"]') as HTMLButtonElement).click();
+    await waitFor(() => !!finishOld);
+    activeAgentId.set('new-agent');
+    await waitFor(() => target.textContent?.includes('new agent graph') === true);
+    finishOld(response({ connected: false, palace: null, reason: 'old private graph', data: [] }));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(target.textContent).toContain('new agent graph');
+    expect(target.textContent).not.toContain('old private graph');
+    pressEscape();
+    await waitFor(() => target.querySelector('[data-knowledge-takeover]') === null);
+    expect(chatIsInert()).toBe(false);
   });
 });

@@ -1,41 +1,7 @@
 <script lang="ts">
-  /**
-   * Why (#3819, epic #3052): Bob's directive moves the agent selector OUT of
-   * the top toolbar (`AgentSwitcher`, formerly in `Header.svelte`) and INTO
-   * the chat pane — the selected agent's display name IS the pane title,
-   * consistent with the gear-icon directive (title + selector + gear all
-   * live in one pane header). "Concierge" (the `ctrl` agent) selects via
-   * `activeAgentId = null`, the pre-existing "tools-armed base PM/ctrl
-   * session" dispatch path (`stores/app.ts`'s `activeAgentId` doc comment) —
-   * load-bearing: dispatching by NAME (`agent: "ctrl"`, the normal roster
-   * path) routes through the tools-OFF persona-chat path instead
-   * (`handlers.rs::resolve_agent_for_chat` — ANY non-null `agent` value
-   * does, with no special case for `"ctrl"`), which would silently strip
-   * Concierge's delegation/tool capability. So even though `ctrl` now
-   * legitimately appears in `$agentRoster` (role=assistant, hidden=false,
-   * per #3812+#3819's composed picker filters), it is explicitly EXCLUDED
-   * from the roster-driven "Assistants" list below and represented ONLY by
-   * the dedicated `selectConcierge` row — Bob's "Concierge appears exactly
-   * once" fix (a prior pass rendered both a hardcoded pinned row AND
-   * `ctrl`'s own roster entry).
-   * What: Renders the active selection's display name as an `<h1>`-style
-   * pane title; a dropdown grouped into TWO typed sections per Bob's
-   * roster-typing directive — "System Tool" (Concierge only, hardcoded) and
-   * "Assistants" (`$agentRoster` minus `ctrl` — currently Izzie/CTO
-   * Assistant; the base `assistant` template never appears here at all,
-   * it's `hidden` server-side and only ever instantiated via Concierge or
-   * the add-agent template flow, `AddAgentForm`); a "+ Add agent" row; and
-   * a gear button toggling the agent-configuration takeover (#3894) for
-   * whichever agent is selected. The gear only flips
-   * `stores/configPane.ts`'s `configPaneOpen`: the config surface covers the
-   * recap rail as well as this column, so it is rendered by `ChatPane` as a
-   * SIBLING of the whole chat column rather than mounted here — which is
-   * also what lets the chat stay mounted (scroll offset + half-typed
-   * message) behind it instead of being unmounted and rebuilt on exit.
-   * Test: `ChatPane.test.ts` (the gear opens the takeover). Manual — open the
-   * app, confirm "Concierge" is the default title and appears exactly once in
-   * the open dropdown (System Tool section); switch to Izzie via the
-   * Assistants section, confirm the title updates.
+  /** The chat title and switcher show user-facing assistants only.
+   * Concierge remains an internal configuration helper, never a picker option.
+   * Configuration stays mounted through ChatPane to preserve conversation state.
    */
   import { onMount } from 'svelte';
   import { ChevronDown, Settings2, Plus, Bot, Network } from 'lucide-svelte';
@@ -45,29 +11,17 @@
     fetchAgentCatalog,
     refreshOverlayAgents,
   } from '../stores/app';
-  // `CONCIERGE_AGENT_ID` — the one agent id Concierge's dedicated row
-  // represents — is excluded from the roster-driven "Assistants" section to
-  // avoid the duplicate. Both constants moved to `lib/roster.ts` in #3894 so
-  // the config takeover resolves the same identity from the same place.
-  import { CONCIERGE_AGENT_ID, CONCIERGE_LABEL, rosterDisplayName } from '../lib/roster';
+  import { CONCIERGE_AGENT_ID, rosterDisplayName } from '../lib/roster';
   import { configPaneOpen, openConfigPane, requestExitConfigPane } from '../stores/configPane';
   import AddAgentForm from './AddAgentForm.svelte';
-  import KnowledgeGraphBrowser from './KnowledgeGraphBrowser.svelte';
+  export let onOpenKnowledgeGraph: () => void = () => {};
 
   let open = false;
   let addingAgent = false;
-  // #4290: local open/closed bit for the Knowledge Graph slide-over. Kept
-  // local (not a module-level store like `configPaneOpen`) because — unlike
-  // the config takeover, which another surface (App's Chat→Events switch)
-  // must be able to query — nothing outside this component needs to know
-  // whether the panel is open, and there is nothing unsaved to guard on exit
-  // (read-only v1).
-  let kgOpen = false;
 
-  $: isConcierge = $activeAgentId === null;
-  $: title = isConcierge ? CONCIERGE_LABEL : rosterDisplayName($agentRoster, $activeAgentId);
-  // #3819 roster-typing: "Assistants" section is everything the roster
-  // returns EXCEPT ctrl (Concierge has its own dedicated System Tool row).
+
+  $: hasSelectedAssistant = $activeAgentId !== null;
+  $: title = rosterDisplayName($agentRoster, $activeAgentId);
   $: assistantEntries = $agentRoster.filter((e) => e.id !== CONCIERGE_AGENT_ID);
 
   function toggleDropdown() {
@@ -95,11 +49,6 @@
     } else {
       openConfigPane();
     }
-  }
-
-  function selectConcierge() {
-    activeAgentId.set(null);
-    open = false;
   }
 
   function selectRosterEntry(id: string) {
@@ -130,7 +79,7 @@
 
 <svelte:window on:click={handleWindowClick} />
 
-<div class="flex items-center justify-between border-b border-foundry-light-border dark:border-foundry-border bg-foundry-light-surface dark:bg-foundry-surface px-4 py-2.5">
+<div class="flex shrink-0 min-w-0 items-center justify-between border-b border-foundry-light-border dark:border-foundry-border bg-foundry-light-surface dark:bg-foundry-surface px-4 py-2.5">
   <div class="relative inline-block" data-chat-header-switcher>
     <button
       type="button"
@@ -150,25 +99,6 @@
         class="absolute left-0 top-full z-30 mt-1 max-h-80 w-64 overflow-y-auto rounded-md border border-foundry-light-border dark:border-foundry-border bg-foundry-light-surface dark:bg-foundry-surface py-1 shadow-lg"
       >
         <li class="px-3 pt-1.5 pb-0.5 font-mono text-[10px] font-semibold uppercase tracking-wide text-foundry-light-muted dark:text-foundry-text/40">
-          System Tool
-        </li>
-        <li>
-          <button
-            type="button"
-            role="option"
-            aria-selected={isConcierge}
-            class="flex w-full flex-col items-start gap-0.5 px-3 py-1.5 text-left text-xs transition-colors {isConcierge
-              ? 'bg-foundry-light-primary/15 dark:bg-foundry-primary/15 text-foundry-light-primary dark:text-foundry-primary'
-              : 'text-foundry-light-text/80 dark:text-foundry-text/80 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10'}"
-            on:click={selectConcierge}
-          >
-            <span class="font-medium">{CONCIERGE_LABEL}</span>
-            <span class="font-mono text-[10px] uppercase tracking-wide text-foundry-light-muted dark:text-foundry-text/40">
-              fixed coordination layer
-            </span>
-          </button>
-        </li>
-        <li class="mt-1 border-t border-foundry-light-border dark:border-foundry-border px-3 pt-1.5 pb-0.5 font-mono text-[10px] font-semibold uppercase tracking-wide text-foundry-light-muted dark:text-foundry-text/40">
           Assistants
         </li>
         {#each assistantEntries as entry (entry.id)}
@@ -176,9 +106,8 @@
             <button
               type="button"
               role="option"
-              aria-selected={!isConcierge && entry.id === $activeAgentId}
-              class="flex w-full flex-col items-start gap-0.5 px-3 py-1.5 text-left text-xs transition-colors {!isConcierge &&
-              entry.id === $activeAgentId
+              aria-selected={entry.id === $activeAgentId}
+              class="flex w-full flex-col items-start gap-0.5 px-3 py-1.5 text-left text-xs transition-colors {entry.id === $activeAgentId
                 ? 'bg-foundry-light-primary/15 dark:bg-foundry-primary/15 text-foundry-light-primary dark:text-foundry-primary'
                 : 'text-foundry-light-text/80 dark:text-foundry-text/80 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10'}"
               on:click={() => selectRosterEntry(entry.id)}
@@ -222,16 +151,14 @@
   </div>
 
   <span class="ml-auto flex items-center gap-1">
-    <!-- #4290: hidden entirely for Concierge (owner decision 4) — it binds no
-         `agent.toml`/`[[stores]]`, so there is no palace for the button to
-         open a browser onto. -->
-    {#if !isConcierge}
+    <!-- A knowledge graph requires an explicitly selected assistant. -->
+    {#if hasSelectedAssistant}
       <button
         type="button"
         class="rounded-md p-1.5 text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10 hover:text-foundry-light-primary dark:hover:text-foundry-primary"
         aria-label="Knowledge Graph"
         title="Knowledge Graph"
-        on:click={() => (kgOpen = true)}
+        on:click={onOpenKnowledgeGraph}
       >
         <Network class="h-4 w-4" />
       </button>
@@ -248,7 +175,3 @@
     </button>
   </span>
 </div>
-
-{#if kgOpen && $activeAgentId}
-  <KnowledgeGraphBrowser agentName={$activeAgentId} onClose={() => (kgOpen = false)} />
-{/if}

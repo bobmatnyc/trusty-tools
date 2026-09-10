@@ -354,6 +354,26 @@ mod tests {
         assert!(build_rpc_client().is_ok());
     }
 
+    /// This bridge's timeout must stay clear of `disk_survey`'s budget clamp.
+    ///
+    /// Why the two numbers need a test between them (#7313): they live in
+    /// different modules and neither reads the other, but they are one
+    /// contract — a survey allowed to run for longer than this bridge will wait
+    /// produces a transport error instead of an answer, which is exactly what
+    /// `budget_seconds: 120` did. Dropping `REQUEST_TIMEOUT` below the clamp
+    /// plus headroom reintroduces that silently; this fails instead.
+    #[test]
+    fn the_forwarding_timeout_leaves_headroom_over_the_disk_survey_budget_clamp() {
+        let clamp = Duration::from_secs(trusty_mpm::daemon::mcp_disk::MAX_BUDGET_SECONDS);
+        let headroom = Duration::from_secs(5);
+        assert!(
+            REQUEST_TIMEOUT >= clamp + headroom,
+            "a {clamp:?} survey plus {headroom:?} of serialization and round trip \
+             does not fit in a {REQUEST_TIMEOUT:?} forwarding timeout — either \
+             raise this timeout or lower `mcp_disk::MAX_BUDGET_SECONDS`"
+        );
+    }
+
     /// Why (#2486): `build_bridge_config`'s `no_spawn` must track whether a
     /// trusty-mpm launchd unit is registered on this host — this test compares
     /// against `launchd_may_own_daemon()` directly (not via

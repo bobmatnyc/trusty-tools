@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 use trusty_kb::okg::registry::SourceSpec;
 use trusty_kb::store::KbStore;
 
-use crate::stores::index_feed::{HttpIndexFeed, IndexFeed, IndexFeedReport, feed_source};
+use crate::stores::index_feed::{IndexFeed, IndexFeedReport, feed_source};
 
 /// Feed everything this source owes the agent's bound search index.
 ///
@@ -66,14 +66,9 @@ fn resolve_feed(
         &store.root,
         agent,
     )?;
-    let Some(base) = trusty_common::resolve_daemon_base_url("trusty-search") else {
-        return Err(format!(
-            "trusty-search daemon not discoverable (no address file; is it running?) — \
-             `{}` is bound but nothing was pushed",
-            bound.index
-        ));
-    };
-    let feed = HttpIndexFeed::new(base).map_err(|e| format!("HTTP client unavailable: {e}"))?;
+    let socket = trusty_common::search_rpc::search_socket()
+        .map_err(|e| format!("trusty-search socket unavailable: {e}"))?;
+    let feed = crate::stores::index_feed_rpc::RpcIndexFeed::new(socket);
     Ok((bound.index, Box::new(feed)))
 }
 

@@ -338,3 +338,29 @@ fn native_tool_registry_returns_six_tools_without_ticketing() {
     assert!(names.contains(&"retrieve_memory"));
     assert!(names.contains(&"list_memory_keys"));
 }
+
+#[tokio::test]
+async fn tool_activity_dispatch_records_real_success_and_errors_without_payloads() {
+    let mut registry = ToolRegistry::new().with_activity_session("fixture-tools");
+    registry.register(Arc::new(FakeTool));
+    registry.register(Arc::new(FailingTool));
+    registry
+        .dispatch("fake", serde_json::json!({"secret":"credential"}))
+        .await;
+    registry.dispatch("fails", serde_json::json!({})).await;
+    let history = registry.activity_history();
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0]["status"], "complete");
+    assert_eq!(history[1]["status"], "error");
+    assert_ne!(history[0]["call_id"], history[1]["call_id"]);
+    assert!(
+        !serde_json::to_string(&history)
+            .unwrap()
+            .contains("credential")
+    );
+    assert!(
+        !serde_json::to_string(&history)
+            .unwrap()
+            .contains("fake-output")
+    );
+}

@@ -497,12 +497,72 @@ pub(crate) fn render_memory_block(memory: &PersonaMemory) -> Option<String> {
 /// Test: `persist_turn_creates_session_then_appends` (mock-daemon),
 /// `persist_turn_surfaces_rpc_envelope_errors`,
 /// `spawn_persist_turn_is_noop_without_palace`.
+/// Serialize complete chat persistence sequences across the API and channel processes.
+async fn acquire_chat_persistence_lock(
+    socket: &Path,
+    palace: &str,
+    session: &str,
+) -> Result<std::fs::File, String> {
+    use sha2::{Digest, Sha256};
+    let socket = socket.to_path_buf();
+    let palace = palace.to_owned();
+    let session = session.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let parent = socket
+            .parent()
+            .ok_or_else(|| "Memory socket has no parent".to_owned())?;
+        let parent = std::fs::canonicalize(parent).map_err(|e| e.to_string())?;
+        let identity = format!(
+            "{}\n{palace}\n{session}",
+            parent
+                .join(socket.file_name().unwrap_or_default())
+                .display()
+        );
+        let filename = format!(
+            ".persona-chat-{:x}.lock",
+            Sha256::digest(identity.as_bytes())
+        );
+        let mut opts = std::fs::OpenOptions::new();
+        opts.create(true).read(true).write(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let file = opts
+            .open(parent.join(filename))
+            .map_err(|e| e.to_string())?;
+        fs4::FileExt::lock(&file).map_err(|e| e.to_string())?;
+        Ok(file)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 pub(crate) fn spawn_persist_turn(
     stores: &StoresConfig,
     memory_socket: Option<&Path>,
     agent_name: &str,
     user_input: &str,
     response: &str,
+) {
+    spawn_persist_turn_with_activity(
+        stores,
+        memory_socket,
+        agent_name,
+        user_input,
+        response,
+        vec![],
+    );
+}
+
+pub(crate) fn spawn_persist_turn_with_activity(
+    stores: &StoresConfig,
+    memory_socket: Option<&Path>,
+    agent_name: &str,
+    user_input: &str,
+    response: &str,
+    activities: Vec<serde_json::Value>,
 ) {
     let (Some(palace), Some(socket)) = (
         stores.primary().and_then(|b| b.palace.clone()),
@@ -513,10 +573,46 @@ pub(crate) fn spawn_persist_turn(
     let session_id = session_id_for(agent_name);
     let agent = agent_name.to_string();
     let prompt = user_input.to_string();
+    let event = crate::listeners::wake::LISTENER_CHAT_EVENT
+        .try_with(Clone::clone)
+        .ok();
     let reply = response.to_string();
 
     tokio::spawn(async move {
-        if let Err(e) = persist_turn(&socket, &palace, &session_id, &prompt, &reply).await {
+        static PERSIST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _guard = PERSIST_LOCK.lock().await;
+        let _process_guard = match acquire_chat_persistence_lock(&socket, &palace, &session_id)
+            .await
+        {
+            Ok(guard) => guard,
+            Err(error) => {
+                tracing::warn!(%error,"Chat persistence lock unavailable; skipping unsafe write");
+                return;
+            }
+        };
+        let result = if event.is_some() || !activities.is_empty() {
+            persist_activity_turn(
+                &socket,
+                &palace,
+                &session_id,
+                event.as_deref(),
+                &prompt,
+                &reply,
+                &activities,
+            )
+            .await
+        } else {
+            persist_turn(&socket, &palace, &session_id, &prompt, &reply).await
+        };
+        if result.is_ok() && event.is_some() {
+            let notification = crate::events::Event::ChatHistoryUpdated {
+                agent: agent.clone(),
+            };
+            crate::events::publish(notification.clone());
+            // The Slack intake can run in a separate process; use its existing authenticated relay.
+            tokio::spawn(crate::slack::relay::relay_event(notification));
+        }
+        if let Err(e) = result {
             tracing::warn!(
                 agent = %agent,
                 palace = %palace,
@@ -525,6 +621,32 @@ pub(crate) fn spawn_persist_turn(
             );
         }
     });
+}
+
+async fn persist_activity_turn(
+    socket: &Path,
+    palace: &str,
+    session_id: &str,
+    event: Option<&str>,
+    prompt: &str,
+    response: &str,
+    activities: &[serde_json::Value],
+) -> Result<(), String> {
+    let mut entries = vec![(
+        if event.is_some() { "system" } else { "user" },
+        event.unwrap_or(prompt).to_owned(),
+    )];
+    entries.extend(activities.iter().map(|v| ("system", v.to_string())));
+    entries.push(("assistant", response.to_owned()));
+    for (role, content) in entries {
+        call_memory_tool(
+            socket,
+            "chat_session_add_turn",
+            json!({"palace":palace,"session_id":session_id,"role":role,"content":content}),
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 /// Awaited body of [`spawn_persist_turn`], separated so tests can observe the

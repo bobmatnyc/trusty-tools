@@ -4,7 +4,9 @@
   import { get } from 'svelte/store';
   import {
     activeMessages,
-    activeProjectId,
+    recordToolActivity,
+    finishToolActivities,
+    conversationForTask,
     agentRoster,
     setMessageSpeakerByTask,
     updateMessageByTask,
@@ -20,6 +22,8 @@
   import { streamAccumulator, type DeltaPayload } from '../lib/chatStream';
   import { isPinnedToBottom } from '../lib/chatScroll';
   import ActionIcon from '../lib/icons/ActionIcon.svelte';
+  import ToolActivity from './ToolActivity.svelte';
+  import { renderChatMarkdown, assistantEmptyNotice } from '../lib/chatRendering';
   import WorkflowPhaseCard from './WorkflowPhaseCard.svelte';
   import { workflowState } from '../stores/workflow';
 
@@ -27,6 +31,8 @@
   let unlistenComplete: UnlistenFn | null = null;
   let unlistenError: UnlistenFn | null = null;
   let unlistenDelta: UnlistenFn | null = null;
+  let unlistenTool: UnlistenFn | null = null;
+  let destroyed = false;
 
   // Token-streaming accumulator: grows the in-flight reply bubble from
   // `task-delta` fragments and lets the progress handler know which tasks are
@@ -64,6 +70,8 @@
    * `task-complete`.
    */
   async function wireListeners() {
+    unlistenTool = await listenEvent<{ task_id: string; call_id: string; tool: string; status: 'running' | 'complete' | 'error' }>('task-tool-activity', recordToolActivity);
+    if (destroyed) { unlistenTool(); return; }
     // Token-level streaming: each fragment grows the in-flight bubble. The
     // fragment's `agent` (when present) keeps per-message attribution (#3739)
     // truthful mid-stream. The terminal `done` marker carries no text — the
@@ -103,19 +111,26 @@
       // Drop any streamed buffer FIRST so the authoritative narrative replaces
       // (never appends to) the accumulation — the streaming dedupe contract.
       streams.finalize(p.id);
-      const text = p.narrative && p.narrative.length > 0 ? p.narrative : '(no narrative)';
-      updateMessageByTask($activeProjectId, p.id, text);
+      finishToolActivities(p.id, 'complete');
+      const text = p.narrative?.trim() ? p.narrative
+        : /cancel/i.test(p.status ?? '') ? 'The request was cancelled without returning a response.'
+        : /fail|error/i.test(p.status ?? '') ? 'The request failed without returning a response.' : '';
+      const owner = conversationForTask(p.id);
+      if (!owner) return;
+      updateMessageByTask(owner, p.id, text);
       // #3737: if the turn delegated, relabel the bubble to the agent that
       // actually answered (resolved to its display name via the roster).
       const responder = responderDisplayName(get(agentRoster), p.responder_agent);
       if (responder) {
-        setMessageSpeakerByTask($activeProjectId, p.id, responder);
+        setMessageSpeakerByTask(owner, p.id, responder);
       }
       isRunning.set(false);
     });
     unlistenError = await listenEvent<ErrorPayload>('task-error', (p) => {
       streams.finalize(p.task_id);
-      updateMessageByTask($activeProjectId, p.task_id, `Error: ${p.error}`);
+      finishToolActivities(p.task_id, 'error');
+      const owner = conversationForTask(p.task_id);
+      if (owner) updateMessageByTask(owner, p.task_id, `Error: ${p.error}`);
       isRunning.set(false);
     });
   }
@@ -127,9 +142,11 @@
   });
 
   onDestroy(() => {
+    destroyed = true;
     unlistenComplete?.();
     unlistenError?.();
     unlistenDelta?.();
+    unlistenTool?.();
   });
 
   /**
@@ -189,7 +206,7 @@
   bind:this={scrollEl}
   on:scroll={onScroll}
   data-chat-scroll
-  class="flex-1 overflow-y-auto px-6 py-4 bg-foundry-light-bg dark:bg-foundry-bg"
+  class="min-w-0 min-h-0 flex-1 overflow-y-auto [overflow-wrap:anywhere] px-6 py-4 bg-foundry-light-bg dark:bg-foundry-bg"
 >
   {#if $activeMessages.length === 0}
     <div class="mt-10 text-center text-sm text-foundry-light-muted dark:text-foundry-text/50 font-sans">
@@ -197,7 +214,7 @@
     </div>
   {/if}
 
-  <div class="mx-auto flex max-w-3xl flex-col gap-3 font-sans">
+  <div class="chat-message-list flex w-full min-w-0 flex-col gap-6 font-sans">
     <!-- #4278: the other half of the bounded initial load. Rehydration seeds
          only the newest page of a `persona-{agent}` session that never rolls
          over, so without this control the bound would just be truncation.
@@ -218,13 +235,15 @@
       </div>
     {/if}
     {#each $activeMessages as msg (msg.id)}
-      {#if msg.role === 'user'}
-        <div class="flex justify-end">
-          <div class="max-w-[75%] rounded-2xl bg-foundry-light-surface dark:bg-foundry-surface px-4 py-2 text-foundry-light-text dark:text-foundry-text shadow border border-foundry-light-border dark:border-transparent">
-            <p class="whitespace-pre-wrap text-sm leading-relaxed">{msg.content}</p>
+      {#if msg.role === 'user' || msg.role === 'event'}
+        <div class="flex w-full justify-end" data-incoming-message>
+          <div class="incoming-bubble min-w-0 px-4 py-3 text-foundry-light-text dark:text-foundry-text">
+            <p class="whitespace-pre-wrap break-words text-left text-sm leading-7">{msg.content}</p>
             <p class="mt-1 text-right text-[10px] text-foundry-light-muted dark:text-foundry-text/50">{fmtTime(msg.timestamp)}</p>
           </div>
         </div>
+      {:else if msg.role === 'tool'}
+        <ToolActivity name={msg.toolName ?? 'Tool activity'} details={msg.content} status={msg.activityStatus} />
       {:else if msg.role === 'assistant'}
         <!-- Why: the waiting indicator belongs to the bubble it is waiting on,
              so BOTH the in-bubble spinner and the pulsing green border read
@@ -239,9 +258,9 @@
              Test: `ChatView.test.ts` (the spinner appears/clears with the
              flag, inside the bubble). -->
         {@const waiting = $isRunning && !!msg.taskId && msg.taskId === $activeTaskId}
-        <div class="flex justify-start ml-4">
+        <div class="flex w-full">
           <div
-            class="max-w-[85%] rounded-r-2xl rounded-bl-2xl border-l-4 border-foundry-teal bg-foundry-teal/10 px-4 py-2 text-foundry-light-text dark:text-foundry-text shadow-sm {waiting ? 'waiting-bubble' : ''}"
+            class="w-full min-w-0 px-1 py-2 text-foundry-light-text dark:text-foundry-text {waiting ? 'waiting-bubble' : ''}"
           >
             <!-- #3737: label each assistant bubble with the specific persona
                  that produced it (stamped on the message at send time), never
@@ -261,7 +280,7 @@
                  the markup's own indentation as literal text. `role="status"`
                  + `aria-label` carry the accessible busy name that the removed
                  out-of-bubble element used to own. -->
-            <p class="whitespace-pre-wrap text-sm leading-relaxed">{msg.content}{#if waiting}<span class="ml-0.5 inline-flex align-middle text-foundry-light-success dark:text-foundry-success" role="status" aria-label="Assistant is responding"><Loader2 class="h-3 w-3 animate-spin" aria-hidden="true" /></span>{:else if !msg.content}…{/if}</p>
+            <div data-assistant-body class="assistant-markdown break-words text-sm leading-7">{#if msg.content.trim()}{@html renderChatMarkdown(msg.content)}{:else if !waiting}<p>{assistantEmptyNotice(msg, $activeMessages)}</p>{/if}{#if waiting}<span class="ml-0.5 inline-flex align-middle text-foundry-light-success dark:text-foundry-success" role="status" aria-label="Assistant is responding"><Loader2 class="h-3 w-3 animate-spin" aria-hidden="true" /></span>{/if}</div>
             <p class="mt-1 text-[10px] text-foundry-teal/70">{fmtTime(msg.timestamp)}</p>
           </div>
         </div>
@@ -307,12 +326,12 @@
         </div>
       {:else if msg.role === 'pm'}
         <div class="flex justify-start">
-          <div class="max-w-[85%] rounded-r-2xl rounded-bl-2xl border-l-4 border-foundry-light-primary dark:border-foundry-primary bg-foundry-light-primary/10 dark:bg-foundry-primary/10 px-4 py-2 text-foundry-light-text dark:text-foundry-text shadow-sm">
+          <div class="w-full min-w-0 px-1 py-2 text-foundry-light-text dark:text-foundry-text">
             <div class="mb-1 flex items-center gap-1 text-[10px] font-medium uppercase tracking-wide text-foundry-light-primary/80 dark:text-foundry-primary/80">
               <ActionIcon name="pm" size={14} />
               <span>pm</span>
             </div>
-            <p class="whitespace-pre-wrap text-sm leading-relaxed">{msg.content || '…'}</p>
+            <p class="whitespace-pre-wrap break-words text-sm leading-7">{msg.content || '…'}</p>
             <p class="mt-1 text-[10px] text-foundry-light-primary/80 dark:text-foundry-primary/80">{fmtTime(msg.timestamp)}</p>
           </div>
         </div>
@@ -337,8 +356,8 @@
     {#if $workflowState.phases.length > 0}
       <!-- #3218: inline RESEARCH/PLAN/IMPLEMENT/VERIFY checklist for the
            active task, fed live by the structured workflow store. -->
-      <div class="flex justify-start ml-4">
-        <div class="max-w-[85%] w-full">
+      <div class="flex w-full">
+        <div class="w-full">
           <WorkflowPhaseCard />
         </div>
       </div>
@@ -347,6 +366,21 @@
 </div>
 
 <style>
+  .assistant-markdown :global(p) { margin:0 0 .65em; white-space:pre-wrap; }
+  .assistant-markdown :global(pre) { overflow:auto; padding:12px; border-radius:8px; background:rgb(var(--color-text-primary) / .05); }
+  .assistant-markdown :global(code) { font-size:.9em; white-space:pre-wrap; overflow-wrap:anywhere; }
+  .assistant-markdown :global(ul), .assistant-markdown :global(ol) { padding-left:1.5em; margin:.6em 0; }
+  .assistant-markdown :global(ul) { list-style:disc; }
+  .assistant-markdown :global(ol) { list-style:decimal; }
+  .assistant-markdown :global(h1), .assistant-markdown :global(h2), .assistant-markdown :global(h3) { font-weight:600; margin:.8em 0 .4em; }
+  .assistant-markdown :global(blockquote) { border-left:2px solid rgb(var(--color-border)); padding-left:12px; }
+  .assistant-markdown :global(table) { display:block; max-width:100%; overflow:auto; border-collapse:collapse; }
+  .assistant-markdown :global(td), .assistant-markdown :global(th) { padding:4px 8px; border:1px solid rgb(var(--color-border)); }
+
+  .chat-message-list :global([data-tool-activity] + [data-tool-activity]) { margin-top:-16px; }
+  .incoming-bubble { width:fit-content; max-width:70%; border-radius:16px; background:rgb(128 128 128 / .10); text-align:left; }
+  :global(.dark) .incoming-bubble { background:rgb(190 190 190 / .12); }
+
   /* Why (#3387): was an unsanctioned raw `rgb(20 184 166 / 0.04)` teal-500
      literal with no token relationship (audit finding B2). Now reads
      --trusty-surface-hover (app.css), the DS's own sanctioned hover/tint
@@ -360,40 +394,4 @@
     background-color: var(--trusty-surface-hover);
   }
 
-  /* Why: the in-flight assistant bubble gets a pulsing green ring so the
-     waiting state belongs to the message rather than floating beneath it.
-     Drawn with `outline`, not `border`: the bubble already carries a 4px teal
-     `border-l-4` and no other border, so overriding the border box would both
-     fight that utility's specificity and reflow the bubble every time a task
-     starts or ends. An outline follows `border-radius`, costs no layout, and
-     leaves the teal identity bar intact.
-     Green comes from `--color-success` (app.css), the Foundry
-     `--trusty-success` pair — #3F6F2A light / #8FBF6A dark — so it reads
-     correctly in both themes with no hardcoded hex here.
-     Test: send a message and watch the bubble ring pulse until the reply
-     lands (or errors/cancels), then stop. */
-  .waiting-bubble {
-    outline: 2px solid rgb(var(--color-success));
-    outline-offset: 1px;
-    animation: waiting-pulse 1.6s ease-in-out infinite;
-  }
-
-  @keyframes waiting-pulse {
-    0%,
-    100% {
-      outline-color: rgb(var(--color-success) / 0.95);
-    }
-    50% {
-      outline-color: rgb(var(--color-success) / 0.3);
-    }
-  }
-
-  /* Reduced motion: the ring still marks the bubble as waiting, it just
-     stops moving — a static green outline, not a removed one. */
-  @media (prefers-reduced-motion: reduce) {
-    .waiting-bubble {
-      animation: none;
-      outline-color: rgb(var(--color-success));
-    }
-  }
 </style>

@@ -561,6 +561,7 @@ mod eventstream_tests {
             subject: None,
             snippet: None,
             included: true,
+            labels: vec![],
         };
         assert!(
             EventStore::append(&probe).await.is_err(),
