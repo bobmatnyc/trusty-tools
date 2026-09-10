@@ -338,6 +338,7 @@ fn state_delete_on_a_stopped_row_confirms_with_yes() {
         &Mode::Confirm {
             index: 1,
             force: false,
+            stop_first: false,
             typed: String::new()
         }
     );
@@ -346,9 +347,66 @@ fn state_delete_on_a_stopped_row_confirms_with_yes() {
         state.apply(Input::Enter, &sessions),
         Action::Delete {
             index: 1,
-            force: false
+            force: false,
+            stop_first: false
         }
     );
+}
+
+/// An ERRORED row confirms with a plain `y`, and the action it yields carries
+/// `stop_first` — the runtime-stop leg the daemon's refusal used to send the
+/// operator out to a shell to run (#7224). `force` stays false: the delete that
+/// follows the stop is still unforced, so the daemon's tmux probe remains the
+/// authority on whether the record may go.
+#[test]
+fn state_delete_on_an_errored_row_asks_to_stop_and_delete() {
+    let mut sessions = fleet();
+    sessions[1].state = "errored".to_string();
+    let mut state = browsing();
+    state.sync(&sessions);
+    state.apply(Input::Down, &sessions); // tm-bravo-02, errored
+    assert_eq!(state.apply(Input::Char('d'), &sessions), Action::Redraw);
+    assert_eq!(
+        state.mode(),
+        &Mode::Confirm {
+            index: 1,
+            force: false,
+            stop_first: true,
+            typed: String::new()
+        },
+        "an errored row must open a stop-and-delete confirm, not a plain one"
+    );
+    state.apply(Input::Char('y'), &sessions);
+    assert_eq!(
+        state.apply(Input::Enter, &sessions),
+        Action::Delete {
+            index: 1,
+            force: false,
+            stop_first: true
+        }
+    );
+}
+
+/// The stop-first leg is scoped to `errored`: a `stopped` row has no runtime to
+/// stop, and a running one takes the force-confirm path instead — neither may
+/// pick up a stop request it does not need (#7224).
+#[test]
+fn state_delete_sets_stop_first_only_for_errored() {
+    let sessions = fleet();
+    for (index, expect_stop) in [(0usize, false), (1, false)] {
+        let mut state = browsing();
+        state.apply(
+            if index == 0 { Input::Home } else { Input::Down },
+            &sessions,
+        );
+        state.apply(Input::Char('d'), &sessions);
+        match state.mode() {
+            Mode::Confirm { stop_first, .. } => {
+                assert_eq!(*stop_first, expect_stop, "row {index}");
+            }
+            other => panic!("row {index} must open a confirm, got {other:?}"),
+        }
+    }
 }
 
 #[test]
@@ -377,7 +435,8 @@ fn state_delete_on_a_running_row_requires_the_force_word() {
         state.apply(Input::Enter, &sessions),
         Action::Delete {
             index: 0,
-            force: true
+            force: true,
+            stop_first: false
         }
     );
 }
@@ -567,6 +626,22 @@ fn delete_outcome_surfaces_a_refusal() {
     assert_eq!(text, "delete refused: session is running");
 }
 
+/// A failed stop leg must read as "nothing was deleted", carrying the daemon's
+/// own status and body — never as a delete that merely did not happen (#7224).
+#[test]
+fn delete_outcome_reports_a_failed_stop_as_not_deleted() {
+    let (text, severity) = delete_outcome(
+        "tm-bravo-02",
+        Ok(DeleteReport::StopFailed(
+            "stop returned HTTP 500 Internal Server Error: tmux driver unavailable".to_string(),
+        )),
+    );
+    assert_eq!(severity, Severity::Error);
+    assert!(text.contains("NOT deleted"), "{text}");
+    assert!(text.contains("tmux driver unavailable"), "{text}");
+    assert!(text.contains("500"), "{text}");
+}
+
 #[test]
 fn delete_outcome_reports_not_found() {
     let (text, severity) = delete_outcome("gone-01", Ok(DeleteReport::NotFound));
@@ -670,6 +745,20 @@ fn render_at_two_hundred_by_fifty_shows_every_column() {
     }
     assert!(joined.contains("bobmatnyc/trusty-tools"), "{joined}");
     assert!(joined.contains("%11"), "{joined}");
+}
+
+/// The TUI overlay renders the SHARED errored question (#7224), so an operator
+/// who learns what `y` does in the numbered fallback picker reads the same
+/// promise here.
+#[test]
+fn confirm_overlay_asks_the_shared_errored_question() {
+    let sessions = vec![session("tm-quiet-falcon", "errored", 4)];
+    let mut state = TuiState::new(None, None);
+    state.sync(&sessions);
+    state.apply(Input::Char('d'), &sessions);
+    let joined = draw(200, 50, &sessions, &mut state).join("\n");
+    let ask = crate::commands::picker_delete::errored_confirm_ask("tm-quiet-falcon");
+    assert!(joined.contains(&ask), "expected {ask:?} in\n{joined}");
 }
 
 #[test]
@@ -813,4 +902,128 @@ fn render_shows_a_rename_after_the_refetch() {
         "tm-renamed-02",
         "selection must follow the renamed session across the re-fetch"
     );
+}
+
+// ── status-line wrapping: never cut a token in half (#7224) ─────────────────
+
+/// The exact refusal the daemon's delete guard produces, for a session whose
+/// friendly name and UUID are both realistic. This is the string the owner saw
+/// cut off mid-UUID in the picker.
+const GUARD_REFUSAL: &str = "delete refused: session 'tm-quiet-falcon' is errored — stop it first \
+     with `tm session stop` (or `tm session decommission`), or pass --force to delete the record \
+     anyway. Session id:\n8fc5db8f-b0a5-5c47-9a5b-59cd2a1e4f77";
+
+/// The UUID in the guard refusal, which no wrap may split.
+const GUARD_UUID: &str = "8fc5db8f-b0a5-5c47-9a5b-59cd2a1e4f77";
+
+#[test]
+fn wrap_message_keeps_a_uuid_whole_at_eighty_columns() {
+    let lines = layout::wrap_message(GUARD_REFUSAL, 80, layout::STATUS_MAX_LINES);
+    for line in &lines {
+        assert!(
+            line.chars().count() <= 80,
+            "wrapped line exceeds the width: {line}"
+        );
+    }
+    assert!(
+        lines.iter().any(|l| l.contains(GUARD_UUID)),
+        "the full session id must survive the wrap, got:\n{lines:#?}"
+    );
+}
+
+#[test]
+fn wrap_message_honours_explicit_newlines() {
+    let lines = layout::wrap_message("first line\nsecond line", 80, 4);
+    assert_eq!(lines, vec!["first line", "second line"]);
+}
+
+#[test]
+fn wrap_message_elides_on_a_token_boundary() {
+    // Ten five-character tokens at width 12 need five lines; capped at two, the
+    // second must end in an ellipsis and never inside a token.
+    let text = "aaaaa bbbbb ccccc ddddd eeeee fffff ggggg hhhhh iiiii jjjjj";
+    let lines = layout::wrap_message(text, 12, 2);
+    assert_eq!(lines.len(), 2);
+    assert!(lines[1].ends_with('…'), "{lines:#?}");
+    for line in &lines {
+        assert!(line.chars().count() <= 12, "{line}");
+        for token in line.trim_end_matches('…').split_whitespace() {
+            assert_eq!(token.chars().count(), 5, "token cut mid-word: {token}");
+        }
+    }
+}
+
+/// #7224: the session id is the point of the refusal, so it has to survive the
+/// wrap at the narrow widths a split pane actually has. Packing greedily from
+/// the front filled all four lines with the first paragraph at 40 and 60
+/// columns and dropped the id paragraph entirely.
+#[test]
+fn wrap_message_keeps_the_session_id_at_narrow_widths() {
+    for width in [40usize, 60, 80] {
+        let lines = layout::wrap_message(GUARD_REFUSAL, width, layout::STATUS_MAX_LINES);
+        assert!(
+            lines.len() <= layout::STATUS_MAX_LINES,
+            "width {width} overflowed the status region:\n{lines:#?}"
+        );
+        for line in &lines {
+            assert!(
+                line.chars().count() <= width,
+                "width {width}: line exceeds it: {line}"
+            );
+        }
+        assert!(
+            lines.iter().any(|l| l.contains(GUARD_UUID)),
+            "width {width}: the full session id must survive, got:\n{lines:#?}"
+        );
+    }
+}
+
+/// A token longer than the width has no wrap that shows it whole, so it is
+/// emitted alone and intact — splitting it is the exact failure the wrap exists
+/// to prevent, and the elide helper must leave a line it cannot cut at a
+/// whitespace boundary exactly as it is.
+#[test]
+fn wrap_message_keeps_an_overlong_token_whole() {
+    let token = "z".repeat(200);
+    let lines = layout::wrap_message(&token, 40, layout::STATUS_MAX_LINES);
+    assert_eq!(lines, vec![token]);
+}
+
+#[test]
+fn wrap_message_zero_width_is_empty() {
+    assert!(layout::wrap_message("anything", 0, 4).is_empty());
+    assert!(layout::wrap_message("anything", 80, 0).is_empty());
+}
+
+/// The regression the owner reported: at 80 columns the picker's status line
+/// showed the delete refusal cut off inside the session UUID. The full id must
+/// now appear somewhere on screen, unbroken (#7224).
+#[test]
+fn render_wraps_a_long_refusal_without_cutting_the_uuid() {
+    let sessions = fleet();
+    let mut state = browsing();
+    state.set_message(GUARD_REFUSAL, Severity::Error);
+    let screen = draw(80, 24, &sessions, &mut state);
+    let joined = screen.join("\n");
+    assert!(
+        joined.contains(GUARD_UUID),
+        "the session id was cut by the status line:\n{joined}"
+    );
+    for line in &screen {
+        assert!(line.chars().count() <= 80, "overlong row: {line}");
+    }
+    // The table and the key footer must survive the taller status region.
+    assert!(joined.contains("NAME"), "{joined}");
+    assert!(joined.contains("q quit"), "{joined}");
+}
+
+#[test]
+fn render_status_uses_one_row_when_there_is_no_message() {
+    let sessions = fleet();
+    let mut state = browsing();
+    let screen = draw(80, 24, &sessions, &mut state);
+    // Three sessions plus a header, a title, an empty status row and a footer —
+    // the layout must not have grown a status region with nothing in it.
+    assert_eq!(screen.len(), 24);
+    assert!(screen.last().is_some_and(|l| l.contains("q quit")));
 }

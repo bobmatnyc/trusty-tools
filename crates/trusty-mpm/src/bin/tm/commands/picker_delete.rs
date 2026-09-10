@@ -71,6 +71,13 @@ pub(crate) enum DeleteReport {
     NotFound,
     /// The managed running-guard (409) refused the delete; carries its message.
     Refused(String),
+    /// The stop-first leg failed, so NO delete was attempted (#7224).
+    ///
+    /// Carries the daemon's full status + body. Distinct from [`Self::Refused`]
+    /// because nothing reached the delete endpoint at all: the session is still
+    /// exactly as it was, and the operator has to deal with the stop failure
+    /// before a delete can mean anything.
+    StopFailed(String),
 }
 
 /// Next step after the managed-delete attempt, keyed on the HTTP status.
@@ -109,6 +116,116 @@ pub(crate) enum ManagedDeleteNext {
 /// `delete_needs_force_errored_false` in `tests_behavior_d_tests.rs`.
 pub(crate) fn delete_needs_force(state: &str) -> bool {
     !super::guided_resume::needs_restart(state)
+}
+
+/// Does deleting a session in state `state` need a runtime-stop first (#7224)?
+///
+/// Why: an `errored` record can still have a LIVE tmux session behind it —
+/// provisioning failed after the session was created, or the runtime died in a
+/// way that left the pane up. [`delete_needs_force`] answers `false` for it (no
+/// force word needed), the delete then goes out with `force = false`, and the
+/// daemon's own tmux-liveness probe 409s. That refusal is correct and the
+/// operator's only recourse used to be dropping to `tm session stop` in a
+/// shell — a bounce out of the surface they were already in. Doing the stop
+/// leg here is the automation of exactly that step, and nothing more: the
+/// delete that follows still goes out UNFORCED, so the daemon's probe stays the
+/// authority on whether the record may go.
+/// What: `true` only for `errored`. A `stopped` record has no runtime to stop,
+/// and `active`/`provisioning` take the force-confirm path instead.
+/// Test: `delete_needs_stop_first_only_for_errored` in
+/// `tests_behavior_d_stop_delete_tests.rs`.
+pub(crate) fn delete_needs_stop_first(state: &str) -> bool {
+    state == "errored"
+}
+
+/// What the stop-first leg's HTTP status means for the delete that follows.
+///
+/// Why: the fail-open risk in a stop-then-delete sequence is downgrading a
+/// failed stop to "close enough" and deleting anyway. Making the status→meaning
+/// mapping a pure enum is what keeps that carve-out keyed on the daemon's
+/// EXPLICIT answer rather than on "an error happened".
+/// What: `Stopped` = 2xx (the runtime is down); `NothingToStop` = 404, the
+/// daemon's answer for a record it has no live lifecycle for — no managed
+/// record, or a terminal one (`runtime_stop_core` maps both to 404), neither of
+/// which is a running session; `Failed` = every other status.
+/// Test: `classify_stop_first_maps_each_status` in
+/// `tests_behavior_d_stop_delete_tests.rs`.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub(crate) enum StopFirstNext {
+    /// 2xx — the runtime is stopped; proceed to the delete.
+    Stopped,
+    /// 404 — the daemon has no live session to stop; proceed to the delete,
+    /// which does its own not-found routing.
+    NothingToStop,
+    /// Anything else — report it and delete NOTHING.
+    Failed,
+}
+
+/// Map the stop-first leg's HTTP status to [`StopFirstNext`].
+///
+/// Test: `classify_stop_first_maps_each_status` in
+/// `tests_behavior_d_stop_delete_tests.rs`.
+pub(crate) fn classify_stop_first(status: reqwest::StatusCode) -> StopFirstNext {
+    match status {
+        s if s.is_success() => StopFirstNext::Stopped,
+        reqwest::StatusCode::NOT_FOUND => StopFirstNext::NothingToStop,
+        _ => StopFirstNext::Failed,
+    }
+}
+
+/// The `(force, stop_first)` pair a delete of a session in `state` uses (#7224).
+///
+/// Why: `tm ls` has two delete surfaces — the ratatui TUI and the numbered
+/// picker it falls back to when the terminal has no raw mode — and they must
+/// answer "what kind of delete is this?" identically. They did not: the TUI
+/// learned the stop-first leg and the numbered picker kept issuing the bare
+/// delete, so the same errored row was deleted in one surface and refused in
+/// the other. One function is what makes that divergence unrepresentable.
+/// What: `force` from [`delete_needs_force`] (running rows demand the word
+/// `force`), `stop_first` from [`delete_needs_stop_first`] (an errored row's
+/// runtime is stopped before the delete goes out).
+/// Test: `delete_route_flags_match_the_two_guards` in
+/// `tests_behavior_d_stop_delete_tests.rs`.
+pub(crate) fn delete_route_flags(state: &str) -> (bool, bool) {
+    (delete_needs_force(state), delete_needs_stop_first(state))
+}
+
+/// The question both delete surfaces ask before an ERRORED row's delete (#7224).
+///
+/// Why: confirming an errored row runs two legs — stop the runtime, then delete
+/// the record — and an operator who agrees to that in one surface must be
+/// agreeing to the same thing in the other. Holding the sentence in one place
+/// is what keeps the numbered picker's prompt and the TUI overlay's from
+/// drifting into describing different actions.
+/// Test: `both_delete_surfaces_ask_the_same_errored_question` in
+/// `tests_behavior_d_stop_delete_tests.rs`, and the overlay render in
+/// `confirm_overlay_asks_the_shared_errored_question`.
+pub(crate) fn errored_confirm_ask(name: &str) -> String {
+    format!("'{name}' is errored. Stop it and delete it? Type y, then Enter.")
+}
+
+/// Issue a confirmed delete by the route `stop_first` selects (#7224).
+///
+/// Why: both delete surfaces had this two-branch choice written out inline, and
+/// only one of them had both branches. Naming the route once removes the branch
+/// a surface can forget to write.
+/// What: `stop_first` sends the delete through [`stop_then_delete`]; otherwise
+/// straight to [`delete_managed_then_local`]. `force` is threaded unchanged
+/// either way — the stop leg never escalates it.
+/// Test: the `picker_delete_*` and `stop_then_delete_*` round trips in
+/// `tests_behavior_d_stop_delete_tests.rs`.
+pub(crate) async fn route_delete(
+    client: &reqwest::Client,
+    url: &str,
+    id: &str,
+    force: bool,
+    stop_first: bool,
+) -> anyhow::Result<DeleteReport> {
+    if stop_first {
+        stop_then_delete(client, url, id, force).await
+    } else {
+        delete_managed_then_local(client, url, id, force).await
+    }
 }
 
 /// Map a managed-delete HTTP status to the next routing step.
@@ -247,6 +364,45 @@ pub(crate) async fn delete_managed_then_local(
     }
 }
 
+/// Stop a session's runtime, then delete its record — one operator action (#7224).
+///
+/// Why: the `tm ls` surface must not answer a delete with instructions for a
+/// different surface. An `errored` record whose tmux session is still up gets
+/// refused by the daemon's liveness probe, and the refusal's own advice is
+/// "stop it first" — a step the caller can perform. This performs it.
+/// What: POSTs `/api/v1/sessions/managed/{id}/runtime-stop`, classifies the
+/// status through [`classify_stop_first`], and only then calls
+/// [`delete_managed_then_local`] with the SAME `force` flag the caller passed —
+/// never an escalated one, so the daemon's tmux probe still decides whether the
+/// record may go. A `Failed` status returns [`DeleteReport::StopFailed`] with
+/// the status and body, and NO delete request is issued: there is no branch in
+/// which a stop the daemon rejected is downgraded into a delete. A transport
+/// error on the stop leg propagates as `Err` for the same reason.
+/// Test: `stop_then_delete_deletes_after_a_successful_stop`,
+/// `stop_then_delete_treats_not_found_as_nothing_to_stop`,
+/// `stop_then_delete_never_deletes_after_a_failed_stop` in
+/// `tests_behavior_d_stop_delete_tests.rs`.
+pub(crate) async fn stop_then_delete(
+    client: &reqwest::Client,
+    url: &str,
+    id: &str,
+    force: bool,
+) -> anyhow::Result<DeleteReport> {
+    let resp = client
+        .post(format!("{url}/api/v1/sessions/managed/{id}/runtime-stop"))
+        .send()
+        .await?;
+    let status = resp.status();
+    if classify_stop_first(status) == StopFirstNext::Failed {
+        let body = resp.text().await.unwrap_or_default();
+        return Ok(DeleteReport::StopFailed(format!(
+            "stop returned HTTP {status}: {}",
+            body.trim()
+        )));
+    }
+    delete_managed_then_local(client, url, id, force).await
+}
+
 /// Delete a project-session record via `DELETE /sessions/{id}` (the local path),
 /// refusing a still-running session unless `force` is set (#2304 CRITICAL fix).
 ///
@@ -305,13 +461,15 @@ async fn delete_local(
 /// Why: the interactive delete must be explicit and, for a running session,
 /// force-confirmed — never a silent destructive default. This is the TTY driver
 /// that renders the confirm prompt and calls the shared routing helper.
-/// What: computes [`delete_needs_force`] from the session state; for a running
-/// session it prints a force warning and requires the operator to type `force`
-/// ([`confirm_is_force`]); otherwise it requires `y`/`yes` ([`confirm_is_yes`]).
-/// On confirm it calls [`delete_managed_then_local`] with the matching `force`
-/// flag and renders the [`DeleteReport`]. Returns `Ok(true)` only when a record
-/// was actually removed (so the caller knows the list changed); a cancel, an EOF,
-/// a 409 refusal, or a not-found all return `Ok(false)`.
+/// What: computes the route with [`delete_route_flags`]; for a running session
+/// it prints a force warning and requires the operator to type `force`
+/// ([`confirm_is_force`]); an errored session is asked the shared
+/// [`errored_confirm_ask`] question, which names the stop leg as well; every
+/// other state is asked plainly. All three then require the same `y`/`yes`
+/// ([`confirm_is_yes`]) except the force case. On confirm it hands off to
+/// [`delete_confirmed`], which routes and renders. Returns `Ok(true)` only when
+/// a record was actually removed (so the caller knows the list changed); a
+/// cancel, an EOF, a 409 refusal, or a not-found all return `Ok(false)`.
 /// Test: stdin/HTTP path is side-effect-only (manual smoke + e2e); the pure
 /// confirm/route/guard seams it composes are unit-tested (see module doc).
 pub(crate) async fn confirm_and_delete(
@@ -319,13 +477,18 @@ pub(crate) async fn confirm_and_delete(
     url: &str,
     session: &ManagedSessionSummary,
 ) -> anyhow::Result<bool> {
-    let force = delete_needs_force(&session.state);
+    let (force, stop_first) = delete_route_flags(&session.state);
     if force {
         eprintln!(
             "tm: '{}' is {} (running) — deleting will FORCE-remove the record.",
             session.name, session.state
         );
         eprint!("tm: type 'force' to confirm, or anything else to cancel > ");
+    } else if stop_first {
+        // #7224: an errored row's confirm covers BOTH legs, so say so before
+        // the operator agrees rather than after.
+        eprintln!("tm: {}", errored_confirm_ask(&session.name));
+        eprint!("tm: [y/N] > ");
     } else {
         eprintln!(
             "tm: delete '{}' ({})? this permanently removes the session record.",
@@ -354,7 +517,31 @@ pub(crate) async fn confirm_and_delete(
         return Ok(false);
     }
 
-    match delete_managed_then_local(client, url, &session.id, force).await? {
+    delete_confirmed(client, url, session).await
+}
+
+/// Route an already-confirmed delete and report what the daemon did (#7224).
+///
+/// Why: the confirm half of [`confirm_and_delete`] reads stdin, so while the
+/// routing lived inside it the numbered picker's delete could not be proven
+/// against a stub daemon the way the TUI's can. Splitting the two is what let
+/// the missing stop-first leg be caught: the ROUTING is now decidable without a
+/// terminal.
+/// What: recomputes the delete's route from `session.state`, issues it, and
+/// prints the [`DeleteReport`]. Returns `Ok(true)` only when a record was
+/// actually removed, so the caller knows the list changed.
+/// Test: `picker_delete_stops_an_errored_session_before_deleting_it`,
+/// `picker_delete_treats_a_not_found_stop_as_nothing_to_stop`,
+/// `picker_delete_never_deletes_after_a_failed_stop`,
+/// `picker_delete_issues_no_stop_for_a_non_errored_row` in
+/// `tests_behavior_d_stop_delete_tests.rs`.
+pub(crate) async fn delete_confirmed(
+    client: &reqwest::Client,
+    url: &str,
+    session: &ManagedSessionSummary,
+) -> anyhow::Result<bool> {
+    let (force, stop_first) = delete_route_flags(&session.state);
+    match route_delete(client, url, &session.id, force, stop_first).await? {
         DeleteReport::Deleted {
             name,
             prior_state,
@@ -376,6 +563,13 @@ pub(crate) async fn confirm_and_delete(
         }
         DeleteReport::Refused(msg) => {
             eprintln!("tm: delete refused: {msg}");
+            Ok(false)
+        }
+        DeleteReport::StopFailed(msg) => {
+            eprintln!(
+                "tm: stop failed — '{}' was NOT deleted: {msg}",
+                session.name
+            );
             Ok(false)
         }
         DeleteReport::NotFound => {

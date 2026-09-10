@@ -66,5 +66,12 @@ pub(crate) async fn session_delete(
             eprintln!("error: {msg}");
             Err(anyhow::anyhow!("delete refused: {msg}"))
         }
+        // #7224: unreachable from this verb (it never takes the stop-first
+        // route), but the variant is exhaustive and a silent `_` arm would
+        // swallow a future caller's failed stop as a success.
+        DeleteReport::StopFailed(msg) => {
+            eprintln!("error: {msg}");
+            Err(anyhow::anyhow!("stop failed; {id} was not deleted: {msg}"))
+        }
     }
 }

@@ -92,6 +92,12 @@ mod tests_behavior_d;
 #[path = "tests_behavior_d_ls_connector_tests.rs"]
 mod tests_behavior_d_ls_connector;
 
+// #7224: the errored-session stop-then-delete route, split out for the same
+// reason — `tests_behavior_d_tests.rs` has no room left under the test cap.
+#[cfg(test)]
+#[path = "tests_behavior_d_stop_delete_tests.rs"]
+mod tests_behavior_d_stop_delete;
+
 #[cfg(test)]
 #[path = "tests_behavior_e_tests.rs"]
 mod tests_behavior_e;

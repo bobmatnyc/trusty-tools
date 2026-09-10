@@ -54,7 +54,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use trusty_mpm::client::ManagedSessionSummary;
 use trusty_mpm::tui::terminal::{self, TerminalGuard};
 
-use super::picker_delete::{DeleteReport, delete_managed_then_local};
+use super::picker_delete::{DeleteReport, route_delete};
 use super::session_picker::{PickerScope, fetch_live_sessions};
 use state::{Action, Input, Severity, TuiState};
 
@@ -173,9 +173,17 @@ pub(crate) async fn run_session_tui(
                     }
                 }
             }
-            Action::Delete { index, force } => {
+            Action::Delete {
+                index,
+                force,
+                stop_first,
+            } => {
                 let session = &sessions[index];
-                let report = delete_managed_then_local(client, url, &session.id, force).await;
+                // #7224: an errored row takes the stop-then-delete route, which
+                // is the CLI step the daemon's refusal used to send the operator
+                // out of this surface to run by hand. The numbered fallback
+                // picker shares this routing rather than re-deciding it.
+                let report = route_delete(client, url, &session.id, force, stop_first).await;
                 let (text, severity) = delete_outcome(&session.name, report);
                 state.set_message(text, severity);
             }
@@ -216,10 +224,14 @@ pub(crate) async fn run_session_tui(
 /// the TUI say them in one line instead of two.
 /// What: `Deleted` reports the store it came from (a managed record is SOFT
 /// deleted and stays in the listing, #2012); `Refused` carries the daemon's own
-/// 409 text; `NotFound` says the record was already gone. A transport error
-/// becomes an error line rather than ending the TUI.
+/// 409 text; `StopFailed` (#7224) says the stop leg failed and NOTHING was
+/// deleted, carrying the daemon's full status and body; `NotFound` says the
+/// record was already gone. A transport error becomes an error line rather than
+/// ending the TUI.
 /// Test: `delete_outcome_names_the_soft_delete`,
-/// `delete_outcome_surfaces_a_refusal`, `delete_outcome_reports_not_found`,
+/// `delete_outcome_surfaces_a_refusal`,
+/// `delete_outcome_reports_a_failed_stop_as_not_deleted`,
+/// `delete_outcome_reports_not_found`,
 /// `delete_outcome_reports_a_transport_error`.
 pub(crate) fn delete_outcome(
     name: &str,
@@ -246,6 +258,10 @@ pub(crate) fn delete_outcome(
         Ok(DeleteReport::Refused(msg)) => {
             (format!("delete refused: {}", msg.trim()), Severity::Error)
         }
+        Ok(DeleteReport::StopFailed(msg)) => (
+            format!("'{name}' NOT deleted — {}", msg.trim()),
+            Severity::Error,
+        ),
         Ok(DeleteReport::NotFound) => {
             (format!("'{name}' not found — already gone"), Severity::Info)
         }
