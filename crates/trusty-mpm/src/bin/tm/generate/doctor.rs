@@ -141,6 +141,11 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "gh_account",
         "Active `gh` CLI identity is unambiguous — warns on multi-account ambiguity.",
     ),
+    // #7311: rtk is an install dependency; never run rtk init.
+    (
+        "rtk",
+        "Warns when the `rtk` binary is not on PATH. `tm compress` shells out to rtk and falls back to a slower native compressor when it is absent, silently — so an install that never pulled rtk in reads exactly like one that did. Advisory: the fallback keeps compression working, so a missing rtk never turns `tm doctor` red. Remediation: install with `brew install rtk`; do not run `rtk init`, tm invokes rtk directly — `rtk init` / `rtk init -g` install a competing PreToolUse Bash hook. The Homebrew formula carries `depends_on \"rtk\"`, so only `cargo install` users have to install it themselves (issue #7311).",
+    ),
     (
         "issue_audit_recent",
         "Warns when an OPEN issue created in the last 7 days misses what the ticketing standard requires — a GitHub Project, a milestone (or a `no-milestone: <reason>` comment), or a component label — naming the failing issue numbers and the requirement each missed. Advisory: ticket hygiene never turns `tm doctor` red. A `gh` that is absent, unauthenticated, or erroring reports UNDETERMINED rather than a pass, since an audit that did not run has not found the tickets clean. Run `tm issue audit <N>` for one issue's detail (issue #7097).",
