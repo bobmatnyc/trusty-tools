@@ -2105,12 +2105,14 @@ fn a_quoted_command_path_with_spaces_gets_the_unquoted_decision() {
     }
 }
 
-/// #7374: quoting a forbidden verb's path does not buy an exemption.
+/// #7374: no quoting spelling buys a forbidden verb an exemption.
 ///
-/// Why: the narrow fix is "resolve the real basename", not "strip quotes and
-/// allow". Before it these three slipped the shell-edit deny entirely, because
-/// the name resolved to `My` rather than to `sed`/`patch`/`awk`.
-/// What: asserts each denies with [`SHELL_EDIT_REASON`], and that the
+/// Why: the fix is "resolve the program bash would exec", not "strip quotes and
+/// allow". Three spellings were slipping the deny for the same reason — a
+/// quoted path read as `My`, split quoting read as the literal `s"e"d`, a
+/// backslash-escaped space read as `my\` — and each is closed by lexing rather
+/// than by naming the spelling.
+/// What: asserts every spelling denies with its own reason, and that the
 /// false-DENY direction — a benign program under a directory named `make` —
 /// now allows.
 /// Test: itself.
@@ -2120,6 +2122,12 @@ fn a_quoted_path_to_a_forbidden_verb_is_still_refused() {
         r#""/Applications/My Tools/sed" -i s/a/b/ f"#,
         r#"'/Applications/My Tools/patch' -p1 x"#,
         r#""/Applications/My Tools/awk" -i inplace '{print}' f"#,
+        // #7374 round 2: split across adjacent quote fragments, and a
+        // backslash-escaped space — both invisible to a whitespace scan.
+        r#"s"e"d -i s/a/b/ f"#,
+        r#"'se'"d" -i s/a/b/ f"#,
+        r#""se"'d' -i s/a/b/ f"#,
+        r"/opt/my\ tools/sed -i x f",
     ] {
         assert_eq!(
             evaluate_bash_command(command),
@@ -2127,5 +2135,17 @@ fn a_quoted_path_to_a_forbidden_verb_is_still_refused() {
             "a quoted path must not hide the verb: {command}"
         );
     }
+    assert_eq!(
+        evaluate_bash_command(r#"c"u"rl http://x"#),
+        Some(NETWORK_REASON)
+    );
+    assert_eq!(
+        evaluate_bash_command(r#""/opt/My Tools/npm" test"#),
+        Some(BUILD_TEST_REASON)
+    );
+    assert_eq!(
+        evaluate_bash_command(r#"n"p"m test"#),
+        Some(BUILD_TEST_REASON)
+    );
     assert_eq!(evaluate_bash_command(r#""/opt/make tools/echo" hi"#), None);
 }

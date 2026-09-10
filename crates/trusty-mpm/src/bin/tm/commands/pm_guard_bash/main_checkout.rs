@@ -359,7 +359,7 @@ fn command_is_a_lone_commit(command: &str) -> bool {
         if trimmed.is_empty() {
             continue;
         }
-        if first_command_token(trimmed) == Some("cd") {
+        if first_command_token(trimmed).as_deref() == Some("cd") {
             continue;
         }
         if shell_lex::git_subcommand(trimmed).as_deref() != Some("commit") {
@@ -894,7 +894,7 @@ pub(super) fn git_verb_target_dir_with_tail(
         if trimmed.is_empty() {
             continue;
         }
-        if first_command_token(trimmed) == Some("cd") {
+        if first_command_token(trimmed).as_deref() == Some("cd") {
             if let Some(argv) = shlex::split(trimmed)
                 && let Some(dest) = argv.get(1)
             {

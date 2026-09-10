@@ -409,7 +409,7 @@ fn classify_bash_segment(segment: &str, depth: usize) -> Option<&'static str> {
         return None;
     }
     if let Some(program) = first_command_token(trimmed) {
-        match program {
+        match program.as_str() {
             "patch" => return Some(SHELL_EDIT_REASON),
             "sed" if !sed_awk::sed_is_readonly(trimmed) => return Some(SHELL_EDIT_REASON),
             "awk" | "gawk" | "nawk" | "mawk" if !sed_awk::awk_is_readonly(trimmed) => {
@@ -587,6 +587,7 @@ pub(crate) fn extract_shell_edit_target(command: &str) -> Option<String> {
             return Some(target);
         }
         if let Some(program) = first_command_token(trimmed) {
+            let program = program.as_str();
             let is_sed_awk_family =
                 matches!(program, "patch" | "sed" | "awk" | "gawk" | "nawk" | "mawk");
             let is_git_apply =
@@ -891,7 +892,7 @@ fn evaluate_worktree_add_command_in(
         if trimmed.is_empty() {
             continue;
         }
-        if first_command_token(trimmed) == Some("cd") {
+        if first_command_token(trimmed).as_deref() == Some("cd") {
             if let Some(argv) = shlex::split(trimmed)
                 && let Some(dest) = argv.get(1)
             {
