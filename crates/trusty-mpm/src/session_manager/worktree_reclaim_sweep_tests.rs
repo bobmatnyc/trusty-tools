@@ -414,6 +414,64 @@ fn survey_reports_a_merged_worktree_as_reclaimable() {
     assert!(s.total_bytes > 0);
 }
 
+/// #7267, the reported defect end to end: a worktree left on `<branch>-r2` by
+/// a review round, whose pull request merged under `<branch>`.
+///
+/// Why: `prune-worktrees --merged-prs --force` reclaimed 0 of 11 stale trees
+/// because the lookup keyed on the exact branch name. On `origin/main` this
+/// candidate comes back blocked at gate 5 with "no pull request found for this
+/// branch"; the index resolves it by round stem, with no network call.
+#[test]
+fn survey_reclaims_a_round_sibling_of_a_merged_pr() {
+    let fx = GitWorktreeFixture::new();
+    let path = fx.add_worktree("survey-7267-r2");
+    land(&path);
+    let s = survey_with_index(
+        &fx.repos_root,
+        &nobody(),
+        // The pull request merged under the pre-round name.
+        &|_: &Path| merged_index("session/survey-7267", 71),
+        &no_agents,
+        SurveyBudget::default(),
+        false,
+        &KeepList::default(),
+    );
+    let found = s
+        .candidates
+        .iter()
+        .find(|c| c.path == path)
+        .unwrap_or_else(|| panic!("survey missed {}", path.display()));
+    assert_eq!(found.verdict, ReclaimVerdict::Reclaimable { pr: 71 });
+}
+
+/// The other half of #7267: a branch with no merged pull request under ANY
+/// stem is still refused, so the widening did not become a sweep.
+#[test]
+fn survey_still_blocks_a_branch_no_merged_pr_relates_to() {
+    let fx = GitWorktreeFixture::new();
+    let path = fx.add_worktree("survey-7267-none");
+    land(&path);
+    let s = survey_with_index(
+        &fx.repos_root,
+        &nobody(),
+        &|_: &Path| merged_index("session/somebody-else", 72),
+        &no_agents,
+        SurveyBudget::default(),
+        false,
+        &KeepList::default(),
+    );
+    let found = s
+        .candidates
+        .iter()
+        .find(|c| c.path == path)
+        .unwrap_or_else(|| panic!("survey missed {}", path.display()));
+    assert!(
+        !found.verdict.is_reclaimable(),
+        "an unrelated merged PR must not vouch for this tree: {:?}",
+        found.verdict
+    );
+}
+
 /// #6806, the reported defect end to end: a session surveying from inside its
 /// own workspace must reclaim the merged worktrees it created under it. On
 /// `origin/main` every one of these came back `gate 2 (liveness)`.

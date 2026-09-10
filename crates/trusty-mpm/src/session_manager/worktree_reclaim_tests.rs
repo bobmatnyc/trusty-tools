@@ -813,6 +813,70 @@ fn pr_index_truncated_reply_makes_absent_branches_unknown() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// PrIndex — round siblings (#7267)
+// ---------------------------------------------------------------------------
+
+/// The rows a review round leaves behind: the pull request keeps the name it
+/// was opened from, and the worktree sits on the other spelling.
+const ROUND_ROWS: &str = r#"[
+  {"number": 11, "headRefName": "fix/7267-thing", "state": "MERGED"},
+  {"number": 12, "headRefName": "feat/other-r2", "state": "MERGED"}
+]"#;
+
+/// A worktree on `<branch>-r2` resolves the merged pull request opened from
+/// `<branch>` (#7267).
+///
+/// Why: `prune-worktrees --merged-prs --force` reclaimed 0 of 11 stale trees
+/// because every one of them had been renamed before its pull request opened.
+#[test]
+fn pr_index_resolves_a_round_sibling_by_stem() {
+    let idx = PrIndex::from_json(ROUND_ROWS, 400);
+    assert_eq!(
+        idx.state_for(Some("fix/7267-thing-r3")),
+        BranchPrState::Merged { pr: 11 }
+    );
+}
+
+/// And the same in reverse: the worktree kept the stem, the pull request was
+/// opened from the round-suffixed branch (#7267).
+#[test]
+fn pr_index_resolves_a_stem_branch_from_its_round_sibling() {
+    let idx = PrIndex::from_json(ROUND_ROWS, 400);
+    assert_eq!(
+        idx.state_for(Some("feat/other")),
+        BranchPrState::Merged { pr: 12 }
+    );
+}
+
+/// A branch that shares no stem is still unrelated — the widening relates round
+/// siblings and nothing else (#7267).
+#[test]
+fn pr_index_does_not_relate_an_unrelated_branch() {
+    let idx = PrIndex::from_json(ROUND_ROWS, 400);
+    assert_eq!(idx.state_for(Some("fix/7267-other")), BranchPrState::NoPr);
+    // A suffix that is not `-r<digits>` is not a round suffix.
+    assert_eq!(
+        idx.state_for(Some("fix/7267-thing-rework")),
+        BranchPrState::NoPr
+    );
+}
+
+/// An OPEN sibling outranks a MERGED one, so a workstream with work still in
+/// flight is refused rather than reclaimed (#7267).
+#[test]
+fn pr_index_open_round_sibling_beats_a_merged_one() {
+    const ROWS_WITH_OPEN: &str = r#"[
+  {"number": 21, "headRefName": "fix/x", "state": "MERGED"},
+  {"number": 22, "headRefName": "fix/x-r2", "state": "OPEN"}
+]"#;
+    let idx = PrIndex::from_json(ROWS_WITH_OPEN, 400);
+    assert_eq!(
+        idx.state_for(Some("fix/x-r5")),
+        BranchPrState::Open { pr: 22 }
+    );
+}
+
 /// A `gh` call that FAILED reports its reason for every branch it cannot
 /// answer, rather than a cause-free `Unknown` (#6561).
 ///
