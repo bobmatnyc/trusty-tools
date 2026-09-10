@@ -144,6 +144,49 @@ fn build_tree_statusline_command_ignores_an_installed_binary() {
 }
 
 #[test]
+fn repointed_hook_command_rewrites_every_argv_shape() {
+    // #7262 (reopened): the repair keeps the argv and replaces only the path,
+    // so a `--pm-guard` entry comes back as a `--pm-guard` entry.
+    let installed = std::path::Path::new("/usr/local/bin/tm");
+    for tail in TM_HOOK_ARGV_TAILS {
+        assert_eq!(
+            repointed_hook_command(&format!("{INCIDENT_EXE}{tail}"), installed).as_deref(),
+            Some(format!("/usr/local/bin/tm{tail}").as_str()),
+            "tail {tail:?} was not repointed"
+        );
+    }
+}
+
+#[test]
+fn repointed_hook_command_declines_an_installed_binary() {
+    // Detection and repair share one split, so anything the predicate rejects
+    // the repointer must decline — that is what makes a second pass a no-op.
+    let installed = std::path::Path::new("/usr/local/bin/tm");
+    for cmd in [
+        "/usr/local/bin/tm hook",
+        "/usr/local/bin/tm hook --pm-guard",
+        "tm hook",
+        &format!("{INCIDENT_EXE} lint --fix"),
+    ] {
+        assert!(
+            repointed_hook_command(cmd, installed).is_none(),
+            "{cmd} should not be repointed"
+        );
+    }
+}
+
+#[test]
+fn repointed_statusline_command_rewrites_the_incident_shape() {
+    let installed = std::path::Path::new("/usr/local/bin/tm");
+    assert_eq!(
+        repointed_statusline_command(&format!("{INCIDENT_EXE} statusline"), installed).as_deref(),
+        Some("/usr/local/bin/tm statusline")
+    );
+    assert!(repointed_statusline_command(&format!("{INCIDENT_EXE} hook"), installed).is_none());
+    assert!(repointed_statusline_command("/usr/local/bin/tm statusline", installed).is_none());
+}
+
+#[test]
 fn statusline_tail_is_not_a_hook_tail() {
     // The two lists must stay disjoint: a strip driven by the hook predicate
     // must never claim a `statusLine` command it does not put back.

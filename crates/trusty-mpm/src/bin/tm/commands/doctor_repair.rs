@@ -18,8 +18,8 @@
 
 use colored::Colorize;
 use trusty_mpm::core::doctor_repair::{
-    RepairMode, RepairStep, StepStatus, refuse_legacy_sources, repair_hooks_contamination,
-    repair_output_style, repair_push_guard,
+    RepairMode, RepairStep, StepStatus, refuse_legacy_sources, repair_build_tree_binary,
+    repair_hooks_contamination, repair_output_style, repair_push_guard,
 };
 use trusty_mpm::core::skill_repair::RepairAction;
 use trusty_mpm::core::stray_mcp::{quarantine_explicit, quarantine_strays};
@@ -116,8 +116,10 @@ const FIX_APPLY_HINT: &str = "tm doctor --fix --yes";
 /// Why: see the module doc. The default is a preview because these repairs
 /// rewrite files the operator can see and care about; `--yes` is the second
 /// deliberate act that lets one write.
-/// What: runs, in order, the skill redeploy (`skill_staleness`), the project
-/// hook cleanup (`hooks_contamination`), the push-guard retrofit
+/// What: runs, in order, the skill redeploy (`skill_staleness`), the
+/// machine-wide build-tree repoint (`hooks_build_tree_binary`, #7262 — first,
+/// so the strip below cannot delete a PM guard the repoint would have fixed),
+/// the project hook cleanup (`hooks_contamination`), the push-guard retrofit
 /// (`push_guard`), the output-style redeploy (`output_style_staleness`, #5866),
 /// the `legacy_sources` refusals, and the stray-`.mcp.json`
 /// sweep (`stray_mcp_json`) — printing each item's path, what would change,
@@ -140,6 +142,13 @@ pub(crate) fn run_repairs(apply: bool, include_frozen: bool) {
     let mut steps = skill_steps(include_frozen, mode);
 
     let project_dir = std::env::current_dir().ok();
+    // #7262: the repoint runs BEFORE the contamination strip. A build-tree
+    // command is tm-owned by `is_mpm_hook_command`, so a strip that ran first
+    // would delete the PM guard this pass repairs in place.
+    steps.extend(repair_build_tree_binary(
+        &machine_wide_settings_files(project_dir.as_deref()),
+        mode,
+    ));
     if let Some(project) = &project_dir {
         steps.extend(repair_hooks_contamination(project, mode));
         steps.extend(repair_push_guard(project, mode));
@@ -168,6 +177,45 @@ pub(crate) fn run_repairs(apply: bool, include_frozen: bool) {
     }
 
     print_steps(&steps, apply, FIX_APPLY_HINT);
+}
+
+/// Every `.claude/settings*.json` the build-tree repoint should reach (#7262).
+///
+/// Why: the corruption is written by whichever build tree ran last, into
+/// whichever project that session was pointed at — on 2026-09-10 that was eight
+/// projects, none of them the cwd of the operator who ran `tm doctor`. A
+/// cwd-scoped repair leaves seven of them broken and reports success, which is
+/// why the fix had to be done by hand with `sed`. The sweep therefore uses the
+/// same `$HOME`-wide discovery `tm hooks clean` (no `--path`) already owns
+/// rather than a second enumerator, plus the cwd, which a `$HOME` walk misses
+/// when the project lives outside the home directory.
+/// What: the deduplicated union of `<cwd>/.claude/{settings.json,
+/// settings.local.json}` and
+/// [`trusty_common::claude_config::discover_claude_settings`] under the resolved
+/// home. Existence is not checked here — [`repair_build_tree_binary`] treats a
+/// missing file as nothing to do. An unresolvable home contributes nothing
+/// rather than aborting the repair.
+///
+/// This walk is the reason it belongs to `--fix` and not to `tm doctor` itself:
+/// the diagnostic must stay fast, so its `hooks_build_tree_binary` probe stays
+/// scoped to the projects the daemon tracks (see
+/// `daemon::doctor_hooks_hygiene::candidate_settings_files`), while the repair
+/// the operator explicitly asked for pays the cost once.
+/// Test: `machine_wide_settings_files_includes_the_cwd_project`.
+fn machine_wide_settings_files(project_dir: Option<&std::path::Path>) -> Vec<std::path::PathBuf> {
+    let mut set: std::collections::BTreeSet<std::path::PathBuf> = std::collections::BTreeSet::new();
+    if let Some(dir) = project_dir {
+        for name in ["settings.json", "settings.local.json"] {
+            set.insert(dir.join(".claude").join(name));
+        }
+    }
+    if let Some(home) = dirs::home_dir() {
+        set.extend(trusty_common::claude_config::discover_claude_settings(
+            &home,
+            trusty_common::claude_config::default_settings_max_depth(),
+        ));
+    }
+    set.into_iter().collect()
 }
 
 /// Print one repair's worth of steps, with the per-outcome tallies.
@@ -352,5 +400,27 @@ mod tests {
     fn fix_hint_names_the_fix_command() {
         assert_eq!(FIX_APPLY_HINT, "tm doctor --fix --yes");
         assert!(!FIX_APPLY_HINT.contains("--quarantine-mcp"));
+    }
+
+    /// #7262: the eight projects corrupted on 2026-09-09 were not the cwd of the
+    /// operator who ran `tm doctor`, so the sweep must reach past it. A project
+    /// checked out OUTSIDE `$HOME` is only reachable through the cwd entry,
+    /// which is why both sources are unioned rather than one replacing the
+    /// other.
+    #[test]
+    fn machine_wide_settings_files_includes_the_cwd_project() {
+        let project = std::path::Path::new("/srv/projects/acme");
+        let files = machine_wide_settings_files(Some(project));
+
+        for name in ["settings.json", "settings.local.json"] {
+            let expected = project.join(".claude").join(name);
+            assert!(files.contains(&expected), "{expected:?} missing: {files:?}");
+        }
+        // Deduplicated and ordered, so one project can never be repaired twice
+        // in one run.
+        let mut sorted = files.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted, files, "the list must be sorted and deduplicated");
     }
 }

@@ -42,6 +42,7 @@ mod tests;
 pub(crate) mod backup;
 pub mod build_tree;
 pub mod cleanup;
+pub mod repoint;
 
 pub use build_tree::{is_build_tree_hook_command, is_build_tree_statusline_command};
 
@@ -126,7 +127,12 @@ pub fn mpm_hook_command(exe_override: Option<&Path>) -> Result<String, StableHoo
 /// Test: covered by `test_hook_command_uses_absolute_path`,
 /// `test_hook_command_rejects_ephemeral_exe_override`,
 /// `test_hook_command_rejects_system_temp_exe_override`.
-fn resolve_stable_hook_exe(exe_override: Option<&Path>) -> Result<PathBuf, StableHookExeError> {
+///
+/// `pub` since #7262 (reopened): [`crate::core::doctor_repair`] repoints a
+/// corrupted hook command at the installed binary, and the binary it repoints
+/// to must be resolved by the SAME rule the writers persist — a second resolver
+/// could hand the repair a path the writer would have refused.
+pub fn resolve_stable_hook_exe(exe_override: Option<&Path>) -> Result<PathBuf, StableHookExeError> {
     let running = exe_override
         .map(|p| p.canonicalize().unwrap_or_else(|_| p.to_path_buf()))
         .or_else(|| {
@@ -530,17 +536,48 @@ pub fn is_mpm_hook_command(cmd: &str) -> bool {
 /// — checked here defensively so a command is NEVER double-classified.
 /// What: returns `true` when `cmd` contains the substring `claude-mpm` or
 /// `claude_mpm` (case-insensitive, covering both the installed CLI and a
-/// `.claude-mpm/`-rooted script path) AND [`is_mpm_hook_command`] does not
-/// already claim it.
+/// `.claude-mpm/`-rooted script path) OR its executable's file name is one of
+/// [`CLAUDE_MPM_HOOK_BIN_NAMES`], AND [`is_mpm_hook_command`] does not already
+/// claim it.
+///
+/// #7262 (reopened): the substring test alone reported CLEAN while claude-mpm's
+/// `claude-hook` shim raced tm's `PreToolUse` rewrite in a real project. The
+/// shim is invoked by BARE NAME off `PATH`, so no part of the command string
+/// names the harness — the check has to resolve what the command actually
+/// invokes, not look for a spelling of the owner's name inside it.
 /// Test: `test_is_claude_mpm_hook_command_recognises_foreign_signatures`,
-/// `test_is_claude_mpm_hook_command_never_overlaps_tm`.
+/// `test_is_claude_mpm_hook_command_never_overlaps_tm`,
+/// `is_claude_mpm_hook_command_recognises_the_bare_claude_hook_shim`.
 pub fn is_claude_mpm_hook_command(cmd: &str) -> bool {
     if is_mpm_hook_command(cmd) {
         return false;
     }
     let lower = cmd.to_ascii_lowercase();
-    lower.contains("claude-mpm") || lower.contains("claude_mpm")
+    if lower.contains("claude-mpm") || lower.contains("claude_mpm") {
+        return true;
+    }
+    // #7262: classify by the executable the command runs, not by a substring.
+    lower
+        .split_whitespace()
+        .next()
+        .map(Path::new)
+        .and_then(Path::file_name)
+        .and_then(|f| f.to_str())
+        .is_some_and(|stem| CLAUDE_MPM_HOOK_BIN_NAMES.contains(&stem))
 }
+
+/// Executable names that belong to the foreign claude-mpm harness (#7262).
+///
+/// Why: `claude-hook` is the shim the Python claude-mpm installs (observed at
+/// `~/.local/share/uv/tools/claude-mpm/`), and it is registered by bare name.
+/// Nothing in `claude-hook <args>` spells `claude-mpm`, so the substring test
+/// in [`is_claude_mpm_hook_command`] answered "not foreign" and
+/// `hooks_foreign_conflict` reported clean while both harnesses' `PreToolUse`
+/// hooks fired.
+/// What: file names, compared lower-cased against the command's first word.
+/// tm ships none of them, so this can never overlap [`is_mpm_hook_command`].
+/// Test: `is_claude_mpm_hook_command_recognises_the_bare_claude_hook_shim`.
+const CLAUDE_MPM_HOOK_BIN_NAMES: &[&str] = &["claude-hook", "claude_hook"];
 
 /// The two GLOBAL Claude settings files under `home`.
 ///
