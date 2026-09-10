@@ -6,6 +6,44 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.5.27] — 2026-09-10
+
+### Added
+
+- A regression table pinning that `tm hook --pm-guard` allows every read-only `git diff` spelling carrying a pathspec — `git diff main..HEAD -- docs/` and its `--stat`, `--cached`, `...`-range, `--no-pager` and `-C <path>` variants — in both the ABSOLUTE band a dispatched subagent reaches and the PM classifier. This guard has no `git diff` rule and never had one: it classifies `git` by subcommand and only `apply` denies, so there was no allowlist to widen. The refusal reported in [#7368](https://github.com/bobmatnyc/trusty-tools/issues/7368) belongs to the harness family tracked by [#6982](https://github.com/bobmatnyc/trusty-tools/issues/6982), and the issue's literal command joins `HARNESS_REFUSED_SHAPES` (refs [#7368](https://github.com/bobmatnyc/trusty-tools/issues/7368))
+- `n` in the `tm ls` session TUI creates a new session. It lists the registered projects (the same `GET /api/v1/projects` read `tm project list` performs) and offers a free-text path for a checkout the registry does not hold yet; an unregistered path is registered through `tm projects register`'s own upsert before the session is created, and one already in the registry is not re-registered. The session itself is created and attached by the same `launch_new_session_and_attach` the numbered picker's launch-new arm calls, so the two surfaces cannot disagree about what a new session is. Esc cancels at every step and returns to the list with the selection, scroll offset and status line untouched. The key is in the footer legend and the `?` reference; `tm ls --plain`, `--json`, `--all`, `--attached` and every non-TTY invocation are unchanged (#7395).
+
+### Fixed
+
+- `tm hook --pm-guard` resolves a command's name with `shlex`, the lexer bash agrees with, so quoted, split-quoted and backslash-escaped spellings of a program all resolve to the program that would actually run. The name was previously read off a `split_whitespace` scan, which reads a quote as an ordinary character — so `"/Applications/My Tools/sed" -i x f` resolved to `My`, `s"e"d -i x f` resolved to the literal `s"e"d`, and `/opt/my\ tools/sed -i x f` resolved to `my\`, each slipping the shell-edit deny while bash ran the real `sed`; in the other direction `"/opt/make tools/echo" hi` resolved to `make` and was denied as a build. A macOS `.app` binary such as `"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"` now gets the same decision its space-free spelling gets. The same lexer backs the `npm test` decision, so `"/opt/My Tools/npm" test` and `n"p"m test` are seen (refs [#7374](https://github.com/bobmatnyc/trusty-tools/issues/7374), [#7399](https://github.com/bobmatnyc/trusty-tools/issues/7399) finding (b)). A command `shlex` cannot lex — an unbalanced quote — falls back to the whitespace split and keeps exactly the decision it had before
+- `tm compress` returns the raw text, and warns, when compression emptied a
+  non-empty input. The `rtk_binary` path handed back whatever the subprocess
+  printed, so an rtk that exited zero having printed nothing turned an
+  824-byte `git diff --stat` into 0 bytes and reported it as a successful 100%
+  reduction. The backstop added for the native filter chain never covered the
+  rtk subprocess.
+- `tm compress`'s stats line now carries the wrapped command's exit status as
+  `exit=N`, so an empty result no longer reads the same whether the command
+  found nothing, failed, or had its stdout redirected away. The `tm hook`
+  PreToolUse rewrite wraps the command in a brace group whose trailing `printf`
+  reports `$?`, and the filter strips that sentinel before compressing, so it
+  never reaches the caller's output. A signal-killed command reports the
+  shell's `128 + signal`; an unwrapped `tm compress < file` reports
+  `exit=unknown`. A command a brace group cannot wrap is left alone: a `#`
+  would comment out the group's own `printf` and closing brace, and a trailing
+  unescaped `\` would escape its `;` and turn the `printf` into arguments.
+- `tm session delete <id>` on an errored session now stops its runtime and then
+  deletes the record, instead of exiting 1 with advice to run `tm session stop`
+  first. The verb reads the record's state and routes through the same
+  `route_delete_for_state` seam the `tm ls` picker uses, so the two surfaces
+  cannot answer the same state differently (#7388). A running
+  (`active`/`provisioning`) session still refuses without `--force`, and a stop
+  the daemon rejects issues no delete.
+
+### Documentation
+
+- Fixed a broken intra-doc link in `run_compress`'s doc comment (`commands/compress.rs`) that pointed at `compress_tool_output_async_with_path`, a name not in scope in this module; it now points at `compress_with_raw_fallback`, the function `run_compress` actually calls (#7384).
+
 ## [1.5.26] — 2026-09-10
 
 ### Fixed
