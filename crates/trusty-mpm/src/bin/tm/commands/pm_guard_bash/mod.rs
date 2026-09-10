@@ -428,9 +428,10 @@ fn classify_bash_segment(segment: &str, depth: usize) -> Option<&'static str> {
             "git" if shell_lex::git_subcommand(trimmed).as_deref() == Some("apply") => {
                 return Some(SHELL_EDIT_REASON);
             }
-            // #7399: `git diff --output=<file>` writes a file with no `>`, so
-            // the redirection check below never saw it.
-            "git" if shell_lex::git_output_file(trimmed).is_some() => {
+            // #7399: `git diff --output=<file>`, `git format-patch -o <dir>`,
+            // `git archive -o <file>` and `git bundle create <file>` all write
+            // with no `>`, so the redirection check below never saw them.
+            "git" if shell_lex::git_file_write_target(trimmed).is_some() => {
                 return Some(SHELL_EDIT_REASON);
             }
             _ => {}
@@ -573,8 +574,8 @@ fn classify_command_substitutions(segment: &str, depth: usize) -> Option<&'stati
 /// (which name it directly in `tool_input.file_path`), a Bash command only has
 /// its target embedded in the command text itself.
 /// What: scans each composition segment ([`split_shell_segments`]) for a real
-/// file-write redirect ([`redirection_target`]), for the file a git
-/// `--output` option names ([`shell_lex::git_output_file`], #7399), or, for a
+/// file-write redirect ([`redirection_target`]), for the file a git write
+/// option names ([`shell_lex::git_file_write_target`], #7399), or, for a
 /// sed/awk-family/`patch`/`git apply` segment, the command's trailing
 /// non-flag token ([`trailing_file_token`]) — the conventional position of the
 /// target file for those verbs. Returns the first match found; `None` when no
@@ -594,10 +595,11 @@ pub(crate) fn extract_shell_edit_target(command: &str) -> Option<String> {
         }
         if let Some(program) = first_command_token(trimmed) {
             let program = program.as_str();
-            // #7399: the file `--output` names is the target, and it sits in
-            // the option rather than the trailing position the verbs below use.
+            // #7399: the file a git write option names is the target, and it
+            // sits in the option rather than the trailing position the verbs
+            // below use.
             if program == "git"
-                && let Some(target) = shell_lex::git_output_file(trimmed)
+                && let Some(target) = shell_lex::git_file_write_target(trimmed)
                 && !target.is_empty()
             {
                 return Some(target);

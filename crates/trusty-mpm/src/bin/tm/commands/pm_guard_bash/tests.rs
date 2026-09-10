@@ -2195,6 +2195,62 @@ fn git_diff_output_flag_is_refused_as_a_file_write() {
     );
 }
 
+/// #7399 round 2: `-o`, `--output-directory` and `bundle create` write too.
+///
+/// Why: the round-1 rule matched only `--output`, and a critic ran the three
+/// gaps against git 2.54.0 in a scratch repo: `git format-patch -o <dir> -1
+/// HEAD` wrote `0001-init.patch`, `git format-patch --output-directory=<dir>
+/// -1 HEAD` wrote a patch, `git archive -o <file> HEAD` wrote a 10KB tar. Two
+/// more writes carry no option at all — a bare `git format-patch` drops patch
+/// files into the working directory, and `git bundle create <file>` names its
+/// output as a positional.
+/// What: asserts every write spelling denies with [`SHELL_EDIT_REASON`], and
+/// that the read-only siblings still allow — `--stdout`, an archive to stdout,
+/// `git diff -o` (a revision there), and `git clone -o` (the origin remote).
+/// Test: itself.
+#[test]
+fn git_short_output_options_are_refused_as_file_writes() {
+    for command in [
+        "git format-patch -o /tmp/d -1 HEAD",
+        "git format-patch -1 -o/tmp/d HEAD",
+        "git format-patch --output-directory=/tmp/d -1 HEAD",
+        "git format-patch --output-directory /tmp/d -1 HEAD",
+        "git format-patch -1 HEAD",
+        "git archive -o /tmp/a.tar HEAD",
+        "git archive -o/tmp/a.tar HEAD",
+        "git archive --output=/tmp/a.tar HEAD",
+        "git bundle create /tmp/x.bundle HEAD",
+        "git bundle create -q /tmp/x.bundle --all",
+        "git -C /repo format-patch -o /tmp/d -1 HEAD",
+        "sh -c 'git archive -o /tmp/a.tar HEAD'",
+    ] {
+        assert_eq!(
+            evaluate_bash_command(command),
+            Some(SHELL_EDIT_REASON),
+            "a git write option is a file write: {command}"
+        );
+    }
+    for command in [
+        "git format-patch --stdout -1 HEAD",
+        "git format-patch -1 HEAD --stdout",
+        "git archive --format=tar HEAD | tar -t",
+        "git bundle create - HEAD",
+        "git bundle verify /tmp/x.bundle",
+        "git diff -o /tmp/o.diff HEAD",
+        "git clone -o upstream https://x/y.git",
+    ] {
+        assert_eq!(
+            evaluate_bash_command(command),
+            None,
+            "a read-only spelling must stay allowed: {command}"
+        );
+    }
+    assert_eq!(
+        extract_shell_edit_target("git archive -o /tmp/a.tar HEAD"),
+        Some("/tmp/a.tar".to_string())
+    );
+}
+
 /// #7399: the read-only `git diff` shapes stay allowed beside that deny.
 ///
 /// Why: the deny above must match the OPTION, not its prefix.
@@ -2253,8 +2309,13 @@ fn an_unlexable_git_segment_keeps_every_deny_it_already_had() {
         Some(SHELL_EDIT_REASON)
     );
     assert_eq!(
-        shell_lex::git_output_file("git diff --output='/tmp/o.diff"),
+        shell_lex::git_file_write_target("git diff --output='/tmp/o.diff"),
         None,
         "an unbalanced segment withholds the new deny rather than granting one"
+    );
+    assert_eq!(
+        shell_lex::git_file_write_target("git archive -o '/tmp/a.tar"),
+        None,
+        "the round-2 spellings inherit the same withhold-only failure"
     );
 }
