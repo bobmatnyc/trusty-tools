@@ -159,17 +159,31 @@ fn warn_legacy_overrides(project_dir: &Path) {
 /// launch entry points grows and a new one would silently ship without the
 /// signal. Process-global rather than a threaded parameter because the two
 /// resolutions sit in different modules with no shared handle between them, and
-/// the CLI process IS the launch. Keyed by PATH, not by a bare `Once`, so a
-/// distinct project still reports and each test's own `TempDir` stays
+/// the CLI process IS the launch.
+///
+/// Global state, named plainly: this is a keyed once-per-process set, and it
+/// goes beyond the codebase's one precedent under CLAUDE.md's "No global state"
+/// rule — `warn_once_about_the_keychain` in
+/// `crates/trusty-mpm/src/session_manager/worktree_reclaim_gh.rs` uses a bare
+/// `std::sync::Once`. A bare `Once` is insufficient here: it latches on the
+/// first call and is closed to every later one, so the daemon — one process
+/// that resolves prompts for many projects — would let the first project's
+/// leftover file silence the second project's. The key is the FILE PATH, so
+/// each project reports its own file once, and each test's own `TempDir` stays
 /// independent of execution order.
 ///
 /// Accepted tradeoff: a long-lived daemon reports a given file once per daemon
-/// lifetime rather than once per launch. `tm doctor`'s `legacy_overrides` check
-/// is the on-demand half of the same signal and is unaffected.
+/// lifetime rather than once per launch. Enforcement does not run through this
+/// log line at all — the on-demand `legacy_overrides` `tm doctor` check
+/// (`check_legacy_overrides`, in
+/// `crates/trusty-mpm/src/daemon/doctor_legacy_overrides.rs`) reads the same
+/// [`detect_legacy_overrides`] and `Fail`s while the file is present, however
+/// many times the line was logged (#4286).
 /// What: lazily-initialized `Mutex`-guarded set of reported paths, accessed only
 /// via [`claim_legacy_warning`].
 /// Test: `the_retired_override_signal_is_emitted_once_per_launch`,
-/// `two_projects_each_report_their_own_retired_file`.
+/// `two_projects_each_report_their_own_retired_file`,
+/// `a_poisoned_dedupe_lock_still_emits`.
 static WARNED_LEGACY_PATHS: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
 > = std::sync::OnceLock::new();
@@ -181,7 +195,8 @@ static WARNED_LEGACY_PATHS: std::sync::OnceLock<
 /// mode of the dedupe must be a duplicate line, never a missing one.
 /// What: inserts `path` into the process-global set and reports whether the
 /// insert was new.
-/// Test: `the_retired_override_signal_is_emitted_once_per_launch`.
+/// Test: `the_retired_override_signal_is_emitted_once_per_launch`,
+/// `a_poisoned_dedupe_lock_still_emits`.
 fn claim_legacy_warning(path: &Path) -> bool {
     let set = WARNED_LEGACY_PATHS.get_or_init(|| std::sync::Mutex::new(Default::default()));
     match set.lock() {
