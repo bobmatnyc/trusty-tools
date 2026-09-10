@@ -40,8 +40,11 @@ use std::time::{Duration, Instant};
 use super::worktree_reclaim::{
     AgentStateProbe, BranchPrState, KeepList, LiveClaims, NOT_INSPECTED_REASON, PrIndex,
     ReclaimCandidate, ReclaimGate, ReclaimMode, ReclaimOutcome, ReclaimSurvey, ReclaimVerdict,
-    agent_ownership_blocks, classify, measure_bytes_until, pr_state_for_branch, tm_provisioned,
+    agent_ownership_blocks, classify, measure_bytes_until, tm_provisioned,
 };
+// #7267: the merged-pull-request matcher — round stem and head commit, not the
+// branch name alone.
+use super::worktree_reclaim_pr_match::{GhLandingProbe, resolve_with_index};
 use super::worktree_registry::{list_registered_worktrees, scan_registered_worktrees};
 use super::worktree_safety::inspect_dirt;
 
@@ -95,11 +98,12 @@ impl SurveyBudget {
 /// automatic runs. It opens no destructive path.
 /// What: enumerates via [`scan_registered_worktrees`] (git-authoritative,
 /// ADR-0023), builds ONE [`PrIndex`] per registry root, and runs [`classify`].
-/// When the bulk index was truncated and `per_branch_fallback` is set, a branch
-/// the index cannot answer is resolved with a targeted
-/// [`pr_state_for_branch`] call — without that, no worktree older than the last
+/// When `per_branch_fallback` is set, [`resolve_with_index`] adds the targeted
+/// per-branch lookup a truncated index cannot answer — without that, no
+/// worktree older than the last
 /// [`PR_INDEX_LIMIT`](super::worktree_reclaim::PR_INDEX_LIMIT) pull requests
-/// could ever be reclaimed, which on this repository is nearly all of them.
+/// could ever be reclaimed, which on this repository is nearly all of them —
+/// and the #7267 widening onto the round-stem sibling and the head commit.
 /// `index_for` is injectable so the classification paths are testable
 /// without `gh`.
 /// Test: `survey_reports_a_merged_worktree_as_reclaimable`,
@@ -134,21 +138,17 @@ pub(crate) fn survey_with_index(
         let index = indexes
             .entry(scanned.registry_root.clone())
             .or_insert_with(|| index_for(&scanned.registry_root));
-        let mut pr = index.state_for(scanned.branch.as_deref());
-        // #6561: a FAILED bulk lookup retries per-branch too. The bulk call and
-        // the targeted one can fail for different reasons (a page limit is not
-        // an auth failure), and only the targeted one resolves a branch older
-        // than the bulk window.
-        if per_branch_fallback
-            && matches!(
-                pr,
-                BranchPrState::Unknown | BranchPrState::LookupFailed { .. }
-            )
-            && !index.is_complete()
-            && let Some(branch) = scanned.branch.as_deref()
-        {
-            pr = pr_state_for_branch(&scanned.registry_root, branch);
-        }
+        // #6561 (the per-branch retry) and #7267 (the round-stem and head-commit
+        // widening) both live in `resolve_with_index`, so this call site and the
+        // pre-delete re-check below cannot drift apart.
+        let pr = resolve_with_index(
+            &scanned.path,
+            &scanned.registry_root,
+            scanned.branch.as_deref(),
+            index,
+            per_branch_fallback,
+            &GhLandingProbe,
+        );
         // #6806: WHOSE claim, not merely whether one exists.
         let claim = in_use.claim_state(&scanned.path);
         // #7232: a claim that stopped blocking has to be visible, or the change
@@ -446,16 +446,17 @@ pub(crate) fn reclaim_with_probes(
         let index = fresh_indexes
             .entry(candidate.registry_root.clone())
             .or_insert_with(|| (probes.index_for)(&candidate.registry_root));
-        let mut pr_now = index.state_for(candidate.branch.as_deref());
-        // #6561: same widening as the survey — a failed bulk lookup retries.
-        if matches!(
-            pr_now,
-            BranchPrState::Unknown | BranchPrState::LookupFailed { .. }
-        ) && !index.is_complete()
-            && let Some(branch) = candidate.branch.as_deref()
-        {
-            pr_now = pr_state_for_branch(&candidate.registry_root, branch);
-        }
+        // #6561, #7267: the same resolution the survey ran, re-run FRESH — the
+        // survey's answer is minutes old, and a widening applied only there
+        // would propose a candidate this re-check could not confirm.
+        let pr_now = resolve_with_index(
+            &path,
+            &candidate.registry_root,
+            candidate.branch.as_deref(),
+            index,
+            true,
+            &GhLandingProbe,
+        );
         // FRESH, per candidate, and now genuinely immediately before the
         // re-check that judges it.
         let in_use_now = (probes.in_use_now)();

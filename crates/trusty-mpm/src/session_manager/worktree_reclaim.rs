@@ -435,26 +435,74 @@ impl PrIndex {
     /// when the index is complete, [`BranchPrState::LookupFailed`] when the
     /// lookup itself failed (#6561), and `Unknown` when the index merely ran
     /// past its page limit.
+    ///
+    /// #7267: a branch the index does not hold under its own name is asked for
+    /// again by ROUND STEM, via [`related_state`](Self::related_state) — a
+    /// review round renames `<branch>` to `<branch>-r2` while the pull request
+    /// keeps whichever spelling it was opened from, so the two names miss each
+    /// other by exact match in both directions.
     /// Test: `pr_index_detached_worktree_is_unknown`,
     /// `pr_index_absent_branch_is_no_pr_when_complete`,
-    /// `pr_index_reports_a_failed_lookup_with_its_reason`.
+    /// `pr_index_reports_a_failed_lookup_with_its_reason`,
+    /// `pr_index_resolves_a_round_sibling_by_stem`,
+    /// `pr_index_resolves_a_stem_branch_from_its_round_sibling`,
+    /// `pr_index_does_not_relate_an_unrelated_branch`.
     pub(crate) fn state_for(&self, branch: Option<&str>) -> BranchPrState {
         let Some(branch) = branch else {
             return BranchPrState::Unknown;
         };
-        match self.by_branch.get(branch) {
-            Some(state) => state.clone(),
-            None if self.complete => BranchPrState::NoPr,
-            // #6561: a branch the index could not answer BECAUSE the lookup
-            // failed reports the failure; a merely truncated index still
-            // reports `Unknown`.
-            None => match &self.failure {
-                Some(reason) => BranchPrState::LookupFailed {
-                    reason: reason.clone(),
-                },
-                None => BranchPrState::Unknown,
-            },
+        if let Some(state) = self.by_branch.get(branch) {
+            return state.clone();
         }
+        // #7267: before "absent" is read as an answer, the round siblings this
+        // index DOES hold are consulted.
+        if let Some(state) = self.related_state(branch) {
+            return state;
+        }
+        if self.complete {
+            return BranchPrState::NoPr;
+        }
+        // #6561: a branch the index could not answer BECAUSE the lookup failed
+        // reports the failure; a merely truncated index still reports
+        // `Unknown`.
+        match &self.failure {
+            Some(reason) => BranchPrState::LookupFailed {
+                reason: reason.clone(),
+            },
+            None => BranchPrState::Unknown,
+        }
+    }
+
+    /// The most blocking state this index holds for `branch`'s ROUND SIBLINGS
+    /// (#7267).
+    ///
+    /// Why: `tm session prune-worktrees --merged-prs` matched a worktree to its
+    /// pull request by exact branch name, and reclaimed 0 of 11 stale trees
+    /// because a review round had renamed every one of them. `foo` and `foo-r2`
+    /// are one workstream, related here by the same
+    /// [`strip_round_suffix`](crate::core::pr_cleanup::plan::strip_round_suffix)
+    /// stem `core::pr_cleanup` relates them by and the ADR-0057 removal guard
+    /// applies — one implementation of that equivalence, not a second matcher.
+    /// What: `None` when the index holds no sibling under a different name;
+    /// otherwise the sibling state with the highest
+    /// [`BranchPrState::block_rank`], so a MERGED sibling never outvotes an
+    /// OPEN one. The lookup costs no network call: it reads rows the bulk index
+    /// already holds.
+    /// Test: `pr_index_resolves_a_round_sibling_by_stem`,
+    /// `pr_index_resolves_a_stem_branch_from_its_round_sibling`,
+    /// `pr_index_does_not_relate_an_unrelated_branch`,
+    /// `pr_index_open_round_sibling_beats_a_merged_one`.
+    fn related_state(&self, branch: &str) -> Option<BranchPrState> {
+        let stem = crate::core::pr_cleanup::plan::strip_round_suffix(branch);
+        self.by_branch
+            .iter()
+            .filter(|(name, _)| {
+                name.as_str() != branch
+                    && crate::core::pr_cleanup::plan::strip_round_suffix(name) == stem
+            })
+            .map(|(_, state)| state)
+            .max_by_key(|state| state.block_rank())
+            .cloned()
     }
 }
 

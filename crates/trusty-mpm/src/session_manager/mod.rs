@@ -72,6 +72,9 @@ pub(crate) mod worktree_reclaim_gh;
 // #6867: decides whether a `gh` poll may be spawned at all — one call in
 // flight per query, and no polling of a root that has hung three times running.
 pub(crate) mod worktree_reclaim_gh_gate;
+// #7267: which merged pull request carried a worktree's work, when the branch
+// it is on is not the name that pull request was opened from.
+pub(crate) mod worktree_reclaim_pr_match;
 // #6507: the verdict vocabulary, including which GATE refused a candidate.
 pub(crate) mod worktree_reclaim_verdict;
 // #6806: gate 2's claim resolution — WHICH session claims a candidate, and
