@@ -26,7 +26,8 @@ use super::layout::{self, Column, MARKER_WIDTH};
 use super::state::{Mode, Severity, TuiState};
 
 /// The footer key legend — the discoverability half of every action key.
-const FOOTER: &str = "↑↓ move · Enter open · r rename · d delete · R refresh · ? keys · q quit";
+const FOOTER: &str =
+    "↑↓ move · Enter open · n new · r rename · d delete · R refresh · ? keys · q quit";
 
 /// Draw one frame of the session TUI.
 ///
@@ -88,6 +89,8 @@ pub(crate) fn render(frame: &mut Frame, sessions: &[ManagedSessionSummary], stat
             let was = sessions.get(*index).map_or("?", |s| s.name.as_str());
             overlay(frame, area, "rename", rename_body(was, typed));
         }
+        // #7395: the create flow — a project list, then optionally a path.
+        Mode::New(flow) => overlay(frame, area, "new session", new_session_body(flow)),
     }
 }
 
@@ -262,6 +265,35 @@ fn rename_body(was: &str, typed: &str) -> Vec<Line<'static>> {
     ]
 }
 
+/// The new-session overlay's text: the project list, or the path entry (#7395).
+///
+/// Why: one body function for both steps keeps "which step am I on" a single
+/// readable branch, and makes the free-text entry look exactly like the rename
+/// overlay's — the operator has already learned that shape.
+/// What: the picker step lists the windowed targets from
+/// [`super::new_session::NewSessionFlow::rows`]; the path step draws the typed
+/// buffer with the same cursor block. Both name Esc as the way out.
+/// Test: `render_new_session_overlay_lists_the_registered_projects`,
+/// `render_new_session_overlay_shows_the_typed_path`.
+fn new_session_body(flow: &super::new_session::NewSessionFlow) -> Vec<Line<'static>> {
+    if let Some(typed) = flow.typed() {
+        return vec![
+            Line::from("Path to a git checkout tm has not registered yet:"),
+            Line::from(String::new()),
+            Line::from(format!("> {typed}▌")),
+            Line::from("Enter registers it and starts a session, Esc cancels."),
+        ];
+    }
+    let mut lines = vec![
+        Line::from("Start a new session in:"),
+        Line::from(String::new()),
+    ];
+    lines.extend(flow.rows().into_iter().map(Line::from));
+    lines.push(Line::from(String::new()));
+    lines.push(Line::from("Enter confirms, Esc cancels."));
+    lines
+}
+
 /// The `?` key reference.
 fn help_body() -> Vec<Line<'static>> {
     [
@@ -269,6 +301,7 @@ fn help_body() -> Vec<Line<'static>> {
         "g / G          first / last row",
         "PgUp / PgDn    move ten rows",
         "Enter          open (resume + attach) the selected session",
+        "n              new session, in a registered project or a typed path",
         "r              rename it",
         "d              delete it, with a confirm step",
         "R              refresh the list from the daemon",

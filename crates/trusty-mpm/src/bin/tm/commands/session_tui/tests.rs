@@ -12,13 +12,18 @@
 
 use ratatui::{Terminal, backend::TestBackend};
 use trusty_mpm::client::ManagedSessionSummary;
+use trusty_mpm::project::Project;
 use trusty_mpm::session_manager::rename::validate_session_name;
 
 use super::layout::{self, Column};
+use super::new_session::{
+    self, NewProject, NewSessionFlow, NewSessionRequest, ProjectIdentity, Target,
+};
 use super::render;
 use super::state::{Action, Input, Mode, Severity, TuiState, is_self_session};
 use super::{delete_outcome, map_key};
 use crate::commands::picker_delete::DeleteReport;
+use crate::commands::tmux_attach::AttachOutcome;
 
 /// Minimal `ManagedSessionSummary` fixture.
 fn session(name: &str, state: &str, slot: u32) -> ManagedSessionSummary {
@@ -1026,4 +1031,390 @@ fn render_status_uses_one_row_when_there_is_no_message() {
     // the layout must not have grown a status region with nothing in it.
     assert_eq!(screen.len(), 24);
     assert!(screen.last().is_some_and(|l| l.contains("q quit")));
+}
+
+// ── new-session flow (#7395) ────────────────────────────────────────────────
+
+/// A registry row fixture. Built through serde so every optional field takes
+/// the same default the daemon's own listing gives it.
+fn project(name: &str, repo_url: &str) -> Project {
+    serde_json::from_value(serde_json::json!({
+        "name": name,
+        "repo_url": repo_url,
+        "default_branch": "main",
+    }))
+    .expect("project fixture")
+}
+
+/// Two registered projects, plus the typed-path escape `targets_from` appends.
+fn targets() -> Vec<Target> {
+    new_session::targets_from(&[
+        project("trusty-tools", "https://github.com/bobmatnyc/trusty-tools"),
+        project("apex", "https://github.com/duetto/apex"),
+    ])
+}
+
+/// Stand-in for the real git resolution, so the unregistered-path branch is
+/// decidable without a checkout on disk.
+fn stub_identity(typed: &str) -> Option<ProjectIdentity> {
+    match typed {
+        "/w/widgets" => Some(ProjectIdentity {
+            name: "widgets".to_string(),
+            repo_url: "https://github.com/acme/widgets".to_string(),
+            root: "/w/widgets".to_string(),
+        }),
+        // The SAME project the registry already holds, reached by its checkout.
+        "/w/trusty-tools" => Some(ProjectIdentity {
+            name: "trusty-tools".to_string(),
+            repo_url: "https://github.com/bobmatnyc/trusty-tools".to_string(),
+            root: "/w/trusty-tools".to_string(),
+        }),
+        _ => None,
+    }
+}
+
+/// A state browsing `fleet()` with the new-session flow already open.
+fn creating() -> TuiState {
+    let mut state = browsing();
+    state.open_new_session(NewSessionFlow::with_resolver(targets(), stub_identity));
+    state
+}
+
+#[test]
+fn new_session_targets_from_puts_the_path_escape_last() {
+    let targets = targets();
+    assert_eq!(
+        targets.first(),
+        Some(&Target::Registered {
+            name: "trusty-tools".to_string(),
+            repo: "https://github.com/bobmatnyc/trusty-tools".to_string(),
+        })
+    );
+    assert_eq!(targets.last(), Some(&Target::Other));
+    // An empty registry still offers the escape, or a fresh host could never
+    // create anything from this surface.
+    assert_eq!(new_session::targets_from(&[]), vec![Target::Other]);
+}
+
+#[test]
+fn new_session_key_opens_the_flow() {
+    let sessions = fleet();
+    let mut state = browsing();
+    // `n` only ASKS — the registry read belongs to the driver, so the state
+    // machine never issues one itself.
+    assert_eq!(state.apply(Input::Char('n'), &sessions), Action::NewSession);
+    assert_eq!(state.mode(), &Mode::Browse, "the flow opens on the answer");
+    state.open_new_session(NewSessionFlow::with_resolver(targets(), stub_identity));
+    assert!(matches!(state.mode(), Mode::New(_)));
+}
+
+/// Confirming a registered row creates in THAT project and registers nothing.
+///
+/// Why (#7395 requirement 3): this is the acceptance case for the
+/// existing-project half — the create call has to receive the repo of the row
+/// the operator moved onto, not the first row and not the cwd. Driving it from
+/// the keystrokes, then through [`new_session::perform_with`] with fakes, is
+/// what makes an implementation that creates something else fail here.
+#[tokio::test]
+async fn new_session_confirming_a_registered_project_creates_without_registering() {
+    let sessions = fleet();
+    let mut state = creating();
+    // Move onto the SECOND registered project before confirming.
+    assert_eq!(state.apply(Input::Down, &sessions), Action::Redraw);
+    let action = state.apply(Input::Enter, &sessions);
+    let Action::Create(request) = action else {
+        panic!("expected a create action, got {action:?}");
+    };
+    assert_eq!(
+        request,
+        NewSessionRequest {
+            register: None,
+            repo: "https://github.com/duetto/apex".to_string(),
+            label: "apex".to_string(),
+        }
+    );
+    assert_eq!(state.mode(), &Mode::Browse, "the overlay closes on confirm");
+
+    let calls = std::cell::RefCell::new(Vec::new());
+    let outcome = new_session::perform_with(
+        request,
+        |p: NewProject| {
+            calls.borrow_mut().push(format!("register:{}", p.name));
+            async { anyhow::Ok(()) }
+        },
+        |repo: String| {
+            calls.borrow_mut().push(format!("create:{repo}"));
+            async { anyhow::Ok(AttachOutcome::Attached) }
+        },
+    )
+    .await
+    .expect("the create leg must succeed");
+    assert_eq!(outcome, AttachOutcome::Attached);
+    assert_eq!(
+        calls.into_inner(),
+        vec!["create:https://github.com/duetto/apex".to_string()],
+        "a registered project must not be registered again"
+    );
+}
+
+/// An unregistered path is registered FIRST, then created in.
+///
+/// Why (#7395 requirement 2): the daemon cannot spawn into a project it has
+/// never heard of, so the ORDER is the requirement — asserting only that both
+/// calls happened would pass for an implementation that registers afterwards.
+#[tokio::test]
+async fn new_session_unregistered_path_registers_before_creating() {
+    let sessions = fleet();
+    let mut state = creating();
+    // Walk to the "other" row; two registered projects precede it.
+    state.apply(Input::Down, &sessions);
+    state.apply(Input::Down, &sessions);
+    assert_eq!(
+        state.apply(Input::Enter, &sessions),
+        Action::Redraw,
+        "the path entry opens rather than creating"
+    );
+    for c in "/w/widgets".chars() {
+        state.apply(Input::Char(c), &sessions);
+    }
+    let action = state.apply(Input::Enter, &sessions);
+    let Action::Create(request) = action else {
+        panic!("expected a create action, got {action:?}");
+    };
+    assert_eq!(
+        request,
+        NewSessionRequest {
+            register: Some(NewProject {
+                name: "widgets".to_string(),
+                repo_url: "https://github.com/acme/widgets".to_string(),
+            }),
+            // The local working-tree root, not the URL — that is what lets the
+            // daemon resolve `source_id` for a checkout already on disk.
+            repo: "/w/widgets".to_string(),
+            label: "widgets".to_string(),
+        }
+    );
+
+    let calls = std::cell::RefCell::new(Vec::new());
+    new_session::perform_with(
+        request,
+        |p: NewProject| {
+            calls.borrow_mut().push(format!("register:{}", p.repo_url));
+            async { anyhow::Ok(()) }
+        },
+        |repo: String| {
+            calls.borrow_mut().push(format!("create:{repo}"));
+            async { anyhow::Ok(AttachOutcome::Attached) }
+        },
+    )
+    .await
+    .expect("both legs must succeed");
+    assert_eq!(
+        calls.into_inner(),
+        vec![
+            "register:https://github.com/acme/widgets".to_string(),
+            "create:/w/widgets".to_string(),
+        ],
+        "registration must land before the session is created"
+    );
+}
+
+#[tokio::test]
+async fn new_session_a_failed_registration_never_creates() {
+    let request = NewSessionRequest {
+        register: Some(NewProject {
+            name: "widgets".to_string(),
+            repo_url: "https://github.com/acme/widgets".to_string(),
+        }),
+        repo: "/w/widgets".to_string(),
+        label: "widgets".to_string(),
+    };
+    let created = std::cell::Cell::new(false);
+    let err = new_session::perform_with(
+        request,
+        |_: NewProject| async { Err(anyhow::anyhow!("registry refused it")) },
+        |_: String| {
+            created.set(true);
+            async { anyhow::Ok(AttachOutcome::Attached) }
+        },
+    )
+    .await
+    .expect_err("a failed registration must abort the flow");
+    assert!(
+        !created.get(),
+        "nothing may be created after a failed register"
+    );
+    assert!(
+        format!("{err:#}").contains("registry refused it"),
+        "the daemon's own reason must survive: {err:#}"
+    );
+}
+
+#[test]
+fn new_session_known_path_skips_registration() {
+    // The typed checkout resolves to a project the registry ALREADY holds, so
+    // re-registering would replace its stored record with these two fields.
+    let request = new_session::request_for_path("/w/trusty-tools", &targets(), stub_identity)
+        .expect("a known checkout is usable");
+    assert_eq!(request.register, None);
+    assert_eq!(request.repo, "/w/trusty-tools");
+}
+
+#[test]
+fn new_session_rejects_a_path_that_is_not_a_checkout() {
+    let sessions = fleet();
+    let mut state = creating();
+    state.apply(Input::Down, &sessions);
+    state.apply(Input::Down, &sessions);
+    state.apply(Input::Enter, &sessions);
+    for c in "/tmp/nope".chars() {
+        state.apply(Input::Char(c), &sessions);
+    }
+    assert_eq!(state.apply(Input::Enter, &sessions), Action::Redraw);
+    let (text, severity) = state.message().expect("a refusal must be shown");
+    assert!(text.contains("/tmp/nope"), "{text}");
+    assert_eq!(severity, Severity::Error);
+    // The entry stays open with what was typed, so it can be corrected.
+    match state.mode() {
+        Mode::New(flow) => assert_eq!(flow.typed(), Some("/tmp/nope")),
+        other => panic!("the flow must stay open, got {other:?}"),
+    }
+}
+
+#[test]
+fn new_session_rejects_an_empty_path() {
+    let err = new_session::request_for_path("   ", &targets(), stub_identity)
+        .expect_err("an empty path is not a project");
+    assert!(err.contains("path"), "{err}");
+}
+
+#[test]
+fn new_session_escape_cancels_from_both_steps() {
+    let sessions = fleet();
+    // From the project list.
+    let mut state = creating();
+    assert_eq!(state.apply(Input::Escape, &sessions), Action::Redraw);
+    assert_eq!(state.mode(), &Mode::Browse);
+    // From the path entry.
+    let mut state = creating();
+    state.apply(Input::Down, &sessions);
+    state.apply(Input::Down, &sessions);
+    state.apply(Input::Enter, &sessions);
+    state.apply(Input::Char('/'), &sessions);
+    assert_eq!(state.apply(Input::Escape, &sessions), Action::Redraw);
+    assert_eq!(state.mode(), &Mode::Browse);
+}
+
+/// Esc out of the flow leaves every observable part of the surface as it was.
+///
+/// Why (#7395 requirement 4): "returns to the list unchanged" is a claim about
+/// the selection, the scroll offset and the status line, not just the mode — a
+/// flow that reset the pinned row on the way out would still pass a mode-only
+/// assertion.
+#[test]
+fn new_session_escape_leaves_the_state_identical() {
+    let sessions = fleet();
+    let mut state = browsing();
+    state.apply(Input::Down, &sessions);
+    let before = (
+        state.mode().clone(),
+        state.selected(),
+        state.scroll(),
+        state.message().map(|(t, s)| (t.to_string(), s)),
+    );
+
+    assert_eq!(state.apply(Input::Char('n'), &sessions), Action::NewSession);
+    state.open_new_session(NewSessionFlow::with_resolver(targets(), stub_identity));
+    state.apply(Input::Down, &sessions);
+    state.apply(Input::Down, &sessions);
+    state.apply(Input::Enter, &sessions);
+    state.apply(Input::Char('/'), &sessions);
+    state.apply(Input::Char('w'), &sessions);
+    state.apply(Input::Escape, &sessions);
+
+    let after = (
+        state.mode().clone(),
+        state.selected(),
+        state.scroll(),
+        state.message().map(|(t, s)| (t.to_string(), s)),
+    );
+    assert_eq!(after, before);
+}
+
+#[test]
+fn new_session_rows_window_keeps_the_selection_visible() {
+    let many: Vec<Project> = (0..12)
+        .map(|i| project(&format!("p{i}"), &format!("https://example.test/p{i}")))
+        .collect();
+    let mut flow = NewSessionFlow::with_resolver(new_session::targets_from(&many), stub_identity);
+    // Eight rows is the whole window, so a short registry never scrolls.
+    assert_eq!(flow.rows().len(), 8);
+    assert!(flow.rows()[0].starts_with('▸'));
+    for _ in 0..12 {
+        flow.apply(Input::Down);
+    }
+    // Twelve projects plus the escape row: twelve `Down`s land on the escape.
+    let rows = flow.rows();
+    assert_eq!(rows.len(), 8);
+    assert!(
+        rows.last()
+            .is_some_and(|r| r.starts_with('▸') && r.contains("other")),
+        "the selection scrolled off the window: {rows:?}"
+    );
+    assert!(
+        rows[0].contains("p5"),
+        "the window did not follow the selection down: {rows:?}"
+    );
+}
+
+#[test]
+fn render_new_session_overlay_lists_the_registered_projects() {
+    let sessions = fleet();
+    let mut state = creating();
+    let joined = draw(110, 30, &sessions, &mut state).join("\n");
+    assert!(joined.contains("Start a new session in:"), "{joined}");
+    assert!(
+        joined.contains("https://github.com/duetto/apex"),
+        "{joined}"
+    );
+    assert!(joined.contains("other — type a project path"), "{joined}");
+    assert!(joined.contains("Esc cancels"), "{joined}");
+}
+
+#[test]
+fn render_new_session_overlay_shows_the_typed_path() {
+    let sessions = fleet();
+    let mut state = creating();
+    state.apply(Input::Down, &sessions);
+    state.apply(Input::Down, &sessions);
+    state.apply(Input::Enter, &sessions);
+    for c in "/w/widgets".chars() {
+        state.apply(Input::Char(c), &sessions);
+    }
+    let joined = draw(110, 30, &sessions, &mut state).join("\n");
+    assert!(joined.contains("/w/widgets"), "{joined}");
+    assert!(joined.contains("registers it"), "{joined}");
+}
+
+/// The footer advertises the create key at the narrowest supported width.
+///
+/// Why (#7395 requirement 1): a key nobody can discover is not a feature, and
+/// the footer is the only place it is visible without opening `?`. Asserting at
+/// 80 columns is what catches a legend that has grown past the width it has to
+/// fit in.
+#[test]
+fn render_footer_offers_the_new_session_key() {
+    let sessions = fleet();
+    let mut state = browsing();
+    let screen = draw(80, 24, &sessions, &mut state);
+    let footer = screen.last().expect("a footer row");
+    assert!(footer.contains("n new"), "{footer}");
+    assert!(
+        footer.contains("q quit"),
+        "the legend was clipped: {footer}"
+    );
+    // And the `?` reference says what the key does.
+    state.apply(Input::Char('?'), &sessions);
+    let joined = draw(110, 30, &sessions, &mut state).join("\n");
+    assert!(joined.contains("new session"), "{joined}");
 }
