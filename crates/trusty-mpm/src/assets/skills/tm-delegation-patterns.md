@@ -300,10 +300,14 @@ sequential agents, read-only research, or separate file trees. Use
 `run_in_background: true` for fire-and-forget parallel work.
 
 🔴 **`isolation: "worktree"` is the only sanctioned mechanism, and the PM never
-authors a `git worktree add` into a dispatch prompt (#5649).**
+tells a dispatched agent to hand-roll one — not a literal `git worktree add`,
+and not prose like "work in a worktree of your own" (#5649).**
 `tm hook --pm-guard` reads the declared parameter and never the prompt, so a
 hand-rolled worktree leaves the agent counted against the shared HEAD and gets
-the next file-mutating dispatch denied for a collision that does not exist.
+the next file-mutating dispatch denied for a collision that does not exist. The
+prose form recurred on 2026-09-09 in a different project after the literal-command
+form was fixed here — the guard cannot see either phrasing, so both are banned,
+regardless of wording.
 
 **When `isolation` is unavailable, serialize** — one file-mutating agent at a
 time, each waited for before the next. Serializing always works. Hand-rolling to
