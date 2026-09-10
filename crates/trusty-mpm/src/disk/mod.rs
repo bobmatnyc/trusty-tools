@@ -40,7 +40,8 @@ pub(crate) mod survey_run;
 /// Why: "1180591620717411303424" is not an early warning. The 1.1 TiB in the
 /// 2026-07-21 post-mortem is only legible in binary units. It lives here, on
 /// the module that owns disk accounting, rather than in
-/// [`crate::daemon::doctor_worktree_disk`] where it started (#7313): `tm
+/// [`crate::daemon::doctor`]'s private `doctor_worktree_disk` submodule where
+/// it started (#7313): `tm
 /// session disk` renders the same figures from the `tm` binary, which is a
 /// separate crate from the library and so cannot reach a private daemon
 /// helper. One formatter, so the doctor row and the CLI never disagree about
