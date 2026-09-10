@@ -21,9 +21,10 @@
 //! index the daemon actually holds for this root rather than one it was merely
 //! asked for.
 //!
-//! The trade-off this picks: a session launch pays at most [`CONFIRM_DEADLINE`]
-//! on top of the create's own budget, and only when the daemon left the create
-//! unanswered. An ordinary create answers in milliseconds and never reaches
+//! The trade-off this picks: a session launch pays roughly [`CONFIRM_DEADLINE`]
+//! on top of the create's own budget — see that constant for why one in-flight
+//! registry read can carry it a second further — and only when the daemon left
+//! the create unanswered. An ordinary create answers in milliseconds and never reaches
 //! here. A launch that exhausts the deadline is told so in one `warn` and still
 //! withholds the pin — the daemon may finish registering afterwards, and nothing
 //! here retries.
@@ -39,13 +40,19 @@ use std::time::{Duration, Instant};
 
 use super::reconcile::{ListFailure, fetch_index_list, index_id_serving_root};
 
-/// How long [`confirm_after_no_answer`] keeps asking, in total (#7237).
+/// How long [`confirm_after_no_answer`] keeps asking, before giving up (#7237).
 ///
 /// Sized against the failure it exists for: the measured cold reload took
 /// 3.8 s from the client's first byte, of which the create's own
 /// [`super::CREATE_TIMEOUT`] covers the first second. Four seconds leaves
 /// margin over the rest without turning "the daemon is wedged" into a launch
-/// that hangs — the worst case a caller can pay is this plus the create budget.
+/// that hangs.
+///
+/// Not the total wall time: the deadline is tested only after a registry read
+/// returns, and each read carries its own one-second budget, so a read that
+/// starts just under the deadline can push the confirm to roughly five seconds.
+/// The alternative — cancelling a read mid-flight — would throw away the answer
+/// this poll exists to get.
 const CONFIRM_DEADLINE: Duration = Duration::from_secs(4);
 
 /// How long [`confirm_after_no_answer`] waits between two registry reads.
@@ -84,8 +91,10 @@ pub(super) fn confirm_after_no_answer(
 /// asserted in milliseconds while the one end-to-end test still exercises the
 /// production constants.
 /// What: read, match, sleep, repeat — the sleep is clamped to whatever is left
-/// of `deadline` so the function cannot overrun it, and the loop always performs
-/// at least one read even when `deadline` is zero.
+/// of `deadline` so no wait is started that outlives it, and the loop always
+/// performs at least one read even when `deadline` is zero. `deadline` is tested
+/// between reads, not during one, so the final read can still overrun it by its
+/// own budget; see [`CONFIRM_DEADLINE`].
 /// Test: `confirm_within_stops_at_the_deadline_and_withholds`,
 /// `confirm_within_never_confirms_an_index_at_another_root`.
 fn confirm_within(

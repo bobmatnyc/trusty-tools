@@ -253,8 +253,10 @@ pub enum IndexRegistration {
     /// The daemon acknowledged the create — the index exists in the daemon.
     Confirmed,
     /// The daemon address resolved but the create call did not confirm: a
-    /// non-2xx response, a transport error, or a panicked worker thread. All
-    /// three are logged at warn by [`best_effort_create_index`].
+    /// non-2xx response, a transport error, a panicked worker thread, or an
+    /// unanswered create the registry poll could not confirm within its
+    /// deadline (#7237). The first three are logged at warn by
+    /// [`best_effort_create_index`], the fourth by the `confirm` module.
     NotConfirmed,
     /// No trusty-search daemon address could be resolved, so nothing was sent.
     DaemonUnreachable,
