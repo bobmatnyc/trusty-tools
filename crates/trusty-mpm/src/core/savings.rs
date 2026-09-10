@@ -79,6 +79,15 @@ pub const TECHNIQUE_INSTRUCTION_COMPRESSION: &str = "instruction-compression";
 /// Test: `divert_row_carries_the_named_technique`.
 pub const TECHNIQUE_DIVERT: &str = "divert";
 
+/// `technique` value written by the tool-output compression producer.
+///
+/// Why: `tm compress` shrinks a gate's output before an agent reads it, which
+/// avoids sending tokens exactly the way the other two producers do. Until it
+/// wrote a row, the `💸` segment reported everything the harness saves EXCEPT
+/// bash and tool output.
+/// Test: `a_compress_row_carries_the_named_technique`.
+pub const TECHNIQUE_COMPRESS: &str = "compress";
+
 /// The environment variable Claude Code exports carrying the session's own id.
 ///
 /// Why (#7209): every row on this ledger is folded back by

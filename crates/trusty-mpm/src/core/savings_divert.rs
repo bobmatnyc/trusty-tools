@@ -98,7 +98,7 @@ pub struct ParentModel {
 /// measurement to report.
 /// What: `1e-6` USD.
 /// Test: `no_row_when_the_worker_cost_exceeds_the_saving`.
-const MIN_COST_SAVED_USD: f64 = 1e-6;
+pub(crate) const MIN_COST_SAVED_USD: f64 = 1e-6;
 
 /// Append one `divert` row for a diversion that answered.
 ///
@@ -290,7 +290,7 @@ fn choose_parent_model(
 /// one `warn!` naming it, because that price is a guess the operator cannot
 /// otherwise see.
 /// Test: `resolve_session_price_agrees_with_the_shared_table`.
-fn resolve_session_price(root: &Path, session_id: &str) -> Option<ParentModel> {
+pub(crate) fn resolve_session_price(root: &Path, session_id: &str) -> Option<ParentModel> {
     let (model, source) = choose_parent_model(
         std::env::var(SESSION_MODEL_ENV).ok(),
         read_session_model(root, session_id),
@@ -306,7 +306,8 @@ fn resolve_session_price(root: &Path, session_id: &str) -> Option<ParentModel> {
             session_id,
             %model,
             env = SESSION_MODEL_ENV,
-            "no statusline model record for this session; pricing the divert row \
+            // Shared with the compress producer, so the message names no technique.
+            "no statusline model record for this session; pricing the savings row \
              from the config chain, which may not be the model the session runs"
         );
     }
