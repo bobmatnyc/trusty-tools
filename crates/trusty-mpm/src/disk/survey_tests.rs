@@ -15,7 +15,7 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use super::{ReasonCode, WorktreeFacts, WorktreeTier, classify_tier};
+use super::{GroupBy, ReasonCode, WorktreeFacts, WorktreeTier, classify_tier};
 use crate::disk::size_index::{DirSizeIndex, IndexPolicy};
 use crate::disk::survey_run::{self, DiskProbes, run};
 use crate::session_manager::worktree_git_fixture::GitWorktreeFixture;
@@ -482,6 +482,17 @@ fn survey_fixture(
     keep_patterns: &[String],
     deadline: Option<Instant>,
 ) -> super::DiskSurvey {
+    survey_fixture_grouped(fx, fixed, keep_patterns, deadline, GroupBy::None)
+}
+
+/// [`survey_fixture`], asking for a roll-up (#7313).
+fn survey_fixture_grouped(
+    fx: &GitWorktreeFixture,
+    fixed: &Fixed,
+    keep_patterns: &[String],
+    deadline: Option<Instant>,
+    group_by: GroupBy,
+) -> super::DiskSurvey {
     let keep_list = KeepList::from_patterns(keep_patterns);
     let pr_state = |_: &ScannedWorktree, _: Option<Duration>| fixed.pr.clone();
     let agent_state = |_: &AgentWorktreeOwner| AgentDelegationState::Ended;
@@ -496,7 +507,14 @@ fn survey_fixture(
         dirt: &inspect_dirt,
         measure: &measure,
     };
-    run(&fx.repos_root, &keep_list, &probes, deadline, None)
+    run(
+        &fx.repos_root,
+        &keep_list,
+        &probes,
+        deadline,
+        None,
+        group_by,
+    )
 }
 
 /// Every worktree row in the survey, flattened out of its project.
@@ -750,7 +768,14 @@ fn a_deadline_that_crosses_mid_inspection_yields_a_not_inspected_row() {
         dirt: &inspect_dirt,
         measure: &measure,
     };
-    let survey = run(&fx.repos_root, &keep_list, &probes, Some(deadline), None);
+    let survey = run(
+        &fx.repos_root,
+        &keep_list,
+        &probes,
+        Some(deadline),
+        None,
+        GroupBy::None,
+    );
 
     assert_eq!(
         inspected.borrow().as_slice(),
@@ -814,7 +839,14 @@ fn the_survey_hands_each_measurement_only_the_time_left() {
         measure: &measure,
     };
 
-    run(&fx.repos_root, &keep_list, &probes, Some(deadline), None);
+    run(
+        &fx.repos_root,
+        &keep_list,
+        &probes,
+        Some(deadline),
+        None,
+        GroupBy::None,
+    );
     let budgets = seen.borrow().clone();
     assert!(
         budgets.len() >= 3,
@@ -833,7 +865,14 @@ fn the_survey_hands_each_measurement_only_the_time_left() {
     }
 
     seen.borrow_mut().clear();
-    run(&fx.repos_root, &keep_list, &probes, None, None);
+    run(
+        &fx.repos_root,
+        &keep_list,
+        &probes,
+        None,
+        None,
+        GroupBy::None,
+    );
     let unbounded = seen.borrow().clone();
     assert!(!unbounded.is_empty());
     assert!(
@@ -916,7 +955,14 @@ fn an_unreadable_keep_list_is_reported_and_keeps_every_row() {
         dirt: &inspect_dirt,
         measure: &measure,
     };
-    let survey = run(&fx.repos_root, &keep_list, &probes, None, None);
+    let survey = run(
+        &fx.repos_root,
+        &keep_list,
+        &probes,
+        None,
+        None,
+        GroupBy::None,
+    );
 
     assert_eq!(survey.root.counts.stale, 0, "{:#?}", survey.root);
     let row = rows(&survey)
@@ -967,6 +1013,7 @@ fn a_project_filter_selects_only_that_project() {
         &probes,
         None,
         Some("someone-else/repo"),
+        GroupBy::None,
     );
     assert!(miss.root.projects.is_empty(), "{:#?}", miss.root.projects);
 
@@ -976,6 +1023,7 @@ fn a_project_filter_selects_only_that_project() {
         &probes,
         None,
         Some("owner/repo"),
+        GroupBy::None,
     );
     assert_eq!(hit.root.projects.len(), 1, "{:#?}", hit.root.projects);
 }
@@ -1044,6 +1092,7 @@ fn a_budgeted_survey_answers_within_its_budget() {
         &probes,
         Some(started + BUDGET),
         None,
+        GroupBy::None,
     );
     let elapsed = started.elapsed();
     assert!(
@@ -1099,6 +1148,7 @@ fn the_survey_hands_each_pull_request_lookup_only_the_time_left() {
         &probes,
         Some(Instant::now() + window),
         None,
+        GroupBy::None,
     );
     let budgets = seen.borrow().clone();
     assert!(!budgets.is_empty(), "every worktree is looked up");
@@ -1112,7 +1162,14 @@ fn the_survey_hands_each_pull_request_lookup_only_the_time_left() {
     }
 
     seen.borrow_mut().clear();
-    run(&fx.repos_root, &keep_list, &probes, None, None);
+    run(
+        &fx.repos_root,
+        &keep_list,
+        &probes,
+        None,
+        None,
+        GroupBy::None,
+    );
     assert!(
         seen.borrow().iter().all(Option::is_none),
         "an unbudgeted survey imposes no ceiling: {:?}",
@@ -1149,7 +1206,14 @@ fn a_survey_reports_whether_its_deadline_truncated_the_pass() {
         measure: &measure,
     };
 
-    let whole = run(&fx.repos_root, &keep_list, &probes, None, None);
+    let whole = run(
+        &fx.repos_root,
+        &keep_list,
+        &probes,
+        None,
+        None,
+        GroupBy::None,
+    );
     assert!(
         !whole.partial,
         "an unbudgeted pass inspects everything: {:#?}",
@@ -1159,7 +1223,14 @@ fn a_survey_reports_whether_its_deadline_truncated_the_pass() {
     // A deadline already in the past: nothing is inspected, everything is
     // listed, and the payload says so rather than reading as a clean fleet.
     let spent = Instant::now() - Duration::from_secs(1);
-    let truncated = run(&fx.repos_root, &keep_list, &probes, Some(spent), None);
+    let truncated = run(
+        &fx.repos_root,
+        &keep_list,
+        &probes,
+        Some(spent),
+        None,
+        GroupBy::None,
+    );
     assert!(truncated.partial, "{:#?}", truncated.root.counts);
     assert_eq!(
         rows(&truncated).len(),
@@ -1171,4 +1242,244 @@ fn a_survey_reports_whether_its_deadline_truncated_the_pass() {
         json["partial"], true,
         "the console reads this off the payload: {json:#}"
     );
+}
+
+// ── #7313: session attribution, build directories, and the roll-up ───────────
+
+/// An ENDED session's leftovers are attributed to it, not to nobody.
+///
+/// Why this is the whole issue: before #7313 a row's only owner field was the
+/// LIVE claim, so every worktree a finished session left behind grouped under
+/// "unknown" — 44 worktrees on this repository with no way to see which session
+/// was responsible for them. The `.trusty-mpm-worktree` sentinel outlives the
+/// session, and an agent worktree's sentinel names the session that DISPATCHED
+/// the agent, which is the session an operator would charge the bytes to.
+///
+/// Fails before the change: `DiskWorktree` had no `owning_session` at all, and
+/// `by_session` did not exist.
+#[test]
+fn a_sentinel_attributes_an_ended_sessions_worktree() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("ended-session");
+    // No claim: this session is gone. The sentinel is the only record left.
+    let owner = GitWorktreeFixture::stamp_agent_sentinel(&wt, "agent-7313");
+    let expected = owner.parent_session_id.0.to_string();
+
+    let survey = survey_fixture_grouped(
+        &fx,
+        &Fixed::new(BranchPrState::Merged { pr: 1 }),
+        &[],
+        None,
+        GroupBy::Session,
+    );
+
+    let row = row_for(&survey, &wt);
+    assert_eq!(row.session, None, "no live session claims it: {row:#?}");
+    assert_eq!(
+        row.owning_session.as_deref(),
+        Some(expected.as_str()),
+        "the sentinel's parent session is what the bytes are charged to: {row:#?}"
+    );
+
+    let groups = survey.by_session.as_ref().expect("group_by was asked for");
+    let group = groups
+        .iter()
+        .find(|g| g.session_id.as_deref() == Some(expected.as_str()))
+        .unwrap_or_else(|| panic!("no group for {expected}: {groups:#?}"));
+    assert!(
+        group.worktree_paths.contains(&wt),
+        "the worktree must appear under its own session: {group:#?}"
+    );
+    assert_eq!(group.worktree_count, 1, "{group:#?}");
+}
+
+/// A live claim outranks the sentinel.
+///
+/// Why: the sentinel records who PROVISIONED the worktree; a live claim records
+/// who is sitting in it now. When they disagree the claim is the stronger fact,
+/// and it is also the one the #6927 console already renders — attributing
+/// against it would show two different sessions for one row.
+///
+/// Fails before the change: there was no `owning_session` to have a precedence.
+#[test]
+fn a_live_claim_outranks_the_sentinel_for_attribution() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("claimed-and-stamped");
+    let owner = GitWorktreeFixture::stamp_agent_sentinel(&wt, "agent-7313b");
+    let sentinel_session = owner.parent_session_id.0.to_string();
+
+    let mut fixed = Fixed::new(BranchPrState::Merged { pr: 1 });
+    fixed.claims = LiveClaims::foreign(vec![WorkspaceClaim::new("sess-live-7313", wt.clone())]);
+    let survey = survey_fixture_grouped(&fx, &fixed, &[], None, GroupBy::Session);
+
+    let row = row_for(&survey, &wt);
+    assert_eq!(
+        row.owning_session.as_deref(),
+        Some("sess-live-7313"),
+        "the live claim wins over the sentinel's {sentinel_session}: {row:#?}"
+    );
+    let groups = survey.by_session.as_ref().expect("group_by was asked for");
+    assert!(
+        groups
+            .iter()
+            .all(|g| g.session_id.as_deref() != Some(sentinel_session.as_str())),
+        "the sentinel's session must not also get a group: {groups:#?}"
+    );
+}
+
+/// The roll-up is absent unless the caller asks for it.
+///
+/// Why: #6927's console reads this payload today and renders no per-session
+/// view. Serializing a second index by default would change every existing
+/// consumer's payload to pay for something none of them use.
+///
+/// Fails before the change: `run` took no `group_by` and `DiskSurvey` had no
+/// `by_session` field to be absent.
+#[test]
+fn by_session_is_absent_unless_group_by_is_asked_for() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("ungrouped");
+    GitWorktreeFixture::stamp_reclaimable_sentinel(&wt);
+    let fixed = Fixed::new(BranchPrState::Merged { pr: 1 });
+
+    let plain = survey_fixture(&fx, &fixed, &[], None);
+    assert!(plain.by_session.is_none(), "{:#?}", plain.by_session);
+    let json = serde_json::to_value(&plain).expect("serialize");
+    assert!(
+        json.get("by_session").is_none(),
+        "an existing consumer must see an unchanged payload: {json:#}"
+    );
+
+    let grouped = survey_fixture_grouped(&fx, &fixed, &[], None, GroupBy::Session);
+    let json = serde_json::to_value(&grouped).expect("serialize");
+    assert!(
+        json.get("by_session").is_some(),
+        "asking for the roll-up must produce the key: {json:#}"
+    );
+}
+
+/// `build_dir_bytes` counts every `target*` directory and nothing else.
+///
+/// Why the prefix and not a fixed name: agents are handed an absolute
+/// `CARGO_TARGET_DIR` inside their own worktree, so the directory is
+/// `target-<issue>` or `target-worktree` as often as it is `target` — see
+/// docs/reference/worktree-discipline.md. A fixed-name match would report zero
+/// for the majority of this fleet's build directories.
+///
+/// Fails before the change: `DiskWorktree` had no `build_dir_bytes`.
+#[test]
+fn build_dir_bytes_counts_target_dirs_and_nothing_else() {
+    /// Bytes in `target-7`.
+    const TARGET_N: usize = 4096;
+    /// Bytes in `target-worktree`.
+    const TARGET_WORKTREE: usize = 8192;
+    /// Bytes in `src`, which must not be counted.
+    const SOURCE: usize = 65_536;
+
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("with-build-dirs");
+    GitWorktreeFixture::stamp_reclaimable_sentinel(&wt);
+    for (dir, bytes) in [
+        ("target-7", TARGET_N),
+        ("target-worktree", TARGET_WORKTREE),
+        ("src", SOURCE),
+    ] {
+        std::fs::create_dir_all(wt.join(dir)).expect("create dir");
+        std::fs::write(wt.join(dir).join("payload.bin"), vec![3u8; bytes]).expect("write payload");
+    }
+
+    let survey = survey_fixture(&fx, &Fixed::new(BranchPrState::Merged { pr: 1 }), &[], None);
+    let row = row_for(&survey, &wt);
+
+    let build = row
+        .build_dir_bytes
+        .unwrap_or_else(|| panic!("a listable worktree must report a figure: {row:#?}"));
+    let both_targets = (TARGET_N + TARGET_WORKTREE) as u64;
+    assert!(
+        build >= both_targets,
+        "both target directories must be counted: {build} < {both_targets} in {row:#?}"
+    );
+    assert!(
+        build < SOURCE as u64,
+        "`src` must not be counted: {build} reaches into the {SOURCE}-byte source \
+         tree in {row:#?}"
+    );
+    assert!(
+        row.bytes.unwrap_or(0) > build,
+        "the worktree total already contains the build directories: {row:#?}"
+    );
+}
+
+/// The roll-up sorts by bytes and buckets what nothing attributed.
+///
+/// Why a separate, pure test: ordering and the `None` bucket are the two things
+/// a console depends on and neither needs a filesystem to state. The fixture
+/// repositories above cannot easily produce two sessions with controlled byte
+/// totals; this can.
+///
+/// Fails before the change: `group_by_session` did not exist.
+#[test]
+fn by_session_sorts_by_bytes_and_buckets_the_unattributed() {
+    let project = super::DiskProject {
+        name: "owner/repo".to_string(),
+        path: PathBuf::from("/w/owner/repo"),
+        bytes: None,
+        size: None,
+        worktrees: vec![
+            grouping_row("/w/a", Some("small"), 10, 4, WorktreeTier::Keep),
+            grouping_row("/w/b", Some("big"), 100, 40, WorktreeTier::Stale),
+            grouping_row("/w/c", Some("big"), 5, 1, WorktreeTier::Review),
+            grouping_row("/w/d", None, 50, 25, WorktreeTier::Stale),
+        ],
+    };
+
+    let groups = super::group_by_session(std::slice::from_ref(&project));
+
+    let order: Vec<Option<&str>> = groups.iter().map(|g| g.session_id.as_deref()).collect();
+    assert_eq!(
+        order,
+        vec![Some("big"), None, Some("small")],
+        "descending by bytes: {groups:#?}"
+    );
+    let big = &groups[0];
+    assert_eq!(big.bytes, 105, "{big:#?}");
+    assert_eq!(big.build_dir_bytes, 41, "{big:#?}");
+    assert_eq!(big.worktree_count, 2, "{big:#?}");
+    assert_eq!(big.tiers.stale, 1, "{big:#?}");
+    assert_eq!(big.tiers.review, 1, "{big:#?}");
+    assert_eq!(
+        big.worktree_paths,
+        vec![PathBuf::from("/w/b"), PathBuf::from("/w/c")],
+        "{big:#?}"
+    );
+    assert_eq!(
+        groups[1].session_id, None,
+        "the unattributed bucket is a bucket, not a dropped row: {groups:#?}"
+    );
+}
+
+/// A row for [`by_session_sorts_by_bytes_and_buckets_the_unattributed`].
+fn grouping_row(
+    path: &str,
+    owning_session: Option<&str>,
+    bytes: u64,
+    build_dir_bytes: u64,
+    tier: WorktreeTier,
+) -> super::DiskWorktree {
+    super::DiskWorktree {
+        id: path.to_string(),
+        path: PathBuf::from(path),
+        branch: None,
+        tier,
+        reasons: Vec::new(),
+        gate: None,
+        reason: None,
+        reclaimable: false,
+        bytes: Some(bytes),
+        size: None,
+        pr: None,
+        session: None,
+        owning_session: owning_session.map(str::to_string),
+        build_dir_bytes: Some(build_dir_bytes),
+    }
 }

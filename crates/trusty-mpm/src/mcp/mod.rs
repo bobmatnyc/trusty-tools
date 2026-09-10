@@ -139,12 +139,15 @@ pub trait OrchestratorBackend: Send + Sync {
     /// was applied, and the workspace root's projects, each with its worktrees'
     /// bytes, tier and reasons. `project` scopes to one managed project;
     /// `budget_seconds` bounds classification, past which remaining worktrees
-    /// are listed as `review` rather than omitted.
+    /// are listed as `review` rather than omitted; it is clamped to the stdio
+    /// bridge's forwarding timeout (#7313). `group_by` asks for the per-session
+    /// roll-up (#7313) — `Some("session")`, or `None` for the tree alone.
     /// Test: `dispatch_disk_survey_tool` in the `tests` module.
     async fn disk_survey(
         &self,
         project: Option<&str>,
         budget_seconds: Option<u64>,
+        group_by: Option<&str>,
     ) -> Result<Value, String>;
 
     // ── #1221: session-lifecycle tools ───────────────────────────────────────
@@ -689,7 +692,10 @@ async fn dispatch_tool_call<B: OrchestratorBackend>(
         "disk_survey" => {
             let project = args.get("project").and_then(Value::as_str);
             let budget_seconds = args.get("budget_seconds").and_then(Value::as_u64);
-            backend.disk_survey(project, budget_seconds).await
+            // #7313: the per-session roll-up, opt-in so an existing consumer's
+            // payload is unchanged.
+            let group_by = args.get("group_by").and_then(Value::as_str);
+            backend.disk_survey(project, budget_seconds, group_by).await
         }
         // ── #1222: console-facing tools ──────────────────────────────────────
         "console_metrics" => backend.console_metrics().await,
