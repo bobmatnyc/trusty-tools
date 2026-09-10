@@ -62,7 +62,18 @@ pub(crate) use main_checkout::{
     evaluate_main_checkout_destructive_command, head_move_deny_reason, main_checkout_head_move,
 };
 pub(crate) use persistence::command_is_persistence_only;
-pub(crate) use secret_file_copy::evaluate_secret_file_copy_command;
+// #7266: everything after the first export is shared with
+// `crate::commands::pm_guard_secret_read`, so a READ of a secret-bearing file
+// is screened against the same pattern list, the same brace expander and the
+// same process-substitution stripper a COPY of one is.
+pub(crate) use secret_file_copy::{
+    any_pattern_overlaps, evaluate_secret_file_copy_command, expand_brace_alternatives,
+    matches_only_name_substring_family, secret_pattern_overlaps, strip_process_substitution,
+};
+// #7266 round 5: the read rule allowlists `git add`/`rm`/`mv`/`status`, and the
+// subcommand behind `git -C <path> …` is already parsed here. One parser, two
+// callers, rather than a second global-option table.
+pub(crate) use shell_lex::git_subcommand;
 // #5791: worktree removal is PM-executed, so an agent's `git worktree remove`
 // denies. The sibling `worktree add` guard above is a different rule with a
 // different scope — that one is about WHERE a tree is provisioned, this one is
@@ -272,7 +283,10 @@ fn evaluate_bash_command_inner(command: &str, depth: usize) -> Option<&'static s
 /// `sh -c` / `bash -c` / `env -S` / `xargs` wrapper — see
 /// [`expand_shell_segments`]. Every rule in this module reads its segments from
 /// here, which is what makes one descent reach all of them.
-fn split_shell_segments(command: &str) -> Vec<String> {
+// #7266: `pub(crate)` so the read guard reads its segments from the SAME
+// splitter every rule in this module already uses — that is what makes the
+// `sh -c` descent above reach it too.
+pub(crate) fn split_shell_segments(command: &str) -> Vec<String> {
     let mut out = Vec::new();
     expand_shell_segments(command, 0, &mut out);
     out
