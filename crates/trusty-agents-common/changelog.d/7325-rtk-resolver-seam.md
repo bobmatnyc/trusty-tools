@@ -1,0 +1,3 @@
+Added
+
+- `compress_tool_output_async_with_path_using` and `compress_via_rtk_with` take an `RtkResolver`, so a caller can force the native fallback chain instead of depending on whether the host has `rtk` installed; `no_rtk` is the resolver that never resolves. `TRUSTY_COMPRESS_NO_RTK` (`1`/`true`/`yes`/`on`) selects it for a whole process, for a spawned binary that cannot be handed a resolver. Reporting `rtk_binary` still requires a subprocess that ran and exited zero, so the seam can only downgrade to the native chain, never claim the rtk path for a binary that did not run ([#7325](https://github.com/bobmatnyc/trusty-tools/issues/7325)).

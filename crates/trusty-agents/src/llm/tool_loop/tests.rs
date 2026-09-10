@@ -110,11 +110,13 @@ async fn parallel_tool_dispatch_does_not_cancel_peers() {
 /// `compression_path` fields — i.e. the stats are no longer discarded at the
 /// real call site, not just in the pure builder unit tests in
 /// `compression.rs`.
-/// What: Drives repetitive `cargo test`-shaped input (known to compress via
-/// the native fallback chain, since `rtk` is never installed in CI) through
-/// `super::compress_success_result`, awaits the returned `JoinHandle` for a
-/// deterministic (non-sleep-based) wait on the spawned append, then reads
-/// back the JSONL file.
+/// What: Drives repetitive `cargo test`-shaped input through
+/// `compression_hook::compress_success_result_using` with the `no_rtk`
+/// resolver, awaits the returned `JoinHandle` for a deterministic
+/// (non-sleep-based) wait on the spawned append, then reads back the JSONL
+/// file. The resolver is forced because the record's `compression_path` names
+/// whichever chain ran: this test used to assume `rtk` is never installed,
+/// which held in CI and failed on any host with a Homebrew `rtk` (#7325).
 /// Test: This IS the test.
 #[tokio::test]
 async fn compress_success_result_appends_rtk_record_with_correct_fields() {
@@ -125,8 +127,13 @@ async fn compress_success_result_appends_rtk_record_with_correct_fields() {
     }
     input.push_str("test result: ok. 50 passed; 0 failed\n");
 
-    let (compressed, handle) =
-        super::compress_success_result("cargo test", &input, dir.path().to_path_buf()).await;
+    let (compressed, handle) = super::compression_hook::compress_success_result_using(
+        trusty_agents_common::compress::no_rtk,
+        "cargo test",
+        &input,
+        dir.path().to_path_buf(),
+    )
+    .await;
     assert!(
         compressed.len() < input.len(),
         "expected compression to shrink repetitive passing-test output"
@@ -142,8 +149,8 @@ async fn compress_success_result_appends_rtk_record_with_correct_fields() {
     let parsed: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
     assert_eq!(parsed["surface"], "rtk");
     assert_eq!(parsed["surface_detail"], "cargo test");
-    // `rtk` is never on PATH in CI, so this call site must report the
-    // native-fallback path, not silently omit `compression_path`.
+    // #7325: the resolver above forced the native chain, so this call site
+    // must report that path — not silently omit `compression_path`.
     assert_eq!(parsed["compression_path"], "native_fallback");
     assert!(parsed["tokens_before"].as_u64().unwrap() > 0);
 }

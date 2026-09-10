@@ -22,6 +22,7 @@
 pub mod tool_output;
 
 pub use tool_output::{
-    CompressionPath, ToolFilter, classify_tool, compress_tool_output, compress_tool_output_async,
-    compress_tool_output_async_with_path, has_filter_for,
+    CompressionPath, ENV_COMPRESS_NO_RTK, RtkResolver, ToolFilter, classify_tool,
+    compress_tool_output, compress_tool_output_async, compress_tool_output_async_with_path,
+    compress_tool_output_async_with_path_using, default_rtk_resolver, has_filter_for, no_rtk,
 };

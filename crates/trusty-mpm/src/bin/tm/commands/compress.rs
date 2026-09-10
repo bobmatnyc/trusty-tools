@@ -394,6 +394,23 @@ async fn append_compression_record(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use trusty_agents_common::compress::{
+        CompressionPath, compress_tool_output_async_with_path_using, no_rtk,
+    };
+
+    /// Compress through the native chain, whatever the host has installed.
+    ///
+    /// Why: `trusty_common::bin_resolve::resolve_binary` finds a Homebrew
+    /// `rtk` whatever `PATH` says, so every assertion below about the native
+    /// chain's own output — the 80-byte size gate, the line-list elision —
+    /// passed or failed by host until the resolver seam existed (#7325).
+    /// What: [`compress_tool_output_async_with_path_using`] with the
+    /// never-resolving [`no_rtk`] resolver. No env mutation, so the
+    /// `src/bin/tm/**` env-isolation ratchet stays intact.
+    /// Test: every caller in this module.
+    async fn native_compress(tool: &str, input: &str) -> (String, CompressionPath) {
+        compress_tool_output_async_with_path_using(no_rtk, tool, input).await
+    }
 
     #[test]
     fn log_compression_stats_pct_reduction_is_zero_for_empty_input() {
@@ -417,7 +434,10 @@ mod tests {
                 "crates/x/src/lib.rs:{i}: fn candidate_{i}() -> bool\n"
             ));
         }
-        let (compressed, path) = compress_tool_output_async_with_path("grep -n", &input).await;
+        // #7325: force the native chain through the resolver seam. The default
+        // resolver finds a Homebrew `rtk` whatever PATH says, so without this
+        // the assertion below passed only on hosts without rtk installed.
+        let (compressed, path) = native_compress("grep -n", &input).await;
         assert_eq!(path.as_str(), "native_fallback");
         assert!(
             compressed.contains("lines omitted"),
@@ -459,7 +479,10 @@ mod tests {
             input.push_str(&format!("test mod::t{i} ... ok\n"));
         }
         input.push_str("test result: ok. 50 passed; 0 failed\n");
-        let (compressed, _path) = compress_tool_output_async_with_path("cargo test", &input).await;
+        // #7325: the shrinkage asserted below is the NATIVE chain's, so force
+        // it — with the default resolver this measured whichever chain the
+        // host happened to have.
+        let (compressed, _path) = native_compress("cargo test", &input).await;
         assert!(
             compressed.len() < input.len(),
             "expected compression to shrink repetitive passing-test output"
@@ -471,9 +494,11 @@ mod tests {
     async fn run_compress_passes_through_short_output_unchanged() {
         // Below the 80-byte size gate in `compress_tool_output` — must be a
         // verbatim passthrough, proving `tm compress` never mangles small
-        // Bash results (exit codes, short status lines).
+        // Bash results (exit codes, short status lines). The gate is the
+        // native chain's, so #7325's seam forces that chain: rtk applies no
+        // size gate and rewrites even three bytes.
         let input = "ok\n";
-        let (compressed, _path) = compress_tool_output_async_with_path("bash", input).await;
+        let (compressed, _path) = native_compress("bash", input).await;
         assert_eq!(compressed, input);
     }
 

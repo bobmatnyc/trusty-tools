@@ -7,7 +7,9 @@
 //! independently unit-testable without driving a full LLM loop, mirroring
 //! `classification.rs`'s `should_refresh_summary` testability pattern.
 //! What: `compress_success_result`, called from `mod.rs`'s tool-result loop
-//! for every `ToolResult::Success`.
+//! for every `ToolResult::Success`, over `compress_success_result_using`,
+//! which takes the `rtk` resolver so a test can force the native chain
+//! (#7325).
 //! Test: `tests::compress_success_result_appends_rtk_record_with_correct_fields`.
 
 /// Compress a successful tool result and durably record RTK
@@ -31,10 +33,37 @@ pub(super) async fn compress_success_result(
     raw_str: &str,
     project_dir: std::path::PathBuf,
 ) -> (String, tokio::task::JoinHandle<()>) {
+    // #7325: production resolves rtk the usual way; only a test names another.
+    compress_success_result_using(
+        trusty_agents_common::compress::default_rtk_resolver(),
+        tool_name,
+        raw_str,
+        project_dir,
+    )
+    .await
+}
+
+/// [`compress_success_result`] against a caller-chosen `rtk` resolver.
+///
+/// Why: the record's `compression_path` field names whichever chain ran, so a
+/// test that asserts `native_fallback` needs to force that chain — otherwise
+/// the assertion reads the host's rtk install state instead of this call
+/// site's behaviour, passing in CI and failing on a developer's Mac (#7325).
+/// What: identical to [`compress_success_result`], except `resolve` decides
+/// whether rtk is reachable.
+/// Test: `compress_success_result_appends_rtk_record_with_correct_fields`.
+pub(super) async fn compress_success_result_using(
+    resolve: trusty_agents_common::compress::RtkResolver,
+    tool_name: &str,
+    raw_str: &str,
+    project_dir: std::path::PathBuf,
+) -> (String, tokio::task::JoinHandle<()>) {
     let started = std::time::Instant::now();
     let (content_str, path) =
-        trusty_agents_common::compress::compress_tool_output_async_with_path(tool_name, raw_str)
-            .await;
+        trusty_agents_common::compress::compress_tool_output_async_with_path_using(
+            resolve, tool_name, raw_str,
+        )
+        .await;
     let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let record = crate::compression::rtk_compression_record(
         tool_name,
