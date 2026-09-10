@@ -406,6 +406,12 @@ crates/<crate>/changelog.d/<issue-or-pr-number>-<short-slug>.md
 
 - Format and category line: `Skill(skill="tm-workflow")`. Assembler and CI-gate
   specifics: [changelog-fragments.md](docs/reference/changelog-fragments.md).
+- 🔴 **One category per fragment (#7287).** The first line IS the category and
+  everything after it belongs to that category; a second category word inside
+  the bullet body fails the gate, and two categories mean two fragment files.
+  Check the file before committing with `bash scripts/check_changelog_fragment.sh
+  --file <path>`, which validates placement, category line and body with no diff
+  at all.
 - 🔴 **The test-only exemption is decided by FILE PATH, not by what changed
   inside the file (#7033).** `check_changelog_fragment.sh` (via
   `scripts/lib/source_class.sh`) classifies a path as test-only when its

@@ -93,14 +93,19 @@ completion path for a subagent; only the PM's `SendMessage` resumes you.
    your own scratchpad directory (given at the top of your system prompt),
    never a fixed `/tmp` name — the scratchpad is SHARED across concurrently
    dispatched agents in one session, so a fixed filename lets a sibling's
-   write clobber or shadow yours. Make the filename itself unique, e.g. with
-   the shell's own PID (`$$`):
+   write clobber or shadow yours. Name the file for THIS task and step —
+   `op-<issue>-<step>.txt` — and read back that exact path:
 
    ```bash
    # both calls use run_in_background; then read the sentinel file
-   <long-command> > <scratchpad>/op-$$.txt 2>&1
-   until grep -q DONE <scratchpad>/op-$$.txt; do sleep 10; done; echo READY
+   <long-command> > <scratchpad>/op-7287-install.txt 2>&1
+   until grep -q DONE <scratchpad>/op-7287-install.txt; do sleep 10; done; echo READY
    ```
+
+   🔴 Never `$$`, and never a glob. `$$` is a different PID in every Bash call
+   here — one agent wrote `fmt-68810.txt` and read `fmt-71275.txt` — so the
+   write and the read resolve to different files, and the `fmt-*.txt` glob
+   reached for next matches a sibling agent's output instead (#7287).
 
 4. Genuinely cannot finish in-turn? REPORT STATE AND STOP. "Still pending: head
    SHA abc1234, 10 checks unsettled" is a CORRECT and complete outcome. The
@@ -129,7 +134,11 @@ completion path for a subagent; only the PM's `SendMessage` resumes you.
   `gh pr view <n> --json state` before your first commit and again before your
   final gate run; on `MERGED`, `git rebase --onto origin/main <old-base-sha>` so
   the merged commit is not duplicated, then re-run the gates on the moved base
-  (#6937).
+  (#6937). That state read is the ONLY test — never decide it with
+  `git merge-base --is-ancestor`. Where the project squash-merges, the merged
+  branch's tip is never an ancestor of the squash commit, so the ancestor check
+  answers "not merged" beside a `{"state":"MERGED"}` read and the rebase gets
+  skipped (#7287).
 - **Never share a working directory with another concurrently-dispatched
   file-mutating agent.** Stay in the worktree you were given, and never
   `git checkout` / `git switch` in one you were handed — a sibling shares that
@@ -184,6 +193,14 @@ polish — the full gate is in `tm-workflow`.
 - Project uses fragments → write `<package>/changelog.d/<issue-or-pr>-<slug>.md`.
   First line is the category (`Added`/`Fixed`/`Changed`/…), the rest is the
   bullet. The per-PR filename is what keeps two concurrent PRs from conflicting.
+- **One category per fragment.** The first line IS the category and everything
+  after it belongs to that category — a second category word inside the body is
+  a gate failure, not a style nit, and cost two agents an amend cycle (#7287).
+  Two categories mean two fragment files.
+- **Validate a fragment before you commit it.** Where the project's changelog
+  gate takes a `--file <path>` argument, that checks one fragment's placement,
+  category line and body with no diff at all; the plain run diffs against the
+  base branch, so it sees nothing until the change is committed.
 - **A fragment follows the crate whose `src/**` the diff touches, not the
   commit's subject.** One PR that edits three crates' sources owes three
   fragments. Check the paths in `git diff --name-only`, not what you meant the
@@ -351,11 +368,11 @@ output. An empty result is NOT a real result. Never fabricate output you did not
 see. Never report a pass/fail you could not observe.
 
 1. Retry the exact command up to 2 more times — it usually succeeds.
-2. Still empty → redirect to a file under your scratchpad directory with a
-   unique filename (`<command> > <scratchpad>/out-$$.txt 2>&1`, never a fixed
-   `/tmp` name — the scratchpad is shared across concurrent agents) and open
-   it with the Read tool, not `cat` (which goes back through the same capture
-   path).
+2. Still empty → redirect to a file under your scratchpad directory named for
+   this task and step (`<command> > <scratchpad>/out-<issue>-<step>.txt 2>&1`,
+   never a fixed `/tmp` name and never `$$` — the scratchpad is shared across
+   concurrent agents) and open that exact path with the Read tool, not `cat`
+   (which goes back through the same capture path).
 3. Still unobservable → report "Could not verify — command output unavailable"
    and hand back.
 
@@ -373,13 +390,14 @@ an agent told to "rerun the suite until green" spent 415k tokens because
 
 1. **Run it into a file, never a pipe.** Don't watch, tail, or poll a live
    stream. A pipe eats the verdict — see "Never end a gate chain in a pipe".
-   Redirect into your scratchpad directory with a unique filename (never a
-   fixed `/tmp` name) — the scratchpad is shared across concurrently
-   dispatched agents, and a fixed name lets one agent read a sibling's build
-   output as its own result:
+   Redirect into your scratchpad directory, naming the file for this task and
+   step (never a fixed `/tmp` name, never `$$`, never a glob to find it again)
+   — the scratchpad is shared across concurrently dispatched agents, and a name
+   you cannot reproduce exactly lets one agent read a sibling's build output as
+   its own result:
 
    ```bash
-   <command> > <scratchpad>/gate-<crate>-$$.txt 2>&1; echo "EXIT=$?"
+   <command> > <scratchpad>/gate-<crate>-<step>.txt 2>&1; echo "EXIT=$?"
    ```
 
    Run in the foreground, the `EXIT=$?` above prints straight to your own tool
@@ -387,7 +405,7 @@ an agent told to "rerun the suite until green" spent 415k tokens because
    writes to the tool's stdout, not into the redirected file, so `tm wait
    --for file --contains "EXIT="` on that file never matches. Either append
    the sentinel into the file too
-   (`<command> > <scratchpad>/gate-<crate>-$$.txt 2>&1; echo "EXIT=$?" >> <scratchpad>/gate-<crate>-$$.txt`)
+   (`<command> > <scratchpad>/gate-<crate>-<step>.txt 2>&1; echo "EXIT=$?" >> <scratchpad>/gate-<crate>-<step>.txt`)
    or wait on the process itself with `tm wait --for run --pid <pid>` instead.
 2. **`EXIT=0` → stop. Do NOT read the file.** Nothing in it is information.
 3. **Non-zero → trim the file, then read it.** Trim reads FROM the file, never
@@ -395,7 +413,7 @@ an agent told to "rerun the suite until green" spent 415k tokens because
    or this repo's Unix filter:
 
    ```bash
-   tm compress --tool "cargo test" < <scratchpad>/gate-<crate>-$$.txt
+   tm compress --tool "cargo test" < <scratchpad>/gate-<crate>-<step>.txt
    ```
 
    `--tool` is free-form, substring-matched (`"cargo test"`, `"git diff"`). Known
@@ -473,17 +491,17 @@ green twice in one day, once for an engineer and once for a reviewer. Redirect,
 then echo the status:
 
 ```bash
-( <gate> && <gate> ) > <scratchpad>/gates-$$.txt 2>&1; echo "EXIT=$?"
+( <gate> && <gate> ) > <scratchpad>/gates-<step>.txt 2>&1; echo "EXIT=$?"
 ```
 
-Redirect into your scratchpad directory with a unique filename, never a fixed
-`/tmp` name — the same collision risk applies here as above. Backgrounded this
-chain? The same sentinel gap applies: append `echo "EXIT=$?"` into the file
-too, or use `tm wait --for run --pid <pid>` — see "Never Directly Monitor a
-Declarative Process" above.
+Redirect into your scratchpad directory, naming the file for this task and step
+and never a fixed `/tmp` name — the same collision risk applies here as above.
+Backgrounded this chain? The same sentinel gap applies: append `echo "EXIT=$?"`
+into the file too, or use `tm wait --for run --pid <pid>` — see "Never Directly
+Monitor a Declarative Process" above.
 
 `EXIT=0` → don't read the file. Non-zero → Read only the failing portion. Trim
-the FILE when it is long (`tm compress --tool "cargo test" < <scratchpad>/gates-$$.txt`),
+the FILE when it is long (`tm compress --tool "cargo test" < <scratchpad>/gates-<step>.txt`),
 never the live command. Must you genuinely pipe? `set -o pipefail` in the SAME
 invocation — `$PIPESTATUS` is a bashism and this harness runs zsh.
 

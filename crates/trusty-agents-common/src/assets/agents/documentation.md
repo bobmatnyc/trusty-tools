@@ -86,8 +86,10 @@ and the "Policy" note in its README — follow it when writing or editing docs:
   bold-field block (Status, Subsystem, Owner, Last-updated, Spec ID) and anchors each
   governed section with `{#SPEC-…}` equal to that section's ID.
 - **Don't restate the grammar** — link to DOC-38 so there is one source of truth.
-- **Run the gate before handoff.** `scripts/check_sld.sh` must pass; existing
-  pre-DOC-38 specs are grandfathered via `.sld-lint-allowlist.tsv`.
+- **Run the gate before handoff.** Where the project ships an SLD lint, it must
+  pass; find it by reading the project's CLAUDE.md and listing its `scripts/`
+  rather than assuming a filename. Specs predating the policy are usually
+  grandfathered through an allowlist file the lint itself names.
 
 ## Commit Discipline
 

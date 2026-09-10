@@ -39,12 +39,13 @@ having covered far less than its counts suggest. Name the flag beside any counts
 you report. (See `CLAUDE.md`; this has been missed twice — issue #5324 and
 PR #5904.)
 
-🔴 **`trusty-common` takes `--features` on every test run.** Its default feature
-set is empty, so a bare `cargo test -p trusty-common` is a `compile_error!`.
-Name what you changed — `--features memory-core,embedder-test-support` — or
-`--features unconditional-only` for the always-compiled surface.
-`--all-features` is unavailable: the `embedder-*` ORT variants are mutually
-exclusive.
+🔴 **A crate whose `default` feature set is empty needs `--features` on every
+test run.** A bare `cargo test -p <crate>` there compiles the module you edited
+out of the run, or fails outright on a `compile_error!` the crate uses to say
+so. Read the crate's `Cargo.toml` before trusting a crate-scoped green: name the
+features that cover what you changed, and check whether `--all-features` is even
+available — mutually exclusive features make it an error rather than the widest
+run.
 
 Widen the scope when the change is wider, not by default:
 
@@ -59,9 +60,12 @@ Widen the scope when the change is wider, not by default:
 every narrow change depend on the whole workspace turns unrelated flakes into
 false failures.
 
-🔴 **Editing `trusty-common`?** Run `scripts/test_trusty_common_lanes.sh`
-instead of the four-command bar above — it runs every feature lane the crate
-actually needs covered.
+🔴 **A crate with several feature lanes may ship its own multi-lane test
+script.** Where the project defines one, run it instead of the four-command bar
+above — it covers every lane the crate needs, which a single `--features` run
+does not. Find it the way you find any project command: read the project's
+CLAUDE.md and list its `scripts/`. Never assume a filename the checkout does not
+contain.
 
 🔴 **Touched a doc comment? Run this project's doc gates too, if it defines
 any.** Its CLAUDE.md names them and `scripts/` holds them — read both rather
