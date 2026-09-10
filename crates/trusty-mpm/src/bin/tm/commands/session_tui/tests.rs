@@ -747,6 +747,20 @@ fn render_at_two_hundred_by_fifty_shows_every_column() {
     assert!(joined.contains("%11"), "{joined}");
 }
 
+/// The TUI overlay renders the SHARED errored question (#7224), so an operator
+/// who learns what `y` does in the numbered fallback picker reads the same
+/// promise here.
+#[test]
+fn confirm_overlay_asks_the_shared_errored_question() {
+    let sessions = vec![session("tm-quiet-falcon", "errored", 4)];
+    let mut state = TuiState::new(None, None);
+    state.sync(&sessions);
+    state.apply(Input::Char('d'), &sessions);
+    let joined = draw(200, 50, &sessions, &mut state).join("\n");
+    let ask = crate::commands::picker_delete::errored_confirm_ask("tm-quiet-falcon");
+    assert!(joined.contains(&ask), "expected {ask:?} in\n{joined}");
+}
+
 #[test]
 fn render_tiny_terminal_does_not_panic() {
     let sessions = fleet();
@@ -937,6 +951,42 @@ fn wrap_message_elides_on_a_token_boundary() {
             assert_eq!(token.chars().count(), 5, "token cut mid-word: {token}");
         }
     }
+}
+
+/// #7224: the session id is the point of the refusal, so it has to survive the
+/// wrap at the narrow widths a split pane actually has. Packing greedily from
+/// the front filled all four lines with the first paragraph at 40 and 60
+/// columns and dropped the id paragraph entirely.
+#[test]
+fn wrap_message_keeps_the_session_id_at_narrow_widths() {
+    for width in [40usize, 60, 80] {
+        let lines = layout::wrap_message(GUARD_REFUSAL, width, layout::STATUS_MAX_LINES);
+        assert!(
+            lines.len() <= layout::STATUS_MAX_LINES,
+            "width {width} overflowed the status region:\n{lines:#?}"
+        );
+        for line in &lines {
+            assert!(
+                line.chars().count() <= width,
+                "width {width}: line exceeds it: {line}"
+            );
+        }
+        assert!(
+            lines.iter().any(|l| l.contains(GUARD_UUID)),
+            "width {width}: the full session id must survive, got:\n{lines:#?}"
+        );
+    }
+}
+
+/// A token longer than the width has no wrap that shows it whole, so it is
+/// emitted alone and intact — splitting it is the exact failure the wrap exists
+/// to prevent, and the elide helper must leave a line it cannot cut at a
+/// whitespace boundary exactly as it is.
+#[test]
+fn wrap_message_keeps_an_overlong_token_whole() {
+    let token = "z".repeat(200);
+    let lines = layout::wrap_message(&token, 40, layout::STATUS_MAX_LINES);
+    assert_eq!(lines, vec![token]);
 }
 
 #[test]

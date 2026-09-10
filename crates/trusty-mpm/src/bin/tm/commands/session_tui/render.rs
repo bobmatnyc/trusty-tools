@@ -240,7 +240,7 @@ fn confirm_body(name: &str, force: bool, stop_first: bool, typed: &str) -> Vec<L
     let ask = if force {
         format!("'{name}' is RUNNING. Type the word force, then Enter, to delete it.")
     } else if stop_first {
-        format!("'{name}' is errored. Stop it and delete it? Type y, then Enter.")
+        crate::commands::picker_delete::errored_confirm_ask(name)
     } else {
         format!("Delete '{name}'? Type y, then Enter.")
     };

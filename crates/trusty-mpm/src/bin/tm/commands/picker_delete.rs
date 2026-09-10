@@ -173,6 +173,61 @@ pub(crate) fn classify_stop_first(status: reqwest::StatusCode) -> StopFirstNext 
     }
 }
 
+/// The `(force, stop_first)` pair a delete of a session in `state` uses (#7224).
+///
+/// Why: `tm ls` has two delete surfaces — the ratatui TUI and the numbered
+/// picker it falls back to when the terminal has no raw mode — and they must
+/// answer "what kind of delete is this?" identically. They did not: the TUI
+/// learned the stop-first leg and the numbered picker kept issuing the bare
+/// delete, so the same errored row was deleted in one surface and refused in
+/// the other. One function is what makes that divergence unrepresentable.
+/// What: `force` from [`delete_needs_force`] (running rows demand the word
+/// `force`), `stop_first` from [`delete_needs_stop_first`] (an errored row's
+/// runtime is stopped before the delete goes out).
+/// Test: `delete_route_flags_match_the_two_guards` in
+/// `tests_behavior_d_stop_delete_tests.rs`.
+pub(crate) fn delete_route_flags(state: &str) -> (bool, bool) {
+    (delete_needs_force(state), delete_needs_stop_first(state))
+}
+
+/// The question both delete surfaces ask before an ERRORED row's delete (#7224).
+///
+/// Why: confirming an errored row runs two legs — stop the runtime, then delete
+/// the record — and an operator who agrees to that in one surface must be
+/// agreeing to the same thing in the other. Holding the sentence in one place
+/// is what keeps the numbered picker's prompt and the TUI overlay's from
+/// drifting into describing different actions.
+/// Test: `both_delete_surfaces_ask_the_same_errored_question` in
+/// `tests_behavior_d_stop_delete_tests.rs`, and the overlay render in
+/// `confirm_overlay_asks_the_shared_errored_question`.
+pub(crate) fn errored_confirm_ask(name: &str) -> String {
+    format!("'{name}' is errored. Stop it and delete it? Type y, then Enter.")
+}
+
+/// Issue a confirmed delete by the route `stop_first` selects (#7224).
+///
+/// Why: both delete surfaces had this two-branch choice written out inline, and
+/// only one of them had both branches. Naming the route once removes the branch
+/// a surface can forget to write.
+/// What: `stop_first` sends the delete through [`stop_then_delete`]; otherwise
+/// straight to [`delete_managed_then_local`]. `force` is threaded unchanged
+/// either way — the stop leg never escalates it.
+/// Test: the `picker_delete_*` and `stop_then_delete_*` round trips in
+/// `tests_behavior_d_stop_delete_tests.rs`.
+pub(crate) async fn route_delete(
+    client: &reqwest::Client,
+    url: &str,
+    id: &str,
+    force: bool,
+    stop_first: bool,
+) -> anyhow::Result<DeleteReport> {
+    if stop_first {
+        stop_then_delete(client, url, id, force).await
+    } else {
+        delete_managed_then_local(client, url, id, force).await
+    }
+}
+
 /// Map a managed-delete HTTP status to the next routing step.
 ///
 /// Why: pure seam for the family routing so 200/404/409/other are testable
@@ -406,13 +461,15 @@ async fn delete_local(
 /// Why: the interactive delete must be explicit and, for a running session,
 /// force-confirmed — never a silent destructive default. This is the TTY driver
 /// that renders the confirm prompt and calls the shared routing helper.
-/// What: computes [`delete_needs_force`] from the session state; for a running
-/// session it prints a force warning and requires the operator to type `force`
-/// ([`confirm_is_force`]); otherwise it requires `y`/`yes` ([`confirm_is_yes`]).
-/// On confirm it calls [`delete_managed_then_local`] with the matching `force`
-/// flag and renders the [`DeleteReport`]. Returns `Ok(true)` only when a record
-/// was actually removed (so the caller knows the list changed); a cancel, an EOF,
-/// a 409 refusal, or a not-found all return `Ok(false)`.
+/// What: computes the route with [`delete_route_flags`]; for a running session
+/// it prints a force warning and requires the operator to type `force`
+/// ([`confirm_is_force`]); an errored session is asked the shared
+/// [`errored_confirm_ask`] question, which names the stop leg as well; every
+/// other state is asked plainly. All three then require the same `y`/`yes`
+/// ([`confirm_is_yes`]) except the force case. On confirm it hands off to
+/// [`delete_confirmed`], which routes and renders. Returns `Ok(true)` only when
+/// a record was actually removed (so the caller knows the list changed); a
+/// cancel, an EOF, a 409 refusal, or a not-found all return `Ok(false)`.
 /// Test: stdin/HTTP path is side-effect-only (manual smoke + e2e); the pure
 /// confirm/route/guard seams it composes are unit-tested (see module doc).
 pub(crate) async fn confirm_and_delete(
@@ -420,13 +477,18 @@ pub(crate) async fn confirm_and_delete(
     url: &str,
     session: &ManagedSessionSummary,
 ) -> anyhow::Result<bool> {
-    let force = delete_needs_force(&session.state);
+    let (force, stop_first) = delete_route_flags(&session.state);
     if force {
         eprintln!(
             "tm: '{}' is {} (running) — deleting will FORCE-remove the record.",
             session.name, session.state
         );
         eprint!("tm: type 'force' to confirm, or anything else to cancel > ");
+    } else if stop_first {
+        // #7224: an errored row's confirm covers BOTH legs, so say so before
+        // the operator agrees rather than after.
+        eprintln!("tm: {}", errored_confirm_ask(&session.name));
+        eprint!("tm: [y/N] > ");
     } else {
         eprintln!(
             "tm: delete '{}' ({})? this permanently removes the session record.",
@@ -455,7 +517,31 @@ pub(crate) async fn confirm_and_delete(
         return Ok(false);
     }
 
-    match delete_managed_then_local(client, url, &session.id, force).await? {
+    delete_confirmed(client, url, session).await
+}
+
+/// Route an already-confirmed delete and report what the daemon did (#7224).
+///
+/// Why: the confirm half of [`confirm_and_delete`] reads stdin, so while the
+/// routing lived inside it the numbered picker's delete could not be proven
+/// against a stub daemon the way the TUI's can. Splitting the two is what let
+/// the missing stop-first leg be caught: the ROUTING is now decidable without a
+/// terminal.
+/// What: recomputes the delete's route from `session.state`, issues it, and
+/// prints the [`DeleteReport`]. Returns `Ok(true)` only when a record was
+/// actually removed, so the caller knows the list changed.
+/// Test: `picker_delete_stops_an_errored_session_before_deleting_it`,
+/// `picker_delete_treats_a_not_found_stop_as_nothing_to_stop`,
+/// `picker_delete_never_deletes_after_a_failed_stop`,
+/// `picker_delete_issues_no_stop_for_a_non_errored_row` in
+/// `tests_behavior_d_stop_delete_tests.rs`.
+pub(crate) async fn delete_confirmed(
+    client: &reqwest::Client,
+    url: &str,
+    session: &ManagedSessionSummary,
+) -> anyhow::Result<bool> {
+    let (force, stop_first) = delete_route_flags(&session.state);
+    match route_delete(client, url, &session.id, force, stop_first).await? {
         DeleteReport::Deleted {
             name,
             prior_state,

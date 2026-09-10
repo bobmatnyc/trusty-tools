@@ -209,3 +209,220 @@ async fn stop_then_delete_never_deletes_after_a_failed_stop() {
         handle.abort();
     }
 }
+
+// ── the numbered picker's own delete route (#7224) ──────────────────────────
+
+/// The daemon's answer for an ERRORED session whose tmux pane is still up: the
+/// delete guard 409s until the runtime has actually been stopped. This is the
+/// shape of the reported bug — a delete that never stops first bounces off that
+/// 409 with advice to leave the surface and run `tm session stop` by hand.
+#[derive(Clone)]
+struct LiveErroredStub {
+    stop_status: axum::http::StatusCode,
+    runtime_down: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    stops: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    deletes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl LiveErroredStub {
+    fn new(stop_status: axum::http::StatusCode) -> Self {
+        Self {
+            stop_status,
+            runtime_down: Default::default(),
+            stops: Default::default(),
+            deletes: Default::default(),
+        }
+    }
+
+    fn router(&self) -> axum::Router {
+        use std::sync::atomic::Ordering::SeqCst;
+
+        use axum::{Router, extract::State, response::IntoResponse, routing::post};
+        let stub = self.clone();
+        Router::new()
+            .route(
+                "/api/v1/sessions/managed/{id}/runtime-stop",
+                post(|State(s): State<LiveErroredStub>| async move {
+                    s.stops.fetch_add(1, SeqCst);
+                    // 2xx and 404 are both "no live runtime remains"; anything
+                    // else leaves the session exactly as it was.
+                    if s.stop_status.is_success()
+                        || s.stop_status == axum::http::StatusCode::NOT_FOUND
+                    {
+                        s.runtime_down.store(true, SeqCst);
+                    }
+                    (s.stop_status, "stub stop body")
+                }),
+            )
+            .route(
+                "/api/v1/sessions/managed/{id}/delete",
+                post(|State(s): State<LiveErroredStub>| async move {
+                    s.deletes.fetch_add(1, SeqCst);
+                    if !s.runtime_down.load(SeqCst) {
+                        return (
+                            axum::http::StatusCode::CONFLICT,
+                            "session is errored — stop it first with `tm session stop`",
+                        )
+                            .into_response();
+                    }
+                    axum::Json(serde_json::json!({
+                        "name": "tm-quiet-falcon",
+                        "state": "errored",
+                        "deleted": true,
+                    }))
+                    .into_response()
+                }),
+            )
+            .with_state(stub)
+    }
+
+    fn counts(&self) -> (usize, usize) {
+        use std::sync::atomic::Ordering::SeqCst;
+        (self.stops.load(SeqCst), self.deletes.load(SeqCst))
+    }
+}
+
+/// A managed row in `state`, with the id the stub answers for.
+fn row(state: &str) -> trusty_mpm::client::ManagedSessionSummary {
+    trusty_mpm::client::ManagedSessionSummary {
+        id: "sid-picker".to_string(),
+        name: "tm-quiet-falcon".to_string(),
+        state: state.to_string(),
+        persisted_state: None,
+        workspace_path: None,
+        repo_url: None,
+        branch: None,
+        created_at: None,
+        last_activity_at: None,
+        pending_decision: None,
+        proposed_default: None,
+        source_id: None,
+        task: None,
+        cwd: None,
+        claude_session_id: None,
+        deliverable_id: None,
+        pane_id: None,
+        injection_status: None,
+        unresumable: false,
+        stale_assets: false,
+        stale_assets_unchecked: false,
+        attached: false,
+        slot: 1,
+        deleted: false,
+        auto_resume_parked: None,
+    }
+}
+
+/// The reported bug, on the surface it was reported from. `tm ls` falls back to
+/// the NUMBERED picker whenever the terminal has no raw mode, and that picker's
+/// delete driver used to issue the delete alone — so an errored row whose tmux
+/// pane was still up got the daemon's 409 and the operator got told to go run a
+/// different command in a different surface.
+#[tokio::test]
+async fn picker_delete_stops_an_errored_session_before_deleting_it() {
+    use crate::commands::picker_delete::delete_confirmed;
+    let stub = LiveErroredStub::new(axum::http::StatusCode::OK);
+    let (url, handle) = serve_stub(stub.router()).await;
+
+    let deleted = delete_confirmed(&reqwest::Client::new(), &url, &row("errored"))
+        .await
+        .expect("the delete driver must not error");
+    assert!(deleted, "the errored row must end up deleted, not refused");
+    assert_eq!(stub.counts(), (1, 1), "one stop, then one delete");
+    handle.abort();
+}
+
+/// A 404 stop is the daemon's explicit "no live session here", not a failure —
+/// the delete still goes out and does its own not-found routing.
+#[tokio::test]
+async fn picker_delete_treats_a_not_found_stop_as_nothing_to_stop() {
+    use crate::commands::picker_delete::delete_confirmed;
+    let stub = LiveErroredStub::new(axum::http::StatusCode::NOT_FOUND);
+    let (url, handle) = serve_stub(stub.router()).await;
+
+    let deleted = delete_confirmed(&reqwest::Client::new(), &url, &row("errored"))
+        .await
+        .expect("the delete driver must not error");
+    assert!(deleted, "a 404 stop must not block the delete");
+    assert_eq!(stub.counts(), (1, 1));
+    handle.abort();
+}
+
+/// Fail-open check on the picker's own route: a stop the daemon REJECTED leaves
+/// the record alone, and the delete endpoint is never reached at all.
+#[tokio::test]
+async fn picker_delete_never_deletes_after_a_failed_stop() {
+    use crate::commands::picker_delete::delete_confirmed;
+    for status in [
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        axum::http::StatusCode::CONFLICT,
+    ] {
+        let stub = LiveErroredStub::new(status);
+        let (url, handle) = serve_stub(stub.router()).await;
+
+        let deleted = delete_confirmed(&reqwest::Client::new(), &url, &row("errored"))
+            .await
+            .expect("the delete driver must not error");
+        assert!(!deleted, "a {status} stop must not report a deletion");
+        assert_eq!(
+            stub.counts(),
+            (1, 0),
+            "a rejected stop must issue NO delete request ({status})"
+        );
+        handle.abort();
+    }
+}
+
+/// The carve-out stays scoped: a `stopped` row is deleted exactly as before,
+/// with no runtime-stop request issued on its behalf.
+#[tokio::test]
+async fn picker_delete_issues_no_stop_for_a_non_errored_row() {
+    use crate::commands::picker_delete::delete_confirmed;
+    let stub = StopStub::new(axum::http::StatusCode::OK);
+    let (url, handle) = serve_stub(stub.router()).await;
+
+    let deleted = delete_confirmed(&reqwest::Client::new(), &url, &row("stopped"))
+        .await
+        .expect("the delete driver must not error");
+    assert!(deleted);
+    assert_eq!(
+        stub.counts(),
+        (0, 1),
+        "a stopped row has no runtime to stop — one delete, no stop"
+    );
+    handle.abort();
+}
+
+/// The pair is the whole reason the two surfaces cannot diverge again, so it
+/// must stay exactly the two guards it composes — never a third opinion.
+#[test]
+fn delete_route_flags_match_the_two_guards() {
+    use crate::commands::picker_delete::{
+        delete_needs_force, delete_needs_stop_first, delete_route_flags,
+    };
+    for state in [
+        "errored",
+        "stopped",
+        "active",
+        "provisioning",
+        "decommissioned",
+        "deleted",
+    ] {
+        assert_eq!(
+            delete_route_flags(state),
+            (delete_needs_force(state), delete_needs_stop_first(state)),
+            "{state}"
+        );
+    }
+}
+
+/// Confirming an errored row runs two legs, and both surfaces must promise the
+/// same two before the operator agrees — one sentence, not two spellings.
+#[test]
+fn both_delete_surfaces_ask_the_same_errored_question() {
+    use crate::commands::picker_delete::errored_confirm_ask;
+    assert_eq!(
+        errored_confirm_ask("tm-quiet-falcon"),
+        "'tm-quiet-falcon' is errored. Stop it and delete it? Type y, then Enter."
+    );
+}

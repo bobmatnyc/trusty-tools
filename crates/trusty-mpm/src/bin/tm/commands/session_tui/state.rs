@@ -22,9 +22,7 @@
 use trusty_mpm::client::ManagedSessionSummary;
 use trusty_mpm::session_manager::rename::validate_session_name;
 
-use super::super::picker_delete::{
-    confirm_is_force, confirm_is_yes, delete_needs_force, delete_needs_stop_first,
-};
+use super::super::picker_delete::{confirm_is_force, confirm_is_yes, delete_route_flags};
 
 /// How far `PageUp`/`PageDown` move the selection.
 const PAGE: usize = 10;
@@ -329,11 +327,11 @@ impl TuiState {
     /// a visible message rather than a silent no-op, because a key that does
     /// nothing reads as a broken key.
     /// What: [`is_self_session`] decides; otherwise the mode becomes `Confirm`,
-    /// with `force` set by the same [`delete_needs_force`] the line picker uses,
-    /// so a running session demands the word `force` in both surfaces, and
-    /// `stop_first` set by [`delete_needs_stop_first`] — the errored row whose
-    /// runtime the daemon will refuse to delete around (#7224). One `y` covers
-    /// both legs; the overlay says so before it is typed.
+    /// with `force` and `stop_first` both read from [`delete_route_flags`] — the
+    /// same pair the numbered fallback picker computes, so a running session
+    /// demands the word `force` and an errored session takes the stop-first leg
+    /// (#7224) in either surface. One `y` covers both legs; the overlay says so
+    /// before it is typed.
     /// Test: `state_delete_refuses_the_attached_self_session`,
     /// `state_delete_on_a_running_row_requires_the_force_word`,
     /// `state_delete_on_an_errored_row_asks_to_stop_and_delete`.
@@ -356,10 +354,11 @@ impl TuiState {
             );
             return Action::Redraw;
         }
+        let (force, stop_first) = delete_route_flags(&session.state);
         self.mode = Mode::Confirm {
             index: self.selected,
-            force: delete_needs_force(&session.state),
-            stop_first: delete_needs_stop_first(&session.state),
+            force,
+            stop_first,
             typed: String::new(),
         };
         self.message = None;

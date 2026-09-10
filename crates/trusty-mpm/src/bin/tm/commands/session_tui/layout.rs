@@ -234,15 +234,24 @@ pub(crate) const STATUS_MAX_LINES: usize = 4;
 /// no UUID: it looks copy-pasteable and is not. Wrapping here rather than
 /// through ratatui's own `Wrap` is what lets the caller size the status region
 /// from the SAME lines it will draw, so the height and the content cannot
-/// disagree.
-/// What: splits on `'\n'` first (the refusal puts the id on its own line), then
-/// packs whitespace-separated tokens greedily into lines of at most `width`
-/// characters. A token longer than `width` is emitted alone and intact — at
-/// that width no wrapping could show it whole, and splitting it is the exact
-/// failure this exists to prevent. Beyond `max_lines` the last kept line drops
-/// whole tokens and ends in an ellipsis. A `width` or `max_lines` of zero
+/// disagree. Packing greedily from the front had the same end result at a
+/// narrow width by a different route: below about 70 columns the refusal's
+/// first paragraph filled all four rows on its own and the id paragraph behind
+/// it was truncated away whole.
+/// What: splits on `'\n'` first (the refusal puts the id on its own line) and
+/// packs each paragraph's whitespace-separated tokens greedily into lines of at
+/// most `width` characters. A token longer than `width` is emitted alone and
+/// intact — at that width no wrapping could show it whole, and splitting it is
+/// the exact failure this exists to prevent. The LAST paragraph's rows are then
+/// reserved before anything ahead of them is kept, so the identifier a message
+/// ends with survives every width; the paragraphs in front of it fill what
+/// budget remains and the last of them is elided on a token boundary. A single
+/// paragraph has nothing to reserve behind it and is simply capped at
+/// `max_lines` with its last line elided. A `width` or `max_lines` of zero
 /// yields no lines.
 /// Test: `wrap_message_keeps_a_uuid_whole_at_eighty_columns`,
+/// `wrap_message_keeps_the_session_id_at_narrow_widths`,
+/// `wrap_message_keeps_an_overlong_token_whole`,
 /// `wrap_message_honours_explicit_newlines`,
 /// `wrap_message_elides_on_a_token_boundary`,
 /// `wrap_message_zero_width_is_empty`.
@@ -250,34 +259,70 @@ pub(crate) fn wrap_message(text: &str, width: usize, max_lines: usize) -> Vec<St
     if width == 0 || max_lines == 0 {
         return Vec::new();
     }
-    let mut lines: Vec<String> = Vec::new();
-    for paragraph in text.split('\n') {
-        let mut current = String::new();
-        for token in paragraph.split_whitespace() {
-            let fits = current.chars().count() + 1 + token.chars().count() <= width;
-            if current.is_empty() {
-                current.push_str(token);
-            } else if fits {
-                current.push(' ');
-                current.push_str(token);
-            } else {
-                lines.push(std::mem::take(&mut current));
-                current.push_str(token);
+    let mut paragraphs: Vec<Vec<String>> = text
+        .split('\n')
+        .map(|paragraph| wrap_paragraph(paragraph, width))
+        .collect();
+    // A message ending in a newline (or made only of whitespace) would otherwise
+    // reserve a blank row under the table. An empty line is only ever a whole
+    // paragraph, so dropping trailing empty paragraphs is the same trim.
+    while paragraphs
+        .last()
+        .is_some_and(|p| p.len() == 1 && p[0].is_empty())
+    {
+        paragraphs.pop();
+    }
+    let Some(mut tail) = paragraphs.pop() else {
+        return Vec::new();
+    };
+    if paragraphs.is_empty() {
+        if tail.len() > max_lines {
+            tail.truncate(max_lines);
+            if let Some(last) = tail.last_mut() {
+                elide(last, width);
             }
         }
-        lines.push(current);
+        return tail;
     }
-    // A message ending in a newline (or made only of whitespace) would otherwise
-    // reserve a blank row under the table.
-    while lines.last().is_some_and(String::is_empty) {
-        lines.pop();
+    // #7224: the last paragraph is where the caller put the identifier, so its
+    // rows are reserved first. A tail longer than the whole budget keeps its
+    // FINAL rows — the end of the identifier is what must survive.
+    if tail.len() > max_lines {
+        let drop = tail.len() - max_lines;
+        tail = tail.split_off(drop);
     }
-    if lines.len() > max_lines {
-        lines.truncate(max_lines);
+    let mut lines: Vec<String> = paragraphs.into_iter().flatten().collect();
+    let head_budget = max_lines - tail.len();
+    if lines.len() > head_budget {
+        lines.truncate(head_budget);
         if let Some(last) = lines.last_mut() {
             elide(last, width);
         }
     }
+    lines.extend(tail);
+    lines
+}
+
+/// Pack one newline-free paragraph into `width`-wide lines, never mid-token.
+///
+/// Always returns at least one line, empty when the paragraph holds no tokens —
+/// which is what lets [`wrap_message`] recognise and trim a trailing blank.
+fn wrap_paragraph(paragraph: &str, width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for token in paragraph.split_whitespace() {
+        let fits = current.chars().count() + 1 + token.chars().count() <= width;
+        if current.is_empty() {
+            current.push_str(token);
+        } else if fits {
+            current.push(' ');
+            current.push_str(token);
+        } else {
+            lines.push(std::mem::take(&mut current));
+            current.push_str(token);
+        }
+    }
+    lines.push(current);
     lines
 }
 

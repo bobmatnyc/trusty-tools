@@ -54,7 +54,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use trusty_mpm::client::ManagedSessionSummary;
 use trusty_mpm::tui::terminal::{self, TerminalGuard};
 
-use super::picker_delete::{DeleteReport, delete_managed_then_local, stop_then_delete};
+use super::picker_delete::{DeleteReport, route_delete};
 use super::session_picker::{PickerScope, fetch_live_sessions};
 use state::{Action, Input, Severity, TuiState};
 
@@ -181,12 +181,9 @@ pub(crate) async fn run_session_tui(
                 let session = &sessions[index];
                 // #7224: an errored row takes the stop-then-delete route, which
                 // is the CLI step the daemon's refusal used to send the operator
-                // out of this surface to run by hand.
-                let report = if stop_first {
-                    stop_then_delete(client, url, &session.id, force).await
-                } else {
-                    delete_managed_then_local(client, url, &session.id, force).await
-                };
+                // out of this surface to run by hand. The numbered fallback
+                // picker shares this routing rather than re-deciding it.
+                let report = route_delete(client, url, &session.id, force, stop_first).await;
                 let (text, severity) = delete_outcome(&session.name, report);
                 state.set_message(text, severity);
             }
