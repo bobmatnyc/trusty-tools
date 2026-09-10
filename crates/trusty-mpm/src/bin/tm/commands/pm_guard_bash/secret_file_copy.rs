@@ -66,11 +66,14 @@
 //! guard cannot tell a laundered name from a real one, so the stop has to be
 //! here.
 //!
-//! Three shapes are deliberately left alone, because none of them renames
+//! Four shapes are deliberately left alone, because none of them renames
 //! anything: a destination that is itself unreadable (`cp .env .env.bak`), a
 //! directory destination (`cp .env /tmp/`), and a source written as a bare WORD
 //! rather than a path (`npm install token-bucket express`, `grep -rn
-//! credentials src/ > out.md`) — see [`is_written_as_a_path`].
+//! credentials src/ > out.md`) — see [`is_written_as_a_path`]. A destination
+//! carrying an UNRESOLVABLE brace group (`cp .env 'note{s.txt'`) joins them for
+//! the same reason: [`is_secret_read_target`] fails closed on it, so the read
+//! guard refuses to print that name and nothing was laundered.
 //!
 //! Residual bypasses, stated rather than hidden (mirrors
 //! [`super::destructive_delete`]'s own list):
@@ -230,26 +233,54 @@ fn is_secret_bearing_name(name: &str) -> bool {
         .any(|pattern| glob_match(&pattern.to_ascii_lowercase(), &lower))
 }
 
-/// Whether `candidate` — a caller-supplied GLOB, or a literal basename — can
-/// match a name in [`SECRET_BEARING_FILE_PATTERNS`].
+/// The literal core of a denylist entry — the pattern with every `*` removed.
+///
+/// Why: `*.pem` -> `.pem`, `id_rsa*` -> `id_rsa`, `*credentials*` ->
+/// `credentials`, `.env.*` -> `.env.`. A caller's GLOB is screened against
+/// these cores rather than against the full entries; see
+/// [`secret_pattern_overlaps`] for why.
+fn pattern_literal_core(pattern: &str) -> String {
+    pattern.replace('*', "")
+}
+
+/// Whether `candidate` — a caller-supplied GLOB, or a literal basename — names
+/// a file in [`SECRET_BEARING_FILE_PATTERNS`]'s classes.
 ///
 /// Why: #7266 round 3, critic CRITICAL 1. [`is_secret_bearing_name`] compares a
 /// literal name against the denylist, so a caller's PATTERN was screened as if
 /// it were a filename: `Grep(glob = "*.env")` matched no entry and was allowed,
 /// while `glob = "*.pem"` was denied only because that entry happens to carry a
-/// `*` in the same place. Whether a caller can reach a secret is a question
-/// about two patterns OVERLAPPING, not about one matching the other, and the
-/// denylist's literal-only entries (`.env`, `.env.local`, `.netrc`) were the
-/// three that answered wrongly.
-/// What: `true` when some string is matched by BOTH `candidate` and one
-/// denylist entry, decided case-insensitively by [`globs_overlap`]. For a
-/// candidate carrying no wildcard this is exactly [`is_secret_bearing_name`].
+/// `*` in the same place.
+///
+/// Round 3 answered that with a sound two-pattern OVERLAP test, and overlap is
+/// too much: four entries (`*credentials*`, `*secrets*`, `token*`, `.env.*`)
+/// carry unbounded wildcards, so they intersect nearly every extension glob an
+/// agent writes. That build denied `Grep(glob = "*.toml")` — and `*.json`,
+/// `*.txt`, `*.log`, `*.csv`, `*.tf`, `*test*` — because `credentials.toml` and
+/// `.env.log` are names those families really do reach (#7266 round 4, measured
+/// against the round-3 binary). Taxing every ordinary tree search is a worse
+/// outcome than the leak it prevents.
+/// What: a candidate carrying no wildcard is [`is_secret_bearing_name`],
+/// unchanged and sound — that is the path every `cp`/`mv`/read operand takes. A
+/// candidate carrying `*` or `?` is additionally screened against each entry's
+/// [`pattern_literal_core`]: it denies when it MATCHES a core, which is the
+/// narrower question of whether the glob targets a credential family by name.
+/// `*.env` matches the core `.env` and denies; `*.toml` matches no core and
+/// allows.
 /// Test: `every_pattern_family_is_reachable_by_its_natural_glob`,
+/// `a_glob_denies_only_when_it_targets_a_family_by_name`,
 /// `overlap_answers_where_literal_matching_did_not`.
 pub(crate) fn secret_pattern_overlaps(candidate: &str) -> bool {
     let lower = candidate.to_ascii_lowercase();
+    if is_secret_bearing_name(&lower) {
+        return true;
+    }
+    if !lower.bytes().any(|b| b == b'*' || b == b'?') {
+        return false;
+    }
     SECRET_BEARING_FILE_PATTERNS.iter().any(|pattern| {
-        globs_overlap(pattern.to_ascii_lowercase().as_bytes(), lower.as_bytes())
+        let core = pattern_literal_core(&pattern.to_ascii_lowercase());
+        !core.is_empty() && globs_overlap(lower.as_bytes(), core.as_bytes())
     })
 }
 
@@ -262,7 +293,11 @@ pub(crate) fn secret_pattern_overlaps(candidate: &str) -> bool {
 /// has run out is satisfiable only when the other side's remainder is all `*`.
 /// `?` is honoured on both sides even though [`glob_match`] does not implement
 /// it, so a caller glob spelled with one over-matches rather than slipping past.
-/// Test: `overlap_answers_where_literal_matching_did_not`.
+/// [`secret_pattern_overlaps`] passes a wildcard-free literal core on the `b`
+/// side, which reduces this to "does `a` match that core"; the two-sided form is
+/// kept because it is what makes `?` answerable at all.
+/// Test: `overlap_answers_where_literal_matching_did_not`,
+/// `a_glob_denies_only_when_it_targets_a_family_by_name`.
 fn globs_overlap(a: &[u8], b: &[u8]) -> bool {
     let (la, lb) = (a.len(), b.len());
     let width = lb + 1;
@@ -612,6 +647,7 @@ fn names_an_unreadable_secret_file(token: &str) -> bool {
 /// Test: `denies_a_secret_renamed_to_a_source_extension_outside_a_worktree`,
 /// `denies_a_secret_renamed_to_a_source_extension_by_any_copy_verb`,
 /// `denies_a_secret_renamed_to_an_unsuspicious_name`,
+/// `denies_a_secret_renamed_through_a_brace_group`,
 /// `denies_a_secret_redirected_into_a_markup_name`,
 /// `allows_a_secret_copy_that_keeps_its_own_extension`,
 /// `allows_a_secret_copy_into_a_directory`,
@@ -622,13 +658,37 @@ fn laundered_source_rename(argv: &[String]) -> Option<String> {
     renamed_by_a_copy_verb(argv).or_else(|| renamed_by_a_redirection(argv))
 }
 
+/// The positional operands a copy verb will really see, with every resolvable
+/// brace group expanded into separate words (#7266 round 4).
+///
+/// Why: bash expands `{a,b}` before the verb runs, so one shlex token can be two
+/// operands. `cp {terraform.tfvars,notes.txt}` reached
+/// [`renamed_by_a_copy_verb`] as a single positional, left no source behind the
+/// destination, and was allowed.
+/// What: flat-maps [`expand_brace_alternatives`]; a token whose braces that
+/// expander cannot resolve is kept verbatim, which is what leaves it to the
+/// fail-closed [`is_secret_read_target`] downstream.
+/// Test: `denies_a_secret_renamed_through_a_brace_group`.
+fn brace_expanded_positionals(positional: &[String]) -> Vec<String> {
+    positional
+        .iter()
+        .flat_map(|token| expand_brace_alternatives(token).unwrap_or_else(|| vec![token.clone()]))
+        .collect()
+}
+
 /// The [`RENAME_VERBS`] half of [`laundered_source_rename`].
 fn renamed_by_a_copy_verb(argv: &[String]) -> Option<String> {
     let verb_idx = argv
         .iter()
         .position(|tok| RENAME_VERBS.contains(&tok.strip_prefix('\\').unwrap_or(tok)))?;
     let verb = argv[verb_idx].strip_prefix('\\').unwrap_or(&argv[verb_idx]);
-    let positional = positional_args(&argv[verb_idx + 1..]);
+    // #7266 round 4: bash expands a brace group into SEPARATE words before the
+    // verb ever runs, so `cp {terraform.tfvars,notes.txt}` is `cp
+    // terraform.tfvars notes.txt`. `shlex::split` leaves it as one token, which
+    // arrived here as a lone positional with no source behind it and allowed the
+    // rename outright. Expanding first is what makes the operand split match
+    // what the shell will actually do.
+    let positional = brace_expanded_positionals(&positional_args(&argv[verb_idx + 1..]));
     let (dest, sources) = positional.split_last()?;
     // A directory destination keeps each source's own basename, so nothing is
     // renamed. The source COUNT is not a proxy for that: `positional_args` does
@@ -643,9 +703,9 @@ fn renamed_by_a_copy_verb(argv: &[String]) -> Option<String> {
     if names_an_unreadable_secret(dest) {
         return None;
     }
-    let source = sources
-        .iter()
-        .find(|source| names_an_unreadable_secret_file(source) && source.as_str() != dest.as_str())?;
+    let source = sources.iter().find(|source| {
+        names_an_unreadable_secret_file(source) && source.as_str() != dest.as_str()
+    })?;
     Some(source_rename_deny_reason(
         source,
         dest,
@@ -1084,12 +1144,47 @@ mod tests {
             "every pattern in the denylist needs exactly one covering glob here"
         );
         for (pattern, glob) in cases {
+            let core = pattern_literal_core(pattern);
             assert!(
-                globs_overlap(pattern.as_bytes(), glob.as_bytes()),
-                "glob `{glob}` must overlap the `{pattern}` family specifically"
+                globs_overlap(glob.as_bytes(), core.as_bytes()),
+                "glob `{glob}` must target the `{pattern}` family by name (core `{core}`)"
             );
             assert!(secret_pattern_overlaps(glob), "glob `{glob}` must deny");
         }
+    }
+
+    #[test]
+    fn a_glob_denies_only_when_it_targets_a_family_by_name() {
+        // #7266 round 4. Round 3 screened a caller glob by sound pattern
+        // OVERLAP, and every one of these denied against that binary because
+        // `credentials.toml`, `.env.log` and friends are names the four
+        // unbounded families really do reach. They are also the globs an agent
+        // writes all day, so the screen now asks whether the glob targets a
+        // family by NAME instead.
+        for glob in [
+            "*.toml",
+            "*.json.map",
+            "*.txt",
+            "*.log",
+            "*.csv",
+            "*.tf",
+            "*test*",
+            "*.rs",
+            "*.md",
+            "**/*",
+            "*.yaml",
+            "*.snap",
+            "src/**",
+            "*.html",
+        ] {
+            assert!(
+                !secret_pattern_overlaps(glob),
+                "ordinary glob `{glob}` must not be screened as a secret"
+            );
+        }
+        // `*.json` is the one extension glob that stays denied, and it earns it:
+        // `*.tfvars.json` is a credential family spelled in JSON.
+        assert!(secret_pattern_overlaps("*.json"));
     }
 
     #[test]
@@ -1097,12 +1192,16 @@ mod tests {
         // The two shapes the critic drove live against the round-2 binary.
         assert!(secret_pattern_overlaps("*.env"));
         assert!(secret_pattern_overlaps("*.netrc"));
-        assert!(!is_secret_bearing_name("*.env"), "the literal test misses it");
+        assert!(
+            !is_secret_bearing_name("*.env"),
+            "the literal test misses it"
+        );
         assert!(!is_secret_bearing_name("*.netrc"));
-        // An ordinary source glob overlaps `*credentials*` (via
-        // `credentials.rs`), which is why the read guard's transparent-extension
-        // narrowing runs on top of this predicate rather than instead of it.
-        assert!(secret_pattern_overlaps("*.rs"));
+        // A literal name still takes the sound `is_secret_bearing_name` path, so
+        // the read guard's transparent-extension narrowing is what keeps
+        // `credentials.rs` readable — not this predicate.
+        assert!(secret_pattern_overlaps("credentials.rs"));
+        assert!(secret_pattern_overlaps("terraform.tfvars"));
         // A literal name that can reach no family stays clear.
         assert!(!secret_pattern_overlaps("Cargo.toml"));
         assert!(!secret_pattern_overlaps("README.md"));
@@ -1163,6 +1262,31 @@ mod tests {
             "npm install token-bucket express",
             "npm install @scope/token-bucket express",
             "npm install --save-dev secrets-manager lodash",
+        ] {
+            assert_eq!(eval_outside_a_worktree(command), None, "`{command}`");
+        }
+    }
+
+    #[test]
+    fn denies_a_secret_renamed_through_a_brace_group() {
+        // #7266 round 4: bash expands this to `cp terraform.tfvars notes.txt`,
+        // but `shlex::split` keeps it as ONE token, so the rename rule saw a
+        // destination with no source behind it and allowed the laundering.
+        for command in [
+            "cp {terraform.tfvars,notes.txt}",
+            "mv {.env,notes.md}",
+            "cp {/repo/.env,/tmp/dump.bin}",
+        ] {
+            assert!(
+                eval_outside_a_worktree(command).is_some(),
+                "`{command}` must deny"
+            );
+        }
+        // Expansion must not invent a rename where bash makes none.
+        for command in [
+            "cp {a,b}.rs dist/",
+            "cp Cargo{,.bak}.toml",
+            "mv {README,NOTES}.md docs/",
         ] {
             assert_eq!(eval_outside_a_worktree(command), None, "`{command}`");
         }

@@ -37,14 +37,17 @@
 //!
 //! The file classifier is NOT a second list — it is the one
 //! `pm_guard_bash::secret_file_copy` already owns, read at this rule's scope by
-//! [`is_secret_read_target`] through [`secret_pattern_overlaps`]. That overlap
-//! test is what makes a caller's GLOB answerable: round 2 compared
+//! [`is_secret_read_target`] through [`secret_pattern_overlaps`]. That
+//! predicate is what makes a caller's GLOB answerable: round 2 compared
 //! `Grep(glob = "*.env")` against the list as though it were a filename,
 //! matched nothing and allowed the dump, while `glob = "*.pem"` denied only
 //! because that entry happens to carry a `*` in the same place (#7266 round 3,
-//! critic CRITICAL 1). A glob carrying no literal character at all is exempt,
-//! because it selects the same files a `Grep` with no glob does — see
-//! [`selects_every_name`]. The only narrowing is
+//! critic CRITICAL 1). A glob denies when it TARGETS a credential family by
+//! name; a sound pattern-overlap test was tried in round 3 and taxed
+//! `Grep(glob = "*.toml")` and every other ordinary extension search, which is
+//! why it is not the test (#7266 round 4). A glob carrying no literal character
+//! at all is exempt on top of that, because it selects the same files a `Grep`
+//! with no glob does — see [`selects_every_name`]. The only further narrowing is
 //! [`has_transparent_source_extension`]: that list's three name-SUBSTRING
 //! patterns (`*credentials*`, `*secrets*`, `token*`) match 24 ordinary tracked
 //! files in this repository (`credentials.rs`, `tokens.css`, `secrets.rs`,
@@ -72,9 +75,14 @@
 //! a `.yml`/`.yaml` credential manifest read by name (`secrets.yaml`) is
 //! carved out with the rest of the markup extensions; `git show
 //! HEAD:terraform.tfvars` prints a COMMITTED copy through a verb this rule has
-//! no opinion about; and a file operand that reaches the verb only through a
+//! no opinion about; a file operand that reaches the verb only through a
 //! variable (`sed -n 1,5p "$F"`) is not resolved here — this rule reads
-//! basenames, not the filesystem.
+//! basenames, not the filesystem; and a GLOB whose only literal is the TAIL of
+//! an `.env.<name>` file (`Grep(glob = "*.production")` reaching
+//! `.env.production`) names no credential family's literal core, so it is not
+//! screened. Closing that last one costs every ordinary extension glob, which
+//! is the round-3 trade #7266 round 4 reversed — see
+//! [`secret_pattern_overlaps`].
 //!
 //! Test: `denies_the_reported_sed_line_range`, `denies_a_tail_of_a_dotenv`,
 //! `denies_a_grep_of_a_tfvars_json`, `denies_a_read_tool_call_with_a_range`,
@@ -303,16 +311,17 @@ pub(crate) fn evaluate_secret_file_read_tool(
 /// likewise refuses a secret operand whatever the output flags say — a guard
 /// that reads the mode would allow the dump whenever the field is omitted from
 /// the payload this guard sees.
-/// What: denies on a secret-shaped `path`, then on a `glob` that can MATCH a
-/// secret-bearing pattern — [`is_secret_read_target`] decides both, comparing
-/// pattern against pattern rather than treating the glob as a literal filename
-/// (#7266 round 3). A directory `path` with no `glob`, and a `glob` carrying no
-/// literal character, are ordinary tree-wide search and allow. Fails CLOSED on
-/// a `glob` whose brace alternation the shared expander cannot resolve, exactly
-/// as the copy rule does.
+/// What: denies on a secret-shaped `path`, then on a `glob` that TARGETS a
+/// credential family by name — [`is_secret_read_target`] decides both, reading
+/// the glob as a pattern rather than as a literal filename (#7266 round 3). A
+/// directory `path` with no `glob`, a `glob` carrying no literal character, and
+/// a `glob` naming no family's literal core (`*.toml`, `*.txt`) are ordinary
+/// tree-wide search and allow. Fails CLOSED on a `glob` whose brace alternation
+/// the shared expander cannot resolve, exactly as the copy rule does.
 /// Test: `denies_a_grep_tool_call_on_a_secret_bearing_path`,
 /// `denies_a_grep_tool_call_whose_glob_names_a_secret`,
 /// `denies_a_grep_tool_call_whose_glob_can_match_a_secret`,
+/// `allows_a_grep_glob_that_targets_no_credential_family`,
 /// `allows_a_grep_tool_call_over_a_directory_with_no_glob`.
 fn evaluate_grep_tool(tool_input: Option<&serde_json::Value>) -> Option<String> {
     if let Some(path) = string_field(tool_input, "path")
@@ -888,8 +897,21 @@ mod tests {
         // to the denylist as though it were a filename, so only an entry
         // spelled with a `*` in the same place ever matched.
         for glob in [
-            "*.env", "*.netrc", ".env*", "*.local", "*.tfvars", "*.key", "id_*", "token*",
-            "*credentials*", "*.p12", "*.kdbx", "*.ovpn", "*.pfx", "*.jks", "*.tfstate",
+            "*.env",
+            "*.netrc",
+            ".env*",
+            "*.local",
+            "*.tfvars",
+            "*.key",
+            "id_*",
+            "token*",
+            "*credentials*",
+            "*.p12",
+            "*.kdbx",
+            "*.ovpn",
+            "*.pfx",
+            "*.jks",
+            "*.tfstate",
         ] {
             let input = serde_json::json!({
                 "pattern": ".",
@@ -904,10 +926,25 @@ mod tests {
     }
 
     #[test]
-    fn allows_a_grep_glob_that_forces_a_transparent_extension() {
-        // These overlap `*credentials*` (via `credentials.rs`), so only the
-        // transparent-extension narrowing keeps ordinary work readable.
-        for glob in ["*.rs", "**/*.md", "*.{rs,ts}", "*", "**/*"] {
+    fn allows_a_grep_glob_that_targets_no_credential_family() {
+        // #7266 round 4: every one of these DENIED under round 3's sound
+        // pattern-overlap screen, because `credentials.toml` and `.env.log` are
+        // names the four unbounded families reach. They are ordinary tree
+        // searches and must allow.
+        for glob in [
+            "*.rs",
+            "**/*.md",
+            "*.{rs,ts}",
+            "*",
+            "**/*",
+            "*.toml",
+            "*.txt",
+            "*.log",
+            "*.csv",
+            "*.tf",
+            "*test*",
+            "*.yaml",
+        ] {
             let input = serde_json::json!({"pattern": "TODO", "path": "/repo/src", "glob": glob});
             assert_eq!(
                 evaluate_secret_file_read_tool("Grep", Some(&input)),

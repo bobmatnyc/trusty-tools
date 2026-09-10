@@ -23,12 +23,26 @@ Fixed
   ordinary work and stays allowed. `base64`, `basenc` and `diff` join the
   content-printing verb class, so `base64 .env` and `diff .env /dev/null` deny
   too (#7266).
+- A `Grep` glob is now read as a PATTERN rather than as a literal filename, so
+  `glob="*.env"`, `"*.netrc"`, `".env*"` and `"id_*"` deny instead of slipping
+  past the denylist; previously only a glob spelled with a `*` in the same place
+  as its denylist entry (`*.pem`) matched at all. A glob denies when it names a
+  credential family — `*.toml`, `*.txt`, `*.log`, `*.csv`, `*.tf`, `*test*` and
+  every other ordinary extension search stay allowed (#7266).
+- A process substitution no longer hides a secret read. `diff <(cat .env)
+  /dev/null` and `cat <(cat ~/.ssh/id_rsa)` lex into the tokens `<(cat` and
+  `.env)`, which no filename rule could see; the wrapper now comes off before
+  the basename match, and a segment carrying `<(`/`>(` beside a secret-shaped
+  word is refused whatever verb sits inside it (#7266).
 - `cp`/`mv`/`install`/`rsync`/`ln` and shell output redirection now refuse to
-  reproduce a secret-bearing file under a name the read guard prints freely —
-  `cp terraform.tfvars secrets.rs`, `cat .env > notes.md` — for EVERY
-  destination, not only one inside a session worktree. The read guard's
-  carve-out for ordinary source and markup extensions was a one-move bypass
-  until this half existed: copy from a main checkout, `$HOME` or `/tmp`, then
-  read the copy. Renaming a genuine source file whose name carries
-  `secrets`/`credentials`/`token` is untouched, as is a copy that keeps the
-  source's own extension (#7266).
+  reproduce a secret-bearing file under ANY destination name the read guard
+  would print — `cp terraform.tfvars secrets.rs`, `cp .env ./notes.txt`,
+  `mv terraform.tfvars vars.bin`, `cat .env > notes.md` — wherever it lands, not
+  only inside a session worktree and no longer only for the 35 source and markup
+  extensions. A brace group is expanded first, so `cp {terraform.tfvars,notes.txt}`
+  denies as the two operands bash will make of it. Copy from a main checkout,
+  `$HOME` or `/tmp` and then read the copy was the one-move bypass this closes.
+  Renaming a genuine source file whose name carries
+  `secrets`/`credentials`/`token`, a copy that keeps a secret-shaped name
+  (`cp .env .env.bak`), a copy into a directory (`cp .env /tmp/`) and an
+  `npm install token-bucket` are all untouched (#7266).

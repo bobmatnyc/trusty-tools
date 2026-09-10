@@ -2533,7 +2533,14 @@ fn pm_guard_denies_a_grep_glob_that_can_match_a_secret() {
             "glob `{glob}` must cite the issue: {stdout}"
         );
     }
-    for glob in ["*.rs", "*.md", "*"] {
+    // #7266 round 4: these ordinary tree searches all DENIED under round 3's
+    // sound pattern-overlap screen — `credentials.toml` and `.env.log` are names
+    // the four unbounded families really do reach — which taxed every extension
+    // search an agent writes. Measured live against the round-3 binary.
+    for glob in [
+        "*.rs", "*.md", "*", "**/*", "*.toml", "*.txt", "*.log", "*.csv", "*.tf", "*test*",
+        "*.yaml",
+    ] {
         let input = format!(
             r#"{{"pattern":"TODO","path":"{}","glob":"{glob}"}}"#,
             repo.join("crates").display()
@@ -2591,10 +2598,15 @@ fn pm_guard_denies_a_secret_laundered_to_an_unsuspicious_name() {
     // transparent SOURCE extensions, so `cp .env ./notes.txt` from a main
     // checkout was allowed and `cat notes.txt` afterwards was allowed too.
     let (_dir, repo) = main_checkout_fixture();
+    // The last one is #7266 round 4: bash expands it to
+    // `cp terraform.tfvars notes.txt`, but `shlex::split` keeps it as one
+    // token, so round 3 saw a destination with no source behind it and allowed
+    // the rename.
     for command in [
         "cp .env ./notes.txt",
         "mv terraform.tfvars vars.bin",
         "cat .env > notes.txt",
+        "cp {terraform.tfvars,notes.txt}",
     ] {
         let stdout = run_pm_guard_at(
             &bash_payload_at(command, &repo, ""),
