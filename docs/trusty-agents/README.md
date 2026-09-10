@@ -31,6 +31,7 @@ with the crate README and current workspace behavior contracts.
 ## Where to start
 
 - **New to trusty-agents?** Start with the [crate README](../../crates/trusty-agents/README.md) and [current product spec](../specs/trusty-agents-product-spec.md).
+- **Desktop projects, channels, and skills?** [`user/desktop-workspace.md`](user/desktop-workspace.md).
 - **Installing / using it?** [`user/quickstart.md`](user/quickstart.md).
 - **Contributing?** [`developer/contributing.md`](developer/contributing.md) and [`developer/building.md`](developer/building.md).
 - **Understanding a past decision?** [`decisions/`](decisions/) (crate-specific) or [`docs/adr/`](../adr/) (workspace-wide).

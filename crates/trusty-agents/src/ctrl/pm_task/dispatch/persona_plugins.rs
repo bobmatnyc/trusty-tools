@@ -71,7 +71,9 @@ pub(super) fn register_python_plugins(
     let mut registered = Vec::with_capacity(plugins.len());
     for cfg in plugins {
         let plugin_name = cfg.name.clone();
-        if registry.contains(&plugin_name) {
+        if crate::tools::listener_config::is_reserved_name(&plugin_name)
+            || registry.contains(&plugin_name)
+        {
             tracing::warn!(
                 persona = %persona_name,
                 plugin = %plugin_name,

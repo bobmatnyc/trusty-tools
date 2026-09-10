@@ -1,49 +1,13 @@
 <script lang="ts">
-  /**
-   * Why (#4290): the owner asked for a dedicated Knowledge Graph browser
-   * reachable from the chat pane — a slide-over opened by its own button in
-   * `ChatHeader`, not a new config-pane tab and not folded into the existing
-   * "Knowledge" tab (`AgentConfigKnowledge.svelte`, which only shows store
-   * BINDINGS, never the graph's contents). Ports the interaction pattern of
-   * `crates/trusty-memory/ui/src/lib/views/KG.svelte` (subject list with
-   * count badges, drill-down to a subject's triples, paginated "all" mode,
-   * substring filter, sort by name/count) into this app's Foundry/Tailwind
-   * idiom — that component is NOT imported (the two Svelte apps share no
-   * package) and its palace dropdown is dropped: this browser is scoped to
-   * the active agent's one bound palace (owner decision — single palace, no
-   * picker).
-   *
-   * Read-only v1 (owner decision): no assert/delete UI. The backend
-   * (`agent_kg.rs`) deliberately proxies only the four GET routes.
-   *
-   * Label is always "Knowledge Graph" in user-facing text — never "OKG"
-   * (verbatim owner requirement), even though the on-disk concept is the
-   * same one `AgentConfigKnowledge.svelte` calls "OKG store" today.
-   *
-   * What: A fixed slide-over (backdrop + right-anchored panel) that resolves
-   * palace-binding state ONCE via `/kg/subjects` (the cheapest of the four
-   * routes to establish "is this agent's palace reachable at all"), then —
-   * only once `connected` — loads `/kg/all` and `/kg/count` alongside it.
-   * Mirrors `AgentConfigPanel`'s per-surface fetch isolation: `/kg/count`'s
-   * own failure never blanks the triple table, and vice versa. Six explicit
-   * states, matching the ticket's checklist: (1) loading, (2) connected with
-   * data, (3) connected with a genuinely empty graph, (4) `connected: false`
-   * with `reason` rendered directly, (5) `config_error` surfaced alongside
-   * (4) — the backend only ever sets it together with a "no palace bound"
-   * reason, never alone — and (6) the fetch-helper error path, split into a
-   * 404 ("agent not found", a stale roster selection) and any other
-   * network/HTTP throw.
-   * Test: `KnowledgeGraphBrowser.test.ts` automates the mid-session
-   * degradation regression (#4290 code-review finding) — a `connected: false`
-   * envelope from `loadAll`/`loadCount`/`loadSubject` after a connected
-   * bootstrap. The full six-state sweep against a live agent/palace/daemon
-   * remains manual: open the panel for an agent with a bound palace with
-   * data, one with a palace but no triples, one with no `[[stores]].palace`,
-   * and with the trusty-memory daemon stopped; confirm each renders its own
-   * copy rather than a shared spinner or empty list.
+  /** Read-only browser for the selected assistant's bound knowledge graph.
+   * ChatPane positions this over its mounted chat, matching preferences.
+   * Every request is scoped to the current assistant generation; triple
+   * selection requests additionally use a sequence so older results cannot
+   * replace a newer selection. Disconnected envelopes remain distinct from
+   * an empty connected graph. Tests cover takeover and asynchronous races.
    */
   import { AlertCircle, ArrowLeft, Loader2, Network, X } from 'lucide-svelte';
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import {
     fetchKgAll,
     fetchKgCount,
@@ -89,6 +53,8 @@
   let offset = 0;
 
   let container: HTMLElement | null = null;
+  let generation = 0;
+  let triplesRequest = 0;
 
   $: visibleSubjects = (() => {
     const f = subjectFilter.trim().toLowerCase();
@@ -138,6 +104,11 @@
    * per-surface isolation precedent).
    */
   async function bootstrap(name: string) {
+    const token = ++generation;
+    triplesRequest++;
+    subjectFilter = '';
+    triplesError = '';
+    triplesLoading = false;
     notFound = false;
     loadError = '';
     connected = null;
@@ -152,6 +123,7 @@
     activeCount = null;
     try {
       const env = await fetchKgSubjects(name, 200);
+      if (token !== generation) return;
       if (env === null) {
         notFound = true;
         return;
@@ -164,15 +136,17 @@
       if (!connected) return;
       await Promise.all([loadAll(name), loadCount(name)]);
     } catch (e) {
-      loadError = `${e}`;
+      if (token === generation) loadError = `${e}`;
     }
   }
 
   async function loadAll(name: string) {
+    const token = generation, request = ++triplesRequest;
     triplesLoading = true;
     triplesError = '';
     try {
       const env = await fetchKgAll(name, PAGE_SIZE, offset);
+      if (token !== generation || request !== triplesRequest) return;
       if (env === null) {
         notFound = true;
         return;
@@ -185,16 +159,17 @@
       }
       triples = env.data ?? [];
     } catch (e) {
-      triplesError = `${e}`;
-      triples = [];
+      if (token === generation && request === triplesRequest) { triplesError = `${e}`; triples = []; }
     } finally {
-      triplesLoading = false;
+      if (token === generation && request === triplesRequest) triplesLoading = false;
     }
   }
 
   async function loadCount(name: string) {
+    const token = generation;
     try {
       const env = await fetchKgCount(name);
+      if (token !== generation) return;
       if (env === null) {
         activeCount = null;
         return;
@@ -208,17 +183,19 @@
       }
       activeCount = env.data?.active ?? null;
     } catch {
-      activeCount = null;
+      if (token === generation) activeCount = null;
     }
   }
 
   async function loadSubject(subject: string) {
+    const token = generation, request = ++triplesRequest;
     selectedSubject = subject;
     mode = 'subject';
     triplesLoading = true;
     triplesError = '';
     try {
       const env = await fetchKgSubject(agentName, subject);
+      if (token !== generation || request !== triplesRequest) return;
       if (env === null) {
         notFound = true;
         return;
@@ -230,10 +207,9 @@
       }
       triples = env.data ?? [];
     } catch (e) {
-      triplesError = `${e}`;
-      triples = [];
+      if (token === generation && request === triplesRequest) { triplesError = `${e}`; triples = []; }
     } finally {
-      triplesLoading = false;
+      if (token === generation && request === triplesRequest) triplesLoading = false;
     }
   }
 
@@ -275,33 +251,24 @@
     onClose();
   }
 
-  // Move focus into the slide-over on open, mirroring `AgentConfigOverlay` —
+  // Move focus into the main-pane browser, mirroring AgentConfigOverlay —
   // otherwise a keyboard user is left focused on the (now covered) button
   // that opened it.
-  onMount(() => {
-    container?.focus();
-  });
+  onMount(() => { container?.focus(); });
+  onDestroy(() => { generation++; triplesRequest++; });
 </script>
 
 <svelte:window on:keydown={onKeydown} />
 
-<div class="fixed inset-0 z-40 flex justify-end">
-  <button
-    type="button"
-    class="absolute inset-0 bg-black/40"
-    aria-label="Close Knowledge Graph"
-    on:click={onClose}
-  ></button>
-
-  <section
+<section
     bind:this={container}
-    role="dialog"
-    aria-modal="true"
-    aria-label="Knowledge Graph"
+    aria-label="Knowledge Graph browser"
     tabindex="-1"
-    class="relative z-10 flex h-full w-full max-w-3xl flex-col border-l border-foundry-light-border dark:border-foundry-border bg-foundry-light-surface dark:bg-foundry-surface shadow-xl focus:outline-none"
+    data-knowledge-takeover
+    class="kg-takeover absolute inset-0 z-20 flex min-h-0 min-w-0 flex-col bg-foundry-light-surface dark:bg-foundry-surface focus:outline-none"
   >
     <header class="flex shrink-0 items-center gap-2 border-b border-foundry-light-border dark:border-foundry-border px-4 py-3">
+      <button type="button" class="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-foundry-light-muted dark:text-foundry-text/60" on:click={onClose}><ArrowLeft class="h-4 w-4" />Back to chat</button>
       <Network class="h-4 w-4 text-foundry-light-primary dark:text-foundry-primary" />
       <h2 class="font-mono text-xs font-semibold uppercase tracking-wide text-foundry-light-text dark:text-foundry-text">
         Knowledge Graph
@@ -311,19 +278,8 @@
           {activeCount.toLocaleString()} active triples
         </span>
       {/if}
-      <span class="ml-auto flex items-center gap-2">
-        <kbd class="rounded border border-foundry-light-border dark:border-foundry-border px-1.5 py-0.5 font-mono text-[10px] uppercase text-foundry-light-muted dark:text-foundry-text/40">
-          Esc
-        </kbd>
-        <button
-          type="button"
-          class="rounded-md p-1.5 text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10 hover:text-foundry-light-primary dark:hover:text-foundry-primary"
-          aria-label="Close Knowledge Graph"
-          on:click={onClose}
-        >
-          <X class="h-4 w-4" />
-        </button>
-      </span>
+
+      <button type="button" aria-label="Close Knowledge Graph" title="Close Knowledge Graph" class="ml-auto rounded-md p-1.5 text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10" on:click={onClose}><X class="h-4 w-4" /></button>
     </header>
 
     <div class="flex min-h-0 flex-1 flex-col overflow-y-auto px-4 py-3">
@@ -370,7 +326,7 @@
 
       <!-- State: connected:true with data — the explorer. -->
       {:else}
-        <div class="grid min-h-0 flex-1 grid-cols-[minmax(180px,30%)_1fr] gap-3">
+        <div class="kg-columns grid min-h-0 flex-1 grid-cols-[minmax(180px,30%)_minmax(0,1fr)] gap-3">
           <aside class="flex min-h-0 flex-col rounded-md border border-foundry-light-border dark:border-foundry-border">
             <div class="flex items-center justify-between gap-2 border-b border-foundry-light-border dark:border-foundry-border px-3 py-2 font-mono text-[10px] font-semibold uppercase tracking-wide text-foundry-light-muted dark:text-foundry-text/50">
               <span>Subjects ({visibleSubjects.length}/{subjects.length})</span>
@@ -507,4 +463,11 @@
       {/if}
     </div>
   </section>
-</div>
+
+<style>
+  .kg-takeover { container-type:inline-size; }
+  @container (max-width:600px) {
+    .kg-columns { grid-template-columns:minmax(0,1fr); }
+    .kg-columns > aside { max-height:220px; }
+  }
+</style>

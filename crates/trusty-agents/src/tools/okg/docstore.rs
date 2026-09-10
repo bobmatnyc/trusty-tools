@@ -73,6 +73,16 @@ impl ToolExecutor for OkgIngestDocstoreTool {
 /// The fallible body — any `Err` becomes an error result.
 async fn run(args: &Value) -> anyhow::Result<ToolResult> {
     let store = resolve_store(args)?;
+    ingest_into_store(args, store, &crate::tools::okg::docstore_policy()).await
+}
+
+/// Operator HTTP flows resolve and confine the actual configured store before
+/// invoking this shared engine; model tools still use resolve_store above.
+pub(crate) async fn ingest_into_store(
+    args: &Value,
+    store: trusty_kb::store::KbStore,
+    policy: &trusty_kb::okg::policy::DocStorePolicy,
+) -> anyhow::Result<ToolResult> {
     let source_id = require_str(args, "source_id")?;
     let now = now_iso();
 
@@ -97,7 +107,6 @@ async fn run(args: &Value) -> anyhow::Result<ToolResult> {
     // never even reaches `registry.toml`. The engine re-checks this same policy
     // at scan time on every later run, so this is a fast, clear failure rather
     // than the only line of defence.
-    let policy = crate::tools::okg::docstore_policy();
     let path = policy
         .permit(std::path::Path::new(&path))?
         .to_string_lossy()
@@ -140,7 +149,7 @@ async fn run(args: &Value) -> anyhow::Result<ToolResult> {
     );
     spec.tombstone_deleted = tombstone;
     let registered = store.okg_register_source(spec)?;
-    let report = store.okg_ingest_docstore(&registered.id, &policy, &now)?;
+    let report = store.okg_ingest_docstore(&registered.id, policy, &now)?;
     // Then make it findable. The tree write above is the durable record; this
     // step is fail-open but never silent — see `tools::okg::index_feed`.
     let spec = store.okg_source(&registered.id)?;

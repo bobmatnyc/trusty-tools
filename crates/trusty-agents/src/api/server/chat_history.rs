@@ -197,6 +197,7 @@ fn unavailable(
 ) -> Response {
     let mut body = json!({
         "available": false,
+        "session_absent": reason == format!("no persisted chat session `{session_id}` yet"),
         "reason": reason,
         "palace": palace,
         "session_id": session_id,

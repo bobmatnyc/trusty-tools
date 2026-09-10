@@ -136,14 +136,18 @@ const SUBAGENTS_PAYLOAD = {
     tool_registered: true,
     tool_granted: true,
     delegator_tier: 'l1',
+    reachable_floor: ['research-agent', 'ticketing-agent'],
+    selected: ['research-agent'],
     allowed_roles: ['engineer', 'qa', 'researcher', 'documentation', 'ops', 'planner', 'assistant'],
     targets: [
       {
-        name: 'engineer',
-        display_name: 'Engineer',
+        name: 'research-agent',
+        display_name: 'Research',
         role: 'engineer',
         tier: 'l1',
         reachable: true,
+        eligible: true,
+        selected: true,
         reason: null,
       },
       {
@@ -207,6 +211,10 @@ function stubApi() {
     'fetch',
     vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.includes('/listeners')) {
+        const body = { agent: 'izzie', revision: 'v1', available_listeners: [{name:'personal-mail',connector:'gmail',identity:null,enabled:true}], listeners:[] };
+        return {ok:true,status:200,json:async()=>body,text:async()=>JSON.stringify(body)} as Response;
+      }
       const json = url.includes('/persona')
         ? { content: PERSONA, editable: true }
         : url.includes('/subagents')
@@ -236,6 +244,7 @@ function stubBareApiWithFailingStores() {
     'fetch',
     vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.includes('/listeners')) return { ok:false, status:503, text:async()=>JSON.stringify({error:'Listeners unavailable'}) } as Response;
       if (url.includes('/stores')) return { ok: false, status: 503, json: async () => ({}) } as Response;
       const json = url.includes('/persona')
         ? { content: '', editable: false }
@@ -437,14 +446,14 @@ describe('AgentConfigPanel — six sections (#3932 + #4029, DOC-57 §8.2)', () =
     // #4029: both delegation mechanisms, labelled separately, sourced from
     // `GET .../subagents` — never derived client-side from `tools_allow`.
     tabButton('Sub-agents').click();
-    await waitFor(() => target.textContent?.includes('delegate_to_agent') ?? false);
-    expect(target.textContent).toContain('Engineer');
+    await waitFor(() => target.textContent?.includes('Allowed agents') ?? false);
+    expect(target.textContent).toContain('Research');
     expect(target.textContent).toContain('dispatch_task');
     expect(target.textContent).toContain('1 of 2 cross-product specialists granted');
 
     tabButton('Listeners').click();
-    await waitFor(() => target.textContent?.includes('Gmail') ?? false);
-    expect(target.textContent).toContain('Google Calendar');
+    await waitFor(() => target.textContent?.includes('personal-mail') ?? false);
+    expect(target.textContent).toContain('This assistant has no listener bindings');
 
     tabButton('Permissions').click();
     await waitFor(() => target.textContent?.includes('agents.read') ?? false);
@@ -498,7 +507,7 @@ describe('AgentConfigPanel — degraded backends (#3932, C-07.2)', () => {
     expect(target.textContent).toContain('0 of 2 cross-product specialists granted');
 
     tabButton('Listeners').click();
-    await waitFor(() => target.textContent?.includes('Scaffolding, not configuration') ?? false);
+    await waitFor(() => target.textContent?.includes('Listeners unavailable') ?? false);
     // L-1: the hardcoded per-listener "not bound" badge is gone.
     expect(target.textContent).not.toContain('not bound');
 
@@ -508,4 +517,33 @@ describe('AgentConfigPanel — degraded backends (#3932, C-07.2)', () => {
     // PM-6: unenforced mechanisms are marked as such.
     expect(target.textContent).toContain('not enforced');
   });
+});
+
+
+it('keeps the saved delegation whitelist through tab changes and uses it for the next toggle', async () => {
+  const previousFetch = globalThis.fetch;
+  let selected = ['research-agent'];
+  const writes: string[][] = [];
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (init?.method === 'PATCH') {
+      const body = JSON.parse(String(init.body));
+      if (body.subagents_delegate_allowed) { selected = body.subagents_delegate_allowed; writes.push([...selected]); }
+      return { ok: true, status: 200, json: async () => ({ name: 'izzie' }) } as Response;
+    }
+    if (String(input).includes('/subagents')) return { ok: true, status: 200, json: async () => ({ ...SUBAGENTS_PAYLOAD, in_product: { ...SUBAGENTS_PAYLOAD.in_product, selected, targets: ['research-agent', 'ticketing-agent'].map(name => ({ name, display_name: name, role: 'researcher', tier: 'l1', eligible: true, selected: selected.includes(name), reachable: selected.includes(name), reason: null })) } }) } as Response;
+    return previousFetch(input, init);
+  }));
+  mountPanel(); await waitFor(() => (editor()?.value.length ?? 0) > 0);
+  tabButton('Sub-agents').click();
+  await waitFor(() => target.querySelectorAll('[data-subagents-editor] input').length === 2);
+  const first = target.querySelector('[data-subagents-editor] input') as HTMLInputElement;
+  first.click(); await waitFor(() => writes.length === 1 && !first.disabled);
+  expect(writes[0]).toEqual([]);
+  tabButton('Skills').click(); tabButton('Sub-agents').click();
+  await new Promise(resolve => setTimeout(resolve, 10));
+  expect(target.querySelector('[data-subagents-editor] input')).toBe(first);
+  expect(first.checked).toBe(false);
+  (target.querySelectorAll('[data-subagents-editor] input')[1] as HTMLInputElement).click();
+  await waitFor(() => writes.length === 2);
+  expect(writes[1]).toEqual(['ticketing-agent']);
 });

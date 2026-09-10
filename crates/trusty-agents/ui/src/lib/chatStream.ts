@@ -141,7 +141,7 @@ export function fillDeltaIntoList(
   content: string,
   speaker?: string,
 ): Message[] {
-  const idx = list.findIndex((m) => m.taskId === taskId);
+  const idx = list.findIndex((m) => m.taskId === taskId && (m.role === 'assistant' || m.role === 'pm'));
   if (idx === -1) return list; // unattributable frame ⇒ drop (never guess)
 
   const target = list[idx];

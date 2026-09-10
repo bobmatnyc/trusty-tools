@@ -129,7 +129,17 @@ pub enum Event {
         error: String,
     },
 
+    ChatHistoryUpdated {
+        agent: String,
+    },
+
     // -- Tool calls --
+    ToolActivity {
+        session_id: String,
+        call_id: String,
+        tool: String,
+        status: String,
+    },
     ToolCalled {
         session_id: String,
         tool: String,
@@ -360,6 +370,7 @@ impl Event {
             | Event::AgentMessageDelta { session_id, .. }
             | Event::AgentDone { session_id, .. }
             | Event::AgentFailed { session_id, .. }
+            | Event::ToolActivity { session_id, .. }
             | Event::ToolCalled { session_id, .. }
             | Event::ToolResult { session_id, .. }
             | Event::AstOperation { session_id, .. }
@@ -381,6 +392,7 @@ impl Event {
             Event::SlackMessageReceived { .. }
             | Event::SlackReplySent { .. }
             | Event::ListenerEventReceived { .. }
+            | Event::ChatHistoryUpdated { .. }
             | Event::Ping => None,
         }
     }
@@ -436,6 +448,7 @@ impl Event {
             | Event::AgentMessageDelta { .. }
             | Event::AgentDone { .. }
             | Event::AgentFailed { .. }
+            | Event::ToolActivity { .. }
             | Event::ToolCalled { .. }
             | Event::ToolResult { .. }
             | Event::AstOperation { .. }
@@ -450,6 +463,7 @@ impl Event {
             | Event::ReportGenerated { .. }
             | Event::RecapGenerated { .. }
             | Event::ListenerEventReceived { .. }
+            | Event::ChatHistoryUpdated { .. }
             | Event::Ping => None,
         }
     }

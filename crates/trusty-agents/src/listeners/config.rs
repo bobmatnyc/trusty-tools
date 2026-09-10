@@ -120,6 +120,11 @@ pub struct ListenerFilter {
 }
 
 impl ListenerFilter {
+    /// OR across configured labels, including multi-label history responses.
+    pub fn matches_labels(&self, labels: &[String]) -> bool {
+        self.label_ids.is_empty() || self.label_ids.iter().any(|label| labels.contains(label))
+    }
+
     /// The single Gmail label to pass to `history.list`'s `labelId` param,
     /// if the filter names exactly one.
     ///
@@ -127,10 +132,8 @@ impl ListenerFilter {
     /// param (unlike `messages.list`'s multi-label `labelIds`); a listener
     /// filter naming zero or >1 labels can't be expressed as that one param,
     /// so this returns `None` for those cases and the poller falls back to
-    /// fetching unfiltered history and filtering client-side (not yet
-    /// implemented — today an empty/multi-label filter just means "no
-    /// server-side label narrowing", which is a safe, just-more-verbose
-    /// degradation).
+    /// fetching unfiltered history and applying `matches_labels` client-side
+    /// before persisting events or waking an assistant.
     /// What: `Some(label)` only when exactly one label id is present.
     /// Test: `listener_filter_single_label_returns_some`,
     /// `listener_filter_empty_or_multi_label_returns_none`.
@@ -154,9 +157,14 @@ impl ListenerFilter {
 /// listener emits". `filter` applies sender/label narrowing on top.
 /// Test: `agent_listener_binding_parses_filter`,
 /// `agent_listener_binding_defaults_event_types_empty`.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentListenerBinding {
     pub name: String,
+    #[serde(default = "default_binding_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub instructions: String,
     #[serde(default)]
     pub event_types: Vec<String>,
     #[serde(default)]
@@ -165,7 +173,14 @@ pub struct AgentListenerBinding {
 
 /// Stage-two (per-agent-binding) filter — DOC-54 §5.3 / §7.5.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentBindingFilter {
+    #[serde(default)]
+    pub include_labels: Vec<String>,
+    #[serde(default)]
+    pub subject_contains: Vec<String>,
+    #[serde(default)]
+    pub snippet_contains: Vec<String>,
     /// Sender glob patterns (`*` = suffix/prefix wildcard, matched via the
     /// same `match_any_glob` semantics as `[tools].allow`). Empty = any
     /// sender.
@@ -175,6 +190,63 @@ pub struct AgentBindingFilter {
     /// waking this agent (e.g. `["PROMOTIONS"]`). Empty = no exclusions.
     #[serde(default)]
     pub exclude_labels: Vec<String>,
+}
+
+fn default_binding_enabled() -> bool {
+    true
+}
+impl Default for AgentListenerBinding {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            enabled: true,
+            instructions: String::new(),
+            event_types: vec![],
+            filter: AgentBindingFilter::default(),
+        }
+    }
+}
+impl AgentListenerBinding {
+    /// Invalid hand-edited bindings fail closed in the wake matcher as well as API writes.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.name.is_empty()
+            || self.name.len() > 128
+            || !self
+                .name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        {
+            return Err("Listener name must be a simple identifier".into());
+        }
+        if self.instructions.chars().count() > 8000 || self.instructions.contains('\0') {
+            return Err("Instructions must be at most 8000 characters without NUL".into());
+        }
+        for values in [
+            &self.event_types,
+            &self.filter.from,
+            &self.filter.include_labels,
+            &self.filter.exclude_labels,
+            &self.filter.subject_contains,
+            &self.filter.snippet_contains,
+        ] {
+            if values.len() > 32
+                || values.iter().any(|v| {
+                    v.trim().is_empty()
+                        || v.chars().count() > 256
+                        || v.chars().any(char::is_control)
+                })
+            {
+                return Err("Filters allow at most 32 nonblank values of at most 256 characters without control characters".into());
+            }
+        }
+        if self.filter.from.iter().any(|p| {
+            let n = p.chars().filter(|c| *c == '*').count();
+            n > 1 || (n == 1 && !p.starts_with('*') && !p.ends_with('*'))
+        }) {
+            return Err("Sender filters support one wildcard at the start or end".into());
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -288,5 +360,31 @@ filter = { from = ["*@family.com"], exclude_labels = ["PROMOTIONS"] }
             label_ids: vec!["INBOX".to_string(), "IMPORTANT".to_string()],
         };
         assert_eq!(f.single_gmail_label(), None);
+    }
+    #[test]
+    fn listener_filter_multiple_labels_are_enforced() {
+        let filter = ListenerFilter {
+            label_ids: vec!["INBOX".into(), "IMPORTANT".into()],
+        };
+        assert!(filter.matches_labels(&["INBOX".into()]));
+        assert!(!filter.matches_labels(&["PROMOTIONS".into()]));
+        assert!(!filter.matches_labels(&[]));
+    }
+    #[test]
+    fn listener_defaults_and_invalid_rules_fail_closed() {
+        let binding: AgentListenerBinding = toml::from_str("name='mail'").unwrap();
+        assert!(binding.enabled);
+        assert!(binding.instructions.is_empty());
+        assert!(binding.validate().is_ok());
+        let mut invalid = binding.clone();
+        invalid.filter.from = vec!["bad*middle".into()];
+        assert!(invalid.validate().is_err());
+        invalid.filter.from.clear();
+        invalid.instructions = "x".repeat(8001);
+        assert!(invalid.validate().is_err());
+        assert!(
+            toml::from_str::<AgentListenerBinding>("name='mail'\n[filter]\nunknown=['oops']")
+                .is_err()
+        );
     }
 }

@@ -94,7 +94,7 @@ pub(super) fn relay_endpoint() -> String {
 /// `TAGENT_API_TOKEN` bearer (when the API is `--api-token`-guarded), then
 /// delegates to `post_event`.
 /// Test: `relay_tolerates_unreachable_server`.
-pub(super) async fn relay_event(event: Event) {
+pub(crate) async fn relay_event(event: Event) {
     let relay_token = std::env::var(RELAY_TOKEN_ENV)
         .ok()
         .filter(|s| !s.trim().is_empty());

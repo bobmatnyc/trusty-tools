@@ -54,11 +54,15 @@ export interface Message {
   // hard context wall between tasks, so "New Task" marks a topic boundary
   // in the ONE ongoing stream rather than wiping it. Rendered as a divider
   // in `ChatView.svelte`.
-  role: 'user' | 'assistant' | 'system' | 'pm' | 'recap' | 'topic-boundary';
+  role: 'user' | 'assistant' | 'system' | 'pm' | 'recap' | 'topic-boundary' | 'tool' | 'event';
   content: string;
   timestamp: number;
   /** Task id returned by the backend; used to route progress events. */
   taskId?: string;
+  eventId?: string;
+  toolName?: string;
+  toolCallId?: string;
+  activityStatus?: 'running' | 'complete' | 'error';
   /**
    * Why (#3737, per-message chat attribution, epic #3052): the display name
    * of the persona that produced this message ("Assistant", "Izzie", "CTO
@@ -375,10 +379,23 @@ export const activeProject = derived(
     $projects.find((p) => p.id === $activeProjectId) ?? $projects[0],
 );
 
-export const activeMessages = derived(
-  [messages, activeProjectId],
-  ([$messages, $activeProjectId]) => $messages.get($activeProjectId) ?? [],
+/** Stable message bucket; null/ctrl keeps the base conversation key. */
+export function conversationKey(projectId: string, agentId: string | null): string {
+  return !agentId || agentId === 'ctrl' ? projectId : JSON.stringify([projectId, agentId]);
+}
+export const activeConversationKey = derived(
+  [activeProjectId, activeAgentId],
+  ([$project, $agent]) => conversationKey($project, $agent),
 );
+export const activeMessages = derived(
+  [messages, activeConversationKey],
+  ([$messages, $key]) => $messages.get($key) ?? [],
+);
+
+/** Completion events belong to the task's original conversation after switching. */
+export function conversationForTask(taskId: string): string | undefined {
+  return [...get(messages)].find(([, list]) => list.some((m) => m.taskId === taskId))?.[0];
+}
 
 /**
  * Why: Messages are appended from user input, assistant replies, and progress
@@ -416,9 +433,10 @@ export function hydrateMessages(projectId: string, history: Message[]): boolean 
   if (history.length === 0) return false;
   let seeded = false;
   messages.update((map) => {
-    if ((map.get(projectId) ?? []).length > 0) return map;
+    const existing = map.get(projectId) ?? [];
+    if (existing.some(message => message.role !== 'system' && message.role !== 'topic-boundary')) return map;
     const next = new Map(map);
-    next.set(projectId, [...history]);
+    next.set(projectId, [...history, ...existing]);
     seeded = true;
     return next;
   });
@@ -437,7 +455,8 @@ export function prependMessages(projectId: string, older: Message[]): void {
   if (older.length === 0) return;
   messages.update((map) => {
     const next = new Map(map);
-    next.set(projectId, [...older, ...(next.get(projectId) ?? [])]);
+    const existing=next.get(projectId)??[];const ids=new Set(existing.map(m=>m.id));
+    next.set(projectId, [...older.filter(m=>!ids.has(m.id)), ...existing]);
     return next;
   });
 }
@@ -510,7 +529,7 @@ export function updateMessageByTask(projectId: string, taskId: string, content: 
     const next = new Map(map);
     next.set(
       projectId,
-      list.map((m) => (m.taskId === taskId ? { ...m, content } : m)),
+      list.map((m) => (m.taskId === taskId && (m.role === 'assistant' || m.role === 'pm') ? { ...m, content } : m)),
     );
     return next;
   });
@@ -578,7 +597,7 @@ export function setMessageSpeakerByTask(
     const next = new Map(map);
     next.set(
       projectId,
-      list.map((m) => (m.taskId === taskId ? { ...m, speaker } : m)),
+      list.map((m) => (m.taskId === taskId && (m.role === 'assistant' || m.role === 'pm') ? { ...m, speaker } : m)),
     );
     return next;
   });
@@ -611,6 +630,7 @@ export function replaceMessageTaskId(
     );
     return next;
   });
+  replayToolActivities(newTaskId);
 }
 
 export function addProject(project: Project): void {
@@ -715,4 +735,46 @@ export const tmSessions = writable<TmSession[]>([]);
 export async function fetchTmSessions(): Promise<void> {
   const data = await tmApi<{ sessions: TmSession[] }>('/api/tm/sessions');
   tmSessions.set(data.sessions ?? []);
+}
+
+export interface ToolActivityPayload { task_id: string; call_id: string; tool: string; status: 'running' | 'complete' | 'error'; }
+const finishedToolTasks = new Set<string>();
+const pendingToolActivities = new Map<string, { at: number; events: ToolActivityPayload[] }>();
+function replayToolActivities(taskId: string): void {
+  const pending = pendingToolActivities.get(taskId);
+  pendingToolActivities.delete(taskId);
+  if (pending && Date.now() - pending.at < 60000) pending.events.forEach(recordToolActivity);
+}
+/** Route actual tool telemetry only to the conversation owning its task. */
+export function recordToolActivity(event: ToolActivityPayload): void {
+  if (typeof event.task_id !== 'string' || !event.task_id || typeof event.call_id !== 'string' || !event.call_id || typeof event.tool !== 'string' || !event.tool || !['running','complete','error'].includes(event.status)) return;
+  if (finishedToolTasks.has(event.task_id) && event.status === 'running') return;
+  const map = get(messages);
+  const entry = [...map].find(([, list]) => list.some(m => m.taskId === event.task_id && (m.role === 'assistant' || m.role === 'pm')));
+  if (!entry) {
+    for (const [id,pending] of pendingToolActivities) if (Date.now()-pending.at > 60000) pendingToolActivities.delete(id);
+    if (!pendingToolActivities.has(event.task_id) && pendingToolActivities.size >= 16) pendingToolActivities.delete(pendingToolActivities.keys().next().value!);
+    const pending = pendingToolActivities.get(event.task_id) ?? {at:Date.now(),events:[]};
+    pending.events.push(event); pending.events=pending.events.slice(-64); pendingToolActivities.set(event.task_id,pending); return;
+  }
+  const [key, list] = entry;
+  const id = `tool:${event.task_id}:${event.call_id}`;
+  const existing = list.find(m => m.id === id);
+  if (existing && existing.activityStatus !== 'running' && event.status === 'running') return;
+  const row: Message = { id, role:'tool', content:'', timestamp:existing?.timestamp ?? Date.now(), taskId:event.task_id, toolName:event.tool.slice(0,160), toolCallId:event.call_id, activityStatus:event.status };
+  const nextList = existing ? list.map(m => m.id === id ? row : m) : [...list];
+  if (!existing) {
+    const responseIndex = nextList.findIndex(m => m.taskId === event.task_id && (m.role === 'assistant' || m.role === 'pm'));
+    nextList.splice(responseIndex,0,row);
+  }
+  const next = new Map(map); next.set(key,nextList); messages.set(next);
+}
+
+/** A task ending without a tool result cannot imply successful tool completion. */
+export function finishToolActivities(taskId: string, _status: 'complete' | 'error'): void {
+  finishedToolTasks.add(taskId);
+  if (finishedToolTasks.size > 128) finishedToolTasks.delete(finishedToolTasks.values().next().value!);
+  const pending=pendingToolActivities.get(taskId);
+  if (pending) pending.events=pending.events.map(e=>e.status==='running'?{...e,status:'error'}:e);
+  messages.update(map=>new Map([...map].map(([key,list])=>[key,list.map(m=>m.role==='tool' && m.taskId===taskId && m.activityStatus==='running' ? {...m,activityStatus:'error' as const,content:'Activity ended without a completion event'} :m)])));
 }

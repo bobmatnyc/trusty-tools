@@ -46,6 +46,9 @@ pub fn format_event(event: &Event) -> Option<String> {
         Event::ToolCalled { tool, preview, .. } => {
             Some(dim.paint(format!("  [TOOL] {tool}: {preview}")).to_string())
         }
+        Event::ToolActivity { tool, status, .. } => {
+            Some(dim.paint(format!("  [TOOL] {tool}: {status}")).to_string())
+        }
         Event::ToolResult { .. } => None, // suppress to reduce noise
         Event::AgentDone { agent, status, .. } if status == "success" => {
             Some(green.paint(format!("  ✓ {agent} complete")).to_string())
@@ -88,7 +91,7 @@ pub fn format_event(event: &Event) -> Option<String> {
             teal.paint(format!("  ↻ resumed at phase: {resumed_at_phase}"))
                 .to_string(),
         ),
-        Event::Ping => None,
+        Event::Ping | Event::ChatHistoryUpdated { .. } => None,
         // #199: LLM lifecycle + agent fine-grained events emit on the bus but
         // are suppressed from the REPL stream by default to reduce noise.
         // (UI consumers can re-enable via separate display logic.)

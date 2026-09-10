@@ -68,20 +68,7 @@ export interface RosterEntry {
   kind: string;
 }
 
-/**
- * Why: `BASE_AGENT_ID`/`BASE_AGENT_LABEL` remain the fallback identity for
- * "no roster selection" (`activeAgentId === null` — see `rosterDisplayName`),
- * but per Bob's roster-typing directive (#3819) the base, nameless
- * `assistant` template is NEVER a directly pickable roster row: it stays
- * `hidden = true` server-side and is only ever instantiated as the add-agent
- * flow's template (`agent_create.rs`) or dispatched through Concierge.
- * `buildRoster` below therefore does NOT push a `BASE_ENTRY` row into its
- * returned list (pre-#3819 behavior, when Concierge had no other selectable
- * default, did) — Concierge (`activeAgentId = null`) is this app's actual
- * "always available" default now. `seen` still seeds with `BASE_AGENT_ID` as
- * a defensive dedup guard in case a catalog entry named `assistant` ever
- * slips past the server-side `hidden` filter.
- */
+/** The hidden base template is never a selectable assistant instance. */
 export const BASE_AGENT_ID = 'assistant';
 
 /**
@@ -126,7 +113,8 @@ export function slugify(input: string): string {
  * `hidden = true` server-side and simply won't appear in `catalog` at all
  * for a correctly-configured install, but `seen` still guards against it
  * slipping through.
- * What: Returns catalog agents (skipping any named `BASE_AGENT_ID`, defensive),
+ * What: Returns catalog agents, excluding the base template and internal
+ * Concierge helper from both catalog and overlays,
  * then overlay agents (skipping any slug already used by a catalog entry)
  * sorted by label. Catalog labels prefer `display_name` (#3737), falling
  * back to `name`. Overlay labels prefer `display_name`, falling back to
@@ -143,7 +131,7 @@ export function buildRoster(
   catalog: CatalogAgent[],
   overlays: OverlayAgent[],
 ): RosterEntry[] {
-  const seen = new Set<string>([BASE_AGENT_ID]);
+  const seen = new Set<string>([BASE_AGENT_ID, CONCIERGE_AGENT_ID]);
   const entries: RosterEntry[] = [];
 
   for (const agent of catalog) {
@@ -206,23 +194,16 @@ export function rosterDisplayName(
   return roster.find((e) => e.id === id)?.label ?? BASE_AGENT_LABEL;
 }
 
-/**
- * Why (#3819): Concierge — the `ctrl` agent — is selected by
- * `activeAgentId === null` (the tools-armed base PM/ctrl dispatch path; see
- * `stores/app.ts`'s `activeAgentId` doc comment) but is CONFIGURED by name
- * like any other agent. Two surfaces now need that mapping — `ChatHeader`'s
- * picker and the full-pane `AgentConfigOverlay` (#3894) — so it lives here
- * once instead of being re-derived in each.
- */
+/** Internal system-configuration helper; never a selectable roster entry. */
 export const CONCIERGE_AGENT_ID = 'ctrl';
 
-/** Human-facing label for the Concierge selection (`activeAgentId === null`). */
+/** Human-facing label for internal configuration surfaces. */
 export const CONCIERGE_LABEL = 'Concierge';
 
 /**
  * Why (#3894): the config surface addresses agents by NAME (`GET
  * /api/agents/:name`), while chat dispatch addresses the active selection by
- * `activeAgentId`, where `null` means Concierge. This is the one translation
+ * `activeAgentId`, where `null` retains the internal default. This is the translation
  * between the two axes.
  * What: Returns the selected agent's name, or `CONCIERGE_AGENT_ID` when
  * nothing is selected.

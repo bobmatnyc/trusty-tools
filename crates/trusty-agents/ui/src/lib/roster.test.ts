@@ -86,6 +86,11 @@ describe('buildRoster', () => {
     expect(roster.map((r) => r.id)).toEqual(['engineer']);
   });
 
+  it('excludes the internal Concierge helper from catalog and overlays independently', () => {
+    expect(buildRoster([{ name: 'ctrl', display_name: 'Concierge' }], [])).toEqual([]);
+    expect(buildRoster([], [{ slug: 'ctrl', name: 'Concierge' }])).toEqual([]);
+  });
+
   it('appends overlay agents, preferring display_name then name then slug as the label', () => {
     const overlays: OverlayAgent[] = [
       { slug: 'my-cto', name: 'my-cto', display_name: 'My CTO', extends: 'cto-assistant' },
@@ -117,11 +122,11 @@ describe('buildRoster', () => {
 
   it('carries kind through from the catalog, defaulting to "assistant" when absent (#3819)', () => {
     const catalog: CatalogAgent[] = [
-      { name: 'ctrl', kind: 'system-tool' },
+      { name: 'helper', kind: 'system-tool' },
       { name: 'izzie' },
     ];
     const roster = buildRoster(catalog, []);
-    expect(roster.find((r) => r.id === 'ctrl')?.kind).toBe('system-tool');
+    expect(roster.find((r) => r.id === 'helper')?.kind).toBe('system-tool');
     expect(roster.find((r) => r.id === 'izzie')?.kind).toBe('assistant');
   });
 
@@ -243,7 +248,7 @@ describe('parseOverlayMarkdown', () => {
 
 describe('configAgentName', () => {
   it('configAgentName_null_selection_is_concierge', () => {
-    // `activeAgentId === null` is the Concierge selection on the dispatch
+    // `activeAgentId === null` retains the internal default on the dispatch
     // axis; the config surface addresses it by name (`ctrl`).
     expect(configAgentName(null)).toBe(CONCIERGE_AGENT_ID);
     expect(CONCIERGE_AGENT_ID).toBe('ctrl');

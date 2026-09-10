@@ -46,6 +46,7 @@
   import type { AgentSkills, AgentSkill, AgentSkillGroup } from '../lib/agentConfig';
   import { providerChip } from '../lib/agentConfig';
   import AgentSkillCard from './AgentSkillCard.svelte';
+  import UserSkillSettings from './UserSkillSettings.svelte';
 
   /** Loaded by the shell from `GET /api/agents/:name/skills`; `null` while loading. */
   export let data: AgentSkills | null = null;
@@ -307,4 +308,5 @@
       {granted.length} of {catalogSize} known skills granted.
     </p>
   {/if}
+  <UserSkillSettings />
 </div>

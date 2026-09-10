@@ -390,6 +390,10 @@ async fn in_product_surface(
                     "display_name": target.agent.display_label(),
                     "role": target.agent.role,
                     "tier": target_tier.wire_label(),
+                    "eligible": cfg.agent.role == ASSISTANT_TIER_ROLE
+                        && !kind_blocked && !tier_blocked
+                        && crate::agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS.contains(&target.agent.name.as_str()),
+                    "selected": whitelist.resolve(&target.agent.name).is_ok(),
                     "reachable": !(kind_blocked || tier_blocked || whitelist_blocked),
                     "reason": if kind_blocked {
                         Some(
@@ -454,6 +458,7 @@ async fn in_product_surface(
         // `execute`'s own scoping, not a display toggle.
         "whitelist_enforced": whitelist_applies,
         "declares_whitelist": cfg.subagents.delegate_allowed.is_some(),
+        "selected": crate::agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS.iter().filter(|name| whitelist.resolve(name).is_ok()).collect::<Vec<_>>(),
         "reachable_floor": crate::agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS,
         "targets": targets,
         "role_excluded_count": role_excluded_count,
@@ -647,6 +652,7 @@ fn empty_in_product() -> Value {
         // pane reading these blanks out on a config error otherwise.
         "whitelist_enforced": false,
         "declares_whitelist": false,
+        "selected": Vec::<String>::new(),
         "reachable_floor": crate::agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS,
         "targets": Vec::<Value>::new(),
         "role_excluded_count": 0,

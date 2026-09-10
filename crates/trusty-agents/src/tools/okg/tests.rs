@@ -380,7 +380,7 @@ async fn bound_store_reports_pending_when_the_daemon_is_down() {
     assert_eq!(out["index"]["pending"], 2, "{out}");
     let reason = out["index"]["reason"].as_str().unwrap_or_default();
     assert!(
-        reason.contains("not discoverable") && reason.contains("okg-feed-test-index"),
+        reason.contains("could not be interrogated") && reason.contains("okg-feed-test-index"),
         "the reason must name the daemon AND the bound index: {reason}"
     );
 }

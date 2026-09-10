@@ -13,17 +13,21 @@
    * existing `recaps` store for the summary/table fold. Collapses below
    * the `xl` breakpoint (see the responsive note in the issue) since at
    * narrower widths there isn't room for sidebar + chat + a 300px rail.
+   * At wide widths, the header chevron collapses the whole rail to a
+   * reopen control; content stays mounted to preserve its scroll and fold.
    * Test: Dispatch SSE `agent_spawned`/`agent_message`/`phase_*` events and
    * a `recap_generated` event for the active project; observe AGENTS
    * ACTIVE/FILES TOUCHED/TOKENS populate live and the recap fold appear
    * with its summary; click the recap header to collapse/expand the table.
    */
+  import { ChevronLeft, ChevronRight } from 'lucide-svelte';
   import { recaps } from '../stores/recap';
   import { activeProjectId } from '../stores/app';
   import { workflowState, type AgentActivityStatus } from '../stores/workflow';
   import { isDesktop } from '../lib/transport';
 
   let collapsed = false;
+  let railCollapsed = false;
   const desktop = isDesktop();
 
   $: currentRecap = $recaps.get($activeProjectId) ?? null;
@@ -51,14 +55,31 @@
 </script>
 
 <aside
-  class="hidden xl:flex w-[300px] flex-shrink-0 flex-col border-l border-foundry-light-border dark:border-foundry-border bg-foundry-light-surface dark:bg-foundry-surface overflow-y-auto"
+  aria-label="Session recap"
+  class="hidden xl:flex flex-shrink-0 flex-col border-l border-foundry-light-border dark:border-foundry-border bg-foundry-light-surface dark:bg-foundry-surface {railCollapsed ? 'w-10' : 'w-[300px]'}"
 >
-  <div
-    class="px-4 py-3 border-b border-foundry-light-border dark:border-foundry-border font-mono text-[10px] font-semibold uppercase tracking-widest text-foundry-light-muted dark:text-foundry-text/60"
-  >
-    Session Recap
+  <div class="flex h-12 shrink-0 items-center gap-2 border-b border-foundry-light-border dark:border-foundry-border px-1">
+    <button
+      type="button"
+      class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-foundry-light-primary dark:focus-visible:ring-foundry-primary"
+      aria-label={railCollapsed ? 'Expand session recap' : 'Collapse session recap'}
+      title={railCollapsed ? 'Expand session recap' : 'Collapse session recap'}
+      aria-expanded={!railCollapsed}
+      aria-controls="session-recap-content"
+      on:click={() => (railCollapsed = !railCollapsed)}
+    >
+      {#if railCollapsed}
+        <ChevronLeft size={16} aria-hidden="true" />
+      {:else}
+        <ChevronRight size={16} aria-hidden="true" />
+      {/if}
+    </button>
+    {#if !railCollapsed}
+      <span class="font-mono text-[10px] font-semibold uppercase tracking-widest text-foundry-light-muted dark:text-foundry-text/60">Session Recap</span>
+    {/if}
   </div>
 
+  <div id="session-recap-content" hidden={railCollapsed} class="min-h-0 overflow-y-auto">
   <div class="flex flex-col gap-5 px-4 py-4 text-xs font-mono">
     <!-- AGENTS ACTIVE -->
     <section>
@@ -164,6 +185,7 @@
         {/if}
       </section>
     {/if}
+  </div>
   </div>
 </aside>
 

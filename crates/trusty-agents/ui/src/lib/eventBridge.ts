@@ -137,6 +137,12 @@ export function bridgeEventToWebBus(ev: AppEvent) {
         error: `Agent ${ev.agent} failed: ${ev.error ?? ''}`,
       });
       break;
+    case 'chat_history_updated':
+      emitWebEvent('chat-history-updated', {agent:ev.agent});
+      break;
+    case 'tool_activity':
+      emitWebEvent('task-tool-activity', {task_id: ev.session_id ?? '', call_id: ev.call_id, tool: ev.tool, status: ev.status});
+      break;
     case 'tool_called':
       emitWebEvent('task-progress', {
         task_id: ev.session_id ?? '',

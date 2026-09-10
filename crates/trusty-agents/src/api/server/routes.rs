@@ -27,6 +27,7 @@ use super::agent_kg::{
     agent_kg_all_route, agent_kg_count_route, agent_kg_query_route, agent_kg_subjects_route,
 };
 use super::agent_knowledge::agent_knowledge_route;
+use super::agent_listeners::{get_listeners, put_listeners};
 use super::agent_patch::{get_agent_persona_route, get_agent_route, patch_agent_route};
 use super::agent_permissions::agent_permissions_route;
 use super::agent_skills::agent_skills_route;
@@ -49,6 +50,10 @@ use super::handlers::{
 use super::listener_events::{list_listener_events, set_listener_event_filter};
 use super::models::get_models;
 use super::project_registration::{connect_project, get_project_config};
+use super::project_tools::{
+    get_project_skills, get_project_tools, get_user_skills, import_project, index_project,
+    patch_project_skills, patch_user_skills,
+};
 use super::projects::{list_agents_route, list_projects, list_sessions_route};
 use super::relay::relay_event_handler;
 use super::state::AppState;
@@ -136,6 +141,33 @@ pub fn build_router_with_origins(
         // picker (epic #3052) — never returns credential values, only
         // whether one resolves.
         .route("/api/models", get(get_models))
+        .route(
+            "/api/agents/{name}/channels",
+            get(super::agent_channels::get_route).put(super::agent_channels::put_route),
+        )
+        .route(
+            "/api/agents/{name}/channels/{id}/send",
+            post(super::agent_channels::send_route),
+        )
+        .route(
+            "/api/agents/{name}/channels/{id}/messages",
+            get(super::agent_channels::messages_route),
+        )
+        .route(
+            "/api/agents/{name}/listeners",
+            get(get_listeners).put(put_listeners),
+        )
+        .route("/api/project-tools", get(get_project_tools))
+        .route(
+            "/api/user-skills",
+            get(get_user_skills).patch(patch_user_skills),
+        )
+        .route(
+            "/api/project-tools/skills",
+            get(get_project_skills).patch(patch_project_skills),
+        )
+        .route("/api/project-tools/index", post(index_project))
+        .route("/api/project-tools/import", post(import_project))
         .route("/api/projects", get(list_projects).post(connect_project))
         // #451: per-project TOML config lookup (mirrors the on-disk shape of
         // `.trusty-agents/projects/<name>.toml` rather than the global registry).
