@@ -48,6 +48,7 @@ pub mod python_skill;
 pub mod registry;
 pub mod run_bash;
 // #4171 (epic #4167): L0-only read-only session-state visibility.
+pub mod knowledge_history;
 pub mod listener_config;
 pub mod session_state;
 pub mod shell;

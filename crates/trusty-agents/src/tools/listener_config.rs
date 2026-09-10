@@ -76,6 +76,7 @@ pub fn is_reserved_name(name: &str) -> bool {
     matches!(
         name,
         "listener_config"
+            | "knowledge_history"
             | "project_skill"
             | "channel"
             | "manage_skills"

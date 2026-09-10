@@ -3,12 +3,13 @@
   import { get } from 'svelte/store';
   import { Folder, File, ArrowLeft, ArrowUp, RefreshCw, Plus, Eye, EyeOff, Settings } from 'lucide-svelte';
   import ProjectConfiguration from './ProjectConfiguration.svelte';
-  import { projects, projectsList, fetchProjects } from '../stores/app';
+  import { projects, projectsList, fetchProjects, tmApi } from '../stores/app';
   import { isDesktop } from '../lib/transport';
-  import { folderError, listWorkspaceFiles, DESKTOP_FILES_MESSAGE, type WorkspaceEntry, type WorkspaceRoot } from '../lib/workspaceFiles';
+  import { folderError, listWorkspaceFiles, chooseWorkspaceRoot, DESKTOP_FILES_MESSAGE, type WorkspaceEntry, type WorkspaceRoot } from '../lib/workspaceFiles';
   import { activeRoot, openedFile, registeredWorkspaceRoots, currentChatRoots, chatProjectPath, chatWorkspaceKey, workspaceError, loadWorkspaceRoots, attachRootToChat, detachRootFromChat, selectChatRoot } from '../stores/workspace';
   const desktop = isDesktop();
-  let browsing = false, adding = false, path = '', loading = false, refreshingProjects = false;
+  let browsing = false, adding = false, choosingFolder = false, path = '', loading = false, refreshingProjects = false;
+  let folderRequest = 0;
   let configurationRoot: WorkspaceRoot | null = null;
   let entries: WorkspaceEntry[] = [];
   let showHidden = false;
@@ -19,7 +20,7 @@
   let request = 0;
   let previousRootId: string | null | undefined = undefined;
   let previousChat = '';
-  $: if (previousChat !== $chatWorkspaceKey) { previousChat = $chatWorkspaceKey; browsing = false; adding = false; configurationRoot = null; request++; entries = []; }
+  $: if (previousChat !== $chatWorkspaceKey) { previousChat = $chatWorkspaceKey; folderRequest++; choosingFolder = false; browsing = false; adding = false; configurationRoot = null; request++; entries = []; }
   $: projectPaths = [...new Set([...$projects, ...$projectsList].map(project => project.path).filter((path): path is string => !!path))];
   let reconciledPaths = '';
   $: if (desktop && !refreshingProjects && JSON.stringify(projectPaths) !== reconciledPaths) {
@@ -45,6 +46,26 @@
     const root = candidates.find(root => root.id === (event.target as HTMLSelectElement).value);
     if (root) { attachRootToChat(root); adding = false; }
   }
+  async function addFolder() {
+    if (choosingFolder) return;
+    const chat = $chatWorkspaceKey, token = ++folderRequest;
+    const current = () => token === folderRequest && chat === get(chatWorkspaceKey);
+    choosingFolder = true; error = null;
+    try {
+      // Native registration validates and canonicalizes the chosen directory only.
+      const root = await chooseWorkspaceRoot();
+      if (!root || !current()) return;
+      // Global registration must succeed before the folder becomes a chat/knowledge source.
+      await tmApi('/api/projects', { method: 'POST', body: JSON.stringify({ path: root.path }) });
+      if (!current()) return;
+      attachRootToChat(root);
+      adding = false;
+      try { await fetchProjects(true); }
+      catch (cause) { if (current()) error = 'Project attached, but the registered project list could not be refreshed. ' + String(cause); }
+    } catch (cause) {
+      if (current()) error = 'Could not add project. ' + String(cause instanceof Error ? cause.message : cause);
+    } finally { if (current()) choosingFolder = false; }
+  }
   async function refreshProjects() {
     if (refreshingProjects) return;
     refreshingProjects = true; error = null;
@@ -64,7 +85,7 @@
     else openedFile.set({ root: $activeRoot, path: entry.path });
   }
   onMount(() => { if (desktop) { void fetchProjects(true).catch(cause => { error = 'Registered projects could not be loaded. ' + String(cause); }); } });
-  onDestroy(() => { request++; });
+  onDestroy(() => { request++; folderRequest++; });
 </script>
 <div class="navigator">
   {#if !desktop}<p class="notice">{DESKTOP_FILES_MESSAGE}</p>
@@ -83,11 +104,12 @@
             {#each candidates as root (root.id)}<option value={root.id}>{root.name} — {root.path}</option>{/each}
           </select>
           {#if !candidates.length}<p class="hint">No additional registered projects with available folders.</p>{/if}
+          <button type="button" class="choose" disabled={choosingFolder} on:click={addFolder}><Folder size={14} />{choosingFolder ? 'Adding folder…' : 'Choose folder…'}</button>
         {/if}
       </div>
       {#if error}<p class="notice error" role="alert">{error}</p>{/if}
       <section class="project-list" aria-label="Projects attached to this chat">
-        {#if !attached.length}<p class="notice">Add a registered project to browse its files in this chat.</p>{/if}
+        {#if !attached.length}<p class="notice">Add a project or choose a folder to browse its files in this chat.</p>{/if}
         {#each attached as root (root.id)}
           <div class="project-item">
             <div class="project-heading">

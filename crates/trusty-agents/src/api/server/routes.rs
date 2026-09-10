@@ -223,6 +223,20 @@ pub fn build_router_with_origins(
             "/api/agents/{name}/knowledge",
             axum::routing::get(agent_knowledge_route),
         )
+        .route(
+            "/api/agents/{name}/knowledge/pipeline",
+            axum::routing::get(super::knowledge_pipeline::get)
+                .post(super::knowledge_pipeline::post)
+                .patch(super::knowledge_pipeline::patch),
+        )
+        .route(
+            "/api/agents/{name}/knowledge/pipeline/projects",
+            axum::routing::put(super::knowledge_pipeline::projects),
+        )
+        .route(
+            "/api/agents/{name}/knowledge/pipeline/backfill",
+            axum::routing::post(super::knowledge_pipeline::backfill),
+        )
         // #4290: the Knowledge Graph browser reads the agent's BOUND memory
         // palace's KG through a thin read-only proxy — trusty-memory owns
         // every one of these queries (`web/kg_routes.rs`), this crate only
@@ -506,6 +520,9 @@ pub async fn serve_with_config(cfg: ApiConfig) -> Result<()> {
     let addr = std::net::SocketAddr::from((cfg.bind, cfg.port));
     tracing::info!(%addr, "trusty-agents api server listening");
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    // #4531: the task is cancelled with this server; router construction stays pure for tests.
+    let mut knowledge_startup = tokio::task::JoinSet::new();
+    knowledge_startup.spawn(super::knowledge_pipeline::startup());
 
     // Resolve the actual bound address (port may have been requested as 0) and
     // trust it as a self-origin for the router-wide write guard so a

@@ -391,6 +391,7 @@
       />
     {:else if tab === 'knowledge'}
       <AgentConfigKnowledge
+        {agentName}
         stores={okgStores}
         issues={okgIssues}
         error={okgError}

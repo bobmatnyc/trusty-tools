@@ -333,6 +333,9 @@ async fn poll_once(
                 new_count += 1;
 
                 let included = EventStore::is_event_type_included(&event.event_type).await;
+                if included {
+                    crate::api::server::knowledge_pipeline::intake::listener(&event).await;
+                }
                 // Mirror onto the live harness event bus (#3820) so the GUI's
                 // Events pane updates in real time via the SAME SSE/Tauri
                 // bridge every other event type already uses — see

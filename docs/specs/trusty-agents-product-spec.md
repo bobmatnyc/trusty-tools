@@ -111,9 +111,13 @@ Each agent defines exactly three binding kinds, persisted in `agent.toml` and th
 | **Tools** | How the agent *acts* (MCP tool allow-list) | `[tools]` | `allow = ["compose_email", "manage_events"]` |
 | **Listeners** | What the agent *reacts to* (inbound event bindings, further-filtered) | `[[listeners]]` | `name = "gmail-personal"`, `event_types = ["message.received"]` |
 
-### 5.1 Stores (Knowledge): One per agent
+### 5.1 Stores (Knowledge): One per Assistant
 
-Each agent has exactly **ONE** dedicated OKG store (Bob decision, 2026-07-24: "stores are one per agent; we can allow agents to talk to each other").
+Each **Assistant** has exactly **ONE protected** OKG store. The owner clarified
+on 2026-09-09 that Assistants are privileged, user-facing virtual twins;
+specialist and delegated agents do not receive independent stores.
+[DOC-57 §4.7](./agent-config-five-sections.md#SPEC-AGENTCFG-03~draft) governs
+project/channel business-entity extraction, monthly history, and ongoing updates.
 
 - **Contents:** The agent's OKF knowledge tree (structured markdown KG) + search index over that tree.
 - **Cross-agent knowledge:** Flows via agent-to-agent communication (via MCP tools or chat), NOT via shared stores.
