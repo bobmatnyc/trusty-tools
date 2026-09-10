@@ -22,6 +22,20 @@ fn survey(value: serde_json::Value) -> Survey {
     serde_json::from_value(value).expect("the fixture must match the survey schema")
 }
 
+/// No friendly names known — the shape when the daemon lists no session, which
+/// is also every fixture whose ids stand in for themselves.
+fn no_names() -> SessionNames {
+    SessionNames::new()
+}
+
+/// One directory row, as `session_directory` flattens either store into.
+fn session_row(id: &str, name: &str) -> DirectoryRow {
+    DirectoryRow {
+        id: id.to_string(),
+        name: name.to_string(),
+    }
+}
+
 /// A survey with two attributed sessions and the unattributed bucket, ordered
 /// exactly as slice 1's `group_by_session` emits it (bytes descending, `null`
 /// last).
@@ -119,7 +133,8 @@ fn one_session_across_two_projects() -> Survey {
 /// CLI name the same session first. Re-sorting here would be a second answer.
 #[test]
 fn sessions_report_sorts_by_bytes_descending() {
-    let DiskReport::Sessions { sessions, .. } = sessions_report(&two_sessions(), None) else {
+    let DiskReport::Sessions { sessions, .. } = sessions_report(&two_sessions(), None, &no_names())
+    else {
         panic!("the no-argument view must be the sessions view");
     };
     let ids: Vec<Option<&str>> = sessions
@@ -143,7 +158,11 @@ fn sessions_report_sorts_by_bytes_descending() {
 fn sessions_report_totals_every_row() {
     let DiskReport::Sessions {
         sessions, total, ..
-    } = sessions_report(&two_sessions(), Some("bobmatnyc/trusty-tools".to_string()))
+    } = sessions_report(
+        &two_sessions(),
+        Some("bobmatnyc/trusty-tools".to_string()),
+        &no_names(),
+    )
     else {
         panic!("the no-argument view must be the sessions view");
     };
@@ -172,7 +191,7 @@ fn a_daemon_without_the_rollup_reports_nothing() {
     }));
     let DiskReport::Sessions {
         sessions, total, ..
-    } = sessions_report(&older, None)
+    } = sessions_report(&older, None, &no_names())
     else {
         panic!("the no-argument view must be the sessions view");
     };
@@ -183,8 +202,12 @@ fn a_daemon_without_the_rollup_reports_nothing() {
 /// A session's breakdown separates the build directories from the rest.
 #[test]
 fn a_session_report_splits_build_bytes_from_the_rest() {
-    let report = session_report(&one_session_across_two_projects(), "trusty-tools-95")
-        .expect("the session owns worktrees");
+    let report = session_report(
+        &one_session_across_two_projects(),
+        "trusty-tools-95",
+        &no_names(),
+    )
+    .expect("the session owns worktrees");
     let DiskReport::Session { classes, total, .. } = report else {
         panic!("an argument must produce the session view");
     };
@@ -206,8 +229,12 @@ fn a_session_report_splits_build_bytes_from_the_rest() {
 /// is the whole reason slice 1 added the roll-up.
 #[test]
 fn a_session_report_spans_projects() {
-    let report = session_report(&one_session_across_two_projects(), "trusty-tools-95")
-        .expect("the session owns worktrees");
+    let report = session_report(
+        &one_session_across_two_projects(),
+        "trusty-tools-95",
+        &no_names(),
+    )
+    .expect("the session owns worktrees");
     let DiskReport::Session { worktrees, .. } = report else {
         panic!("an argument must produce the session view");
     };
@@ -235,8 +262,12 @@ fn a_session_report_spans_projects() {
 /// pass read as a complete one.
 #[test]
 fn an_unmeasured_worktree_is_listed_and_adds_nothing() {
-    let report = session_report(&one_session_across_two_projects(), "trusty-tools-95")
-        .expect("the session owns worktrees");
+    let report = session_report(
+        &one_session_across_two_projects(),
+        "trusty-tools-95",
+        &no_names(),
+    )
+    .expect("the session owns worktrees");
     let DiskReport::Session {
         worktrees, total, ..
     } = report
@@ -262,8 +293,12 @@ fn an_unmeasured_worktree_is_listed_and_adds_nothing() {
 /// that genuinely holds nothing, and the operator acts on the wrong one.
 #[test]
 fn an_unknown_session_is_an_error() {
-    let err = session_report(&one_session_across_two_projects(), "no-such-session")
-        .expect_err("an unattributed id must not produce a report");
+    let err = session_report(
+        &one_session_across_two_projects(),
+        "no-such-session",
+        &no_names(),
+    )
+    .expect_err("an unattributed id must not produce a report");
     let message = err.to_string();
     assert!(message.contains("no-such-session"), "{message}");
     assert!(
@@ -384,7 +419,11 @@ fn a_cwd_outside_the_workspace_root_has_no_filter() {
 /// The listing renders a header, one row per session, and a total line.
 #[test]
 fn the_listing_renders_a_total_line() {
-    let report = sessions_report(&two_sessions(), Some("bobmatnyc/trusty-tools".to_string()));
+    let report = sessions_report(
+        &two_sessions(),
+        Some("bobmatnyc/trusty-tools".to_string()),
+        &no_names(),
+    );
     let text = render(&report);
     assert!(text.contains("project bobmatnyc/trusty-tools"), "{text}");
     assert!(text.contains("trusty-tools-95"), "{text}");
@@ -427,7 +466,7 @@ fn a_uuid_session_id_keeps_the_columns_aligned() {
         }],
         "root": { "projects": [] }
     }));
-    let text = render(&sessions_report(&wide, None));
+    let text = render(&sessions_report(&wide, None, &no_names()));
     let lines: Vec<&str> = text.lines().collect();
     // The header, the one row, and the total must put `TOTAL`'s figure in the
     // same column — which only holds while the id fits its field.
@@ -458,8 +497,12 @@ fn a_uuid_session_id_keeps_the_columns_aligned() {
 /// The breakdown names both classes and every worktree.
 #[test]
 fn the_breakdown_names_every_class() {
-    let report = session_report(&one_session_across_two_projects(), "trusty-tools-95")
-        .expect("the session owns worktrees");
+    let report = session_report(
+        &one_session_across_two_projects(),
+        "trusty-tools-95",
+        &no_names(),
+    )
+    .expect("the session owns worktrees");
     let text = render(&report);
     assert!(text.contains("session trusty-tools-95"), "{text}");
     assert!(text.contains("build"), "{text}");
@@ -482,4 +525,172 @@ fn a_relative_cwd_has_no_filter() {
         project_filter_within(Path::new("bobmatnyc/trusty-tools"), Path::new("/w")),
         None
     );
+}
+
+/// A friendly name resolves to the UUID the survey attributes by.
+///
+/// Why this is the whole point: `owning_session` is always a raw UUID, so
+/// matching the operator's `trusty-tools-95` against it directly found nothing
+/// — while the help text promises "by id or friendly name".
+///
+/// Fails before the change: there was no resolution step; the argument went
+/// straight into `session_report` and matched no worktree.
+#[test]
+fn a_friendly_name_resolves_to_its_session_uuid() {
+    let uuid = "0b318c84-bae9-4a50-8832-65ed61f8ab22";
+    let directory = vec![
+        session_row(uuid, "trusty-tools-95"),
+        session_row("11111111-2222-3333-4444-555555555555", "trusty-tools-12"),
+    ];
+    assert_eq!(
+        resolve_session_id(&directory, "trusty-tools-95").expect("the name names a session"),
+        uuid
+    );
+    // The id resolves to itself, and an unambiguous prefix resolves too,
+    // because this is the one canonical `resolve_target`.
+    assert_eq!(
+        resolve_session_id(&directory, uuid).expect("an id resolves to itself"),
+        uuid
+    );
+    assert_eq!(
+        resolve_session_id(&directory, "trusty-tools-9").expect("an unambiguous prefix resolves"),
+        uuid
+    );
+}
+
+/// A UUID the daemon no longer lists still resolves.
+///
+/// Why: slice 1 attributes an ENDED session's leftovers from their ownership
+/// sentinel, and those are the bytes an operator goes looking for. A resolver
+/// that insisted on a live row would refuse the one case the attribution exists
+/// to cover.
+#[test]
+fn an_ended_sessions_uuid_resolves_without_the_daemon_listing_it() {
+    let gone = "0b318c84-bae9-4a50-8832-65ed61f8ab22";
+    assert_eq!(
+        resolve_session_id(&[], gone).expect("a UUID passes through an empty directory"),
+        gone
+    );
+}
+
+/// A name that resolves to nothing is a DIFFERENT error from a session that
+/// holds nothing.
+///
+/// Why: one is a typo, the other is a fact about disk. Answering both with "no
+/// worktree attributed" made a mistyped name look like an empty session.
+///
+/// Fails before the change: both arms produced the same "no worktree ...
+/// attributed" message, so nothing could tell them apart.
+#[test]
+fn an_unknown_name_is_a_distinct_error() {
+    let directory = vec![session_row(
+        "0b318c84-bae9-4a50-8832-65ed61f8ab22",
+        "trusty-tools-95",
+    )];
+    let unknown = resolve_session_id(&directory, "no-such-session")
+        .expect_err("a name matching nothing must not resolve");
+    assert!(
+        unknown.to_string().contains("no session named"),
+        "the unresolvable-name arm must say so: {unknown}"
+    );
+    assert!(unknown.to_string().contains("no-such-session"), "{unknown}");
+
+    let empty = session_report(
+        &one_session_across_two_projects(),
+        "0b318c84-bae9-4a50-8832-65ed61f8ab22",
+        &no_names(),
+    )
+    .expect_err("a session owning no worktree must not produce a report");
+    assert!(
+        empty.to_string().contains("holds no worktrees"),
+        "the holds-nothing arm must say so instead: {empty}"
+    );
+    assert!(
+        !empty.to_string().contains("no session named"),
+        "the two arms must not share a message: {empty}"
+    );
+}
+
+/// The listing renders the friendly name; `--json` keeps the UUID.
+#[test]
+fn the_listing_renders_the_friendly_name_when_one_is_known() {
+    let uuid = "0b318c84-bae9-4a50-8832-65ed61f8ab22";
+    let names = session_names(&[session_row(uuid, "trusty-tools-95")]);
+    let report = sessions_report(&one_attributed_session(uuid), None, &names);
+    let DiskReport::Sessions { ref sessions, .. } = report else {
+        panic!("the no-argument view must be the sessions view");
+    };
+    assert_eq!(
+        sessions[0].session_id.as_deref(),
+        Some(uuid),
+        "`--json` keys on the UUID, which a name cannot replace"
+    );
+    assert_eq!(sessions[0].session_name.as_deref(), Some("trusty-tools-95"));
+
+    let text = render(&report);
+    assert!(text.contains("trusty-tools-95"), "{text}");
+    assert!(
+        !text.contains(uuid),
+        "the table renders the name in the UUID's place: {text}"
+    );
+}
+
+/// A long name is truncated so the numeric columns stay where the header put
+/// them.
+///
+/// Why: `{:<38}` pads but never truncates, so a 50-character name shifted
+/// TREES, BUILD, SOURCE and TOTAL right on that row alone.
+///
+/// Fails before the change: the label went into the format unbounded.
+#[test]
+fn a_long_session_name_is_truncated_to_keep_the_columns_aligned() {
+    let uuid = "0b318c84-bae9-4a50-8832-65ed61f8ab22";
+    let long = "trusty-tools-a-very-long-friendly-session-name-xyz";
+    assert_eq!(long.chars().count(), 50, "the width this test exists for");
+    let names = session_names(&[session_row(uuid, long)]);
+    let text = render(&sessions_report(
+        &one_attributed_session(uuid),
+        None,
+        &names,
+    ));
+    let lines: Vec<&str> = text.lines().collect();
+    let header = lines
+        .iter()
+        .find(|l| l.starts_with("SESSION"))
+        .expect("a header line");
+    let row = lines
+        .iter()
+        .find(|l| l.starts_with("trusty-tools-a-very-long"))
+        .expect("the session's own row");
+    let total = lines
+        .iter()
+        .find(|l| l.starts_with("TOTAL"))
+        .expect("a total line");
+    assert_eq!(
+        header.chars().count(),
+        row.chars().count(),
+        "a long name must not push the row wider than the header:\n{header}\n{row}"
+    );
+    assert_eq!(header.chars().count(), total.chars().count());
+    assert!(
+        row.contains('…'),
+        "and the cut must be visible rather than silent: {row}"
+    );
+}
+
+/// One attributed session's roll-up, for the labelling tests.
+fn one_attributed_session(uuid: &str) -> Survey {
+    survey(json!({
+        "generated_at": "2026-09-10T00:00:00Z",
+        "partial": false,
+        "by_session": [{
+            "session_id": uuid,
+            "bytes": 1_000_000_000u64,
+            "build_dir_bytes": 400_000_000u64,
+            "worktree_count": 1,
+            "tiers": { "stale": 0, "review": 0, "keep": 1, "missing": 0 },
+            "worktree_paths": []
+        }],
+        "root": { "projects": [] }
+    }))
 }

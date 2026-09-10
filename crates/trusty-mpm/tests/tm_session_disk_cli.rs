@@ -5,12 +5,14 @@
 //! BINARY reaches the daemon, sends `group_by: "session"`, or puts the report
 //! on stdout and its diagnostics on stderr. That wiring is what an operator
 //! actually runs, and it is exactly what a unit test cannot see.
-//! What: serves one axum route at `/rpc` that answers `tools/call` with a fixed
-//! `disk_survey` payload, points the binary at it with `TRUSTY_MPM_URL`
-//! (`--url`'s env form, which every resolver honours ahead of the lock file and
-//! the gateway probe), and asserts the JSON schema, the table, and the
-//! unknown-session error. The stub also RECORDS the arguments it was called
-//! with, so the `group_by` contract is asserted rather than assumed.
+//! What: serves two axum routes — `/rpc`, which answers `tools/call` with a
+//! fixed `disk_survey` payload, and `GET /sessions`, which maps the survey's
+//! session UUID to its friendly name — points the binary at them with
+//! `TRUSTY_MPM_URL` (`--url`'s env form, which every resolver honours ahead of
+//! the lock file and the gateway probe), and asserts the JSON schema, the
+//! table, the name resolution, and the two distinct error arms. The stub also
+//! RECORDS the arguments it was called with, so the `group_by` contract is
+//! asserted rather than assumed.
 //! Test: this file; run with
 //! `cargo test -p trusty-mpm --test tm_session_disk_cli`.
 
@@ -18,9 +20,16 @@ use std::future::IntoFuture;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{Value, json};
+
+/// The session the survey attributes bytes to — a raw UUID, which is the only
+/// thing `owning_session` is ever set to (#7313).
+const OWNER: &str = "0b318c84-bae9-4a50-8832-65ed61f8ab22";
+
+/// The friendly name the daemon knows that session by.
+const OWNER_NAME: &str = "trusty-tools-95";
 
 /// The survey the stub daemon answers with: two sessions plus the unattributed
 /// bucket, and one session owning worktrees under two different projects.
@@ -31,7 +40,7 @@ fn survey_payload() -> Value {
         "keep_list": { "patterns": [], "invalid": [] },
         "by_session": [
             {
-                "session_id": "trusty-tools-95",
+                "session_id": OWNER,
                 "bytes": 30_000_000_000u64,
                 "build_dir_bytes": 24_000_000_000u64,
                 "worktree_count": 2,
@@ -67,7 +76,7 @@ fn survey_payload() -> Value {
                             "tier": "review",
                             "bytes": 20_000_000_000u64,
                             "build_dir_bytes": 18_000_000_000u64,
-                            "owning_session": "trusty-tools-95"
+                            "owning_session": OWNER
                         },
                         {
                             "path": "/w/bobmatnyc/trusty-tools/.claude/worktrees/z",
@@ -88,7 +97,7 @@ fn survey_payload() -> Value {
                             "tier": "stale",
                             "bytes": 10_000_000_000u64,
                             "build_dir_bytes": 6_000_000_000u64,
-                            "owning_session": "trusty-tools-95"
+                            "owning_session": OWNER
                         }
                     ]
                 }
@@ -97,35 +106,58 @@ fn survey_payload() -> Value {
     })
 }
 
-/// Serve one `/rpc` route answering `disk_survey`, recording each call's
-/// arguments; return the base URL and the recorder.
+/// Serve the two routes the command uses — `/rpc` for the survey (recording
+/// each call's arguments) and `GET /sessions` for the name↔id directory —
+/// returning the base URL and the recorder.
+///
+/// Why `/sessions` belongs here: the survey attributes by UUID, so a friendly
+/// name only resolves through this list. A stub without it would prove the
+/// fallback path and nothing about the resolution (#7313).
 async fn serve_stub() -> (String, Arc<Mutex<Vec<Value>>>) {
     let calls: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
     let recorder = Arc::clone(&calls);
-    let router = Router::new().route(
-        "/rpc",
-        post(move |Json(req): Json<Value>| {
-            let recorder = Arc::clone(&recorder);
-            async move {
-                let args = req
-                    .pointer("/params/arguments")
-                    .cloned()
-                    .unwrap_or(Value::Null);
-                recorder.lock().expect("record the call").push(args);
+    let router = Router::new()
+        .route(
+            "/rpc",
+            post(move |Json(req): Json<Value>| {
+                let recorder = Arc::clone(&recorder);
+                async move {
+                    let args = req
+                        .pointer("/params/arguments")
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    recorder.lock().expect("record the call").push(args);
+                    Json(json!({
+                        "jsonrpc": "2.0",
+                        "id": req.get("id").cloned().unwrap_or(Value::Null),
+                        "result": {
+                            "content": [{
+                                "type": "text",
+                                "text": survey_payload().to_string()
+                            }],
+                            "isError": false
+                        }
+                    }))
+                }
+            }),
+        )
+        // The MANAGED store is where an attributed session actually lives on a
+        // live machine (#7313); the project store answers empty beside it, so
+        // both halves of the directory are exercised.
+        .route(
+            "/api/v1/sessions/managed",
+            get(|| async {
                 Json(json!({
-                    "jsonrpc": "2.0",
-                    "id": req.get("id").cloned().unwrap_or(Value::Null),
-                    "result": {
-                        "content": [{
-                            "type": "text",
-                            "text": survey_payload().to_string()
-                        }],
-                        "isError": false
-                    }
+                    "sessions": [{
+                        "id": OWNER,
+                        "name": OWNER_NAME,
+                        "state": "active",
+                        "persisted_state": "active",
+                    }]
                 }))
-            }
-        }),
-    );
+            }),
+        )
+        .route("/sessions", get(|| async { Json(json!({"sessions": []})) }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind an ephemeral loopback port");
@@ -176,7 +208,14 @@ async fn session_disk_json_reports_every_session() {
     assert_eq!(report["view"], "sessions");
     let sessions = report["sessions"].as_array().expect("a sessions array");
     assert_eq!(sessions.len(), 2, "{report}");
-    assert_eq!(sessions[0]["session_id"], "trusty-tools-95");
+    assert_eq!(
+        sessions[0]["session_id"], OWNER,
+        "`--json` keys on the UUID the survey attributes by"
+    );
+    assert_eq!(
+        sessions[0]["session_name"], OWNER_NAME,
+        "with the friendly name beside it: {report}"
+    );
     assert_eq!(sessions[0]["bytes"], 30_000_000_000u64);
     assert_eq!(
         sessions[0]["source_bytes"], 6_000_000_000u64,
@@ -204,37 +243,43 @@ async fn session_disk_json_reports_every_session() {
     );
 }
 
-/// Naming a session prints its breakdown by class and its worktrees across
-/// every project.
+/// Naming a session by its FRIENDLY NAME prints its breakdown by class and its
+/// worktrees across every project.
+///
+/// Why the name and not the UUID: the help text promises "by id or friendly
+/// name", and the survey attributes by UUID only, so this is the whole
+/// resolution contract in one run.
+///
+/// Fails before the change: `trusty-tools-95` was matched against
+/// `owning_session` directly, matched no worktree, and the binary exited
+/// non-zero with "no worktree in the survey is attributed to session".
 #[tokio::test(flavor = "multi_thread")]
-async fn session_disk_breaks_one_session_down_by_class() {
+async fn session_disk_resolves_a_friendly_name() {
     let (url, _calls) = serve_stub().await;
     let cwd = tempfile::tempdir().expect("temp cwd");
 
     let out = tokio::task::spawn_blocking({
         let url = url.clone();
         let cwd = cwd.path().to_path_buf();
-        move || {
-            run_tm(
-                &url,
-                &cwd,
-                &["session", "disk", "trusty-tools-95", "--json"],
-            )
-        }
+        move || run_tm(&url, &cwd, &["session", "disk", OWNER_NAME, "--json"])
     })
     .await
     .expect("the binary run must not panic");
 
     assert!(
         out.status.success(),
-        "stdout={} stderr={}",
+        "a friendly name must resolve; stdout={} stderr={}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
     let report: Value = serde_json::from_slice(&out.stdout).expect("a JSON document on stdout");
 
     assert_eq!(report["view"], "session");
-    assert_eq!(report["session_id"], "trusty-tools-95");
+    assert_eq!(
+        report["session_id"], OWNER,
+        "the name resolved to the session's UUID: {report}"
+    );
+    assert_eq!(report["session_name"], OWNER_NAME);
     let classes = report["classes"].as_array().expect("a classes array");
     assert_eq!(classes[0]["class"], "build");
     assert_eq!(classes[0]["bytes"], 24_000_000_000u64);
@@ -274,7 +319,14 @@ async fn session_disk_prints_a_table_without_json() {
     assert!(out.status.success(), "{:?}", out.status);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("SESSION"), "{stdout}");
-    assert!(stdout.contains("trusty-tools-95"), "{stdout}");
+    assert!(
+        stdout.contains(OWNER_NAME),
+        "the table names the session an operator recognises: {stdout}"
+    );
+    assert!(
+        !stdout.contains(OWNER),
+        "and renders the name in the UUID's place: {stdout}"
+    );
     assert!(stdout.contains("(unattributed)"), "{stdout}");
     assert!(
         stdout.lines().any(|l| l.starts_with("TOTAL")),
@@ -322,7 +374,46 @@ async fn session_disk_rejects_an_unknown_session() {
         "stderr must name the session that matched nothing: {stderr}"
     );
     assert!(
+        stderr.contains("no session named"),
+        "a name that resolves to nothing says so, not 'holds no worktrees': {stderr}"
+    );
+    assert!(
         String::from_utf8_lossy(&out.stdout).trim().is_empty(),
         "nothing may reach stdout — a partial document would parse as a report"
+    );
+}
+
+/// A session that exists but owns no worktree gets its OWN message.
+///
+/// Why the two must differ: a typo and an empty session are different facts,
+/// and before this they shared one message — so an operator could not tell
+/// which they were looking at.
+///
+/// Fails before the change: the argument was matched against `owning_session`
+/// directly, so a valid UUID owning nothing produced the same "no worktree ...
+/// attributed" text as a mistyped name.
+#[tokio::test(flavor = "multi_thread")]
+async fn session_disk_separates_an_empty_session_from_an_unknown_name() {
+    let (url, _calls) = serve_stub().await;
+    let cwd = tempfile::tempdir().expect("temp cwd");
+    let empty = "11111111-2222-3333-4444-555555555555";
+
+    let out = tokio::task::spawn_blocking({
+        let url = url.clone();
+        let cwd = cwd.path().to_path_buf();
+        move || run_tm(&url, &cwd, &["session", "disk", empty, "--json"])
+    })
+    .await
+    .expect("the binary run must not panic");
+
+    assert!(!out.status.success(), "{:?}", out.status);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("holds no worktrees"),
+        "a resolved session owning nothing says so: {stderr}"
+    );
+    assert!(
+        !stderr.contains("no session named"),
+        "and never borrows the unresolvable-name message: {stderr}"
     );
 }

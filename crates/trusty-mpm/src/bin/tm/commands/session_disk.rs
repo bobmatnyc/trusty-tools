@@ -11,17 +11,22 @@
 //! back. It runs no survey of its own: the walk, the classification, the
 //! attribution and the by-session fold are all slice 1's, in the daemon, where
 //! the shared size index and the live claim set are. A second walker here
-//! would be a second answer to the same question.
+//! would be a second answer to the same question. The survey attributes by raw
+//! session UUID, so `<id-or-name>` is resolved against the daemon's session
+//! list through the canonical [`resolve_target`] before anything is filtered by
+//! it, and that same list labels the listing's rows.
 //! Test: `session_disk_tests`, and `crates/trusty-mpm/tests/tm_session_disk_cli.rs`
 //! for the built binary against a stub daemon.
 //!
 //! READ-ONLY. Nothing here removes, prunes, or writes anything.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use trusty_mpm::client::{Resolvable, resolve_target};
 use trusty_mpm::disk::human_bytes;
 
 #[cfg(test)]
@@ -31,10 +36,11 @@ mod session_disk_tests;
 /// `tm session disk [<id-or-name>] [--json]` (#7313).
 ///
 /// Why: see the module docs.
-/// What: resolves the scope, calls the daemon once, folds the response into
-/// [`DiskReport`], and prints it — JSON when `json`, otherwise the table. An
-/// argument that names no session in the survey is an error, so a typo can
-/// never read as "that session holds nothing".
+/// What: resolves the argument to a session id, calls the daemon once, folds
+/// the response into [`DiskReport`], and prints it — JSON when `json`,
+/// otherwise the table. An argument naming no session and a session holding
+/// nothing are two DIFFERENT errors, so a typo can never read as "that session
+/// holds nothing".
 /// Test: `cli_parses_session_disk`, `sessions_report_sorts_by_bytes_descending`,
 /// `an_unknown_session_is_an_error`, and the binary-level
 /// `session_disk_json_reports_every_session` / `session_disk_rejects_an_unknown_session`.
@@ -45,19 +51,28 @@ pub(crate) async fn session_disk(
     json_out: bool,
     budget_seconds: Option<u64>,
 ) -> anyhow::Result<()> {
+    // #7313: the survey attributes by UUID, so the operator's `<id-or-name>`
+    // is resolved against the daemon's session list BEFORE anything is filtered
+    // by it. The same list supplies the friendly names the listing renders.
+    let directory = session_directory(client, url).await;
+    let target = match id_or_name {
+        Some(ref arg) => Some(resolve_session_id(&directory, arg)?),
+        None => None,
+    };
     // A named session's worktrees are not confined to one repository — an
     // isolation worktree, an install/verify throwaway tree and a `jobs/<id>/`
     // tree can sit under three — so the breakdown surveys the whole workspace.
     // The listing scopes to the current project, which is what an operator
     // standing in a checkout is asking about.
-    let project = match id_or_name {
+    let project = match target {
         Some(_) => None,
         None => current_project_filter(&std::env::current_dir()?),
     };
     let survey = fetch_survey(client, url, project.as_deref(), budget_seconds).await?;
-    let report = match id_or_name {
-        Some(ref target) => session_report(&survey, target)?,
-        None => sessions_report(&survey, project.clone()),
+    let names = session_names(&directory);
+    let report = match target {
+        Some(ref id) => session_report(&survey, id, &names)?,
+        None => sessions_report(&survey, project.clone(), &names),
     };
     if json_out {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -73,6 +88,123 @@ pub(crate) async fn session_disk(
         );
     }
     Ok(())
+}
+
+/// UUID → friendly name for the sessions the daemon still lists.
+pub(crate) type SessionNames = HashMap<String, String>;
+
+/// One session the daemon knows, flattened from whichever store holds it.
+///
+/// Why one row type over both stores: `owning_session` can be either a
+/// `ManagedSessionId` (a session worktree's sentinel, and the case every
+/// attributed row on a live machine turns out to be) or a project `SessionId`
+/// (an agent sentinel's `parent_session_id`). Flattening them means the ONE
+/// [`resolve_target`] sees every candidate at once, so an id-exact match always
+/// outranks a name-exact match in the other store — which two separate lookups,
+/// tried in order, would get backwards.
+/// Test: `a_friendly_name_resolves_to_its_session_uuid`.
+#[derive(Debug, Clone)]
+pub(crate) struct DirectoryRow {
+    /// The session's canonical id, as the survey attributes by.
+    pub id: String,
+    /// Its friendly name — `tmux_name` for a project session, `name` for a
+    /// managed one.
+    pub name: String,
+}
+
+impl Resolvable for DirectoryRow {
+    fn id_matches(&self, query: &str) -> bool {
+        self.id == query
+    }
+
+    fn resolve_name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// Every session the daemon knows, for id-or-name resolution and labelling.
+///
+/// Why: `disk_survey` charges every worktree to a raw session UUID (slice 1
+/// reads `owner_session_id` or `agent.parent_session_id`), and neither an
+/// operator nor the listing wants to read UUIDs. Both stores are asked because
+/// either can hold the attributed id; the lists are also what labels the rows,
+/// so the same fetch serves the resolution and the table.
+/// What: the managed list and the project list, through the shared
+/// [`DaemonClient`] — the same two calls
+/// [`resolve_managed_summary`](super::managed_route::resolve_managed_summary)
+/// and [`resolve_project_session_id`](super::managed_route::resolve_project_session_id)
+/// make. An unreachable store contributes nothing: the survey call that follows
+/// reports an outage far better than a name lookup could, so this declines
+/// rather than pre-empting it.
+/// Test: the binary-level `session_disk_resolves_a_friendly_name` drives the
+/// real HTTP path against a stub daemon.
+///
+/// [`DaemonClient`]: trusty_mpm::client::DaemonClient
+async fn session_directory(client: &reqwest::Client, url: &str) -> Vec<DirectoryRow> {
+    let executor = super::managed_route::executor(client, url);
+    let managed = executor
+        .client()
+        .list_managed_sessions()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| DirectoryRow {
+            id: s.id,
+            name: s.name,
+        });
+    let project = executor
+        .client()
+        .sessions()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| DirectoryRow {
+            id: r.id.0.to_string(),
+            name: r.tmux_name,
+        });
+    managed.chain(project).collect()
+}
+
+/// Resolve the operator's `<id-or-name>` to the id the survey attributes by.
+///
+/// Why: `owning_session` is ALWAYS a UUID, so matching the operator's string
+/// against it directly meant a friendly name resolved to nothing and drew the
+/// same "no worktree attributed" message as a session that genuinely holds
+/// none — two different facts, one message, and the operator cannot tell a typo
+/// from an empty session. Resolution goes through the one canonical
+/// [`resolve_target`] (id-exact → name-exact → unambiguous prefix), the same
+/// precedence `stop`, `resume` and `events` already use.
+/// What: the matched row's UUID. A UUID the daemon no longer lists passes
+/// through unchanged, because an ENDED session's leftovers are still attributed
+/// by their ownership sentinel and are exactly what an operator asks about.
+/// Anything else is an error naming the argument, distinct from the
+/// holds-nothing arm in [`session_report`].
+/// Test: `a_friendly_name_resolves_to_its_session_uuid`,
+/// `an_ended_sessions_uuid_resolves_without_the_daemon_listing_it`,
+/// `an_unknown_name_is_a_distinct_error`.
+fn resolve_session_id(directory: &[DirectoryRow], id_or_name: &str) -> anyhow::Result<String> {
+    if let Some(row) = resolve_target(directory, id_or_name) {
+        return Ok(row.id.clone());
+    }
+    if uuid::Uuid::parse_str(id_or_name).is_ok() {
+        return Ok(id_or_name.to_string());
+    }
+    bail!(
+        "no session named `{id_or_name}` — `tm sessions ls` lists the sessions \
+         the daemon knows, and `tm session disk` with no argument lists the \
+         ones holding bytes"
+    )
+}
+
+/// Index the directory by UUID so a row can be labelled by name.
+///
+/// Test: `the_listing_renders_the_friendly_name_when_one_is_known`.
+fn session_names(directory: &[DirectoryRow]) -> SessionNames {
+    directory
+        .iter()
+        .filter(|row| !row.name.is_empty())
+        .map(|row| (row.id.clone(), row.name.clone()))
+        .collect()
 }
 
 /// The `<owner>/<repo>` label for the project the caller is standing in.
@@ -290,8 +422,10 @@ pub(crate) enum DiskReport {
         generated_at: String,
         /// Whether the survey's deadline truncated the pass.
         partial: bool,
-        /// The session this breaks down.
+        /// The session this breaks down, as the survey attributes it.
         session_id: String,
+        /// Its friendly name, when the daemon still lists the session.
+        session_name: Option<String>,
         /// The byte split by class, largest first.
         classes: Vec<ClassRow>,
         /// The worktrees behind it, bytes descending.
@@ -305,7 +439,13 @@ pub(crate) enum DiskReport {
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct SessionRow {
     /// The owning session, `None` for the unattributed bucket.
+    ///
+    /// Always the raw UUID, in `--json` as well as in the fold — a consumer
+    /// keys on it, and the name beside it can change or disappear.
     pub session_id: Option<String>,
+    /// Its friendly name, when the daemon still lists the session. The table
+    /// renders this in place of the UUID; `--json` carries both.
+    pub session_name: Option<String>,
     /// Bytes across its measured worktrees.
     pub bytes: u64,
     /// Build-directory bytes across them.
@@ -367,11 +507,19 @@ pub(crate) struct Totals {
 /// the total across every row.
 /// Test: `sessions_report_sorts_by_bytes_descending`,
 /// `sessions_report_totals_every_row`, `a_daemon_without_the_rollup_reports_nothing`.
-pub(crate) fn sessions_report(survey: &Survey, project: Option<String>) -> DiskReport {
+pub(crate) fn sessions_report(
+    survey: &Survey,
+    project: Option<String>,
+    names: &SessionNames,
+) -> DiskReport {
     let groups = survey.by_session.clone().unwrap_or_default();
     let sessions: Vec<SessionRow> = groups
         .into_iter()
         .map(|g| SessionRow {
+            session_name: g
+                .session_id
+                .as_ref()
+                .and_then(|id| names.get(id.as_str()).cloned()),
             session_id: g.session_id,
             bytes: g.bytes,
             build_dir_bytes: g.build_dir_bytes,
@@ -408,7 +556,11 @@ pub(crate) fn sessions_report(survey: &Survey, project: Option<String>) -> DiskR
 /// Test: `a_session_report_splits_build_bytes_from_the_rest`,
 /// `a_session_report_spans_projects`, `an_unknown_session_is_an_error`,
 /// `an_unmeasured_worktree_is_listed_and_adds_nothing`.
-pub(crate) fn session_report(survey: &Survey, target: &str) -> anyhow::Result<DiskReport> {
+pub(crate) fn session_report(
+    survey: &Survey,
+    target: &str,
+    names: &SessionNames,
+) -> anyhow::Result<DiskReport> {
     let mut worktrees: Vec<WorktreeRow> = Vec::new();
     for project in &survey.root.projects {
         for wt in &project.worktrees {
@@ -429,11 +581,15 @@ pub(crate) fn session_report(survey: &Survey, target: &str) -> anyhow::Result<Di
         }
     }
     if worktrees.is_empty() {
-        // #7313: an error, never an empty report. A mistyped id that answered
-        // "0 B across 0 worktrees" is indistinguishable from a session that
-        // genuinely holds nothing, and the operator would act on the wrong one.
+        // #7313: an error, never an empty report. "0 B across 0 worktrees"
+        // would be indistinguishable from a session that genuinely holds
+        // nothing, and the operator would act on the wrong one. A name that
+        // resolved to no session at all fails earlier, in
+        // `resolve_session_id`, with its own message — this arm is only for a
+        // session that exists and holds nothing.
+        let label = names.get(target).map_or(target, String::as_str);
         bail!(
-            "no worktree in the survey is attributed to session `{target}` — \
+            "session `{label}` holds no worktrees in the survey — \
              `tm session disk` with no argument lists the sessions that hold bytes"
         );
     }
@@ -467,6 +623,7 @@ pub(crate) fn session_report(survey: &Survey, target: &str) -> anyhow::Result<Di
         generated_at: survey.generated_at.clone(),
         partial: survey.partial,
         session_id: target.to_string(),
+        session_name: names.get(target).cloned(),
         classes,
         worktrees,
         total,
@@ -494,13 +651,13 @@ pub(crate) fn render(report: &DiskReport) -> String {
                 None => "every managed project\n".to_string(),
             });
             out.push_str(&format!(
-                "{:<38} {:>6} {:>11} {:>11} {:>11}\n",
+                "{:<SESSION_COLUMN$} {:>6} {:>11} {:>11} {:>11}\n",
                 "SESSION", "TREES", "BUILD", "SOURCE", "TOTAL"
             ));
             for row in sessions {
                 out.push_str(&format!(
-                    "{:<38} {:>6} {:>11} {:>11} {:>11}\n",
-                    row.session_id.clone().unwrap_or_else(unattributed),
+                    "{:<SESSION_COLUMN$} {:>6} {:>11} {:>11} {:>11}\n",
+                    session_label(row),
                     row.worktree_count,
                     human_bytes(row.build_dir_bytes),
                     human_bytes(row.source_bytes),
@@ -511,12 +668,16 @@ pub(crate) fn render(report: &DiskReport) -> String {
         }
         DiskReport::Session {
             session_id,
+            session_name,
             classes,
             worktrees,
             total,
             ..
         } => {
-            out.push_str(&format!("session {session_id}\n"));
+            out.push_str(&match session_name {
+                Some(name) => format!("session {name} ({session_id})\n"),
+                None => format!("session {session_id}\n"),
+            });
             for class in classes {
                 out.push_str(&format!(
                     "  {:<10} {:>11}\n",
@@ -544,10 +705,42 @@ pub(crate) fn render(report: &DiskReport) -> String {
     out
 }
 
+/// Width of the SESSION column, wide enough for a 36-character UUID.
+const SESSION_COLUMN: usize = 38;
+
+/// What the SESSION column says for one row.
+///
+/// Why: an operator reads names, not UUIDs, so the friendly name wins where the
+/// daemon still knows one; the UUID is the fallback because an ENDED session's
+/// leftovers have no name left to render, and `--json` carries the UUID either
+/// way. The result is capped so a long name cannot shift every numeric column
+/// right — the one failure that makes the table unreadable.
+/// Test: `the_listing_renders_the_friendly_name_when_one_is_known`,
+/// `a_long_session_name_is_truncated_to_keep_the_columns_aligned`.
+fn session_label(row: &SessionRow) -> String {
+    let label = row
+        .session_name
+        .clone()
+        .or_else(|| row.session_id.clone())
+        .unwrap_or_else(unattributed);
+    fit(&label, SESSION_COLUMN)
+}
+
+/// Cap `label` at `width` characters, marking a cut with an ellipsis.
+///
+/// Test: `a_long_session_name_is_truncated_to_keep_the_columns_aligned`.
+fn fit(label: &str, width: usize) -> String {
+    if label.chars().count() <= width {
+        return label.to_string();
+    }
+    let kept: String = label.chars().take(width.saturating_sub(1)).collect();
+    format!("{kept}…")
+}
+
 /// The bottom line both views end on.
 fn total_line(total: &Totals) -> String {
     format!(
-        "{:<38} {:>6} {:>11} {:>11} {:>11}\n",
+        "{:<SESSION_COLUMN$} {:>6} {:>11} {:>11} {:>11}\n",
         "TOTAL",
         total.worktree_count,
         human_bytes(total.build_dir_bytes),
