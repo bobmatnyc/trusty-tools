@@ -7,4 +7,6 @@ Fixed
   reports `$?`, and the filter strips that sentinel before compressing, so it
   never reaches the caller's output. A signal-killed command reports the
   shell's `128 + signal`; an unwrapped `tm compress < file` reports
-  `exit=unknown`.
+  `exit=unknown`. A command a brace group cannot wrap is left alone: a `#`
+  would comment out the group's own `printf` and closing brace, and a trailing
+  unescaped `\` would escape its `;` and turn the `printf` into arguments.

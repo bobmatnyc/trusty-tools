@@ -73,11 +73,15 @@ const EXIT_SENTINEL_SUFFIX: &str = "__";
 /// argument before any element runs — so the status is appended to the stream
 /// the filter already reads, by a `printf` that runs after the command in the
 /// same brace group.
-/// What: `{ <command>; printf '\n<sentinel>\n' "$?"; }`. The rewrite only ever
-/// reaches a simple command (`hook_rewrite::has_unsafe_pipe_composition`
-/// rejects `|`, `&`, `;`, `>` and `<` first), so the brace group is valid in
-/// sh, bash and zsh alike. The leading newline keeps the sentinel on its own
-/// line whether or not the command's output ended in one, and
+/// What: `{ <command>; printf '\n<sentinel>\n' "$?"; }`. The whole group is one
+/// physical line, so the caller owes this function a command that cannot break
+/// it: `hook_rewrite::has_unsafe_pipe_composition` rejects `|`, `&`, `;`, `>`
+/// and `<`, and `hook_rewrite::cannot_be_brace_wrapped` rejects a `#` (which
+/// would comment out the `printf` and the closing brace) and a trailing
+/// unescaped `\` (which would escape the `;` and turn the `printf` into
+/// arguments). What reaches here is a simple command, and the group is then
+/// valid in sh, bash and zsh alike. The leading newline keeps the sentinel on
+/// its own line whether or not the command's output ended in one, and
 /// [`split_exit_sentinel`] removes exactly the bytes this adds.
 /// Test: `wrap_command_reporting_exit_round_trips_through_split`,
 /// `rewrite_appends_compress_pipe_for_plain_command`, and the process-level
