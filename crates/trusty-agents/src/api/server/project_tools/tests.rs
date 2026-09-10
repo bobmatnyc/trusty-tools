@@ -68,10 +68,10 @@ fn destination_uses_bound_tree_and_refuses_missing_or_invalid_binding() {
     )
     .unwrap();
     let knowledge = tmp.path().join("knowledge");
-    let found = destination(&[agents.clone()], &knowledge, "fixture").unwrap();
+    let found = destination(std::slice::from_ref(&agents), &knowledge, "fixture").unwrap();
     assert_eq!(found.root, knowledge.join("shared-fixture"));
     assert_eq!(found.index, "fixture-index");
-    assert!(destination(&[agents.clone()], &knowledge, "../fixture").is_err());
+    assert!(destination(std::slice::from_ref(&agents), &knowledge, "../fixture").is_err());
     std::fs::write(agents.join("fixture.toml"), "[agent]\nname='fixture'\n").unwrap();
     assert_eq!(
         destination(&[agents], &knowledge, "fixture").unwrap_err().0,

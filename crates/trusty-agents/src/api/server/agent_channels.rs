@@ -448,10 +448,7 @@ mod receive_tests {
                 .1
                 .is_some()
         );
-        assert_eq!(
-            receive_selection(std::slice::from_ref(&binding), "COTHER", &event, true).0,
-            false
-        );
+        assert!(!receive_selection(std::slice::from_ref(&binding), "COTHER", &event, true).0);
         assert!(
             receive_selection(std::slice::from_ref(&binding), "C123", &event, false)
                 .1

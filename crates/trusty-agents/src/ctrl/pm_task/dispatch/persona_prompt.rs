@@ -27,7 +27,7 @@ pub(super) fn system_prompt(
         agent_name: &persona_cfg.agent.name,
         model: &persona_cfg.agent.model,
         runner: &format!("{:?}", persona_cfg.agent.runner),
-        provider: provider,
+        provider,
     };
     let base = build_user_context_prefix(&persona_cfg.system_prompt.content, &identity);
     let base = format!(

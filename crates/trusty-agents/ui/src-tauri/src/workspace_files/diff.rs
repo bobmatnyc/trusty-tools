@@ -216,7 +216,7 @@ mod tests {
     #[tokio::test]
     async fn diff_includes_staged_and_working_changes_and_literal_paths() {
         let t = Temp::new();
-        assert!(!diff_file(&t.0, "missing").await.is_ok());
+        assert!(diff_file(&t.0, "missing").await.is_err());
         git(&t.0, &["init"]).await.unwrap();
         fs::write(t.0.join("a[1].md"), "original\n").unwrap();
         git(&t.0, &["add", "."]).await.unwrap();

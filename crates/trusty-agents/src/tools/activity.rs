@@ -113,10 +113,10 @@ mod cap_tests {
         assert!(ctx.history().iter().all(|v| v["status"] == "complete"));
         let mut count = 0;
         while let Ok(event) = rx.try_recv() {
-            if let crate::events::Event::ToolActivity { session_id, .. } = event {
-                if session_id == "cap-fixture-unique" {
-                    count += 1;
-                }
+            if let crate::events::Event::ToolActivity { session_id, .. } = event
+                && session_id == "cap-fixture-unique"
+            {
+                count += 1;
             }
         }
         assert_eq!(count, 256);

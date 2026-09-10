@@ -581,6 +581,7 @@ mod tests {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(&p)
             .unwrap();
         let second = std::fs::OpenOptions::new()
