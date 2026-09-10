@@ -36,6 +36,7 @@
 //! what the deleter will accept — asserted by
 //! `a_reclaimable_verdict_is_always_shown_stale`.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -404,7 +405,47 @@ pub(crate) struct DiskWorktree {
     /// The branch's pull request, when it has one.
     pub pr: Option<PrRef>,
     /// The session claiming this workspace, when one does.
+    ///
+    /// This is the LIVE claim alone, and it stays that way: a console built
+    /// against #6927 reads it as "a running session is sitting here". #7313's
+    /// attribution is [`Self::owning_session`], beside it rather than in it.
     pub session: Option<String>,
+    /// The session this worktree's bytes are charged to (#7313).
+    ///
+    /// Why: [`Self::session`] answers only for a LIVE claim, so every worktree
+    /// an ended session left behind was attributed to nobody — which is the
+    /// whole of what #7313 reports. A worktree the harness created for a
+    /// dispatched agent carries the dispatching session in its durable
+    /// `.trusty-mpm-worktree` sentinel, and that record outlives the session,
+    /// so an ended session's leftovers are still attributable.
+    /// What: the path-overlap claim's session when a live one holds this path;
+    /// otherwise the sentinel's owner — an agent worktree's
+    /// `agent.parent_session_id`, or a session worktree's `owner_session_id`;
+    /// otherwise `None`, which the grouping renders as its unattributed bucket.
+    /// Test: `a_sentinel_attributes_an_ended_sessions_worktree`,
+    /// `a_live_claim_outranks_the_sentinel_for_attribution`.
+    pub owning_session: Option<String>,
+    /// Bytes held by this worktree's top-level `target*` build directories
+    /// (#7313), or `None` when no complete figure could be obtained.
+    ///
+    /// Why: a build directory is the reclaimable majority of a worktree's
+    /// bytes, and an operator deciding what to clear wants that split rather
+    /// than one total. The convention this matches is
+    /// [worktree-discipline.md](../../../../docs/reference/worktree-discipline.md):
+    /// an agent is given an absolute `CARGO_TARGET_DIR` inside its own
+    /// worktree, so the directories are `target`, `target-worktree`, and
+    /// `target-<issue-number>` — a prefix match, never a fixed name.
+    /// What: the sum of [`DiskProbes::measure`](super::survey_run::DiskProbes)
+    /// over the top-level entries whose name starts with `target`, so the
+    /// figures come from the SAME budgeted, cached index that produced
+    /// [`Self::bytes`] — never a second walker. `Some(0)` when the worktree has
+    /// no such directory; `None` when the directory could not be listed, a
+    /// matched entry produced no figure, or the deadline was spent, because a
+    /// short sum presented as a total is worse than no sum. These directories
+    /// are inside the worktree, so they are already part of `bytes`, and
+    /// [`Self::size`]'s provenance covers both walks.
+    /// Test: `build_dir_bytes_counts_target_dirs_and_nothing_else`.
+    pub build_dir_bytes: Option<u64>,
 }
 
 /// One project and the worktrees under it.
@@ -433,6 +474,103 @@ pub(crate) struct TierCounts {
     pub keep: usize,
     /// Registrations whose directory is gone.
     pub missing: usize,
+}
+
+/// What roll-up the caller asked for, beside the per-project tree (#7313).
+///
+/// Why an enum rather than a bool: the tool's `group_by` argument is a string
+/// with one accepted value today, and a second grouping (by project, by tier)
+/// is the obvious next ask. A bool would have to be renamed to add one.
+/// What: [`None`](Self::None) leaves [`DiskSurvey::by_session`] absent, so a
+/// console built against #6927 sees a byte-identical payload;
+/// [`Session`](Self::Session) fills it, possibly with an empty list.
+/// Test: `by_session_is_absent_unless_group_by_is_asked_for`,
+/// `a_sentinel_attributes_an_ended_sessions_worktree`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GroupBy {
+    /// No roll-up — the per-project tree alone.
+    None,
+    /// Roll worktrees up by the session that owns them.
+    Session,
+}
+
+/// One session's whole footprint, rolled up across every project (#7313).
+///
+/// Why: the owner's ask is "report disk usage by session", and a session's
+/// worktrees are not confined to one project — an agent isolation worktree, an
+/// install/verify throwaway tree, and a `jobs/<id>/tmp/` tree can sit under
+/// three different repositories while belonging to one dispatching session. The
+/// per-project tree cannot express that, so this is a second index over the same
+/// rows rather than a reshaping of them.
+/// What: the totals and the tier split for one `session_id`, plus the paths that
+/// produced them so a caller can drill back into the tree without re-folding it.
+/// A `None` `session_id` is the bucket for worktrees nothing attributed.
+/// Test: `a_sentinel_attributes_an_ended_sessions_worktree`,
+/// `by_session_sorts_by_bytes_and_buckets_the_unattributed`.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct DiskSessionGroup {
+    /// The owning session, or `None` for the unattributed bucket.
+    pub session_id: Option<String>,
+    /// Bytes across this session's MEASURED worktrees. A worktree carrying no
+    /// figure contributes nothing and is still counted in `worktree_count`, so
+    /// the two disagreeing is the signal that the pass was budget-limited.
+    pub bytes: u64,
+    /// Build-directory bytes across the worktrees that reported a figure.
+    pub build_dir_bytes: u64,
+    /// How many worktrees this session owns, measured or not.
+    pub worktree_count: usize,
+    /// The tier split, so a caller renders a legend without folding the rows.
+    pub tiers: TierCounts,
+    /// The worktree paths behind these totals, in path order.
+    pub worktree_paths: Vec<PathBuf>,
+}
+
+/// Roll every worktree row up by its owning session (#7313).
+///
+/// Why: pure, so the ordering contract and the unattributed bucket are testable
+/// without a filesystem — the attribution itself is [`super::survey_run`]'s, and
+/// this only folds what it decided.
+/// What: one group per distinct [`DiskWorktree::owning_session`], sorted by
+/// `bytes` descending so the console's first row is the session worth
+/// reclaiming; ties break on the session id, with the `None` bucket last, so the
+/// order is total rather than merely mostly-determined.
+/// Test: `by_session_sorts_by_bytes_and_buckets_the_unattributed`.
+pub(crate) fn group_by_session(projects: &[DiskProject]) -> Vec<DiskSessionGroup> {
+    let mut groups: BTreeMap<Option<String>, DiskSessionGroup> = BTreeMap::new();
+    for wt in projects.iter().flat_map(|p| p.worktrees.iter()) {
+        let group = groups
+            .entry(wt.owning_session.clone())
+            .or_insert_with(|| DiskSessionGroup {
+                session_id: wt.owning_session.clone(),
+                bytes: 0,
+                build_dir_bytes: 0,
+                worktree_count: 0,
+                tiers: TierCounts::default(),
+                worktree_paths: Vec::new(),
+            });
+        group.bytes = group.bytes.saturating_add(wt.bytes.unwrap_or(0));
+        group.build_dir_bytes = group
+            .build_dir_bytes
+            .saturating_add(wt.build_dir_bytes.unwrap_or(0));
+        group.worktree_count += 1;
+        match wt.tier {
+            WorktreeTier::Stale => group.tiers.stale += 1,
+            WorktreeTier::Review => group.tiers.review += 1,
+            WorktreeTier::Keep => group.tiers.keep += 1,
+            WorktreeTier::Missing => group.tiers.missing += 1,
+        }
+        group.worktree_paths.push(wt.path.clone());
+    }
+    let mut out: Vec<DiskSessionGroup> = groups.into_values().collect();
+    out.sort_by(|a, b| {
+        b.bytes
+            .cmp(&a.bytes)
+            // `None` sorts after every `Some`, which is where the unattributed
+            // bucket belongs when its byte total ties a real session's.
+            .then_with(|| a.session_id.is_none().cmp(&b.session_id.is_none()))
+            .then_with(|| a.session_id.cmp(&b.session_id))
+    });
+    out
 }
 
 /// The workspace root and everything under it.
@@ -499,6 +637,15 @@ pub(crate) struct DiskSurvey {
     pub keep_list: KeepListReport,
     /// The scanned workspace root.
     pub root: DiskRoot,
+    /// Per-session roll-up, present only when the caller asked for it (#7313).
+    ///
+    /// Why it is absent rather than empty by default: #6927's console reads this
+    /// payload today, and the survey already costs a git and `gh` pass per
+    /// worktree. Serializing a second index nobody asked for would change every
+    /// existing consumer's payload to pay for a view none of them render.
+    /// Test: `by_session_is_absent_unless_group_by_is_asked_for`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub by_session: Option<Vec<DiskSessionGroup>>,
 }
 
 #[cfg(test)]

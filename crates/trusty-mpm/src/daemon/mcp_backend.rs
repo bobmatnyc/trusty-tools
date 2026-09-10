@@ -514,8 +514,9 @@ impl OrchestratorBackend for StateBackend {
         &self,
         project: Option<&str>,
         budget_seconds: Option<u64>,
+        group_by: Option<&str>,
     ) -> Result<Value, String> {
-        crate::daemon::mcp_disk::disk_survey(&self.state, project, budget_seconds).await
+        crate::daemon::mcp_disk::disk_survey(&self.state, project, budget_seconds, group_by).await
     }
 
     async fn config_read(&self) -> Result<Value, String> {
