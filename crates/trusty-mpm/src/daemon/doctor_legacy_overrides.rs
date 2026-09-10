@@ -61,10 +61,29 @@ pub(super) fn check_legacy_overrides(project_dir: Option<&Path>) -> DoctorCheck 
         CheckStatus::Fail,
         format!(
             "{} retired override file(s) are NO LONGER READ and their contents do not \
-             reach the PM prompt: {} — {LEGACY_MIGRATION_HINT}",
+             reach the PM prompt: {} — {LEGACY_MIGRATION_HINT} {}",
             names.len(),
-            names.join(", ")
+            names.join(", "),
+            removal_command(&names),
         ),
+    )
+}
+
+/// The exact command that removes the retired files, for the failure text.
+///
+/// Why (#7262): this check has no `--fix` arm and must not grow one without an
+/// owner ruling — the files are TRACKED, so repairing them means deleting a
+/// file the project committed, which is not a call `tm doctor` may make on its
+/// own. What it can do is stop making the operator assemble the command: the
+/// finding names paths, and the remedy is one `git rm` over exactly those
+/// paths.
+/// What: `Run this once the sections are migrated: git rm <paths>`, space
+/// separated in the order [`detect_legacy_overrides`] found them.
+/// Test: `legacy_overrides_prints_the_exact_git_rm_command`.
+fn removal_command(names: &[String]) -> String {
+    format!(
+        "Once those sections are migrated, remove the files with: git rm {}",
+        names.join(" ")
     )
 }
 
@@ -103,6 +122,32 @@ mod tests {
 
         let check = check_legacy_overrides(Some(tmp.path()));
         assert_eq!(check.status, CheckStatus::Ok);
+    }
+
+    /// #7262: this check has no `--fix` arm — repairing it means deleting a
+    /// TRACKED file, which needs an owner ruling — so the failure text must at
+    /// least hand the operator the exact command instead of the shape of one.
+    #[test]
+    fn legacy_overrides_prints_the_exact_git_rm_command() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_legacy(tmp.path(), FILE_INSTRUCTIONS);
+        let expected = tmp.path().join(OVERRIDE_DIR_NAME).join(FILE_INSTRUCTIONS);
+
+        let check = check_legacy_overrides(Some(tmp.path()));
+
+        assert_eq!(
+            check.message.matches("git rm ").count(),
+            1,
+            "one command, not a hint: {}",
+            check.message
+        );
+        assert!(
+            check
+                .message
+                .contains(&format!("git rm {}", expected.display())),
+            "the command must name the file that was found: {}",
+            check.message
+        );
     }
 
     #[test]

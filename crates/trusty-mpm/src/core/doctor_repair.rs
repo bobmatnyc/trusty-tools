@@ -33,8 +33,9 @@
 //!    than silent: `legacy_sources` findings are REPORTED with their paths and
 //!    a reason, never acted on. See #4409.
 //!
-//! What: [`RepairMode`], the [`RepairStep`] outcome model, and the four
-//! repairs `--fix` drives — [`repair_hooks_contamination`],
+//! What: [`RepairMode`], the [`RepairStep`] outcome model, and the repairs
+//! `--fix` drives — [`repair_build_tree_binary`] (#7262, the repoint that runs
+//! first), [`repair_hooks_contamination`],
 //! [`repair_push_guard`], [`repair_output_style`] (#5866 — the one check whose
 //! remedy string named a command with no such step), and (via
 //! [`crate::core::skill_repair`]) the skill redeploy — plus
@@ -47,6 +48,8 @@ use crate::core::push_guard::{
     GuardState, HookInstall, inspect_pre_push_guard, install_pre_push_guard,
 };
 use crate::core::standalone::hooks::cleanup::clean_settings_file;
+use crate::core::standalone::hooks::repoint::{build_tree_commands_in, repoint_settings_file};
+use crate::core::standalone::hooks::{StableHookExeError, resolve_stable_hook_exe};
 
 /// Whether a repair may write, or is only describing what it would write.
 ///
@@ -212,6 +215,141 @@ pub fn repair_hooks_contamination(project_dir: &Path, mode: RepairMode) -> Vec<R
         }
     }
     steps
+}
+
+/// The `tm doctor` check [`repair_build_tree_binary`] answers.
+///
+/// Why: named once so the repair, its tests, and the driver's ordering comment
+/// cannot drift onto a check name the report does not emit.
+/// What: the string `hooks_build_tree_binary`, as
+/// `daemon::doctor_hooks_hygiene` publishes it.
+/// Test: `build_tree_repair_repoints_at_the_installed_binary`.
+const BUILD_TREE_CHECK: &str = "hooks_build_tree_binary";
+
+/// Repoint every build-tree hook and `statusLine` command at the installed
+/// binary (issue #7262, reopened).
+///
+/// Why: #7286 made `hooks_build_tree_binary` visible and left it unrepairable —
+/// `--fix` planned zero repairs for it, and on 2026-09-10 eight projects were
+/// fixed by hand with `sed`. [`repair_hooks_contamination`] is not that repair:
+/// it REMOVES the entry, which takes PM enforcement offline until the project's
+/// next managed launch and cannot touch `statusLine.command` at all. Repointing
+/// keeps the entry and fixes the one thing wrong with it.
+///
+/// This runs BEFORE [`repair_hooks_contamination`] in the driver, deliberately.
+/// [`crate::core::standalone::hooks::is_mpm_hook_command`] claims a build-tree
+/// command, so a contamination pass that ran first would delete the PM guard
+/// this pass would have restored.
+/// What: one step per file that carried at least one such command, naming the
+/// count and the first command in full. Scope is the caller's — the driver
+/// passes every settings file on the machine, not just this project's, because
+/// the damage is written by whichever build tree ran last and lands wherever
+/// that session was pointed. Applying takes a timestamped snapshot before it
+/// writes; see [`repoint_settings_file`], which is fail-closed on an
+/// unreadable, unparseable, or non-object file.
+///
+/// When no installed `tm`/`trusty-mpm` binary resolves there is nothing to
+/// repoint to, so every affected file gets a [`StepStatus::Refused`] naming the
+/// reason — a clean file stays silent, because a machine with no tm on `PATH`
+/// must not grow a refusal line per project.
+/// Test: `build_tree_repair_repoints_at_the_installed_binary`,
+/// `build_tree_repair_dry_run_changes_nothing`,
+/// `build_tree_repair_is_idempotent`,
+/// `build_tree_repair_fails_closed_on_unparseable_json`,
+/// `build_tree_repair_refuses_when_no_installed_binary_resolves`,
+/// `build_tree_repair_is_silent_for_a_clean_file`.
+pub fn repair_build_tree_binary(settings_files: &[PathBuf], mode: RepairMode) -> Vec<RepairStep> {
+    repair_build_tree_binary_with(settings_files, resolve_stable_hook_exe(None), mode)
+}
+
+/// [`repair_build_tree_binary`] with the installed-binary resolution supplied.
+///
+/// Why: [`resolve_stable_hook_exe`] reads `current_exe()` and `PATH`, so a test
+/// running inside a `cargo test` harness would get a different answer on a
+/// machine that has `tm` installed than on one that does not — and the refusal
+/// arm is the half worth pinning. Injecting the result makes both arms
+/// deterministic without a second resolver.
+/// What: as [`repair_build_tree_binary`]; `installed` is what that function
+/// resolves in production.
+/// Test: see [`repair_build_tree_binary`].
+fn repair_build_tree_binary_with(
+    settings_files: &[PathBuf],
+    installed: Result<PathBuf, StableHookExeError>,
+    mode: RepairMode,
+) -> Vec<RepairStep> {
+    settings_files
+        .iter()
+        .filter_map(|path| build_tree_step(path, installed.as_deref(), mode))
+        .collect()
+}
+
+/// One file's worth of [`repair_build_tree_binary`].
+///
+/// Why: three outcomes (nothing to do, repointed, refused/failed) read far
+/// better as one function than as three arms nested inside a loop.
+/// What: `None` when the file carries no build-tree command. Otherwise the step
+/// — `Refused` when `installed` is an error, `Failed` when the rewrite itself
+/// failed, else `Planned`/`Applied`.
+/// Test: see [`repair_build_tree_binary`].
+fn build_tree_step(
+    path: &Path,
+    installed: Result<&Path, &StableHookExeError>,
+    mode: RepairMode,
+) -> Option<RepairStep> {
+    let installed = match installed {
+        Ok(bin) => bin,
+        Err(e) => {
+            // Speak up only for a file that actually carries the damage.
+            if build_tree_commands_in(path).is_empty() {
+                return None;
+            }
+            return Some(RepairStep {
+                check: BUILD_TREE_CHECK,
+                path: path.to_path_buf(),
+                what: "repoint build-tree hook commands at the installed tm binary".to_string(),
+                status: StepStatus::Refused(e.to_string()),
+            });
+        }
+    };
+
+    match repoint_settings_file(path, installed, mode == RepairMode::Apply) {
+        Ok(None) => None,
+        Ok(Some(outcome)) => {
+            let (first, _) = outcome
+                .hooks
+                .first()
+                .or(outcome.statusline.as_ref())
+                .expect("an outcome exists only when at least one command was rewritten");
+            let what = format!(
+                "repoint {} command{} at {} (first: `{first}`)",
+                outcome.command_count(),
+                if outcome.command_count() == 1 {
+                    ""
+                } else {
+                    "s"
+                },
+                installed.display(),
+            );
+            let status = match mode {
+                RepairMode::DryRun => StepStatus::Planned,
+                RepairMode::Apply => StepStatus::Applied {
+                    backup: outcome.backup_path,
+                },
+            };
+            Some(RepairStep {
+                check: BUILD_TREE_CHECK,
+                path: outcome.path,
+                what,
+                status,
+            })
+        }
+        Err(e) => Some(RepairStep {
+            check: BUILD_TREE_CHECK,
+            path: path.to_path_buf(),
+            what: "repoint build-tree hook commands at the installed tm binary".to_string(),
+            status: StepStatus::Failed(e.to_string()),
+        }),
+    }
 }
 
 /// Install the #2867 cross-branch `pre-push` guard on this clone.

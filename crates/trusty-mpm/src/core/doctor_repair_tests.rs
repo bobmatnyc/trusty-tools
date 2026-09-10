@@ -192,6 +192,185 @@ fn hooks_repair_omits_the_pm_guard_clause_for_other_entries() {
     );
 }
 
+/// The installed binary the #7262 repoint tests write.
+///
+/// Why: [`resolve_stable_hook_exe`] reads the host's `PATH`, which would make
+/// these assertions depend on whether the machine has `tm` installed. Every test
+/// here injects this instead.
+const INSTALLED_BIN: &str = "/usr/local/bin/tm";
+
+/// Seed `<project>/.claude/settings.json` with the #7244 incident shape.
+///
+/// Why (#7262): the ONE fixture the classifier, the cleanup, the doctor probe
+/// and now the repair all share — see
+/// `core::standalone::hooks::build_tree::tests::incident_settings`.
+fn write_build_tree_settings(project: &Path) -> PathBuf {
+    let claude = project.join(".claude");
+    fs::create_dir_all(&claude).unwrap();
+    let path = claude.join("settings.json");
+    fs::write(
+        &path,
+        crate::core::standalone::hooks::build_tree::tests::incident_settings().to_string(),
+    )
+    .unwrap();
+    path
+}
+
+#[test]
+fn build_tree_repair_repoints_at_the_installed_binary() {
+    // #7262 reopened: `hooks_build_tree_binary` had no `--fix` arm at all, so
+    // this is the whole point of the change.
+    let tmp = tempfile::tempdir().unwrap();
+    let path = write_build_tree_settings(tmp.path());
+
+    let steps = repair_build_tree_binary_with(
+        std::slice::from_ref(&path),
+        Ok(PathBuf::from(INSTALLED_BIN)),
+        RepairMode::Apply,
+    );
+
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    assert_eq!(steps[0].check, "hooks_build_tree_binary");
+    assert_eq!(steps[0].path, path);
+    assert!(steps[0].changed(), "{:?}", steps[0]);
+    assert!(
+        steps[0]
+            .what
+            .contains("repoint 8 commands at /usr/local/bin/tm"),
+        "{}",
+        steps[0].what
+    );
+    match &steps[0].status {
+        StepStatus::Applied { backup } => {
+            let backup = backup.as_ref().expect("apply snapshots the file first");
+            assert!(backup.exists(), "{}", backup.display());
+        }
+        other => panic!("expected Applied, got {other:?}"),
+    }
+
+    // Detect → repair → clean.
+    let after: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(
+        crate::core::standalone::hooks::cleanup::build_tree_hook_commands(&after).is_empty(),
+        "{after}"
+    );
+    assert!(
+        crate::core::standalone::hooks::cleanup::build_tree_statusline_command(&after).is_none(),
+        "{after}"
+    );
+}
+
+#[test]
+fn build_tree_repair_dry_run_changes_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = write_build_tree_settings(tmp.path());
+    let raw = fs::read_to_string(&path).unwrap();
+
+    let steps = repair_build_tree_binary_with(
+        std::slice::from_ref(&path),
+        Ok(PathBuf::from(INSTALLED_BIN)),
+        RepairMode::DryRun,
+    );
+
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    assert_eq!(steps[0].status, StepStatus::Planned);
+    assert!(!steps[0].changed());
+    assert_eq!(fs::read_to_string(&path).unwrap(), raw);
+}
+
+#[test]
+fn build_tree_repair_is_idempotent() {
+    // A second `--fix --yes` must plan nothing and rewrite nothing.
+    let tmp = tempfile::tempdir().unwrap();
+    let path = write_build_tree_settings(tmp.path());
+    let files = [path.clone()];
+
+    repair_build_tree_binary_with(&files, Ok(PathBuf::from(INSTALLED_BIN)), RepairMode::Apply);
+    let after_first = fs::read_to_string(&path).unwrap();
+
+    let second =
+        repair_build_tree_binary_with(&files, Ok(PathBuf::from(INSTALLED_BIN)), RepairMode::Apply);
+
+    assert!(second.is_empty(), "{second:?}");
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        after_first,
+        "the second pass must be byte-identical"
+    );
+}
+
+#[test]
+fn build_tree_repair_fails_closed_on_unparseable_json() {
+    // The error arm: an unparseable file is REPORTED as a failed step, never
+    // skipped silently and never rewritten.
+    let tmp = tempfile::tempdir().unwrap();
+    let claude = tmp.path().join(".claude");
+    fs::create_dir_all(&claude).unwrap();
+    let path = claude.join("settings.json");
+    fs::write(&path, "{ \"hooks\": ").unwrap();
+
+    let steps = repair_build_tree_binary_with(
+        std::slice::from_ref(&path),
+        Ok(PathBuf::from(INSTALLED_BIN)),
+        RepairMode::Apply,
+    );
+
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    assert_eq!(steps[0].check, "hooks_build_tree_binary");
+    match &steps[0].status {
+        StepStatus::Failed(msg) => assert!(msg.contains("is not valid JSON"), "{msg}"),
+        other => panic!("expected Failed, got {other:?}"),
+    }
+    assert_eq!(fs::read_to_string(&path).unwrap(), "{ \"hooks\": ");
+}
+
+#[test]
+fn build_tree_repair_refuses_when_no_installed_binary_resolves() {
+    // Nothing to repoint TO is a refusal with a reason, not a silent pass.
+    let tmp = tempfile::tempdir().unwrap();
+    let path = write_build_tree_settings(tmp.path());
+    let raw = fs::read_to_string(&path).unwrap();
+
+    let steps = repair_build_tree_binary_with(
+        std::slice::from_ref(&path),
+        Err(crate::core::standalone::hooks::StableHookExeError::Unresolved),
+        RepairMode::Apply,
+    );
+
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    match &steps[0].status {
+        StepStatus::Refused(reason) => {
+            assert!(
+                reason.contains("no installed tm/trusty-mpm binary"),
+                "{reason}"
+            );
+        }
+        other => panic!("expected Refused, got {other:?}"),
+    }
+    assert_eq!(fs::read_to_string(&path).unwrap(), raw);
+}
+
+#[test]
+fn build_tree_repair_is_silent_for_a_clean_file() {
+    // A machine with no tm on PATH must not grow one refusal line per project.
+    let tmp = tempfile::tempdir().unwrap();
+    let path = write_mixed_settings(tmp.path());
+
+    for installed in [
+        Ok(PathBuf::from(INSTALLED_BIN)),
+        Err(crate::core::standalone::hooks::StableHookExeError::Unresolved),
+    ] {
+        let steps = repair_build_tree_binary_with(
+            std::slice::from_ref(&path),
+            installed,
+            RepairMode::Apply,
+        );
+        assert!(steps.is_empty(), "{steps:?}");
+    }
+    assert!(!tmp.path().join(".claude/settings.json.bak").exists());
+}
+
 #[test]
 fn push_guard_repair_installs_when_missing() {
     let Some((_dir, repo)) = temp_repo() else {

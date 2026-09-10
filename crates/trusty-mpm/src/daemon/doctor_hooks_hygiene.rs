@@ -195,9 +195,12 @@ pub(super) fn check_hooks_hygiene(
 /// string — is readable on its own and the scan loop stays a scan loop.
 /// What: `Ok` when `offenders` is empty. Otherwise `Warn`, listing up to 5
 /// `<path>: <command>` pairs plus an overflow count, and naming
-/// `tm doctor --fix` / `tm hooks clean` as the repair. A `statusLine` command is
-/// listed too but not repaired by either — the message says so, because
-/// silently under-delivering on a named remedy is how #4948 happened.
+/// `tm doctor --fix` as the repair. #7262 (reopened): that repair now REPOINTS
+/// each command at the installed binary rather than removing it, `statusLine`
+/// included, and sweeps every settings file on the machine — the message says
+/// both, because silently under-delivering on a named remedy is how #4948
+/// happened and naming a project-scoped remedy for machine-wide damage is how
+/// this one came back.
 /// Test: `check_hooks_hygiene_reports_the_build_tree_incident_shape`,
 /// `check_hooks_hygiene_reports_a_build_tree_statusline`,
 /// `check_hooks_hygiene_build_tree_check_is_ok_for_an_installed_binary`.
@@ -224,11 +227,10 @@ fn build_tree_check(offenders: &[(PathBuf, String)]) -> DoctorCheck {
         CheckStatus::Warn,
         format!(
             "{} command{} point into a Cargo build tree and stop working the moment that \
-             artifact is rebuilt away — `tm doctor --fix` previews the removal of the hook \
-             entries for this project and `--yes` applies it, `tm hooks clean` sweeps every \
-             project under $HOME, and the correct command is re-rendered from the installed \
-             binary on the next managed launch. A `statusLine` command is reported here but \
-             repaired only by that relaunch. {}{}",
+             artifact is rebuilt away — `tm doctor --fix` previews repointing every one of \
+             them at the installed tm binary and `--yes` applies it, snapshotting each file \
+             first. That repair sweeps every settings file on the machine, not just this \
+             project, and repairs a `statusLine` command the same way (#7262). {}{}",
             offenders.len(),
             if offenders.len() == 1 { "" } else { "s" },
             shown.join("; "),
