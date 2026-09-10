@@ -42,8 +42,30 @@ against the file (issue #7121).
   embeds the replacement as a raw or triple-quoted string, then run that
   script — one interpretation of the string, by the language runtime that
   owns it, never an intermediate shell.
+- **A substitution whose replacement contains its own pattern is not
+  idempotent.** `s/super::settings::/super::super::settings::/g` matches what it
+  just wrote, so every already-correct line is rewritten and a second run
+  compounds it — one such command turned 20 correct lines into a broken
+  triple-`super` form (#7287). Use Edit for this shape: it matches one exact
+  string and fails instead of reapplying.
 - After the edit, verify byte-for-byte over the affected region —
   `od -c <file>` or `xxd` — not just a visual diff.
+
+## Proving a Regression Test Fails First
+
+A regression test earns its place by failing against the OLD behavior. Proving
+that means reverting the fix, running the test, and restoring the fix — and the
+restore is where the work gets lost.
+
+1. **Commit the fix BEFORE you revert anything.** The commit is what the restore
+   reads back; with no commit there is nothing to restore from.
+2. Revert only the files under test — `git checkout origin/main -- <paths>` —
+   run the test, and confirm it fails for the reason you expect.
+3. Restore with `git checkout HEAD -- <paths>`, naming `HEAD`.
+4. **Never restore with `git checkout <branch> -- <paths>` on a branch with no
+   commit yet.** Its tip IS the base branch, so that checkout discards every
+   uncommitted edit and prints nothing — an engineer lost a finished fix this
+   way and redid it from scratch (#7271).
 
 ## Right-Level Engineering
 
@@ -120,9 +142,9 @@ Before using any dependency, verify it is available; before declaring done,
 verify the build resolves clean.
 
 - Confirm a dependency exists in the manifest (`Cargo.toml` / equivalent) and
-  the workspace before relying on it. In this workspace, shared crates live in
-  `[workspace.dependencies]` — reference them as `dep = { workspace = true }`,
-  never pinned locally.
+  the workspace before relying on it. Where a project centralises shared
+  dependencies (a Cargo `[workspace.dependencies]` table, a lockfile-backed
+  catalog), reference the central entry rather than pinning a version locally.
 - Guard genuinely optional functionality behind feature flags rather than
   unconditional dependencies.
 - After writing code, run the build/verify command and confirm imports/paths
@@ -210,11 +232,12 @@ Before returning, re-read the prompt for "Deliverables" / "Requirements" /
 - [ ] Your own tests — edge cases and error paths.
 - [ ] Docs — what it does, how to run it, key decisions (when the prompt asks).
       Follow the `documentation-style` skill for per-artifact-type conventions
-      (file/class/method/block) and, where the project defines specs, its
-      spec-link-back convention (e.g. this repo's DOC-38 SLD).
+      (file/class/method/block) and, where the project defines specs, its own
+      spec-link-back convention.
 - [ ] Project config present if standalone.
-- [ ] Build passes — run the full verify command before returning:
-      `cargo check --all-targets && cargo test && cargo clippy -- -D warnings`.
+- [ ] Build passes — run the project's own verify command before returning, the
+      one its CLAUDE.md or build config names (in a Cargo project, typically
+      `cargo check --all-targets && cargo test && cargo clippy -- -D warnings`).
 
 Run that verify/quality-gate command as a BLOCKING FOREGROUND call and wait for it
 to exit — even 15+ minutes. NEVER end your turn to "wait for the gate to finish"

@@ -97,8 +97,18 @@ Block debug endpoints in production (return 404, not 403 — avoid information d
 
 ## Output Format
 
+🔴 **Verify every `file:line` against the checkout before you report it.**
+Re-read the file at that exact line and confirm the code there is the code the
+finding describes. A number carried over from an earlier read, from a different
+file, or from a buffer that has since moved is a fabricated citation — in one
+scan two of three citations pointed at the wrong line and one named the wrong
+file entirely (`build_tree_tests.rs:303` was really `:14`; a
+`divert_hooks.rs:388` citation was really `build_tree_tests.rs:99`, #7287). A
+finding whose location you cannot confirm is reported without a line number,
+never with a guessed one.
+
 Every security analysis includes:
 - **Summary**: Overview of scope and key findings
-- **Findings**: Severity-classified issues with file:line references
+- **Findings**: Severity-classified issues with verified file:line references
 - **Remediation**: Specific, actionable fix for each finding
 - **Compliance status**: OWASP Top 10 coverage summary

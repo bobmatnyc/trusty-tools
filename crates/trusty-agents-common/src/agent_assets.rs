@@ -507,6 +507,73 @@ mod tests {
         }
     }
 
+    /// A general-purpose agent deploys unchanged into every project, so a
+    /// `trusty-tools` crate name, script path or repository slug written into
+    /// one is a claim about a checkout this crate has never seen.
+    ///
+    /// Why (#7270, #7271, #7287): the fix above covered three doc-gate scripts
+    /// in three assets, and the same class survived one paragraph higher —
+    /// `rust-engineer.md` still told every project that `trusty-common` needs
+    /// `--features` and that `scripts/test_trusty_common_lanes.sh` exists,
+    /// `documentation.md` required `scripts/check_sld.sh` to pass, and
+    /// `version-control.md` read branch protection from a hardcoded
+    /// `bobmatnyc/trusty-tools`. A per-file, per-literal list cannot keep up;
+    /// this sweeps the whole roster instead so the class cannot return.
+    /// What: rejects each literal in every bundled asset except the four whose
+    /// SUBJECT is this framework or this repo's delivery chain, where naming
+    /// them is the point. `BASE-AGENT.md` keeps one exemption: the
+    /// self-improvement destination is owner-ruled to be `bobmatnyc/trusty-tools`
+    /// whatever project the agent ran in (#6935), and
+    /// `self_analysis_reporting_ships_in_the_base_agent` asserts it.
+    /// Test: this IS the assertion.
+    #[test]
+    fn general_purpose_assets_state_no_repo_specific_literal() {
+        /// Crate names, gate scripts, feature names and paths that exist in
+        /// `trusty-tools` and cannot be assumed anywhere else.
+        const REPO_SPECIFIC_LITERALS: [&str; 12] = [
+            "trusty-common",
+            "test_trusty_common_lanes.sh",
+            "check_sld.sh",
+            "check_line_cap.sh",
+            "check_test_pointers.sh",
+            "check_changelog_fragment.sh",
+            "check-pr-version-bump.sh",
+            "required-checks.sh",
+            "is-branch-caused.sh",
+            "memory-core",
+            "bobmatnyc/trusty-tools",
+            "crates/",
+        ];
+        /// Assets whose subject IS this framework or this repo's delivery
+        /// chain; a literal there names what the agent actually maintains.
+        const FRAMEWORK_SCOPED: [&str; 4] = [
+            "mpm-agent-manager.md",
+            "mpm-skills-manager.md",
+            "ticketing.md",
+            "version-control.md",
+        ];
+
+        for (name, body) in AGENT_ASSETS {
+            if FRAMEWORK_SCOPED.contains(name) {
+                continue;
+            }
+            for literal in REPO_SPECIFIC_LITERALS {
+                // #6935: the self-improvement destination is fixed by owner
+                // ruling, not a claim about the project under work.
+                if *name == "BASE-AGENT.md" && literal == "bobmatnyc/trusty-tools" {
+                    continue;
+                }
+                assert!(
+                    !body.contains(literal),
+                    "`{name}` states `{literal}`, which exists in trusty-tools \
+                     and not in every project (#7270) — these assets deploy \
+                     unchanged everywhere, so point the agent at the project's \
+                     own CLAUDE.md and `scripts/` instead of naming a literal"
+                );
+            }
+        }
+    }
+
     /// The `BASE-*` templates are what every other asset's `extends:` chain
     /// roots at. Shipping the roster without them would make composition
     /// impossible for every consumer, which is precisely why all 42 moved
