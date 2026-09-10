@@ -1,3 +1,0 @@
-Fixed
-
-- Intra-doc links in `disk::size_index::DirSizeIndex` and `provisioner::{RealGitBackend, ProvisionError}` now resolve under `cargo doc`. Both modules' own inner `//!` docs referenced their items bare, which resolves against the declaring module's scope rather than the module's own — fixed with `[`name`]: crate::path::to::name` link-reference definitions, extending the pattern `provisioner::mod.rs` already used for `GitBackend`/`FakeGitBackend`. Also fixes a stray `untracked_sync::glob_match` link in the `pm-guard` secret-file-copy guard's doc comment to the fully qualified `trusty_mpm::daemon::managed_routes::inproject::untracked_sync::glob_match` (#7157).

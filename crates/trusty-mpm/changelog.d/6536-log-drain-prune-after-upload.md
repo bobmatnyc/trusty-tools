@@ -1,3 +1,0 @@
-Added
-
-- `log_drain:` gains `prune_after_upload` (#6536, Phase 4 of #6533): once cloud logging is enabled, a manifest-confirmed uploaded object is deleted from its destination after `prune_retention_days` (default 30, per the 2026-09-01 owner ruling) — never a failed or partial upload, since only a real manifest entry ever counts as confirmed. The delete is gated by a two-tick `RetentionDebounce` (genericised from the session-retention sweep's own gate), so a candidate must survive two consecutive drain ticks before anything is removed. Set `prune_after_upload: false` to keep uploading forever with no destination-side cleanup. `LogDrainStatus`/`LogDrainDestinationStatus` gain a `pruned` count.
