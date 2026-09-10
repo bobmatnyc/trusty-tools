@@ -446,6 +446,23 @@ pub(crate) async fn session(
         // #6497: the transfer the reconcile report can only propose. Explicit
         // by design — a tree that changes hands on its own is indistinguishable
         // from one taken out from under a working agent.
+        // #7313: read-only per-session disk reporting. One `disk_survey` call
+        // over `POST /rpc` — the walk, the classification and the by-session
+        // fold are all the daemon's, so this verb runs no survey of its own.
+        SessionAction::Disk {
+            id_or_name,
+            json,
+            budget_seconds,
+        } => {
+            crate::commands::session_disk::session_disk(
+                client,
+                url,
+                id_or_name,
+                json,
+                budget_seconds,
+            )
+            .await?
+        }
         SessionAction::AdoptWorktree { path, as_session } => {
             crate::commands::adopt_worktree::session_adopt_worktree(client, url, &path, &as_session)
                 .await?

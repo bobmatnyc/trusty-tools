@@ -142,6 +142,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `decommission` — Decommission a managed session: stop runtime + remove workspace from disk
   - `decommission-ephemeral` — Tear down EVERY ephemeral (test/throwaway) managed session (#1508)
   - `delete` — Hard-delete a managed session RECORD from the store (#2012)
+  - `disk` — Report disk usage per session (#7313)
   - `events` — Show the recent hook-event feed for one session
   - `info` — Show detailed info for a specific session
   - `instructions` — Print the composed launch instructions a session would receive
@@ -176,6 +177,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `decommission` — Decommission a managed session: stop runtime + remove workspace from disk
   - `decommission-ephemeral` — Tear down EVERY ephemeral (test/throwaway) managed session (#1508)
   - `delete` — Hard-delete a managed session RECORD from the store (#2012)
+  - `disk` — Report disk usage per session (#7313)
   - `events` — Show the recent hook-event feed for one session
   - `info` — Show detailed info for a specific session
   - `instructions` — Print the composed launch instructions a session would receive

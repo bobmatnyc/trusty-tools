@@ -151,6 +151,24 @@ pub(super) const DOCTOR_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// crate boundary [`super::default_client`] exists to cross.
 pub const RECLAIM_SURVEY_REQUEST_TIMEOUT: Duration = Duration::from_secs(1800);
 
+/// Per-request timeout override for the `disk_survey` call `tm session disk`
+/// makes over `POST /rpc` (#7313).
+///
+/// Why: the daemon clamps that survey's own budget to
+/// [`crate::daemon::mcp_disk::MAX_BUDGET_SECONDS`] and then still has to
+/// serialize a survey covering every managed worktree. Under
+/// [`DEFAULT_REQUEST_TIMEOUT`] the client hangs up at 10s while the daemon
+/// keeps surveying, so the operator sees a transport error where a truncated
+/// survey was available — the #6929 failure mode reached through the client's
+/// bound instead of the tool's. This is the same rule the stdio bridge's
+/// `REQUEST_TIMEOUT` applies for the same clamp, with more headroom because
+/// this caller also pays for the survey's own serialization.
+/// What: 75s, passed to `reqwest::RequestBuilder::timeout` at the
+/// `session_disk` call site alone; every other request keeps the 10s default.
+/// Test: `tests::default_client_uses_default_bounds` pins the value and its
+/// headroom over the daemon's clamp.
+pub const DISK_SURVEY_REQUEST_TIMEOUT: Duration = Duration::from_secs(75);
+
 /// Build the `reqwest::Client` [`super::DaemonClient::new`] uses by default.
 ///
 /// Why: the one production call site for [`build_client`], pinned to this
@@ -272,6 +290,17 @@ mod tests {
             RECLAIM_SURVEY_REQUEST_TIMEOUT > PROVISION_REQUEST_TIMEOUT,
             "the merged-PR survey outlasts a first-clone provision, so its bound \
              must exceed the provisioning one"
+        );
+        // #7313: the disk survey's bound must clear the daemon's own budget
+        // clamp with room for serialization, or `tm session disk` hangs up on a
+        // survey the daemon was about to hand back.
+        assert_eq!(DISK_SURVEY_REQUEST_TIMEOUT, Duration::from_secs(75));
+        assert!(
+            DISK_SURVEY_REQUEST_TIMEOUT
+                > Duration::from_secs(crate::daemon::mcp_disk::MAX_BUDGET_SECONDS)
+                    + Duration::from_secs(5),
+            "the disk-survey bound must leave more than five seconds over the \
+             daemon's budget clamp for serialization and the round trip"
         );
         let _ = default_client();
     }

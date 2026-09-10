@@ -609,4 +609,35 @@ pub(crate) enum SessionAction {
         #[arg(long = "as")]
         as_session: String,
     },
+    /// Report disk usage per session (#7313).
+    ///
+    /// Why: a worktree an ended session left behind was charged to nobody, so
+    /// an operator deciding what to clear had a per-project tree and no way to
+    /// ask which SESSION is holding the bytes. #7313 slice 1 made the survey
+    /// attribute each worktree to its owning session; this is the shell view of
+    /// that attribution, beside the lifecycle verbs an operator already knows.
+    /// What: with no argument, one row per session of the current project,
+    /// sorted by bytes descending, with a total. With an id or friendly name,
+    /// that one session's breakdown — build-directory bytes against the rest,
+    /// then one row per worktree it owns across EVERY project, because a
+    /// session's worktrees are not confined to one repository. `--json` emits
+    /// the same structure; the table goes to stdout and diagnostics to stderr.
+    /// READ-ONLY: nothing here removes or prunes anything.
+    /// Test: `cli_parses_session_disk`, `cli_session_disk_takes_no_destructive_flag`.
+    Disk {
+        /// The session to break down, by id or friendly name. Omit for the
+        /// per-session listing of the current project.
+        id_or_name: Option<String>,
+        /// Print the report as JSON instead of the table.
+        #[arg(long)]
+        json: bool,
+        /// Wall-clock seconds the daemon's survey may spend.
+        ///
+        /// Defaults to the daemon's own clamp. A lower figure returns sooner
+        /// and marks the report partial; a higher one is clamped daemon-side,
+        /// because a survey the client's bound outlives cannot reach the
+        /// operator.
+        #[arg(long)]
+        budget_seconds: Option<u64>,
+    },
 }
