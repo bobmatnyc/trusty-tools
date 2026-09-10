@@ -257,6 +257,22 @@ pub enum UdsSecurityError {
         path: PathBuf,
     },
 
+    /// The socket path exists but holds something that is not a socket, so a
+    /// singleton bind refused it instead of unlinking it.
+    ///
+    /// Why its own variant rather than [`UdsSecurityError::AlreadyServing`]:
+    /// the two say different things to an operator — one means "another daemon
+    /// has this path", the other "something unrelated is sitting on it" — and
+    /// on macOS the second used to arrive dressed as the first, by accident of
+    /// which errno a connect to a regular file returns. See #7312.
+    #[error("socket path {path} is a {found}, not a socket; refusing to remove it")]
+    NotASocketFile {
+        /// The offending path.
+        path: PathBuf,
+        /// What `lstat` actually found there.
+        found: String,
+    },
+
     /// `UnixListener::bind` failed.
     #[error("bind unix socket at {path}: {source}")]
     Bind {

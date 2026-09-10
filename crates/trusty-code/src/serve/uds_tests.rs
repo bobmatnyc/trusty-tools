@@ -137,6 +137,18 @@ async fn open_stream(
     send_framed_stream_request(socket, &request, CALL_TIMEOUT).await
 }
 
+/// How long a daemon future given a shutdown signal that never fires may run
+/// before the test calls it a regression.
+///
+/// Why a bound at all (#7312): this test's shutdown signal is
+/// `std::future::pending()`, so a daemon that manages to bind serves forever.
+/// On Linux `bind_singleton_hardened` did exactly that — it read the regular
+/// file below as a dead socket, unlinked it, and bound — and the test consumed
+/// its whole CI shard until the job's 45-minute cancel, with the shard's other
+/// tests never reported. A regression must fail in seconds and say what
+/// happened.
+const BIND_FAILURE_BUDGET: Duration = Duration::from_secs(10);
+
 /// A socket path already occupied by something that is not a dead socket must
 /// stop the daemon outright — never a silent degrade to HTTP only, which would
 /// leave every socket client reporting "no daemon" against a live process.
@@ -146,27 +158,36 @@ async fn run_uds_socket_bind_failure_is_fatal() {
     let data = tempfile::tempdir().expect("data tempdir");
     let project = tempfile::tempdir().expect("project tempdir");
     let socket = dir.path().join("tcode.sock");
-    // A regular file, not a stale socket: `bind_singleton_hardened` only
-    // unlinks a path the kernel proved is not serving, and a regular file is
-    // never that, so the bind below genuinely fails.
+    // A regular file, not a stale socket: `bind_singleton_hardened` refuses a
+    // path holding anything that is not a socket and never unlinks it, so the
+    // bind below genuinely fails. #7312: that file-type check is what makes
+    // this true on Linux as well as macOS.
     std::fs::write(&socket, b"not a socket").expect("occupy the socket path");
 
     let binding =
         ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind");
-    let err = run_daemon_on(
-        binding,
-        &socket,
-        Some(data.path()),
-        // A port is offered and must NOT be bound: the socket failed first.
-        Some(0),
-        std::future::pending(),
+    let err = timeout(
+        BIND_FAILURE_BUDGET,
+        run_daemon_on(
+            binding,
+            &socket,
+            Some(data.path()),
+            // A port is offered and must NOT be bound: the socket failed first.
+            Some(0),
+            std::future::pending(),
+        ),
     )
     .await
+    .expect("the daemon began serving instead of failing the bind — see #7312")
     .expect_err("an unbindable socket must stop the daemon");
     let rendered = format!("{err:#}");
     assert!(
         rendered.contains("bind the daemon socket"),
         "the failure must name the bind, got: {rendered}"
+    );
+    assert!(
+        socket.is_file(),
+        "the occupying file must survive the refused bind"
     );
 }
 

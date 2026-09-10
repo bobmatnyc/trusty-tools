@@ -13,6 +13,7 @@
 
 use super::dir::{DirVerdict, classify_existing_dir};
 use super::peer::peer_uid_verdict;
+use super::singleton::{TakeoverVerdict, classify_takeover};
 use super::*;
 
 use std::os::unix::fs::PermissionsExt;
@@ -649,6 +650,123 @@ async fn bind_singleton_refuses_a_socket_someone_is_serving() {
         "expected AlreadyServing, got {err:?}"
     );
     assert!(sock.exists(), "the live owner's socket must survive");
+}
+
+// ── the takeover decision (#7312) ───────────────────────────────────────────
+//
+// Every arm below is asserted against `classify_takeover` directly, because two
+// of the four cannot be reached through real syscalls on this machine: Linux
+// reports a non-socket as ECONNREFUSED and macOS as ENOTSOCK, and neither
+// platform lets an unprivileged test manufacture an `Inconclusive` probe of a
+// real socket.
+
+#[test]
+fn takeover_verdict_refuses_a_non_socket_even_when_the_probe_says_dead() {
+    // This pair — not a socket, probe says NotServing — is exactly what Linux
+    // hands the decision for a regular file on the socket path. Before #7312 it
+    // unlinked the file and bound over it.
+    assert_eq!(
+        classify_takeover(false, SocketVerdict::NotServing),
+        TakeoverVerdict::NotASocket
+    );
+}
+
+#[test]
+fn takeover_verdict_refuses_a_non_socket_on_every_probe_answer() {
+    for verdict in [
+        SocketVerdict::Serving,
+        SocketVerdict::NotServing,
+        SocketVerdict::Inconclusive,
+    ] {
+        assert_eq!(
+            classify_takeover(false, verdict),
+            TakeoverVerdict::NotASocket,
+            "the file type outranks the probe, got {verdict:?}"
+        );
+    }
+}
+
+#[test]
+fn takeover_verdict_takes_over_a_dead_socket() {
+    // The one arm that unlinks anything, unchanged by #7312.
+    assert_eq!(
+        classify_takeover(true, SocketVerdict::NotServing),
+        TakeoverVerdict::TakeOver
+    );
+}
+
+#[test]
+fn takeover_verdict_refuses_a_served_socket() {
+    assert_eq!(
+        classify_takeover(true, SocketVerdict::Serving),
+        TakeoverVerdict::Occupied
+    );
+}
+
+#[test]
+fn takeover_verdict_refuses_an_inconclusive_probe() {
+    // The fail-open check: `Inconclusive` must never reach the unlink. A probe
+    // that could not settle the question is treated as a live owner.
+    assert_eq!(
+        classify_takeover(true, SocketVerdict::Inconclusive),
+        TakeoverVerdict::Occupied
+    );
+}
+
+#[tokio::test]
+async fn bind_singleton_refuses_a_regular_file_and_leaves_it_on_disk() {
+    // #7312: the takeover exists for a socket corpse. A regular file on the
+    // socket path is not one, and deleting it is data loss in whatever owns it.
+    //
+    // This is the platform split, in one test. macOS answers a connect to a
+    // regular file with ENOTSOCK, which reads `Inconclusive` and refused — by
+    // accident, and under the wrong error. Linux answers ECONNREFUSED, which
+    // read `NotServing`: the file was unlinked, the bind succeeded, and
+    // `trusty-code`'s `run_uds_socket_bind_failure_is_fatal` then served
+    // forever instead of failing, hanging a CI shard until its 45-minute
+    // cancel. Both platforms must now refuse for the stated reason.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("sockets");
+    std::fs::create_dir_all(&dir).expect("socket dir");
+    let sock = dir.join("occupied.sock");
+    std::fs::write(&sock, b"not a socket").expect("occupy the socket path");
+
+    let err = bind_singleton_hardened(&sock)
+        .await
+        .expect_err("a regular file on the socket path must stop the bind");
+
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("is a regular file, not a socket"),
+        "the refusal must name what is actually there, got: {rendered}"
+    );
+    assert!(sock.exists(), "the file must not have been unlinked");
+    assert_eq!(
+        std::fs::read(&sock).expect("read the file back"),
+        b"not a socket",
+        "the file's contents must be untouched"
+    );
+}
+
+#[tokio::test]
+async fn bind_singleton_refuses_a_directory_on_the_socket_path() {
+    // The other shape the same rule covers: a directory is not a corpse either,
+    // and `remove_file` on one would have failed silently, leaving the bind to
+    // report an unrelated EADDRINUSE.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("sockets");
+    let sock = dir.join("occupied.sock");
+    std::fs::create_dir_all(&sock).expect("occupy the socket path with a directory");
+
+    let err = bind_singleton_hardened(&sock)
+        .await
+        .expect_err("a directory on the socket path must stop the bind");
+
+    assert!(
+        matches!(err, UdsSecurityError::NotASocketFile { ref found, .. } if found == "directory"),
+        "expected NotASocketFile naming a directory, got {err:?}"
+    );
+    assert!(sock.is_dir(), "the directory must survive");
 }
 
 // ---------------------------------------------------------------------------
