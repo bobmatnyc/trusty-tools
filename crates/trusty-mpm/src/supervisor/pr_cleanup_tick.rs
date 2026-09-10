@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use tracing::warn;
 
-use crate::core::pr_cleanup::{ClaimEnder, CleanupRegistry, RealGh, RealGit, sweep};
+use crate::core::pr_cleanup::{ClaimEnder, CleanupRegistry, RealGh, RealGit, RealLanding, sweep};
 use crate::session_manager::SessionManager;
 use crate::session_manager::worktree_safety::inspect_dirt;
 
@@ -121,6 +121,9 @@ pub async fn run_sweep(mgr: &SessionManager) -> usize {
         &gh,
         &RealGit,
         &claims,
+        // #7275: the merged-pull-request matcher decides "landed", never an
+        // ahead-of-upstream count.
+        &RealLanding,
         &inspect_dirt,
         &CleanupRegistry::production(),
     )

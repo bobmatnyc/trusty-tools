@@ -440,4 +440,4 @@ impl LandingProbe for GhLandingProbe {
 
 #[cfg(test)]
 #[path = "worktree_reclaim_pr_match_tests.rs"]
-mod worktree_reclaim_pr_match_tests;
+pub(crate) mod worktree_reclaim_pr_match_tests;

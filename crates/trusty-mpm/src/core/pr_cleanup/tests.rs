@@ -6,7 +6,7 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
-use super::driver::{ClaimEnder, CmdOut, Gh, Git};
+use super::driver::{ClaimEnder, CmdOut, Gh, Git, Landing};
 use super::plan::{
     AGENT_BRANCH_PREFIX, MergeCommit, PrView, StepLine, StepStatus, agent_branches_at,
     merge_refusal, parse_worktree_list, worktree_targets,
@@ -14,6 +14,8 @@ use super::plan::{
 use super::registry::{CleanupRegistry, OpenedPr};
 use super::{CleanupRequest, run};
 use crate::session_manager::DirtyWorktree;
+use crate::session_manager::worktree_reclaim::BranchPrState;
+use crate::session_manager::worktree_reclaim_pr_match::worktree_reclaim_pr_match_tests::FakeProbe;
 
 // ── fakes ────────────────────────────────────────────────────────────────
 
@@ -197,6 +199,58 @@ fn clean(_p: &Path) -> Option<DirtyWorktree> {
     None
 }
 
+/// A [`Landing`] over #7267's own `LandingProbe` fake (#7275 round 3).
+///
+/// Why: what is under test is the ahead-count gate's POLICY, not `gh`. Routing
+/// through `driver::resolve_merged_pr` means these tests run the production
+/// seed-then-ladder body rather than a second copy of it, and the probe below
+/// is the fake `worktree_reclaim_pr_match_tests` already drives.
+struct FakeLanding {
+    /// The scripted merged-pull-request answers.
+    probe: FakeProbe,
+}
+
+impl FakeLanding {
+    /// A probe that knows of no pull request at all — the refusal arm.
+    fn nothing_merged() -> Self {
+        Self {
+            probe: FakeProbe::default(),
+        }
+    }
+
+    /// A probe reporting `branch` as carried by a MERGED pull request.
+    fn merged(branch: &str, pr: u64) -> Self {
+        Self {
+            probe: FakeProbe::default().with_head(branch, BranchPrState::Merged { pr }),
+        }
+    }
+}
+
+impl Landing for FakeLanding {
+    fn merged_pr(
+        &self,
+        repo_root: &Path,
+        worktree: &Path,
+        branch: Option<&str>,
+        exact: Option<u64>,
+    ) -> Option<u64> {
+        super::driver::resolve_merged_pr(&self.probe, repo_root, worktree, branch, exact)
+    }
+}
+
+/// A dirt probe reporting `n` commits ahead of the upstream and nothing else —
+/// exactly what `inspect_dirt` says about every squash-merged worktree.
+fn ahead_by(n: usize) -> impl Fn(&Path) -> Option<DirtyWorktree> {
+    move |p: &Path| {
+        Some(DirtyWorktree {
+            path: p.to_path_buf(),
+            reason: format!("0 uncommitted/untracked file(s), {n} unpushed commit(s)"),
+            dirty_files: 0,
+            unpushed_commits: n,
+        })
+    }
+}
+
 fn rendered(lines: &[StepLine]) -> String {
     lines
         .iter()
@@ -352,7 +406,15 @@ async fn cleanup_refuses_an_open_pr() {
     );
     let git = Scripted::new();
     let claims = FakeClaims::none();
-    let report = run(&gh, &git, &claims, &clean, &req(false)).await;
+    let report = run(
+        &gh,
+        &git,
+        &claims,
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req(false),
+    )
+    .await;
 
     assert!(report.failed(), "{}", report.render());
     assert_eq!(report.lines.len(), 1, "the refusal short-circuits the run");
@@ -369,7 +431,15 @@ async fn cleanup_refuses_when_gh_view_fails() {
     let gh = Scripted::new().on_fail("gh pr view 7275", "no pull requests found");
     let git = Scripted::new();
     let claims = FakeClaims::none();
-    let report = run(&gh, &git, &claims, &clean, &req(false)).await;
+    let report = run(
+        &gh,
+        &git,
+        &claims,
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req(false),
+    )
+    .await;
 
     assert!(report.failed());
     assert!(report.lines[0].detail.contains("no pull requests found"));
@@ -381,7 +451,15 @@ async fn cleanup_clean_path_removes_everything() {
     let gh = gh_merged();
     let git = git_full();
     let claims = FakeClaims::none();
-    let report = run(&gh, &git, &claims, &clean, &req(false)).await;
+    let report = run(
+        &gh,
+        &git,
+        &claims,
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req(false),
+    )
+    .await;
 
     assert!(!report.failed(), "{}", report.render());
     let calls = git.calls();
@@ -432,7 +510,15 @@ async fn cleanup_refuses_when_the_registry_repo_and_checkout_disagree() {
         )
         .on("git ls-remote", "");
     let claims = FakeClaims::none();
-    let report = run(&gh, &git, &claims, &clean, &req(false)).await;
+    let report = run(
+        &gh,
+        &git,
+        &claims,
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req(false),
+    )
+    .await;
 
     assert!(report.failed(), "{}", report.render());
     let rendered = report.render();
@@ -454,7 +540,15 @@ async fn cleanup_refuses_when_the_checkout_origin_cannot_be_read() {
         .on_fail(ORIGIN_QUERY, "not a git repository")
         .on("git ls-remote", "");
     let claims = FakeClaims::none();
-    let report = run(&gh, &git, &claims, &clean, &req(false)).await;
+    let report = run(
+        &gh,
+        &git,
+        &claims,
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req(false),
+    )
+    .await;
 
     assert!(report.failed(), "{}", report.render());
     assert!(
@@ -477,7 +571,15 @@ async fn cleanup_clean_path_with_the_remote_branch_already_gone() {
         .on("git worktree prune", "")
         .on("git fetch --prune", "");
     let claims = FakeClaims::none();
-    let report = run(&gh, &git, &claims, &clean, &req(false)).await;
+    let report = run(
+        &gh,
+        &git,
+        &claims,
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req(false),
+    )
+    .await;
 
     assert!(!report.failed(), "{}", report.render());
     assert!(
@@ -507,7 +609,15 @@ async fn cleanup_refuses_a_dirty_worktree() {
             unpushed_commits: 1,
         })
     };
-    let report = run(&gh, &git, &claims, &dirty, &req(false)).await;
+    let report = run(
+        &gh,
+        &git,
+        &claims,
+        &FakeLanding::nothing_merged(),
+        &dirty,
+        &req(false),
+    )
+    .await;
 
     assert!(report.failed(), "{}", report.render());
     assert!(
@@ -527,7 +637,15 @@ async fn cleanup_ends_a_session_claim_before_removing_the_worktree() {
     let gh = gh_merged();
     let git = git_full();
     let claims = FakeClaims::held_by("tm-bobmatnyc-01");
-    let report = run(&gh, &git, &claims, &clean, &req(false)).await;
+    let report = run(
+        &gh,
+        &git,
+        &claims,
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req(false),
+    )
+    .await;
 
     assert!(!report.failed(), "{}", report.render());
     assert_eq!(
@@ -547,7 +665,15 @@ async fn cleanup_fails_the_worktree_step_when_claims_cannot_be_read() {
     let gh = gh_merged();
     let git = git_full();
     let claims = super::UnavailableClaims::new("the daemon is not reachable");
-    let report = run(&gh, &git, &claims, &clean, &req(false)).await;
+    let report = run(
+        &gh,
+        &git,
+        &claims,
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req(false),
+    )
+    .await;
 
     assert!(report.failed(), "{}", report.render());
     assert!(
@@ -562,7 +688,15 @@ async fn cleanup_dry_run_makes_no_mutating_call() {
     let gh = gh_merged();
     let git = git_full();
     let claims = FakeClaims::held_by("tm-bobmatnyc-01");
-    let report = run(&gh, &git, &claims, &clean, &req(true)).await;
+    let report = run(
+        &gh,
+        &git,
+        &claims,
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req(true),
+    )
+    .await;
 
     assert!(!report.failed(), "{}", report.render());
     for call in git.calls() {
@@ -698,7 +832,15 @@ async fn cleanup_removes_a_round_sibling_whose_content_landed() {
     let gh = gh_merged();
     let git = git_with_sibling(true);
     let claims = FakeClaims::none();
-    let report = run(&gh, &git, &claims, &clean, &req(false)).await;
+    let report = run(
+        &gh,
+        &git,
+        &claims,
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req(false),
+    )
+    .await;
 
     assert!(!report.failed(), "{}", report.render());
     let joined = git.calls().join("\n");
@@ -720,7 +862,15 @@ async fn cleanup_refuses_a_sibling_whose_content_is_not_on_the_base() {
     let gh = gh_merged();
     let git = git_with_sibling(false);
     let claims = FakeClaims::none();
-    let report = run(&gh, &git, &claims, &clean, &req(false)).await;
+    let report = run(
+        &gh,
+        &git,
+        &claims,
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req(false),
+    )
+    .await;
 
     assert!(report.failed(), "{}", report.render());
     let text = report.render();
@@ -766,7 +916,15 @@ async fn cleanup_removes_a_round_one_branch_that_never_had_its_own_pr() {
         .on("git worktree prune", "")
         .on("git fetch --prune", "");
     let claims = FakeClaims::none();
-    let report = run(&gh, &git, &claims, &clean, &req(false)).await;
+    let report = run(
+        &gh,
+        &git,
+        &claims,
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req(false),
+    )
+    .await;
 
     assert!(!report.failed(), "{}", report.render());
     let joined = git.calls().join("\n");
@@ -781,6 +939,270 @@ async fn cleanup_removes_a_round_one_branch_that_never_had_its_own_pr() {
     assert!(
         !joined.contains("merge-tree"),
         "an ancestor tip needs no merge test: {joined}"
+    );
+}
+
+// ── the ahead-count gate (#7275 round 3) ─────────────────────────────────
+
+/// A commit that is not the merged head — a sibling branch's own tip.
+const SIB_OID: &str = "5555555555555555555555555555555555555555";
+
+/// The squash-merge shape: `origin/<head>` is already gone, the tip is an
+/// ancestor of nothing, and the merge into the base is or is not a no-op.
+///
+/// `merge-base --is-ancestor` FAILS on purpose, so every test below reaches the
+/// `git merge-tree --write-tree` comparison the owner's round-3 brief names
+/// rather than the ancestor shortcut.
+fn git_squash(listing: &str, branches: &str, landed: bool) -> Scripted {
+    let s = Scripted::new()
+        .on(ORIGIN_QUERY, ORIGIN_URL)
+        .on("git ls-remote", "")
+        .on_fail("git merge-base --is-ancestor", "not an ancestor")
+        .on("git merge-tree --write-tree", "aaaabbbbccccdddd\n")
+        .on("git worktree list", listing)
+        .on("git worktree remove", "")
+        .on("git branch --format", branches)
+        .on("git branch -D", "")
+        .on("git worktree prune", "")
+        .on("git fetch --prune", "");
+    if landed {
+        s.on("git diff --name-only", "")
+    } else {
+        s.on("git diff --name-only", "crates/a/src/lib.rs\n")
+    }
+}
+
+/// 🔴 REGRESSION (#7275 round 3): a squash-merged worktree is landed and
+/// removable, however many commits it is "ahead" by.
+///
+/// Why: a squash merge puts the branch's content on `main` as a NEW commit, so
+/// nothing the branch holds is an ancestor of `main` and `inspect_dirt` counts
+/// every one of its commits as unpushed. Seven worktrees were refused that way
+/// on 2026-09-09 — the exact population cleanup exists to reclaim. FAILS on
+/// origin/main, where the count alone refused.
+#[tokio::test]
+async fn cleanup_removes_a_squash_merged_worktree() {
+    let gh = gh_merged();
+    let git = git_squash(&worktree_listing(), &branch_listing(), true);
+    let claims = FakeClaims::none();
+    let probe = ahead_by(2);
+    let report = run(
+        &gh,
+        &git,
+        &claims,
+        &FakeLanding::nothing_merged(),
+        &probe,
+        &req(false),
+    )
+    .await;
+
+    assert!(!report.failed(), "{}", report.render());
+    let joined = git.calls().join("\n");
+    assert!(
+        joined.contains(&format!("git worktree remove {TREE}")),
+        "a squash-merged tree must be removed, not refused for being ahead: {joined}"
+    );
+    assert!(
+        joined.contains("git merge-tree --write-tree origin/main"),
+        "the merge-tree no-op is what proves it landed: {joined}"
+    );
+    assert!(!joined.contains("--force"), "still never forced: {joined}");
+    assert!(
+        report.render().contains("landed"),
+        "the line must say the ahead-count was accounted for: {}",
+        report.render()
+    );
+}
+
+/// 🔴 REGRESSION (#7275 round 3): a branch with a merged pull request whose
+/// merge-tree still ADDS content is refused, and the refusal names what.
+///
+/// Why: the merged pull request proves the branch's NAME landed, not that this
+/// checkout holds only what landed. Without the merge-tree half, a tree whose
+/// branch gained commits after the merge would be removed with them.
+#[tokio::test]
+async fn cleanup_refuses_a_squash_merged_tree_that_moved_on() {
+    let gh = gh_merged();
+    let git = git_squash(&worktree_listing(), &branch_listing(), false);
+    let claims = FakeClaims::none();
+    let probe = ahead_by(3);
+    let report = run(
+        &gh,
+        &git,
+        &claims,
+        &FakeLanding::nothing_merged(),
+        &probe,
+        &req(false),
+    )
+    .await;
+
+    assert!(report.failed(), "{}", report.render());
+    let text = report.render();
+    assert!(
+        text.contains("crates/a/src/lib.rs"),
+        "the refusal must name the divergence: {text}"
+    );
+    assert!(
+        text.contains("3 unpushed commit(s)"),
+        "and still report what the probe saw: {text}"
+    );
+    assert!(
+        !git.calls()
+            .iter()
+            .any(|c| c.contains(&format!("worktree remove {TREE}"))),
+        "a tree that moved on past the merge is never removed: {:?}",
+        git.calls()
+    );
+}
+
+/// 🔴 REGRESSION (#7275 round 3): an ahead-of-upstream tree that NO merged pull
+/// request matches is refused.
+///
+/// Why: the ahead count stops being a refusal only because a merge accounts for
+/// it. With no merged pull request under the branch name, its round stem or its
+/// head commit, nothing does — and today's refusal must stand.
+#[tokio::test]
+async fn cleanup_refuses_an_ahead_tree_with_no_merged_pr() {
+    let gh = gh_merged();
+    // The tree carries the PR's branch NAME but sits on a different commit, so
+    // step 1's own proof does not settle it and the matcher is asked.
+    let listing = format!(
+        "worktree /repo\nHEAD 1111\nbranch refs/heads/main\n\n\
+         worktree {TREE}\nHEAD {SIB_OID}\nbranch refs/heads/{BRANCH}\n\n"
+    );
+    let git = git_squash(&listing, &format!("main 1111\n{BRANCH} {SIB_OID}\n"), true);
+    let claims = FakeClaims::none();
+    let probe = ahead_by(1);
+    let report = run(
+        &gh,
+        &git,
+        &claims,
+        &FakeLanding::nothing_merged(),
+        &probe,
+        &req(false),
+    )
+    .await;
+
+    assert!(report.failed(), "{}", report.render());
+    let text = report.render();
+    assert!(
+        text.contains("no MERGED pull request matches"),
+        "the refusal must name the missing evidence: {text}"
+    );
+    assert!(
+        !git.calls().iter().any(|c| c.contains("worktree remove")),
+        "no merged pull request means no removal: {:?}",
+        git.calls()
+    );
+}
+
+/// REGRESSION (#7275 round 3): a round sibling reaches its merged pull request
+/// through the #7267 round-stem rung, not through its own name.
+#[tokio::test]
+async fn cleanup_removes_a_squash_merged_round_sibling() {
+    let gh = gh_merged();
+    let listing = format!(
+        "worktree /repo\nHEAD 1111\nbranch refs/heads/main\n\n\
+         worktree /repo/wt-r2\nHEAD {SIB_OID}\nbranch refs/heads/{BRANCH}-r2\n\n"
+    );
+    let branches = format!("main 1111\n{BRANCH}-r2 {SIB_OID}\n");
+    let git = git_squash(&listing, &branches, true);
+    let claims = FakeClaims::none();
+    let probe = ahead_by(1);
+    let report = run(
+        &gh,
+        &git,
+        &claims,
+        &FakeLanding::merged(BRANCH, 7275),
+        &probe,
+        &req(false),
+    )
+    .await;
+
+    assert!(!report.failed(), "{}", report.render());
+    assert!(
+        git.calls()
+            .iter()
+            .any(|c| c.contains("worktree remove /repo/wt-r2")),
+        "the stem's merged pull request vouches for the sibling: {:?}",
+        git.calls()
+    );
+}
+
+/// 🔴 FAIL-CLOSED (#7275 round 3): a `git merge-tree` that cannot run leaves
+/// the refusal standing.
+///
+/// Why: the gate's grant deletes a checkout, so an unanswerable question must
+/// never read as "landed" (ADR-0045).
+#[tokio::test]
+async fn cleanup_refuses_when_the_merge_test_cannot_run() {
+    let gh = gh_merged();
+    let git = Scripted::new()
+        .on(ORIGIN_QUERY, ORIGIN_URL)
+        .on("git ls-remote", "")
+        .on_fail("git merge-base --is-ancestor", "not an ancestor")
+        .on_fail("git merge-tree --write-tree", "fatal: not a valid object")
+        .on("git worktree list", &worktree_listing())
+        .on("git worktree remove", "")
+        .on("git branch --format", &branch_listing())
+        .on("git branch -D", "")
+        .on("git worktree prune", "")
+        .on("git fetch --prune", "");
+    let claims = FakeClaims::none();
+    let probe = ahead_by(1);
+    let report = run(
+        &gh,
+        &git,
+        &claims,
+        &FakeLanding::nothing_merged(),
+        &probe,
+        &req(false),
+    )
+    .await;
+
+    assert!(report.failed(), "{}", report.render());
+    assert!(
+        !git.calls().iter().any(|c| c.contains("worktree remove")),
+        "a failed merge test must not advance toward a delete: {:?}",
+        git.calls()
+    );
+}
+
+/// 🔴 FAIL-CLOSED (#7275 round 3): an `inspect_dirt` that could not read the
+/// tree — both counts zero, its error arm — still refuses.
+#[tokio::test]
+async fn cleanup_refuses_an_unreadable_worktree() {
+    let gh = gh_merged();
+    let git = git_full();
+    let claims = FakeClaims::none();
+    let unreadable = |p: &Path| {
+        Some(DirtyWorktree {
+            path: p.to_path_buf(),
+            reason: "`git status` could not be run".to_string(),
+            dirty_files: 0,
+            unpushed_commits: 0,
+        })
+    };
+    let report = run(
+        &gh,
+        &git,
+        &claims,
+        &FakeLanding::nothing_merged(),
+        &unreadable,
+        &req(false),
+    )
+    .await;
+
+    assert!(report.failed(), "{}", report.render());
+    assert!(
+        report.render().contains("unsaved work"),
+        "an unreadable tree is dirty, not ahead: {}",
+        report.render()
+    );
+    assert!(
+        !git.calls().iter().any(|c| c.contains("worktree remove")),
+        "{:?}",
+        git.calls()
     );
 }
 

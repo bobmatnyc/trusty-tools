@@ -18,6 +18,14 @@
 //! | `pr` | `gh pr view <n> --json state,headRefName,headRefOid,mergeCommit` | the state is not `MERGED` |
 //! | `remote-branch` | deletes `origin/<head>` when `git ls-remote` still lists it | the delete errors |
 //! | `worktree` | ends any session claim, then `git worktree remove` each tree holding the head | a tree holds unsaved work, or the claim store cannot be read |
+//!
+//! **"Unsaved work" is not an ahead-of-upstream count (#7275 round 3).** Every
+//! merge here is a squash, so a landed branch's commits are never ancestors of
+//! `main` and `inspect_dirt` reports "N unpushed commit(s)" for every worktree
+//! cleanup exists to reclaim — seven were refused that way on 2026-09-09. A
+//! reading whose ONLY finding is that count defers to [`landed::landed`], which
+//! requires a MERGED pull request matching the tree AND a merge that changes
+//! nothing. Uncommitted or untracked files still refuse outright.
 //! | `local-branch` | `git branch -D` the head branch and each `worktree-agent-*` at the head commit | a delete errors |
 //! | `prune` | `git worktree prune`, then `git fetch --prune origin` | either errors |
 //!
@@ -61,6 +69,7 @@
 //! Test: the sibling `tests.rs`.
 
 pub mod driver;
+mod landed;
 pub mod plan;
 pub mod registry;
 pub mod sweep;
@@ -73,7 +82,9 @@ use std::path::{Path, PathBuf};
 
 use tracing::info;
 
-pub use driver::{ClaimEnder, CmdOut, Gh, Git, RealGh, RealGit, UnavailableClaims};
+pub use driver::{
+    ClaimEnder, CmdOut, Gh, Git, Landing, RealGh, RealGit, RealLanding, UnavailableClaims,
+};
 pub use plan::{PrView, StepLine, StepStatus};
 pub use registry::{CleanupRegistry, OpenedPr};
 pub use sweep::{SweepDecision, sweep_decision};
@@ -149,6 +160,7 @@ pub async fn run<G: Gh, T: Git, C: ClaimEnder>(
     gh: &G,
     git: &T,
     claims: &C,
+    landing: &dyn Landing,
     probe_dirt: DirtProbe<'_>,
     req: &CleanupRequest,
 ) -> CleanupReport {
@@ -193,7 +205,7 @@ pub async fn run<G: Gh, T: Git, C: ClaimEnder>(
     }
 
     lines.push(step_remote_branch(git, req, &view));
-    step_worktrees(git, claims, probe_dirt, req, &view, &mut lines).await;
+    step_worktrees(git, claims, landing, probe_dirt, req, &view, &mut lines).await;
     // The head branch cannot be deleted while a worktree still has it checked
     // out, so branch deletion always follows the removals above.
     lines.push(step_local_branches(git, req, &view));
@@ -329,6 +341,7 @@ fn step_remote_branch<T: Git>(git: &T, req: &CleanupRequest, view: &PrView) -> S
 async fn step_worktrees<T: Git, C: ClaimEnder>(
     git: &T,
     claims: &C,
+    landing: &dyn Landing,
     probe_dirt: DirtProbe<'_>,
     req: &CleanupRequest,
     view: &PrView,
@@ -363,7 +376,7 @@ async fn step_worktrees<T: Git, C: ClaimEnder>(
         // proof from step 1 and are not asked again.
         if !is_merged_head(view, t)
             && let Some(branch) = t.branch.as_deref()
-            && let Some(refusal) = unlanded(git, req, view, branch)
+            && let Some(refusal) = landed::unlanded(git, req, view, branch)
         {
             lines.push(StepLine::failed(
                 STEP,
@@ -371,7 +384,7 @@ async fn step_worktrees<T: Git, C: ClaimEnder>(
             ));
             continue;
         }
-        lines.push(remove_one(git, claims, probe_dirt, req, &t.path).await);
+        lines.push(remove_one(git, claims, landing, probe_dirt, req, view, t).await);
     }
 }
 
@@ -387,127 +400,57 @@ fn is_merged_head(view: &PrView, entry: &plan::WorktreeEntry) -> bool {
         || (!oid.is_empty() && entry.head.eq_ignore_ascii_case(oid))
 }
 
-/// Why `tip` is NOT safely deletable as this PR's sibling, or `None` when it is.
-///
-/// Why (#7275, owner correction 2026-09-09): every merge here is a squash, so
-/// `git cherry`'s per-commit patch-id comparison reports `+` for content that
-/// IS on the base — it said so for #7258. Merging the tip into the base and
-/// asking whether the result differs from the base answers the real question:
-/// would landing this branch change anything? An empty diff means no, which is
-/// the ownership proof a sibling needs and also what makes a stacked branch
-/// whose base already merged a no-op.
-/// What: accepts immediately when `tip` is an ancestor of the merged head —
-/// a round-1 branch superseded by `-r2` usually is — and otherwise runs
-/// `git merge-tree --write-tree origin/<base> <tip>` for the merged tree, then
-/// `git diff --name-only origin/<base> <tree>`. An empty answer is the no-op; a
-/// non-empty one NAMES the residue files, so a person can look at what the
-/// merge did not carry instead of being told only that something remains.
-/// FAIL-SAFE: a conflict, an unreadable tree, and any error all REFUSE.
-/// Test: `cleanup_removes_a_round_sibling_whose_content_landed`,
-/// `cleanup_refuses_a_sibling_whose_content_is_not_on_the_base`,
-/// `cleanup_removes_a_round_one_branch_that_never_had_its_own_pr`.
-fn unlanded<T: Git>(git: &T, req: &CleanupRequest, view: &PrView, tip: &str) -> Option<String> {
-    let head_oid = view.head_ref_oid.trim();
-    if !head_oid.is_empty()
-        && let Ok(out) = git.run(
-            &req.repo_root,
-            &owned(&["merge-base", "--is-ancestor", tip, head_oid]),
-        )
-        && out.success
-    {
-        return None;
-    }
-    let base = match view.base_ref_name.trim() {
-        "" => FALLBACK_BASE,
-        b => b,
-    };
-    let base_ref = format!("origin/{base}");
-    let merged = match git.run(
-        &req.repo_root,
-        &owned(&["merge-tree", "--write-tree", &base_ref, tip]),
-    ) {
-        Ok(out) if out.success => out.stdout,
-        Ok(out) => {
-            return Some(format!(
-                "`{tip}` does not merge cleanly into {base_ref}, so the merge cannot have \
-                 carried it: {}",
-                out.stderr.trim()
-            ));
-        }
-        Err(e) => {
-            return Some(format!(
-                "cannot merge-test `{tip}` against {base_ref}: {e:#}"
-            ));
-        }
-    };
-    let Some(tree) = merged
-        .lines()
-        .next()
-        .map(str::trim)
-        .filter(|t| !t.is_empty())
-    else {
-        return Some(format!(
-            "`git merge-tree --write-tree {base_ref} {tip}` named no tree"
-        ));
-    };
-    match git.run(
-        &req.repo_root,
-        &owned(&["diff", "--name-only", &base_ref, tree]),
-    ) {
-        Ok(out) if out.success && out.stdout.trim().is_empty() => None,
-        Ok(out) if out.success => Some(format!(
-            "`{tip}` is this PR's round sibling, but merging it into {base_ref} would still \
-             change {}: {} — it holds work the merge did not carry, so cleanup leaves it alone \
-             (#7275)",
-            file_count(&out.stdout),
-            out.stdout.split_whitespace().collect::<Vec<_>>().join(", ")
-        )),
-        Ok(out) => Some(format!(
-            "cannot compare the merge of `{tip}` against {base_ref}: {}",
-            out.stderr.trim()
-        )),
-        Err(e) => Some(format!(
-            "cannot compare the merge of `{tip}` against {base_ref}: {e:#}"
-        )),
-    }
-}
-
-/// `"1 file"` / `"3 files"` for a newline-separated listing.
-fn file_count(listing: &str) -> String {
-    let n = listing.split_whitespace().count();
-    if n == 1 {
-        "1 file".to_string()
-    } else {
-        format!("{n} files")
-    }
-}
-
 /// Build an owned argv from string slices.
 fn owned(parts: &[&str]) -> Vec<String> {
     parts.iter().map(|s| (*s).to_string()).collect()
 }
 
 /// End the claims on one worktree and remove it, or say why it stayed.
+///
+/// The unsaved-work probe runs FIRST and is the one refusal: a merged PR makes
+/// the claim obsolete, but it says nothing about work that was never committed.
+/// #7275 round 3 narrows what counts as unsaved: a reading whose only finding
+/// is that the branch is AHEAD of its upstream is what a squash merge produces
+/// for every landed branch, so it defers to [`landed::landed`] instead of
+/// refusing outright. Uncommitted and untracked files still refuse, as does an
+/// `inspect_dirt` that could not read the tree.
 async fn remove_one<T: Git, C: ClaimEnder>(
     git: &T,
     claims: &C,
+    landing: &dyn Landing,
     probe_dirt: DirtProbe<'_>,
     req: &CleanupRequest,
-    path: &Path,
+    view: &PrView,
+    entry: &plan::WorktreeEntry,
 ) -> StepLine {
     const STEP: &str = "worktree";
+    let path = entry.path.as_path();
     let shown = path.display().to_string();
-    // The dirty check runs FIRST and is the one refusal: a merged PR makes the
-    // claim obsolete, but it says nothing about work that was never committed.
+    let mut landed_note = String::new();
     if let Some(dirt) = probe_dirt(path) {
-        return StepLine::failed(
-            STEP,
-            format!(
-                "{shown} holds unsaved work ({}) — refusing to remove it; cleanup never forces \
-                 (#7275)",
-                dirt.reason
-            ),
-        );
+        // #7275: an ahead-of-upstream count is never on its own evidence of
+        // unlanded work — a squash merge guarantees one for landed branches.
+        if !landed::ahead_only(&dirt) {
+            return StepLine::failed(
+                STEP,
+                format!(
+                    "{shown} holds unsaved work ({}) — refusing to remove it; cleanup never \
+                     forces (#7275)",
+                    dirt.reason
+                ),
+            );
+        }
+        match landed::landed(git, landing, req, view, entry) {
+            Ok(pr) => {
+                landed_note = format!(
+                    " ({} landed: #{pr} merged it and re-merging changes nothing)",
+                    dirt.reason
+                );
+            }
+            Err(why) => {
+                return StepLine::failed(STEP, landed::ahead_refusal(&shown, &dirt.reason, &why));
+            }
+        }
     }
     let holders = match claims.claims_on(path).await {
         Ok(h) => h,
@@ -516,7 +459,10 @@ async fn remove_one<T: Git, C: ClaimEnder>(
     if req.dry_run {
         return StepLine::ok(
             STEP,
-            format!("would remove {shown}{}", claim_note(&holders, "end ")),
+            format!(
+                "would remove {shown}{}{landed_note}",
+                claim_note(&holders, "end ")
+            ),
         );
     }
     for id in &holders {
@@ -534,7 +480,10 @@ async fn remove_one<T: Git, C: ClaimEnder>(
     match run_git(git, req, &["worktree", "remove", &shown]) {
         Ok(_) => StepLine::ok(
             STEP,
-            format!("removed {shown}{}", claim_note(&holders, "ended ")),
+            format!(
+                "removed {shown}{}{landed_note}",
+                claim_note(&holders, "ended ")
+            ),
         ),
         Err(e) => StepLine::failed(STEP, format!("{e:#}")),
     }
@@ -573,7 +522,7 @@ fn step_local_branches<T: Git>(git: &T, req: &CleanupRequest, view: &PrView) -> 
             if b == head {
                 return true;
             }
-            match unlanded(git, req, view, b) {
+            match landed::unlanded(git, req, view, b) {
                 None => true,
                 Some(reason) => {
                     refusals.push(reason);
