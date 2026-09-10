@@ -128,6 +128,9 @@ pub(crate) mod serve_stdio;
 pub(crate) mod services;
 pub(crate) mod sessctl;
 pub(crate) mod session;
+// #7313: `tm session disk` — the shell view of the per-session disk
+// attribution slice 1 added to the `disk_survey` tool.
+pub(crate) mod session_disk;
 pub(crate) mod session_ls_connector;
 pub(crate) mod session_picker;
 pub(crate) mod session_picker_filter;

@@ -67,26 +67,10 @@ const SURVEY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 /// Test: `worktree_disk_timeout_is_a_bounded_constant`.
 const SURVEY_TIMEOUT_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Render a byte count the way an operator reads a disk figure.
-///
-/// Why: "1180591620717411303424" is not an early warning. The 1.1 TiB in the
-/// post-mortem is only legible in binary units.
-/// What: binary units (1024-based), one decimal place above KiB.
-/// Test: `human_bytes_renders_binary_units`.
-fn human_bytes(n: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut value = n as f64;
-    let mut unit = 0usize;
-    while value >= 1024.0 && unit + 1 < UNITS.len() {
-        value /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{n} B")
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
-}
+// #7313: the byte formatter moved to `crate::disk::human_bytes` so `tm session
+// disk` — a separate crate from the library — renders the same figures through
+// the same code.
+use crate::disk::human_bytes;
 
 /// The pure verdict for [`check_worktree_disk`], separated for hermetic tests.
 ///

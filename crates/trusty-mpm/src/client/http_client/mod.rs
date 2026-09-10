@@ -39,6 +39,10 @@ pub(crate) use config::PROVISION_REQUEST_TIMEOUT;
 // `default_client` below is a public seam.
 pub use config::RECLAIM_SURVEY_REQUEST_TIMEOUT;
 
+// #7313: `tm session disk` lives in the binary crate, so its per-request bound
+// is re-exported publicly for the same reason the merged-PR one above is.
+pub use config::DISK_SURVEY_REQUEST_TIMEOUT;
+
 pub use types::{
     BreakerRow, ChatMessage, ConfigRecommendation, CoordinatorChatOutcome, CoordinatorContext,
     CoordinatorSession, DiscoveredProjectRow, EventRow, FleetByProjectWireResponse,

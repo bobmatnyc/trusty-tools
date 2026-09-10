@@ -60,16 +60,6 @@ fn candidate(bytes: Option<u64>, pr: BranchPrState, verdict: ReclaimVerdict) -> 
 }
 
 #[test]
-fn human_bytes_renders_binary_units() {
-    assert_eq!(human_bytes(512), "512 B");
-    assert_eq!(human_bytes(1024), "1.0 KiB");
-    assert_eq!(human_bytes(1024 * 1024 * 3), "3.0 MiB");
-    // The figure from the 2026-07-21 post-mortem must render as terabytes,
-    // not as an unreadable integer.
-    assert_eq!(human_bytes(1_209_462_790_553), "1.1 TiB");
-}
-
-#[test]
 fn worktree_disk_check_is_ok_with_no_worktrees() {
     let check = build_worktree_disk_check(&survey_of(vec![]));
     assert_eq!(check.status, CheckStatus::Ok);
