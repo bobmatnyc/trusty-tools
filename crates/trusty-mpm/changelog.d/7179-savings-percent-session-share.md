@@ -1,3 +1,0 @@
-Changed
-
-- The `💸` statusline savings percent now denominates against the session's own actual token spend — `saved / (session actual tokens + saved)` — instead of the ledger's own before-figure, per owner ruling on #7179. The `tm statusline` compaction tracker (`~/.trusty-mpm/statusline/<session_id>.json`) folds a cumulative actual-tokens counter across every auto-compaction reset of `total_input_tokens`, so the denominator survives any number of resets within a session; `SavingsTotal::percent_saved` falls back to the pre-ruling ledger-only formula only when no compaction tick has landed yet for the session, and that fallback is never distinguished in the rendered `💸<N>%` string.

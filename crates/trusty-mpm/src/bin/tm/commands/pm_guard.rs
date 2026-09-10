@@ -228,6 +228,7 @@ pub(crate) use crate::commands::pm_guard_response::{
     build_pretooluse_context_response, build_pretooluse_deny_response,
 };
 use crate::commands::pm_guard_routing::{GENERIC_ENGINEER_HINT, delegation_hint_for_path};
+use crate::commands::pm_guard_secret_read;
 use crate::commands::pm_guard_worktree_grant;
 use crate::commands::pm_guard_write_boundary;
 use trusty_mpm::core::agent_cost::{self, AgentCostConfig, BudgetStatus};
@@ -534,6 +535,21 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
                 return Ok(());
             }
         }
+    }
+
+    // ABSOLUTE guard (issue #7266) — the `secret_file_copy` rule above screens
+    // only where a secret-shaped file GOES; this one screens the verb that
+    // prints its bytes, which is what actually leaked an ngrok authtoken
+    // (`sed -n '38,46p' terraform.tfvars`). It answers for a Bash command and
+    // for a `Read` tool call alike, and denies EVERY caller — the PM included —
+    // placed here with the Bash rules and ahead of Guards 1 and 4 for the same
+    // structural reason as its neighbours: the reported caller was a dispatched
+    // agent. See `pm_guard_secret_read` for the verb class, the shared
+    // classifier it reads, and the key-name-only `grep` it still allows.
+    if let Some(reason) = pm_guard_secret_read::evaluate_secret_file_read(tool_name, tool_input) {
+        audit_denied_tool(url, session_id, tool_name, &reason).await;
+        println!("{}", build_pretooluse_deny_response(&reason));
+        return Ok(());
     }
 
     // ABSOLUTE guard (ADR-0044 decision 1, enforced by ADR-0048) — the write

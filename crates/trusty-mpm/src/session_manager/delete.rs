@@ -51,7 +51,10 @@ impl SessionManager {
     /// real probe, not the persisted `state` field), returns
     /// [`ManagedError::InvalidState`] with an actionable message telling the
     /// operator to stop the session first or pass `--force` — no record is
-    /// touched. A record whose `state` still says `Active`/`Provisioning` but
+    /// touched. That message names the session's FRIENDLY name and puts the full
+    /// UUID alone on a trailing line (#7224), so a width-clamped surface — the
+    /// `tm ls` TUI status line — can wrap it without cutting the id in half.
+    /// A record whose `state` still says `Active`/`Provisioning` but
     /// whose tmux session is actually gone is NOT running by this probe, so it
     /// deletes cleanly without `--force`. Otherwise transitions the record to
     /// `Deleted`, persists it, and returns the PRE-deletion [`SessionRecord`]
@@ -78,13 +81,17 @@ impl SessionManager {
         // #5859: `?` — a probe that could not reach tmux refuses the delete
         // instead of answering "not running" and dropping a live session.
         if !force && is_running(&record, self.tmux.as_ref())? {
+            // #7224: the refusal used to inline the 36-character UUID twice, mid
+            // sentence, which any width-clamped surface cut mid-token. The
+            // friendly name carries the identity; the id gets its own line.
             return Err(ManagedError::InvalidState(
                 id.to_string(),
                 format!(
-                    "session is {} — stop it first with `tm session stop {id}` \
-                     (or `tm session decommission {id}`), or pass --force to \
-                     delete the record anyway",
-                    record.state
+                    "session '{name}' is {state} — stop it first with \
+                     `tm session stop` (or `tm session decommission`), or pass \
+                     --force to delete the record anyway. Session id:\n{id}",
+                    name = record.tmux_name,
+                    state = record.state,
                 ),
             ));
         }

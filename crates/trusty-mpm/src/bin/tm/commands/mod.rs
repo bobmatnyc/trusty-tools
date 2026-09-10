@@ -105,6 +105,10 @@ pub(crate) mod pm_guard_enter_worktree;
 pub(crate) mod pm_guard_fanout;
 pub(crate) mod pm_guard_response;
 pub(crate) mod pm_guard_routing;
+// #7266: a line-range or partial READ of a secret-bearing file, refused for
+// every caller — the sibling `pm_guard_bash::secret_file_copy` screens only a
+// `cp`/`mv` of one, so nothing stopped `sed -n '38,46p' terraform.tfvars`.
+pub(crate) mod pm_guard_secret_read;
 pub(crate) mod pm_guard_worktree_grant;
 pub(crate) mod pm_guard_write_boundary;
 // #6653: `tm pr` — the deterministic PR-open and merge-queue gates.
@@ -128,6 +132,9 @@ pub(crate) mod serve_stdio;
 pub(crate) mod services;
 pub(crate) mod sessctl;
 pub(crate) mod session;
+// #7313: `tm session disk` — the shell view of the per-session disk
+// attribution slice 1 added to the `disk_survey` tool.
+pub(crate) mod session_disk;
 pub(crate) mod session_ls_connector;
 pub(crate) mod session_picker;
 pub(crate) mod session_picker_filter;

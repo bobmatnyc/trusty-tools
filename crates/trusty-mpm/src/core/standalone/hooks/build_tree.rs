@@ -22,6 +22,21 @@
 //! clean`, and both writers' replace-by-identity strips — sees this shape
 //! without a second predicate to keep in sync.
 //!
+//! [`repointed_hook_command`] and [`repointed_statusline_command`] are the
+//! REPAIR half (#7262, reopened): they hand back the same command with its
+//! executable replaced by the installed binary and its argv untouched, which is
+//! what [`super::repoint`] writes back. Detection and repair share one split
+//! ([`split_build_tree_command`]), so the repair can never rewrite a command the
+//! probe would not name.
+//!
+//! **Repair is narrower than detection, deliberately.** Naming a dead artifact
+//! costs a report line; rewriting one makes tm run on an event tm may never have
+//! registered. So the repair asks a second question the probe does not — is this
+//! executable one tm's OWN writer could have persisted ([`is_tm_writable_exe`])
+//! — and declines a foreign stem such as `<build-tree>/mytool`. What it still
+//! repairs is what #7244 actually wrote: a tm stem, or the hash-suffixed
+//! `deps/` artifact `current_exe()` yields for a Cargo binary.
+//!
 //! **Where the line is drawn.** A build-tree path ALONE is not enough: a
 //! project may legitimately register its own hook that happens to live under
 //! `target/debug`, and tm must not delete another owner's entry. Both halves
@@ -127,6 +142,40 @@ pub fn is_build_tree_statusline_command(cmd: &str) -> bool {
     exe_in_build_tree(cmd, &[STATUSLINE_ARGV_TAIL])
 }
 
+/// The same hook command with its executable half replaced by `installed`
+/// (issue #7262).
+///
+/// Why: removing a corrupted hook entry and repointing it are different
+/// outcomes. Removal takes PM enforcement offline until the project's next
+/// managed launch; repointing keeps the entry the operator already has and
+/// fixes the one thing wrong with it — the dead path. The argv is preserved
+/// verbatim, so `--pm-guard` stays `--pm-guard`.
+/// What: `Some(<installed><tail>)` when [`is_build_tree_hook_command`] claims
+/// `cmd` AND [`is_tm_writable_exe`] claims its executable, where `<tail>` is the
+/// matched entry of [`TM_HOOK_ARGV_TAILS`]; `None` for every command either
+/// rejects, and for an `installed` path that is not valid UTF-8. It never
+/// inspects `installed` further — the caller
+/// ([`super::repoint::repoint_settings_file`]) validates it once, so a refusal
+/// is reported rather than silently collapsing into "nothing to do".
+/// Test: `repointed_hook_command_rewrites_every_argv_shape`,
+/// `repointed_hook_command_declines_an_installed_binary`,
+/// `repointed_hook_command_declines_a_foreign_build_tree_stem`.
+pub fn repointed_hook_command(cmd: &str, installed: &Path) -> Option<String> {
+    repointed(cmd, TM_HOOK_ARGV_TAILS, installed)
+}
+
+/// The `statusLine.command` counterpart of [`repointed_hook_command`] (#7262).
+///
+/// Why: #7286 could only REPORT a build-tree `statusLine.command`, because the
+/// hooks writer does not own that key and stripping it would leave the operator
+/// with no statusline at all. Repointing has neither problem: the key keeps its
+/// value and gains a working path.
+/// What: as [`repointed_hook_command`], against [`STATUSLINE_ARGV_TAIL`].
+/// Test: `repointed_statusline_command_rewrites_the_incident_shape`.
+pub fn repointed_statusline_command(cmd: &str, installed: &Path) -> Option<String> {
+    repointed(cmd, &[STATUSLINE_ARGV_TAIL], installed)
+}
+
 /// Shared rule behind both predicates above.
 ///
 /// Why: the two differ only in which argv tails they accept; the path test is
@@ -134,11 +183,74 @@ pub fn is_build_tree_statusline_command(cmd: &str) -> bool {
 /// What: finds the first `tails` entry that is a suffix of `cmd`, then returns
 /// whether the remaining prefix is an absolute build-tree path.
 fn exe_in_build_tree(cmd: &str, tails: &[&str]) -> bool {
-    let Some(exe) = tails.iter().find_map(|tail| cmd.strip_suffix(tail)) else {
+    split_build_tree_command(cmd, tails).is_some()
+}
+
+/// Shared rule behind both repointers above.
+///
+/// Why (#7262): a repoint that used its own notion of "is this the damage" could
+/// rewrite a command the detector never flagged. Deriving the rewrite from the
+/// SAME split the predicate answers with makes the two unable to disagree about
+/// which commands are candidates. Repair then asks ONE more question detection
+/// does not — see [`is_tm_writable_exe`] — so the set it rewrites is a subset of
+/// the set the probe names, never a different set.
+/// What: `Some(<installed><tail>)` when [`split_build_tree_command`] claims
+/// `cmd` AND [`is_tm_writable_exe`] claims the executable half; `None`
+/// otherwise, or when `installed` is not valid UTF-8.
+fn repointed(cmd: &str, tails: &[&str], installed: &Path) -> Option<String> {
+    let (exe, tail) = split_build_tree_command(cmd, tails)?;
+    if !is_tm_writable_exe(Path::new(exe)) {
+        return None;
+    }
+    Some(format!("{}{tail}", installed.to_str()?))
+}
+
+/// Could tm's own writer have persisted `exe` as a hook command's executable?
+///
+/// Why (#7262 round 2): repair and detection are not the same question.
+/// Detection names a dead build artifact whoever owns it, which costs the
+/// operator a report line. Repair rewrites the command into `<installed tm>
+/// …`, which starts invoking tm on an event tm may never have registered — a
+/// project that builds its own `target/debug/mytool` and wires it with tm's
+/// argv would come back pointing at tm. That is a worse outcome than the dead
+/// path it replaces, so the rewrite requires the executable to be one tm's
+/// writer could actually have produced.
+/// What: `true` when the file name is a shipped tm stem
+/// ([`super::is_mpm_bin_stem_path`], a Cargo `-<hexhash>` suffix tolerated), or
+/// when the path is a hash-suffixed artifact under a `deps/` directory. That
+/// second arm is what #7244 wrote: the pre-fix writer persisted `current_exe()`
+/// of whatever harness was running, and Cargo places every such artifact at
+/// `…/deps/<stem>-<hexhash>`. A hand-named binary sitting directly in a build
+/// tree matches neither arm.
+/// Test: `repointed_hook_command_declines_a_foreign_build_tree_stem`,
+/// `repointed_hook_command_still_claims_what_tm_wrote`.
+fn is_tm_writable_exe(exe: &Path) -> bool {
+    if super::is_mpm_bin_stem_path(exe) {
+        return true;
+    }
+    let Some(name) = exe.file_name().and_then(|f| f.to_str()) else {
         return false;
     };
+    super::hash_stripped_stem(name) != name && exe.components().any(|c| c.as_os_str() == "deps")
+}
+
+/// Split `cmd` into its build-tree executable and the tm argv tail after it.
+///
+/// Why: the predicate and the repointer ask the same question — is this
+/// executable a dead build artifact invoked with one of tm's own argv shapes —
+/// and only differ in what they do with the answer. One split, two consumers.
+/// What: `Some((exe, tail))` for the first `tails` entry that is a suffix of
+/// `cmd` whose remaining prefix is an ABSOLUTE path
+/// [`trusty_common::bin_resolve::is_ephemeral_build_path`] claims. A relative
+/// prefix is never matched: tm always persists an absolute path, so a bare
+/// `tm hook` belongs to the exact-name branch, not this one.
+fn split_build_tree_command<'a>(cmd: &'a str, tails: &[&'a str]) -> Option<(&'a str, &'a str)> {
+    let (exe, tail) = tails
+        .iter()
+        .find_map(|tail| cmd.strip_suffix(tail).map(|exe| (exe, *tail)))?;
     let path = Path::new(exe);
-    path.is_absolute() && trusty_common::bin_resolve::is_ephemeral_build_path(path)
+    (path.is_absolute() && trusty_common::bin_resolve::is_ephemeral_build_path(path))
+        .then_some((exe, tail))
 }
 
 // `pub(crate)` so the #7244 incident fixture below is written ONCE and shared

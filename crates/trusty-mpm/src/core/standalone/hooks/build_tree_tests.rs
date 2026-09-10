@@ -144,6 +144,49 @@ fn build_tree_statusline_command_ignores_an_installed_binary() {
 }
 
 #[test]
+fn repointed_hook_command_rewrites_every_argv_shape() {
+    // #7262 (reopened): the repair keeps the argv and replaces only the path,
+    // so a `--pm-guard` entry comes back as a `--pm-guard` entry.
+    let installed = std::path::Path::new("/usr/local/bin/tm");
+    for tail in TM_HOOK_ARGV_TAILS {
+        assert_eq!(
+            repointed_hook_command(&format!("{INCIDENT_EXE}{tail}"), installed).as_deref(),
+            Some(format!("/usr/local/bin/tm{tail}").as_str()),
+            "tail {tail:?} was not repointed"
+        );
+    }
+}
+
+#[test]
+fn repointed_hook_command_declines_an_installed_binary() {
+    // Detection and repair share one split, so anything the predicate rejects
+    // the repointer must decline — that is what makes a second pass a no-op.
+    let installed = std::path::Path::new("/usr/local/bin/tm");
+    for cmd in [
+        "/usr/local/bin/tm hook",
+        "/usr/local/bin/tm hook --pm-guard",
+        "tm hook",
+        &format!("{INCIDENT_EXE} lint --fix"),
+    ] {
+        assert!(
+            repointed_hook_command(cmd, installed).is_none(),
+            "{cmd} should not be repointed"
+        );
+    }
+}
+
+#[test]
+fn repointed_statusline_command_rewrites_the_incident_shape() {
+    let installed = std::path::Path::new("/usr/local/bin/tm");
+    assert_eq!(
+        repointed_statusline_command(&format!("{INCIDENT_EXE} statusline"), installed).as_deref(),
+        Some("/usr/local/bin/tm statusline")
+    );
+    assert!(repointed_statusline_command(&format!("{INCIDENT_EXE} hook"), installed).is_none());
+    assert!(repointed_statusline_command("/usr/local/bin/tm statusline", installed).is_none());
+}
+
+#[test]
 fn statusline_tail_is_not_a_hook_tail() {
     // The two lists must stay disjoint: a strip driven by the hook predicate
     // must never claim a `statusLine` command it does not put back.
@@ -151,4 +194,51 @@ fn statusline_tail_is_not_a_hook_tail() {
         "{INCIDENT_EXE} statusline"
     )));
     assert!(!TM_HOOK_ARGV_TAILS.contains(&STATUSLINE_ARGV_TAIL));
+}
+
+/// #7262 round 2: detection is wide on purpose, but the REWRITE must not adopt
+/// another owner's entry. A project that builds its own `target/debug/mytool`
+/// and registers it with tm's argv would otherwise come back invoking tm.
+#[test]
+fn repointed_hook_command_declines_a_foreign_build_tree_stem() {
+    let installed = std::path::Path::new("/usr/local/bin/tm");
+    for exe in [
+        "/repo/target/debug/mytool",
+        "/repo/target/release/some_bin",
+        "/repo/target-7224/debug/deps/mytool",
+    ] {
+        let cmd = format!("{exe} hook");
+        assert!(
+            is_build_tree_hook_command(&cmd),
+            "{exe} is still named as a dead build artifact"
+        );
+        assert!(
+            repointed_hook_command(&cmd, installed).is_none(),
+            "{exe} must not be repointed"
+        );
+        assert!(
+            repointed_statusline_command(&format!("{exe} statusline"), installed).is_none(),
+            "{exe} statusline must not be repointed"
+        );
+    }
+}
+
+/// The other half of that rule: every shape tm's OWN writer produced before
+/// #7244 is still repaired — a tm stem anywhere in a build tree, and the
+/// hash-suffixed `deps/` artifact `current_exe()` yields for a Cargo binary.
+#[test]
+fn repointed_hook_command_still_claims_what_tm_wrote() {
+    let installed = std::path::Path::new("/usr/local/bin/tm");
+    for exe in [
+        "/repo/target/debug/tm",
+        "/repo/target-7224/debug/trusty-mpm",
+        "/repo/target/debug/deps/trusty_mpm-1a2b3c4d5e6f7a8b",
+        INCIDENT_EXE,
+    ] {
+        assert_eq!(
+            repointed_hook_command(&format!("{exe} hook"), installed).as_deref(),
+            Some("/usr/local/bin/tm hook"),
+            "{exe} must still be repaired"
+        );
+    }
 }

@@ -921,18 +921,31 @@ fn pm_guard_denies_secret_file_copy_into_a_worktree_from_native_subagent() {
 #[test]
 fn pm_guard_allows_secret_file_copy_outside_a_worktree_and_ordinary_copies_into_one() {
     let (_dir, repo) = main_checkout_fixture();
-    for command in [
-        // Secret-shaped source, but the destination is not a worktree.
-        "cp .env /Users/agent/backup/.env",
-        // Worktree destination, but an ordinary, non-secret source.
-        "cp README.md .claude/worktrees/agent-x/README.md",
-    ] {
-        assert_eq!(
-            run_pm_guard(&bash_payload_at(command, &repo, ""), &[]).trim(),
-            "",
-            "expected allow for: {command}"
-        );
-    }
+    // Worktree destination, but an ordinary, non-secret source.
+    assert_eq!(
+        run_pm_guard(
+            &bash_payload_at(
+                "cp README.md .claude/worktrees/agent-x/README.md",
+                &repo,
+                ""
+            ),
+            &[]
+        )
+        .trim(),
+        "",
+        "an ordinary copy into a worktree must be allowed"
+    );
+    // #7266 round 5: the #7122 COPY rule still permits a secret-shaped source
+    // whose destination is outside a worktree — its own unit test
+    // `allows_secret_copy_to_a_non_worktree_destination` proves that — but the
+    // read rule now refuses any command that NAMES such a file under a verb
+    // outside its allowlist, and `cp` is not on it. The composed guard denies.
+    let stdout = run_pm_guard(
+        &bash_payload_at("cp .env /Users/agent/backup/.env", &repo, ""),
+        &[],
+    );
+    assert_denied(&stdout);
+    assert!(stdout.contains("#7266"), "must cite the issue: {stdout}");
 }
 
 #[test]
@@ -2381,6 +2394,628 @@ fn tool_payload_at(
         r#"{{"hook_event_name":"PreToolUse",{extra_fields}"cwd":"{}","tool_name":"{tool}","tool_input":{tool_input}}}"#,
         cwd.display()
     )
+}
+
+#[test]
+fn pm_guard_denies_a_line_range_read_of_a_secret_bearing_file() {
+    // #7266, the reported command verbatim: a line-range print is not `cat`, so
+    // an agent told "never print tfvars values" printed an ngrok authtoken with
+    // it. These run through the real binary, which is what proves the rule is
+    // WIRED — the module's own unit tests would pass with the call site absent.
+    let (_dir, repo) = main_checkout_fixture();
+    for command in [
+        "sed -n '38,46p' terraform.tfvars",
+        "sed -n '12,14p' infra/terraform.tfvars",
+        "tail -n 3 .env.production",
+        "grep -n TOKEN secrets/app.tfvars.json",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert_denied(&stdout);
+        assert!(
+            stdout.contains("#7266") && stdout.contains("secret-bearing file class"),
+            "the deny must name the issue and the file class: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_denies_a_read_tool_call_on_a_secret_bearing_file() {
+    // #7266: the harness's own `Read` takes `offset`/`limit`, the same
+    // line-range shape — and a `Read` with no range prints strictly more.
+    let (_dir, repo) = main_checkout_fixture();
+    let ranged = format!(
+        r#"{{"file_path":"{}","offset":12,"limit":3}}"#,
+        repo.join(".env").display()
+    );
+    let whole = format!(
+        r#"{{"file_path":"{}"}}"#,
+        repo.join("infra/terraform.tfvars").display()
+    );
+    for input in [ranged.as_str(), whole.as_str()] {
+        let stdout = run_pm_guard_at(
+            &tool_payload_at("Read", input, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert_denied(&stdout);
+        assert!(stdout.contains("#7266"), "must cite the issue: {stdout}");
+    }
+}
+
+#[test]
+fn pm_guard_denies_a_grep_tool_call_on_a_secret_bearing_file() {
+    // #7266 fix round: the harness's native `Grep` prints matching lines
+    // verbatim under `output_mode: "content"`, so a pattern matching everything
+    // dumps the file with no shell involved — and the glob form reaches the
+    // same file through a directory path.
+    let (_dir, repo) = main_checkout_fixture();
+    let by_path = format!(
+        r#"{{"pattern":".","path":"{}","output_mode":"content"}}"#,
+        repo.join("infra/terraform.tfvars").display()
+    );
+    let by_glob = format!(
+        r#"{{"pattern":".","path":"{}","glob":"*.tfvars","output_mode":"content"}}"#,
+        repo.join("infra").display()
+    );
+    for input in [by_path.as_str(), by_glob.as_str()] {
+        let stdout = run_pm_guard_at(
+            &tool_payload_at("Grep", input, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert_denied(&stdout);
+        assert!(stdout.contains("#7266"), "must cite the issue: {stdout}");
+    }
+    // A directory with no glob is ordinary tree-wide search and stays allowed.
+    let tree = format!(
+        r#"{{"pattern":"TODO","path":"{}","output_mode":"content"}}"#,
+        repo.join("crates").display()
+    );
+    let stdout = run_pm_guard_at(
+        &tool_payload_at("Grep", &tree, &repo, ""),
+        UNREACHABLE_DAEMON,
+        &repo,
+    );
+    assert!(
+        stdout.trim().is_empty(),
+        "a directory grep with no glob must be allowed: {stdout}"
+    );
+}
+
+#[test]
+fn pm_guard_denies_a_secret_copied_to_a_source_extension_name() {
+    // #7266 fix round, the seam between the two rules: `secret_file_copy`
+    // scoped its destination check to worktree paths, so from a main checkout
+    // `cp terraform.tfvars secrets.rs` was allowed — and `cat secrets.rs` then
+    // passed the read guard's transparent-extension carve-out.
+    let (_dir, repo) = main_checkout_fixture();
+    for command in [
+        "cp terraform.tfvars secrets.rs",
+        "cat .env > notes.md",
+        "mv /Users/agent/.aws/credentials app_config.rs",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert_denied(&stdout);
+        assert!(
+            stdout.contains("#7266"),
+            "`{command}` must cite the issue: {stdout}"
+        );
+    }
+    // A copy that keeps the source's own extension is out of the RENAME rule's
+    // scope, but since #7266 round 5 the read rule refuses any command naming a
+    // secret-shaped file under a verb outside its allowlist. `cp` is not on it.
+    let stdout = run_pm_guard_at(
+        &bash_payload_at("cp terraform.tfvars backup.tfvars", &repo, ""),
+        UNREACHABLE_DAEMON,
+        &repo,
+    );
+    assert_denied(&stdout);
+    assert!(stdout.contains("#7266"), "must cite the issue: {stdout}");
+}
+
+#[test]
+fn pm_guard_denies_a_grep_glob_that_can_match_a_secret() {
+    // #7266 round 3, critic CRITICAL 1: the glob was screened as though it were
+    // a filename, so `*.env` and `*.netrc` matched no denylist entry and were
+    // allowed, while `*.pem` denied only because that entry happens to carry a
+    // `*` in the same place. All four deny now, and the ordinary source globs
+    // below still allow.
+    let (_dir, repo) = main_checkout_fixture();
+    for glob in ["*.env", "*.netrc", "id_*", ".env*"] {
+        let input = format!(
+            r#"{{"pattern":".","path":"{}","glob":"{glob}","output_mode":"content"}}"#,
+            repo.join("infra").display()
+        );
+        let stdout = run_pm_guard_at(
+            &tool_payload_at("Grep", &input, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert_denied(&stdout);
+        assert!(
+            stdout.contains("#7266"),
+            "glob `{glob}` must cite the issue: {stdout}"
+        );
+    }
+    // #7266 round 4: these ordinary tree searches all DENIED under round 3's
+    // sound pattern-overlap screen — `credentials.toml` and `.env.log` are names
+    // the four unbounded families really do reach — which taxed every extension
+    // search an agent writes. Measured live against the round-3 binary.
+    for glob in [
+        "*.rs", "*.md", "*", "**/*", "*.toml", "*.txt", "*.log", "*.csv", "*.tf", "*test*",
+        "*.yaml",
+    ] {
+        let input = format!(
+            r#"{{"pattern":"TODO","path":"{}","glob":"{glob}"}}"#,
+            repo.join("crates").display()
+        );
+        let stdout = run_pm_guard_at(
+            &tool_payload_at("Grep", &input, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert!(
+            stdout.trim().is_empty(),
+            "glob `{glob}` must be allowed: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_denies_a_read_through_process_substitution() {
+    // #7266 round 3, critic CRITICAL 2: `shlex::split` yields the tokens
+    // `<(cat` and `.env)`, so no operand rule saw the basename and
+    // `diff <(cat .env) /dev/null` was allowed while `diff .env /dev/null`
+    // denied.
+    let (_dir, repo) = main_checkout_fixture();
+    for command in [
+        "diff <(cat .env) /dev/null",
+        "cat <(cat .env)",
+        "wc -l <(sed -n '1,5p' terraform.tfvars)",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert_denied(&stdout);
+        assert!(
+            stdout.contains("#7266"),
+            "`{command}` must cite the issue: {stdout}"
+        );
+    }
+    // The same shape over an ordinary file is untouched.
+    let stdout = run_pm_guard_at(
+        &bash_payload_at("diff <(cat README.md) /dev/null", &repo, ""),
+        UNREACHABLE_DAEMON,
+        &repo,
+    );
+    assert!(
+        stdout.trim().is_empty(),
+        "a process substitution over a doc must be allowed: {stdout}"
+    );
+}
+
+#[test]
+fn pm_guard_denies_a_secret_laundered_to_an_unsuspicious_name() {
+    // #7266 round 3, critic HIGH 3: round 2's rename rule fired only for the 35
+    // transparent SOURCE extensions, so `cp .env ./notes.txt` from a main
+    // checkout was allowed and `cat notes.txt` afterwards was allowed too.
+    let (_dir, repo) = main_checkout_fixture();
+    // The last one is #7266 round 4: bash expands it to
+    // `cp terraform.tfvars notes.txt`, but `shlex::split` keeps it as one
+    // token, so round 3 saw a destination with no source behind it and allowed
+    // the rename.
+    for command in [
+        "cp .env ./notes.txt",
+        "mv terraform.tfvars vars.bin",
+        "cat .env > notes.txt",
+        "cp {terraform.tfvars,notes.txt}",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert_denied(&stdout);
+        assert!(
+            stdout.contains("#7266"),
+            "`{command}` must cite the issue: {stdout}"
+        );
+    }
+    // #7266 round 5: `cp .env .env.bak` and `cp /repo/.env /tmp/` were carve-outs
+    // of the COPY rule and still are — but the read rule refuses every command
+    // that names a secret-shaped file outside its verb allowlist, so the
+    // composed guard denies both. They moved to the deny arm above in spirit;
+    // what stays allowed here is work that names no secret file at all.
+    for command in [
+        "npm install token-bucket token-bucket",
+        "grep -rn credentials src/ > out.md",
+        "mv crates/trusty-audit/src/grounding/secrets.rs renamed.rs",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert!(
+            stdout.trim().is_empty(),
+            "`{command}` must be allowed: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_still_allows_ordinary_reads_and_non_operand_mentions() {
+    // The other half of #7266's acceptance: the rule must not tax ordinary
+    // work. A line range of a normal file, a `cat` of a manifest, a `tfvars`
+    // string that names no file, an extension glob, and the three word families
+    // used as English words all stay allowed.
+    //
+    // `grep -o '^key_[a-z_]*' terraform.tfvars` is deliberately NOT here any
+    // more: rounds 1 to 4 carved it out, and round 5 withdrew the carve-out
+    // because it was the one place a verb's FLAGS decided the verdict — see
+    // `denies_the_key_name_only_grep_the_earlier_rounds_carved_out`.
+    let (_dir, repo) = main_checkout_fixture();
+    for command in [
+        "sed -n '1,5p' README.md",
+        "cat Cargo.toml",
+        "git log --grep tfvars",
+        "grep -rn TODO --include=*.toml .",
+        "echo \"no secrets here\"",
+        "grep -rn credentials src/",
+        "cargo build 2>&1 | grep error",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert!(
+            stdout.trim().is_empty(),
+            "`{command}` must be allowed (empty stdout), got: {stdout}"
+        );
+    }
+    let readme = format!(r#"{{"file_path":"{}"}}"#, repo.join("README.md").display());
+    let stdout = run_pm_guard_at(
+        &tool_payload_at("Read", &readme, &repo, ""),
+        UNREACHABLE_DAEMON,
+        &repo,
+    );
+    assert!(
+        stdout.trim().is_empty(),
+        "Read of a doc must allow: {stdout}"
+    );
+}
+
+#[test]
+fn pm_guard_denies_every_verb_bypass_of_the_secret_file_rule() {
+    // #7266 round 5, against the real binary. Rounds 1 to 4 enumerated the
+    // verbs that print a file and were bypassed four times by a verb the list
+    // did not carry. These are the round-4 verdict's four classes plus the
+    // earlier rounds' — none of them reads through a verb this guard names, and
+    // all of them deny because the FILE decides.
+    //
+    // `bash_payload_at` interpolates the command into JSON without escaping, so
+    // every row here is spelled without a double quote. The double-quoted
+    // spellings (`echo "$(cat .env)"`, `php -r 'readfile(".env");'`) live in
+    // this module's unit corpus, `BYPASS_CORPUS`.
+    let (_dir, repo) = main_checkout_fixture();
+    for command in [
+        "echo $(cat .env)",
+        "X=$(cat .env)",
+        "dd if=.env of=/dev/stdout",
+        "tar cf - .env",
+        "php -r 'readfile(.env);'",
+        "deno eval 'Deno.readTextFileSync(.env)'",
+        "perl -ne 'print' .env",
+        "xxd .env",
+        "base64 .env",
+        "strings .env",
+        "cp .env /tmp/x",
+        "mv .env x",
+        "grep -r SECRET .env",
+        "cat id_rsa",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert_denied(&stdout);
+        assert!(
+            stdout.contains("#7266"),
+            "`{command}` must cite the issue: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_allows_the_safe_handling_verbs_on_a_secret_file() {
+    // The escape the deny needs to stay usable: an agent must still see that a
+    // secret file exists, stage it, and delete it. Every other verb denies, so
+    // this arm is what keeps the rule from being routed around.
+    let (_dir, repo) = main_checkout_fixture();
+    for command in [
+        "ls -la .env",
+        "stat .env",
+        "rm .env.bak",
+        "test -f .env",
+        "file .env",
+        "git add .env.example",
+        "git status",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert!(
+            stdout.trim().is_empty(),
+            "`{command}` must be allowed: {stdout}"
+        );
+    }
+    // The allowlist is a claim about the program, and a nested command voids it.
+    let stdout = run_pm_guard_at(
+        &bash_payload_at("ls $(cat .env)", &repo, ""),
+        UNREACHABLE_DAEMON,
+        &repo,
+    );
+    assert_denied(&stdout);
+    assert!(stdout.contains("#7266"), "must cite the issue: {stdout}");
+}
+
+#[test]
+fn pm_guard_denies_a_glob_or_quote_join_that_names_a_secret() {
+    // #7266 round 6, critic CRITICAL 1 and 2, through the real binary. Every
+    // one of these ALLOWED on the round-5 binary (71ad20438): the word scan cut
+    // at `*`, `?`, `[` and `]`, and it read raw text even when the segment
+    // lexed, so a wildcard or a quote join hid the name from it.
+    let (_dir, repo) = main_checkout_fixture();
+    for command in [
+        "cat .en?",
+        "cat .e*",
+        "cat ./.*",
+        "cat id_rs?",
+        "cat *.p?m",
+        "cat id_[r]sa",
+        "cat ./.*rc",
+        "sed -n '1,5p' terraform.tfvar?",
+        "cat '.en''v'",
+        "cat 'terraform'.tfvars",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert_denied(&stdout);
+        assert!(
+            stdout.contains("#7266"),
+            "`{command}` must cite the issue: {stdout}"
+        );
+    }
+    // Keeping the glob bytes in the word must not tax ordinary globbing.
+    for command in [
+        "cat *.toml",
+        "ls *.json",
+        "rg foo src/*.rs",
+        "ls -la target/*",
+        "cat ~/.bashrc",
+        "ls file?.txt",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert!(
+            stdout.trim().is_empty(),
+            "`{command}` must be allowed: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_denies_git_add_in_a_content_revealing_mode() {
+    // #7266 round 6, critic CRITICAL 3: `SAFE_GIT_SUBCOMMANDS` granted `add` on
+    // the subcommand name alone, so `git add -p .env` walked the file's diff
+    // into the transcript and ALLOWED on the round-5 binary.
+    let (_dir, repo) = main_checkout_fixture();
+    for command in [
+        "git add -p .env",
+        "git add --patch .env",
+        "git add -i .env",
+        "git add --interactive .env",
+        "git add -e .env",
+        "git add --edit terraform.tfvars",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert_denied(&stdout);
+        assert!(
+            stdout.contains("#7266"),
+            "`{command}` must cite the issue: {stdout}"
+        );
+    }
+    // Staging without printing keeps the grant.
+    for command in ["git add .env.example", "git add -A .env", "git add -u .env"] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert!(
+            stdout.trim().is_empty(),
+            "`{command}` must be allowed: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_allows_a_secret_name_as_a_search_pattern_and_a_public_key() {
+    // #7266 round 6, the two HIGH false-positive findings, through the real
+    // binary. Both DENIED on the round-5 binary (71ad20438): searching the tree
+    // FOR the name prints no byte of the file, and an SSH public key is
+    // published by definition.
+    let (_dir, repo) = main_checkout_fixture();
+    for command in [
+        "grep -rn terraform.tfvars docs/",
+        "rg id_rsa --type md",
+        r"grep -rn '\\.env' docs/",
+        r"grep -rn '\\.pem' README.md",
+        "cat id_rsa.pub",
+        "cat ~/.ssh/id_rsa.pub",
+        "ssh-copy-id -i id_rsa.pub host",
+        "cat id_ed25519.pub",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert!(
+            stdout.trim().is_empty(),
+            "`{command}` must be allowed: {stdout}"
+        );
+    }
+    let pubkey = format!(r#"{{"file_path":"{}"}}"#, repo.join("id_rsa.pub").display());
+    let stdout = run_pm_guard_at(
+        &tool_payload_at("Read", &pubkey, &repo, ""),
+        UNREACHABLE_DAEMON,
+        &repo,
+    );
+    assert!(
+        stdout.trim().is_empty(),
+        "a public key must be readable: {stdout}"
+    );
+    // The operand arm and the private half still deny.
+    for command in [
+        "grep -r SECRET .env",
+        "rg . .env",
+        "git grep SECRET .env",
+        "cat id_rsa",
+        "cat id_rsa_credentials.pub",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert_denied(&stdout);
+        assert!(
+            stdout.contains("#7266"),
+            "`{command}` must cite the issue: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_reads_a_parameter_expansion_as_its_operand() {
+    // #7266 round 7, critic CRITICAL 1, through the real binary. Every ALLOW
+    // row here DENIED on the round-6 binary (f40805985) with no secret named:
+    // the word scan keeps `{` and `}` for brace alternation but cuts at the
+    // expansion operators `:`, `#` and `%`, so `${OUT_DIR:-build}` left an
+    // unmatched `{OUT_DIR` that fails closed. `cat ${F-.env}` went the other
+    // way and ALLOWED, because the bare `-` operator glued onto the operand.
+    let (_dir, repo) = main_checkout_fixture();
+    for command in [
+        "mkdir -p ${OUT_DIR:-build}",
+        "echo ${1:-default}",
+        "cp ${SRC%.rs}.bak x",
+        "echo ${PATH#/usr}",
+        "echo ${HOME##*/}",
+        "echo ${LINE:2:3}",
+        "echo ${FILE//old/new}",
+        "echo ${VAR}",
+        "echo $VAR",
+        // #7266 round 8: the splice glues the operand to its neighbours, so an
+        // ordinary path built out of one must still allow, and so must the
+        // expansion shapes the round-7 critic verified by hand.
+        "mkdir -p ${OUT_DIR:-build}/logs",
+        "cat ${DIR:-src}/main.rs",
+        "cat pre${MID:-fix}post",
+        "echo ${#VAR}",
+        "echo ${!VAR}",
+        "echo ${@:2}",
+        "echo ${VAR^^}",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert!(
+            stdout.trim().is_empty(),
+            "`{command}` must be allowed: {stdout}"
+        );
+    }
+    // The operand is still SCANNED, not skipped — a fail-open on the span
+    // would reopen the shape the rule exists for.
+    for command in [
+        "cat ${F:-.env}",
+        "cat ${F:=id_rsa}",
+        "cat ${F:+server.pem}",
+        "cat ${F-.env}",
+        "cat ${F#*/}.env",
+        "rm ${SECRET:-.env}",
+        // #7266 round 8, critic CRITICAL: the name SPLIT across a span
+        // boundary. Round 7 separated the operand from the literal bytes
+        // beside it, so each of these ALLOWED on the round-7 binary
+        // (5b7f629e4) — the operand and the literal were different words and
+        // neither was the file. Measured live against that binary.
+        "cat ${F:-.en}v",
+        "cat ${F:-.e}${G:-nv}",
+        "cat ${F:-id_rs}a",
+        "cat ${F:-id_}rsa",
+        "cat id_${F:-rsa}",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert_denied(&stdout);
+        assert!(
+            stdout.contains("#7266"),
+            "`{command}` must cite the issue: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_deny_text_advertises_no_flag_escape() {
+    // #7266 round 6, critic HIGH + MEDIUM: round 5's reason offered
+    // `--env-file`/`-var-file`/`-state` and no such escape was ever
+    // implemented. Round 6 removed the claim rather than build it.
+    let (_dir, repo) = main_checkout_fixture();
+    let stdout = run_pm_guard_at(
+        &bash_payload_at("cat .env", &repo, ""),
+        UNREACHABLE_DAEMON,
+        &repo,
+    );
+    assert_denied(&stdout);
+    for phantom in ["--env-file", "-var-file", "-state"] {
+        assert!(
+            !stdout.contains(phantom),
+            "the deny text still advertises `{phantom}`: {stdout}"
+        );
+    }
+    assert!(
+        stdout.contains("no flag that buys an exception"),
+        "{stdout}"
+    );
 }
 
 #[test]

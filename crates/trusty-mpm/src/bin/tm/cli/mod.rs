@@ -1584,9 +1584,14 @@ pub struct DoctorFlags {
     /// carrying tm hook entries, a repairable skill drift — all `Warn`,
     /// none actionable without a separate command the operator had to know
     /// existed. This runs the repairs whose target is something tm itself
-    /// wrote: the skill redeploy (`skill_staleness`), the project hook
+    /// wrote: the skill redeploy (`skill_staleness`), the build-tree
+    /// repoint (`hooks_build_tree_binary`, #7262), the project hook
     /// cleanup (`hooks_contamination`), and the push-guard retrofit
     /// (`push_guard`).
+    /// The repoint is the one repair that is MACHINE-WIDE rather than
+    /// scoped to this project: the corruption is written by whichever
+    /// build tree ran last, wherever that session was pointed, so a
+    /// cwd-scoped pass leaves the other projects broken (#7262).
     /// What: on its own it CHANGES NOTHING — it prints, per item and with
     /// the path, exactly what it would do. `--yes` performs the writes.
     /// It never deletes: `legacy_sources` findings under `~/.claude` are

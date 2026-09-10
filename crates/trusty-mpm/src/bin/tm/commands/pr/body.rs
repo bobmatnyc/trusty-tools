@@ -19,7 +19,8 @@
 //! are string-shaped facts about a file, so both are checkable.
 //!
 //! What: [`Field`] names the seven, [`validate`] reports which are missing or
-//! empty and whether the footer is the last non-blank line, and
+//! empty and whether the body ends with the attribution block — the footer,
+//! optionally followed by the harness's session link (#7297) — and
 //! [`apply_issue_link`] resolves this repo's `Refs #N` / `Closes #N` rule
 //! (root `CLAUDE.md`, "Key Conventions": fix PRs use `Refs #N`, **never**
 //! `Closes #N`).
@@ -120,7 +121,7 @@ pub(crate) struct BodyReport {
     pub(crate) missing: Vec<Field>,
     /// Fields whose heading exists but whose section body is blank.
     pub(crate) empty: Vec<Field>,
-    /// Whether [`ATTRIBUTION_FOOTER`] is the last non-blank line.
+    /// Whether the body ends with the attribution block — see [`footer_closes`].
     pub(crate) footer_ok: bool,
     /// Fields that were present AND non-empty, in contract order.
     pub(crate) supplied: Vec<Field>,
@@ -146,7 +147,8 @@ impl BodyReport {
         }
         if !self.footer_ok {
             out.push(format!(
-                "attribution footer is not the last non-blank line (expected `{ATTRIBUTION_FOOTER}`)"
+                "body does not end with the attribution footer `{ATTRIBUTION_FOOTER}` \
+                 (a single trailing `{SESSION_LINK_PREFIX}…` line after it is allowed)"
             ));
         }
         out
@@ -187,12 +189,16 @@ fn heading_text(line: &str) -> Option<String> {
 /// What: walks the body once. Each ATX heading claims the FIRST contract field
 /// it matches that is not already claimed, so `## Docs / changelog` cannot
 /// also satisfy `## Review`. A field's section is its lines up to the next
-/// heading; the attribution footer line never counts as section content, so a
-/// section holding only the footer is reported empty. The footer must be the
-/// last non-blank line of the file.
+/// heading; no line of the attribution block — the footer, and the session link
+/// the harness pairs with it — counts as section content, so a section holding
+/// only those is reported empty. The footer must be the last non-blank line,
+/// or the last one above a single trailing session link (#7297).
 /// Test: `body_accepts_a_complete_body`, `body_reports_each_missing_field`,
 /// `body_reports_empty_section`, `footer_must_be_last_line`,
-/// `footer_alone_does_not_fill_a_section`.
+/// `footer_alone_does_not_fill_a_section`,
+/// `footer_accepts_the_trailing_session_link`,
+/// `footer_accepts_a_session_link_before_the_footer`,
+/// `footer_rejects_a_body_with_no_attribution_line`.
 pub(crate) fn validate(body: &str) -> BodyReport {
     // (field, heading seen, section held content) — one row per contract field.
     let mut seen: Vec<(Field, bool, bool)> = FIELDS.iter().map(|f| (*f, false, false)).collect();
@@ -209,7 +215,9 @@ pub(crate) fn validate(body: &str) -> BodyReport {
             continue;
         }
         let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed == ATTRIBUTION_FOOTER {
+        // #7297: the session link is part of the attribution block, so like the
+        // footer it can never be what fills a section.
+        if trimmed.is_empty() || trimmed == ATTRIBUTION_FOOTER || is_session_link(trimmed) {
             continue;
         }
         if let Some(idx) = current {
@@ -217,11 +225,7 @@ pub(crate) fn validate(body: &str) -> BodyReport {
         }
     }
 
-    let footer_ok = body
-        .lines()
-        .rev()
-        .find(|l| !l.trim().is_empty())
-        .is_some_and(|l| l.trim() == ATTRIBUTION_FOOTER);
+    let footer_ok = footer_closes(body);
 
     let mut report = BodyReport {
         footer_ok,
@@ -235,6 +239,74 @@ pub(crate) fn validate(body: &str) -> BodyReport {
         }
     }
     report
+}
+
+/// The Claude Code session link the harness pairs with the footer.
+///
+/// Why (#7297): Claude Code's provisioned attribution instructs a session to
+/// end a PR body with the footer, a blank line, then this link. The validator
+/// required the footer to be the LAST non-blank line, so a session that
+/// followed its own instructions could not open a PR with `tm pr open` and fell
+/// back to `gh pr create` — which skips the seven-field gate entirely.
+/// What: the URL prefix, matched with or without the `Claude-Session:` label
+/// the commit-message form of the same block uses.
+/// Test: `footer_accepts_the_trailing_session_link`,
+/// `footer_accepts_a_session_link_before_the_footer`.
+const SESSION_LINK_PREFIX: &str = "https://claude.ai/code/session_";
+
+/// Label the commit-message form of the session line carries.
+const SESSION_LINE_LABEL: &str = "Claude-Session:";
+
+/// Is `line` a session link belonging to the attribution block?
+///
+/// Why: see [`SESSION_LINK_PREFIX`]. A prefix test alone accepted anything that
+/// merely STARTED with the URL, so a line of prose trailing the link — or an
+/// entire sentence after it — passed as attribution and could close a body or
+/// be skipped as section content.
+/// What: the whole line, after an optional [`SESSION_LINE_LABEL`] and the
+/// whitespace behind it, must be the prefix plus a non-empty session id of
+/// ASCII alphanumerics, `_` and `-`. Anything else — an empty id, a space, a
+/// trailing word, punctuation — is not a session link.
+/// Test: `footer_accepts_the_trailing_session_link`,
+/// `footer_accepts_a_session_link_before_the_footer`,
+/// `footer_rejects_a_session_link_with_trailing_junk`.
+fn is_session_link(line: &str) -> bool {
+    let text = line.trim();
+    let url = text
+        .strip_prefix(SESSION_LINE_LABEL)
+        .map_or(text, str::trim_start);
+    let Some(id) = url.strip_prefix(SESSION_LINK_PREFIX) else {
+        return false;
+    };
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Does `body` end with the attribution block?
+///
+/// Why: the block is the footer, optionally followed by the session link — both
+/// orderings are in live use, because agents blocked by the old rule moved the
+/// link ABOVE the footer to get a PR open (#7297). Accepting both keeps those
+/// bodies valid while letting a session follow its own attribution instruction.
+/// What: true when the last non-blank line is [`ATTRIBUTION_FOOTER`], or when it
+/// is a single session link whose preceding non-blank line is that footer. A
+/// body with no footer at all is false, whatever else it ends with.
+/// Test: `footer_must_be_last_line`, `footer_accepts_the_trailing_session_link`,
+/// `footer_accepts_a_session_link_before_the_footer`,
+/// `footer_rejects_a_body_with_no_attribution_line`,
+/// `footer_rejects_a_session_link_with_trailing_junk`,
+/// `footer_rejects_two_stacked_session_links`.
+fn footer_closes(body: &str) -> bool {
+    let mut tail = body.lines().rev().filter(|l| !l.trim().is_empty());
+    match tail.next() {
+        Some(last) if last.trim() == ATTRIBUTION_FOOTER => true,
+        Some(last) if is_session_link(last) => {
+            tail.next().is_some_and(|l| l.trim() == ATTRIBUTION_FOOTER)
+        }
+        _ => false,
+    }
 }
 
 /// How an issue reference must appear in the body.
@@ -281,7 +353,8 @@ impl IssueLink {
 /// `issue_link_rejects_a_closing_keyword_outside_field_one`,
 /// `issue_link_rejects_a_negated_closing_keyword`,
 /// `issue_link_allows_prose_that_only_looks_like_a_keyword`,
-/// `issue_link_without_issue_leaves_body_alone`.
+/// `issue_link_without_issue_leaves_body_alone`,
+/// `issue_link_lands_above_a_footer_a_session_link_trails`.
 pub(crate) fn apply_issue_link(
     body: &str,
     issue: Option<u64>,

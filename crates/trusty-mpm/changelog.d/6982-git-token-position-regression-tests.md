@@ -1,3 +1,0 @@
-Fixed
-
-- Regression coverage pins that the pm-guard Bash classifier matches `git` in command position only (#6982): a `for` loop over `crates/trusty-git-analytics/**`, the words `digit`/`legit`/`gitignore`, a `--git-dir` flag, and a here-document body naming `git apply` are all allowed, while a real `git apply` after `&&`, `;`, `|`, `||` or a bare `&` still denies. The false denials reported in #6982 come from the Claude Code harness's own worktree-isolation classifier, which this crate does not ship; the guard here already resolved the program's basename as a token and framed here-document bodies (#6946), and these tests keep it that way.

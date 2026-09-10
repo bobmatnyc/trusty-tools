@@ -34,3 +34,46 @@ pub mod size_index;
 // tool is the only consumer.
 pub(crate) mod survey;
 pub(crate) mod survey_run;
+
+/// Render a byte count the way an operator reads a disk figure.
+///
+/// Why: "1180591620717411303424" is not an early warning. The 1.1 TiB in the
+/// 2026-07-21 post-mortem is only legible in binary units. It lives here, on
+/// the module that owns disk accounting, rather than in
+/// [`crate::daemon::doctor`]'s private `doctor_worktree_disk` submodule where
+/// it started (#7313): `tm
+/// session disk` renders the same figures from the `tm` binary, which is a
+/// separate crate from the library and so cannot reach a private daemon
+/// helper. One formatter, so the doctor row and the CLI never disagree about
+/// what 1.1 TiB looks like.
+/// What: binary units (1024-based), one decimal place above KiB.
+/// Test: `human_bytes_renders_binary_units`.
+pub fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = n as f64;
+    let mut unit = 0usize;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{n} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::human_bytes;
+
+    #[test]
+    fn human_bytes_renders_binary_units() {
+        assert_eq!(human_bytes(512), "512 B");
+        assert_eq!(human_bytes(1024), "1.0 KiB");
+        assert_eq!(human_bytes(1024 * 1024 * 3), "3.0 MiB");
+        // The figure from the 2026-07-21 post-mortem must render as terabytes,
+        // not as an unreadable integer.
+        assert_eq!(human_bytes(1_209_462_790_553), "1.1 TiB");
+    }
+}

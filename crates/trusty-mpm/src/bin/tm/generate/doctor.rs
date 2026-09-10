@@ -164,7 +164,7 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
     ),
     (
         "hooks_build_tree_binary",
-        "Warns when a hook or `statusLine` command in a project's `.claude/settings*.json` runs a binary that lives in a Cargo build tree, naming the file and each offending command. Such a command stops working the moment the artifact is rebuilt away, which silently disables PM-guard enforcement; the hook entries are removed by `tm doctor --fix --yes` / `tm hooks clean` and re-rendered from the installed binary on the next managed launch (issue #7262).",
+        "Warns when a hook or `statusLine` command in a project's `.claude/settings*.json` runs a binary that lives in a Cargo build tree, naming the file and each offending command. Such a command stops working the moment the artifact is rebuilt away, which silently disables PM-guard enforcement. `tm doctor --fix` previews repointing every one of them at the installed `tm` binary — machine-wide, not just this project — and `--yes` applies it, taking a timestamped snapshot of each file first; `statusLine.command` is repaired by the same pass (issue #7262).",
     ),
     (
         "tcc_taint",

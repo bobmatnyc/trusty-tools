@@ -699,6 +699,74 @@ fn cli_reconcile_worktrees_takes_no_destructive_flag() {
     }
 }
 
+/// #7313: `disk` parses bare, with a session argument, and with `--json`.
+#[test]
+fn cli_parses_session_disk() {
+    let bare = Cli::try_parse_from(["trusty-mpm", "session", "disk"]).unwrap();
+    match bare.command.unwrap() {
+        Command::Session {
+            action:
+                SessionAction::Disk {
+                    id_or_name,
+                    json,
+                    budget_seconds,
+                },
+        } => {
+            assert_eq!(
+                id_or_name, None,
+                "no argument means the per-session listing"
+            );
+            assert!(!json, "the default must be the table, not JSON");
+            assert_eq!(
+                budget_seconds, None,
+                "an unset budget defers to the daemon's own clamp"
+            );
+        }
+        other => panic!("expected session disk, got {other:?}"),
+    }
+    let scoped = Cli::try_parse_from([
+        "trusty-mpm",
+        "session",
+        "disk",
+        "trusty-tools-95",
+        "--json",
+        "--budget-seconds",
+        "20",
+    ])
+    .unwrap();
+    match scoped.command.unwrap() {
+        Command::Session {
+            action:
+                SessionAction::Disk {
+                    id_or_name,
+                    json,
+                    budget_seconds,
+                },
+        } => {
+            assert_eq!(id_or_name.as_deref(), Some("trusty-tools-95"));
+            assert!(json);
+            assert_eq!(budget_seconds, Some(20));
+        }
+        other => panic!("expected session disk, got {other:?}"),
+    }
+}
+
+/// #7313: `disk` has NO destructive flag, and gains one only over this test.
+///
+/// Why: it reports what is on disk beside `prune-worktrees`, which deletes.
+/// The way a reporting verb stops being report-only is that someone adds a
+/// flag to it; clap refusing these at parse time is the mechanical form of
+/// "there is no destructive form of this command".
+#[test]
+fn cli_session_disk_takes_no_destructive_flag() {
+    for flag in ["--force", "--discard-dirty", "--dry-run"] {
+        assert!(
+            Cli::try_parse_from(["trusty-mpm", "session", "disk", flag]).is_err(),
+            "`session disk {flag}` must not parse — this verb writes nothing"
+        );
+    }
+}
+
 /// #6497: the adoption verb parses a path and the session taking it over.
 #[test]
 fn cli_parses_session_adopt_worktree() {

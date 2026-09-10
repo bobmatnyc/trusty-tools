@@ -1,4 +1,0 @@
-Removed
-
-- **trusty-mpm no longer clones a repository or creates a worktree for a session** (ADR-0055, [#6000](https://github.com/bobmatnyc/trusty-tools/issues/6000)). `GitBackend::ensure_base_checkout` and `GitBackend::worktree_add`, their `RealGitBackend`/`FakeGitBackend` implementations, `WorkspaceProvisioner` (`provision`/`provision_in`/`PreparedWorkspace`), the `base_lock` advisory-lock module, the `identity_seed` prompt-fact seeder that only that path called, and the `spawn_managed_cloned` spawn branch are all deleted. The `GitBackend` seam survives for `content::catalog_sync`, which clones and refreshes the framework catalog through it. Session worktrees are created by `daemon::managed_routes::inproject`, which never used the removed methods and is unchanged.
-- `ProvisionError::PrepareSession` is gone with the `prepare_session` step it reported; the enum is now `#[non_exhaustive]`.

@@ -1,6 +1,0 @@
-Fixed
-
-- `session_context_pause` now opens its snapshot PR with an explicit `--head <branch>`, so the publish no longer depends on which branch the project checkout happens to be on. The chore branch is built with git plumbing and never checked out, so `gh pr create` read the checkout's own branch and aborted with "you must first push the current branch to a remote, or use the --head flag", stranding the commit locally.
-- A pause snapshot publishes from any checkout that has a branch, not only from the project's default branch. The commit is plumbing against `origin/<default>` and the PR names its own head, so the checkout's branch reaches neither. A detached HEAD is still refused, because `rev-parse --abbrev-ref HEAD` names no branch there.
-- `tm pr open` takes a `--head <branch>` flag, and derives the component-label diff from that branch rather than the checkout's `HEAD`.
-- `tm pr open --head` now requires `--docs-only` and exits 2 without calling `gh` otherwise. `scripts/check_changelog_fragment.sh` accepts only `--base`, so the fragment gate could diff nothing but the CHECKOUT's `HEAD` — a source PR opened with `--head` from another branch cleared the gate against a diff it did not contain.

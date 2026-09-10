@@ -37,7 +37,11 @@ name = "trusty-mpm"
 # 1.5.23 (owner-authorized reinstall, refs #7311 #7314): patch,
 # version-only — 1.5.22 is already published and this bump exists solely so
 # `tm --version` identifies the reinstalled build (rtk pipe-mode fix).
-version = "1.5.23"
+# 1.5.24 (owner-authorized reinstall, refs #7311 #7313 #7312 #7278 #7282
+# #7275 #7237 #7325 #7319): patch, version-only — 1.5.23 is already
+# published and this bump exists solely so `tm --version` identifies the
+# reinstalled build (statusline savings percentage format).
+version = "1.5.26"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

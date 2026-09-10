@@ -286,6 +286,90 @@ fn footer_alone_does_not_fill_a_section() {
     assert_eq!(report.empty, vec![Field::Review], "{report:?}");
 }
 
+/// The session link Claude Code appends after the footer in a PR body.
+const SESSION_LINK: &str = "https://claude.ai/code/session_0194bkFi1G1Wv3kh1bVbMw4q";
+
+#[test]
+fn footer_accepts_the_trailing_session_link() {
+    // #7297: this IS the shape Claude Code's provisioned attribution tells a
+    // session to write — footer, blank line, session link. Rejecting it sent
+    // version-control agents to `gh pr create`, skipping this gate entirely.
+    let body = format!("{}\n{SESSION_LINK}\n", full_body());
+    let report = body::validate(&body);
+    assert!(report.footer_ok, "{report:?}");
+    assert!(report.failures().is_empty(), "{report:?}");
+
+    // The labelled form the commit message uses is the same block.
+    let labelled = format!("{}\nClaude-Session: {SESSION_LINK}\n", full_body());
+    assert!(body::validate(&labelled).footer_ok);
+}
+
+#[test]
+fn footer_accepts_a_session_link_before_the_footer() {
+    // The workaround shape agents adopted while #7297 stood. Bodies already
+    // written this way must keep passing.
+    let mut s = String::new();
+    for f in FIELDS {
+        s.push_str(&format!("## {}\n\nsomething real.\n\n", f.heading()));
+    }
+    s.push_str(&format!("{SESSION_LINK}\n\n{ATTRIBUTION_FOOTER}\n"));
+    let report = body::validate(&s);
+    assert!(report.footer_ok, "{report:?}");
+    assert!(report.failures().is_empty(), "{report:?}");
+}
+
+#[test]
+fn footer_rejects_a_body_with_no_attribution_line() {
+    // A session link alone is not attribution — the footer is still required.
+    let body = full_body().replace(ATTRIBUTION_FOOTER, SESSION_LINK);
+    assert!(!body.contains(ATTRIBUTION_FOOTER));
+    let report = body::validate(&body);
+    assert!(!report.footer_ok, "{report:?}");
+    assert!(
+        report
+            .failures()
+            .iter()
+            .any(|f| f.contains("attribution footer")),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn footer_rejects_a_session_link_with_trailing_junk() {
+    // `is_session_link` tested only the URL PREFIX, so a line that merely
+    // STARTED with the link — link plus a sentence — closed the body as
+    // attribution. The session id must be the whole rest of the line.
+    let body = format!("{}\n{SESSION_LINK} some trailing junk\n", full_body());
+    assert!(!body::validate(&body).footer_ok, "{body}");
+
+    // The same holds for the labelled form.
+    let labelled = format!(
+        "{}\nClaude-Session: {SESSION_LINK} some trailing junk\n",
+        full_body()
+    );
+    assert!(!body::validate(&labelled).footer_ok, "{labelled}");
+
+    // A bare prefix with no session id is not a link either.
+    let bare = format!("{}\nhttps://claude.ai/code/session_\n", full_body());
+    assert!(!body::validate(&bare).footer_ok, "{bare}");
+}
+
+#[test]
+fn footer_rejects_two_stacked_session_links() {
+    // The block is the footer plus AT MOST ONE session link. Two stacked links
+    // leave a link, not the footer, as the line before the last one.
+    let body = format!("{}\n{SESSION_LINK}\n\n{SESSION_LINK}\n", full_body());
+    let report = body::validate(&body);
+    assert!(!report.footer_ok, "{report:?}");
+    assert!(
+        report
+            .failures()
+            .iter()
+            .any(|f| f.contains("attribution footer")),
+        "{report:?}"
+    );
+}
+
 // ── Refs vs Closes ───────────────────────────────────────────────────────
 
 #[test]
@@ -318,6 +402,30 @@ fn issue_link_is_inserted_above_the_footer() {
     assert!(refs_at < footer_at, "{out}");
     // Still the last non-blank line.
     assert!(body::validate(&out).footer_ok);
+}
+
+#[test]
+fn issue_link_lands_above_a_footer_a_session_link_trails() {
+    // #7297 made the session link a legal LAST line, and the insertion point is
+    // the footer rather than the end of the body — so the issue line must still
+    // land above the footer and leave the link closing the body.
+    let body = format!("{}\n{SESSION_LINK}\n", full_body());
+    let out =
+        body::apply_issue_link(&body, Some(7297), IssueLink::Refs).expect("refs link applies");
+
+    let at = |needle: &str| {
+        out.lines()
+            .position(|l| l.trim() == needle)
+            .unwrap_or_else(|| panic!("`{needle}` missing from:\n{out}"))
+    };
+    assert!(at("Refs #7297") < at(ATTRIBUTION_FOOTER), "{out}");
+    assert!(at(ATTRIBUTION_FOOTER) < at(SESSION_LINK), "{out}");
+    assert_eq!(
+        out.lines().rev().find(|l| !l.trim().is_empty()),
+        Some(SESSION_LINK),
+        "{out}"
+    );
+    assert!(body::validate(&out).footer_ok, "{out}");
 }
 
 #[test]

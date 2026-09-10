@@ -1,3 +1,0 @@
-Changed
-
-- Bare `tm` now opens the same full-screen session TUI `tm ls` opens, through the same gate rather than a second copy of it: two real TTYs, a `TERM` that can address the cursor, and at least one live session. `guided::try_show_picker` calls the new `session_ls_connector::run_bare_tm_surface` where it called `run_tty_picker` directly, so a gate added to `should_show_picker` reaches both surfaces at once. The numbered picker stays the fallback for the two cases the TUI cannot serve — an empty fleet, where launching a new session is the point, and a terminal that cannot enter raw mode — and inside a tm-managed pane (`TM_MANAGED_SESSION_ID` set), where bare `tm` remains that pane's relaunch verb and must not take the pane over (#7224).
