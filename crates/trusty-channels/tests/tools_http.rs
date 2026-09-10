@@ -1,6 +1,6 @@
 //! Hermetic tests for the send + read Slack tool handlers (issue #2639).
 //!
-//! Why: the send/read/list handlers must POST the correct Slack method, shape a
+//! Why: the send/read/list handlers must call the correct Slack method, shape a
 //! compact result, and — critically — markup-escape untrusted inbound text so a
 //! hostile message cannot inject a `<!channel>` broadcast span into the
 //! model-facing output. These behaviours need coverage that runs in CI with no
@@ -35,9 +35,13 @@ fn client_with_user_for(server: &MockServer) -> BaseClient {
     .expect("construct client")
 }
 
-/// Mount a single POST route returning a 200 + JSON body.
+/// Mount the method's route returning a 200 + JSON body.
 async fn mount_ok(server: &MockServer, method_path: &str, body: serde_json::Value) {
-    Mock::given(method("POST"))
+    let verb = match method_path {
+        "conversations.list" | "users.list" => "GET",
+        _ => "POST",
+    };
+    Mock::given(method(verb))
         .and(path(format!("/{method_path}")))
         .respond_with(ResponseTemplate::new(200).set_body_json(body))
         .mount(server)
