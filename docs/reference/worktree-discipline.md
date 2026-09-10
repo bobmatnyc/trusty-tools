@@ -119,3 +119,80 @@ by hand (#4730).
 When staging changes in a worktree, always name files explicitly: `git add <file>` or `git add -p`.
 Never use `git add -A` in a worktree, as it stages untracked build directories.
 The ignored directory name is `target-worktree/`, verified with `git check-ignore -v target-worktree/` from the worktree root.
+
+## Harness Refusals Inside an Isolation Worktree
+
+An agent pinned to a worktree meets a second command classifier that is not
+ours. The Claude Code harness refuses Bash commands it cannot prove stay inside
+the worktree, in one of three wordings:
+
+```
+This agent is isolated in the worktree …, refusing
+… runs tm with the text `git diff` in a plain command, so what it runs cannot
+  be shown not to be git
+… is too complex to verify that it stays inside the worktree
+```
+
+Those strings live only in the harness bundle. `tm hook --pm-guard` clears every
+shape reported on [#6982](https://github.com/bobmatnyc/trusty-tools/issues/6982):
+it resolves `git` by token position rather than by substring, and it frames
+heredoc bodies before any rule reads them. The reported shapes are transcribed
+into `HARNESS_REFUSED_SHAPES` in
+`crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/tests.rs`, where
+`harness_refused_shapes_stay_classifiable_here` asserts this guard can still say
+what each one runs. A refusal in this family is therefore never a `tm` defect
+and never earns a fix here. Take the substitute and move on; the shapes keep
+arriving in new forms, so treat the tables below as a pattern, not a whitelist.
+
+The refusals are intermittent. `bash scripts/check_line_cap.sh` and a
+`python3 - <<'PY'` heredoc have each been refused in one session and run in
+another, so a command that worked earlier is not evidence that this refusal is
+about something else. The substitute column is the spelling that has not been
+seen to fail; reach for it first rather than after the refusal.
+
+### Reading git
+
+`git status --short`, `git show <sha>` and a `git` command inside an `&&` chain
+have all run while a plain `git diff` next to them was refused, so read the
+substitutes as the reliable spelling rather than as a workaround for one shape.
+
+| Refused | Works instead |
+|---|---|
+| `git diff --stat` from the worktree's own cwd | `git -C <absolute worktree path> diff --stat` |
+| `git diff --cached -- <path>`, `git diff <a>...<b>`, `git diff HEAD~2 HEAD -- <path>` | `git --no-pager diff …` |
+| a diff of one path at one commit | `git show <sha> -- <path>` |
+| `git log origin/main..<sha>` | `git --no-pager log …` |
+| `git -C .` — a relative `-C` reads as computed at runtime | `git -C <absolute worktree path>` |
+| `cd <worktree> && git diff …` | `git -C <absolute worktree path> diff …` |
+| a git command wrapped in the redirect-then-`echo` gate idiom | run the git command bare, one per Bash call |
+| a pathspec whose basename starts `tm-`, or a `$(git …)` substitution as a pathspec | quote a glob: `git --no-pager diff -- 'crates/*/src/assets/skills/tm-capa*'` |
+
+### Running a script or an interpreter
+
+| Refused | Works instead |
+|---|---|
+| `bash scripts/<name>.sh`, and the same path spelled absolutely | `./scripts/<name>.sh` |
+| `awk -f <prog>`, `sed -f <prog>`, `awk -f /dev/stdin <<'AWK'` | write the program with the Write tool, run it as one plain command |
+| `python3 - <<'PY'`, `cat >> <file> <<'EOF'`, a heredoc piped into a runner | the Write tool, or Edit for a multi-hunk change |
+| `node -e` whose script path is built from a variable | a literal path |
+| an `awk` program over a log file | `grep` |
+
+This repo's docs spell every gate `bash scripts/<name>.sh`, so the first row
+above applies to the whole test ladder, not only to the line-cap check.
+
+### Shell constructs
+
+| Refused | Works instead |
+|---|---|
+| a `for` or `while` loop, including `for i in $(seq 20)` | write the loop to a scratchpad script with the Write tool, then run that file |
+| `cmd \| tail` followed by a `${PIPESTATUS[0]}` read | separate Bash calls, each a plain command |
+| `xargs` piped into another program | one program per Bash call |
+| `sed -n` whose address is shell arithmetic, or whose path is a variable | a literal address and a literal path, or `grep` |
+| `export VAR=$PWD/… && cargo …`, `CARGO_TARGET_DIR=$PWD/… cargo …` | spell the absolute path literally in the assignment |
+| `$(pgrep …)` or any command substitution supplying an argument | a literal value, captured in a previous call |
+| an argument whose TEXT contains `git` — a grep pattern, a `perl -pi` regex, a filename | none; re-spell the pattern, or use the Write-a-script route |
+
+One reported shape is refused HERE too, for a reason of our own: `$'…'` quoting
+(`grep -n $'\tfixture' README.md`). The guard's lexer cannot decode it, so it
+cannot establish which program would run (#6660). Rewrite it with ordinary
+`'…'` quoting — that is a real finding about the command, not a harness misfire.

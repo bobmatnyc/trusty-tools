@@ -1881,6 +1881,13 @@ fn git_is_only_a_git_command_in_command_position() {
         // which the quote-aware split must not treat as syntax.
         "echo 'git status'",
         "echo \"cd x && git checkout -- .\"",
+        // #6982 (2026-09-10): an argument whose TEXT contains the letters —
+        // a grep pattern, a perl substitution, and a pgrep pattern inside a
+        // command substitution. All three were refused by the harness with no
+        // git command present anywhere.
+        "grep -n 'git ls-remote' README.md",
+        "perl -pi -e 's/gitlab/github/g' notes.md",
+        "tm wait --for run --pid $(pgrep -f 'git-upload-pack')",
     ] {
         assert!(
             !command_runs_git(command),
@@ -1918,10 +1925,116 @@ fn git_in_command_position_is_still_a_git_command() {
         "/usr/bin/git status",
         // A `-C` naming a path that itself contains the letters.
         "git -C crates/trusty-git-analytics apply p.diff",
+        // #6982 (2026-09-10): the substitutes engineers reached for when the
+        // harness refused a plain `git diff` are still git commands here, so
+        // the rules that matter still see them.
+        "git --no-pager diff --stat",
+        "git -C /repo/.claude/worktrees/agent-x diff --stat",
+        "git show 3350be5 -- crates/trusty-mpm/src/lib.rs",
     ] {
         assert!(
             command_runs_git(command),
             "git is the command word of a segment here: {command}"
         );
     }
+}
+
+/// Every command shape the Claude Code harness refused inside an isolation
+/// worktree, as reported on #6982 between 2026-09-07 and 2026-09-10.
+///
+/// Why: the reports keep arriving in new forms rather than converging, and
+/// each new form draws a fresh "fix the guard" dispatch to this repository.
+/// One table naming the shapes, asserted against the guard that is actually
+/// ours, is what settles that: a row here is evidence that `tm` clears the
+/// shape, so the refusal came from the harness. The catalogue with the working
+/// substitute for each row is `docs/reference/worktree-discipline.md`.
+/// What: the literal commands, transcribed from the issue thread. Interpreter
+/// heredocs carry real newlines because the guard frames heredoc bodies.
+/// Test: `harness_refused_shapes_stay_classifiable_here`.
+const HARNESS_REFUSED_SHAPES: &[&str] = &[
+    // Read-only git, in the argument shapes reported: a three-dot range, a
+    // `--cached` pathspec, a two-commit range, a `..` log range, an explicit
+    // `-C`, the `--no-pager` workaround, a `$(git …)` pathspec, and a git
+    // command inside BASE-AGENT's redirect-then-echo gate idiom.
+    "git diff origin/main...HEAD --stat",
+    "git diff --cached -- crates/trusty-mpm/src/lib.rs",
+    "git diff HEAD~2 HEAD -- crates/trusty-mpm/src/lib.rs",
+    "git log origin/main..3350be5",
+    "git -C . status --short",
+    "git --no-pager diff --stat",
+    "git grep -n fixture -- $(git diff --name-only origin/main...HEAD)",
+    "git commit -F /tmp/msg.txt > /tmp/out.txt 2>&1; echo EXIT=$?",
+    // A repo script invoked through an interpreter, relative and absolute.
+    "bash scripts/check_line_cap.sh",
+    "bash /repo/scripts/check_line_cap.sh",
+    // An interpreter handed a program: as a file, as `-e`, and as a heredoc.
+    "awk -f /tmp/prog.awk /tmp/build.log",
+    "sed -f /tmp/prog.sed notes.md",
+    "node -e 'console.log(1)'",
+    "python3 - <<'PY'\nprint(1)\nPY",
+    "awk -f /dev/stdin <<'AWK'\n{ print }\nAWK",
+    "cat >> crates/trusty-mpm/tests/tools.rs <<'EOF'\nfn x() {}\nEOF",
+    // Shell constructs: loops, a pipeline status read, an xargs pipe, a
+    // variable-built path, an env assignment computed from `$PWD`, a `cd`
+    // prefix, and a command substitution feeding an argument.
+    "for f in crates/trusty-git-analytics/src/collect/jira/*.rs; do printf '%s\\n' \"$f\"; done",
+    "for i in $(seq 20); do cargo test -p trusty-mpm; done",
+    "for n in 102 124; do sed -n \"$((n - 8)),$((n + 8))p\" src/lib.rs; done",
+    "cargo test -p trusty-mpm | tail -5; echo ${PIPESTATUS[0]}",
+    "ls crates | xargs grep -l fixture",
+    "sed -n '/running/,$p' \"$SP/full.txt\"",
+    "export TD=/repo/target-worktree && cargo check -p trusty-mpm",
+    "CARGO_TARGET_DIR=$PWD/target-worktree cargo check -p trusty-mpm",
+    "cd /repo/.claude/worktrees/agent-x && git diff --stat",
+    "S=/repo/fixtures && ./tm hook --pm-guard < $S/p1.json",
+    "tm wait --for run --pid $(pgrep -f cargo)",
+    // An argument whose text merely contains `git`, with no git command.
+    "grep -n 'git ls-remote' README.md",
+    "perl -pi -e 's/gitlab/github/g' notes.md",
+];
+
+/// #6982: the guard can say what each harness-refused shape would run.
+///
+/// Why: the harness refuses these as "too complex to verify that it stays
+/// inside the worktree" and "cannot be shown not to be git" — the same
+/// question [`unclassifiable_command`] answers, from the ABSOLUTE band a
+/// dispatched subagent actually reaches. A `None` here is the whole finding of
+/// this issue in mechanical form: the shape is classifiable, so a further fix
+/// routed to this guard would be routed to the wrong codebase.
+/// What: asserts [`unclassifiable_command`] is `None` for every row of
+/// [`HARNESS_REFUSED_SHAPES`].
+/// Test: itself.
+#[test]
+fn harness_refused_shapes_stay_classifiable_here() {
+    for command in HARNESS_REFUSED_SHAPES {
+        assert_eq!(
+            unclassifiable_command(command),
+            None,
+            "the harness refused this as unverifiable; this guard must still \
+             establish what it runs: {command:?}"
+        );
+    }
+}
+
+/// #6982: `$'…'` is the one reported shape this guard also refuses.
+///
+/// Why: the catalogue above would read as "the harness is wrong about
+/// everything" without this row. `$'…'` quoting is refused here too, for a
+/// reason of our own that predates the issue (#6660): the lexer cannot decode
+/// it, so `sh -c $'git worktree remove x'` reads as `$git` and matches no
+/// rule. An engineer who hits it in a worktree should rewrite the quoting
+/// rather than report it as another harness misfire.
+/// What: asserts the ANSI-C row denies with [`ANSI_C_QUOTING_REASON`] while a
+/// plain-quoted spelling of the same command classifies.
+/// Test: itself.
+#[test]
+fn ansi_c_quoting_is_refused_by_this_guard_too() {
+    assert_eq!(
+        unclassifiable_command(r"grep -n $'\tfixture' README.md"),
+        Some(ANSI_C_QUOTING_REASON)
+    );
+    assert_eq!(
+        unclassifiable_command(r"grep -n '\tfixture' README.md"),
+        None
+    );
 }
