@@ -26,6 +26,17 @@
 //! reading whose ONLY finding is that count defers to [`landed::landed`], which
 //! requires a MERGED pull request matching the tree AND a merge that changes
 //! nothing. Uncommitted or untracked files still refuse outright.
+//!
+//! **That merge test reads a ref this run refreshes itself (#7275 round 4).**
+//! The comparison is against `origin/<base>` in the local ref store and the
+//! only fetch is step 5's, which runs after the worktree step — so the first
+//! cleanup after a merge would compare against a base predating it. [`landed::Merge`]
+//! refreshes that one ref, once per run, before the first comparison.
+//!
+//! **The unsaved-work probe is taken twice (#7275 round 4).** Several `gh` and
+//! `git` round trips separate the first probe from the removal it authorises,
+//! and the claim ended in between is record-only — so [`recheck`] re-reads the
+//! tree immediately before `git worktree remove` and refuses on any difference.
 //! | `local-branch` | `git branch -D` the head branch and each `worktree-agent-*` at the head commit | a delete errors |
 //! | `prune` | `git worktree prune`, then `git fetch --prune origin` | either errors |
 //!
@@ -71,6 +82,7 @@
 pub mod driver;
 mod landed;
 pub mod plan;
+mod recheck;
 pub mod registry;
 pub mod sweep;
 
@@ -204,11 +216,19 @@ pub async fn run<G: Gh, T: Git, C: ClaimEnder>(
         return CleanupReport { pr: req.pr, lines };
     }
 
+    // #7275 round 4: every merge test below compares against `origin/<base>`,
+    // and the run's own fetch is step 5. One `Merge` shared across the steps
+    // refreshes that ref on first use, so the whole run pays one round trip.
+    let merged = MergedPr {
+        merge: landed::Merge::new(&view),
+        view: &view,
+    };
+
     lines.push(step_remote_branch(git, req, &view));
-    step_worktrees(git, claims, landing, probe_dirt, req, &view, &mut lines).await;
+    step_worktrees(git, claims, landing, probe_dirt, req, &merged, &mut lines).await;
     // The head branch cannot be deleted while a worktree still has it checked
     // out, so branch deletion always follows the removals above.
-    lines.push(step_local_branches(git, req, &view));
+    lines.push(step_local_branches(git, req, &merged));
     lines.push(step_prune(git, req));
 
     let report = CleanupReport { pr: req.pr, lines };
@@ -337,6 +357,25 @@ fn step_remote_branch<T: Git>(git: &T, req: &CleanupRequest, view: &PrView) -> S
     }
 }
 
+/// The merged pull request as steps 3 and 4 read it (#7275 round 4).
+///
+/// Why: those steps need both the `gh` payload and the refreshed base ref the
+/// merge tests compare against, and passing the two separately put
+/// [`step_worktrees`] one argument over the lint's limit. Grouping them also
+/// says the truer thing: the base ref is derived from this pull request's own
+/// `baseRefName`, so the two travel together or not at all.
+/// What: a borrow of step 1's payload plus the one [`landed::Merge`] every
+/// landing test in the run shares — which is what keeps a sweep over five
+/// worktrees to a single `git fetch`.
+/// Test: `cleanup_reclaims_a_tree_whose_base_ref_was_stale` (one fetch, before
+/// the first comparison), `cleanup_clean_path_removes_everything`.
+struct MergedPr<'a> {
+    /// Step 1's `gh` payload — head branch, head commit, base branch.
+    view: &'a PrView,
+    /// The base ref every landing test is measured against, refreshed once.
+    merge: landed::Merge,
+}
+
 /// Step 3: end each claim, then remove each worktree holding the merged head.
 async fn step_worktrees<T: Git, C: ClaimEnder>(
     git: &T,
@@ -344,9 +383,10 @@ async fn step_worktrees<T: Git, C: ClaimEnder>(
     landing: &dyn Landing,
     probe_dirt: DirtProbe<'_>,
     req: &CleanupRequest,
-    view: &PrView,
+    merged: &MergedPr<'_>,
     lines: &mut Vec<StepLine>,
 ) {
+    let view = merged.view;
     const STEP: &str = "worktree";
     let porcelain = match run_git(git, req, &["worktree", "list", "--porcelain"]) {
         Ok(s) => s,
@@ -376,7 +416,7 @@ async fn step_worktrees<T: Git, C: ClaimEnder>(
         // proof from step 1 and are not asked again.
         if !is_merged_head(view, t)
             && let Some(branch) = t.branch.as_deref()
-            && let Some(refusal) = landed::unlanded(git, req, view, branch)
+            && let Some(refusal) = landed::unlanded(git, req, &merged.merge, branch)
         {
             lines.push(StepLine::failed(
                 STEP,
@@ -384,7 +424,7 @@ async fn step_worktrees<T: Git, C: ClaimEnder>(
             ));
             continue;
         }
-        lines.push(remove_one(git, claims, landing, probe_dirt, req, view, t).await);
+        lines.push(remove_one(git, claims, landing, probe_dirt, req, &merged.merge, t).await);
     }
 }
 
@@ -414,23 +454,29 @@ fn owned(parts: &[&str]) -> Vec<String> {
 /// for every landed branch, so it defers to [`landed::landed`] instead of
 /// refusing outright. Uncommitted and untracked files still refuse, as does an
 /// `inspect_dirt` that could not read the tree.
+///
+/// #7275 round 4 adds a SECOND probe immediately before the removal, because
+/// the checks between the two make several `gh` and `git` round trips and the
+/// claim they end is record-only — see [`recheck`].
 async fn remove_one<T: Git, C: ClaimEnder>(
     git: &T,
     claims: &C,
     landing: &dyn Landing,
     probe_dirt: DirtProbe<'_>,
     req: &CleanupRequest,
-    view: &PrView,
+    merge: &landed::Merge,
     entry: &plan::WorktreeEntry,
 ) -> StepLine {
     const STEP: &str = "worktree";
     let path = entry.path.as_path();
     let shown = path.display().to_string();
     let mut landed_note = String::new();
-    if let Some(dirt) = probe_dirt(path) {
+    let dirt = probe_dirt(path);
+    let before = recheck::first(dirt.as_ref(), &entry.head);
+    if let Some(dirt) = &dirt {
         // #7275: an ahead-of-upstream count is never on its own evidence of
         // unlanded work — a squash merge guarantees one for landed branches.
-        if !landed::ahead_only(&dirt) {
+        if !landed::ahead_only(dirt) {
             return StepLine::failed(
                 STEP,
                 format!(
@@ -440,7 +486,7 @@ async fn remove_one<T: Git, C: ClaimEnder>(
                 ),
             );
         }
-        match landed::landed(git, landing, req, view, entry) {
+        match landed::landed(git, landing, req, merge, entry) {
             Ok(pr) => {
                 landed_note = format!(
                     " ({} landed: #{pr} merged it and re-merging changes nothing)",
@@ -475,6 +521,29 @@ async fn remove_one<T: Git, C: ClaimEnder>(
             );
         }
     }
+    // #7275 round 4: the first probe is now several round trips old and the
+    // claim just ended was record-only, so the agent that held it could have
+    // written or committed in the window. Ask again, here, and refuse on any
+    // difference — the removal below is what a stale answer would authorise.
+    match recheck::again(git, probe_dirt, path) {
+        Ok(now) => {
+            if let Some(changed) = recheck::drift(&before, &now) {
+                return StepLine::failed(
+                    STEP,
+                    format!(
+                        "{shown} changed while cleanup was checking it ({changed}) — refusing to \
+                         remove it (#7275)"
+                    ),
+                );
+            }
+        }
+        Err(why) => {
+            return StepLine::failed(
+                STEP,
+                format!("{shown} could not be re-read before removal: {why} (#7275)"),
+            );
+        }
+    }
     // Never `--force`: the dirty gate above is the only thing standing between
     // this call and an operator's unsaved work.
     match run_git(git, req, &["worktree", "remove", &shown]) {
@@ -498,8 +567,9 @@ fn claim_note(holders: &[String], verb: &str) -> String {
 }
 
 /// Step 4: delete the local head branch and every agent branch at its tip.
-fn step_local_branches<T: Git>(git: &T, req: &CleanupRequest, view: &PrView) -> StepLine {
+fn step_local_branches<T: Git>(git: &T, req: &CleanupRequest, merged: &MergedPr<'_>) -> StepLine {
     const STEP: &str = "local-branch";
+    let view = merged.view;
     let listing = match run_git(
         git,
         req,
@@ -522,7 +592,7 @@ fn step_local_branches<T: Git>(git: &T, req: &CleanupRequest, view: &PrView) -> 
             if b == head {
                 return true;
             }
-            match landed::unlanded(git, req, view, b) {
+            match landed::unlanded(git, req, &merged.merge, b) {
                 None => true,
                 Some(reason) => {
                     refusals.push(reason);

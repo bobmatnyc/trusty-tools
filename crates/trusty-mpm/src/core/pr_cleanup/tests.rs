@@ -83,9 +83,44 @@ impl Gh for Scripted {
     }
 }
 
+impl Scripted {
+    /// The head this fake's own worktree listing gives `dir` (#7275 round 4).
+    ///
+    /// Why: the pre-removal re-read asks each WORKTREE for its HEAD, and a
+    /// substring route cannot tell two trees apart. Answering out of the
+    /// porcelain listing this fake already serves keeps the two consistent by
+    /// construction — a real `git` cannot disagree with itself either — and
+    /// costs no route per test.
+    fn head_of(&self, dir: &Path) -> anyhow::Result<CmdOut> {
+        let listing = self
+            .routes
+            .iter()
+            .find(|(needle, _)| needle.contains("worktree list"))
+            .map(|(_, out)| out.stdout.clone())
+            .unwrap_or_default();
+        let head = parse_worktree_list(&listing)
+            .into_iter()
+            .find(|e| e.path == dir)
+            .map(|e| e.head);
+        match head {
+            Some(h) => Ok(CmdOut {
+                success: true,
+                stdout: format!("{h}\n"),
+                stderr: String::new(),
+            }),
+            None => anyhow::bail!("Scripted: no worktree listed at {}", dir.display()),
+        }
+    }
+}
+
 impl Git for Scripted {
-    fn run(&self, _dir: &Path, args: &[String]) -> anyhow::Result<CmdOut> {
-        self.answer(&format!("git {}", args.join(" ")))
+    fn run(&self, dir: &Path, args: &[String]) -> anyhow::Result<CmdOut> {
+        let joined = format!("git {}", args.join(" "));
+        if args == ["rev-parse", "HEAD"] {
+            self.seen.borrow_mut().push(joined);
+            return self.head_of(dir);
+        }
+        self.answer(&joined)
     }
 }
 
@@ -807,6 +842,9 @@ fn git_with_sibling(landed: bool) -> Scripted {
         // The sibling's tip is NOT an ancestor of the merged head, so the
         // merge-tree test is what decides.
         .on_fail("git merge-base --is-ancestor", "not an ancestor")
+        // #7275 round 4: the base ref is refreshed once, before the first
+        // merge-tree comparison that reads it.
+        .on("git fetch origin", "")
         .on("git merge-tree --write-tree", "aaaabbbbccccdddd\n")
         .on("git worktree list", &listing)
         .on("git worktree remove", "")
@@ -958,6 +996,9 @@ fn git_squash(listing: &str, branches: &str, landed: bool) -> Scripted {
         .on(ORIGIN_QUERY, ORIGIN_URL)
         .on("git ls-remote", "")
         .on_fail("git merge-base --is-ancestor", "not an ancestor")
+        // #7275 round 4: the base ref is refreshed once, before the first
+        // merge-tree comparison that reads it.
+        .on("git fetch origin", "")
         .on("git merge-tree --write-tree", "aaaabbbbccccdddd\n")
         .on("git worktree list", listing)
         .on("git worktree remove", "")
@@ -1141,6 +1182,7 @@ async fn cleanup_refuses_when_the_merge_test_cannot_run() {
         .on(ORIGIN_QUERY, ORIGIN_URL)
         .on("git ls-remote", "")
         .on_fail("git merge-base --is-ancestor", "not an ancestor")
+        .on("git fetch origin", "")
         .on_fail("git merge-tree --write-tree", "fatal: not a valid object")
         .on("git worktree list", &worktree_listing())
         .on("git worktree remove", "")
@@ -1202,6 +1244,213 @@ async fn cleanup_refuses_an_unreadable_worktree() {
     assert!(
         !git.calls().iter().any(|c| c.contains("worktree remove")),
         "{:?}",
+        git.calls()
+    );
+}
+
+// ── the base ref and the removal window (#7275 round 4) ──────────────────
+
+/// A `git` fake whose `origin/main` is STALE until a targeted fetch lands.
+///
+/// Why: this is the shape of a real checkout the moment after a merge. The
+/// squash commit is on GitHub and not in the local ref store, so the merge test
+/// diffs the branch against a base that predates it and NAMES every file the
+/// branch touched as residue. Only a fetch of that ref makes the same
+/// comparison empty.
+struct StaleBase {
+    /// The routes for everything the run does besides the base comparison.
+    inner: Scripted,
+    /// Set once `git fetch origin <base>` has run.
+    fetched: RefCell<bool>,
+}
+
+impl StaleBase {
+    fn new(inner: Scripted) -> Self {
+        Self {
+            inner,
+            fetched: RefCell::new(false),
+        }
+    }
+}
+
+impl Git for StaleBase {
+    fn run(&self, dir: &Path, args: &[String]) -> anyhow::Result<CmdOut> {
+        let joined = args.join(" ");
+        if joined.starts_with("fetch origin ") {
+            *self.fetched.borrow_mut() = true;
+        }
+        if joined.starts_with("diff --name-only") && !*self.fetched.borrow() {
+            self.inner.seen.borrow_mut().push(format!("git {joined}"));
+            return Ok(CmdOut {
+                success: true,
+                stdout: "crates/a/src/lib.rs\n".to_string(),
+                stderr: String::new(),
+            });
+        }
+        Git::run(&self.inner, dir, args)
+    }
+}
+
+/// 🔴 REGRESSION (#7275 round 4): a tree whose `origin/<base>` had not yet been
+/// fetched is reclaimed in ONE pass, not the pass after next.
+///
+/// Why: the merge test compares against the local `origin/<base>`, and the only
+/// fetch in the run is step 5's — which runs AFTER the worktree step. So the
+/// first cleanup following a merge compared against a base predating it, found
+/// the branch's content missing, and refused a tree that had genuinely landed;
+/// under `--auto` that is a whole sweep interval of delay, and by hand it looks
+/// like a false refusal. FAILS on round 3, where no fetch precedes the compare.
+#[tokio::test]
+async fn cleanup_reclaims_a_tree_whose_base_ref_was_stale() {
+    let gh = gh_merged();
+    let git = StaleBase::new(git_squash(&worktree_listing(), &branch_listing(), true));
+    let claims = FakeClaims::none();
+    let probe = ahead_by(2);
+    let report = run(
+        &gh,
+        &git,
+        &claims,
+        &FakeLanding::nothing_merged(),
+        &probe,
+        &req(false),
+    )
+    .await;
+
+    assert!(!report.failed(), "{}", report.render());
+    let calls = git.inner.calls();
+    let joined = calls.join("\n");
+    assert!(
+        joined.contains("git fetch origin main"),
+        "the base ref must be refreshed before it is compared against: {joined}"
+    );
+    let fetch_at = calls
+        .iter()
+        .position(|c| c.contains("fetch origin main"))
+        .expect("the fetch must have run");
+    let diff_at = calls
+        .iter()
+        .position(|c| c.contains("diff --name-only"))
+        .expect("the merge comparison must have run");
+    assert!(
+        fetch_at < diff_at,
+        "the refresh must precede the comparison it feeds: {calls:?}"
+    );
+    assert!(
+        joined.contains(&format!("git worktree remove {TREE}")),
+        "one pass must reclaim it: {joined}"
+    );
+}
+
+/// 🔴 FAIL-CLOSED (#7275 round 4): a base ref that cannot be refreshed refuses.
+///
+/// Why: the alternative is comparing against a ref that may predate the merge,
+/// and that comparison's only two answers are "refuse" and "delete a checkout".
+/// An unanswerable question must never take the second (ADR-0045).
+#[tokio::test]
+async fn cleanup_refuses_when_the_base_ref_cannot_be_refreshed() {
+    let gh = gh_merged();
+    // Every other route says landed; only the refresh fails.
+    let git = Scripted::new()
+        .on(ORIGIN_QUERY, ORIGIN_URL)
+        .on("git ls-remote", "")
+        .on_fail("git merge-base --is-ancestor", "not an ancestor")
+        .on_fail(
+            "git fetch origin",
+            "fatal: could not read from remote repository",
+        )
+        .on("git merge-tree --write-tree", "aaaabbbbccccdddd\n")
+        .on("git diff --name-only", "")
+        .on("git worktree list", &worktree_listing())
+        .on("git worktree remove", "")
+        .on("git branch --format", &branch_listing())
+        .on("git branch -D", "")
+        .on("git worktree prune", "")
+        .on("git fetch --prune", "");
+    let claims = FakeClaims::none();
+    let probe = ahead_by(1);
+    let report = run(
+        &gh,
+        &git,
+        &claims,
+        &FakeLanding::nothing_merged(),
+        &probe,
+        &req(false),
+    )
+    .await;
+
+    assert!(report.failed(), "{}", report.render());
+    let text = report.render();
+    assert!(
+        text.contains("could not read from remote repository"),
+        "the refusal must name what failed: {text}"
+    );
+    assert!(
+        !git.calls().iter().any(|c| c.contains("worktree remove")),
+        "a base ref that may predate the merge must not authorise a delete: {:?}",
+        git.calls()
+    );
+}
+
+/// A dirt probe that answers once, then differently — an agent that wrote in
+/// the window between cleanup's two reads.
+fn dirt_then(later: Option<DirtyWorktree>) -> impl Fn(&Path) -> Option<DirtyWorktree> {
+    let calls = std::cell::Cell::new(0usize);
+    move |p: &Path| {
+        let n = calls.get();
+        calls.set(n + 1);
+        if n == 0 {
+            return None;
+        }
+        later.clone().map(|mut d| {
+            d.path = p.to_path_buf();
+            d
+        })
+    }
+}
+
+/// 🔴 REGRESSION (#7275 round 4): a tree that gains unsaved work WHILE cleanup
+/// is checking it is refused, not removed on the stale first reading.
+///
+/// Why: the first probe and the removal are separated by the merged-pull-request
+/// lookup, the merge-tree comparison, the claim read and the claim tombstone —
+/// several `gh` and `git` round trips. Ending a claim is record-only, so the
+/// agent that held it keeps writing; on round 3 the removal ran on an answer
+/// taken before all of that. FAILS on round 3, where the tree is removed with
+/// the file in it.
+#[tokio::test]
+async fn cleanup_refuses_a_tree_that_changed_while_cleanup_was_checking_it() {
+    let gh = gh_merged();
+    let git = git_full();
+    let claims = FakeClaims::held_by("tm-bobmatnyc-01");
+    let probe = dirt_then(Some(DirtyWorktree {
+        path: PathBuf::from(TREE),
+        reason: "1 uncommitted/untracked file(s), 0 unpushed commit(s)".to_string(),
+        dirty_files: 1,
+        unpushed_commits: 0,
+    }));
+    let report = run(
+        &gh,
+        &git,
+        &claims,
+        &FakeLanding::nothing_merged(),
+        &probe,
+        &req(false),
+    )
+    .await;
+
+    assert!(report.failed(), "{}", report.render());
+    let text = report.render();
+    assert!(
+        text.contains("changed while cleanup was checking it"),
+        "the refusal must say the reading went stale: {text}"
+    );
+    assert!(
+        text.contains("uncommitted/untracked files went from 0 to 1"),
+        "and name what changed: {text}"
+    );
+    assert!(
+        !git.calls().iter().any(|c| c.contains("worktree remove")),
+        "work written during the window is never deleted: {:?}",
         git.calls()
     );
 }

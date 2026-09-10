@@ -196,6 +196,8 @@ fn git_one_tree(tree: &str) -> Scripted {
                  worktree {tree}\nHEAD {HEAD_OID}\nbranch refs/heads/{BRANCH}\n\n"
             ),
         )
+        // #7275 round 4: the tree is re-read immediately before it is removed.
+        .on("rev-parse HEAD", &format!("{HEAD_OID}\n"))
         .on("git worktree remove", "")
         .on("git branch --format", "main 1111\n")
         .on("git worktree prune", "")
