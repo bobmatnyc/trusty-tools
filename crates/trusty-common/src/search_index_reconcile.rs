@@ -78,6 +78,33 @@ const LIST_TIMEOUT: Duration = CREATE_TIMEOUT;
 /// is what actually resolves the collision.
 const COLLISION_MARKER: &str = "is already registered to index '";
 
+/// Where the daemon's root-mismatch refusal stops stating facts and starts
+/// telling an operator what to do (#7365).
+const OPERATOR_ADVICE_MARKER: &str = ". Use the relocate endpoint";
+
+/// The daemon's conflict message without the sentence addressed to an operator.
+///
+/// Why: `root_path_mismatch_response` ends with "Use the relocate endpoint to
+/// move it, or register the other tree under a distinct id" — correct advice for
+/// a human holding a create that failed, and wrong here, where the client
+/// resolves the collision itself before the line is even read. Printing it made
+/// a self-healed session look like one needing manual repair (#7365). The facts
+/// before it — the registered path and the requested path — are what an operator
+/// reading the log actually needs, so they stay.
+/// What: everything before [`OPERATOR_ADVICE_MARKER`], or the whole message when
+/// that marker is absent. `root_path_collision_response`, the other conflict
+/// shape, carries no advice sentence and so passes through untouched. This
+/// depends on the daemon's wording exactly as [`COLLISION_MARKER`] does, and
+/// degrades the same way: a reworded advice sentence is printed rather than
+/// dropped, which is cosmetic — the level, not the text, is what #7365 fixed.
+/// Test: `a_resolvable_conflict_is_logged_at_info_without_operator_advice`,
+/// `a_collision_message_passes_through_whole`.
+fn without_operator_advice(message: &str) -> &str {
+    message
+        .split_once(OPERATOR_ADVICE_MARKER)
+        .map_or(message, |(facts, _)| facts)
+}
+
 /// What one create attempt achieved, with the conflict told apart (#6864).
 ///
 /// Why: [`IndexRegistration`] collapses "the daemon refused" and "the daemon
@@ -159,12 +186,17 @@ pub(super) fn classify_create_result(
 /// [`existing_id_from_conflict`] can read out of the daemon's message; a
 /// transport failure that leaves the request's fate unknown yields `Unanswered`
 /// (#7237, see [`create_left_unanswered`]); every other daemon refusal, and
-/// every decode failure, yields `NotConfirmed`. All are logged at warn and
-/// swallowed — this function never makes the call fallible.
+/// every decode failure, yields `NotConfirmed`. All are swallowed — this
+/// function never makes the call fallible. The conflict is logged at INFO
+/// because [`resolve_colliding_id`] resolves it in the same second and the
+/// operator has nothing to do about it (#7365); the arms no recovery follows
+/// stay at warn.
 /// Test: `search_index_tests.rs::{a_daemon_refusal_is_not_a_registration,
 /// registration_matches_an_existing_index_by_root_path,
 /// create_rejected_by_the_daemon_withholds_the_pinnable_id}`, plus
-/// `an_unanswered_create_is_not_a_refusal` below.
+/// `an_unanswered_create_is_not_a_refusal`,
+/// `a_resolvable_conflict_is_logged_at_info_without_operator_advice` and
+/// `an_unrecoverable_refusal_still_warns` below.
 pub(super) fn classify_create_failure(
     err: &anyhow::Error,
     index_id: &str,
@@ -184,10 +216,12 @@ pub(super) fn classify_create_failure(
         return CreateOutcome::NotConfirmed;
     };
     if refusal.is_conflict() {
-        tracing::warn!(
+        // #7365: this conflict is the INPUT to a recovery that resolves it in
+        // the same second, so it is not an operator's problem to act on.
+        tracing::info!(
             "trusty-search index registration for '{index_id}' at {root_display} \
-             conflicts ({}); looking for the index already serving that tree",
-            refusal.message
+             conflicts ({}); resolving it to the index that already serves that tree",
+            without_operator_advice(&refusal.message)
         );
         return CreateOutcome::Conflict {
             existing_id: existing_id_from_conflict(&refusal.message),
@@ -318,14 +352,24 @@ fn resolve_colliding_id(
          collision-resistant id '{fresh}' because '{derived}' names another tree (#6864)",
         root.display()
     );
-    match best_effort_create_index(socket, &fresh, root, opts) {
+    let resolved = match best_effort_create_index(socket, &fresh, root, opts) {
         CreateOutcome::Confirmed => Some(fresh),
         CreateOutcome::Conflict { existing_id } => existing_id,
         CreateOutcome::NotConfirmed => None,
         // #7237: same rule as the first create — silence is settled by the
         // registry, not read as a refusal.
         CreateOutcome::Unanswered => super::confirm::confirm_after_no_answer(socket, &fresh, root),
+    };
+    // #7365: the line above announces an attempt; this one reports what the
+    // recovery landed on, so the log carries the outcome and not just the
+    // conflict that started it. A failure here already warns from the create.
+    if let Some(id) = &resolved {
+        tracing::info!(
+            "trusty-search serves {} as index '{id}' (#6864)",
+            root.display()
+        );
     }
+    resolved
 }
 
 /// The id a root-collision refusal names as the current owner of a `root_path`.
@@ -444,6 +488,116 @@ mod tests {
             "root_path {root:?} is already registered to index '{existing_id}'; two \
              indexes cannot share one on-disk corpus (issues #2305, #2336)"
         )
+    }
+
+    /// The message `root_path_mismatch_response` builds, advice sentence and
+    /// all, in the wording the daemon actually sends (#7365).
+    fn mismatch_message(index_id: &str, registered: &str, requested: &str) -> String {
+        format!(
+            "index '{index_id}' is registered at {registered:?}; it cannot be re-registered \
+             at {requested:?} because one index identifies one directory tree. Use the \
+             relocate endpoint to move it, or register the other tree under a distinct id"
+        )
+    }
+
+    /// Wrap a conflict message as the refusal `search_rpc` hands the caller.
+    fn conflict_error(message: String) -> anyhow::Error {
+        anyhow::Error::new(SearchRpcError {
+            method: search_rpc::METHOD_INDEX_CREATE.to_string(),
+            code: search_rpc::CODE_CONFLICT,
+            message,
+        })
+    }
+
+    /// Run `body` with a subscriber that captures every event, and return the
+    /// captured lines alongside the body's value.
+    ///
+    /// Why: level is what #7365 turns on, and `LogBufferLayer` renders it into
+    /// the line — so a level regression is observable here rather than only by
+    /// eye. Test: the two callers below.
+    fn capture_logs<T>(body: impl FnOnce() -> T) -> (T, Vec<String>) {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let buffer = crate::log_buffer::LogBuffer::new(16);
+        let subscriber = tracing_subscriber::registry()
+            .with(crate::log_buffer::LogBufferLayer::new(buffer.clone()));
+        let value = tracing::subscriber::with_default(subscriber, body);
+        (value, buffer.tail(16))
+    }
+
+    /// A root-mismatch conflict is reported at INFO, and without the daemon's
+    /// operator advice (#7365).
+    ///
+    /// Why: the observed line warned an operator about a condition the very next
+    /// call resolved, and told them to relocate an index the code was already
+    /// working around. Both halves are pinned here, because a regression on
+    /// either one puts the same false alarm back in front of a reader.
+    /// What: classifies a real `root_path_mismatch_response` message under a
+    /// capturing subscriber, then asserts the one emitted line is INFO, keeps
+    /// both paths, and drops the advice sentence.
+    /// Test: itself.
+    #[test]
+    fn a_resolvable_conflict_is_logged_at_info_without_operator_advice() {
+        let registered = "/Users/masa/Projects/trusty-tools";
+        let requested = "/Users/masa/trusty-mpm-projects/bobmatnyc/trusty-tools";
+        let err = conflict_error(mismatch_message("trusty-tools", registered, requested));
+
+        let (outcome, lines) =
+            capture_logs(|| classify_create_failure(&err, "trusty-tools", requested));
+
+        assert_eq!(outcome, CreateOutcome::Conflict { existing_id: None });
+        assert_eq!(lines.len(), 1, "expected one line, got {lines:?}");
+        let line = &lines[0];
+        assert!(
+            line.contains("INFO") && !line.contains("WARN"),
+            "a conflict this code resolves itself is not a warning: {line}"
+        );
+        assert!(line.contains(registered), "line was: {line}");
+        assert!(line.contains(requested), "line was: {line}");
+        assert!(
+            !line.contains("Use the relocate endpoint"),
+            "the daemon's operator advice does not belong in a self-healing line: {line}"
+        );
+    }
+
+    /// A refusal nothing recovers from still warns (#7365).
+    ///
+    /// Why: #7365 lowered ONE arm. The arms where the registration simply ends
+    /// carry the only signal an operator gets, so a fix that quieted them too
+    /// would trade one false alarm for a silent failure.
+    /// What: a non-conflict refusal, asserted to stay `NotConfirmed` and to
+    /// still emit a WARN line.
+    /// Test: itself.
+    #[test]
+    fn an_unrecoverable_refusal_still_warns() {
+        let err = anyhow::Error::new(SearchRpcError {
+            method: search_rpc::METHOD_INDEX_CREATE.to_string(),
+            code: -32603,
+            message: "internal error".to_string(),
+        });
+
+        let (outcome, lines) =
+            capture_logs(|| classify_create_failure(&err, "trusty-tools", "/nonexistent/tree"));
+
+        assert_eq!(outcome, CreateOutcome::NotConfirmed);
+        assert_eq!(lines.len(), 1, "expected one line, got {lines:?}");
+        assert!(
+            lines[0].contains("WARN"),
+            "nothing recovers this, so it stays a warning: {}",
+            lines[0]
+        );
+    }
+
+    /// The other conflict shape carries no advice sentence and is not trimmed.
+    ///
+    /// Why: `without_operator_advice` runs on every conflict message, so it must
+    /// not eat the collision refusal — that message ends in the issue numbers
+    /// this recovery was built from, and its `existing_id` is read out of it.
+    /// Test: itself.
+    #[test]
+    fn a_collision_message_passes_through_whole() {
+        let message = collision_message("/Users/masa/checkout/trusty-tools", "trusty-tools");
+        assert_eq!(without_operator_advice(&message), message);
     }
 
     /// A create the daemon never answered is `Unanswered`, not `NotConfirmed`
