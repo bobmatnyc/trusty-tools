@@ -459,7 +459,9 @@ mod tests {
     /// What: tty_fn=true, prompt_fn=true, exec_fn=Ok; check_fn tracks call
     /// count and returns absent when n is even (PRESENCE probes: 0, 2) and
     /// present when n is odd (re-verify probes: 1, 3). Both binaries should
-    /// end in `installed`.
+    /// end in `installed`. The two detection-only rows — `git` and, since
+    /// #7311, `rtk` — report present so the alternation covers only the rows
+    /// that actually carry an `auto_cmd`.
     ///
     /// Test: This is the test.
     #[test]
@@ -469,9 +471,11 @@ mod tests {
         let call_count = Arc::new(AtomicUsize::new(0));
         let cc = call_count.clone();
         let check_fn = move |bin: &str| {
-            // git has no auto_cmd in our hints (no install offer), so return
-            // it as already present to keep it out of still_missing.
-            if bin == "git" {
+            // git and rtk have no auto_cmd in our hints (no install offer), so
+            // return them as already present to keep them out of still_missing.
+            // #7311: rtk is an install dependency; never run rtk init — the row
+            // is detection-only, so it can never move to `installed`.
+            if bin == "git" || bin == "rtk" {
                 return true;
             }
             let n = cc.fetch_add(1, Ordering::SeqCst);

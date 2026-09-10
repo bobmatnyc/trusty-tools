@@ -148,16 +148,21 @@ pub struct InstallHint {
 ///   macOS/Linux without npm → `curl -fsSL https://claude.ai/install.sh | sh`;
 ///   unknown platform without npm → `auto_cmd = None`. Manual note always
 ///   includes `https://claude.ai/download`.
+/// - `rtk`: `auto_cmd = None` on every platform — detection only; the manual
+///   note carries `brew install rtk` and the `rtk init` prohibition (#7311).
 /// - Other binaries: `auto_cmd = None`, generic manual note.
 ///
 /// Test: `tests::hint_tmux_brew`, `tests::hint_tmux_apt`, `tests::hint_tmux_dnf`,
 /// `tests::hint_tmux_pacman`, `tests::hint_tmux_no_pkg_mgr`,
 /// `tests::hint_claude_npm`, `tests::hint_claude_native_installer`,
-/// `tests::hint_claude_unknown_platform`.
+/// `tests::hint_claude_unknown_platform`, `tests::hint_rtk_never_auto_installs`,
+/// `tests::hint_rtk_forbids_rtk_init`.
 pub fn install_hint_for(binary: &str, platform: &PlatformInfo) -> InstallHint {
     match binary {
         "tmux" => hint_tmux(platform),
         "claude" => hint_claude(platform),
+        // #7311: rtk is an install dependency; never run rtk init.
+        "rtk" => hint_rtk(),
         other => InstallHint {
             auto_cmd: None,
             manual_note: format!(
@@ -187,6 +192,28 @@ fn hint_tmux(platform: &PlatformInfo) -> InstallHint {
     InstallHint {
         auto_cmd,
         manual_note,
+    }
+}
+
+/// The rtk hint: detection only, never an auto-install.
+///
+/// Why: rtk ships through the Homebrew tap (`trusty-mpm`'s formula
+/// `depends_on "rtk"`), so a `tctl` run that finds it missing is a
+/// `cargo install` machine the operator installs it on by hand. tctl never runs
+/// the install itself, because the follow-on step an operator is likely to
+/// search for — `rtk init` / `rtk init -g` — installs a PreToolUse Bash hook
+/// that competes with tm's own, and tm invokes rtk directly and needs none.
+/// What: `auto_cmd: None` unconditionally (no platform branch), with the
+/// remediation as the manual note.
+/// Test: `tests::hint_rtk_never_auto_installs`,
+/// `tests::hint_rtk_forbids_rtk_init`.
+// #7311: rtk is an install dependency; never run rtk init.
+fn hint_rtk() -> InstallHint {
+    InstallHint {
+        auto_cmd: None,
+        manual_note: "install with `brew install rtk`; do not run `rtk init`, \
+                      tm invokes rtk directly"
+            .to_owned(),
     }
 }
 
@@ -364,6 +391,51 @@ mod tests {
         let hint = install_hint_for("claude", &unknown_no_npm());
         assert!(hint.auto_cmd.is_none());
         assert!(hint.manual_note.contains("claude.ai/download"));
+    }
+
+    /// Why: rtk is detection-only — tctl must never offer or run an install for
+    /// it on any platform, however capable the detected package manager is.
+    /// What: asserts `auto_cmd` is None on macOS+brew, Linux+apt, and an
+    /// unknown platform alike.
+    /// Test: This is the test.
+    // #7311: rtk is an install dependency; never run rtk init.
+    #[test]
+    fn hint_rtk_never_auto_installs() {
+        for platform in [macos_brew(), linux_apt(), unknown_no_npm()] {
+            let hint = install_hint_for("rtk", &platform);
+            assert!(
+                hint.auto_cmd.is_none(),
+                "rtk must never auto-install: {hint:?}"
+            );
+            assert!(
+                hint.manual_note.contains("brew install rtk"),
+                "manual note must name the install command: {}",
+                hint.manual_note
+            );
+        }
+    }
+
+    /// Why: `rtk init` / `rtk init -g` install a competing PreToolUse Bash hook;
+    /// tm invokes rtk directly, so the note must forbid them explicitly rather
+    /// than leave an operator to find `rtk init` on their own.
+    /// What: asserts the manual note carries the prohibition and no auto command
+    /// mentions `init`.
+    /// Test: This is the test.
+    // #7311: rtk is an install dependency; never run rtk init.
+    #[test]
+    fn hint_rtk_forbids_rtk_init() {
+        let hint = install_hint_for("rtk", &macos_brew());
+        assert!(
+            hint.manual_note.contains("do not run `rtk init`"),
+            "manual note must forbid `rtk init`: {}",
+            hint.manual_note
+        );
+        assert_eq!(
+            hint.manual_note.matches("rtk init").count(),
+            1,
+            "only the prohibition may name `rtk init`: {}",
+            hint.manual_note
+        );
     }
 
     /// Why: An unknown binary must return a safe default with no auto_cmd.

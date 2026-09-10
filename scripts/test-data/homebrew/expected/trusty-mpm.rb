@@ -7,6 +7,8 @@ class TrustyMpm < Formula
   homepage "https://github.com/bobmatnyc/trusty-tools"
   version "1.3.6"
 
+  depends_on "rtk"
+
   # macOS arm64 (Apple Silicon) pre-built binary
   on_macos do
     on_arm do

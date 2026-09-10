@@ -66,6 +66,8 @@ Homebrew provides:
 - Standard macOS / Linux PATH integration
 - Easy dependency management
 
+The formula `depends_on "rtk"`, so a Homebrew install pulls it in: `tm compress` routes tool output through the rtk binary and falls back to a slower native compressor when it is absent. `cargo install` users install it separately with `brew install rtk`. Do not run `rtk init` — it installs a competing PreToolUse hook, and tm invokes rtk directly.
+
 ### Prerequisites & Special Cases
 
 #### System Requirements
