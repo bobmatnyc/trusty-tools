@@ -305,11 +305,19 @@ The line is whether a `cargo publish` is bound to the tag: if it is, that is
 
 ## Conflict Resolution
 
-1. Check file sizes before reading diffs
-2. Extract conflict markers with `git diff --diff-filter=U`
-3. Resolve conflicts ONE file at a time
-4. Test after each resolution before moving to next
-5. Never retain full file contents — extract resolution patterns only
+<!-- #7386 -->
+1. Detect conflicts with `git merge-tree --write-tree HEAD origin/main`. Exit 0
+   means the merge is clean; exit 1 means conflicts, and stdout names the
+   conflicted paths. Never use the legacy three-argument
+   `git merge-tree <base> <a> <b>` form — it has reported a merge clean when
+   `--write-tree` and GitHub both flagged it as conflicting. When the two
+   disagree, trust `mergeable` from `gh pr view --json mergeable` as the
+   tiebreak.
+2. Check file sizes before reading diffs
+3. Extract conflict markers with `git diff --diff-filter=U`
+4. Resolve conflicts ONE file at a time
+5. Test after each resolution before moving to next
+6. Never retain full file contents — extract resolution patterns only
 
 ## Safety Rules
 
