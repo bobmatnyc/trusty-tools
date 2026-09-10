@@ -1967,3 +1967,216 @@ fn registration_falls_back_to_a_collision_resistant_id() {
 
     let _ = fs::remove_dir_all(&other);
 }
+
+// ── #7237 second round: a create the daemon answers LATE is still a create ───
+
+/// The id the mock registry hands back for an unanswered create, deliberately
+/// NOT the derived basename so a pass proves the id came from the REGISTRY.
+const LATE_REGISTERED_ID: &str = "late-create-project-checkout";
+
+/// A create the daemon completes after the client's budget is confirmed, not
+/// withheld (#7237).
+///
+/// Why: the reported failure. `writing`'s index had been cold-parked with
+/// 32,754 chunks, the daemon reloads a cold index INSIDE its create handler, and
+/// that reload took 3.8 s against a one-second client budget. The client
+/// recorded `NotConfirmed`, withheld the id, and the session ran unpinned
+/// against an index the daemon had registered 2.8 s after it gave up. Against
+/// `origin/main` this test fails with `NotConfirmed`.
+/// What: a daemon whose `search.index.create` sleeps past `CREATE_TIMEOUT` and
+/// then registers, and whose registry answers empty until it has. Asserts the
+/// registration comes back `Confirmed`, that the pinned id is the one the
+/// REGISTRY names rather than the one that was asked for, and that the reindex
+/// trigger follows — which it may only do once the index actually exists.
+/// Test: this test.
+#[test]
+fn a_late_create_is_confirmed_by_polling_the_registry() {
+    let log = call_log();
+    let recorder = Arc::clone(&log);
+    let registered: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let daemon_side = Arc::clone(&registered);
+
+    let report = with_socket_daemon(
+        "late-create",
+        "late-create-project",
+        move |method, params| {
+            recorder
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((method.to_string(), params.clone()));
+            let registered = Arc::clone(&daemon_side);
+            let method = method.to_string();
+            Box::pin(async move {
+                if method == METHOD_INDEX_CREATE {
+                    // The cold reload in miniature: longer than the client's
+                    // budget, and the registration lands regardless.
+                    tokio::time::sleep(Duration::from_millis(1_500)).await;
+                    let root = params
+                        .get("root_path")
+                        .and_then(serde_json::Value::as_str)
+                        .expect("the create carries a root_path")
+                        .to_string();
+                    *registered.lock().unwrap_or_else(|e| e.into_inner()) = Some(root);
+                    return Ok(serde_json::json!({ "created": true }));
+                }
+                if method == METHOD_INDEXES_LIST {
+                    let listed = registered.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    return Ok(match listed {
+                        Some(root) => serde_json::json!({
+                            "indexes": [{ "id": LATE_REGISTERED_ID, "root_path": root }]
+                        }),
+                        None => serde_json::json!({ "indexes": [] }),
+                    });
+                }
+                reindex_lane(&method)
+            })
+        },
+        |project| ensure_project_indexed_reporting(project, IndexOptions::default()),
+    );
+
+    assert_eq!(
+        report.registration,
+        IndexRegistration::Confirmed,
+        "the daemon registered the index; a client budget that elapsed first is not a \
+         refusal (#7237)"
+    );
+    assert_eq!(
+        report.index_id,
+        Some(LATE_REGISTERED_ID.to_string()),
+        "the pinned id must be the one the registry reports for this tree"
+    );
+    let seen = methods(&log);
+    assert_eq!(
+        seen.first().map(String::as_str),
+        Some(METHOD_INDEX_CREATE),
+        "the create still goes first: {seen:?}"
+    );
+    assert!(
+        seen.iter().any(|m| m == METHOD_INDEXES_LIST),
+        "the unanswered create must be settled by reading the registry: {seen:?}"
+    );
+    assert_eq!(
+        seen.last().map(String::as_str),
+        Some(METHOD_INDEX_REINDEX),
+        "a confirmed registration still gets its reindex trigger: {seen:?}"
+    );
+}
+
+/// An unconfirmed registration fires no reindex (#7237).
+///
+/// Why: the second half of the reported failure. The trigger ran unconditionally
+/// after the create, so a registration the daemon had refused was immediately
+/// followed by `search.index.reindex failed: unknown index: writing` — a second
+/// warning that reads like an unrelated fault and sends the operator looking for
+/// a missing index rather than at the create that never landed. It also asks a
+/// busy daemon to do work for an index that does not exist.
+/// What: a daemon that refuses the create with a non-conflict code. Asserts the
+/// registration is `NotConfirmed`, no pinnable id comes back, and the create is
+/// the ONLY method the daemon was asked — no freshness probe, no trigger, and no
+/// confirm poll either, because a refusal is an answer.
+/// Test: this test.
+#[test]
+fn an_unconfirmed_registration_fires_no_reindex() {
+    let log = call_log();
+    let seen = Arc::clone(&log);
+
+    let report = with_socket_daemon(
+        "no-reindex",
+        "no-reindex-project",
+        recording(seen, |method, _nth| {
+            if method == METHOD_INDEX_CREATE {
+                return Err(RpcError::internal("the corpus would not open"));
+            }
+            reindex_lane(method)
+        }),
+        |project| ensure_project_indexed_reporting(project, IndexOptions::default()),
+    );
+
+    assert_eq!(report.registration, IndexRegistration::NotConfirmed);
+    assert_eq!(
+        pinnable_index_id(report),
+        None,
+        "an index the daemon never registered must stay unpinned (#5091)"
+    );
+    assert_eq!(
+        methods(&log),
+        vec![METHOD_INDEX_CREATE.to_string()],
+        "nothing may be reindexed against an index the daemon has not registered"
+    );
+}
+
+/// A create the daemon registers and then hangs up on is confirmed (#7237).
+///
+/// Why: this is the shape the live failure actually took. `tm` logged
+/// `search.index.create … closed the connection without sending a response
+/// frame` — `UdsRpcError::NoResponse`, not `Timeout`. The client never
+/// constructs `NoResponse` from its own budget elapsing: that path returns
+/// `Timeout` (`uds::rpc::send_framed_request_capped`). `NoResponse` is reached
+/// only when the read sees the peer's end gone, so the DAEMON closed the socket
+/// and the fix has to cover both silences, not just the client-side one.
+/// What: a daemon whose create handler records the registration and then panics,
+/// which drops its connection task without writing a frame — the same close
+/// `search_rpc`'s `call_blocking_reports_a_panicking_handler_rather_than_hanging`
+/// pins. Asserts the registration still comes back `Confirmed`, carrying the id
+/// the REGISTRY names. Against `origin/main` this fails with `NotConfirmed`.
+/// Test: this test.
+#[test]
+fn a_create_the_daemon_hung_up_on_is_confirmed_by_polling_the_registry() {
+    let log = call_log();
+    let recorder = Arc::clone(&log);
+    let registered: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let daemon_side = Arc::clone(&registered);
+
+    let report = with_socket_daemon(
+        "hung-up-create",
+        "hung-up-create-project",
+        move |method, params| {
+            recorder
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((method.to_string(), params.clone()));
+            let registered = Arc::clone(&daemon_side);
+            let method = method.to_string();
+            Box::pin(async move {
+                if method == METHOD_INDEX_CREATE {
+                    let root = params
+                        .get("root_path")
+                        .and_then(serde_json::Value::as_str)
+                        .expect("the create carries a root_path")
+                        .to_string();
+                    *registered.lock().unwrap_or_else(|e| e.into_inner()) = Some(root);
+                    // The registration landed; the connection dies before the
+                    // reply is written, which is what the client saw live.
+                    panic!("the mock daemon dropped the create connection after registering");
+                }
+                if method == METHOD_INDEXES_LIST {
+                    let listed = registered.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    return Ok(match listed {
+                        Some(root) => serde_json::json!({
+                            "indexes": [{ "id": LATE_REGISTERED_ID, "root_path": root }]
+                        }),
+                        None => serde_json::json!({ "indexes": [] }),
+                    });
+                }
+                reindex_lane(&method)
+            })
+        },
+        |project| ensure_project_indexed_reporting(project, IndexOptions::default()),
+    );
+
+    assert_eq!(
+        report.registration,
+        IndexRegistration::Confirmed,
+        "a daemon that hung up after registering has still registered (#7237)"
+    );
+    assert_eq!(
+        report.index_id,
+        Some(LATE_REGISTERED_ID.to_string()),
+        "the pinned id must be the one the registry reports for this tree"
+    );
+    let seen = methods(&log);
+    assert!(
+        seen.iter().any(|m| m == METHOD_INDEXES_LIST),
+        "a hang-up must be settled by reading the registry: {seen:?}"
+    );
+}
