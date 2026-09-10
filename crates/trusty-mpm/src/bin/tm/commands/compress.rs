@@ -159,7 +159,7 @@ fn parse_exit_sentinel(line: &str) -> Option<i32> {
 /// fn's Tokio worker thread for the entire read, which is exactly the wrong
 /// tradeoff here since large piped output (the case this subcommand exists
 /// to compress) is the slow case (trusty-review finding, PR #1968).
-/// Compresses via [`compress_tool_output_async_with_path`], logs
+/// Compresses via [`compress_with_raw_fallback`], logs
 /// `tool_name`/`bytes_before`/`bytes_after`/`pct_reduction`/
 /// `compression_path` at `info` level, then writes the compressed text via
 /// [`tokio::io::AsyncWriteExt::write_all`] (rather than a synchronous
