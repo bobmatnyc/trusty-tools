@@ -41,6 +41,9 @@ pub const SESSIONS_PREFIX: &str = ".trusty-mpm/sessions/";
 /// resort in [`resolve_default_branch`], never an override (#7282 review).
 pub const FALLBACK_BRANCH: &str = "main";
 
+/// What `git rev-parse --abbrev-ref HEAD` prints for a detached checkout.
+const DETACHED_HEAD: &str = "HEAD";
+
 /// Blob mode for a regular non-executable file, as `update-index` spells it.
 const BLOB_MODE: &str = "100644";
 
@@ -154,10 +157,10 @@ pub struct PublishOutcome {
 /// Why: "this project does not track its sessions" is a legitimate no-op, while
 /// "the push failed after the commit was made" leaves a local commit a person
 /// must deal with. Collapsing the two into one string would hide the second.
-/// What: `NotTracked` is the no-op; `NotOnDefaultBranch` refuses before
-/// anything is created and names the branch it expected; `Step` names the
-/// failed step and carries the branch and commit when they already exist.
-/// Test: `publish_refuses_when_not_on_the_default_branch`,
+/// What: `NotTracked` is the no-op; `NotOnDefaultBranch` refuses a detached
+/// checkout before anything is created; `Step` names the failed step and
+/// carries the branch and commit when they already exist.
+/// Test: `a_detached_checkout_is_refused_by_name`,
 /// `push_failure_leaves_the_commit_and_names_it`,
 /// `publish_skips_a_directory_that_is_not_a_git_repo`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -169,15 +172,21 @@ pub enum PublishError {
     /// The project directory is not a git checkout at all.
     #[error("`{0}` is not a git repository; there is nothing to publish a snapshot into")]
     NotAGitRepo(String),
-    /// The checkout is on some branch other than the project's default.
+    /// The checkout has no branch checked out at all.
+    ///
+    /// The name is historical: this refused every non-default branch until the
+    /// owner ruled that a pause publishes from any checkout (#7282). A detached
+    /// HEAD is all that is left, because `rev-parse --abbrev-ref HEAD` answers
+    /// the literal `HEAD` there rather than a branch name.
     #[error(
-        "pause snapshots publish only from `{expected}`; this checkout is on `{actual}`. \
+        "pause snapshots cannot publish from a detached checkout: HEAD names no branch, \
+         and this project's default is `{expected}` (git reported `{actual}`). \
          The snapshot file was written; commit and open its PR by hand."
     )]
     NotOnDefaultBranch {
         /// The project's default branch, as resolved for this checkout.
         expected: String,
-        /// The branch the checkout is actually on.
+        /// What `rev-parse --abbrev-ref HEAD` reported — the literal `HEAD`.
         actual: String,
     },
     /// A step failed. `commit` is `Some` once the commit exists locally.
@@ -211,8 +220,8 @@ fn commit_note(branch: Option<&str>, commit: Option<&str>) -> String {
 ///
 /// Why: see the module doc — a pause must reach `origin/main`, and it must do
 /// so without disturbing a checkout other sessions are working in.
-/// What: refuses unless the checkout is on the project's default branch and the
-/// paths are tracked regular files, then builds the tree with `hash-object` /
+/// What: refuses a detached checkout and any path that is not a tracked regular
+/// file, then builds the tree with `hash-object` /
 /// `read-tree` / `update-index` / `write-tree` against a scratch
 /// `GIT_INDEX_FILE` in a per-call [`tempfile::TempDir`], commits with
 /// `commit-tree` parented on `origin/<default>`, points a fresh
@@ -225,8 +234,8 @@ fn commit_note(branch: Option<&str>, commit: Option<&str>) -> String {
 /// `the_pushed_branch_is_the_head_the_pr_opens_from`,
 /// `a_dirty_checkout_is_never_read_staged_or_switched`,
 /// `a_detached_checkout_is_refused_by_name`,
+/// `a_feature_branch_checkout_still_publishes`,
 /// `publish_branch_name_carries_session_and_timestamp`,
-/// `publish_refuses_when_not_on_the_default_branch`,
 /// `publish_uses_the_configured_default_branch`,
 /// `concurrent_publishes_never_share_a_scratch_index`,
 /// `push_failure_leaves_the_commit_and_names_it`,
@@ -253,7 +262,14 @@ pub fn publish_pause_snapshot<V: PauseVcs>(
     }
     let current = branch_out.out().to_string();
     let default = resolve_default_branch(vcs, req);
-    if current != default {
+    // #7282 (owner ruling): a pause is live state and must publish as its own
+    // PR, so which branch the checkout sits on no longer decides whether it
+    // can. Every step below is plumbing against `origin/<default>` and the PR
+    // names its pushed branch as `--head`, so HEAD is never read or moved.
+    // What still cannot work is a checkout with no branch at all: `rev-parse
+    // --abbrev-ref HEAD` answers the literal `HEAD` there, which is not a
+    // branch name and gives a person nothing to act on.
+    if current == DETACHED_HEAD {
         return Err(PublishError::NotOnDefaultBranch {
             expected: default,
             actual: current,
@@ -541,13 +557,13 @@ fn walk_is_unredirected(repo: &Path, p: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The branch this project publishes pauses from.
+/// The branch a pause PR is based on, and the ref its commit is parented on.
 ///
 /// Why: `session_context_pause` serves every managed project, so a literal
-/// `main` made a pause on a `master` or `develop` project always error
-/// (#7282 review). The operator's declared answer wins; `origin/HEAD` is what
-/// the checkout itself says; [`FALLBACK_BRANCH`] is the last resort, consulted
-/// only when neither answered.
+/// `main` sent a `master` or `develop` project's pause at a ref that does not
+/// exist (#7282 review). The operator's declared answer wins; `origin/HEAD` is
+/// what the checkout itself says; [`FALLBACK_BRANCH`] is the last resort,
+/// consulted only when neither answered.
 /// What: configured branch, else `git rev-parse --abbrev-ref origin/HEAD` with
 /// its `origin/` prefix stripped, else `main`.
 /// Test: `publish_uses_the_configured_default_branch`,

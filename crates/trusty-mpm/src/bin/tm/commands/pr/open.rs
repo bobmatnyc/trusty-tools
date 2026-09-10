@@ -119,8 +119,8 @@ impl Preflight for RealPreflight {
             return Ok(ChangelogVerdict::Skipped);
         }
         // #7282: the script takes `--base` and always diffs it against the
-        // checkout's HEAD — it has no `--head` of its own, so a `--head` caller
-        // whose branch is not checked out must pass `--docs-only`.
+        // checkout's HEAD — it has no `--head` of its own, which is why
+        // `head_docs_only_conflict` refuses `--head` without `--docs-only`.
         let out = std::process::Command::new("bash")
             .arg(&script)
             .arg("--base")
@@ -178,6 +178,35 @@ fn head_branch(args: &PrOpenArgs) -> Option<&str> {
         .filter(|h| !h.is_empty())
 }
 
+/// The refusal a `--head` earns when it is not paired with `--docs-only`.
+///
+/// Why (#7282 round 5): `scripts/check_changelog_fragment.sh` accepts only
+/// `--base`, `--staged` and `--file`, so [`Preflight::changelog_gate`] can
+/// diff nothing but `origin/<base>...HEAD` — the CHECKOUT's HEAD. A caller who
+/// names `--head other-branch` from a checkout sitting on a different branch
+/// therefore has the fragment gate judge a diff the PR does not contain, and a
+/// source PR with no fragment passes it. Until the script can diff an explicit
+/// head, refusing the pair is the only sound answer; `--docs-only` is the one
+/// case where the gate's verdict does not matter, because it is skipped.
+/// What: `Some(message)` when a non-blank `--head` was named without
+/// `--docs-only`, else `None`.
+/// Test: `open_head_without_docs_only_is_refused`,
+/// `open_head_without_docs_only_never_calls_gh`,
+/// `open_head_with_docs_only_plans`.
+fn head_docs_only_conflict(args: &PrOpenArgs) -> Option<String> {
+    let head = head_branch(args)?;
+    if args.docs_only {
+        return None;
+    }
+    Some(format!(
+        "--head requires --docs-only until the changelog gate can diff an explicit head: \
+         scripts/check_changelog_fragment.sh takes only --base, so it would judge \
+         origin/{}...HEAD — this checkout — rather than `{head}`. \
+         Run tm pr open from a checkout of `{head}` for a source PR.",
+        args.base
+    ))
+}
+
 /// The revision the pre-flight diffs against `origin/<base>`.
 ///
 /// Why (#7282): the changelog gate and the component-label diff both asked
@@ -228,15 +257,18 @@ pub(crate) struct OpenPlan {
 /// pure function of (args, body text, session name, changelog verdict) — which
 /// is what makes "each missing field exits 2" testable without a `gh` or a
 /// repository.
-/// What: in order — the body contract and footer ([`body::validate`]), the
-/// `Refs`/`Closes` rule ([`body::apply_issue_link`]), the workstream label,
-/// and the changelog gate. Returns every failure found, not just the first,
-/// so one run fixes them all. Both labels and the assignee come from
-/// `core::policy_labels` and the resolved `agents.ticketing` block (#6918),
-/// never from constants spelled here.
+/// What: in order — the `--head`/`--docs-only` pairing
+/// ([`head_docs_only_conflict`]), the body contract and footer
+/// ([`body::validate`]), the `Refs`/`Closes` rule ([`body::apply_issue_link`]),
+/// the workstream label, and the changelog gate. Returns every failure found,
+/// not just the first, so one run fixes them all. Both labels and the assignee
+/// come from `core::policy_labels` and the resolved `agents.ticketing` block
+/// (#6918), never from constants spelled here.
 /// Test: `open_reports_each_missing_field`, `open_rejects_bad_footer`,
 /// `open_requires_a_session_name`, `open_reports_changelog_failure`,
 /// `open_docs_only_skips_the_changelog_gate`,
+/// `open_head_without_docs_only_is_refused`,
+/// `open_head_with_docs_only_plans`,
 /// `open_labels_come_from_the_policy_table`,
 /// `open_assignee_comes_from_the_ticketing_block`.
 pub(crate) fn plan(
@@ -248,6 +280,10 @@ pub(crate) fn plan(
     ticketing: &ResolvedTicketing,
 ) -> Result<OpenPlan, Vec<String>> {
     let mut failures: Vec<String> = Vec::new();
+
+    // #7282 round 5: `--head` and the changelog gate cannot both be honoured,
+    // so the pair is refused here — before `run` reaches `gh`.
+    failures.extend(head_docs_only_conflict(args));
 
     let report = body::validate(body_text);
     failures.extend(report.failures());

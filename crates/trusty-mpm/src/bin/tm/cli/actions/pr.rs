@@ -135,14 +135,19 @@ pub(crate) struct PrOpenArgs {
     #[arg(long, default_value = "main")]
     pub(crate) base: String,
 
-    /// Head branch to open FROM. Defaults to the checkout's current branch.
+    /// Head branch to open FROM; requires --docs-only. Defaults to the
+    /// checkout's current branch.
     ///
     /// Why (#7282): `gh pr create` infers the head from the checkout's current
     /// branch, so a caller that built its branch with git plumbing — the
     /// session-pause publisher does exactly that — had `gh` read `main` and
     /// abort with "you must first push the current branch to a remote, or use
     /// the --head flag". Naming the head makes the caller's checkout state
-    /// irrelevant.
+    /// irrelevant. `--docs-only` is required with it because the changelog gate
+    /// can only diff the CHECKOUT's HEAD, so a source PR opened this way would
+    /// clear the gate against a diff it does not contain (#7282 round 5). The
+    /// pairing is enforced in `commands::pr::open::head_docs_only_conflict`,
+    /// which names the obligation instead of a bare clap message.
     #[arg(long)]
     pub(crate) head: Option<String>,
 

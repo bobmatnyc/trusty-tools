@@ -570,11 +570,13 @@ fn flag_value<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {
 fn open_argv_carries_the_explicit_head_branch() {
     let mut args = open_args("/dev/null");
     args.head = Some("chore/sessions-abc-20260909-233853".to_string());
+    // #7282 round 5: `--head` only plans when paired with `--docs-only`.
+    args.docs_only = true;
     let plan = open::plan(
         &args,
         &full_body(),
         Some("s"),
-        ChangelogVerdict::Pass,
+        ChangelogVerdict::Skipped,
         &ResolvedTicketing::default(),
     )
     .expect("a named head plans");
@@ -631,6 +633,8 @@ fn open_head_drives_the_preflight_diff_revision() {
     let (_d, path) = scratch_body(&full_body());
     let mut args = open_args(&path.to_string_lossy());
     args.head = Some("chore/sessions-abc".to_string());
+    // #7282 round 5: `--head` only reaches `gh` alongside `--docs-only`.
+    args.docs_only = true;
     let gh = FakeGh::new()
         .on("pr create", "https://github.com/o/r/pull/4242\n")
         .on("pr edit", "");
@@ -640,6 +644,80 @@ fn open_head_drives_the_preflight_diff_revision() {
         pre.diff_heads.borrow().as_slice(),
         ["chore/sessions-abc".to_string()]
     );
+}
+
+/// Why: `scripts/check_changelog_fragment.sh` accepts only `--base`, `--staged`
+/// and `--file`, so the gate `tm pr open` runs can diff nothing but
+/// `origin/<base>...HEAD`. A `--head` caller standing on another branch would
+/// have that gate judge the checkout instead of the PR, and a source PR with no
+/// fragment would pass it — the changelog gate silently evaluating the wrong
+/// ref (#7282 round 5, code-critic HIGH). The refusal has to name the
+/// obligation, because the caller's next move is either `--docs-only` or a real
+/// checkout of the head.
+/// Test target: `head_docs_only_conflict`, through `plan`.
+#[test]
+fn open_head_without_docs_only_is_refused() {
+    let mut args = open_args("/dev/null");
+    args.head = Some("chore/sessions-abc".to_string());
+    let failures = open::plan(
+        &args,
+        &full_body(),
+        Some("s"),
+        ChangelogVerdict::Pass,
+        &ResolvedTicketing::default(),
+    )
+    .expect_err("--head without --docs-only must not plan");
+
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert!(
+        failures[0].contains("--head requires --docs-only"),
+        "{failures:?}"
+    );
+    assert!(
+        failures[0].contains("check_changelog_fragment.sh"),
+        "the refusal must name what cannot be checked: {failures:?}"
+    );
+    assert!(
+        failures[0].contains("chore/sessions-abc"),
+        "the refusal must name the head it is about: {failures:?}"
+    );
+}
+
+/// Why: the refusal is worth nothing if the PR opens anyway — `gh` must never
+/// be spawned, and the exit code must be the check-failed one every other
+/// pre-flight failure uses.
+/// Test target: `run`'s failure path with a `--head` and no `--docs-only`.
+#[test]
+fn open_head_without_docs_only_never_calls_gh() {
+    let (_d, path) = scratch_body(&full_body());
+    let mut args = open_args(&path.to_string_lossy());
+    args.head = Some("chore/sessions-abc".to_string());
+    let gh = FakeGh::new();
+    let code = open::run(&gh, &args, &FakePreflight::ok()).expect("a failed check is not an error");
+
+    assert_eq!(code, 2);
+    assert!(gh.calls().is_empty(), "{:?}", gh.calls());
+}
+
+/// Why: `--docs-only` is the one case where the gate's verdict cannot be wrong,
+/// because it is skipped — so the pair must still plan. This is the pause
+/// publisher's own invocation, and refusing it would break every pause.
+/// Test target: `head_docs_only_conflict`, permitting arm.
+#[test]
+fn open_head_with_docs_only_plans() {
+    let mut args = open_args("/dev/null");
+    args.head = Some("chore/sessions-abc".to_string());
+    args.docs_only = true;
+    let plan = open::plan(
+        &args,
+        &full_body(),
+        Some("s"),
+        ChangelogVerdict::Skipped,
+        &ResolvedTicketing::default(),
+    )
+    .expect("--head with --docs-only plans");
+
+    assert_eq!(flag_value(&plan.argv, "--head"), Some("chore/sessions-abc"));
 }
 
 /// Why: without `--head` the diff must still be the checkout's `HEAD`.
