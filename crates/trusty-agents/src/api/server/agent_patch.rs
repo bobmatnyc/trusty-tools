@@ -299,6 +299,7 @@ pub(super) async fn patch_agent_at(
         ));
     }
 
+    let _manifest_lock = super::AGENT_CONFIG_WRITE_LOCK.lock().await;
     let raw = match tokio::fs::read_to_string(&path).await {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {

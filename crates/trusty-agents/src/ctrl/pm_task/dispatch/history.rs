@@ -479,6 +479,9 @@ pub async fn run_pm_task_with_history(
         active_project: active_project_slot,
     }));
     registry.register(Arc::new(MoveFileTool));
+    registry.register(Arc::new(
+        crate::skills::manage::ManageSkillsTool::concierge(),
+    ));
     registry.register(Arc::new(CreateDirTool));
     registry.register(Arc::new(
         crate::tools::web_search::BraveSearchTool::from_env(),
@@ -495,7 +498,7 @@ pub async fn run_pm_task_with_history(
         registry.register(Arc::new(crate::tools::run_bash::RunBashTool::new(cwd)));
     }
     for tool in crate::tools::mcp_tools::mcp_tool_executors() {
-        registry.register(tool);
+        crate::tools::listener_config::register_external(&mut registry, tool);
     }
     register_ticketing_tools(&mut registry).await;
 

@@ -143,6 +143,10 @@ pub(super) async fn relay_event_handler(headers: HeaderMap, Json(event): Json<Ev
     }
 
     match &event {
+        Event::ChatHistoryUpdated { agent } if super::agent_stores::is_valid_agent_name(agent) => {
+            events::publish(event);
+            StatusCode::ACCEPTED.into_response()
+        }
         Event::SlackMessageReceived { tier, .. } => {
             if !tier_is_known(tier) {
                 return (

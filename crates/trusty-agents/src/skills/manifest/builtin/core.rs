@@ -11,6 +11,46 @@
 use super::super::{SkillDef, SkillKind::Action, SkillKind::System, tool_skill};
 
 pub(super) static TABLE: &[SkillDef] = &[
+    tool_skill(
+        "listener-config",
+        "Configure My Listeners",
+        "Configure this assistant's event filters and instructions.",
+        "listener_config",
+        System,
+        None,
+    ),
+    tool_skill(
+        "channel",
+        "Assistant Channels",
+        "Read or explicitly send through this assistant's configured channels.",
+        "channel",
+        Action,
+        None,
+    ),
+    tool_skill(
+        "project-skill",
+        "Installed Skills",
+        "Read enabled user and project guidance and authorized capabilities.",
+        "project_skill",
+        System,
+        None,
+    ),
+    tool_skill(
+        "manage-skills",
+        "Manage Installed Skills",
+        "Concierge's scoped installed skill management service.",
+        "manage_skills",
+        System,
+        None,
+    ),
+    tool_skill(
+        "delegate-skill-configuration",
+        "Ask Concierge to Manage Skills",
+        "Forward installed skill configuration to Concierge's scoped service.",
+        "delegate_skill_configuration",
+        System,
+        None,
+    ),
     // --- filesystem ------------------------------------------------------
     tool_skill(
         "file-read",

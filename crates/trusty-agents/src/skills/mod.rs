@@ -20,6 +20,7 @@
 pub mod global_cache;
 pub mod index;
 pub mod manifest;
+pub mod project;
 pub mod rating;
 pub mod registry;
 pub mod sources;
@@ -35,3 +36,5 @@ pub use types::{SkillEntry, SkillRegistry, strip_frontmatter};
 
 #[cfg(test)]
 mod mod_tests;
+
+pub mod manage;

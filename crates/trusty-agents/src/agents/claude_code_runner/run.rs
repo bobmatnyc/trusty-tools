@@ -280,6 +280,8 @@ impl ClaudeCodeAgentRunner {
                 continue;
             };
 
+            let _ =
+                crate::tools::activity::CLI_ACTIVITY.try_with(|context| context.observe(&event));
             match event.get("type").and_then(|v| v.as_str()) {
                 Some("result") => {
                     is_error = event

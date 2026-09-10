@@ -95,7 +95,11 @@ export function buildPicker(catalog: ModelsCatalogResponse): PickerEntry[] {
     providerId: null,
   };
 
-  const providerEntries: PickerEntry[] = catalog.providers.map((p) => ({
+  // The registry also reports local. The synthetic row below has the live
+  // availability probe; keep that single row so keyed menus remain usable.
+  const providerEntries: PickerEntry[] = catalog.providers
+    .filter((p) => p.provider_id !== 'local' && p.provider_id !== catalog.local.provider_id)
+    .map((p) => ({
     id: p.provider_id,
     label: `${p.provider_id} — ${p.default_model}`,
     selectable: p.credential_configured && p.reachable_today,

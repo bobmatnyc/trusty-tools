@@ -10,10 +10,12 @@
 //! `dispatch("fake", args)` returns the fake's output and `schemas()`
 //! contains the fake's schema.
 
+pub(crate) mod activity;
 pub mod agent_plugin;
 pub mod always_on;
 pub mod analysis;
 pub mod ast_tools;
+pub mod channel;
 // #4026/#4028: cross-product subagent allow-set + propose-only envelope.
 pub mod cross_product;
 pub mod delegate;
@@ -46,6 +48,7 @@ pub mod python_skill;
 pub mod registry;
 pub mod run_bash;
 // #4171 (epic #4167): L0-only read-only session-state visibility.
+pub mod listener_config;
 pub mod session_state;
 pub mod shell;
 pub mod shell_exec;
@@ -79,6 +82,8 @@ pub use traits::{
 /// Test: See unit tests below.
 #[derive(Default)]
 pub struct ToolRegistry {
+    activity_session: Option<String>,
+    activity_history: std::sync::Mutex<Vec<Value>>,
     tools: HashMap<String, Arc<dyn ToolExecutor>>,
 }
 
@@ -87,9 +92,22 @@ impl ToolRegistry {
     pub fn new() -> Self {
         Self {
             tools: HashMap::new(),
+            activity_session: None,
+            activity_history: std::sync::Mutex::new(Vec::new()),
         }
     }
 
+    /// Attach a task identity for safe, argument-free tool activity telemetry.
+    pub fn with_activity_session(mut self, session: &str) -> Self {
+        self.activity_session = (!session.is_empty()).then(|| session.to_owned());
+        self
+    }
+    pub fn activity_history(&self) -> Vec<Value> {
+        self.activity_history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
     /// Register the three read-only filesystem exploration tools
     /// (`read_file`, `list_dir`, `grep_files`).
     ///
@@ -144,7 +162,39 @@ impl ToolRegistry {
         let Some(tool) = self.tools.get(name) else {
             return ToolResult::err(format!("no tool registered with name '{name}'"));
         };
-        tool.execute(args).await
+        static NEXT_CALL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let call_id = NEXT_CALL
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .to_string();
+        let emit = |status: &str| {
+            if let Some(session_id) = &self.activity_session {
+                let mut history = self
+                    .activity_history
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                let row = serde_json::json!({"kind":"trusty.tool-activity","version":1,"call_id":call_id,"tool":name,"status":status});
+                if let Some(existing) = history.iter_mut().find(|v| v["call_id"] == call_id) {
+                    *existing = row;
+                } else if history.len() < 128 {
+                    history.push(row);
+                }
+                drop(history);
+                crate::events::emit(crate::events::Event::ToolActivity {
+                    session_id: session_id.clone(),
+                    call_id: call_id.clone(),
+                    tool: name.to_owned(),
+                    status: status.to_owned(),
+                });
+            }
+        };
+        emit("running");
+        let result = tool.execute(args).await;
+        emit(if result.is_error() {
+            "error"
+        } else {
+            "complete"
+        });
+        result
     }
 
     /// Dispatch with an optional per-agent allowlist (see `ToolsConfig`).

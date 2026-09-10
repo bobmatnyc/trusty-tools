@@ -151,12 +151,13 @@ fn binding_for(
         return Err(issue);
     }
     let tree_uri = binding.resolved_tree(agent);
-    let Some(tree_path) = okg_tree_path(knowledge_dir, &tree_uri) else {
-        return Err(format!(
-            "store `{}` declares tree `{tree_uri}`, which does not resolve to a \
-             knowledge-tree directory",
-            binding.name
-        ));
+    let tree_path = if binding.root.is_some() {
+        crate::assistants::AssistantHome::for_instance(agent)
+            .map_err(|e| e.to_string())?
+            .store_root(binding)
+            .map_err(|e| e.to_string())?
+    } else {
+        okg_tree_path(knowledge_dir, &tree_uri).ok_or_else(||format!("store `{}` declares tree `{tree_uri}`, which does not resolve to a knowledge-tree directory",binding.name))?
     };
     if !same_dir(&tree_path, root) {
         return Err(format!(
@@ -390,5 +391,24 @@ mod tests {
         agent_dir(&agents, "izzie", "[[stores]]\nname = \"bob-kb\"\n");
         let err = bound_index_for_tree(&[agents], &kdir, &kdir.join("orphan"), None).unwrap_err();
         assert!(err.contains("no agent binds"), "reason was: {err}");
+    }
+    #[test]
+    fn explicit_private_store_root_resolves_to_its_bound_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agents = tmp.path().join("agents");
+        agent_dir(
+            &agents,
+            "fixture-private",
+            "[[stores]]\nname='private-index'\nroot='knowledge'\n",
+        );
+        let home = crate::assistants::AssistantHome::for_instance("fixture-private").unwrap();
+        let found = bound_index_for_tree(
+            &[agents],
+            &tmp.path().join("shared"),
+            &home.path().join("knowledge"),
+            Some("fixture-private"),
+        )
+        .unwrap();
+        assert_eq!(found.index, "private-index");
     }
 }

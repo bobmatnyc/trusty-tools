@@ -1,18 +1,6 @@
-// Why (#4404): the picker's correctness is almost entirely in its DATA, and the
-// one bug that would be invisible in the UI is the Concierge decode — a card
-// that wrote `'ctrl'` onto `activeAgentId` would look identical on screen while
-// silently routing every subsequent message through the tools-OFF persona path
-// and stripping Concierge's delegation capability. The second is the duplicate:
-// `ctrl` is a normal roster entry since #3819, so a picker that rendered the
-// roster verbatim draws Concierge twice — the exact defect Bob's "Concierge
-// appears exactly once" fix removed from the header switcher.
-// What: pure unit tests over `buildPickerCards` / `decodeAssistantSelection` and
-// the monogram/hue stand-ins. No DOM and no stores — the component wiring is
-// covered by `components/AssistantPicker.test.ts`.
-// Test: this file.
+// Assistant cards exclude the internal helper; legacy selection decoding remains compatible.
 import { describe, expect, it } from 'vitest';
 import {
-  CONCIERGE_CARD,
   avatarHue,
   buildPickerCards,
   decodeAssistantSelection,
@@ -32,30 +20,16 @@ function entry(over: Partial<RosterEntry> = {}): RosterEntry {
 }
 
 describe('buildPickerCards', () => {
-  it('pins Concierge first, ahead of every roster instance', () => {
-    const cards = buildPickerCards([entry()]);
-    expect(cards[0]).toEqual(CONCIERGE_CARD);
-    expect(cards[0].id).toBe(CONCIERGE_AGENT_ID);
-    expect(cards[0].origin).toBe('concierge');
+  it('has no cards while the roster is empty', () => {
+    expect(buildPickerCards([])).toEqual([]);
   });
 
-  it('offers Concierge even when the roster has not loaded', () => {
-    // The cold-start case: the catalog fetch races the sidecar, so an empty
-    // roster is "not loaded", never "no assistants exist". A picker with no
-    // selectable card at all would be a dead landing view.
-    expect(buildPickerCards([])).toHaveLength(1);
-  });
-
-  // The duplicate-card defect. `ctrl` is a legitimate role=assistant,
-  // non-hidden catalog entry since #3819, so this is a live hazard, not a
-  // hypothetical one.
-  it('never draws Concierge twice when ctrl is in the roster', () => {
+  it('excludes Concierge even when an old roster contains ctrl', () => {
     const cards = buildPickerCards([
       entry({ id: CONCIERGE_AGENT_ID, label: 'Concierge' }),
       entry(),
     ]);
-    expect(cards.filter((c) => c.id === CONCIERGE_AGENT_ID)).toHaveLength(1);
-    expect(cards.map((c) => c.id)).toEqual([CONCIERGE_AGENT_ID, 'izzie']);
+    expect(cards.map((c) => c.id)).toEqual(['izzie']);
   });
 
   it('preserves the roster order the merge already established', () => {
@@ -63,7 +37,7 @@ describe('buildPickerCards', () => {
       entry({ id: 'cto-assistant', label: 'CTO Bot' }),
       entry({ id: 'izzie', label: 'Izzie' }),
     ]);
-    expect(cards.map((c) => c.id)).toEqual([CONCIERGE_AGENT_ID, 'cto-assistant', 'izzie']);
+    expect(cards.map((c) => c.id)).toEqual(['cto-assistant', 'izzie']);
   });
 
   it("distinguishes a user's own overlay instance from a project one", () => {
@@ -77,32 +51,19 @@ describe('buildPickerCards', () => {
 
   it('carries the roster label and description onto the card', () => {
     const cards = buildPickerCards([entry({ label: 'Izzie', description: 'Weather etc.' })]);
-    expect(cards[1].label).toBe('Izzie');
-    expect(cards[1].description).toBe('Weather etc.');
+    expect(cards[0].label).toBe('Izzie');
+    expect(cards[0].description).toBe('Weather etc.');
   });
 });
 
-describe('decodeAssistantSelection — the tools-armed guard', () => {
-  // THE assertion of this file. `activeAgentId === null` is the tools-ARMED
-  // ctrl path; the literal `'ctrl'` is the tools-OFF persona path. The card
-  // must carry `ctrl` (it is the persisted sentinel and the config vocabulary)
-  // and must never be written through unchanged.
-  it('maps the Concierge card id back to null, never to the literal', () => {
+describe('decodeAssistantSelection — persistence compatibility', () => {
+  it('maps the legacy ctrl sentinel back to null', () => {
     expect(decodeAssistantSelection(CONCIERGE_AGENT_ID)).toBeNull();
-    expect(decodeAssistantSelection(CONCIERGE_CARD.id)).toBeNull();
   });
 
-  it('passes an instance id through verbatim', () => {
-    expect(decodeAssistantSelection('izzie')).toBe('izzie');
-    expect(decodeAssistantSelection('cto-assistant')).toBe('cto-assistant');
-  });
-
-  it('is the exact inverse of the persisted encoding for every card', () => {
-    // Round-trip property: every card the picker can draw decodes to a value
-    // `activeAgentId` accepts, and only Concierge collapses to null.
-    const cards = buildPickerCards([entry({ id: 'izzie' }), entry({ id: 'cto-assistant' })]);
-    const decoded = cards.map((c) => decodeAssistantSelection(c.id));
-    expect(decoded).toEqual([null, 'izzie', 'cto-assistant']);
+  it('passes selectable instance ids through verbatim', () => {
+    const cards = buildPickerCards([entry(), entry({ id: 'cto-assistant' })]);
+    expect(cards.map((c) => decodeAssistantSelection(c.id))).toEqual(['izzie', 'cto-assistant']);
   });
 });
 
@@ -141,8 +102,7 @@ describe('avatarHue', () => {
 
   it('separates the ids this app actually ships', () => {
     // Not a general collision guarantee — a 360-bucket hash has collisions by
-    // construction. This pins that the three identities a user meets on a
-    // default install are visually distinct.
+    // construction. This pins that these example identities remain visually distinct.
     const hues = ['ctrl', 'izzie', 'cto-assistant'].map(avatarHue);
     expect(new Set(hues).size).toBe(3);
   });

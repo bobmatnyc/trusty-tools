@@ -396,6 +396,14 @@ async fn subagents_route_absent_whitelist_makes_every_target_unreachable() {
             "{t:?}"
         );
     }
+    assert_eq!(ip["selected"], serde_json::json!([]));
+    for target in targets {
+        assert_eq!(target["selected"], false);
+        assert_eq!(
+            target["eligible"],
+            target["name"] == "research-agent" || target["name"] == "ticketing-agent"
+        );
+    }
     let floor: Vec<&str> = ip["reachable_floor"]
         .as_array()
         .unwrap()
@@ -432,6 +440,8 @@ async fn subagents_route_reports_a_non_whitelisted_target_as_unreachable() {
     let body = body_json(resp).await;
     let targets = body["in_product"]["targets"].as_array().unwrap();
     let eng = targets.iter().find(|t| t["name"] == "engineer").unwrap();
+    assert_eq!(eng["eligible"], false);
+    assert_eq!(eng["selected"], false);
     assert_eq!(
         eng["reachable"], false,
         "a config naming a coding agent must not make it reachable: {eng:?}"

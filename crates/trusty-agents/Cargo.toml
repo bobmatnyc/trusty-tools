@@ -84,6 +84,7 @@ trusty-search = { path = "../trusty-search", version = "0.54" }
 # `install_plugins` exists to keep out of this Cargo.toml (see the
 # `trusty-agents-common` comment below) — trusty-gworkspace is a plain
 # connector library, no cargo-cycle concern.
+trusty-channels = { path = "../trusty-channels", version = "0.1.0" }
 trusty-gworkspace = { path = "../trusty-gworkspace", version = "0.2.2" }
 # trusty-kb: the deterministic KB store + OKG ingest engine (source registry,
 # per-item ledger, entity writes). The `okg_ingest_*` tools are thin agent-facing
@@ -136,6 +137,7 @@ shlex = { workspace = true }
 stop-words = "0.8"
 dirs = "5"
 sha2 = "0.10"
+tempfile = "3"
 # subtle (#3761): constant-time byte equality for the internal relay's shared
 # secret (`api::server::relay::relay_authorized`). Plain `==` short-circuits on
 # the first differing byte, leaking the matching-prefix length to a caller that
@@ -215,7 +217,6 @@ path = "src/main.rs"
 # relying on `tokio-test` happening to pull the same feature in.
 tokio = { version = "1", features = ["full", "test-util"] }
 tokio-test = "0.4"
-tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 serial_test = "3"
 # Exposes async-openai's `OpenAIConfig::api_key()` (a `SecretString`) in

@@ -31,6 +31,9 @@ import {
 } from './chatHistory';
 import {
   activeAgentId,
+  activeMessages,
+  conversationKey,
+  streamDeltaIntoTask,
   activeProjectId,
   addMessage,
   chatHistoryCursor,
@@ -86,7 +89,7 @@ describe('rehydrateChat', () => {
     const result = await rehydrateChat('izzie', 'Izzie', 'ctrl');
 
     expect(result).toEqual({ seeded: 2, hasMore: false, reason: undefined });
-    const restored = get(messages).get('ctrl') ?? [];
+    const restored = get(messages).get(conversationKey('ctrl', 'izzie')) ?? [];
     expect(restored.map((m) => m.content)).toEqual([
       'what did we decide?',
       'we shipped the fragment gate',
@@ -135,7 +138,7 @@ describe('rehydrateChat', () => {
 
     expect(result.seeded).toBe(0);
     expect(result.hasMore).toBe(false);
-    expect(get(messages).get('ctrl')).toBeUndefined();
+    expect(get(messages).get(conversationKey('ctrl', 'izzie'))).toBeUndefined();
   });
 
   test('rehydrateChat_does_not_clobber_a_message_typed_during_bootstrap', async () => {
@@ -146,13 +149,13 @@ describe('rehydrateChat', () => {
       content: 'typed while loading',
       timestamp: 1,
     };
-    addMessage('ctrl', typed);
+    addMessage(conversationKey('ctrl', 'izzie'), typed);
     stubFetch(page());
 
     const result = await rehydrateChat('izzie', 'Izzie', 'ctrl');
 
     expect(result.seeded).toBe(0);
-    expect(get(messages).get('ctrl')).toEqual([typed]);
+    expect(get(messages).get(conversationKey('ctrl', 'izzie'))).toEqual([typed]);
   });
 
   test('rehydrateChat_reports_more_when_older_turns_remain', async () => {
@@ -177,7 +180,7 @@ describe('loadOlderChat', () => {
   }
 
   test('loadOlderChat_prepends_the_previous_page', async () => {
-    addMessage('ctrl', {
+    addMessage(conversationKey('ctrl', 'izzie'), {
       id: 'history-4',
       role: 'user',
       content: 'newest',
@@ -197,7 +200,7 @@ describe('loadOlderChat', () => {
 
     expect(result).toMatchObject({ seeded: 1, hasMore: true });
     // Older turns must land ABOVE what is already rendered.
-    expect((get(messages).get('ctrl') ?? []).map((m) => m.content)).toEqual([
+    expect((get(messages).get(conversationKey('ctrl', 'izzie')) ?? []).map((m) => m.content)).toEqual([
       'older',
       'newest',
     ]);
@@ -277,7 +280,7 @@ describe('loadOlderChat', () => {
 
     await loadOlderChat();
 
-    expect((get(messages).get('ctrl') ?? []).map((m) => m.content)).toEqual(['older']);
+    expect((get(messages).get(conversationKey('ctrl', 'izzie')) ?? []).map((m) => m.content)).toEqual(['older']);
     expect(get(messages).get('other-project')).toBeUndefined();
   });
 
@@ -285,7 +288,7 @@ describe('loadOlderChat', () => {
     armCursor(4);
     stubFetch(page({ messages: [{ role: 'user', content: 'older' }], start: 3 }));
     await loadOlderChat();
-    expect((get(messages).get('ctrl') ?? [])[0].id).toBe('history-3-0');
+    expect((get(messages).get(conversationKey('ctrl', 'izzie')) ?? [])[0].id).toBe('history-3');
   });
 });
 
@@ -305,7 +308,7 @@ describe('the cursor rehydrateChat arms', () => {
   test('rehydrateChat_does_not_arm_the_cursor_when_the_seed_was_refused', async () => {
     // Live messages won the bucket, so paging older into it would interleave a
     // restored conversation with an unrelated live one.
-    addMessage('ctrl', { id: 'live-1', role: 'user', content: 'typed', timestamp: 1 });
+    addMessage(conversationKey('ctrl', 'izzie'), { id: 'live-1', role: 'user', content: 'typed', timestamp: 1 });
     stubFetch(page({ start: 98, has_more: true }));
 
     const result = await rehydrateChat('izzie', 'Izzie', 'ctrl');
@@ -463,4 +466,70 @@ describe('resolveRehydrationTarget', () => {
       speaker: 'Assistant',
     });
   });
+});
+
+
+describe('switching assistant conversations', () => {
+  test('switches immediately, restores each history and keeps background replies in their own chat', async () => {
+    stubFetch(page({ start: 10, has_more: true }));
+    await rehydrateChat('izzie', 'Izzie', 'ctrl');
+    addMessage(conversationKey('ctrl', 'izzie'), { id: 'live', taskId: 'task-a', role: 'assistant', content: '', timestamp: 1 });
+    activeAgentId.set('cto');
+    expect(get(activeMessages)).toEqual([]);
+    stubFetch(page({ messages: [{role: 'user', content: 'CTO history'}] }));
+    await rehydrateChat('cto', 'CTO', 'ctrl');
+    streamDeltaIntoTask('task-a', 'Background reply');
+    expect(get(activeMessages).map(m => m.content)).toEqual(['CTO history']);
+    activeAgentId.set('izzie');
+    await rehydrateChat('izzie', 'Izzie', 'ctrl');
+    expect(get(activeMessages).slice(-1)[0]?.content).toBe('Background reply');
+    expect(get(chatHistoryCursor)?.start).toBe(10);
+  });
+
+  test('a late history response cannot replace the selected assistant or its paging cursor', async () => {
+    let finish!: (value: unknown) => void;
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(resolve => { finish = resolve; })));
+    const pending = rehydrateChat('izzie', 'Izzie', 'ctrl');
+    activeAgentId.set('cto');
+    stubFetch(page({ messages: [{role: 'user', content: 'CTO history'}], start: 20, has_more: true }));
+    await rehydrateChat('cto', 'CTO', 'ctrl');
+    finish({ ok: true, json: async () => page() });
+    await pending;
+    expect(get(activeMessages).map(m => m.content)).toEqual(['CTO history']);
+    expect(get(chatHistoryCursor)?.agentId).toBe('cto');
+    activeAgentId.set('empty');
+    stubFetch(page({ available: false, messages: [] }));
+    await rehydrateChat('empty', 'Empty', 'ctrl');
+    expect(get(activeMessages)).toEqual([]);
+    expect(get(chatHistoryCursor)).toBeNull();
+  });
+});
+
+
+test.each([true, false])('rapid return ignores an older response (available=%s)', async (available) => {
+  let finish!: (value: unknown) => void;
+  vi.stubGlobal('fetch', vi.fn(() => new Promise(resolve => { finish = resolve; })));
+  const pending = rehydrateChat('izzie', 'Izzie', 'ctrl');
+  activeAgentId.set('cto');
+  activeAgentId.set('izzie');
+  stubFetch(page({ messages: [{role: 'user', content: 'Latest history'}], start: 40, has_more: true }));
+  await rehydrateChat('izzie', 'Izzie', 'ctrl');
+  finish({ ok: true, json: async () => page({ available, messages: available ? [{role: 'user', content: 'Stale history'}] : [] }) });
+  await pending;
+  expect(get(activeMessages).map(m => m.content)).toEqual(['Latest history']);
+  expect(get(chatHistoryCursor)?.start).toBe(40);
+});
+
+
+test('history still loads when a resumed task banner arrives during overlapping selection', async () => {
+  const pending: ((value: unknown) => void)[] = [];
+  vi.stubGlobal('fetch', vi.fn(() => new Promise(resolve => pending.push(resolve))));
+  const resumed = rehydrateChat('izzie', 'Izzie', 'ctrl');
+  const selection = rehydrateChat('izzie', 'Izzie', 'ctrl');
+  pending[0]({ ok: true, json: async () => page() });
+  await resumed;
+  addMessage(conversationKey('ctrl', 'izzie'), { id: 'resume', role: 'system', content: 'Resumed task', timestamp: 1 });
+  pending[1]({ ok: true, json: async () => page() });
+  await selection;
+  expect(get(activeMessages).map(m => m.content)).toEqual(['what did we decide?', 'we shipped the fragment gate', 'Resumed task']);
 });

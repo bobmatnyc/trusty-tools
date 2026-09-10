@@ -42,6 +42,7 @@ use trusty_kb::store::KbStore;
 use crate::tools::traits::{ToolExecutor, ToolResult};
 
 pub use docstore::OkgIngestDocstoreTool;
+pub(crate) use docstore::ingest_into_store;
 pub use drive::OkgIngestDriveTool;
 pub use gmail::OkgIngestGmailTool;
 pub use sources::OkgSourcesTool;
@@ -91,7 +92,7 @@ pub(super) fn with_root(mut props: Value) -> Value {
 ///
 /// Mirrors `trusty-kb`'s own default so both binaries address the same trees:
 /// `$KB_KNOWLEDGE_DIR`, else `<home>/.trusty-agents/knowledge`.
-pub(super) fn knowledge_dir() -> PathBuf {
+pub(crate) fn knowledge_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("KB_KNOWLEDGE_DIR") {
         return PathBuf::from(dir);
     }
@@ -162,7 +163,7 @@ pub(super) fn require_str<'a>(args: &'a Value, key: &str) -> anyhow::Result<&'a 
 /// argument. Resolved per call so an operator can widen the list without
 /// restarting the agent.
 /// Test: `config_defaults_to_home`, `docstore_tool_rejects_credential_dir`.
-pub(super) fn docstore_policy() -> trusty_kb::okg::policy::DocStorePolicy {
+pub(crate) fn docstore_policy() -> trusty_kb::okg::policy::DocStorePolicy {
     let home = config::home_dir().unwrap_or_else(|| PathBuf::from("."));
     config::load().policy(&home)
 }

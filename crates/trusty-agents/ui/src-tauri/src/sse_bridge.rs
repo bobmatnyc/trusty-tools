@@ -174,11 +174,34 @@ async fn pump_stream(app: &AppHandle, base: &str, token: Option<&str>) -> Result
 /// Test: `parse_dispatches_agent_message_delta`,
 /// `parse_slack_frame_matches_both_kinds`.
 fn dispatch_frame(app: &AppHandle, data: &str) {
-    if let Some(payload) = parse_delta_frame(data) {
+    if let Some(agent) = serde_json::from_str::<serde_json::Value>(data)
+        .ok()
+        .filter(|v| v["type"] == "chat_history_updated")
+        .and_then(|v| v["agent"].as_str().map(str::to_owned))
+    {
+        let _ = app.emit("chat-history-updated", serde_json::json!({"agent":agent}));
+    } else if let Some(payload) = parse_tool_activity_frame(data) {
+        let _ = app.emit("task-tool-activity", payload);
+    } else if let Some(payload) = parse_delta_frame(data) {
         let _ = app.emit("task-delta", payload);
     } else if let Some(value) = parse_slack_frame(data) {
         let _ = app.emit("slack-event", value);
     }
+}
+
+fn parse_tool_activity_frame(data: &str) -> Option<serde_json::Value> {
+    let value: serde_json::Value = serde_json::from_str(data).ok()?;
+    if value["type"] != "tool_activity" {
+        return None;
+    }
+    let task = value["session_id"].as_str().filter(|s| !s.is_empty())?;
+    let call = value["call_id"].as_str().filter(|s| !s.is_empty())?;
+    let tool = value["tool"].as_str().filter(|s| !s.is_empty())?;
+    let status = value["status"].as_str()?;
+    if !["running", "complete", "error"].contains(&status) {
+        return None;
+    }
+    Some(serde_json::json!({"task_id":task,"call_id":call,"tool":tool,"status":status}))
 }
 
 /// Incremental SSE frame parser.
@@ -375,4 +398,12 @@ mod tests {
         assert_eq!(parse_delta_frame(&frames[0]).unwrap().text, "1");
         assert_eq!(parse_delta_frame(&frames[1]).unwrap().text, "2");
     }
+}
+
+#[test]
+fn tool_activity_frame_validates_and_omits_private_payloads() {
+    let result=parse_tool_activity_frame(r#"{"type":"tool_activity","session_id":"task","call_id":"one","tool":"Read","status":"complete","input":"private"}"#).unwrap();
+    assert_eq!(result["task_id"], "task");
+    assert!(result.get("input").is_none());
+    assert!(parse_tool_activity_frame(r#"{"type":"tool_activity","session_id":"task","call_id":"one","tool":"Read","status":"invented"}"#).is_none());
 }

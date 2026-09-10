@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { get } from 'svelte/store';
+  import { createEventRefreshQueue } from './lib/eventRefreshQueue';
   import Sidebar from './components/Sidebar.svelte';
   import Header from './components/Header.svelte';
   // #3894: the Chat view's whole composition (chat column + recap rail +
@@ -11,7 +12,9 @@
   // #4404: the landing view — a card per assistant instance + Concierge +
   // create. Selection writes `activeAgentId`, which persists itself (#4281).
   import AssistantPicker from './components/AssistantPicker.svelte';
-  import EventsView from './components/EventsView.svelte';
+  import FileViewer from './components/FileViewer.svelte';
+  import { openedFile, loadWorkspaceRoots } from './stores/workspace';
+  import ChannelsView from './components/ChannelsView.svelte';
   // #4098 (COST-09): the Costs tab — spend by agent/model/day from
   // `GET /api/costs`. Owns its own fetch; see the component's doc comment.
   import CostsView from './components/CostsView.svelte';
@@ -50,8 +53,9 @@
     activeAgentId,
     activeProjectId,
     agentRoster,
+    isRunning,
   } from './stores/app';
-  import { rehydrateChat, resolveRehydrationTarget } from './lib/chatHistory';
+  import { rehydrateChat, resolveRehydrationTarget, refreshEventHistory } from './lib/chatHistory';
   import { requestExitConfigPane } from './stores/configPane';
   // Why (#3217): parallel structured-data sink — see stores/workflow.ts doc
   // comment for the full rationale. Additive to the flattened webBus path
@@ -79,6 +83,8 @@
   // without a relaunch. (`ProjectsView` deliberately gains no entry: #3819
   // dropped it from the nav and epic #4355 rebuilds that surface.)
   type View = 'assistants' | 'chat' | 'events' | 'costs';
+  let channelsVisited = false;
+  $: if (activeView === 'events') channelsVisited = true;
   let activeView: View = 'assistants';
 
   function switchView(view: View) {
@@ -336,45 +342,32 @@
       // "Assistant". Chaining off the catalog (settled, not resolved — a failed
       // fetch must still rehydrate, just with the fallback label) is what makes
       // the label correct.
-      catalog.then(rehydrateChatOnReady);
+      catalog.then(() => { historyReady = true; });
     }
     prevApiReady = ready;
   }
   $: refetchPickerCatalogsOnReady(apiReady);
 
-  // #4278: restore the persisted conversation once the API is healthy.
-  //
-  // It hangs off the same apiReady edge as the catalog refetch rather than off
-  // `onMount`, because the route reads through the sidecar — on a cold start
-  // that is not listening when `onMount` fires, so a mount-time fetch would
-  // fail and leave the chat blank, which is the bug. `hydrateMessages` refuses
-  // to overwrite a non-empty bucket, so a message typed while this is in
-  // flight survives.
-  //
-  // The persona log is keyed by AGENT (`persona-{agent}`) while the chat store
-  // is keyed by project, so this maps the selected agent's history into the
-  // active project's bucket. `activeAgentId` is null for the base ctrl/PM
-  // session — see its doc comment in `stores/app.ts`.
-  let rehydrated = false;
-  function rehydrateChatOnReady() {
-    if (rehydrated) return;
-    rehydrated = true;
-    const { agentId, speaker } = resolveRehydrationTarget(
-      get(activeAgentId),
-      get(agentRoster),
-    );
-    rehydrateChat(agentId, speaker, get(activeProjectId))
+  // Refresh the selected assistant's durable log on every conversation switch.
+  let historyReady = false;
+  function rehydrateSelectedChat(ready: boolean, selectedAgent: string | null, projectId: string) {
+    if (!ready) return;
+    const { agentId, speaker } = resolveRehydrationTarget(selectedAgent, get(agentRoster));
+    rehydrateChat(agentId, speaker, projectId)
       .then((result) => {
-        // Every failure mode renders as an empty chat, so an unreported reason
-        // makes a broken history indistinguishable from a first run.
-        if (result.reason) {
-          console.warn('[App] chat not rehydrated:', result.reason);
-        }
+        if (result.reason) console.warn('[App] chat not rehydrated:', result.reason);
       })
       .catch((e) => console.error('[App] chat rehydration failed:', e));
   }
+  $: rehydrateSelectedChat(historyReady, $activeAgentId, $activeProjectId);
+  const eventRefreshQueue = createEventRefreshQueue((agent, project) => {
+    const { speaker } = resolveRehydrationTarget(agent, get(agentRoster));
+    return refreshEventHistory(agent, speaker, project);
+  }, error => console.warn('[App] incoming chat refresh failed:', error));
+  $: eventRefreshQueue.update({ ready: historyReady, running: $isRunning, agent: $activeAgentId, project: $activeProjectId });
 
   onMount(() => {
+    if (desktop) void loadWorkspaceRoots();
     bootstrap();
     const onUnload = () => stopEventStream();
     window.addEventListener('beforeunload', onUnload);
@@ -404,12 +397,20 @@
     // listener is a harmless no-op in browser mode (nothing emits `slack-event`
     // on the web bus), so exactly one push happens per event in each transport.
     let unlistenSlack: (() => void) | null = null;
+    let unlistenHistory: (() => void) | null = null;
+    let disposed = false;
+    listenEvent<{ agent: string }>('chat-history-updated', ({ agent }) => {
+      eventRefreshQueue.notify(agent);
+    }).then(fn => { if (disposed) fn(); else unlistenHistory = fn; });
     listenEvent<AppEvent>('slack-event', (ev) => {
       pushSlackEvent(ev);
     }).then((fn) => {
       unlistenSlack = fn;
     });
     return () => {
+      disposed = true;
+      eventRefreshQueue.dispose();
+      unlistenHistory?.();
       window.removeEventListener('beforeunload', onUnload);
       unlistenWorkflowComplete?.();
       unlistenWorkflowProgress?.();
@@ -484,8 +485,9 @@
       </div>
     </main>
   {:else}
-    <Sidebar {apiReady} {apiError} />
-    <main class="flex flex-1 flex-col bg-foundry-light-bg dark:bg-foundry-bg">
+    <Sidebar />
+    <main class="relative flex min-w-0 min-h-0 flex-1 flex-col bg-foundry-light-bg dark:bg-foundry-bg">
+      <div class="flex min-w-0 min-h-0 flex-1 flex-col" inert={!!$openedFile} aria-hidden={$openedFile ? 'true' : undefined}>
       <!-- #3220: the top-level Chat/Events tab nav lives in <Header/>, which
            dispatches `switch-view` back up to `switchView()` above. #3819:
            the chat pane additionally gets its OWN header (`ChatHeader`) —
@@ -503,9 +505,14 @@
       {:else if activeView === 'costs'}
         <!-- #4098 (COST-09): Costs tab. -->
         <CostsView />
-      {:else}
-        <EventsView />
       {/if}
+      {#if channelsVisited}
+        <div class="flex min-h-0 min-w-0 flex-1" style:display={activeView === 'events' ? 'flex' : 'none'}>
+          <ChannelsView />
+        </div>
+      {/if}
+      </div>
+      {#if $openedFile}<div class="absolute inset-0 z-20"><FileViewer /></div>{/if}
     </main>
   {/if}
   </div>

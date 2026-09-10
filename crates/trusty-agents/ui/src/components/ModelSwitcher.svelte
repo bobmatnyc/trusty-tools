@@ -59,24 +59,25 @@
 
 <svelte:window on:click={handleWindowClick} />
 
-<div class="relative inline-block" data-model-switcher>
+<div class="relative inline-block min-w-0 max-w-full" data-model-switcher>
   <button
     type="button"
-    class="flex h-8 items-center gap-1.5 rounded-md border border-foundry-light-border dark:border-foundry-border bg-foundry-light-surface dark:bg-foundry-surface px-2.5 font-mono text-[11px] font-semibold uppercase tracking-wide text-foundry-light-text dark:text-foundry-text hover:border-foundry-light-primary dark:hover:border-foundry-primary"
+    class="flex h-8 max-w-full items-center gap-1.5 rounded-md border border-foundry-light-border dark:border-foundry-border bg-foundry-light-surface dark:bg-foundry-surface px-2.5 font-mono text-[11px] font-semibold uppercase tracking-wide text-foundry-light-text dark:text-foundry-text hover:border-foundry-light-primary dark:hover:border-foundry-primary"
     on:click={toggle}
+    aria-label={`Model: ${activeEntry?.label ?? 'Default'}`}
     aria-haspopup="listbox"
     aria-expanded={open}
     title={loadError ? 'Model catalog unavailable — using default' : undefined}
   >
     <Cpu class="h-3.5 w-3.5 text-foundry-light-primary dark:text-foundry-primary" />
-    {activeEntry?.label ?? 'Default'}
+    <span class="truncate">{activeEntry?.label ?? 'Default'}</span>
     <ChevronDown class="h-3 w-3 opacity-60" />
   </button>
 
   {#if open}
     <ul
       role="listbox"
-      class="absolute right-0 top-full z-30 mt-1 max-h-72 w-64 overflow-y-auto rounded-md border border-foundry-light-border dark:border-foundry-border bg-foundry-light-surface dark:bg-foundry-surface py-1 shadow-lg"
+      class="absolute left-0 bottom-full z-30 mb-1 max-h-72 w-64 max-w-[calc(100vw-2rem)] overflow-y-auto rounded-md border border-foundry-light-border dark:border-foundry-border bg-foundry-light-surface dark:bg-foundry-surface py-1 shadow-lg"
     >
       {#if picker.length === 0}
         <li class="px-3 py-1.5 text-xs text-foundry-light-muted dark:text-foundry-text/40">

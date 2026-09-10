@@ -28,6 +28,7 @@ tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 tracing = "0.1"
+base64 = "0.22"
 
 [target.'cfg(unix)'.dependencies]
 # Graceful sidecar shutdown: tokio's `Child` only exposes `start_kill`

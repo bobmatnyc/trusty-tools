@@ -75,6 +75,7 @@ pub(super) async fn record_listener_event(
         subject: None,
         snippet: Some(truncated_snippet(&text)),
         included: true,
+        labels: vec![],
     };
     if let Err(e) = EventStore::append(&event).await {
         warn!(
@@ -88,6 +89,7 @@ pub(super) async fn record_listener_event(
         // mirror the Events pane reads from.
     }
     let included = EventStore::is_event_type_included(&event_type).await;
+
     crate::events::publish(crate::events::Event::ListenerEventReceived {
         listener_id: event.listener_id.clone(),
         provider: event.provider.clone(),

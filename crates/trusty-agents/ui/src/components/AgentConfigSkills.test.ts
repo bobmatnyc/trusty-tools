@@ -403,9 +403,10 @@ describe('AgentConfigSkills', () => {
     expect(target.textContent).not.toContain('Functions (');
   });
 
-  it('offers no write path in this phase (S-12) and points at the real edit surface', () => {
+  it('keeps tool grants read-only while offering user guidance settings', () => {
     render(payload());
-    expect(Array.from(target.querySelectorAll('button'))).toHaveLength(0);
+    expect(Array.from(target.querySelectorAll('button')).filter(button => !button.closest('[aria-label="User skills"]'))).toHaveLength(0);
+    expect(target.querySelector('[aria-label="User skills"]')).not.toBeNull();
     expect(target.textContent).toContain('agent.toml');
     expect(target.textContent).toContain('[skills].allow');
   });

@@ -40,8 +40,10 @@
 
 mod agent_create;
 // #4290: per-agent read-only Knowledge Graph proxy for the KG browser.
+pub(crate) mod agent_channels;
 mod agent_kg;
 mod agent_knowledge;
+pub(crate) mod agent_listeners;
 mod agent_patch;
 mod agent_permissions;
 mod agent_skills;
@@ -66,6 +68,7 @@ mod models;
 #[cfg(test)]
 pub(crate) use models::reachable_today;
 mod project_registration;
+mod project_tools;
 mod projects;
 mod relay;
 mod routes;
@@ -98,3 +101,7 @@ pub(crate) use projects::agent_roster;
 pub use routes::{build_router, build_router_with_config, serve, serve_with_config};
 #[allow(unused_imports)]
 pub use state::AppState;
+
+/// Serialize all assistant manifest read-modify-write operations in this process.
+pub(super) static AGENT_CONFIG_WRITE_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
