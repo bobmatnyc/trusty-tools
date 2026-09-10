@@ -195,3 +195,50 @@ fn statusline_tail_is_not_a_hook_tail() {
     )));
     assert!(!TM_HOOK_ARGV_TAILS.contains(&STATUSLINE_ARGV_TAIL));
 }
+
+/// #7262 round 2: detection is wide on purpose, but the REWRITE must not adopt
+/// another owner's entry. A project that builds its own `target/debug/mytool`
+/// and registers it with tm's argv would otherwise come back invoking tm.
+#[test]
+fn repointed_hook_command_declines_a_foreign_build_tree_stem() {
+    let installed = std::path::Path::new("/usr/local/bin/tm");
+    for exe in [
+        "/repo/target/debug/mytool",
+        "/repo/target/release/some_bin",
+        "/repo/target-7224/debug/deps/mytool",
+    ] {
+        let cmd = format!("{exe} hook");
+        assert!(
+            is_build_tree_hook_command(&cmd),
+            "{exe} is still named as a dead build artifact"
+        );
+        assert!(
+            repointed_hook_command(&cmd, installed).is_none(),
+            "{exe} must not be repointed"
+        );
+        assert!(
+            repointed_statusline_command(&format!("{exe} statusline"), installed).is_none(),
+            "{exe} statusline must not be repointed"
+        );
+    }
+}
+
+/// The other half of that rule: every shape tm's OWN writer produced before
+/// #7244 is still repaired — a tm stem anywhere in a build tree, and the
+/// hash-suffixed `deps/` artifact `current_exe()` yields for a Cargo binary.
+#[test]
+fn repointed_hook_command_still_claims_what_tm_wrote() {
+    let installed = std::path::Path::new("/usr/local/bin/tm");
+    for exe in [
+        "/repo/target/debug/tm",
+        "/repo/target-7224/debug/trusty-mpm",
+        "/repo/target/debug/deps/trusty_mpm-1a2b3c4d5e6f7a8b",
+        INCIDENT_EXE,
+    ] {
+        assert_eq!(
+            repointed_hook_command(&format!("{exe} hook"), installed).as_deref(),
+            Some("/usr/local/bin/tm hook"),
+            "{exe} must still be repaired"
+        );
+    }
+}

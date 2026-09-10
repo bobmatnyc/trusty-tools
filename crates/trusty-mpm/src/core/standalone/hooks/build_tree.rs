@@ -26,8 +26,16 @@
 //! REPAIR half (#7262, reopened): they hand back the same command with its
 //! executable replaced by the installed binary and its argv untouched, which is
 //! what [`super::repoint`] writes back. Detection and repair share one split
-//! ([`split_build_tree_command`]), so a command the probe names is exactly a
-//! command the repair rewrites.
+//! ([`split_build_tree_command`]), so the repair can never rewrite a command the
+//! probe would not name.
+//!
+//! **Repair is narrower than detection, deliberately.** Naming a dead artifact
+//! costs a report line; rewriting one makes tm run on an event tm may never have
+//! registered. So the repair asks a second question the probe does not — is this
+//! executable one tm's OWN writer could have persisted ([`is_tm_writable_exe`])
+//! — and declines a foreign stem such as `<build-tree>/mytool`. What it still
+//! repairs is what #7244 actually wrote: a tm stem, or the hash-suffixed
+//! `deps/` artifact `current_exe()` yields for a Cargo binary.
 //!
 //! **Where the line is drawn.** A build-tree path ALONE is not enough: a
 //! project may legitimately register its own hook that happens to live under
@@ -143,13 +151,15 @@ pub fn is_build_tree_statusline_command(cmd: &str) -> bool {
 /// fixes the one thing wrong with it — the dead path. The argv is preserved
 /// verbatim, so `--pm-guard` stays `--pm-guard`.
 /// What: `Some(<installed><tail>)` when [`is_build_tree_hook_command`] claims
-/// `cmd`, where `<tail>` is the matched entry of [`TM_HOOK_ARGV_TAILS`];
-/// `None` for every command that predicate rejects, and for an `installed`
-/// path that is not valid UTF-8. It never inspects `installed` further — the
-/// caller ([`super::repoint::repoint_settings_file`]) validates it once, so a
-/// refusal is reported rather than silently collapsing into "nothing to do".
+/// `cmd` AND [`is_tm_writable_exe`] claims its executable, where `<tail>` is the
+/// matched entry of [`TM_HOOK_ARGV_TAILS`]; `None` for every command either
+/// rejects, and for an `installed` path that is not valid UTF-8. It never
+/// inspects `installed` further — the caller
+/// ([`super::repoint::repoint_settings_file`]) validates it once, so a refusal
+/// is reported rather than silently collapsing into "nothing to do".
 /// Test: `repointed_hook_command_rewrites_every_argv_shape`,
-/// `repointed_hook_command_declines_an_installed_binary`.
+/// `repointed_hook_command_declines_an_installed_binary`,
+/// `repointed_hook_command_declines_a_foreign_build_tree_stem`.
 pub fn repointed_hook_command(cmd: &str, installed: &Path) -> Option<String> {
     repointed(cmd, TM_HOOK_ARGV_TAILS, installed)
 }
@@ -179,14 +189,49 @@ fn exe_in_build_tree(cmd: &str, tails: &[&str]) -> bool {
 /// Shared rule behind both repointers above.
 ///
 /// Why (#7262): a repoint that used its own notion of "is this the damage" could
-/// rewrite a command the detector never flagged, or skip one it did. Deriving
-/// the rewrite from the SAME split the predicate answers with makes the two
-/// unable to disagree.
+/// rewrite a command the detector never flagged. Deriving the rewrite from the
+/// SAME split the predicate answers with makes the two unable to disagree about
+/// which commands are candidates. Repair then asks ONE more question detection
+/// does not — see [`is_tm_writable_exe`] — so the set it rewrites is a subset of
+/// the set the probe names, never a different set.
 /// What: `Some(<installed><tail>)` when [`split_build_tree_command`] claims
-/// `cmd`; `None` otherwise, or when `installed` is not valid UTF-8.
+/// `cmd` AND [`is_tm_writable_exe`] claims the executable half; `None`
+/// otherwise, or when `installed` is not valid UTF-8.
 fn repointed(cmd: &str, tails: &[&str], installed: &Path) -> Option<String> {
-    let (_, tail) = split_build_tree_command(cmd, tails)?;
+    let (exe, tail) = split_build_tree_command(cmd, tails)?;
+    if !is_tm_writable_exe(Path::new(exe)) {
+        return None;
+    }
     Some(format!("{}{tail}", installed.to_str()?))
+}
+
+/// Could tm's own writer have persisted `exe` as a hook command's executable?
+///
+/// Why (#7262 round 2): repair and detection are not the same question.
+/// Detection names a dead build artifact whoever owns it, which costs the
+/// operator a report line. Repair rewrites the command into `<installed tm>
+/// …`, which starts invoking tm on an event tm may never have registered — a
+/// project that builds its own `target/debug/mytool` and wires it with tm's
+/// argv would come back pointing at tm. That is a worse outcome than the dead
+/// path it replaces, so the rewrite requires the executable to be one tm's
+/// writer could actually have produced.
+/// What: `true` when the file name is a shipped tm stem
+/// ([`super::is_mpm_bin_stem_path`], a Cargo `-<hexhash>` suffix tolerated), or
+/// when the path is a hash-suffixed artifact under a `deps/` directory. That
+/// second arm is what #7244 wrote: the pre-fix writer persisted `current_exe()`
+/// of whatever harness was running, and Cargo places every such artifact at
+/// `…/deps/<stem>-<hexhash>`. A hand-named binary sitting directly in a build
+/// tree matches neither arm.
+/// Test: `repointed_hook_command_declines_a_foreign_build_tree_stem`,
+/// `repointed_hook_command_still_claims_what_tm_wrote`.
+fn is_tm_writable_exe(exe: &Path) -> bool {
+    if super::is_mpm_bin_stem_path(exe) {
+        return true;
+    }
+    let Some(name) = exe.file_name().and_then(|f| f.to_str()) else {
+        return false;
+    };
+    super::hash_stripped_stem(name) != name && exe.components().any(|c| c.as_os_str() == "deps")
 }
 
 /// Split `cmd` into its build-tree executable and the tm argv tail after it.

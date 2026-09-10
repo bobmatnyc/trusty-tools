@@ -545,9 +545,12 @@ pub fn is_mpm_hook_command(cmd: &str) -> bool {
 /// shim is invoked by BARE NAME off `PATH`, so no part of the command string
 /// names the harness — the check has to resolve what the command actually
 /// invokes, not look for a spelling of the owner's name inside it.
+/// [`command_exe_is_named`] does that resolution, and reads an executable whose
+/// path contains a space.
 /// Test: `test_is_claude_mpm_hook_command_recognises_foreign_signatures`,
 /// `test_is_claude_mpm_hook_command_never_overlaps_tm`,
-/// `is_claude_mpm_hook_command_recognises_the_bare_claude_hook_shim`.
+/// `is_claude_mpm_hook_command_recognises_the_bare_claude_hook_shim`,
+/// `is_claude_mpm_hook_command_finds_the_shim_behind_a_spaced_path`.
 pub fn is_claude_mpm_hook_command(cmd: &str) -> bool {
     if is_mpm_hook_command(cmd) {
         return false;
@@ -557,13 +560,58 @@ pub fn is_claude_mpm_hook_command(cmd: &str) -> bool {
         return true;
     }
     // #7262: classify by the executable the command runs, not by a substring.
-    lower
-        .split_whitespace()
-        .next()
-        .map(Path::new)
-        .and_then(Path::file_name)
-        .and_then(|f| f.to_str())
-        .is_some_and(|stem| CLAUDE_MPM_HOOK_BIN_NAMES.contains(&stem))
+    command_exe_is_named(&lower, CLAUDE_MPM_HOOK_BIN_NAMES)
+}
+
+/// Does the executable `cmd` invokes have a file name in `names`?
+///
+/// Why (#7262 round 2): reading the executable as `split_whitespace().next()`
+/// stops at the first space, so
+/// `/Users/Some Name/.local/bin/claude-hook PreToolUse` resolved to
+/// `/Users/Some` and the shim went unseen. A space in a home directory or in
+/// `~/Library/Application Support/…` is ordinary on macOS.
+/// [`build_tree::is_build_tree_hook_command`] does not have the bug because it
+/// splits on a KNOWN argv tail and keeps the whole prefix; nothing here knows
+/// the foreign harness's argv, so the executable is found by growing the
+/// candidate instead of by cutting the tail off.
+/// What: tests the file name of each prefix of `cmd` that ends at a whitespace
+/// boundary, growing the candidate only while the next token continues a path —
+/// it contains a separator and starts with neither `/` nor `-`. That bound is
+/// what keeps `/usr/bin/env claude-hook` reading as `env` with an argument, and
+/// `foo --config /opt/claude-hook` as `foo` with a flag.
+/// Test: `is_claude_mpm_hook_command_finds_the_shim_behind_a_spaced_path`,
+/// `is_claude_mpm_hook_command_recognises_the_bare_claude_hook_shim`.
+fn command_exe_is_named(cmd: &str, names: &[&str]) -> bool {
+    let bytes = cmd.as_bytes();
+    let mut idx = 0;
+    let mut first = true;
+    while idx < bytes.len() {
+        while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        let start = idx;
+        while idx < bytes.len() && !bytes[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        if start == idx {
+            break;
+        }
+        let token = &cmd[start..idx];
+        let continues_path =
+            token.contains('/') && !token.starts_with('/') && !token.starts_with('-');
+        if !first && !continues_path {
+            break;
+        }
+        first = false;
+        if Path::new(&cmd[..idx])
+            .file_name()
+            .and_then(|f| f.to_str())
+            .is_some_and(|name| names.contains(&name))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Executable names that belong to the foreign claude-mpm harness (#7262).
@@ -574,7 +622,8 @@ pub fn is_claude_mpm_hook_command(cmd: &str) -> bool {
 /// in [`is_claude_mpm_hook_command`] answered "not foreign" and
 /// `hooks_foreign_conflict` reported clean while both harnesses' `PreToolUse`
 /// hooks fired.
-/// What: file names, compared lower-cased against the command's first word.
+/// What: file names, compared lower-cased against the executable
+/// [`command_exe_is_named`] reads out of the command.
 /// tm ships none of them, so this can never overlap [`is_mpm_hook_command`].
 /// Test: `is_claude_mpm_hook_command_recognises_the_bare_claude_hook_shim`.
 const CLAUDE_MPM_HOOK_BIN_NAMES: &[&str] = &["claude-hook", "claude_hook"];

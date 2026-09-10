@@ -237,6 +237,39 @@ fn repoint_settings_file_leaves_foreign_entries_alone() {
 }
 
 #[test]
+fn repoint_settings_file_leaves_a_foreign_build_tree_binary_alone() {
+    // #7262 round 2: a build-tree path plus tm's argv does not prove the entry
+    // is tm's. Rewriting another owner's hook would start invoking tm on an
+    // event tm never registered — worse than the dead path it replaces.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let foreign = tmp.path().join("target").join("debug").join("mytool");
+    let path = tmp.path().join("settings.json");
+    let body = serde_json::json!({
+        "hooks": {
+            "PreToolUse": [{
+                "matcher": "*",
+                "hooks": [{
+                    "type": "command",
+                    "command": format!("{} hook", foreign.display()),
+                }]
+            }]
+        }
+    })
+    .to_string();
+    fs::write(&path, &body).expect("seed");
+
+    // The probe still NAMES it — a dead build artifact is worth reporting.
+    assert_eq!(build_tree_commands_in(&path).len(), 1);
+    assert!(
+        repoint_settings_file(&path, Path::new(INSTALLED), true)
+            .expect("repoint")
+            .is_none(),
+        "a foreign stem must not be repointed"
+    );
+    assert_eq!(fs::read_to_string(&path).expect("read"), body);
+}
+
+#[test]
 fn repoint_settings_file_ignores_an_installed_statusline() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("settings.json");

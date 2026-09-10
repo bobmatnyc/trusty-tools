@@ -835,6 +835,28 @@ fn is_claude_mpm_hook_command_recognises_the_bare_claude_hook_shim() {
     assert!(!is_claude_mpm_hook_command("claude-hooks-lint run"));
 }
 
+/// #7262 round 2: taking the first whitespace token as the executable reads
+/// `/Users/Some Name/.local/bin/claude-hook PreToolUse` as `/Users/Some`, so
+/// the shim went unseen on any account whose home or `Application Support`
+/// path carries a space.
+#[test]
+fn is_claude_mpm_hook_command_finds_the_shim_behind_a_spaced_path() {
+    assert!(is_claude_mpm_hook_command(
+        "/Users/Some Name/.local/bin/claude-hook PreToolUse"
+    ));
+    assert!(is_claude_mpm_hook_command(
+        "/Users/x/Library/Application Support/foo/claude_hook Stop"
+    ));
+    // A flag ends the path, so an argument that names the shim still does not
+    // make the command foreign.
+    assert!(!is_claude_mpm_hook_command(
+        "/usr/bin/foo --config /opt/claude-hook"
+    ));
+    assert!(!is_claude_mpm_hook_command(
+        "/Users/Some Name/bin/other PreToolUse"
+    ));
+}
+
 /// Why (issue #2940): the two predicates gate mutually exclusive actions
 /// (strip vs. warn-only) — if they ever overlapped, `tm hooks clean` could
 /// delete a foreign harness's hooks, which is strictly the operator's call.

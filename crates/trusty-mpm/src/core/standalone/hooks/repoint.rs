@@ -105,7 +105,11 @@ pub fn build_tree_commands_in(path: &Path) -> Vec<String> {
 /// Repoint every build-tree command in one settings file at `installed`.
 ///
 /// Why: see the module doc — this is the `--fix` arm `hooks_build_tree_binary`
-/// lacked, and the reason the 2026-09-10 repair had to be done by hand.
+/// lacked, and the reason the 2026-09-10 repair had to be done by hand. The
+/// read-modify-write below takes no cross-process lock, so a settings file
+/// written concurrently by another process loses one side's edit; that limit is
+/// shared with every other writer of a `.claude/settings.json` in this crate —
+/// [`super::write_project_hooks`] and [`super::cleanup::clean_settings_file`].
 /// What: reads `path` (missing → `Ok(None)`), parses it, and rewrites every
 /// command [`repointed_hook_command`] / [`repointed_statusline_command`]
 /// claims. Returns `Ok(None)` when nothing matched, which is also what a second
