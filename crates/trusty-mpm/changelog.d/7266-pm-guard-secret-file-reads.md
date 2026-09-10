@@ -68,3 +68,13 @@ Fixed
   so an expansion that names a secret still denies — `cat "${F:-.env}"` and
   `cat "${F:=id_rsa}"` do, and `cat ${F-.env}`, which the bare `-` operator hid,
   denies now too. `${VAR}` and `$VAR` are unchanged (#7266).
+- A secret name SPLIT across a `${…}` boundary denies. The expansion's operand
+  is spliced back against the literal bytes either side of the span, so
+  `cat "${F:-.en}v"`, `cat "${F:-.e}${G:-nv}"`, `cat ${F:-id_rs}a`,
+  `cat ${F:-id_}rsa` and `cat id_${F:-rsa}` each read as the file they build
+  and each denies; two adjacent spans join their operands, and an empty operand
+  leaves its neighbours contiguous. Only the parameter NAME is a word of its
+  own, so it can never glue onto a neighbour and `${id_rsa}` still denies on its
+  name. A path built out of an expansion is unaffected —
+  `mkdir -p "${OUT_DIR:-build}/logs"` and `cat "${DIR:-src}/main.rs"` allow
+  (#7266).

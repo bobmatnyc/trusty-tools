@@ -71,6 +71,18 @@
 //! `cat ${F-.env}`, which round 6 ALLOWED, denies now too. `${VAR}` and `$VAR`
 //! reach the same words they always did.
 //!
+//! Round 8 closes the bypass round 7's rewrite opened. Round 7 put a separator
+//! on BOTH sides of the operand, so a name SPLIT across a span boundary landed
+//! in two different words and matched nothing: `cat "${F:-.en}v"`,
+//! `cat "${F:-.e}${G:-nv}"`, `cat ${F:-id_rs}a`, `cat ${F:-id_}rsa` and
+//! `cat id_${F:-rsa}` all ALLOWED on `5b7f629e4`. The operand is now also
+//! SPLICED — glued to the literal bytes either side of the span, so two
+//! adjacent spans join their operands and an empty operand leaves its
+//! neighbours contiguous — while only the parameter NAME is emitted as a word
+//! of its own. Round 7's separated spelling is scanned alongside the spliced
+//! one rather than replaced by it, because `cat "${F:-x}.env"` denies only
+//! while the literal tail is a word (see [`rewrite_parameter_expansions`]).
+//!
 //! What this costs, deliberately: naming a secret-shaped file in ANY command
 //! now denies, including one that reads nothing — `git log --grep .env`,
 //! `git commit -m "add .env.example"`, `cp .env .env.bak`. Rounds 1 to 4
@@ -124,6 +136,8 @@
 //! `allows_a_parameter_expansion_that_names_no_secret`,
 //! `denies_a_parameter_expansion_whose_operand_names_a_secret`,
 //! `splits_a_parameter_expansion_into_its_name_and_operand`,
+//! `splices_an_operand_against_the_bytes_beside_it`,
+//! `denies_a_secret_name_split_across_a_span_boundary`,
 //! `the_documented_residuals_still_allow`, and the rest of this
 //! module's `tests` submodule. The rule is proved WIRED end to end through the
 //! real binary by `pm_guard_denies_a_line_range_read_of_a_secret_bearing_file`,
@@ -594,15 +608,49 @@ fn matching_close_brace(chars: &[char], open: usize) -> Option<usize> {
 /// untouched. Failing OPEN on the whole span would reopen `${x:-.env}`, so the
 /// span is not skipped — it is REWRITTEN to its name and its operand, and both
 /// are scanned. `${VAR}` and `$VAR` reach the same words they always did.
-/// What: rewrites each balanced `${…}` to ` <name> <operand> `, recursing into
-/// the operand so a nested expansion is resolved too. An UNBALANCED `${` is
-/// left exactly as it stands, which keeps that shape failing closed.
+///
+/// Round 8, critic CRITICAL: round 7 put a separator on BOTH sides of the
+/// operand, so `${F:-.en}v` scanned as the three words `F`, `.en` and `v` and
+/// the name the shell actually builds — `.env` — appeared in none of them.
+/// `cat "${F:-.en}v"`, `cat "${F:-.e}${G:-nv}"`, `cat ${F:-id_rs}a`,
+/// `cat ${F:-id_}rsa` and `cat id_${F:-rsa}` all ALLOWED on `5b7f629e4`. The
+/// SPLICED spelling — operand glued to the literal bytes on either side, so two
+/// adjacent spans join their operands and an empty operand leaves its
+/// neighbours contiguous — closes that.
+///
+/// Both spellings are scanned, not just the spliced one. The SEPARATED
+/// spelling is what makes `cat "${F:-x}.env"` deny: there the secret is the
+/// literal TAIL, which is a word of its own only while the span emits a
+/// trailing separator (`x.env` matches no pattern). Round 7 shipped that row
+/// denying and the round-8 verdict requires it preserved, so the separated
+/// spelling stays and the spliced one is added beside it. Scanning both can
+/// only ADD deny words, never remove one.
+/// What: walks each balanced `${…}` twice. The spliced walk emits the operand
+/// with no separator and collects every parameter NAME into a trailing
+/// word list, so a name can never glue onto a neighbour; the separated walk is
+/// round 7's ` <name> <operand> `. Both recurse into the operand, so a nested
+/// expansion resolves in each. An UNBALANCED `${` is left exactly as it stands
+/// in both, which keeps that shape failing closed.
 /// Test: `allows_a_parameter_expansion_that_names_no_secret`,
-/// `denies_a_parameter_expansion_whose_operand_names_a_secret`.
+/// `denies_a_parameter_expansion_whose_operand_names_a_secret`,
+/// `splices_an_operand_against_the_bytes_beside_it`.
 fn rewrite_parameter_expansions(text: &str) -> String {
     if !text.contains("${") {
         return text.to_string();
     }
+    let mut names = String::new();
+    let spliced = walk_parameter_expansions(text, true, &mut names);
+    let separated = walk_parameter_expansions(text, false, &mut String::new());
+    format!("{spliced}{names} {separated}")
+}
+
+/// One walk of [`rewrite_parameter_expansions`], in either spelling.
+///
+/// What: with `splice`, each `${…}` contributes only its operand to the
+/// returned text and pushes its NAME onto `names`; without it, the span becomes
+/// ` <name> <operand> `. `names` is untouched by the separated walk.
+/// Test: `splices_an_operand_against_the_bytes_beside_it`.
+fn walk_parameter_expansions(text: &str, splice: bool, names: &mut String) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
@@ -613,11 +661,18 @@ fn rewrite_parameter_expansions(text: &str) -> String {
         {
             let inner: String = chars[i + 2..close].iter().collect();
             let (name, operand) = split_parameter_expansion(&inner);
-            out.push(' ');
-            out.push_str(name);
-            out.push(' ');
-            out.push_str(&rewrite_parameter_expansions(operand));
-            out.push(' ');
+            if splice {
+                names.push(' ');
+                names.push_str(name);
+            } else {
+                out.push(' ');
+                out.push_str(name);
+                out.push(' ');
+            }
+            out.push_str(&walk_parameter_expansions(operand, splice, names));
+            if !splice {
+                out.push(' ');
+            }
             i = close + 1;
             continue;
         }
@@ -1054,6 +1109,21 @@ mod tests {
         "cat \"${F#*/}.env\"",
         "cat \"${DIR:-/etc}/.env\"",
         "rm ${SECRET:-.env}",
+        // Round 8, critic CRITICAL: the name SPLIT across a span boundary.
+        // Round 7 emitted a separator on both sides of the operand, so every
+        // one of these ALLOWED on 5b7f629e4 — measured live against that
+        // binary before the splice landed.
+        "cat \"${F:-.en}v\"",
+        "cat \"${F:-.e}${G:-nv}\"",
+        "cat ${F:-id_rs}a",
+        "cat ${F:-id_}rsa",
+        "cat id_${F:-rsa}",
+        // Three spans joining, and an empty operand that must leave its
+        // neighbours contiguous rather than cutting the name in half.
+        "cat ${A:-.}${B:-en}${C:-v}",
+        "cat .env${F:-}",
+        "cat ${F:-}.env",
+        "cat .e${F:-}nv",
     ];
 
     /// Bypasses this rule DOES NOT catch, pinned so a change to one is visible.
@@ -1066,7 +1136,13 @@ mod tests {
     /// These rows ALLOW today. A row that starts denying is not a regression —
     /// it is a residual that closed, and this list is what makes that visible.
     /// Test: `the_documented_residuals_still_allow`.
-    const DOCUMENTED_RESIDUALS: &[&str] = &["cat $(printf '\\056env')"];
+    const DOCUMENTED_RESIDUALS: &[&str] = &[
+        "cat $(printf '\\056env')",
+        // Round 8, critic MEDIUM: the same class through an encoder rather
+        // than a printf escape. `LmVudg==` is `.env` in base64, and no byte of
+        // that name appears in the command text.
+        "cat $(echo LmVudg== | base64 -d)",
+    ];
 
     /// Ordinary daily commands that must ALLOW.
     ///
@@ -1162,6 +1238,23 @@ mod tests {
         "echo ${FILE//old/new}",
         "echo ${VAR}",
         "echo $VAR",
+        // Round 8: the expansion shapes the round-7 critic verified by hand,
+        // pinned here so the splice cannot regress them. A nested default, the
+        // `$(dirname …)` idiom every shell script opens with, the length and
+        // indirection sigils, an array, `$@` with an offset, and a case
+        // transform.
+        "echo \"${A:-${B:-x}}\"",
+        "\"$(dirname \"${BASH_SOURCE[0]}\")\"",
+        "echo ${#VAR}",
+        "echo ${!VAR}",
+        "echo \"${ARR[@]}\"",
+        "echo ${@:2}",
+        "echo ${VAR^^}",
+        // The splice glues the operand to its neighbours, so an ordinary
+        // command that builds a path out of one must still allow.
+        "mkdir -p \"${OUT_DIR:-build}/logs\"",
+        "cat \"${DIR:-src}/main.rs\"",
+        "cat pre${MID:-fix}post",
     ];
 
     #[test]
@@ -1873,8 +1966,76 @@ mod tests {
         );
         // An unbalanced `${` is left as it stands, which keeps it failing
         // closed exactly as round 6 left it.
-        assert_eq!(rewrite_parameter_expansions("cat ${VAR"), "cat ${VAR");
+        assert!(rewrite_parameter_expansions("cat ${VAR").contains("${VAR"));
         assert!(eval("cat ${VAR").is_some());
+    }
+
+    // --- #7266 round 8 -----------------------------------------------------
+
+    #[test]
+    fn splices_an_operand_against_the_bytes_beside_it() {
+        // Critic CRITICAL. Round 7 emitted ` <name> <operand> `, so a name cut
+        // across a span boundary landed in two words and matched nothing. The
+        // spliced spelling has to carry the JOINED name; the parameter name
+        // must never join its neighbours.
+        let spliced = |text: &str| {
+            let mut names = String::new();
+            let body = walk_parameter_expansions(text, true, &mut names);
+            (body, names)
+        };
+        // Single-sided split, right: the literal `v` follows the operand.
+        assert_eq!(spliced("${F:-.en}v").0, ".env");
+        // Single-sided split, left: the literal `id_` precedes the operand.
+        assert_eq!(spliced("id_${F:-rsa}").0, "id_rsa");
+        // Two spans join their operands with nothing between them.
+        assert_eq!(spliced("${F:-.e}${G:-nv}").0, ".env");
+        // Three spans join the same way.
+        assert_eq!(spliced("${A:-.}${B:-en}${C:-v}").0, ".env");
+        // An empty operand leaves the neighbours contiguous with each other.
+        assert_eq!(spliced("x${F:-}y").0, "xy");
+        assert_eq!(spliced(".e${F:-}nv").0, ".env");
+        // Only the NAME is a word of its own, and it is never glued to a
+        // neighbour — that is what keeps `${id_rsa}` denying on its name.
+        assert_eq!(spliced("id_${F:-rsa}").1, " F");
+        assert_eq!(spliced("x${id_rsa}y").0, "xy");
+        assert_eq!(spliced("x${id_rsa}y").1, " id_rsa");
+        // A nested expansion resolves inside the spliced walk too, and its
+        // name goes to the word list rather than into the spliced text.
+        assert_eq!(spliced("${A:-${B:-.env}}").0, ".env");
+        assert_eq!(spliced("${A:-${B:-x}}").1, " A B");
+    }
+
+    #[test]
+    fn denies_a_secret_name_split_across_a_span_boundary() {
+        // The five rows measured ALLOWED against the round-7 binary
+        // (5b7f629e4), plus the join and empty-operand shapes.
+        for command in [
+            "cat \"${F:-.en}v\"",
+            "cat \"${F:-.e}${G:-nv}\"",
+            "cat ${F:-id_rs}a",
+            "cat ${F:-id_}rsa",
+            "cat id_${F:-rsa}",
+            "cat ${A:-.}${B:-en}${C:-v}",
+            "cat .env${F:-}",
+            "cat ${F:-}.env",
+            "cat .e${F:-}nv",
+        ] {
+            let reason = eval(command).unwrap_or_else(|| panic!("`{command}` must deny"));
+            assert!(reason.contains("#7266"), "{reason}");
+        }
+        // Round 7's answers on the operand-internal shapes are unchanged: the
+        // separated spelling is still scanned beside the spliced one, which is
+        // the only reason the literal TAIL of this row is a word at all.
+        assert!(eval("cat \"${F:-x}.env\"").is_some());
+        assert!(eval("echo ${id_rsa}").is_some());
+        // And the splice adds no false positive on an ordinary built path.
+        for command in [
+            "mkdir -p \"${OUT_DIR:-build}/logs\"",
+            "cat \"${DIR:-src}/main.rs\"",
+            "cat pre${MID:-fix}post",
+        ] {
+            assert_eq!(eval(command), None, "`{command}` must allow");
+        }
     }
 
     #[test]

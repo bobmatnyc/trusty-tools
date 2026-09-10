@@ -2940,6 +2940,16 @@ fn pm_guard_reads_a_parameter_expansion_as_its_operand() {
         "echo ${FILE//old/new}",
         "echo ${VAR}",
         "echo $VAR",
+        // #7266 round 8: the splice glues the operand to its neighbours, so an
+        // ordinary path built out of one must still allow, and so must the
+        // expansion shapes the round-7 critic verified by hand.
+        "mkdir -p ${OUT_DIR:-build}/logs",
+        "cat ${DIR:-src}/main.rs",
+        "cat pre${MID:-fix}post",
+        "echo ${#VAR}",
+        "echo ${!VAR}",
+        "echo ${@:2}",
+        "echo ${VAR^^}",
     ] {
         let stdout = run_pm_guard_at(
             &bash_payload_at(command, &repo, ""),
@@ -2960,6 +2970,16 @@ fn pm_guard_reads_a_parameter_expansion_as_its_operand() {
         "cat ${F-.env}",
         "cat ${F#*/}.env",
         "rm ${SECRET:-.env}",
+        // #7266 round 8, critic CRITICAL: the name SPLIT across a span
+        // boundary. Round 7 separated the operand from the literal bytes
+        // beside it, so each of these ALLOWED on the round-7 binary
+        // (5b7f629e4) — the operand and the literal were different words and
+        // neither was the file. Measured live against that binary.
+        "cat ${F:-.en}v",
+        "cat ${F:-.e}${G:-nv}",
+        "cat ${F:-id_rs}a",
+        "cat ${F:-id_}rsa",
+        "cat id_${F:-rsa}",
     ] {
         let stdout = run_pm_guard_at(
             &bash_payload_at(command, &repo, ""),
