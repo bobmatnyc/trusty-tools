@@ -28,6 +28,16 @@
 //! against a real running Claude Code session.
 
 use std::io::Write;
+
+/// What `tm hook` rewrites `cargo test` into.
+///
+/// #7384 put the command inside a brace group whose trailing `printf` reports
+/// its exit status, because a pipeline hands its filter stdout and nothing
+/// else. `commands::compress::wrap_command_reporting_exit` is the producer and
+/// `split_exit_sentinel` the consumer; this file is outside the binary, so the
+/// spelling is repeated here — the unit tests build theirs from the producer,
+/// which is what keeps the two from drifting apart unnoticed.
+const EXPECTED_CARGO_TEST_REWRITE: &str = "{ cargo test; printf '\\n__tm_compress_exit=%s__\\n' \"$?\"; } | tm compress --tool \"cargo test\"";
 use std::process::{Command, Stdio};
 
 /// Spawn `tm hook` with the given `CLAUDE_HOOK_EVENT` and stdin JSON,
@@ -74,7 +84,7 @@ fn hook_rewrites_plain_bash_command_on_pretooluse() {
     assert_eq!(parsed["hookSpecificOutput"]["hookEventName"], "PreToolUse");
     assert_eq!(
         parsed["hookSpecificOutput"]["updatedInput"]["command"],
-        "cargo test | tm compress --tool \"cargo test\""
+        EXPECTED_CARGO_TEST_REWRITE
     );
 }
 
@@ -180,6 +190,6 @@ fn hook_rewrites_using_stdin_hook_event_name_without_env_var() {
         serde_json::from_str(stdout.trim()).expect("stdout must be valid JSON when rewriting");
     assert_eq!(
         parsed["hookSpecificOutput"]["updatedInput"]["command"],
-        "cargo test | tm compress --tool \"cargo test\""
+        EXPECTED_CARGO_TEST_REWRITE
     );
 }

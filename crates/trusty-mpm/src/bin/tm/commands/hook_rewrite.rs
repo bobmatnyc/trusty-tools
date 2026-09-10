@@ -78,7 +78,12 @@ const ORCHESTRATOR_EXCLUSIONS: &[&str] = &[
 /// trusty-review-flagged injection risk, PR #1968: the derived name is
 /// embedded verbatim inside a double-quoted shell argument below, and
 /// double quotes do not stop POSIX command substitution). Otherwise returns
-/// `Some("<command> | tm compress --tool \"<effective tool name>\"")` —
+/// `Some("{ <command>; <exit sentinel>; } | tm compress --tool \"<effective tool name>\"")` —
+/// the brace group and its trailing `printf` come from
+/// [`crate::commands::compress::wrap_command_reporting_exit`], which is what
+/// carries the wrapped command's exit status into a filter the shell started
+/// concurrently (#7384); every guard above runs against the bare command, and
+/// the group is only ever wrapped around a simple one —
 /// the `--tool` value comes from [`effective_tool_name`], **not** a
 /// hardcoded `"bash"`: `compress_tool_output`'s dispatch table
 /// (`trusty-agents-common::compress::tool_output`) matches filters by
@@ -122,7 +127,12 @@ pub(crate) fn rewrite_bash_command_for_compression(command: &str) -> Option<Stri
     if !has_filter_for(&tool) {
         return None;
     }
-    Some(format!("{trimmed} | tm compress --tool \"{tool}\""))
+    // #7384: the brace group carries the wrapped command's exit status into the
+    // filter, which a pipeline otherwise discards.
+    Some(format!(
+        "{} | tm compress --tool \"{tool}\"",
+        crate::commands::compress::wrap_command_reporting_exit(trimmed)
+    ))
 }
 
 /// Derive the `compress_tool_output` dispatch key from a Bash command.
@@ -453,12 +463,33 @@ pub(crate) fn build_pretooluse_rewrite_response(rewritten_command: &str) -> serd
 mod tests {
     use super::*;
 
+    /// The one place the whole rewritten string is spelled out.
+    ///
+    /// #7384 put the command inside a brace group with a trailing exit-status
+    /// `printf`; the producer of that group is `commands::compress`, so every
+    /// expectation below is built from it rather than from a second literal
+    /// that could drift away from what the filter parses.
+    fn expected_rewrite(command: &str, tool: &str) -> String {
+        format!(
+            "{} | tm compress --tool \"{tool}\"",
+            crate::commands::compress::wrap_command_reporting_exit(command)
+        )
+    }
+
     #[test]
     fn rewrite_appends_compress_pipe_for_plain_command() {
         let out = rewrite_bash_command_for_compression("cargo test");
         assert_eq!(
             out.as_deref(),
-            Some("cargo test | tm compress --tool \"cargo test\"")
+            Some(expected_rewrite("cargo test", "cargo test").as_str())
+        );
+        // #7384: the command still runs first and the pipe still terminates in
+        // the filter — the group only adds the status report.
+        let out = out.expect("a covered tool must be wrapped");
+        assert!(out.starts_with("{ cargo test; printf "), "{out}");
+        assert!(
+            out.ends_with("} | tm compress --tool \"cargo test\""),
+            "{out}"
         );
     }
 
@@ -471,7 +502,7 @@ mod tests {
         let out = rewrite_bash_command_for_compression("git diff HEAD~1");
         assert_eq!(
             out.as_deref(),
-            Some("git diff HEAD~1 | tm compress --tool \"git diff\"")
+            Some(expected_rewrite("git diff HEAD~1", "git diff").as_str())
         );
     }
 
@@ -585,7 +616,7 @@ mod tests {
             ("grep -n foo src/", "grep -n"),
             ("ls -la", "ls -la"),
         ] {
-            let expected = format!("{cmd} | tm compress --tool \"{tool}\"");
+            let expected = expected_rewrite(cmd, tool);
             assert_eq!(
                 rewrite_bash_command_for_compression(cmd).as_deref(),
                 Some(expected.as_str()),
