@@ -187,16 +187,19 @@ pub(super) fn classify_create_result(
 /// transport failure that leaves the request's fate unknown yields `Unanswered`
 /// (#7237, see [`create_left_unanswered`]); every other daemon refusal, and
 /// every decode failure, yields `NotConfirmed`. All are swallowed — this
-/// function never makes the call fallible. The conflict is logged at INFO
-/// because [`resolve_colliding_id`] resolves it in the same second and the
-/// operator has nothing to do about it (#7365); the arms no recovery follows
+/// function never makes the call fallible. The two arms a recovery follows are
+/// logged at INFO, because each is the INPUT to that recovery rather than its
+/// outcome: the conflict, which [`resolve_colliding_id`] resolves in the same
+/// second (#7365), and the silence, which [`super::confirm`] settles within
+/// seconds and reports at its own level (#7390). The arms no recovery follows
 /// stay at warn.
 /// Test: `search_index_tests.rs::{a_daemon_refusal_is_not_a_registration,
 /// registration_matches_an_existing_index_by_root_path,
 /// create_rejected_by_the_daemon_withholds_the_pinnable_id}`, plus
 /// `an_unanswered_create_is_not_a_refusal`,
-/// `a_resolvable_conflict_is_logged_at_info_without_operator_advice` and
-/// `an_unrecoverable_refusal_still_warns` below.
+/// `a_resolvable_conflict_is_logged_at_info_without_operator_advice`,
+/// `an_unrecoverable_refusal_still_warns` and
+/// `an_unanswered_create_the_registry_confirms_emits_no_warning` below.
 pub(super) fn classify_create_failure(
     err: &anyhow::Error,
     index_id: &str,
@@ -204,11 +207,13 @@ pub(super) fn classify_create_failure(
 ) -> CreateOutcome {
     let Some(refusal) = err.downcast_ref::<SearchRpcError>() else {
         // #7237: a call the daemon never answered is not a call it refused.
+        // #7390: and it is not yet a failure either — this line announces the
+        // registry check, and `super::confirm` logs what that check found.
         if create_left_unanswered(err) {
-            tracing::warn!(
-                "trusty-search index registration for '{index_id}' at {root_display} went \
-                 unanswered ({err:#}); asking the registry whether the daemon registered it \
-                 anyway (#7237)"
+            tracing::info!(
+                "trusty-search has not answered the index registration for '{index_id}' at \
+                 {root_display} within the create budget ({err:#}); checking the registry for \
+                 a late registration (#7237)"
             );
             return CreateOutcome::Unanswered;
         }
@@ -480,6 +485,9 @@ pub(super) enum ListFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::log_buffer::capture_logs;
+    use crate::uds_mock;
+    use std::sync::{Arc, Mutex};
 
     /// The message `root_path_collision_response` builds, in the wording the
     /// daemon actually sends.
@@ -507,22 +515,6 @@ mod tests {
             code: search_rpc::CODE_CONFLICT,
             message,
         })
-    }
-
-    /// Run `body` with a subscriber that captures every event, and return the
-    /// captured lines alongside the body's value.
-    ///
-    /// Why: level is what #7365 turns on, and `LogBufferLayer` renders it into
-    /// the line — so a level regression is observable here rather than only by
-    /// eye. Test: the two callers below.
-    fn capture_logs<T>(body: impl FnOnce() -> T) -> (T, Vec<String>) {
-        use tracing_subscriber::layer::SubscriberExt as _;
-
-        let buffer = crate::log_buffer::LogBuffer::new(16);
-        let subscriber = tracing_subscriber::registry()
-            .with(crate::log_buffer::LogBufferLayer::new(buffer.clone()));
-        let value = tracing::subscriber::with_default(subscriber, body);
-        (value, buffer.tail(16))
     }
 
     /// A root-mismatch conflict is reported at INFO, and without the daemon's
@@ -598,6 +590,102 @@ mod tests {
     fn a_collision_message_passes_through_whole() {
         let message = collision_message("/Users/masa/checkout/trusty-tools", "trusty-tools");
         assert_eq!(without_operator_advice(&message), message);
+    }
+
+    /// A create the daemon answers late and the registry confirms warns about
+    /// nothing (#7390).
+    ///
+    /// Why: the reported failure. The owner's writing index was cold-parked with
+    /// 32k chunks, the create waited behind its reload, and the confirm loop
+    /// pinned the index the daemon had registered — the launch worked. The log
+    /// said otherwise, because the trigger line fired at warn before the confirm
+    /// loop had run, so a session that recovered inside four seconds read as a
+    /// registration that failed. This is the whole-path assertion: the trigger
+    /// and the confirm outcome are in two modules, and only running both proves
+    /// the pair emits no warning.
+    /// What: a mock daemon that records the create's `root_path` and then drops
+    /// the connection without replying — the `UdsRpcError::NoResponse` shape the
+    /// live failure took — and whose registry then names that tree under a
+    /// DIFFERENT id, so a pass proves the id came from the registry. Asserts the
+    /// registration is `Confirmed` and that not one captured line is WARN.
+    /// Against the pre-fix commit the trigger line is WARN and this fails.
+    /// Test: itself.
+    #[test]
+    fn an_unanswered_create_the_registry_confirms_emits_no_warning() {
+        let root = tempfile::tempdir().expect("tempdir for the indexed tree");
+        let ((resolved, registration), lines) = with_daemon(late_registering_daemon(), |socket| {
+            capture_logs(|| {
+                create_and_reconcile(socket, "asked-for", root.path(), IndexOptions::default())
+            })
+        });
+
+        assert_eq!(
+            registration,
+            IndexRegistration::Confirmed,
+            "the daemon registered the index; the confirm loop found it: {lines:?}"
+        );
+        assert_eq!(
+            resolved, LATE_REGISTERED_ID,
+            "the pinned id must be the one the registry names for this tree"
+        );
+        let warnings: Vec<&String> = lines.iter().filter(|l| l.contains("WARN")).collect();
+        assert!(
+            warnings.is_empty(),
+            "a registration that succeeded must warn about nothing, saw {warnings:?} in {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("INFO")),
+            "the recovery still reports itself, at info: {lines:?}"
+        );
+    }
+
+    /// The id the mock registry hands back, deliberately NOT the id the create
+    /// asked for, so a pass proves the id came from the REGISTRY (#7390).
+    const LATE_REGISTERED_ID: &str = "registered-late-by-the-daemon";
+
+    /// A daemon that registers the tree, drops the create connection without
+    /// replying, and then serves the registration from its registry (#7390).
+    fn late_registering_daemon()
+    -> impl Fn(&str, serde_json::Value) -> uds_mock::MockFuture + Send + Sync + 'static {
+        let registered: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        move |method, params| {
+            let registered = Arc::clone(&registered);
+            let method = method.to_string();
+            Box::pin(async move {
+                if method == search_rpc::METHOD_INDEX_CREATE {
+                    let root = params
+                        .get("root_path")
+                        .and_then(serde_json::Value::as_str)
+                        .expect("the create carries a root_path")
+                        .to_string();
+                    *registered.lock().unwrap_or_else(|e| e.into_inner()) = Some(root);
+                    // The registration landed; the connection dies before the
+                    // reply is written, which is what the client saw live.
+                    panic!("the mock daemon dropped the create connection after registering");
+                }
+                let listed = registered.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                Ok(match listed {
+                    Some(root) => serde_json::json!({
+                        "indexes": [{ "id": LATE_REGISTERED_ID, "root_path": root }]
+                    }),
+                    None => serde_json::json!({ "indexes": [] }),
+                })
+            })
+        }
+    }
+
+    /// Run `body` against a mock daemon answering every method through
+    /// `handler`, on a socket this function owns (#7390).
+    fn with_daemon<T>(
+        handler: impl Fn(&str, serde_json::Value) -> uds_mock::MockFuture + Send + Sync + 'static,
+        body: impl FnOnce(&Path) -> T,
+    ) -> T {
+        let dir = tempfile::tempdir().expect("tempdir for the mock socket");
+        let socket = dir.path().join("s.sock");
+        let daemon = uds_mock::spawn_blocking_at(socket.clone(), handler);
+        let out = body(&socket);
+        drop(daemon);
+        out
     }
 
     /// A create the daemon never answered is `Unanswered`, not `NotConfirmed`

@@ -30,7 +30,8 @@
 //! here retries.
 //!
 //! Test: `confirm_within_stops_at_the_deadline_and_withholds`,
-//! `confirm_within_never_confirms_an_index_at_another_root` below, plus
+//! `confirm_within_never_confirms_an_index_at_another_root`,
+//! `an_exhausted_confirm_deadline_is_still_a_warning` below, plus
 //! `a_late_create_is_confirmed_by_polling_the_registry`,
 //! `a_create_the_daemon_hung_up_on_is_confirmed_by_polling_the_registry` and
 //! `an_unconfirmed_registration_fires_no_reindex` in `search_index_tests.rs`.
@@ -96,7 +97,8 @@ pub(super) fn confirm_after_no_answer(
 /// between reads, not during one, so the final read can still overrun it by its
 /// own budget; see [`CONFIRM_DEADLINE`].
 /// Test: `confirm_within_stops_at_the_deadline_and_withholds`,
-/// `confirm_within_never_confirms_an_index_at_another_root`.
+/// `confirm_within_never_confirms_an_index_at_another_root`,
+/// `an_exhausted_confirm_deadline_is_still_a_warning`.
 fn confirm_within(
     socket: &Path,
     index_id: &str,
@@ -210,6 +212,47 @@ mod tests {
             started.elapsed() < Duration::from_secs(2),
             "the poll must stop at its deadline, took {:?}",
             started.elapsed()
+        );
+    }
+
+    /// A confirm that exhausts its deadline is still a warning (#7390).
+    ///
+    /// Why: #7390 lowered the line that ANNOUNCES the registry check, on the
+    /// grounds that it fires before the outcome is known. The give-up here is
+    /// the outcome — the id is withheld, the session runs unpinned, and this
+    /// warn is the only signal an operator gets — so a fix that quieted it too
+    /// would trade one false alarm for a silent failure. Pinned beside the
+    /// zero-warning assertion in
+    /// `super::super::reconcile::tests::an_unanswered_create_the_registry_confirms_emits_no_warning`,
+    /// which is what would push a well-meant edit into this line.
+    /// What: a daemon whose registry stays empty, under a capturing subscriber
+    /// and a millisecond deadline; asserts the withheld id still comes with a
+    /// WARN line naming the tree.
+    /// Test: itself.
+    #[test]
+    fn an_exhausted_confirm_deadline_is_still_a_warning() {
+        let root = Path::new("/nonexistent/never/registered");
+        let (confirmed, lines) = with_daemon(
+            move |_method, _params| Box::pin(async { Ok(serde_json::json!({ "indexes": [] })) }),
+            |socket| {
+                crate::log_buffer::capture_logs(|| {
+                    confirm_within(
+                        socket,
+                        "never-registered",
+                        root,
+                        Duration::from_millis(60),
+                        Duration::from_millis(20),
+                    )
+                })
+            },
+        );
+
+        assert_eq!(confirmed, None, "an empty registry confirms nothing");
+        assert_eq!(lines.len(), 1, "expected one line, got {lines:?}");
+        assert!(
+            lines[0].contains("WARN") && lines[0].contains(&root.display().to_string()),
+            "the give-up is the outcome an operator has to act on: {}",
+            lines[0]
         );
     }
 
