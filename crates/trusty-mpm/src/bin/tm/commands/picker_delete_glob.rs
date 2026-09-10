@@ -510,6 +510,13 @@ pub(crate) async fn confirm_and_delete_glob(
                 missing += 1;
                 eprintln!("tm: '{}' not found — already gone.", s.name);
             }
+            // #7224: unreachable here — this loop calls the plain delete, never
+            // the stop-first route — but counted as a failure rather than
+            // matched by a `_` arm that would silently read as a success.
+            Ok(DeleteReport::StopFailed(msg)) => {
+                failed += 1;
+                eprintln!("tm: '{}' NOT deleted — {msg}", s.name);
+            }
             Err(e) => {
                 failed += 1;
                 eprintln!("tm: '{}' failed: {e}", s.name);

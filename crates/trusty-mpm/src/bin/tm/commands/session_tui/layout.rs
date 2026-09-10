@@ -13,11 +13,13 @@
 //! ellipsis through the same [`super::super::managed_render::truncate`] the
 //! static table uses. [`visible_window`] is the scroll seam: which slice of the
 //! rows a viewport of `height` shows with `selected` inside it.
+//! [`wrap_message`] is the same idea for the status line: how many rows a
+//! message needs at a given width, and what goes on each of them.
 //!
 //! Column vocabulary matches the console's (#7224): friendly name, short id,
 //! project, state, tmux pane.
 //!
-//! Test: `layout_*` and `window_*` in `super::tests`.
+//! Test: `layout_*`, `window_*` and `wrap_*` in `super::tests`.
 
 use trusty_mpm::client::ManagedSessionSummary;
 
@@ -216,4 +218,78 @@ pub(crate) fn visible_window(
         start = selected + 1 - len;
     }
     (start, len)
+}
+
+/// How many rows the status line may grow to before its tail is elided (#7224).
+///
+/// Four is what the daemon's longest refusal — the delete guard's, which ends
+/// with a full UUID on its own line — needs at 80 columns.
+pub(crate) const STATUS_MAX_LINES: usize = 4;
+
+/// Wrap a status message to `width`, on whitespace, never mid-token (#7224).
+///
+/// Why: the status line was a one-row unwrapped `Paragraph`, so ratatui clipped
+/// whatever did not fit — and what did not fit was the tail of the delete
+/// guard's refusal, cutting a session UUID in half. A half-UUID is worse than
+/// no UUID: it looks copy-pasteable and is not. Wrapping here rather than
+/// through ratatui's own `Wrap` is what lets the caller size the status region
+/// from the SAME lines it will draw, so the height and the content cannot
+/// disagree.
+/// What: splits on `'\n'` first (the refusal puts the id on its own line), then
+/// packs whitespace-separated tokens greedily into lines of at most `width`
+/// characters. A token longer than `width` is emitted alone and intact — at
+/// that width no wrapping could show it whole, and splitting it is the exact
+/// failure this exists to prevent. Beyond `max_lines` the last kept line drops
+/// whole tokens and ends in an ellipsis. A `width` or `max_lines` of zero
+/// yields no lines.
+/// Test: `wrap_message_keeps_a_uuid_whole_at_eighty_columns`,
+/// `wrap_message_honours_explicit_newlines`,
+/// `wrap_message_elides_on_a_token_boundary`,
+/// `wrap_message_zero_width_is_empty`.
+pub(crate) fn wrap_message(text: &str, width: usize, max_lines: usize) -> Vec<String> {
+    if width == 0 || max_lines == 0 {
+        return Vec::new();
+    }
+    let mut lines: Vec<String> = Vec::new();
+    for paragraph in text.split('\n') {
+        let mut current = String::new();
+        for token in paragraph.split_whitespace() {
+            let fits = current.chars().count() + 1 + token.chars().count() <= width;
+            if current.is_empty() {
+                current.push_str(token);
+            } else if fits {
+                current.push(' ');
+                current.push_str(token);
+            } else {
+                lines.push(std::mem::take(&mut current));
+                current.push_str(token);
+            }
+        }
+        lines.push(current);
+    }
+    // A message ending in a newline (or made only of whitespace) would otherwise
+    // reserve a blank row under the table.
+    while lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    if lines.len() > max_lines {
+        lines.truncate(max_lines);
+        if let Some(last) = lines.last_mut() {
+            elide(last, width);
+        }
+    }
+    lines
+}
+
+/// Trim `line` back to a whole-token boundary and mark it elided.
+///
+/// Drops trailing tokens until the ellipsis fits within `width`. A line with no
+/// whitespace to cut at is left exactly as it is rather than gaining a mark that
+/// would push it further over.
+fn elide(line: &mut String, width: usize) {
+    while line.chars().count() + 1 > width {
+        let Some(cut) = line.rfind(' ') else { return };
+        line.truncate(cut);
+    }
+    line.push('…');
 }

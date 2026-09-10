@@ -43,10 +43,18 @@ const FOOTER: &str = "↑↓ move · Enter open · r rename · d delete · R ref
 /// `render_tiny_terminal_does_not_panic`, `render_*_overlay_*`.
 pub(crate) fn render(frame: &mut Frame, sessions: &[ManagedSessionSummary], state: &mut TuiState) {
     let area = frame.area();
+    // #7224: the status region is sized from the wrapped message BEFORE the
+    // split, so a multi-line refusal gets the rows it needs instead of being
+    // clipped mid-token by a fixed one-row `Paragraph`. Capped so the table
+    // keeps at least one row on a short terminal.
+    let status_text = status_lines(state, area.width);
+    let status_rows = (status_text.len().max(1) as u16)
+        .min(area.height.saturating_sub(3).max(1))
+        .max(1);
     let [title, body, status, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(1),
-        Constraint::Length(1),
+        Constraint::Length(status_rows),
         Constraint::Length(1),
     ])
     .areas(area);
@@ -57,7 +65,7 @@ pub(crate) fn render(frame: &mut Frame, sessions: &[ManagedSessionSummary], stat
         title,
     );
     render_table(frame, body, sessions, state);
-    frame.render_widget(Paragraph::new(status_line(state)), status);
+    frame.render_widget(Paragraph::new(status_text), status);
     frame.render_widget(
         Paragraph::new(FOOTER).style(Style::default().fg(Color::DarkGray)),
         footer,
@@ -69,10 +77,12 @@ pub(crate) fn render(frame: &mut Frame, sessions: &[ManagedSessionSummary], stat
         Mode::Confirm {
             index,
             force,
+            stop_first,
             typed,
         } => {
             let name = sessions.get(*index).map_or("?", |s| s.name.as_str());
-            overlay(frame, area, "delete", confirm_body(name, *force, typed));
+            let body = confirm_body(name, *force, *stop_first, typed);
+            overlay(frame, area, "delete", body);
         }
         Mode::Rename { index, typed } => {
             let was = sessions.get(*index).map_or("?", |s| s.name.as_str());
@@ -93,22 +103,28 @@ fn title_line(sessions: &[ManagedSessionSummary], state: &TuiState) -> String {
     )
 }
 
-/// The status line: the last outcome, or a hint when there is none.
-fn status_line(state: &TuiState) -> Line<'static> {
-    match state.message() {
-        Some((text, Severity::Error)) => Line::from(Span::styled(
-            text.to_string(),
-            Style::default().fg(Color::Red),
-        )),
-        Some((text, Severity::Info)) => Line::from(Span::styled(
-            text.to_string(),
-            Style::default().fg(Color::Green),
-        )),
-        None => Line::from(Span::styled(
-            "".to_string(),
-            Style::default().fg(Color::DarkGray),
-        )),
-    }
+/// The status region: the last outcome, wrapped to `width`, or nothing.
+///
+/// Why: a refusal from the daemon can run past 150 characters, and the one that
+/// matters most — the delete guard's — ends in a session UUID. Wrapping it
+/// through [`layout::wrap_message`] rather than letting a one-row `Paragraph`
+/// clip it is what keeps that id whole (#7224).
+/// What: one styled [`Line`] per wrapped row, red for a refusal and green for an
+/// outcome; an empty `Vec` when there is no message.
+/// Test: `render_wraps_a_long_refusal_without_cutting_the_uuid`,
+/// `render_status_uses_one_row_when_there_is_no_message`.
+fn status_lines(state: &TuiState, width: u16) -> Vec<Line<'static>> {
+    let Some((text, severity)) = state.message() else {
+        return Vec::new();
+    };
+    let color = match severity {
+        Severity::Error => Color::Red,
+        Severity::Info => Color::Green,
+    };
+    layout::wrap_message(text, width as usize, layout::STATUS_MAX_LINES)
+        .into_iter()
+        .map(|line| Line::from(Span::styled(line, Style::default().fg(color))))
+        .collect()
 }
 
 /// Render the session table into `area` for whatever columns fit its width.
@@ -216,9 +232,15 @@ fn overlay(frame: &mut Frame, area: Rect, title: &str, body: Vec<Line<'static>>)
 }
 
 /// The delete confirmation's text — the word required, and what typing it does.
-fn confirm_body(name: &str, force: bool, typed: &str) -> Vec<Line<'static>> {
+///
+/// `stop_first` (#7224) states the second leg up front: confirming an errored
+/// row stops its runtime AND deletes the record, so the prompt must say so
+/// before the operator agrees to it rather than after.
+fn confirm_body(name: &str, force: bool, stop_first: bool, typed: &str) -> Vec<Line<'static>> {
     let ask = if force {
         format!("'{name}' is RUNNING. Type the word force, then Enter, to delete it.")
+    } else if stop_first {
+        format!("'{name}' is errored. Stop it and delete it? Type y, then Enter.")
     } else {
         format!("Delete '{name}'? Type y, then Enter.")
     };

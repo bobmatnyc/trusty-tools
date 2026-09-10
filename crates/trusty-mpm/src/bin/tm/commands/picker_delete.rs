@@ -71,6 +71,13 @@ pub(crate) enum DeleteReport {
     NotFound,
     /// The managed running-guard (409) refused the delete; carries its message.
     Refused(String),
+    /// The stop-first leg failed, so NO delete was attempted (#7224).
+    ///
+    /// Carries the daemon's full status + body. Distinct from [`Self::Refused`]
+    /// because nothing reached the delete endpoint at all: the session is still
+    /// exactly as it was, and the operator has to deal with the stop failure
+    /// before a delete can mean anything.
+    StopFailed(String),
 }
 
 /// Next step after the managed-delete attempt, keyed on the HTTP status.
@@ -109,6 +116,61 @@ pub(crate) enum ManagedDeleteNext {
 /// `delete_needs_force_errored_false` in `tests_behavior_d_tests.rs`.
 pub(crate) fn delete_needs_force(state: &str) -> bool {
     !super::guided_resume::needs_restart(state)
+}
+
+/// Does deleting a session in state `state` need a runtime-stop first (#7224)?
+///
+/// Why: an `errored` record can still have a LIVE tmux session behind it —
+/// provisioning failed after the session was created, or the runtime died in a
+/// way that left the pane up. [`delete_needs_force`] answers `false` for it (no
+/// force word needed), the delete then goes out with `force = false`, and the
+/// daemon's own tmux-liveness probe 409s. That refusal is correct and the
+/// operator's only recourse used to be dropping to `tm session stop` in a
+/// shell — a bounce out of the surface they were already in. Doing the stop
+/// leg here is the automation of exactly that step, and nothing more: the
+/// delete that follows still goes out UNFORCED, so the daemon's probe stays the
+/// authority on whether the record may go.
+/// What: `true` only for `errored`. A `stopped` record has no runtime to stop,
+/// and `active`/`provisioning` take the force-confirm path instead.
+/// Test: `delete_needs_stop_first_only_for_errored` in
+/// `tests_behavior_d_stop_delete_tests.rs`.
+pub(crate) fn delete_needs_stop_first(state: &str) -> bool {
+    state == "errored"
+}
+
+/// What the stop-first leg's HTTP status means for the delete that follows.
+///
+/// Why: the fail-open risk in a stop-then-delete sequence is downgrading a
+/// failed stop to "close enough" and deleting anyway. Making the status→meaning
+/// mapping a pure enum is what keeps that carve-out keyed on the daemon's
+/// EXPLICIT answer rather than on "an error happened".
+/// What: `Stopped` = 2xx (the runtime is down); `NothingToStop` = 404, the
+/// daemon's answer for a record it has no live lifecycle for — no managed
+/// record, or a terminal one (`runtime_stop_core` maps both to 404), neither of
+/// which is a running session; `Failed` = every other status.
+/// Test: `classify_stop_first_maps_each_status` in
+/// `tests_behavior_d_stop_delete_tests.rs`.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub(crate) enum StopFirstNext {
+    /// 2xx — the runtime is stopped; proceed to the delete.
+    Stopped,
+    /// 404 — the daemon has no live session to stop; proceed to the delete,
+    /// which does its own not-found routing.
+    NothingToStop,
+    /// Anything else — report it and delete NOTHING.
+    Failed,
+}
+
+/// Map the stop-first leg's HTTP status to [`StopFirstNext`].
+///
+/// Test: `classify_stop_first_maps_each_status` in
+/// `tests_behavior_d_stop_delete_tests.rs`.
+pub(crate) fn classify_stop_first(status: reqwest::StatusCode) -> StopFirstNext {
+    match status {
+        s if s.is_success() => StopFirstNext::Stopped,
+        reqwest::StatusCode::NOT_FOUND => StopFirstNext::NothingToStop,
+        _ => StopFirstNext::Failed,
+    }
 }
 
 /// Map a managed-delete HTTP status to the next routing step.
@@ -247,6 +309,45 @@ pub(crate) async fn delete_managed_then_local(
     }
 }
 
+/// Stop a session's runtime, then delete its record — one operator action (#7224).
+///
+/// Why: the `tm ls` surface must not answer a delete with instructions for a
+/// different surface. An `errored` record whose tmux session is still up gets
+/// refused by the daemon's liveness probe, and the refusal's own advice is
+/// "stop it first" — a step the caller can perform. This performs it.
+/// What: POSTs `/api/v1/sessions/managed/{id}/runtime-stop`, classifies the
+/// status through [`classify_stop_first`], and only then calls
+/// [`delete_managed_then_local`] with the SAME `force` flag the caller passed —
+/// never an escalated one, so the daemon's tmux probe still decides whether the
+/// record may go. A `Failed` status returns [`DeleteReport::StopFailed`] with
+/// the status and body, and NO delete request is issued: there is no branch in
+/// which a stop the daemon rejected is downgraded into a delete. A transport
+/// error on the stop leg propagates as `Err` for the same reason.
+/// Test: `stop_then_delete_deletes_after_a_successful_stop`,
+/// `stop_then_delete_treats_not_found_as_nothing_to_stop`,
+/// `stop_then_delete_never_deletes_after_a_failed_stop` in
+/// `tests_behavior_d_stop_delete_tests.rs`.
+pub(crate) async fn stop_then_delete(
+    client: &reqwest::Client,
+    url: &str,
+    id: &str,
+    force: bool,
+) -> anyhow::Result<DeleteReport> {
+    let resp = client
+        .post(format!("{url}/api/v1/sessions/managed/{id}/runtime-stop"))
+        .send()
+        .await?;
+    let status = resp.status();
+    if classify_stop_first(status) == StopFirstNext::Failed {
+        let body = resp.text().await.unwrap_or_default();
+        return Ok(DeleteReport::StopFailed(format!(
+            "stop returned HTTP {status}: {}",
+            body.trim()
+        )));
+    }
+    delete_managed_then_local(client, url, id, force).await
+}
+
 /// Delete a project-session record via `DELETE /sessions/{id}` (the local path),
 /// refusing a still-running session unless `force` is set (#2304 CRITICAL fix).
 ///
@@ -376,6 +477,13 @@ pub(crate) async fn confirm_and_delete(
         }
         DeleteReport::Refused(msg) => {
             eprintln!("tm: delete refused: {msg}");
+            Ok(false)
+        }
+        DeleteReport::StopFailed(msg) => {
+            eprintln!(
+                "tm: stop failed — '{}' was NOT deleted: {msg}",
+                session.name
+            );
             Ok(false)
         }
         DeleteReport::NotFound => {
