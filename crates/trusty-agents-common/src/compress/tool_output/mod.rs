@@ -236,47 +236,56 @@ pub fn compress_tool_output(tool_name: &str, output: &str) -> String {
     compressed
 }
 
-/// Strip passing test lines from `cargo test` output.
+/// Drop a test runner's passing-test lines and keep everything else.
 ///
 /// Why: Hundreds of `test foo ... ok` lines drown out the few failures the
-/// model needs to see.
-/// What: Drops lines matching `test <name> ... ok`. Keeps `FAILED`, `error`,
-/// `warning`, and the final `test result:` summary. Returns summary-only
-/// when nothing else remains.
-/// Test: `test_runner_strips_passing_tests`, `test_runner_keeps_summary_line`,
+/// model needs to see. Until #7544 this was an ALLOWLIST — a line survived
+/// only by containing `FAILED`/`error`/`warning` or starting `---- ` /
+/// `failures:` — so the panic location, the `left:`/`right:` assertion values
+/// and every multiline context line were discarded as noise, and only the LAST
+/// `test result:` line was kept. A failing suite followed by a passing one
+/// therefore compressed to output ending `test result: ok`, which reads as a
+/// green run.
+/// What: A blocklist. Every line is emitted in its original position except a
+/// passing or ignored per-test line ([`is_passing_test_line`]) and cargo's
+/// indented build-progress chatter ([`is_cargo_progress_line`]); runs of blank
+/// lines collapse to one and leading/trailing blanks are dropped. Every
+/// `test result:` summary survives in order, next to the diagnostics that
+/// explain it, and a shape this function does not recognise is kept rather
+/// than discarded.
+/// Test: `test_runner_keeps_every_suite_summary_in_order`,
+/// `test_runner_keeps_panic_location_and_assertion_values`,
+/// `test_runner_keeps_the_failing_test_name_list`,
+/// `test_runner_keeps_unrecognised_blocks`,
+/// `test_runner_drops_cargo_progress_lines`,
+/// `test_runner_still_reduces_passing_only_output`,
+/// `test_runner_strips_passing_tests`, `test_runner_keeps_summary_line`,
 /// `test_runner_no_failures_returns_summary_only`.
 pub fn filter_test_runner(output: &str) -> String {
     let mut kept: Vec<&str> = Vec::new();
-    let mut summary: Option<&str> = None;
+    // #7544: a blank line is held back rather than emitted, so a run collapses
+    // to one and a trailing run is dropped without a second pass.
+    let mut pending_blank: Option<&str> = None;
     for line in output.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("test result:") {
-            summary = Some(line);
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            if !kept.is_empty() {
+                pending_blank = Some(line);
+            }
             continue;
         }
-        if is_passing_test_line(trimmed) {
+        // #7544: the only two droppable shapes. Everything else — panics,
+        // assertion values, every `test result:` summary, output from a
+        // harness this has never seen — is kept where it stands.
+        if is_passing_test_line(trimmed) || is_cargo_progress_line(line, trimmed) {
             continue;
         }
-        let lower = trimmed.to_ascii_lowercase();
-        if trimmed.contains("FAILED")
-            || lower.contains("error")
-            || lower.contains("warning")
-            || trimmed.starts_with("---- ")
-            || trimmed.starts_with("failures:")
-        {
-            kept.push(line);
+        if let Some(blank) = pending_blank.take() {
+            kept.push(blank);
         }
+        kept.push(line);
     }
-
-    if kept.is_empty() {
-        return summary.map(|s| s.to_string()).unwrap_or_default();
-    }
-    let mut out = kept.join("\n");
-    if let Some(s) = summary {
-        out.push('\n');
-        out.push_str(s);
-    }
-    out
+    kept.join("\n")
 }
 
 fn is_passing_test_line(s: &str) -> bool {
@@ -285,6 +294,34 @@ fn is_passing_test_line(s: &str) -> bool {
         return false;
     }
     s.ends_with(" ... ok") || s.ends_with(" ... ignored")
+}
+
+/// Whether `raw` is one of cargo's build-progress lines.
+///
+/// Why: #7544 made the filter keep every unrecognised line, so the only lines
+/// it may still drop are ones whose shape is known to carry no test signal.
+/// Cargo's progress chatter is that shape; `Running`, which names the suite
+/// each `test result:` line belongs to, deliberately is not.
+/// What: true when `raw` is indented — cargo right-aligns these verbs into a
+/// 12-column gutter — and `trimmed` starts with one of them. A line at column
+/// 0 is a test's own stdout and is kept whatever it says. `Blocking` is absent
+/// on purpose: a build waiting on a lock is worth seeing.
+/// Test: `test_runner_drops_cargo_progress_lines`,
+/// `test_runner_keeps_column_zero_lines_that_look_like_progress`.
+fn is_cargo_progress_line(raw: &str, trimmed: &str) -> bool {
+    if !raw.starts_with(' ') {
+        return false;
+    }
+    const VERBS: [&str; 7] = [
+        "Compiling ",
+        "Finished ",
+        "Updating ",
+        "Downloading ",
+        "Downloaded ",
+        "Fresh ",
+        "Locking ",
+    ];
+    VERBS.iter().any(|verb| trimmed.starts_with(verb))
 }
 
 /// Collapse runs of context lines in a unified diff.
