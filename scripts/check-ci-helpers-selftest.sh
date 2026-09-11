@@ -602,13 +602,15 @@ assert_eq "a push with no before SHA still fails closed" "1" \
 assert_eq "a push with no before SHA still runs the CUDA check" "1" \
   "$(grep -c 'echo "embedder_cuda_relevant=true" >> "\$GITHUB_OUTPUT"' <<<"${changes_job}" || true)"
 
-# capabilities-drift is optional, so it can use exact trigger paths instead of
-# paying for a duplicate checkout/classifier job on every PR.
+# capabilities-drift is a REQUIRED context since 2026-09-11 (owner ruling;
+# #7471, #7472 both merged with this job never having run under its old
+# `paths:`-filtered, non-required form). It classifies relevance inside its
+# own first step instead of a separate `changes:` job — the #5311 wiring
+# block below asserts the rest of that shape (no paths filter, no job-level
+# `if:`).
 capabilities_wf=".github/workflows/capabilities-drift.yml"
 assert_eq "capabilities-drift.yml has no duplicate classifier" "0" \
   "$(grep -c '^  changes:' "${capabilities_wf}" || true)"
-assert_eq "capabilities-drift.yml scopes both events to trusty-mpm" "2" \
-  "$(grep -c '      - "crates/trusty-mpm/\*\*"' "${capabilities_wf}" || true)"
 
 # ADR consistency is a pure-shell document gate. Keep it beside document
 # allocation rather than installing Rust in the SLD workflow for ADR-only PRs.
@@ -1178,6 +1180,35 @@ done
 # belongs in this file at all any more.
 assert_eq "test-pointers.yml: no job-level if: anywhere" "0" \
   "$(grep -cE '^    if:' .github/workflows/test-pointers.yml || true)"
+
+# capabilities-drift.yml (owner ruling 2026-09-11; #7471, #7472) uses the
+# OTHER structurally-valid shape for the same #5311 requirement: instead of
+# one no-op step gating a single job-wide condition, it follows ci.yml's four
+# required Tauri UI clippy jobs (agents-ui and siblings) — a relevance
+# verdict computed once in the job's own first step, and every expensive step
+# after it individually gated `if: steps.relevance.outputs.relevant !=
+# 'false'`. Asserted on its own terms rather than folded into the loop above,
+# which checks for a single no-op step this workflow does not have.
+cap_wf=".github/workflows/capabilities-drift.yml"
+cap_gate="$(job_block "${cap_wf}" "capabilities-drift")"
+assert_eq "capabilities-drift.yml: pull_request trigger has no paths filter" "0" \
+  "$(grep -cE '^    paths(-ignore)?:' <<<"$(pr_trigger_block "${cap_wf}")" || true)"
+assert_eq "capabilities-drift.yml: push trigger has no paths filter" "0" \
+  "$(grep -cE '^    paths(-ignore)?:' <<<"$(sed -n '/^  push:/,/^  pull_request:/p' "${cap_wf}")" || true)"
+assert_eq "capabilities-drift.yml: no job-level if: can skip the gate" "0" \
+  "$(grep -cE '^    if:' <<<"${cap_gate}" || true)"
+assert_eq "capabilities-drift.yml has a relevance-classifying step" "1" \
+  "$(grep -c '^        id: relevance$' "${cap_wf}" || true)"
+assert_eq "capabilities-drift.yml classifies relevance from the diff, not the event" "1" \
+  "$(grep -c 'bash scripts/ci-crate-relevance.sh trusty-mpm' "${cap_wf}" || true)"
+assert_eq "capabilities-drift.yml gates its costly steps on relevance, not the job" "3" \
+  "$(grep -cE "if: steps\.relevance\.outputs\.relevant != 'false'$" "${cap_wf}" || true)"
+# Structural, not string-matched on the old wording (#5407): no JOB the check
+# reports from may decide anything from the activity type. `concurrency:` may
+# still name `github.event.action` — that decides what gets cancelled, never
+# what gets checked — so the assertion is scoped to `jobs:` onward.
+assert_eq "no gate in capabilities-drift branches on the activity type" "0" \
+  "$(grep -c 'github\.event\.action' <<<"$(sed -n '/^jobs:/,$p' "${cap_wf}")" || true)"
 
 assert_eq "semver-checks runs on pull requests at all" "1" \
   "$(grep -c '^  pull_request:' .github/workflows/semver-checks.yml || true)"
