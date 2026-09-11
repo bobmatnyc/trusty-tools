@@ -333,6 +333,31 @@ pub(crate) fn write_agent_sentinel(
     std::fs::write(worktree_path.join(WORKTREE_SENTINEL_FILE), bytes)
 }
 
+/// Delete the harness's own ownership sentinel from `worktree_path` (#7185).
+///
+/// Why: tm's clean-tree decision
+/// ([`super::worktree_safety::count_dirty_files`]) excuses this file — it is
+/// the harness's marker, not the agent's work — but `git worktree remove`
+/// applies git's OWN clean check, which counts any untracked entry and has no
+/// such exemption. The two agree only in a project whose `.gitignore` lists the
+/// marker. Everywhere else tm authorises a removal git then refuses with
+/// `contains modified or untracked files`, so every merged worktree is left on
+/// disk. Clearing the marker is what makes git's answer match the decision tm
+/// already made; adding `--force` would instead override the one gate standing
+/// between the removal and an operator's unsaved work.
+/// What: removes `<worktree_path>/.trusty-mpm-worktree`. An absent file is
+/// success — this runs immediately before a removal, and "the marker is not
+/// there" is the state it exists to reach. Any other error is propagated so the
+/// caller reports a removal it could not prepare rather than one that will fail.
+/// Test: `a_worktree_holding_only_the_harness_marker_is_removable_by_plain_git`,
+/// `clearing_the_marker_leaves_every_other_file_alone`.
+pub(crate) fn clear_worktree_sentinel(worktree_path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(worktree_path.join(WORKTREE_SENTINEL_FILE)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
 /// Rebuild one agent worktree's ownership from disk alone (#4311).
 ///
 /// Why: ADR-0023 point 4 — the ownership record must be reconstructable from

@@ -1098,3 +1098,104 @@ fn inspect_dirt_discounts_nothing_without_a_remote_landing_branch() {
     let dirt = inspect_dirt(&repo).expect("a commit on no remote is unsaved work");
     assert_eq!(dirt.unpushed_commits, 1, "reason was: {}", dirt.reason);
 }
+
+// ── #7185: every reclaim path agrees about the harness marker, git included ──
+
+/// Run `git -C <dir> <args>` and return whether it succeeded, plus its stderr.
+fn git_try(dir: &Path, args: &[&str]) -> (bool, String) {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("`git {}` could not be run: {e}", args.join(" ")));
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// 🔴 REGRESSION (#7185): a tree carrying ONLY the harness ownership marker
+/// reads clean on BOTH reclaim decisions, and plain `git worktree remove` can
+/// only agree once the marker is cleared.
+///
+/// Why: #7212 made [`count_dirty_files`] and the ADR-0057 removal guard's
+/// `dirty_entries` one answer, and that answer excuses the marker. It does not
+/// bind git. `git worktree remove` applies its own clean check, which counts
+/// every untracked entry — so the `tm pr merge` cleanup path, which deliberately
+/// never forces, was authorised by tm and refused by git on every worktree in a
+/// project that does not gitignore the marker. This pins all three answers in
+/// one place so they cannot drift apart again.
+#[test]
+fn a_worktree_holding_only_the_harness_marker_is_removable_by_plain_git() {
+    use crate::core::worktree_removal_facts::{GitAndGhProbe, WorktreeRemovalProbe};
+    use crate::session_manager::worktree_ownership::clear_worktree_sentinel;
+
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("marker-only");
+    GitWorktreeFixture::stamp_reclaimable_sentinel(&wt);
+
+    // Decision 1 — the reclaim sweep and `tm pr merge`'s cleanup probe.
+    assert!(
+        inspect_dirt(&wt).is_none(),
+        "the harness marker is not unsaved work; got {:?}",
+        inspect_dirt(&wt)
+    );
+    // Decision 2 — the ADR-0057 `git worktree remove` guard.
+    assert_eq!(
+        GitAndGhProbe
+            .dirty_entries(&wt)
+            .expect("status must be readable"),
+        0,
+        "both reclaim paths must read the marker-only tree as clean"
+    );
+
+    // Git's own answer, which neither decision above can change.
+    let (removed, stderr) = git_try(&fx.repo, &["worktree", "remove", wt.to_str().unwrap()]);
+    assert!(
+        !removed && stderr.contains("untracked files"),
+        "git itself counts the untracked marker — if this ever stops being true \
+         the clearing step below is no longer needed; stderr: {stderr}"
+    );
+
+    clear_worktree_sentinel(&wt).expect("the harness marker must be clearable");
+    let (removed, stderr) = git_try(&fx.repo, &["worktree", "remove", wt.to_str().unwrap()]);
+    assert!(
+        removed,
+        "clearing the marker must let a NON-forced removal succeed; stderr: {stderr}"
+    );
+}
+
+/// 🔴 The excusal covers that one name and nothing else: real work beside the
+/// marker still refuses, and clearing the marker never touches it.
+#[test]
+fn clearing_the_marker_leaves_every_other_file_alone() {
+    use crate::core::worktree_removal_facts::{GitAndGhProbe, WorktreeRemovalProbe};
+    use crate::session_manager::worktree_ownership::clear_worktree_sentinel;
+
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("marker-plus-work");
+    GitWorktreeFixture::stamp_reclaimable_sentinel(&wt);
+    // One modified tracked file and one untracked source file, beside the marker.
+    std::fs::write(wt.join("README.md"), "edited\n").expect("modify tracked file");
+    let untracked = wt.join("scratch.rs");
+    std::fs::write(&untracked, "fn main() {}\n").expect("write untracked source");
+
+    let dirt = inspect_dirt(&wt).expect("real work beside the marker is still unsaved work");
+    assert_eq!(dirt.dirty_files, 2, "reason was: {}", dirt.reason);
+    assert_eq!(
+        GitAndGhProbe
+            .dirty_entries(&wt)
+            .expect("status must be readable"),
+        2,
+        "the removal guard must count the same two files"
+    );
+
+    clear_worktree_sentinel(&wt).expect("clearing must succeed");
+    assert!(
+        untracked.exists() && wt.join("README.md").exists(),
+        "clearing the marker must remove the marker and nothing else"
+    );
+    // Clearing is idempotent: an absent marker is the state it exists to reach.
+    clear_worktree_sentinel(&wt).expect("a second clear must be a no-op");
+}

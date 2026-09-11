@@ -1533,3 +1533,125 @@ fn registry_unreadable_file_reads_as_empty() {
         "a corrupt registry makes the sweep idle, never guess"
     );
 }
+
+// ── #7185: the harness marker git counts and this engine's gate does not ─────
+
+/// 🔴 REGRESSION (#7185, recurrence 2026-09-11): the worktree step clears the
+/// harness ownership marker before it removes the tree.
+///
+/// Why: `count_dirty_files` excuses `.trusty-mpm-worktree` (it is the harness's
+/// marker, not the agent's work), so the dirt gate above authorises the
+/// removal — but `git worktree remove` runs git's OWN clean check, which counts
+/// every untracked entry. Verified against git 2.54.0: a worktree whose only
+/// untracked file is that marker is refused with `contains modified or
+/// untracked files, use --force to delete it`. The two answers agree only where
+/// the project gitignores the marker (this repo does; the project that hit the
+/// recurrence does not), so `tm pr merge`'s cleanup left EVERY merged worktree
+/// on disk there. Fails on 4cc327dbc, where nothing clears the marker.
+/// What this does NOT assert: `--force`. Forcing would override the dirt gate
+/// itself, which is the one thing standing between this step and unsaved work.
+#[tokio::test]
+async fn cleanup_clears_the_harness_marker_before_removing_the_tree() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let tree = tmp.path().join("agent-aa11");
+    std::fs::create_dir_all(&tree).expect("tree");
+    let marker = tree.join(crate::session_manager::decommission::WORKTREE_SENTINEL_FILE);
+    std::fs::write(&marker, b"{}").expect("marker");
+    let kept = tree.join("notes.md");
+    std::fs::write(&kept, "left alone\n").expect("sibling");
+    let shown = tree.display().to_string();
+
+    let listing = format!(
+        "worktree /repo\nHEAD 1111111111111111111111111111111111111111\n\
+         branch refs/heads/main\n\n\
+         worktree {shown}\nHEAD {HEAD_OID}\nbranch refs/heads/{BRANCH}\n\n"
+    );
+    let git = Scripted::new()
+        .on(ORIGIN_QUERY, ORIGIN_URL)
+        .on(
+            "git ls-remote",
+            &format!("{HEAD_OID}\trefs/heads/{BRANCH}\n"),
+        )
+        .on("git push origin --delete", "")
+        .on("git worktree list", &listing)
+        .on("git worktree remove", "")
+        .on("git branch --format", &branch_listing())
+        .on("git branch -D", "")
+        .on("git worktree prune", "")
+        .on("git fetch --prune", "");
+
+    let report = run(
+        &gh_merged(),
+        &git,
+        &FakeClaims::none(),
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req(false),
+    )
+    .await;
+
+    assert!(!report.failed(), "{}", report.render());
+    assert!(
+        !marker.exists(),
+        "the harness marker must be cleared before the removal, or git refuses it"
+    );
+    assert!(
+        kept.exists(),
+        "clearing the marker must touch nothing else in the tree"
+    );
+    let joined = git.calls().join("\n");
+    assert!(
+        joined.contains(&format!("git worktree remove {shown}")),
+        "the tree must still be removed: {joined}"
+    );
+    assert!(
+        !joined.contains("--force"),
+        "clearing the marker is not licence to force: {joined}"
+    );
+}
+
+/// 🔴 A dry run inspects and reports; it must not touch the tree.
+///
+/// Why: `--dry-run` exists so an operator can see what cleanup would do. A
+/// marker deleted by a preview is a write the preview promised not to make, and
+/// the tree stays registered afterwards — so the next real run would find it
+/// unmarked and owner-unknown.
+#[tokio::test]
+async fn a_dry_run_leaves_the_harness_marker_in_place() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let tree = tmp.path().join("agent-aa11");
+    std::fs::create_dir_all(&tree).expect("tree");
+    let marker = tree.join(crate::session_manager::decommission::WORKTREE_SENTINEL_FILE);
+    std::fs::write(&marker, b"{}").expect("marker");
+    let shown = tree.display().to_string();
+
+    let listing = format!(
+        "worktree /repo\nHEAD 1111111111111111111111111111111111111111\n\
+         branch refs/heads/main\n\n\
+         worktree {shown}\nHEAD {HEAD_OID}\nbranch refs/heads/{BRANCH}\n\n"
+    );
+    let git = Scripted::new()
+        .on(ORIGIN_QUERY, ORIGIN_URL)
+        .on(
+            "git ls-remote",
+            &format!("{HEAD_OID}\trefs/heads/{BRANCH}\n"),
+        )
+        .on("git worktree list", &listing)
+        .on("git branch --format", &branch_listing());
+
+    let report = run(
+        &gh_merged(),
+        &git,
+        &FakeClaims::none(),
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req(true),
+    )
+    .await;
+
+    assert!(!report.failed(), "{}", report.render());
+    assert!(
+        marker.exists(),
+        "a dry run must leave the tree exactly as it found it"
+    );
+}

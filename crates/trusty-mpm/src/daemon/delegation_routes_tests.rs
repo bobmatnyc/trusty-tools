@@ -690,10 +690,27 @@ async fn shared_tree_dispatch_route_does_not_reserve_when_it_denies() {
     .await;
 
     assert!(!body.claimed);
+    // #7487: the guarantee is unchanged — a denied dispatch must never OCCUPY
+    // the directory — but its shape is. The deny now leaves a TERMINAL tombstone
+    // on `toolu_B` instead of nothing at all, because the tracker's
+    // `matcher: "*"` hook POSTs the same dispatch independently and can land
+    // AFTER this call; an absent record is exactly what let that late
+    // observation write a live claim for an agent that never ran. A terminal
+    // record occupies nothing and makes `on_dispatch` a no-op on that id.
     assert_eq!(
-        state.delegations_for(session).len(),
-        1,
-        "the denied dispatch must leave no record of its own"
+        state.shared_tree_occupants(std::path::Path::new("/repo"), None),
+        vec!["rust-engineer".to_string()],
+        "the denied dispatch must not occupy the directory"
+    );
+    let denied = state
+        .delegations_for(session)
+        .into_iter()
+        .find(|d| d.tool_use_id.as_deref() == Some("toolu_B"))
+        .expect("the deny records a tombstone so a late observation cannot revive it");
+    assert_eq!(
+        denied.status,
+        DelegationStatus::Cancelled,
+        "and that tombstone must be terminal"
     );
 }
 
@@ -1037,4 +1054,230 @@ async fn the_two_questions_disagree_about_the_callers_own_record() {
     .await;
     assert_eq!(commit.total, 0, "the commit hears nothing of its own agent");
     assert_eq!(disp.total, 1, "the dispatch still hears the occupant");
+}
+
+// ── #7487: a claim outlives neither a TaskStop nor its own denial ────────────
+
+/// Teach the tracker the `agentId` a dispatch's `PostToolUse` carries (#7487).
+fn launch(state: &Arc<DaemonState>, session: SessionId, tool_use_id: &str, agent_id: &str) {
+    crate::daemon::services::delegation_tracker::observe(
+        state,
+        session,
+        crate::core::hook::HookEvent::PostToolUse,
+        &serde_json::json!({
+            "cwd": "/repo",
+            "tool": "Agent",
+            "tool_use_id": tool_use_id,
+            "tool_response": {"isAsync": true, "agentId": agent_id},
+        }),
+    );
+}
+
+/// The `PostToolUse` a `TaskStop` emits, as `tm hook` forwards it (#7487).
+fn task_stop(state: &Arc<DaemonState>, session: SessionId, task_id: &str, ok: bool) {
+    let event = if ok {
+        crate::core::hook::HookEvent::PostToolUse
+    } else {
+        crate::core::hook::HookEvent::PostToolUseFailure
+    };
+    crate::daemon::services::delegation_tracker::observe(
+        state,
+        session,
+        event,
+        &serde_json::json!({
+            "cwd": "/repo",
+            "tool": "TaskStop",
+            "tool_use_id": "toolu_stop",
+            "input": {"task_id": task_id},
+        }),
+    );
+}
+
+/// 🔴 REGRESSION (#7487a): a `TaskStop`-cancelled agent releases the tree.
+///
+/// Why: a stopped subagent emits no `SubagentStop`, so nothing terminalized its
+/// record and `shared_tree_occupants` kept naming it for the six hours of
+/// `RUNNING_STALE_AFTER_SECS`. Fails on 4cc327dbc, where the third dispatch is
+/// still refused by an agent that was stopped two minutes earlier.
+#[tokio::test]
+async fn a_task_stop_releases_the_stopped_agents_claim() {
+    let (state, _dir, session) = hermetic();
+
+    let first = call(
+        &state,
+        session,
+        dispatch("/repo", "qa", None, Some("toolu_qa")),
+    )
+    .await;
+    assert!(first.claimed, "the first dispatch takes the tree");
+    launch(&state, session, "toolu_qa", "agent-qa-1");
+
+    // Control: while `qa` is running, a second unisolated writer is refused.
+    let while_running = call(
+        &state,
+        session,
+        dispatch("/repo", "rust-engineer", None, Some("toolu_a")),
+    )
+    .await;
+    assert_eq!(while_running.total, 1, "a live claim must still refuse");
+    assert!(!while_running.claimed);
+
+    task_stop(&state, session, "agent-qa-1", true);
+
+    let after_stop = call(
+        &state,
+        session,
+        dispatch("/repo", "rust-engineer", None, Some("toolu_b")),
+    )
+    .await;
+    assert_eq!(
+        after_stop.total, 0,
+        "a stopped agent holds nothing; occupants were {:?}",
+        after_stop.agents
+    );
+    assert!(after_stop.claimed, "the tree must be claimable again");
+}
+
+/// 🔴 A stop that did NOT take leaves the agent running, so it releases nothing.
+#[tokio::test]
+async fn a_failed_task_stop_releases_nothing() {
+    let (state, _dir, session) = hermetic();
+    call(
+        &state,
+        session,
+        dispatch("/repo", "qa", None, Some("toolu_qa")),
+    )
+    .await;
+    launch(&state, session, "toolu_qa", "agent-qa-1");
+
+    task_stop(&state, session, "agent-qa-1", false);
+
+    let after = call(
+        &state,
+        session,
+        dispatch("/repo", "rust-engineer", None, Some("toolu_a")),
+    )
+    .await;
+    assert_eq!(after.total, 1, "a failed stop must not release the tree");
+    assert!(!after.claimed);
+}
+
+/// 🔴 A `task_id` no delegation carries terminalizes nothing.
+#[tokio::test]
+async fn a_task_stop_naming_an_unknown_id_terminalizes_nothing() {
+    let (state, _dir, session) = hermetic();
+    call(
+        &state,
+        session,
+        dispatch("/repo", "qa", None, Some("toolu_qa")),
+    )
+    .await;
+    launch(&state, session, "toolu_qa", "agent-qa-1");
+
+    task_stop(&state, session, "some-background-shell", true);
+
+    let after = call(
+        &state,
+        session,
+        dispatch("/repo", "rust-engineer", None, Some("toolu_a")),
+    )
+    .await;
+    assert_eq!(
+        after.total, 1,
+        "a stop naming something else must close nothing — a 'most recent live \
+         record' guess is what the tracker forbids"
+    );
+}
+
+/// 🔴 REGRESSION (#7487b): a dispatch the guard denies records no claim, when
+/// the tracker's own hook lands AFTER the deny.
+///
+/// Why: two `PreToolUse` hooks see one dispatch — `tm hook --pm-guard` decides
+/// and the `matcher: "*"` tracker records, independently and in either order —
+/// so a denied dispatch left a live record carrying its `cwd` and became the
+/// next dispatch's collision. The reported incident's second refusal read
+/// "qa, rust-engineer", naming the very dispatch the guard had just refused.
+/// Fails on 4cc327dbc, where the third call hears two occupants.
+#[tokio::test]
+async fn a_late_observation_of_a_denied_dispatch_records_nothing() {
+    let (state, _dir, session) = hermetic();
+    call(
+        &state,
+        session,
+        dispatch("/repo", "qa", None, Some("toolu_qa")),
+    )
+    .await;
+    launch(&state, session, "toolu_qa", "agent-qa-1");
+    call(
+        &state,
+        session,
+        dispatch("/repo", "rust-engineer", None, Some("toolu_denied")),
+    )
+    .await;
+
+    // The `matcher: "*"` hook's POST, arriving after the guard already denied.
+    crate::daemon::services::delegation_tracker::observe(
+        &state,
+        session,
+        crate::core::hook::HookEvent::PreToolUse,
+        &unisolated_hook_payload("toolu_denied"),
+    );
+
+    let next = call(
+        &state,
+        session,
+        dispatch("/repo", "rust-engineer", None, Some("toolu_next")),
+    )
+    .await;
+    assert_eq!(
+        next.total, 1,
+        "a late observation must not resurrect a refused dispatch's claim. Got {:?}",
+        next.agents
+    );
+    let names: Vec<&str> = next.agents.iter().map(|a| a.agent.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["qa"],
+        "a denial must not manufacture an occupant"
+    );
+}
+
+/// 🔴 The mirror order: the tracker's hook lands FIRST, and the deny must
+/// cancel the record it already wrote. Fails on 4cc327dbc for the same reason.
+#[tokio::test]
+async fn a_denied_dispatch_cancels_a_record_the_tracker_already_wrote() {
+    let (state, _dir, session) = hermetic();
+    call(
+        &state,
+        session,
+        dispatch("/repo", "qa", None, Some("toolu_qa")),
+    )
+    .await;
+    launch(&state, session, "toolu_qa", "agent-qa-1");
+
+    // The `matcher: "*"` hook wins the race and records the dispatch first.
+    crate::daemon::services::delegation_tracker::observe(
+        &state,
+        session,
+        crate::core::hook::HookEvent::PreToolUse,
+        &unisolated_hook_payload("toolu_denied"),
+    );
+    call(
+        &state,
+        session,
+        dispatch("/repo", "rust-engineer", None, Some("toolu_denied")),
+    )
+    .await;
+
+    let next = call(
+        &state,
+        session,
+        dispatch("/repo", "rust-engineer", None, Some("toolu_next")),
+    )
+    .await;
+    assert_eq!(
+        next.total, 1,
+        "the deny must cancel the record the tracker had already written. Got {:?}",
+        next.agents
+    );
 }

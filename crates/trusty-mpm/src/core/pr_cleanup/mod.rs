@@ -102,6 +102,7 @@ pub use registry::{CleanupRegistry, OpenedPr};
 pub use sweep::{SweepDecision, sweep_decision};
 
 use crate::session_manager::DirtyWorktree;
+use crate::session_manager::worktree_ownership::clear_worktree_sentinel;
 
 /// The `--json` field set step 1 reads.
 const VIEW_FIELDS: &str = "state,headRefName,headRefOid,mergeCommit,baseRefName";
@@ -543,6 +544,16 @@ async fn remove_one<T: Git, C: ClaimEnder>(
                 format!("{shown} could not be re-read before removal: {why} (#7275)"),
             );
         }
+    }
+    // #7185: git's own clean check has no exemption for the harness marker tm's
+    // dirty gate just excused, so a tree whose only untracked entry is that
+    // marker is authorised here and refused by git below. Clear it, and report
+    // a marker that cannot be cleared rather than running into that refusal.
+    if let Err(e) = clear_worktree_sentinel(path) {
+        return StepLine::failed(
+            STEP,
+            format!("{shown}: the harness ownership marker could not be cleared: {e} (#7185)"),
+        );
     }
     // Never `--force`: the dirty gate above is the only thing standing between
     // this call and an operator's unsaved work.
