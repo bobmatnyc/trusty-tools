@@ -50,6 +50,7 @@
 
 pub(crate) mod layout;
 pub(crate) mod new_session;
+pub(crate) mod new_session_entry;
 pub(crate) mod new_session_order;
 pub(crate) mod render;
 pub(crate) mod state;

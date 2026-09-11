@@ -1839,3 +1839,320 @@ fn render_new_session_overlay_truncates_a_long_row() {
         "the long row wrapped instead of being cut: {joined}"
     );
 }
+
+// ── new-session picker grouping and free-text entry (#7488) ─────────────────
+
+/// A registry spanning two GitHub owners, a self-hosted forge, a GitLab owner
+/// and one registration with no remote at all.
+///
+/// Why: the four cases the grouping has to tell apart, in one fixture — and
+/// `alpha.example.com` deliberately hosts a `zed/infra` whose LABEL sorts near
+/// the end, so a plain label sort cannot produce the expected order by accident.
+fn grouped_projects() -> Vec<Project> {
+    vec![
+        project("api", "https://github.com/acme/api"),
+        project("charts", "https://gitlab.com/zeta/charts"),
+        project("infra", "https://alpha.example.com/zed/infra"),
+        project("notes", ""),
+        project("tools", "git@gitlab.com:zeta/tools.git"),
+        project("trusty-tools", "https://github.com/bobmatnyc/trusty-tools"),
+        project("widgets", "https://github.com/acme/widgets"),
+    ]
+}
+
+/// Rows group by owner-or-domain, then by name, whatever order they arrive in.
+///
+/// Why (#7488 acceptance 1): the owner asked for the list to be structured by
+/// who owns the project. `zed/infra` is on a self-hosted host, so it groups
+/// under `alpha.example.com` — between `acme` and `bobmatnyc` — while a plain
+/// alphabetical sort of the LABELS would put it second from last. That gap is
+/// what makes this fail against #7421's ordering.
+#[test]
+fn new_session_order_groups_by_owner_then_domain() {
+    let forward = new_session::targets_from(&grouped_projects(), &[]);
+    assert_eq!(
+        new_session::row_labels(&forward),
+        vec![
+            // github.com → the owner is the group.
+            "acme/api".to_string(),
+            "acme/widgets".to_string(),
+            // Not a known forge → the host is the group, so it sorts under `a`.
+            "zed/infra".to_string(),
+            "bobmatnyc/trusty-tools".to_string(),
+            "zeta/charts".to_string(),
+            "zeta/tools".to_string(),
+            // No remote → one fixed group, always last.
+            "notes (local)".to_string(),
+            "other — type a project path…".to_string(),
+        ]
+    );
+
+    // Two differently shuffled inputs, one order (#7488 acceptance 1).
+    let mut shuffled = grouped_projects();
+    shuffled.reverse();
+    shuffled.swap(0, 4);
+    shuffled.swap(1, 5);
+    assert_eq!(
+        new_session::targets_from(&shuffled, &[]),
+        forward,
+        "the row order followed the input order"
+    );
+    let mut other = grouped_projects();
+    other.rotate_left(3);
+    other.swap(2, 6);
+    assert_eq!(
+        new_session::targets_from(&other, &[]),
+        forward,
+        "a second shuffle produced a third order"
+    );
+}
+
+/// A live session lifts its whole OWNER, and stays first inside it.
+///
+/// Why (#7488 acceptance 1): #7421's "the projects I am working in come first"
+/// has to survive the grouping, and the least surprising way to keep both is to
+/// move the group rather than pull one row out of it. `zeta` sorts last of the
+/// remote groups, so an implementation that ignores sessions fails here, and one
+/// that hoists the single project out of its group fails on the second row.
+#[test]
+fn new_session_order_lifts_the_whole_group_of_a_live_session() {
+    let mut live = session("z1", "active", 1);
+    live.source_id = Some("zeta/tools".to_string());
+    live.last_activity_at = Some("2026-09-11T10:00:00Z".to_string());
+
+    let rows = new_session::targets_from(&grouped_projects(), &[live]);
+    assert_eq!(
+        new_session::row_labels(&rows),
+        vec![
+            "zeta/tools".to_string(),
+            "zeta/charts".to_string(),
+            "acme/api".to_string(),
+            "acme/widgets".to_string(),
+            "zed/infra".to_string(),
+            "bobmatnyc/trusty-tools".to_string(),
+            "notes (local)".to_string(),
+            "other — type a project path…".to_string(),
+        ]
+    );
+}
+
+/// Group keys: the owner on a known forge, the host anywhere else, one fixed
+/// key with no remote.
+#[test]
+fn new_session_order_group_of_reads_owner_then_domain() {
+    use super::new_session_order::group_of;
+    assert_eq!(
+        group_of("https://github.com/Acme/api"),
+        (0, "acme".to_string())
+    );
+    assert_eq!(
+        group_of("git@gitlab.com:zeta/tools.git"),
+        (0, "zeta".to_string())
+    );
+    assert_eq!(
+        group_of("https://alpha.example.com/zed/infra"),
+        (0, "alpha.example.com".to_string())
+    );
+    // A local path and an empty registration are the same, always-last group.
+    assert_eq!(
+        group_of("/Users/me/code/widgets"),
+        (1, "(local)".to_string())
+    );
+    assert_eq!(group_of(""), (1, "(local)".to_string()));
+}
+
+/// The three spellings the picker accepts as a project it can clone.
+#[test]
+fn new_session_entry_parses_the_three_shapes() {
+    use super::new_session_entry::{ProjectEntry, parse_project_entry};
+    let expect = |text: &str, name: &str, repo_url: &str| {
+        assert_eq!(
+            parse_project_entry(text),
+            Some(ProjectEntry {
+                name: name.to_string(),
+                repo_url: repo_url.to_string(),
+            }),
+            "{text}"
+        );
+    };
+    // (a) a full clone URL, kept verbatim so an ssh entry still clones over ssh.
+    expect(
+        "https://github.com/acme/widgets",
+        "widgets",
+        "https://github.com/acme/widgets",
+    );
+    expect(
+        "https://github.com/acme/widgets.git",
+        "widgets",
+        "https://github.com/acme/widgets.git",
+    );
+    expect(
+        "git@github.com:acme/widgets.git",
+        "widgets",
+        "git@github.com:acme/widgets.git",
+    );
+    expect(
+        "ssh://git@git.example.com/ops/infra",
+        "infra",
+        "ssh://git@git.example.com/ops/infra",
+    );
+    // (b) `owner/repo` means github.com.
+    expect("acme/widgets", "widgets", "https://github.com/acme/widgets");
+    expect(
+        "acme/widgets.git",
+        "widgets",
+        "https://github.com/acme/widgets",
+    );
+    // (c) `domain/owner/repo` spells the host.
+    expect(
+        "git.example.com/ops/infra",
+        "infra",
+        "https://git.example.com/ops/infra",
+    );
+    expect(
+        "localhost/ops/infra",
+        "infra",
+        "https://localhost/ops/infra",
+    );
+}
+
+/// Text that names no project is refused, never guessed at.
+#[test]
+fn new_session_entry_rejects_malformed_text() {
+    use super::new_session_entry::parse_project_entry;
+    for bad in [
+        "",
+        "   ",
+        "widgets",
+        "acme/",
+        "/acme/widgets",
+        "acme widgets",
+        "acme/widgets/extra/deep",
+        // A path is the checkout resolver's job, not a clone target.
+        "/Users/me/code/widgets",
+        "~/code/widgets",
+        "./widgets",
+        // Two segments whose first is a domain names no owner.
+        "example.com/widgets",
+        // A URL shape the one remote parser refuses.
+        "https://github.com/acme",
+    ] {
+        assert_eq!(parse_project_entry(bad), None, "{bad:?} was accepted");
+    }
+}
+
+/// An unregistered entry carries the register leg AND the clone URL.
+#[test]
+fn new_session_entry_builds_a_clone_and_register_request() {
+    let request = super::new_session_entry::request_for_entry("acme/widgets", &targets())
+        .expect("owner/repo is a project");
+    assert_eq!(
+        request,
+        NewSessionRequest {
+            register: Some(NewProject {
+                name: "widgets".to_string(),
+                repo_url: "https://github.com/acme/widgets".to_string(),
+            }),
+            // The daemon clones this, exactly as `tm session new <url>` does.
+            repo: "https://github.com/acme/widgets".to_string(),
+            label: "widgets".to_string(),
+        }
+    );
+}
+
+/// An entry naming a project the registry already holds never re-registers it.
+///
+/// Why: `register` is an unqualified upsert, so a redundant call would replace
+/// the stored record's optional fields with the two this flow can supply.
+#[test]
+fn new_session_entry_reuses_a_registered_project() {
+    let request = super::new_session_entry::request_for_entry("bobmatnyc/trusty-tools", &targets())
+        .expect("a registered project is still a project");
+    assert_eq!(request.register, None);
+    assert_eq!(request.repo, "https://github.com/bobmatnyc/trusty-tools");
+    assert_eq!(request.label, "trusty-tools");
+}
+
+/// Typing a project the registry lacks and pressing Enter clones it.
+///
+/// Why (#7488 acceptance 2): the filter box is where the operator already types
+/// a project's name; before this, a name matching nothing emptied the list and
+/// Enter only opened a blank path prompt.
+#[test]
+fn new_session_entry_from_the_filter_creates_a_clone_request() {
+    let mut flow = NewSessionFlow::with_resolver(targets(), stub_identity);
+    for c in "acme/widgets".chars() {
+        assert_eq!(flow.apply(Input::Char(c)), Step::Redraw);
+    }
+    match flow.apply(Input::Enter) {
+        Step::Create(request) => {
+            assert_eq!(
+                request.register,
+                Some(NewProject {
+                    name: "widgets".to_string(),
+                    repo_url: "https://github.com/acme/widgets".to_string(),
+                })
+            );
+            assert_eq!(request.repo, "https://github.com/acme/widgets");
+        }
+        other => panic!("the typed project was not confirmed, got {other:?}"),
+    }
+}
+
+/// A filter that still matches a row keeps Enter meaning "open that row".
+#[test]
+fn new_session_entry_does_not_hijack_a_matching_filter() {
+    let mut flow = NewSessionFlow::with_resolver(targets(), stub_identity);
+    for c in "duetto".chars() {
+        flow.apply(Input::Char(c));
+    }
+    assert_eq!(
+        flow.apply(Input::Enter),
+        Step::Create(NewSessionRequest {
+            register: None,
+            repo: "https://github.com/duetto/apex".to_string(),
+            label: "apex".to_string(),
+        })
+    );
+}
+
+/// Malformed free text is refused inline, with the flow and the filter intact.
+///
+/// Why (#7488 acceptance 3): nothing may be silently dropped, and no session
+/// may be created from text the picker could not read.
+#[test]
+fn new_session_entry_from_the_filter_rejects_malformed_text() {
+    let sessions = fleet();
+    let mut state = creating();
+    for c in "nope!!".chars() {
+        state.apply(Input::Char(c), &sessions);
+    }
+    assert_eq!(
+        state.apply(Input::Enter, &sessions),
+        Action::Redraw,
+        "malformed text created a session"
+    );
+    let (text, severity) = state.message().expect("a refusal must be shown");
+    assert!(text.contains("nope!!"), "{text}");
+    assert_eq!(severity, Severity::Error);
+    match state.mode() {
+        Mode::New(flow) => assert_eq!(flow.filter(), "nope!!"),
+        other => panic!("the flow must stay open, got {other:?}"),
+    }
+}
+
+/// The typed-path entry takes a clone URL too, not only a checkout path.
+#[test]
+fn new_session_entry_path_step_accepts_a_clone_url() {
+    let request =
+        new_session::request_for_path("https://github.com/acme/widgets", &targets(), stub_identity)
+            .expect("a clone URL is a project");
+    assert_eq!(
+        request.register,
+        Some(NewProject {
+            name: "widgets".to_string(),
+            repo_url: "https://github.com/acme/widgets".to_string(),
+        })
+    );
+    assert_eq!(request.repo, "https://github.com/acme/widgets");
+}
