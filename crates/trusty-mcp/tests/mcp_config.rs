@@ -119,7 +119,20 @@ fn toml_round_trip_preserves_extensions() {
     };
     remote.enabled = false;
 
-    let original = McpConfigFile::new(vec![agents, remote]);
+    // The third transport has to survive the file too, or g2 cannot store what
+    // `tm mcp add --transport sse` accepts.
+    let mut events = McpServerConfig::new(
+        "events",
+        McpTransport::Sse {
+            url: "https://example.test/sse".into(),
+            headers: map(&[("Authorization", "Bearer s")]),
+        },
+    );
+    events
+        .extensions
+        .insert("scopes".into(), json!(["events:read"]));
+
+    let original = McpConfigFile::new(vec![agents, remote, events]);
     original.save(&path).expect("save");
 
     let loaded = McpConfigFile::load(&path).expect("load");
@@ -131,6 +144,10 @@ fn toml_round_trip_preserves_extensions() {
     assert!(
         text.contains("discovery_ttl_secs"),
         "extensions survive: {text}"
+    );
+    assert!(
+        text.contains("type = \"sse\""),
+        "the sse discriminant is what distinguishes it from http: {text}"
     );
 }
 
@@ -425,6 +442,44 @@ fn claude_code_remote_entry_matches_trusty_mpm_golden() {
 }
 
 #[test]
+fn claude_code_sse_entry_matches_trusty_mpm_golden() {
+    // Golden from `build_remote_entry_http`'s tail, which asserts sse shares
+    // the remote shape with a different discriminant:
+    //   let s = build_remote_entry(McpTransport::Sse, "https://x/sse", &Map::new());
+    //   assert_eq!(s["type"], "sse");
+    let plain = write_mcp_servers(&[McpServerConfig::new(
+        "events",
+        McpTransport::Sse {
+            url: "https://x/sse".into(),
+            headers: BTreeMap::new(),
+        },
+    )]);
+    assert_eq!(
+        plain,
+        json!({ "events": { "type": "sse", "url": "https://x/sse" } })
+    );
+
+    let with_headers = write_mcp_servers(&[McpServerConfig::new(
+        "events",
+        McpTransport::Sse {
+            url: "https://x/sse".into(),
+            headers: map(&[("Authorization", "Bearer t")]),
+        },
+    )]);
+    assert_eq!(
+        with_headers,
+        json!({
+            "events": {
+                "type": "sse",
+                "url": "https://x/sse",
+                "headers": { "Authorization": "Bearer t" }
+            }
+        }),
+        "headers are added only when non-empty, exactly as for http"
+    );
+}
+
+#[test]
 fn claude_code_write_omits_disabled_servers() {
     let mut off = stdio("off", "off", &[]);
     off.enabled = false;
@@ -451,7 +506,15 @@ fn claude_code_write_then_read_round_trips() {
         headers: map(&[("X-Key", "v")]),
     };
 
-    let servers = vec![stdio_server, remote];
+    let events = McpServerConfig::new(
+        "gamma",
+        McpTransport::Sse {
+            url: "https://gamma.test/sse".into(),
+            headers: map(&[("X-Key", "v")]),
+        },
+    );
+
+    let servers = vec![stdio_server, remote, events];
     let back = read_mcp_servers(&write_mcp_servers(&servers)).expect("round trip");
     // Read output is name-ordered; the input already is.
     assert_eq!(back, servers);
@@ -482,13 +545,21 @@ fn read_rejects_unknown_transport() {
 }
 
 #[test]
-fn read_rejects_sse_transport() {
-    // Folding sse into Http would silently change the protocol a client speaks.
-    let err = read_mcp_servers(&json!({ "s": { "type": "sse", "url": "https://x/sse" } }))
-        .expect_err("sse has no McpTransport variant");
+fn read_accepts_sse_transport() {
+    let got = read_mcp_servers(&json!({
+        "s": { "type": "sse", "url": "https://x/sse", "headers": { "X-Key": "v" } }
+    }))
+    .expect("sse is one of the three transports");
+    assert_eq!(got.len(), 1);
+    // Sse, not Http — the discriminant decides which protocol a client speaks.
     assert!(
-        err.to_string().contains("sse"),
-        "the message names it: {err}"
+        matches!(
+            &got[0].transport,
+            McpTransport::Sse { url, headers }
+                if url == "https://x/sse" && headers["X-Key"] == "v"
+        ),
+        "got: {:?}",
+        got[0].transport
     );
 }
 

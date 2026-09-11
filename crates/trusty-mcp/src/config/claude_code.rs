@@ -40,7 +40,7 @@ use super::{McpConfigError, McpServerConfig, McpTransport};
 /// any other writer.
 /// What: returns a JSON object keyed by server name. A stdio server becomes
 /// `{"type":"stdio","command":…,"args":[…]}` with `"env"` added only when
-/// non-empty; an http server becomes `{"type":"http","url":…}` with
+/// non-empty; an http or sse server becomes `{"type":<http|sse>,"url":…}` with
 /// `"headers"` added only when non-empty. `args` is always present, empty
 /// array included — matching `trusty_mpm::core::mcp_config::build_stdio_entry`
 /// exactly, because a re-add must stay idempotent against entries that module
@@ -82,15 +82,30 @@ fn write_entry(transport: &McpTransport) -> Value {
                 obj.insert("env".into(), string_map(env));
             }
         }
-        McpTransport::Http { url, headers } => {
-            obj.insert("type".into(), Value::String("http".into()));
-            obj.insert("url".into(), Value::String(url.clone()));
-            if !headers.is_empty() {
-                obj.insert("headers".into(), string_map(headers));
-            }
-        }
+        McpTransport::Http { url, headers } => remote(&mut obj, "http", url, headers),
+        McpTransport::Sse { url, headers } => remote(&mut obj, "sse", url, headers),
     }
     Value::Object(obj)
+}
+
+/// Fill in a remote entry's `type`, `url` and optional `headers`.
+///
+/// Why: `http` and `sse` differ only in the discriminant, exactly as
+/// `trusty_mpm::core::mcp_config::build_remote_entry` treats them — one
+/// function keeps them from drifting apart the way two copies would.
+/// Test: `claude_code_remote_entry_matches_trusty_mpm_golden`,
+/// `claude_code_sse_entry_matches_trusty_mpm_golden`.
+fn remote(
+    obj: &mut Map<String, Value>,
+    discriminant: &str,
+    url: &str,
+    headers: &BTreeMap<String, String>,
+) {
+    obj.insert("type".into(), Value::String(discriminant.to_string()));
+    obj.insert("url".into(), Value::String(url.to_string()));
+    if !headers.is_empty() {
+        obj.insert("headers".into(), string_map(headers));
+    }
 }
 
 /// A `BTreeMap<String, String>` as a JSON object.
@@ -117,15 +132,14 @@ fn string_map(source: &BTreeMap<String, String>) -> Value {
 /// `extensions`.
 ///
 /// Fails closed on anything it cannot represent, rather than skipping the
-/// entry: a value that is not an object, a `"type"` that is neither `stdio`
-/// nor `http`, an entry with neither `command` nor `url`, or a non-string in
-/// `args` / `env` / `headers`. `"type": "sse"` is rejected by name —
-/// [`McpTransport`] has no SSE variant, and folding SSE into `Http` would
-/// silently change which protocol a client speaks. An entry that omits
-/// `"type"` is read as stdio when it carries `command` and as http when it
-/// carries `url`, which is how Claude Code itself treats the older shape.
+/// entry: a value that is not an object, a `"type"` outside `stdio` / `http` /
+/// `sse`, an entry with neither `command` nor `url`, or a non-string in
+/// `args` / `env` / `headers`. An entry that omits `"type"` is read as stdio
+/// when it carries `command` and as http when it carries `url` — that shape
+/// predates the discriminant and never meant sse, so the inference never
+/// produces [`McpTransport::Sse`].
 /// Test: `claude_code_write_then_read_round_trips`, `read_infers_transport_without_type`,
-/// `read_rejects_unknown_transport`, `read_rejects_sse_transport`,
+/// `read_rejects_unknown_transport`, `read_accepts_sse_transport`,
 /// `read_rejects_non_object_entry`.
 pub fn read_mcp_servers(json: &Value) -> Result<Vec<McpServerConfig>, McpConfigError> {
     let map = json
@@ -143,7 +157,7 @@ pub fn read_mcp_servers(json: &Value) -> Result<Vec<McpServerConfig>, McpConfigE
 ///
 /// Why: keeps [`read_mcp_servers`] to its map walk and puts every rejection
 /// reason in one place.
-/// Test: `read_rejects_unknown_transport`, `read_rejects_sse_transport`.
+/// Test: `read_rejects_unknown_transport`, `read_accepts_sse_transport`.
 fn read_entry(name: &str, entry: &Value) -> Result<McpTransport, McpConfigError> {
     let obj = entry
         .as_object()
@@ -160,20 +174,15 @@ fn read_entry(name: &str, entry: &Value) -> Result<McpTransport, McpConfigError>
         }
     };
 
-    let is_stdio = match declared {
-        Some("stdio") => true,
-        Some("http") => false,
-        Some("sse") => {
-            return Err(bad(
-                name,
-                "`type` is \"sse\", which this crate does not model (#7452 covers stdio and http)",
-            ));
-        }
+    // An entry with no `type` predates the discriminant, and only stdio and
+    // http were ever written that way — an sse entry always carries its type.
+    let resolved = match declared {
+        Some(known @ ("stdio" | "http" | "sse")) => known,
         Some(other) => {
             return Err(bad(name, &format!("unknown transport type {other:?}")));
         }
-        None if obj.contains_key("command") => true,
-        None if obj.contains_key("url") => false,
+        None if obj.contains_key("command") => "stdio",
+        None if obj.contains_key("url") => "http",
         None => {
             return Err(bad(
                 name,
@@ -182,7 +191,7 @@ fn read_entry(name: &str, entry: &Value) -> Result<McpTransport, McpConfigError>
         }
     };
 
-    if is_stdio {
+    if resolved == "stdio" {
         let command = string_field(name, obj, "command")?;
         let args = match obj.get("args") {
             None | Some(Value::Null) => Vec::new(),
@@ -209,9 +218,12 @@ fn read_entry(name: &str, entry: &Value) -> Result<McpTransport, McpConfigError>
             env: read_string_map(name, obj, "env")?,
         })
     } else {
-        Ok(McpTransport::Http {
-            url: string_field(name, obj, "url")?,
-            headers: read_string_map(name, obj, "headers")?,
+        let url = string_field(name, obj, "url")?;
+        let headers = read_string_map(name, obj, "headers")?;
+        Ok(if resolved == "sse" {
+            McpTransport::Sse { url, headers }
+        } else {
+            McpTransport::Http { url, headers }
         })
     }
 }

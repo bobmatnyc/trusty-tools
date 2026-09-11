@@ -116,21 +116,23 @@ pub enum McpConfigError {
 
 /// How a client reaches one MCP server.
 ///
-/// Why: the two shapes every consumer already models — a local subprocess
-/// speaking MCP over its stdio, and a remote HTTP endpoint. Making the
-/// transport an enum rather than a `transport: String` plus six `Option`
-/// fields (the shape `trusty_agents::mcp::config::McpService` grew) means an
-/// entry cannot be half-stdio and half-remote, and a match over it is total.
-/// What: `Stdio` carries the command line and its environment; `Http` carries
-/// the URL and its request headers. Both collections are `BTreeMap`, so the
+/// Why: the three shapes every consumer already models — a local subprocess
+/// speaking MCP over its stdio, and the two remote forms. Making the transport
+/// an enum rather than a `transport: String` plus six `Option` fields (the
+/// shape `trusty_agents::mcp::config::McpService` grew) means an entry cannot
+/// be half-stdio and half-remote, and a match over it is total.
+/// What: `Stdio` carries the command line and its environment; `Http` and
+/// `Sse` each carry a URL and its request headers. The variants match
+/// `trusty_mpm::core::mcp_config::McpTransport`'s three one for one, so
+/// `tm mcp add` can route through [`write_mcp_servers`] without losing a
+/// transport. `Http` and `Sse` stay separate rather than sharing one variant
+/// with a flag, because Claude Code's `type` discriminant is what decides
+/// which protocol the client speaks. Every collection is a `BTreeMap`, so the
 /// serialised form is byte-stable across runs — a config file that round-trips
 /// through load/save must not reorder on every write.
-///
-/// Claude Code's own `sse` transport has deliberately NO variant here: #7452
-/// scopes this type to stdio and http, and [`read_mcp_servers`] rejects an
-/// `sse` entry rather than silently folding it into `Http`. The enum is
-/// `#[non_exhaustive]`, so adding the variant later is additive.
-/// Test: `toml_round_trip_preserves_extensions`, `claude_code_remote_entry_matches_trusty_mpm_golden`.
+/// Test: `toml_round_trip_preserves_extensions`,
+/// `claude_code_remote_entry_matches_trusty_mpm_golden`,
+/// `claude_code_sse_entry_matches_trusty_mpm_golden`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 #[non_exhaustive]
@@ -148,6 +150,14 @@ pub enum McpTransport {
     },
     /// A remote streamable-HTTP endpoint.
     Http {
+        /// The endpoint URL.
+        url: String,
+        /// Extra request headers.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        headers: BTreeMap<String, String>,
+    },
+    /// A remote server-sent-events endpoint.
+    Sse {
         /// The endpoint URL.
         url: String,
         /// Extra request headers.
