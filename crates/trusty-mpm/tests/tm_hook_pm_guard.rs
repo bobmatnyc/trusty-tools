@@ -3226,6 +3226,48 @@ fn pm_guard_allows_a_brace_literal_passed_as_an_argument_value() {
 }
 
 #[test]
+fn pm_guard_allows_a_for_loop_word_list_of_branch_names() {
+    // #7498, through the real binary. Both ALLOW rows DENIED on installed tm
+    // 1.5.33: `split_shell_segments` cuts at `;`, so a loop header arrives as a
+    // segment whose first token is `for` and whose words the scan read as argv.
+    // A git BRANCH carrying `secrets`/`credentials`/`token` was then a "secret
+    // file" on the strength of the `/` in front of it, and the whole loop
+    // refused while no file was ever opened.
+    let (_dir, repo) = main_checkout_fixture();
+    for command in [
+        "for b in feat/x fix/y docs/secrets-integration-spec; do echo $b; done",
+        "for b in release/v1.0 hotfix/token-refresh feat/credentials-rotation; do echo $b; done",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert!(
+            stdout.trim().is_empty(),
+            "`{command}` names no file and must be allowed: {stdout}"
+        );
+    }
+    // The negative bound: only the directory-prefix proxy is withdrawn there.
+    // A name with file shape of its own still denies inside a word list.
+    for command in [
+        // No `\"` in these rows: `bash_payload_at` interpolates the command
+        // into raw JSON, so a bare double quote would break the payload and
+        // the guard would never see the command at all.
+        "for f in .env secrets.txt; do cat $f; done",
+        "for f in *.pem; do sed -n 1p $f; done",
+        "for f in credentials.json; do cat $f; done",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert_denied(&stdout);
+    }
+}
+
+#[test]
 fn pm_guard_deny_text_advertises_no_flag_escape() {
     // #7266 round 6, critic HIGH + MEDIUM: round 5's reason offered
     // `--env-file`/`-var-file`/`-state` and no such escape was ever

@@ -132,6 +132,25 @@
 //! text is scanned so its brace fails CLOSED. Deliberate cost: a literal brace
 //! group with more than 64 alternatives now denies.
 //!
+//! Round 13 (#7498) withdraws the same over-refusal from a `for` loop's WORD
+//! LIST. `split_shell_segments` cuts at `;`, so `for b in … ; do … ; done`
+//! arrives as a segment whose first token is the keyword `for` and whose
+//! remaining words the scan read as argv. Live on tm 1.5.33,
+//! `for b in feat/x fix/y docs/secrets-integration-spec; do if git show-ref
+//! --verify -q refs/remotes/origin/$b; then …` was refused for "naming
+//! `docs/secrets-integration-spec`" — a git BRANCH, matched by `*secrets*` and
+//! admitted as a file only by the `/` in front of it. A word list is not a path
+//! operand list: the body decides what the variable is for, and the name
+//! reaches the body as `$b`. [`for_word_list_start`] identifies the list by
+//! POSITION, the way [`pattern_argument_index`] and [`inline_program_index`]
+//! identify theirs, and inside it
+//! [`admitted_only_by_a_directory_prefix`] withdraws that one proxy — because a
+//! slash in a word list separates a branch, a ref, a tag or a label at least as
+//! often as a directory. Nothing else moves: a name with file shape of its own
+//! still denies in a word list, so `for f in .env secrets.txt; do cat "$f";
+//! done`, `for f in *.pem; do sed -n 1p $f; done` and
+//! `for f in credentials.json; do cat $f; done` all still deny.
+//!
 //! What this costs, deliberately: naming a secret-shaped file in ANY command
 //! now denies, including one that reads nothing — `git log --grep .env`,
 //! `git commit -m "add .env.example"`, `cp .env .env.bak`. Rounds 1 to 4
@@ -163,7 +182,13 @@
 //! argument, so `rg --type md id_rsa` — pattern behind a value-taking flag —
 //! still denies. Enumerating which flags take a value is the trade refused
 //! there: a wrong entry would skip a real file operand, which is a bypass
-//! rather than a false positive.
+//! rather than a false positive. Round 13 adds one of the same shape: a word
+//! matched ONLY by `*credentials*`/`*secrets*`/`token*`, carrying no dot and no
+//! extension, reaches a reading verb through a `for` word list
+//! (`for f in config/credentials; do cat $f; done`) where the same name written
+//! as an operand (`cat config/credentials`) still denies. That is the variable
+//! indirection beside it — the body reads `$f`, not a literal — and refusing it
+//! costs every branch-name loop, which is everyday git work.
 //!
 //! `git show HEAD:terraform.tfvars` is DENIED, not residual: `:` is not a path
 //! byte, so `HEAD:terraform.tfvars` cuts into `HEAD` and `terraform.tfvars`,
@@ -203,7 +228,10 @@
 //! `a_real_brace_alternation_in_argv_still_denies`,
 //! `drops_only_the_braces_the_cut_orphaned`,
 //! `denies_a_secret_hidden_by_nesting_or_cap_overflow`,
-//! `the_documented_residuals_still_allow`, and the rest of this
+//! `the_documented_residuals_still_allow`,
+//! `allows_a_for_loop_word_list_of_branch_names`,
+//! `denies_a_secret_file_in_a_for_loop_word_list`,
+//! `admitted_only_by_a_directory_prefix_is_the_word_family_arm`, and the rest of this
 //! module's `tests` submodule. The rule is proved WIRED end to end through the
 //! real binary by `pm_guard_denies_a_line_range_read_of_a_secret_bearing_file`,
 //! `pm_guard_denies_a_read_tool_call_on_a_secret_bearing_file`,
@@ -219,7 +247,8 @@
 //! `pm_guard_deny_text_advertises_no_flag_escape`,
 //! `pm_guard_reads_a_parameter_expansion_as_its_operand` and
 //! `pm_guard_allows_code_braces_in_a_heredoc_body_and_an_inline_program` and
-//! `pm_guard_allows_a_brace_literal_passed_as_an_argument_value` in
+//! `pm_guard_allows_a_brace_literal_passed_as_an_argument_value` and
+//! `pm_guard_allows_a_for_loop_word_list_of_branch_names` in
 //! `tests/tm_hook_pm_guard.rs`.
 
 use std::path::Path;
@@ -554,6 +583,8 @@ fn secret_words_in_segment(segment: &str) -> Vec<String> {
     let pattern_at = pattern_argument_index(segment, &argv);
     // #7266: an interpreter's inline program is source text, not a path list.
     let program_at = inline_program_index(&argv);
+    // #7498: the words after `in` are a loop's word LIST, not a path operand list.
+    let word_list_from = for_word_list_start(segment, &argv);
     let mut out: Vec<String> = Vec::new();
     for (index, token) in argv.iter().enumerate() {
         if Some(index) == pattern_at {
@@ -564,13 +595,79 @@ fn secret_words_in_segment(segment: &str) -> Vec<String> {
         } else {
             secret_files_named_in(token, Scan::Argv)
         };
+        let in_word_list = word_list_from.is_some_and(|from| index >= from);
         for word in words {
+            if in_word_list && admitted_only_by_a_directory_prefix(&word) {
+                continue;
+            }
             if !out.contains(&word) {
                 out.push(word);
             }
         }
     }
     out
+}
+
+/// Shell keywords whose `<var> in <words>` header is a WORD LIST (#7498).
+///
+/// Why: `for` and `select` are the two compound commands that bind a variable
+/// to a list of literal words. Nothing in that list is handed to a program as
+/// a path — the body decides what the variable is used for, and it reaches the
+/// body as `$var`.
+/// Test: `allows_a_for_loop_word_list_of_branch_names`.
+const WORD_LIST_KEYWORDS: &[&str] = &["for", "select"];
+
+/// Where a segment's `for`/`select` WORD LIST begins, if it is one (#7498).
+///
+/// Why: `split_shell_segments` cuts at `;`, so `for b in … ; do … ; done`
+/// reaches this rule as a segment whose first token is the keyword `for`. The
+/// scan then read every word after it as argv, and a git BRANCH name that
+/// carries `secrets`/`credentials`/`token` refused the whole loop — live on tm
+/// 1.5.33, `for b in feat/x fix/y docs/secrets-integration-spec; do …` was
+/// refused for "naming" a branch this guard never opened (#7498).
+/// What: `Some(3)` — the index just past `for <var> in` — when the segment
+/// lexes to that header and runs no nested command. A nested command
+/// (`for f in $(ls …)`) withdraws it, because the words are then whatever that
+/// command prints rather than the literal list written here. `None` for every
+/// other segment, so no ordinary argv reaches the narrowed shape test. The
+/// keyword is identified by POSITION, exactly as
+/// [`pattern_argument_index`] and [`inline_program_index`] identify theirs —
+/// this adds no verb to any list.
+/// Test: `allows_a_for_loop_word_list_of_branch_names`,
+/// `denies_a_secret_file_in_a_for_loop_word_list`.
+fn for_word_list_start(segment: &str, argv: &[String]) -> Option<usize> {
+    if NESTED_COMMAND_MARKERS.iter().any(|m| segment.contains(m)) {
+        return None;
+    }
+    let keyword = argv.first()?;
+    if !WORD_LIST_KEYWORDS.contains(&keyword.as_str()) || argv.get(2)? != "in" {
+        return None;
+    }
+    (argv.len() > 3).then_some(3)
+}
+
+/// Whether `word` is a secret-shaped name ONLY because a directory is written
+/// in front of it (#7498).
+///
+/// Why: [`names_a_secret_file`]'s last arm is the proxy the three English-word
+/// families use for "this is a file rather than a word" — a `/` in the word.
+/// In an argv operand that proxy holds. In a `for` word list it does not: a
+/// slash-bearing word there is a git branch (`docs/secrets-integration-spec`),
+/// a remote ref, a tag or a label at least as often as a path, and the guard
+/// opens none of them. Every family that carries file shape in the NAME — a
+/// leading `.`, an extension, or a filename-only family such as `id_rsa` —
+/// answers `false` here and still denies in a word list, so `.env`,
+/// `secrets.txt`, `credentials.json` and `*.pem` are untouched.
+/// What: the three tests [`names_a_secret_file`] takes BEFORE that last arm,
+/// inverted — no leading dot, no extension, and matched only by
+/// `pm_guard_bash::matches_only_name_substring_family`.
+/// Test: `admitted_only_by_a_directory_prefix_is_the_word_family_arm`,
+/// `denies_a_secret_file_in_a_for_loop_word_list`.
+fn admitted_only_by_a_directory_prefix(word: &str) -> bool {
+    let base = normalize_bracket_classes(&command_basename(word));
+    !base.starts_with('.')
+        && Path::new(&base).extension().is_none()
+        && matches_only_name_substring_family(&base)
 }
 
 /// Every distinct word of one PROGRAM TEXT block that names a secret file.
@@ -1060,6 +1157,108 @@ mod tests {
 
     fn eval(command: &str) -> Option<String> {
         evaluate_secret_file_read_command(command)
+    }
+
+    /// A `for` loop over BRANCH names, refused live on tm 1.5.33 (#7498).
+    ///
+    /// Why: `split_shell_segments` cuts at `;`, so the loop header reaches the
+    /// scan as a segment whose first token is `for` and whose words it read as
+    /// argv. A branch carrying `secrets`/`credentials`/`token` is then a
+    /// "secret file" on the strength of the `/` in front of it, and the whole
+    /// loop refused while this guard never opened a file at all.
+    const WORD_LIST_ALLOW_CORPUS: &[&str] = &[
+        // The PM's reproduction, verbatim.
+        "for b in feat/x fix/y docs/secrets-integration-spec; do if git show-ref \
+         --verify -q refs/remotes/origin/$b; then echo \"$b\"; fi; done",
+        // The same header alone, and the `select` spelling of it.
+        "for b in docs/secrets-integration-spec; do echo $b; done",
+        "select b in docs/secrets-integration-spec; do echo $b; done",
+        // A branch-name sweep: all three word families, none with file shape.
+        "for b in release/v1.0 hotfix/token-refresh feat/credentials-rotation; \
+         do echo $b; done",
+        "for r in refs/remotes/origin/docs/secrets-plan; do echo $r; done",
+    ];
+
+    #[test]
+    fn allows_a_for_loop_word_list_of_branch_names() {
+        for command in WORD_LIST_ALLOW_CORPUS {
+            assert_eq!(
+                eval(command),
+                None,
+                "a `for` word list of branch names must allow: `{command}`"
+            );
+        }
+    }
+
+    /// The word list is narrowed for ONE arm only: every name with file shape
+    /// of its own still denies there.
+    ///
+    /// Why: #7498's acceptance criterion — an implementation that exempted the
+    /// `for` keyword outright would pass
+    /// `allows_a_for_loop_word_list_of_branch_names` and fail every row here,
+    /// so both tests must run together.
+    #[test]
+    fn denies_a_secret_file_in_a_for_loop_word_list() {
+        for (command, named) in [
+            // A dotfile family and an extension family, fed to a reading verb.
+            ("for f in .env secrets.txt; do cat \"$f\"; done", ".env"),
+            // A glob whose extension is a key family.
+            ("for f in *.pem; do sed -n 1p $f; done", "*.pem"),
+            // A word family that DOES carry an extension: a real credential store.
+            (
+                "for f in credentials.json; do cat $f; done",
+                "credentials.json",
+            ),
+            // A filename-only family needs no path in front of it.
+            ("for f in id_rsa; do cat $f; done", "id_rsa"),
+            // A nested command withdraws the word list entirely, so even a
+            // word-family name with no file shape stays screened there.
+            (
+                "for f in $(echo config/credentials); do cat $f; done",
+                "config/credentials",
+            ),
+        ] {
+            let reason = eval(command).unwrap_or_else(|| {
+                panic!("a secret file in a `for` word list must deny: `{command}`")
+            });
+            assert!(
+                reason.contains(named),
+                "the deny must name `{named}`: {reason}"
+            );
+        }
+    }
+
+    /// [`admitted_only_by_a_directory_prefix`] is exactly
+    /// [`names_a_secret_file`]'s last arm, inverted.
+    #[test]
+    fn admitted_only_by_a_directory_prefix_is_the_word_family_arm() {
+        for word in [
+            "docs/secrets-integration-spec",
+            "config/credentials",
+            "hotfix/token-refresh",
+        ] {
+            assert!(
+                admitted_only_by_a_directory_prefix(word),
+                "`{word}` is admitted only by its directory prefix"
+            );
+            // The proof that the prefix is the ONLY reason: drop it and the
+            // word stops naming a secret file.
+            let base = word.rsplit('/').next().unwrap_or(word);
+            assert!(!names_a_secret_file(base, Scan::Argv), "{base}");
+        }
+        for word in [
+            "docs/.env",
+            "docs/secrets.txt",
+            "docs/credentials.json",
+            "docs/id_rsa",
+            "docs/x.pem",
+        ] {
+            assert!(
+                !admitted_only_by_a_directory_prefix(word),
+                "`{word}` carries file shape of its own"
+            );
+            assert!(names_a_secret_file(word, Scan::Argv), "{word}");
+        }
     }
 
     /// Every shape a critic drove through rounds 1 to 4, plus the round-4
