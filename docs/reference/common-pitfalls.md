@@ -98,7 +98,7 @@ fast with an explicit glibc-version error instead of hanging for up to
 `rustup update` and picking up a new nightly may introduce syntax that
 compiles locally but fails on CI. Prefer stable channel toolchains.
 
-🟢 **Edition mismatch** — `trusty-mpm`, `trusty-mpm-gui`, `trusty-agents`, `trusty-agents-common`, and `trusty-agents-local` use edition 2024;
+🟢 **Edition mismatch** — `trusty-mpm`, `trusty-mpm-gui`, `trusty-agents`, and `trusty-agents-common` use edition 2024;
 all other crates use edition 2021. Let-chains (`if let … && let …`) only
 work in edition 2024. Do not copy let-chain patterns into edition-2021 crates.
 

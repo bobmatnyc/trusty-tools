@@ -561,7 +561,7 @@ jobs:
           #   trusty-common      — shared library (thiserror error types, memory-core, …)
           #   trusty-embedderd   — binary ships INSIDE trusty-search (#1318)
           #   trusty-progress    — shared progress-reporting library
-          #   trusty-agents-common / trusty-agents-local — internal libs (publish=false)
+          #   trusty-agents-common — internal lib (publish=false)
           #   …and any future library-only crate added to the workspace.
           #
           # Pushing a tag for one of these (e.g. `trusty-common-v0.15.3`) used to

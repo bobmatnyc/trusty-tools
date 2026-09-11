@@ -35,7 +35,6 @@
 - [trusty-cto-db](./trusty-cto-db/README.md)
 - [tc-services](./tc-services/README.md)
 - [trusty-agents-common](./trusty-agents-common/README.md)
-- [trusty-agents-local](./trusty-agents-local/README.md)
 
 # Operations and Reference
 

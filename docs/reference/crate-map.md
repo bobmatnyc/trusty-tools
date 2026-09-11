@@ -24,7 +24,6 @@ versions, publishability, and targets.
 | `tc-services` | [`crates/tc-services/`](../../crates/tc-services/) | library | [crate README](../../crates/tc-services/README.md), [extended docs](../tc-services/README.md) |
 | `trusty-agents` | [`crates/trusty-agents/`](../../crates/trusty-agents/) | library, `tagent` | [crate README](../../crates/trusty-agents/README.md), [extended docs](../trusty-agents/README.md) |
 | `trusty-agents-common` | [`crates/trusty-agents-common/`](../../crates/trusty-agents-common/) | library | [crate README](../../crates/trusty-agents-common/README.md), [extended docs](../trusty-agents-common/README.md) |
-| `trusty-agents-local` | [`crates/trusty-agents-local/`](../../crates/trusty-agents-local/) | `trusty-agents-local` | [crate README](../../crates/trusty-agents-local/README.md), [extended docs](../trusty-agents-local/README.md) |
 | `trusty-analyze` | [`crates/trusty-analyze/`](../../crates/trusty-analyze/) | library, `trusty-analyze` | [crate README](../../crates/trusty-analyze/README.md), [extended docs](../trusty-analyze/README.md) |
 | `trusty-audit` | [`crates/trusty-audit/`](../../crates/trusty-audit/) | library, `trusty-audit`, `taudit` | [crate README](../../crates/trusty-audit/README.md) |
 | `trusty-channels` | [`crates/trusty-channels/`](../../crates/trusty-channels/) | library, `slack-mcp`, `telegram-mcp` | [crate README](../../crates/trusty-channels/README.md) |

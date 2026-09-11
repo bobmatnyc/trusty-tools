@@ -15,7 +15,6 @@ trusty-console	trusty-console	trusty-console	src/main.rs	-	yes	present	present	p
 # --- out of scope per DOC-1 D3; carried so --check-table can detect additions ---
 trusty-agents	trusty-agents	tagent	src/main.rs	-	no	-	-	-
 trusty-agents-ui	trusty-agents/ui/src-tauri	trusty-agents-ui	src/main.rs	-	no	-	-	-
-trusty-agents-local	trusty-agents-local	trusty-agents-local	src/main.rs	-	no	-	-	-
 trusty-audit	trusty-audit	trusty-audit	src/main.rs	-	no	-	-	-
 trusty-audit	trusty-audit	taudit	src/main.rs	-	no	-	-	-
 trusty-channels	trusty-channels	slack-mcp	src/bin/slack-mcp.rs	-	no	-	-	-

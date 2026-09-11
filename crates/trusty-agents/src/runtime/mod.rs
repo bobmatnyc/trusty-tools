@@ -121,10 +121,9 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 /// Launch the whole binary: own the tokio runtime, run [`run`] on it, and tear
 /// the runtime down with a bounded wait.
 ///
-/// Why (#3655): this is the single launcher both `tagent` and
-/// `trusty-agents-local` call, so the shutdown ceiling above exists once
-/// rather than once per `main.rs`. See [`SHUTDOWN_GRACE`] for what the bound
-/// is protecting against.
+/// Why (#3655): this is the single launcher every `main.rs` calls, so the
+/// shutdown ceiling above exists once rather than once per binary. See
+/// [`SHUTDOWN_GRACE`] for what the bound is protecting against.
 /// What: builds the same multi-thread, all-drivers-enabled runtime
 /// `#[tokio::main]` would have built, blocks on `run()`, then calls
 /// `shutdown_timeout` instead of letting `Drop` wait forever. When the grace
@@ -155,21 +154,20 @@ pub fn run_to_completion() -> Result<()> {
 /// Library entry point — contains the full top-level dispatch previously
 /// hosted in `fn main()`.
 ///
-/// Why: Exposing the binary's startup logic via the library lets private
-///      launchers (e.g. `trusty-agents-local`) install additional agent plugins
-///      via `install_plugins(...)` before delegating to this function, so
-///      the published `trusty-agents` crate stays free of references to
-///      `publish = false` agent crates.
+/// Why: Exposing the binary's startup logic via the library lets a downstream
+///      launcher install additional agent plugins via `install_plugins(...)`
+///      before delegating to this function, so the published `trusty-agents`
+///      crate stays free of references to `publish = false` agent crates.
 /// What: Performs argv parsing, env loading, tracing setup, plugin spawn,
 ///       subcommand dispatch, mode-flag dispatch (--api/--workflow/--direct
 ///       /--agent/...), and finally the interactive REPL or CTRL fallback.
-/// Test: Indirectly via `cargo run -p trusty-agents`/`trusty-agents-local` and the
-///       crate's integration tests.
+/// Test: Indirectly via `cargo run -p trusty-agents` and the crate's
+///       integration tests.
 pub async fn run() -> Result<()> {
     // #4825: install the process-level rustls CryptoProvider before ANY code
     // path can reach a TLS handshake. Lives here rather than in `main.rs` so
-    // every launcher that calls `run()` — `tagent` and `trusty-agents-local`
-    // alike — is covered, and ahead of the `config` / `mcp-serve` early
+    // every launcher that calls `run()` is covered — `tagent` here, and any
+    // downstream one — and ahead of the `config` / `mcp-serve` early
     // dispatches below because those make HTTPS calls too.
     crate::tls::install_crypto_provider()?;
 
