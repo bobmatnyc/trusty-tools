@@ -144,6 +144,7 @@ mod pm_prompt_golden_tests;
 pub mod native_session_finder;
 pub mod output_style;
 pub mod output_style_deployer;
+pub mod output_style_tiers;
 pub mod overseer;
 pub mod overseer_config;
 // #4058: single canonical source for the crate's own `[[bin]]` names, so
