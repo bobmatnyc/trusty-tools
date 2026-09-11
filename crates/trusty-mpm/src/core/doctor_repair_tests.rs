@@ -708,3 +708,102 @@ fn output_style_repair_refuses_an_unreadable_file() {
     );
     assert!(!steps[0].changed());
 }
+
+/// The #7490 incident shape: `SessionStart` wired to the memory hook only,
+/// with the PM guard present so the file reads as tm-provisioned.
+fn write_missing_group_settings(project: &Path) -> PathBuf {
+    let claude = project.join(".claude");
+    fs::create_dir_all(&claude).unwrap();
+    let path = claude.join("settings.json");
+    fs::write(
+        &path,
+        serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    { "hooks": [{ "type": "command", "command": "/usr/local/bin/tm hook --pm-guard" }] }
+                ],
+                "SessionStart": [
+                    { "hooks": [{ "type": "command", "command": "trusty-memory inbox-check" }] }
+                ]
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    path
+}
+
+/// The `--fix --yes` arm merges the missing lifecycle group back in (#7490).
+#[test]
+fn missing_group_repair_merges_the_sessionstart_group_back() {
+    let project = tempfile::tempdir().unwrap();
+    let path = write_missing_group_settings(project.path());
+
+    let steps = repair_missing_hook_group_with(
+        project.path(),
+        Some(Path::new("/usr/local/bin/tm")),
+        RepairMode::Apply,
+    );
+    assert_eq!(
+        steps.len(),
+        1,
+        "one step for the one gapped file: {steps:?}"
+    );
+    assert_eq!(steps[0].check, "hooks_missing_tm_group");
+    assert!(
+        matches!(steps[0].status, StepStatus::Applied { .. }),
+        "the merge must apply: {steps:?}"
+    );
+
+    let after: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let text = after["hooks"]["SessionStart"].to_string();
+    assert!(
+        text.contains("/usr/local/bin/tm hook\""),
+        "SessionStart must gain the lifecycle entry: {text}"
+    );
+    assert!(
+        text.contains("trusty-memory inbox-check"),
+        "the project's own entry must survive: {text}"
+    );
+}
+
+/// The dry run reports the gap and writes nothing (#7490).
+#[test]
+fn missing_group_repair_dry_run_changes_nothing() {
+    let project = tempfile::tempdir().unwrap();
+    let path = write_missing_group_settings(project.path());
+    let before = fs::read(&path).unwrap();
+
+    let steps = repair_missing_hook_group(project.path(), RepairMode::DryRun);
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    assert_eq!(steps[0].status, StepStatus::Planned);
+    assert!(
+        steps[0].what.contains("SessionStart"),
+        "the preview must name the event: {}",
+        steps[0].what
+    );
+    assert_eq!(
+        before,
+        fs::read(&path).unwrap(),
+        "a dry run must not touch the file"
+    );
+}
+
+/// A file with no gap produces no step at all (#7490).
+#[test]
+fn missing_group_repair_is_silent_for_a_complete_file() {
+    let project = tempfile::tempdir().unwrap();
+    write_missing_group_settings(project.path());
+    crate::core::session_launch::ensure_project_hooks(
+        project.path(),
+        Some(Path::new("/usr/local/bin/tm")),
+    )
+    .unwrap();
+
+    let steps = repair_missing_hook_group(project.path(), RepairMode::DryRun);
+    assert!(
+        steps.is_empty(),
+        "a complete file must not produce a repair line: {steps:?}"
+    );
+}

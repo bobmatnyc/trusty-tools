@@ -246,7 +246,13 @@ pub fn build_tree_statusline_command(val: &Value) -> Option<String> {
 /// foreign-owned predicates, since neither ALL-tm nor ALL-foreign held. `.any()`
 /// makes the walker symmetric with [`super::strip_hook_entries_matching_for_events`],
 /// which also now operates at entry (not group) granularity.
-fn event_names_matching(val: &Value, matches_cmd: impl Fn(&str) -> bool) -> Vec<String> {
+///
+/// `pub` since #7490: `session_launch::resume_hooks` asks the same question of
+/// the same shape with a BROADER predicate (`is_project_managed_hook_command`,
+/// which also claims the `trusty-memory` / PM-guard / divert commands the
+/// project tier writes). A second walker there would be a second notion of
+/// where a hook command lives.
+pub fn event_names_matching(val: &Value, matches_cmd: impl Fn(&str) -> bool) -> Vec<String> {
     let Some(hooks) = val.get("hooks").and_then(Value::as_object) else {
         return Vec::new();
     };

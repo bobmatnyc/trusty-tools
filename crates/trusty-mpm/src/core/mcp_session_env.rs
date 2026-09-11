@@ -60,7 +60,11 @@ pub fn resolve_conditional_mcp_toggles(
 /// project > user > catalog > default). Reads files; writes nothing.
 /// Test: `resolve_conditional_mcp_toggles_defaults_to_both_on`,
 /// `session_mcp_env_omits_divert_when_disabled`.
-fn resolve_plan(
+///
+/// `pub(crate)` since #7490: `session_launch::resume_hooks` needs
+/// `divert_enabled` on the same no-`HarnessPlan` resume path this module was
+/// written for, and a second re-derivation there could answer differently.
+pub(crate) fn resolve_plan(
     fw: &crate::core::paths::FrameworkPaths,
     project_dir: &Path,
 ) -> crate::core::manifest::HarnessPlan {

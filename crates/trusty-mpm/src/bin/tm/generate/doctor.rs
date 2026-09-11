@@ -167,6 +167,10 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "Warns when a hook or `statusLine` command in a project's `.claude/settings*.json` runs a binary that lives in a Cargo build tree, naming the file and each offending command. Such a command stops working the moment the artifact is rebuilt away, which silently disables PM-guard enforcement. `tm doctor --fix` previews repointing every one of them at the installed `tm` binary — machine-wide, not just this project — and `--yes` applies it, taking a timestamped snapshot of each file first; `statusLine.command` is repaired by the same pass (issue #7262).",
     ),
     (
+        "hooks_missing_tm_group",
+        "Warns when a tm-provisioned project `.claude/settings*.json` carries NO tm hook group for one of the six lifecycle events, naming the file and each missing event. Only `prepare_session` wrote those groups and no resume or in-place relaunch reached it, so a project provisioned before an event existed never gained it — a missing `SessionStart` means `tm hook` never fires, no savings row is written under the live Claude session id, and the 💸 statusline segment stays hidden. `tm doctor --fix` previews merging the groups back in and `--yes` applies it, preserving every other entry and snapshotting the file first (issue #7490).",
+    ),
+    (
         "tcc_taint",
         "macOS: whether managed panes spawn `claude` with TCC responsibility disclaimed so its data-access prompts aren't attributed to the shared tmux server (issue #2997).",
     ),

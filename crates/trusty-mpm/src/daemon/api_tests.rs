@@ -1244,6 +1244,8 @@ async fn doctor_endpoint_returns_report() {
         "hooks_contamination",
         "hooks_foreign_conflict",
         "hooks_build_tree_binary",
+        // #7490: the lifecycle event a tm-provisioned file has no group for.
+        "hooks_missing_tm_group",
         "tcc_taint",
         "scaffold_tracking",
         "push_guard",

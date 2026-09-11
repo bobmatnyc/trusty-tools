@@ -1451,3 +1451,34 @@ fn write_project_hooks_replaces_a_build_tree_group_instead_of_duplicating_it() {
         assert!(!write_project_hooks(&settings, Some(&exe)).unwrap());
     }
 }
+
+/// The [`MPM_LIFECYCLE_HOOK_EVENTS`] literal names exactly the events
+/// [`mpm_hook_additions_with_exe`] writes a group for (#7490).
+///
+/// Why: `tm doctor`'s `hooks_missing_tm_group` check reports an event that is
+/// ABSENT from a settings file, so it cannot read the name off the file and
+/// must trust the literal. A literal that drifted from the block would report
+/// a gap that does not exist, or miss one that does.
+/// What: compares the const against the block's own key set, as sets.
+/// Test: itself.
+#[test]
+fn lifecycle_event_names_match_the_written_block() {
+    let block = mpm_hook_additions_with_exe(Some(std::path::Path::new(STABLE_TEST_EXE)))
+        .expect("an installed-looking path resolves");
+    let mut written: Vec<String> = block["hooks"]
+        .as_object()
+        .expect("the block carries a hooks object")
+        .keys()
+        .cloned()
+        .collect();
+    let mut declared: Vec<String> = MPM_LIFECYCLE_HOOK_EVENTS
+        .iter()
+        .map(|event| (*event).to_string())
+        .collect();
+    written.sort();
+    declared.sort();
+    assert_eq!(
+        declared, written,
+        "MPM_LIFECYCLE_HOOK_EVENTS has drifted from mpm_hook_additions_with_exe"
+    );
+}

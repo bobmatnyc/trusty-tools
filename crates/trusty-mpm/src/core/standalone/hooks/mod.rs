@@ -248,6 +248,26 @@ fn hash_stripped_stem(name: &str) -> &str {
     }
 }
 
+/// The six lifecycle events [`mpm_hook_additions_with_exe`] writes a group for.
+///
+/// Why (#7490): `tm doctor`'s `hooks_missing_tm_group` check has to name the
+/// events a settings file is MISSING, and a missing event has no group to read
+/// the name off. Deriving the list from the block itself needs a resolvable
+/// binary, which the diagnostic must not depend on; a literal that drifts from
+/// the block would report a gap that does not exist. The drift is closed by
+/// test instead.
+/// What: the event keys of `mpm_hook_additions_with_exe`'s `hooks` object, in
+/// the order that function writes them.
+/// Test: `lifecycle_event_names_match_the_written_block`.
+pub const MPM_LIFECYCLE_HOOK_EVENTS: [&str; 6] = [
+    "PreToolUse",
+    "PostToolUse",
+    "Stop",
+    "SubagentStop",
+    "SessionStart",
+    "SessionEnd",
+];
+
 /// Build the MPM lifecycle hook additions JSON block (six events).
 ///
 /// Why: every call site — the managed global config writer AND `tm install` — must

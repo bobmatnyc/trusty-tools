@@ -820,6 +820,17 @@ fn prepare_managed_config_with_exe(
         );
     }
 
+    // #7490: re-merge the project-tier hook groups into the project's OWN
+    // `.claude/settings.json`. Only `prepare_session` wrote them, and no resume
+    // or in-place relaunch reaches it, so a project provisioned before an event
+    // group existed never gained it — the `SessionStart` gap that kept the
+    // savings row and the 💸 statusline segment from ever appearing. Idempotent
+    // (a file that already carries every group is left byte-identical) and
+    // non-fatal, like every other step here.
+    if let Err(e) = crate::core::session_launch::ensure_project_hooks(cwd, hook_exe) {
+        tracing::warn!(session = %tmux_name, "project hook merge failed (non-fatal): {e}");
+    }
+
     // Seed workspace trust into <config_dir>/.claude.json (isolation invariant:
     // NEVER ~/.claude.json) so the session starts without the trust dialog.
     // // #4181: no MCP approval is written, and a stale one is stripped.

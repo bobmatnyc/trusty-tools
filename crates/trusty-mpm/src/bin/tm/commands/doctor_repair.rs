@@ -19,7 +19,7 @@
 use colored::Colorize;
 use trusty_mpm::core::doctor_repair::{
     RepairMode, RepairStep, StepStatus, refuse_legacy_sources, repair_build_tree_binary,
-    repair_hooks_contamination, repair_output_style, repair_push_guard,
+    repair_hooks_contamination, repair_missing_hook_group, repair_output_style, repair_push_guard,
 };
 use trusty_mpm::core::skill_repair::RepairAction;
 use trusty_mpm::core::stray_mcp::{quarantine_explicit, quarantine_strays};
@@ -119,7 +119,9 @@ const FIX_APPLY_HINT: &str = "tm doctor --fix --yes";
 /// What: runs, in order, the skill redeploy (`skill_staleness`), the
 /// machine-wide build-tree repoint (`hooks_build_tree_binary`, #7262 — first,
 /// so the strip below cannot delete a PM guard the repoint would have fixed),
-/// the project hook cleanup (`hooks_contamination`), the push-guard retrofit
+/// the project hook cleanup (`hooks_contamination`), the lifecycle-group
+/// re-merge (`hooks_missing_tm_group`, #7490 — after that cleanup, so it
+/// restores what a managed launch would write), the push-guard retrofit
 /// (`push_guard`), the output-style redeploy at BOTH style tiers
 /// (`output_style_staleness`, #5866, #7423),
 /// the `legacy_sources` refusals, and the stray-`.mcp.json`
@@ -152,6 +154,10 @@ pub(crate) fn run_repairs(apply: bool, include_frozen: bool) {
     ));
     if let Some(project) = &project_dir {
         steps.extend(repair_hooks_contamination(project, mode));
+        // #7490: AFTER the strip above, never before. That pass removes every
+        // `<exe> hook` entry it finds, including the ones this pass restores,
+        // so running first would report a merge the strip then undid.
+        steps.extend(repair_missing_hook_group(project, mode));
         steps.extend(repair_push_guard(project, mode));
     } else {
         eprintln!("  could not resolve the current directory — skipped the project-scoped repairs");

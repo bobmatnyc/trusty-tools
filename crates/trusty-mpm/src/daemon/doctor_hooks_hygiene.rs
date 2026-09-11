@@ -16,9 +16,11 @@
 //! `check_agents`/`check_skills` use — and returns THREE checks:
 //! `hooks_contamination` (`Warn` when any file carries a tm-owned hook group),
 //! `hooks_foreign_conflict` (`Warn` when any file carries a foreign claude-mpm
-//! hook group), and `hooks_build_tree_binary` (#7262 — `Warn` naming each hook
-//! or `statusLine` command whose executable lives in a Cargo build tree).
-//! Test: the `tests` module below covers all three checks against temp
+//! hook group), `hooks_build_tree_binary` (#7262 — `Warn` naming each hook
+//! or `statusLine` command whose executable lives in a Cargo build tree), and
+//! `hooks_missing_tm_group` (#7490 — `Warn` naming each lifecycle event a
+//! tm-provisioned file carries NO tm hook group for).
+//! Test: the `tests` module below covers all four checks against temp
 //! directories.
 
 use std::collections::BTreeSet;
@@ -103,19 +105,34 @@ pub(crate) fn read_settings(path: &Path) -> Option<serde_json::Value> {
 /// `check_hooks_hygiene_reports_the_build_tree_incident_shape`,
 /// `check_hooks_hygiene_reports_a_build_tree_statusline`,
 /// `check_hooks_hygiene_build_tree_check_is_ok_for_an_installed_binary`.
+///
+/// #7490: a FOURTH check, `hooks_missing_tm_group`, names each lifecycle event
+/// a tm-provisioned file has no tm hook group for. It is the inverse of
+/// `hooks_contamination` and does not overlap it: contamination reports an
+/// entry that should not be there, this reports one that should be and is not.
+/// Test: `check_hooks_hygiene_reports_a_missing_sessionstart_group`,
+/// `check_hooks_hygiene_missing_group_check_is_ok_for_a_complete_file`,
+/// `check_hooks_hygiene_missing_group_check_ignores_a_foreign_project`.
 pub(super) fn check_hooks_hygiene(
     project_dir: Option<&Path>,
     active_workspace_paths: &[PathBuf],
-) -> (DoctorCheck, DoctorCheck, DoctorCheck) {
+) -> (DoctorCheck, DoctorCheck, DoctorCheck, DoctorCheck) {
     let files = candidate_settings_files(project_dir, active_workspace_paths);
 
     let mut contaminated: Vec<PathBuf> = Vec::new();
     let mut foreign: Vec<PathBuf> = Vec::new();
     let mut build_tree: Vec<(PathBuf, String)> = Vec::new();
+    let mut missing: Vec<(PathBuf, Vec<String>)> = Vec::new();
     for path in &files {
         let Some(val) = read_settings(path) else {
             continue;
         };
+        // #7490: empty for a file tm never provisioned, so a foreign project
+        // never grows a finding telling it to adopt tm's hooks.
+        let gaps = crate::core::session_launch::missing_lifecycle_hook_events(&val);
+        if !gaps.is_empty() {
+            missing.push((path.clone(), gaps));
+        }
         if !tm_hook_event_names(&val).is_empty() {
             contaminated.push(path.clone());
         }
@@ -184,6 +201,56 @@ pub(super) fn check_hooks_hygiene(
         contamination_check,
         foreign_check,
         build_tree_check(&build_tree),
+        missing_group_check(&missing),
+    )
+}
+
+/// Render the `hooks_missing_tm_group` check from the collected gaps (#7490).
+///
+/// Why: the operator has to see WHICH event is unwired and in which file. The
+/// incident was a single missing `SessionStart` group in a file that carried
+/// every other group, and the consequence — no savings row, no 💸 segment —
+/// is invisible from the file itself. It also has to name the repair, because
+/// a finding whose remedy the operator has to guess is how #4948 happened.
+/// What: `Ok` when `gaps` is empty. Otherwise `Warn`, listing up to 5
+/// `<path>: <event>, <event>` pairs plus an overflow count, and naming
+/// `tm doctor --fix`.
+/// Test: `check_hooks_hygiene_reports_a_missing_sessionstart_group`,
+/// `check_hooks_hygiene_missing_group_check_is_ok_for_a_complete_file`,
+/// `check_hooks_hygiene_missing_group_check_ignores_a_foreign_project`.
+fn missing_group_check(gaps: &[(PathBuf, Vec<String>)]) -> DoctorCheck {
+    if gaps.is_empty() {
+        return DoctorCheck::new(
+            "hooks_missing_tm_group",
+            CheckStatus::Ok,
+            "every tm-provisioned settings file carries the full tm hook lifecycle group",
+        );
+    }
+    let shown: Vec<String> = gaps
+        .iter()
+        .take(5)
+        .map(|(path, events)| format!("{}: {}", path.display(), events.join(", ")))
+        .collect();
+    let overflow = if gaps.len() > 5 {
+        format!(" (+{} more)", gaps.len() - 5)
+    } else {
+        String::new()
+    };
+    DoctorCheck::new(
+        "hooks_missing_tm_group",
+        CheckStatus::Warn,
+        format!(
+            "{} tm-provisioned settings file{} lack{} a tm hook group for at least one \
+             lifecycle event, so `tm hook` never fires for it — a missing `SessionStart` \
+             costs the session its savings row and the 💸 statusline segment. \
+             `tm doctor --fix` previews merging the groups back in and `--yes` applies it, \
+             preserving every other entry (issue #7490). {}{}",
+            gaps.len(),
+            if gaps.len() == 1 { "" } else { "s" },
+            if gaps.len() == 1 { "s" } else { "" },
+            shown.join("; "),
+            overflow,
+        ),
     )
 }
 
