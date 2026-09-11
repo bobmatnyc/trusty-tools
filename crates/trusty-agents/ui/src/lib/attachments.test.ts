@@ -6,7 +6,7 @@ import {
   formatSize,
   parseAttachmentIds,
   personaSessionId,
-  uploadAttachment,
+  uploadAttachments,
   visibleText,
   type AttachmentRef,
 } from './attachments';
@@ -97,25 +97,35 @@ describe('formatSize', () => {
   });
 });
 
-describe('uploadAttachment', () => {
-  it('uploadAttachment_posts_multipart_and_returns_the_row', async () => {
-    const seen: { url?: string; init?: RequestInit } = {};
+describe('uploadAttachments', () => {
+  it('uploadAttachments_posts_every_file_in_one_request', async () => {
+    const seen: { url?: string; init?: RequestInit; calls: number } = { calls: 0 };
     vi.stubGlobal('fetch', (url: string, init: RequestInit) => {
       seen.url = url;
       seen.init = init;
-      return Promise.resolve({ ok: true, json: () => Promise.resolve(row()) });
+      seen.calls += 1;
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ attachments: [row(), row({ id: OTHER })] }),
+      });
     });
 
-    const file = new File(['a,b\n1,2\n'], 'data.csv', { type: 'text/csv' });
-    const uploaded = await uploadAttachment('izzie', file);
+    const uploaded = await uploadAttachments('izzie', [
+      new File(['a,b\n1,2\n'], 'data.csv', { type: 'text/csv' }),
+      new File(['x'], 'shot.png', { type: 'image/png' }),
+    ]);
 
-    expect(uploaded.id).toBe(ID);
+    // One request, not one per file — dropping two files is one gesture.
+    expect(seen.calls).toBe(1);
+    expect(uploaded.map((a) => a.id)).toEqual([ID, OTHER]);
     expect(seen.url).toContain('/api/agents/izzie/sessions/persona-izzie/attachments');
     expect(seen.init?.method).toBe('POST');
-    expect(seen.init?.body).toBeInstanceOf(FormData);
+    const body = seen.init?.body as FormData;
+    expect(body).toBeInstanceOf(FormData);
+    expect(body.getAll('file')).toHaveLength(2);
   });
 
-  it('uploadAttachment_throws_the_servers_message', async () => {
+  it('uploadAttachments_throws_the_servers_message', async () => {
     vi.stubGlobal('fetch', () =>
       Promise.resolve({
         ok: false,
@@ -124,8 +134,13 @@ describe('uploadAttachment', () => {
       }),
     );
     await expect(
-      uploadAttachment('izzie', new File(['x'], 'big.bin')),
+      uploadAttachments('izzie', [new File(['x'], 'big.bin')]),
     ).rejects.toThrow('attachment `big.bin` is too large');
+  });
+
+  it('uploadAttachments_returns_empty_when_the_body_has_no_rows', async () => {
+    vi.stubGlobal('fetch', () => Promise.resolve({ ok: true, json: () => Promise.resolve({}) }));
+    expect(await uploadAttachments('izzie', [new File(['x'], 'a.txt')])).toEqual([]);
   });
 });
 

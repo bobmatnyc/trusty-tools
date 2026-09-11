@@ -54,7 +54,7 @@ pub fn marker_for(id: &str) -> String {
 /// that happens to contain the delimiters cannot make a reload go looking for
 /// an attachment that was never stored.
 /// What: scans for `[[attachment:` … `]]` pairs and keeps the payloads that
-/// pass [`is_attachment_id`], preserving first-seen order.
+/// pass the `is_attachment_id` shape check, preserving first-seen order.
 /// Test: `super::tests::model_input_tests::markers_round_trip`,
 /// `super::tests::model_input_tests::parse_ignores_malformed_markers`.
 pub fn parse_markers(content: &str) -> Vec<String> {

@@ -35,7 +35,10 @@ use serde_json::{Value, json};
 
 use super::state::AppState;
 use crate::assistants::{AssistantHome, AssistantInstanceId};
-use crate::attachments::{Attachment, AttachmentError, AttachmentStore, MAX_ATTACHMENT_BYTES};
+use crate::attachments::{
+    Attachment, AttachmentError, AttachmentStore, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_TURN,
+    UploadedFile,
+};
 
 /// Largest request body the upload route accepts.
 ///
@@ -51,12 +54,15 @@ pub(super) const MAX_UPLOAD_BODY_BYTES: usize = MAX_ATTACHMENT_BYTES as usize + 
 /// Why: the one write path for a chat attachment. Multipart, because the
 /// payload is a file the browser already has in a `File` object and base64 in
 /// JSON would cost a third more bytes for nothing.
-/// What: reads the first field carrying a filename, hands the bytes to
-/// [`AttachmentStore::store`], and answers `201` with the stored row and the
-/// URL that retrieves it. Every guard — traversal, absolute name, size cap —
-/// answers a `4xx` with the store's own message and leaves the tree untouched;
-/// nothing is renamed and retried.
+/// What: reads EVERY field carrying a filename — a person who drags three files
+/// onto the composer sends one request, and must get three rows back. Keeping
+/// only the first, as this route did before #7370's review, dropped the rest
+/// with nothing in the response saying so. The files go to
+/// [`AttachmentStore::store_all`], which checks every name and size before it
+/// writes any of them, so a guard failure leaves the tree untouched rather than
+/// half a batch. Answers `201` with one row per file, in request order.
 /// Test: `super::tests::attachments::upload_stores_the_file_and_returns_its_row`,
+/// `super::tests::attachments::upload_accepts_every_file_in_one_request`,
 /// `super::tests::attachments::upload_refuses_a_traversal_file_name`,
 /// `super::tests::attachments::upload_refuses_an_oversize_file`.
 pub(super) async fn upload_route(
@@ -69,14 +75,25 @@ pub(super) async fn upload_route(
         Err(response) => return response,
     };
 
-    let mut part: Option<(String, Option<String>, Vec<u8>)> = None;
+    let mut files: Vec<UploadedFile> = Vec::new();
     loop {
         match multipart.next_field().await {
             Ok(None) => break,
             Err(e) => return bad_request(&format!("could not read the upload body: {e}")),
             Ok(Some(field)) => {
-                let file_name = field.file_name().map(str::to_string);
-                let content_type = field.content_type().map(str::to_string);
+                // A part with no filename is an ordinary form field, not a
+                // file. Skipped rather than refused, so a client may send its
+                // own metadata alongside without this route caring.
+                let Some(file_name) = field.file_name().map(str::to_string) else {
+                    continue;
+                };
+                let media_type = field.content_type().map(str::to_string);
+                if files.len() == MAX_ATTACHMENTS_PER_TURN {
+                    return refuse(AttachmentError::TooManyFiles {
+                        count: files.len() + 1,
+                        cap: MAX_ATTACHMENTS_PER_TURN,
+                    });
+                }
                 let bytes = match field.bytes().await {
                     Ok(bytes) => bytes,
                     Err(e) => {
@@ -87,26 +104,27 @@ pub(super) async fn upload_route(
                             .into_response();
                     }
                 };
-                if let Some(file_name) = file_name {
-                    part = Some((file_name, content_type, bytes.to_vec()));
-                    break;
-                }
+                files.push(UploadedFile {
+                    file_name,
+                    media_type,
+                    bytes: bytes.to_vec(),
+                });
             }
         }
     }
 
-    let Some((file_name, content_type, bytes)) = part else {
+    if files.is_empty() {
         return bad_request("the upload carried no file field with a filename");
-    };
+    }
 
-    let stored = tokio::task::spawn_blocking(move || {
-        store.store(&session, &file_name, content_type.as_deref(), &bytes)
-    })
-    .await;
+    let stored = tokio::task::spawn_blocking(move || store.store_all(&session, &files)).await;
     match stored {
         Err(e) => internal("attachment upload task failed", &e.to_string()),
         Ok(Err(e)) => refuse(e),
-        Ok(Ok(row)) => (StatusCode::CREATED, Json(wire(&name, &row))).into_response(),
+        Ok(Ok(rows)) => {
+            let rows: Vec<Value> = rows.iter().map(|row| wire(&name, row)).collect();
+            (StatusCode::CREATED, Json(json!({ "attachments": rows }))).into_response()
+        }
     }
 }
 

@@ -304,3 +304,83 @@ fn a_failed_manifest_write_leaves_no_orphan() {
         "a failed manifest write left an orphaned file"
     );
 }
+
+fn uploaded(file_name: &str, bytes: &[u8]) -> super::super::UploadedFile {
+    super::super::UploadedFile {
+        file_name: file_name.to_string(),
+        media_type: None,
+        bytes: bytes.to_vec(),
+    }
+}
+
+#[test]
+fn store_all_writes_every_file() {
+    let (_temp, store) = fixture();
+    let rows = store
+        .store_all(
+            SESSION,
+            &[uploaded("a.txt", b"aaa"), uploaded("b.csv", b"x,y\n")],
+        )
+        .unwrap();
+
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].file_name, "a.txt");
+    assert_eq!(rows[1].media_type, "text/csv");
+    assert_eq!(std::fs::read(&rows[0].stored_path).unwrap(), b"aaa");
+    assert_eq!(store.list(SESSION).unwrap().len(), 2);
+}
+
+/// Every name and size is checked before a byte is written, so one bad entry
+/// leaves the tree exactly as it was — never half a batch.
+#[test]
+fn store_all_writes_nothing_when_one_name_is_bad() {
+    let (_temp, store) = fixture();
+    let err = store
+        .store_all(
+            SESSION,
+            &[
+                uploaded("good.txt", b"ok"),
+                uploaded("../escape.txt", b"bad"),
+            ],
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, AttachmentError::UnsafeFileName { .. }),
+        "{err:?}"
+    );
+    assert!(
+        tree(&store).is_empty(),
+        "a refused batch wrote its earlier files"
+    );
+
+    let (_temp, store) = fixture();
+    let store = AttachmentStore::new(store.root()).with_max_bytes(4);
+    let err = store
+        .store_all(
+            SESSION,
+            &[uploaded("ok.txt", b"1234"), uploaded("big.txt", b"12345")],
+        )
+        .unwrap_err();
+    assert!(matches!(err, AttachmentError::TooLarge { .. }), "{err:?}");
+    assert!(tree(&store).is_empty());
+}
+
+#[test]
+fn store_all_refuses_more_than_the_cap() {
+    let (_temp, store) = fixture();
+    let files: Vec<_> = (0..super::super::MAX_ATTACHMENTS_PER_TURN + 1)
+        .map(|i| uploaded(&format!("f{i}.txt"), b"x"))
+        .collect();
+    let err = store.store_all(SESSION, &files).unwrap_err();
+    match err {
+        AttachmentError::TooManyFiles { count, cap } => {
+            assert_eq!(
+                (count, cap),
+                (files.len(), super::super::MAX_ATTACHMENTS_PER_TURN)
+            );
+        }
+        other => panic!("expected TooManyFiles, got {other:?}"),
+    }
+    assert!(tree(&store).is_empty());
+    assert!(store.store_all(SESSION, &files[..8]).is_ok());
+}

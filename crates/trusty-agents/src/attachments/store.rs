@@ -44,6 +44,33 @@ pub const MAX_ATTACHMENT_BYTES: u64 = 10 * 1024 * 1024;
 /// The media type used when nothing better can be determined.
 pub const FALLBACK_MEDIA_TYPE: &str = "application/octet-stream";
 
+/// Most attachments one turn may carry, and so most files one upload accepts.
+///
+/// Why: each attachment is rendered into the turn and then replayed as
+/// conversation history on every later turn in the session, so the cost is paid
+/// repeatedly. The upload route and `api::server::handlers::submit_task` read
+/// the SAME constant, because a request that may stage more files than a turn
+/// may reference would accept work that can never be used.
+/// Test: `super::tests::store_tests::store_all_refuses_more_than_the_cap`,
+/// `crate::api::server::tests::attachments::send_refuses_too_many_attachments`.
+pub const MAX_ATTACHMENTS_PER_TURN: usize = 8;
+
+/// One file as it arrived, before any guard has looked at it.
+///
+/// Why: [`AttachmentStore::store_all`] has to see every file in a request
+/// BEFORE it writes any of them, so a batch cannot half-apply on a name or a
+/// size the caller could have fixed. Carrying them as values is what makes that
+/// two-pass shape possible.
+#[derive(Debug, Clone)]
+pub struct UploadedFile {
+    /// The name the upload declared. Not yet checked.
+    pub file_name: String,
+    /// The part's declared content type, if it carried one.
+    pub media_type: Option<String>,
+    /// The file's bytes.
+    pub bytes: Vec<u8>,
+}
+
 /// One assistant's attachments tree.
 pub struct AttachmentStore {
     root: PathBuf,
@@ -100,7 +127,7 @@ impl AttachmentStore {
     /// requirement 2 of #7370 ("no partial file left").
     /// What: validates the session id and the file name, enforces
     /// [`MAX_ATTACHMENT_BYTES`], resolves the media type (see
-    /// [`resolve_media_type`]), writes the bytes, and records the row. A file
+    /// `resolve_media_type`), writes the bytes, and records the row. A file
     /// of that name already holding IDENTICAL bytes is reused rather than
     /// rewritten; one holding different bytes is left alone and the new file
     /// lands at `<stem>.<id prefix><ext>` — never clobbered, never silently
@@ -182,6 +209,66 @@ impl AttachmentStore {
                 Err(e)
             }
         }
+    }
+
+    /// Store every file in one request, or none of them.
+    ///
+    /// Why (#7370): a multi-file upload used to keep only the first file and
+    /// discard the rest silently — the user saw one card where they dropped
+    /// three, and nothing said why. Accepting all of them raises a second
+    /// question this answers too: a batch must not HALF apply. Every name and
+    /// size is checked before a single byte is written, so the two refusals a
+    /// caller can act on — a bad name, an oversize file — leave the tree
+    /// exactly as it was.
+    /// What: `Err` on the first guard failure with nothing written; otherwise
+    /// one row per file, in request order. The honest limit: a filesystem
+    /// failure PART WAY through the writing pass leaves the files already
+    /// written in place. They are recorded rows, not orphans — reachable,
+    /// listable and deletable — so this is a partial success, never silent
+    /// corruption.
+    /// Test: `super::tests::store_tests::store_all_writes_every_file`,
+    /// `super::tests::store_tests::store_all_writes_nothing_when_one_name_is_bad`,
+    /// `super::tests::store_tests::store_all_refuses_more_than_the_cap`.
+    pub fn store_all(
+        &self,
+        session_id: &str,
+        files: &[UploadedFile],
+    ) -> Result<Vec<Attachment>, AttachmentError> {
+        self.session_dir(session_id)?;
+        if files.len() > MAX_ATTACHMENTS_PER_TURN {
+            return Err(AttachmentError::TooManyFiles {
+                count: files.len(),
+                cap: MAX_ATTACHMENTS_PER_TURN,
+            });
+        }
+        // Pass one: every guard that can refuse on the caller's own input, with
+        // nothing created yet.
+        for file in files {
+            single_segment(&file.file_name).map_err(|reason| AttachmentError::UnsafeFileName {
+                name: file.file_name.clone(),
+                reason,
+            })?;
+            let size = file.bytes.len() as u64;
+            if size > self.max_bytes {
+                return Err(AttachmentError::TooLarge {
+                    name: file.file_name.clone(),
+                    size,
+                    cap: self.max_bytes,
+                });
+            }
+        }
+        // Pass two: the writes, each through the single write path.
+        files
+            .iter()
+            .map(|file| {
+                self.store(
+                    session_id,
+                    &file.file_name,
+                    file.media_type.as_deref(),
+                    &file.bytes,
+                )
+            })
+            .collect()
     }
 
     /// Every attachment recorded for a session, oldest first.

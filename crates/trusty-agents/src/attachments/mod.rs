@@ -54,4 +54,7 @@ mod tests;
 
 pub use error::AttachmentError;
 pub use manifest::Attachment;
-pub use store::{AttachmentStore, FALLBACK_MEDIA_TYPE, MAX_ATTACHMENT_BYTES};
+pub use store::{
+    AttachmentStore, FALLBACK_MEDIA_TYPE, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_TURN,
+    UploadedFile,
+};

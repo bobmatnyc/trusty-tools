@@ -28,6 +28,12 @@ pub enum AttachmentError {
     #[error("attachment `{name}` is {size} bytes, over the {cap}-byte limit")]
     TooLarge { name: String, size: u64, cap: u64 },
 
+    /// One request carried more files than a turn may reference.
+    ///
+    /// Test: `super::tests::store_tests::store_all_refuses_more_than_the_cap`.
+    #[error("this upload carries {count} files, over the limit of {cap}")]
+    TooManyFiles { count: usize, cap: usize },
+
     /// An id that is not the 32-hex-character shape this module mints.
     #[error("`{0}` is not an attachment id")]
     InvalidId(String),
@@ -91,6 +97,7 @@ impl AttachmentError {
             Self::UnsafeFileName { .. }
                 | Self::UnsafeSessionId { .. }
                 | Self::TooLarge { .. }
+                | Self::TooManyFiles { .. }
                 | Self::InvalidId(_)
                 | Self::NotFound { .. }
         )

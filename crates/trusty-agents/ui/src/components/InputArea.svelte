@@ -26,7 +26,7 @@
   // #7370: files attached to this turn. They are uploaded BEFORE the send, so
   // the turn carries ids the server has already validated rather than bytes it
   // has to accept mid-dispatch.
-  import { formatSize, uploadAttachment, type AttachmentRef } from '../lib/attachments';
+  import { formatSize, uploadAttachments, type AttachmentRef } from '../lib/attachments';
 
   import ModelSwitcher from './ModelSwitcher.svelte';
   import { chatProjectPath, chatFolderError, detachUnavailableChatFolders } from '../stores/workspace';
@@ -57,19 +57,19 @@
    * Why: the upload is what turns a local `File` into something a turn can
    * reference. Errors are shown next to the composer rather than thrown,
    * because the user is mid-draft and the draft must survive.
-   * What: uploads each file to the ACTIVE assistant's chat session and stages
-   * the returned row. The first failure stops the batch and is reported with
-   * the server's own message.
-   * Test: `lib/attachments.test.ts` covers `uploadAttachment`'s two arms.
+   * What: one request for the whole selection, because dropping three files is
+   * one gesture. The server refuses the batch whole on a bad name or an
+   * oversize file, so a refusal stages nothing and the message it gives is the
+   * one shown.
+   * Test: `lib/attachments.test.ts` covers `uploadAttachments`' two arms.
    */
   async function stageFiles(files: File[]): Promise<void> {
     if (files.length === 0) return;
     uploading = true;
     attachmentError = null;
     try {
-      for (const file of files) {
-        pendingAttachments = [...pendingAttachments, await uploadAttachment(get(activeAgentId), file)];
-      }
+      const staged = await uploadAttachments(get(activeAgentId), files);
+      pendingAttachments = [...pendingAttachments, ...staged];
     } catch (e) {
       attachmentError = `${e instanceof Error ? e.message : e}`;
     } finally {

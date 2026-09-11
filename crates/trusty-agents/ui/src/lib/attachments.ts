@@ -64,23 +64,26 @@ export function attachmentUrl(ref: AttachmentRef): string {
 }
 
 /**
- * Upload one file to the active assistant's chat session.
+ * Upload files to the active assistant's chat session, in ONE request.
  *
- * Why: the server owns validation — traversal, the size cap, the media type.
- * Pre-empting any of it here would put a second, drifting copy of those rules
- * in the browser; the client's job is to report what the server said.
- * What: `multipart/form-data` with one `file` part. Throws with the server's
- * own message on any non-2xx, because an upload that silently no-ops leaves a
- * user staring at a chat that never got their file.
- * Test: `uploadAttachment_posts_multipart_and_returns_the_row`,
- * `uploadAttachment_throws_the_servers_message`.
+ * Why: dropping three files is one gesture and should be one round trip. The
+ * server accepts every file part and answers one row per file, having checked
+ * every name and size before writing any of them — so a batch either lands
+ * whole or not at all, and the client never has to reconcile a half-applied
+ * upload of its own making.
+ * What: `multipart/form-data` with one `file` part per file. Throws with the
+ * server's own message on any non-2xx, because an upload that silently no-ops
+ * leaves a user staring at a chat that never got their file. Validation is the
+ * server's: a second copy of those rules here would drift from it.
+ * Test: `uploadAttachments_posts_every_file_in_one_request`,
+ * `uploadAttachments_throws_the_servers_message`.
  */
-export async function uploadAttachment(
+export async function uploadAttachments(
   agentId: string | null,
-  file: File,
-): Promise<AttachmentRef> {
+  files: File[],
+): Promise<AttachmentRef[]> {
   const body = new FormData();
-  body.append('file', file, file.name);
+  for (const file of files) body.append('file', file, file.name);
   const r = await fetch(sessionRoute(agentId), {
     method: 'POST',
     headers: authHeaders(),
@@ -96,7 +99,8 @@ export async function uploadAttachment(
     }
     throw new Error(detail);
   }
-  return (await r.json()) as AttachmentRef;
+  const payload = (await r.json()) as { attachments?: AttachmentRef[] };
+  return Array.isArray(payload.attachments) ? payload.attachments : [];
 }
 
 /**

@@ -16,11 +16,16 @@
 //! paths would break the moment they did, while a name resolves against
 //! wherever the directory now lives.
 //!
-//! Concurrency: [`append`] takes an exclusive `fs4` advisory lock on the
-//! manifest for the whole read-modify-write, the same mechanism
-//! `crate::state_writer` and `crate::memory::code_store` use. Two uploads
-//! racing on one session therefore serialize instead of one silently
-//! overwriting the other's row.
+//! Concurrency: [`Manifest::lock`] takes an exclusive `fs4` advisory lock on
+//! the manifest, the same mechanism `crate::state_writer` and
+//! `crate::memory::code_store` use. The guard it returns is what lets
+//! `super::AttachmentStore::store` hold that lock across choosing a file name,
+//! writing the bytes AND recording the row — one critical section, so two
+//! uploads racing on one session serialize instead of one silently overwriting
+//! the other's file or row. The lock is therefore held across a `std::fs::write`
+//! of up to `super::MAX_ATTACHMENT_BYTES`; that is deliberate, and accepted —
+//! see #7370. [`Manifest::append`] is the shorthand for a caller with nothing
+//! else to do inside the section.
 //!
 //! Test: `super::tests::manifest_tests`.
 

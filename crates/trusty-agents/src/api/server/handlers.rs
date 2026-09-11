@@ -621,14 +621,6 @@ pub(super) async fn submit_task(
         .into_response()
 }
 
-/// Most attachments one turn may carry.
-///
-/// Why: each one is rendered into the turn and then replayed as conversation
-/// history on every later turn in the session, so the cost is paid repeatedly.
-/// A bound here is what stops a client asking for a turn nothing can answer.
-/// Test: `super::tests::attachments::send_refuses_too_many_attachments`.
-const MAX_ATTACHMENTS_PER_TURN: usize = 8;
-
 /// Resolve the attachment ids a request names into the blocks its turn carries.
 ///
 /// Why (#7370): this is the validate-before-persist gate. It runs before the
@@ -650,12 +642,13 @@ async fn resolve_attachments(state: &AppState, req: &TaskRequest) -> Result<Vec<
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    if ids.len() > MAX_ATTACHMENTS_PER_TURN {
+    if ids.len() > crate::attachments::MAX_ATTACHMENTS_PER_TURN {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
                 "error": format!(
-                    "a turn may carry at most {MAX_ATTACHMENTS_PER_TURN} attachments, not {}",
+                    "a turn may carry at most {} attachments, not {}",
+                    crate::attachments::MAX_ATTACHMENTS_PER_TURN,
                     ids.len()
                 ),
             })),

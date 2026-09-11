@@ -36,21 +36,28 @@ fn session_dir(root: &std::path::Path) -> std::path::PathBuf {
     root.join(AGENT).join("attachments").join(session())
 }
 
-/// A `multipart/form-data` body carrying exactly one file part.
-fn multipart_body(file_name: &str, content_type: &str, bytes: &[u8]) -> Vec<u8> {
+/// A `multipart/form-data` body carrying one file part per entry.
+fn multipart_body(parts: &[(&str, &str, &[u8])]) -> Vec<u8> {
     let mut body = Vec::new();
-    body.extend_from_slice(b"--BOUND7370\r\n");
-    body.extend_from_slice(
-        format!("Content-Disposition: form-data; name=\"file\"; filename=\"{file_name}\"\r\n")
-            .as_bytes(),
-    );
-    body.extend_from_slice(format!("Content-Type: {content_type}\r\n\r\n").as_bytes());
-    body.extend_from_slice(bytes);
-    body.extend_from_slice(b"\r\n--BOUND7370--\r\n");
+    for (file_name, content_type, bytes) in parts {
+        body.extend_from_slice(b"--BOUND7370\r\n");
+        body.extend_from_slice(
+            format!("Content-Disposition: form-data; name=\"file\"; filename=\"{file_name}\"\r\n")
+                .as_bytes(),
+        );
+        body.extend_from_slice(format!("Content-Type: {content_type}\r\n\r\n").as_bytes());
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(b"--BOUND7370--\r\n");
     body
 }
 
 fn upload_request(agent: &str, file_name: &str, content_type: &str, bytes: &[u8]) -> Request<Body> {
+    upload_request_many(agent, &[(file_name, content_type, bytes)])
+}
+
+fn upload_request_many(agent: &str, parts: &[(&str, &str, &[u8])]) -> Request<Body> {
     Request::builder()
         .method(Method::POST)
         .uri(format!(
@@ -61,7 +68,7 @@ fn upload_request(agent: &str, file_name: &str, content_type: &str, bytes: &[u8]
             header::CONTENT_TYPE,
             "multipart/form-data; boundary=BOUND7370",
         )
-        .body(Body::from(multipart_body(file_name, content_type, bytes)))
+        .body(Body::from(multipart_body(parts)))
         .expect("request")
 }
 
@@ -72,7 +79,7 @@ async fn json_of(response: axum::response::Response) -> serde_json::Value {
     serde_json::from_slice(&bytes).expect("json")
 }
 
-/// Upload one file, then read back its row and its bytes.
+/// Upload one file and return its row.
 async fn upload_one(
     root: &std::path::Path,
     file_name: &str,
@@ -84,7 +91,13 @@ async fn upload_one(
         .await
         .expect("upload");
     assert_eq!(response.status(), StatusCode::CREATED);
-    json_of(response).await
+    let mut body = json_of(response).await;
+    // The route answers one row per file, always as an array — a single-file
+    // upload is the one-element case, not a different shape.
+    body["attachments"]
+        .as_array_mut()
+        .expect("attachments array")
+        .remove(0)
 }
 
 #[tokio::test]
@@ -451,4 +464,98 @@ async fn download_refuses_a_tampered_stored_name() {
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let body = json_of(response).await;
     assert!(!body["error"].as_str().unwrap().contains('/'), "{body}");
+}
+
+/// Three files in one request must produce three rows and three files.
+///
+/// Why this is a regression: `upload_route` used to `break` at the first field
+/// carrying a filename. A person who dragged three files onto the composer got
+/// one card, two files silently discarded, and a `201` saying everything was
+/// fine.
+#[tokio::test]
+async fn upload_accepts_every_file_in_one_request() {
+    let dir = tempfile::TempDir::new().expect("temp");
+    let response = build_router(state_at(dir.path()))
+        .oneshot(upload_request_many(
+            AGENT,
+            &[
+                ("a.txt", "text/plain", b"aaa"),
+                ("b.csv", "text/csv", b"x,y\n1,2\n"),
+                ("c.png", "image/png", b"\x89PNG"),
+            ],
+        ))
+        .await
+        .expect("upload");
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = json_of(response).await;
+    let rows = body["attachments"].as_array().expect("array");
+    assert_eq!(rows.len(), 3, "{body}");
+    assert_eq!(rows[0]["file_name"], "a.txt");
+    assert_eq!(rows[1]["file_name"], "b.csv");
+    assert_eq!(rows[2]["media_type"], "image/png");
+
+    let session_path = session_dir(dir.path());
+    for (name, expected) in [
+        ("a.txt", &b"aaa"[..]),
+        ("b.csv", &b"x,y\n1,2\n"[..]),
+        ("c.png", &b"\x89PNG"[..]),
+    ] {
+        assert_eq!(
+            std::fs::read(session_path.join(name)).unwrap(),
+            expected,
+            "{name}"
+        );
+    }
+    // And the manifest lists all three, so a reload finds them.
+    assert_eq!(
+        rows.len(),
+        crate::attachments::AttachmentStore::new(dir.path().join(AGENT).join("attachments"))
+            .list(&session())
+            .unwrap()
+            .len()
+    );
+}
+
+/// A bad name anywhere in a batch refuses the whole batch, writing nothing.
+#[tokio::test]
+async fn upload_writes_nothing_when_one_file_in_the_batch_is_refused() {
+    let dir = tempfile::TempDir::new().expect("temp");
+    let response = build_router(state_at(dir.path()))
+        .oneshot(upload_request_many(
+            AGENT,
+            &[
+                ("good.txt", "text/plain", b"ok"),
+                ("../escape.txt", "text/plain", b"bad"),
+            ],
+        ))
+        .await
+        .expect("upload");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        !session_dir(dir.path()).join("good.txt").exists(),
+        "a refused batch wrote its earlier files anyway"
+    );
+}
+
+/// More files than a turn may reference is refused, not silently truncated.
+#[tokio::test]
+async fn upload_refuses_more_files_than_a_turn_can_carry() {
+    let dir = tempfile::TempDir::new().expect("temp");
+    let names: Vec<String> = (0..crate::attachments::MAX_ATTACHMENTS_PER_TURN + 1)
+        .map(|i| format!("f{i}.txt"))
+        .collect();
+    let parts: Vec<(&str, &str, &[u8])> = names
+        .iter()
+        .map(|name| (name.as_str(), "text/plain", &b"x"[..]))
+        .collect();
+
+    let response = build_router(state_at(dir.path()))
+        .oneshot(upload_request_many(AGENT, &parts))
+        .await
+        .expect("upload");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(!session_dir(dir.path()).join("f0.txt").exists());
 }
