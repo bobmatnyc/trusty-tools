@@ -177,3 +177,34 @@ fn load_or_report_returns_a_valid_config() {
         Some(true)
     );
 }
+
+// ─── #7422: the `[session]` MCP-server / plugin allowlists ────────────────
+
+/// Both allowlists parse, and they are independent of each other.
+#[test]
+fn project_config_parses_session_scope() {
+    let raw = "[session]\nmcp_servers = [\"slack-mcp\"]\nplugins = [\"aws-core\"]\n";
+    let cfg = ProjectLevelConfig::from_toml(raw, Path::new("/p/.trusty-mpm.toml")).unwrap();
+    let session = cfg.session.expect("the table parses");
+    assert_eq!(session.mcp_servers, Some(vec!["slack-mcp".to_owned()]));
+    assert_eq!(session.plugins, Some(vec!["aws-core".to_owned()]));
+}
+
+/// An absent `[session]` table is deny-all, not an error.
+#[test]
+fn project_config_session_defaults_to_none() {
+    let cfg = ProjectLevelConfig::from_toml("worktree = true\n", Path::new("/p")).unwrap();
+    assert_eq!(cfg.session, None);
+}
+
+/// A misspelled key inside `[session]` silently denies a server the operator
+/// meant to allow, so it fails loudly like every other key here.
+#[test]
+fn project_config_rejects_unknown_session_key() {
+    let raw = "[session]\nmcp_server = [\"slack-mcp\"]\n";
+    let err = ProjectLevelConfig::from_toml(raw, Path::new("/p")).unwrap_err();
+    assert!(
+        matches!(err, ProjectConfigError::Malformed { .. }),
+        "expected a Malformed error, got {err:?}"
+    );
+}

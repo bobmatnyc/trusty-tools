@@ -3209,6 +3209,109 @@ fn pm_guard_allows_documents_and_configuration_in_a_main_checkout() {
 }
 
 #[test]
+fn pm_guard_denies_a_git_output_write_in_a_main_checkout() {
+    // #7399 finding (a), live-verified: `git diff --output=<file>` writes a
+    // file with no `>`, and until now the only rule that saw it was the
+    // budget-tiered `SHELL_EDIT_REASON` — which allows the first writes of a
+    // turn and which both subagent markers skip. So the write landed in a
+    // shared main checkout. It now takes the same ADR-0044 boundary an `Edit`
+    // takes, and so does the `>` redirect it is a spelling of.
+    let (_dir, repo) = main_checkout_fixture();
+    let target = repo.join("crates/trusty-mpm/src/lib.rs");
+    let target = target.display().to_string();
+
+    for command in [
+        format!("git diff --output={target} HEAD~1 HEAD"),
+        format!("git diff --output {target} HEAD"),
+        format!("git log -1 --output={target}"),
+        format!("echo 'fn main() {{}}' > {target}"),
+    ] {
+        let stdout = run_pm_guard(&bash_payload_at(&command, &repo, ""), &[]);
+        assert_denied(&stdout);
+        assert!(
+            stdout.contains("ADR-0044"),
+            "`{command}` must deny through the write boundary, not the budget: {stdout}"
+        );
+    }
+
+    // ADR-0044 binds every dispatched agent too, so the deny must pierce both
+    // subagent markers exactly as the `Edit` half does.
+    let command = format!("git diff --output={target} HEAD");
+    let dispatched = run_pm_guard(
+        &bash_payload_at(&command, &repo, r#""agent_id":"agt_1","#),
+        &[],
+    );
+    assert_denied(&dispatched);
+    assert!(dispatched.contains("ADR-0044"), "{dispatched}");
+    let nested = run_pm_guard(
+        &bash_payload_at(&command, &repo, ""),
+        &[("CLAUDE_MPM_SUB_AGENT", "1")],
+    );
+    assert_denied(&nested);
+    assert!(nested.contains("ADR-0044"), "{nested}");
+}
+
+#[test]
+fn pm_guard_allows_a_git_output_write_inside_a_worktree() {
+    // The worktree is where delegated work is SUPPOSED to write, and a rule
+    // that denied there would leave nowhere to write at all. A linked worktree
+    // carries a `.git` FILE rather than a directory.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let worktree = dir.path().join("wt");
+    std::fs::create_dir_all(worktree.join("crates/trusty-mpm/src")).expect("mkdir");
+    std::fs::write(worktree.join(".git"), "gitdir: /elsewhere").expect("write .git");
+    let target = worktree.join("crates/trusty-mpm/src/lib.rs");
+
+    let command = format!("git diff --output={} HEAD", target.display());
+    let stdout = run_pm_guard(
+        &bash_payload_at(&command, &worktree, r#""agent_id":"agt_1","#),
+        &[],
+    );
+    assert_eq!(
+        stdout.trim(),
+        "",
+        "a worktree write is the outcome the rule steers toward: {stdout}"
+    );
+}
+
+#[test]
+fn pm_guard_keeps_the_reads_and_the_quoted_verb_decision_unchanged() {
+    // #7399 findings (b) and (c), pinned end to end so the boundary cannot
+    // regress them: `--no-index` compares two files and writes none, a plain
+    // diff writes nothing, and a forbidden verb reached through a quoted path
+    // stays refused (#7374 / #7402).
+    let (_dir, repo) = main_checkout_fixture();
+    let a = repo.join("crates/trusty-mpm/src/lib.rs");
+    let a = a.display().to_string();
+
+    for command in [
+        format!("git diff --no-index {a} {a}"),
+        "git diff HEAD~1 HEAD".to_string(),
+        "git diff --stat".to_string(),
+        "git format-patch --stdout -1 HEAD".to_string(),
+    ] {
+        let stdout = run_pm_guard(&bash_payload_at(&command, &repo, ""), &[]);
+        assert_eq!(
+            stdout.trim(),
+            "",
+            "`{command}` writes nothing and must allow"
+        );
+    }
+
+    let quoted = run_pm_guard(
+        &serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "cwd": repo.display().to_string(),
+            "tool_name": "Bash",
+            "tool_input": {"command": r#""/opt/My Tools/npm" test"#},
+        })
+        .to_string(),
+        &[],
+    );
+    assert_denied(&quoted);
+}
+
+#[test]
 fn pm_guard_denies_a_commit_in_a_main_checkout() {
     // The commit is where a write becomes permanent on a branch another
     // session is standing on — the step that produced `f1da7bce` landing on a

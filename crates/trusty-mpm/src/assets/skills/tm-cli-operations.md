@@ -45,16 +45,30 @@ This map is **user scope**. There is deliberately **no `--scope` flag**:
 `tm mcp` is inherently user scope. (Stock `claude mcp add` cannot target this
 relocated dir, which is why `tm mcp` exists.)
 
+🔴 **Since #7422, user scope is DECLARED but not LOADED.** A session loads the
+trusty-* builtins, the project's own `.mcp.json`, and only the user-scope
+servers that project's `.trusty-mpm.toml` names:
+
+```toml
+[session]
+mcp_servers = ["slack-mcp", "gworkspace-mcp"]
+plugins = ["aws-core"]
+```
+
+`tm mcp list` marks each row `opted-in` or `scoped-out` for the current
+directory, and `tm doctor`'s `session_scope` check names what a project stopped
+loading. Full rules, failure arms and migration:
+[session-mcp-plugin-scope.md](../../../../../docs/reference/session-mcp-plugin-scope.md).
+
 **ANTI-PATTERN — do not hand-edit a project's `.mcp.json`.** When asked to
 "register the X MCP server" with no scope qualifier, that almost always means
 **user-wide** (available in every project/session), and the answer is always
-`tm mcp add` — never editing a project's `.mcp.json` directly. A project
-`.mcp.json` is **project scope**: visible only inside that one repo/worktree,
-invisible to every other project and to the standalone `tm run` driver, and
-(inside a fleet worktree) silently overwritten by `tm` on the next spawn
-anyway. If a PM delegates "register the duetto-memory MCP" and an agent edits
-`.mcp.json` in whatever worktree happens to be open, that is the wrong scope —
-route it through `tm mcp add` instead.
+`tm mcp add` — never editing a project's `.mcp.json` by hand. A project
+`.mcp.json` is **project scope**: visible only inside that one repo/worktree
+and invisible to every other project. When a server genuinely belongs to ONE
+repository, `tm mcp add <name> --project -- <command>` writes it there for you
+(#7422) — that is the supported project-scope path, and the declaration doubles
+as the permission because a session always loads its own `.mcp.json`.
 
 **Where these servers actually reach (issue #2739, inverted by #4181):**
 
@@ -63,9 +77,11 @@ route it through `tm mcp add` instead.
 - **Daemon-managed / fleet sessions** (`tm session new`) launch
   `claude --setting-sources user,project,local`, so they read that same
   user-scope map directly. Since ADR-0042 (#4181) nothing is injected into a
-  workspace `.mcp.json`, and there is no native-server allowlist: any server you
-  `tm mcp add` reaches a fleet session under whatever name you gave it. Proof:
-  `prepare_session_reaches_an_operator_registered_server_through_user_scope`.
+  workspace `.mcp.json`, and there is no native-server allowlist. Since #7422 a
+  server you `tm mcp add` reaches a fleet session only in a project whose
+  `.trusty-mpm.toml` names it under `[session] mcp_servers`. Proof:
+  `prepare_session_reaches_an_operator_registered_server_through_user_scope`,
+  `resolve_scope_excludes_a_shared_only_server`.
 - **Project scope**: a project's own `<project>/.trusty-mpm/manifest.toml`
   `[mcp.custom.<name>]` table (the same per-project override file
   `[agents]`/`[skills]` already use) declares servers scoped to THAT project's

@@ -173,3 +173,100 @@ fn fold_skips_a_malformed_line_and_keeps_the_valid_total() {
     assert_eq!(total.tokens_in, 30);
     assert_eq!(total.tokens_out, 12);
 }
+
+// ── #7424: the turn-1 startup-context read ────────────────────────────────────
+
+/// Why (#7424): the startup figure is the FIRST assistant turn's context, not
+/// the largest and not the newest — every later turn carries the conversation
+/// too, so only turn 1 measures what the harness spent before any work began.
+/// Test: itself.
+#[test]
+fn first_turn_reads_the_opening_assistant_turn() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = write_transcript(
+        dir.path(),
+        &[
+            r#"{"type":"user","message":{"role":"user","content":"hi"}}"#.to_string(),
+            assistant_line("msg_a", 3, 100, 50),
+            assistant_line("msg_b", 4, 900, 70),
+        ],
+    );
+
+    assert_eq!(first_turn_context_tokens(&path), Some(103));
+}
+
+/// Why: the #4513 measurement is `input + cache_creation + cache_read`, and the
+/// bulk of a startup prompt lands in `cache_creation` on turn 1 — a reading of
+/// `input_tokens` alone would report a three-digit number for a 100k prompt.
+/// The fixture carries #4513's own shape.
+/// Test: itself.
+#[test]
+fn first_turn_counts_cache_tokens() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let line = r#"{"type":"assistant","message":{"id":"m1","usage":{"input_tokens":4,"cache_creation_input_tokens":74685,"cache_read_input_tokens":27297,"output_tokens":288}}}"#;
+    let path = write_transcript(dir.path(), &[line.to_string()]);
+
+    assert_eq!(first_turn_context_tokens(&path), Some(101_986));
+}
+
+/// Why: a session whose transcript has not been written yet is the ordinary
+/// state at the first render. "Not measured" must read as `None`, because a
+/// recorded `0` would enter the doctor sample as a real, tiny startup.
+/// Test: itself.
+#[test]
+fn first_turn_of_a_missing_transcript_is_none() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    assert_eq!(
+        first_turn_context_tokens(&dir.path().join("absent.jsonl")),
+        None
+    );
+}
+
+/// Why: the same fail-soft rule the fold has — one unparseable line costs that
+/// line, not the reading.
+/// Test: itself.
+#[test]
+fn first_turn_skips_a_malformed_line() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = write_transcript(
+        dir.path(),
+        &[
+            r#"{"type":"assistant","message":{"usage":{"input_to"#.to_string(),
+            assistant_line("m2", 20, 5, 7),
+        ],
+    );
+
+    assert_eq!(first_turn_context_tokens(&path), Some(25));
+}
+
+/// Why: a transcript holding only user turns has no measurement in it, which is
+/// different from a measurement of zero.
+/// Test: itself.
+#[test]
+fn first_turn_of_a_transcript_with_no_assistant_turn_is_none() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = write_transcript(
+        dir.path(),
+        &[r#"{"type":"user","message":{"role":"user","content":"hi"}}"#.to_string()],
+    );
+
+    assert_eq!(first_turn_context_tokens(&path), None);
+}
+
+/// Why: the scan runs on the statusline render path until the figure is
+/// recorded once, so a transcript that never produced an assistant turn must
+/// not be read end to end on every render.
+/// Test: itself.
+#[test]
+fn first_turn_stops_at_the_head_cap() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let filler = r#"{"type":"user","message":{"role":"user","content":"padding padding padding"}}"#;
+    let mut lines: Vec<String> = (0..40).map(|_| filler.to_string()).collect();
+    lines.push(assistant_line("late", 11, 0, 3));
+    let path = write_transcript(dir.path(), &lines);
+
+    // The whole file is well under the shipped cap, so the default read finds
+    // the late turn; a cap smaller than the filler gives up before reaching it.
+    assert_eq!(first_turn_context_tokens(&path), Some(11));
+    assert_eq!(first_turn_context_tokens_within(&path, 200), None);
+}

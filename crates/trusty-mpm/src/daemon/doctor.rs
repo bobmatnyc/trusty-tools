@@ -87,6 +87,11 @@ use doctor_asset_duplicates::check_asset_duplicates;
 mod doctor_transcript_saving;
 use doctor_transcript_saving::check_transcript_saving;
 
+// #7424: the startup-context budget row. Its `mod` declaration is in
+// `daemon/mod.rs` rather than here — this file sits AT the 500-SLOC production
+// cap, so only the `use` fits.
+use super::doctor_startup_context::check_startup_context;
+
 // Split out to keep this file under the 500-SLOC production cap (issue #2876 —
 // the skill-staleness and legacy-instruction-source probes).
 #[path = "doctor_staleness.rs"]
@@ -237,9 +242,23 @@ use doctor_session_store::check_session_store;
 #[path = "doctor_stray_mcp.rs"]
 mod doctor_stray_mcp;
 use doctor_stray_mcp::check_stray_mcp_json;
+// #7422: default-deny scoping changes what a session loads without changing
+// anything the operator can see. This names what a project stopped loading.
+#[path = "doctor_session_scope.rs"]
+mod doctor_session_scope;
+use doctor_session_scope::check_session_scope;
 // #6469: a tmux server tm did not start carries none of tm's server globals —
 // a tmux-resurrect restore leaves every restored pane on the factory 2000-line
 // scrollback. Read-only: it reads options, never sets one.
+// #7422: split out when the `session_scope` check pushed this file over the
+// 500-SLOC production cap; the probe itself is unchanged.
+#[path = "doctor_oauth_token.rs"]
+mod doctor_oauth_token;
+use doctor_oauth_token::check_oauth_token_config;
+// The pure verdict half has no production caller here — `doctor_tests.rs`
+// exercises it directly through this module's `use super::*`.
+#[cfg(test)]
+use doctor_oauth_token::build_oauth_token_check;
 #[path = "doctor_tmux_options.rs"]
 mod doctor_tmux_options;
 use doctor_tmux_options::check_tmux_options;
@@ -372,7 +391,7 @@ const PROBE_RETRY_DELAY: Duration = Duration::from_millis(500);
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_forty_four_checks`,
+/// Test: `run_doctor_produces_forty_six_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -479,7 +498,7 @@ pub(crate) async fn run_doctor_with_claims(
         // name — and warns when two tiers hold the same one.
         check_skill_reachability(&paths, project_dir),
         check_output_style(project_dir, &home),
-        check_output_style_staleness(project_dir, &home),
+        check_output_style_staleness(project_dir, &home, &paths),
         check_output_style_legacy_ids(project_dir, &home),
         check_deployment_completeness(&workspace_paths),
         check_skill_staleness(&paths, project_dir),
@@ -529,11 +548,9 @@ pub(crate) async fn run_doctor_with_claims(
     checks.push(check_oauth_token_config());
     // #7262: the third check names each hook/statusLine command whose binary
     // lives in a Cargo build tree, which the file-counting check above cannot.
-    let (hooks_contamination, hooks_foreign_conflict, hooks_build_tree_binary) =
+    let (contamination, foreign_conflict, build_tree_binary) =
         check_hooks_hygiene(project_dir, active_workspace_paths);
-    checks.push(hooks_contamination);
-    checks.push(hooks_foreign_conflict);
-    checks.push(hooks_build_tree_binary);
+    checks.extend([contamination, foreign_conflict, build_tree_binary]);
     // Issue #2997: surface whether managed panes disclaim TCC responsibility so
     // the "trusty-mpm/tmux would like to access data…" prompt class is
     // diagnosable rather than silent. Synchronous + instantaneous (no log scan).
@@ -571,6 +588,13 @@ pub(crate) async fn run_doctor_with_claims(
         project_dir,
         &home,
     ));
+    // #7422: which shared MCP servers and installed plugins this project's
+    // sessions will NOT load, and where to opt each one back in. Informational
+    // — an excluded server is the designed outcome, never a fault.
+    checks.push(check_session_scope(
+        project_dir,
+        crate::core::trusty_tools_config::managed_claude_config_dir().as_deref(),
+    ));
     // #6469: whether the live tmux server's globals still match tm's spec. Says
     // nothing about panes already created — `history-limit` is captured at pane
     // creation and cannot be grown in place.
@@ -582,6 +606,11 @@ pub(crate) async fn run_doctor_with_claims(
     // #6535: whether the cloud log drain is on, where it points, and whether
     // its last pass actually landed. Read-only — it never drains.
     checks.push(check_log_drain(&FrameworkPaths::default().root, &home));
+    // #7424: this project's turn-1 startup context against its configured
+    // ceiling. Warn-only, and it opens no transcript — every reading was taken
+    // by the session that owned it, so the row cannot reach another project's
+    // session data. Declared in `daemon/mod.rs`; this file is AT the SLOC cap.
+    checks.push(check_startup_context(project_dir));
 
     DoctorReport::from_checks(checks)
 }
@@ -687,76 +716,6 @@ fn is_managed_workspace(project_dir: &Path, active_workspace_paths: &[PathBuf]) 
     active_workspace_paths
         .iter()
         .any(|candidate| resolve(candidate) == target)
-}
-
-/// Probe for the `CLAUDE_CONFIG_DIR`-keyed OAuth login-loop risk (issue #2246).
-///
-/// Why: every managed spawn relocates `CLAUDE_CONFIG_DIR` to the tm-owned
-/// config home; on macOS the Keychain credential Claude Code reads is keyed by
-/// a hash of that path, so a `/login` run inside a managed session can
-/// diverge from the login stored under the operator's default config dir and
-/// loop between "login successful" and "not logged in". Storing a
-/// `CLAUDE_CODE_OAUTH_TOKEN` (`tm auth set-token`) bypasses the Keychain
-/// entirely — this probe warns BEFORE an operator hits the loop rather than
-/// after.
-/// What: `Warn` when the managed config dir resolves (true in virtually every
-/// real environment — see [`crate::core::trusty_tools_config::managed_claude_config_dir`])
-/// AND no OAuth token will resolve for a managed spawn — i.e. neither a stored
-/// token file NOR the `CLAUDE_CODE_OAUTH_TOKEN` env var is set (the two sources
-/// [`crate::core::oauth_token::resolve_oauth_token`] consults, via
-/// [`crate::core::oauth_token::compute_status`]); `Ok` otherwise. Ambient
-/// `ANTHROPIC_API_KEY` deliberately does NOT count — every managed spawn strips
-/// it with `env -u ANTHROPIC_API_KEY` (see [`crate::runtime::claude_code`]), so
-/// relying on it still triggers the #2246 login loop while doctor would
-/// otherwise falsely report `Ok`. Never `Fail` — a first `/login` still
-/// frequently succeeds even without a stored token, so this is advisory.
-/// Test: `oauth_token_check_warns_when_relocated_with_no_token_or_key`,
-/// `oauth_token_check_ok_when_token_stored`,
-/// `oauth_token_check_warns_when_only_api_key_set`.
-fn check_oauth_token_config() -> DoctorCheck {
-    let relocated = crate::core::trusty_tools_config::managed_claude_config_dir().is_some();
-    let status = crate::core::oauth_token::compute_status();
-    build_oauth_token_check(relocated, status.stored_token_present, status.env_var_set)
-}
-
-/// Pure verdict for [`check_oauth_token_config`], separated for hermetic
-/// testing without mutating real process env / home state.
-///
-/// Why: keeping the branch logic pure makes both the warn and ok paths
-/// unit-testable without redirecting `HOME` or the process env.
-/// What: `token_available = stored_token_present || env_var_set` — exactly the
-/// two sources a managed spawn's [`crate::core::oauth_token::resolve_oauth_token`]
-/// consults. `Warn` when `relocated && !token_available`, else `Ok`. Ambient
-/// `ANTHROPIC_API_KEY` is intentionally NOT an input: managed spawns scrub it,
-/// so it can never satisfy the managed-session auth requirement (#2246 doctor
-/// false-negative fix).
-/// Test: `oauth_token_check_warns_when_relocated_with_no_token_or_key`,
-/// `oauth_token_check_ok_when_token_stored`,
-/// `oauth_token_check_ok_when_env_var_set`,
-/// `oauth_token_check_warns_when_only_api_key_set`,
-/// `oauth_token_check_ok_when_not_relocated`.
-fn build_oauth_token_check(
-    relocated: bool,
-    stored_token_present: bool,
-    env_var_set: bool,
-) -> DoctorCheck {
-    let token_available = stored_token_present || env_var_set;
-    if relocated && !token_available {
-        DoctorCheck::new(
-            "oauth_token",
-            CheckStatus::Warn,
-            "managed sessions relocate CLAUDE_CONFIG_DIR but no CLAUDE_CODE_OAUTH_TOKEN is \
-             configured — a `/login` inside a managed session may loop between \"successful\" \
-             and \"not logged in\" (issue #2246). Note an ambient ANTHROPIC_API_KEY does NOT \
-             help: managed spawns strip it. Run `claude setup-token` then `tm auth set-token`",
-        )
-    } else {
-        DoctorCheck::new(
-            "oauth_token",
-            CheckStatus::Ok,
-            "managed-session auth looks configured",
-        )
-    }
 }
 
 /// Probe trusty-memory's health (#6286).

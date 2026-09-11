@@ -2,13 +2,13 @@
 
 (Plus two operator scripts no workflow runs at all — see the last section.)
 
-Ten scripts in `scripts/` run in a GitHub Actions workflow and nowhere else —
+Eleven scripts in `scripts/` run in a GitHub Actions workflow and nowhere else —
 no pre-commit hook, no `Makefile` target, no other doc page. Each was written
 for a specific failure and none of them announced itself anywhere a reader
 would look, so a change to one of the workflows below could drop it with
 nothing to notice.
 
-`check_public_docs.sh` is listed as an eleventh row for the opposite reason: it ran
+`check_public_docs.sh` is listed as a twelfth row for the opposite reason: it ran
 in a pre-commit hook ALONE until #5134, which is unenforceable (`--no-verify`, a
 commit made outside the repo's hook path, a merge that runs no hook), and two
 files asserted a CI job that did not exist.
@@ -36,10 +36,11 @@ what it stops; the header says why it exists.
 | `check_workspace_dep_versions.sh` | `version-parity.yml` (`pr-version-bump`) | Asserts every internal `[workspace.dependencies]` row's `version` requirement actually accepts the member crate's own version, under Cargo's caret rules. The row's `path` wins in-tree, so no cargo command in the workspace can see the drift — `trusty-console` sat at `^0.9.0` against a 0.11.0 crate and `tga` at `^6.0.1` against 7.1.0, both invisible until `cargo publish` or an external consumer resolved from the registry (#6776, same class as #4088). |
 | `check_public_docs.sh` | `public-docs.yml`, plus the `public-docs` pre-commit hook | Validates `docs/public-manifest.tsv`, the allowlist the website publishes from: every PAGE row must resolve to an existing `.md` under `docs/`, outside the DO-NOT-PUBLISH trees, on a unique route. The STALE content pass runs in the same invocation and needs NO flag (#5134) — every published page is searched for the retired names in `docs/public-stale-terms.tsv`, whose waivers are a count ratchet in both directions. Both call sites invoke the script bare, so neither can drop the content check without deleting the gate outright. A page the gate cannot read fails as `UNREADABLE` rather than passing as clean. |
 | `check_token_drift.mjs` | `token-drift.yml` | Compares each Tailwind app's hand-transcribed `--color-*` RGB triples against the canonical Foundry `tokens.css`. `ci.yml` deliberately does NOT duplicate it (`ci.yml`, `ui-checks` job): `token-drift.yml` already runs it across all seven crates directly rather than through each `package.json`. |
+| `check_context_budget.sh` | `ci.yml` (`changes`) | Sums the bytes of `CLAUDE.md`, the framework instruction sections and the active output style against `scripts/context-budget-baseline.tsv`, and fails when the TOTAL grew more than 5% or any one file more than 10%. Every managed session pays for those three on its first assistant turn; #4513's audits measured 98k–107k tokens against a 50k target, and the creep between them was many small additions rather than one reviewable commit, so no single PR ever looked like the problem (#7424). A deliberate growth is recorded in the same PR with `--update`. It is a STEP of the existing `changes` job, not a job of its own: a new required context wedges every open PR that predates it (#5962). Reading and the trim levers: [startup-context-budget.md](startup-context-budget.md). |
 
 ## Self-tests
 
-Nine of the eleven have a companion test that proves the gate can still fail — a
+Ten of the twelve have a companion test that proves the gate can still fail — a
 gate that cannot fail makes its own green meaningless:
 
 | Script | Its test |
@@ -53,6 +54,7 @@ gate that cannot fail makes its own green meaningless:
 | `check_token_drift.mjs` | `scripts/check_token_drift.test.mjs`, a `node:test` suite `token-drift.yml` runs before the gate |
 | `check_workspace_dep_versions.sh` | `scripts/check_workspace_dep_versions_selftest.sh`, run as the step before the gate in the same job |
 | `check_public_docs.sh` | `scripts/check_public_docs_selftest.sh`, run as the step before the gate in the same job. Two of its cases pass no `--stale` flag at all, so a change that made the content pass opt-in again fails there rather than going quiet |
+| `check_context_budget.sh` | `scripts/check_context_budget_selftest.sh`, run as the step before the gate in the same job. Its `total_over` and `file_over` fixtures are built so that ONLY one arm can catch each — +6% on every file trips the total and not the per-file allowance, +15% on one file trips the per-file and not the total — so a change that collapsed the two arms into one fails there |
 
 `check_deny_duplicates.sh` and `ci-create-local-main.sh` have no test of their
 own. Both carry a frozen baseline or a fetch that can fail open, which is the

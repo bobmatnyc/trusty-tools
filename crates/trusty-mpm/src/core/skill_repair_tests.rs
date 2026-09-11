@@ -58,6 +58,58 @@ fn paths_under(tmp: &TempDir) -> FrameworkPaths {
     paths
 }
 
+/// #7423: `tm doctor --fix` deploys a bundled skill that reached NO tier, into
+/// the managed tier and nowhere else.
+///
+/// Why: the audit only knew the on-disk ledger, so a brand-new bundled skill was
+/// invisible to the repair — `tm-prose-style` shipped in 1.5.29 and landed
+/// nowhere. The second half of the assertion is the #6586 ruling: the operator
+/// home must stay empty of it. Fails on `origin/main`, where no outcome is
+/// produced for the skill at all.
+/// Test: this test.
+#[test]
+fn repair_deploys_a_bundled_skill_that_reached_no_tier() {
+    let tmp = TempDir::new().unwrap();
+    let backups = TempDir::new().unwrap();
+    let paths = paths_under(&tmp);
+    let managed = paths.skill_deploy_dir();
+    // Both tiers exist and are tm-owned, but neither holds the new skill.
+    let _managed_src = deploy_real(&managed, "tm-workflow", "v1", None);
+    let _home_src = deploy_real(&paths.claude_skills_dir(), "tm-workflow", "v1", None);
+
+    let outcomes = repair_skills(
+        &reference_of(&[("tm-workflow", "v1"), ("tm-prose-style", "brand new")]),
+        &paths,
+        None,
+        false,
+        backups.path(),
+    );
+
+    let written: Vec<&RepairOutcome> = outcomes
+        .iter()
+        .filter(|o| o.stem == "tm-prose-style" && o.changed())
+        .collect();
+    assert_eq!(written.len(), 1, "outcomes: {outcomes:?}");
+    assert_eq!(written[0].tier, "managed config");
+    assert_eq!(
+        fs::read_to_string(managed.join("tm-prose-style").join("SKILL.md")).unwrap(),
+        "brand new"
+    );
+    // #6586: bundled skills are user-tier only — the repair must not start
+    // deploying them into the operator's own `~/.claude/skills`.
+    assert!(
+        !paths.claude_skills_dir().join("tm-prose-style").exists(),
+        "the repair must not deploy a bundled skill to the operator home tier"
+    );
+    // And the written copy is tm-owned, so the next audit reads it Fresh rather
+    // than frozen.
+    assert!(
+        SkillManifest::load(&managed)
+            .unwrap()
+            .checksum_matches("tm-prose-style", "brand new")
+    );
+}
+
 #[test]
 fn repair_rewrites_drifted_and_verifies() {
     // The ordinary case: tm still owns the file, so the redeploy is safe. The

@@ -73,7 +73,7 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
     ),
     (
         "output_style_staleness",
-        "Deployed output-style file content matches the bundled catalog, and no orphaned files linger under `output-styles/` (issue #2333).",
+        "Deployed output-style file content matches the bundled catalog, and no orphaned files linger under `output-styles/` (issue #2333). Scans BOTH style tiers and names the tier in every finding: the operator's `~/.claude/output-styles/` and the managed `$CLAUDE_CONFIG_DIR/output-styles/`, which is the copy a tm-launched session actually reads. Scanning only the first let `tm doctor --fix --yes` redeploy the operator's copy and report clean while the managed copy stayed stale (issue #7423). `tm doctor --fix --yes` redeploys whichever tier drifted; an orphaned file is named and never deleted.",
     ),
     (
         "output_style_legacy_ids",
@@ -85,7 +85,7 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
     ),
     (
         "skill_staleness",
-        "Deployed skill content matches the RUNNING BINARY's own embedded bundled asset, at every deploy tier (`$CLAUDE_CONFIG_DIR/skills`, `~/.claude/skills`, the project's `.claude/skills`). Reads the deployed FILE, not the deploy manifest, and compares against the compiled-in asset rather than the `~/.trusty-mpm/framework/skills` extraction cache — that cache can itself lag the installed binary, which made every skill it covered report clean regardless of what shipped (issue #4604). Distinguishes drift a redeploy repairs from drift that is FROZEN (hand-edited, so `tm install` deliberately skips it), and reports UNKNOWN — never `Ok` — for anything it cannot verify. Read-only; `tm doctor --fix-skills` is the repair — a bare `--fix-skills` PREVIEWS the redeploy and writes nothing, and `tm doctor --fix-skills --yes` applies it, backing up each overwrite first (issues #2876, #4604, #6620).",
+        "Deployed skill content matches the RUNNING BINARY's own embedded bundled asset, at every deploy tier (`$CLAUDE_CONFIG_DIR/skills`, `~/.claude/skills`, the project's `.claude/skills`). Reads the deployed FILE, not the deploy manifest, and compares against the compiled-in asset rather than the `~/.trusty-mpm/framework/skills` extraction cache — that cache can itself lag the installed binary, which made every skill it covered report clean regardless of what shipped (issue #4604). Distinguishes drift a redeploy repairs from drift that is FROZEN (hand-edited, so `tm install` deliberately skips it), and reports UNKNOWN — never `Ok` — for anything it cannot verify. Read-only; `tm doctor --fix-skills` is the repair — a bare `--fix-skills` PREVIEWS the redeploy and writes nothing, and `tm doctor --fix-skills --yes` applies it, backing up each overwrite first (issues #2876, #4604, #6620). At the managed `$CLAUDE_CONFIG_DIR/skills` tier the audited set is the deploy ledger UNION this binary's own bundled roster, so a skill the binary ships and no deploy has ever written reports `Missing` there instead of producing no finding at all; `tm doctor --fix --yes` then deploys it. The operator-home and project tiers keep auditing the ledger alone — bundled skills are user-tier only since the 2026-09-01 owner ruling (issues #6586, #7423).",
     ),
     (
         "skill_unmanaged",
@@ -199,6 +199,10 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "Warns when a `.mcp.json` sits ABOVE the workspace or in a temp root. Claude Code discovers `.mcp.json` by walking UP from a session's cwd, so such a file silently supplies the MCP servers of every session started beneath it — agent scratchpads under `/tmp` included — with nothing in the project to point at. The scan is bounded: the workspace's strict ancestors up to the home directory (never the filesystem root, never a recursive descent) plus `$TMPDIR` and `/tmp`. Each finding names the servers it declares and what tm can PROVE about who wrote it, read from the `mcp-json-provenance.json` ledger rather than guessed from content — a file full of `trusty-*` servers may equally be one the operator wrote. Read-only. `tm doctor --fix` quarantines only ledger-proven tm writes (renaming them aside, never deleting); everything else is refused and needs `tm doctor --quarantine-mcp <path>`.",
     ),
     (
+        "session_scope",
+        "Names the shared MCP servers and installed Claude Code plugins a project's sessions will NOT load under default-deny scoping, and the `.trusty-mpm.toml` `[session]` keys that opt each one back in (issue #7422). Informational: `Warn` when something is excluded, `Ok` when nothing is, never `Fail` — an excluded server is the designed outcome, not a fault. Read-only; it composes the same decision the launch path does and writes nothing.",
+    ),
+    (
         "tmux_options",
         "Whether the live tmux SERVER's globals still match tm's spec — `history-limit`, `mouse`, and the window-scoped `alternate-screen`. `create_managed_session` applies and verifies them before every pane tm creates, but a server tm did not start carries none of them: a tmux-continuum restore recreates `tm-*` sessions through tmux-resurrect's own bare `new-session`, so restored panes bake tmux's factory 2000-line scrollback and can enter the alternate screen (issue #6469). Warns naming each drifted option; UNKNOWN — never `Ok` — when no option could be read (no tmux binary, or no server running). A green row means NEW panes will be correct: `history-limit` is captured into a pane's ring buffer at creation and cannot be grown in place, so an affected session has to be restarted. Read-only — it reads options, never sets one.",
     ),
@@ -209,6 +213,10 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
     (
         "log_drain",
         "Whether the cloud log drain is configured, where it points, and how its last pass ended (issue #6535). The drain uploads the daemon's own log files to an object store on an interval; it is OFF unless `log_drain.enabled` is set in `~/.trusty-tools/trusty-mpm/config.yaml`, and a host that never configured one reports `Ok`. A `log_drain:` section that does not resolve — a malformed destination URI, a zero interval, a source with no root — reports `Fail`, because the daemon refuses to start the scheduler and no bytes move. Enabled but never observed running reports `Warn`. The last pass's verdict is read from `~/.trusty-mpm/log-drain/status.json`, and a pass that errored — including one that finished with per-file failures — reports `Fail`, never a drained-looking `Ok`. Read-only: this probe never drains and never connects to the destination.",
+    ),
+    (
+        "startup_context",
+        "Whether this project's turn-1 startup context — what the first assistant turn re-sent, `input + cache_creation + cache_read` — sits inside its budget (issue #7424, parent #4513). Every managed session records that one number when its first turn lands, keyed by Claude session id beside the savings ledger under `~/.trusty-mpm/usage/`; this row samples the newest ones recorded for the project `tm doctor` was run in and compares the median and the latest against `startup_context.ceiling_tokens` in `~/.trusty-tools/trusty-mpm/config.yaml` (default 50,000 tokens over 10 sessions). Warns — never Fails — when either reaches the ceiling, because the ceiling is an operator budget and a prompt the operator deliberately grew is a preference, not a defect. A project with no reading yet reports UNKNOWN rather than `Ok`: nothing was measured, so nothing passed. It opens NO transcript — each number was measured by the session that owned it — so it cannot read another project's session data.",
     ),
 ];
 

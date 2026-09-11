@@ -451,18 +451,49 @@ pub const OUTPUT_STYLE_REMEDY: &str = "tm doctor --fix --yes";
 /// error cannot turn a completed write into `Failed` (#5866). Orphaned files
 /// under `output-styles/` are deliberately NOT touched — `output_style_staleness`
 /// names them and refuses to delete them, and so does this (issue #2333).
+///
+/// #7423: it now repairs EVERY [`crate::core::output_style_tiers::output_style_tiers`]
+/// entry. The old body hardcoded `home.join(".claude")`, so
+/// `tm doctor --fix --yes` on 1.5.29 redeployed the operator's copy and left
+/// `$CLAUDE_CONFIG_DIR/output-styles/trusty-mpm.md` — the copy a tm-launched
+/// session actually reads — at its old 12,012 bytes.
 /// Test: `output_style_repair_plans_the_drifted_file`,
 /// `output_style_repair_dry_run_writes_nothing`,
 /// `output_style_repair_applies_and_reports_from_disk`,
 /// `output_style_repair_is_empty_when_in_sync`,
 /// `output_style_repair_refuses_an_unreadable_file`,
-/// `one_unreadable_style_does_not_fail_a_sibling_that_was_written`.
-pub fn repair_output_style(home: &Path, mode: RepairMode) -> Vec<RepairStep> {
+/// `one_unreadable_style_does_not_fail_a_sibling_that_was_written`,
+/// `output_style_repair_rewrites_the_managed_tier`.
+pub fn repair_output_style(
+    home: &Path,
+    managed_config: Option<&Path>,
+    mode: RepairMode,
+) -> Vec<RepairStep> {
+    crate::core::output_style_tiers::output_style_tiers(home, managed_config)
+        .into_iter()
+        .flat_map(|tier| repair_output_style_tier(&tier.claude_dir, tier.label, mode))
+        .collect()
+}
+
+/// [`repair_output_style`] for ONE tier's `CLAUDE_CONFIG_DIR`-shaped directory.
+///
+/// Why (#7423): the per-tier body is the pre-existing repair verbatim; splitting
+/// it out is what lets the tier loop above exist without a second copy of the
+/// drift/refusal/verify rules. The tier label rides into each step's `what` so
+/// an operator reading the preview can tell the two `trusty-mpm.md` copies apart
+/// before either is written.
+/// What: the scan-then-deploy-then-report-from-disk pipeline documented on
+/// [`repair_output_style`], against `<claude_dir>/output-styles/`.
+/// Test: `repair_output_style`'s tests exercise it through the public entry.
+fn repair_output_style_tier(
+    claude: &Path,
+    tier: &'static str,
+    mode: RepairMode,
+) -> Vec<RepairStep> {
     use crate::core::output_style_deployer::{
         StyleDrift, deploy_output_styles, output_style_drift,
     };
 
-    let claude = home.join(".claude");
     let styles_dir = claude.join("output-styles");
     let drift = output_style_drift(&styles_dir);
     if drift.is_empty() {
@@ -477,7 +508,7 @@ pub fn repair_output_style(home: &Path, mode: RepairMode) -> Vec<RepairStep> {
     // One deploy call covers every writable file; run it once, up front, so each
     // step below reports the outcome that actually happened on disk.
     let applied = match (mode, writable.is_empty()) {
-        (RepairMode::Apply, false) => Some(deploy_output_styles(&claude)),
+        (RepairMode::Apply, false) => Some(deploy_output_styles(claude)),
         _ => None,
     };
 
@@ -485,16 +516,20 @@ pub fn repair_output_style(home: &Path, mode: RepairMode) -> Vec<RepairStep> {
         .iter()
         .map(|(file_name, state)| {
             let path = styles_dir.join(file_name);
+            // #7423: the tier label rides in so two tiers' `trusty-mpm.md` steps
+            // are distinguishable in the preview.
             let what = match state {
-                StyleDrift::Drifted => {
-                    format!(
-                        "redeploy `{file_name}` from the bundled output style (content drifted)"
-                    )
+                StyleDrift::Drifted => format!(
+                    "redeploy `{file_name}` at the {tier} tier from the bundled output style \
+                     (content drifted)"
+                ),
+                StyleDrift::Missing => format!(
+                    "write `{file_name}` at the {tier} tier from the bundled output style \
+                     (currently absent)"
+                ),
+                StyleDrift::Unreadable(_) => {
+                    format!("redeploy `{file_name}` at the {tier} tier")
                 }
-                StyleDrift::Missing => {
-                    format!("write `{file_name}` from the bundled output style (currently absent)")
-                }
-                StyleDrift::Unreadable(_) => format!("redeploy `{file_name}`"),
             };
             let status = match (state, &applied) {
                 (StyleDrift::Unreadable(why), _) => StepStatus::Refused(format!(

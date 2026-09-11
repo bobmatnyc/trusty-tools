@@ -14,7 +14,8 @@ use clap::Parser;
 
 use crate::cli::{AuthAction, Cli, Command, RepairAction, ServicesAction, SessctlAction};
 use crate::commands::session::{
-    compose_session_instructions, compose_session_instructions_with_roster,
+    instructions::compose_session_instructions,
+    instructions::compose_session_instructions_with_roster,
 };
 // #6542: teardown for the tmux sessions the guided-fallback tests cause
 // `fallback_protected` to launch.
@@ -106,7 +107,7 @@ fn assert_connect_claude_cmd_carries_persona_flags() {
     // Both shapes must carry the prompt and an isolation flag, so assert on both
     // rather than narrowing this to whichever one the test machine happens to
     // produce.
-    let fallback = crate::commands::launch::connect_claude_cmd(Some(path), None, &[]);
+    let fallback = crate::commands::launch::connect_claude_cmd(Some(path), None, &[], None);
     assert!(
         fallback.contains("--append-system-prompt-file"),
         "connect claude_cmd must inject the PM system prompt file: {fallback}"
@@ -118,7 +119,7 @@ fn assert_connect_claude_cmd_carries_persona_flags() {
     );
 
     let dir = std::path::Path::new("/tm/claude-config");
-    let relocated = crate::commands::launch::connect_claude_cmd(Some(path), Some(dir), &[]);
+    let relocated = crate::commands::launch::connect_claude_cmd(Some(path), Some(dir), &[], None);
     assert!(
         relocated.contains("--append-system-prompt-file"),
         "connect claude_cmd must inject the PM system prompt file: {relocated}"

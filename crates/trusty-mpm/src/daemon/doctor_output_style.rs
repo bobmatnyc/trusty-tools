@@ -76,6 +76,8 @@ use std::path::{Path, PathBuf};
 use crate::core::bundle::OUTPUT_STYLES;
 use crate::core::claude_config::ClaudeConfigReader;
 use crate::core::doctor::{CheckStatus, DoctorCheck};
+use crate::core::output_style_tiers::output_style_tiers;
+use crate::core::paths::FrameworkPaths;
 
 /// Result of reading the `outputStyle` key out of one settings file.
 ///
@@ -400,29 +402,104 @@ pub(crate) fn check_output_style_legacy_ids(
 /// when the directory is fully in sync (including when it does not exist
 /// yet — nothing has been deployed there, a state [`check_output_style`]
 /// already reports on).
+///
+/// #7423: it scans EVERY [`output_style_tiers`] entry, not just
+/// `<home>/.claude`. A tm-launched session reads the managed
+/// `$CLAUDE_CONFIG_DIR` as its `user` tier, so that copy is the one governing
+/// the session — and it was the one going unscanned while the home copy was
+/// redeployed. Each fragment names its tier, because "trusty-mpm.md drifted" is
+/// not actionable when two tiers hold that file.
 /// Test: `staleness_ok_when_in_sync`, `staleness_warns_on_drift`,
 /// `staleness_warns_on_orphan`, `staleness_ok_when_dir_missing`,
 /// `staleness_ok_when_file_never_deployed`,
-/// `staleness_orphan_exempts_configured_custom_id`.
-pub(crate) fn check_output_style_staleness(project_dir: Option<&Path>, home: &Path) -> DoctorCheck {
-    let styles_dir = home.join(".claude").join("output-styles");
+/// `staleness_orphan_exempts_configured_custom_id`,
+/// `staleness_warns_on_managed_config_drift`.
+pub(crate) fn check_output_style_staleness(
+    project_dir: Option<&Path>,
+    home: &Path,
+    paths: &FrameworkPaths,
+) -> DoctorCheck {
     let known_names: HashSet<&str> = OUTPUT_STYLES.iter().map(|s| s.file_name).collect();
+    let exempt_custom = resolve_effective_style_id(project_dir, home).map(|id| format!("{id}.md"));
+    let managed = paths.managed_claude_config_dir();
 
-    // #5866: the drift scan is shared with `core::doctor_repair::repair_output_style`
-    // so the file list this reports is exactly the list `tm doctor --fix` acts on.
-    // Missing and unreadable files are still filtered out here — a missing file is
-    // already `Fail`ed by `check_output_style` and must not be double-reported as
-    // drift, and an unreadable one is not evidence of staleness.
-    let drifted: Vec<&str> = crate::core::output_style_deployer::output_style_drift(&styles_dir)
-        .into_iter()
-        .filter(|(_, state)| *state == crate::core::output_style_deployer::StyleDrift::Drifted)
-        .map(|(file_name, _)| file_name)
-        .collect();
+    let mut parts: Vec<String> = Vec::new();
+    for tier in output_style_tiers(home, Some(&managed)) {
+        let styles_dir = tier.styles_dir();
+        // #5866: the drift scan is shared with `core::doctor_repair::repair_output_style`
+        // so the file list this reports is exactly the list `tm doctor --fix` acts on.
+        // Missing and unreadable files are still filtered out here — a missing file is
+        // already `Fail`ed by `check_output_style` and must not be double-reported as
+        // drift, and an unreadable one is not evidence of staleness.
+        let drifted: Vec<&str> =
+            crate::core::output_style_deployer::output_style_drift(&styles_dir)
+                .into_iter()
+                .filter(|(_, state)| {
+                    *state == crate::core::output_style_deployer::StyleDrift::Drifted
+                })
+                .map(|(file_name, _)| file_name)
+                .collect();
+        if !drifted.is_empty() {
+            // #5866: this named `tm install`, which has no output-style step — the
+            // deployed file kept its mtime across a full install run.
+            parts.push(format!(
+                "{} drifted from bundled content at the {} tier ({}, under {}) — run `{}` to \
+                 redeploy",
+                drifted.len(),
+                tier.label,
+                drifted.join(", "),
+                styles_dir.display(),
+                crate::core::doctor_repair::OUTPUT_STYLE_REMEDY
+            ));
+        }
 
+        let orphans = orphan_styles(&styles_dir, &known_names, exempt_custom.as_deref());
+        if !orphans.is_empty() {
+            parts.push(format!(
+                "{} unrecognized file(s) present at the {} tier ({}, under {}) — not removed \
+                 automatically; confirm they are not referenced by outputStyle before deleting",
+                orphans.len(),
+                tier.label,
+                orphans.join(", "),
+                styles_dir.display(),
+            ));
+        }
+    }
+
+    if parts.is_empty() {
+        return DoctorCheck::new(
+            "output_style_staleness",
+            CheckStatus::Ok,
+            "deployed output styles match the installed binary's bundled assets at every tier",
+        );
+    }
+
+    DoctorCheck::new(
+        "output_style_staleness",
+        CheckStatus::Warn,
+        parts.join("; "),
+    )
+}
+
+/// `.md` files under one styles directory that no bundled style claims.
+///
+/// Why (#7423): the orphan scan used to be inline and single-tier; lifting it
+/// out is what lets every tier be scanned by the same rules rather than by a
+/// second copy of them. The rules themselves are unchanged from #2333 — a
+/// foreign file is NAMED and never deleted, because it may belong to a
+/// separately-installed tool.
+/// What: sorted names of `*.md` entries that match no [`OUTPUT_STYLES`]
+/// `file_name` and are not `exempt_custom` (the operator's own configured
+/// custom style). An unlistable directory yields nothing — absence of evidence,
+/// not evidence of an orphan.
+/// Test: `staleness_warns_on_orphan`, `staleness_orphan_exempts_configured_custom_id`.
+fn orphan_styles(
+    styles_dir: &Path,
+    known_names: &HashSet<&str>,
+    exempt_custom: Option<&str>,
+) -> Vec<String> {
     let mut orphans: Vec<String> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&styles_dir) {
-        let exempt_custom =
-            resolve_effective_style_id(project_dir, home).map(|id| format!("{id}.md"));
+    if let Ok(entries) = std::fs::read_dir(styles_dir) {
         for entry in entries.flatten() {
             let file_name = entry.file_name();
             let Some(name) = file_name.to_str() else {
@@ -431,47 +508,14 @@ pub(crate) fn check_output_style_staleness(project_dir: Option<&Path>, home: &Pa
             if !name.ends_with(".md") || known_names.contains(name) {
                 continue;
             }
-            if exempt_custom.as_deref() == Some(name) {
+            if exempt_custom == Some(name) {
                 continue;
             }
             orphans.push(name.to_string());
         }
     }
     orphans.sort_unstable();
-
-    if drifted.is_empty() && orphans.is_empty() {
-        return DoctorCheck::new(
-            "output_style_staleness",
-            CheckStatus::Ok,
-            "deployed output styles match the installed binary's bundled assets",
-        );
-    }
-
-    let mut parts: Vec<String> = Vec::new();
-    if !drifted.is_empty() {
-        // #5866: this named `tm install`, which has no output-style step — the
-        // deployed file kept its mtime across a full install run.
-        parts.push(format!(
-            "{} drifted from bundled content ({}) — run `{}` to redeploy",
-            drifted.len(),
-            drifted.join(", "),
-            crate::core::doctor_repair::OUTPUT_STYLE_REMEDY
-        ));
-    }
-    if !orphans.is_empty() {
-        parts.push(format!(
-            "{} unrecognized file(s) present ({}) — not removed automatically; confirm they \
-             are not referenced by outputStyle before deleting",
-            orphans.len(),
-            orphans.join(", ")
-        ));
-    }
-
-    DoctorCheck::new(
-        "output_style_staleness",
-        CheckStatus::Warn,
-        parts.join("; "),
-    )
+    orphans
 }
 
 #[cfg(test)]

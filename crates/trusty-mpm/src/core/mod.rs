@@ -144,6 +144,7 @@ mod pm_prompt_golden_tests;
 pub mod native_session_finder;
 pub mod output_style;
 pub mod output_style_deployer;
+pub mod output_style_tiers;
 pub mod overseer;
 pub mod overseer_config;
 // #4058: single canonical source for the crate's own `[[bin]]` names, so
@@ -207,12 +208,18 @@ pub mod scaffold_gitignore;
 pub mod session;
 pub mod session_assets;
 pub mod session_launch;
+// #7422: default-deny MCP scoping — a session loads the trusty-* builtins, the
+// project's own `.mcp.json`, and only the shared servers the project opts into.
+pub mod session_mcp_scope;
 // #6972: which model the parent session runs, remembered by the statusline hook
 // so the divert producer prices its rows at the parent's real rate.
 pub mod session_model;
 // #7282: a pause snapshot reaches `origin/main` through its own branch and PR,
 // never as a commit on whatever branch the main checkout happens to be on.
 pub mod session_pause_pr;
+// #7422: the plugin half of the same default-deny decision — written into the
+// project's `.claude/settings.json`, because Claude Code has no plugin flag.
+pub mod session_plugin_scope;
 pub mod session_record;
 pub mod session_store;
 pub mod skill_deploy_tiers;
@@ -230,9 +237,11 @@ pub mod skill_unmanaged;
 pub mod sm;
 pub mod spawn_disclaim;
 pub mod stack_profile;
+// #7424: the turn-1 startup-context reading, its store, and the doctor verdict.
 pub mod staged_paths;
 pub mod stale_skills;
 pub mod standalone;
+pub mod startup_context;
 pub mod stray_mcp;
 pub mod tmux;
 pub mod transcript_usage;

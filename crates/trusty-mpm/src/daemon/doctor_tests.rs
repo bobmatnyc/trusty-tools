@@ -423,7 +423,7 @@ fn an_absent_path_still_matches_the_recorded_spelling_of_itself() {
 }
 
 #[tokio::test]
-async fn run_doctor_produces_forty_four_checks() {
+async fn run_doctor_produces_forty_six_checks() {
     // Issue #2158 added the `deployment` probe (nine → ten); issue #2246
     // adds `oauth_token` (ten → eleven); issue #2876 adds `skill_staleness`
     // and `legacy_sources` (eleven → thirteen); DOC-42 / issue #2889 adds
@@ -450,7 +450,9 @@ async fn run_doctor_produces_forty_four_checks() {
     // `skill_project_tier` (thirty-six → thirty-seven); issue #6649 adds
     // `asset_duplicates` (thirty-seven → thirty-eight); issue #4947 adds
     // `skill_reachability` (thirty-eight → thirty-nine); issue #7311 adds
-    // `rtk` (forty-three → forty-four).
+    // `rtk` (forty-three → forty-four); #7422 adds `session_scope`
+    // (forty-four → forty-five); issue #7424 adds `startup_context`
+    // (forty-five → forty-six).
     //
     // The test NAME had drifted four additions behind the tally above by the
     // time #6586 landed — it still read `thirty_two`. Renaming it is part of
@@ -510,6 +512,8 @@ async fn run_doctor_produces_forty_four_checks() {
         // #5007: `sessions.json` integrity — a corrupt store blocks every write.
         "session_store",
         "stray_mcp_json",
+        // #7422: what this project's sessions will NOT load, and where to opt in.
+        "session_scope",
         // #6469: the tmux server globals a resurrect restore leaves unset.
         "tmux_options",
         // #6529: pseudo-terminal headroom — a session leak exhausts it and the
@@ -518,6 +522,8 @@ async fn run_doctor_produces_forty_four_checks() {
         // #6535: whether the cloud log drain is on, where it points, and
         // whether its last pass landed.
         "log_drain",
+        // #7424: this project's turn-1 startup context against its ceiling.
+        "startup_context",
     ];
     assert_eq!(names, expected);
     // Count derived from the list above, never a standalone literal:

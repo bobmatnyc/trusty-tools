@@ -130,6 +130,7 @@ fn cli_parses_mcp_add() {
                 header,
                 command_and_args,
                 root,
+                project: _,
             },
     }) = cli.command
     else {

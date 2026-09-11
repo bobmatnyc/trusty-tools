@@ -11873,7 +11873,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mcp"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -11882,7 +11882,9 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 1.0.69",
  "tokio",
+ "toml 0.8.23",
  "trusty-common",
 ]
 
@@ -11928,7 +11930,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mpm"
-version = "1.5.29"
+version = "1.5.30"
 dependencies = [
  "anyhow",
  "async-trait",

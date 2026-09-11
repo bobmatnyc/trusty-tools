@@ -1254,6 +1254,8 @@ async fn doctor_endpoint_returns_report() {
         // #5007: `sessions.json` integrity — a corrupt store blocks every write.
         "session_store",
         "stray_mcp_json",
+        // #7422: what this project's sessions will NOT load, and where to opt in.
+        "session_scope",
         // #6469: the tmux server globals a resurrect restore leaves unset.
         "tmux_options",
         // #6529: pseudo-terminal headroom — a session leak exhausts it and the
@@ -1261,6 +1263,8 @@ async fn doctor_endpoint_returns_report() {
         "pty_headroom",
         // #6535: the cloud log drain's state and last-run verdict.
         "log_drain",
+        // #7424: this project's turn-1 startup context against its ceiling.
+        "startup_context",
     ];
     assert_eq!(names, expected);
     // Count derived from the list above, never a standalone literal:
