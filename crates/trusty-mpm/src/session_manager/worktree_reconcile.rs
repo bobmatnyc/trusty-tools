@@ -403,7 +403,8 @@ pub fn reconcile_worktrees(
     // disagreement between two registries about one path is precisely the state
     // this whole slice exists to surface. See `classify`'s contested branch.
     let mut scanned: BTreeMap<PathBuf, Vec<ScannedWorktree>> = BTreeMap::new();
-    for s in scan_registered_worktrees(repos_root) {
+    // #7357: adopted anchors reach projects the repos-root walk cannot.
+    for s in scan_registered_worktrees(repos_root, &crate::project::default_adopted_anchors()) {
         scanned.entry(s.path.clone()).or_default().push(s);
     }
     let mut by_workspace: BTreeMap<PathBuf, Vec<&SessionRecord>> = BTreeMap::new();

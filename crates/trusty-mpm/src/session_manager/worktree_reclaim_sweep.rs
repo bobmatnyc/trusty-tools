@@ -121,7 +121,9 @@ pub(crate) fn survey_with_index(
 ) -> ReclaimSurvey {
     let mut indexes: BTreeMap<PathBuf, PrIndex> = BTreeMap::new();
     let mut candidates = Vec::new();
-    for scanned in scan_registered_worktrees(repos_root) {
+    // #7357: adopted anchors reach projects the repos-root walk cannot.
+    for scanned in scan_registered_worktrees(repos_root, &crate::project::default_adopted_anchors())
+    {
         if budget.classify.is_some_and(|d| Instant::now() >= d) {
             // #2919: fail closed. A candidate we ran out of time to inspect is
             // reported as blocked, never omitted and never approved.

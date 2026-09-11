@@ -216,7 +216,9 @@ pub(crate) fn run(
         answer
     };
 
-    for scanned in scan_registered_worktrees(repos_root) {
+    // #7357: adopted anchors reach projects the repos-root walk cannot.
+    for scanned in scan_registered_worktrees(repos_root, &crate::project::default_adopted_anchors())
+    {
         if !selected(&scanned, repos_root, project) {
             continue;
         }

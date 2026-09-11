@@ -63,9 +63,12 @@ pub async fn project_list(state: &Arc<DaemonState>) -> Result<Value, String> {
 /// current persisted value rather than clearing it (#3025 review follow-up
 /// item 4 — mirrors [`crate::daemon::managed_routes::project_registry_routes::register_project_registry_route`](crate::daemon::managed_routes::register_project_registry_route)'s
 /// identical fix; see that function's doc for the full rationale and the
-/// deliberate `default_branch` exception). Calls `registry.register` and
-/// returns the persisted record.
-/// Test: `dispatch_project_register_tool` in `crate::mcp::tests`.
+/// deliberate `default_branch` exception). Calls `registry.register`, then
+/// adopts the checkout's PRE-EXISTING worktrees (#7357 — see
+/// [`backfill_pre_existing_worktrees`]), and returns the persisted record.
+/// Test: `dispatch_project_register_tool` in `crate::mcp::tests`;
+/// `project_register_backfills_pre_existing_worktrees`,
+/// `project_register_backfill_is_idempotent`.
 #[allow(clippy::too_many_arguments)]
 pub async fn project_register(
     state: &Arc<DaemonState>,
@@ -116,7 +119,52 @@ pub async fn project_register(
         .register(project.clone())
         .await
         .map_err(|e| format!("project_register: registry error: {e}"))?;
+    backfill_pre_existing_worktrees(state, &project);
     serde_json::to_value(&project).map_err(|e| e.to_string())
+}
+
+/// Adopt the worktrees a project's checkout ALREADY has (#7357).
+///
+/// Why: before #7357 registration wrote a [`Project`] record and nothing else,
+/// so a repo that had agent activity before it was registered stayed invisible
+/// to `reconcile-worktrees`, `prune-worktrees --merged-prs`, `tm doctor` and the
+/// Disk survey — all four read one scan, and that scan reaches a project only at
+/// `<repos_root>/<owner>/<repo>`. The operator's only remaining move was
+/// `git worktree remove --force` by hand. Running the backfill here is what
+/// makes a pre-existing worktree indistinguishable, to every later pass, from
+/// one provisioned after registration.
+/// What: resolves the project's LOCAL checkout — `repo_url` when it names an
+/// existing directory — and hands it to
+/// [`crate::project::backfill_checkout`], which writes one adoption record per
+/// worktree it can read. A `repo_url` that is a remote URL needs nothing: its
+/// checkout lives at `<repos_root>/<owner>/<repo>`, which the walk already
+/// covers.
+///
+/// NOT A GATE. Every failure below is a warning: registration is bookkeeping and
+/// must not fail because a checkout moved, a disk is unreadable, or git will not
+/// answer. A skipped worktree is exactly as invisible as it was before.
+/// Test: `project_register_backfills_pre_existing_worktrees`,
+/// `project_register_backfill_is_idempotent`,
+/// `project_register_succeeds_when_the_checkout_is_not_a_repository`.
+fn backfill_pre_existing_worktrees(state: &Arc<DaemonState>, project: &Project) {
+    let checkout = std::path::Path::new(&project.repo_url);
+    if !checkout.is_dir() {
+        return;
+    }
+    let store_dir = crate::project::registry_data_dir_under(state.framework_root());
+    let report =
+        crate::project::backfill_checkout(&store_dir, &project.name, checkout, chrono::Utc::now());
+    if report != crate::project::BackfillReport::default() {
+        tracing::info!(
+            project = %project.name,
+            checkout = %checkout.display(),
+            recorded = report.recorded,
+            already_recorded = report.already_recorded,
+            claimed_by_another = report.claimed_by_another,
+            skipped = report.skipped,
+            "#7357: adopted pre-existing worktrees at project registration"
+        );
+    }
 }
 
 /// Look up a single project by name.
@@ -300,5 +348,103 @@ mod tests {
 
         assert_eq!(result["stack_hint"], "python");
         assert_eq!(result["gh_account"], "bob-work");
+    }
+
+    /// Register a project whose checkout ALREADY has worktrees, and both get a
+    /// record naming it (#7357).
+    ///
+    /// Why: this is the reported bug end to end. Before the fix registration
+    /// wrote a `Project` record and nothing else, so every worktree already on
+    /// disk stayed invisible to `reconcile-worktrees`, the `--merged-prs` sweep
+    /// and `tm doctor` — all three read one scan that reaches a project only at
+    /// `<repos_root>/<owner>/<repo>`.
+    /// Test: itself.
+    #[tokio::test]
+    async fn project_register_backfills_pre_existing_worktrees() {
+        let fx = crate::session_manager::worktree_git_fixture::GitWorktreeFixture::new();
+        let a = fx.add_worktree("pre-one");
+        let b = fx.add_worktree("pre-two");
+        let state = isolated_state().await;
+
+        project_register(
+            &state,
+            "gnomish",
+            fx.repo.to_str().expect("utf8 checkout"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("register");
+
+        let store = crate::project::AdoptionStore::load(&crate::project::registry_data_dir_under(
+            state.framework_root(),
+        ));
+        let paths: Vec<&std::path::PathBuf> = store.entries().iter().map(|e| &e.path).collect();
+        for wt in [&a, &b] {
+            let canonical = std::fs::canonicalize(wt).expect("canonical worktree");
+            assert!(
+                paths.contains(&&canonical),
+                "{} must have an adoption record; got {paths:?}",
+                canonical.display()
+            );
+        }
+        assert!(store.entries().iter().all(|e| e.project == "gnomish"));
+    }
+
+    /// Re-registering an already-registered project adds no duplicate records.
+    /// Test: itself.
+    #[tokio::test]
+    async fn project_register_backfill_is_idempotent() {
+        let fx = crate::session_manager::worktree_git_fixture::GitWorktreeFixture::new();
+        fx.add_worktree("pre-one");
+        fx.add_worktree("pre-two");
+        let state = isolated_state().await;
+        let checkout = fx.repo.to_str().expect("utf8 checkout");
+
+        for _ in 0..2 {
+            project_register(
+                &state, "gnomish", checkout, None, None, None, None, None, None,
+            )
+            .await
+            .expect("register");
+        }
+
+        let store = crate::project::AdoptionStore::load(&crate::project::registry_data_dir_under(
+            state.framework_root(),
+        ));
+        assert_eq!(store.entries().len(), 2, "two worktrees, two records");
+    }
+
+    /// The backfill is not a gate: a `repo_url` that is not a local repository
+    /// leaves registration succeeding and writes no records.
+    /// Test: itself.
+    #[tokio::test]
+    async fn project_register_succeeds_when_the_checkout_is_not_a_repository() {
+        let plain = tempfile::tempdir().expect("tempdir");
+        let state = isolated_state().await;
+
+        let result = project_register(
+            &state,
+            "plainly",
+            plain.path().to_str().expect("utf8 path"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("register must still succeed");
+
+        assert_eq!(result["name"], "plainly");
+        let store = crate::project::AdoptionStore::load(&crate::project::registry_data_dir_under(
+            state.framework_root(),
+        ));
+        assert!(store.entries().is_empty());
     }
 }

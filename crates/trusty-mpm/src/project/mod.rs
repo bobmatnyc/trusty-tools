@@ -12,6 +12,9 @@
 //! - `store`  — [`ProjectStore`] on-disk JSON persistence.
 //! - `registry` — [`ProjectRegistry`] lifecycle manager.
 //! - `resolver` — NL→project resolver, session↔project binding, fleet grouping.
+//! - `worktree_adoption` — adopting a project's PRE-EXISTING worktrees at
+//!   registration time (#7357), so a repo that had agent activity before it was
+//!   registered is still surveyed and reclaimable.
 //! - `worktree_policy` — the `worktree` opt-out decision, shared by the daemon
 //!   and the out-of-process `tm` CLI (#3455, #4300). Since #5207 a project's
 //!   own committed `.trusty-mpm.toml` outranks the machine-global registry;
@@ -32,6 +35,7 @@ pub mod record;
 pub mod registry;
 pub mod resolver;
 pub mod store;
+pub mod worktree_adoption;
 pub mod worktree_policy;
 
 pub use record::{Project, derive_name_from_url};
@@ -41,6 +45,10 @@ pub use resolver::{
     ResolutionReason, ResolverError, fleet_by_project, resolve_project, resolve_session_project,
 };
 pub use store::ProjectStoreError;
+pub use worktree_adoption::{
+    AdoptedWorktree, AdoptionStore, BackfillReport, RecordOutcome, adopted_anchors,
+    backfill_checkout, default_adopted_anchors,
+};
 pub use worktree_policy::{
     dispatched_agent_worktree_enabled, registry_data_dir, registry_data_dir_under,
     worktree_enabled_for_origin, worktree_enabled_for_origin_at, worktree_enabled_for_project,

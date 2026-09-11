@@ -299,10 +299,15 @@ pub(crate) fn find_orphaned_worktrees(
     repos_root: &std::path::Path,
     active_set: &std::collections::HashSet<std::path::PathBuf>,
 ) -> Vec<std::path::PathBuf> {
-    super::worktree_registry::enumerate_registered_worktrees(repos_root)
-        .into_iter()
-        .filter(|candidate| !active_set.contains(candidate))
-        .collect()
+    // #7357: the repos-root walk reaches a project only at
+    // `<repos_root>/<owner>/<repo>`; the adopted anchors carry the rest.
+    super::worktree_registry::enumerate_registered_worktrees(
+        repos_root,
+        &crate::project::default_adopted_anchors(),
+    )
+    .into_iter()
+    .filter(|candidate| !active_set.contains(candidate))
+    .collect()
 }
 
 /// Outcome of an orphaned-worktree sweep (#3649): which candidates were (or

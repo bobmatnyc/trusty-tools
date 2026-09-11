@@ -407,9 +407,18 @@ pub(crate) fn list_registered_worktrees(anchor: &Path) -> Option<Vec<RegisteredW
 /// `enumerate_excludes_worktrees_outside_the_repos_root`,
 /// `enumerate_excludes_a_sibling_checkout_of_the_same_repo`,
 /// `enumerate_excludes_a_worktree_parked_beside_the_project`,
-/// `enumerate_excludes_a_locked_worktree`.
-pub(crate) fn enumerate_registered_worktrees(repos_root: &Path) -> Vec<PathBuf> {
-    let admitted: BTreeSet<PathBuf> = scan_registered_worktrees(repos_root)
+/// `enumerate_excludes_a_locked_worktree`,
+/// `enumerate_admits_a_worktree_under_an_adopted_checkout` (#7357).
+///
+/// `adopted` (#7357) names the checkouts of projects registered from somewhere
+/// other than `<repos_root>/<owner>/<repo>`; see
+/// [`scan_registered_worktrees`] for the containment rule they get. Pass `&[]`
+/// for the walk alone.
+pub(crate) fn enumerate_registered_worktrees(
+    repos_root: &Path,
+    adopted: &[PathBuf],
+) -> Vec<PathBuf> {
+    let admitted: BTreeSet<PathBuf> = scan_registered_worktrees(repos_root, adopted)
         .into_iter()
         .filter(|s| s.admission == Admission::Admitted)
         .map(|s| s.path)
@@ -558,7 +567,36 @@ pub(crate) struct ScannedWorktree {
 /// porcelain record, deduplicated on (path, registry root) and sorted.
 /// Test: `scan_reports_the_excluded_set_with_reasons`,
 /// `scan_reports_both_registries_for_the_same_path_prefix`.
-pub(crate) fn scan_registered_worktrees(repos_root: &Path) -> Vec<ScannedWorktree> {
+///
+/// # `adopted` — the checkouts of projects registered elsewhere (#7357)
+///
+/// Why: the repos-root walk finds a project only at `<repos_root>/<owner>/<repo>`.
+/// A project registered from a checkout anywhere else — the case #7357 reports —
+/// is never interrogated at all, so reconcile reported zero rows for it, the
+/// `--merged-prs` sweep reclaimed nothing under it, and `tm doctor` agreed
+/// because all three read this one function. `adopted` is the set of checkouts
+/// [`crate::project::worktree_adoption`] recorded when those projects were
+/// registered.
+/// What: the walk exactly as before, then one pass per adopted checkout. Two
+/// rules keep the widening from re-attributing anything:
+///
+/// 1. An adopted checkout INSIDE `repos_root` is skipped — the walk already
+///    owns it, and letting both produce a row would put one path under two
+///    projects.
+/// 2. An adopted checkout bounds its own candidates: containment is asserted
+///    against the checkout itself (the same strict-descendant rule
+///    [`enumerate_registered_worktrees`]' "positive assertion" section
+///    describes), and a path some earlier anchor already produced is left with
+///    the attribution it already has.
+///
+/// Test (#7357): `scan_admits_a_worktree_under_an_adopted_checkout`,
+/// `scan_ignores_an_adopted_checkout_inside_the_repos_root`,
+/// `scan_does_not_duplicate_a_repeated_adopted_checkout`. Pass `&[]` for the
+/// walk alone.
+pub(crate) fn scan_registered_worktrees(
+    repos_root: &Path,
+    adopted: &[PathBuf],
+) -> Vec<ScannedWorktree> {
     let canonical_root = std::fs::canonicalize(repos_root).unwrap_or_else(|_| repos_root.into());
     let mut found: BTreeSet<(PathBuf, PathBuf, ScannedKey)> = BTreeSet::new();
     let Ok(owner_entries) = std::fs::read_dir(repos_root) else {
@@ -587,6 +625,7 @@ pub(crate) fn scan_registered_worktrees(repos_root: &Path) -> Vec<ScannedWorktre
             }
         }
     }
+    scan_adopted_checkouts(adopted, &canonical_root, &mut found);
     found
         .into_iter()
         .map(|(path, registry_root, key)| ScannedWorktree {
@@ -597,6 +636,53 @@ pub(crate) fn scan_registered_worktrees(repos_root: &Path) -> Vec<ScannedWorktre
             admission: key.admission,
         })
         .collect()
+}
+
+/// Record every worktree registered at an ADOPTED project checkout (#7357).
+///
+/// Why: the repos-root walk cannot reach these checkouts, and the fix must not
+/// widen anything else while reaching them. Both guards below exist so an
+/// adopted anchor can only ADD rows for paths nothing else produced.
+/// What: skips an anchor that lies inside `canonical_root` (the walk already
+/// covers it) and any path already present in `found`; otherwise interrogates
+/// the checkout and its `.base` clone exactly as the walk does, with the
+/// checkout itself as BOTH the containment root and the bounding project.
+/// Test: `scan_admits_a_worktree_under_an_adopted_checkout`,
+/// `scan_ignores_an_adopted_checkout_inside_the_repos_root`,
+/// `scan_does_not_duplicate_a_repeated_adopted_checkout`.
+fn scan_adopted_checkouts(
+    adopted: &[PathBuf],
+    canonical_root: &Path,
+    found: &mut BTreeSet<(PathBuf, PathBuf, ScannedKey)>,
+) {
+    for checkout in adopted {
+        let Ok(canonical_checkout) = std::fs::canonicalize(checkout) else {
+            continue;
+        };
+        // Guard 1: the walk owns everything under the managed repos root.
+        if canonical_checkout.starts_with(canonical_root) {
+            continue;
+        }
+        let already: BTreeSet<PathBuf> = found.iter().map(|(p, _, _)| p.clone()).collect();
+        let mut fresh: BTreeSet<(PathBuf, PathBuf, ScannedKey)> = BTreeSet::new();
+        for anchor in [
+            canonical_checkout.clone(),
+            canonical_checkout.join(BASE_CLONE_DIRNAME),
+        ] {
+            scan_from_anchor(
+                &anchor,
+                &canonical_checkout,
+                &canonical_checkout,
+                &mut fresh,
+            );
+        }
+        // Guard 2: never restate a path some earlier anchor already attributed.
+        for row in fresh {
+            if !already.contains(&row.0) {
+                found.insert(row);
+            }
+        }
+    }
 }
 
 /// The non-key remainder of a [`ScannedWorktree`], carried through the dedup
