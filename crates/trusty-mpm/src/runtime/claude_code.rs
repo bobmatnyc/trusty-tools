@@ -330,7 +330,7 @@ fn spawn_command(
     mcp_env: &[(String, String)],
 ) -> String {
     let body = format!(
-        "{}{}{}{}{} {} {}{}",
+        "{}{}{}{}{} {}{} {}{}",
         session_id_export_prefix(session_id),
         // #6766: stamp the launch second here, between the two prefixes whose
         // positions are already pinned — the `export` stays the group's first
@@ -343,6 +343,13 @@ fn spawn_command(
         // #4451: the relocated spawn must load the `user` tier — that is where
         // `CLAUDE_CONFIG_DIR/agents` (the bundled roster) lives.
         crate::core::model_inject::setting_sources_flag(config_dir),
+        // #7422: default-deny MCP scoping, rendered from the same spawn posture
+        // as the flag above so the two can never drift. `spawn` wrote the file
+        // before this builder ran; an empty string here means the spawn does not
+        // relocate its config dir and reads the operator's own `~/.claude.json`.
+        crate::core::session_mcp_scope::strict_mcp_flag_string(
+            crate::core::session_mcp_scope::scoped_for(cwd, config_dir).as_deref(),
+        ),
         crate::core::model_inject::PERMISSION_MODE_FLAG,
         exit_dispatch_suffix(),
     );
@@ -501,7 +508,7 @@ fn resume_command(
     mcp_env: &[(String, String)],
 ) -> String {
     let base = format!(
-        "{}{}{}{}{} {} {}",
+        "{}{}{}{}{} {}{} {}",
         session_id_export_prefix(session_id),
         // #6766: same launch stamp, same position as `spawn_command` — the
         // resume path is the one the refused relaunch was observed on.
@@ -511,6 +518,10 @@ fn resume_command(
         prompt_file_flag(prompt_file),
         // #4451: same relocated-tier contract as `spawn_command`.
         crate::core::model_inject::setting_sources_flag(config_dir),
+        // #7422: same default-deny MCP scoping as `spawn_command`.
+        crate::core::session_mcp_scope::strict_mcp_flag_string(
+            crate::core::session_mcp_scope::scoped_for(cwd, config_dir).as_deref(),
+        ),
         crate::core::model_inject::PERMISSION_MODE_FLAG,
     );
     let cmd = match claude_session_id {
@@ -917,6 +928,12 @@ fn compose_inplace_args(
             .chain(crate::core::model_inject::PERMISSION_MODE_FLAG.split_whitespace())
             .map(str::to_owned),
     );
+    // #7422: default-deny MCP scoping. Unquoted tokens — this path `exec`s with
+    // no shell in between, so a quoted path would name a file claude cannot
+    // open, exactly as for `--append-system-prompt-file` above.
+    args.extend(crate::core::session_mcp_scope::strict_mcp_argv(
+        crate::core::session_mcp_scope::scoped_for(cwd, config_dir).as_deref(),
+    ));
 
     // #6765: an id verified against the session's OWN store, or a fresh launch.
     // Never a bare `--continue` — see `resume_command`'s doc.
@@ -949,6 +966,13 @@ pub fn build_inplace_resume_command(
     cwd: &Path,
     claude_session_id: Option<&str>,
 ) -> Result<InPlaceResumeCommand, RuntimeError> {
+    let config_dir = prepare_managed_config("in-place-relaunch", cwd);
+    // #7422: compose the session-scoped MCP file BEFORE anything else, so the
+    // fail-closed gate does not depend on a binary lookup succeeding first. A
+    // failure here abandons the relaunch rather than dropping the flag, which
+    // would hand the pane the unscoped shared server map.
+    crate::core::session_mcp_scope::provision_for_spawn(cwd, config_dir.as_deref())
+        .map_err(|err| RuntimeError::Spawn(err.to_string()))?;
     let claude_bin = ClaudeCodeAdapter::resolve_claude().ok_or_else(|| {
         RuntimeError::BinaryNotFound(
             "claude binary not found on PATH or in well-known dirs \
@@ -956,7 +980,6 @@ pub fn build_inplace_resume_command(
                 .into(),
         )
     })?;
-    let config_dir = prepare_managed_config("in-place-relaunch", cwd);
     // #4832: no explicit id here — this path runs INSIDE the managed pane, so
     // `session_scope` reads `TM_MANAGED_SESSION_ID` from the environment.
     let prompt_file = build_prompt_file(cwd, None);
@@ -1092,6 +1115,20 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         session_id: &str,
         gh_env: &[(String, String)],
     ) -> Result<(), RuntimeError> {
+        // Point the session at the tm-owned CLAUDE_CONFIG_DIR for auth + trust
+        // isolation and seed trust there — never at `~/.claude.json` (DOC-34).
+        // #4873: the framework roster and skills load FROM this config dir —
+        // `setting_sources_flag` yields `user,project,local` whenever it is
+        // present, and `user` is the tier it relocates. The older comment here
+        // claimed the project layer under `project,local`; see
+        // `prepare_managed_config`. Non-fatal throughout (closes #1696).
+        let config_dir = prepare_managed_config(tmux_name, cwd);
+        // #7422: compose this session's MCP config before anything else, so the
+        // fail-closed gate does not depend on a binary lookup succeeding first.
+        // Fatal by design — the only fallback is a spawn with no
+        // `--mcp-config`, which loads the whole shared server map.
+        crate::core::session_mcp_scope::provision_for_spawn(cwd, config_dir.as_deref())
+            .map_err(|err| RuntimeError::Spawn(err.to_string()))?;
         let claude_bin = Self::resolve_claude().ok_or_else(|| {
             RuntimeError::BinaryNotFound(
                 "claude binary not found on PATH or in well-known dirs \
@@ -1106,14 +1143,6 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             claude = %claude_bin,
             "spawning claude-code in tmux pane"
         );
-        // Point the session at the tm-owned CLAUDE_CONFIG_DIR for auth + trust
-        // isolation and seed trust there — never at `~/.claude.json` (DOC-34).
-        // #4873: the framework roster and skills load FROM this config dir —
-        // `setting_sources_flag` yields `user,project,local` whenever it is
-        // present, and `user` is the tier it relocates. The older comment here
-        // claimed the project layer under `project,local`; see
-        // `prepare_managed_config`. Non-fatal throughout (closes #1696).
-        let config_dir = prepare_managed_config(tmux_name, cwd);
         // Build and inject the PM system prompt (issue #2125 item 3) so this,
         // the default daemon on-ramp, can no longer silently spawn vanilla
         // Claude Code. Non-fatal: a write failure omits the flag (#2173 ruled
@@ -1216,6 +1245,12 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         session_id: &str,
         gh_env: &[(String, String)],
     ) -> Result<(), RuntimeError> {
+        let config_dir = prepare_managed_config(tmux_name, cwd);
+        // #7422: same fail-closed MCP composition as `spawn`, in the same
+        // position — a resumed pane must not be the one path that still loads
+        // every shared server.
+        crate::core::session_mcp_scope::provision_for_spawn(cwd, config_dir.as_deref())
+            .map_err(|err| RuntimeError::Spawn(err.to_string()))?;
         let claude_bin = Self::resolve_claude().ok_or_else(|| {
             RuntimeError::BinaryNotFound(
                 "claude binary not found on PATH or in well-known dirs \
@@ -1223,7 +1258,6 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
                     .into(),
             )
         })?;
-        let config_dir = prepare_managed_config(tmux_name, cwd);
         // #2230: build the PM system prompt for the resume path too — before
         // this fix only spawn() passed --append-system-prompt-file, so every
         // resumed/guided-resume/crash-recovery session silently ran vanilla
@@ -1349,3 +1383,9 @@ mod gh_env_tests;
 #[cfg(test)]
 #[path = "claude_code_tests.rs"]
 mod tests;
+
+// #7422: the default-deny MCP flags get their own file — one pin per builder,
+// so an edit that drops them from one path cannot hide behind the others.
+#[cfg(test)]
+#[path = "claude_code_scope_tests.rs"]
+mod scope_tests;

@@ -699,6 +699,7 @@ async fn main() -> anyhow::Result<()> {
                 header,
                 command_and_args,
                 root,
+                project,
             } => commands::mcp::add_cmd(
                 root.as_deref(),
                 &name,
@@ -706,6 +707,7 @@ async fn main() -> anyhow::Result<()> {
                 &env,
                 &header,
                 &command_and_args,
+                project,
             ),
             cli::McpCmd::Remove { name, root } => commands::mcp::remove_cmd(root.as_deref(), &name),
             cli::McpCmd::List { json, root } => commands::mcp::list_cmd(root.as_deref(), json),

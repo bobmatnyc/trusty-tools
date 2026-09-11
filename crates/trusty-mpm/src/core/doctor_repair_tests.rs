@@ -514,7 +514,7 @@ fn output_style_repair_is_empty_when_in_sync() {
     let home = tempfile::tempdir().unwrap();
     deploy_styles(home.path());
     assert!(
-        repair_output_style(home.path(), RepairMode::DryRun).is_empty(),
+        repair_output_style(home.path(), None, RepairMode::DryRun).is_empty(),
         "an in-sync tier produces no step, so `--fix` prints nothing about it"
     );
 }
@@ -526,7 +526,7 @@ fn output_style_repair_plans_the_drifted_file() {
     let target = style_path(home.path(), 0);
     fs::write(&target, "stale text").unwrap();
 
-    let steps = repair_output_style(home.path(), RepairMode::DryRun);
+    let steps = repair_output_style(home.path(), None, RepairMode::DryRun);
     assert_eq!(steps.len(), 1, "{steps:?}");
     assert_eq!(steps[0].check, "output_style_staleness");
     assert_eq!(steps[0].path, target);
@@ -540,7 +540,7 @@ fn output_style_repair_dry_run_writes_nothing() {
     let target = style_path(home.path(), 0);
     fs::write(&target, "stale text").unwrap();
 
-    repair_output_style(home.path(), RepairMode::DryRun);
+    repair_output_style(home.path(), None, RepairMode::DryRun);
 
     assert_eq!(
         fs::read_to_string(&target).unwrap(),
@@ -560,7 +560,7 @@ fn output_style_repair_applies_and_reports_from_disk() {
     fs::write(&drifted, "stale text").unwrap();
     fs::remove_file(&missing).unwrap();
 
-    let steps = repair_output_style(home.path(), RepairMode::Apply);
+    let steps = repair_output_style(home.path(), None, RepairMode::Apply);
 
     assert_eq!(steps.len(), 2, "{steps:?}");
     assert!(
@@ -576,7 +576,48 @@ fn output_style_repair_applies_and_reports_from_disk() {
         crate::core::bundle::OUTPUT_STYLES[1].content
     );
     assert!(
-        repair_output_style(home.path(), RepairMode::DryRun).is_empty(),
+        repair_output_style(home.path(), None, RepairMode::DryRun).is_empty(),
+        "the repair must actually clear the finding it reported"
+    );
+}
+
+/// #7423: a drifted style in the managed `$CLAUDE_CONFIG_DIR` tier is rewritten,
+/// and a clean operator-home tier is left alone.
+///
+/// Why: `tm doctor --fix --yes` on 1.5.29 redeployed `~/.claude/output-styles/`
+/// and left `$CLAUDE_CONFIG_DIR/output-styles/trusty-mpm.md` at its old 12,012
+/// bytes — the copy every tm-launched session reads. Fails on `origin/main`,
+/// whose body hardcoded `home.join(".claude")`.
+/// Test: this function IS the test.
+#[test]
+fn output_style_repair_rewrites_the_managed_tier() {
+    let home = tempfile::tempdir().unwrap();
+    let managed = tempfile::tempdir().unwrap();
+    deploy_styles(home.path());
+
+    let managed_styles = managed.path().join("output-styles");
+    fs::create_dir_all(&managed_styles).unwrap();
+    for style in crate::core::bundle::OUTPUT_STYLES {
+        fs::write(managed_styles.join(style.file_name), style.content).unwrap();
+    }
+    let stale = managed_styles.join(crate::core::bundle::OUTPUT_STYLES[0].file_name);
+    fs::write(&stale, "stale managed copy").unwrap();
+
+    let steps = repair_output_style(home.path(), Some(managed.path()), RepairMode::Apply);
+
+    assert_eq!(steps.len(), 1, "only the managed copy drifted: {steps:?}");
+    assert!(steps[0].changed(), "{steps:?}");
+    assert!(
+        steps[0].what.contains("managed config"),
+        "the step must name the tier it wrote: {steps:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(&stale).unwrap(),
+        crate::core::bundle::OUTPUT_STYLES[0].content,
+        "the managed copy must be rewritten from the bundled asset"
+    );
+    assert!(
+        repair_output_style(home.path(), Some(managed.path()), RepairMode::DryRun).is_empty(),
         "the repair must actually clear the finding it reported"
     );
 }
@@ -608,7 +649,7 @@ fn one_unreadable_style_does_not_fail_a_sibling_that_was_written() {
         return;
     }
 
-    let steps = repair_output_style(home.path(), RepairMode::Apply);
+    let steps = repair_output_style(home.path(), None, RepairMode::Apply);
     let _ = fs::set_permissions(&blocked, fs::Permissions::from_mode(0o600));
 
     let drifted_step = steps
@@ -657,7 +698,7 @@ fn output_style_repair_refuses_an_unreadable_file() {
         return;
     }
 
-    let steps = repair_output_style(home.path(), RepairMode::Apply);
+    let steps = repair_output_style(home.path(), None, RepairMode::Apply);
     let _ = fs::set_permissions(&target, fs::Permissions::from_mode(0o600));
 
     assert_eq!(steps.len(), 1, "{steps:?}");

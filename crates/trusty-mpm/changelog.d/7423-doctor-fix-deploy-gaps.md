@@ -1,0 +1,4 @@
+Fixed
+
+- `tm doctor --fix` now deploys a bundled skill that reached no tier at all. `skill_staleness` audits the deploy ledger UNION this binary's own bundled roster at the managed `$CLAUDE_CONFIG_DIR/skills` tier, so a skill the binary ships and no deploy has ever written reports `Missing` there instead of producing no finding; the operator-home and project tiers keep auditing the ledger alone, per the 2026-09-01 user-tier-only ruling (#7423, #6586).
+- `output_style_staleness` and its `tm doctor --fix` repair now cover both style tiers and name the tier in every finding. The managed `$CLAUDE_CONFIG_DIR/output-styles/` copy is what a tm-launched session reads, and it went unscanned and unrepaired while `~/.claude/output-styles/` was redeployed. Unrecognized files under `output-styles/` are still named and never deleted (#7423).

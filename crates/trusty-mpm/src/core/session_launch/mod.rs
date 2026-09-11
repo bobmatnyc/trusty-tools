@@ -83,7 +83,7 @@ use crate::core::paths::FrameworkPaths;
 use crate::core::skill_deployer::DeployStats;
 use settings::{
     deploy_output_style, preseed_workspace_trust_home, remove_global_trusty_memory_hooks,
-    write_output_style, write_project_hooks, write_status_line,
+    write_enabled_plugins, write_output_style, write_project_hooks, write_status_line,
 };
 
 /// Re-export of the project-tier output-style/statusLine resolution primitives
@@ -1035,6 +1035,18 @@ fn prepare_session_inner(
     // still launches, it just shows the operator's default style.
     if let Err(err) = write_output_style(project_dir, Some(active_style_id)) {
         tracing::warn!("failed to set trusty-mpm output style: {err}");
+    }
+
+    // #7422: write the project-tier `enabledPlugins` allowlist beside the output
+    // style. Default-deny: every plugin the managed config dir knows about is
+    // written `false` unless this project's `[session] plugins` names it.
+    // Non-fatal — a failure costs the project its plugin scoping, not its
+    // session, and the unscoped state is exactly the pre-#7422 behaviour.
+    if let Err(err) = write_enabled_plugins(
+        project_dir,
+        crate::core::trusty_tools_config::managed_claude_config_dir().as_deref(),
+    ) {
+        tracing::warn!("failed to write the project plugin allowlist: {err}");
     }
 
     // Inject `tm statusline` into the project's `.claude/settings.json` so

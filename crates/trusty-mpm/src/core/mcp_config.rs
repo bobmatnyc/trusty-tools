@@ -391,6 +391,51 @@ pub fn seed_builtin_servers(config_dir: &Path) -> Result<Vec<String>> {
     Ok(seeded)
 }
 
+/// Declare an MCP server in a PROJECT's own `.mcp.json` (#7422).
+///
+/// Why: since default-deny scoping, a server a project needs has two possible
+/// homes — the shared `<config_dir>/.claude.json` map plus a `[session]
+/// mcp_servers` opt-in naming it, or the project's own `.mcp.json`, which
+/// [`crate::core::session_mcp_scope::resolve_scope`] always includes. ADR-0042
+/// asks for ONE declaration point per server, and `.mcp.json` is the one that
+/// keeps it: the definition and the permission are the same line, it travels
+/// with the clone, and it shows up in the PR that needed it. The opt-in list
+/// stays for servers whose definition genuinely belongs to the operator's
+/// machine (a secret-bearing remote, a path only that host has).
+/// What: reads `<workspace>/.mcp.json` (an absent or non-object file starts
+/// from `{}`; a MALFORMED one is an error, never a silent overwrite — this file
+/// is usually git-tracked), sets `mcpServers[name] = entry`, and writes it back
+/// pretty-printed. Returns `Ok(false)` with no write when the key already maps
+/// to an equal value.
+///
+/// # Errors
+///
+/// An unreadable or malformed `.mcp.json`, or a failed write.
+/// Test: `add_project_server_creates_the_file`,
+/// `add_project_server_preserves_other_servers`,
+/// `add_project_server_is_idempotent`,
+/// `add_project_server_refuses_a_malformed_file`.
+pub fn add_project_server(workspace: &Path, name: &str, entry: Value) -> Result<bool> {
+    let path = workspace.join(MCP_JSON);
+    let mut config: Value = match std::fs::read_to_string(&path) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Value::Object(Map::new()),
+        Err(err) => return Err(err).with_context(|| format!("reading {}", path.display())),
+        Ok(text) if text.trim().is_empty() => Value::Object(Map::new()),
+        Ok(text) => serde_json::from_str(&text)
+            .with_context(|| format!("{} is not valid JSON; fix it by hand", path.display()))?,
+    };
+    if !config.is_object() {
+        anyhow::bail!("{} does not hold a JSON object", path.display());
+    }
+    let servers = mcp_servers_mut(&mut config);
+    if servers.get(name) == Some(&entry) {
+        return Ok(false);
+    }
+    servers.insert(name.to_string(), entry);
+    write(&path, &config)?;
+    Ok(true)
+}
+
 /// Remove a user-scope MCP server.
 ///
 /// Why: `tm mcp remove` drops a server the operator no longer wants injected

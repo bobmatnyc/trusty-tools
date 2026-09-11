@@ -351,6 +351,14 @@ pub(crate) async fn launch(
     // the shared tmux server just like the daemon path — wrap it in the
     // disclaim-exec so tccd blames Claude Code, not the tmux server. No-op off
     // macOS / under TM_DISABLE_SPAWN_DISCLAIM.
+    // #7422: compose this session's default-deny MCP config before the line
+    // that names it. Fatal — launching without `--mcp-config` would hand the
+    // pane the whole shared server map.
+    let scoped_mcp = trusty_mpm::core::session_mcp_scope::provision_for_spawn(
+        &managed_path,
+        config_dir.as_deref(),
+    )
+    .map_err(|err| anyhow::anyhow!("failed to compose the session-scoped MCP config: {err}"))?;
     let claude_cmd = trusty_mpm::core::spawn_disclaim::disclaim_pane_command(
         // #4181: `config_dir` selects `--setting-sources user,project,local` and
         // carries the #2246 OAuth token; `None` keeps the pre-#4181 posture.
@@ -361,6 +369,7 @@ pub(crate) async fn launch(
             // #4181: the per-project MCP pins the shared user-scope declarations
             // cannot carry as arguments.
             &trusty_mpm::core::mcp_session_env::session_mcp_env(&managed_path, Some(&origin_url)),
+            scoped_mcp.as_deref(),
         ),
     );
 
@@ -623,12 +632,19 @@ pub(crate) async fn connect(
         // #2997: disclaim the pane's `claude` off the shared tmux server (same
         // wrapper the daemon + `tm launch` paths use). No-op off macOS / under
         // TM_DISABLE_SPAWN_DISCLAIM.
+        // #7422: same fail-closed composition as `tm launch`.
+        let scoped_mcp =
+            trusty_mpm::core::session_mcp_scope::provision_for_spawn(&path, config_dir.as_deref())
+                .map_err(|err| {
+                    anyhow::anyhow!("failed to compose the session-scoped MCP config: {err}")
+                })?;
         let claude_cmd =
             trusty_mpm::core::spawn_disclaim::disclaim_pane_command(&connect_claude_cmd(
                 prompt_path.as_deref(),
                 config_dir.as_deref(),
                 // #4181: the per-project MCP pins.
                 &trusty_mpm::core::mcp_session_env::session_mcp_env(&path, None),
+                scoped_mcp.as_deref(),
             ));
         let send = trusty_mpm::core::tmux::send_line(
             None,
@@ -674,8 +690,17 @@ pub(crate) fn connect_claude_cmd(
     prompt_file: Option<&std::path::Path>,
     config_dir: Option<&std::path::Path>,
     mcp_env: &[(String, String)],
+    scoped_mcp: Option<&std::path::Path>,
 ) -> String {
-    trusty_mpm::core::model_inject::build_claude_command(None, prompt_file, config_dir, mcp_env)
+    trusty_mpm::core::model_inject::build_claude_command(
+        None,
+        prompt_file,
+        config_dir,
+        mcp_env,
+        // #7422: the composed default-deny MCP file, already written by the
+        // caller; `None` only when the config dir did not relocate.
+        scoped_mcp,
+    )
 }
 
 /// Relocate `CLAUDE_CONFIG_DIR` for an interactive launch, provisioning and

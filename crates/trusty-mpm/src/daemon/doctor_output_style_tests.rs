@@ -32,6 +32,14 @@ fn deploy_default_style(home: &Path) {
     std::fs::write(styles_dir.join(default.file_name), default.content).unwrap();
 }
 
+/// A `FrameworkPaths` rooted under `home`, so the managed-config tier the
+/// staleness probe scans is inside the temp dir rather than the real one (#7423).
+fn hermetic_paths(home: &Path) -> FrameworkPaths {
+    let mut paths = FrameworkPaths::under(home);
+    paths.trusty_mpm_root = None;
+    paths
+}
+
 /// Deploy every bundled style, byte-exact, under `<home>/.claude/output-styles/`.
 fn deploy_all_styles(home: &Path) {
     let styles_dir = home.join(".claude").join("output-styles");
@@ -261,7 +269,7 @@ fn staleness_ok_when_in_sync() {
     // All three bundled styles deployed byte-exact must be Ok.
     let home = tempfile::tempdir().unwrap();
     deploy_all_styles(home.path());
-    let check = check_output_style_staleness(None, home.path());
+    let check = check_output_style_staleness(None, home.path(), &hermetic_paths(home.path()));
     assert_eq!(check.status, CheckStatus::Ok, "message: {}", check.message);
 }
 
@@ -282,7 +290,7 @@ fn staleness_warns_on_drift() {
     )
     .unwrap();
 
-    let check = check_output_style_staleness(None, home.path());
+    let check = check_output_style_staleness(None, home.path(), &hermetic_paths(home.path()));
     assert_eq!(check.status, CheckStatus::Warn);
     assert!(check.message.contains(first.file_name));
     assert!(
@@ -309,7 +317,7 @@ fn staleness_warns_on_orphan() {
     let styles_dir = home.path().join(".claude").join("output-styles");
     std::fs::write(styles_dir.join("claude-mpm.md"), "pre-rebrand lineage").unwrap();
 
-    let check = check_output_style_staleness(None, home.path());
+    let check = check_output_style_staleness(None, home.path(), &hermetic_paths(home.path()));
     assert_eq!(check.status, CheckStatus::Warn);
     assert!(check.message.contains("claude-mpm.md"));
     assert!(
@@ -323,7 +331,7 @@ fn staleness_ok_when_dir_missing() {
     // Nothing deployed yet is not staleness — `check_output_style` already
     // reports on that state (Warn/Fail depending on configuration).
     let home = tempfile::tempdir().unwrap();
-    let check = check_output_style_staleness(None, home.path());
+    let check = check_output_style_staleness(None, home.path(), &hermetic_paths(home.path()));
     assert_eq!(check.status, CheckStatus::Ok);
 }
 
@@ -334,7 +342,7 @@ fn staleness_ok_when_file_never_deployed() {
     // that state is `check_output_style`'s Fail, not this probe's Warn.
     let home = tempfile::tempdir().unwrap();
     deploy_default_style(home.path()); // only OUTPUT_STYLES[0]
-    let check = check_output_style_staleness(None, home.path());
+    let check = check_output_style_staleness(None, home.path(), &hermetic_paths(home.path()));
     assert_eq!(check.status, CheckStatus::Ok, "message: {}", check.message);
 }
 
@@ -354,8 +362,60 @@ fn staleness_orphan_exempts_configured_custom_id() {
     )
     .unwrap();
 
-    let check = check_output_style_staleness(None, home.path());
+    let check = check_output_style_staleness(None, home.path(), &hermetic_paths(home.path()));
     assert_eq!(check.status, CheckStatus::Ok, "message: {}", check.message);
+}
+
+/// #7423: a DRIFTED copy in the managed `$CLAUDE_CONFIG_DIR` tier must Warn
+/// even when `~/.claude/output-styles/` is byte-perfect.
+///
+/// Why: that is the measured 2026-09-11 state after `tm doctor --fix --yes` on
+/// 1.5.29 — the home copy redeployed, the managed copy left at the old 12,012
+/// bytes, and the probe reported `Ok`. The managed copy is the one a tm-launched
+/// session reads (`SETTING_SOURCES_FLAG_RELOCATED`), so `Ok` there is the
+/// report that matters being wrong. Fails on `origin/main`, which scanned
+/// `<home>/.claude` and nothing else.
+/// Test: this test.
+#[test]
+fn staleness_warns_on_managed_config_drift() {
+    let home = tempfile::tempdir().unwrap();
+    deploy_all_styles(home.path());
+
+    let paths = hermetic_paths(home.path());
+    let managed_styles = paths.managed_claude_config_dir().join("output-styles");
+    std::fs::create_dir_all(&managed_styles).unwrap();
+    let first = &OUTPUT_STYLES[0];
+    for style in OUTPUT_STYLES {
+        std::fs::write(managed_styles.join(style.file_name), style.content).unwrap();
+    }
+    std::fs::write(
+        managed_styles.join(first.file_name),
+        "stale pre-1.5.29 managed copy",
+    )
+    .unwrap();
+
+    let check = check_output_style_staleness(None, home.path(), &paths);
+    assert_eq!(
+        check.status,
+        CheckStatus::Warn,
+        "message: {}",
+        check.message
+    );
+    assert!(
+        check.message.contains("managed config"),
+        "the finding must name the tier: {}",
+        check.message
+    );
+    assert!(
+        check.message.contains(first.file_name),
+        "the finding must name the file: {}",
+        check.message
+    );
+    assert!(
+        !check.message.contains("operator home"),
+        "the operator's own copy is in sync and must not be reported: {}",
+        check.message
+    );
 }
 
 #[test]

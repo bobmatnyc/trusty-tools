@@ -39,7 +39,10 @@
 //! `<stem>` and a nested `<stem>/references/<file>.md`. Handling only the first
 //! made 80 of this machine's 132 keys permanently unverifiable (#4622 review,
 //! HIGH-1); [`deployed_path`] is the one resolver both the audit and the repair
-//! use.
+//! use. At the tier that receives the bundled roster the reference's OWN keys
+//! join the ledger's, so a never-deployed bundled skill is visible as
+//! [`SkillDrift::Missing`] rather than as no key at all (#7423) — see
+//! [`audit_deployed_skills_with_roster`].
 //!
 //! Test: `skill_drift_tests.rs`.
 
@@ -320,6 +323,35 @@ pub fn key_stem(manifest_key: &str) -> &str {
 /// Findings are sorted by key for stable output.
 /// Test: `skill_drift_tests.rs`.
 pub fn audit_deployed_skills(reference: &SkillReference, dest_dir: &Path) -> TierAudit {
+    audit_deployed_skills_with_roster(reference, dest_dir, false)
+}
+
+/// [`audit_deployed_skills`], optionally holding the tier to the FULL roster.
+///
+/// Why (#7423): the audit iterated `manifest.managed.keys()` — the ON-DISK
+/// ledger — so a bundled skill that had never been deployed anywhere produced
+/// no key, no finding, and nothing for `super::skill_repair` to act on. The new
+/// `tm-prose-style` skill shipped embedded in `trusty-mpm` 1.5.29 and
+/// `tm doctor --fix --yes` deployed it to no tier at all: every probe was
+/// looking only at what was already there. Unioning the reference roster in is
+/// what makes "absent" expressible.
+/// What: identical to [`audit_deployed_skills`] except that when
+/// `expect_bundled_roster` is set, the audited key set is `manifest.managed`
+/// UNION `reference.assets` — so a roster key with no deployed file classifies
+/// [`SkillDrift::Missing`]. Pass it ONLY for the tier that receives the bundled
+/// roster ([`super::skill_deploy_tiers::SkillDeployTier::receives_bundled_roster`]);
+/// asserting the roster at the operator home or the project tier would
+/// contradict the 2026-09-01 ruling (#6586) and make the repair deploy there.
+/// A ledger that is absent or unreadable still yields NO findings whatever this
+/// flag says — an un-attributable tier is not evidence that anything is missing
+/// from it.
+/// Test: `a_bundled_skill_absent_from_the_manifest_is_missing_at_the_roster_tier`,
+/// `a_bundled_skill_absent_is_not_a_finding_without_the_roster_flag`.
+pub fn audit_deployed_skills_with_roster(
+    reference: &SkillReference,
+    dest_dir: &Path,
+    expect_bundled_roster: bool,
+) -> TierAudit {
     let manifest_path = dest_dir.join(SKILL_MANIFEST_FILE);
     // #5626: the parsed document is CARRIED to the findings loop rather than
     // re-read there. The old second read went through `SkillManifest::load`,
@@ -373,15 +405,23 @@ pub fn audit_deployed_skills(reference: &SkillReference, dest_dir: &Path) -> Tie
         };
     };
 
-    let mut findings: Vec<SkillDriftFinding> = manifest
-        .managed
-        .keys()
+    // #7423: the ledger alone cannot name a skill that was never deployed, so
+    // at the roster tier the reference's own keys join it. `BTreeSet` both
+    // deduplicates the overlap and yields the sorted order the old explicit
+    // `sort_by` produced.
+    let mut keys: std::collections::BTreeSet<&str> =
+        manifest.managed.keys().map(String::as_str).collect();
+    if expect_bundled_roster {
+        keys.extend(reference.assets.keys().map(String::as_str));
+    }
+
+    let findings: Vec<SkillDriftFinding> = keys
+        .into_iter()
         .map(|key| SkillDriftFinding {
-            stem: key.clone(),
+            stem: key.to_string(),
             state: classify(reference, &manifest, dest_dir, key),
         })
         .collect();
-    findings.sort_by(|a, b| a.stem.cmp(&b.stem));
     TierAudit {
         manifest: state,
         findings,

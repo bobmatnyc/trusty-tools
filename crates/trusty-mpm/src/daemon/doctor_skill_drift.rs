@@ -32,7 +32,8 @@ use crate::core::doctor::{CheckStatus, DoctorCheck};
 use crate::core::paths::FrameworkPaths;
 use crate::core::skill_deploy_tiers::skill_deploy_tiers;
 use crate::core::skill_drift::{
-    ManifestState, SkillDrift, SkillReference, audit_deployed_skills, key_stem, skill_reference,
+    ManifestState, SkillDrift, SkillReference, audit_deployed_skills_with_roster, key_stem,
+    skill_reference,
 };
 
 /// Name of this check as it appears in `tm doctor` output.
@@ -131,7 +132,10 @@ fn report(
     let mut conventions: Vec<String> = Vec::new();
 
     for tier in skill_deploy_tiers(paths, project_dir) {
-        let audit = audit_deployed_skills(reference, &tier.dir);
+        // #7423: a bundled skill this binary ships but no deploy ever wrote is
+        // `Missing` at the managed tier — previously it produced no key at all.
+        let audit =
+            audit_deployed_skills_with_roster(reference, &tier.dir, tier.receives_bundled_roster);
         // #4622 review (MEDIUM): a tier whose ownership ledger is missing over
         // deployed content, or present but unparseable, has NOT been shown to be
         // clean — `SkillManifest::load` returns an empty manifest for both, which
@@ -197,8 +201,12 @@ fn report(
         ));
     }
     if !missing.is_empty() {
+        // #7423: a Missing key is no longer only "the ledger recorded it and the
+        // file went away" — at the managed tier the bundled roster is audited
+        // too, so it also covers a skill no deploy has ever written.
         parts.push(format!(
-            "{} recorded as deployed but ABSENT from disk ({})",
+            "{} ABSENT from disk ({}) — recorded as deployed and since removed, or bundled in \
+             this binary and never deployed here; `tm doctor --fix --yes` writes them",
             missing.len(),
             summarise(&missing)
         ));

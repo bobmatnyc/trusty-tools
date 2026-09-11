@@ -2,7 +2,8 @@ use super::search_index::register_project_index;
 use super::settings::{
     clean_global_trusty_memory_hooks, deploy_output_style, is_stale_bare_statusline_command,
     is_stale_statusline_command, preseed_workspace_trust, resolve_palace_slug,
-    resolve_statusline_binary_with, write_output_style, write_project_hooks, write_status_line,
+    resolve_statusline_binary_with, write_enabled_plugins, write_output_style, write_project_hooks,
+    write_status_line,
 };
 use super::*;
 use tempfile::tempdir;
@@ -2475,5 +2476,183 @@ fn resolve_palace_slug_override_env_wins() {
     assert_eq!(
         resolve_palace_slug(tmp.path(), Some("git@github.com:acme/widget.git")).as_deref(),
         Some("operator-choice")
+    );
+}
+
+// ─── #7422: the project-tier `enabledPlugins` allowlist ───────────────────
+
+/// Write a managed config dir whose installed-plugin index lists `keys`.
+fn plugin_index(config_dir: &std::path::Path, keys: &[&str]) {
+    let mut plugins = serde_json::Map::new();
+    for key in keys {
+        plugins.insert((*key).to_string(), serde_json::json!([]));
+    }
+    std::fs::create_dir_all(config_dir.join("plugins")).unwrap();
+    std::fs::write(
+        config_dir.join("plugins").join("installed_plugins.json"),
+        serde_json::to_string_pretty(&serde_json::json!({ "plugins": plugins })).unwrap(),
+    )
+    .unwrap();
+}
+
+/// Read back `<project>/.claude/settings.json`.
+fn read_settings(project: &std::path::Path) -> serde_json::Value {
+    let raw = std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap();
+    serde_json::from_str(&raw).unwrap()
+}
+
+/// A plugin the project never opted into is written `false` — that IS the
+/// default-deny decision, and nothing else in the file records it.
+#[test]
+fn write_enabled_plugins_denies_a_non_opted_plugin() {
+    let tmp = tempdir().unwrap();
+    let project = tmp.path().join("repo");
+    let config_dir = tmp.path().join("cfg");
+    std::fs::create_dir_all(&project).unwrap();
+    plugin_index(&config_dir, &["aws-core@m", "vercel@m"]);
+
+    write_enabled_plugins(&project, Some(&config_dir)).unwrap();
+
+    let settings = read_settings(&project);
+    assert_eq!(
+        settings["enabledPlugins"]["aws-core@m"],
+        serde_json::json!(false)
+    );
+    assert_eq!(
+        settings["enabledPlugins"]["vercel@m"],
+        serde_json::json!(false)
+    );
+}
+
+/// Plant `[session] plugins = ["aws-core"]` in `project`.
+fn declare_plugin_opt_in(project: &std::path::Path) {
+    std::fs::write(
+        project.join(crate::core::project_config::PROJECT_CONFIG_FILE),
+        "[session]\nplugins = [\"aws-core\"]\n",
+    )
+    .unwrap();
+}
+
+/// Record a real `tm project trust` grant for `project` under the current
+/// `$HOME`. Callers MUST be `#[serial]` with `$HOME` already redirected.
+fn trust_project(project: &std::path::Path) {
+    let root = crate::core::project_trust::trust_store_root().expect("HOME was redirected");
+    let mut store = crate::core::project_trust::ProjectTrustStore::load(&root).unwrap();
+    store.trust(project);
+    store.save().unwrap();
+}
+
+/// A plugin named in `[session] plugins` is written `true` — in a TRUSTED
+/// project. #7422: the opt-in list ships with the clone, so the grant is what
+/// makes it mean anything.
+#[test]
+#[serial_test::serial]
+fn write_enabled_plugins_enables_an_opted_in_plugin() {
+    let tmp = tempdir().unwrap();
+    let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
+    let project = tmp.path().join("repo");
+    let config_dir = tmp.path().join("cfg");
+    std::fs::create_dir_all(&project).unwrap();
+    plugin_index(&config_dir, &["aws-core@m", "vercel@m"]);
+    declare_plugin_opt_in(&project);
+    trust_project(&project);
+
+    write_enabled_plugins(&project, Some(&config_dir)).unwrap();
+
+    let settings = read_settings(&project);
+    assert_eq!(
+        settings["enabledPlugins"]["aws-core@m"],
+        serde_json::json!(true)
+    );
+    assert_eq!(
+        settings["enabledPlugins"]["vercel@m"],
+        serde_json::json!(false)
+    );
+}
+
+/// The same declaration in an UNTRUSTED project turns nothing on (#7422).
+///
+/// Why: `[session] plugins` is committed, so a hostile clone naming an
+/// operator-installed plugin would otherwise load that plugin's skills,
+/// commands and hooks into a pane launched with
+/// `--dangerously-skip-permissions`. This is the ungated-twin regression: the
+/// only difference from the test above is the missing grant.
+#[test]
+#[serial_test::serial]
+fn write_enabled_plugins_denies_an_opt_in_from_an_untrusted_project() {
+    let tmp = tempdir().unwrap();
+    let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
+    let project = tmp.path().join("repo");
+    let config_dir = tmp.path().join("cfg");
+    std::fs::create_dir_all(&project).unwrap();
+    plugin_index(&config_dir, &["aws-core@m", "vercel@m"]);
+    declare_plugin_opt_in(&project);
+
+    write_enabled_plugins(&project, Some(&config_dir)).unwrap();
+
+    let settings = read_settings(&project);
+    assert_eq!(
+        settings["enabledPlugins"]["aws-core@m"],
+        serde_json::json!(false),
+        "an in-repo declaration is not its own permission"
+    );
+    assert_eq!(
+        settings["enabledPlugins"]["vercel@m"],
+        serde_json::json!(false)
+    );
+}
+
+/// tm owns only the keys it enumerated: an operator's own key and every
+/// unrelated settings key survive the write.
+#[test]
+fn write_enabled_plugins_preserves_foreign_keys() {
+    let tmp = tempdir().unwrap();
+    let project = tmp.path().join("repo");
+    let config_dir = tmp.path().join("cfg");
+    std::fs::create_dir_all(project.join(".claude")).unwrap();
+    plugin_index(&config_dir, &["aws-core@m"]);
+    std::fs::write(
+        project.join(".claude").join("settings.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "outputStyle": "operator-choice",
+            "enabledPlugins": { "hand-added@local": true },
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    write_enabled_plugins(&project, Some(&config_dir)).unwrap();
+
+    let settings = read_settings(&project);
+    assert_eq!(
+        settings["outputStyle"],
+        serde_json::json!("operator-choice")
+    );
+    assert_eq!(
+        settings["enabledPlugins"]["hand-added@local"],
+        serde_json::json!(true),
+        "a key tm never enumerated is the operator's"
+    );
+    assert_eq!(
+        settings["enabledPlugins"]["aws-core@m"],
+        serde_json::json!(false)
+    );
+}
+
+/// No managed config dir means nothing was enumerated, so nothing is written —
+/// an empty map would disable plugins tm never saw.
+#[test]
+fn write_enabled_plugins_skips_without_a_config_dir() {
+    let tmp = tempdir().unwrap();
+    let project = tmp.path().join("repo");
+    std::fs::create_dir_all(&project).unwrap();
+
+    write_enabled_plugins(&project, None).unwrap();
+
+    assert!(
+        !project.join(".claude").join("settings.json").exists(),
+        "nothing to decide means nothing to write"
     );
 }

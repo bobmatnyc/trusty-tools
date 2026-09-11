@@ -120,6 +120,9 @@ fn launch_lines() -> Vec<(&'static str, Vec<String>)> {
         Some(&config_dir),
         Some(PROBE_TOKEN),
         &[],
+        // #7422: the probe reads the env prefix only; a scoped MCP file would
+        // add flags it does not inspect and a path that does not exist.
+        None,
     );
     let relaunch_line = crate::daemon::spawn_command::relaunch_command();
     // #4467 round 2: the two launch lines the anti-drift scan found uncovered.
@@ -129,9 +132,12 @@ fn launch_lines() -> Vec<(&'static str, Vec<String>)> {
     ));
 
     // `Command` builders: an `env_remove` shows up as a `None` value.
+    // #7422: `None` for the composed MCP file — this probe checks env scrubbing
+    // and composes nothing, so it must not name a file that does not exist.
     let run_cmd = crate::core::standalone::run::build_launch_command(
         std::path::Path::new("/probe/repo"),
         &config_dir,
+        None,
         None,
     );
     let stream_cmd = crate::control::backend::stream_json::build_claude_command(
