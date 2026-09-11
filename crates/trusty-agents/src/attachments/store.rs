@@ -138,16 +138,26 @@ impl AttachmentStore {
             path: session_dir.clone(),
             source,
         })?;
+
+        // #7370: ONE critical section covers choosing the name, writing the
+        // bytes and recording the row. Choosing the name outside it let two
+        // concurrent uploads of the same name both pick the unsuffixed one;
+        // the second then skipped its write on `!target.exists()` and recorded
+        // a row whose digest and size described bytes that were never on disk.
+        let manifest = Manifest::at(&session_dir, session_id);
+        let mut guard = manifest.lock()?;
         let stored_name = self.reserve_name(&session_dir, &name, &id, bytes, &digest)?;
         let target = session_dir.join(&stored_name);
-        if !target.exists() {
+        let wrote = !target.exists();
+        if wrote {
             std::fs::write(&target, bytes).map_err(|source| AttachmentError::Io {
                 path: target.clone(),
                 source,
             })?;
         }
 
-        Manifest::at(&session_dir, session_id).append(
+        match manifest.append_with(
+            &mut guard,
             &id,
             &name,
             &media_type,
@@ -155,7 +165,23 @@ impl AttachmentStore {
             &digest,
             &stored_name,
             &chrono::Utc::now().to_rfc3339(),
-        )
+        ) {
+            Ok(row) => Ok(row),
+            Err(e) => {
+                // #7370: a file no row refers to is unreachable and invisible —
+                // it would sit in the user's home forever. Removed only when
+                // THIS call created it, so a retry that reused an existing
+                // identical file cannot delete what another row still names.
+                if wrote && let Err(removal) = std::fs::remove_file(&target) {
+                    tracing::warn!(
+                        path = %target.display(),
+                        error = %removal,
+                        "attachments: could not remove the orphaned file left by a failed manifest write"
+                    );
+                }
+                Err(e)
+            }
+        }
     }
 
     /// Every attachment recorded for a session, oldest first.
@@ -190,8 +216,16 @@ impl AttachmentStore {
         id: &str,
     ) -> Result<(Attachment, Vec<u8>), AttachmentError> {
         let row = self.get(session_id, id)?;
-        let bytes = match std::fs::read(&row.stored_path) {
-            Ok(bytes) => bytes,
+        let session_dir = self.session_dir(session_id)?;
+        // #7370: the second half of the confinement, and it runs BEFORE a byte
+        // is read. `Manifest::hydrate` already refuses a stored name that is
+        // not one ordinary segment; this catches what a name check cannot — a
+        // SYMLINK sitting inside the session directory under an innocent name.
+        // Both sides are canonicalized, because the session directory itself
+        // routinely contains symlinks (`/var` on macOS) and comparing a
+        // resolved path against an unresolved base would refuse every read.
+        let real = match row.stored_path.canonicalize() {
+            Ok(real) => real,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Err(AttachmentError::MissingFile {
                     id: row.id,
@@ -205,6 +239,23 @@ impl AttachmentStore {
                 });
             }
         };
+        let base = session_dir
+            .canonicalize()
+            .map_err(|source| AttachmentError::Io {
+                path: session_dir.clone(),
+                source,
+            })?;
+        if !real.starts_with(&base) {
+            return Err(AttachmentError::TamperedManifest {
+                path: row.stored_path,
+                id: row.id,
+                reason: "it resolves outside the session directory".to_string(),
+            });
+        }
+        let bytes = std::fs::read(&real).map_err(|source| AttachmentError::Io {
+            path: real.clone(),
+            source,
+        })?;
         Ok((row, bytes))
     }
 
@@ -280,7 +331,7 @@ pub fn is_attachment_id(id: &str) -> bool {
 /// Test: `super::tests::store_tests::traversal_file_name_writes_nothing`,
 /// `super::tests::store_tests::session_traversal_is_refused`,
 /// `super::tests::store_tests::absolute_file_name_is_refused`.
-fn single_segment(raw: &str) -> Result<String, String> {
+pub(super) fn single_segment(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err("it is empty".to_string());

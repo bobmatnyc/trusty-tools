@@ -97,11 +97,12 @@ pub fn render(attachment: &Attachment, bytes: &[u8]) -> String {
         return format!("{header} — binary attachment; its contents are not included.");
     }
     let (text, truncated) = decode_capped(bytes, MAX_INLINE_TEXT_BYTES);
-    let fence = if attachment.media_type == "text/csv" {
+    let language = if attachment.media_type == "text/csv" {
         "csv"
     } else {
         "text"
     };
+    let fence = fence_for(&text);
     let note = if truncated {
         format!(
             "\n[truncated: the first {} of {} bytes are shown]",
@@ -111,7 +112,33 @@ pub fn render(attachment: &Attachment, bytes: &[u8]) -> String {
     } else {
         String::new()
     };
-    format!("{header}\n```{fence}\n{text}{note}\n```")
+    format!("{header}\n{fence}{language}\n{text}{note}\n{fence}")
+}
+
+/// The fence that can hold `content` without it breaking out.
+///
+/// Why: an attachment is arbitrary text, and a Markdown file or a code listing
+/// routinely contains a fence of its own. A fixed three-backtick fence ends at
+/// the file's first one, and the rest of the file is then read as prose - the
+/// model sees a truncated attachment and instructions that were never given to
+/// it. CommonMark ends a fenced block only at a run of AT LEAST as many
+/// backticks as opened it, so opening with one more than the longest run
+/// inside makes the content unable to close it.
+/// What: a run of `max(longest run in content, 2) + 1` backticks - three for
+/// ordinary content, four for content holding a three-backtick run, and so on.
+/// Test: `super::tests::model_input_tests::a_fence_inside_the_content_cannot_break_out`.
+fn fence_for(content: &str) -> String {
+    let mut run = 0usize;
+    let mut longest = 0usize;
+    for byte in content.bytes() {
+        if byte == b'`' {
+            run += 1;
+            longest = longest.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    "`".repeat(longest.max(2) + 1)
 }
 
 /// Join the user's own text to the rendered attachment blocks.

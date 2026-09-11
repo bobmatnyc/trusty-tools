@@ -134,11 +134,11 @@ impl Manifest {
             Err(source) => return Err(AttachmentError::Io { path, source }),
         };
         let document = self.decode(&raw, &path)?;
-        Ok(document
+        document
             .attachments
             .into_iter()
             .map(|row| self.hydrate(row))
-            .collect())
+            .collect()
     }
 
     /// The row with this id, or [`AttachmentError::NotFound`].
@@ -154,30 +154,22 @@ impl Manifest {
             })
     }
 
-    /// Record one attachment under an exclusive lock on the manifest.
+    /// Take the session's exclusive write lock.
     ///
-    /// Why: the read-modify-write has to be atomic against a second upload
-    /// into the same session, or one row silently replaces the other. The lock
-    /// is `fs4` advisory, matching `crate::state_writer`.
-    /// What: opens (creating) the manifest, locks it, decodes what is there,
-    /// appends the row, and rewrites the whole document in place. An id that
-    /// is already present REPLACES its row rather than duplicating it, so a
-    /// retried upload of the same id is idempotent.
-    /// Test: `super::tests::manifest_tests::append_then_rows_round_trips`,
-    /// `super::tests::manifest_tests::append_is_idempotent_on_one_id`.
-    #[allow(clippy::too_many_arguments)]
-    pub fn append(
-        &self,
-        id: &str,
-        file_name: &str,
-        media_type: &str,
-        size: u64,
-        sha256: &str,
-        stored_name: &str,
-        created_at: &str,
-    ) -> Result<Attachment, AttachmentError> {
+    /// Why: the lock has to cover MORE than the manifest's own read-modify-
+    /// write. `AttachmentStore::store` chooses a file name from what is already
+    /// on disk, writes the bytes, and then records the row — and all three have
+    /// to be one critical section, or two concurrent uploads of the same name
+    /// both choose the unsuffixed name and one of them records a digest for
+    /// bytes that are not there. Handing the caller a guard is what lets the
+    /// section span those three steps instead of only the last.
+    /// What: opens (creating) the manifest and takes an `fs4` exclusive
+    /// advisory lock on it, the mechanism `crate::state_writer` uses. The lock
+    /// is released when the guard drops, on every path including a panic.
+    /// Test: `super::tests::store_tests::concurrent_same_name_uploads_keep_their_bytes`.
+    pub fn lock(&self) -> Result<ManifestGuard, AttachmentError> {
         let path = self.path();
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
@@ -192,8 +184,61 @@ impl Manifest {
             path: path.clone(),
             source,
         })?;
-        let result = self.append_locked(
-            &mut file,
+        Ok(ManifestGuard { file, path })
+    }
+
+    /// Record one attachment, taking the lock for the duration of the call.
+    ///
+    /// Why: the shorthand for a caller that has nothing else to do under the
+    /// lock. `AttachmentStore::store` uses [`Self::lock`] +
+    /// [`Self::append_with`] instead, because it does.
+    /// Test: `super::tests::manifest_tests::append_then_rows_round_trips`,
+    /// `super::tests::manifest_tests::append_is_idempotent_on_one_id`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append(
+        &self,
+        id: &str,
+        file_name: &str,
+        media_type: &str,
+        size: u64,
+        sha256: &str,
+        stored_name: &str,
+        created_at: &str,
+    ) -> Result<Attachment, AttachmentError> {
+        let mut guard = self.lock()?;
+        self.append_with(
+            &mut guard,
+            id,
+            file_name,
+            media_type,
+            size,
+            sha256,
+            stored_name,
+            created_at,
+        )
+    }
+
+    /// Record one attachment under a lock the caller already holds.
+    ///
+    /// Why/What: see [`Self::lock`]. An id already present REPLACES its row
+    /// rather than duplicating it, so a retried write of the same id is
+    /// idempotent.
+    /// Test: `super::tests::manifest_tests::append_is_idempotent_on_one_id`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_with(
+        &self,
+        guard: &mut ManifestGuard,
+        id: &str,
+        file_name: &str,
+        media_type: &str,
+        size: u64,
+        sha256: &str,
+        stored_name: &str,
+        created_at: &str,
+    ) -> Result<Attachment, AttachmentError> {
+        let path = guard.path.clone();
+        self.append_locked(
+            &mut guard.file,
             &path,
             Row {
                 id: id.to_string(),
@@ -204,13 +249,10 @@ impl Manifest {
                 stored_name: stored_name.to_string(),
                 created_at: created_at.to_string(),
             },
-        );
-        let _ = fs4::FileExt::unlock(&file);
-        result
+        )
     }
 
-    /// The locked half of [`Self::append`], split out so the unlock above runs
-    /// on every path including an early error.
+    /// The body of an append, with the lock already held.
     fn append_locked(
         &self,
         file: &mut File,
@@ -243,7 +285,7 @@ impl Manifest {
         file.write_all(encoded.as_bytes()).map_err(io)?;
         file.write_all(b"\n").map_err(io)?;
         file.flush().map_err(io)?;
-        Ok(self.hydrate(row))
+        self.hydrate(row)
     }
 
     /// Decode a manifest body, treating an EMPTY file as a fresh session.
@@ -266,15 +308,57 @@ impl Manifest {
     }
 
     /// Resolve a stored row's name against this session's directory.
-    fn hydrate(&self, row: Row) -> Attachment {
-        Attachment {
+    ///
+    /// Why: this is the confinement for a manifest that has been EDITED. The
+    /// file is plain JSON in the user's own home tree, so its contents are not
+    /// this crate's word — and `Path::join` replaces the base when handed an
+    /// absolute component, so an unchecked `stored_name` of `/etc/passwd`
+    /// resolves to `/etc/passwd` rather than to something under the session.
+    /// The row is REFUSED, never repaired: a manifest that has been tampered
+    /// with must surface, not silently read a neighbouring file instead.
+    /// What: `stored_name` must be one ordinary path segment
+    /// ([`super::store::single_segment`], the same guard the upload applies to
+    /// the name it accepts). `AttachmentStore::read` then re-checks the
+    /// canonical result, which is what catches a symlink the name check cannot
+    /// see.
+    /// Test: `super::tests::manifest_tests::an_absolute_stored_name_is_refused`,
+    /// `super::tests::manifest_tests::a_traversal_stored_name_is_refused`.
+    fn hydrate(&self, row: Row) -> Result<Attachment, AttachmentError> {
+        let stored_name = super::store::single_segment(&row.stored_name).map_err(|reason| {
+            AttachmentError::TamperedManifest {
+                path: self.path(),
+                id: row.id.clone(),
+                reason: format!(
+                    "its stored name `{}` is rejected: {reason}",
+                    row.stored_name
+                ),
+            }
+        })?;
+        Ok(Attachment {
             id: row.id,
             session_id: self.session_id.clone(),
             file_name: row.file_name,
             media_type: row.media_type,
             size: row.size,
             sha256: row.sha256,
-            stored_path: self.session_dir.join(row.stored_name),
-        }
+            stored_path: self.session_dir.join(stored_name),
+        })
+    }
+}
+
+/// An exclusive advisory lock on one session's manifest.
+///
+/// Why: a guard rather than a scoped closure, so the critical section can span
+/// the caller's own filesystem work (see [`Manifest::lock`]). Unlocking on
+/// `Drop` is what makes every exit path — early `?`, panic, ordinary return —
+/// release it.
+pub struct ManifestGuard {
+    file: File,
+    path: PathBuf,
+}
+
+impl Drop for ManifestGuard {
+    fn drop(&mut self) {
+        let _ = fs4::FileExt::unlock(&self.file);
     }
 }

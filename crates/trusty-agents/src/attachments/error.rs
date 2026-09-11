@@ -55,6 +55,26 @@ pub enum AttachmentError {
         #[source]
         source: serde_json::Error,
     },
+
+    /// A manifest row whose stored name does not resolve inside its session
+    /// directory.
+    ///
+    /// Why: the manifest is a plain JSON file in the user's own home tree, so
+    /// it is EDITABLE — by the user, by anything else that can write there, or
+    /// by a process that should not be able to. A row saying
+    /// `stored_name: "/etc/passwd"` would otherwise resolve straight through
+    /// `Path::join`, whose absolute-component rule replaces the base rather
+    /// than appending to it. This is the refusal for that row: never repaired,
+    /// never renamed, and never a client error, because the request was fine
+    /// and the stored state is not.
+    /// Test: `super::tests::manifest_tests::an_absolute_stored_name_is_refused`,
+    /// `super::tests::manifest_tests::a_traversal_stored_name_is_refused`.
+    #[error("attachment `{id}` does not resolve inside its session directory ({path}): {reason}")]
+    TamperedManifest {
+        path: PathBuf,
+        id: String,
+        reason: String,
+    },
 }
 
 impl AttachmentError {

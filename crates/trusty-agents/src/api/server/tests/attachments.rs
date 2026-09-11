@@ -371,3 +371,84 @@ async fn send_refuses_too_many_attachments() {
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
+
+/// A server-side failure must not hand the caller an absolute path.
+///
+/// Why this is a regression: `refuse` used to return `error.to_string()` for
+/// every variant, and `Io`, `Manifest` and `MissingFile` all carry a path from
+/// the operator's home directory. A caller who can only address attachments by
+/// id was being told the on-disk layout of the tree they sit in.
+/// What: a manifest that opens but does not decode makes the upload fail after
+/// its own guards pass, which is the shortest route to a real 5xx. The body is
+/// checked for any path at all, and the orphaned file is checked for too — the
+/// same failure exercises both.
+#[tokio::test]
+async fn a_server_error_body_carries_no_path() {
+    let dir = tempfile::TempDir::new().expect("temp");
+    let session_path = session_dir(dir.path());
+    std::fs::create_dir_all(&session_path).expect("session dir");
+    std::fs::write(session_path.join("manifest.json"), "{ not json").expect("manifest");
+
+    let response = build_router(state_at(dir.path()))
+        .oneshot(upload_request(AGENT, "a.txt", "text/plain", b"payload"))
+        .await
+        .expect("upload");
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = json_of(response).await;
+    let message = body["error"].as_str().expect("error string");
+    assert!(
+        !message.contains('/'),
+        "a path leaked into a 5xx body: {message}"
+    );
+    assert!(
+        !message.contains(dir.path().to_str().unwrap()),
+        "the store root leaked into a 5xx body: {message}"
+    );
+    // The same failure arm: the bytes were written before the append failed,
+    // and nothing may be left behind for a row that was never recorded.
+    assert!(
+        !session_path.join("a.txt").exists(),
+        "a failed manifest write left an orphaned file"
+    );
+}
+
+/// A tampered manifest is refused over HTTP too, as a 5xx with no path.
+#[tokio::test]
+async fn download_refuses_a_tampered_stored_name() {
+    let dir = tempfile::TempDir::new().expect("temp");
+    let session_path = session_dir(dir.path());
+    std::fs::create_dir_all(&session_path).expect("session dir");
+    let id = "f".repeat(32);
+    let document = serde_json::json!({
+        "version": 1,
+        "session_id": session(),
+        "attachments": [{
+            "id": id,
+            "file_name": "innocent.txt",
+            "media_type": "text/plain",
+            "size": 6,
+            "sha256": "deadbeef",
+            "stored_name": "/etc/hosts",
+            "created_at": "2026-09-11T00:00:00Z",
+        }],
+    });
+    std::fs::write(session_path.join("manifest.json"), document.to_string()).expect("manifest");
+
+    let response = build_router(state_at(dir.path()))
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/agents/{AGENT}/sessions/{}/attachments/{id}",
+                    session()
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("download");
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = json_of(response).await;
+    assert!(!body["error"].as_str().unwrap().contains('/'), "{body}");
+}

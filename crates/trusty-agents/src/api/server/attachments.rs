@@ -253,16 +253,29 @@ fn urlencode(segment: &str) -> String {
 }
 
 /// Map a store refusal to its status, without string-matching the message.
+///
+/// Why: a client error's message is the caller's to read — it names the file
+/// they sent and the rule it broke, which is the whole point of refusing
+/// rather than repairing. A SERVER error's message is not: every non-client
+/// variant carries an absolute path from the operator's home directory, and
+/// returning it hands a caller the on-disk layout of a tree they can otherwise
+/// only address by id. Those go to the log and a generic body.
+/// What: `4xx` with the store's verbatim message for
+/// [`AttachmentError::is_client_error`]; otherwise [`internal`], which logs the
+/// detail and answers a fixed sentence.
+/// Test: `super::tests::attachments::a_server_error_body_carries_no_path`.
 pub(super) fn refuse(error: AttachmentError) -> Response {
+    if !error.is_client_error() {
+        return internal(
+            "the attachment store could not complete this request",
+            &error.to_string(),
+        );
+    }
     let status = match &error {
         AttachmentError::TooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
         AttachmentError::NotFound { .. } | AttachmentError::InvalidId(_) => StatusCode::NOT_FOUND,
-        e if e.is_client_error() => StatusCode::BAD_REQUEST,
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
+        _ => StatusCode::BAD_REQUEST,
     };
-    if !error.is_client_error() {
-        tracing::warn!(%error, "attachments: request failed");
-    }
     (status, Json(json!({ "error": error.to_string() }))).into_response()
 }
 

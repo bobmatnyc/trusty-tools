@@ -92,3 +92,40 @@ fn blocks_follow_the_users_text() {
     assert_eq!(joined, "summarise\n\nONE\n\nTWO");
     assert_eq!(augment_user_turn("  ", &["ONE".to_string()]), "ONE");
 }
+
+/// Content holding its own fence must not close the block it is inside.
+///
+/// Why this is a regression: the fence was a fixed three backticks, so a
+/// Markdown file or a code listing ended the block at its own first fence. The
+/// model then read the rest of the attachment as prose addressed to it —
+/// truncated content plus text that was never meant as instruction.
+#[test]
+fn a_fence_inside_the_content_cannot_break_out() {
+    let (_temp, store) = fixture();
+
+    let three = "before\n```\ninner\n```\nafter";
+    let row = store
+        .store(SESSION, "notes.md", None, three.as_bytes())
+        .unwrap();
+    let block = render(&row, three.as_bytes());
+    assert!(block.contains("\n````text\n"), "{block}");
+    assert!(block.ends_with("\n````"), "{block}");
+    assert!(block.contains(three), "the content was altered: {block}");
+
+    let four = "a\n````\nb\n````";
+    let row = store
+        .store(SESSION, "deeper.md", None, four.as_bytes())
+        .unwrap();
+    let block = render(&row, four.as_bytes());
+    assert!(block.contains("\n`````text\n"), "{block}");
+    assert!(block.ends_with("\n`````"), "{block}");
+
+    // Ordinary content still gets the ordinary three-backtick fence.
+    let plain = "a,b\n1,2\n";
+    let row = store
+        .store(SESSION, "plain.csv", None, plain.as_bytes())
+        .unwrap();
+    let block = render(&row, plain.as_bytes());
+    assert!(block.contains("\n```csv\n"), "{block}");
+    assert!(block.ends_with("\n```"), "{block}");
+}

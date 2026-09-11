@@ -240,3 +240,67 @@ fn client_errors_are_classified() {
         .is_client_error()
     );
 }
+
+/// Two uploads of the same name, racing, must each keep their own bytes.
+///
+/// Why this is a regression: choosing the file name and writing the bytes used
+/// to happen OUTSIDE the manifest lock. Both threads then saw no `data.csv`,
+/// both chose the unsuffixed name, one overwrote the other, and the loser's
+/// row recorded a digest and size for bytes that were no longer on disk — a
+/// manifest that confidently describes a file it does not match. The barrier
+/// and the repeats are what make the interleaving reliable rather than lucky.
+#[test]
+fn concurrent_same_name_uploads_keep_their_bytes() {
+    use sha2::Digest;
+
+    for round in 0..20 {
+        let (_temp, store) = fixture();
+        let session = format!("persona-round-{round}");
+        let barrier = std::sync::Barrier::new(2);
+        let (first, second) = std::thread::scope(|scope| {
+            let one = scope.spawn(|| {
+                barrier.wait();
+                store.store(&session, "data.csv", None, b"a,b\n1,1\n")
+            });
+            let two = scope.spawn(|| {
+                barrier.wait();
+                store.store(&session, "data.csv", None, b"a,b\n2,2\n")
+            });
+            (one.join().unwrap().unwrap(), two.join().unwrap().unwrap())
+        });
+
+        assert_ne!(
+            first.stored_path, second.stored_path,
+            "round {round}: both uploads claimed the same file"
+        );
+        assert_eq!(store.list(&session).unwrap().len(), 2, "round {round}");
+        for row in [&first, &second] {
+            let on_disk = std::fs::read(&row.stored_path).unwrap();
+            assert_eq!(row.size as usize, on_disk.len(), "round {round}");
+            assert_eq!(
+                row.sha256,
+                format!("{:x}", sha2::Sha256::digest(&on_disk)),
+                "round {round}: the row describes bytes that are not on disk"
+            );
+        }
+    }
+}
+
+/// A manifest write that fails after the bytes are written must not leave the
+/// file behind: no row refers to it, so nothing can ever reach or remove it.
+#[test]
+fn a_failed_manifest_write_leaves_no_orphan() {
+    let (_temp, store) = fixture();
+    let session_dir = store.session_dir(SESSION).unwrap();
+    std::fs::create_dir_all(&session_dir).unwrap();
+    // A manifest that opens and locks but does not decode: the failure lands
+    // in `append`, after `store` has already written the bytes.
+    std::fs::write(session_dir.join("manifest.json"), "{ not json").unwrap();
+
+    let err = store.store(SESSION, "a.txt", None, b"payload").unwrap_err();
+    assert!(matches!(err, AttachmentError::Manifest { .. }), "{err:?}");
+    assert!(
+        !session_dir.join("a.txt").exists(),
+        "a failed manifest write left an orphaned file"
+    );
+}
