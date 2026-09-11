@@ -33,6 +33,13 @@
 //! ([`NewSessionFlow::position`]), and typing narrows it
 //! ([`NewSessionFlow::filter`]).
 //!
+//! #7488 made the choosing structural and open-ended: the rows are grouped by
+//! owner-or-domain ([`super::new_session_order::group_of`]), and the filter box
+//! doubles as free-text entry — a clone URL, `owner/repo` or
+//! `domain/owner/repo` the registry does not hold is cloned and registered
+//! through the SAME [`perform`] driver a typed checkout path uses
+//! ([`super::new_session_entry`]).
+//!
 //! Test: `new_session_*` in `super::tests`.
 
 use std::future::Future;
@@ -361,14 +368,45 @@ impl NewSessionFlow {
                     repo: repo.clone(),
                     label: name.clone(),
                 }),
-                Some(Target::Other) => {
-                    self.typed = Some(String::new());
-                    Step::Redraw
-                }
+                Some(Target::Other) => self.confirm_escape_row(),
                 None => Step::Ignore,
             },
             _ => Step::Ignore,
         }
+    }
+
+    /// Enter on the escape row: free-text entry, or the typed-path step (#7488).
+    ///
+    /// Why: the filter box is already where the operator types a project's
+    /// name, so a name the registry does NOT hold is the one keystroke sequence
+    /// that used to lead nowhere — it emptied the list and left Enter meaning
+    /// "open an empty path prompt and type it all again".
+    /// What: a filter that still matches a registered row (or no filter at all)
+    /// keeps the pre-#7488 behaviour and opens the typed-path entry. A filter
+    /// matching nothing is handed to
+    /// [`request_for_entry`](super::new_session_entry::request_for_entry): a
+    /// clone URL, `owner/repo` or `domain/owner/repo` becomes a create request,
+    /// and anything else is a [`Step::Reject`] the overlay shows inline, with
+    /// the filter left intact so it can be corrected.
+    /// Test: `new_session_entry_from_the_filter_creates_a_clone_request`,
+    /// `new_session_entry_from_the_filter_rejects_malformed_text`.
+    fn confirm_escape_row(&mut self) -> Step {
+        let typed = self.filter.trim().to_string();
+        if typed.is_empty() || self.filter_matches_a_registered_row() {
+            self.typed = Some(String::new());
+            return Step::Redraw;
+        }
+        match super::new_session_entry::request_for_entry(&typed, &self.targets) {
+            Ok(request) => Step::Create(request),
+            Err(message) => Step::Reject(message),
+        }
+    }
+
+    /// True while the filter still leaves a registered project on screen.
+    fn filter_matches_a_registered_row(&self) -> bool {
+        self.visible()
+            .iter()
+            .any(|i| matches!(self.targets.get(*i), Some(Target::Registered { .. })))
     }
 
     /// Move the highlight to a position within the filtered rows.
@@ -443,13 +481,18 @@ pub(crate) fn request_for_path(
 ) -> Result<NewSessionRequest, String> {
     let trimmed = typed.trim();
     if trimmed.is_empty() {
-        return Err("type the path to a git checkout, then Enter".to_string());
+        return Err("type the path, clone URL or owner/repo, then Enter".to_string());
     }
     let Some(id) = resolve(trimmed) else {
-        return Err(format!(
-            "{trimmed} is not a git checkout with a GitHub remote — tm cannot \
-             register a project for it"
-        ));
+        // #7488: text that is not a checkout on this host may still name a
+        // project to clone, so the same recogniser the filter entry uses gets
+        // the second look — one implementation, two ways in.
+        return super::new_session_entry::request_for_entry(trimmed, targets).map_err(|_| {
+            format!(
+                "{trimmed} is not a git checkout, a clone URL, or an \
+                 owner/repo project"
+            )
+        });
     };
     let known = targets.iter().any(|t| match t {
         Target::Registered { name, repo } => *name == id.name || *repo == id.repo_url,

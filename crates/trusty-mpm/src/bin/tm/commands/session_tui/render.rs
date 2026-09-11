@@ -317,7 +317,9 @@ fn rename_body(was: &str, typed: &str) -> Vec<Line<'static>> {
 fn new_session_body(flow: &super::new_session::NewSessionFlow, width: usize) -> Vec<Line<'static>> {
     if let Some(typed) = flow.typed() {
         return vec![
-            Line::from("Path to a git checkout tm has not registered yet:"),
+            // #7488: the entry takes a clone URL or owner/repo too, so the
+            // prompt has to say so or the capability is invisible.
+            Line::from("Path, clone URL or owner/repo tm does not have yet:"),
             Line::from(String::new()),
             Line::from(format!("> {typed}▌")),
             Line::from("Enter registers it and starts a session, Esc cancels."),
@@ -334,7 +336,11 @@ fn new_session_body(flow: &super::new_session::NewSessionFlow, width: usize) -> 
         lines.push(Line::from(fit(&hint, width)));
     }
     lines.push(Line::from(String::new()));
-    lines.push(Line::from("Type to filter. Enter confirms, Esc cancels."));
+    // #7488: a filter matching nothing is an entry, not a dead end.
+    lines.push(Line::from(
+        "Type to filter, or type owner/repo or a clone URL.",
+    ));
+    lines.push(Line::from("Enter confirms, Esc cancels."));
     lines
 }
 
@@ -357,7 +363,8 @@ fn help_body() -> Vec<Line<'static>> {
         "g / G          first / last row",
         "PgUp / PgDn    move ten rows",
         "Enter          open (resume + attach) the selected session",
-        "n              new session, in a registered project or a typed path",
+        "n              new session — pick a project, or type a path, a clone",
+        "               URL, owner/repo, or domain/owner/repo",
         "r              rename it",
         "d              delete it, with a confirm step",
         "R              refresh the list from the daemon",
