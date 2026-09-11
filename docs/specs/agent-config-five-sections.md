@@ -16,7 +16,7 @@ spec_refs:
 **Status:** Draft
 **Subsystem:** trusty-agents — agent configuration model, capability declaration, permissions surface, GUI config pane
 **Owner:** Engineering (trusty-agents) / Bob Matsuoka
-**Last-updated:** 2026-09-09
+**Last-updated:** 2026-09-11
 **Spec ID:** `SPEC-AGENTCFG-01~draft` … `SPEC-AGENTCFG-09~draft` (DOC-57)
 **Epic:** #3052 (Assistant M1)
 **Builds on:** DOC-54 [Trusty Agents Product Specification](./trusty-agents-product-spec.md) §5 (the config triple this spec supersedes) and §8.4 (the in-pane config sections); DOC-41 [Eve-Style Agent Framework](./trusty-agents-eve-style-agents-spec.md) §2.3/§2.6/§5.5 (manifest schema, no-code enforcement, user-authority singleton); DOC-42 [Agent-Bundled Skills](./agent-bundled-skills.md) (the `skills:` declaration + co-deployment model on the trusty-mpm side); DOC-23 [Learned-Autonomy Auto-Answer](./learned-autonomy-auto-answer.md) (the only designed approval/undo/audit model in the repo)
@@ -316,17 +316,29 @@ follows a symlink. Interrupted manifest binding is recoverable on retry.
 
 Sources are the union of registered project folders attached to the Assistant's
 chats and its effective, enabled incoming-channel bindings. Registration alone
-never authorizes extraction. The API persists chat-to-project attachments;
-canonical directory identity deduplicates them. Missing directories are omitted
-from the eligible catalogue without erasing attachment history. Channel source
-identity includes the configured account, target, and deterministic filters.
-Gmail, Google Drive, Slack, and Google Calendar are channel source kinds.
-Disabled, removed, or retargeted bindings invalidate pending work. No job may
-broaden the connector's configured authorization or filters.
+never authorizes extraction; it does auto-add the project's path as a root of
+the Assistant's one search index (below), which is immediate and does not wait
+for entity extraction. The API persists chat-to-project attachments; canonical
+directory identity deduplicates them. Missing directories are omitted from the
+eligible catalogue without erasing attachment history. Channel source identity
+includes the configured account, target, and deterministic filters. **Superseded
+2026-09-11:** gworkspace (Gmail, Drive, Calendar), Slack, Telegram, and Notion
+were previously described here as one-way "channel source kinds." They are
+two-way channel connectors — independent inbound and outbound bindings,
+configured per Assistant (#7425, tracked in #7427; see
+`crates/trusty-agents/src/tools/channel.rs`'s `context()` string for today's
+per-connector direction gaps). Each connector separately backs a read-only
+OKG entity-extraction source, specified in DOC-63 §5.1 — that pipeline's
+direction is independent of the channel's own send/receive bindings. Disabled,
+removed, or retargeted bindings invalidate pending work. No job may broaden the
+connector's configured authorization or filters.
 
-The two indexes serve different purposes: a project's index covers its eligible
-current files; the Assistant's index covers its derived **OKG business
-entities**. A copied source document alone does not count as entity extraction.
+**Superseded 2026-09-11 by the one-index-multiple-roots model (#7425, tracked
+for search in #7429).** The Assistant has **one** trusty-search index, not two:
+the OKG tree is one root of that index, and each attached project is an
+additional root. A copied source document alone does not count as entity
+extraction.
+
 The pipeline is source collection → NLP entity candidates → bounded batches of
 inexpensive inference for normalization/deduplication → validated OKG entities
 with provenance → trusty-search publication. People, organizations, projects,
@@ -1383,3 +1395,12 @@ tools *and* MCP connections. Users may read "Knowledge" as documents only.
   permissive behavior; §5.8 will be revisited when the review gate lands to make
   enforcement normative. Harmonizes this spec with the stated intent that security
   review gates implementation.
+- **2026-09-11** — Amended §4.7 for the owner's 1.0 assistant-platform scope
+  (epic #7425). Superseded the two-index-per-Assistant description with the
+  one-index-multiple-roots model (#7429): one trusty-search index per
+  Assistant, the OKG tree as one root, each attached project as another root.
+  Superseded the "channel source kinds" framing of gworkspace/Slack/Telegram/
+  Notion with the two-way channel connector model (#7427): each connector
+  carries independent inbound and outbound bindings, and separately backs a
+  read-only OKG entity-extraction source (DOC-63 §5.1). Evidence:
+  `docs/research/trusty-agents-1.0-gap-analysis-2026-09-11.md`.
