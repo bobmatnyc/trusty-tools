@@ -335,6 +335,27 @@ pub fn fold_session(ledger: &Path, session_id: &str) -> SavingsTotal {
     fold(ledger, Some(session_id))
 }
 
+/// Does the ledger already hold an accepted `technique` row for `session_id`?
+///
+/// Why (#7411): the hook re-derives an instruction-compression row from the
+/// compiled prompt when nothing was staged for the session, and a Claude
+/// session raises `SessionStart` more than once — a resume and a compact each
+/// raise it again. Without a "this session already has one" read, every one of
+/// those would append a second copy of the same measurement and double the
+/// `💸` figure. [`fold_session`] cannot answer it: it sums across every
+/// technique, so a session that had only a `divert` row would read as already
+/// covered.
+/// What: scans the accepted rows for `session_id` and reports whether any
+/// carries `technique`. A missing or unreadable ledger reads as `false`.
+/// Test: `has_row_sees_only_the_named_technique`.
+pub fn has_row(ledger: &Path, session_id: &str, technique: &str) -> bool {
+    let mut found = false;
+    for_each_accepted_row(ledger, Some(session_id), |row| {
+        found |= row.technique == technique;
+    });
+    found
+}
+
 /// Fold every accepted row, whatever session wrote it.
 ///
 /// Why: a machine-wide figure is what a future `tm usage`/console surface wants,

@@ -42,6 +42,23 @@
 //! machine-wide [`crate::core::savings::fold_all`] — a contribution no
 //! per-session surface could ever have read.
 //!
+//! **Why "in the same scope" was not good enough (#7411).** The compiling
+//! process exports `TM_MANAGED_SESSION_ID`; the hook Claude Code spawns does
+//! not. The two therefore derive different compiled-prompt paths, different
+//! digests, and different staging file names, and the claim — which only ever
+//! tried the one digest the hook could rebuild — matched nothing. Rows sat in
+//! `pending-savings/` indefinitely and the `💸` segment under-reported by
+//! exactly them. Three changes close it:
+//!
+//! - the staged file records the compiled prompt it measures, so a claimer that
+//!   derives a different path can still tell what the file is for;
+//! - [`sweep_pending_rows`] walks the whole directory instead of probing one
+//!   name, claiming every row whose compiled prompt still exists and deleting —
+//!   with the measurement logged — only the ones whose prompt is gone and which
+//!   have passed [`STRANDED_AFTER`];
+//! - a hook that finds nothing staged re-measures the fold from the compiled
+//!   prompt on disk, so the ledger is not left empty for the session.
+//!
 //! Everything here is best-effort, like the producer it serves: an unwritable
 //! directory, an unparseable staged row, or a lost claim each skip silently. A
 //! missing savings row must never cost a session its launch.
@@ -55,14 +72,45 @@
 //! `two_compiled_prompts_stage_to_different_files`,
 //! `the_no_fold_warning_fires_once_per_project`,
 //! `the_no_fold_warning_fires_again_when_the_byte_pair_moves`,
-//! `the_no_fold_warning_is_emitted_at_warn_level`.
+//! `the_no_fold_warning_is_emitted_at_warn_level`,
+//! `a_staged_row_remembers_its_compiled_prompt` — plus the #7411 suite in
+//! `savings_sidecar_sweep_tests.rs`:
+//! `a_stranded_row_for_another_project_is_adopted_rather_than_stranded`,
+//! `a_second_session_start_does_not_append_a_second_rederived_row`,
+//! `the_sweep_claims_a_row_staged_under_another_session_scope`,
+//! `a_hook_with_nothing_staged_rederives_from_the_compiled_prompt`,
+//! `a_stranded_orphan_is_discarded_with_its_measurement_logged`,
+//! `a_fresh_row_for_another_project_is_left_for_its_own_hook`,
+//! `a_row_staged_without_a_path_is_still_claimed_by_digest`,
+//! `two_racing_sweeps_append_exactly_one_row`.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use crate::core::savings::{SavingsRow, append_row};
 
 /// Directory holding staged rows, under the framework root's `usage/`.
 const PENDING_DIR: &str = "pending-savings";
+
+/// How long a staged row whose compiled prompt is gone waits before the next
+/// hook discards it (#7411).
+///
+/// Why: two failure shapes need separating, and only time separates them. A
+/// staged row is normally claimed seconds later — the compile stages it and the
+/// launch it is part of raises `SessionStart` immediately — so anything still
+/// unclaimed after half a day belongs to a launch that never happened, or to a
+/// compiled prompt that has since been deleted. Twelve hours is long enough to
+/// cover a machine suspended mid-launch and an overnight gap between a compile
+/// and the session it was for, and short enough that the ledger does not carry
+/// a growing tail of files nothing will ever attribute. Days would defeat the
+/// point: the whole defect is a file that outlives every hook that could have
+/// claimed it.
+///
+/// It never causes a row to be LOST while its compiled prompt still exists —
+/// such a row is claimed at any age. Age only decides two things: when an
+/// orphan is discarded, and when a row staged for another project's compiled
+/// prompt may be adopted rather than left forever.
+const STRANDED_AFTER: Duration = Duration::from_secs(12 * 60 * 60);
 
 /// Directory holding the per-project "nothing folded" warning markers.
 const NO_FOLD_WARNED_DIR: &str = "no-fold-warned";
@@ -106,6 +154,32 @@ pub fn pending_row_path_in(root: &Path, compiled_prompt: &Path) -> PathBuf {
     keyed_path(root, PENDING_DIR, compiled_prompt, ".json")
 }
 
+/// A staged row plus the compiled prompt it measures (#7411).
+///
+/// Why: the file name is a digest, which is one-way — a sweeping hook can see
+/// that a staged file exists and cannot tell which compiled prompt it belongs
+/// to, whether that prompt still exists, or whether it is this project's. That
+/// is the whole defect: the claim only ever matched a path the hook happened to
+/// reconstruct identically, and a row staged under a managed session scope the
+/// hook process does not export sat unclaimed forever.
+/// What: `#[serde(flatten)]` keeps the on-disk object exactly the row's own
+/// fields plus `compiled_prompt`, so a file staged before this field existed
+/// still parses (the path reads back empty and the sweep falls back to matching
+/// the digest), and a file staged now still deserialises as a bare
+/// [`SavingsRow`] for anything that reads it that way.
+/// Test: `a_staged_row_remembers_its_compiled_prompt`,
+/// `a_row_staged_without_a_path_is_still_claimed_by_digest`.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StagedRow {
+    /// The compiled prompt whose fold this row measures; empty in a file
+    /// staged before #7411.
+    #[serde(default)]
+    compiled_prompt: String,
+    /// The row itself, inlined as the object's own fields.
+    #[serde(flatten)]
+    row: SavingsRow,
+}
+
 /// Stage `row` for the hook that will learn this session's Claude id.
 ///
 /// Why: see the module header — the compiling process has the measurement and
@@ -123,7 +197,14 @@ pub fn stage_row(root: &Path, compiled_prompt: &Path, row: &SavingsRow) {
     let staged = (|| -> Option<()> {
         let dir = path.parent()?;
         std::fs::create_dir_all(dir).ok()?;
-        let line = serde_json::to_string(row).ok()?;
+        // #7411: record which compiled prompt this measures, so a hook that
+        // reconstructs a different path can still claim it and a sweep can tell
+        // an orphan from a row still waiting for its own launch.
+        let line = serde_json::to_string(&StagedRow {
+            compiled_prompt: compiled_prompt.to_string_lossy().into_owned(),
+            row: row.clone(),
+        })
+        .ok()?;
         let mut tmp = tempfile::NamedTempFile::new_in(dir).ok()?;
         tmp.write_all(line.as_bytes()).ok()?;
         // On failure `PersistError::Drop` removes the temp file.
@@ -185,11 +266,31 @@ pub fn emit_staged_row(
     compiled_prompt: &Path,
     claude_session_id: &str,
 ) -> bool {
+    claim_staged_row(
+        ledger,
+        &pending_row_path_in(root, compiled_prompt),
+        claude_session_id,
+    )
+}
+
+/// Claim the staged row at `path` and append it under `claude_session_id`.
+///
+/// Why (#7411): the claim used to be reachable only through the digest of a
+/// compiled-prompt path the caller had reconstructed, which is exactly the
+/// reconstruction that fails when the hook resolves a different session scope
+/// than the compile did. The sweep needs to claim a file it found by reading
+/// the directory, so the atomic rename lives here — one claim primitive, still
+/// the only writer, so two hooks racing on one staged file still produce one
+/// ledger row.
+/// What: see [`emit_staged_row`], which is this against a digested path.
+/// Test: `two_racing_claims_append_exactly_one_row`,
+/// `a_failed_append_leaves_the_row_staged_for_the_next_hook`.
+fn claim_staged_row(ledger: &Path, path: &Path, claude_session_id: &str) -> bool {
     let session_id = claude_session_id.trim();
     if session_id.is_empty() {
         return false;
     }
-    let path = pending_row_path_in(root, compiled_prompt);
+    let path = path.to_path_buf();
     // #7245: the rename IS the claim. A second hook — or a concurrent one —
     // finds nothing to rename and appends nothing, which is what makes this
     // idempotent, and the claimed file still exists until the append lands.
@@ -210,8 +311,8 @@ pub fn emit_staged_row(
             return false;
         }
     };
-    let mut row: SavingsRow = match serde_json::from_str(&text) {
-        Ok(row) => row,
+    let mut row: SavingsRow = match serde_json::from_str::<StagedRow>(&text) {
+        Ok(staged) => staged.row,
         Err(source) => {
             tracing::warn!(
                 path = %path.display(),
@@ -239,40 +340,242 @@ pub fn emit_staged_row(
     true
 }
 
-/// [`emit_staged_row`] against the ambient framework root, working directory
-/// and managed session scope.
+/// Every compiled prompt that exists under `project_dir`, newest first.
+///
+/// Why (#7411): the hook cannot reconstruct the session scope the compiling
+/// process used. `TM_MANAGED_SESSION_ID` is set for the compile and absent in
+/// the hook Claude Code spawns, so the two derive different paths, different
+/// digests, and different staging file names — which is how a row is staged
+/// that no hook ever claims. Reading the sessions directory answers the same
+/// question without guessing at the scope, and a file found this way is by
+/// construction a compiled prompt that still exists.
+/// What: the `INSTRUCTIONS-COMPILED.md` under each
+/// `<project>/.trusty-mpm/sessions/<scope>/`, ordered by modification time with
+/// the most recent first, so a caller wanting this launch's prompt takes the
+/// head. Empty when the directory is absent.
+/// Test: `the_sweep_claims_a_row_staged_under_another_session_scope`,
+/// `a_hook_with_nothing_staged_rederives_from_the_compiled_prompt`.
+fn compiled_prompts_in(project_dir: &Path) -> Vec<PathBuf> {
+    let sessions = crate::core::harness_root::harness_dir(project_dir)
+        .join(crate::core::harness_root::SESSIONS_DIR);
+    let Ok(entries) = std::fs::read_dir(&sessions) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(SystemTime, PathBuf)> = entries
+        .flatten()
+        .map(|entry| {
+            entry
+                .path()
+                .join(crate::core::instruction_pipeline::COMPILED_PROMPT_FILE)
+        })
+        .filter_map(|path| {
+            let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
+            Some((modified, path))
+        })
+        .collect();
+    found.sort_by(|left, right| right.0.cmp(&left.0));
+    found.into_iter().map(|(_, path)| path).collect()
+}
+
+/// How long ago `path` was last written.
+///
+/// Why: the staging file's own modification time is the moment the compile
+/// staged it, which is the age the sweep's discard bound is measured against.
+/// Reading it rather than the row's `ts` field means an unparseable file — the
+/// one shape with no readable timestamp — still ages out.
+/// What: `None` when the file is gone or the clock ran backwards, which both
+/// read as "not stranded" and leave the file alone.
+/// Test: `a_stranded_orphan_is_discarded_with_its_measurement_logged`.
+fn age_of(path: &Path) -> Option<Duration> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    SystemTime::now().duration_since(modified).ok()
+}
+
+/// The compiled prompt the file staged at `staged` measures, if it still
+/// exists.
+///
+/// Why (#7411): the sweep's three-way decision — claim, leave, discard — turns
+/// entirely on this. A staged row whose prompt exists is live and must never be
+/// dropped; one whose prompt is gone can never be attributed to a session and
+/// is the only thing the sweep is allowed to discard.
+/// What: the path the file recorded, when that file is still there. A file
+/// staged before #7411 records none, so it falls back to the digest match the
+/// pre-#7411 claim used — no row is lost across the upgrade.
+/// Test: `a_row_staged_without_a_path_is_still_claimed_by_digest`,
+/// `a_stranded_orphan_is_discarded_with_its_measurement_logged`.
+fn live_compiled_prompt(
+    root: &Path,
+    staged: &Path,
+    project_prompts: &[PathBuf],
+) -> Option<PathBuf> {
+    let recorded = std::fs::read_to_string(staged)
+        .ok()
+        .and_then(|text| serde_json::from_str::<StagedRow>(&text).ok())
+        .map(|parsed| parsed.compiled_prompt)
+        .filter(|recorded| !recorded.is_empty())
+        .map(PathBuf::from);
+    if let Some(recorded) = recorded {
+        return recorded.is_file().then_some(recorded);
+    }
+    project_prompts
+        .iter()
+        .find(|compiled| pending_row_path_in(root, compiled) == staged)
+        .cloned()
+}
+
+/// Claim, discard, or leave every row staged under `root`, on behalf of
+/// `project_dir`.
+///
+/// Why (#7411): claiming only the one digest the hook could reconstruct left
+/// every other staged row on disk forever, under-reporting the `💸` segment by
+/// exactly the rows it stranded. A sweep reaches them all, and gives each file
+/// one of two terminal outcomes — appended to the ledger, or deleted with its
+/// measurement in the log — so no file can outlive the hooks that could have
+/// resolved it.
+/// What: for each `*.json` under `usage/pending-savings/`, resolves the
+/// compiled prompt it measures and then:
+///
+/// - prompt exists and is this project's → claim it, at any age;
+/// - prompt exists and is another project's → leave it, until it passes
+///   [`STRANDED_AFTER`], after which this hook adopts it rather than let it sit
+///   forever;
+/// - prompt is gone (or the file is unreadable) and it has passed
+///   [`STRANDED_AFTER`] → delete it and log the row's JSON at `warn`;
+/// - otherwise → leave it for a hook that can do better.
+///
+/// Claiming goes through [`claim_staged_row`], so the rename-then-append still
+/// makes two racing sweeps append exactly one row. Returns how many rows
+/// reached the ledger.
+/// Test: `the_sweep_claims_a_row_staged_under_another_session_scope`,
+/// `a_stranded_orphan_is_discarded_with_its_measurement_logged`,
+/// `a_fresh_row_for_another_project_is_left_for_its_own_hook`,
+/// `a_stranded_row_for_another_project_is_adopted_rather_than_stranded`,
+/// `a_row_staged_without_a_path_is_still_claimed_by_digest`,
+/// `two_racing_sweeps_append_exactly_one_row`.
+pub fn sweep_pending_rows(
+    ledger: &Path,
+    root: &Path,
+    project_dir: &Path,
+    claude_session_id: &str,
+) -> usize {
+    let Ok(entries) = std::fs::read_dir(root.join("usage").join(PENDING_DIR)) else {
+        return 0;
+    };
+    let prompts = compiled_prompts_in(project_dir);
+    let harness = crate::core::harness_root::harness_dir(project_dir);
+    let mut appended = 0;
+    for staged in entries.flatten().map(|entry| entry.path()) {
+        // Skip the `.claim-<pid>-<n>` files a concurrent claim is holding.
+        if staged.extension().is_none_or(|ext| ext != "json") {
+            continue;
+        }
+        let stranded = age_of(&staged).is_some_and(|age| age >= STRANDED_AFTER);
+        match live_compiled_prompt(root, &staged, &prompts) {
+            Some(compiled) if compiled.starts_with(&harness) || stranded => {
+                if claim_staged_row(ledger, &staged, claude_session_id) {
+                    appended += 1;
+                }
+            }
+            Some(_) => {}
+            None if stranded => {
+                let row = std::fs::read_to_string(&staged).unwrap_or_default();
+                if std::fs::remove_file(&staged).is_ok() {
+                    tracing::warn!(
+                        path = %staged.display(),
+                        row = %row.trim(),
+                        stranded_hours = STRANDED_AFTER.as_secs() / 3600,
+                        "discarding a staged instruction-compression savings row whose \
+                         compiled prompt no longer exists; no session can be attributed \
+                         it, and this line preserves the measurement"
+                    );
+                }
+            }
+            None => {}
+        }
+    }
+    appended
+}
+
+/// Put an instruction-compression row in the ledger for `claude_session_id`,
+/// from whatever this machine has on disk.
 ///
 /// Why: the `tm hook` handler knows only the Claude session id Claude Code sent
-/// it on stdin. Every other input — which ledger, which project, which session
-/// scope — is ambient, and resolving it here keeps the handler's addition to
+/// it on stdin. Every other input — which ledger, which project, which compiled
+/// prompt — is ambient, and resolving it here keeps the handler's addition to
 /// one call. The framework root is
 /// [`crate::core::paths::FrameworkPaths::default`], the same root the producer
-/// staged under, so the two cannot disagree about where the file is.
-/// What: rebuilds the compiled-prompt path from the session scope
-/// ([`crate::core::harness_root::session_scope`], i.e. `TM_MANAGED_SESSION_ID`
-/// or `local`) and tries it against two project directories — the checkout that
-/// owns this working directory's harness state, then the working directory
-/// itself, which differ when the session runs in a worktree. Returns whether a
-/// row was appended.
-/// Test: `a_staged_row_emits_once_under_the_claude_session_id` covers the
-/// resolved-path form this delegates to; the ambient reads themselves are
+/// staged under, so the two cannot disagree about where the files are.
+/// What: sweeps the staged rows ([`sweep_pending_rows`]) for two project
+/// directories — the checkout that owns this working directory's harness state,
+/// then the working directory itself, which differ when the session runs in a
+/// worktree. When that appends nothing and the ledger holds no
+/// instruction-compression row for this session yet, re-measures the fold from
+/// the newest compiled prompt on disk (#7411), so a session whose staged row
+/// was never written still gets its figure. Returns whether a row was appended.
+/// Test: `the_sweep_claims_a_row_staged_under_another_session_scope` and
+/// `a_hook_with_nothing_staged_rederives_from_the_compiled_prompt` cover the
+/// two resolved-path forms this delegates to; the ambient reads themselves are
 /// exercised by the `tm hook` SessionStart path.
 pub fn emit_staged_row_for_session(claude_session_id: &str) -> bool {
     let root = crate::core::paths::FrameworkPaths::default().root;
-    let ledger = crate::core::savings::savings_log_in(&root);
-    let scope = crate::core::harness_root::session_scope(None);
     let Ok(cwd) = std::env::current_dir() else {
         return false;
     };
-    let owner = crate::core::harness_root::harness_root(&cwd);
-    let mut candidates = vec![owner.clone()];
-    if owner != cwd {
-        candidates.push(cwd);
+    emit_staged_row_for_session_in(&root, &cwd, claude_session_id)
+}
+
+/// [`emit_staged_row_for_session`] against an explicit framework root and
+/// working directory.
+///
+/// Why: the two ambient reads the entry point makes — the framework root under
+/// the operator's home and the process working directory — are the whole reason
+/// the sweep and the re-derivation were untestable in place. Passing them in
+/// keeps every test on a tempdir with no process-env or working-directory
+/// mutation, which parallel test binaries require. Same split as
+/// [`crate::core::harness_root::session_scope_from`] and
+/// `savings_instructions::record_instruction_compression_to`.
+/// What: see [`emit_staged_row_for_session`]; this is its body.
+/// Test: `the_sweep_claims_a_row_staged_under_another_session_scope`,
+/// `a_hook_with_nothing_staged_rederives_from_the_compiled_prompt`,
+/// `a_second_session_start_does_not_append_a_second_rederived_row`.
+pub fn emit_staged_row_for_session_in(root: &Path, cwd: &Path, claude_session_id: &str) -> bool {
+    let session_id = claude_session_id.trim();
+    if session_id.is_empty() {
+        return false;
     }
-    candidates.iter().any(|project_dir| {
-        let compiled = crate::core::instruction_pipeline::compiled_prompt_path(project_dir, &scope);
-        emit_staged_row(&ledger, &root, &compiled, claude_session_id)
-    })
+    let ledger = crate::core::savings::savings_log_in(root);
+    let cwd = cwd.to_path_buf();
+    let owner = crate::core::harness_root::harness_root(&cwd);
+    let mut projects = vec![owner.clone()];
+    if owner != cwd {
+        projects.push(cwd);
+    }
+    let appended: usize = projects
+        .iter()
+        .map(|project| sweep_pending_rows(&ledger, root, project, session_id))
+        .sum();
+    if appended > 0 {
+        return true;
+    }
+    // #7411: nothing was staged for this session, so re-measure the fold from
+    // the compiled prompt this launch is actually running on. Guarded by the
+    // ledger read because a Claude session raises SessionStart again on every
+    // resume and compact.
+    if crate::core::savings::has_row(
+        &ledger,
+        session_id,
+        crate::core::savings::TECHNIQUE_INSTRUCTION_COMPRESSION,
+    ) {
+        return false;
+    }
+    projects
+        .iter()
+        .filter_map(|project| compiled_prompts_in(project).into_iter().next())
+        .any(|compiled| {
+            crate::core::savings_instructions::rederive_from_compiled_prompt(
+                root, &compiled, session_id,
+            )
+        })
 }
 
 /// Where the "nothing folded" warning marker for `project_dir` lives.
@@ -332,3 +635,7 @@ pub fn warn_no_fold_once(
 #[cfg(test)]
 #[path = "savings_sidecar_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "savings_sidecar_sweep_tests.rs"]
+mod sweep_tests;

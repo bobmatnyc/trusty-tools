@@ -349,6 +349,55 @@ fn a_prompt_that_folds_nothing_warns_once_and_writes_no_row() {
     );
 }
 
+/// Why (#7411): staging is the producer's only route to the ledger for a normal
+/// launch, so a staged row that was never written leaves the session with a
+/// blank `💸` segment for its whole life. The compiled prompt on disk is the
+/// same input the producer measured, so the hook can redo the measurement
+/// rather than depend on a file that may not be there.
+/// Test: itself.
+#[test]
+fn rederiving_from_the_compiled_prompt_appends_under_the_session_id() {
+    let project = tempfile::tempdir().expect("temp project");
+    let framework_root = tempfile::tempdir().expect("temp framework root");
+    let dest = compiled_prompt_dest(project.path(), "local");
+    std::fs::write(&dest, "tiny").expect("compiled prompt");
+    let ledger = crate::core::savings::savings_log_in(framework_root.path());
+
+    assert!(
+        rederive_from_compiled_prompt(framework_root.path(), &dest, "c1"),
+        "the compiled prompt on disk must be enough to produce the row"
+    );
+    let folded = crate::core::savings::fold_session(&ledger, "c1");
+    assert!(
+        !folded.is_zero(),
+        "the re-derived row must fold under the Claude session id: {folded:?}"
+    );
+    assert!(
+        !crate::core::savings_sidecar::pending_row_path_in(framework_root.path(), &dest).exists(),
+        "a re-derivation appends; it must never stage a second copy"
+    );
+}
+
+/// Why (#7411): the re-derivation runs the ordinary producer, so it inherits the
+/// decline for a project that folds nothing. Reporting a row there would put a
+/// fabricated figure on the status bar.
+/// Test: itself.
+#[test]
+fn rederiving_a_prompt_that_folds_nothing_appends_nothing() {
+    let project = tempfile::tempdir().expect("temp project");
+    let framework_root = tempfile::tempdir().expect("temp framework root");
+    let dest = compiled_prompt_dest(project.path(), "local");
+    let bulky = "x".repeat(folded_source_bytes(project.path()) + 1);
+    std::fs::write(&dest, &bulky).expect("compiled prompt");
+    let ledger = crate::core::savings::savings_log_in(framework_root.path());
+
+    assert!(
+        !rederive_from_compiled_prompt(framework_root.path(), &dest, "c1"),
+        "a prompt that folded nothing must report no row"
+    );
+    assert!(crate::core::savings::fold_session(&ledger, "c1").is_zero());
+}
+
 /// Why (#7209): the producers must read one variable name. A rename on one side
 /// only would silently unmatch every row the other writes.
 /// Test: itself.
