@@ -140,7 +140,8 @@ impl SessionManagerAgent {
     /// Construct an SM agent wired for inference (the daemon path, SM-7).
     ///
     /// Why: the daemon builds the agent once at startup with a credential-aware
-    /// [`ProviderRegistry`] (from the process environment), the storage root for
+    /// [`ProviderRegistry`](crate::core::sm::ProviderRegistry) (from the
+    /// process environment), the storage root for
     /// context-engine state, and — under `sm-memory` — the SM palace handle.
     /// Keeping construction side-effect-free (the registry is just resolved
     /// credentials; no provider is built until a chat turn) means wiring it up
@@ -276,7 +277,9 @@ impl SessionManagerAgent {
             Ok(hits) if !hits.is_empty() => {
                 let joined = hits
                     .iter()
-                    .map(|h| h.drawer.content.trim())
+                    // #7466: `Drawer::content` is a private field behind the
+                    // `content()` accessor (#5902 keeps the digest in agreement).
+                    .map(|h| h.drawer.content().trim())
                     .filter(|c| !c.is_empty())
                     .collect::<Vec<_>>()
                     .join("\n");

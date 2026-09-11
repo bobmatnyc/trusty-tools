@@ -212,7 +212,7 @@ async fn ensure_palace_falls_back_to_open_when_palace_already_exists() {
         .expect("recall from second instance");
     assert!(
         hits.iter()
-            .any(|h| h.drawer.content.contains("TOCTOU_MARKER")),
+            .any(|h| h.drawer.content().contains("TOCTOU_MARKER")),
         "second SM must open the EXISTING palace (seeing prior content), not a fresh one; got {hits:?}"
     );
 }
@@ -236,8 +236,10 @@ async fn remember_then_recall_round_trips() {
         .expect("recall");
 
     assert!(
-        hits.iter()
-            .any(|h| h.drawer.content.contains("delegates all engineering work")),
+        hits.iter().any(|h| h
+            .drawer
+            .content()
+            .contains("delegates all engineering work")),
         "recall must surface the remembered SM fact; got {hits:?}"
     );
 }
@@ -261,7 +263,7 @@ async fn recall_deep_round_trips() {
 
     assert!(
         hits.iter()
-            .any(|h| h.drawer.content.contains("worktree-per-ticket")),
+            .any(|h| h.drawer.content().contains("worktree-per-ticket")),
         "recall_deep must surface the remembered SM fact; got {hits:?}"
     );
 }
@@ -279,7 +281,8 @@ async fn note_stores_short_fact() {
 
     let hits = mem.recall("what is the goal").await.expect("recall");
     assert!(
-        hits.iter().any(|h| h.drawer.content.contains("ship SM-4")),
+        hits.iter()
+            .any(|h| h.drawer.content().contains("ship SM-4")),
         "note must store a short curated fact retrievable via recall; got {hits:?}"
     );
 }
@@ -317,7 +320,7 @@ async fn recall_is_scoped_to_sm_palace() {
     assert!(
         sm_hits
             .iter()
-            .all(|h| !h.drawer.content.contains("OTHER_PALACE_SECRET")),
+            .all(|h| !h.drawer.content().contains("OTHER_PALACE_SECRET")),
         "SM recall must never surface another palace's content; got {sm_hits:?}"
     );
 
@@ -326,7 +329,7 @@ async fn recall_is_scoped_to_sm_palace() {
     assert!(
         other_hits
             .iter()
-            .all(|h| !h.drawer.content.contains("SM_PALACE_SECRET")),
+            .all(|h| !h.drawer.content().contains("SM_PALACE_SECRET")),
         "non-SM recall must never surface SM content; got {other_hits:?}"
     );
 }
@@ -364,7 +367,7 @@ async fn data_survives_fresh_construction() {
         .expect("recall after restart");
     assert!(
         hits.iter()
-            .any(|h| h.drawer.content.contains("SM-3 merged to main")),
+            .any(|h| h.drawer.content().contains("SM-3 merged to main")),
         "remembered data must survive a fresh SmMemory construction; got {hits:?}"
     );
 }

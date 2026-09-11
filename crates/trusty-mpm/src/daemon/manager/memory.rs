@@ -274,12 +274,15 @@ pub enum PortfolioMemoryError {
 /// The live portfolio palace binding (opt-in `manager-memory` feature).
 ///
 /// Why: mirrors [`crate::core::sm::memory::SmMemory`] — a DIRECT `memory-core`
-/// library call (not over MCP) scoped to a single [`PalaceId`] so the manager
+/// library call (not over MCP) scoped to a single
+/// [`PalaceId`](trusty_common::memory_core::palace::PalaceId) so the manager
 /// can never touch another namespace. Binding one id for the struct's lifetime
 /// makes "manager only ever reads/writes its own portfolio palace" a structural
 /// invariant, not caller discipline (the DOC-36 §3.4 "never duplicates project
 /// state" guarantee).
-/// What: owns the open-handle [`PalaceRegistry`], the on-disk `data_root`, and
+/// What: owns the open-handle
+/// [`PalaceRegistry`](trusty_common::memory_core::registry::PalaceRegistry),
+/// the on-disk `data_root`, and
 /// the bound `palace_id`. Built via [`Self::open`], which idempotently ensures
 /// exactly one palace. Phase 1a exposes the minimal remember/recall surface
 /// later phases extend; it deliberately does NOT reimplement the SM palace's

@@ -20,6 +20,8 @@
 //! "never writes to a non-SM palace" guard.
 //!
 //! [`SmMemory`]: crate::core::sm::memory::SmMemory
+//! [`PalaceRegistry`]: trusty_common::memory_core::registry::PalaceRegistry
+//! [`PalaceId`]: trusty_common::memory_core::palace::PalaceId
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -393,7 +395,12 @@ impl SmMemory {
                  truncated on rebuild — revisit the cap"
             );
         }
-        Ok(drawers.into_iter().map(|d| d.content).collect())
+        // #7466: `Drawer::content` is a private field behind the `content()`
+        // accessor (#5902), which borrows — so copy the body out per drawer.
+        Ok(drawers
+            .into_iter()
+            .map(|d| d.content().to_string())
+            .collect())
     }
 
     /// Number of palaces currently persisted under the SM data root.
