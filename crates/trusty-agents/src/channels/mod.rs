@@ -27,6 +27,10 @@ mod telegram;
 
 pub(crate) use credentials::{resolve_credential, validate_credential_ref};
 pub(crate) use registry::{adapter, providers_json, require_adapter};
+// #7427 (PR 2): the Telegram long-poll loop resolves its bot token through the
+// same reference a binding names, so `crate::telegram` never reads the
+// environment itself.
+pub(crate) use telegram::poll_token as telegram_poll_token;
 
 use crate::api::server::agent_channels::Binding;
 use crate::listeners::store::StoredEvent;

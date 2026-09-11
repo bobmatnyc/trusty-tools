@@ -1,7 +1,7 @@
 //! Per-binding dispatch health, so a failed inbound wake stops being invisible.
 //!
-//! Why: `agent_channels::receive_slack` spawned the wake dispatch and threw the
-//! result away — `let _result = …`. A `run_pm_task_with_persona` that failed
+//! Why: `agent_channels::receive_inbound` spawned the wake dispatch and threw
+//! the result away — `let _result = …`. A `run_pm_task_with_persona` that failed
 //! (model error, missing persona, cancelled session) produced no log line, no
 //! counter, and no change in what the channel view showed: the binding still
 //! read as healthy while every inbound message was being dropped. That is
@@ -17,17 +17,61 @@
 //! same `LazyLock<Mutex<HashMap<…>>>` shape as
 //! `crate::tools::mcp_live::cache`'s process-wide cache.
 //!
+//! A poisoned lock recovers rather than dropping the update, and the retained
+//! reason is bounded in bytes: both are fences that must not themselves fail
+//! silently, which is what dropping the write or over-running the payload
+//! budget would be.
+//!
 //! Test: `channel_dispatch_failure_is_counted_per_binding`,
-//! `channel_dispatch_success_leaves_the_counter_alone`.
+//! `channel_dispatch_success_leaves_the_counter_alone`,
+//! `channel_dispatch_reason_is_bounded_in_bytes_at_a_char_boundary`.
 
 // #7427: the discarded wake-dispatch result becomes an observable failure.
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 
-/// Longest error text retained per binding. Bounds what one failing binding can
-/// hold, and keeps the channel-view payload small.
-const MAX_REASON_LEN: usize = 240;
+/// Longest error text retained per binding, in BYTES. Bounds what one failing
+/// binding can hold, and keeps the channel-view payload small.
+///
+/// Why bytes (#7427): the budget exists to bound the JSON payload, and JSON is
+/// measured in bytes. Counting characters let a reason of 240 multi-byte
+/// characters — a provider error carrying a non-ASCII channel name, say —
+/// occupy up to four times the intended budget. [`truncate_reason`] cuts at a
+/// character boundary at or below this many bytes, so the bound holds and the
+/// result is still valid UTF-8.
+const MAX_REASON_BYTES: usize = 240;
+
+/// The stored prefix of `reason`: at most [`MAX_REASON_BYTES`] bytes, cut on a
+/// character boundary.
+///
+/// Test: `channel_dispatch_reason_is_bounded_in_bytes_at_a_char_boundary`.
+fn truncate_reason(reason: &str) -> String {
+    if reason.len() <= MAX_REASON_BYTES {
+        return reason.to_string();
+    }
+    let mut end = MAX_REASON_BYTES;
+    while end > 0 && !reason.is_char_boundary(end) {
+        end -= 1;
+    }
+    reason[..end].to_string()
+}
+
+/// Read a poisoned lock's contents rather than dropping the write.
+///
+/// Why (#7427): a `LazyLock<Mutex<…>>` is poisoned when a thread panics while
+/// holding it. The map behind it is a plain `HashMap` of counters — a panic
+/// mid-update cannot leave it in a state that misleads a later reader, so
+/// refusing to touch it afterwards buys nothing and costs everything: every
+/// subsequent dispatch failure would go uncounted, silently, which is the exact
+/// invisibility this module exists to end. Recovering with `into_inner` keeps
+/// the fence working, and the panic that poisoned the lock has already been
+/// reported by the panicking thread.
+fn health() -> std::sync::MutexGuard<'static, HashMap<(String, String), BindingHealth>> {
+    HEALTH
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// What one binding's dispatches have been doing.
 #[derive(Clone, Debug, Default)]
@@ -76,14 +120,12 @@ pub(crate) async fn record_dispatch<T, E: std::fmt::Display>(
 /// failures are just as invisible.
 /// Test: `channel_dispatch_failure_is_counted_per_binding`.
 pub(crate) fn record_failure(agent: &str, binding_id: &str, reason: &str) {
-    let Ok(mut health) = HEALTH.lock() else {
-        return;
-    };
+    let mut health = health();
     let entry = health
         .entry((agent.to_string(), binding_id.to_string()))
         .or_default();
     entry.failures = entry.failures.saturating_add(1);
-    entry.last_error = Some(reason.chars().take(MAX_REASON_LEN).collect());
+    entry.last_error = Some(truncate_reason(reason));
 }
 
 /// This assistant's per-binding dispatch health, for the channel view.
@@ -95,9 +137,7 @@ pub(crate) fn record_failure(agent: &str, binding_id: &str, reason: &str) {
 /// so a healthy assistant returns `{}`.
 /// Test: `channel_dispatch_failure_is_counted_per_binding`.
 pub(crate) fn status_json(agent: &str) -> Value {
-    let Ok(health) = HEALTH.lock() else {
-        return json!({});
-    };
+    let health = health();
     let mut out = serde_json::Map::new();
     for ((owner, binding_id), entry) in health.iter() {
         if owner != agent {
@@ -114,14 +154,9 @@ pub(crate) fn status_json(agent: &str) -> Value {
 /// Failures recorded for one binding.
 #[cfg(test)]
 pub(crate) fn dispatch_failures(agent: &str, binding_id: &str) -> u64 {
-    HEALTH
-        .lock()
-        .ok()
-        .and_then(|h| {
-            h.get(&(agent.to_string(), binding_id.to_string()))
-                .map(|e| e.failures)
-        })
-        .unwrap_or(0)
+    health()
+        .get(&(agent.to_string(), binding_id.to_string()))
+        .map_or(0, |e| e.failures)
 }
 
 #[cfg(test)]
@@ -129,7 +164,7 @@ mod tests {
     use super::*;
 
     /// Pre-change this test does not compile: there is no counter to read.
-    /// `receive_slack` discarded the dispatch result outright.
+    /// the inbound path discarded the dispatch result outright.
     #[tokio::test]
     async fn channel_dispatch_failure_is_counted_per_binding() {
         let agent = "fixture-failure";
@@ -147,6 +182,28 @@ mod tests {
             json!("persona dispatch exploded")
         );
         assert!(status.get("other").is_none());
+    }
+
+    /// The retained reason is bounded in bytes and stays valid UTF-8.
+    ///
+    /// Pre-change this fails on the first assertion: the cut took 240
+    /// CHARACTERS, so a reason of multi-byte characters was stored at up to
+    /// four times the intended budget.
+    #[test]
+    fn channel_dispatch_reason_is_bounded_in_bytes_at_a_char_boundary() {
+        // One ASCII byte then three-byte characters, so byte 240 lands inside a
+        // character and the cut has to step back to 238.
+        let multibyte = format!("x{}", "日".repeat(200));
+        assert_eq!(multibyte.len(), 601);
+        let stored = truncate_reason(&multibyte);
+        assert!(stored.len() <= MAX_REASON_BYTES);
+        assert_eq!(stored.len(), 238);
+        assert!(stored.starts_with('x'));
+        assert!(stored.chars().skip(1).all(|c| c == '日'));
+
+        // A reason inside the budget is stored whole, multi-byte or not.
+        assert_eq!(truncate_reason("persona dispatch exploded 💥").len(), 30);
+        assert_eq!(truncate_reason(""), "");
     }
 
     #[tokio::test]

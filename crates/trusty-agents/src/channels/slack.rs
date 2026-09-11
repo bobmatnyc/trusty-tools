@@ -1,9 +1,10 @@
 //! Slack adapter — the reference implementation of [`ChannelAdapter`].
 //!
-//! Why: Slack is the only provider that both sends and receives today, so it is
-//! the one adapter that exercises every method on the trait. The code here is
+//! Why: Slack was the first provider to both send and receive, and it is still
+//! the one adapter that exercises every method on the trait — Telegram gained
+//! inbound in #7427 PR 2 but has no readable history. The code here is
 //! the code that used to sit inline in `agent_channels::send`'s `"slack"` arm
-//! and in `agent_channels::receive_slack`; behaviour is unchanged, and the
+//! and in `agent_channels`'s inbound path; behaviour is unchanged, and the
 //! existing `agent_channels` tests still pin it.
 //! What: `chat.postMessage` for outbound. For inbound, the knowledge-intake
 //! pass and the wake-prompt construction, returned as a [`WakePrompt`] the

@@ -10,8 +10,16 @@
 //! dispatches to `ctrl`. Responses are sent as `ParseMode::Html` with
 //! HTML-escaped content, split at 4096-char boundaries on newline preference.
 //!
+//! Since #7427 PR 2 this loop is also the Telegram INBOUND SOURCE for the
+//! per-assistant channel bindings: a plain-text update whose chat id a saved
+//! binding names goes to `agent_channels::receive_inbound`, the same dispatch
+//! Slack's intake uses, and the `ChatSession` path above handles only the
+//! updates no binding claims. The bot token comes from the credential authority
+//! under the binding's own reference, not from a direct environment read.
+//!
 //! Module layout (see #366 split):
 //! - `mod.rs` — lifecycle (`run_telegram_bot`), session types, dptree wiring
+//! - `inbound.rs` — update → `StoredEvent` → `receive_inbound` (#7427)
 //! - `pairing.rs` — pairing state machine, persistence, codes, PID guard
 //! - `handlers.rs` — `Command` enum + slash/plain-text handlers
 //! - `format.rs` — Markdown→HTML conversion + 4096-char chunking
@@ -23,6 +31,10 @@
 
 mod format;
 mod handlers;
+// #7427: the bridge from a long-poll update into the per-assistant channel
+// bindings. The gateway below is now the Telegram inbound SOURCE; the dispatch
+// it feeds is `agent_channels::receive_inbound`, the same one Slack uses.
+mod inbound;
 mod pairing;
 
 #[cfg(test)]
@@ -174,11 +186,16 @@ pub(super) fn home_persona_exists(name: &str) -> bool {
 /// Why: This is the entry point wired to `--telegram` in `main.rs`. Long
 /// polling avoids webhook setup (no public URL / TLS termination required) so
 /// the bot can run from a developer's laptop or a CI runner identically.
-/// What: Loads `TELEGRAM_BOT_TOKEN`, builds a `Bot` with explicit HTTP
-/// timeouts (matches the reference implementation), wires `dptree` routes for
-/// commands and plain text, then dispatches with Ctrl-C handling enabled.
+/// What: resolves the bot token through the credential authority (#7427),
+/// builds a `Bot` with explicit HTTP timeouts (matches the reference
+/// implementation), wires `dptree` routes for commands and plain text, then
+/// dispatches with Ctrl-C handling enabled. A token that will not resolve fails
+/// startup rather than polling without one.
 /// Test: `cargo build` is the primary gate; we never actually contact
-/// Telegram in CI.
+/// Telegram in CI. The two decisions this function makes that are testable
+/// without a live bot are pinned by
+/// `telegram_poll_token_refuses_a_credential_outside_the_family` and
+/// `agent_channels_poll_credential_ref_reads_the_first_receiving_binding`.
 pub async fn run_telegram_bot(project_path: PathBuf, pending: PendingPairs) -> Result<()> {
     // Single-instance guard: refuse to start if another Telegram daemon is
     // already long-polling, which would otherwise cause Telegram's
@@ -191,9 +208,19 @@ pub async fn run_telegram_bot(project_path: PathBuf, pending: PendingPairs) -> R
     })?;
     info!("Telegram daemon starting (PID {})", std::process::id());
 
-    let token = std::env::var("TELEGRAM_BOT_TOKEN").map_err(|_| {
+    // #7427: the token resolves through the credential authority, under the
+    // reference a receiving Telegram binding names — the same reference
+    // `TelegramAdapter::send` resolves, so the identity that polls and the
+    // identity that replies are one credential. A token that will not resolve
+    // stops startup here: polling with an empty token produces a `getUpdates`
+    // 401 per cycle and looks like a network fault, which is exactly the
+    // failure an operator cannot diagnose.
+    let credential_ref = crate::api::server::agent_channels::telegram_poll_credential_ref().await;
+    let token = crate::channels::telegram_poll_token(credential_ref.as_deref()).map_err(|e| {
+        error!(error = %e, "Telegram bot token could not be resolved; refusing to poll without one");
         anyhow!(
-            "TELEGRAM_BOT_TOKEN not set. Add it to .env.local or export it before running --telegram."
+            "Telegram bot token could not be resolved ({e}). Set TELEGRAM_BOT_TOKEN in .env.local, \
+             or point the binding's credential reference at a stored Telegram credential."
         )
     })?;
 
@@ -208,7 +235,7 @@ pub async fn run_telegram_bot(project_path: PathBuf, pending: PendingPairs) -> R
         .build()
         .map_err(|e| anyhow!("failed to build telegram HTTP client: {}", e))?;
 
-    let bot = Bot::with_client(token, client);
+    let bot = Bot::with_client(token.into_inner(), client);
 
     // #333: Startup diagnostics. Long-polling silently drops updates if a
     // webhook is registered, and an invalid token gives a misleading "no
@@ -341,6 +368,12 @@ pub async fn run_telegram_bot(project_path: PathBuf, pending: PendingPairs) -> R
                     }
                 }),
         )
+        // #7427: plain text is the branch a binding can claim. A chat id a
+        // saved binding names dispatches through `receive_inbound` — the same
+        // path, prompt and failure counter Slack uses. Everything else falls
+        // through to the pre-#7427 gateway session, so a host with no bindings
+        // behaves exactly as it did. Slash commands never route here: they are
+        // gateway control (`/pair`, `/connect`, `/switch`), not assistant work.
         .branch(
             Update::filter_message()
                 .filter(|msg: Message| msg.text().map(|t| !t.starts_with('/')).unwrap_or(false))
@@ -350,6 +383,10 @@ pub async fn run_telegram_bot(project_path: PathBuf, pending: PendingPairs) -> R
                     let paired = Arc::clone(&paired_for_msg);
                     let attendance_root = attendance_for_msg.clone();
                     async move {
+                        let text = msg.text().unwrap_or_default().to_string();
+                        if inbound::route(&msg, &text, project.as_path()).await {
+                            return Ok(());
+                        }
                         handle_message(bot, msg, sessions, project, paired, attendance_root).await
                     }
                 }),

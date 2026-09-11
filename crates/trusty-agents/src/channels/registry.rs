@@ -90,7 +90,11 @@ mod tests {
         assert_eq!(list[0]["can_receive"], json!(true));
         assert_eq!(list[1]["id"], json!("telegram"));
         assert_eq!(list[1]["can_send"], json!(true));
-        assert_eq!(list[1]["can_receive"], json!(false));
+        // #7427 PR 2: was `false`. The providers listing is what the channel
+        // view reads to enable the Receive updates checkbox, so the flip has to
+        // be visible here or the UI keeps refusing what the adapter now allows.
+        assert_eq!(list[1]["can_receive"], json!(true));
+        assert_eq!(list[1]["can_read"], json!(false));
         assert!(!list.iter().any(|p| p["id"] == json!("notion")));
     }
 }

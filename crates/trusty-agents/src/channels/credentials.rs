@@ -73,7 +73,8 @@ pub(crate) fn validate_credential_ref(
     })?;
     if !allowed.contains(&parsed.provider()) {
         return Err(ChannelError::Credential(format!(
-            "provider `{}` is not one this channel may send as (allowed: {})",
+            "credential reference `{reference}` names provider `{}`, which is not one this \
+             channel may send as (allowed: {})",
             parsed.provider(),
             allowed.join(", ")
         )));
@@ -84,12 +85,20 @@ pub(crate) fn validate_credential_ref(
     // otherwise turn the allowlist into a hole.
     match trusty_common::credentials::env_var_for(parsed.provider()) {
         Some(var) if var.starts_with(env_prefix) => Ok(()),
+        // #7427: both arms name the reference as written, the provider segment
+        // parsed out of it, and the invariant that failed. An operator reading
+        // the earlier message had the provider and nothing else — not the
+        // reference they typed, and not which of the two rules rejected it.
         Some(var) => Err(ChannelError::Credential(format!(
-            "provider `{}` resolves `{var}`, outside this channel's `{env_prefix}` credentials",
+            "credential reference `{reference}` names provider `{}`, which the registry maps to \
+             `{var}` — outside this channel's `{env_prefix}` family. A channel may only send as a \
+             credential whose registry variable starts with `{env_prefix}`.",
             parsed.provider()
         ))),
         None => Err(ChannelError::Credential(format!(
-            "provider `{}` is not in the credential registry",
+            "credential reference `{reference}` names provider `{}`, which is absent from \
+             `trusty_common::credentials::REGISTRY` — only a registered provider can be named, \
+             because the registry is what maps a name to a storage location.",
             parsed.provider()
         ))),
     }
@@ -186,6 +195,25 @@ mod tests {
                 "`{foreign}` must not be sendable as a Slack credential"
             );
         }
+        // #7427: a rejection names the reference as written and the invariant
+        // that rejected it, not just the provider segment.
+        let rejected = validate_credential_ref("github", SLACK_PROVIDERS, "SLACK_")
+            .unwrap_err()
+            .to_string();
+        assert!(rejected.contains("`github`"), "{rejected}");
+        assert!(rejected.contains("may send as"), "{rejected}");
+        assert!(rejected.contains("slack-app"), "{rejected}");
+        // An adapter listing a key the registry does not carry is refused with
+        // that invariant named. Unreachable through a real adapter — the
+        // `channel_credential_providers_map_to_the_adapters_env_prefix` test
+        // below is what keeps it so — which is exactly why the message is
+        // asserted here rather than left to be read for the first time in
+        // production.
+        let unregistered = validate_credential_ref("not-a-provider", &["not-a-provider"], "SLACK_")
+            .unwrap_err()
+            .to_string();
+        assert!(unregistered.contains("`not-a-provider`"), "{unregistered}");
+        assert!(unregistered.contains("REGISTRY"), "{unregistered}");
         assert!(validate_credential_ref("slack", SLACK_PROVIDERS, "SLACK_").is_ok());
         assert!(
             validate_credential_ref("slack/second-workspace", SLACK_PROVIDERS, "SLACK_").is_ok()
