@@ -1,25 +1,24 @@
-// Per-agent Knowledge Graph browser API client (#4290).
+// Per-agent Knowledge Graph browser API client (#4290, #7430).
 //
 // Why: The Knowledge Graph browser needs a typed surface over the read-only
-// proxy routes `crates/trusty-agents/src/api/server/agent_kg.rs` exposes
+// routes `crates/trusty-agents/src/api/server/agent_kg.rs` exposes
 // (`GET /api/agents/:name/kg/subjects`, `/kg/all`, `/kg`, `/kg/count`). The
-// SPA must never call trusty-memory directly — every cross-daemon read in
-// this codebase goes through the trusty-agents sidecar (see
-// `fetchAgentStores`, `fetchAgentSkills`), and the KG routes are no
-// exception. Kept in its own module (rather than folded into
-// `agentConfig.ts`) because these routes are not part of the agent-config
-// five-section surface — they back a standalone slide-over opened from
-// `ChatHeader`, not a config pane tab.
-// What: `KgTriple`/`KgSubjectCount`/`KgActiveCount` mirror the upstream
-// trusty-memory KG shapes verbatim (the proxy passes them through
-// unreshaped); `KgEnvelope<T>` is the `{palace, connected, data}` wrapper
-// every route returns. `fetchKgSubjects`/`fetchKgAll`/`fetchKgSubject`/
-// `fetchKgCount` follow `fetchAgentStores`'s idiom exactly (agentConfig.ts:
-// 200-213): `null` on a 404 (unknown agent — a normal outcome for a stale
-// selection), throw on any other network/HTTP error. `connected: false` in a
-// successfully-parsed envelope is NOT an error — it's a first-class state
-// carrying a machine-readable `reason` the caller renders directly, per the
-// route's never-fail posture.
+// graph those routes serve is the assistant's OKG tree — triples AND
+// definitions. It is NOT a memory palace: before #7430 the routes proxied
+// trusty-memory's palace-scoped `kg_*` surface, so this pane showed the memory
+// knowledge graph, which epic #7425 item (f) rules out. Kept in its own module
+// (rather than folded into `agentConfig.ts`) because these routes are not part
+// of the agent-config five-section surface — they back a standalone slide-over
+// opened from `ChatHeader`, not a config pane tab.
+// What: `KgTriple`/`KgDefinition`/`KgSubjectCount`/`KgActiveCount` mirror the
+// route's shapes verbatim; `KgEnvelope<T>` is the `{tree, source, connected,
+// data, definitions}` wrapper every route returns. `fetchKgSubjects`/
+// `fetchKgAll`/`fetchKgSubject`/`fetchKgCount` follow `fetchAgentStores`'s
+// idiom exactly (agentConfig.ts: 200-213): `null` on a 404 (unknown agent — a
+// normal outcome for a stale selection), throw on any other network/HTTP
+// error. `connected: false` in a successfully-parsed envelope is NOT an error —
+// it's a first-class state carrying a machine-readable `reason` the caller
+// renders directly, per the route's never-fail posture.
 // Test: `kg.test.ts` covers this module's own fetch/parse contract.
 // `KnowledgeGraphBrowser.test.ts` covers the caller-side regression — a
 // `connected: false` envelope from any of these functions must not render as
@@ -33,14 +32,27 @@ function authHeaders(): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
-/** One resolved KG triple, verbatim from trusty-memory (`kg_routes.rs`). */
+/** One relationship edge read out of the OKG tree (`stores/okg_graph.rs`). */
 export interface KgTriple {
   subject: string;
   predicate: string;
   object: string;
-  confidence?: number;
-  valid_from?: string;
+  /** Tree-relative path of the entity file the edge came from. */
   provenance?: string;
+}
+
+/**
+ * One entity definition — what a subject IS, as distinct from what it links to.
+ * The owner's closure condition for #7430 is that the exposed graph carries
+ * both halves, so every content route returns these beside the triples.
+ */
+export interface KgDefinition {
+  subject: string;
+  collection: string;
+  slug: string;
+  type?: string;
+  summary?: string;
+  path: string;
 }
 
 /** One subject + its triple count, from `/kg/subjects`. */
@@ -49,24 +61,29 @@ export interface KgSubjectCount {
   count: number;
 }
 
-/** `/kg/count`'s `data` object. */
+/** `/kg/count`'s `data` object — both halves of the graph, as totals. */
 export interface KgActiveCount {
   active: number;
+  definition_count?: number;
 }
 
 /**
- * The `{palace, connected, data}` envelope every KG proxy route returns
- * (`agent_kg.rs`'s module doc). `connected: false` is a first-class,
+ * The `{tree, source, connected, data, definitions}` envelope every KG route
+ * returns (`agent_kg.rs`'s module doc). `connected: false` is a first-class,
  * non-error state carrying a human-readable `reason` — render it directly,
  * never as a generic failure or an empty list that looks like "no data".
- * `config_error` is present only when the agent's own `agent.toml` failed to
- * parse (in which case `connected` is also `false`).
+ * `tree` is the OKG directory the graph was read from, and `source` is always
+ * `"okg"` — the payload states what it is made of rather than leaving a reader
+ * to infer it. `config_error` is present only when the agent's own `agent.toml`
+ * failed to parse (in which case `connected` is also `false`).
  */
 export interface KgEnvelope<T> {
-  palace: string | null;
+  tree: string | null;
+  source?: string;
   connected: boolean;
   reason?: string;
   data: T;
+  definitions?: KgDefinition[];
   config_error?: string;
 }
 
@@ -112,9 +129,8 @@ export async function fetchKgAll(
 }
 
 /**
- * `GET /api/agents/:name/kg?subject=<s>`. `subject` is REQUIRED by the
- * upstream route (a `400` otherwise) — callers must never pass an empty
- * string.
+ * `GET /api/agents/:name/kg?subject=<s>`. `subject` is REQUIRED by the route
+ * (a `400` otherwise) — callers must never pass an empty string.
  * Test: `fetchKgSubject_encodes_the_subject` (`kg.test.ts`).
  */
 export async function fetchKgSubject(
@@ -126,7 +142,8 @@ export async function fetchKgSubject(
 }
 
 /**
- * `GET /api/agents/:name/kg/count`. `data` is `{"active": N}`.
+ * `GET /api/agents/:name/kg/count`. `data` is
+ * `{"active": N, "definition_count": D}`.
  * Test: `fetchKgCount_parses_active_count` (`kg.test.ts`).
  */
 export async function fetchKgCount(name: string): Promise<KgEnvelope<KgActiveCount> | null> {

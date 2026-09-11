@@ -5,7 +5,7 @@
 // Why: Mirrors `agentConfig.test.ts`'s stubbed-`fetch` idiom — these routes
 // are thin REST glue, but the null-on-404 branch and the `connected: false`
 // envelope are exactly the contract `KnowledgeGraphBrowser.svelte` depends on
-// to avoid rendering a degraded palace as empty data (see
+// to avoid rendering a degraded tree as empty data (see
 // `KnowledgeGraphBrowser.test.ts` for the component-level regression against
 // that same failure mode).
 // What: `getKgEnvelope`'s shared 404/throw/parse contract, each fetch
@@ -47,30 +47,36 @@ describe('fetchKgSubjects_returns_null_on_404', () => {
 });
 
 describe('fetchKgSubjects_parses_envelope', () => {
-  it('passes the {palace, connected, data} envelope through verbatim', async () => {
+  it('passes the tree/connected/data envelope through verbatim', async () => {
     const payload = {
-      palace: 'owner-profile',
+      tree: '/homes/izzie/okg',
+      source: 'okg',
       connected: true,
       data: [{ subject: 'bob', count: 3 }],
+      definitions: [
+        { subject: 'bob', collection: 'people', slug: 'bob', type: 'Person', path: 'people/bob.md' },
+      ],
     };
     stubFetch(200, payload);
     const got = await fetchKgSubjects('izzie');
-    expect(got?.palace).toBe('owner-profile');
+    expect(got?.tree).toBe('/homes/izzie/okg');
+    expect(got?.source).toBe('okg');
     expect(got?.connected).toBe(true);
     expect(got?.data).toEqual([{ subject: 'bob', count: 3 }]);
+    expect(got?.definitions?.[0].type).toBe('Person');
   });
 
   it('surfaces connected:false with its reason and config_error, not an error throw', async () => {
     stubFetch(200, {
-      palace: null,
+      tree: null,
       connected: false,
-      reason: "agent's agent.toml declares no [[stores]] palace",
+      reason: 'this assistant has no OKG tree yet',
       config_error: 'could not parse agent.toml: missing field `model`',
       data: [],
     });
     const got = await fetchKgSubjects('broken');
     expect(got?.connected).toBe(false);
-    expect(got?.reason).toContain('no [[stores]] palace');
+    expect(got?.reason).toContain('no OKG tree');
     expect(got?.config_error).toContain('missing field');
     expect(got?.data).toEqual([]);
   });
@@ -83,7 +89,7 @@ describe('fetchKgSubjects_parses_envelope', () => {
 
 describe('fetchKgAll_forwards_limit_and_offset', () => {
   it('forwards limit and offset as query params', async () => {
-    const fn = stubFetch(200, { palace: 'p', connected: true, data: [] });
+    const fn = stubFetch(200, { tree: 'p', connected: true, data: [] });
     await fetchKgAll('izzie', 25, 50);
     const url = requestedUrl(fn);
     expect(url.pathname).toBe('/api/agents/izzie/kg/all');
@@ -92,7 +98,7 @@ describe('fetchKgAll_forwards_limit_and_offset', () => {
   });
 
   it('defaults limit/offset when omitted', async () => {
-    const fn = stubFetch(200, { palace: 'p', connected: true, data: [] });
+    const fn = stubFetch(200, { tree: 'p', connected: true, data: [] });
     await fetchKgAll('izzie');
     const url = requestedUrl(fn);
     expect(url.searchParams.get('limit')).toBe('50');
@@ -102,7 +108,7 @@ describe('fetchKgAll_forwards_limit_and_offset', () => {
 
 describe('fetchKgSubject_encodes_the_subject', () => {
   it('round-trips a subject containing reserved query characters', async () => {
-    const fn = stubFetch(200, { palace: 'p', connected: true, data: [] });
+    const fn = stubFetch(200, { tree: 'p', connected: true, data: [] });
     const subject = 'bob smith/likes cats & dogs?';
     await fetchKgSubject('izzie', subject);
     const url = requestedUrl(fn);
@@ -111,7 +117,7 @@ describe('fetchKgSubject_encodes_the_subject', () => {
   });
 
   it('percent-encodes the agent name in the path segment', async () => {
-    const fn = stubFetch(200, { palace: 'p', connected: true, data: [] });
+    const fn = stubFetch(200, { tree: 'p', connected: true, data: [] });
     await fetchKgSubject('agent/with slash', 'bob');
     const url = requestedUrl(fn);
     expect(url.pathname).toBe(`/api/agents/${encodeURIComponent('agent/with slash')}/kg`);
@@ -124,22 +130,23 @@ describe('fetchKgSubject_encodes_the_subject', () => {
 });
 
 describe('fetchKgCount_parses_active_count', () => {
-  it('parses the {active: N} data object', async () => {
-    stubFetch(200, { palace: 'p', connected: true, data: { active: 42 } });
+  it('parses the counts object — both halves of the graph', async () => {
+    stubFetch(200, { tree: 'p', connected: true, data: { active: 42, definition_count: 7 } });
     const got = await fetchKgCount('izzie');
     expect(got?.data.active).toBe(42);
+    expect(got?.data.definition_count).toBe(7);
   });
 
   it('surfaces connected:false alongside a zeroed active count', async () => {
     stubFetch(200, {
-      palace: 'p',
+      tree: 'p',
       connected: false,
-      reason: 'trusty-memory is unreachable',
-      data: { active: 0 },
+      reason: 'the OKG tree is unreadable',
+      data: { active: 0, definition_count: 0 },
     });
     const got = await fetchKgCount('izzie');
     expect(got?.connected).toBe(false);
-    expect(got?.reason).toBe('trusty-memory is unreachable');
+    expect(got?.reason).toBe('the OKG tree is unreadable');
   });
 
   it('returns null on 404', async () => {

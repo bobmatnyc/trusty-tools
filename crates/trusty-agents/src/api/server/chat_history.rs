@@ -60,7 +60,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::agent_kg::{describe_failure, parse_stores};
+use super::agent_kg::parse_stores;
 use super::agent_patch::resolve_agent_paths;
 use super::state::AppState;
 use crate::ctrl::pm_task::session_id_for;
@@ -343,4 +343,25 @@ async fn fetch_session(socket: &Path, palace: &str, session_id: &str) -> Result<
         history,
         updated_at: decoded.get("updated_at").cloned().unwrap_or(Value::Null),
     })
+}
+
+/// Turn a trusty-memory call failure into the reason a pane renders.
+///
+/// Why: a not-found refusal is the palace being absent, which is an ordinary
+/// state for an agent whose palace was never created; anything else is the
+/// daemon being unreachable or in trouble, and carries its own message so an
+/// operator reads what they were given. The vocabulary matches
+/// `stores::status::probe_palace`, so a client that already renders a store
+/// card's `reason` renders this one with no new cases.
+/// What: one sentence naming the palace and the failure class.
+/// Test: `chat_history_degrades_when_memory_unreachable`,
+/// `chat_history_absent_palace_is_not_reported_as_absent_session`.
+// #7430: moved here from `agent_kg`, whose routes no longer call trusty-memory
+// at all; this is now the only caller.
+fn describe_failure(e: &anyhow::Error, palace: &str) -> String {
+    match e.downcast_ref::<trusty_common::memory_rpc::MemoryRpcError>() {
+        Some(rpc) if rpc.is_not_found() => format!("memory palace `{palace}` does not exist"),
+        Some(rpc) => format!("trusty-memory refused the read for palace `{palace}`: {rpc}"),
+        None => format!("trusty-memory unreachable: {e:#}"),
+    }
 }

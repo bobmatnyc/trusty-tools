@@ -426,7 +426,7 @@ describe('Knowledge Graph main-pane takeover', () => {
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.includes('/agents/izzie/kg/subjects')) return new Promise<Response>(resolve => finishOld = resolve);
-      if (url.includes('/agents/new-agent/kg/subjects')) return Promise.resolve(response({ connected: false, palace: null, reason: 'new agent graph', data: [] }));
+      if (url.includes('/agents/new-agent/kg/subjects')) return Promise.resolve(response({ connected: false, tree: null, reason: 'new agent graph', data: [] }));
       return previousFetch(input, init);
     }));
     activeAgentId.set('izzie');
