@@ -100,6 +100,18 @@ pub struct AppState {
     /// documented no-op, never an error.
     /// Test: `submit_task_records_attendance_under_the_injected_root`.
     pub(super) attendance_root: Option<PathBuf>,
+    /// #7370: the root holding one assistant home per instance, under which
+    /// `<instance>/attachments/<session>/` lives.
+    ///
+    /// Why: same reason as [`AppState::attendance_root`] — resolving it from
+    /// `$HOME` inside the handler makes "an upload lands in the assistant's
+    /// home" untestable, because the natural test writes into the developer's
+    /// real `~/trusty-agents`. Injected here, a test points it at a tempdir and
+    /// asserts against that.
+    /// `None` means no home directory could be resolved; the attachment routes
+    /// then answer `503` rather than inventing a path.
+    /// Test: `super::tests::attachments`.
+    pub(super) attachments_root: Option<PathBuf>,
 }
 
 impl Default for AppState {
@@ -110,6 +122,7 @@ impl Default for AppState {
             recap_tracker: Arc::new(Mutex::new(RecapTracker::new(RecapConfig::default()))),
             tm_manager: None,
             attendance_root: crate::attendance::default_attendance_root().ok(),
+            attachments_root: crate::assistants::assistants_root().ok(),
         }
     }
 }

@@ -288,6 +288,27 @@ pub fn build_router_with_origins(
             "/api/assistants/{id}/memory",
             axum::routing::get(super::assistant_memory::get).put(super::assistant_memory::put),
         )
+        // #7370: chat-thread attachments, stored under
+        // `<assistant home>/attachments/<session>/`. POST uploads one file
+        // (multipart); the collection GET returns the session manifest a
+        // reload rebuilds its cards from; the id GET returns the bytes.
+        // Never a static file mount — every read is looked up by id in the
+        // manifest and the server opens the path the ROW names, never one the
+        // caller supplied (see `attachments`'s module doc).
+        .route(
+            "/api/agents/{name}/sessions/{session}/attachments",
+            axum::routing::get(super::attachments::list_route)
+                .post(super::attachments::upload_route)
+                // axum's 2 MiB default would refuse a legitimate attachment
+                // before the store's own cap could name the file.
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    super::attachments::MAX_UPLOAD_BODY_BYTES,
+                )),
+        )
+        .route(
+            "/api/agents/{name}/sessions/{session}/attachments/{id}",
+            axum::routing::get(super::attachments::download_route),
+        )
         // #4098: aggregated usage cost for the Costs tab — totals plus
         // by-agent/by-model/by-date breakdowns, folded read-time from
         // `.trusty-agents/state/usage.jsonl` and priced through the single

@@ -143,6 +143,13 @@ async function fetchFallback(command: string, args?: Record<string, unknown>): P
       if (typeof providerId === 'string' && providerId.trim()) {
         body.provider_id = providerId;
       }
+      // #7370: attachment ids for this turn, mirroring the Tauri
+      // `send_message` command's own forwarding. Omitted entirely when the
+      // composer staged none, so an ordinary turn's payload is unchanged.
+      const attachments = args?.attachments;
+      if (Array.isArray(attachments) && attachments.length > 0) {
+        body.attachments = attachments;
+      }
       const submit = await fetch(`${base}/api/task`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders() },

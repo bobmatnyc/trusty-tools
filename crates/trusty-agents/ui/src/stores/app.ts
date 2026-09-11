@@ -47,6 +47,8 @@ export interface Project {
   sessions?: SessionSummary[];
 }
 
+import type { AttachmentRef } from '../lib/attachments';
+
 export interface Message {
   id: string;
   // #3819: 'topic-boundary' is a non-destructive divider row inserted by
@@ -82,6 +84,16 @@ export interface Message {
    * is `[step_label, result_text]`, mirroring the SSE event shape.
    */
   recapRows?: [string, string][];
+  /**
+   * Why (#7370): a turn can carry files. Chat messages stay `{role, content}`
+   * on the wire, so the reference travels as a `[[attachment:<id>]]` marker
+   * INSIDE `content`; this field is the resolved row behind each marker, so
+   * `ChatView` can draw a card without re-fetching per bubble. Populated by
+   * `InputArea` at send time and by `chatHistory` on rehydration.
+   * What: absent for every turn that carries no attachment, which is what
+   * keeps an ordinary message identical to what it was before this existed.
+   */
+  attachments?: AttachmentRef[];
 }
 
 export interface TaskHistoryEntry {

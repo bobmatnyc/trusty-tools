@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ArrowUp, Square } from 'lucide-svelte';
+  import { ArrowUp, Paperclip, Square, X } from 'lucide-svelte';
   import {
     activeAgentId,
     conversationKey,
@@ -23,16 +23,86 @@
   import { agentRoster } from '../stores/app';
   import { rosterDisplayName } from '../lib/roster';
 
+  // #7370: files attached to this turn. They are uploaded BEFORE the send, so
+  // the turn carries ids the server has already validated rather than bytes it
+  // has to accept mid-dispatch.
+  import { formatSize, uploadAttachment, type AttachmentRef } from '../lib/attachments';
+
   import ModelSwitcher from './ModelSwitcher.svelte';
   import { chatProjectPath, chatFolderError, detachUnavailableChatFolders } from '../stores/workspace';
 
-  type SubmissionContext = { projectPath: string | null; agent: string | null; model: PickerEntry | null; speaker: string };
+  type SubmissionContext = { projectPath: string | null; agent: string | null; model: PickerEntry | null; speaker: string; attachments: AttachmentRef[] };
 
   let input = '';
   let textareaEl: HTMLTextAreaElement;
   let cancelling = false;
 
-  $: disabled = !input.trim() || !!$chatFolderError;
+  /**
+   * Why (#7370): an attachment is uploaded the moment it is picked, not at
+   * send time — so the server's guards (traversal, size cap, media type) answer
+   * while the user is still composing and can do something about it, rather
+   * than failing a turn they have already committed to.
+   * What: the rows the server returned for files staged on this draft. Cleared
+   * when the turn is sent, so the next turn starts empty.
+   */
+  let pendingAttachments: AttachmentRef[] = [];
+  let attachmentError: string | null = null;
+  let uploading = false;
+  let fileInput: HTMLInputElement;
+  let dragging = false;
+
+  $: disabled = (!input.trim() && pendingAttachments.length === 0) || !!$chatFolderError || uploading;
+
+  /**
+   * Why: the upload is what turns a local `File` into something a turn can
+   * reference. Errors are shown next to the composer rather than thrown,
+   * because the user is mid-draft and the draft must survive.
+   * What: uploads each file to the ACTIVE assistant's chat session and stages
+   * the returned row. The first failure stops the batch and is reported with
+   * the server's own message.
+   * Test: `lib/attachments.test.ts` covers `uploadAttachment`'s two arms.
+   */
+  async function stageFiles(files: File[]): Promise<void> {
+    if (files.length === 0) return;
+    uploading = true;
+    attachmentError = null;
+    try {
+      for (const file of files) {
+        pendingAttachments = [...pendingAttachments, await uploadAttachment(get(activeAgentId), file)];
+      }
+    } catch (e) {
+      attachmentError = `${e instanceof Error ? e.message : e}`;
+    } finally {
+      uploading = false;
+    }
+  }
+
+  function onPick(event: Event): void {
+    const picked = (event.target as HTMLInputElement).files;
+    void stageFiles(picked ? Array.from(picked) : []);
+    // Reset so picking the same file twice in a row still fires `change`.
+    if (fileInput) fileInput.value = '';
+  }
+
+  /**
+   * Why: dropping a FILE onto the composer stages an attachment. This is a
+   * different gesture from the project-folder drop that sets `chatProjectPath`
+   * (`stores/workspace`), which arrives as a Tauri native drop event carrying
+   * paths, not as a DOM `DataTransfer` carrying `File` objects — so the two
+   * cannot be confused. A drop with no `File` in it is ignored here and left
+   * to whatever else is listening.
+   */
+  function onDrop(event: DragEvent): void {
+    dragging = false;
+    const dropped = Array.from(event.dataTransfer?.files ?? []);
+    if (dropped.length === 0) return;
+    event.preventDefault();
+    void stageFiles(dropped);
+  }
+
+  function removeAttachment(id: string): void {
+    pendingAttachments = pendingAttachments.filter((a) => a.id !== id);
+  }
 
   // Why (#3063): a retask can start before the previous submission's
   // `send_message` invoke/poll-loop has resolved (it only notices the abort
@@ -117,6 +187,10 @@
       role: 'user',
       content: displayContent,
       timestamp: now,
+      // #7370: the bubble shows the cards immediately. The server appends the
+      // rendered attachment blocks to the PERSISTED turn, so a later reload
+      // rebuilds these same cards from the markers in that content.
+      ...(context.attachments.length ? { attachments: context.attachments } : {}),
     });
 
     // Assistant placeholder. `taskId` is set to a temp id and patched once
@@ -211,6 +285,11 @@
       if (selectedAgent) {
         invokeArgs.agent = selectedAgent;
       }
+      // #7370: ids only. The bytes are already on the server, validated; the
+      // turn is refused outright if any id is not in the session's manifest.
+      if (context.attachments.length) {
+        invokeArgs.attachments = context.attachments.map((a) => a.id);
+      }
       // #3245: forward the model/provider picker's selection, when any.
       // `resolveOverride` returns `{ modelId: null, providerId: null }` for
       // both the "Default" row and a `null` store (nothing selected yet),
@@ -273,7 +352,8 @@
    */
   async function handleSubmit() {
     const content = input.trim();
-    if (!content || get(chatFolderError)) return;
+    // #7370: an attachment alone is a valid turn — "here, look at this".
+    if ((!content && pendingAttachments.length === 0) || get(chatFolderError)) return;
 
     const project = $activeProject;
     // Freeze all dispatch choices before listener setup or cancellation can yield.
@@ -281,6 +361,7 @@
       projectPath: get(chatProjectPath) ?? project.path ?? null,
       agent: get(activeAgentId), model: get(activeModelEntry),
       speaker: rosterDisplayName(get(agentRoster), get(activeAgentId)),
+      attachments: pendingAttachments,
     };
     const historyForRetask: HistoryTurn[] = $activeMessages
       .filter((m): m is Message & { role: HistoryTurn['role'] } => m.role !== 'topic-boundary')
@@ -319,11 +400,16 @@
       // is a real `HistoryTurn[]`, not a `Message[]` the type checker still
       // sees as possibly carrying `'topic-boundary'`.
       const payload = buildRetaskPayload(historyForRetask, content);
+      pendingAttachments = [];
       await submitTask(project, content, payload, context);
       return;
     }
 
     input = '';
+    // Cleared before the await so a second Enter cannot send the same files
+    // twice; `context` already holds them.
+    pendingAttachments = [];
+    attachmentError = null;
     await submitTask(project, content, content, context);
   }
 
@@ -385,7 +471,13 @@
   }
 </script>
 
-<footer class="shrink-0 min-w-0 border-t border-foundry-light-border dark:border-foundry-border bg-foundry-light-bg dark:bg-foundry-bg p-3">
+<!-- svelte-ignore a11y-no-static-element-interactions -->
+<footer
+  class="shrink-0 min-w-0 border-t border-foundry-light-border dark:border-foundry-border bg-foundry-light-bg dark:bg-foundry-bg p-3 {dragging ? 'ring-2 ring-inset ring-foundry-light-primary dark:ring-foundry-primary' : ''}"
+  on:dragover|preventDefault={() => (dragging = true)}
+  on:dragleave={() => (dragging = false)}
+  on:drop={onDrop}
+>
   {#if $chatFolderError}<p role="alert" class="mb-2 text-xs text-foundry-light-muted dark:text-foundry-text/70">{$chatFolderError} <button type="button" class="underline" on:click={detachUnavailableChatFolders}>Remove attachment</button></p>{/if}
   <div class="flex w-full min-w-0 flex-col rounded-xl border border-foundry-light-border dark:border-foundry-border bg-foundry-light-surface dark:bg-foundry-surface shadow-sm focus-within:border-foundry-light-primary dark:focus-within:border-foundry-primary">
     <textarea
@@ -397,8 +489,50 @@
       class="w-full resize-none rounded-t-xl bg-transparent px-3 pt-3 pb-2 text-sm text-foundry-light-text dark:text-foundry-text focus:outline-none placeholder:text-foundry-light-muted dark:placeholder:text-foundry-text/40"
       on:keydown={handleKeydown}
     ></textarea>
+    {#if attachmentError}
+      <p role="alert" class="px-3 pb-1 text-xs text-red-600 dark:text-red-400">{attachmentError}</p>
+    {/if}
+    {#if pendingAttachments.length > 0}
+      <ul class="flex flex-wrap gap-2 px-3 pb-2" data-pending-attachments>
+        {#each pendingAttachments as attachment (attachment.id)}
+          <li class="flex items-center gap-1 rounded-full border border-foundry-light-border dark:border-foundry-border px-2 py-0.5 text-xs text-foundry-light-text dark:text-foundry-text">
+            <span class="max-w-[12rem] truncate">{attachment.file_name}</span>
+            <span class="text-foundry-light-muted dark:text-foundry-text/50">{formatSize(attachment.size)}</span>
+            <button
+              type="button"
+              aria-label={`Remove ${attachment.file_name}`}
+              class="ml-0.5 rounded-full p-0.5 hover:bg-foundry-light-bg dark:hover:bg-foundry-bg"
+              on:click={() => removeAttachment(attachment.id)}
+            >
+              <X class="h-3 w-3" />
+            </button>
+          </li>
+        {/each}
+      </ul>
+    {/if}
     <div class="flex min-w-0 items-center justify-between gap-2 px-2 pb-2">
-      <ModelSwitcher />
+      <div class="flex min-w-0 items-center gap-2">
+        <input
+          bind:this={fileInput}
+          type="file"
+          multiple
+          class="hidden"
+          aria-hidden="true"
+          tabindex="-1"
+          on:change={onPick}
+        />
+        <button
+          type="button"
+          aria-label="Attach a file"
+          title={uploading ? 'Uploading…' : 'Attach a file'}
+          class="inline-flex h-8 w-8 items-center justify-center rounded-full text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-light-bg dark:hover:bg-foundry-bg disabled:opacity-40"
+          on:click={() => fileInput?.click()}
+          disabled={uploading}
+        >
+          <Paperclip class="h-4 w-4" />
+        </button>
+        <ModelSwitcher />
+      </div>
       <div class="flex shrink-0 items-center gap-2">
         {#if $isRunning}
           <button

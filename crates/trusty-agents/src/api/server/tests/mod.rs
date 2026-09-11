@@ -17,6 +17,9 @@ mod agent_subagents;
 mod assistant_memory;
 // #4355: per-assistant task-stream attribution, retention, and retrieval.
 mod assistant_streams;
+// #7370: chat-thread attachment upload, listing, retrieval, and the
+// validate-before-persist gate on `POST /api/task`.
+mod attachments;
 mod attendance;
 mod cancel;
 // #4278: the durable persona chat log read back for GUI rehydration.

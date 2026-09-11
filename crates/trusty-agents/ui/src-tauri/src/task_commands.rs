@@ -158,6 +158,10 @@ pub async fn send_message(
     agent: Option<String>,
     model_id: Option<String>,
     provider_id: Option<String>,
+    // #7370: ids of attachments staged on this turn, already uploaded through
+    // the session's attachment route. Omitted from the body when empty so an
+    // ordinary turn's payload is byte-identical to what it was.
+    attachments: Option<Vec<String>>,
 ) -> Result<String, String> {
     let port = state.port.lock().await.unwrap_or(8765);
     let client = reqwest::Client::new();
@@ -179,6 +183,12 @@ pub async fn send_message(
     }
     if let Some(p) = provider_id.as_ref().filter(|s| !s.is_empty()) {
         body.insert("provider_id".into(), Value::String(p.clone()));
+    }
+    if let Some(ids) = attachments.as_ref().filter(|ids| !ids.is_empty()) {
+        body.insert(
+            "attachments".into(),
+            Value::Array(ids.iter().cloned().map(Value::String).collect()),
+        );
     }
 
     let submit_url = format!("{}/api/task", api_base(port));

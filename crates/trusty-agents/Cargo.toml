@@ -148,7 +148,11 @@ comrak = { workspace = true }
 serde_yaml = { workspace = true }
 toml_edit = "0.22"
 base64 = "0.22"
-axum = { workspace = true }
+# `multipart` (#7370): the chat-attachment upload route takes a file the
+# browser already holds as a `File`; base64 in JSON would cost a third more
+# bytes for nothing. Declared on the member entry, which UNIONS with the root
+# `[workspace.dependencies]` feature list rather than replacing it.
+axum = { workspace = true, features = ["multipart"] }
 tower-http = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 backon = "1"
