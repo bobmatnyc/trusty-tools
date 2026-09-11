@@ -151,7 +151,15 @@ fn render_statusline_from(input: &StatusInput, account_config: Option<&Path>) ->
     // its savings rows at. #7074 adds the transcript path on the same footing,
     // for `tm commit-trailers` to fold a session's token counts out of. Writes
     // only when a value changed.
-    record_session_facts(&input.session_id, &input.model.id, &input.transcript_path);
+    // #7424: `cwd` joins the call — the turn-1 startup reading recorded here is
+    // only usable scoped to a project, and this payload is where `tm` learns
+    // the session's working directory.
+    record_session_facts(
+        &input.session_id,
+        &input.model.id,
+        &input.transcript_path,
+        &input.cwd,
+    );
 
     // Compaction efficiency / live context fill; falls back to a bare
     // `ctx>200k` marker when no context-window payload was sent at all.

@@ -137,8 +137,21 @@ pub(crate) fn savings_segment_at(
 /// `a_transcript_path_outside_the_config_dir_is_not_recorded`,
 /// `a_traversing_transcript_path_is_not_recorded`,
 /// `a_transcript_path_is_not_recorded_without_a_config_dir`,
-/// `a_transcript_path_under_the_config_dir_is_recorded`.
-pub(crate) fn record_session_facts(session_id: &str, model_id: &str, transcript_path: &str) {
+/// `a_transcript_path_under_the_config_dir_is_recorded`,
+/// `the_first_render_records_the_startup_context`.
+///
+/// #7424 adds a third fact on the same footing: the session's turn-1 startup
+/// context, folded from the transcript this function has just screened. `cwd`
+/// joins the signature because that reading is only usable scoped to a project
+/// — see [`trusty_mpm::core::startup_context`] — and the `statusLine` payload
+/// is the one place `tm` learns the session's working directory alongside its
+/// id.
+pub(crate) fn record_session_facts(
+    session_id: &str,
+    model_id: &str,
+    transcript_path: &str,
+    cwd: &str,
+) {
     if session_id.is_empty() {
         return;
     }
@@ -157,6 +170,7 @@ pub(crate) fn record_session_facts(session_id: &str, model_id: &str, transcript_
         session_id,
         model_id,
         transcript_path,
+        cwd,
     );
 }
 
@@ -176,13 +190,15 @@ pub(crate) fn record_session_facts(session_id: &str, model_id: &str, transcript_
 /// Test: `a_transcript_path_outside_the_config_dir_is_not_recorded`,
 /// `a_traversing_transcript_path_is_not_recorded`,
 /// `a_transcript_path_is_not_recorded_without_a_config_dir`,
-/// `a_transcript_path_under_the_config_dir_is_recorded`.
+/// `a_transcript_path_under_the_config_dir_is_recorded`,
+/// `the_first_render_records_the_startup_context`.
 fn record_session_facts_at(
     root: &Path,
     claude_config_dir: Option<&Path>,
     session_id: &str,
     model_id: &str,
     transcript_path: &str,
+    cwd: &str,
 ) {
     trusty_mpm::core::session_model::record_session_model(root, session_id, model_id);
     let Some(config_dir) = claude_config_dir else {
@@ -200,6 +216,19 @@ fn record_session_facts_at(
         session_id,
         &transcript.to_string_lossy(),
     );
+    // #7424: the screened transcript is also where the session's turn-1
+    // startup context is read from, once. `record_startup_context` returns
+    // early when a reading already exists, so a steady session costs one small
+    // record read per render and no transcript scan at all.
+    let cwd = cwd.trim();
+    if !cwd.is_empty() {
+        let _ = trusty_mpm::core::startup_context::record_startup_context(
+            root,
+            session_id,
+            Path::new(cwd),
+            &transcript,
+        );
+    }
 }
 
 /// Resolve the framework root the ledger lives under.
@@ -531,6 +560,7 @@ mod tests {
             "sess-1",
             "claude-opus-4-1",
             "/etc/passwd",
+            "",
         );
         assert_eq!(recorded_transcript(root.path(), "sess-1"), None);
 
@@ -540,6 +570,7 @@ mod tests {
             "sess-1",
             "claude-opus-4-1",
             &outside.to_string_lossy(),
+            "",
         );
         assert_eq!(recorded_transcript(root.path(), "sess-1"), None);
         assert_eq!(
@@ -571,6 +602,7 @@ mod tests {
             "sess-1",
             "claude-opus-4-1",
             &traversing.to_string_lossy(),
+            "",
         );
         assert_eq!(recorded_transcript(root.path(), "sess-1"), None);
     }
@@ -595,6 +627,7 @@ mod tests {
             "sess-1",
             "claude-opus-4-1",
             &transcript.to_string_lossy(),
+            "",
         );
         assert_eq!(
             recorded_transcript(root.path(), "sess-1"),
@@ -625,6 +658,7 @@ mod tests {
             "sess-1",
             "claude-opus-4-1",
             &transcript.to_string_lossy(),
+            "",
         );
         assert_eq!(
             recorded_transcript(root.path(), "sess-1"),
@@ -635,6 +669,55 @@ mod tests {
                     .to_string_lossy()
                     .into_owned()
             )
+        );
+    }
+
+    /// Why (#7424): the render that first sees an assistant turn is the only
+    /// process holding the session id, the screened transcript path and the
+    /// working directory at once, so it is where the startup reading is taken.
+    /// A render that takes it must also not take it twice.
+    /// Test: itself.
+    #[test]
+    fn the_first_render_records_the_startup_context() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let config = tempfile::tempdir().expect("temp dir");
+        let project = tempfile::tempdir().expect("temp dir");
+        let transcript = transcript_under(config.path(), "sess-1");
+        std::fs::write(
+            &transcript,
+            "{\"type\":\"assistant\",\"message\":{\"id\":\"m1\",\"usage\":{\"input_tokens\":4,\
+             \"cache_creation_input_tokens\":74685,\"cache_read_input_tokens\":27297,\
+             \"output_tokens\":9}}}\n",
+        )
+        .expect("write transcript");
+
+        record_session_facts_at(
+            root.path(),
+            Some(config.path()),
+            "sess-1",
+            "claude-opus-4-1",
+            &transcript.to_string_lossy(),
+            &project.path().to_string_lossy(),
+        );
+
+        let stored = trusty_mpm::core::startup_context::read_startup_context(root.path(), "sess-1")
+            .expect("a startup reading");
+        assert_eq!(stored.tokens, 101_986);
+        // A render with no cwd in its payload records nothing new, and the
+        // reading already taken is never revised.
+        record_session_facts_at(
+            root.path(),
+            Some(config.path()),
+            "sess-1",
+            "claude-opus-4-1",
+            &transcript.to_string_lossy(),
+            "",
+        );
+        assert_eq!(
+            trusty_mpm::core::startup_context::read_startup_context(root.path(), "sess-1")
+                .expect("still there")
+                .tokens,
+            101_986
         );
     }
 }

@@ -24,6 +24,10 @@ pub mod coordinator;
 pub mod delegation_routes;
 pub mod discovery;
 pub mod doctor;
+// #7424: declared here rather than inside `doctor.rs` — that file sits AT the
+// 500-SLOC production cap, so its `mod` + `use` pair would not fit. The check
+// is reached as `super::doctor_startup_context::…` from `doctor::run_doctor`.
+mod doctor_startup_context;
 pub mod error;
 pub mod idle_nudge;
 pub mod idle_reaper;

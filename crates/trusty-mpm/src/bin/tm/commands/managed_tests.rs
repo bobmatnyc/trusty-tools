@@ -1092,7 +1092,7 @@ fn strip_ansi(s: &str) -> String {
 /// Test: this test.
 #[test]
 fn ls_row_colors_num_and_name_in_distinct_hues() {
-    let row = format_ls_row(&ls_session("tm-trusty-tools-01", 7), true, 14);
+    let row = format_ls_row(&ls_session("tm-trusty-tools-01", 7), true, 14, None);
     assert!(
         row.starts_with("\u{1b}[35m7\u{1b}[0m"),
         "NUM colored: {row:?}"
@@ -1115,10 +1115,10 @@ fn ls_row_colors_num_and_name_in_distinct_hues() {
 #[test]
 fn ls_row_plain_when_color_disabled() {
     let s = ls_session("tm-trusty-tools-01", 7);
-    let plain = format_ls_row(&s, false, 14);
+    let plain = format_ls_row(&s, false, 14, None);
     assert!(!plain.contains('\u{1b}'), "no escapes: {plain:?}");
     assert_eq!(
-        strip_ansi(&format_ls_row(&s, true, 14)),
+        strip_ansi(&format_ls_row(&s, true, 14, None)),
         plain,
         "color must change bytes only inside the escapes"
     );
@@ -1139,8 +1139,10 @@ fn ls_row_alignment_matches_with_and_without_color() {
         for slot in [1u32, 107] {
             let s = ls_session(name, slot);
             assert_eq!(
-                strip_ansi(&format_ls_row(&s, true, 14)).chars().count(),
-                format_ls_row(&s, false, 14).chars().count(),
+                strip_ansi(&format_ls_row(&s, true, 14, None))
+                    .chars()
+                    .count(),
+                format_ls_row(&s, false, 14, None).chars().count(),
                 "row width drifts for name={name:?} slot={slot}"
             );
         }
@@ -1158,7 +1160,7 @@ fn ls_row_alignment_matches_with_and_without_color() {
         let plain = format_tombstone_row(slot, false);
         assert_eq!(
             &plain[..7],
-            &format_ls_row(&ls_session("n", slot), false, 14)[..7],
+            &format_ls_row(&ls_session("n", slot), false, 14, None)[..7],
             "tombstone NUM column matches the live row's"
         );
     }
@@ -1175,7 +1177,7 @@ fn ls_row_alignment_matches_with_and_without_color() {
 #[test]
 fn ls_row_colors_id_column_dimmed() {
     let s = ls_session("tm-trusty-tools-01", 7);
-    let row = format_ls_row(&s, true, 14);
+    let row = format_ls_row(&s, true, 14, None);
     assert!(
         row.contains(&format!("\u{1b}[2m{}\u{1b}[0m", s.id)),
         "ID colored dim: {row:?}"
@@ -1249,8 +1251,8 @@ fn ls_table_columns_align_when_a_row_carries_an_annotation() {
 
     let name_offset = |row: &str, name: &str| row.find(name).expect("name present in row");
     for use_color in [false, true] {
-        let a = strip_ansi(&format_ls_row(&plain, use_color, width));
-        let b = strip_ansi(&format_ls_row(&annotated, use_color, width));
+        let a = strip_ansi(&format_ls_row(&plain, use_color, width, None));
+        let b = strip_ansi(&format_ls_row(&annotated, use_color, width, None));
         assert_eq!(
             name_offset(&a, "plain-name"),
             name_offset(&b, "stale-name"),
@@ -1260,18 +1262,58 @@ fn ls_table_columns_align_when_a_row_carries_an_annotation() {
 
     // And the annotation is actually present — otherwise the offsets above
     // would agree for the trivial reason that nothing was annotated.
-    assert!(format_ls_row(&annotated, false, width).contains("attached [stale-assets]"));
+    assert!(format_ls_row(&annotated, false, width, None).contains("attached [stale-assets]"));
 
     // Padding is computed on the VISIBLE text: stripping the escapes from the
     // colored row must reproduce the plain row byte-for-byte. Padding measured
     // on the escaped string would eat ~9 spaces per colored column here.
     for s in [&plain, &annotated] {
         assert_eq!(
-            strip_ansi(&format_ls_row(s, true, width)),
-            format_ls_row(s, false, width),
+            strip_ansi(&format_ls_row(s, true, width, None)),
+            format_ls_row(s, false, width, None),
             "padding must be measured on visible text, not the ANSI-wrapped string"
         );
     }
+}
+
+/// Why (#7424): `tm session ls` is where an operator sees what each session
+/// actually started with, so the column has to carry the figure and stay
+/// aligned whether or not a session recorded one.
+/// Test: itself.
+#[test]
+fn ls_row_renders_the_startup_context_column() {
+    let s = ls_session("tm-trusty-tools-01", 7);
+    let measured = format_ls_row(&s, false, 14, Some(98_214));
+    let unmeasured = format_ls_row(&s, false, 14, None);
+
+    assert!(
+        measured.contains("98k"),
+        "the reading is shown: {measured:?}"
+    );
+    assert!(
+        !unmeasured.contains('k'),
+        "an unrecorded session shows no figure: {unmeasured:?}"
+    );
+    assert_eq!(
+        measured.chars().count(),
+        unmeasured.chars().count(),
+        "the START column keeps its width with and without a reading"
+    );
+}
+
+/// Why: a recorded-and-tiny startup and an unrecorded one are different facts,
+/// and a cell that rendered both as blank would lose the distinction the store
+/// deliberately keeps (`None` vs `Some(0)`).
+/// Test: itself.
+#[test]
+fn startup_cell_distinguishes_unmeasured_from_tiny() {
+    use crate::commands::managed_render::format_startup_cell;
+
+    assert_eq!(format_startup_cell(None), "-");
+    assert_eq!(format_startup_cell(Some(0)), "0k");
+    assert_eq!(format_startup_cell(Some(499)), "0k");
+    assert_eq!(format_startup_cell(Some(500)), "1k");
+    assert_eq!(format_startup_cell(Some(101_986)), "102k");
 }
 
 /// 🔴 #6118 FAIL-OPEN GUARD: a `--dry-run` the daemon did not confirm is an

@@ -87,6 +87,11 @@ use doctor_asset_duplicates::check_asset_duplicates;
 mod doctor_transcript_saving;
 use doctor_transcript_saving::check_transcript_saving;
 
+// #7424: the startup-context budget row. Its `mod` declaration is in
+// `daemon/mod.rs` rather than here — this file sits AT the 500-SLOC production
+// cap, so only the `use` fits.
+use super::doctor_startup_context::check_startup_context;
+
 // Split out to keep this file under the 500-SLOC production cap (issue #2876 —
 // the skill-staleness and legacy-instruction-source probes).
 #[path = "doctor_staleness.rs"]
@@ -372,7 +377,7 @@ const PROBE_RETRY_DELAY: Duration = Duration::from_millis(500);
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_forty_four_checks`,
+/// Test: `run_doctor_produces_forty_five_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -529,11 +534,9 @@ pub(crate) async fn run_doctor_with_claims(
     checks.push(check_oauth_token_config());
     // #7262: the third check names each hook/statusLine command whose binary
     // lives in a Cargo build tree, which the file-counting check above cannot.
-    let (hooks_contamination, hooks_foreign_conflict, hooks_build_tree_binary) =
+    let (contamination, foreign_conflict, build_tree_binary) =
         check_hooks_hygiene(project_dir, active_workspace_paths);
-    checks.push(hooks_contamination);
-    checks.push(hooks_foreign_conflict);
-    checks.push(hooks_build_tree_binary);
+    checks.extend([contamination, foreign_conflict, build_tree_binary]);
     // Issue #2997: surface whether managed panes disclaim TCC responsibility so
     // the "trusty-mpm/tmux would like to access data…" prompt class is
     // diagnosable rather than silent. Synchronous + instantaneous (no log scan).
@@ -582,6 +585,11 @@ pub(crate) async fn run_doctor_with_claims(
     // #6535: whether the cloud log drain is on, where it points, and whether
     // its last pass actually landed. Read-only — it never drains.
     checks.push(check_log_drain(&FrameworkPaths::default().root, &home));
+    // #7424: this project's turn-1 startup context against its configured
+    // ceiling. Warn-only, and it opens no transcript — every reading was taken
+    // by the session that owned it, so the row cannot reach another project's
+    // session data. Declared in `daemon/mod.rs`; this file is AT the SLOC cap.
+    checks.push(check_startup_context(project_dir));
 
     DoctorReport::from_checks(checks)
 }

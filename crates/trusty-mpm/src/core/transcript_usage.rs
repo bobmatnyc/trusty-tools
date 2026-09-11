@@ -43,6 +43,19 @@
 //! `fold_skips_a_malformed_line_and_keeps_the_valid_total`,
 //! `fold_reads_only_the_tail_of_an_oversized_transcript`,
 //! `fold_of_a_transcript_within_the_cap_is_not_truncated`.
+//!
+//! #7424 added a second, opposite read to the same module rather than a second
+//! module: [`first_turn_context_tokens`] scans the HEAD for the session's first
+//! assistant turn, which is the startup-context measurement #4513 took by hand.
+//! It shares this module's line parser and its `input + cache_creation +
+//! cache_read` definition, so the two reads cannot come to disagree about what
+//! a turn's context costs. Its own coverage:
+//! `first_turn_reads_the_opening_assistant_turn`,
+//! `first_turn_counts_cache_tokens`,
+//! `first_turn_of_a_missing_transcript_is_none`,
+//! `first_turn_skips_a_malformed_line`,
+//! `first_turn_of_a_transcript_with_no_assistant_turn_is_none`,
+//! `first_turn_stops_at_the_head_cap`.
 
 use std::collections::HashSet;
 use std::io::{BufRead as _, Seek as _};
@@ -129,6 +142,23 @@ struct MessageUsage {
     cache_read_input_tokens: u64,
     #[serde(default)]
     output_tokens: u64,
+}
+
+impl MessageUsage {
+    /// Everything this turn re-sent: the fresh prompt plus the cached prefix.
+    ///
+    /// Why: `input_tokens` alone excludes the cached prefix, which is where a
+    /// startup prompt's whole weight sits — a turn that re-sent 100k of
+    /// instructions reads as a few hundred `input_tokens` and the rest as
+    /// cache. Both fold paths here need the same sum, and two spellings of it
+    /// would eventually disagree.
+    /// What: `input_tokens + cache_creation_input_tokens +
+    /// cache_read_input_tokens`.
+    /// Test: `fold_counts_cache_tokens_as_tokens_in`,
+    /// `first_turn_counts_cache_tokens`.
+    fn context_tokens(&self) -> u64 {
+        self.input_tokens + self.cache_creation_input_tokens + self.cache_read_input_tokens
+    }
 }
 
 /// Cheap pre-filter: only a line mentioning `"usage"` can contribute.
@@ -236,12 +266,106 @@ fn fold_transcript_tail(transcript: &Path, limit: u64) -> TranscriptUsage {
         {
             continue;
         }
-        total.tokens_in +=
-            usage.input_tokens + usage.cache_creation_input_tokens + usage.cache_read_input_tokens;
+        total.tokens_in += usage.context_tokens();
         total.tokens_out += usage.output_tokens;
         total.messages += 1;
     }
     total
+}
+
+/// How much of a transcript's HEAD [`first_turn_context_tokens`] reads.
+///
+/// Why (#7424): the first assistant turn sits at the START of the file, so the
+/// tail window [`TRANSCRIPT_TAIL_BYTES`] opens is the wrong end entirely. The
+/// read runs on the statusline's render path until the figure has been
+/// recorded once, so it is bounded for the same reason the fold is. 1 MiB
+/// spans the session's opening turns many times over — a turn-1 usage block
+/// appears within the first few kilobytes of a real transcript — while a
+/// transcript that never produced one costs this much and stops.
+/// What: when the file is larger than this, the scan gives up at this offset
+/// and reports `None` rather than reading on.
+/// Test: `first_turn_stops_at_the_head_cap`.
+pub const TRANSCRIPT_HEAD_BYTES: u64 = 1024 * 1024;
+
+/// The context the session's FIRST assistant turn re-sent (#7424).
+///
+/// Why: this is the startup-context measurement #4513 took by hand — how many
+/// tokens the harness had already spent before the operator's first request was
+/// answered. Turn 1 is the only turn whose input is entirely instructions,
+/// tool definitions and injected context, so it is the one number a budget can
+/// be set against; every later turn mixes in the conversation itself. It reads
+/// the same `message.usage` block the fold above reads, through the same
+/// parser, because a second transcript parser is exactly what would drift.
+/// What: scans forward from the start of `transcript` for the first line
+/// carrying a `message.usage`, and returns
+/// [`MessageUsage::context_tokens`] for it. `None` when the file is missing or
+/// unreadable, when no assistant turn has landed yet, or when
+/// [`TRANSCRIPT_HEAD_BYTES`] is reached first — each of which means "not
+/// measured", never "measured zero".
+/// Test: `first_turn_reads_the_opening_assistant_turn`,
+/// `first_turn_counts_cache_tokens`,
+/// `first_turn_of_a_missing_transcript_is_none`,
+/// `first_turn_skips_a_malformed_line`,
+/// `first_turn_of_a_transcript_with_no_assistant_turn_is_none`,
+/// `first_turn_stops_at_the_head_cap`.
+pub fn first_turn_context_tokens(transcript: &Path) -> Option<u64> {
+    first_turn_context_tokens_within(transcript, TRANSCRIPT_HEAD_BYTES)
+}
+
+/// [`first_turn_context_tokens`] with the byte cap as a parameter.
+///
+/// Why: the same reason [`fold_transcript_tail`] takes one — proving the cap
+/// holds would otherwise need a 1 MiB fixture on every run.
+/// What: reads lines from the start, stopping once `limit` bytes have been
+/// consumed without a usage block.
+/// Test: `first_turn_stops_at_the_head_cap`.
+fn first_turn_context_tokens_within(transcript: &Path, limit: u64) -> Option<u64> {
+    let file = std::fs::File::open(transcript).ok()?;
+    let reader = std::io::BufReader::new(file);
+    let mut consumed: u64 = 0;
+    for (index, line) in reader.lines().enumerate() {
+        let Ok(line) = line else {
+            tracing::warn!(
+                transcript = %transcript.display(),
+                line = index + 1,
+                "stopping the turn-1 scan at an unreadable line"
+            );
+            return None;
+        };
+        // `+ 1` for the newline `lines()` strips, so the cap measures the file
+        // rather than the sum of its trimmed lines.
+        consumed = consumed.saturating_add(line.len() as u64 + 1);
+        if !may_carry_usage(&line) {
+            if consumed >= limit {
+                tracing::debug!(
+                    transcript = %transcript.display(),
+                    limit,
+                    "no assistant turn within the turn-1 head window"
+                );
+                return None;
+            }
+            continue;
+        }
+        let parsed: TranscriptLine = match serde_json::from_str(&line) {
+            Ok(parsed) => parsed,
+            Err(source) => {
+                tracing::warn!(
+                    transcript = %transcript.display(),
+                    line = index + 1,
+                    %source,
+                    "skipping a malformed transcript line"
+                );
+                continue;
+            }
+        };
+        if let Some(usage) = parsed.message.and_then(|message| message.usage) {
+            return Some(usage.context_tokens());
+        }
+        if consumed >= limit {
+            return None;
+        }
+    }
+    None
 }
 
 #[cfg(test)]

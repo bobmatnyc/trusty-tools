@@ -52,6 +52,14 @@ const NAME_WIDTH: usize = 24;
 /// Rendered width of the `TASK` column; tasks are truncated to match.
 const TASK_WIDTH: usize = 30;
 
+/// Rendered width of the `START` column — the turn-1 startup context (#7424).
+///
+/// Why: the widest cell it holds is a six-character `1234k`-shaped figure plus
+/// the header's own five, so five is the floor and the column never grows.
+/// What: the padding applied to [`format_startup_cell`]'s output.
+/// Test: `ls_row_renders_the_startup_context_column`.
+const STARTUP_WIDTH: usize = 5;
+
 /// Floor for the `STATE` column, preserving the pre-#4061 table shape when no
 /// row carries an annotation.
 const STATE_MIN_WIDTH: usize = 14;
@@ -130,9 +138,16 @@ pub(crate) fn render_session_table(sessions: &[ManagedSessionSummary], source_id
     let use_color = super::session_picker_render::table_use_color(std::io::stdout().is_terminal());
     let state_width = state_column_width(sessions);
     println!(
-        "{:<NUM_WIDTH$}  {:<ID_WIDTH$}  {:<state_width$}  {:<NAME_WIDTH$}  {:<TASK_WIDTH$}  CREATED",
-        "NUM", "ID", "STATE", "NAME", "TASK"
+        "{:<NUM_WIDTH$}  {:<ID_WIDTH$}  {:<state_width$}  {:<NAME_WIDTH$}  {:<TASK_WIDTH$}  \
+         {:<STARTUP_WIDTH$}  CREATED",
+        "NUM", "ID", "STATE", "NAME", "TASK", "START"
     );
+    // #7424: resolved once for the whole table rather than per row — every row
+    // reads the same framework root, and a listing of 50 sessions must not
+    // re-run the `--root` / `TRUSTY_MPM_ROOT` / XDG chain 50 times.
+    let root = super::managed_root::resolve_managed_paths(None)
+        .ok()
+        .map(|paths| paths.root);
     for s in sessions {
         if s.deleted {
             // #3034: the slot stays reserved — never silently reused by a
@@ -140,8 +155,43 @@ pub(crate) fn render_session_table(sessions: &[ManagedSessionSummary], source_id
             // now dead rather than having it vanish from the listing.
             println!("{}", format_tombstone_row(s.slot, use_color));
         } else {
-            println!("{}", format_ls_row(s, use_color, state_width));
+            let startup = root.as_deref().and_then(|root| startup_tokens_for(root, s));
+            println!("{}", format_ls_row(s, use_color, state_width, startup));
         }
+    }
+}
+
+/// One row's stored turn-1 startup context, if a session recorded one (#7424).
+///
+/// Why: the reading is keyed by the CLAUDE session id — the id the statusline
+/// render knows — and a managed record carries that id only once Claude Code
+/// has reported it. A row with no captured id simply has no reading to show,
+/// which is the same blank cell as a session whose first turn has not landed.
+/// What: [`trusty_mpm::core::startup_context::read_startup_context`] against
+/// the row's `claude_session_id`.
+/// Test: `ls_row_renders_the_startup_context_column` covers the rendering; the
+/// store's own round trip is `a_reading_round_trips_through_the_store`.
+fn startup_tokens_for(root: &std::path::Path, s: &ManagedSessionSummary) -> Option<u64> {
+    let id = s.claude_session_id.as_deref()?;
+    trusty_mpm::core::startup_context::read_startup_context(root, id).map(|record| record.tokens)
+}
+
+/// The `START` cell — a session's turn-1 startup context, in thousands.
+///
+/// Why: the raw figure is five or six digits and the column exists to be
+/// SCANNED down, not read precisely — `98k` beside `31k` says what a row of
+/// `98214` beside `31007` makes the reader work for. `tm doctor`'s
+/// `startup_context` row carries the exact numbers.
+/// What: `None` renders as `-` (nothing recorded); otherwise the token count
+/// divided by 1000, rounded to nearest, suffixed `k`. A reading under 500
+/// tokens rounds to `0k` rather than to `-`, so "measured and tiny" stays
+/// distinguishable from "not measured".
+/// Test: `ls_row_renders_the_startup_context_column`,
+/// `startup_cell_distinguishes_unmeasured_from_tiny`.
+pub(crate) fn format_startup_cell(tokens: Option<u64>) -> String {
+    match tokens {
+        None => "-".to_string(),
+        Some(tokens) => format!("{}k", (tokens + 500) / 1000),
     }
 }
 
@@ -214,14 +264,21 @@ fn row_state(s: &ManagedSessionSummary) -> String {
 /// `state_width` comes from [`state_column_width`] over the whole listing, so a
 /// row whose annotation is longer than [`STATE_MIN_WIDTH`] widens the column for
 /// every row instead of shoving its own `NAME`/`TASK`/`CREATED` out of line.
+///
+/// `startup_tokens` (#7424) is this session's recorded turn-1 startup context,
+/// read by [`render_session_table`] from the per-session usage store and passed
+/// in rather than read here, so every column this function renders stays a pure
+/// function of its arguments. `None` — no reading recorded — renders as `-`.
 /// Test: `ls_row_colors_num_and_name_in_distinct_hues`,
 /// `ls_row_colors_id_column_dimmed`, `ls_row_plain_when_color_disabled`,
 /// `ls_row_alignment_matches_with_and_without_color`,
-/// `ls_table_columns_align_when_a_row_carries_an_annotation`.
+/// `ls_table_columns_align_when_a_row_carries_an_annotation`,
+/// `ls_row_renders_the_startup_context_column`.
 pub(crate) fn format_ls_row(
     s: &ManagedSessionSummary,
     use_color: bool,
     state_width: usize,
+    startup_tokens: Option<u64>,
 ) -> String {
     let task = s
         .task
@@ -239,7 +296,7 @@ pub(crate) fn format_ls_row(
         .map(|d| format!(" [pending: {d}]"))
         .unwrap_or_default();
     format!(
-        "{}  {}  {:<state_width$}  {}  {:<TASK_WIDTH$}  {}{}",
+        "{}  {}  {:<state_width$}  {}  {:<TASK_WIDTH$}  {:<STARTUP_WIDTH$}  {}{}",
         pad_visible(&s.slot.to_string(), NUM_WIDTH, NUM_COLOR, use_color),
         pad_visible(&s.id, ID_WIDTH, ID_COLOR, use_color),
         row_state(s),
@@ -250,6 +307,7 @@ pub(crate) fn format_ls_row(
             use_color
         ),
         task,
+        format_startup_cell(startup_tokens),
         created,
         pending
     )
