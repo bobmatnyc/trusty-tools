@@ -9,8 +9,9 @@ import { activeAgentId } from '../stores/app';
 import { fetchChannels,saveChannels,fetchChannelMessages,sendChannelMessage,type ChannelConfiguration } from '../lib/channels';
 import { fetchListeners } from '../lib/listeners';
 const filter={from:[],include_labels:[],exclude_labels:[],subject_contains:[],snippet_contains:[]};
-// #7427: telegram reports can_receive true, matching the adapter registry.
-const config=(agent='alice'):ChannelConfiguration=>({agent,revision:'r1',providers:[{id:'slack',name:'Slack',configured:true,can_send:true,can_read:true,can_receive:true,receive_reason:'Automatic updates require the Slack bot listener to be running'},{id:'telegram',name:'Telegram',configured:true,can_send:true,can_read:false,can_receive:true,receive_reason:'Automatic updates require the Telegram long-poll gateway to be running'}],bindings:[{id:`${agent}-channel`,name:`${agent} updates`,provider:'slack',target:'C123',enabled:true,send_enabled:true,receive_enabled:true,filter,instructions:''}]});
+// #7427: telegram reports can_receive true and the listing carries gworkspace,
+// both matching the adapter registry.
+const config=(agent='alice'):ChannelConfiguration=>({agent,revision:'r1',providers:[{id:'slack',name:'Slack',configured:true,can_send:true,can_read:true,can_receive:true,receive_reason:'Automatic updates require the Slack bot listener to be running'},{id:'telegram',name:'Telegram',configured:true,can_send:true,can_read:false,can_receive:true,receive_reason:'Automatic updates require the Telegram long-poll gateway to be running'},{id:'gworkspace',name:'Google Workspace (Gmail)',configured:true,can_send:true,can_read:false,can_receive:true,receive_reason:'Automatic updates require a Gmail listener polling the bound mailbox'}],bindings:[{id:`${agent}-channel`,name:`${agent} updates`,provider:'slack',target:'C123',enabled:true,send_enabled:true,receive_enabled:true,filter,instructions:''}]});
 let view:ReturnType<typeof mount>|undefined;
 async function settle(){await Promise.resolve();await tick();await Promise.resolve();await tick();}
 function button(text:string){return [...document.querySelectorAll('button')].find(b=>b.textContent?.includes(text))!;}
@@ -63,6 +64,16 @@ it('lets a Telegram binding enable receive and shows its dispatch failures',asyn
 });
 it('shows no dispatch-failure notice for a healthy binding',async()=>{
  await render();expect(document.body.textContent).not.toContain('could not reach the assistant');
+});
+// #7427: pre-change the Service dropdown had no gworkspace option and the
+// destination placeholder was a Slack-or-Telegram ternary, so a Gmail binding
+// could not be configured or hinted at.
+it('offers gworkspace with its own destination placeholder',async()=>{
+ const c=config();c.bindings[0]={...c.bindings[0],provider:'gworkspace',target:'from:alice@example.com',receive_enabled:true};vi.mocked(fetchChannels).mockResolvedValue(c);await render();
+ const services=[...document.querySelectorAll('select')].flatMap(s=>[...s.options].map(o=>o.value));expect(services).toContain('gworkspace');
+ const target=[...document.querySelectorAll('input')].find(i=>i.placeholder.includes('from:'))!;expect(target.placeholder).toBe('from:someone@example.com or label:INBOX');expect(target.value).toBe('from:alice@example.com');
+ expect(document.body.textContent).toContain('Gmail listener polling the bound mailbox');
+ const receive=[...document.querySelectorAll('label')].find(label=>label.textContent?.trim()==='Receive updates')!.querySelector('input') as HTMLInputElement;expect(receive.disabled).toBe(false);
 });
 it('keeps a draft visible and editable when reload removes every binding',async()=>{
  await render();input('[aria-label="Channel message"]','Keep this draft');await settle();vi.mocked(fetchChannels).mockResolvedValue({...config(),revision:'r2',bindings:[]});button('Reload').click();await settle();const composer=document.querySelector('[aria-label="Channel message"]') as HTMLTextAreaElement;expect(composer.value).toBe('Keep this draft');expect(composer.disabled).toBe(false);expect((document.querySelector('[aria-label="Send channel message"]') as HTMLButtonElement).disabled).toBe(true);

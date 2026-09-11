@@ -68,6 +68,17 @@ pub(crate) fn validate_credential_ref(
     allowed: &[&'static str],
     env_prefix: &str,
 ) -> Result<(), ChannelError> {
+    // #7427: a provider with no registry family authenticates with its own
+    // account store, so there is no name for a binding to give. Answering that
+    // before parsing keeps the message about the provider rather than about a
+    // grammar the operator cannot satisfy either way.
+    if allowed.is_empty() {
+        return Err(ChannelError::Credential(
+            "this channel authenticates with its provider account, not a named credential; \
+             remove credential_ref"
+                .to_string(),
+        ));
+    }
     let parsed = CredentialRef::parse(reference).map_err(|e| {
         ChannelError::Credential(format!("reference is not a credential name: {e}"))
     })?;
@@ -239,6 +250,7 @@ mod tests {
         for adapter in [
             &crate::channels::slack::SlackAdapter as &dyn ChannelAdapter,
             &crate::channels::telegram::TelegramAdapter,
+            &crate::channels::gworkspace::GworkspaceAdapter,
         ] {
             let prefix = adapter.credential_env_prefix();
             for key in adapter.credential_providers() {
@@ -251,6 +263,43 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A gworkspace binding names no credential at all, and in particular not
+    /// the read-scoped Google credential an OKG Gmail source resolves.
+    ///
+    /// Why: DOC-63 §7.1b — a channel's send credential and an OKG source's
+    /// read credential are two separate grants against the same provider, and
+    /// neither implies the other. The gworkspace channel authenticates with the
+    /// gworkspace account token store, so there is no name to give here; the
+    /// registry's one Google key, `google-oauth`, is the OAuth client secret
+    /// that refreshes those tokens, never a credential an email is sent as.
+    ///
+    /// Pre-change this test does not compile: there was no `GworkspaceAdapter`.
+    #[test]
+    fn channel_gworkspace_binding_cannot_name_an_okg_source_credential() {
+        use crate::channels::gworkspace::GworkspaceAdapter;
+        let allowed = GworkspaceAdapter.credential_providers();
+        let prefix = GworkspaceAdapter.credential_env_prefix();
+        assert!(allowed.is_empty());
+        // The read-scoped Google grant an OKG Gmail source would hold.
+        assert!(validate_credential_ref("google-oauth", allowed, prefix).is_err());
+        for foreign in ["slack", "telegram", "github", "gworkspace", ""] {
+            assert!(
+                validate_credential_ref(foreign, allowed, prefix).is_err(),
+                "`{foreign}` must not be usable as a gworkspace channel credential"
+            );
+        }
+
+        // The refusal reaches the operator through `Binding::validate`, which
+        // is what runs on every save and every load.
+        let binding: Binding = serde_json::from_value(serde_json::json!({
+            "id":"family","name":"Family mail","provider":"gworkspace",
+            "target":"from:alice@example.com","enabled":true,"send_enabled":true,
+            "credential_ref":"google-oauth",
+        }))
+        .unwrap();
+        assert!(binding.validate().is_err());
     }
 
     #[test]

@@ -56,8 +56,9 @@ impl Binding {
     /// work never reaches the point where a send silently goes nowhere.
     /// What: identity and name limits, then the provider's own rules —
     /// #7427 resolves the provider through [`crate::channels::adapter`], so an
-    /// unregistered id (Notion, gworkspace) is refused here rather than
-    /// accepted and left inert, and a `receive_enabled` binding is refused on a
+    /// unregistered id (Notion, until `trusty-channels` grows a connector) is
+    /// refused here rather than accepted and left inert, and a
+    /// `receive_enabled` binding is refused on a
     /// provider whose [`crate::channels::Capabilities`] say it has no inbound
     /// path.
     /// Test: `agent_channels_validates_provider_destination_and_permissions`,
@@ -75,8 +76,10 @@ impl Binding {
             return Err(bad("Unsupported channel provider"));
         };
         if !adapter.validate_target(&self.target) {
+            // #7427: gworkspace targets are `from:<address>` / `label:<id>`,
+            // so the copy can no longer name only the two id-shaped providers.
             return Err(bad(
-                "Choose Slack channel ID or Telegram chat ID for the selected provider",
+                "Choose a Slack channel ID, a Telegram chat ID, or a Gmail from:<address> or label:<label> for the selected provider",
             ));
         }
         if self.receive_enabled && !adapter.capabilities().can_receive {
@@ -256,6 +259,14 @@ fn channel_failure(binding_id: &str, error: crate::channels::ChannelError) -> Er
                 "Channel provider request failed; check connection and access",
             )
         }
+        // #7427: a gworkspace `label:` binding can answer an incoming message
+        // but has no correspondent of its own to open a thread to.
+        crate::channels::ChannelError::Destination { .. } => {
+            tracing::warn!(binding = binding_id, %error, "channel operation failed");
+            bad(
+                "This channel destination cannot start a message; bind a sender address, or reply to an incoming message",
+            )
+        }
     }
 }
 /// The credential reference the Telegram long-poll gateway authenticates with.
@@ -373,17 +384,20 @@ pub(super) async fn messages_route(
 
 /// Which saved destination, if any, this inbound event belongs to.
 ///
-/// Why (#7427 PR 2): the provider was hard-coded to `"slack"`, so a Telegram
-/// update could not select a binding however it was configured. Taking the
-/// provider as an argument is what lets one inbound path serve both, and it is
-/// what confines a Telegram update to bindings that name a Telegram chat id —
-/// a message from an unbound chat matches nothing and is never dispatched.
+/// Why (#7427): the provider was hard-coded to `"slack"`, so no other
+/// provider's event could select a binding however it was configured. Taking
+/// the provider as an argument is what lets one inbound path serve all of them,
+/// and it is what confines a Telegram update to bindings that name a Telegram
+/// chat id — a message from an unbound chat matches nothing and is never
+/// dispatched. Asking the adapter whether a target addresses the event is what
+/// lets Gmail — which has no destination id — bind a correspondent or a label.
 /// What: returns `(claimed, selected)` — `claimed` is true when any binding
-/// names this destination at all (so the gateway knows the assistant owns this
+/// addresses this event at all (so the caller knows an assistant owns this
 /// conversation even when the binding is disabled), `selected` is the one
-/// enabled, receive-enabled binding whose filter the event passes.
+/// enabled, receive-enabled binding whose filter the event also passes.
 /// Test: `agent_channels_receive_never_falls_back_for_disabled_bound_destination`,
-/// `agent_channels_inbound_ignores_an_unbound_telegram_chat`.
+/// `agent_channels_inbound_ignores_an_unbound_telegram_chat`,
+/// `agent_channels_gmail_binding_claims_only_its_own_correspondent`.
 fn receive_selection<'a>(
     bindings: &'a [Binding],
     provider: &str,
@@ -391,9 +405,12 @@ fn receive_selection<'a>(
     event: &crate::listeners::store::StoredEvent,
     persona_allowed: bool,
 ) -> (bool, Option<&'a Binding>) {
+    let Some(adapter) = crate::channels::adapter(provider) else {
+        return (false, None);
+    };
     let destinations: Vec<_> = bindings
         .iter()
-        .filter(|b| b.provider == provider && b.target == channel)
+        .filter(|b| b.provider == provider && adapter.addresses(&b.target, channel, event))
         .collect();
     let claimed = !destinations.is_empty();
     let selected = if persona_allowed {
@@ -421,8 +438,8 @@ fn receive_selection<'a>(
 /// assistant's saved destinations and dispatched as a wake.
 ///
 /// Why (#7427): this was `receive_slack`, with `"slack"` written into its
-/// binding filter, so Telegram had to grow a second dispatch path of its own —
-/// which is how the two ended up on different prompt shapes and different
+/// binding filter, so every other provider needed a dispatch path of its own —
+/// which is how two channels end up on different prompt shapes and different
 /// failure handling. One function, with the provider as an argument, is what
 /// makes DOC-60 §8's "one envelope regardless of channel" true rather than
 /// merely intended. The wake dispatch also used to be spawned and its result
@@ -434,10 +451,11 @@ fn receive_selection<'a>(
 /// What: per assistant, selects the bound destination this event matches, asks
 /// the provider's adapter for a wake prompt, and spawns the dispatch. Returns
 /// whether any assistant claimed the destination — a caller with its own
-/// fallback (the Slack session map, the Telegram long-poll gateway) uses that
-/// to decide whether to handle the message itself.
+/// fallback (the Slack session map, the Telegram long-poll gateway, the Gmail
+/// listener wake) uses that to decide whether to handle the event itself.
 /// Test: `agent_channels_receive_never_falls_back_for_disabled_bound_destination`,
 /// `agent_channels_inbound_ignores_an_unbound_telegram_chat`,
+/// `agent_channels_gmail_binding_claims_only_its_own_correspondent`,
 /// `channel_dispatch_failure_is_counted_per_binding`.
 pub(crate) async fn receive_inbound(
     provider: &str,
@@ -665,60 +683,32 @@ mod receive_tests {
             included: true,
             labels: vec![],
         };
+        let slack = |bindings: &[Binding], channel: &str, allowed: bool| {
+            let (claimed, selected) =
+                receive_selection(bindings, "slack", channel, &event, allowed);
+            (claimed, selected.map(|b| b.id.clone()))
+        };
         assert!(
-            receive_selection(
-                std::slice::from_ref(&binding),
-                "slack",
-                "C123",
-                &event,
-                true
-            )
-            .1
-            .is_some()
+            slack(std::slice::from_ref(&binding), "C123", true)
+                .1
+                .is_some()
         );
+        assert!(!slack(std::slice::from_ref(&binding), "COTHER", true).0);
         assert!(
-            !receive_selection(
-                std::slice::from_ref(&binding),
-                "slack",
-                "COTHER",
-                &event,
-                true
-            )
-            .0
-        );
-        assert!(
-            receive_selection(
-                std::slice::from_ref(&binding),
-                "slack",
-                "C123",
-                &event,
-                false
-            )
-            .1
-            .is_none()
+            slack(std::slice::from_ref(&binding), "C123", false)
+                .1
+                .is_none()
         );
         binding.receive_enabled = false;
-        let (claimed, selected) = receive_selection(
-            std::slice::from_ref(&binding),
-            "slack",
-            "C123",
-            &event,
-            true,
-        );
+        let (claimed, selected) = slack(std::slice::from_ref(&binding), "C123", true);
         assert!(claimed);
         assert!(selected.is_none());
         binding.receive_enabled = true;
         binding.filter.from = vec!["Other".into()];
         assert!(
-            receive_selection(
-                std::slice::from_ref(&binding),
-                "slack",
-                "C123",
-                &event,
-                true
-            )
-            .1
-            .is_none()
+            slack(std::slice::from_ref(&binding), "C123", true)
+                .1
+                .is_none()
         );
     }
 
@@ -760,6 +750,78 @@ mod receive_tests {
 
         // The same chat id under another provider is a different destination.
         assert!(!receive_selection(bound, "slack", "123456", &event, true).0);
+    }
+
+    /// A Gmail message addressed by a gworkspace binding selects it; a message
+    /// from anyone else is not claimed at all, so the listener wake still runs.
+    ///
+    /// Why: this pair is what makes the two inbound paths mutually exclusive —
+    /// `claimed` is the flag `listeners::poll` reads to decide which one an
+    /// event takes, and a `false` there is what keeps every unbound mailbox
+    /// message on the pre-#7427 path.
+    ///
+    /// Pre-change this test does not compile: `receive_selection` filtered on a
+    /// literal `"slack"` and compared targets by equality, so no gworkspace
+    /// binding could ever be selected and the function took no provider.
+    #[test]
+    fn agent_channels_gmail_binding_claims_only_its_own_correspondent() {
+        let binding: Binding = serde_json::from_value(json!({
+            "id":"family","name":"Family mail","provider":"gworkspace",
+            "target":"from:alice@example.com","enabled":true,"receive_enabled":true
+        }))
+        .unwrap();
+        // A receive-enabled gworkspace binding saves. Pre-change this is the
+        // first failure: `adapter("gworkspace")` was `None`, so `validate`
+        // answered "Unsupported channel provider".
+        assert!(binding.validate().is_ok());
+        let mut wrong_target = binding.clone();
+        wrong_target.target = "alice@example.com".into();
+        assert!(wrong_target.validate().is_err());
+
+        // Sending is a separate permission from receiving: this binding never
+        // set `send_enabled`, so `authorized` refuses a send on it.
+        let refused = authorized(std::slice::from_ref(&binding), "family", true).unwrap_err();
+        assert_eq!(refused.0, StatusCode::FORBIDDEN);
+        assert!(authorized(std::slice::from_ref(&binding), "family", false).is_ok());
+
+        let event = |from: &str| crate::listeners::store::StoredEvent {
+            id: "gmail-personal:19abc".into(),
+            listener_id: "gmail-personal".into(),
+            provider: "gmail".into(),
+            event_type: "message.received".into(),
+            ts: "2026-09-11T00:00:00Z".into(),
+            from: Some(from.into()),
+            subject: Some("Dinner".into()),
+            snippet: Some("Are we still on?".into()),
+            included: true,
+            labels: vec!["INBOX".into()],
+        };
+        let bound = std::slice::from_ref(&binding);
+
+        let alice = event("Alice <alice@example.com>");
+        let (claimed, selected) = receive_selection(
+            bound,
+            "gworkspace",
+            alice.from.as_deref().unwrap(),
+            &alice,
+            true,
+        );
+        assert!(claimed);
+        assert_eq!(selected.map(|b| b.id.as_str()), Some("family"));
+
+        let bob = event("bob@example.com");
+        let (claimed, selected) = receive_selection(
+            bound,
+            "gworkspace",
+            bob.from.as_deref().unwrap(),
+            &bob,
+            true,
+        );
+        assert!(!claimed, "an unbound sender must stay on the listener path");
+        assert!(selected.is_none());
+
+        // The sender address under another provider is a different destination.
+        assert!(!receive_selection(bound, "slack", "alice@example.com", &alice, true).0);
     }
 }
 
