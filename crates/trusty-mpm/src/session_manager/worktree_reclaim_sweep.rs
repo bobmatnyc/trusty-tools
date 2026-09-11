@@ -42,6 +42,9 @@ use super::worktree_reclaim::{
     ReclaimCandidate, ReclaimGate, ReclaimMode, ReclaimOutcome, ReclaimSurvey, ReclaimVerdict,
     agent_ownership_blocks, classify, measure_bytes_until, tm_provisioned,
 };
+// #7504: the worktree-launched-process gate, applied per candidate immediately
+// before its deletion alongside the five `recheck_before_delete` re-asks.
+use super::worktree_reclaim_launch::launch_refusal;
 // #7267: the merged-pull-request matcher — round stem and head commit, not the
 // branch name alone.
 use super::worktree_reclaim_pr_match::{GhLandingProbe, resolve_with_index};
@@ -391,6 +394,15 @@ pub(crate) struct FreshProbes<'a> {
     /// as `in_use_now` is. Reading it is a small local file, not a subprocess,
     /// so the per-candidate cost is nil.
     pub keep_list: &'a dyn Fn() -> KeepList,
+    /// The directories a live process was launched from (#7504).
+    ///
+    /// Why a VALUE and not a probe, unlike its three neighbours: a process's
+    /// working directory and executable path are fixed for that process's
+    /// lifetime, so re-reading them per candidate would re-derive the same
+    /// answer at a cost. The staleness this module guards against is state
+    /// OTHERS change during a minutes-long sweep; this input is the sweep's own.
+    /// An empty slice is the pre-#7504 behaviour — a no-op gate.
+    pub launched_from: &'a [PathBuf],
 }
 
 /// Survey, and in [`ReclaimMode::Remove`] reclaim, merged-PR worktrees (#2919).
@@ -448,6 +460,21 @@ pub(crate) fn reclaim_with_probes(
     let mut fresh_indexes: BTreeMap<PathBuf, PrIndex> = BTreeMap::new();
     for candidate in approved {
         let path = candidate.path;
+        // #7504: ahead of the pull-request lookups, because it is the only gate
+        // here that costs nothing — two in-process path compares — and a
+        // candidate holding the running daemon's own footing must not first buy
+        // a `gh` call. It is also the only input that cannot go stale under this
+        // sweep, so evaluating it early costs no freshness (see
+        // `FreshProbes::launched_from`).
+        if let Some(reason) = launch_refusal(&path, probes.launched_from) {
+            tracing::warn!(
+                path = %path.display(),
+                "worktree-reclaim: spared a surveyed candidate — {reason}"
+            );
+            out.refused_at_recheck
+                .push(format!("{}: {reason}", path.display()));
+            continue;
+        }
         // The pull-request lookups go FIRST because they are the slow part —
         // measured 322-366 ms for a per-branch call and 1220 ms for the bulk
         // one, against a 10 s ceiling. Reading liveness before them would date
@@ -491,9 +518,25 @@ pub(crate) fn reclaim_with_probes(
         }
         let outcome = super::decommission::remove_session_worktree(&path);
         if outcome.removed() && !path.exists() {
+            // #7504: the AUDIT LINE. It carries path, branch, pull request and
+            // bytes freed because the reclaim is now automatic: nobody typed the
+            // command, so this line is the only record of what the daemon
+            // decided and why it was allowed to. `bytes` is `None` when the
+            // survey's measurement phase ran out of budget before reaching this
+            // candidate — reported as absent rather than as zero, which would
+            // read as "freed nothing".
             tracing::info!(
                 path = %path.display(),
-                "worktree-reclaim: reclaimed a merged-PR worktree (#2919)"
+                branch = candidate.branch.as_deref().unwrap_or("(detached)"),
+                pr = match &pr_now {
+                    BranchPrState::Merged { pr } => Some(*pr),
+                    // Unreachable past `recheck_before_delete`, which refuses
+                    // every other state. Rendered as absent rather than as a
+                    // fabricated number if that ever stops being true.
+                    _ => None,
+                },
+                bytes_freed = candidate.bytes,
+                "worktree-reclaim: reclaimed a merged-PR worktree (#2919, #7504)"
             );
             out.removed_bytes = out
                 .removed_bytes
@@ -521,8 +564,12 @@ pub(crate) fn reclaim_with_probes(
 /// [`reclaim_with_probes`] against the real `gh`-backed index and a live
 /// re-read of the session store (#2919).
 ///
-/// Why: the production entry point, reached only from the explicit
-/// `merged_prs` opt-in on `tm session prune-worktrees`.
+/// Why: the production entry point for the merged-PR reclaim — reached from the
+/// `merged_prs` opt-in on `tm session prune-worktrees` AND, since #7504, from the
+/// daemon's automatic post-merge sweep. Both arrive through
+/// [`crate::daemon::services::merged_pr_reclaim::reclaim`], the one place the
+/// production probes are assembled, so an operator-typed reclaim and an automatic
+/// one cannot apply different gates.
 /// What: `in_use_paths` and `keep_list` are both re-invoked per candidate by
 /// the loop, so the caller must supply closures that genuinely RE-READ rather
 /// than ones closing over a captured snapshot. `in_use_paths` returns `None`
@@ -538,6 +585,10 @@ pub(crate) fn reclaim_merged_pr_worktrees(
     keep_list: &dyn Fn() -> KeepList,
     // #7357: resolved by the route that invokes this, never here.
     adopted: &[PathBuf],
+    // #7504: the caller's own launch directories, resolved by the entry point
+    // that assembles the probes — never here, so a test can hand in a scratch
+    // path without the real process's cwd leaking into the comparison.
+    launched_from: &[PathBuf],
 ) -> ReclaimOutcome {
     reclaim_with_probes(
         repos_root,
@@ -546,6 +597,7 @@ pub(crate) fn reclaim_merged_pr_worktrees(
             index_for: &PrIndex::from_gh,
             agent_state,
             keep_list,
+            launched_from,
         },
         mode,
         adopted,

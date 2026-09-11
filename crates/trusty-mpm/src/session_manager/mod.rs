@@ -77,6 +77,9 @@ pub(crate) mod worktree_reclaim_gh_gate;
 pub(crate) mod worktree_reclaim_pr_match;
 // #6507: the verdict vocabulary, including which GATE refused a candidate.
 pub(crate) mod worktree_reclaim_verdict;
+// #7504: the gate that spares a worktree a live process was launched from — the
+// daemon's own working directory or the executable serving the sweep.
+pub(crate) mod worktree_reclaim_launch;
 // #6806: gate 2's claim resolution — WHICH session claims a candidate, and
 // whether that session is the one that invoked the sweep.
 pub(crate) mod worktree_reclaim_claim;

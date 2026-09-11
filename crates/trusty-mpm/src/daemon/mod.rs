@@ -238,6 +238,13 @@ pub async fn serve_with_shutdown(
         info!("orphan-GC disabled via TRUSTY_MPM_ORPHAN_GC");
     }
 
+    // #7504: automatic post-merge worktree reclaim. Disk management is a daemon
+    // function (epic #7505), so this is ON by default — a reclaim the PM must
+    // remember to run is the manual step #2919 already shipped. The env gate, the
+    // cadence and the spawn all live in the service module, which keeps this file
+    // under its SLOC cap and keeps the policy next to the loop it governs.
+    services::merged_pr_reclaim::spawn_if_enabled(Arc::clone(&state), cancel.child_token());
+
     // Cloud log drain (#6535): OFF unless `log_drain.enabled` is true, so the
     // default host spawns nothing. A malformed section is reported here and
     // recorded for the `log_drain` doctor row rather than silently skipped —

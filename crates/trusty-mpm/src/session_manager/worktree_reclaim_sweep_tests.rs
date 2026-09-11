@@ -274,6 +274,7 @@ fn reclaim_remove_mode_spares_a_live_agents_merged_worktree() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &agent_live,
             in_use_now: &|| Some(nobody()),
@@ -313,6 +314,7 @@ fn survey_discloses_a_live_agents_spared_worktree() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &agent_live,
             in_use_now: &|| Some(nobody()),
@@ -354,6 +356,7 @@ fn survey_discloses_nothing_when_no_agent_was_spared() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &no_agents,
             in_use_now: &|| Some(nobody()),
@@ -791,6 +794,7 @@ fn reclaim_report_mode_removes_nothing() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &no_agents,
             in_use_now: &|| Some(nobody()),
@@ -828,6 +832,7 @@ fn a_dead_sessions_claim_does_not_block_the_dry_run() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &no_agents,
             in_use_now: &|| Some(dead.clone()),
@@ -860,6 +865,7 @@ fn a_live_sessions_claim_still_blocks_the_dry_run() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &no_agents,
             in_use_now: &|| Some(live.clone()),
@@ -909,6 +915,7 @@ fn reclaim_remove_mode_refuses_a_worktree_claimed_after_the_survey() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &no_agents,
             in_use_now: &in_use_now,
@@ -946,6 +953,7 @@ fn reclaim_remove_mode_refuses_a_worktree_dirtied_after_the_survey() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &no_agents,
             in_use_now: &in_use_now,
@@ -987,6 +995,7 @@ fn reclaim_remove_mode_refuses_a_worktree_locked_after_the_survey() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &no_agents,
             in_use_now: &in_use_now,
@@ -1021,6 +1030,7 @@ fn reclaim_remove_mode_refuses_when_the_pr_reopens_after_the_survey() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &no_agents,
             in_use_now: &|| Some(nobody()),
@@ -1048,6 +1058,7 @@ fn reclaim_remove_mode_refuses_when_the_live_set_cannot_be_read() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &no_agents,
             in_use_now: &in_use_now,
@@ -1129,6 +1140,7 @@ fn reclaim_remove_mode_refuses_a_worktree_keep_listed_after_the_survey() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            launched_from: &[],
             keep_list: &keep_list,
             agent_state: &no_agents,
             in_use_now: &|| Some(nobody()),
@@ -1198,6 +1210,7 @@ fn a_malformed_config_refuses_to_reclaim_a_merged_clean_worktree() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            launched_from: &[],
             keep_list: &keep_list,
             agent_state: &no_agents,
             in_use_now: &|| Some(nobody()),
@@ -1233,6 +1246,7 @@ fn reclaim_remove_mode_reclaims_a_clean_merged_worktree() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &no_agents,
             in_use_now: &|| Some(nobody()),
@@ -1245,6 +1259,73 @@ fn reclaim_remove_mode_reclaims_a_clean_merged_worktree() {
     assert!(!path.exists(), "the directory must be gone");
     assert!(out.removed_bytes > 0);
     assert!(out.removal_failed.is_empty());
+}
+
+/// A worktree a live process was launched from is spared, merged and clean
+/// though it is (#7504).
+///
+/// Why this is the discriminating shape: the fixture is byte-for-byte the one
+/// `reclaim_remove_mode_reclaims_a_clean_merged_worktree` above DELETES. The
+/// only difference is the launch directory, so the test cannot pass for any
+/// reason other than the gate — and deleting the gate from
+/// `reclaim_with_probes` makes it fail by deleting the directory.
+#[test]
+fn reclaim_remove_mode_spares_a_worktree_a_process_was_launched_from() {
+    let fx = GitWorktreeFixture::new();
+    let path = fx.add_worktree("launched-from-7504");
+    land(&path);
+    // A process sitting one level inside the tree — the `cargo run` shape.
+    let inside = vec![path.join("crates")];
+    std::fs::create_dir_all(&inside[0]).expect("create the launch directory");
+
+    let out = reclaim_with_probes(
+        &fx.repos_root,
+        &FreshProbes {
+            launched_from: &inside,
+            keep_list: &no_keeps,
+            agent_state: &no_agents,
+            in_use_now: &|| Some(nobody()),
+            index_for: &|_: &Path| merged_index("session/launched-from-7504", 7504),
+        },
+        ReclaimMode::Remove,
+        &[],
+    );
+
+    assert!(
+        path.exists(),
+        "the daemon deleted the directory it was launched from: {out:?}"
+    );
+    assert!(out.removed.is_empty(), "outcome: {out:?}");
+    let refused = format!("{:?}", out.refused_at_recheck);
+    assert!(
+        refused.contains("launched from inside"),
+        "the refusal must be REPORTED, not silent: {refused}"
+    );
+}
+
+/// The repository's own main checkout is never removed (#7504).
+///
+/// Why a direct re-check test rather than a loop one: the survey's ownership gate
+/// already blocks a main checkout (it carries no trusty-mpm marker), so a loop
+/// test could never reach the deletion and would pass with the guard gone. This
+/// asserts the arm that is the last line of defence if any earlier gate is ever
+/// widened.
+#[test]
+fn recheck_refuses_the_repositorys_main_checkout() {
+    let fx = GitWorktreeFixture::new();
+
+    let reason = recheck_before_delete(
+        &fx.repo,
+        &no_keeps(),
+        Some(&nobody()),
+        &merged(7505),
+        &no_agents,
+    )
+    .unwrap_or_else(|| panic!("{} is the main checkout and must refuse", fx.repo.display()));
+    assert!(
+        reason.contains("main checkout"),
+        "the refusal must name what it protected: {reason}"
+    );
 }
 
 #[test]
@@ -1637,6 +1718,7 @@ fn survey_offers_a_merged_agent_worktree_the_harness_released() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &restarted_registry,
             in_use_now: &|| Some(nobody()),
@@ -1670,6 +1752,7 @@ fn reclaim_reclaims_a_merged_agent_worktree_the_harness_released() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &restarted_registry,
             in_use_now: &|| Some(nobody()),
@@ -1695,6 +1778,7 @@ fn reclaim_never_offers_an_agent_worktree_whose_pr_is_open() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &restarted_registry,
             in_use_now: &|| Some(nobody()),
@@ -1728,6 +1812,7 @@ fn reclaim_never_offers_a_dirty_agent_worktree() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &restarted_registry,
             in_use_now: &|| Some(nobody()),
@@ -1766,6 +1851,7 @@ fn survey_discloses_a_harness_locked_agent_worktree() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &restarted_registry,
             in_use_now: &|| Some(nobody()),
@@ -1943,6 +2029,7 @@ fn prune_resolves_each_projects_repo_from_its_own_origin_7057() {
     let out = reclaim_with_probes(
         &fx.repos_root,
         &FreshProbes {
+            launched_from: &[],
             keep_list: &no_keeps,
             agent_state: &no_agents,
             in_use_now: &|| Some(nobody()),
