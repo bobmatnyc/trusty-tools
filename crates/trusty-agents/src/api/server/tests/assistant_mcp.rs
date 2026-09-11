@@ -515,6 +515,122 @@ fn concurrent_write_at_calls_do_not_lose_servers() {
     assert_eq!(stored.overrides.disabled, ["github"]);
 }
 
+/// #7454: seeding `config.toml` is a check-then-act — `AssistantHome::seed`
+/// tests for absence and then writes — so doing it in the `ensure` call BEFORE
+/// the lock loses the first write. Two concurrent first-time PUTs both decide
+/// "absent" before either has written, and the loser's unlocked
+/// `std::fs::write` truncates the file back to the bare `id = "…"` stub,
+/// discarding the `[mcp]` table the winner published under the lock.
+///
+/// Constructed from the observable half of that: while the lock is held and
+/// `config.toml` is still absent on disk, a racing [`write_at`] must not have
+/// written the file. A `write_at` that seeds outside the lock creates it
+/// within microseconds of being called, so the mid-lock observation catches
+/// the decision point the truncation depends on. The observation is recorded
+/// and asserted after the update, so a failure never panics while holding the
+/// lock the racer is waiting on.
+#[test]
+fn write_at_does_not_seed_config_outside_the_lock() {
+    let (_tmp, dirs, root) = fixture();
+    let config = root.join("izzie").join("config.toml");
+
+    let racing_dirs = dirs.clone();
+    let racing_root = root.clone();
+    let mut racer = None;
+    let mut existed_under_the_lock = None;
+    crate::state_writer::atomic_update(&config, |existing| {
+        assert!(existing.is_none(), "the config file must start absent");
+        racer = Some(std::thread::spawn(move || {
+            write_at(
+                &racing_dirs,
+                &racing_root,
+                "izzie",
+                disabled_only(&["github"]),
+                tier(),
+            )
+            .status()
+        }));
+        // Long enough for that thread to reach the lock; an unlocked seed
+        // happens within microseconds of reaching it.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        existed_under_the_lock = Some(config.exists());
+        Ok(Some(WITH_SERVER.as_bytes().to_vec()))
+    })
+    .unwrap();
+
+    let status = racer.expect("thread spawned").join().expect("joined");
+    assert_eq!(status, StatusCode::OK, "the racing PUT must succeed");
+    assert_eq!(
+        existed_under_the_lock,
+        Some(false),
+        "a racing write_at seeded `config.toml` outside the lock; its next \
+         first-time write would truncate a concurrently published `[mcp]` table"
+    );
+
+    let home = AssistantHome::under(&root, AssistantInstanceId::new("izzie").unwrap());
+    let stored = read_overrides(&home);
+    assert_eq!(stored.error, None, "{:?}", stored.error);
+    let names: Vec<&str> = stored
+        .overrides
+        .servers
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect();
+    assert_eq!(names, ["izzie-only"], "the published server must survive");
+}
+
+/// #7454: moving the seed inside the lock must not lose it. A first write to
+/// an absent `config.toml` still starts from the seeded stub, so the `id` the
+/// home is identified by survives alongside the table the PUT publishes, and a
+/// second write neither re-seeds nor resets what the first stored.
+#[test]
+fn write_at_seeds_a_new_config_inside_the_lock() {
+    let (_tmp, dirs, root) = fixture();
+    let config = root.join("izzie").join("config.toml");
+    assert!(!config.exists(), "the config file must start absent");
+
+    let first = write_at(
+        &dirs,
+        &root,
+        "izzie",
+        put_body(
+            serde_json::json!([stdio_json("izzie-only", "izzie-bin")]),
+            &["github"],
+        ),
+        tier(),
+    );
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let seeded = std::fs::read_to_string(&config).expect("config.toml written");
+    assert!(
+        seeded.contains(r#"id = "izzie""#),
+        "the seeded id must survive the first locked write: {seeded}"
+    );
+    assert!(
+        seeded.contains("[mcp]"),
+        "the published table must be in the same document: {seeded}"
+    );
+
+    let second = write_at(&dirs, &root, "izzie", disabled_only(&["github"]), tier());
+    assert_eq!(second.status(), StatusCode::OK);
+
+    let home = AssistantHome::under(&root, AssistantInstanceId::new("izzie").unwrap());
+    let stored = read_overrides(&home);
+    assert_eq!(stored.error, None, "{:?}", stored.error);
+    let names: Vec<&str> = stored
+        .overrides
+        .servers
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        ["izzie-only"],
+        "the second write must not reset the table the first stored"
+    );
+    assert_eq!(stored.overrides.disabled, ["github"]);
+}
+
 /// #7454: `load_global().unwrap_or_default()` rendered an unlocatable shared
 /// file as an EMPTY tier, which is exactly what a clean fresh install looks
 /// like. The degraded answer carries the issue instead, the way

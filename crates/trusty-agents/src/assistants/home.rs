@@ -289,6 +289,28 @@ impl AssistantHome {
     /// `super::tests::home_tests::ensure_is_idempotent`,
     /// `super::tests::home_tests::ensure_never_overwrites_user_edits`.
     pub fn ensure(&self) -> Result<Created, AssistantError> {
+        // #7454: split so a caller that publishes into `config.toml` under a
+        // lock can seed that one file inside it. Same work, same order.
+        let mut created = self.ensure_without_config()?;
+        self.seed(self.config_path(), self.seed_config_body(), &mut created)?;
+        Ok(created)
+    }
+
+    /// Everything [`Self::ensure`] creates except [`CONFIG_FILE`].
+    ///
+    /// Why: [`Self::seed`] is a check-then-act — it tests for absence, then
+    /// writes — so a caller that publishes into `config.toml` under a lock
+    /// must not seed that file outside the lock. Two concurrent FIRST writes
+    /// both decide "absent" before either has written, and the loser's seed
+    /// then truncates the winner's published table (#7454). Such a caller
+    /// creates the directories here, which `create_dir_all` makes genuinely
+    /// idempotent, and seeds `config.toml` from [`Self::seed_config_body`]
+    /// inside its own lock.
+    /// What: the home, [`AGENTS_DIR`], [`OKG_DIR`], [`ATTACHMENTS_DIR`],
+    /// [`STORES_DIR`] and [`INSTRUCTIONS_FILE`], in the order and with the
+    /// additive-only rule [`Self::ensure`] documents.
+    /// Test: `super::tests::home_tests::ensure_without_config_leaves_config_absent`.
+    pub fn ensure_without_config(&self) -> Result<Created, AssistantError> {
         let mut created = Created::default();
         for dir in [
             self.path.clone(),
@@ -310,8 +332,17 @@ impl AssistantHome {
             seed_instructions(&self.id),
             &mut created,
         )?;
-        self.seed(self.config_path(), seed_config(&self.id), &mut created)?;
         Ok(created)
+    }
+
+    /// The body a fresh [`CONFIG_FILE`] is seeded with.
+    ///
+    /// Why: [`Self::ensure_without_config`]'s caller owns that file's
+    /// lifecycle inside its own lock and needs the seed this module writes; a
+    /// second copy of the stub would drift from it (#7454).
+    /// Test: `super::tests::home_tests::ensure_without_config_leaves_config_absent`.
+    pub fn seed_config_body(&self) -> String {
+        seed_config(&self.id)
     }
 
     /// Write `body` to `path` only when nothing is there. See [`Self::ensure`].

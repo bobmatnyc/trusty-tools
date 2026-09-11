@@ -34,7 +34,8 @@
 //! [`write_at`] therefore reads, validates and publishes inside one
 //! `crate::state_writer::atomic_update` over the assistant's `config.toml` —
 //! the shape `crate::tools::mcp_tools::dispatch` uses for the global file
-//! (#7454).
+//! (#7454). Seeding that file when it is absent happens inside the same
+//! update, because the seed is itself a check-then-act — see [`write_at`].
 //!
 //! Test: `super::tests::assistant_mcp`.
 
@@ -210,11 +211,25 @@ pub(super) fn read_at(dirs: &[PathBuf], root: &Path, name: &str, global: GlobalT
 /// update: two concurrent PUTs, one changing only `disabled` and one changing
 /// `servers`, let the first's stale read publish the assistant's servers as
 /// they were before the second wrote them (#7454).
+///
+/// Seeding a brand-new `config.toml` happens inside that same update, not in
+/// the `AssistantHome::ensure` call before it, because the seed is a
+/// check-then-act: `AssistantHome::seed` tests for absence and then writes.
+/// Two concurrent FIRST writes both decide "absent" before either has
+/// written, so the loser's unlocked `std::fs::write` truncates the file back
+/// to the bare stub and silently discards the `[mcp]` table the winner just
+/// published. Deciding absence under the held lock — `existing.is_none()`
+/// starting from `AssistantHome::seed_config_body` — is the same shape
+/// `crate::mcp::shared::migrate::migrate_if_absent` uses for the global file.
+/// Only the directory creation stays outside the lock, where `create_dir_all`
+/// is genuinely idempotent.
 /// Test: `put_replaces_the_whole_table`, `put_refuses_a_blank_name`,
 /// `put_refuses_a_duplicate_name`, `put_refuses_a_name_in_both_lists`,
 /// `put_refuses_a_redacted_value`, `put_trims_a_stored_name`,
 /// `put_without_servers_keeps_the_stored_ones`,
-/// `concurrent_write_at_calls_do_not_lose_servers`.
+/// `concurrent_write_at_calls_do_not_lose_servers`,
+/// `write_at_does_not_seed_config_outside_the_lock`,
+/// `write_at_seeds_a_new_config_inside_the_lock`.
 pub(super) fn write_at(
     dirs: &[PathBuf],
     root: &Path,
@@ -227,10 +242,10 @@ pub(super) fn write_at(
         Err(response) => return response,
     };
     let home = AssistantHome::under(root, id.clone());
-    // #7454: the home and its seeded `config.toml` are created before the
-    // locked update, so the document the render preserves is the seeded one.
-    // `ensure` is additive and idempotent, so it is safe outside the lock.
-    if let Err(e) = home.ensure() {
+    // #7454: only the DIRECTORIES are created outside the lock — that part is
+    // `create_dir_all`, which is genuinely idempotent. `config.toml`'s seed is
+    // not; it is seeded inside the update below. See the doc above.
+    if let Err(e) = home.ensure_without_config() {
         return fail(StatusCode::INTERNAL_SERVER_ERROR, e);
     }
 
@@ -242,7 +257,9 @@ pub(super) fn write_at(
             Some(bytes) => std::str::from_utf8(bytes)
                 .map_err(|e| anyhow::anyhow!("`config.toml` is not UTF-8: {e}"))?
                 .to_string(),
-            None => String::new(),
+            // #7454: absence is decided HERE, under the held lock, and the
+            // seed is what the render then preserves.
+            None => home.seed_config_body(),
         };
         // Absent `servers` keeps what is stored, so a client editing only the
         // disable list never restates a transport it was shown redacted.
