@@ -22,7 +22,9 @@
 //! an attacker-controlled host/owner), and for a local filesystem path it
 //! requires the CANONICAL FULL PATH to sit at or under a registered project's
 //! own canonical root (#7066 — a basename match let any directory named like a
-//! registered project satisfy the allowlist);
+//! registered project satisfy the allowlist), with a DEGENERATE root (`/`, the
+//! operator's home, the workspace root) refused at match time so that an
+//! ungated `project_register` call cannot widen the allowlist to the host;
 //! [`ensure_mcp_spawn_allowed`] is the async orchestration `spawn_managed` calls
 //! FIRST — before any session id, workspace, or record is created — so a
 //! refusal has zero side effects. It takes the registry and config as plain
@@ -33,12 +35,24 @@
 //! `spawn_managed` is covered by `tests/mcp_spawn_gate.rs` (proves a rejected
 //! MCP spawn creates nothing and that CLI-origin spawns are never gated).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use tracing::warn;
 use trusty_common::github_path::parse_github_path;
 
-use crate::core::trusty_tools_config::{TrustyToolsConfig, workspace_subpath};
+use crate::core::trusty_tools_config::{TrustyToolsConfig, workspace_root, workspace_subpath};
 use crate::project::{Project, ProjectRegistry, derive_name_from_url};
+
+/// Fewest path components a registered root may have and still bound a project
+/// (#7066).
+///
+/// Why: the same "too shallow to be a project" floor
+/// `session_manager::workspace_guard::is_safe_to_remove` already applies before
+/// it will delete anything — counted from the filesystem root, so `/` is 1 and
+/// `/Users` is 2. Reusing that number keeps one notion of a degenerate path in
+/// this crate instead of two.
+/// What: `3`. Test: `tests::a_degenerate_registered_root_is_never_a_containment_root`.
+const MIN_ROOT_COMPONENTS: usize = 3;
 
 /// Env var that force-enables MCP-initiated spawning, overriding config (#1836).
 ///
@@ -125,7 +139,8 @@ fn looks_like_remote_url(s: &str) -> bool {
 /// denied). A project with no resolvable root on this host contributes NOTHING
 /// to the allowlist — every failure arm refuses.
 /// Test: `tests::local_path_allowlist_decides_on_the_canonical_full_path`,
-/// `tests::a_remote_registered_project_is_known_at_its_workspace_checkout`.
+/// `tests::a_remote_registered_project_is_known_at_its_workspace_checkout`,
+/// `tests::a_degenerate_registered_root_is_never_a_containment_root`.
 fn registered_local_root(project: &Project, config: &TrustyToolsConfig) -> Option<PathBuf> {
     let declared = if looks_like_remote_url(&project.repo_url) {
         workspace_subpath(config, &parse_github_path(&project.repo_url)?)
@@ -134,7 +149,69 @@ fn registered_local_root(project: &Project, config: &TrustyToolsConfig) -> Optio
     };
     // `canonicalize` resolves symlinks and `..` AND fails on a path that does
     // not exist, so an unresolvable root simply yields no match.
-    std::fs::canonicalize(declared).ok()
+    let root = std::fs::canonicalize(declared).ok()?;
+    // #7066: a degenerate root contains every path on the host, so refuse it
+    // here rather than trusting the registration that produced it.
+    if let Some(reason) = degenerate_root_reason(&root, config) {
+        warn!(
+            project = %project.name,
+            root = %root.display(),
+            "MCP spawn gate: ignoring registered project root — {reason}"
+        );
+        return None;
+    }
+    Some(root)
+}
+
+/// Why the canonical `root` is too broad to bound the spawn allowlist (#7066).
+///
+/// Why: `project_register` is an ungated MCP tool that takes any string as
+/// `repo_url`, so a caller can register a project rooted at `/`, at the
+/// operator's home directory, or at the daemon's own workspace root.
+/// [`is_known_repo`]'s local arm admits any target CONTAINED by a registered
+/// root, and containment under such a root holds for every existing directory
+/// on the host — a single degenerate registration would turn the allowlist into
+/// an allow-everything, which is the ARIA-incident shape the gate exists to
+/// stop. The floor is enforced HERE, at match time, and NOT in
+/// `project_register`, so a bad registration already sitting in the registry —
+/// written by an older build, by hand, or by a caller that never passed a
+/// registration-time check — still cannot widen the allowlist.
+/// What: `Some(reason)` when `root` has fewer than [`MIN_ROOT_COMPONENTS`]
+/// components (`/`, `/Users`), or IS the operator's home directory, or IS the
+/// workspace root the daemon provisions every project under
+/// ([`workspace_root`]). The last two need naming explicitly because the
+/// component floor does not reach them — `/Users/op` is already three
+/// components. Comparison canonicalizes both sides and falls back to a literal
+/// comparison when a side cannot be canonicalized, so a home or workspace root
+/// reached through a symlink still matches. `None` means the root bounds a real
+/// project directory.
+/// Test: `tests::a_degenerate_registered_root_is_never_a_containment_root`.
+fn degenerate_root_reason(root: &Path, config: &TrustyToolsConfig) -> Option<&'static str> {
+    if root.components().count() < MIN_ROOT_COMPONENTS {
+        return Some("too few path components to be a project checkout");
+    }
+    if dirs::home_dir().is_some_and(|home| same_path(&home, root)) {
+        return Some("it is the operator's home directory");
+    }
+    if same_path(&workspace_root(config), root) {
+        return Some("it is the daemon's workspace root");
+    }
+    None
+}
+
+/// Whether two paths name the same directory, resolving symlinks when possible.
+///
+/// Why: [`degenerate_root_reason`] compares an already-canonical root against
+/// `$HOME` and the workspace root, neither of which is canonical and either of
+/// which may not exist (an unprovisioned workspace root is the normal case).
+/// What: canonicalizes both and compares; when either side cannot be
+/// canonicalized, compares the paths literally.
+/// Test: `tests::a_degenerate_registered_root_is_never_a_containment_root`.
+fn same_path(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
 }
 
 /// Whether `repo_url` matches an already-registered project (#1837).
@@ -166,6 +243,12 @@ fn registered_local_root(project: &Project, config: &TrustyToolsConfig) -> Optio
 /// and a path inside a registered project's own directory is exactly what the
 /// operator registered. Comparison is by path COMPONENT, so a sibling whose
 /// name merely starts with a registered root's name is not contained by it.
+/// A DEGENERATE registered root — `/`, the operator's home, the workspace root,
+/// anything shallower than [`MIN_ROOT_COMPONENTS`] — bounds nothing and is
+/// dropped by [`degenerate_root_reason`] before containment is tested, because
+/// `project_register` accepts any string as a `repo_url` and containment under
+/// such a root holds for the whole host. That floor is applied at MATCH time,
+/// not at registration, so a bad registration cannot widen the allowlist.
 /// Every error arm refuses: a target that cannot be canonicalized (missing,
 /// permission denied) is NOT known.
 /// Test: `tests::is_known_repo_matches_by_owner_and_repo_ignoring_git_suffix`,
@@ -173,6 +256,7 @@ fn registered_local_root(project: &Project, config: &TrustyToolsConfig) -> Optio
 /// `tests::is_known_repo_rejects_same_repo_name_different_owner`,
 /// `tests::local_path_allowlist_decides_on_the_canonical_full_path`,
 /// `tests::a_remote_registered_project_is_known_at_its_workspace_checkout`,
+/// `tests::a_degenerate_registered_root_is_never_a_containment_root`,
 /// `tests::is_known_repo_rejects_unregistered`,
 /// `tests::is_known_repo_remote_target_ignores_local_registered_url`.
 #[must_use]
@@ -254,37 +338,48 @@ mod tests {
     use serial_test::serial;
     use tempfile::TempDir;
 
-    /// RAII guard that sets (or removes) [`ALLOW_MCP_SPAWN_ENV`] for the
+    /// RAII guard that sets (or removes) one environment variable for the
     /// duration of a `#[serial]` test, restoring the prior value (or absence)
     /// on drop — panic-safe, so a failed assertion mid-test cannot leak the
     /// override into a sibling test (mirrors `session_launch::tests::EnvVarGuard`).
+    /// The no-key constructors act on [`ALLOW_MCP_SPAWN_ENV`], this module's
+    /// most-overridden variable; `set_key`/`unset_key` take any other.
     struct EnvGuard {
+        key: &'static str,
         prev: Option<String>,
     }
 
     impl EnvGuard {
         fn set(value: &str) -> Self {
-            let prev = std::env::var(ALLOW_MCP_SPAWN_ENV).ok();
-            // SAFETY: env-mutating tests using this guard are tagged `#[serial]`.
-            unsafe { std::env::set_var(ALLOW_MCP_SPAWN_ENV, value) };
-            Self { prev }
+            Self::set_key(ALLOW_MCP_SPAWN_ENV, value)
         }
 
         fn unset() -> Self {
-            let prev = std::env::var(ALLOW_MCP_SPAWN_ENV).ok();
+            Self::unset_key(ALLOW_MCP_SPAWN_ENV)
+        }
+
+        fn set_key(key: &'static str, value: &str) -> Self {
+            let prev = std::env::var(key).ok();
             // SAFETY: env-mutating tests using this guard are tagged `#[serial]`.
-            unsafe { std::env::remove_var(ALLOW_MCP_SPAWN_ENV) };
-            Self { prev }
+            unsafe { std::env::set_var(key, value) };
+            Self { key, prev }
+        }
+
+        fn unset_key(key: &'static str) -> Self {
+            let prev = std::env::var(key).ok();
+            // SAFETY: env-mutating tests using this guard are tagged `#[serial]`.
+            unsafe { std::env::remove_var(key) };
+            Self { key, prev }
         }
     }
 
     impl Drop for EnvGuard {
         fn drop(&mut self) {
-            // SAFETY: see `set`/`unset` — serialized by `#[serial]`.
+            // SAFETY: see `set_key`/`unset_key` — serialized by `#[serial]`.
             unsafe {
                 match self.prev.take() {
-                    Some(v) => std::env::set_var(ALLOW_MCP_SPAWN_ENV, v),
-                    None => std::env::remove_var(ALLOW_MCP_SPAWN_ENV),
+                    Some(v) => std::env::set_var(self.key, v),
+                    None => std::env::remove_var(self.key),
                 }
             }
         }
@@ -472,9 +567,11 @@ mod tests {
     #[test]
     fn a_remote_registered_project_is_known_at_its_workspace_checkout() {
         let _g = crate::core::trusty_tools_config::env_test_lock();
-        // SAFETY: guarded by `env_test_lock`; this test exercises the CONFIG
-        // template, which the env var would otherwise override.
-        unsafe { std::env::remove_var(trusty_common::workspace_layout::WORKSPACE_ROOT_ENV) };
+        // This test exercises the CONFIG template, which the env var would
+        // otherwise override. The guard restores whatever the caller had, so a
+        // developer running with `TRUSTY_MPM_WORKSPACE_ROOT` set does not lose
+        // it for every later test in this binary.
+        let _env = EnvGuard::unset_key(trusty_common::workspace_layout::WORKSPACE_ROOT_ENV);
 
         let tmp = TempDir::new().expect("tempdir");
         let workspace = tmp.path().join("trusty-mpm-projects");
@@ -500,6 +597,47 @@ mod tests {
         assert!(
             !is_known_repo(&projects, &cfg, &impostor.to_string_lossy()),
             "a same-name directory outside the workspace checkout must not be"
+        );
+    }
+
+    /// #7066 (review round 2): a registered root broad enough to contain the
+    /// whole host must never bound the allowlist.
+    ///
+    /// `project_register` is ungated and takes any string as `repo_url`, so one
+    /// registration at `/` or at the operator's home would make
+    /// `target.starts_with(root)` true for every existing directory — the
+    /// containment rule's match arm, not a failure arm. Both degenerate roots
+    /// are registered alongside a real one, so the same run also proves the
+    /// floor did not cost a genuine project its worktrees.
+    #[test]
+    #[serial]
+    fn a_degenerate_registered_root_is_never_a_containment_root() {
+        let tmp = TempDir::new().expect("tempdir");
+        let home = tmp.path().join("home").join("op");
+        let unrelated = home.join("checkouts").join("aria");
+        let real = tmp.path().join("checkouts").join("trusty-tools");
+        let real_worktree = real.join(".worktrees").join("agent-x");
+        for dir in [&unrelated, &real_worktree] {
+            std::fs::create_dir_all(dir).expect("create fixture dir");
+        }
+        // `degenerate_root_reason` reads `$HOME` through `dirs::home_dir`, so
+        // the simulated home must be the process's for the duration.
+        let _home = EnvGuard::set_key("HOME", &home.to_string_lossy());
+
+        let projects = vec![
+            make_project("filesystem-root", "/"),
+            make_project("home-dir", &home.to_string_lossy()),
+            make_project("trusty-tools", &real.to_string_lossy()),
+        ];
+        let cfg = TrustyToolsConfig::default();
+
+        assert!(
+            !is_known_repo(&projects, &cfg, &unrelated.to_string_lossy()),
+            "a path outside every real project must not be known via `/` or $HOME"
+        );
+        assert!(
+            is_known_repo(&projects, &cfg, &real_worktree.to_string_lossy()),
+            "a worktree of a genuinely registered checkout must stay known"
         );
     }
 
