@@ -56,7 +56,11 @@ name = "trusty-mpm"
 # 1.5.32 (owner-authorized reinstall, refs #7490): patch, version-only —
 # 1.5.31 is already published and this bump exists solely so `tm --version`
 # identifies the reinstalled build.
-version = "1.5.32"
+# 1.5.33 (owner-authorized reinstall, refs #7461 #7464 #7491 #7497 #7498
+# #7479 #7499 #7185 #7487 #7518 #7504): patch, version-only — 1.5.32 is
+# already published and this bump exists solely so `tm --version` identifies
+# the reinstalled build.
+version = "1.5.33"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
