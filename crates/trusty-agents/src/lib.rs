@@ -84,6 +84,10 @@ pub mod knowledge;
 pub mod attendance;
 pub mod build_info;
 pub mod bus;
+// #7427: one `ChannelAdapter` per channel provider, behind a registry. Crate-
+// internal because the trait's methods take `api::server::agent_channels::Binding`,
+// which is `pub(crate)`.
+pub(crate) mod channels;
 pub mod cli;
 #[allow(dead_code)]
 pub mod compress;

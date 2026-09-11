@@ -36,9 +36,32 @@ pub(crate) struct Binding {
     pub filter: AgentBindingFilter,
     #[serde(default)]
     pub instructions: String,
+    /// Name of the credential this binding sends as, never a credential value.
+    ///
+    /// Why (#7427): every send used to authenticate with whichever
+    /// process-global token was in the environment, so two assistants bound to
+    /// two workspaces could not send as different identities and nothing in the
+    /// binding recorded which credential it meant. `None` keeps that behaviour.
+    /// What: `<scheme>:<name>` — `env:SLACK_BOT_TOKEN` today; see
+    /// [`crate::channels::credentials`] for the grammar and for why an unknown
+    /// scheme is an error rather than a fallback to the global token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_ref: Option<String>,
 }
 impl Binding {
-    fn validate(&self) -> Result<(), Error> {
+    /// Reject a binding the assistant could not act on.
+    ///
+    /// Why: runs on every load and every save, so a configuration that cannot
+    /// work never reaches the point where a send silently goes nowhere.
+    /// What: identity and name limits, then the provider's own rules —
+    /// #7427 resolves the provider through [`crate::channels::adapter`], so an
+    /// unregistered id (Notion, gworkspace) is refused here rather than
+    /// accepted and left inert, and a `receive_enabled` binding is refused on a
+    /// provider whose [`crate::channels::Capabilities`] say it has no inbound
+    /// path.
+    /// Test: `agent_channels_validates_provider_destination_and_permissions`,
+    /// `agent_channels_rejects_unregistered_provider`.
+    pub(crate) fn validate(&self) -> Result<(), Error> {
         if !is_valid_agent_name(&self.id)
             || self.name.trim().is_empty()
             || self.name.chars().count() > 128
@@ -47,36 +70,24 @@ impl Binding {
                 "Channel ID and name are required (maximum 128 characters)",
             ));
         }
-        let target_valid = match self.provider.as_str() {
-            "slack" => {
-                self.target.len() >= 2
-                    && self.target.len() <= 32
-                    && matches!(self.target.chars().next(), Some('C' | 'G' | 'D'))
-                    && self
-                        .target
-                        .chars()
-                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
-            }
-            "telegram" => {
-                self.target.parse::<i64>().is_ok()
-                    || (self.target.starts_with('@')
-                        && self.target.len() > 1
-                        && self.target.len() <= 64
-                        && self.target[1..]
-                            .chars()
-                            .all(|c| c.is_ascii_alphanumeric() || c == '_'))
-            }
-            _ => false,
+        let Some(adapter) = crate::channels::adapter(&self.provider) else {
+            return Err(bad("Unsupported channel provider"));
         };
-        if !target_valid {
+        if !adapter.validate_target(&self.target) {
             return Err(bad(
                 "Choose Slack channel ID or Telegram chat ID for the selected provider",
             ));
         }
-        if self.provider == "telegram" && self.receive_enabled {
-            return Err(bad(
-                "Telegram incoming updates are not available through this channel integration",
-            ));
+        if self.receive_enabled && !adapter.capabilities().can_receive {
+            return Err(bad(&format!(
+                "{} incoming updates are not available through this channel integration",
+                adapter.display_name()
+            )));
+        }
+        if let Some(reference) = &self.credential_ref
+            && let Err(e) = crate::channels::validate_credential_ref(reference)
+        {
+            return Err(bad(&format!("Channel credential reference: {e}")));
         }
         AgentListenerBinding {
             name: self.id.clone(),
@@ -128,17 +139,20 @@ pub(crate) async fn load_at(
 fn revision(raw: &str) -> String {
     format!("{:x}", Sha256::digest(raw.as_bytes()))
 }
-fn providers() -> Value {
-    json!([
-     {"id":"slack","name":"Slack","configured":trusty_channels::slack::api::client::BaseClient::new().is_ok_and(|c|c.has_token()),"can_send":true,"can_read":true,"can_receive":true,"receive_reason":"Automatic updates require the Slack bot listener to be running, the channel paired, and sender authorized"},
-     {"id":"telegram","name":"Telegram","configured":trusty_channels::telegram::api::client::BaseClient::new().is_ok_and(|c|c.has_token()),"can_send":true,"can_read":false,"can_receive":false,"receive_reason":"Telegram incoming updates are not supported by this integration"}
-    ])
-}
+/// The channel view's payload: bindings, what each provider can do, and how the
+/// bindings have actually been behaving.
+///
+/// Why (#7427): `providers` now comes from the adapter registry rather than a
+/// hand-written literal, and `status` publishes the per-binding
+/// dispatch-failure counter so a binding that is dropping inbound wakes says so
+/// instead of reading as healthy.
+/// Test: `channel_providers_json_reports_registry_capabilities`,
+/// `channel_dispatch_failure_is_counted_per_binding`.
 pub(crate) async fn read(name: &str) -> Result<Value, Error> {
     let (_, raw, bindings) = load_at(&crate::agents::agents_dir_candidates(), name).await?;
     let listeners = agent_listeners::read(name).await?;
     Ok(
-        json!({"agent":name,"revision":revision(&raw),"bindings":bindings,"providers":providers(),"listeners":listeners}),
+        json!({"agent":name,"revision":revision(&raw),"bindings":bindings,"providers":crate::channels::providers_json(),"listeners":listeners,"status":crate::channels::status::status_json(name)}),
     )
 }
 async fn write_at(dirs: &[PathBuf], name: &str, update: Update) -> Result<(), Error> {
@@ -199,6 +213,38 @@ async fn prepare_send(
     }
     authorized(&bindings, id, true).cloned()
 }
+/// Map an adapter failure onto the HTTP answer the caller sees.
+///
+/// Why (#7427): the statuses and copy are the ones this endpoint returned
+/// before the adapter split, so the UI and the `channel` tool are unchanged. A
+/// credential that will not resolve is separated out because the operator fix
+/// is different — the binding names a credential this host does not have.
+fn channel_failure(binding_id: &str, error: crate::channels::ChannelError) -> Error {
+    tracing::warn!(binding = binding_id, %error, "channel operation failed");
+    match error {
+        crate::channels::ChannelError::UnsupportedProvider(_) => {
+            bad("Unsupported channel provider")
+        }
+        crate::channels::ChannelError::ReceiveUnsupported(_) => {
+            bad("This provider does not deliver incoming updates")
+        }
+        crate::channels::ChannelError::Credential(_) => err(
+            StatusCode::BAD_GATEWAY,
+            "Channel credential could not be resolved; check the binding's credential reference",
+        ),
+        crate::channels::ChannelError::Provider { .. } => err(
+            StatusCode::BAD_GATEWAY,
+            "Channel provider request failed; check connection and access",
+        ),
+    }
+}
+/// Send user-requested text to a saved destination.
+///
+/// Why (#7427): the per-provider arms moved into the adapters, so this function
+/// is the permission and freshness gate and nothing else — it still refuses an
+/// oversized message, a stale revision, and a binding whose send is disabled,
+/// all before the provider is contacted.
+/// Test: `agent_channels_stale_send_rejects_retarget_before_provider`.
 pub(crate) async fn send(
     name: &str,
     id: &str,
@@ -215,34 +261,20 @@ pub(crate) async fn send(
         expected_revision,
     )
     .await?;
-    let failure = || {
-        err(
-            StatusCode::BAD_GATEWAY,
-            "Channel provider request failed; check connection and access",
-        )
-    };
-    match binding.provider.as_str() {
-        "slack" => {
-            let client =
-                trusty_channels::slack::api::client::BaseClient::new().map_err(|_| failure())?;
-            let result=client.call_method("chat.postMessage",&json!({"channel":binding.target,"text":text,"unfurl_links":false,"unfurl_media":false})).await.map_err(|_|failure())?;
-            Ok(json!({"ok":true,"message_id":result["ts"]}))
-        }
-        "telegram" => {
-            let client =
-                trusty_channels::telegram::api::client::BaseClient::new().map_err(|_| failure())?;
-            let result=client.call_method("sendMessage",&json!({"chat_id":binding.target,"text":text,"link_preview_options":{"is_disabled":true}})).await.map_err(|_|failure())?;
-            Ok(json!({"ok":true,"message_id":result["result"]["message_id"]}))
-        }
-        _ => Err(bad("Unsupported channel provider")),
-    }
+    let adapter = crate::channels::require_adapter(&binding.provider)
+        .map_err(|e| channel_failure(&binding.id, e))?;
+    adapter
+        .send(&binding, text)
+        .await
+        .map_err(|e| channel_failure(&binding.id, e))
 }
 pub(crate) async fn messages(name: &str, id: &str) -> Result<Value, Error> {
     let binding = bound(name, id, false).await?;
-    if binding.provider != "slack" {
-        return Ok(
-            json!({"available":false,"messages":[],"reason":"Telegram bots cannot read prior chat history"}),
-        );
+    let capabilities = crate::channels::require_adapter(&binding.provider)
+        .map_err(|e| channel_failure(&binding.id, e))?
+        .capabilities();
+    if !capabilities.can_read {
+        return Ok(json!({"available":false,"messages":[],"reason":capabilities.read_reason}));
     }
     let failure = || {
         err(
@@ -316,6 +348,18 @@ fn receive_selection<'a>(
 }
 
 /// Existing authenticated Slack intake calls this; only saved assistant destinations match.
+///
+/// Why (#7427): the wake dispatch used to be spawned and its result discarded
+/// (`let _result = …`), so a failed `run_pm_task_with_persona` produced no log
+/// line and no visible change — the binding read as healthy while every inbound
+/// message was dropped. The dispatch now goes through
+/// [`crate::channels::status::record_dispatch`], which logs at error level and
+/// increments the per-binding counter the channel view reads.
+/// What: per assistant, selects the bound destination this event matches, asks
+/// the provider's adapter for a wake prompt, and spawns the dispatch. Returns
+/// whether any assistant claimed the channel, unchanged.
+/// Test: `agent_channels_receive_never_falls_back_for_disabled_bound_destination`,
+/// `channel_dispatch_failure_is_counted_per_binding`.
 pub(crate) async fn receive_slack(
     channel: &str,
     event: &crate::listeners::store::StoredEvent,
@@ -342,31 +386,50 @@ pub(crate) async fn receive_slack(
         let Some(binding) = binding else {
             continue;
         };
-        super::knowledge_pipeline::intake::slack(&name, binding, event).await;
-        let prompt =
-            crate::listeners::wake::build_wake_prompt(event, None, Some(&binding.instructions));
-        let metadata=json!({"kind":"trusty.listener-event","version":1,"listener":binding.name,"event_id":event.id,"event_type":event.event_type,"from":event.from,"subject":event.subject}).to_string();
+        let Some(adapter) = crate::channels::adapter(&binding.provider) else {
+            continue;
+        };
+        let wake = adapter
+            .receive(
+                binding,
+                crate::channels::InboundEvent {
+                    agent: &name,
+                    event,
+                },
+            )
+            .await;
+        let binding_id = binding.id.clone();
+        let wake = match wake {
+            Ok(Some(wake)) => wake,
+            Ok(None) => continue,
+            Err(e) => {
+                // #7427: an inbound event that cannot even produce a prompt is
+                // counted too, not dropped.
+                tracing::error!(assistant = %name, binding = %binding_id, %e, "channel inbound could not be prepared");
+                crate::channels::status::record_failure(&name, &binding_id, &e.to_string());
+                continue;
+            }
+        };
         let name = name.clone();
         let root = root.to_path_buf();
         let user = user.clone();
         tokio::spawn(async move {
-            let _result = crate::listeners::wake::LISTENER_CHAT_EVENT
-                .scope(
-                    metadata,
-                    crate::ctrl::pm_task::run_pm_task_with_persona(
-                        &root,
-                        &name,
-                        &prompt,
-                        &[],
-                        None,
-                        crate::ctrl::config::SessionOverrides {
-                            user: Some(user),
-                            ..Default::default()
-                        },
-                    ),
-                )
-                .await;
+            let dispatch = crate::listeners::wake::LISTENER_CHAT_EVENT.scope(
+                wake.metadata,
+                crate::ctrl::pm_task::run_pm_task_with_persona(
+                    &root,
+                    &name,
+                    &wake.prompt,
+                    &[],
+                    None,
+                    crate::ctrl::config::SessionOverrides {
+                        user: Some(user),
+                        ..Default::default()
+                    },
+                ),
+            );
             // Incoming updates remain private in the assistant chat; sending requires an explicit UI or tool request.
+            crate::channels::status::record_dispatch(&name, &binding_id, dispatch).await;
         });
     }
     claimed
@@ -390,6 +453,27 @@ mod tests {
         let b = binding();
         let list = [b];
         assert!(authorized(&list, "other", true).is_err());
+    }
+    /// Pins the current state until `trusty-channels` grows a Notion connector
+    /// (#7427 PR 3): a provider with no registered adapter is refused at save
+    /// time rather than stored and left silently inert.
+    #[test]
+    fn agent_channels_rejects_unregistered_provider() {
+        let mut b = binding();
+        b.provider = "notion".into();
+        b.target = "some-notion-page".into();
+        let rejection = b.validate().unwrap_err();
+        assert_eq!(rejection.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            rejection.1.0["error"],
+            json!("Unsupported channel provider")
+        );
+        assert!(!providers_contains("notion"));
+    }
+    fn providers_contains(id: &str) -> bool {
+        crate::channels::providers_json()
+            .as_array()
+            .is_some_and(|list| list.iter().any(|p| p["id"] == json!(id)))
     }
     #[tokio::test]
     async fn agent_channels_revision_preserves_bindings_and_rejects_stale_write() {
