@@ -206,7 +206,11 @@ pub(crate) fn remove_cmd(root: Option<&str>, name: &str) -> Result<()> {
 /// Why: operators need an overview of which user-scope servers managed sessions
 /// will load.
 /// What: lists the top-level `mcpServers` map as a table (name → type + target)
-/// or, with `--json`, the raw map.
+/// or, with `--json`, the raw map. Each row is marked `opted-in` or
+/// `scoped-out` for the current directory, and when the scope came back
+/// degraded — an untrusted project, or an unreadable `.mcp.json` — that reason
+/// prints above the opt-in hint, because until it is resolved the suggested
+/// `[session] mcp_servers` edit changes nothing (#7422).
 /// Test: `cli_parses_mcp_list`; CRUD in `core::mcp_config`.
 pub(crate) fn list_cmd(root: Option<&str>, json: bool) -> Result<()> {
     let config_dir = resolve_config_dir(root)?;
@@ -247,6 +251,12 @@ pub(crate) fn list_cmd(root: Option<&str>, json: bool) -> Result<()> {
             marker,
             entry_target(entry)
         );
+    }
+    // #7422: in an untrusted project the opt-in hint below changes nothing until
+    // the grant exists, so the reason that made it a no-op prints above it.
+    if let Some(reason) = &scope.degraded {
+        println!();
+        println!("  {reason}");
     }
     if !scope.excluded.is_empty() {
         println!();

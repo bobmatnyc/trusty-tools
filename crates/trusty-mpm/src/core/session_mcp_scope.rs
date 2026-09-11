@@ -23,6 +23,13 @@
 //! itself (issue #3033, ADR-0042, owner ruling 2026-07-18). An untrusted
 //! project loads the builtins only.
 //!
+//! THE `[session] plugins` HALF IS GATED THE SAME WAY, through
+//! [`granted_plugins`]. A plugin brings its own skills, commands and hooks into
+//! every session in the project, so an ungated read would let the same hostile
+//! clone turn an operator-installed plugin on in that same
+//! `--dangerously-skip-permissions` pane. Untrusted grants nothing, which
+//! writes every known plugin `false`.
+//!
 //! What: [`resolve_scope`] composes that set and also reports what it left out;
 //! [`provision`] writes it under the tm-managed state root and hands back the
 //! path; [`strict_mcp_flag_string`] / [`strict_mcp_argv`] render the
@@ -152,12 +159,53 @@ pub fn opt_in_servers(project_dir: &Path) -> Vec<String> {
 /// cost every session in the project its context whether or not that project
 /// uses them.
 /// What: the `session.plugins` list, or an empty vector.
+///
+/// THIS IS THE RAW, UNGATED READ of a file that ships with the clone. Nothing
+/// outside this module should call it: the list only takes effect in a trusted
+/// project, so every consumer wants [`granted_plugins`] instead.
 /// Test: `opt_in_plugins_reads_the_project_config`.
 pub fn opt_in_plugins(project_dir: &Path) -> Vec<String> {
     crate::core::project_config::load_or_report(project_dir)
         .and_then(|cfg| cfg.session)
         .and_then(|s| s.plugins)
         .unwrap_or_default()
+}
+
+/// The plugin opt-ins this project has actually been GRANTED.
+///
+/// Why (#7422): `[session] plugins` is an in-repo declaration, exactly like
+/// `[session] mcp_servers` and `.mcp.json`, so it cannot be the permission for
+/// itself. An untrusted clone that names a plugin would otherwise turn that
+/// plugin's whole skill catalog on inside a pane running
+/// `--dangerously-skip-permissions`, and an installed plugin can carry hooks
+/// and commands. The server list is gated in
+/// [`resolve_scope_with_trust`]; this is the same gate, on the same store, for
+/// the other half of the same `[session]` table.
+/// What: [`opt_in_plugins`] in a trusted project, an empty vector otherwise —
+/// which maps every known plugin to `false`, the default-deny state.
+/// Test: `granted_plugins_reads_the_real_trust_store_and_denies_by_default`,
+/// `plugin_scope_denies_an_opt_in_from_an_untrusted_project`.
+pub fn granted_plugins(project_dir: &Path) -> Vec<String> {
+    granted_plugins_with_trust(
+        project_dir,
+        crate::core::project_trust::is_project_trusted(project_dir),
+    )
+}
+
+/// [`granted_plugins`] against an explicit trust decision.
+///
+/// Why: the hermetic seam, mirroring [`resolve_scope_with_trust`] — the trust
+/// bit lives under the operator's `$HOME`, so a test of the gate itself would
+/// otherwise have to redirect it.
+/// What: the declared list when `trusted`, an empty vector when not.
+/// Test: `granted_plugins_are_empty_for_an_untrusted_project`,
+/// `granted_plugins_pass_through_for_a_trusted_project`.
+pub fn granted_plugins_with_trust(project_dir: &Path, trusted: bool) -> Vec<String> {
+    if trusted {
+        opt_in_plugins(project_dir)
+    } else {
+        Vec::new()
+    }
 }
 
 /// Stable per-workspace filename component for `cwd`.

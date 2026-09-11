@@ -7,8 +7,9 @@
 //! same treatment from the other side: a test that only ever passes `true`
 //! would still pass against a build with no gate at all.
 //! What: scope composition under both trust decisions, the fail arms, the file
-//! location and its permissions, the flag renderers, and the project-config
-//! opt-in reader.
+//! location and its permissions, the flag renderers, the project-config opt-in
+//! reader, and the same trust gate applied to the plugin half of that
+//! `[session]` table.
 //! Test: this file.
 
 use std::path::{Path, PathBuf};
@@ -346,6 +347,98 @@ fn opt_in_plugins_reads_the_project_config() {
     )
     .unwrap();
     assert_eq!(opt_in_plugins(tmp.path()), vec!["aws-core".to_owned()]);
+}
+
+/// A project whose committed config opts `aws-core` in.
+fn project_declaring_a_plugin(tmp: &TempDir) -> PathBuf {
+    let dir = tmp.path().join("repo");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join(crate::core::project_config::PROJECT_CONFIG_FILE),
+        "[session]\nplugins = [\"aws-core\"]\n",
+    )
+    .unwrap();
+    dir
+}
+
+/// A managed config dir with `aws-core@m` installed.
+fn config_with_installed_plugin(tmp: &TempDir) -> PathBuf {
+    let cfg = tmp.path().join("cfg");
+    std::fs::create_dir_all(cfg.join("plugins")).unwrap();
+    std::fs::write(
+        cfg.join("plugins").join("installed_plugins.json"),
+        serde_json::to_string_pretty(&json!({"plugins": {"aws-core@m": []}})).unwrap(),
+    )
+    .unwrap();
+    cfg
+}
+
+#[test]
+fn granted_plugins_are_empty_for_an_untrusted_project() {
+    let tmp = TempDir::new().unwrap();
+    let project = project_declaring_a_plugin(&tmp);
+
+    assert!(
+        granted_plugins_with_trust(&project, false).is_empty(),
+        "a `[session] plugins` list ships with the clone, so it grants nothing \
+         until the operator trusts the directory"
+    );
+}
+
+#[test]
+fn granted_plugins_pass_through_for_a_trusted_project() {
+    let tmp = TempDir::new().unwrap();
+    let project = project_declaring_a_plugin(&tmp);
+
+    assert_eq!(
+        granted_plugins_with_trust(&project, true),
+        vec!["aws-core".to_owned()]
+    );
+}
+
+#[test]
+fn plugin_scope_denies_an_opt_in_from_an_untrusted_project() {
+    use crate::core::session_plugin_scope::plugin_scope;
+
+    let tmp = TempDir::new().unwrap();
+    let project = project_declaring_a_plugin(&tmp);
+    let cfg = config_with_installed_plugin(&tmp);
+
+    let untrusted = plugin_scope(&cfg, &granted_plugins_with_trust(&project, false));
+    let trusted = plugin_scope(&cfg, &granted_plugins_with_trust(&project, true));
+
+    assert_eq!(
+        untrusted.get("aws-core@m"),
+        Some(&false),
+        "an untrusted clone must not turn an operator-installed plugin on in a \
+         pane running --dangerously-skip-permissions"
+    );
+    assert_eq!(trusted.get("aws-core@m"), Some(&true));
+}
+
+#[test]
+#[serial_test::serial]
+fn granted_plugins_reads_the_real_trust_store_and_denies_by_default() {
+    let tmp = TempDir::new().unwrap();
+    let project = project_declaring_a_plugin(&tmp);
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let prev = std::env::var_os("HOME");
+    // SAFETY: this test is `#[serial]`, so no other test thread races the
+    // set/restore, and `$HOME` is put back before it returns.
+    unsafe { std::env::set_var("HOME", &home) };
+
+    let granted = granted_plugins(&project);
+
+    match prev {
+        Some(v) => unsafe { std::env::set_var("HOME", v) },
+        None => unsafe { std::env::remove_var("HOME") },
+    }
+    assert!(
+        granted.is_empty(),
+        "the production accessor must resolve the trust store itself and \
+         fail closed on a home that records no grant"
+    );
 }
 
 #[test]

@@ -21,9 +21,10 @@ Since #7422 a session loads:
    `.trusty-mpm.toml` names.
 
 Everything else in the shared map is scoped out. Plugins are off unless the
-project names them.
+project names them AND the project is trusted — both `[session]` keys carry the
+same grant requirement.
 
-## Why both project surfaces need a trust grant
+## Why every project surface needs a trust grant
 
 `.mcp.json` and `.trusty-mpm.toml` both ship WITH a clone, so neither can be the
 permission for itself. A pane runs `--dangerously-skip-permissions` against a
@@ -38,7 +39,14 @@ would execute that on the first `tm run` against the clone. The `[session]
 mcp_servers` list is the same problem pointed the other way: it decides which of
 the OPERATOR's credentialed shared servers a repository gets to load.
 
-Both are therefore gated on the project-trust store
+`[session] plugins` is the third instance of it. A Claude Code plugin brings its
+own skills, slash commands and hooks into every session in the project, so a
+clone that names an operator-installed plugin would turn all of that on in the
+same `--dangerously-skip-permissions` pane. The list is read through
+`granted_plugins`, which resolves the same trust bit: an untrusted project grants
+nothing, and every plugin tm can see is written `false`.
+
+All three are therefore gated on the project-trust store
 (`crates/trusty-mpm/src/core/project_trust.rs`) — the durable, USER-scope
 decision `tm project trust <path>` records under `~/.trusty-tools/trusty-mpm/`,
 which a repository cannot flip from inside itself (issue #3033, owner ruling
@@ -64,7 +72,9 @@ plugins = ["aws-core"]
   Naming a server that map does not declare is a no-op — the allowlist grants
   access to a declaration, it does not create one.
 - `plugins` names Claude Code plugins, either as the full
-  `<plugin>@<marketplace>` key or the bare `<plugin>` half.
+  `<plugin>@<marketplace>` key or the bare `<plugin>` half. Like `mcp_servers`,
+  it takes effect only once `tm project trust <path>` has recorded a grant for
+  the directory.
 - The file is parsed with `deny_unknown_fields`, so a misspelled key fails
   loudly instead of silently denying.
 
@@ -88,7 +98,9 @@ derives a path nobody wrote.
 Plugins have no per-invocation flag, so tm writes an `enabledPlugins` map into
 the project's `.claude/settings.json`, which outranks the user tier. tm owns
 only the keys it enumerated from the managed config dir; a key an operator
-added by hand for a plugin tm cannot see is carried through untouched.
+added by hand for a plugin tm cannot see is carried through untouched. In an
+untrusted project every enumerated key is written `false`, whatever
+`[session] plugins` says.
 
 ## Failure arms
 
@@ -140,7 +152,9 @@ composed prompt it writes to stdout.
 
 `tm mcp list` marks each shared server `opted-in` or `scoped-out` for the
 current directory, and prints a ready-to-paste `[session] mcp_servers` block
-for the scoped-out ones.
+for the scoped-out ones. When the scope came back degraded it prints that reason
+first, because in an untrusted project the suggested edit changes nothing until
+`tm project trust` runs.
 
 ## Spec References
 

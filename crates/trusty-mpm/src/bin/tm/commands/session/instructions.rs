@@ -29,9 +29,11 @@ pub(crate) fn print_excluded_scope(project_dir: &std::path::Path) {
         return;
     };
     let scope = trusty_mpm::core::session_mcp_scope::resolve_scope(project_dir, &config_dir);
+    // #7422: the granted list, not the declared one — an untrusted project's
+    // `[session] plugins` entry grants nothing and must report as scoped out.
     let plugins = trusty_mpm::core::session_plugin_scope::excluded_plugins(
         &config_dir,
-        &trusty_mpm::core::session_mcp_scope::opt_in_plugins(project_dir),
+        &trusty_mpm::core::session_mcp_scope::granted_plugins(project_dir),
     );
     if scope.excluded.is_empty() && plugins.is_empty() {
         return;

@@ -2524,19 +2524,39 @@ fn write_enabled_plugins_denies_a_non_opted_plugin() {
     );
 }
 
-/// A plugin named in `[session] plugins` is written `true`.
-#[test]
-fn write_enabled_plugins_enables_an_opted_in_plugin() {
-    let tmp = tempdir().unwrap();
-    let project = tmp.path().join("repo");
-    let config_dir = tmp.path().join("cfg");
-    std::fs::create_dir_all(&project).unwrap();
-    plugin_index(&config_dir, &["aws-core@m", "vercel@m"]);
+/// Plant `[session] plugins = ["aws-core"]` in `project`.
+fn declare_plugin_opt_in(project: &std::path::Path) {
     std::fs::write(
         project.join(crate::core::project_config::PROJECT_CONFIG_FILE),
         "[session]\nplugins = [\"aws-core\"]\n",
     )
     .unwrap();
+}
+
+/// Record a real `tm project trust` grant for `project` under the current
+/// `$HOME`. Callers MUST be `#[serial]` with `$HOME` already redirected.
+fn trust_project(project: &std::path::Path) {
+    let root = crate::core::project_trust::trust_store_root().expect("HOME was redirected");
+    let mut store = crate::core::project_trust::ProjectTrustStore::load(&root).unwrap();
+    store.trust(project);
+    store.save().unwrap();
+}
+
+/// A plugin named in `[session] plugins` is written `true` — in a TRUSTED
+/// project. #7422: the opt-in list ships with the clone, so the grant is what
+/// makes it mean anything.
+#[test]
+#[serial_test::serial]
+fn write_enabled_plugins_enables_an_opted_in_plugin() {
+    let tmp = tempdir().unwrap();
+    let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
+    let project = tmp.path().join("repo");
+    let config_dir = tmp.path().join("cfg");
+    std::fs::create_dir_all(&project).unwrap();
+    plugin_index(&config_dir, &["aws-core@m", "vercel@m"]);
+    declare_plugin_opt_in(&project);
+    trust_project(&project);
 
     write_enabled_plugins(&project, Some(&config_dir)).unwrap();
 
@@ -2544,6 +2564,39 @@ fn write_enabled_plugins_enables_an_opted_in_plugin() {
     assert_eq!(
         settings["enabledPlugins"]["aws-core@m"],
         serde_json::json!(true)
+    );
+    assert_eq!(
+        settings["enabledPlugins"]["vercel@m"],
+        serde_json::json!(false)
+    );
+}
+
+/// The same declaration in an UNTRUSTED project turns nothing on (#7422).
+///
+/// Why: `[session] plugins` is committed, so a hostile clone naming an
+/// operator-installed plugin would otherwise load that plugin's skills,
+/// commands and hooks into a pane launched with
+/// `--dangerously-skip-permissions`. This is the ungated-twin regression: the
+/// only difference from the test above is the missing grant.
+#[test]
+#[serial_test::serial]
+fn write_enabled_plugins_denies_an_opt_in_from_an_untrusted_project() {
+    let tmp = tempdir().unwrap();
+    let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
+    let project = tmp.path().join("repo");
+    let config_dir = tmp.path().join("cfg");
+    std::fs::create_dir_all(&project).unwrap();
+    plugin_index(&config_dir, &["aws-core@m", "vercel@m"]);
+    declare_plugin_opt_in(&project);
+
+    write_enabled_plugins(&project, Some(&config_dir)).unwrap();
+
+    let settings = read_settings(&project);
+    assert_eq!(
+        settings["enabledPlugins"]["aws-core@m"],
+        serde_json::json!(false),
+        "an in-repo declaration is not its own permission"
     );
     assert_eq!(
         settings["enabledPlugins"]["vercel@m"],

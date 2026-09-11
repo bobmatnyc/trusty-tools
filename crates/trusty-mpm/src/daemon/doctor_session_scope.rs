@@ -50,9 +50,11 @@ pub(super) fn check_session_scope(
     };
 
     let scope = crate::core::session_mcp_scope::resolve_scope(project, config);
+    // #7422: read the same GRANTED list the launch write uses, so an untrusted
+    // project's declared plugins report excluded here and are written `false` there.
     let plugins = crate::core::session_plugin_scope::excluded_plugins(
         config,
-        &crate::core::session_mcp_scope::opt_in_plugins(project),
+        &crate::core::session_mcp_scope::granted_plugins(project),
     );
 
     if scope.excluded.is_empty() && plugins.is_empty() && scope.degraded.is_none() {

@@ -265,6 +265,12 @@ pub(super) fn write_output_style(
 /// ([`crate::core::session_plugin_scope::known_plugins`]), maps each to `true`
 /// when the project's committed `[session] plugins` list names it and `false`
 /// otherwise, and merges that map into the existing `enabledPlugins` object.
+/// The opt-in list reaches this function through
+/// [`crate::core::session_mcp_scope::granted_plugins`], so an UNTRUSTED project
+/// grants nothing and every enumerated key is written `false` — the same gate
+/// [`crate::core::session_mcp_scope::resolve_scope_with_trust`] applies to the
+/// server half of that `[session]` table, for the same reason: the file ships
+/// with the clone.
 /// tm owns ONLY the keys it enumerated: a key for a plugin tm cannot see is the
 /// operator's and is carried through untouched, the same merge discipline
 /// [`write_output_style`]'s `attribution` seed and
@@ -276,6 +282,7 @@ pub(super) fn write_output_style(
 /// unresolvable home — enumerates nothing and writes nothing, rather than
 /// writing an empty map that would disable plugins tm never saw.
 /// Test: `write_enabled_plugins_denies_a_non_opted_plugin`,
+/// `write_enabled_plugins_denies_an_opt_in_from_an_untrusted_project`,
 /// `write_enabled_plugins_enables_an_opted_in_plugin`,
 /// `write_enabled_plugins_preserves_foreign_keys`,
 /// `write_enabled_plugins_skips_without_a_config_dir`.
@@ -290,7 +297,9 @@ pub(super) fn write_enabled_plugins(
     let Some(config_dir) = config_dir else {
         return Ok(());
     };
-    let opt_in = crate::core::session_mcp_scope::opt_in_plugins(project_dir);
+    // #7422: the opt-in list ships with the clone, so it only counts in a
+    // trusted project — an untrusted one grants nothing and every key goes false.
+    let opt_in = crate::core::session_mcp_scope::granted_plugins(project_dir);
     let scope = plugin_scope(config_dir, &opt_in);
     if scope.is_empty() {
         return Ok(());
