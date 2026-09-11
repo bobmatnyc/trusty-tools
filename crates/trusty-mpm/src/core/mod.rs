@@ -89,6 +89,8 @@ pub mod delegation_authority;
 pub mod deploy_validate;
 pub mod deterministic_overseer;
 pub mod discovery;
+/// The `disk.max_usage_pct` gate every worktree-creation path consults (#7497).
+pub mod disk_usage_guard;
 /// Working-tree isolation policy for native Agent-tool dispatches (#4480).
 pub mod dispatch_isolation;
 pub mod doctor;

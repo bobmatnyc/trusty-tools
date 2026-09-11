@@ -201,6 +201,13 @@ use doctor_maintenance_storm::{check_live_maintenance_processes, check_maintenan
 #[path = "doctor_worktree_disk.rs"]
 mod doctor_worktree_disk;
 use doctor_worktree_disk::check_worktree_disk;
+
+// #7497: the check above counts the BYTES tm's own worktrees hold; this one
+// reports the MOUNT's headroom against `disk.max_usage_pct`, which is what
+// decides whether the next worktree is created at all.
+#[path = "doctor_disk_usage.rs"]
+mod doctor_disk_usage;
+use doctor_disk_usage::check_disk_usage;
 #[path = "doctor_pty_headroom.rs"]
 mod doctor_pty_headroom;
 use doctor_pty_headroom::check_pty_headroom;
@@ -391,7 +398,7 @@ const PROBE_RETRY_DELAY: Duration = Duration::from_millis(500);
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_forty_seven_checks`,
+/// Test: `run_doctor_produces_forty_eight_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -528,6 +535,9 @@ pub(crate) async fn run_doctor_with_claims(
     // byte, so it read identically whether the worktree store held 4 GiB or the
     // 1.1 TiB measured on 2026-07-21. This is the disk half.
     checks.push(check_worktree_disk(repos_root, active).await);
+    // #7497: and this is the mount the store sits ON — the number the
+    // `disk.max_usage_pct` gate reads before creating the next worktree.
+    checks.push(check_disk_usage(repos_root, &home));
     // #3605: and this is the identity half — a live worktree keeps its files
     // when the base clone behind it loses its git internals, so every git
     // command there fails while both probes above stay green.

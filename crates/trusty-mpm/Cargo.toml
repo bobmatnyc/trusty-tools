@@ -230,6 +230,12 @@ trusty-common = { workspace = true, features = [
     "bug-capture",
     "crate-config",
     "console-metrics",
+    # #7497: `host_metrics::mount_for_path` — the usage of the mount a path sits
+    # on, which `core::disk_usage_guard` reads before any new worktree is
+    # created. Adds no crate to the lockfile: `sysinfo` is already an
+    # unconditional dependency here, and this only turns on its disk/network
+    # features.
+    "host-metrics",
     "intent-source",
     # DOC-28 catch-up engine (PR1, #1762): moves the catch-up module out of
     # trusty-mpm/src/core/ into trusty-common so trusty-code can share it.

@@ -2406,3 +2406,78 @@ fn shell_write_target_ignores_a_heredoc_body_redirect() {
         Some("f.rs")
     );
 }
+
+// ── #7497: the disk-usage half of the worktree-add gate ──────────────────────
+
+/// Why (#7497): the disk rule reads the SAME targets the temp-root rule does,
+///      so the shared resolver has to survive `cd` and `git -C` intact.
+/// What: both forms resolve to the same absolute target, and a relative target
+///      resolves against the hook's working directory.
+/// Test: this test.
+#[test]
+fn worktree_add_targets_resolves_cd_and_dash_c() {
+    let cwd = Path::new("/projects/example-repo");
+    assert_eq!(
+        worktree_add_targets("cd /srv/base && git worktree add wt-foo", cwd),
+        vec![PathBuf::from("/srv/base/wt-foo")]
+    );
+    assert_eq!(
+        worktree_add_targets("git -C /srv/base worktree add wt-foo", cwd),
+        vec![PathBuf::from("/srv/base/wt-foo")]
+    );
+    assert_eq!(
+        worktree_add_targets("git worktree add .claude/worktrees/wt-x", cwd),
+        vec![PathBuf::from(
+            "/projects/example-repo/.claude/worktrees/wt-x"
+        )]
+    );
+}
+
+/// Why (#7497): gating `list`/`remove`/`prune` would block reading and cleanup
+///      on exactly the full disk where an operator needs both most.
+/// What: no `worktree add` means no targets, so nothing is measured and nothing
+///      can be denied.
+/// Test: this test.
+#[test]
+fn worktree_list_and_remove_produce_no_disk_targets() {
+    let cwd = Path::new("/projects/example-repo");
+    for cmd in [
+        "git worktree list",
+        "git worktree remove .claude/worktrees/wt-x",
+        "git worktree prune",
+        "cargo test -p trusty-mpm",
+    ] {
+        assert!(
+            worktree_add_targets(cmd, cwd).is_empty(),
+            "`{cmd}` must not be gated on disk usage"
+        );
+    }
+}
+
+/// Why (#7497): the rule must not sample the disk for the overwhelming
+///      majority of Bash calls, which create no worktree.
+/// What: an empty target list never invokes the measurement closure.
+/// Test: this test.
+#[test]
+fn no_targets_means_no_measurement() {
+    let called = std::cell::Cell::new(false);
+    let reason = super::disk_usage::refusal_for_targets(&[], |_| {
+        called.set(true);
+        Some("denied".to_string())
+    });
+    assert!(reason.is_none());
+    assert!(!called.get(), "an empty target list must measure nothing");
+}
+
+/// Why (#7497): a command can add several worktrees; the first one that would
+///      overfill the disk has to stop the whole call.
+/// What: the second target refuses, and that refusal is what comes back.
+/// Test: this test.
+#[test]
+fn the_first_refusing_target_wins() {
+    let targets = vec![PathBuf::from("/ok/wt-a"), PathBuf::from("/full/wt-b")];
+    let reason = super::disk_usage::refusal_for_targets(&targets, |p| {
+        p.starts_with("/full").then(|| "over threshold".to_string())
+    });
+    assert_eq!(reason.as_deref(), Some("over threshold"));
+}

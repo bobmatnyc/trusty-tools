@@ -588,6 +588,31 @@ fn disk_config_yaml_round_trip() {
     assert!(back.contains("hotstats"), "{back}");
 }
 
+/// #7497: `disk.max_usage_pct` round-trips through the same section, and an
+/// absent key stays absent rather than being written back as a number the
+/// operator never chose.
+#[test]
+fn max_usage_pct_round_trips() {
+    let yaml = "disk:\n  max_usage_pct: 85\n";
+    let config: TrustyToolsConfig = serde_yaml::from_str(yaml).expect("parse the disk section");
+    assert_eq!(
+        config.disk.as_ref().and_then(|d| d.max_usage_pct),
+        Some(85),
+        "the operator's threshold must reach the gate"
+    );
+    let back = serde_yaml::to_string(&config).expect("serialize");
+    assert!(back.contains("max_usage_pct: 85"), "{back}");
+
+    let keep_only: TrustyToolsConfig = serde_yaml::from_str("disk:\n  keep_list:\n    - /a\n")
+        .expect("parse a disk section without the key");
+    assert_eq!(keep_only.disk.as_ref().and_then(|d| d.max_usage_pct), None);
+    let back = serde_yaml::to_string(&keep_only).expect("serialize");
+    assert!(
+        !back.contains("max_usage_pct"),
+        "an absent threshold must not be written back: {back}"
+    );
+}
+
 /// Write `yaml` as the trusty-mpm config under a fake home, and return it.
 ///
 /// Why: `load_disk_keep_list_at` is the hermetic half of the reader precisely

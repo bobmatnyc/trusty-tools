@@ -257,15 +257,28 @@ pub struct TrustyToolsConfig {
 ///   keep_list:
 ///     - ~/work/hotstats
 ///     - "**/scratch-*"
+///   max_usage_pct: 90
 /// ```
 ///
-/// Test: `disk_config_yaml_round_trip`, `disk_keep_list_defaults_to_empty`.
+/// Test: `disk_config_yaml_round_trip`, `disk_keep_list_defaults_to_empty`,
+/// `max_usage_pct_round_trips`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct DiskConfig {
     /// Worktree paths and glob patterns that are never proposed for reclaim.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keep_list: Vec<String>,
+
+    /// Disk-usage percentage at or above which no new worktree is created
+    /// (#7497).
+    ///
+    /// `None` → the built-in
+    /// [`DEFAULT_MAX_USAGE_PCT`](crate::core::disk_usage_guard::DEFAULT_MAX_USAGE_PCT).
+    /// A value outside `1..=100` is REJECTED rather than applied — see
+    /// [`resolve_max_usage_pct`](crate::core::disk_usage_guard::resolve_max_usage_pct)
+    /// for why a nonsense threshold must not become a permissive one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_usage_pct: Option<u8>,
 }
 
 /// The `daemon:` section of `~/.trusty-tools/trusty-mpm/config.yaml` (#1836).

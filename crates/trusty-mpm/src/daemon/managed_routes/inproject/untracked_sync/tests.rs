@@ -8,6 +8,10 @@
 //! guard, a real-git-worktree round trip proving `.git/info/exclude` resolution
 //! survives the linked-worktree gitlink indirection, and the #4733 refusals (a
 //! broken repo copies nothing; a tracked path is never overwritten).
+//!
+//! #7497: the real-worktree fixtures call
+//! `create_session_worktree_unchecked`, the ungated constructor — see
+//! `inproject/tests.rs` for why a fixture opts out of the disk gate explicitly.
 //! Test: this IS the test module.
 
 use std::path::Path;
@@ -286,7 +290,7 @@ fn copied_files_are_added_to_shared_worktree_exclude() {
     let base = base_tmp.path();
     init_base_repo(base);
 
-    let worktree = super::super::create_session_worktree(
+    let worktree = super::super::create_session_worktree_unchecked(
         base,
         "untracked-sync-exclude-test",
         &crate::session_manager::ManagedSessionId::new(),
@@ -337,7 +341,7 @@ fn append_to_git_exclude_is_idempotent() {
     let base_tmp = tempfile::TempDir::new().expect("base tmp dir");
     let base = base_tmp.path();
     init_base_repo(base);
-    let worktree = super::super::create_session_worktree(
+    let worktree = super::super::create_session_worktree_unchecked(
         base,
         "untracked-sync-idempotent-test",
         &crate::session_manager::ManagedSessionId::new(),
@@ -450,7 +454,7 @@ fn tracked_secret_is_not_overwritten_in_worktree() {
         assert!(ok.success(), "git {args:?} failed");
     }
 
-    let worktree = super::super::create_session_worktree(
+    let worktree = super::super::create_session_worktree_unchecked(
         base,
         "untracked-sync-tracked-test",
         &crate::session_manager::ManagedSessionId::new(),
@@ -524,7 +528,7 @@ fn broken_exclude_file_still_refuses_unignored_paths() {
     let base_tmp = tempfile::TempDir::new().expect("base tmp dir");
     let base = base_tmp.path();
     init_base_repo(base);
-    let worktree = super::super::create_session_worktree(
+    let worktree = super::super::create_session_worktree_unchecked(
         base,
         "untracked-sync-broken-exclude-test",
         &crate::session_manager::ManagedSessionId::new(),
@@ -566,7 +570,7 @@ fn missing_git_binary_copies_nothing() {
     let base_tmp = tempfile::TempDir::new().expect("base tmp dir");
     let base = base_tmp.path();
     init_base_repo(base);
-    let worktree = super::super::create_session_worktree(
+    let worktree = super::super::create_session_worktree_unchecked(
         base,
         "untracked-sync-missing-git-test",
         &crate::session_manager::ManagedSessionId::new(),
