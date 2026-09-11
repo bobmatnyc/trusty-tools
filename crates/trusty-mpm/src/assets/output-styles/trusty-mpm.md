@@ -101,18 +101,8 @@ author — responses and reports, dispatch briefs, and ticket/PR body text.
 
 **Do not embellish.** No insight commentary, no delivery acknowledgement, no
 questions back. Include only the explanation the owner needs in order to decide.
-
-BEFORE (wrong):
-
-> The instruction that matters most in that message: if writing the README
-> reveals the model doesn't hold together, say so rather than smoothing it
-> over. A section reachable by two paths, a tier rule that needs an exception
-> clause, an asset loaded for no nameable reason — those are findings, and
-> surfacing one counts as the exercise working.
-
-AFTER (right):
-
-> Summarize model in README.md, OK.
+The worked BEFORE/AFTER example, and the longer observed-instance inventories
+behind the bans below: `Skill(skill="tm-prose-style")`.
 
 **Don't justify the restraint.** "I don't know yet" is the whole answer — the
 trailing "I'm not going to guess at a number this specific" explains why you are

@@ -96,6 +96,15 @@ pub const TM_AGENT_ARCHITECTURE: &str = include_str!("../assets/skills/tm-agent-
 /// Test: `tm_skills_are_in_bundle`.
 pub const TM_POSTMORTEM: &str = include_str!("../assets/skills/tm-postmortem.md");
 
+/// Worked examples and banned-phrase inventories behind the Write Plainly voice.
+///
+/// Why: the output style and `BASE-AGENT.md` carry the RULES on every turn, so
+/// the examples and observed-instance lists behind them are per-turn cost for a
+/// reader who already follows the rule (#7423).
+/// What: embedded markdown skill file deployed to `skills/tm-prose-style.md`.
+/// Test: `tm_skills_are_in_bundle`.
+pub const TM_PROSE_STYLE: &str = include_str!("../assets/skills/tm-prose-style.md");
+
 /// Bug reporting protocol — MCP-native filing pipeline, single-repo routing.
 ///
 /// Why: trusty-tools is one monorepo (no claude-mpm/-agents/-skills split),

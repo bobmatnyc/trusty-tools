@@ -1,13 +1,36 @@
-# Rust Test Ladder — Gate Commands and Baseline-Failure Protocol
+# Rust Test Ladder — Change Classes, Gate Commands, Baseline-Failure Protocol
 
-> **Which rung a change lands on — the change classes, the risk labels, and
-> "never make a red gate green by deleting coverage" — is decided in
-> [`CLAUDE.md`](../../CLAUDE.md)** (Rust Test Ladder). Choose the rung there,
-> then come here for the exact command to run and for triaging a red gate.
+> This file is the authoritative answer to "how much testing does this change
+> need" for this repo. [`CLAUDE.md`](../../CLAUDE.md) keeps only the headline —
+> run the smallest deterministic gate covering the change's blast radius, and
+> scope down but never scope away — and points here (#7423). Pick the rung from
+> the change-class table below, then read its command off the per-rung table.
 
 The baseline-failure protocol (establish whose red it is, fix if branch-caused,
 hand a pre-existing red to `tm-ticketing` for its disposition, and the literal
 report string) lives in `tm-workflow`. It is **not** restated here. What follows is only what that generic version cannot carry.
+
+## Which Rung a Change Lands On
+
+Risk labels map onto the rungs (1–2 Low, 3–4 Normal, 5–6 High).
+
+| # | Change class | Risk | PR gate, in short |
+|---|---|---|---|
+| 1 | Docs, comments, changelog fragments only | Low | Doc gates only (`check_sld.sh`, plus doc-numbers / line-cap if touched). No Cargo test by default. |
+| 2 | Test-only stabilization — flake fix, fixture, test harness | Low | `fmt --check` + `test -p <crate> --no-fail-fast`, with the flake re-run ~10× |
+| 3 | Localized behavior inside one crate | Normal | `fmt --check` + `check` + `clippy` + `test --no-fail-fast`, all `-p <crate>`, plus one regression test that provably failed before, plus doc gates if a doc comment changed (`check_line_cap.sh`, `check_changelog_fragment.sh`, `check_test_pointers.sh`) |
+| 4 | **Cross-crate change** — public API or shared library (`trusty-common`, `trusty-embedderd`, …) | Normal → High | Rung 3 on the library, then `check --workspace` + `test -p <consumer> --no-fail-fast` for **each direct dependent** |
+| 5 | Cross-crate contract, persistence, security, process lifecycle, **release tooling** | High | Rung 4, plus `--include-ignored` integration coverage, failure-path/concurrency tests, and a `code-critic` round |
+| 6 | **UI / API surface** — Svelte UIs, MCP tool schemas, HTTP routes | High | Rung 3 or 4 for the Rust side, plus the UI package's own test/build and one binary smoke run — with direct UI/API evidence, not just crate tests |
+
+- Required tests stay in the implementation PR. Name the rung and paste its
+  command in the PR body.
+- 🔴 **`cargo test --workspace` is not the default inner-loop proof for a
+  localized change** — it belongs at the publish boundary; a rung-4 PR does not
+  owe one to merge.
+- 🔴 **Scope down, never scope away.** A lower rung is a claim about blast radius
+  you must be able to prove. Never licence to make a red gate green by deleting,
+  `#[ignore]`-ing, `cfg`-gating, `--exclude`-ing, or `--lib`-narrowing coverage.
 
 ## Per-Rung Gate Commands
 
@@ -24,9 +47,8 @@ was exercised.
 | 5 | Targeted plus failure-path and concurrency tests | rung 4, plus `cargo test -p <crate> --no-fail-fast -- --include-ignored` for gated integration coverage, plus an adversarial review round (`code-critic`) | full workspace, `cargo audit`, and for release tooling `scripts/check-publish-ready.sh <crate>` && `scripts/preflight-publish.sh <crate>` |
 | 6 | Rust crate tests **plus** direct UI/API evidence (curl the route, call the MCP tool, load the page) | rung 3 or 4 for the Rust side, plus `pnpm -C crates/<crate>/ui test` (where the package defines one; otherwise `… build`) and one smoke run of the binary | full product/e2e gate plus `cargo test -- --include-ignored` when hardening |
 
-Why `cargo test --workspace` is absent from rungs 1–3, and the "scope down,
-never scope away" line that constrains picking a lower rung, are stated with the
-ladder itself in [`CLAUDE.md`](../../CLAUDE.md) — not repeated here.
+`cargo test --workspace` is absent from rungs 1–3 on purpose; "scope down, never
+scope away" above is what constrains picking a lower rung.
 
 ### Every rung carries `--no-fail-fast`, and the reason is not politeness
 

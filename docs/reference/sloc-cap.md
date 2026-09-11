@@ -1,10 +1,25 @@
 # SLOC File Size Cap — Mechanics Reference
 
-> **The cap numbers, classification rule, and merge-blocking prohibition are
-> in [`CLAUDE.md`](../../CLAUDE.md)** (Key Conventions). This page is the counting definition, the
-> batch-with-the-next-change scheduling rule, the ratchet-allowlist mechanics,
+> **The cap numbers and the merge-blocking prohibition are in
+> [`CLAUDE.md`](../../CLAUDE.md)** (Key Conventions). This page is the
+> classification rule, the counting definition, the batch-with-the-next-change
+> scheduling rule, the shared region detector, the ratchet-allowlist mechanics,
 > and the resolved-refactor history — consult it when running the gate locally,
 > updating the allowlist, or deciding which PR carries a split.
+
+## Which Cap Applies — Production or Test/Benchmark
+
+Moved here from [`CLAUDE.md`](../../CLAUDE.md) by #7423, unchanged.
+
+A file is a **test/benchmark file** (3000 SLOC) when ANY match: basename exactly
+`tests.rs`; basename ending `_test.rs` or `_tests.rs`; a `/tests/` path segment
+(covers `crates/*/tests/*.rs` and `src/**/tests/*.rs`); a `/benches/` path
+segment. All other tracked `.rs` files are **production**, capped at 500.
+
+🟡 Inline `#[cfg(test)] mod <name> { … }` bodies do not count (#5153) — only that
+exact shape. `#[cfg(test)] mod tests;` sibling declarations, `#[cfg(test)]` on an
+`fn`/`impl`/`use`, and `all(test, …)` / `any(test, …)` predicates are all still
+counted.
 
 ## Enforcement
 
@@ -102,6 +117,21 @@ Fixtures for every row above live in `scripts/test-data/sloc-cfg-test-*.rs` and
 are asserted by `scripts/check_line_cap_selftest.sh`, which also runs the gate
 end to end against a 600-SLOC production decoy (must fail) and a
 400-production + 400-inline-test file (must pass).
+
+## The Region Detector Is Shared, and a New Consumer Inherits Its Failure Modes
+
+🔴 Moved here from [`CLAUDE.md`](../../CLAUDE.md) by #7423, unchanged.
+
+`scripts/lib/sloc_awk.sh` serves `check_line_cap.sh` (skip test bodies when
+counting) and `check_teardown_guard.sh` (skip test-only call sites, via
+`emit_skip=1`). It is line-based, not a Rust parser, and fails CLOSED: an
+unrecognised spelling leaves the region COUNTED.
+
+- Weigh that bias per consumer before reusing it — a false cap violation is
+  noise, but the teardown gate's only silencer is a durable row in
+  `scripts/teardown-guard-manifest.tsv`.
+- A consumer that would fail OPEN on a missed region must not use this detector
+  as its only check.
 
 ## The Ratchet — Allowlist That Can Only Shrink
 

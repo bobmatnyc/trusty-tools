@@ -174,6 +174,30 @@ is also a CI failure (`.github/workflows/changelog-fragment.yml` →
 
 Docs-only, CI-only, test-only and `testdata/` PRs may skip the fragment.
 
+### The test-only exemption is decided by FILE PATH (#7033)
+
+Moved here from [`CLAUDE.md`](../../CLAUDE.md) by #7423, unchanged.
+
+`check_changelog_fragment.sh` (via `scripts/lib/source_class.sh`) classifies a
+path as test-only when its basename is exactly `tests.rs`, ends
+`_test.rs`/`_tests.rs`, or a path segment is `/tests/`, `/benches/`, or
+`/testdata/` — nothing else, and never by what changed inside the file. An edit
+confined to an inline `#[cfg(test)] mod tests { … }` block inside a `src/**`
+production file still owes a fragment: the file itself is a production path
+under that rule, even though `check_line_cap.sh` excludes that exact block from
+the SLOC count (#5153). Same input, two different rulings, by design.
+
+### Two gates that need a real commit, not the working tree
+
+- `check_changelog_fragment.sh` diffs `origin/main..HEAD`, so the default run
+  sees nothing until the change is committed. Before committing, use `--staged`
+  (the index plus untracked files) or `--file <path>` (#6947); run the default
+  gate after committing. `check_line_cap.sh` reads tracked `git ls-files`, so a
+  new file needs `git add` first too.
+- `scripts/check-pr-version-bump.sh` is the second post-commit gate on the same
+  shape — it diffs `merge-base..HEAD` and fails with `SCAN FLOOR` on a diff that
+  resolves to zero changed paths.
+
 ## Transitional Note
 
 PRs opened before #4476 landed wrote into the shared `## [Unreleased]` section

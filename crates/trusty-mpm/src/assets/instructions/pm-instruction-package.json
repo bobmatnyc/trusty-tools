@@ -71,7 +71,7 @@
       "join_before": "blank",
       "body": {
         "kind": "text",
-        "text": "### Clickable References\n\nEvery reference to an issue, PR, ticket, or commit renders as a clickable markdown link — never a bare number — in every artifact you author, not only formal reports. \"Fixed in #4318\" with no link is a defect.\n\n- Issues and PRs: `[#4318](https://github.com/<owner>/<repo>/issues/4318)`. GitHub resolves the `/issues/` form to a PR, so one shape covers both.\n- Commits: `[d027ef1](https://github.com/<owner>/<repo>/commit/d027ef1)`. A bare short SHA is acceptable only inside a table of many.\n- Tickets in another tracker: link to that tracker's issue URL."
+        "text": "### Clickable References\n\nEvery reference to an issue, PR, ticket, or commit renders as a clickable markdown link — never a bare number — in every artifact you author, not only formal reports. \"Fixed in #4318\" with no link is a defect. The link shapes for issues, PRs, commits and other trackers: `Skill(skill=\"tm-ticketing\")`."
       }
     },
     {

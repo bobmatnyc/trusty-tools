@@ -233,8 +233,18 @@ Row three is the Fail-Open Check the instruction package already puts in
 
 ## Per-Agent Model Overrides and the Cost Model
 
-The instruction package's Model Selection table is the default routing, and an
-explicit `model=` in an Agent call always wins. Standing per-agent defaults are
+This is the default routing (moved here from the instruction package by #7423,
+which keeps the one-line mapping). An explicit `model=` in an Agent call always
+wins.
+
+| Task Type | Model to pass | Examples |
+|-----------|--------------|---------|
+| Simple/routine | `model: "haiku"` | Commit, format, read config, docs, lint |
+| General work | `model: "sonnet"` | Research, ops, QA, analysis, general tasks |
+| Coding/engineering | `model: "opus"` | Implement, refactor, debug, test writing |
+| Complex planning | Route to `research` (`model: "sonnet"`) | Architecture, system design, RFC drafting, roadmaps, trade-off analysis |
+
+Standing per-agent defaults are
 set in `~/.trusty-mpm/config.toml`, taking priority over built-in defaults and
 agent frontmatter but not over an explicit `model=`:
 
@@ -456,6 +466,47 @@ their files it will edit across the line and only git finds out.
 
 Measured on 2026-08-03: five concurrent PRs across five branches, every brief
 carrying the block — zero merge conflicts, zero rebases.
+
+## The PM Allowlist, in Full
+
+Moved out of the instruction package by #7423, which keeps the summary line.
+These actions are unbudgeted; everything not listed is budgeted or delegated.
+
+| Action | Limit |
+|--------|-------|
+| Git ops | `git status/add/commit/log/diff/pull/stash` |
+| Read files | <=3 files, <100 lines each, config/docs only (not code understanding) |
+| Grep/Glob | 3-5 orientation searches |
+| TodoWrite | Progress tracking |
+| Write single NON-source file | Orchestration state (`.trusty-mpm/**`, `TASK.md`), docs, config — never a memory file. `Write`/`Edit` only; bash pipe-to-file is still P5. Never bulk edits |
+| Report | Results to user |
+| **Source-code edits (BUDGETED, not forbidden)** | Within the direct-action budget: delegate once the task will take more than 3 direct actions, or the moment a 3-action estimate stops holding mid-flight |
+
+## Autonomous Execution — When the PM May Stop and Ask
+
+Moved out of the instruction package by #7423, which keeps only the headline.
+
+Run the full pipeline without stopping. Never ask "should I proceed / test /
+commit?". Forbidden: nanny coding, permission seeking on an obvious next step,
+partial completion.
+
+Stop and ask only on an **observable condition**, never a confidence level:
+
+- requirements are ambiguous and the repository does not settle them;
+- a credential, access, or approval you lack;
+- a not-cheaply-reversible architecture choice the user has not made;
+- a destructive or irreversible step the user did not request.
+
+## The Mandatory Closing Instruction on an Engineer Delegation
+
+Moved out of the instruction package by #7423. Every engineer delegation ends
+with this text, verbatim:
+
+> Before returning: run linters/formatters, fix any issues, run tests, verify all
+> pass. Verify ALL deliverables from the prompt are present (README, config,
+> etc.). Show raw test output. Plus this project's own doc gates, if it defines
+> any — its CLAUDE.md names them and `scripts/` holds them; name the ones you
+> ran. A project that defines none owes no such run.
 
 ## A Running Agent's Scope Is Fixed
 

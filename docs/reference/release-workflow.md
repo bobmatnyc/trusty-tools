@@ -260,6 +260,13 @@ exists for thirty seconds has nothing to strand.
 
 ## Version-Parity Guard (issue #3366)
 
+🟡 **Cargo's 0.x rule applies: for a `0.y.z` crate the breaking bump is MINOR.**
+A `0.y` member's MINOR bump also requires widening its root
+`[workspace.dependencies]` row (`version = "0.y"`); a PATCH does not. The gate is
+`scripts/check_workspace_dep_versions.sh`, a step of issue #4421's
+`pr-version-bump` job — see [ci-scripts.md](ci-scripts.md). (Moved here from
+`CLAUDE.md` by #7423.)
+
 🔴 **Before bumping a crate's version, confirm it hasn't already drifted.**
 `scripts/check-version-parity.sh` (also `make version-parity-check`) compares
 every publishable crate's local `src/` tree against the crates.io tarball for

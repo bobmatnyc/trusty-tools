@@ -1,5 +1,12 @@
 # Common Pitfalls Reference
 
+🔴 **Process-global env in the `tm` bin target (#5544)** — moved here from
+[CLAUDE.md](../../CLAUDE.md) by #7423. `std::env::set_var`/`remove_var` under
+`crates/trusty-mpm/src/bin/tm/**` is ratcheted by `env_isolation_tests.rs` to a
+per-file budget of 0 for new files; inject the path or value instead
+(`BannerEnv`, `PathEnv`). A `PATH`/`HOME` write also corrupts every other test in
+that binary.
+
 🔴 **Duplicating a shared capability instead of extending the common entry point** —
 every cross-crate capability (external tool spawning, HTTP clients, config/secret
 loading, daemon discovery) has exactly one canonical implementation. A second

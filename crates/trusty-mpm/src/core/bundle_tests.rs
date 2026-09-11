@@ -72,6 +72,7 @@ fn constants_are_non_empty() {
     assert!(!TM_WORKFLOW.trim().is_empty());
     assert!(!TM_AGENT_ARCHITECTURE.trim().is_empty());
     assert!(!TM_POSTMORTEM.trim().is_empty());
+    assert!(!TM_PROSE_STYLE.trim().is_empty());
     assert!(!TM_BUG_REPORTING.trim().is_empty());
     assert!(!TM_TEACHING_TEMPLATES.trim().is_empty());
     assert!(!TM_TICKETING.trim().is_empty());
@@ -116,6 +117,7 @@ fn tm_skills_are_in_bundle() {
         "skills/tm-workflow.md",
         "skills/tm-agent-architecture.md",
         "skills/tm-postmortem.md",
+        "skills/tm-prose-style.md",
         "skills/tm-bug-reporting.md",
         "skills/tm-teaching-templates.md",
         "skills/tm-ticketing.md",
@@ -276,6 +278,7 @@ fn tm_skills_have_frontmatter() {
         ("tm-workflow", TM_WORKFLOW),
         ("tm-agent-architecture", TM_AGENT_ARCHITECTURE),
         ("tm-postmortem", TM_POSTMORTEM),
+        ("tm-prose-style", TM_PROSE_STYLE),
         ("tm-bug-reporting", TM_BUG_REPORTING),
         ("tm-teaching-templates", TM_TEACHING_TEMPLATES),
         ("tm-ticketing", TM_TICKETING),
@@ -502,11 +505,14 @@ fn bundle_table_is_complete() {
     // Issue #5202 (-1): `skills/tm-pr-workflow.md` is RETIRED — its live policy
     //   was consolidated into `tm-workflow`, leaving one workflow skill rather
     //   than an alias or a second editable source. 179 - 1 = 178.
-    assert_eq!(ALL.len(), 178);
+    // Issue #7423 (+1): `skills/tm-prose-style.md` is NEW — it carries the
+    //   worked example and observed-instance inventories the output style and
+    //   BASE-AGENT.md used to state inline. 178 + 1 = 179.
+    assert_eq!(ALL.len(), 179);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 178, "artifact paths must be unique");
+    assert_eq!(paths.len(), 179, "artifact paths must be unique");
     for artifact in ALL {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());
