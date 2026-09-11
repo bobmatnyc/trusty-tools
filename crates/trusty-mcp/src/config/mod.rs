@@ -11,7 +11,7 @@
 //! names `trusty-mcp` as the crate those should collapse onto, because it owns
 //! none of this today and is already the crate every MCP participant links.
 //!
-//! What: [`McpServerConfig`] and [`McpTransport`] (the shape), [`file`] (one
+//! What: [`McpServerConfig`] and [`McpTransport`] (the shape), [`file`](mod@file) (one
 //! shared TOML file plus its canonical path), [`resolve`](mod@resolve) (a global tier
 //! layered with per-consumer overrides), and [`claude_code`] (pure conversion
 //! to and from the `mcpServers` map Claude Code reads). This module holds no
@@ -222,8 +222,9 @@ impl std::fmt::Debug for Redacted {
 }
 
 impl std::fmt::Debug for McpTransport {
-    /// Why: see [`RedactedValues`] — a derived impl would leak every secret in
-    /// `env` and `headers`.
+    /// Why: see `RedactedValues` above — a derived impl would leak every
+    /// secret in `env` and `headers`. Named, not linked: the type is private,
+    /// and rustdoc warns on a public doc pointing at one.
     /// What: the derived rendering, with each secret-bearing map's values
     /// replaced. `command`, `args` and `url` print in full; they are what an
     /// operator needs to identify the server, and none is a credential.
