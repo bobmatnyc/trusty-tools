@@ -35,13 +35,17 @@ fn a_row(session_id: &str) -> SavingsRow {
 
 /// A project directory holding a compiled prompt at `scope`, written to disk.
 ///
-/// What: returns the compiled prompt's path. The body is deliberately tiny so
-/// the producer's fold measurement comes out positive when a test re-derives.
+/// What: returns the compiled prompt's path. The body is far smaller than the
+/// bundled source set so the producer's fold measurement comes out positive when
+/// a test re-derives, and — since #7491 — at least
+/// [`crate::core::savings_instructions::min_plausible_compiled_bytes`], below
+/// which the producer treats the file as a stub and writes no row at all.
 fn project_with_compiled_prompt(under: &Path, name: &str, scope: &str) -> PathBuf {
     let project = under.join(name);
     let compiled = crate::core::instruction_pipeline::compiled_prompt_path(&project, scope);
     std::fs::create_dir_all(compiled.parent().expect("session dir")).expect("session dir");
-    std::fs::write(&compiled, "tiny").expect("compiled prompt");
+    let body = "x".repeat(crate::core::savings_instructions::min_plausible_compiled_bytes().max(1));
+    std::fs::write(&compiled, &body).expect("compiled prompt");
     compiled
 }
 

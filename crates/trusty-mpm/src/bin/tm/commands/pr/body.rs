@@ -160,16 +160,39 @@ fn field_index(f: Field) -> usize {
     FIELDS.iter().position(|c| *c == f).unwrap_or(0) + 1
 }
 
+/// Maximum `#` characters an ATX heading opener may carry.
+///
+/// Why (#7461): CommonMark caps the opening sequence at six; a seventh `#`
+/// makes the line a paragraph. Spelled here so [`heading_text`] states the rule
+/// rather than a literal.
+const MAX_ATX_LEVEL: usize = 6;
+
 /// Normalize a heading line to its comparable text.
 ///
 /// Why: headings arrive as `## 4. Test evidence` / `### RISK / blast radius`,
 /// and the contract is about the words, not the punctuation or the numbering.
-/// What: strips leading `#`, digits, `.`/`)`/`:` and `*`/`_` emphasis, then
-/// lowercases. Returns `None` for a line that is not an ATX heading.
-/// Test: `heading_text_strips_numbering_and_emphasis`.
+/// What: strips the ATX opener, then digits, `.`/`)`/`:` and `*`/`_` emphasis,
+/// then lowercases. Returns `None` for a line that is not an ATX heading.
+///
+/// The opener is the CommonMark one (#7461): one to six `#`, then a space, a
+/// tab, or the end of the line. `#7459 flakes not seen.` is therefore a
+/// paragraph that happens to start with an issue reference, not a heading —
+/// reading it as one ended the previous field's section and reported every
+/// field after it empty.
+/// Test: `heading_text_strips_numbering_and_emphasis`,
+/// `an_issue_ref_at_line_start_is_not_a_heading`.
 fn heading_text(line: &str) -> Option<String> {
-    let rest = line.trim_start().strip_prefix('#')?;
-    let rest = rest.trim_start_matches('#').trim();
+    let opener = line.trim_start();
+    // #7461: `#` is one byte, so the count is also the byte offset of the rest.
+    let level = opener.chars().take_while(|c| *c == '#').count();
+    if level == 0 || level > MAX_ATX_LEVEL {
+        return None;
+    }
+    let rest = &opener[level..];
+    if !rest.is_empty() && !rest.starts_with([' ', '\t']) {
+        return None;
+    }
+    let rest = rest.trim();
     let cleaned: String = rest
         .chars()
         .map(|c| if c == '*' || c == '_' { ' ' } else { c })

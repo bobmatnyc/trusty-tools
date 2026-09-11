@@ -376,7 +376,11 @@ pub async fn session_context_pause(
     // A failure here is an ERROR, never a warning — the previous behaviour
     // (commit onto whatever branch the checkout was on) failed silently for
     // weeks, and the snapshot file is already on disk either way.
-    let publish = publish_snapshot(&project_path, session_id, &outcome).await;
+    // #7464: the `ws/<session>` label carries the session's NAME, so resolve it
+    // from the managed record before the publish spends it on `gh pr create`.
+    let session_name = managed_session_name(state, session_id).await;
+    let publish =
+        publish_snapshot(&project_path, session_id, session_name.as_deref(), &outcome).await;
 
     let publish_json = match publish {
         Ok(SnapshotPublish::Opened(out)) => json!({
@@ -439,6 +443,7 @@ pub async fn session_context_pause(
 async fn publish_snapshot(
     project_path: &Path,
     session_id: &str,
+    session_name: Option<&str>,
     outcome: &trusty_common::catchup::pause::PauseSnapshotOutcome,
 ) -> Result<SnapshotPublish, String> {
     use crate::core::session_pause_pr as pause_pr;
@@ -457,12 +462,16 @@ async fn publish_snapshot(
 
     let repo = project_path.to_path_buf();
     let session = session_id.to_string();
+    // #7464: carried into the blocking task so the publish can name the `ws/`
+    // label after the session rather than after its UUID.
+    let name = session_name.map(str::to_string);
     let timestamp = outcome.timestamp;
     let default_branch = configured_default_branch(project_path);
     tokio::task::spawn_blocking(move || {
         let req = pause_pr::PublishRequest {
             repo: &repo,
             session_id: &session,
+            session_name: name.as_deref(),
             timestamp,
             paths,
             default_branch: default_branch.as_deref(),
@@ -481,6 +490,29 @@ async fn publish_snapshot(
     })
     .await
     .map_err(|e| format!("snapshot publish task failed: {e}"))?
+}
+
+/// The NAME of the managed session `session_id` identifies, when one is on
+/// record.
+///
+/// Why (#7464): the `ws/<session>` label the snapshot PR is opened with is
+/// derived from the session's name — that is the label session launch and
+/// `tm issue seed-labels` create. The pause tool is handed the session ID, so
+/// without this lookup the publish spent a UUID on a label that has never
+/// existed and `gh pr create` refused the PR.
+/// What: the managed record's tmux session name, or `None` when nothing on
+/// record matches — an unmanaged or already-pruned caller, which the publish
+/// then falls back to the session id for.
+/// Test: `session_pause_pr::the_workstream_label_comes_from_the_session_name`
+/// covers the derivation this feeds; this lookup is a single store read.
+async fn managed_session_name(state: &Arc<DaemonState>, session_id: &str) -> Option<String> {
+    let manager = state.session_manager().await;
+    manager
+        .list()
+        .await
+        .into_iter()
+        .find(|record| record.id.to_string() == session_id)
+        .map(|record| record.tmux_name)
 }
 
 /// What a pause snapshot publish produced.
@@ -545,7 +577,11 @@ mod tests {
             timestamp: chrono::Utc::now(),
         };
 
-        let publish = publish_snapshot(tmp.path(), "s", &outcome).await.unwrap();
+        // #7464: `None` for the session name — this skip is decided before the
+        // `ws/` label matters.
+        let publish = publish_snapshot(tmp.path(), "s", None, &outcome)
+            .await
+            .unwrap();
         let SnapshotPublish::Skipped(reason) = publish else {
             panic!("{publish:?}");
         };

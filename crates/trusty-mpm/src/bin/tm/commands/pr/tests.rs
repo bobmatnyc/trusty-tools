@@ -250,6 +250,41 @@ fn heading_text_strips_numbering_and_emphasis() {
 }
 
 #[test]
+fn an_issue_ref_at_line_start_is_not_a_heading() {
+    // #7461: `#7459 flakes not seen.` was consumed as an ATX heading, which
+    // ended the section it sat in and claimed no field — so every field after
+    // it reported empty. CommonMark needs whitespace after the `#` run, and a
+    // real `# Heading` (one `#`, then a space) must still claim its field.
+    let body = full_body().replace(
+        "## Risk\n\nsomething real.\n",
+        "# Risk\n\n#7459 flakes not seen.\n#12 and a second ref, also prose.\n",
+    );
+    let report = body::validate(&body);
+    assert!(report.missing.is_empty(), "{report:?}");
+    assert!(report.empty.is_empty(), "{report:?}");
+    assert!(
+        report.supplied.contains(&Field::Risk),
+        "the `# Risk` h1 must still be read as a heading: {report:?}"
+    );
+
+    // The ref lines are prose, so they travel into the body `gh` is handed.
+    let args = open_args("/dev/null");
+    let plan = open::plan(
+        &args,
+        &body,
+        Some("tm-test-01"),
+        ChangelogVerdict::Pass,
+        &ResolvedTicketing::default(),
+    )
+    .expect("a complete body plans");
+    assert!(
+        plan.body.contains("#7459 flakes not seen."),
+        "the issue ref must survive into the PR body: {}",
+        plan.body
+    );
+}
+
+#[test]
 fn body_validate_is_repeatable() {
     let text = full_body();
     assert_eq!(body::validate(&text), body::validate(&text));
