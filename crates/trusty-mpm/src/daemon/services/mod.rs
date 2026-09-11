@@ -14,6 +14,9 @@
 pub mod agent_worktree_reap;
 pub mod delegation_tracker;
 pub mod hook_service;
+// #7504: the ONE place the merged-PR reclaim's production probes are assembled,
+// plus the daemon loop that runs it automatically after a merge.
+pub mod merged_pr_reclaim;
 pub mod pairing_service;
 pub mod session_service;
 pub mod tmux_service;

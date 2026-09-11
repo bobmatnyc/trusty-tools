@@ -259,7 +259,13 @@ fn expand_home(raw: &str) -> PathBuf {
 /// Canonicalization fails for a directory that no longer exists — a stale
 /// worktree pointer, which is precisely a case this gate must still answer for
 /// — so a failure falls back rather than refusing to compare.
-fn resolve(path: &Path) -> PathBuf {
+///
+/// #7504: shared with
+/// [`worktree_reclaim_launch`](super::worktree_reclaim_launch), whose gate
+/// compares the same two forms of the same candidate paths. One resolver, so the
+/// two gates cannot disagree about whether a symlinked workspace root contains a
+/// worktree.
+pub(in crate::session_manager) fn resolve(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 

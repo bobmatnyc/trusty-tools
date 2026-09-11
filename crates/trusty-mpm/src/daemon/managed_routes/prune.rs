@@ -19,8 +19,7 @@ use tracing::warn;
 
 use crate::daemon::rpc::managed::outcome::RouteOutcome;
 use crate::daemon::state::DaemonState;
-use crate::session_manager::worktree_reclaim::{LiveClaims, ReclaimMode};
-use crate::session_manager::worktree_reclaim_sweep::reclaim_merged_pr_worktrees;
+use crate::session_manager::worktree_reclaim::ReclaimMode;
 use crate::session_manager::{DirtyWorktreePolicy, PruneFilter};
 
 /// Request body for POST /api/v1/sessions/managed/prune (#1508).
@@ -316,74 +315,20 @@ pub(crate) async fn prune_worktrees_core(
                 } else {
                     ReclaimMode::Remove
                 };
+                // #7504: through the ONE entry point that binds the production
+                // probes. The assembly used to live inline here; a second copy
+                // for the daemon's automatic sweep is exactly the divergence the
+                // common-entry-point rule forbids, so both callers now ask
+                // `merged_pr_reclaim::reclaim`. The only thing this route still
+                // decides is Report-vs-Remove, from its own `dry_run`.
                 // #6806: the caller's own id, so gate 2 can tell its claim from
                 // a stranger's. Validated ABOVE, before any survey work.
-                let caller = req.invoking_session.clone();
-                let root = repos_root.clone();
-                // #6927: read FALLIBLY and re-read PER CANDIDATE, not resolved
-                // from the lenient `config` this route already loaded. Lenient
-                // loading turns any YAML error anywhere in the file into an
-                // EMPTY keep-list, which is how a vetoed worktree could be
-                // deleted; the fallible reader keeps everything instead. It is
-                // a closure because this pass is unbounded, so an entry the
-                // operator adds mid-sweep must stop the candidates still
-                // queued — see `FreshProbes::keep_list`.
-                // #2919: a HANDLE to the manager, not a captured path list. The
-                // delete loop calls this closure per candidate and needs the
-                // CURRENT set, not one snapshotted before a survey that takes
-                // minutes. `None` (the store could not be read) refuses.
-                let mgr_for_probe = state.session_manager().await.clone();
-                // #5661: the sweep's other gates read SESSION records, and a
-                // dispatched agent has none — which is how this path deleted
-                // three live agents' worktrees. The delegation registry is the
-                // only place an agent's liveness is resolved from real
-                // `SubagentStop` signals, so it is read here and handed to the
-                // classifier as a probe rather than as a captured list.
-                let state_for_agents = Arc::clone(state);
-                // #7357: resolved on the route, moved into the blocking task.
-                let adopted_for_reclaim =
-                    crate::project::adopted_anchors_under(state.framework_root());
-                match tokio::task::spawn_blocking(move || {
-                    let in_use_now = move || -> Option<LiveClaims> {
-                        // `None` means "could not be determined", which REFUSES
-                        // the delete. `SessionManager::list` is itself
-                        // infallible, so the only way to fail here is to have no
-                        // runtime to block on — which happens if this closure is
-                        // ever invoked off the blocking pool. `Handle::current`
-                        // would PANIC in that case, unwinding through a delete
-                        // loop mid-sweep; `try_current` turns it into the
-                        // fail-closed refusal the contract already specifies.
-                        let handle = tokio::runtime::Handle::try_current().ok()?;
-                        // Blocking on the runtime is legal from a blocking-pool
-                        // thread (not a runtime worker), and is the only way to
-                        // re-read an async store from the synchronous loop.
-                        // #6806: each claim carries the session that holds
-                        // it, so gate 2 can tell the caller's own claim from a
-                        // foreign one and name the claimant when it refuses.
-                        // #7232: through the crate's single claim producer,
-                        // which also probes each claiming session for life. A
-                        // `deleted` record holding an org-level
-                        // `workspace_path` blocked every worktree beneath it in
-                        // seven repositories, because the store tombstones
-                        // records rather than dropping them.
-                        Some(handle.block_on(mgr_for_probe.workspace_claims(caller.clone())))
-                    };
-                    let agent_state = move |owner: &crate::session_manager::worktree_ownership::AgentWorktreeOwner| {
-                        crate::daemon::services::agent_worktree_reap::delegation_state_for_agent(
-                            &state_for_agents,
-                            &owner.agent_id,
-                        )
-                    };
-                    let keep_list = crate::core::trusty_tools_config::load_disk_keep_list;
-                    reclaim_merged_pr_worktrees(
-                        &root,
-                        &in_use_now,
-                        &agent_state,
-                        mode,
-                        &keep_list,
-                        &adopted_for_reclaim,
-                    )
-                })
+                match crate::daemon::services::merged_pr_reclaim::reclaim(
+                    state,
+                    &repos_root,
+                    mode,
+                    req.invoking_session.clone(),
+                )
                 .await
                 {
                     Ok(o) => serde_json::json!({
@@ -420,7 +365,7 @@ pub(crate) async fn prune_worktrees_core(
                         // A panicked pass reclaimed nothing; say so rather than
                         // omitting the key, which would read as "not requested".
                         warn!("prune-worktrees route: merged-PR pass panicked: {e}");
-                        serde_json::json!({ "error": e.to_string() })
+                        serde_json::json!({ "error": e })
                     }
                 }
             } else {
