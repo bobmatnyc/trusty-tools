@@ -1035,3 +1035,207 @@ fn dispatch_never_returns_empty_for_non_empty_input() {
         passing_only
     );
 }
+
+// ── Test-runner failure diagnostics and per-suite summaries (#7544) ─────
+
+/// `cargo test` output for a failing suite followed by a passing one.
+///
+/// The shape #7544 reproduced: a panic block carrying a file:line:col
+/// location, an `assertion `left == right`` message with its left/right
+/// values, a multiline `---- <test> stdout ----` section, and TWO
+/// `test result:` summaries — `FAILED` first, `ok` second.
+fn two_suites_failed_then_passing() -> String {
+    String::from(
+        r#"   Compiling trusty-demo v0.1.0 (/w/demo)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.20s
+     Running unittests src/lib.rs (target/debug/deps/demo-1111111111111111)
+
+running 2 tests
+test keeps_working ... ok
+test breaks ... FAILED
+
+failures:
+
+---- breaks stdout ----
+
+thread 'breaks' panicked at crates/trusty-demo/src/lib.rs:42:9:
+assertion `left == right` failed: shunt budget must match the ledger
+  left: 1
+  right: 2
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+failures:
+    breaks
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/integration.rs (target/debug/deps/integration-2222222222222222)
+
+running 1 test
+test integration_smoke ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+"#,
+    )
+}
+
+/// Native-fallback output for `cargo test`, with `rtk` ruled out.
+///
+/// `no_rtk` makes the route deterministic instead of depending on whether an
+/// `rtk` binary happens to be installed on the machine running the suite.
+async fn native_cargo_test(output: &str) -> String {
+    let (text, path) =
+        compress_tool_output_async_with_path_using(no_rtk, "cargo test", output).await;
+    assert_eq!(path, CompressionPath::NativeFallback);
+    text
+}
+
+#[tokio::test]
+async fn test_runner_keeps_every_suite_summary_in_order() {
+    // #7544: only the LAST `test result:` line survived, so a passing suite
+    // after a failing one left the output ending `test result: ok` — the
+    // failure was unreadable from the compressed text.
+    let out = native_cargo_test(&two_suites_failed_then_passing()).await;
+    let failed = out
+        .find("test result: FAILED. 1 passed; 1 failed")
+        .unwrap_or_else(|| panic!("failing suite summary dropped:\n{out}"));
+    let passed = out
+        .find("test result: ok. 1 passed; 0 failed")
+        .unwrap_or_else(|| panic!("passing suite summary dropped:\n{out}"));
+    assert!(
+        failed < passed,
+        "suite summaries must stay in original order:\n{out}"
+    );
+}
+
+#[tokio::test]
+async fn test_runner_keeps_panic_location_and_assertion_values() {
+    // #7544: the panic line, the assertion message, and the left/right values
+    // matched none of the keep-list predicates and were dropped as noise.
+    let out = native_cargo_test(&two_suites_failed_then_passing()).await;
+    for needle in [
+        "panicked at crates/trusty-demo/src/lib.rs:42:9",
+        "assertion `left == right` failed: shunt budget must match the ledger",
+        "left: 1",
+        "right: 2",
+        "---- breaks stdout ----",
+        "test breaks ... FAILED",
+    ] {
+        assert!(out.contains(needle), "dropped {needle:?} from:\n{out}");
+    }
+}
+
+#[tokio::test]
+async fn test_runner_keeps_the_failing_test_name_list() {
+    // The `failures:` list names what to re-run; it is the one line an agent
+    // needs to narrow the next command.
+    let out = native_cargo_test(&two_suites_failed_then_passing()).await;
+    let tail = out
+        .rsplit("failures:")
+        .next()
+        .expect("rsplit always yields one element");
+    assert!(
+        tail.contains("breaks"),
+        "failing-test name list dropped:\n{out}"
+    );
+}
+
+#[tokio::test]
+async fn test_runner_still_reduces_passing_only_output() {
+    // The reduction this filter exists for must survive the fix: a green run
+    // is almost entirely `test <name> ... ok` lines.
+    let mut input = String::from("running 40 tests\n");
+    for i in 0..40 {
+        input.push_str(&format!("test suite::case_{i} ... ok\n"));
+    }
+    input.push_str("test result: ok. 40 passed; 0 failed; 0 ignored\n");
+    let out = native_cargo_test(&input).await;
+    assert!(
+        out.len() * 4 < input.len(),
+        "passing-only output barely shrank: {} -> {}",
+        input.len(),
+        out.len()
+    );
+    assert!(!out.contains("case_7 ... ok"), "kept a passing test line");
+    assert!(
+        out.contains("test result: ok. 40 passed"),
+        "lost the summary"
+    );
+}
+
+#[tokio::test]
+async fn test_runner_keeps_unrecognised_blocks() {
+    // Fail-open: a harness this filter has never seen must come back, not be
+    // discarded for matching no keep-list predicate (#7544).
+    // The fixture deliberately opens with a non-`key: value` line: a leading
+    // one routes the whole input through the structured-format passthrough
+    // instead of this filter, so the test would pass without proving anything.
+    let input = "\
+running 3 scenarios through the bespoke harness
+scenario budget ledger reconciliation
+  step seed ledger -> 3 rows
+  step reconcile -> amber
+  outcome pending (awaiting operator)
+a summary line nothing here recognises
+test result: ok. 3 passed; 0 failed; 0 ignored
+";
+    assert!(
+        !is_structured_format(input),
+        "fixture took the YAML passthrough"
+    );
+    let out = native_cargo_test(input).await;
+    for needle in [
+        "running 3 scenarios through the bespoke harness",
+        "scenario budget ledger reconciliation",
+        "step reconcile -> amber",
+        "outcome pending (awaiting operator)",
+        "a summary line nothing here recognises",
+    ] {
+        assert!(out.contains(needle), "dropped {needle:?} from:\n{out}");
+    }
+}
+
+#[tokio::test]
+async fn test_runner_drops_cargo_progress_lines() {
+    // The reduction side of the blocklist: cargo's indented progress verbs go,
+    // `Running` stays because it names the suite each summary belongs to.
+    let out = native_cargo_test(&two_suites_failed_then_passing()).await;
+    assert!(
+        !out.contains("Compiling trusty-demo"),
+        "kept Compiling:\n{out}"
+    );
+    assert!(
+        !out.contains("Finished `test` profile"),
+        "kept Finished:\n{out}"
+    );
+    assert!(
+        out.contains("Running unittests src/lib.rs"),
+        "dropped the suite attribution line:\n{out}"
+    );
+    assert!(
+        out.contains("Running tests/integration.rs"),
+        "dropped the second suite's attribution line:\n{out}"
+    );
+}
+
+#[test]
+fn test_runner_keeps_column_zero_lines_that_look_like_progress() {
+    // A test's own stdout is never cargo chatter, whatever word it starts with.
+    let input = "\
+running 1 test
+Compiling the shunt ledger in-process before the assertion
+Finished reconciling 3 rows
+test writes_progress_words ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored
+";
+    let out = filter_test_runner(input);
+    assert!(
+        out.contains("Compiling the shunt ledger"),
+        "dropped stdout:\n{out}"
+    );
+    assert!(
+        out.contains("Finished reconciling 3 rows"),
+        "dropped stdout:\n{out}"
+    );
+    assert!(!out.contains("... ok"), "kept a passing test line:\n{out}");
+}
