@@ -109,11 +109,16 @@ while IFS= read -r path; do
   # merge-base file. A heading that already existed at the merge base (a
   # --merge run folding fragments into a stale section, #5298) is not "new"
   # even if the diff happens to touch nearby lines.
+  # #7359: `|| true` — a PR that DELETES a crate's CHANGELOG.md produces a
+  # pure-deletion diff with no `+## [` lines, so grep exits 1, pipefail
+  # propagates it, and `set -e` killed this assignment before the `-z` guard
+  # below could skip the crate — the job failed with NO output. Same guard the
+  # `base_headings` pipeline below already carries.
   new_headings="$(
     git diff --unified=0 --no-renames "${MERGE_BASE}" HEAD -- "$path" \
       | grep -E '^\+## \[' \
       | sed -E 's/^\+## \[([^]]+)\].*/\1/' \
-      | LC_ALL=C sort -u
+      | LC_ALL=C sort -u || true
   )"
   [[ -z "$new_headings" ]] && continue
 
