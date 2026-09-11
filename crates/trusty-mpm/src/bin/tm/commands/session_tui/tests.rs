@@ -1373,10 +1373,9 @@ fn render_new_session_overlay_lists_the_registered_projects() {
     let mut state = creating();
     let joined = draw(110, 30, &sessions, &mut state).join("\n");
     assert!(joined.contains("Start a new session in:"), "{joined}");
-    assert!(
-        joined.contains("https://github.com/duetto/apex"),
-        "{joined}"
-    );
+    // #7406: the row is the project's identity, not its stored URL.
+    assert!(joined.contains("duetto/apex"), "{joined}");
+    assert!(!joined.contains("https://"), "{joined}");
     assert!(joined.contains("other — type a project path"), "{joined}");
     assert!(joined.contains("Esc cancels"), "{joined}");
 }
@@ -1417,4 +1416,208 @@ fn render_footer_offers_the_new_session_key() {
     state.apply(Input::Char('?'), &sessions);
     let joined = draw(110, 30, &sessions, &mut state).join("\n");
     assert!(joined.contains("new session"), "{joined}");
+}
+
+// ── new-session picker polish (#7406) ───────────────────────────────────────
+
+/// The overlay's own rows, unwrapped from the border columns around them.
+fn overlay_rows(screen: &[String]) -> Vec<String> {
+    screen
+        .iter()
+        .filter_map(|line| {
+            let mut parts = line.split('│');
+            parts.next()?;
+            Some(parts.next()?.trim_end().to_string())
+        })
+        .collect()
+}
+
+/// A registered row built straight, bypassing the offerable filter.
+fn target(name: &str, repo: &str) -> Target {
+    Target::Registered {
+        name: name.to_string(),
+        repo: repo.to_string(),
+    }
+}
+
+/// A session whose project is the THIRD registered row.
+fn three_projects() -> Vec<Target> {
+    new_session::targets_from(&[
+        project("trusty-tools", "https://github.com/bobmatnyc/trusty-tools"),
+        project("apex", "https://github.com/duetto/apex"),
+        project("widgets", "https://github.com/acme/widgets"),
+    ])
+}
+
+/// The overlay opens on the project of the row the cursor was on.
+///
+/// Why (#7406 requirement 1): opening on row 0 made the operator scroll past
+/// the project they were already looking at on every create. The fixture puts
+/// that project THIRD, so an implementation that keeps the old behaviour — or
+/// that matches on the first row by accident — fails here.
+#[test]
+fn new_session_preselects_the_cursor_sessions_project() {
+    let targets = three_projects();
+    // The session spells the remote differently from the registry row; the
+    // shared `repo_url_matches` is what makes the two agree.
+    let mut cursor = session("w1", "Active", 1);
+    cursor.repo_url = Some("git@github.com:acme/widgets.git".to_string());
+    assert_eq!(new_session::preselect_index(&targets, Some(&cursor)), 2);
+
+    let flow = NewSessionFlow::with_resolver(targets.clone(), stub_identity)
+        .preselected_for(Some(&cursor));
+    let rows = flow.rows();
+    assert_eq!(rows[2], "▸ acme/widgets", "{rows:?}");
+    assert!(!rows[0].starts_with('▸'), "{rows:?}");
+
+    // A session with no `repo_url` is matched on its `owner/repo` source id.
+    let mut by_source = session("a1", "Active", 2);
+    by_source.source_id = Some("duetto/apex".to_string());
+    assert_eq!(new_session::preselect_index(&targets, Some(&by_source)), 1);
+}
+
+#[test]
+fn new_session_preselect_falls_back_to_the_first_row() {
+    let targets = three_projects();
+    // No cursor session at all.
+    assert_eq!(new_session::preselect_index(&targets, None), 0);
+    // A cursor session whose project is not registered.
+    let mut stranger = session("s1", "Active", 1);
+    stranger.repo_url = Some("https://github.com/other/thing".to_string());
+    assert_eq!(new_session::preselect_index(&targets, Some(&stranger)), 0);
+    // A cursor session that names no project at all.
+    let bare = session("b1", "Active", 1);
+    assert_eq!(new_session::preselect_index(&targets, Some(&bare)), 0);
+}
+
+/// Every row is `owner/repo` or `<basename> (local)` — never a URL or a path.
+#[test]
+fn new_session_rows_show_owner_repo_only() {
+    let flow = NewSessionFlow::with_resolver(
+        vec![
+            target(
+                "trusty-tools",
+                "https://github.com/bobmatnyc/trusty-tools.git",
+            ),
+            target("widgets", "/Users/me/code/widgets"),
+            target("nameless", ""),
+            Target::Other,
+        ],
+        stub_identity,
+    );
+    assert_eq!(
+        flow.rows(),
+        vec![
+            "▸ bobmatnyc/trusty-tools".to_string(),
+            "  widgets (local)".to_string(),
+            "  nameless (local)".to_string(),
+            "  other — type a project path…".to_string(),
+        ]
+    );
+}
+
+/// The host appears only when two rows would otherwise read identically.
+#[test]
+fn new_session_labels_disambiguate_by_host() {
+    let labels = new_session::row_labels(&[
+        target("apex", "https://github.com/duetto/apex"),
+        target("apex-gl", "https://gitlab.com/duetto/apex"),
+        target("trusty-tools", "https://github.com/bobmatnyc/trusty-tools"),
+    ]);
+    assert_eq!(
+        labels,
+        vec![
+            "github.com/duetto/apex".to_string(),
+            "gitlab.com/duetto/apex".to_string(),
+            // Unique on its own, so it keeps the short form.
+            "bobmatnyc/trusty-tools".to_string(),
+        ]
+    );
+}
+
+/// A registration nobody can work in never reaches the picker.
+///
+/// Why (#7406 requirement 3): the owner's screen listed a probe registered at a
+/// `/private/tmp/…/scratchpad/…` path. The fixture carries that row, a row
+/// whose path is gone, and two rows that must survive.
+#[test]
+fn new_session_targets_from_drops_a_scratchpad_registration() {
+    let targets = new_session::targets_from(&[
+        project(
+            "mcp-probe-scratch-4181",
+            "/private/tmp/claude-502/abc/scratchpad/mcp-probe-scratch-4181",
+        ),
+        project("gone", "/nonexistent/7406/no-such-checkout"),
+        project("trusty-tools", "https://github.com/bobmatnyc/trusty-tools"),
+        project("apex", "https://github.com/duetto/apex"),
+    ]);
+    assert_eq!(
+        targets,
+        vec![
+            target("trusty-tools", "https://github.com/bobmatnyc/trusty-tools"),
+            target("apex", "https://github.com/duetto/apex"),
+            Target::Other,
+        ]
+    );
+}
+
+/// At 80 columns the rows are short, exact, and never wrap.
+///
+/// Why (#7406 requirement 2): the owner's screen wrapped a path onto a second
+/// line, which is what made the list unreadable. Asserting the EXACT row text
+/// at the narrowest supported width is what catches a row that grows back.
+#[test]
+fn render_new_session_rows_at_eighty_columns() {
+    let sessions = fleet();
+    let mut state = browsing();
+    state.open_new_session(NewSessionFlow::with_resolver(
+        vec![
+            target("trusty-tools", "https://github.com/bobmatnyc/trusty-tools"),
+            target("widgets", "/Users/me/code/widgets"),
+            Target::Other,
+        ],
+        stub_identity,
+    ));
+    let screen = draw(80, 24, &sessions, &mut state);
+    let rows = overlay_rows(&screen);
+    // The popup is 80% of 80 columns; its inner width is what a row may use.
+    for row in &rows {
+        assert!(
+            row.chars().count() <= 62,
+            "row over the pane width: {row:?}"
+        );
+    }
+    assert!(
+        rows.contains(&"▸ bobmatnyc/trusty-tools".to_string()),
+        "{rows:?}"
+    );
+    assert!(rows.contains(&"  widgets (local)".to_string()), "{rows:?}");
+    let joined = screen.join("\n");
+    assert!(
+        !joined.contains("https://"),
+        "a full URL reached a row: {joined}"
+    );
+    assert!(
+        !joined.contains("/Users/me/code"),
+        "an absolute path reached a row: {joined}"
+    );
+}
+
+/// A row wider than the pane is cut with `…` rather than wrapped.
+#[test]
+fn render_new_session_overlay_truncates_a_long_row() {
+    let sessions = fleet();
+    let mut state = browsing();
+    let long = format!("https://github.com/{}/{}", "o".repeat(40), "r".repeat(40));
+    state.open_new_session(NewSessionFlow::with_resolver(
+        vec![target("long", &long), Target::Other],
+        stub_identity,
+    ));
+    let screen = draw(80, 24, &sessions, &mut state);
+    let joined = screen.join("\n");
+    assert!(joined.contains('…'), "the long row was not cut: {joined}");
+    assert!(
+        !joined.contains(&"r".repeat(40)),
+        "the long row wrapped instead of being cut: {joined}"
+    );
 }

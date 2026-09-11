@@ -20,6 +20,8 @@
 pub(crate) mod convert;
 pub(crate) mod deliverables;
 pub(crate) mod milestones;
+// #7406: the one predicate every surface that OFFERS a project shares.
+pub(crate) mod offerable;
 pub(crate) mod registry;
 
 use crate::cli::ProjectsAction;
