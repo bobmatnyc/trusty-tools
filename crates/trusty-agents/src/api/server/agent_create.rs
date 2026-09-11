@@ -182,6 +182,24 @@ pub(super) async fn create_agent_at(dirs: &[PathBuf], req: CreateAgentRequest) -
     };
     agent_table.insert("name", value(name.clone()));
     agent_table.insert("display_name", value(name.clone()));
+    // #7428: declare descent from the `assistant` base. `roster::is_instance`
+    // accepts a config as an Assistant INSTANCE only when it IS the base
+    // (`name == "assistant"`) or declares `extends = "assistant"` — and the
+    // `name` insert above just took the first of those away. Without this line
+    // every agent created here carries `role = "assistant"` yet is discovered by
+    // nothing that enumerates instances, so per-assistant surfaces
+    // (`GET /api/assistants/:id/memory`, startup home provisioning) answer 404
+    // until someone hand-edits the manifest. Skipped when the new agent IS the
+    // base, which would otherwise extend itself.
+    if crate::assistants::is_assistant_role(
+        agent_table
+            .get("role")
+            .and_then(|item| item.as_str())
+            .unwrap_or_default(),
+    ) && name != crate::assistants::ASSISTANT_BASE
+    {
+        agent_table.insert("extends", value(crate::assistants::ASSISTANT_BASE));
+    }
     if let Some(desc) = &req.description {
         agent_table.insert("description", value(desc.clone()));
     }
@@ -251,6 +269,47 @@ mod tests {
         std::fs::create_dir_all(&pkg).unwrap();
         std::fs::write(pkg.join("agent.toml"), agent_toml).unwrap();
         std::fs::write(pkg.join("persona.md"), "Base assistant persona.\n").unwrap();
+    }
+
+    /// #7428 regression: an agent created here must be DISCOVERABLE as an
+    /// Assistant instance.
+    ///
+    /// Why: `roster::is_instance` accepts a config only when it is the base
+    /// (`name == "assistant"`) or declares `extends = "assistant"`. This handler
+    /// copies the assistant template and overwrites `name`, which removes the
+    /// first condition and never supplied the second — so every agent the UI
+    /// created carried `role = "assistant"` yet appeared in no instance
+    /// enumeration. `GET /api/assistants/:id/memory` 404s on such an agent, and
+    /// startup home provisioning skips it. Against the pre-fix handler this test
+    /// fails on the `discover_instances` assertion.
+    #[tokio::test]
+    async fn a_created_agent_is_discovered_as_an_assistant_instance() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_template(tmp.path());
+
+        let resp = create_agent_at(
+            &[tmp.path().to_path_buf()],
+            CreateAgentRequest {
+                name: "alpha".to_string(),
+                description: None,
+                template: None,
+            },
+        )
+        .await;
+        assert_eq!(resp.status(), SC::CREATED);
+
+        let raw = std::fs::read_to_string(tmp.path().join("alpha").join("agent.toml")).unwrap();
+        assert!(
+            raw.contains("extends = \"assistant\""),
+            "the manifest declares its base: {raw}"
+        );
+
+        let found = crate::assistants::discover_instances(&[tmp.path().to_path_buf()]);
+        let alpha = crate::assistants::AssistantInstanceId::new("alpha").unwrap();
+        assert!(
+            found.contains(&alpha),
+            "a created agent is an Assistant instance; discovered: {found:?}"
+        );
     }
 
     /// Regression guard (demo-build fix): a new agent must be VISIBLE even

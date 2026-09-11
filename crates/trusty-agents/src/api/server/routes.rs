@@ -279,6 +279,15 @@ pub fn build_router_with_origins(
             "/api/agents/{name}/chat-history",
             axum::routing::get(agent_chat_history_route),
         )
+        // #7428: one memory palace per assistant, plus the opt-in fan-out that
+        // selects OTHER assistants whose palaces this one also recalls from.
+        // GET reports the RESOLVED palace (a palace is derived, so the stored
+        // value is routinely empty for an assistant that has one); PUT replaces
+        // the setting after validating every selected id.
+        .route(
+            "/api/assistants/{id}/memory",
+            axum::routing::get(super::assistant_memory::get).put(super::assistant_memory::put),
+        )
         // #4098: aggregated usage cost for the Costs tab — totals plus
         // by-agent/by-model/by-date breakdowns, folded read-time from
         // `.trusty-agents/state/usage.jsonl` and priced through the single

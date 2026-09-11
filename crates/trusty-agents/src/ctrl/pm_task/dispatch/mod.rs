@@ -24,6 +24,10 @@ mod persona_gate;
 // re-export `session_id_for` for the read path. `dispatch` itself stays
 // private, so exactly one function reaches crate scope.
 pub(super) mod persona_memory;
+// #7428: the palace-addressed trusty-memory reads (own palace plus opt-in
+// fan-out), split out of `persona_memory` for the same SLOC-cap reason as
+// `persona_gate` and to keep each drawer's source palace attached to it.
+mod persona_palace;
 // #446 (epic #3052): `[[plugins.python]]` registration, split out of
 // `persona.rs` for the same SLOC-cap reason as `persona_gate`.
 mod persona_plugins;

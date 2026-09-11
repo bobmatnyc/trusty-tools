@@ -29,10 +29,18 @@
 //!   - [`spawn_persist_turn`] writes the turn to the bound palace's
 //!     chat-session store so future sessions can recall past conversations.
 //!
+//! #7428 amends the palace half of all three: an assistant no longer reads the
+//! ONE palace its binding names. It reads its OWN palace — the binding's
+//! `palace` where one is declared, else its instance id — plus every other
+//! assistant's palace it opted into through `[memory] fan_out`. Resolution is
+//! `crate::assistants::memory`; the palace-addressed RPCs are
+//! [`super::persona_palace`]. Writes did NOT change: a turn is persisted to the
+//! own palace alone, because fan-out is a read grant.
+//!
 //! Degradation ladder (a down daemon must never break chat):
-//!   1. No `[[stores]]` binding, or one without a `palace` → [`render_memory_block`]
+//!   1. No `[[stores]]` binding at all → [`render_memory_block`]
 //!      returns `None`: zero prompt change, a real no-op. An agent with no
-//!      bound memory keeps saying it has none, because that is TRUE for it.
+//!      bound store keeps saying it has none, because that is TRUE for it.
 //!   2. Palace bound but unreachable → the block still renders, stating the
 //!      memory is temporarily unavailable and that the stored memories still
 //!      exist. The agent must not conclude it is stateless from one failed read.
@@ -58,11 +66,12 @@
 
 use std::time::Duration;
 
-use serde::Deserialize;
 use std::path::Path;
 
 use serde_json::json;
 
+use super::persona_palace;
+use crate::assistants::PalacePlan;
 use crate::stores::StoresConfig;
 use crate::untrusted::MEMORY_FENCE;
 
@@ -100,8 +109,11 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(3);
 /// collapsing the two is exactly the bug this module fixes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MemoryHealth {
-    /// The agent's binding declares no palace — it genuinely has no
-    /// cross-conversation recall.
+    /// No palace resolves for this agent at all — its name is not a usable
+    /// assistant instance id and its binding declares none, so it genuinely has
+    /// no cross-conversation recall. #7428: this is no longer the answer for a
+    /// binding that merely omits `palace` — an assistant's palace now defaults
+    /// to its instance id.
     NoPalaceBound,
     /// The palace answered (possibly with zero matching drawers).
     Reachable,
@@ -112,8 +124,13 @@ pub(crate) enum MemoryHealth {
 /// Live, introspected facts about the agent's `[[stores]]` binding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BindingFacts {
-    /// Bound trusty-memory palace id, when one is declared.
+    /// The assistant's OWN trusty-memory palace id, resolved by
+    /// `crate::assistants::memory::own_palace` — the binding's `palace` when it
+    /// declares one, else the home config's, else the instance id (#7428).
     pub(crate) palace: Option<String>,
+    /// #7428: palaces of the other assistants this one opted into reading.
+    /// Empty is the default and the common case.
+    pub(crate) fan_out: Vec<String>,
     /// Resolved trusty-search index id (declared `index`, else the store name).
     pub(crate) index: String,
     /// Real chunk count from the search daemon, when it answered.
@@ -127,10 +144,12 @@ pub(crate) struct BindingFacts {
 pub(crate) struct PersonaMemory {
     /// `None` when the agent declares no `[[stores]]` binding at all.
     pub(crate) binding: Option<BindingFacts>,
-    /// `identity`-tagged drawer contents — the agent's own self-description.
-    pub(crate) identity: Vec<String>,
-    /// Query-relevant drawer contents recalled for this turn.
-    pub(crate) recalled: Vec<String>,
+    /// `identity`-tagged drawers — the agent's own self-description. Read from
+    /// the OWN palace only: who an assistant is never comes from a fan-out.
+    pub(crate) identity: Vec<RecalledDrawer>,
+    /// Query-relevant drawers recalled for this turn, merged and ranked across
+    /// the own palace and every opted-in fan-out palace (#7428).
+    pub(crate) recalled: Vec<RecalledDrawer>,
     pub(crate) health: MemoryHealth,
 }
 
@@ -168,14 +187,34 @@ fn build_http_client() -> Option<reqwest::Client> {
         .ok()
 }
 
-/// Minimal projection of trusty-memory's `Drawer` — the recall and
-/// list-drawers routes both return this shape (recall adds `score`/`layer`,
-/// which ranking already applied server-side, so neither is read here).
-#[derive(Debug, Deserialize)]
-struct DrawerRow {
-    content: String,
-    #[serde(default)]
-    tags: Vec<String>,
+/// One drawer as the prompt renders it: its text, plus the palace it came
+/// from (#7428).
+///
+/// Why: with opt-in fan-out the block can carry drawers from several palaces,
+/// and a drawer out of ANOTHER assistant's memory is not this assistant's own
+/// recollection. Dropping the palace here would leave the model unable to tell
+/// the two apart, which is the one thing fan-out must never do.
+/// Test: `render_tags_every_drawer_with_its_source_palace`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RecalledDrawer {
+    pub(crate) palace: String,
+    pub(crate) content: String,
+}
+
+impl RecalledDrawer {
+    /// Truncated drawer text prefixed with its source palace, ready for the
+    /// fence. The palace id is config-derived (never drawer content), and the
+    /// whole line still goes through `MEMORY_FENCE.render_entry`.
+    fn render(&self) -> String {
+        MEMORY_FENCE.render_entry(&format!("(from palace `{}`) {}", self.palace, self.content))
+    }
+
+    fn from_drawer(drawer: &persona_palace::Drawer) -> Self {
+        Self {
+            palace: drawer.palace.clone(),
+            content: truncate_drawer(&drawer.content),
+        }
+    }
 }
 
 /// Truncate `s` to at most [`MAX_DRAWER_CHARS`] characters on a CHARACTER
@@ -193,64 +232,6 @@ fn truncate_drawer(s: &str) -> String {
     }
     let cut: String = trimmed.chars().take(MAX_DRAWER_CHARS).collect();
     format!("{cut}…")
-}
-
-/// Fetch drawers carrying an exact `tag` from `palace`.
-///
-/// Returns `Err` with a human-readable reason so the caller can surface it in
-/// the introspection block rather than silently degrading to "no memory".
-async fn fetch_drawers_by_tag(
-    socket: &Path,
-    palace: &str,
-    tag: &str,
-    limit: usize,
-) -> Result<Vec<DrawerRow>, String> {
-    let raw = memory_call(
-        socket,
-        "memory.drawers_list",
-        json!({ "palace_id": palace, "tag": tag, "limit": limit }),
-    )
-    .await?;
-    serde_json::from_value(raw).map_err(|e| format!("unreadable drawer list: {e}"))
-}
-
-/// Semantically recall `query` against `palace`.
-///
-/// The parameter is `query`, not the `q` the retired REST route took (#6286).
-/// The tool answers `{palace, query, results}` where the route answered a bare
-/// array, so the rows come out of `results`.
-async fn recall_drawers(
-    socket: &Path,
-    palace: &str,
-    query: &str,
-    top_k: usize,
-) -> Result<Vec<DrawerRow>, String> {
-    let raw = memory_call(
-        socket,
-        "memory_recall",
-        json!({ "palace": palace, "query": query, "top_k": top_k }),
-    )
-    .await?;
-    let results = raw
-        .get("results")
-        .cloned()
-        .ok_or_else(|| format!("recall from `{palace}` answered no results member"))?;
-    serde_json::from_value(results).map_err(|e| format!("unreadable recall response: {e}"))
-}
-
-/// One call on the trusty-memory daemon, with this module's error prose.
-///
-/// Why the reason strings are kept verbatim: they are rendered into the
-/// persona's introspection block, so "trusty-memory unreachable" has to stay
-/// distinguishable from a daemon that answered and refused.
-async fn memory_call(
-    socket: &Path,
-    method: &str,
-    params: serde_json::Value,
-) -> Result<serde_json::Value, String> {
-    trusty_common::memory_rpc::call_memory_tool_at(socket, method, params)
-        .await
-        .map_err(|e| format!("trusty-memory unreachable or refused: {e:#}"))
 }
 
 /// Probe the bound search index for its real chunk count.
@@ -293,6 +274,33 @@ async fn probe_index(
 /// Test: `build_persona_memory_*` (mock-daemon, `persona_memory_tests.rs`).
 pub(crate) async fn build_persona_memory(
     stores: &StoresConfig,
+    agent_name: &str,
+    memory_socket: Option<&Path>,
+    search_base: Option<&str>,
+    query: &str,
+) -> PersonaMemory {
+    let plan = crate::assistants::resolve_palace_plan(agent_name, stores.primary());
+    build_persona_memory_with_plan(stores, &plan, memory_socket, search_base, query).await
+}
+
+/// [`build_persona_memory`] against an explicit [`PalacePlan`].
+///
+/// Why: the `_with_plan` split is this crate's injected-dependency convention —
+/// the wrapper above resolves the plan off disk (`agent.toml` plus the
+/// assistant home's `config.toml`), and tests drive this core with a plan they
+/// state outright instead of provisioning a home under `$HOME`.
+/// What: probes the search index, ensures a DERIVED own palace exists, fetches
+/// `identity`-tagged drawers from the own palace only, and recalls `query`
+/// across the whole plan. Identity drawers are de-duplicated out of the recall
+/// list so a self-description that also scores well is not printed twice.
+/// Never returns an error: an unreachable daemon yields
+/// [`MemoryHealth::Unavailable`] with the reason, never a failed turn.
+/// Test: `build_persona_memory_recalls_across_fan_out_palaces`,
+/// `build_persona_memory_uses_the_instance_id_palace_without_a_binding`,
+/// `build_persona_memory_reports_unavailable_when_palace_create_fails`.
+async fn build_persona_memory_with_plan(
+    stores: &StoresConfig,
+    plan: &PalacePlan,
     memory_socket: Option<&Path>,
     search_base: Option<&str>,
     query: &str,
@@ -307,15 +315,17 @@ pub(crate) async fn build_persona_memory(
     let index = binding.resolved_index().to_string();
     let (index_connected, index_chunk_count) = probe_index(&client, search_base, &index).await;
     let facts = BindingFacts {
-        palace: binding.palace.clone(),
+        palace: plan.own.clone(),
+        fan_out: plan.fan_out.clone(),
         index,
         index_chunk_count,
         index_connected,
     };
 
-    let (Some(palace), Some(socket)) = (binding.palace.as_deref(), memory_socket) else {
-        // A store with no palace has no cross-conversation recall — that is a
-        // configuration fact, not a failure, and the block says so.
+    let (Some(palace), Some(socket)) = (plan.own.as_deref(), memory_socket) else {
+        // No palace resolves at all (an agent name that is not a usable
+        // instance id) — a configuration fact, not a failure, and the block
+        // says so.
         return PersonaMemory {
             binding: Some(facts),
             identity: Vec::new(),
@@ -324,8 +334,23 @@ pub(crate) async fn build_persona_memory(
         };
     };
 
-    let identity_rows = fetch_drawers_by_tag(socket, palace, IDENTITY_TAG, IDENTITY_LIMIT).await;
-    let recall_rows = recall_drawers(socket, palace, query, RECALL_TOP_K).await;
+    // #7428: a DERIVED palace is this crate's to create; a binding-declared one
+    // already exists. A creation failure is reported, never worked around — see
+    // `persona_palace::ensure_palace`.
+    if !plan.own_is_bound()
+        && let Err(reason) = persona_palace::ensure_palace(socket, palace).await
+    {
+        return PersonaMemory {
+            binding: Some(facts),
+            identity: Vec::new(),
+            recalled: Vec::new(),
+            health: MemoryHealth::Unavailable(reason),
+        };
+    }
+
+    let identity_rows =
+        persona_palace::identity_drawers(socket, palace, IDENTITY_TAG, IDENTITY_LIMIT).await;
+    let recall_rows = persona_palace::recall_across(socket, plan, query, RECALL_TOP_K).await;
 
     // Health follows whether recall — the load-bearing read — answered. A
     // missing identity tag is a content gap, not an outage.
@@ -334,25 +359,26 @@ pub(crate) async fn build_persona_memory(
         (Ok(_), Err(reason)) | (Err(reason), Err(_)) => MemoryHealth::Unavailable(reason.clone()),
     };
 
-    let identity: Vec<String> = identity_rows
+    let identity: Vec<RecalledDrawer> = identity_rows
         .unwrap_or_default()
         .iter()
-        .map(|d| truncate_drawer(&d.content))
+        .map(RecalledDrawer::from_drawer)
         .collect();
 
-    let recalled: Vec<String> = recall_rows
+    let recalled: Vec<RecalledDrawer> = recall_rows
         .unwrap_or_default()
         .iter()
         .filter(|d| !d.tags.iter().any(|t| t == IDENTITY_TAG))
-        .map(|d| truncate_drawer(&d.content))
+        .map(RecalledDrawer::from_drawer)
         .collect();
 
     tracing::info!(
         palace = %palace,
+        fan_out = plan.fan_out.len(),
         identity_drawers = identity.len(),
         recalled_drawers = recalled.len(),
         health = ?health,
-        "persona memory recalled from bound palace"
+        "persona memory recalled from this assistant's palace plan"
     );
 
     PersonaMemory {
@@ -389,6 +415,22 @@ fn render_introspection(facts: &BindingFacts, health: &MemoryHealth) -> String {
             "- No memory palace is bound to you, so you have no cross-conversation recall."
                 .to_string(),
         ),
+    }
+
+    // #7428: fan-out is opt-in and named, so the model is told exactly whose
+    // memory it can see rather than left to infer it from the drawer tags.
+    if !facts.fan_out.is_empty() {
+        lines.push(format!(
+            "- Shared memory from other assistants: {}. You were given READ access to these in \
+             settings. Entries recalled from them are tagged with their palace — they are that \
+             assistant's memory, not yours, so attribute them that way and never write to them.",
+            facts
+                .fan_out
+                .iter()
+                .map(|p| format!("`{p}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
 
     let index = &facts.index;
@@ -442,7 +484,7 @@ pub(crate) fn render_memory_block(memory: &PersonaMemory) -> Option<String> {
     if !memory.identity.is_empty() {
         out.push_str("\nWho you are (from your own identity memory):\n");
         for entry in &memory.identity {
-            out.push_str(&MEMORY_FENCE.render_entry(entry));
+            out.push_str(&entry.render());
         }
     }
 
@@ -461,7 +503,7 @@ pub(crate) fn render_memory_block(memory: &PersonaMemory) -> Option<String> {
         ),
         MemoryHealth::Reachable => {
             for entry in &memory.recalled {
-                out.push_str(&MEMORY_FENCE.render_entry(entry));
+                out.push_str(&entry.render());
             }
         }
     }
@@ -492,11 +534,14 @@ pub(crate) fn render_memory_block(memory: &PersonaMemory) -> Option<String> {
 /// in front of it (mirrors `classification::finish_turn`, #3840 critic
 /// HIGH-4). Failures are logged and dropped: losing a persisted turn must
 /// never surface as a failed chat turn.
-/// What: no-op unless the agent binds a palace. `chat_session_create` is the
-/// only path accepting a caller-supplied (hence resumable) session id.
+/// What: writes to the assistant's OWN palace and nothing else — #7428's
+/// fan-out is a READ grant, so a turn never lands in another assistant's
+/// memory however many palaces this turn recalled from. No-op when no palace
+/// resolves. `chat_session_create` is the only path accepting a
+/// caller-supplied (hence resumable) session id.
 /// Test: `persist_turn_creates_session_then_appends` (mock-daemon),
 /// `persist_turn_surfaces_rpc_envelope_errors`,
-/// `spawn_persist_turn_is_noop_without_palace`.
+/// `spawn_persist_turn_is_noop_without_a_socket`.
 /// Serialize complete chat persistence sequences across the API and channel processes.
 async fn acquire_chat_persistence_lock(
     socket: &Path,
@@ -564,8 +609,10 @@ pub(crate) fn spawn_persist_turn_with_activity(
     response: &str,
     activities: Vec<serde_json::Value>,
 ) {
+    // #7428: the own palace, by the one resolution rule — never a fan-out
+    // palace, whatever the recall side read this turn.
     let (Some(palace), Some(socket)) = (
-        stores.primary().and_then(|b| b.palace.clone()),
+        crate::assistants::resolve_palace_plan(agent_name, stores.primary()).own,
         memory_socket.map(Path::to_path_buf),
     ) else {
         return;

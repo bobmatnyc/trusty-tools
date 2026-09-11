@@ -360,16 +360,24 @@ impl Created {
 /// comes from `agent.toml`, and this file exists so instance-scoped settings
 /// (#4281's persisted selection, #4282's attached-index list) have a home to
 /// land in without another format decision.
-/// What: `id` plus an optional `display_name`. Unknown keys are IGNORED, not
-/// rejected — a user's hand-added key must never make their home "malformed".
+/// What: `id`, an optional `display_name`, and (#7428) the `[memory]` table
+/// naming this assistant's palace and its opt-in fan-out. Unknown keys are
+/// IGNORED, not rejected — a user's hand-added key must never make their home
+/// "malformed" — and every field defaults, so a `config.toml` written before a
+/// field existed still parses unchanged.
 /// Test: `super::tests::health_tests::tolerates_unknown_config_keys`,
-/// `super::tests::health_tests::reports_malformed_config`.
+/// `super::tests::health_tests::reports_malformed_config`,
+/// `super::tests::memory_tests::config_defaults_when_the_table_is_absent`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct AssistantHomeConfig {
     #[serde(default)]
     pub id: String,
     #[serde(default)]
     pub display_name: Option<String>,
+    /// #7428: this assistant's memory palace and opt-in fan-out. See
+    /// [`super::memory::MemoryConfig`] for the resolution rule.
+    #[serde(default)]
+    pub memory: super::memory::MemoryConfig,
 }
 
 /// The seeded `instructions.md` body for a fresh home.

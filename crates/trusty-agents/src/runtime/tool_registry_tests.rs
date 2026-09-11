@@ -2036,3 +2036,69 @@ fn gh_surface_registers_no_mutating_tool_even_for_l0() {
         );
     }
 }
+
+/// #7428 FENCE: the native memory tools reach no palace by default.
+///
+/// Why: `crate::memory::trusty_backed`'s `palace_id_for` keys palaces by
+/// content-type `Segment`, so under `TAGENT_MEMORY_BACKEND=trusty` every
+/// assistant's `memory_recall` / `store_memory` / `retrieve_memory` /
+/// `list_memory_keys` would share ONE process-global
+/// `trusty-agents-agent-memory` palace — a cross-assistant leak, and the exact
+/// thing one-palace-per-assistant exists to prevent. Re-keying that store per
+/// assistant is deliberately out of scope for #7428; this test is the fence
+/// that keeps the gap from widening meanwhile. It pins the CURRENT truth:
+/// `build_registry_for_agent` and `native_tool_registry` both register these
+/// tools with NO backend, so a default agent reaches no palace at all, shared
+/// or otherwise. Wiring a backend in without re-keying the palace per assistant
+/// turns this test red.
+/// What: dispatches each tool and requires the graceful "memory store not
+/// available" degradation, which is reachable only when `backend` is `None`.
+/// Test: this test IS the fence.
+#[tokio::test]
+async fn native_memory_tools_are_registered_without_a_backend() {
+    fn rendered(result: &crate::tools::traits::ToolResult) -> String {
+        match result {
+            crate::tools::traits::ToolResult::Success(body) => body.clone(),
+            crate::tools::traits::ToolResult::Error { message, .. } => message.clone(),
+        }
+    }
+
+    let reg = build_registry_for_agent(
+        "research-agent",
+        "researcher",
+        None,
+        None,
+        empty_skill_registry(),
+        empty_tag_registry(),
+        None,
+        crate::agents::AgentTier::L1Standard,
+        None,
+    )
+    .expect("research-agent builds a registry");
+    let recall = rendered(
+        &reg.dispatch("memory_recall", serde_json::json!({"query": "anything"}))
+            .await,
+    );
+    assert!(
+        recall.contains("memory store not available"),
+        "memory_recall reached a backend from a default registry: {recall}"
+    );
+
+    let mut native = crate::tools::ToolRegistry::new();
+    for tool in
+        crate::tools::native_tool_registry(None, crate::tools::NativeToolBackends::default())
+    {
+        native.register(tool);
+    }
+    for name in ["store_memory", "retrieve_memory", "list_memory_keys"] {
+        let out = rendered(
+            &native
+                .dispatch(name, serde_json::json!({"key": "k", "content": "v"}))
+                .await,
+        );
+        assert!(
+            out.contains("memory store not available"),
+            "{name} reached a backend without one being injected: {out}"
+        );
+    }
+}

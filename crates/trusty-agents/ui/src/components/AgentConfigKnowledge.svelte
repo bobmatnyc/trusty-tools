@@ -36,6 +36,10 @@
    */
   import { AlertCircle, Loader2 } from 'lucide-svelte';
   import AssistantKnowledgePipeline from './AssistantKnowledgePipeline.svelte';
+  // #7428: one memory palace per assistant, and the opt-in fan-out to other
+  // assistants' palaces. Its own component because the palace is a separate
+  // store from the OKG tree this pane's other sections describe.
+  import AssistantMemoryFanOut from './AssistantMemoryFanOut.svelte';
   export let agentName = '';
   import { KNOWLEDGE_MCP_ENDPOINTS, type OkgStoreBinding } from '../lib/agentConfig';
 
@@ -65,6 +69,7 @@
 
 <div class="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto">
   {#if agentName}<AssistantKnowledgePipeline {agentName} />{/if}
+  {#if agentName}<AssistantMemoryFanOut {agentName} />{/if}
   <section class="flex flex-col gap-2">
     <h3 class={heading}>Store bindings</h3>
     <p class="text-xs text-foundry-light-muted dark:text-foundry-text/60">
