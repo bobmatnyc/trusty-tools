@@ -1,0 +1,2 @@
+Fixed
+- The MCP spawn gate's `is_known_repo` now decides a local `repo_url` on its canonical full path — at or under a registered project's own canonical root, with symlinks resolved and `..` normalised — instead of its basename, so a directory named like a registered project but living elsewhere on disk (`/tmp/evil/trusty-tools`) is no longer allowlisted; a path that cannot be canonicalized is refused (#7066).

@@ -255,9 +255,11 @@ async fn mcp_initiated_spawn_rejects_repo_name_impersonation() {
 /// directory (never real network/git) so passing the gate is proven by
 /// reaching the DIFFERENT downstream "no git origin remote" error rather than
 /// the gate's own "disabled"/"unregistered" errors.
-/// What: registers a project whose name matches the local dir's basename,
-/// enables spawning, and asserts the resulting error is the local-path
-/// no-origin error, NOT a gate refusal.
+/// What: registers a project AT that local path — since #7066 the gate decides
+/// on the canonical full path, so the registered `repo_url` is the checkout
+/// itself (ADR-0055's supported `session_new` form), not a same-named directory
+/// anywhere on disk — enables spawning, and asserts the resulting error is the
+/// local-path no-origin error, NOT a gate refusal.
 /// Test: this function IS the test.
 #[tokio::test]
 #[serial]
@@ -270,8 +272,9 @@ async fn mcp_initiated_spawn_allowed_for_registered_project_reaches_provisioning
         DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await,
     );
 
-    // A local, non-git directory named "known-project" — `derive_name_from_url`
-    // derives "known-project" from its path, matching the registered project.
+    // A local, non-git directory registered BY ITS PATH — #7066: the gate
+    // matches the canonical full path, so this exact directory is what the
+    // registry has to name.
     let target_dir = TempDir::new().expect("target tempdir");
     let local_path = target_dir.path().join("known-project");
     std::fs::create_dir(&local_path).expect("create target dir");
@@ -280,7 +283,7 @@ async fn mcp_initiated_spawn_allowed_for_registered_project_reaches_provisioning
     registry
         .register(Project {
             name: "known-project".to_string(),
-            repo_url: "https://github.com/an-owner/known-project".to_string(),
+            repo_url: local_path.to_string_lossy().into_owned(),
             default_branch: "main".to_string(),
             stack_hint: None,
             tags: vec![],
@@ -309,6 +312,70 @@ async fn mcp_initiated_spawn_allowed_for_registered_project_reaches_provisioning
     assert!(
         !err.contains("disabled") && !err.contains("unregistered"),
         "the MCP gate must not be why this failed: {err}"
+    );
+}
+
+/// #7066: a directory that merely shares a BASENAME with a registered project,
+/// but lives outside it, must be refused end to end.
+///
+/// Why: the gate's local arm used to compare the target's last path segment
+/// against each registered project's `name`, so any directory named like a
+/// registered project satisfied the allowlist — and ADR-0055 left that as the
+/// only rule an MCP-initiated spawn reaches, because a remote `repo_url` is now
+/// refused before the gate runs.
+/// What: registers a project at one real directory, then targets a DIFFERENT
+/// directory with the same basename and asserts `spawn_managed` refuses it as
+/// unregistered with zero session records.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial]
+async fn mcp_initiated_spawn_rejects_a_same_basename_directory_outside_the_project() {
+    let _env = EnvGuard::set("1");
+
+    common::scratch_home(); // #6671
+    let root = TempDir::new().expect("root tempdir");
+    let state = std::sync::Arc::new(
+        DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await,
+    );
+
+    let fixture = TempDir::new().expect("fixture tempdir");
+    let registered = fixture.path().join("checkouts").join("known-project");
+    let impostor = fixture.path().join("elsewhere").join("known-project");
+    std::fs::create_dir_all(&registered).expect("create the registered checkout");
+    std::fs::create_dir_all(&impostor).expect("create the same-named impostor");
+
+    let registry = state.project_registry().await;
+    registry
+        .register(Project {
+            name: "known-project".to_string(),
+            repo_url: registered.to_string_lossy().into_owned(),
+            default_branch: "main".to_string(),
+            stack_hint: None,
+            tags: vec![],
+            description: None,
+            gh_user: None,
+            gh_account: None,
+            github: None,
+            commit_name: None,
+            commit_email: None,
+            worktree: None,
+        })
+        .await
+        .expect("register the legitimate checkout");
+
+    let err = spawn_managed(
+        &state,
+        trusty_mpm::session_manager::ManagedSessionId::new(),
+        base_params(&impostor.to_string_lossy(), true),
+    )
+    .await
+    .expect_err("a same-basename directory outside the project must be refused");
+    assert!(err.contains("unregistered"), "{err}");
+
+    let mgr = state.session_manager().await;
+    assert!(
+        mgr.list().await.is_empty(),
+        "a refused MCP spawn must create zero session records"
     );
 }
 

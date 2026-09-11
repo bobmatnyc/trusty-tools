@@ -19,8 +19,10 @@
 //! default `false`); [`is_known_repo`] is the pure #1837 allowlist predicate —
 //! for a remote-looking `repo_url` it requires a STRICT `(owner, repo)`
 //! identity match (never a bare repo-name match, which would be spoofable by
-//! an attacker-controlled host/owner), falling back to a derived-name match
-//! only for genuine local filesystem paths;
+//! an attacker-controlled host/owner), and for a local filesystem path it
+//! requires the CANONICAL FULL PATH to sit at or under a registered project's
+//! own canonical root (#7066 — a basename match let any directory named like a
+//! registered project satisfy the allowlist);
 //! [`ensure_mcp_spawn_allowed`] is the async orchestration `spawn_managed` calls
 //! FIRST — before any session id, workspace, or record is created — so a
 //! refusal has zero side effects. It takes the registry and config as plain
@@ -31,9 +33,11 @@
 //! `spawn_managed` is covered by `tests/mcp_spawn_gate.rs` (proves a rejected
 //! MCP spawn creates nothing and that CLI-origin spawns are never gated).
 
+use std::path::PathBuf;
+
 use trusty_common::github_path::parse_github_path;
 
-use crate::core::trusty_tools_config::TrustyToolsConfig;
+use crate::core::trusty_tools_config::{TrustyToolsConfig, workspace_subpath};
 use crate::project::{Project, ProjectRegistry, derive_name_from_url};
 
 /// Env var that force-enables MCP-initiated spawning, overriding config (#1836).
@@ -104,6 +108,35 @@ fn looks_like_remote_url(s: &str) -> bool {
     s.contains("://") || s.contains(':')
 }
 
+/// The canonical local root a registered project occupies on this host (#7066).
+///
+/// Why: [`is_known_repo`]'s local arm compares full paths, so it needs each
+/// registered project's OWN path, canonicalized exactly as the target is. A
+/// project reaches the registry in one of two shapes: its `repo_url` is the
+/// local checkout itself — ADR-0055 decision B, "the error must tell the
+/// operator to clone the repository first and pass the local path", enforced by
+/// [`crate::core::local_repo_url::require_local_repo_url`] — or it is a remote
+/// URL, in which case the daemon's provisioning home for that project is
+/// `<workspace_root>/<owner>/<repo>` ([`workspace_subpath`], #1220).
+/// Both are full paths; neither is a basename.
+/// What: `Some(root)` with symlinks resolved and `..` normalised, or `None`
+/// when the `repo_url` is a remote URL that does not parse as `(owner, repo)`,
+/// or when the resulting path cannot be canonicalized (missing, permission
+/// denied). A project with no resolvable root on this host contributes NOTHING
+/// to the allowlist — every failure arm refuses.
+/// Test: `tests::local_path_allowlist_decides_on_the_canonical_full_path`,
+/// `tests::a_remote_registered_project_is_known_at_its_workspace_checkout`.
+fn registered_local_root(project: &Project, config: &TrustyToolsConfig) -> Option<PathBuf> {
+    let declared = if looks_like_remote_url(&project.repo_url) {
+        workspace_subpath(config, &parse_github_path(&project.repo_url)?)
+    } else {
+        PathBuf::from(&project.repo_url)
+    };
+    // `canonicalize` resolves symlinks and `..` AND fails on a path that does
+    // not exist, so an unresolvable root simply yields no match.
+    std::fs::canonicalize(declared).ok()
+}
+
 /// Whether `repo_url` matches an already-registered project (#1837).
 ///
 /// Why: the second gate layer — even with MCP spawning enabled, a repo the
@@ -116,20 +149,34 @@ fn looks_like_remote_url(s: &str) -> bool {
 /// trusty-tools` impersonate a registered `owner/trusty-tools`, reproducing
 /// the exact ARIA-incident shape through the allowlist itself. Only when
 /// `repo_url` carries no such identity (a bare local filesystem path) does
-/// this fall back to the looser derived-name match — a URL can never reach
-/// that branch, so it cannot be used to impersonate a local checkout.
+/// this reach the local arm — and since #7066 that arm decides on the
+/// CANONICAL FULL PATH, not the basename. Before #7066 it compared the path's
+/// last segment against each registered project's `name`, so ANY directory
+/// named like a registered project — `/tmp/evil/trusty-tools` against a
+/// registered `trusty-tools` — satisfied the allowlist. ADR-0055 made that the
+/// SOLE rule an MCP-initiated spawn hits, because `session_new` now refuses
+/// every non-local `repo_url` before the gate runs.
 /// What: for a remote-looking `repo_url`, `true` iff some registered project's
-/// `repo_url` is ALSO remote-looking and parses to the same
-/// `(owner, repo)`. For a local-path `repo_url`, `true` iff some registered
-/// project's `name` equals the path's derived basename.
+/// `repo_url` is ALSO remote-looking and parses to the same `(owner, repo)`.
+/// For a local-path `repo_url`, `true` iff its canonical path IS, or is
+/// contained by, some registered project's canonical root
+/// ([`registered_local_root`]). Containment — not equality alone — is what
+/// admits a session against a worktree of a registered checkout (`.worktrees/`,
+/// `.claude/worktrees/<x>`); neither ADR-0055 nor #7066 fixes a worktree rule,
+/// and a path inside a registered project's own directory is exactly what the
+/// operator registered. Comparison is by path COMPONENT, so a sibling whose
+/// name merely starts with a registered root's name is not contained by it.
+/// Every error arm refuses: a target that cannot be canonicalized (missing,
+/// permission denied) is NOT known.
 /// Test: `tests::is_known_repo_matches_by_owner_and_repo_ignoring_git_suffix`,
 /// `tests::is_known_repo_matches_ssh_and_https_forms`,
 /// `tests::is_known_repo_rejects_same_repo_name_different_owner`,
-/// `tests::is_known_repo_matches_by_name`,
+/// `tests::local_path_allowlist_decides_on_the_canonical_full_path`,
+/// `tests::a_remote_registered_project_is_known_at_its_workspace_checkout`,
 /// `tests::is_known_repo_rejects_unregistered`,
 /// `tests::is_known_repo_remote_target_ignores_local_registered_url`.
 #[must_use]
-pub fn is_known_repo(projects: &[Project], repo_url: &str) -> bool {
+pub fn is_known_repo(projects: &[Project], config: &TrustyToolsConfig, repo_url: &str) -> bool {
     if looks_like_remote_url(repo_url) {
         let Some(target) = parse_github_path(repo_url) else {
             return false;
@@ -143,13 +190,14 @@ pub fn is_known_repo(projects: &[Project], repo_url: &str) -> bool {
         });
     }
 
-    // Bare local filesystem path — match by derived basename only. This arm
-    // is reachable ONLY for inputs `looks_like_remote_url` rejects, so a
-    // crafted URL can never ride this fallback to impersonate a project.
-    let target_name = derive_name_from_url(repo_url);
+    // #7066: a local path is decided on its canonical full path, never its
+    // basename. A failed canonicalization refuses rather than falling through.
+    let Ok(target) = std::fs::canonicalize(repo_url) else {
+        return false;
+    };
     projects
         .iter()
-        .any(|p| target_name.as_deref() == Some(p.name.as_str()))
+        .any(|p| registered_local_root(p, config).is_some_and(|root| target.starts_with(root)))
 }
 
 /// Enforce the two-layer MCP spawn gate before any provisioning begins
@@ -187,7 +235,7 @@ pub async fn ensure_mcp_spawn_allowed(
         .list()
         .await
         .map_err(|e| format!("failed to read project registry: {e}"))?;
-    if !is_known_repo(&projects, repo_url) {
+    if !is_known_repo(&projects, config, repo_url) {
         let name_hint = derive_name_from_url(repo_url).unwrap_or_else(|| repo_url.to_string());
         return Err(format!(
             "refusing MCP-initiated spawn for unregistered repo `{repo_url}`; register it \
@@ -356,12 +404,103 @@ mod tests {
 
     // ── is_known_repo matching ──────────────────────────────────────────────
 
+    /// #7066: the local-path arm decides on the CANONICAL FULL PATH of a
+    /// registered project, never the basename.
+    ///
+    /// Before this fix the arm compared the target's last path segment against
+    /// each registered project's `name`, so `/tmp/evil/trusty-tools` was
+    /// "known" merely for being named `trusty-tools` — and ADR-0055 left that
+    /// as the ONLY allowlist rule an MCP-initiated spawn reaches. The table
+    /// covers the shapes the basename rule got wrong alongside the ones the
+    /// path rule must keep admitting.
     #[test]
-    fn is_known_repo_matches_by_name() {
-        let projects = vec![make_project("aria", "https://github.com/duettoresearch/x")];
-        // A bare local filesystem path (never a remote URL) matches by
-        // derived basename — e.g. a local worktree path ending in `/aria`.
-        assert!(is_known_repo(&projects, "/Users/op/checkouts/aria"));
+    fn local_path_allowlist_decides_on_the_canonical_full_path() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        let registered = root.join("checkouts").join("trusty-tools");
+        let worktree = registered.join(".claude").join("worktrees").join("agent-x");
+        let sibling = root.join("checkouts").join("trusty-tools-evil");
+        let elsewhere = root.join("evil").join("trusty-tools");
+        for dir in [&worktree, &sibling, &elsewhere] {
+            std::fs::create_dir_all(dir).expect("create fixture dir");
+        }
+        let link = root.join("link-to-checkout");
+        std::os::unix::fs::symlink(&registered, &link).expect("symlink the registered checkout");
+
+        let projects = vec![make_project("trusty-tools", &registered.to_string_lossy())];
+        let cfg = TrustyToolsConfig::default();
+
+        let cases: Vec<(&str, PathBuf, bool)> = vec![
+            ("the registered checkout itself", registered.clone(), true),
+            ("a symlink to the registered checkout", link, true),
+            ("a worktree inside the registered checkout", worktree, true),
+            (
+                "a same-basename directory elsewhere on disk",
+                elsewhere,
+                false,
+            ),
+            (
+                "a sibling whose name merely starts with the root's",
+                sibling,
+                false,
+            ),
+            (
+                "a path that does not exist",
+                registered.join("missing"),
+                false,
+            ),
+            (
+                "a `..` escape out of the registered checkout",
+                registered.join("..").join("trusty-tools-evil"),
+                false,
+            ),
+        ];
+
+        for (what, path, expected) in cases {
+            assert_eq!(
+                is_known_repo(&projects, &cfg, &path.to_string_lossy()),
+                expected,
+                "{what}: {}",
+                path.display()
+            );
+        }
+    }
+
+    /// #7066: a project registered by its REMOTE url is known at the daemon's
+    /// own provisioning home for it — `<workspace_root>/<owner>/<repo>` (#1220)
+    /// — and at no other directory of the same name.
+    #[test]
+    fn a_remote_registered_project_is_known_at_its_workspace_checkout() {
+        let _g = crate::core::trusty_tools_config::env_test_lock();
+        // SAFETY: guarded by `env_test_lock`; this test exercises the CONFIG
+        // template, which the env var would otherwise override.
+        unsafe { std::env::remove_var(trusty_common::workspace_layout::WORKSPACE_ROOT_ENV) };
+
+        let tmp = TempDir::new().expect("tempdir");
+        let workspace = tmp.path().join("trusty-mpm-projects");
+        let checkout = workspace.join("bobmatnyc").join("trusty-tools");
+        let impostor = tmp.path().join("elsewhere").join("trusty-tools");
+        for dir in [&checkout, &impostor] {
+            std::fs::create_dir_all(dir).expect("create fixture dir");
+        }
+
+        let projects = vec![make_project(
+            "trusty-tools",
+            "https://github.com/bobmatnyc/trusty-tools",
+        )];
+        let cfg = TrustyToolsConfig {
+            workspace_root_template: Some(workspace.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+
+        assert!(
+            is_known_repo(&projects, &cfg, &checkout.to_string_lossy()),
+            "the project's own workspace checkout must be known"
+        );
+        assert!(
+            !is_known_repo(&projects, &cfg, &impostor.to_string_lossy()),
+            "a same-name directory outside the workspace checkout must not be"
+        );
     }
 
     #[test]
@@ -372,6 +511,7 @@ mod tests {
         )];
         assert!(is_known_repo(
             &projects,
+            &TrustyToolsConfig::default(),
             "https://github.com/bobmatnyc/trusty-tools.git"
         ));
     }
@@ -386,6 +526,7 @@ mod tests {
         )];
         assert!(is_known_repo(
             &projects,
+            &TrustyToolsConfig::default(),
             "git@github.com:bobmatnyc/trusty-tools.git"
         ));
     }
@@ -398,6 +539,7 @@ mod tests {
         )];
         assert!(!is_known_repo(
             &projects,
+            &TrustyToolsConfig::default(),
             "https://github.com/duettoresearch/aria"
         ));
     }
@@ -416,6 +558,7 @@ mod tests {
         )];
         assert!(!is_known_repo(
             &projects,
+            &TrustyToolsConfig::default(),
             "https://evil.example.com/attacker/trusty-tools"
         ));
     }
@@ -427,7 +570,11 @@ mod tests {
     #[test]
     fn is_known_repo_remote_target_ignores_local_registered_url() {
         let projects = vec![make_project("weird", "/some/local/path/repo")];
-        assert!(!is_known_repo(&projects, "https://github.com/some/repo"));
+        assert!(!is_known_repo(
+            &projects,
+            &TrustyToolsConfig::default(),
+            "https://github.com/some/repo"
+        ));
     }
 
     // ── ensure_mcp_spawn_allowed composed behaviour ─────────────────────────
