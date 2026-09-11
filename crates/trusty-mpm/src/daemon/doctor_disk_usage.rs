@@ -18,7 +18,7 @@
 use std::path::Path;
 
 use crate::core::disk_usage_guard::{
-    MAX_USAGE_PCT_KEY, MeasuredMount, read_configured, resolve_max_usage_pct,
+    MAX_USAGE_PCT_KEY, MeasuredMount, ResolvedThreshold, active_threshold_at, fmt_pct,
 };
 use crate::core::doctor::{CheckStatus, DoctorCheck};
 
@@ -34,26 +34,36 @@ pub(super) const CHECK_NAME: &str = "disk_usage";
 /// `threshold_pct`; otherwise `Ok`. Every message names the mount, the measured
 /// percent, the threshold and the config key, because the percentage alone does
 /// not tell an operator what to change.
+/// A rejected configured value is reported too: the threshold in force is then
+/// the default, and an operator who wrote `150` needs to be told their number
+/// is not the one being applied (#7497 review).
 /// Test: `disk_usage_is_ok_below_the_threshold`,
 /// `disk_usage_warns_at_the_threshold`,
-/// `disk_usage_is_unknown_when_the_mount_cannot_be_measured`.
-fn build_disk_usage_check(measured: Option<&MeasuredMount>, threshold_pct: u8) -> DoctorCheck {
+/// `disk_usage_is_unknown_when_the_mount_cannot_be_measured`,
+/// `disk_usage_warns_when_the_configured_value_was_rejected`.
+fn build_disk_usage_check(
+    measured: Option<&MeasuredMount>,
+    threshold: &ResolvedThreshold,
+) -> DoctorCheck {
+    let pct = threshold.threshold_pct;
+    let note = threshold.rejected_note();
     let Some(m) = measured else {
         return DoctorCheck::new(
             CHECK_NAME,
             CheckStatus::Unknown,
             format!(
                 "could not measure the mount holding the worktree store — disk headroom \
-                 against the {MAX_USAGE_PCT_KEY} threshold of {threshold_pct}% is undetermined \
+                 against the {MAX_USAGE_PCT_KEY} threshold of {pct}%{note} is undetermined \
                  (#7497)"
             ),
         );
     };
     let detail = format!(
-        "{} is at {:.1}% disk usage; {MAX_USAGE_PCT_KEY} threshold is {threshold_pct}%",
-        m.mount_point, m.usage_pct
+        "{} is at {} disk usage; {MAX_USAGE_PCT_KEY} threshold is {pct}%{note}",
+        m.mount_point,
+        fmt_pct(&m.usage_pct)
     );
-    if m.usage_pct >= f32::from(threshold_pct) {
+    if m.usage_pct >= f32::from(pct) {
         return DoctorCheck::new(
             CHECK_NAME,
             CheckStatus::Warn,
@@ -61,6 +71,15 @@ fn build_disk_usage_check(measured: Option<&MeasuredMount>, threshold_pct: u8) -
                 "{detail} — new worktrees are being REFUSED; free space or raise \
                  {MAX_USAGE_PCT_KEY} in the trusty-mpm config (#7497)"
             ),
+        );
+    }
+    if threshold.rejected.is_some() {
+        // #7497 review: the volume is fine, but the operator's configured
+        // threshold is not the one in force. Reporting Ok would hide that.
+        return DoctorCheck::new(
+            CHECK_NAME,
+            CheckStatus::Warn,
+            format!("{detail} — fix {MAX_USAGE_PCT_KEY} in the trusty-mpm config (#7497)"),
         );
     }
     DoctorCheck::new(CHECK_NAME, CheckStatus::Ok, detail)
@@ -77,10 +96,10 @@ fn build_disk_usage_check(measured: Option<&MeasuredMount>, threshold_pct: u8) -
 /// this wrapper is exercised by `tm doctor` itself.
 pub(super) fn check_disk_usage(repos_root: Option<&Path>, home: &Path) -> DoctorCheck {
     let target = repos_root.unwrap_or(home);
-    let threshold = resolve_max_usage_pct(read_configured(home)).threshold_pct;
+    let threshold = active_threshold_at(home);
     build_disk_usage_check(
         crate::core::disk_usage_guard::measure(target).as_ref(),
-        threshold,
+        &threshold,
     )
 }
 

@@ -7,6 +7,14 @@
 //! creation, and `.git/info/exclude` idempotency.
 //! What: pure-function + real-temp-repo assertions over the module's public
 //! and private surface (reachable via `use super::*`).
+//!
+//! #7497: every fixture here builds a worktree to exercise something ELSE —
+//! naming, sentinels, branch tracking — so it calls
+//! [`super::create_session_worktree_unchecked`], which skips the
+//! `disk.max_usage_pct` gate. That opt-out is deliberate and spelled at the
+//! call site: a fixture must not be judged by how full the developer's volume
+//! is, and the gate itself is covered by `tests/worktree_disk_usage_gate.rs`
+//! against pinned measurements.
 //! Test: this IS the test module.
 
 use super::*;
@@ -741,9 +749,12 @@ fn session_worktree_path_uses_dot_prefix() {
 
     // Call the production function.
     let name = "tm-test-repo-01";
-    let worktree_path =
-        create_session_worktree(base, name, &crate::session_manager::ManagedSessionId::new())
-            .expect("create_session_worktree must succeed on a real git repo");
+    let worktree_path = create_session_worktree_unchecked(
+        base,
+        name,
+        &crate::session_manager::ManagedSessionId::new(),
+    )
+    .expect("create_session_worktree must succeed on a real git repo");
 
     // (a) Path must be under <base>/.worktrees/ — hardcoded, not from production.
     let expected_parent = base.join(".worktrees");
@@ -818,7 +829,7 @@ fn worktree_name_collides_detects_existing_dir_and_branch() {
     );
 
     // (b) After creating the worktree, the SAME name must collide.
-    create_session_worktree(
+    create_session_worktree_unchecked(
         base,
         "tm-fresh-01",
         &crate::session_manager::ManagedSessionId::new(),
@@ -909,7 +920,7 @@ fn create_session_worktree_rejects_existing_worktree_dir() {
         .expect("git commit");
     assert!(commit.success(), "git commit failed");
 
-    let first = create_session_worktree(
+    let first = create_session_worktree_unchecked(
         base,
         "tm-dup-01",
         &crate::session_manager::ManagedSessionId::new(),
@@ -917,7 +928,7 @@ fn create_session_worktree_rejects_existing_worktree_dir() {
     .expect("first create must succeed");
     assert!(first.is_dir(), "first worktree must exist");
 
-    let second = create_session_worktree(
+    let second = create_session_worktree_unchecked(
         base,
         "tm-dup-01",
         &crate::session_manager::ManagedSessionId::new(),
@@ -1191,7 +1202,7 @@ fn create_session_worktree_sets_pull_upstream_and_worktree_scoped_push() {
     }
 
     // 4. Call the production function under test.
-    let worktree_path = create_session_worktree(
+    let worktree_path = create_session_worktree_unchecked(
         &base,
         "tm-pull-01",
         &crate::session_manager::ManagedSessionId::new(),
@@ -1515,7 +1526,7 @@ fn stale_base_fixture() -> StaleBase {
 fn session_worktree_branches_from_fetched_origin_not_stale_local_main() {
     let fx = stale_base_fixture();
 
-    let worktree = create_session_worktree(
+    let worktree = create_session_worktree_unchecked(
         &fx.base,
         "tm-stale-4957",
         &crate::session_manager::ManagedSessionId::new(),
@@ -1567,7 +1578,7 @@ fn session_worktree_falls_back_to_remote_tracking_ref_when_fetch_fails() {
         "the warning must name the failure: {warning}"
     );
 
-    let worktree = create_session_worktree(
+    let worktree = create_session_worktree_unchecked(
         &fx.base,
         "tm-offline-4957",
         &crate::session_manager::ManagedSessionId::new(),
@@ -1625,7 +1636,7 @@ fn session_worktree_without_a_remote_still_branches_from_head() {
         "a remote-less repo is not a degradation and must not warn"
     );
 
-    let worktree = create_session_worktree(
+    let worktree = create_session_worktree_unchecked(
         &repo,
         "tm-local-4957",
         &crate::session_manager::ManagedSessionId::new(),
@@ -1687,7 +1698,7 @@ fn worktrees_exclude_entry_protects_against_double_force_clean() {
     let url = format!("file://{}", origin.display());
     ensure_base_clone(&url, &base, None).expect("ensure_base_clone must succeed");
 
-    let worktree = create_session_worktree(
+    let worktree = create_session_worktree_unchecked(
         &base,
         "sess-1",
         &crate::session_manager::ManagedSessionId::new(),

@@ -14,18 +14,19 @@
 //!
 //! | Caller | Cannot measure | Why |
 //! |---|---|---|
-//! | [`check_worktree_creation`] — daemon/CLI provisioning | REFUSE | ADR-0037: an explicit worktree request that cannot be honoured is a failure, never a quieter placement |
+//! | [`check_measured`] — daemon/CLI provisioning | REFUSE | ADR-0037: an explicit worktree request that cannot be honoured is a failure, never a quieter placement |
 //! | [`bash_refusal`] — the PreToolUse Bash guard | ALLOW, with a `warn!` | every classifier in that guard family fails open; a guard that denied what it could not read would block ordinary work on any host it does not understand |
 //!
 //! Both read the SAME threshold and the SAME measurement, so the two surfaces
 //! cannot drift into disagreeing about whether the disk is full.
 //!
-//! Under a `cargo test` harness an ABSENT key disables the gate entirely
-//! ([`active_threshold_from`]) — a suite that creates worktrees as fixtures must
-//! not go red because of the developer's free space, which is a property of the
-//! machine and not of the change. An EXPLICIT key still applies, in a test
-//! process exactly as in production, which is how the gate's own end-to-end
-//! coverage drives the real path.
+//! The gate has NO ambient off switch (#7497 review). An earlier revision
+//! disabled the default threshold under `running_under_test_harness()`, which
+//! honours an inherited `TRUSTY_TEST_HARNESS=1` — one exported variable would
+//! have disabled the shipped 90% gate in an installed `tm` with nothing in the
+//! log. Determinism for tests comes from the other direction instead: a test
+//! writes an EXPLICIT `disk.max_usage_pct` into its own config home, or calls
+//! the ungated `create_session_worktree_unchecked`.
 //!
 //! Test: `disk_usage_guard_tests.rs`, plus the end-to-end
 //! `tests/worktree_disk_usage_gate.rs` and the `pm_guard_*disk*` cases in
@@ -64,6 +65,20 @@ pub struct MeasuredMount {
     pub usage_pct: f32,
 }
 
+/// Render a usage percentage, TRUNCATED rather than rounded.
+///
+/// Why: rounding prints `90.0%` for 89.96% — a number that reads as "at the
+/// threshold" beside an `Ok` status, and as a contradiction beside a refusal
+/// that did not happen. Truncating guarantees the printed figure is never
+/// above the measured one, so `90.0%` can only appear when the gate really is
+/// at or above 90 (#7497 review, LOW).
+/// What: one decimal place, toward zero.
+/// Test: `a_percent_is_truncated_not_rounded`.
+#[must_use]
+pub fn fmt_pct(usage_pct: &f32) -> String {
+    format!("{:.1}%", (usage_pct * 10.0).floor() / 10.0)
+}
+
 /// Why a worktree was refused (#7497).
 ///
 /// Why: the caller formats nothing — the refusal an operator reads has to name
@@ -71,15 +86,18 @@ pub struct MeasuredMount {
 /// per-call-site `format!` is how one of those goes missing.
 /// What: [`Self::OverThreshold`] is the measured refusal; [`Self::Unmeasurable`]
 /// is the fail-closed refusal the provisioning path raises when the mount could
-/// not be read at all.
-/// Test: `refusal_names_the_mount_the_threshold_and_the_key`.
+/// not be read at all. `rejected_note` is empty unless a configured value was
+/// discarded, in which case the message must not call the default "configured".
+/// Test: `refusal_names_the_mount_the_threshold_and_the_key`,
+/// `a_rejected_value_is_named_in_the_refusal`.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum WorktreeDiskError {
     /// The mount holding the target is at or above the configured threshold.
     #[error(
-        "refusing to create a worktree: {mount_point} is at {usage_pct:.1}% disk usage, at or \
-         above the configured disk.max_usage_pct threshold of {threshold_pct}% — free space or \
-         raise disk.max_usage_pct in {config_path}"
+        "refusing to create a worktree: {mount_point} is at {} disk usage, at or above the \
+         disk.max_usage_pct threshold of {threshold_pct}%{rejected_note} — free space or raise \
+         disk.max_usage_pct in {config_path}",
+        fmt_pct(usage_pct)
     )]
     OverThreshold {
         /// Mount point the measurement came from.
@@ -88,6 +106,8 @@ pub enum WorktreeDiskError {
         usage_pct: f32,
         /// Threshold in force at the time of the decision.
         threshold_pct: u8,
+        /// Empty, or the parenthetical naming a discarded configured value.
+        rejected_note: String,
         /// Config file the operator edits to change the threshold.
         config_path: String,
     },
@@ -95,14 +115,16 @@ pub enum WorktreeDiskError {
     /// The mount holding the target could not be measured.
     #[error(
         "refusing to create a worktree: disk usage for {path} could not be measured, and the \
-         disk.max_usage_pct threshold of {threshold_pct}% cannot be proved satisfied — set \
-         disk.max_usage_pct in {config_path}, or free space and retry"
+         disk.max_usage_pct threshold of {threshold_pct}%{rejected_note} cannot be proved \
+         satisfied — set disk.max_usage_pct in {config_path}, or free space and retry"
     )]
     Unmeasurable {
         /// The path whose mount could not be resolved.
         path: String,
         /// Threshold that would have applied.
         threshold_pct: u8,
+        /// Empty, or the parenthetical naming a discarded configured value.
+        rejected_note: String,
         /// Config file the operator edits to change the threshold.
         config_path: String,
     },
@@ -113,7 +135,10 @@ pub enum WorktreeDiskError {
 /// Why: `disk.max_usage_pct: 0` and `: 101` are not thresholds — one refuses
 /// every worktree, the other can never fire. Silently applying either turns an
 /// operator typo into a broken machine or a disabled gate, so both are rejected
-/// and reported, the way an unreadable keep-list is (#6927).
+/// and reported, the way an unreadable keep-list is (#6927). The rejection
+/// travels WITH the threshold rather than only into a `warn!`, so `tm doctor`
+/// and the refusal itself can both say the default is in force because a
+/// configured value was discarded (#7497 review).
 /// What: `threshold_pct` is always usable; `rejected` names the discarded value
 /// when one was discarded.
 /// Test: `zero_is_rejected_and_falls_back_to_the_default`,
@@ -124,6 +149,23 @@ pub struct ResolvedThreshold {
     pub threshold_pct: u8,
     /// `Some(reason)` when a configured value was discarded.
     pub rejected: Option<String>,
+}
+
+impl ResolvedThreshold {
+    /// The parenthetical a message appends after the threshold, or `""`.
+    ///
+    /// Why: a refusal that calls 90 "the configured threshold" while the
+    /// operator wrote 150 sends them looking for a 90 that is not in the file.
+    /// What: `" (the configured disk.max_usage_pct 150 is outside 1..=100 and
+    /// was ignored)"`, or empty when nothing was discarded.
+    /// Test: `a_rejected_value_is_named_in_the_refusal`.
+    #[must_use]
+    pub fn rejected_note(&self) -> String {
+        match &self.rejected {
+            Some(reason) => format!(" ({reason})"),
+            None => String::new(),
+        }
+    }
 }
 
 /// Resolve `disk.max_usage_pct` into a usable threshold.
@@ -151,35 +193,36 @@ pub fn resolve_max_usage_pct(configured: Option<u8>) -> ResolvedThreshold {
         Some(pct) => ResolvedThreshold {
             threshold_pct: DEFAULT_MAX_USAGE_PCT,
             rejected: Some(format!(
-                "{MAX_USAGE_PCT_KEY}: {pct} is outside 1..=100 and was ignored; \
-                 using the default {DEFAULT_MAX_USAGE_PCT}%"
+                "the configured {MAX_USAGE_PCT_KEY} {pct} is outside 1..=100 and was ignored; \
+                 the default {DEFAULT_MAX_USAGE_PCT}% applies"
             )),
         },
     }
 }
 
-/// The refusal a measured mount earns against `threshold_pct`, if any.
+/// The refusal a measured mount earns against `threshold`, if any.
 ///
 /// Why: the FAIL-OPEN half — an unmeasured mount yields no refusal, which is
 /// what the Bash guard needs and what the provisioning path deliberately does
 /// not use.
-/// What: `Some` when `usage_pct >= threshold_pct` (at the threshold refuses, per
-/// #7497), `None` when below it or when `measured` is `None`.
+/// What: `Some` when `usage_pct >= threshold.threshold_pct` (at the threshold
+/// refuses, per #7497), `None` when below it or when `measured` is `None`.
 /// Test: `over_threshold_refuses`, `at_threshold_refuses`,
 /// `under_threshold_allows`, `an_unmeasured_mount_yields_no_refusal`.
 #[must_use]
 pub fn refusal_if_over(
     measured: Option<&MeasuredMount>,
-    threshold_pct: u8,
+    threshold: &ResolvedThreshold,
 ) -> Option<WorktreeDiskError> {
     let measured = measured?;
-    if measured.usage_pct < f32::from(threshold_pct) {
+    if measured.usage_pct < f32::from(threshold.threshold_pct) {
         return None;
     }
     Some(WorktreeDiskError::OverThreshold {
         mount_point: measured.mount_point.clone(),
         usage_pct: measured.usage_pct,
-        threshold_pct,
+        threshold_pct: threshold.threshold_pct,
+        rejected_note: threshold.rejected_note(),
         config_path: config_path_display(),
     })
 }
@@ -188,23 +231,26 @@ pub fn refusal_if_over(
 ///
 /// Why: ADR-0037 — a provisioning path that explicitly asked for a worktree
 /// must not proceed on a measurement it could not take. "I could not check" is
-/// not "it is fine".
+/// not "it is fine". This arm is reachable because
+/// [`trusty_common::host_metrics::mount_for_path`] returns `None` for a
+/// filesystem the OS does not enumerate rather than guessing `/`.
 /// What: `measured == None` is [`WorktreeDiskError::Unmeasurable`]; otherwise
 /// [`refusal_if_over`] decides.
 /// Test: `an_unmeasurable_mount_fails_closed`, `over_threshold_refuses`.
 pub fn check_usage(
     measured: Option<&MeasuredMount>,
-    threshold_pct: u8,
+    threshold: &ResolvedThreshold,
     path: &Path,
 ) -> Result<(), WorktreeDiskError> {
     let Some(measured) = measured else {
         return Err(WorktreeDiskError::Unmeasurable {
             path: path.display().to_string(),
-            threshold_pct,
+            threshold_pct: threshold.threshold_pct,
+            rejected_note: threshold.rejected_note(),
             config_path: config_path_display(),
         });
     };
-    match refusal_if_over(Some(measured), threshold_pct) {
+    match refusal_if_over(Some(measured), threshold) {
         Some(err) => Err(err),
         None => Ok(()),
     }
@@ -216,7 +262,8 @@ pub fn check_usage(
 /// it stays pure.
 /// What: delegates to [`trusty_common::host_metrics::mount_for_path`], which
 /// resolves the nearest existing ancestor (the worktree does not exist yet) and
-/// picks its mount by device id. `None` when the OS lists no matching mount.
+/// picks its mount by device id. `None` when the OS lists no mount on that
+/// device — an unmeasurable result, never a substituted one.
 /// Test: covered live by `tests/worktree_disk_usage_gate.rs`; the selection
 /// rule itself is tested in `trusty_common::host_metrics`.
 #[must_use]
@@ -227,19 +274,32 @@ pub fn measure(path: &Path) -> Option<MeasuredMount> {
     })
 }
 
+/// Gate the creation of a new worktree at `path` against an ALREADY-TAKEN
+/// measurement (fail closed).
+///
+/// Why: the seam the end-to-end tests need. Threading the measurement through
+/// is what lets `tests/worktree_disk_usage_gate.rs` pin a synthetic percentage
+/// and assert the real entry point's behaviour deterministically, instead of
+/// passing silently on a runner whose disk sits outside the expressible
+/// range (#7497 review, MEDIUM 2).
+/// What: resolves the operator's threshold and applies [`check_usage`].
+/// Test: `tests/worktree_disk_usage_gate.rs`.
+pub fn check_measured(
+    path: &Path,
+    measured: Option<&MeasuredMount>,
+) -> Result<(), WorktreeDiskError> {
+    check_usage(measured, &active_threshold(), path)
+}
+
 /// Gate the creation of a new worktree at `path` (fail closed).
 ///
 /// Why: the single entry point every tm-owned provisioning path calls, so
 /// `tm session new`, `tm launch`, the MCP `session_new` and the console all
 /// refuse identically.
-/// What: resolves the threshold ([`active_threshold`] — `None` disables the
-/// gate), measures `path`'s mount, and applies [`check_usage`].
+/// What: measures `path`'s mount and applies [`check_measured`].
 /// Test: `tests/worktree_disk_usage_gate.rs`.
 pub fn check_worktree_creation(path: &Path) -> Result<(), WorktreeDiskError> {
-    let Some(threshold_pct) = active_threshold() else {
-        return Ok(());
-    };
-    check_usage(measure(path).as_ref(), threshold_pct, path)
+    check_measured(path, measure(path).as_ref())
 }
 
 /// The refusal reason a `git worktree add` targeting `path` earns (fail open).
@@ -249,41 +309,42 @@ pub fn check_worktree_creation(path: &Path) -> Result<(), WorktreeDiskError> {
 /// fails open, and a guard that denied what it could not read would block
 /// ordinary work on any host it does not understand. The `warn!` is what keeps
 /// that silence from being total.
-/// What: `None` when the gate is off, the mount is unmeasurable, or usage is
-/// below the threshold; `Some(message)` otherwise.
+/// What: `None` when the mount is unmeasurable or usage is below the threshold;
+/// `Some(message)` otherwise.
 /// Test: `an_unmeasured_mount_yields_no_refusal`, and the `pm_guard_*disk*`
 /// cases in `tests/tm_hook_pm_guard.rs`.
 #[must_use]
 pub fn bash_refusal(path: &Path) -> Option<String> {
-    let threshold_pct = active_threshold()?;
+    let threshold = active_threshold();
     let measured = measure(path);
     if measured.is_none() {
         // #7497: fail OPEN here — see this function's doc for why the Bash
         // guard's posture differs from the provisioning path's.
         warn!(
             path = %path.display(),
-            threshold_pct,
+            threshold_pct = threshold.threshold_pct,
             "disk-usage gate: could not measure the mount holding this worktree target — allowing"
         );
         return None;
     }
-    refusal_if_over(measured.as_ref(), threshold_pct).map(|e| e.to_string())
+    refusal_if_over(measured.as_ref(), &threshold).map(|e| e.to_string())
 }
 
-/// The threshold in force for this process, or `None` when the gate is off.
+/// The threshold in force for this process.
 ///
-/// Why: named so the test-harness rule (see the module doc) is stated once
-/// rather than at each gate.
+/// Why: named so the resolution is stated once rather than at each gate. There
+/// is deliberately no "gate off" answer — see the module doc.
 /// What: reads `disk.max_usage_pct` from the operator's config under
-/// `dirs::home_dir()` and applies [`active_threshold_from`].
-/// Test: `active_threshold_from` carries the tested decision table.
+/// `dirs::home_dir()` and resolves it through [`resolve_max_usage_pct`]. An
+/// unknown home is the documented absent case: the default applies.
+/// Test: `active_threshold_at_reads_the_operators_value`,
+/// `an_unreadable_config_leaves_the_default_in_force`.
 #[must_use]
-pub fn active_threshold() -> Option<u8> {
-    let Some(home) = dirs::home_dir() else {
-        // No home is "no config", which is the documented absent case.
-        return active_threshold_from(None, trusty_common::running_under_test_harness());
-    };
-    active_threshold_at(&home, trusty_common::running_under_test_harness())
+pub fn active_threshold() -> ResolvedThreshold {
+    match dirs::home_dir() {
+        Some(home) => active_threshold_at(&home),
+        None => resolve_max_usage_pct(None),
+    }
 }
 
 /// [`active_threshold`] against an explicit home directory (hermetic).
@@ -291,46 +352,29 @@ pub fn active_threshold() -> Option<u8> {
 /// Why: the production reader resolves `dirs::home_dir()`, which a test must
 /// not depend on. Pointing `base` at a `tempfile::TempDir` is what lets the
 /// config→threshold path be asserted without touching the operator's file.
-/// What: [`read_configured`] under `base`, then [`active_threshold_from`].
+/// What: [`read_configured`] under `base`, then [`resolve_max_usage_pct`]. A
+/// discarded value is `warn!`-logged here, once, in addition to travelling with
+/// the returned threshold.
 /// Test: `active_threshold_at_reads_the_operators_value`,
 /// `an_unreadable_config_leaves_the_default_in_force`.
 #[must_use]
-pub fn active_threshold_at(base: &Path, under_test_harness: bool) -> Option<u8> {
-    active_threshold_from(read_configured(base), under_test_harness)
-}
-
-/// The decision table behind [`active_threshold`], with both inputs injected.
-///
-/// Why: env-free and filesystem-free, so the test-harness rule is asserted
-/// without a test process having to lie about what it is.
-/// What: an EXPLICIT value always applies (validated through
-/// [`resolve_max_usage_pct`], so a rejected one becomes the default rather than
-/// a hole). An ABSENT value is the default in production and NO GATE under a
-/// cargo test harness — a fixture worktree must not depend on the developer's
-/// free space.
-/// Test: `an_explicit_threshold_applies_under_a_test_harness`,
-/// `an_absent_threshold_disables_the_gate_under_a_test_harness`,
-/// `an_absent_threshold_is_the_default_in_production`.
-#[must_use]
-pub fn active_threshold_from(configured: Option<u8>, under_test_harness: bool) -> Option<u8> {
-    if configured.is_none() && under_test_harness {
-        return None;
-    }
-    let resolved = resolve_max_usage_pct(configured);
+pub fn active_threshold_at(base: &Path) -> ResolvedThreshold {
+    let resolved = resolve_max_usage_pct(read_configured(base));
     if let Some(reason) = &resolved.rejected {
         warn!("disk-usage gate: {reason}");
     }
-    Some(resolved.threshold_pct)
+    resolved
 }
 
 /// Read `disk.max_usage_pct` from the config under `base`.
 ///
-/// Why: the gate must distinguish "the operator set a threshold" from "no
-/// section" — the test-harness rule above turns on exactly that difference.
+/// Why: the gate needs the operator's value, and must not let an unrelated typo
+/// elsewhere in the file disable a PROTECTIVE gate (#6927's lesson).
 /// What: `<base>/.trusty-tools/trusty-mpm/config.yaml`. An absent file is
-/// `None`; an unreadable one is `None` plus a `warn!`, which leaves the
-/// PRODUCTION default in force rather than disabling a protective gate.
-/// Test: `active_threshold_at_reads_the_operators_value`,
+/// `None`; an unreadable one is `None` plus a `warn!` — and `None` resolves to
+/// the default 90, so an unreadable config gates at the default rather than not
+/// at all.
+/// Test: `an_absent_section_reads_as_no_configured_value`,
 /// `an_unreadable_config_leaves_the_default_in_force`.
 pub(crate) fn read_configured(base: &Path) -> Option<u8> {
     let path = trusty_common::crate_config::crate_config_path_at(base, CRATE_NAME);

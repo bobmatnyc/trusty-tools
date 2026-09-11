@@ -18,7 +18,15 @@ Added
   family (#7497).
 - A `disk.max_usage_pct` outside `1..=100` is rejected and reported rather than
   applied, falling back to 90 — a typo can neither refuse every worktree nor
-  silently disable the gate. An absent `disk:` section changes nothing (#7497).
+  silently disable the gate. The rejection travels into the refusal and into
+  `tm doctor`, which Warns naming the discarded value, so a `150` in the file is
+  never reported as a configured `90`. An absent `disk:` section changes nothing
+  (#7497).
+- The gate has no ambient off switch: no environment variable disables it, and
+  an unreadable config leaves the default 90% in force rather than lifting the
+  gate. A test that needs a different answer writes an explicit
+  `disk.max_usage_pct` in its own config home, or calls the ungated
+  `create_session_worktree_unchecked` (#7497).
 - `tm doctor` gains a `disk_usage` check: the worktree store's mount against
   the threshold — `Ok` below it, `Warn` at or above it (the gate is refusing),
   `Unknown` when the mount could not be measured (#7497).

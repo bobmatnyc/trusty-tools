@@ -6,7 +6,8 @@
 //! percentage.
 //! What: threshold resolution (absent / in range / rejected), the at/over/under
 //! comparison, the two failure postures (fail closed for provisioning, fail
-//! open for the Bash guard), the test-harness rule, and the refusal text.
+//! open for the Bash guard), the refusal text, and the absence of any ambient
+//! off switch.
 //! Test: this file IS the test.
 
 use std::path::Path;
@@ -18,6 +19,14 @@ fn measured(usage_pct: f32) -> MeasuredMount {
     MeasuredMount {
         mount_point: "/System/Volumes/Data".to_string(),
         usage_pct,
+    }
+}
+
+/// A threshold with nothing rejected.
+fn threshold(pct: u8) -> ResolvedThreshold {
+    ResolvedThreshold {
+        threshold_pct: pct,
+        rejected: None,
     }
 }
 
@@ -79,13 +88,32 @@ fn above_one_hundred_is_rejected_and_falls_back_to_the_default() {
     );
 }
 
+/// Why (#7497 review, MEDIUM 1): with `max_usage_pct: 150` the earlier refusal
+///      called 90 "the configured threshold", sending the operator to look for
+///      a 90 that is nowhere in their file.
+/// What: the rejection travels with the threshold into the message, which names
+///      the discarded value and says the default applies.
+/// Test: this test.
+#[test]
+fn a_rejected_value_is_named_in_the_refusal() {
+    let resolved = resolve_max_usage_pct(Some(150));
+    let err = refusal_if_over(Some(&measured(95.0)), &resolved).expect("95% >= 90% refuses");
+    let text = err.to_string();
+    assert!(text.contains("threshold of 90%"), "{text}");
+    assert!(text.contains("150"), "the discarded value is named: {text}");
+    assert!(
+        text.contains("outside 1..=100"),
+        "the message says WHY it was discarded: {text}"
+    );
+}
+
 /// Why: the comparison is the gate. An off-by-one at the boundary is the
 ///      difference between refusing at 90% and refusing at 91%.
 /// What: strictly over refuses.
 /// Test: this test.
 #[test]
 fn over_threshold_refuses() {
-    assert!(refusal_if_over(Some(&measured(91.0)), 90).is_some());
+    assert!(refusal_if_over(Some(&measured(91.0)), &threshold(90)).is_some());
 }
 
 /// Why (#7497 decision 3): the threshold is inclusive — "at or above".
@@ -94,7 +122,7 @@ fn over_threshold_refuses() {
 #[test]
 fn at_threshold_refuses() {
     assert!(
-        refusal_if_over(Some(&measured(90.0)), 90).is_some(),
+        refusal_if_over(Some(&measured(90.0)), &threshold(90)).is_some(),
         "usage exactly AT the threshold must refuse"
     );
 }
@@ -105,7 +133,7 @@ fn at_threshold_refuses() {
 /// Test: this test.
 #[test]
 fn under_threshold_allows() {
-    assert!(refusal_if_over(Some(&measured(89.9)), 90).is_none());
+    assert!(refusal_if_over(Some(&measured(89.9)), &threshold(90)).is_none());
 }
 
 /// Why (#7497 decision 4, Fail-Open Check): the Bash guard ALLOWS what it could
@@ -115,24 +143,26 @@ fn under_threshold_allows() {
 #[test]
 fn an_unmeasured_mount_yields_no_refusal() {
     assert!(
-        refusal_if_over(None, 1).is_none(),
+        refusal_if_over(None, &threshold(1)).is_none(),
         "the fail-OPEN decision must allow an unmeasurable mount, even at a \
          threshold of 1% — a deny here is the regression this test exists for"
     );
 }
 
 /// Why (#7497 decision 4, ADR-0037): the provisioning path is the opposite —
-///      a request it cannot prove safe fails.
+///      a request it cannot prove safe fails. Reachable since the #7497 review:
+///      `mount_for_path` no longer substitutes `/` for an unenumerated mount.
 /// What: the same unmeasured input the test above allows is an error here, and
 ///      the error names the path.
 /// Test: this test.
 #[test]
 fn an_unmeasurable_mount_fails_closed() {
-    let err = check_usage(None, 90, Path::new("/some/worktree"))
+    let err = check_usage(None, &threshold(90), Path::new("/some/worktree"))
         .expect_err("provisioning must refuse what it cannot measure");
     let text = err.to_string();
     assert!(text.contains("/some/worktree"), "{text}");
     assert!(text.contains("could not be measured"), "{text}");
+    assert!(text.contains("90%"), "{text}");
 }
 
 /// Why: the refusal is the whole operator-facing deliverable — mount, measured
@@ -141,7 +171,7 @@ fn an_unmeasurable_mount_fails_closed() {
 /// Test: this test.
 #[test]
 fn refusal_names_the_mount_the_threshold_and_the_key() {
-    let err = refusal_if_over(Some(&measured(92.4)), 90).expect("92.4% >= 90% refuses");
+    let err = refusal_if_over(Some(&measured(92.4)), &threshold(90)).expect("92.4% >= 90% refuses");
     let text = err.to_string();
     assert!(text.contains("/System/Volumes/Data"), "mount: {text}");
     assert!(text.contains("92.4"), "measured percent: {text}");
@@ -150,43 +180,37 @@ fn refusal_names_the_mount_the_threshold_and_the_key() {
     assert!(text.contains("config.yaml"), "config file: {text}");
 }
 
-/// Why: an operator who configured a threshold means it, test process or not —
-///      this is what lets the gate's own end-to-end tests drive the real path.
-/// What: an explicit value applies under a test harness.
+/// Why (#7497 review, LOW): a rounded `90.0%` printed beside an `Ok` status —
+///      or beside a refusal that did not happen — reads as a contradiction.
+/// What: truncation toward zero, so the printed figure never exceeds the
+///      measured one.
 /// Test: this test.
 #[test]
-fn an_explicit_threshold_applies_under_a_test_harness() {
-    assert_eq!(active_threshold_from(Some(42), true), Some(42));
+fn a_percent_is_truncated_not_rounded() {
+    assert_eq!(fmt_pct(&89.96), "89.9%");
+    assert_eq!(fmt_pct(&90.0), "90.0%");
+    assert_eq!(fmt_pct(&92.45), "92.4%");
 }
 
-/// Why: a fixture worktree must not depend on the developer's free space.
-/// What: absent + test harness disables the gate.
+/// Why (#7497 review, HIGH 3): the gate must have NO ambient off switch. An
+///      earlier revision disabled the default threshold whenever
+///      `TRUSTY_TEST_HARNESS=1` was inherited, so one exported variable turned
+///      the shipped gate off in an installed `tm` with nothing in the log.
+/// What: with no config at all, the threshold is the default — and this test
+///      process is itself a cargo test harness, which is exactly the condition
+///      that used to disable it.
 /// Test: this test.
 #[test]
-fn an_absent_threshold_disables_the_gate_under_a_test_harness() {
-    assert_eq!(active_threshold_from(None, true), None);
-}
-
-/// Why: in production the default IS the feature — 90% with no config at all.
-/// What: absent + not a test harness resolves to 90.
-/// Test: this test.
-#[test]
-fn an_absent_threshold_is_the_default_in_production() {
-    assert_eq!(
-        active_threshold_from(None, false),
-        Some(DEFAULT_MAX_USAGE_PCT)
+fn a_test_harness_does_not_disable_the_default_threshold() {
+    let home = tempfile::tempdir().expect("tempdir");
+    assert!(
+        trusty_common::running_under_test_harness(),
+        "precondition: these tests run in the harness the old seam keyed on"
     );
-}
-
-/// Why: a rejected value must not become a permissive threshold even on the
-///      live resolution path.
-/// What: `Some(200)` resolves to the default, never to `200` or to `None`.
-/// Test: this test.
-#[test]
-fn a_rejected_value_still_yields_the_default_threshold() {
     assert_eq!(
-        active_threshold_from(Some(200), false),
-        Some(DEFAULT_MAX_USAGE_PCT)
+        active_threshold_at(home.path()).threshold_pct,
+        DEFAULT_MAX_USAGE_PCT,
+        "no config plus a test harness must still gate at the default"
     );
 }
 
@@ -197,20 +221,23 @@ fn a_rejected_value_still_yields_the_default_threshold() {
 fn active_threshold_at_reads_the_operators_value() {
     let home = tempfile::tempdir().expect("tempdir");
     write_config(home.path(), "disk:\n  max_usage_pct: 55\n");
-    assert_eq!(active_threshold_at(home.path(), true), Some(55));
+    let resolved = active_threshold_at(home.path());
+    assert_eq!(resolved.threshold_pct, 55);
+    assert!(resolved.rejected.is_none());
 }
 
 /// Why (#6927's lesson, applied here): a protective gate must not be disabled
 ///      by an unrelated typo elsewhere in the file.
-/// What: an unparseable config leaves the PRODUCTION default in force.
+/// What: an unparseable config leaves the default in force — never `None`, and
+///      never a permissive threshold.
 /// Test: this test.
 #[test]
 fn an_unreadable_config_leaves_the_default_in_force() {
     let home = tempfile::tempdir().expect("tempdir");
     write_config(home.path(), "disk:\n  max_usage_pct: [not, a, number\n");
     assert_eq!(
-        active_threshold_at(home.path(), false),
-        Some(DEFAULT_MAX_USAGE_PCT),
+        active_threshold_at(home.path()).threshold_pct,
+        DEFAULT_MAX_USAGE_PCT,
         "an unreadable config must not disable the gate"
     );
 }

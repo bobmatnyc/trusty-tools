@@ -44,6 +44,44 @@ fn isolated_home() -> tempfile::TempDir {
     tempfile::tempdir().expect("tempdir")
 }
 
+/// Write `disk.max_usage_pct: <pct>` into `home` (#7497).
+fn write_disk_threshold(home: &std::path::Path, pct: u8) {
+    let dir = home.join(".trusty-tools").join("trusty-mpm");
+    std::fs::create_dir_all(&dir).expect("create config dir");
+    std::fs::write(
+        dir.join("config.yaml"),
+        format!("disk:\n  max_usage_pct: {pct}\n"),
+    )
+    .expect("write config");
+}
+
+/// The `$HOME` every spawned guard child gets unless its caller names one
+/// (#7497).
+///
+/// Why: the child is the real `tm` binary, so it reads a real config. Left on
+/// the developer's `$HOME` it would apply the shipped 90% default, and whether
+/// an ordinary `git worktree add` payload denied would depend on how full that
+/// machine's volume is. Pinning an explicit 100% threshold makes every case
+/// below deterministic without any ambient off switch — the gate has none by
+/// design.
+/// What: one scratch home per test PROCESS, created once, carrying only the
+/// `disk:` section. `keep()`-ed because a `static` is never dropped; it lands
+/// under `/tmp` with the crate's `tm-test-` prefix, which
+/// `test_support::sweep_stale_test_dirs` reaps after a day.
+fn default_hook_home() -> &'static std::path::Path {
+    static HOME: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    HOME.get_or_init(|| {
+        let dir = tempfile::Builder::new()
+            .prefix("tm-test-hook-home-")
+            .tempdir_in("/tmp")
+            .expect("create hook scratch $HOME")
+            .keep();
+        write_disk_threshold(&dir, 100);
+        dir
+    })
+    .as_path()
+}
+
 /// Spawn `tm hook --pm-guard` with the given stdin JSON and optional extra env,
 /// returning stdout as a string. Asserts a clean `exit 0` (fail-open contract).
 ///
@@ -99,14 +137,15 @@ fn spawn_pm_guard(
         .env_remove("TRUSTY_MPM_PM_UNRESTRICTED")
         .env_remove("TRUSTY_MPM_PM_DENY_BY_DEFAULT")
         .env_remove("TM_MANAGED_SESSION_ID")
-        // #7497: the child is `target/<profile>/tm`, outside `deps/`, so it
-        // does not detect itself as a test process. Without this the
-        // `disk.max_usage_pct` gate would apply its production default to every
-        // `git worktree add` payload below, and whether those cases denied
-        // would depend on how full the runner's disk happens to be. The two
-        // disk cases that DO exercise the gate pin an explicit threshold in
-        // their own config home, which outranks this.
-        .env(trusty_common::test_harness::FORCE_ENV, "1")
+        // #7497: point the child at a config home whose `disk.max_usage_pct` is
+        // 100, so the disk gate can never deny an ordinary `git worktree add`
+        // payload below on a runner whose volume happens to be full. An
+        // EXPLICIT threshold is the only thing that moves this gate — there is
+        // deliberately no env var that disables it — and a caller passing its
+        // own `HOME` in `extra_env` (the two disk cases, and every
+        // budget-eligible case) overrides this line, since a later `.env` for
+        // the same key wins.
+        .env("HOME", default_hook_home())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -688,13 +727,7 @@ fn in_project_worktree_add_payload(agent_id: Option<&str>) -> String {
 /// absent-key default is disabled under a test harness on purpose.
 fn disk_threshold_home(max_usage_pct: u8) -> tempfile::TempDir {
     let home = isolated_home();
-    let dir = home.path().join(".trusty-tools").join("trusty-mpm");
-    std::fs::create_dir_all(&dir).expect("create config dir");
-    std::fs::write(
-        dir.join("config.yaml"),
-        format!("disk:\n  max_usage_pct: {max_usage_pct}\n"),
-    )
-    .expect("write config");
+    write_disk_threshold(home.path(), max_usage_pct);
     home
 }
 

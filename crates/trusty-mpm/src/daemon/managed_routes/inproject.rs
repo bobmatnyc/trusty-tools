@@ -506,7 +506,63 @@ pub fn worktree_name_collides(base_path: &Path, worktree_name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Create a per-session git worktree branched off the base clone.
+/// Create a per-session git worktree, refusing when the disk is too full.
+///
+/// Why (#7497): this is the name every tm-owned provisioning path calls, so the
+/// `disk.max_usage_pct` gate belongs on it rather than beside it — a creation
+/// path that forgets to check is then a call to a differently-spelled function,
+/// not an omission. The ungated mechanics stay reachable as
+/// [`create_session_worktree_unchecked`], which is what a test fixture building
+/// a worktree to exercise something else calls.
+/// What: measures the mount the worktree would land on and delegates to
+/// [`create_session_worktree_measured`].
+/// Test: `create_session_worktree_measures_a_real_mount` in
+/// `tests/worktree_disk_usage_gate.rs` — the live half; the decision itself is
+/// pinned through [`create_session_worktree_measured`].
+pub fn create_session_worktree(
+    base_path: &Path,
+    worktree_name: &str,
+    owner_session_id: &crate::session_manager::ManagedSessionId,
+) -> Result<PathBuf, String> {
+    let measured =
+        crate::core::disk_usage_guard::measure(&worktree_path_for(base_path, worktree_name));
+    create_session_worktree_measured(
+        base_path,
+        worktree_name,
+        owner_session_id,
+        measured.as_ref(),
+    )
+}
+
+/// [`create_session_worktree`] against an ALREADY-TAKEN measurement.
+///
+/// Why: the seam the end-to-end tests pin a synthetic percentage through, so
+/// the gate's behaviour at, over and below the threshold — and on an
+/// unmeasurable mount — is asserted deterministically rather than depending on
+/// how full the runner's volume happens to be (#7497 review).
+/// What: applies [`crate::core::disk_usage_guard::check_measured`] — fail-closed
+/// on `None` per ADR-0037 — and creates nothing when it refuses.
+/// Test: `create_session_worktree_refuses_a_pinned_over_threshold_measurement`,
+/// `create_session_worktree_refuses_an_unmeasurable_mount`,
+/// `create_session_worktree_creates_on_a_pinned_under_threshold_measurement`.
+pub fn create_session_worktree_measured(
+    base_path: &Path,
+    worktree_name: &str,
+    owner_session_id: &crate::session_manager::ManagedSessionId,
+    measured: Option<&crate::core::disk_usage_guard::MeasuredMount>,
+) -> Result<PathBuf, String> {
+    // #7497: refuse before creating anything when the mount is at or above
+    // `disk.max_usage_pct`.
+    crate::core::disk_usage_guard::check_measured(
+        &worktree_path_for(base_path, worktree_name),
+        measured,
+    )
+    .map_err(|e| e.to_string())?;
+    create_session_worktree_unchecked(base_path, worktree_name, owner_session_id)
+}
+
+/// Create a per-session git worktree branched off the base clone, with NO disk
+/// gate.
 ///
 /// Why: each managed session must work in an isolated branch; git worktrees
 /// achieve this without duplicating the object store of the base clone. Since
@@ -539,30 +595,17 @@ pub fn worktree_name_collides(base_path: &Path, worktree_name: &str) -> bool {
 /// payload, replacing the pre-#3649 zero-byte convention) so the orphan-GC
 /// sweep and the `decommission` owner gate can later resolve who is entitled
 /// to reclaim this worktree.
-/// #7497: refuses BEFORE any directory or branch is created when the mount
-/// holding the target is at or above `disk.max_usage_pct` (default 90) — see
-/// [`crate::core::disk_usage_guard`] for the threshold, the fail-closed posture
-/// on an unmeasurable mount, and why an absent key gates nothing in a test
-/// process.
 /// Test: covered by integration tests against a real temp repo;
-/// `create_session_worktree_refuses_at_or_above_the_threshold` in
-/// `tests/worktree_disk_usage_gate.rs`;
 /// `create_session_worktree_rejects_existing_worktree_dir`,
 /// `create_session_worktree_writes_owner_sentinel` (#3649),
 /// `session_worktree_branches_from_fetched_origin_not_stale_local_main` (#4957).
-pub fn create_session_worktree(
+pub fn create_session_worktree_unchecked(
     base_path: &Path,
     worktree_name: &str,
     owner_session_id: &crate::session_manager::ManagedSessionId,
 ) -> Result<PathBuf, String> {
     let worktree_path = worktree_path_for(base_path, worktree_name);
     let branch = worktree_branch_for(worktree_name);
-
-    // #7497: refuse before creating anything when the mount is at or above
-    // `disk.max_usage_pct`. Fail-closed (ADR-0037): an unmeasurable mount is a
-    // refusal here, not an assumption that it is fine.
-    crate::core::disk_usage_guard::check_worktree_creation(&worktree_path)
-        .map_err(|e| e.to_string())?;
 
     if worktree_path.exists() {
         return Err(format!(

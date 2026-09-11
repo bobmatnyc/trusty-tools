@@ -545,18 +545,25 @@ fn mount_metrics_from(disk: &Disk, t: &HostThresholds) -> MountMetrics {
 ///      ancestor and for the mount point. The device match is what makes this
 ///      correct on macOS, where `/Users/...` is firmlinked onto the
 ///      `/System/Volumes/Data` mount and is therefore NOT a lexical child of
-///      its own mount point. Where device ids are unavailable (non-unix) it
-///      falls back to [`select_mount_for_path`]'s longest-prefix rule.
-///      `None` when no ancestor exists or the OS lists no matching mount — an
-///      unmeasurable result a caller must handle, never a silent `0`.
-/// Test: `mount_for_path_reports_a_plausible_mount_for_the_cwd`.
+///      its own mount point. Where `st_dev` is readable it is AUTHORITATIVE,
+///      and a miss is `None`: falling back to the lexical rule there would
+///      answer `/` for a path on any filesystem `sysinfo` does not enumerate
+///      (NFS, sshfs, some ZFS datasets) — a wrong number rather than no number,
+///      and one that makes every "could not measure" branch downstream
+///      unreachable (#7497 review). The lexical rule therefore runs ONLY where
+///      no device id is available (non-unix, or an unreadable probe).
+///      `None` means UNMEASURABLE and the caller must decide what that costs —
+///      never a silent `0`.
+/// Test: `mount_for_path_reports_a_plausible_mount_for_the_cwd`,
+///      `a_device_matching_no_enumerated_mount_is_unmeasurable`.
 #[must_use]
 pub fn mount_for_path(path: &Path) -> Option<MountMetrics> {
     let probe = nearest_existing_ancestor(path)?;
     let mounts = sample_mounts(&HostThresholds::default());
-    select_mount_by_device(&mounts, &probe)
-        .or_else(|| select_mount_for_path(&mounts, &probe))
-        .cloned()
+    match device_id(&probe) {
+        Some(device) => select_mount_with_device(&mounts, device, device_id).cloned(),
+        None => select_mount_for_path(&mounts, &probe).cloned(),
+    }
 }
 
 /// The mount whose mount point is the LONGEST lexical prefix of `path`.
@@ -594,15 +601,22 @@ fn sample_mounts(thresholds: &HostThresholds) -> Vec<MountMetrics> {
 /// Why: the firmlink case above — a lexical rule answers `/` for a path that
 ///      really lives on the data volume, and a gate reading the root volume's
 ///      4% while the data volume is at 92% never fires.
-/// What: compares `st_dev` of `path` against `st_dev` of each mount point,
-///      deepest mount point winning a tie (a nested mount shares no device
-///      with its parent, so ties are rare and the deeper one is the closer
-///      answer). `None` off unix, or when the device cannot be read.
-fn select_mount_by_device<'a>(mounts: &'a [MountMetrics], path: &Path) -> Option<&'a MountMetrics> {
-    let device = device_id(path)?;
+/// What: compares `device` against the `st_dev` of each mount point, deepest
+///      mount point winning a tie (a nested mount shares no device with its
+///      parent, so ties are rare and the deeper one is the closer answer).
+///      `None` when NO enumerated mount sits on that device, which is a real
+///      outcome — a filesystem `sysinfo` does not list — and is what makes the
+///      unmeasurable path reachable. `device_of` is injected so that case is
+///      testable without an NFS mount.
+/// Test: `a_device_matching_no_enumerated_mount_is_unmeasurable`.
+fn select_mount_with_device(
+    mounts: &[MountMetrics],
+    device: u64,
+    device_of: impl Fn(&Path) -> Option<u64>,
+) -> Option<&MountMetrics> {
     mounts
         .iter()
-        .filter(|m| device_id(Path::new(&m.mount_point)) == Some(device))
+        .filter(|m| device_of(Path::new(&m.mount_point)) == Some(device))
         .max_by_key(|m| Path::new(&m.mount_point).components().count())
 }
 
@@ -819,6 +833,32 @@ mod tests {
         assert!(
             select_mount_for_path(&[mount("/var", 92.0)], Path::new("/home/x")).is_none(),
             "a path under no listed mount must be unmeasurable, not defaulted"
+        );
+    }
+
+    /// Why (#7497 review): a path on a filesystem `sysinfo` does not enumerate
+    ///      — NFS, sshfs, some ZFS datasets — must come back UNMEASURABLE. The
+    ///      earlier lexical fallback answered `/` for it, which is a wrong
+    ///      number rather than no number, and made every "could not measure"
+    ///      branch downstream unreachable.
+    /// What: a probe device that matches no mount's device yields `None`, with
+    ///      `/` present and prefixing the path — the exact case the fallback
+    ///      used to swallow.
+    /// Test: this test.
+    #[test]
+    fn a_device_matching_no_enumerated_mount_is_unmeasurable() {
+        let mounts = vec![mount("/", 4.0), mount("/System/Volumes/Data", 92.0)];
+        assert!(
+            select_mount_with_device(&mounts, 42, |_| Some(7)).is_none(),
+            "no enumerated mount sits on the probe's device — that is \
+             unmeasurable, not `/`"
+        );
+        assert_eq!(
+            select_mount_with_device(&mounts, 7, |p| (p == Path::new("/System/Volumes/Data"))
+                .then_some(7))
+            .expect("the matching mount is selected")
+            .mount_point,
+            "/System/Volumes/Data"
         );
     }
 

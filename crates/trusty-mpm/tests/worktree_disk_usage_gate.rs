@@ -1,23 +1,26 @@
 //! End-to-end coverage for the `disk.max_usage_pct` worktree gate (#7497).
 //!
-//! Why: the gate's unit tests feed synthetic percentages, and the pm-guard hook
-//! covers the Bash surface. Neither drives the REAL provisioning path — the one
-//! that runs `git worktree add` — through a real measurement of a real mount.
-//! This file does, and it is also why the gate's own `cfg`-free design matters:
-//! an EXPLICIT `disk.max_usage_pct` applies in a test process exactly as in
-//! production, so nothing here is exercising a test-only branch.
+//! Why: the guard's unit tests feed synthetic percentages to the pure decision
+//! functions, and the pm-guard hook covers the Bash surface. Neither drives the
+//! REAL provisioning path — the one that runs `git worktree add` — so nothing
+//! proved that the gate refuses BEFORE git creates anything, or that a refusal
+//! leaves no session record behind.
 //!
-//! What: measures the mount the fixture sits on, then pins the threshold at the
-//! floor of that measurement (must refuse) and one point above it (must
-//! create). Deriving both thresholds from the live measurement is what keeps
-//! the assertions independent of how full the runner's disk is.
+//! What: every assertion about the threshold pins the measurement through
+//! [`create_session_worktree_measured`], so the verdict cannot depend on how
+//! full the runner's volume happens to be (#7497 review, MEDIUM 2). One live
+//! smoke test asserts the real measurement is plausible, and one spawn-level
+//! test drives `spawn_managed` against the live disk because that path has no
+//! measurement seam — it derives its threshold from what it measured.
 //! Test: this file IS the test.
 
 use serial_test::serial;
 use tempfile::TempDir;
 
-use trusty_mpm::core::disk_usage_guard;
-use trusty_mpm::daemon::managed_routes::inproject::create_session_worktree;
+use trusty_mpm::core::disk_usage_guard::{self, MeasuredMount};
+use trusty_mpm::daemon::managed_routes::inproject::{
+    create_session_worktree, create_session_worktree_measured,
+};
 use trusty_mpm::daemon::managed_routes::{SpawnParams, spawn_managed};
 use trusty_mpm::daemon::state::DaemonState;
 use trusty_mpm::session_manager::ManagedSessionId;
@@ -117,55 +120,56 @@ fn write_threshold(home: &std::path::Path, max_usage_pct: u8) {
     .expect("write config");
 }
 
-/// The measured usage of the mount holding `path`, floored to a threshold this
-/// test can express.
-///
-/// Returns `None` on a volume measuring under 1%, where no valid threshold
-/// (1..=100) sits at or below the measurement and the refuse-arm cannot be set
-/// up at all.
-fn refuse_threshold(path: &std::path::Path) -> Option<(u8, f32)> {
-    let m = disk_usage_guard::measure(path).expect("the fixture sits on some mount");
-    let floored = m.usage_pct.floor();
-    (floored >= 1.0).then_some((floored as u8, m.usage_pct))
+/// A pinned measurement — the seam that keeps these assertions independent of
+/// the runner's disk.
+fn pinned(usage_pct: f32) -> MeasuredMount {
+    MeasuredMount {
+        mount_point: "/System/Volumes/Data".to_string(),
+        usage_pct,
+    }
 }
 
 /// A worktree whose mount is AT OR ABOVE the threshold is refused, and nothing
 /// is created (#7497).
 ///
-/// Why: this is the feature. The refusal must also be actionable — mount,
+/// Why: this is the feature, asserted at the real entry point rather than at
+/// the pure decision function. The refusal must also be actionable — mount,
 /// measured percent, threshold, config key — because an operator reading only
 /// "refused" cannot act.
-/// What: pins the threshold at the floor of the live measurement (so the mount
-/// is at or above it by construction), calls the production
-/// `create_session_worktree`, and asserts the error text plus the absence of
-/// any directory or branch.
+/// What: an explicit 90% threshold with a pinned 92.4% measurement, then the
+/// production creation call, then the assertion that git created nothing.
 /// Test: this function IS the test.
 #[test]
 #[serial]
-fn create_session_worktree_refuses_at_or_above_the_threshold() {
+fn create_session_worktree_refuses_a_pinned_over_threshold_measurement() {
     let home = TempDir::new().expect("home tempdir");
+    write_threshold(home.path(), 90);
     let base = base_repo();
-    let Some((threshold, measured)) = refuse_threshold(base.path()) else {
-        eprintln!("skipped: the fixture volume measures under 1% used");
-        return;
-    };
-    write_threshold(home.path(), threshold);
     let _home = HomeGuard::set(home.path());
 
-    let err = create_session_worktree(base.path(), "tm-gate-01", &ManagedSessionId::new())
-        .expect_err("a mount at or above the threshold must refuse the worktree");
+    let err = create_session_worktree_measured(
+        base.path(),
+        "tm-gate-01",
+        &ManagedSessionId::new(),
+        Some(&pinned(92.4)),
+    )
+    .expect_err("a mount at or above the threshold must refuse the worktree");
 
     assert!(
         err.contains("disk.max_usage_pct"),
         "the refusal must name the config key: {err}"
     );
     assert!(
-        err.contains(&format!("threshold of {threshold}%")),
+        err.contains("threshold of 90%"),
         "the refusal must name the threshold in force: {err}"
     );
     assert!(
-        err.contains("% disk usage"),
-        "the refusal must name the measured percent (measured {measured}): {err}"
+        err.contains("92.4% disk usage"),
+        "the refusal must name the measured percent: {err}"
+    );
+    assert!(
+        err.contains("/System/Volumes/Data"),
+        "the refusal must name the mount: {err}"
     );
     assert!(
         !base.path().join(".worktrees").join("tm-gate-01").exists(),
@@ -173,36 +177,121 @@ fn create_session_worktree_refuses_at_or_above_the_threshold() {
     );
 }
 
-/// One point below the measurement, the same call creates the worktree (#7497).
+/// A mount that could not be measured refuses too — fail CLOSED (#7497,
+/// ADR-0037).
+///
+/// Why: "I could not check" is not "it is fine". This arm is reachable because
+/// `host_metrics::mount_for_path` returns `None` for a filesystem the OS does
+/// not enumerate rather than substituting `/`.
+/// What: a `None` measurement at the production entry point, and nothing
+/// created.
+/// Test: this function IS the test.
+#[test]
+#[serial]
+fn create_session_worktree_refuses_an_unmeasurable_mount() {
+    let home = TempDir::new().expect("home tempdir");
+    write_threshold(home.path(), 90);
+    let base = base_repo();
+    let _home = HomeGuard::set(home.path());
+
+    let err =
+        create_session_worktree_measured(base.path(), "tm-gate-02", &ManagedSessionId::new(), None)
+            .expect_err("an unmeasurable mount must refuse the worktree");
+
+    assert!(
+        err.contains("could not be measured"),
+        "the refusal must say the measurement failed: {err}"
+    );
+    assert!(
+        !base.path().join(".worktrees").join("tm-gate-02").exists(),
+        "a refused worktree must leave nothing on disk"
+    );
+}
+
+/// Below the threshold, the same call creates the worktree (#7497).
 ///
 /// Why: the acceptance criterion is that nothing changes under the threshold. A
 /// gate that refused here would be indistinguishable from one that refuses
 /// always.
-/// What: threshold = floor(measured) + 1, so the mount is strictly below it.
+/// What: an explicit 90% threshold with a pinned 10% measurement.
 /// Test: this function IS the test.
 #[test]
 #[serial]
-fn create_session_worktree_creates_below_the_threshold() {
+fn create_session_worktree_creates_on_a_pinned_under_threshold_measurement() {
     let home = TempDir::new().expect("home tempdir");
+    write_threshold(home.path(), 90);
     let base = base_repo();
-    let Some((floored, _)) = refuse_threshold(base.path()) else {
-        eprintln!("skipped: the fixture volume measures under 1% used");
-        return;
-    };
-    if floored >= 100 {
-        eprintln!("skipped: the fixture volume is full; no threshold sits above it");
-        return;
-    }
-    write_threshold(home.path(), floored + 1);
     let _home = HomeGuard::set(home.path());
 
-    let path = create_session_worktree(base.path(), "tm-gate-02", &ManagedSessionId::new())
-        .expect("a mount below the threshold must still get its worktree");
+    let path = create_session_worktree_measured(
+        base.path(),
+        "tm-gate-03",
+        &ManagedSessionId::new(),
+        Some(&pinned(10.0)),
+    )
+    .expect("a mount below the threshold must still get its worktree");
     assert!(
         path.exists(),
         "the worktree must exist at {}",
         path.display()
     );
+}
+
+/// An absent `disk:` section changes nothing (#7497).
+///
+/// Why: the gate ships enabled by default, but a config that never mentions it
+/// must behave exactly as before for every existing caller.
+/// What: no config file at all — so the default 90% applies — with a pinned 10%
+/// measurement, and the worktree is created.
+/// Test: this function IS the test.
+#[test]
+#[serial]
+fn an_absent_disk_section_creates_the_worktree_as_before() {
+    let home = TempDir::new().expect("home tempdir");
+    let base = base_repo();
+    let _home = HomeGuard::set(home.path());
+
+    let path = create_session_worktree_measured(
+        base.path(),
+        "tm-gate-04",
+        &ManagedSessionId::new(),
+        Some(&pinned(10.0)),
+    )
+    .expect("no `disk:` section must change nothing");
+    assert!(path.exists());
+}
+
+/// The production entry point measures a real mount (#7497).
+///
+/// Why: the pinned tests above prove the DECISION; this proves the
+/// MEASUREMENT — that `create_session_worktree` resolves an actual mount for a
+/// directory that does not exist yet, which is the half a synthetic value can
+/// never cover.
+/// What: asserts the live measurement is a plausible mount, then runs the real
+/// gated call against a threshold of 100% so the outcome cannot depend on the
+/// runner's volume.
+/// Test: this function IS the test.
+#[test]
+#[serial]
+fn create_session_worktree_measures_a_real_mount() {
+    let home = TempDir::new().expect("home tempdir");
+    write_threshold(home.path(), 100);
+    let base = base_repo();
+    let _home = HomeGuard::set(home.path());
+
+    let target = base.path().join(".worktrees").join("tm-gate-05");
+    let measured =
+        disk_usage_guard::measure(&target).expect("the fixture sits on an enumerated mount");
+    assert!(!measured.mount_point.is_empty());
+    assert!(
+        (0.0..=100.0).contains(&measured.usage_pct),
+        "usage must be a percentage, got {}",
+        measured.usage_pct
+    );
+
+    let path = create_session_worktree(base.path(), "tm-gate-05", &ManagedSessionId::new())
+        .expect("a 100% threshold can only refuse a completely full volume");
+    assert!(path.exists());
 }
 
 /// A `worktree: true` spawn over the threshold fails and leaves NO session
@@ -214,19 +303,28 @@ fn create_session_worktree_creates_below_the_threshold() {
 /// session manager holds nothing afterwards.
 /// What: a real checkout with a GitHub origin, a real base clone under the
 /// repos root (so the spawn reaches worktree creation rather than failing
-/// earlier), a threshold at the floor of the live measurement, and then the
-/// real `spawn_managed`.
+/// earlier), and a threshold pinned at the floor of what the fixture volume
+/// actually measures — the spawn path has no measurement seam, so this one
+/// test derives its threshold from the live disk. It reports and skips on a
+/// volume under 1% used, where no valid threshold (1..=100) sits at or below
+/// the measurement.
 /// Test: this function IS the test.
 #[tokio::test]
 #[serial]
 async fn an_over_threshold_spawn_leaves_no_session_record() {
     let home = TempDir::new().expect("home tempdir");
     let roots = TempDir::new().expect("roots tempdir");
-    let Some((threshold, _)) = refuse_threshold(roots.path()) else {
-        eprintln!("skipped: the fixture volume measures under 1% used");
+    let measured = disk_usage_guard::measure(roots.path()).expect("the fixture sits on a mount");
+    let floored = measured.usage_pct.floor();
+    if floored < 1.0 {
+        eprintln!(
+            "skipped: the fixture volume measures {}% used, below the lowest \
+             expressible threshold",
+            measured.usage_pct
+        );
         return;
-    };
-    write_threshold(home.path(), threshold);
+    }
+    write_threshold(home.path(), floored as u8);
     let _env = EnvGuard::set(&[
         ("HOME", home.path()),
         (REPOS_ROOT_ENV, roots.path()),
@@ -289,23 +387,4 @@ async fn an_over_threshold_spawn_leaves_no_session_record() {
         mgr.list().await.is_empty(),
         "a refused worktree request must leave no session record"
     );
-}
-
-/// An absent `disk:` section changes nothing (#7497).
-///
-/// Why: the gate ships enabled by default in production, but a config that
-/// never mentions it must behave exactly as before — the acceptance criterion
-/// for every existing caller.
-/// What: no config file at all, and the worktree is created.
-/// Test: this function IS the test.
-#[test]
-#[serial]
-fn an_absent_disk_section_creates_the_worktree_as_before() {
-    let home = TempDir::new().expect("home tempdir");
-    let base = base_repo();
-    let _home = HomeGuard::set(home.path());
-
-    let path = create_session_worktree(base.path(), "tm-gate-03", &ManagedSessionId::new())
-        .expect("no `disk:` section must change nothing");
-    assert!(path.exists());
 }

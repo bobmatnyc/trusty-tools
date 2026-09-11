@@ -12,3 +12,8 @@ Added
   firmlinked onto the `/System/Volumes/Data` mount and is therefore not a
   lexical child of its own mount point; prefix matching remains the fallback
   where device ids are unavailable (#7497).
+- Where a device id IS readable it is authoritative, and a miss returns `None`:
+  a path on a filesystem `sysinfo` does not enumerate (NFS, sshfs, some ZFS
+  datasets) is reported as UNMEASURABLE rather than measured as `/`. A caller
+  decides what that costs; nothing substitutes a wrong number for no number
+  (#7497).
