@@ -790,6 +790,56 @@ fn missing_group_repair_dry_run_changes_nothing() {
     );
 }
 
+/// The driver's repair ORDER leaves a healthy project in the state a launch
+/// would write (#7490).
+///
+/// Why: `repair_hooks_contamination` strips every `<exe> hook` entry it finds,
+/// which on a tm-provisioned project IS the lifecycle triad. The comments in
+/// `core::doctor_repair` and `bin/tm/commands/doctor_repair::run_repairs` both
+/// claim the re-merge runs after that strip precisely so the strip cannot undo
+/// it — a claim nothing tested. Reversing the two calls, or dropping the
+/// second, must fail here.
+/// What: seeds a settings file carrying the full triad (produced by the merge
+/// itself), then runs the two repairs in Apply mode in the SAME order
+/// `run_repairs` uses, and asserts the resulting bytes equal what
+/// `ensure_project_hooks` alone produces for the same input.
+/// Test: itself.
+#[test]
+fn contamination_strip_then_missing_group_merge_restores_the_launch_state() {
+    let exe = Some(Path::new("/usr/local/bin/tm"));
+
+    // The expected state: one project taken straight to the merged form.
+    let expected_project = tempfile::tempdir().unwrap();
+    let expected_path = write_missing_group_settings(expected_project.path());
+    crate::core::session_launch::ensure_project_hooks(expected_project.path(), exe).unwrap();
+    let expected = fs::read(&expected_path).unwrap();
+
+    // The driver's path: identical input, strip first, then re-merge.
+    let actual_project = tempfile::tempdir().unwrap();
+    let actual_path = write_missing_group_settings(actual_project.path());
+    crate::core::session_launch::ensure_project_hooks(actual_project.path(), exe).unwrap();
+    let strip = repair_hooks_contamination(actual_project.path(), RepairMode::Apply);
+    assert!(
+        !strip.is_empty(),
+        "the fixture must actually carry entries the strip removes, or this \
+         test proves nothing about the ordering: {strip:?}"
+    );
+    let merge = repair_missing_hook_group_with(actual_project.path(), exe, RepairMode::Apply);
+    assert!(
+        matches!(
+            merge.first().map(|s| &s.status),
+            Some(StepStatus::Applied { .. })
+        ),
+        "the re-merge must run after the strip and apply: {merge:?}"
+    );
+
+    assert_eq!(
+        String::from_utf8_lossy(&expected),
+        String::from_utf8_lossy(&fs::read(&actual_path).unwrap()),
+        "strip-then-merge must land on the state a managed launch writes"
+    );
+}
+
 /// A file with no gap produces no step at all (#7490).
 #[test]
 fn missing_group_repair_is_silent_for_a_complete_file() {

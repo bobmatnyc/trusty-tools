@@ -159,6 +159,74 @@ fn resume_merge_leaves_a_complete_file_byte_identical() {
     );
 }
 
+/// An unparseable settings.json is left byte-identical, with no backup.
+///
+/// Why: the writer coerces a file it cannot parse into an empty object, and
+/// its no-op exit then compares the merge against THAT fallback — so the
+/// comparison always differs and the file is snapshotted and replaced with
+/// tm's hook additions alone, dropping `permissions`, `statusLine`, `env` and
+/// `outputStyle`. One trailing comma is enough. This call site runs on every
+/// spawn, resume and relaunch, so the destruction would arrive at the next
+/// session rather than at some rare launch.
+/// What: seeds a settings.json with a trailing comma (valid JSON5, invalid
+/// JSON) carrying keys tm does not own, runs the merge, and asserts the bytes
+/// are unchanged and no `.bak` was written.
+/// Test: itself.
+#[test]
+fn resume_merge_leaves_an_unparseable_file_untouched() {
+    let project = tempfile::tempdir().expect("tempdir");
+    let claude = project.path().join(".claude");
+    std::fs::create_dir_all(&claude).expect("create .claude");
+    let path = claude.join("settings.json");
+    // A trailing comma after the last member — the shape a hand-edit leaves.
+    let corrupt = "{\n  \"permissions\": { \"allow\": [\"Bash\"] },\n  \
+                   \"statusLine\": { \"command\": \"tm statusline\" },\n}\n";
+    std::fs::write(&path, corrupt).expect("seed settings");
+    let before = std::fs::read(&path).expect("read before");
+
+    ensure_project_hooks(project.path(), Some(std::path::Path::new(STABLE_HOOK_EXE)))
+        .expect("a refusal is not an error — the launch still proceeds");
+
+    assert_eq!(
+        before,
+        std::fs::read(&path).expect("read after"),
+        "an unparseable settings.json must never be rewritten"
+    );
+    let backups: Vec<_> = std::fs::read_dir(&claude)
+        .expect("read .claude")
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().contains(".bak"))
+        .collect();
+    assert!(
+        backups.is_empty(),
+        "a refused merge must not snapshot either: {backups:?}"
+    );
+}
+
+/// The refusal is scoped to an EXISTING bad file — a missing one is created.
+///
+/// Why: `settings_is_writable_object` returns `true` for an absent file, and a
+/// guard that refused there instead would silently disable hook provisioning
+/// for every project that has no `.claude/settings.json` yet.
+/// What: an empty project gains a settings file carrying the lifecycle group.
+/// Test: itself.
+#[test]
+fn resume_merge_still_creates_a_missing_file() {
+    let project = tempfile::tempdir().expect("tempdir");
+
+    ensure_project_hooks(project.path(), Some(std::path::Path::new(STABLE_HOOK_EXE)))
+        .expect("merge");
+
+    let path = project.path().join(".claude").join("settings.json");
+    let commands = commands_for(&read_settings(&path), "SessionStart");
+    assert!(
+        commands
+            .iter()
+            .any(|c| c == &format!("{STABLE_HOOK_EXE} hook")),
+        "a project with no settings file must still be provisioned: {commands:?}"
+    );
+}
+
 /// The gap predicate names the event the incident file is missing.
 #[test]
 fn missing_events_names_a_sessionstart_gap() {

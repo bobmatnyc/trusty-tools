@@ -71,13 +71,20 @@ pub fn ensure_project_hooks(
 /// config, and would see the two answers DIFFER if any concurrently-running
 /// test redirected the process-global `$HOME` between them.
 /// What: the body of [`ensure_project_hooks`], taking the layout rather than
-/// deriving it.
-/// Test: `resume_merge_leaves_a_complete_file_byte_identical`.
+/// deriving it. Returns without writing when
+/// [`settings_is_writable_object`] refuses the existing file.
+/// Test: `resume_merge_leaves_a_complete_file_byte_identical`,
+/// `resume_merge_leaves_an_unparseable_file_untouched`.
 pub(crate) fn ensure_project_hooks_with(
     fw: &crate::core::paths::FrameworkPaths,
     project_dir: &Path,
     exe_override: Option<&Path>,
 ) -> Result<(), PrepError> {
+    // #7490: fail closed BEFORE the writer, which coerces an unparseable file
+    // into an empty object and would then replace it with tm's hooks alone.
+    if !settings_is_writable_object(project_dir) {
+        return Ok(());
+    }
     let config = crate::core::config::MpmConfig::load(&fw.root);
     let plan = crate::core::mcp_session_env::resolve_plan(fw, project_dir);
     write_project_hooks(
@@ -86,6 +93,45 @@ pub(crate) fn ensure_project_hooks_with(
         config.hooks.prompt_context,
         plan.divert_enabled,
     )
+}
+
+/// May the hooks writer rewrite `<project_dir>/.claude/settings.json`?
+///
+/// Why (#7490): [`write_project_hooks`]'s read step coerces an unparseable or
+/// non-object file into an EMPTY object and keeps going. Its no-op exit then
+/// compares the merge against that fallback rather than against the file, so
+/// the comparison always differs and the file is snapshotted and replaced with
+/// tm's hook additions alone — `permissions`, `statusLine`, `env` and
+/// `outputStyle` gone. That writer ran once per managed launch and now runs on
+/// every spawn, resume and in-place relaunch, so a settings file with one
+/// trailing comma or one `//` comment would be destroyed at the next session.
+/// Refusing here rather than in the writer keeps the #7244 fail-closed rule in
+/// one direction — this call site adds a precondition, it does not change what
+/// `prepare_session` does.
+/// What: `true` when the file is absent (the writer creates it) or parses to a
+/// JSON object; `false` — with a `tracing::warn!` naming the path — when it
+/// exists and does not, mirroring `daemon::doctor_hooks_hygiene::read_settings`'s
+/// tolerate-and-skip reading of the same file. An unreadable file is refused
+/// for the same reason: its contents cannot be preserved by a merge that never
+/// saw them.
+/// Test: `resume_merge_leaves_an_unparseable_file_untouched`,
+/// `resume_merge_still_creates_a_missing_file`.
+fn settings_is_writable_object(project_dir: &Path) -> bool {
+    let path = project_dir.join(".claude").join("settings.json");
+    if !path.is_file() {
+        return true;
+    }
+    let parsed = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .filter(Value::is_object);
+    if parsed.is_none() {
+        tracing::warn!(
+            path = %path.display(),
+            "project settings.json is unreadable or not a JSON object — hook merge skipped"
+        );
+    }
+    parsed.is_some()
 }
 
 /// The lifecycle hook events a tm-provisioned settings file is missing.

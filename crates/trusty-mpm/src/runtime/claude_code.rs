@@ -827,8 +827,11 @@ fn prepare_managed_config_with_exe(
     // savings row and the 💸 statusline segment from ever appearing. Idempotent
     // (a file that already carries every group is left byte-identical) and
     // non-fatal, like every other step here.
+    // The message is terse and the "non-fatal" framing lives in the comment
+    // above: this file sits one line under the 500-SLOC cap, and a wrapped
+    // `tracing::warn!` costs four more.
     if let Err(e) = crate::core::session_launch::ensure_project_hooks(cwd, hook_exe) {
-        tracing::warn!(session = %tmux_name, "project hook merge failed (non-fatal): {e}");
+        tracing::warn!(session = %tmux_name, cwd = %cwd.display(), "hook merge failed: {e}");
     }
 
     // Seed workspace trust into <config_dir>/.claude.json (isolation invariant:
