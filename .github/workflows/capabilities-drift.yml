@@ -55,9 +55,9 @@ concurrency:
 jobs:
   capabilities-drift:
     name: tm-capabilities generated-skill drift check
-    # No job-level `if:` keyed on `github.event.action` here — ci.yml's
-    # `changes` job carries an explicit warning against exactly that pattern
-    # (issue #5407): a title/body `edited` event shares this workflow's PR
+    # No job-level `if:` keyed on the pull_request ACTIVITY TYPE here —
+    # ci.yml's `changes` job carries an explicit warning against exactly that
+    # pattern (issue #5407): a title/body edit shares this workflow's PR
     # concurrency group with the real run (cancel-in-progress excludes
     # `edited`), so an edit-triggered run that reports without doing the work
     # coexists with the genuine one and GitHub shows only whichever finishes
