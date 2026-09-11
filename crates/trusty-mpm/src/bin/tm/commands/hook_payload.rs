@@ -82,7 +82,8 @@ fn compact_tool_response(response: &Value) -> Option<Value> {
 /// that joins `tool_use_id` to `SubagentStop`, and `TaskStop`, whose response
 /// is the only signal that a cancellation actually took.
 /// What: [`is_subagent_dispatch_tool`](trusty_mpm::core::agent::is_subagent_dispatch_tool)
-/// or an exact [`TASK_STOP_TOOL`] match.
+/// or an exact [`TASK_STOP_TOOL`](trusty_mpm::core::agent::TASK_STOP_TOOL)
+/// match.
 /// Test: `compacts_tool_response_to_correlation_keys`,
 /// `forwards_the_task_stop_tool_response`,
 /// `forwards_no_tool_response_for_an_ordinary_tool`.
