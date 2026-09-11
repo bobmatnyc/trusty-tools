@@ -165,7 +165,11 @@ pub(crate) async fn run_session_tui(
             // changed nothing about the fleet, so it owes no re-fetch.
             Action::NewSession => match new_session::fetch_targets(client, url).await {
                 Ok(targets) => {
-                    state.open_new_session(new_session::NewSessionFlow::new(targets));
+                    // #7406: open on the project of the row the cursor is on.
+                    let cursor = sessions.get(state.selected());
+                    state.open_new_session(
+                        new_session::NewSessionFlow::new(targets).preselected_for(cursor),
+                    );
                     continue;
                 }
                 Err(e) => state.set_message(

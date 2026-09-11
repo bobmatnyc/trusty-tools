@@ -90,7 +90,12 @@ pub(crate) fn render(frame: &mut Frame, sessions: &[ManagedSessionSummary], stat
             overlay(frame, area, "rename", rename_body(was, typed));
         }
         // #7395: the create flow — a project list, then optionally a path.
-        Mode::New(flow) => overlay(frame, area, "new session", new_session_body(flow)),
+        // #7406: built to the popup's INNER width (its rect less the two
+        // border columns), so no project row can wrap.
+        Mode::New(flow) => {
+            let inner = overlay_rect(area).width.saturating_sub(2) as usize;
+            overlay(frame, area, "new session", new_session_body(flow, inner));
+        }
     }
 }
 
@@ -211,6 +216,24 @@ fn row(columns: &[Column], session: &ManagedSessionSummary, selected: bool) -> R
 /// the parent, which is what keeps a 20x5 terminal from panicking), `Clear`ed
 /// then filled with a bordered paragraph.
 fn overlay(frame: &mut Frame, area: Rect, title: &str, body: Vec<Line<'static>>) {
+    let popup = overlay_rect(area);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(body).wrap(Wrap { trim: false }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" {title} ")),
+        ),
+        popup,
+    );
+}
+
+/// The centered modal's rect: 60% of the height, 80% of the width.
+///
+/// #7406: split out of [`overlay`] so a body can be built to the width it will
+/// actually be drawn at. Percentages cannot fall outside the parent, which is
+/// what keeps a 20x5 terminal from panicking.
+fn overlay_rect(area: Rect) -> Rect {
     let [_, middle, _] = Layout::vertical([
         Constraint::Percentage(20),
         Constraint::Percentage(60),
@@ -223,15 +246,27 @@ fn overlay(frame: &mut Frame, area: Rect, title: &str, body: Vec<Line<'static>>)
         Constraint::Percentage(10),
     ])
     .areas(middle);
-    frame.render_widget(Clear, popup);
-    frame.render_widget(
-        Paragraph::new(body).wrap(Wrap { trim: false }).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!(" {title} ")),
-        ),
-        popup,
-    );
+    popup
+}
+
+/// Text of `text` that fits `width` columns, ending in `…` when it was cut.
+///
+/// Why (#7406): the overlay wraps, so one row wider than the pane becomes two
+/// rows and the list stops lining up. Cutting is the lesser loss — the head of
+/// an `owner/repo` is what identifies it.
+/// What: counts CHARACTERS, not bytes, so a multi-byte name is never split
+/// mid-codepoint. A width under two leaves nothing to say and returns empty.
+/// Test: `render_new_session_overlay_truncates_a_long_row`.
+fn fit(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    if width < 2 {
+        return String::new();
+    }
+    let mut cut: String = text.chars().take(width - 1).collect();
+    cut.push('…');
+    cut
 }
 
 /// The delete confirmation's text — the word required, and what typing it does.
@@ -271,11 +306,13 @@ fn rename_body(was: &str, typed: &str) -> Vec<Line<'static>> {
 /// readable branch, and makes the free-text entry look exactly like the rename
 /// overlay's — the operator has already learned that shape.
 /// What: the picker step lists the windowed targets from
-/// [`super::new_session::NewSessionFlow::rows`]; the path step draws the typed
-/// buffer with the same cursor block. Both name Esc as the way out.
+/// [`super::new_session::NewSessionFlow::rows`], each cut to `width` (#7406);
+/// the path step draws the typed buffer with the same cursor block. Both name
+/// Esc as the way out.
 /// Test: `render_new_session_overlay_lists_the_registered_projects`,
-/// `render_new_session_overlay_shows_the_typed_path`.
-fn new_session_body(flow: &super::new_session::NewSessionFlow) -> Vec<Line<'static>> {
+/// `render_new_session_overlay_shows_the_typed_path`,
+/// `render_new_session_overlay_truncates_a_long_row`.
+fn new_session_body(flow: &super::new_session::NewSessionFlow, width: usize) -> Vec<Line<'static>> {
     if let Some(typed) = flow.typed() {
         return vec![
             Line::from("Path to a git checkout tm has not registered yet:"),
@@ -288,7 +325,7 @@ fn new_session_body(flow: &super::new_session::NewSessionFlow) -> Vec<Line<'stat
         Line::from("Start a new session in:"),
         Line::from(String::new()),
     ];
-    lines.extend(flow.rows().into_iter().map(Line::from));
+    lines.extend(flow.rows().iter().map(|r| Line::from(fit(r, width))));
     lines.push(Line::from(String::new()));
     lines.push(Line::from("Enter confirms, Esc cancels."));
     lines

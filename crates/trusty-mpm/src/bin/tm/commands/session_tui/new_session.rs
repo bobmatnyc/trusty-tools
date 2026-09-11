@@ -21,14 +21,22 @@
 //! over the target list and the typed-path buffer, and [`perform_with`] is the
 //! driver that orders register-then-create.
 //!
+//! #7406 polished that choosing without touching either leg: the overlay opens
+//! on the cursor session's project ([`preselect_index`]), each row reads
+//! `owner/repo` rather than the stored URL or path ([`row_labels`]), and a
+//! registration nobody can work in is dropped by
+//! [`is_offerable_project`](crate::commands::projects::offerable::is_offerable_project).
+//!
 //! Test: `new_session_*` in `super::tests`.
 
 use std::future::Future;
 use std::path::Path;
 
 use anyhow::Context as _;
-use trusty_mpm::client::DaemonClient;
+use trusty_common::github_path::parse_remote_url;
+use trusty_mpm::client::{DaemonClient, ManagedSessionSummary};
 use trusty_mpm::project::Project;
+use trusty_mpm::project::record::repo_url_matches;
 
 use crate::commands::picker_launch_new::LaunchIsolation;
 use crate::commands::projects::registry::RegisterInput;
@@ -180,6 +188,19 @@ impl NewSessionFlow {
         }
     }
 
+    /// Highlight the project the list cursor was already on (#7406).
+    ///
+    /// Why: the operator opened this overlay from a row, and the project of
+    /// that row is overwhelmingly the project they want another session in.
+    /// Starting on row 0 instead made them scroll past it every time.
+    /// What: moves the highlight to [`preselect_index`]'s answer for `session`,
+    /// which falls back to the first row when nothing matches.
+    /// Test: `new_session_preselects_the_cursor_sessions_project`.
+    pub(crate) fn preselected_for(mut self, session: Option<&ManagedSessionSummary>) -> Self {
+        self.selected = preselect_index(&self.targets, session);
+        self
+    }
+
     /// The free-text buffer, while the path entry is open.
     pub(crate) fn typed(&self) -> Option<&str> {
         self.typed.as_deref()
@@ -191,21 +212,20 @@ impl NewSessionFlow {
     /// overlay taller than the terminal. The window scrolls only once the
     /// selection passes the bottom, so a short registry never moves.
     /// What: the marked rows, in registry order, starting at whichever offset
-    /// keeps the selection on screen.
-    /// Test: `new_session_rows_window_keeps_the_selection_visible`.
+    /// keeps the selection on screen. Each row is [`row_labels`]' short
+    /// `owner/repo` form (#7406), never the stored URL or path.
+    /// Test: `new_session_rows_window_keeps_the_selection_visible`,
+    /// `new_session_rows_show_owner_repo_only`.
     pub(crate) fn rows(&self) -> Vec<String> {
         let start = self.selected.saturating_sub(PICK_ROWS.saturating_sub(1));
-        self.targets
-            .iter()
+        row_labels(&self.targets)
+            .into_iter()
             .enumerate()
             .skip(start)
             .take(PICK_ROWS)
-            .map(|(i, t)| {
+            .map(|(i, label)| {
                 let marker = if i == self.selected { "▸" } else { " " };
-                match t {
-                    Target::Registered { name, repo } => format!("{marker} {name}  {repo}"),
-                    Target::Other => format!("{marker} other — type a project path…"),
-                }
+                format!("{marker} {label}")
             })
             .collect()
     }
@@ -372,15 +392,158 @@ pub(crate) async fn fetch_targets(
 }
 
 /// Pure half of [`fetch_targets`]: registry rows → targets, escape hatch last.
+///
+/// #7406: a row the operator must never be offered — a temp-directory or
+/// scratchpad registration, a path that is gone, a directory that is not a
+/// checkout — is dropped here, through the shared
+/// [`is_offerable_project`](crate::commands::projects::offerable::is_offerable_project)
+/// predicate.
+/// Test: `new_session_targets_from_drops_a_scratchpad_registration`.
 pub(crate) fn targets_from(projects: &[Project]) -> Vec<Target> {
     projects
         .iter()
+        .filter(|p| crate::commands::projects::offerable::is_offerable_project(p))
         .map(|p| Target::Registered {
             name: p.name.clone(),
             repo: p.repo_url.clone(),
         })
         .chain(std::iter::once(Target::Other))
         .collect()
+}
+
+/// One display label per target — `owner/repo`, never a URL or a path (#7406).
+///
+/// Why: the owner's screen showed a stored `repo_url` verbatim, which is either
+/// a full `https://github.com/owner/repo` or an absolute checkout path. Both are
+/// wider than the overlay, so the row wrapped and the list stopped being
+/// scannable. `owner/repo` is the identity, and everything else was noise.
+/// What: a parseable git remote becomes `owner/repo`, widened to
+/// `host/owner/repo` ONLY when another row on a different host spells the same
+/// `owner/repo`. An absolute path becomes `<basename> (local)`, as does a row
+/// with no `repo_url` at all. Anything else falls back to the registry name.
+/// Test: `new_session_rows_show_owner_repo_only`,
+/// `new_session_labels_disambiguate_by_host`.
+pub(crate) fn row_labels(targets: &[Target]) -> Vec<String> {
+    let labels: Vec<Option<Label>> = targets
+        .iter()
+        .map(|t| match t {
+            Target::Registered { name, repo } => Some(label_for(name, repo)),
+            Target::Other => None,
+        })
+        .collect();
+    labels
+        .iter()
+        .map(|label| match label {
+            Some(Label::Remote { host, owner, repo }) => {
+                if collides_across_hosts(&labels, host, owner, repo) {
+                    format!("{host}/{owner}/{repo}")
+                } else {
+                    format!("{owner}/{repo}")
+                }
+            }
+            Some(Label::Local(base)) => format!("{base} (local)"),
+            Some(Label::Plain(name)) => name.clone(),
+            None => "other — type a project path…".to_string(),
+        })
+        .collect()
+}
+
+/// What one registry row reduces to before the host is decided.
+enum Label {
+    /// A git remote: owner and repo as the remote spells them, plus its host.
+    Remote {
+        /// Remote host, kept only for the disambiguating form.
+        host: String,
+        /// Repository owner.
+        owner: String,
+        /// Repository name.
+        repo: String,
+    },
+    /// A checkout that exists only on this host; the directory's basename.
+    Local(String),
+    /// Neither a remote nor a path — the registry name is all there is.
+    Plain(String),
+}
+
+/// Reduce one registry row to its [`Label`].
+fn label_for(name: &str, repo: &str) -> Label {
+    if let Ok(remote) = parse_remote_url(repo) {
+        return Label::Remote {
+            host: remote.host,
+            owner: remote.owner,
+            repo: remote.repo,
+        };
+    }
+    let trimmed = repo.trim();
+    if trimmed.is_empty() {
+        return Label::Local(name.to_string());
+    }
+    if trimmed.starts_with('/') {
+        let base = Path::new(trimmed)
+            .file_name()
+            .map(|b| b.to_string_lossy().to_string())
+            .unwrap_or_else(|| name.to_string());
+        return Label::Local(base);
+    }
+    Label::Plain(name.to_string())
+}
+
+/// True when another row spells this `owner/repo` on a DIFFERENT host.
+///
+/// The host is width the row can rarely afford, so it is added only when
+/// leaving it out would make two rows read identically.
+fn collides_across_hosts(labels: &[Option<Label>], host: &str, owner: &str, repo: &str) -> bool {
+    labels.iter().flatten().any(|l| {
+        matches!(
+            l,
+            Label::Remote {
+                host: h,
+                owner: o,
+                repo: r,
+            } if o.eq_ignore_ascii_case(owner)
+                && r.eq_ignore_ascii_case(repo)
+                && !h.eq_ignore_ascii_case(host)
+        )
+    })
+}
+
+/// Which target row the overlay should open on, given the list cursor (#7406).
+///
+/// Why: "start where I already am" is the whole of the owner's first
+/// requirement, and the session under the cursor is the only thing that says
+/// where that is.
+/// What: the first target whose repo is the cursor session's — matched through
+/// [`repo_url_matches`], so an `https` row and an `ssh` session agree, and
+/// failing that against the session's `owner/repo` `source_id`. Falls back to
+/// row 0 when there is no cursor session, or its project is not in the list.
+/// Test: `new_session_preselects_the_cursor_sessions_project`,
+/// `new_session_preselect_falls_back_to_the_first_row`.
+pub(crate) fn preselect_index(
+    targets: &[Target],
+    session: Option<&ManagedSessionSummary>,
+) -> usize {
+    let Some(session) = session else { return 0 };
+    targets
+        .iter()
+        .position(|t| is_session_project(t, session))
+        .unwrap_or(0)
+}
+
+/// True when `target` is the project `session` runs in.
+fn is_session_project(target: &Target, session: &ManagedSessionSummary) -> bool {
+    let Target::Registered { repo, .. } = target else {
+        return false;
+    };
+    if let Some(url) = session.repo_url.as_deref()
+        && !url.trim().is_empty()
+        && repo_url_matches(url, repo)
+    {
+        return true;
+    }
+    let Some(source) = session.source_id.as_deref() else {
+        return false;
+    };
+    parse_remote_url(repo).is_ok_and(|r| r.owner_repo().eq_ignore_ascii_case(source.trim()))
 }
 
 /// Perform a confirmed request against the real daemon.
