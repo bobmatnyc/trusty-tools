@@ -27,6 +27,12 @@
 //! registration nobody can work in is dropped by
 //! [`is_offerable_project`](crate::commands::projects::offerable::is_offerable_project).
 //!
+//! #7421 made the choosing usable past eight registrations: the rows come in a
+//! deterministic order ([`super::new_session_order::ordered_targets`]), the
+//! overlay says where in the list the window sits
+//! ([`NewSessionFlow::position`]), and typing narrows it
+//! ([`NewSessionFlow::filter`]).
+//!
 //! Test: `new_session_*` in `super::tests`.
 
 use std::future::Future;
@@ -153,6 +159,8 @@ pub(crate) struct NewSessionFlow {
     targets: Vec<Target>,
     selected: usize,
     typed: Option<String>,
+    /// #7421: the substring the operator has typed to narrow the rows.
+    filter: String,
     resolve: Resolver,
 }
 
@@ -167,6 +175,7 @@ impl PartialEq for NewSessionFlow {
         self.targets == other.targets
             && self.selected == other.selected
             && self.typed == other.typed
+            && self.filter == other.filter
     }
 }
 
@@ -184,6 +193,7 @@ impl NewSessionFlow {
             targets,
             selected: 0,
             typed: None,
+            filter: String::new(),
             resolve,
         }
     }
@@ -206,28 +216,92 @@ impl NewSessionFlow {
         self.typed.as_deref()
     }
 
+    /// The substring the operator has typed to narrow the rows (#7421).
+    pub(crate) fn filter(&self) -> &str {
+        &self.filter
+    }
+
+    /// Which targets the current filter shows, as indices into `targets`.
+    ///
+    /// Why (#7421): the filter changes what the operator can move over, so the
+    /// window, the highlight and the position indicator all have to read the
+    /// same answer rather than each deriving one.
+    /// What: every row whose [`row_labels`] label contains the filter, compared
+    /// case-insensitively. [`Target::Other`] always survives — filtering the
+    /// typed-path escape away would leave a non-matching filter with no way
+    /// forward and no way to reach a checkout the registry lacks.
+    /// Test: `new_session_typing_filters_the_rows`.
+    fn visible(&self) -> Vec<usize> {
+        let needle = self.filter.to_lowercase();
+        row_labels(&self.targets)
+            .into_iter()
+            .enumerate()
+            .filter(|(i, label)| {
+                needle.is_empty()
+                    || matches!(self.targets.get(*i), Some(Target::Other))
+                    || label.to_lowercase().contains(&needle)
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Where the highlight sits within [`Self::visible`].
+    fn cursor(&self, visible: &[usize]) -> usize {
+        visible
+            .iter()
+            .position(|i| *i == self.selected)
+            .unwrap_or(0)
+    }
+
+    /// First visible row the window draws, given where the highlight is.
+    fn window_start(&self, visible: &[usize]) -> usize {
+        self.cursor(visible)
+            .saturating_sub(PICK_ROWS.saturating_sub(1))
+    }
+
     /// The overlay's visible target rows, at most [`PICK_ROWS`] of them.
     ///
     /// Why: a host with forty registered projects would otherwise draw an
     /// overlay taller than the terminal. The window scrolls only once the
     /// selection passes the bottom, so a short registry never moves.
-    /// What: the marked rows, in registry order, starting at whichever offset
+    /// What: the marked rows, in [`super::new_session_order::ordered_targets`]'
+    /// order and narrowed by the filter (#7421), starting at whichever offset
     /// keeps the selection on screen. Each row is [`row_labels`]' short
     /// `owner/repo` form (#7406), never the stored URL or path.
     /// Test: `new_session_rows_window_keeps_the_selection_visible`,
-    /// `new_session_rows_show_owner_repo_only`.
+    /// `new_session_rows_show_owner_repo_only`, `new_session_typing_filters_the_rows`.
     pub(crate) fn rows(&self) -> Vec<String> {
-        let start = self.selected.saturating_sub(PICK_ROWS.saturating_sub(1));
-        row_labels(&self.targets)
-            .into_iter()
-            .enumerate()
-            .skip(start)
+        let labels = row_labels(&self.targets);
+        let visible = self.visible();
+        visible
+            .iter()
+            .skip(self.window_start(&visible))
             .take(PICK_ROWS)
-            .map(|(i, label)| {
-                let marker = if i == self.selected { "▸" } else { " " };
+            .map(|i| {
+                let marker = if *i == self.selected { "▸" } else { " " };
+                let label = labels.get(*i).map_or("", String::as_str);
                 format!("{marker} {label}")
             })
             .collect()
+    }
+
+    /// Where the window sits in the list, when the list is longer than it
+    /// (#7421).
+    ///
+    /// Why: the owner could not tell that rows existed past the eighth, so a
+    /// project that scrolled out of the window simply looked absent.
+    /// What: `Some("3–10 of 27")` — the one-based span the window draws and the
+    /// filtered row count. `None` when everything fits, because a count that
+    /// never changes is noise.
+    /// Test: `new_session_position_indicator_reports_the_window`.
+    pub(crate) fn position(&self) -> Option<String> {
+        let visible = self.visible();
+        if visible.len() <= PICK_ROWS {
+            return None;
+        }
+        let start = self.window_start(&visible);
+        let end = (start + PICK_ROWS).min(visible.len());
+        Some(format!("{}–{} of {}", start + 1, end, visible.len()))
     }
 
     /// Route one keystroke through whichever step is open.
@@ -236,24 +310,51 @@ impl NewSessionFlow {
     /// matched once, ahead of the per-step handlers, rather than repeated in
     /// each of them where one could be forgotten.
     /// What: the path entry takes over as soon as it is open; before that the
-    /// keys move over the target list.
-    /// Test: `new_session_escape_cancels_from_both_steps`.
+    /// keys move over the target list. #7421 gives Esc one job first — a
+    /// non-empty filter is cleared, and only an Esc with nothing left to clear
+    /// cancels the flow.
+    /// Test: `new_session_escape_cancels_from_both_steps`,
+    /// `new_session_typing_filters_the_rows`.
     pub(crate) fn apply(&mut self, input: Input) -> Step {
         match input {
+            // #7421: clear the filter before cancelling, so a mistyped filter
+            // costs one key rather than the whole flow.
+            Input::Escape if self.typed.is_none() && !self.filter.is_empty() => {
+                self.filter.clear();
+                Step::Redraw
+            }
             Input::Escape => Step::Cancel,
             _ if self.typed.is_some() => self.apply_path(input),
             _ => self.apply_pick(input),
         }
     }
 
-    /// Target-list keys: move, then Enter to confirm or open the path entry.
+    /// Target-list keys: move or filter, then Enter to confirm or type a path.
     fn apply_pick(&mut self, input: Input) -> Step {
-        let last = self.targets.len().saturating_sub(1);
+        let visible = self.visible();
+        let cursor = self.cursor(&visible);
+        let last = visible.len().saturating_sub(1);
         match input {
-            Input::Up | Input::Char('k') => self.move_to(self.selected.saturating_sub(1)),
-            Input::Down | Input::Char('j') => self.move_to((self.selected + 1).min(last)),
-            Input::Home => self.move_to(0),
-            Input::End => self.move_to(last),
+            Input::Up => self.move_within(&visible, cursor.saturating_sub(1)),
+            Input::Down => self.move_within(&visible, (cursor + 1).min(last)),
+            Input::PageUp => self.move_within(&visible, cursor.saturating_sub(PICK_ROWS)),
+            Input::PageDown => self.move_within(&visible, (cursor + PICK_ROWS).min(last)),
+            Input::Home => self.move_within(&visible, 0),
+            Input::End => self.move_within(&visible, last),
+            // #7421: a printable key narrows the list rather than moving over
+            // it, so `j`/`k` are no longer movement here — the arrows are.
+            Input::Char(c) => {
+                self.filter.push(c);
+                self.keep_selection_visible();
+                Step::Redraw
+            }
+            Input::Backspace => {
+                if self.filter.pop().is_none() {
+                    return Step::Ignore;
+                }
+                self.keep_selection_visible();
+                Step::Redraw
+            }
             Input::Enter => match self.targets.get(self.selected) {
                 Some(Target::Registered { name, repo }) => Step::Create(NewSessionRequest {
                     register: None,
@@ -270,6 +371,14 @@ impl NewSessionFlow {
         }
     }
 
+    /// Move the highlight to a position within the filtered rows.
+    fn move_within(&mut self, visible: &[usize], position: usize) -> Step {
+        match visible.get(position) {
+            Some(index) => self.move_to(*index),
+            None => Step::Ignore,
+        }
+    }
+
     /// Move the highlight, reporting whether anything changed.
     fn move_to(&mut self, index: usize) -> Step {
         if self.targets.is_empty() || index == self.selected {
@@ -277,6 +386,15 @@ impl NewSessionFlow {
         }
         self.selected = index;
         Step::Redraw
+    }
+
+    /// Re-seat the highlight when the filter just hid the row it was on (#7421).
+    fn keep_selection_visible(&mut self) {
+        let visible = self.visible();
+        if visible.contains(&self.selected) {
+            return;
+        }
+        self.selected = visible.first().copied().unwrap_or(0);
     }
 
     /// Path-entry keys: edit the buffer, then Enter to resolve and confirm.
@@ -378,37 +496,39 @@ pub(crate) fn derive_identity(typed: &str) -> Option<ProjectIdentity> {
 /// being a third opinion.
 /// What: every registry row becomes a [`Target::Registered`], with
 /// [`Target::Other`] appended so an unregistered checkout is always reachable
-/// even when the registry is empty.
+/// even when the registry is empty. `sessions` is the list the `tm ls` TUI has
+/// already fetched — it decides the order (#7421), so no second read is made
+/// for it.
 /// Test: the pure half is `new_session_targets_from_puts_the_path_escape_last`;
 /// the read itself is the one `list_rows` already covers.
 pub(crate) async fn fetch_targets(
     client: &reqwest::Client,
     url: &str,
+    sessions: &[ManagedSessionSummary],
 ) -> anyhow::Result<Vec<Target>> {
     let projects = DaemonClient::with_client(client.clone(), url.to_string())
         .registry_list_projects(None)
         .await?;
-    Ok(targets_from(&projects))
+    Ok(targets_from(&projects, sessions))
 }
 
 /// Pure half of [`fetch_targets`]: registry rows → targets, escape hatch last.
 ///
 /// #7406: a row the operator must never be offered — a temp-directory or
 /// scratchpad registration, a path that is gone, a directory that is not a
-/// checkout — is dropped here, through the shared
+/// checkout — is dropped, through the shared
 /// [`is_offerable_project`](crate::commands::projects::offerable::is_offerable_project)
 /// predicate.
-/// Test: `new_session_targets_from_drops_a_scratchpad_registration`.
-pub(crate) fn targets_from(projects: &[Project]) -> Vec<Target> {
-    projects
-        .iter()
-        .filter(|p| crate::commands::projects::offerable::is_offerable_project(p))
-        .map(|p| Target::Registered {
-            name: p.name.clone(),
-            repo: p.repo_url.clone(),
-        })
-        .chain(std::iter::once(Target::Other))
-        .collect()
+/// #7421: the surviving rows are ordered by
+/// [`super::new_session_order::ordered_targets`] rather than left in the
+/// registry's `HashMap` iteration order.
+/// Test: `new_session_targets_from_drops_a_scratchpad_registration`,
+/// `new_session_order_is_independent_of_registry_iteration_order`.
+pub(crate) fn targets_from(
+    projects: &[Project],
+    sessions: &[ManagedSessionSummary],
+) -> Vec<Target> {
+    super::new_session_order::ordered_targets(projects, sessions)
 }
 
 /// One display label per target — `owner/repo`, never a URL or a path (#7406).
@@ -534,6 +654,21 @@ fn is_session_project(target: &Target, session: &ManagedSessionSummary) -> bool 
     let Target::Registered { repo, .. } = target else {
         return false;
     };
+    repo_is_session_project(repo, session)
+}
+
+/// True when `session` runs in the project a registry row's `repo_url` names.
+///
+/// Why: #7421's ordering asks the same question [`preselect_index`] does — "is
+/// this session's project THIS row" — so both route through one predicate
+/// rather than each spelling the URL comparison out.
+/// What: matches the session's `repo_url` through
+/// [`repo_url_matches`] (so an `https` row and an `ssh`
+/// session agree), and failing that the session's `owner/repo` `source_id`
+/// against the row's parsed remote.
+/// Test: `new_session_preselects_the_cursor_sessions_project`,
+/// `new_session_order_puts_a_live_session_project_first`.
+pub(crate) fn repo_is_session_project(repo: &str, session: &ManagedSessionSummary) -> bool {
     if let Some(url) = session.repo_url.as_deref()
         && !url.trim().is_empty()
         && repo_url_matches(url, repo)

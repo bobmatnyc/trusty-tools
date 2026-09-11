@@ -50,6 +50,7 @@
 
 pub(crate) mod layout;
 pub(crate) mod new_session;
+pub(crate) mod new_session_order;
 pub(crate) mod render;
 pub(crate) mod state;
 
@@ -163,7 +164,9 @@ pub(crate) async fn run_session_tui(
             // #7395: read the project registry, then open the create flow over
             // it. `continue` rather than falling through — opening an overlay
             // changed nothing about the fleet, so it owes no re-fetch.
-            Action::NewSession => match new_session::fetch_targets(client, url).await {
+            // #7421: the session list this loop already holds is what orders
+            // the picker's rows, so no second daemon read is made for it.
+            Action::NewSession => match new_session::fetch_targets(client, url, &sessions).await {
                 Ok(targets) => {
                     // #7406: open on the project of the row the cursor is on.
                     let cursor = sessions.get(state.selected());

@@ -1,0 +1,3 @@
+Fixed
+
+- The `tm ls` new-session picker (`n`) no longer lists registered projects in the registry's `HashMap` iteration order, which varied run to run and could push the projects you have sessions in below the eight-row window. Projects with a managed session come first — best session state first, most recently active within that — and the rest follow alphabetically by their `owner/repo` label. The overlay now says where the window sits (`3–10 of 27`), and typing narrows the rows by case-insensitive substring on that label; Backspace edits the filter and Esc clears it before it cancels the flow. Arrow keys move the highlight, since `j`/`k` now type into the filter (#7421).

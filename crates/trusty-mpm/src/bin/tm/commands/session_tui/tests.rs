@@ -17,7 +17,7 @@ use trusty_mpm::session_manager::rename::validate_session_name;
 
 use super::layout::{self, Column};
 use super::new_session::{
-    self, NewProject, NewSessionFlow, NewSessionRequest, ProjectIdentity, Target,
+    self, NewProject, NewSessionFlow, NewSessionRequest, ProjectIdentity, Step, Target,
 };
 use super::render;
 use super::state::{Action, Input, Mode, Severity, TuiState, is_self_session};
@@ -1048,10 +1048,13 @@ fn project(name: &str, repo_url: &str) -> Project {
 
 /// Two registered projects, plus the typed-path escape `targets_from` appends.
 fn targets() -> Vec<Target> {
-    new_session::targets_from(&[
-        project("trusty-tools", "https://github.com/bobmatnyc/trusty-tools"),
-        project("apex", "https://github.com/duetto/apex"),
-    ])
+    new_session::targets_from(
+        &[
+            project("trusty-tools", "https://github.com/bobmatnyc/trusty-tools"),
+            project("apex", "https://github.com/duetto/apex"),
+        ],
+        &[],
+    )
 }
 
 /// Stand-in for the real git resolution, so the unregistered-path branch is
@@ -1093,7 +1096,7 @@ fn new_session_targets_from_puts_the_path_escape_last() {
     assert_eq!(targets.last(), Some(&Target::Other));
     // An empty registry still offers the escape, or a fresh host could never
     // create anything from this surface.
-    assert_eq!(new_session::targets_from(&[]), vec![Target::Other]);
+    assert_eq!(new_session::targets_from(&[], &[]), vec![Target::Other]);
 }
 
 #[test]
@@ -1343,10 +1346,18 @@ fn new_session_escape_leaves_the_state_identical() {
 
 #[test]
 fn new_session_rows_window_keeps_the_selection_visible() {
+    // #7421: zero-padded so the alphabetical order the picker now applies is
+    // also the numeric one, and the window arithmetic stays readable.
     let many: Vec<Project> = (0..12)
-        .map(|i| project(&format!("p{i}"), &format!("https://example.test/p{i}")))
+        .map(|i| {
+            project(
+                &format!("p{i:02}"),
+                &format!("https://example.test/p{i:02}"),
+            )
+        })
         .collect();
-    let mut flow = NewSessionFlow::with_resolver(new_session::targets_from(&many), stub_identity);
+    let mut flow =
+        NewSessionFlow::with_resolver(new_session::targets_from(&many, &[]), stub_identity);
     // Eight rows is the whole window, so a short registry never scrolls.
     assert_eq!(flow.rows().len(), 8);
     assert!(flow.rows()[0].starts_with('▸'));
@@ -1362,7 +1373,7 @@ fn new_session_rows_window_keeps_the_selection_visible() {
         "the selection scrolled off the window: {rows:?}"
     );
     assert!(
-        rows[0].contains("p5"),
+        rows[0].contains("p05"),
         "the window did not follow the selection down: {rows:?}"
     );
 }
@@ -1440,13 +1451,17 @@ fn target(name: &str, repo: &str) -> Target {
     }
 }
 
-/// A session whose project is the THIRD registered row.
+/// Three registered rows, in the alphabetical order #7421 renders them:
+/// `acme/widgets`, `bobmatnyc/trusty-tools`, `duetto/apex`.
 fn three_projects() -> Vec<Target> {
-    new_session::targets_from(&[
-        project("trusty-tools", "https://github.com/bobmatnyc/trusty-tools"),
-        project("apex", "https://github.com/duetto/apex"),
-        project("widgets", "https://github.com/acme/widgets"),
-    ])
+    new_session::targets_from(
+        &[
+            project("trusty-tools", "https://github.com/bobmatnyc/trusty-tools"),
+            project("apex", "https://github.com/duetto/apex"),
+            project("widgets", "https://github.com/acme/widgets"),
+        ],
+        &[],
+    )
 }
 
 /// The overlay opens on the project of the row the cursor was on.
@@ -1460,19 +1475,19 @@ fn new_session_preselects_the_cursor_sessions_project() {
     let targets = three_projects();
     // The session spells the remote differently from the registry row; the
     // shared `repo_url_matches` is what makes the two agree.
-    let mut cursor = session("w1", "Active", 1);
-    cursor.repo_url = Some("git@github.com:acme/widgets.git".to_string());
+    let mut cursor = session("a1", "Active", 1);
+    cursor.repo_url = Some("git@github.com:duetto/apex.git".to_string());
     assert_eq!(new_session::preselect_index(&targets, Some(&cursor)), 2);
 
     let flow = NewSessionFlow::with_resolver(targets.clone(), stub_identity)
         .preselected_for(Some(&cursor));
     let rows = flow.rows();
-    assert_eq!(rows[2], "▸ acme/widgets", "{rows:?}");
+    assert_eq!(rows[2], "▸ duetto/apex", "{rows:?}");
     assert!(!rows[0].starts_with('▸'), "{rows:?}");
 
     // A session with no `repo_url` is matched on its `owner/repo` source id.
-    let mut by_source = session("a1", "Active", 2);
-    by_source.source_id = Some("duetto/apex".to_string());
+    let mut by_source = session("t1", "Active", 2);
+    by_source.source_id = Some("bobmatnyc/trusty-tools".to_string());
     assert_eq!(new_session::preselect_index(&targets, Some(&by_source)), 1);
 }
 
@@ -1542,15 +1557,18 @@ fn new_session_labels_disambiguate_by_host() {
 /// whose path is gone, and two rows that must survive.
 #[test]
 fn new_session_targets_from_drops_a_scratchpad_registration() {
-    let targets = new_session::targets_from(&[
-        project(
-            "mcp-probe-scratch-4181",
-            "/private/tmp/claude-502/abc/scratchpad/mcp-probe-scratch-4181",
-        ),
-        project("gone", "/nonexistent/7406/no-such-checkout"),
-        project("trusty-tools", "https://github.com/bobmatnyc/trusty-tools"),
-        project("apex", "https://github.com/duetto/apex"),
-    ]);
+    let targets = new_session::targets_from(
+        &[
+            project(
+                "mcp-probe-scratch-4181",
+                "/private/tmp/claude-502/abc/scratchpad/mcp-probe-scratch-4181",
+            ),
+            project("gone", "/nonexistent/7406/no-such-checkout"),
+            project("trusty-tools", "https://github.com/bobmatnyc/trusty-tools"),
+            project("apex", "https://github.com/duetto/apex"),
+        ],
+        &[],
+    );
     assert_eq!(
         targets,
         vec![
@@ -1601,6 +1619,206 @@ fn render_new_session_rows_at_eighty_columns() {
         !joined.contains("/Users/me/code"),
         "an absolute path reached a row: {joined}"
     );
+}
+
+// ── new-session picker order, position and filter (#7421) ───────────────────
+
+/// Six registrations, spelled in one order; the caller may reshuffle them.
+fn six_projects() -> Vec<Project> {
+    vec![
+        project("apex", "https://github.com/duetto/apex"),
+        project("widgets", "https://github.com/acme/widgets"),
+        project("trusty-tools", "https://github.com/bobmatnyc/trusty-tools"),
+        project("zeta", "https://github.com/zed/zeta"),
+        project("mid", "https://github.com/mid/mid"),
+        project("early", "https://github.com/early/early"),
+    ]
+}
+
+/// The same registry contents render the same rows, whatever order they arrive
+/// in.
+///
+/// Why (#7421 acceptance 1 and 5): the registry is a `HashMap`, so
+/// `registry_list_projects` hands back `values()` in an order that varies run to
+/// run. Against the pre-#7421 `targets_from` — which mapped the input straight
+/// through — a permuted input produced a permuted row list, so this fails there.
+#[test]
+fn new_session_order_is_independent_of_registry_iteration_order() {
+    let forward = new_session::targets_from(&six_projects(), &[]);
+    let mut shuffled = six_projects();
+    shuffled.reverse();
+    shuffled.swap(0, 3);
+    let reversed = new_session::targets_from(&shuffled, &[]);
+    assert_eq!(forward, reversed, "the row order followed the input order");
+    // And the order is the alphabetical one the labels spell, escape hatch last.
+    assert_eq!(
+        new_session::row_labels(&forward),
+        vec![
+            "acme/widgets".to_string(),
+            "bobmatnyc/trusty-tools".to_string(),
+            "duetto/apex".to_string(),
+            "early/early".to_string(),
+            "mid/mid".to_string(),
+            "zed/zeta".to_string(),
+            "other — type a project path…".to_string(),
+        ]
+    );
+}
+
+/// A project with a live session outranks every project without one.
+///
+/// Why (#7421 acceptance 1 and 5): the owner's four projects with running
+/// sessions were the ones scrolling out of the eight-row window. `zed/zeta`
+/// sorts LAST alphabetically, so an implementation that only sorts by label —
+/// the pre-#7421 behaviour plus a plain sort — fails here.
+#[test]
+fn new_session_order_puts_a_live_session_project_first() {
+    let mut live = session("z1", "active", 1);
+    live.repo_url = Some("git@github.com:zed/zeta.git".to_string());
+    live.last_activity_at = Some("2026-09-11T10:00:00Z".to_string());
+    // A second session, older and merely stopped, in a project that would
+    // otherwise sort first.
+    let mut older = session("w1", "stopped", 2);
+    older.source_id = Some("acme/widgets".to_string());
+    older.last_activity_at = Some("2026-09-01T10:00:00Z".to_string());
+
+    let rows = new_session::targets_from(&six_projects(), &[live, older]);
+    let labels = new_session::row_labels(&rows);
+    assert_eq!(
+        labels.first().map(String::as_str),
+        Some("zed/zeta"),
+        "the live-session project did not sort first: {labels:?}"
+    );
+    assert_eq!(
+        labels.get(1).map(String::as_str),
+        Some("acme/widgets"),
+        "the stopped-session project did not outrank the session-less ones: {labels:?}"
+    );
+    assert_eq!(
+        labels.get(2).map(String::as_str),
+        Some("bobmatnyc/trusty-tools"),
+        "the session-less rows lost their alphabetical order: {labels:?}"
+    );
+}
+
+/// Typing narrows the rows; Esc clears the filter before it cancels the flow.
+///
+/// Why (#7421 acceptance 3): a twenty-project registry is unusable by arrow key
+/// alone, and an Esc that threw the whole flow away on a mistyped filter would
+/// make typing more expensive than scrolling.
+#[test]
+fn new_session_typing_filters_the_rows() {
+    let mut flow = NewSessionFlow::with_resolver(
+        new_session::targets_from(&six_projects(), &[]),
+        stub_identity,
+    );
+    assert_eq!(flow.rows().len(), 7);
+
+    assert_eq!(flow.apply(Input::Char('z')), Step::Redraw);
+    assert_eq!(flow.filter(), "z");
+    // The matching row, plus the typed-path escape, which never filters away.
+    assert_eq!(
+        flow.rows(),
+        vec![
+            "▸ zed/zeta".to_string(),
+            "  other — type a project path…".to_string(),
+        ],
+        "the filter did not narrow the rows"
+    );
+
+    // Matching is case-insensitive and runs over the whole label.
+    assert_eq!(flow.apply(Input::Backspace), Step::Redraw);
+    assert_eq!(flow.apply(Input::Char('A')), Step::Redraw);
+    assert_eq!(flow.apply(Input::Char('C')), Step::Redraw);
+    assert_eq!(flow.rows().len(), 2, "{:?}", flow.rows());
+    assert!(flow.rows()[0].contains("acme/widgets"), "{:?}", flow.rows());
+
+    // Esc clears the filter; a second Esc, with nothing left to clear, cancels.
+    assert_eq!(flow.apply(Input::Escape), Step::Redraw);
+    assert_eq!(flow.filter(), "");
+    assert_eq!(flow.rows().len(), 7);
+    assert_eq!(flow.apply(Input::Escape), Step::Cancel);
+}
+
+/// A filter that hides the highlighted row re-seats it on the first match.
+#[test]
+fn new_session_filter_keeps_the_selection_valid() {
+    let mut flow = NewSessionFlow::with_resolver(
+        new_session::targets_from(&six_projects(), &[]),
+        stub_identity,
+    );
+    // Move onto `bobmatnyc/trusty-tools`, then filter it away.
+    assert_eq!(flow.apply(Input::Down), Step::Redraw);
+    assert_eq!(flow.apply(Input::Char('z')), Step::Redraw);
+    let rows = flow.rows();
+    assert!(
+        rows[0].starts_with("▸ zed/zeta"),
+        "the highlight stayed on a hidden row: {rows:?}"
+    );
+    // And Enter confirms the row the highlight is actually on.
+    assert_eq!(
+        flow.apply(Input::Enter),
+        Step::Create(NewSessionRequest {
+            register: None,
+            repo: "https://github.com/zed/zeta".to_string(),
+            label: "zeta".to_string(),
+        })
+    );
+}
+
+/// The overlay says where in the list the eight-row window sits.
+///
+/// Why (#7421 acceptance 2): with twenty-seven registrations and no indicator,
+/// a project below the fold was indistinguishable from one that is not
+/// registered at all.
+#[test]
+fn new_session_position_indicator_reports_the_window() {
+    let many: Vec<Project> = (0..26)
+        .map(|i| {
+            project(
+                &format!("p{i:02}"),
+                &format!("https://ex.test/o{i:02}/p{i:02}"),
+            )
+        })
+        .collect();
+    let mut flow =
+        NewSessionFlow::with_resolver(new_session::targets_from(&many, &[]), stub_identity);
+    // Twenty-six projects plus the typed-path escape.
+    assert_eq!(flow.position(), Some("1–8 of 27".to_string()));
+    for _ in 0..9 {
+        flow.apply(Input::Down);
+    }
+    assert_eq!(flow.position(), Some("3–10 of 27".to_string()));
+    // A short list needs no indicator at all.
+    let short = NewSessionFlow::with_resolver(new_session::targets_from(&[], &[]), stub_identity);
+    assert_eq!(short.position(), None);
+}
+
+/// The rendered overlay carries both the position and the typed filter.
+#[test]
+fn render_new_session_overlay_shows_the_position_and_filter() {
+    let sessions = fleet();
+    let many: Vec<Project> = (0..26)
+        .map(|i| {
+            project(
+                &format!("p{i:02}"),
+                &format!("https://ex.test/o{i:02}/p{i:02}"),
+            )
+        })
+        .collect();
+    let mut state = browsing();
+    state.open_new_session(NewSessionFlow::with_resolver(
+        new_session::targets_from(&many, &[]),
+        stub_identity,
+    ));
+    let joined = draw(110, 30, &sessions, &mut state).join("\n");
+    assert!(joined.contains("1–8 of 27"), "{joined}");
+    assert!(joined.contains("Type to filter"), "{joined}");
+
+    state.apply(Input::Char('o'), &sessions);
+    state.apply(Input::Char('1'), &sessions);
+    let joined = draw(110, 30, &sessions, &mut state).join("\n");
+    assert!(joined.contains("filter: o1"), "{joined}");
 }
 
 /// A row wider than the pane is cut with `…` rather than wrapped.

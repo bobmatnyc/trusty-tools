@@ -154,7 +154,9 @@ pub(crate) fn prepare_menu(sessions: Vec<ManagedSessionSummary>, scope: &PickerS
 /// other state. Lower sorts first.
 /// Test: `sort_sessions_recent_groups_attached_before_active_before_stopped`,
 /// `sort_sessions_alpha_groups_attached_before_active_before_stopped`.
-fn group_rank(s: &ManagedSessionSummary) -> u8 {
+// #7421: also ranks a PROJECT for the `tm ls` new-session picker, through
+// `session_tui::new_session_order`, so both surfaces share one precedence.
+pub(crate) fn group_rank(s: &ManagedSessionSummary) -> u8 {
     if s.attached {
         0
     } else if s.state == "active" {
@@ -211,7 +213,9 @@ pub(crate) fn sort_sessions(sessions: &mut [ManagedSessionSummary], sort: Sessio
 /// form.
 /// Test: covered indirectly by `sort_sessions_recent_orders_by_last_activity`
 /// and `sort_sessions_recent_falls_back_to_created_at`.
-fn recency_key(s: &ManagedSessionSummary) -> &str {
+// #7421: shared with `session_tui::new_session_order`, which ranks a project by
+// the newest key among its sessions.
+pub(crate) fn recency_key(s: &ManagedSessionSummary) -> &str {
     s.last_activity_at
         .as_deref()
         .or(s.created_at.as_deref())
