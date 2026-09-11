@@ -22,19 +22,44 @@ use trusty_channels::telegram::api::constants::TELEGRAM_API_BASE;
 /// Telegram, over the Bot API.
 pub(crate) struct TelegramAdapter;
 
-/// Build the client this binding's credential selects. See `slack::client`.
-fn client(binding: &Binding) -> Result<BaseClient, ChannelError> {
-    let failed = || ChannelError::Provider {
-        provider: "telegram",
-    };
-    match binding.credential_ref.as_deref() {
-        None => BaseClient::new().map_err(|_| failed()),
-        Some(reference) => {
-            let token = super::resolve_credential(reference)?;
-            BaseClient::with_endpoint(TELEGRAM_API_BASE, Some(token.into_inner()))
-                .map_err(|_| failed())
+/// Credential-registry keys a Telegram binding may send as. Telegram has one
+/// secret, so the family has one member.
+pub(crate) const TELEGRAM_CREDENTIALS: &[&str] = &["telegram"];
+
+/// Build the client this binding's credential selects. See `slack::client_at`.
+fn client_at(binding: &Binding, base_url: &str) -> Result<BaseClient, ChannelError> {
+    let reference = binding
+        .credential_ref
+        .as_deref()
+        .unwrap_or(TELEGRAM_CREDENTIALS[0]);
+    let token = super::resolve_credential(reference, TELEGRAM_CREDENTIALS, "TELEGRAM_")?;
+    BaseClient::with_endpoint(base_url, Some(token.into_inner())).map_err(|_| {
+        ChannelError::Provider {
+            provider: "telegram",
         }
-    }
+    })
+}
+
+/// `sendMessage` against `base_url`. [`ChannelAdapter::send`] is this with the
+/// real API root.
+///
+/// Test: `telegram_adapter_send_uses_the_credential_the_binding_names`.
+async fn send_message(
+    binding: &Binding,
+    text: &str,
+    base_url: &str,
+) -> Result<Value, ChannelError> {
+    let client = client_at(binding, base_url)?;
+    let result = client
+        .call_method(
+            "sendMessage",
+            &json!({"chat_id":binding.target,"text":text,"link_preview_options":{"is_disabled":true}}),
+        )
+        .await
+        .map_err(|_| ChannelError::Provider {
+            provider: "telegram",
+        })?;
+    Ok(json!({"ok":true,"message_id":result["result"]["message_id"]}))
 }
 
 #[async_trait::async_trait]
@@ -58,7 +83,16 @@ impl ChannelAdapter for TelegramAdapter {
     }
 
     fn configured(&self) -> bool {
-        BaseClient::new().is_ok_and(|c| c.has_token())
+        super::resolve_credential(TELEGRAM_CREDENTIALS[0], TELEGRAM_CREDENTIALS, "TELEGRAM_")
+            .is_ok()
+    }
+
+    fn credential_providers(&self) -> &'static [&'static str] {
+        TELEGRAM_CREDENTIALS
+    }
+
+    fn credential_env_prefix(&self) -> &'static str {
+        "TELEGRAM_"
     }
 
     /// A numeric chat ID, or an `@username`.
@@ -73,21 +107,84 @@ impl ChannelAdapter for TelegramAdapter {
     }
 
     async fn send(&self, binding: &Binding, text: &str) -> Result<Value, ChannelError> {
-        let client = client(binding)?;
-        let result = client
-            .call_method(
-                "sendMessage",
-                &json!({"chat_id":binding.target,"text":text,"link_preview_options":{"is_disabled":true}}),
-            )
-            .await
-            .map_err(|_| ChannelError::Provider { provider: "telegram" })?;
-        Ok(json!({"ok":true,"message_id":result["result"]["message_id"]}))
+        send_message(binding, text, TELEGRAM_API_BASE).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channels::credentials::test_env::EnvVarGuard;
+    use std::sync::{Arc, Mutex};
+
+    fn binding_with(credential_ref: Option<&str>) -> Binding {
+        let mut value = json!({
+            "id":"team","name":"Team","provider":"telegram","target":"123456",
+            "enabled":true,"send_enabled":true
+        });
+        if let Some(reference) = credential_ref {
+            value["credential_ref"] = json!(reference);
+        }
+        serde_json::from_value(value).unwrap()
+    }
+
+    /// Stand-in Telegram that records the token from the `/bot<token>/` path.
+    async fn mock_telegram(seen: Arc<Mutex<Option<String>>>) -> String {
+        let app =
+            axum::Router::new().route(
+                "/{token}/sendMessage",
+                axum::routing::post(
+                    move |axum::extract::Path(token): axum::extract::Path<String>,
+                          _body: String| async move {
+                        *seen.lock().unwrap() = Some(token);
+                        axum::Json(json!({"ok":true,"result":{"message_id":7427}}))
+                    },
+                ),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    /// The token on the wire is the one `credential_ref` resolves, and the
+    /// default resolves the same registry key when the binding names none.
+    #[tokio::test]
+    #[serial_test::serial(channel_credentials)]
+    async fn telegram_adapter_send_uses_the_credential_the_binding_names() {
+        let _bot = EnvVarGuard::set("TELEGRAM_BOT_TOKEN", "7427:not-a-real-token");
+
+        let seen = Arc::new(Mutex::new(None));
+        let base = mock_telegram(Arc::clone(&seen)).await;
+
+        send_message(&binding_with(None), "hello", &base)
+            .await
+            .unwrap();
+        assert_eq!(
+            seen.lock().unwrap().clone(),
+            Some("bot7427:not-a-real-token".to_string())
+        );
+
+        *seen.lock().unwrap() = None;
+        send_message(&binding_with(Some("telegram")), "hello", &base)
+            .await
+            .unwrap();
+        assert_eq!(
+            seen.lock().unwrap().clone(),
+            Some("bot7427:not-a-real-token".to_string())
+        );
+
+        // A credential outside Telegram's family never reaches the wire.
+        *seen.lock().unwrap() = None;
+        assert!(
+            send_message(&binding_with(Some("slack")), "hello", &base)
+                .await
+                .is_err()
+        );
+        assert!(seen.lock().unwrap().is_none());
+    }
 
     #[test]
     fn telegram_adapter_is_send_only() {

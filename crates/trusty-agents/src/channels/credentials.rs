@@ -1,22 +1,30 @@
-//! Resolving a binding's `credential_ref` — a name, never a value.
+//! Resolving a binding's `credential_ref` — a name, never a value, and never a
+//! second resolver.
 //!
 //! Why: before #7427 a channel binding carried no credential at all; every send
-//! used whichever process-global token happened to be in the environment
-//! (`SLACK_BOT_TOKEN`, `TELEGRAM_BOT_TOKEN`), so two assistants bound to two
-//! workspaces could not send as different identities, and nothing in the
-//! binding recorded which credential it meant. A binding now names one. The
-//! name is what the config file holds; the value is resolved at send time and
-//! returned in a [`Secret`], which cannot be serialised, cloned, or printed —
-//! so "the assistant home holds no credential" is a property of the types.
+//! used whichever process-global token was in the environment, so two
+//! assistants bound to two workspaces could not send as different identities
+//! and nothing in the binding recorded which credential it meant. A binding now
+//! names one.
 //!
-//! What: a reference is `<scheme>:<name>`. This module implements `env:` — the
-//! process environment, with `.env.local` folded in by
-//! [`trusty_common::credentials::load_env_local_once`] so the precedence
-//! matches the shared resolver's first two tiers. Any other scheme
-//! (`gworkspace:<account>` among them) is an error, deliberately: falling back
-//! to the process-global token would send as an identity the binding did not
-//! name. A binding with no `credential_ref` keeps the pre-#7427 behaviour and
-//! uses the provider's global token.
+//! What: the name is a [`CredentialRef`] — `provider` or `provider/qualifier`,
+//! the credential authority's own naming unit — and resolution is
+//! [`trusty_common::credentials::authority::resolve`] and nothing else. That is
+//! deliberate: DOC-45 `C-3.3` and this repo's common-entry-point rule both say
+//! a second credential-resolution path is a defect, so this module contributes
+//! no tier logic of its own. The env → `.env.local` → secure-store precedence,
+//! the registry check that refuses an unnameable provider, the [`Secret`]
+//! wrapper that cannot be serialised or cloned, and the grant check #4566 will
+//! add all arrive from there.
+//!
+//! A reference is also confined to the provider family of the adapter that will
+//! use it — the caller passes the adapter's
+//! [`credential_providers`](super::ChannelAdapter::credential_providers) list.
+//! Without that, a Slack binding could name `github` or `openrouter` and
+//! forward an unrelated credential to Slack. Confinement is by registry key
+//! rather than by environment-variable name because a key is what the authority
+//! resolves; there is no point in the grammar at which an arbitrary variable
+//! name could be supplied.
 //!
 //! Per-assistant credential authority is a separate concern. DOC-63 §7.1b
 //! (`docs/specs/DOC-63-okg-sources.md`) states that a channel's send/receive
@@ -24,90 +32,128 @@
 //! grants against the same provider, both routed through #4040, and neither
 //! implies the other. This module resolves the channel grant only.
 //!
-//! Test: `channel_credential_ref_resolves_env_scheme_and_rejects_others`,
+//! Test: `channel_credential_ref_resolves_through_the_authority`,
+//! `channel_credential_ref_is_confined_to_the_adapters_providers`,
 //! `channel_binding_serialization_never_carries_a_token_value`.
 
-// #7427: a binding names a credential; it never holds one.
+// #7427: a binding names a credential; it never holds one, and never resolves
+// one itself.
 use super::ChannelError;
-use trusty_common::credentials::Secret;
+use trusty_common::credentials::{CredentialRef, Principal, Scope, Secret, ServiceId};
 
-/// The one credential scheme implemented today.
-const ENV_SCHEME: &str = "env";
-
-/// Longest accepted `<scheme>:<name>` reference, in bytes.
-const MAX_REF_LEN: usize = 128;
-
-/// Split a reference into `(scheme, name)`, rejecting anything out of grammar.
+/// Identity this crate resolves channel credentials as.
 ///
-/// Why: one parser, so validation at save time and resolution at send time can
-/// never disagree about what a reference means.
-fn split(reference: &str) -> Result<(&str, &str), ChannelError> {
-    if reference.len() > MAX_REF_LEN {
-        return Err(ChannelError::Credential(format!(
-            "reference is too long ({} bytes; max {MAX_REF_LEN})",
-            reference.len()
-        )));
-    }
-    let (scheme, name) = reference.split_once(':').ok_or_else(|| {
-        ChannelError::Credential("reference must be `<scheme>:<name>`".to_string())
-    })?;
-    if name.is_empty() {
-        return Err(ChannelError::Credential(
-            "reference must be `<scheme>:<name>`".to_string(),
-        ));
-    }
-    Ok((scheme, name))
+/// Why: [`trusty_common::credentials::authority::resolve`] takes a principal so
+/// that #4566's grant check has something to check. Until it lands the argument
+/// changes nothing, which is exactly why it has to be right now — the signature
+/// will not change when the check arrives.
+fn principal() -> Principal {
+    ServiceId::parse("trusty-agents").map_or(Principal::Operator, Principal::Service)
 }
 
-/// Check a reference's shape without resolving it.
+/// Parse and confine a reference without resolving it.
 ///
 /// Why: `Binding::validate` runs on every load and every save, including for
 /// assistants whose credentials are not present on this host. Resolving there
 /// would make a saved configuration unloadable on a machine that merely lacks
-/// the environment variable. This checks only that the reference is a name this
-/// build knows how to resolve.
-/// What: accepts `env:<NAME>` where `<NAME>` is `[A-Z][A-Z0-9_]*`. Rejects an
-/// unknown scheme, so a `gworkspace:` reference cannot be saved before the
-/// scheme exists and then silently send with the global token.
-/// Test: `channel_credential_ref_resolves_env_scheme_and_rejects_others`.
-pub(crate) fn validate_credential_ref(reference: &str) -> Result<(), ChannelError> {
-    let (scheme, name) = split(reference)?;
-    if scheme != ENV_SCHEME {
+/// the credential. This checks only that the reference is a name this adapter
+/// is allowed to send as.
+/// What: parses the [`CredentialRef`] grammar, then requires the provider
+/// segment to appear in `allowed` — the adapter's own provider family. A
+/// qualifier is preserved, so `slack/second-workspace` reaches a distinct store
+/// row while staying confined to Slack.
+/// Test: `channel_credential_ref_is_confined_to_the_adapters_providers`.
+pub(crate) fn validate_credential_ref(
+    reference: &str,
+    allowed: &[&'static str],
+    env_prefix: &str,
+) -> Result<(), ChannelError> {
+    let parsed = CredentialRef::parse(reference).map_err(|e| {
+        ChannelError::Credential(format!("reference is not a credential name: {e}"))
+    })?;
+    if !allowed.contains(&parsed.provider()) {
         return Err(ChannelError::Credential(format!(
-            "unknown credential scheme `{scheme}`; this build resolves `{ENV_SCHEME}:` only"
+            "provider `{}` is not one this channel may send as (allowed: {})",
+            parsed.provider(),
+            allowed.join(", ")
         )));
     }
-    let valid = name.starts_with(|c: char| c.is_ascii_uppercase())
-        && name
-            .chars()
-            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
-    if !valid {
-        return Err(ChannelError::Credential(
-            "`env:` name must be an uppercase environment variable name".to_string(),
-        ));
+    // The allowlist above is by registry key; this is the property that makes
+    // those keys safe, checked rather than assumed. A registry entry that
+    // mapped an allowed key outside the provider's own variable family would
+    // otherwise turn the allowlist into a hole.
+    match trusty_common::credentials::env_var_for(parsed.provider()) {
+        Some(var) if var.starts_with(env_prefix) => Ok(()),
+        Some(var) => Err(ChannelError::Credential(format!(
+            "provider `{}` resolves `{var}`, outside this channel's `{env_prefix}` credentials",
+            parsed.provider()
+        ))),
+        None => Err(ChannelError::Credential(format!(
+            "provider `{}` is not in the credential registry",
+            parsed.provider()
+        ))),
     }
-    Ok(())
 }
 
 /// Resolve a reference to the credential it names.
 ///
 /// Why: resolution happens where the credential is consumed — at send time, in
 /// the adapter — so nothing between the config file and the HTTP request holds
-/// a value.
-/// What: validates the shape, folds `.env.local` into the process environment
-/// through the shared loader, and reads the named variable. A missing variable
-/// is an error naming the variable, never a fallback to the provider's global
-/// token.
-/// Test: `channel_credential_ref_resolves_env_scheme_and_rejects_others`.
-pub(crate) fn resolve_credential(reference: &str) -> Result<Secret<String>, ChannelError> {
-    validate_credential_ref(reference)?;
-    let (_, name) = split(reference)?;
-    trusty_common::credentials::load_env_local_once();
-    match std::env::var(name) {
-        Ok(value) if !value.is_empty() => Ok(Secret::new(value)),
-        _ => Err(ChannelError::Credential(format!(
-            "environment variable `{name}` is not set"
-        ))),
+/// a value (DOC-45 `C-8.4`).
+/// What: confines the reference, then hands it to the authority. A reference
+/// naming an unregistered provider, or one no storage tier answers for, comes
+/// back as [`ChannelError::Credential`] carrying the authority's own message.
+/// There is no fallback to a process-global token: falling back would send as
+/// an identity the binding did not name.
+/// Test: `channel_credential_ref_resolves_through_the_authority`.
+pub(crate) fn resolve_credential(
+    reference: &str,
+    allowed: &[&'static str],
+    env_prefix: &str,
+) -> Result<Secret<String>, ChannelError> {
+    validate_credential_ref(reference, allowed, env_prefix)?;
+    let parsed = CredentialRef::parse(reference).map_err(|e| {
+        ChannelError::Credential(format!("reference is not a credential name: {e}"))
+    })?;
+    trusty_common::credentials::authority::resolve(&parsed, &principal(), &Scope::write())
+        .map_err(|e| ChannelError::Credential(e.to_string()))
+}
+
+#[cfg(test)]
+pub(crate) mod test_env {
+    //! Save-and-restore guard for a credential environment variable.
+    //!
+    //! Why: the adapter send tests need a known token on the wire, and the
+    //! authority's env tier is the only tier that can be set without writing to
+    //! a real keychain or the operator's `0600` credential file. The guard
+    //! restores whatever the machine actually had, so a developer's live token
+    //! survives the test.
+
+    /// Restores a variable's prior value on drop.
+    pub(crate) struct EnvVarGuard {
+        name: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        /// Set `name` to `value`, remembering what was there.
+        pub(crate) fn set(name: &'static str, value: &str) -> Self {
+            let previous = std::env::var(name).ok();
+            // SAFETY: every caller is `#[serial_test::serial(channel_credentials)]`, so no
+            // other test in any process observes the window.
+            unsafe { std::env::set_var(name, value) };
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: see `set`.
+            match self.previous.take() {
+                Some(value) => unsafe { std::env::set_var(self.name, value) },
+                None => unsafe { std::env::remove_var(self.name) },
+            }
+        }
     }
 }
 
@@ -115,62 +161,89 @@ pub(crate) fn resolve_credential(reference: &str) -> Result<Secret<String>, Chan
 mod tests {
     use super::*;
     use crate::api::server::agent_channels::Binding;
+    use crate::channels::ChannelAdapter;
+    use test_env::EnvVarGuard;
 
-    /// Env var this test owns outright, so no sibling test races it.
-    const TEST_VAR: &str = "TRUSTY_AGENTS_TEST_CHANNEL_TOKEN_7427";
-    const TEST_VALUE: &str = "xoxb-7427-not-a-real-token";
-
-    /// Set [`TEST_VAR`] for the duration of the test.
-    ///
-    /// Why: `std::env::set_var` is process-global and `unsafe` in edition 2024.
-    /// The variable name is unique to this test and both call sites are
-    /// `#[serial_test::serial]`, so no other test observes the window.
-    fn set_test_var() {
-        // SAFETY: single-threaded section of a `#[serial]` test; the name is
-        // used by this module's tests only.
-        unsafe { std::env::set_var(TEST_VAR, TEST_VALUE) };
-    }
-
-    fn clear_test_var() {
-        // SAFETY: see `set_test_var`.
-        unsafe { std::env::remove_var(TEST_VAR) };
-    }
+    const SLACK_PROVIDERS: &[&str] = &["slack", "slack-user", "slack-app"];
 
     #[test]
-    #[serial_test::serial]
-    fn channel_credential_ref_resolves_env_scheme_and_rejects_others() {
-        set_test_var();
-        let resolved = resolve_credential(&format!("env:{TEST_VAR}")).unwrap();
-        assert_eq!(resolved.expose(), TEST_VALUE);
+    #[serial_test::serial(channel_credentials)]
+    fn channel_credential_ref_resolves_through_the_authority() {
+        let _guard = EnvVarGuard::set("SLACK_APP_TOKEN", "xapp-7427-not-a-real-token");
+        let resolved = resolve_credential("slack-app", SLACK_PROVIDERS, "SLACK_").unwrap();
+        assert_eq!(resolved.expose(), "xapp-7427-not-a-real-token");
         // A resolved secret renders a constant, never the value.
-        assert!(!format!("{resolved:?}").contains(TEST_VALUE));
-
-        assert!(validate_credential_ref("gworkspace:masa").is_err());
-        assert!(validate_credential_ref("SLACK_BOT_TOKEN").is_err());
-        assert!(validate_credential_ref("env:").is_err());
-        assert!(validate_credential_ref("env:lowercase").is_err());
-        assert!(validate_credential_ref(&format!("env:{}", "A".repeat(200))).is_err());
-        // An unset variable is an error, not a fallback to the global token.
-        clear_test_var();
-        assert!(resolve_credential(&format!("env:{TEST_VAR}")).is_err());
+        assert!(!format!("{resolved:?}").contains("xapp-7427"));
     }
 
     #[test]
-    #[serial_test::serial]
+    fn channel_credential_ref_is_confined_to_the_adapters_providers() {
+        // The shape the security review named: a Slack binding must not be able
+        // to forward an unrelated credential to Slack.
+        for foreign in ["github", "openrouter", "anthropic", "aws"] {
+            assert!(
+                validate_credential_ref(foreign, SLACK_PROVIDERS, "SLACK_").is_err(),
+                "`{foreign}` must not be sendable as a Slack credential"
+            );
+        }
+        assert!(validate_credential_ref("slack", SLACK_PROVIDERS, "SLACK_").is_ok());
+        assert!(
+            validate_credential_ref("slack/second-workspace", SLACK_PROVIDERS, "SLACK_").is_ok()
+        );
+        assert!(validate_credential_ref("telegram", SLACK_PROVIDERS, "SLACK_").is_err());
+        // Out-of-grammar text is not a credential name at all.
+        assert!(validate_credential_ref("env:SLACK_BOT_TOKEN", SLACK_PROVIDERS, "SLACK_").is_err());
+        assert!(
+            validate_credential_ref("AWS_SECRET_ACCESS_KEY", SLACK_PROVIDERS, "SLACK_").is_err()
+        );
+        assert!(validate_credential_ref("", SLACK_PROVIDERS, "SLACK_").is_err());
+    }
+
+    /// Every key an adapter may send as maps to an environment variable under
+    /// that adapter's own prefix.
+    ///
+    /// Why: the confinement above is by registry key, so it holds only while
+    /// the registry keeps mapping those keys to that provider's variables. This
+    /// asserts the property the security review asked for directly, and fails
+    /// if a future registry entry breaks it.
+    #[test]
+    fn channel_credential_providers_map_to_the_adapters_env_prefix() {
+        for adapter in [
+            &crate::channels::slack::SlackAdapter as &dyn ChannelAdapter,
+            &crate::channels::telegram::TelegramAdapter,
+        ] {
+            let prefix = adapter.credential_env_prefix();
+            for key in adapter.credential_providers() {
+                let var = trusty_common::credentials::env_var_for(key)
+                    .unwrap_or_else(|| panic!("`{key}` is not in the credential registry"));
+                assert!(
+                    var.starts_with(prefix),
+                    "`{key}` maps to `{var}`, outside `{prefix}` for provider `{}`",
+                    adapter.provider()
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(channel_credentials)]
     fn channel_binding_serialization_never_carries_a_token_value() {
-        set_test_var();
+        let _guard = EnvVarGuard::set("SLACK_APP_TOKEN", "xapp-7427-not-a-real-token");
         let binding: Binding = serde_json::from_value(serde_json::json!({
             "id":"team","name":"Team","provider":"slack","target":"C123456",
-            "enabled":true,"send_enabled":true,
-            "credential_ref":format!("env:{TEST_VAR}"),
+            "enabled":true,"send_enabled":true,"credential_ref":"slack-app",
         }))
         .unwrap();
         assert!(binding.validate().is_ok());
         assert_eq!(
-            resolve_credential(binding.credential_ref.as_deref().unwrap())
-                .unwrap()
-                .expose(),
-            TEST_VALUE
+            resolve_credential(
+                binding.credential_ref.as_deref().unwrap(),
+                SLACK_PROVIDERS,
+                "SLACK_"
+            )
+            .unwrap()
+            .expose(),
+            "xapp-7427-not-a-real-token"
         );
 
         // The on-disk format is `<assistant>.channels.json`; `Debug` is the
@@ -179,14 +252,13 @@ mod tests {
         let pretty = serde_json::to_string_pretty(&binding).unwrap();
         for rendered in [&compact, &pretty, &format!("{binding:?}")] {
             assert!(
-                !rendered.contains(TEST_VALUE),
+                !rendered.contains("xapp-7427"),
                 "binding rendering leaked the credential value"
             );
             assert!(
-                rendered.contains(TEST_VAR),
+                rendered.contains("slack-app"),
                 "binding rendering dropped the credential reference"
             );
         }
-        clear_test_var();
     }
 }

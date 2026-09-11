@@ -42,9 +42,10 @@ pub(crate) struct Binding {
     /// process-global token was in the environment, so two assistants bound to
     /// two workspaces could not send as different identities and nothing in the
     /// binding recorded which credential it meant. `None` keeps that behaviour.
-    /// What: `<scheme>:<name>` — `env:SLACK_BOT_TOKEN` today; see
-    /// [`crate::channels::credentials`] for the grammar and for why an unknown
-    /// scheme is an error rather than a fallback to the global token.
+    /// What: a `trusty_common::credentials::CredentialRef` — `slack`,
+    /// `slack-app`, `telegram`, or a qualified `slack/second-workspace`. It is
+    /// confined to the adapter's own provider family, so a Slack binding cannot
+    /// name `github`; see [`crate::channels::credentials`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_ref: Option<String>,
 }
@@ -85,7 +86,11 @@ impl Binding {
             )));
         }
         if let Some(reference) = &self.credential_ref
-            && let Err(e) = crate::channels::validate_credential_ref(reference)
+            && let Err(e) = crate::channels::validate_credential_ref(
+                reference,
+                adapter.credential_providers(),
+                adapter.credential_env_prefix(),
+            )
         {
             return Err(bad(&format!("Channel credential reference: {e}")));
         }

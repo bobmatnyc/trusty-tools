@@ -15,7 +15,7 @@
 //! dispatch-failure counter the assistant's channel view reads.
 //! Test: `channel_registry_resolves_known_providers_and_rejects_notion`,
 //! `channel_adapter_receive_defaults_to_unsupported`,
-//! `channel_credential_ref_resolves_env_scheme_and_rejects_others`,
+//! `channel_credential_ref_resolves_through_the_authority`,
 //! `channel_dispatch_failure_is_counted_per_binding`.
 
 // #7427: adapter model for two-way channel connectors (epic #7425 item b).
@@ -83,7 +83,7 @@ pub(crate) struct WakePrompt {
 /// are both upstream (502) but need different operator guidance.
 /// What: no variant carries a credential value. [`ChannelError::Credential`]
 /// names the scheme and the failure, never the resolved secret.
-/// Test: `channel_credential_ref_resolves_env_scheme_and_rejects_others`.
+/// Test: `channel_credential_ref_resolves_through_the_authority`.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ChannelError {
     /// No adapter is registered for this provider id.
@@ -134,8 +134,28 @@ pub(crate) trait ChannelAdapter: Send + Sync {
     /// What this provider can do.
     fn capabilities(&self) -> Capabilities;
 
-    /// Whether a credential for this provider is present in the environment.
+    /// Whether a credential for this provider resolves on this host.
     fn configured(&self) -> bool;
+
+    /// Credential-registry keys a binding on this provider may send as, most
+    /// specific first; the first entry is the default when a binding names
+    /// none.
+    ///
+    /// Why (#7427): a binding's `credential_ref` is operator-supplied text.
+    /// Confining it to the adapter's own provider family is what stops a Slack
+    /// binding naming `github` and forwarding an unrelated credential to Slack.
+    /// Every entry must appear in `trusty_common::credentials::REGISTRY`.
+    /// Test: `channel_credential_providers_map_to_the_adapters_env_prefix`.
+    fn credential_providers(&self) -> &'static [&'static str];
+
+    /// Environment-variable prefix every one of this adapter's
+    /// [`ChannelAdapter::credential_providers`] must map to.
+    ///
+    /// Why: the confinement above is by registry key; this states the property
+    /// that makes those keys safe, so a future registry entry that breaks it
+    /// fails a test rather than shipping.
+    /// Test: `channel_credential_providers_map_to_the_adapters_env_prefix`.
+    fn credential_env_prefix(&self) -> &'static str;
 
     /// Whether `target` is a well-formed destination for this provider.
     fn validate_target(&self, target: &str) -> bool;
@@ -183,6 +203,12 @@ mod tests {
         }
         fn configured(&self) -> bool {
             false
+        }
+        fn credential_providers(&self) -> &'static [&'static str] {
+            &["slack"]
+        }
+        fn credential_env_prefix(&self) -> &'static str {
+            "SLACK_"
         }
         fn validate_target(&self, target: &str) -> bool {
             !target.is_empty()
