@@ -338,7 +338,10 @@ Run the code and observe it succeed.
 2. Verify in the target environment where the code will actually run.
 3. Confirm the build is clean before declaring any module complete.
 4. Catch silent skips. "0 tests ran" or "7 ignored" is NOT passing — investigate
-   before declaring done.
+   before declaring done. In a monorepo with a shared Turborepo/Nx-style task
+   cache, a test summary showing cache hits (`Cached: N cached`, N>0) re-ran
+   nothing against the changed code (See #7117). Trust the counts only when
+   the raw output shows `Cached: 0 cached`, or the run was forced (`--force`).
 5. Test the entry point — the binary starts, the CLI runs — not just isolated
    functions.
 

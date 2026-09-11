@@ -48,8 +48,15 @@ against the file (issue #7121).
   compounds it — one such command turned 20 correct lines into a broken
   triple-`super` form (#7287). Use Edit for this shape: it matches one exact
   string and fails instead of reapplying.
-- After the edit, verify byte-for-byte over the affected region —
-  `od -c <file>` or `xxd` — not just a visual diff.
+- **Verify byte-for-byte after every Write or Edit call, not only a
+  shell-routed one** (See #7229). Check that the file gained no control byte
+  outside tab and newline: `od -c <file>` or `xxd` over the affected region, or
+  `git diff --stat` reporting `Bin` instead of a line count. The failure
+  signature is git reclassifying the text file as binary and `grep` returning
+  nothing against it, silently — which reads like an output-capture bug, not a
+  corrupted file. This does not mean Write or Edit itself refuses control
+  bytes; any such refusal belongs to the Claude Code harness, not this
+  repository.
 
 ## Proving a Regression Test Fails First
 
@@ -149,6 +156,14 @@ verify the build resolves clean.
   unconditional dependencies.
 - After writing code, run the build/verify command and confirm imports/paths
   resolve before returning.
+- **In a fresh or unbuilt worktree of a workspace monorepo, a wall of
+  `Cannot find module '@scope/…'` errors is a missing-build precondition, not
+  a type error** (See #7118, #7381). The harness's `isolation: "worktree"`
+  provisions the checkout only — it installs no dependencies and builds
+  nothing. Run the project's install and workspace-build command once —
+  illustrative pair: `pnpm install --frozen-lockfile`, then `npx turbo run
+  build --filter=<app>^...` — before the first per-package typecheck or gate,
+  not before every gate.
 
 ## No Mock Data or Silent Fallbacks
 
