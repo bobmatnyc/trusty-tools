@@ -53,11 +53,24 @@
 //!
 //! Residual bypasses, stated rather than hidden: the path is resolved
 //! lexically, so a symlink into a checkout is not followed — the same limit
-//! [`is_main_checkout`] carries and documents. The `Bash` half sees only a
-//! write it can positively identify, so a write performed by an interpreter
-//! (`python -c`), by a verb whose target sits in a trailing position
-//! (`sed -i`), or through a variable the guard does not expand is not resolved
-//! into a path and keeps only the `SHELL_EDIT_REASON` treatment.
+//! [`is_main_checkout`] carries and documents. The `Bash` half sees only the
+//! two shapes that NAME their target unambiguously — a redirect, and a git
+//! write option — so everything else keeps only the `SHELL_EDIT_REASON`
+//! treatment and gets no WHERE dimension:
+//!
+//! * `git apply` and `git am` write the files a patch names, and the patch
+//!   names them, not the argv.
+//! * `tee`, `cp`, `mv`, `install` and `dd` write a target that is an ordinary
+//!   argument, indistinguishable here from the source they read.
+//! * `sed -i` and the awk family put their target in the trailing position,
+//!   which a read (`sed -n '1,5p' <file>`) occupies identically.
+//! * An interpreter (`python -c`, `node -e`) carries its write inside a
+//!   program string this guard does not parse.
+//! * A target built from a shell variable or a command substitution is not
+//!   expanded.
+//!
+//! Each is a candidate for the same detector rather than a second rule; none
+//! is closed here.
 //!
 //! Test: `denies_*`, `allows_*` below; `pm_guard_denies_a_source_write_in_a_main_checkout`
 //! and siblings in `tests/tm_hook_pm_guard.rs` run the real binary, including
@@ -353,6 +366,28 @@ mod tests {
                 "`{command}` writes nothing"
             );
         }
+    }
+
+    // #7399 review, HIGH: a `>` inside a here-document BODY is prose, and the
+    // whole heredoc reaches the guard as one segment (#6946). Denying on it
+    // would refuse a command that writes nothing, through a deny no budget and
+    // no subagent marker can soften.
+    #[test]
+    fn allows_a_heredoc_body_redirect_in_a_main_checkout() {
+        let dir = main_checkout();
+        let target = dir.path().join("crates/x/src/lib.rs");
+        let command = format!("cat <<'EOF'\nsee: git diff > {}\nEOF", target.display());
+        assert_eq!(
+            evaluate_main_checkout_write("Bash", Some(&bash_input(&command)), dir.path()),
+            None,
+            "a here-document body is data, not a write"
+        );
+        // The operator line is still live.
+        let live = format!("python3 <<'PY' > {}\nprint(1)\nPY", target.display());
+        assert!(
+            evaluate_main_checkout_write("Bash", Some(&bash_input(&live)), dir.path()).is_some(),
+            "a redirect on the operator line is still a write"
+        );
     }
 
     // #7399: documents keep the ADR-0049 carve-out through the shell too.

@@ -13,6 +13,11 @@ Fixed
   deny with one message. Denied when the file is source and lands in a main
   checkout; allowed inside a worktree, for a document or configuration file,
   and anywhere outside a checkout (#7399).
+- The redirect scan the boundary reads is the heredoc-aware one, so a `>` in
+  here-document PROSE — `cat <<'EOF'` … `see: git diff > src/lib.rs` … `EOF`,
+  or a `len(k) > 3` comparison in a `python3 <<'PY'` script — names no write.
+  That scan existed in two copies and only one had learned #5356's heredoc
+  skip; they are now one function with two callers (#7399).
 - Reads are untouched: `git diff --no-index a b`, a plain `git diff`,
   `git format-patch --stdout`, and a `sed -n` whose trailing token names a file
   it only reads are all still allowed — the boundary acts only on a write it

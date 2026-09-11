@@ -668,17 +668,28 @@ fn segment_write_target(segment: &str) -> Option<String> {
     None
 }
 
-/// The real file-write redirect target in `command`, if any (owned-string
-/// sibling of [`has_file_write_redirection`], for routing-hint extraction
-/// rather than a pure yes/no classification).
+/// The file a real write redirect in `command` names, if any.
 ///
-/// What: same scan rules as [`has_file_write_redirection`] — skips fd-dups
-/// (`>&`, `2>&1`) and `/dev/null` discards — but returns the target token
-/// itself the first time a real file-write redirect is found, instead of a
-/// bool.
-/// Test: `extract_shell_edit_target_from_redirection`.
-fn redirection_target(command: &str) -> Option<String> {
+/// Why (#7399 review, HIGH): this scan used to exist twice — once returning a
+/// bool for [`has_file_write_redirection`] and once returning the token for
+/// [`redirection_target`] — and only the bool copy learned #5356's heredoc
+/// skip. Once the write boundary began deciding a hard, budget-exempt deny on
+/// the token copy, that drift meant a `>` in here-document PROSE denied a
+/// command that writes nothing. One scanner, two thin callers, so the two
+/// cannot re-diverge.
+/// What: scans for `>` outside quotes ([`QuoteScan`]) and outside
+/// here-document bodies ([`heredoc::HeredocBodies`]); skips a second `>`
+/// (append) and any spaces, treats a following `&` as an fd-duplication
+/// (`2>&1`, `>&2`) and `/dev/null` as an output discard, and returns the
+/// target token of the first real file-write redirect. `Some("")` when the
+/// redirect is real but names no token (`cmd >|`, a trailing `>`): still a
+/// write for the bool caller, no path for the boundary.
+/// Test: `has_file_write_redirection_*`,
+/// `extract_shell_edit_target_from_redirection`,
+/// `shell_write_target_ignores_a_heredoc_body_redirect`.
+fn scan_file_write_redirect(command: &str) -> Option<String> {
     let scan = QuoteScan::new(command);
+    let bodies = heredoc::HeredocBodies::scan(command);
     let bytes = command.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
@@ -686,24 +697,43 @@ fn redirection_target(command: &str) -> Option<String> {
             i += 1;
             continue;
         }
+        // #5356: a here-document body is data, not shell syntax.
+        if bodies.contains(i) {
+            i += 1;
+            continue;
+        }
         if bytes[i] == b'>' {
             let mut j = i + 1;
+            // `>>` append is still a file write; skip the second `>`.
             if j < bytes.len() && bytes[j] == b'>' {
                 j += 1;
             }
-            while j < bytes.len() && bytes[j] == b' ' {
+            while j < bytes.len() && matches!(bytes[j], b' ' | b'\t') {
                 j += 1;
             }
+            // `>&fd` / `2>&1` duplicate a descriptor — not a file write.
             if j < bytes.len() && bytes[j] == b'&' {
                 i = j + 1;
                 continue;
             }
+            // `/dev/null` is an output-discard sink, not a file write
+            // (`which cargo 2>/dev/null`) — allow it and keep scanning.
+            // #7399 review: a newline and a tab end a shell word exactly as a
+            // space does. Without them `python3 <<'PY' > out.rs\nprint(1)\nPY`
+            // read its target as `out.rs\nprint(1)\nPY`, and `cmd >/dev/null`
+            // followed by a newline read as `/dev/null\n…`, missing the
+            // discard and denying a benign command.
             let start = j;
-            while j < bytes.len() && !matches!(bytes[j], b' ' | b'>' | b'<' | b'|' | b';' | b'&') {
+            while j < bytes.len()
+                && !matches!(
+                    bytes[j],
+                    b' ' | b'\t' | b'\n' | b'\r' | b'>' | b'<' | b'|' | b';' | b'&'
+                )
+            {
                 j += 1;
             }
             let target = &command[start..j];
-            if target == "/dev/null" || target.is_empty() {
+            if target == "/dev/null" {
                 i = j;
                 continue;
             }
@@ -712,6 +742,17 @@ fn redirection_target(command: &str) -> Option<String> {
         i += 1;
     }
     None
+}
+
+/// The real file-write redirect target in `command`, if any (owned-string
+/// sibling of [`has_file_write_redirection`], for routing-hint extraction and
+/// for the write boundary rather than a pure yes/no classification).
+///
+/// What: [`scan_file_write_redirect`], with the no-token case dropped — a
+/// redirect that names nothing gives a caller asking "which file" no answer.
+/// Test: `extract_shell_edit_target_from_redirection`.
+fn redirection_target(command: &str) -> Option<String> {
+    scan_file_write_redirect(command).filter(|target| !target.is_empty())
 }
 
 /// The trailing non-flag whitespace-separated token of `command`.
@@ -738,12 +779,13 @@ fn trailing_file_token(command: &str) -> Option<String> {
 /// redirection. But blanket-denying every `>` would false-positive on the very
 /// common `… 2>&1` / `>&2` fd redirects, which are not file writes, so those
 /// must be distinguished.
-/// What: scans for `>`; for each, skips a second `>` (append) and any spaces,
-/// then treats it as an fd-duplication (allow, keep scanning) only when the
-/// next non-space byte is `&`. It then reads the redirect *target* token and
-/// treats `/dev/null` as benign (output discard, e.g. `2>/dev/null` /
-/// `>/dev/null` / `&>/dev/null`) — allow, keep scanning. Any other `>` is a
-/// file-write redirect → `true`.
+/// What: `true` when [`scan_file_write_redirect`] — the one scanner this and
+/// [`redirection_target`] share since #7399 — finds a redirect. It skips a
+/// second `>` (append) and any spaces, treats it as an fd-duplication (allow,
+/// keep scanning) only when the next non-space byte is `&`, then reads the
+/// redirect *target* token and treats `/dev/null` as benign (output discard,
+/// e.g. `2>/dev/null` / `>/dev/null` / `&>/dev/null`) — allow, keep scanning.
+/// Any other `>` is a file-write redirect → `true`.
 /// Quote-aware (#2734): a `>` inside a quoted string is literal argument content
 /// (`git commit -m 'spec -> code'` — Bob's live false positive), not a
 /// redirection, and is skipped — UNLESS the command's quotes are unbalanced, in
@@ -767,50 +809,7 @@ fn trailing_file_token(command: &str) -> Option<String> {
 /// `has_file_write_redirection_detects_redirect_on_a_heredoc_operator_line`,
 /// `has_file_write_redirection_false_for_plain_command`.
 pub(crate) fn has_file_write_redirection(command: &str) -> bool {
-    let scan = QuoteScan::new(command);
-    let bodies = heredoc::HeredocBodies::scan(command);
-    let bytes = command.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if scan.balanced && !scan.is_unquoted(i) {
-            i += 1;
-            continue;
-        }
-        // #5356: a here-document body is data, not shell syntax.
-        if bodies.contains(i) {
-            i += 1;
-            continue;
-        }
-        if bytes[i] == b'>' {
-            let mut j = i + 1;
-            // `>>` append is still a file write; skip the second `>`.
-            if j < bytes.len() && bytes[j] == b'>' {
-                j += 1;
-            }
-            while j < bytes.len() && bytes[j] == b' ' {
-                j += 1;
-            }
-            // `>&fd` / `2>&1` duplicate a descriptor — not a file write.
-            if j < bytes.len() && bytes[j] == b'&' {
-                i = j + 1;
-                continue;
-            }
-            // Read the redirect target token. `/dev/null` is an output-discard
-            // sink, not a file write (`which cargo 2>/dev/null`,
-            // `command -v foo >/dev/null`) — allow it and keep scanning.
-            let start = j;
-            while j < bytes.len() && !matches!(bytes[j], b' ' | b'>' | b'<' | b'|' | b';' | b'&') {
-                j += 1;
-            }
-            if &command[start..j] == "/dev/null" {
-                i = j;
-                continue;
-            }
-            return true;
-        }
-        i += 1;
-    }
-    false
+    scan_file_write_redirect(command).is_some()
 }
 
 /// Deny reason for `git worktree add` targeting a denylisted temp root.

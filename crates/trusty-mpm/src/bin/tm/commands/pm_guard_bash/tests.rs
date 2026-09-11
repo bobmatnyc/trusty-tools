@@ -2377,3 +2377,32 @@ fn shell_write_target_ignores_reads() {
         Some(SHELL_EDIT_REASON)
     );
 }
+
+// #7399 review, HIGH: `redirection_target` was the one copy of the redirect
+// scan that never learned #5356's heredoc skip, and `split_shell_segments_raw`
+// keeps the operator line, the body and the terminator as ONE segment (#6946).
+// A `>` in here-document PROSE would therefore have named a write target and
+// driven a hard ADR-0044 deny on a command that writes nothing.
+#[test]
+fn shell_write_target_ignores_a_heredoc_body_redirect() {
+    for command in [
+        "cat <<'EOF'\nsee: git diff > crates/x/src/lib.rs\nEOF",
+        "python3 <<'PY'\nprint([k for k in d if len(k) > 3])\nPY",
+        "cat <<EOF\nthe pipeline is read -> parse -> write\nEOF",
+    ] {
+        assert_eq!(shell_write_target(command), None, "{command}");
+        assert_eq!(extract_shell_edit_target(command), None, "{command}");
+        assert_eq!(evaluate_bash_command(command), None, "{command}");
+    }
+    // The skip must not fail open: only the BODY is data. A redirect on the
+    // operator line, or after the terminator, still names its file — the
+    // mirror of `has_file_write_redirection_detects_redirect_on_a_heredoc_operator_line`.
+    assert_eq!(
+        shell_write_target("python3 <<'PY' > out.rs\nprint(1)\nPY").as_deref(),
+        Some("out.rs")
+    );
+    assert_eq!(
+        shell_write_target("python3 <<'PY'\nprint(1)\nPY\necho done > f.rs").as_deref(),
+        Some("f.rs")
+    );
+}
