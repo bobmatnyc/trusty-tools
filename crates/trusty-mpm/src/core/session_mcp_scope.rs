@@ -6,23 +6,42 @@
 //! so one `tm mcp add` for one project loaded its server — and its whole tool
 //! catalog — into every session on the host. The measured cost on this machine
 //! was eight unrelated servers in each session. The owner ruling (2026-09-11)
-//! is DEFAULT-DENY: a session loads the trusty-* framework builtins, the
-//! project's own `.mcp.json`, and nothing else unless the project's committed
-//! config names it.
+//! is DEFAULT-DENY: a session loads the trusty-* framework builtins and
+//! nothing else unless the operator has trusted this project.
+//!
+//! IN-REPO DECLARATIONS NEED AN OUT-OF-REPO GRANT. `<cwd>/.mcp.json` and the
+//! `[session] mcp_servers` list in `<cwd>/.trusty-mpm.toml` both ship WITH a
+//! clone, so neither can be the permission for itself: a pane runs
+//! `--dangerously-skip-permissions` against a `.claude.json` that
+//! `standalone::trust_seed::preseed_managed_trust` has already marked
+//! `hasTrustDialogAccepted`, so an
+//! `.mcp.json` entry spelling `{"command": "sh", "args": ["-c", "curl … | sh"]}`
+//! would execute on the first `tm run` against a hostile clone. Both surfaces
+//! are therefore gated on [`crate::core::project_trust::is_project_trusted`] —
+//! the durable USER-scope decision `tm project trust` records under
+//! `~/.trusty-tools/trusty-mpm/`, which a repository cannot flip from inside
+//! itself (issue #3033, ADR-0042, owner ruling 2026-07-18). An untrusted
+//! project loads the builtins only.
 //!
 //! What: [`resolve_scope`] composes that set and also reports what it left out;
-//! [`provision`] writes it to `<cwd>/.trusty-mpm/session-mcp.json` and hands
-//! back the path; [`strict_mcp_flag_string`] / [`strict_mcp_argv`] render the
+//! [`provision`] writes it under the tm-managed state root and hands back the
+//! path; [`strict_mcp_flag_string`] / [`strict_mcp_argv`] render the
 //! `--strict-mcp-config --mcp-config <file>` pair every relocated spawn appends
-//! beside its `--setting-sources` flag. The file is rewritten on every launch
-//! and lives in the session's own state directory, so two worktrees of one
-//! repository never share one.
+//! beside its `--setting-sources` flag.
+//!
+//! THE COMPOSED FILE NEVER LIVES IN THE REPOSITORY. It copies shared entries
+//! verbatim — a stdio server's `env` and a remote server's `headers` carry
+//! bearer tokens — so it is written to
+//! `~/.trusty-tools/trusty-mpm/session-mcp/<hash of cwd>.json` at mode `0600`,
+//! not into a working tree where a `git add` or a stray archive would publish
+//! it. Keying on the cwd keeps two worktrees of one repository on separate
+//! files, and the file is rewritten on every launch.
 //!
 //! FAIL-CLOSED, in two arms that are deliberately different:
-//! - an unreadable or malformed `<cwd>/.mcp.json` DEGRADES — the project's own
-//!   servers are dropped, a warning names the file, and the launch proceeds
-//!   with the builtins plus the opt-ins. The session loses servers; it never
-//!   gains one it did not ask for.
+//! - an unreadable or malformed `<cwd>/.mcp.json`, and an untrusted project,
+//!   both DEGRADE — the affected servers are dropped, [`McpScope::degraded`]
+//!   says which and why, and the launch proceeds with the builtins. The session
+//!   loses servers; it never gains one it did not ask for.
 //! - an unwritable state directory FAILS the launch ([`ScopeError`]). The only
 //!   alternative is spawning with no `--mcp-config`, which is exactly the
 //!   unscoped shared map this module exists to stop.
@@ -35,24 +54,26 @@ use serde_json::{Map, Value};
 
 use crate::core::mcp_config::{BUILTIN_MANAGED_MCP_SERVERS, MCP_JSON, builtin_server_entry};
 
-/// Directory, relative to a session's cwd, holding its machine-local state.
+/// Directory under the tm-managed state root holding every composed file.
 ///
-/// Why: the composed file must not be shared between two worktrees of one
-/// repository, so it is resolved from the cwd AS GIVEN rather than through
-/// [`crate::core::harness_root::harness_dir`], which deliberately hoists a
-/// worktree's state to the owning checkout.
-/// What: `.trusty-mpm`.
-/// Test: `session_mcp_path_is_per_workspace`.
-pub const SESSION_STATE_DIR: &str = ".trusty-mpm";
+/// Why: the composed file carries the `env` and `headers` of every server it
+/// names — credentials the operator gave tm, never the repository — so it lives
+/// beside the rest of tm's user-scope state and never inside a working tree.
+/// What: `session-mcp`, under `~/.trusty-tools/trusty-mpm/`.
+/// Test: `session_mcp_path_is_outside_the_repository`.
+pub const SESSION_MCP_DIR: &str = "session-mcp";
 
-/// Basename of the composed, session-scoped MCP config.
+/// Owner-only permissions for the composed file and its directory.
 ///
-/// Why: one literal, because the writer, the spawn flag, and the scaffolded
-/// `.gitignore` entry must agree — a file that is written but not ignored
-/// lands in a commit.
-/// What: `session-mcp.json`.
-/// Test: `session_mcp_path_is_per_workspace`.
-pub const SESSION_MCP_FILE: &str = "session-mcp.json";
+/// Why: see [`SESSION_MCP_DIR`] — the file is a credential-bearing record under
+/// the operator's own `$HOME`, so it is never group- or world-readable, the
+/// same bar `ProjectTrustStore::save` holds its own store to.
+/// What: `0o600` for the file, `0o700` for the directory.
+#[cfg(unix)]
+const OWNER_ONLY_FILE: u32 = 0o600;
+/// Owner-only directory permissions — see [`OWNER_ONLY_FILE`].
+#[cfg(unix)]
+const OWNER_ONLY_DIR: u32 = 0o700;
 
 /// Basename of the shared, tm-managed Claude Code config.
 const CLAUDE_JSON: &str = ".claude.json";
@@ -139,14 +160,50 @@ pub fn opt_in_plugins(project_dir: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Stable per-workspace filename component for `cwd`.
+///
+/// Why: one composed file per workspace, named without leaking the path into a
+/// directory listing and without any character a filesystem could reject. Two
+/// worktrees of one repository canonicalize differently, so they never collide.
+/// What: the first 32 hex characters of the sha256 of the canonicalized `cwd`
+/// (the path as given when it cannot be canonicalized, matching
+/// `project_trust::normalize`'s fallback so the two agree on the same
+/// directory).
+/// Test: `session_mcp_path_is_per_workspace`.
+fn workspace_key(cwd: &Path) -> String {
+    use sha2::{Digest as _, Sha256};
+    let canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.to_string_lossy().as_bytes());
+    format!("{:x}", hasher.finalize())[..32].to_owned()
+}
+
+/// Where a session's composed MCP config is written, under an explicit root.
+///
+/// Why: the hermetic core of [`session_mcp_path`]; tests point `root` at a
+/// temp dir so they never touch the real `~/.trusty-tools`.
+/// What: `<root>/session-mcp/<workspace key>.json`.
+/// Test: `session_mcp_path_is_per_workspace`,
+/// `session_mcp_path_is_outside_the_repository`.
+pub fn session_mcp_path_at(root: &Path, cwd: &Path) -> PathBuf {
+    root.join(SESSION_MCP_DIR)
+        .join(format!("{}.json", workspace_key(cwd)))
+}
+
 /// Where a session's composed MCP config is written.
 ///
 /// Why: one derivation, so the writer and the `--mcp-config` flag can never
 /// point at different files.
-/// What: `<cwd>/.trusty-mpm/session-mcp.json`.
-/// Test: `session_mcp_path_is_per_workspace`.
-pub fn session_mcp_path(cwd: &Path) -> PathBuf {
-    cwd.join(SESSION_STATE_DIR).join(SESSION_MCP_FILE)
+/// What: `~/.trusty-tools/trusty-mpm/session-mcp/<workspace key>.json`.
+/// `None` only when the home directory cannot be resolved — the spawn paths
+/// call [`provision_for_spawn`] first, which turns that into a typed error
+/// before any argv naming this path is built.
+/// Test: `session_mcp_path_is_outside_the_repository`.
+pub fn session_mcp_path(cwd: &Path) -> Option<PathBuf> {
+    // #7422: the same `~/.trusty-tools/trusty-mpm` root the project-trust store
+    // and the managed Claude config dir already nest under.
+    trusty_common::crate_config::crate_config_dir(crate::core::trusty_tools_config::CRATE_NAME)
+        .map(|root| session_mcp_path_at(&root, cwd))
 }
 
 /// The composed file's path, but only for a spawn that relocates its config dir.
@@ -155,10 +212,11 @@ pub fn session_mcp_path(cwd: &Path) -> PathBuf {
 /// `~/.claude.json`, which tm neither owns nor seeds — scoping it would take
 /// away servers the operator configured for themselves, which is not what this
 /// issue is about.
-/// What: `Some(path)` when `config_dir` is `Some`; `None` otherwise.
+/// What: [`session_mcp_path`] when `config_dir` is `Some`; `None` otherwise.
 /// Test: `scoped_for_declines_a_non_relocated_spawn`.
 pub fn scoped_for(cwd: &Path, config_dir: Option<&Path>) -> Option<PathBuf> {
-    config_dir.map(|_| session_mcp_path(cwd))
+    config_dir?;
+    session_mcp_path(cwd)
 }
 
 /// Render the strict-MCP flag pair for a shell command line.
@@ -252,19 +310,44 @@ fn project_servers(cwd: &Path) -> Result<Map<String, Value>, String> {
 /// Why: see the module doc — this is the default-deny decision itself, in one
 /// place, so the launch, `tm doctor`, and `tm session instructions` all read
 /// the same answer.
-/// What: unions the trusty-* framework builtins
-/// ([`BUILTIN_MANAGED_MCP_SERVERS`], defined by
-/// [`builtin_server_entry`] rather than copied from the shared map), the
-/// project's own `.mcp.json`, and every shared-map entry the project's
-/// `[session] mcp_servers` names. Reports every remaining shared-map name in
-/// `excluded`. A `[session] mcp_servers` entry naming a server the shared map
-/// does not hold is ignored — there is nothing to include — and stays out of
-/// both lists.
+/// What: resolves the project's trust bit from
+/// [`crate::core::project_trust::is_project_trusted`] and delegates to
+/// [`resolve_scope_with_trust`].
 /// Test: `resolve_scope_includes_builtins_and_project_servers`,
 /// `resolve_scope_excludes_a_shared_only_server`,
 /// `resolve_scope_includes_an_opted_in_shared_server`,
 /// `resolve_scope_degrades_on_a_malformed_project_mcp_json`.
 pub fn resolve_scope(cwd: &Path, config_dir: &Path) -> McpScope {
+    resolve_scope_with_trust(
+        cwd,
+        config_dir,
+        crate::core::project_trust::is_project_trusted(cwd),
+    )
+}
+
+/// [`resolve_scope`] against an explicit trust decision.
+///
+/// Why: the trust bit lives under the operator's `$HOME`, so every test of the
+/// composition itself would otherwise have to redirect `$HOME`. Splitting the
+/// lookup from the decision also makes the gate visible at the one call site
+/// that performs it.
+/// What: always unions the trusty-* framework builtins
+/// ([`BUILTIN_MANAGED_MCP_SERVERS`], defined by [`builtin_server_entry`] rather
+/// than copied from the shared map). When `trusted`, it adds the project's own
+/// `.mcp.json` and every shared-map entry the project's `[session] mcp_servers`
+/// names; every remaining shared-map name lands in `excluded`. A
+/// `[session] mcp_servers` entry naming a server the shared map does not hold
+/// is ignored — the allowlist grants access to a declaration, it does not
+/// create one — and stays out of both lists.
+///
+/// When NOT `trusted`, both in-repo surfaces are dropped: every shared-map name
+/// is `excluded`, and `degraded` names `tm project trust` — but only when the
+/// project actually declared something, since a project that declared nothing
+/// lost nothing.
+/// Test: `resolve_scope_drops_project_mcp_json_for_an_untrusted_project`,
+/// `resolve_scope_ignores_opt_ins_for_an_untrusted_project`,
+/// `resolve_scope_is_silent_for_an_untrusted_project_that_declares_nothing`.
+pub fn resolve_scope_with_trust(cwd: &Path, config_dir: &Path, trusted: bool) -> McpScope {
     let mut servers: Map<String, Value> = Map::new();
 
     // #7422: the framework builtins come from the canonical entry builder, not
@@ -276,30 +359,49 @@ pub fn resolve_scope(cwd: &Path, config_dir: &Path) -> McpScope {
         }
     }
 
+    let project = project_servers(cwd);
+    let opt_in = opt_in_servers(cwd);
     let mut degraded = None;
-    match project_servers(cwd) {
-        Ok(project) => {
-            for (name, entry) in project {
-                servers.insert(name, entry);
+
+    if trusted {
+        match project {
+            Ok(entries) => {
+                for (name, entry) in entries {
+                    servers.insert(name, entry);
+                }
+            }
+            Err(reason) => {
+                tracing::warn!(
+                    "session-scoped MCP config degraded: {reason}; \
+                     this project's own servers will not load (#7422)"
+                );
+                degraded = Some(reason);
             }
         }
-        Err(reason) => {
-            tracing::warn!(
-                "session-scoped MCP config degraded: {reason}; \
-                 this project's own servers will not load (#7422)"
-            );
-            degraded = Some(reason);
-        }
+    } else if project.as_ref().is_ok_and(|e| !e.is_empty())
+        || project.is_err()
+        || !opt_in.is_empty()
+    {
+        // #7422: an in-repo declaration is not its own permission — say what was
+        // dropped and how to grant it, once, rather than per server.
+        let reason = format!(
+            "{} is not a trusted project, so its {} and its [session] mcp_servers \
+             opt-ins were ignored; run `tm project trust {}` to load them",
+            cwd.display(),
+            MCP_JSON,
+            cwd.display()
+        );
+        tracing::warn!("session-scoped MCP config degraded: {reason} (#7422)");
+        degraded = Some(reason);
     }
 
     let shared = shared_servers(config_dir);
-    let opt_in = opt_in_servers(cwd);
     let mut excluded: Vec<String> = Vec::new();
     for (name, entry) in &shared {
         if servers.contains_key(name) {
             continue;
         }
-        if opt_in.iter().any(|n| n == name) {
+        if trusted && opt_in.iter().any(|n| n == name) {
             servers.insert(name.clone(), entry.clone());
         } else {
             excluded.push(name.clone());
@@ -324,35 +426,93 @@ pub fn resolve_scope(cwd: &Path, config_dir: &Path) -> McpScope {
 /// run it BEFORE building a launch command and propagate its error, which is
 /// what makes "never silently fall back to the unscoped shared map" mechanical
 /// rather than a convention.
-/// What: creates `<cwd>/.trusty-mpm/`, serialises `{"mcpServers": …}` from
-/// [`resolve_scope`], and overwrites the file. Rewritten on every launch, so a
-/// stale set from a previous launch can never be reused.
+/// What: resolves the managed state root, creates `<root>/session-mcp/` at
+/// `0700`, serialises `{"mcpServers": …}` from [`resolve_scope`], and
+/// overwrites the file at `0600`. Rewritten on every launch, so a stale set
+/// from a previous launch can never be reused, and never written inside the
+/// repository — see the module doc.
 ///
 /// # Errors
 ///
-/// [`ScopeError::Write`] when the state directory or the file cannot be
-/// written; [`ScopeError::Encode`] when the composed map will not serialise.
-/// Both abandon the launch — see the module doc.
+/// [`ScopeError::Write`] when the state root cannot be resolved, or the
+/// directory or file cannot be written; [`ScopeError::Encode`] when the
+/// composed map will not serialise. Both abandon the launch.
 /// Test: `provision_writes_the_composed_map`,
 /// `provision_errors_when_the_state_dir_is_unwritable`,
-/// `provision_rewrites_on_every_call`.
+/// `provision_writes_an_owner_only_file`, `provision_rewrites_on_every_call`.
 pub fn provision(cwd: &Path, config_dir: &Path) -> Result<PathBuf, ScopeError> {
+    let path = session_mcp_path(cwd).ok_or_else(|| ScopeError::Write {
+        path: PathBuf::from(SESSION_MCP_DIR),
+        source: std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "cannot resolve the home directory holding ~/.trusty-tools",
+        ),
+    })?;
+    provision_at(&path, cwd, config_dir)
+}
+
+/// [`provision`] against an already-resolved output path.
+///
+/// Why: the hermetic core, so tests write into a temp dir without redirecting
+/// `$HOME`, and so the one home-resolution failure has exactly one call site.
+/// What: see [`provision`]; `path` is the file to write.
+///
+/// # Errors
+///
+/// See [`provision`].
+/// Test: `provision_writes_the_composed_map`,
+/// `provision_writes_an_owner_only_file`.
+pub fn provision_at(path: &Path, cwd: &Path, config_dir: &Path) -> Result<PathBuf, ScopeError> {
     let scope = resolve_scope(cwd, config_dir);
-    let path = session_mcp_path(cwd);
-    let dir = path.parent().unwrap_or(cwd).to_path_buf();
+    let dir = path.parent().unwrap_or(path).to_path_buf();
     std::fs::create_dir_all(&dir).map_err(|source| ScopeError::Write {
         path: dir.clone(),
         source,
     })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(OWNER_ONLY_DIR)).map_err(
+            |source| ScopeError::Write {
+                path: dir.clone(),
+                source,
+            },
+        )?;
+    }
     let body = serde_json::to_string_pretty(&serde_json::json!({
         "mcpServers": Value::Object(scope.servers),
     }))
     .map_err(|err| ScopeError::Encode(err.to_string()))?;
-    std::fs::write(&path, body).map_err(|source| ScopeError::Write {
-        path: path.clone(),
+    // #7422: create the file owner-only BEFORE any credential-bearing byte
+    // reaches it — a write-then-chmod leaves a readable window.
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(OWNER_ONLY_FILE);
+    }
+    let mut file = options.open(path).map_err(|source| ScopeError::Write {
+        path: path.to_path_buf(),
         source,
     })?;
-    Ok(path)
+    std::io::Write::write_all(&mut file, body.as_bytes()).map_err(|source| ScopeError::Write {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    #[cfg(unix)]
+    {
+        // An existing file keeps its old mode through `OpenOptions::mode`, which
+        // only applies at creation — so restate it for the rewrite case.
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(OWNER_ONLY_FILE)).map_err(
+            |source| ScopeError::Write {
+                path: path.to_path_buf(),
+                source,
+            },
+        )?;
+    }
+    Ok(path.to_path_buf())
 }
 
 /// Provision a session's MCP config when the spawn relocates its config dir.

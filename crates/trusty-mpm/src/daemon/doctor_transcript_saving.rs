@@ -132,9 +132,12 @@ fn launch_lines() -> Vec<(&'static str, Vec<String>)> {
     ));
 
     // `Command` builders: an `env_remove` shows up as a `None` value.
+    // #7422: `None` for the composed MCP file — this probe checks env scrubbing
+    // and composes nothing, so it must not name a file that does not exist.
     let run_cmd = crate::core::standalone::run::build_launch_command(
         std::path::Path::new("/probe/repo"),
         &config_dir,
+        None,
         None,
     );
     let stream_cmd = crate::control::backend::stream_json::build_claude_command(

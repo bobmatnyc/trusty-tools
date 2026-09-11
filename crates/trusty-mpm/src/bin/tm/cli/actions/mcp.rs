@@ -57,11 +57,12 @@ pub(crate) enum McpCmd {
         /// Declare the server in THIS project's `.mcp.json` instead of the
         /// shared user scope (#7422).
         ///
-        /// Sessions load a project's own `.mcp.json` unconditionally, so this
-        /// is both the declaration and the permission — one line, tracked in
-        /// git, reviewed in the PR that needed it. Without the flag the server
-        /// goes to the shared user scope, where it loads only in projects whose
-        /// `.trusty-mpm.toml` names it under `[session] mcp_servers`.
+        /// One declaration point, tracked in git, reviewed in the PR that
+        /// needed it. Requires the project to be trusted (`tm project trust`),
+        /// because an in-repo declaration cannot be its own permission. Without
+        /// the flag the server goes to the shared user scope, where it loads
+        /// only in a TRUSTED project whose `.trusty-mpm.toml` names it under
+        /// `[session] mcp_servers`.
         #[arg(long)]
         project: bool,
     },

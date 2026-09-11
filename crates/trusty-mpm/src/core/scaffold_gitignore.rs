@@ -75,8 +75,6 @@ pub const SCAFFOLD_IGNORED_PATHS: &[&str] = &[
     ".trusty-mpm/sessions/",
     ".trusty-mpm/logs/",
     ".trusty-mpm/last-instructions.md",
-    // #7422: the per-session composed MCP config, rewritten on every launch.
-    ".trusty-mpm/session-mcp.json",
 ];
 
 /// Ensure `<project_dir>/.gitignore` carries the tm-scaffolding managed

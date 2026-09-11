@@ -58,7 +58,16 @@ use super::registry::ManagedRegistry;
 /// terminal scrollback, and Claude Code sets tmux's per-pane `mouse_any_flag`
 /// even under the classic renderer. Nothing is set for a variable the
 /// launching shell already exports; the two are decided independently.
-/// Test: `test_build_launch_command_sets_env_and_cwd`,
+///
+/// Issue #7422: `mcp_config` names the composed, default-deny MCP file, and
+/// `--strict-mcp-config --mcp-config <it>` is appended only when it is `Some`.
+/// The caller passes the path its own `provision` call returned, so the file
+/// and the flag come from one decision — this builder never derives a path a
+/// caller did not write, which is what let `doctor_transcript_saving` build an
+/// argv naming a file that did not exist.
+/// Test: `test_build_launch_command_carries_the_strict_mcp_flags`,
+/// `test_build_launch_command_omits_the_strict_mcp_flags_without_a_file`,
+/// `test_build_launch_command_sets_env_and_cwd`,
 /// `test_build_launch_command_adds_bare_with_api_key`,
 /// `test_build_launch_command_no_bare_without_api_key`,
 /// `test_build_launch_command_includes_bypass_permissions`,
@@ -69,6 +78,7 @@ pub fn build_launch_command(
     repo_path: &Path,
     claude_config_dir: &Path,
     api_key: Option<&str>,
+    mcp_config: Option<&Path>,
 ) -> Command {
     let mut cmd = Command::new("claude");
     cmd.current_dir(repo_path);
@@ -90,13 +100,12 @@ pub fn build_launch_command(
     // Always add bypass-permissions for fully automated orchestration (consistent with
     // all other tm launch paths that use PERMISSION_MODE_FLAG).
     cmd.arg(crate::core::model_inject::PERMISSION_MODE_FLAG);
-    // #7422: default-deny MCP scoping. This spawn always relocates
-    // `CLAUDE_CONFIG_DIR`, so the flags always apply; `run_alias` wrote the file
-    // before calling here and aborts the launch if it could not. Argv tokens go
-    // straight to `exec`, so the path is unquoted.
-    cmd.args(crate::core::session_mcp_scope::strict_mcp_argv(Some(
-        &crate::core::session_mcp_scope::session_mcp_path(repo_path),
-    )));
+    // #7422: default-deny MCP scoping. The caller passes the file its own
+    // `provision` call just wrote, so the flag and the file come from ONE
+    // decision — a builder that named the path itself would emit an argv
+    // pointing at a file nobody composed. Argv tokens go straight to `exec`, so
+    // the path is unquoted.
+    cmd.args(crate::core::session_mcp_scope::strict_mcp_argv(mcp_config));
     // WI-10: when ANTHROPIC_API_KEY is set, add --bare so Claude Code bypasses
     // keychain/OAuth reads and uses the API key directly. When the key is absent
     // the session relies on the keychain entry created by `tm login`.
@@ -236,10 +245,15 @@ pub fn run_alias(alias: &str, managed_root: &Path, claude_config_dir: &Path) -> 
     // #7422: compose this session's MCP config before building the command that
     // names it. A failure aborts `tm run` rather than launching with the
     // unscoped shared server map.
-    crate::core::session_mcp_scope::provision(&repo_path, claude_config_dir)
+    let mcp_config = crate::core::session_mcp_scope::provision(&repo_path, claude_config_dir)
         .context("failed to compose the session-scoped MCP config")?;
 
-    let mut cmd = build_launch_command(&repo_path, claude_config_dir, api_key.as_deref());
+    let mut cmd = build_launch_command(
+        &repo_path,
+        claude_config_dir,
+        api_key.as_deref(),
+        Some(&mcp_config),
+    );
     // Routed through the disclaim-aware spawn (issue #2997) rather than
     // `cmd.status()` directly: on macOS this disclaims TCC responsibility for
     // the child, so mis-attributed consent prompts (media library, App-Data,
@@ -281,15 +295,15 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    /// #7422: `tm run` always relocates `CLAUDE_CONFIG_DIR`, so its argv always
-    /// carries the default-deny MCP flags naming the repo's own composed file.
+    /// #7422: given a composed file, `tm run`'s argv names exactly that file.
     #[test]
     fn test_build_launch_command_carries_the_strict_mcp_flags() {
         let tmp = TempDir::new().unwrap();
         let repo = tmp.path().join("repo");
         let cfg = tmp.path().join("claude-config");
+        let composed = tmp.path().join("state").join("session-mcp").join("ab.json");
 
-        let cmd = build_launch_command(&repo, &cfg, None);
+        let cmd = build_launch_command(&repo, &cfg, None, Some(&composed));
 
         let args: Vec<String> = cmd
             .get_args()
@@ -305,10 +319,31 @@ mod tests {
             .expect("--mcp-config must be present");
         assert_eq!(
             args[pos + 1],
-            crate::core::session_mcp_scope::session_mcp_path(&repo)
-                .display()
-                .to_string(),
-            "the flag must name this repo's own composed file, unquoted for exec"
+            composed.display().to_string(),
+            "the flag must name the file the caller composed, unquoted for exec"
+        );
+    }
+
+    /// #7422: a caller that composed no file gets no flag, so no argv can name
+    /// a path nobody wrote (`doctor_transcript_saving`'s probe is that caller).
+    #[test]
+    fn test_build_launch_command_omits_the_strict_mcp_flags_without_a_file() {
+        let tmp = TempDir::new().unwrap();
+        let cmd = build_launch_command(
+            &tmp.path().join("repo"),
+            &tmp.path().join("claude-config"),
+            None,
+            None,
+        );
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !args
+                .iter()
+                .any(|a| a == "--strict-mcp-config" || a == "--mcp-config"),
+            "no composed file means no flag naming one: {args:?}"
         );
     }
 
@@ -318,7 +353,7 @@ mod tests {
         let repo = tmp.path().join("repo");
         let cfg = tmp.path().join("claude-config");
 
-        let cmd = build_launch_command(&repo, &cfg, None);
+        let cmd = build_launch_command(&repo, &cfg, None, None);
 
         // Verify program is "claude".
         assert_eq!(cmd.get_program(), "claude");
@@ -347,7 +382,7 @@ mod tests {
         let repo = tmp.path().join("repo");
         let cfg = tmp.path().join("claude-config");
 
-        let cmd = build_launch_command(&repo, &cfg, Some("sk-ant-test-key"));
+        let cmd = build_launch_command(&repo, &cfg, Some("sk-ant-test-key"), None);
 
         let args: Vec<_> = cmd.get_args().collect();
         assert!(
@@ -364,7 +399,7 @@ mod tests {
         let cfg = tmp.path().join("claude-config");
 
         // None key → no --bare
-        let cmd = build_launch_command(&repo, &cfg, None);
+        let cmd = build_launch_command(&repo, &cfg, None, None);
         let args: Vec<_> = cmd.get_args().collect();
         assert!(
             !args.iter().any(|a| a == &std::ffi::OsStr::new("--bare")),
@@ -372,7 +407,7 @@ mod tests {
         );
 
         // Empty key → no --bare (treated same as None)
-        let cmd2 = build_launch_command(&repo, &cfg, Some(""));
+        let cmd2 = build_launch_command(&repo, &cfg, Some(""), None);
         let args2: Vec<_> = cmd2.get_args().collect();
         assert!(
             !args2.iter().any(|a| a == &std::ffi::OsStr::new("--bare")),
@@ -380,7 +415,7 @@ mod tests {
         );
 
         // Whitespace-only key → no --bare
-        let cmd3 = build_launch_command(&repo, &cfg, Some("   "));
+        let cmd3 = build_launch_command(&repo, &cfg, Some("   "), None);
         let args3: Vec<_> = cmd3.get_args().collect();
         assert!(
             !args3.iter().any(|a| a == &std::ffi::OsStr::new("--bare")),
@@ -397,7 +432,7 @@ mod tests {
         let cfg = tmp.path().join("claude-config");
 
         // Without API key.
-        let cmd = build_launch_command(&repo, &cfg, None);
+        let cmd = build_launch_command(&repo, &cfg, None, None);
         let args: Vec<_> = cmd.get_args().collect();
         assert!(
             args.iter()
@@ -406,7 +441,7 @@ mod tests {
         );
 
         // With API key (--bare should co-exist with bypass flag).
-        let cmd2 = build_launch_command(&repo, &cfg, Some("sk-ant-test-key"));
+        let cmd2 = build_launch_command(&repo, &cfg, Some("sk-ant-test-key"), None);
         let args2: Vec<_> = cmd2.get_args().collect();
         assert!(
             args2
@@ -430,7 +465,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let repo = tmp.path().join("repo");
         let cfg = tmp.path().join("claude-config");
-        let cmd = build_launch_command(&repo, &cfg, None);
+        let cmd = build_launch_command(&repo, &cfg, None, None);
 
         let envs: Vec<(String, Option<String>)> = cmd
             .get_envs()
@@ -480,7 +515,12 @@ mod tests {
         use crate::core::alt_screen::{ALT_SCREEN_DEFAULT, ALT_SCREEN_ENV_VAR};
 
         let tmp = TempDir::new().unwrap();
-        let cmd = build_launch_command(&tmp.path().join("repo"), &tmp.path().join("cfg"), None);
+        let cmd = build_launch_command(
+            &tmp.path().join("repo"),
+            &tmp.path().join("cfg"),
+            None,
+            None,
+        );
 
         let carried_by_the_launch = std::env::var_os(ALT_SCREEN_ENV_VAR).is_some();
         let provisioned = cmd.get_envs().any(|(k, v)| {
@@ -501,7 +541,12 @@ mod tests {
         use crate::core::alt_screen::{MOUSE_DEFAULT, MOUSE_ENV_VAR};
 
         let tmp = TempDir::new().unwrap();
-        let cmd = build_launch_command(&tmp.path().join("repo"), &tmp.path().join("cfg"), None);
+        let cmd = build_launch_command(
+            &tmp.path().join("repo"),
+            &tmp.path().join("cfg"),
+            None,
+            None,
+        );
 
         let carried_by_the_launch = std::env::var_os(MOUSE_ENV_VAR).is_some();
         let provisioned = cmd.get_envs().any(|(k, v)| {

@@ -144,11 +144,23 @@ pub(crate) fn add_cmd(
     // shared definition plus a separate opt-in naming it.
     if project {
         let cwd = std::env::current_dir().context("cannot resolve the current directory")?;
+        // #7422: the trust store answers for the WHOLE directory, so writing one
+        // server must not mint a grant covering every other declaration already
+        // in that `.mcp.json`. Require the grant instead of recording it.
+        if !trusty_mpm::core::project_trust::is_project_trusted(&cwd) {
+            anyhow::bail!(
+                "{} is not a trusted project, so a server declared in its .mcp.json \
+                 would not load.\n  Review what this repository already declares, then \
+                 grant it once:\n    tm project trust {}",
+                cwd.display(),
+                cwd.display()
+            );
+        }
         let target = cwd.join(mcp_config::MCP_JSON);
         let changed = mcp_config::add_project_server(&cwd, name, entry)?;
         if changed {
             println!("Added MCP server '{name}' to {}", target.display());
-            println!("  Sessions started in this project load it with no opt-in needed.");
+            println!("  Sessions started in this trusted project load it with no opt-in needed.");
         } else {
             println!(
                 "MCP server '{name}' already present in {} (no change)",
@@ -165,7 +177,7 @@ pub(crate) fn add_cmd(
             config_dir.join(".claude.json").display()
         );
         println!(
-            "  This is the SHARED user scope. Since #7422 a session loads it only in a \n               project whose .trusty-mpm.toml names it: [session] mcp_servers = [\"{name}\"]"
+            "  This is the SHARED user scope. Since #7422 a session loads it only in a \n               TRUSTED project whose .trusty-mpm.toml names it: [session] mcp_servers = [\"{name}\"]"
         );
     } else {
         println!("MCP server '{name}' already present (no change)");

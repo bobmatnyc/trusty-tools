@@ -979,7 +979,7 @@ mod tests {
     /// when — the caller composed a file for it.
     #[test]
     fn claude_command_carries_the_strict_mcp_flags() {
-        let scoped = Path::new("/ws/.trusty-mpm/session-mcp.json");
+        let scoped = Path::new("/state/session-mcp/ab12.json");
         let cmd = build_claude_command_with(
             None,
             None,
@@ -993,7 +993,7 @@ mod tests {
             "missing the default-deny scoping flag: {cmd}"
         );
         assert!(
-            cmd.contains("--mcp-config '/ws/.trusty-mpm/session-mcp.json'"),
+            cmd.contains("--mcp-config '/state/session-mcp/ab12.json'"),
             "the pane shell re-splits this line, so the path must be quoted: {cmd}"
         );
     }
