@@ -83,6 +83,28 @@
 //! one rather than replaced by it, because `cat "${F:-x}.env"` denies only
 //! while the literal tail is a word (see [`rewrite_parameter_expansions`]).
 //!
+//! Round 9 withdraws what rounds 5 to 8 took from PROGRAM TEXT. The word scan
+//! ran over here-document bodies and over an interpreter's inline program as
+//! if every word were argv, so a `{` of Rust, awk or Python syntax reached
+//! [`expand_brace_alternatives`], which cannot resolve a lone brace and fails
+//! CLOSED. Live on tm 1.5.26/1.5.27 that refused `cat >> verb.rs <<'RSEOF'`
+//! carrying `struct VerbStub {` ("naming `{`"), `awk -F'[ ;]' '{p+=$4}'`
+//! ("naming `{p+`") and a `python3` here-document ("naming `{a`") — three
+//! commands naming no file at all. A here-document body now leaves the argv
+//! text through `pm_guard_bash::split_heredoc_bodies`, the same framing
+//! `has_file_write_redirection` has used since #5356, and an interpreter's
+//! inline program is identified by position (see [`inline_program_index`]).
+//! Both are then scanned as [`Scan::ProgramText`], which changes exactly one
+//! answer: an unresolvable brace shape is ordinary text rather than a secret.
+//! Every pattern and every family still applies, so `python -c 'open(".env")'`
+//! and a body carrying `.env` both deny, and a body whose operator line names
+//! a SHELL is left in place, because it is shell source whose own segments
+//! must still be classified. Program text is lexed before its words are
+//! matched, so a name a shell rejoins out of quoting — `$(cat .en"v")` in a
+//! body, `sh -c 'cat .en"v"'` — denies exactly as it did before round 9, and
+//! so does one a `\<newline>` continuation splits across two lines (see
+//! [`secret_files_named_in_program_text`]).
+//!
 //! What this costs, deliberately: naming a secret-shaped file in ANY command
 //! now denies, including one that reads nothing — `git log --grep .env`,
 //! `git commit -m "add .env.example"`, `cp .env .env.bak`. Rounds 1 to 4
@@ -138,6 +160,18 @@
 //! `splits_a_parameter_expansion_into_its_name_and_operand`,
 //! `splices_an_operand_against_the_bytes_beside_it`,
 //! `denies_a_secret_name_split_across_a_span_boundary`,
+//! `allows_program_text_that_only_looks_like_a_brace_group`,
+//! `allows_a_heredoc_body_of_code_that_names_no_secret`,
+//! `allows_an_awk_program_carrying_braces`,
+//! `allows_an_inline_program_carrying_braces`,
+//! `denies_a_secret_named_inside_a_heredoc_body`,
+//! `denies_a_secret_named_inside_an_inline_program`,
+//! `denies_a_secret_operand_beside_an_inline_program`,
+//! `a_shell_heredoc_body_stays_live_shell_syntax`,
+//! `denies_a_quote_joined_name_in_a_heredoc_body`,
+//! `denies_a_quote_joined_name_in_an_inline_program`,
+//! `denies_a_name_split_by_a_backslash_newline_continuation`,
+//! `the_program_text_join_keeps_brace_leniency`,
 //! `the_documented_residuals_still_allow`, and the rest of this
 //! module's `tests` submodule. The rule is proved WIRED end to end through the
 //! real binary by `pm_guard_denies_a_line_range_read_of_a_secret_bearing_file`,
@@ -151,8 +185,9 @@
 //! `pm_guard_denies_a_glob_or_quote_join_that_names_a_secret`,
 //! `pm_guard_denies_git_add_in_a_content_revealing_mode`,
 //! `pm_guard_allows_a_secret_name_as_a_search_pattern_and_a_public_key`,
-//! `pm_guard_deny_text_advertises_no_flag_escape` and
-//! `pm_guard_reads_a_parameter_expansion_as_its_operand` in
+//! `pm_guard_deny_text_advertises_no_flag_escape`,
+//! `pm_guard_reads_a_parameter_expansion_as_its_operand` and
+//! `pm_guard_allows_code_braces_in_a_heredoc_body_and_an_inline_program` in
 //! `tests/tm_hook_pm_guard.rs`.
 
 use std::path::Path;
@@ -160,9 +195,34 @@ use std::path::Path;
 use crate::commands::hook_rewrite::{first_command_token, strip_wrapper_prefix};
 use crate::commands::pm_guard_bash::{
     any_pattern_overlaps, expand_brace_alternatives, git_subcommand,
-    matches_only_name_substring_family, secret_pattern_overlaps, split_shell_segments,
-    strip_process_substitution,
+    matches_only_name_substring_family, secret_pattern_overlaps, split_heredoc_bodies,
+    split_shell_segments, strip_process_substitution,
 };
+
+/// Which kind of text a word scan is reading (#7266 round 9).
+///
+/// Why: round 5's scan asks "could this word be a path?" of every byte of a
+/// command, and answers YES for a brace shape it cannot resolve. That is right
+/// for an ARGV operand — `cp secret.{tfvars,bak} dst` really does name a
+/// secret — and wrong for PROGRAM TEXT, where `{` is Rust, awk or Python
+/// syntax that no shell expands. Live on tm 1.5.26 the wrong answer refused
+/// `cat >> verb.rs <<'RSEOF'` carrying `struct VerbStub {` ("naming `{`"),
+/// `awk -F'[ ;]' '{p+=$4}'` ("naming `{p+`") and a `python3` here-document
+/// ("naming `{a`") — three commands that name no file at all.
+/// What: the only thing the two modes decide differently is an UNRESOLVABLE
+/// brace shape. Every pattern, every family and every path-shape test is
+/// shared, so a secret named in program text still denies: `python -c
+/// 'open(".env")'` and a here-document body carrying `.env` both do.
+/// Test: `allows_program_text_that_only_looks_like_a_brace_group`,
+/// `denies_a_secret_named_inside_an_inline_program`,
+/// `denies_a_secret_named_inside_a_heredoc_body`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Scan {
+    /// A word of the command's argv: it can be a path the command opens.
+    Argv,
+    /// Source text — a here-document body, or an interpreter's inline program.
+    ProgramText,
+}
 
 /// Programs that may name a secret-bearing file without printing its bytes.
 ///
@@ -334,11 +394,23 @@ fn is_ssh_public_key_name(basename: &str) -> bool {
 /// round 6).
 /// What: basename, then [`normalize_bracket_classes`], then
 /// [`is_ssh_public_key_name`] as an exemption, then [`is_secret_read_target`].
+/// Under [`Scan::ProgramText`] the same brace expander runs but an
+/// UNRESOLVABLE shape answers `false` instead of failing closed (#7266) — see
+/// [`Scan`].
 /// Test: `allows_reading_an_ssh_public_key`,
-/// `denies_a_glob_that_expands_onto_a_secret_file`.
-fn denies_as_a_read_target(path: &str) -> bool {
+/// `denies_a_glob_that_expands_onto_a_secret_file`,
+/// `allows_program_text_that_only_looks_like_a_brace_group`.
+fn denies_as_a_read_target(path: &str, scan: Scan) -> bool {
     let base = normalize_bracket_classes(&command_basename(path));
-    !base.is_empty() && !is_ssh_public_key_name(&base) && is_secret_read_target(&base)
+    if base.is_empty() || is_ssh_public_key_name(&base) {
+        return false;
+    }
+    match scan {
+        Scan::Argv => is_secret_read_target(&base),
+        // #7266: `{`, `{p+` and `{cmd` are syntax, not a brace alternation.
+        Scan::ProgramText => expand_brace_alternatives(&base)
+            .is_some_and(|candidates| candidates.iter().any(|c| names_a_secret(c))),
+    }
 }
 
 /// File extensions whose content is source or markup, never a credential value.
@@ -393,11 +465,19 @@ pub(crate) fn evaluate_secret_file_read(
 /// naming one allows only when [`segment_only_handles`] proves the segment is a
 /// [`SAFE_HANDLING_VERBS`] or [`SAFE_GIT_SUBCOMMANDS`] call taking those words
 /// as direct arguments; otherwise the first such word denies.
+///
+/// #7266 round 9: a here-document body is lifted out of the argv text first
+/// ([`split_heredoc_bodies`]) and scanned as [`Scan::ProgramText`] afterwards,
+/// so `struct VerbStub {` in a `cat <<'RSEOF'` body no longer reads as a path
+/// word while `.env` in the same body still denies.
 /// Test: `denies_the_reported_sed_line_range`,
 /// `denies_every_bypass_the_earlier_rounds_missed`,
-/// `allows_the_ordinary_command_corpus`.
+/// `allows_the_ordinary_command_corpus`,
+/// `allows_a_heredoc_body_of_code_that_names_no_secret`,
+/// `denies_a_secret_named_inside_a_heredoc_body`.
 pub(crate) fn evaluate_secret_file_read_command(command: &str) -> Option<String> {
-    for segment in split_shell_segments(command) {
+    let (argv_text, bodies) = split_heredoc_bodies(command);
+    for segment in split_shell_segments(&argv_text) {
         let trimmed = segment.trim();
         if trimmed.is_empty() {
             continue;
@@ -410,6 +490,11 @@ pub(crate) fn evaluate_secret_file_read_command(command: &str) -> Option<String>
             continue;
         }
         return Some(deny_reason(first, &describe_command(trimmed)));
+    }
+    for body in &bodies {
+        if let Some(first) = secret_files_named_in_program_text(body).first() {
+            return Some(deny_reason(first, "a here-document body"));
+        }
     }
     None
 }
@@ -500,21 +585,173 @@ fn pattern_argument_index(segment: &str, argv: &[String]) -> Option<usize> {
 /// `denies_an_unlexable_segment_that_names_a_secret`.
 fn secret_words_in_segment(segment: &str) -> Vec<String> {
     let Some(argv) = shlex::split(segment) else {
-        return secret_files_named_in(segment);
+        return secret_files_named_in(segment, Scan::Argv);
     };
     let pattern_at = pattern_argument_index(segment, &argv);
+    // #7266: an interpreter's inline program is source text, not a path list.
+    let program_at = inline_program_index(&argv);
     let mut out: Vec<String> = Vec::new();
     for (index, token) in argv.iter().enumerate() {
         if Some(index) == pattern_at {
             continue;
         }
-        for word in secret_files_named_in(token) {
+        let words = if Some(index) == program_at {
+            secret_files_named_in_program_text(token)
+        } else {
+            secret_files_named_in(token, Scan::Argv)
+        };
+        for word in words {
             if !out.contains(&word) {
                 out.push(word);
             }
         }
     }
     out
+}
+
+/// Every distinct word of one PROGRAM TEXT block that names a secret file.
+///
+/// Why: critic CRITICAL on the round-9 fix. [`secret_files_named_in`] cuts at
+/// every byte a path cannot contain, and `"` is one of them, so a here-document
+/// body carrying `$(cat .en"v")` cut into `.en` and `v` and ALLOWED — while
+/// with an unquoted delimiter bash runs that substitution and prints the file.
+/// The ARGV path never had the hole, because [`secret_words_in_segment`] lexes
+/// first; before round 9 the whole here-document reached it as one segment and
+/// `shlex` glued the name back together. Program text needs the same join.
+/// What: scans each LINE twice and unions the words — once through
+/// `shlex::split`, which performs the quote removal, and once raw, which is
+/// what round 9 did. Scanning BOTH means this can only ADD denials to round 9,
+/// never remove one, so a line the lexer reads differently from the byte scan
+/// cannot open a gap either way. A line `shlex` cannot read contributes its raw
+/// scan alone. Per line rather than per block, so one unlexable line does not
+/// cost the join for the rest. Brace leniency is untouched: the join runs
+/// BEFORE [`names_a_secret_file`], which still reads an unresolvable `{` as
+/// ordinary text under [`Scan::ProgramText`].
+///
+/// Round 11: a per-LINE pass cannot see a name a `\<newline>` CONTINUATION
+/// splits across two lines. The shell removes that pair before any word
+/// splitting — `bash -c "cat <<EOF\n$(echo ab\<newline>cd)\nEOF"` prints
+/// `abcd` — so `$(cat .en\<newline>v)` in a body reads `.env` and ALLOWED on
+/// `8ddc7d438`. The continuation-joined spelling is now scanned ALONGSIDE the
+/// original, so this too only adds denials.
+/// Test: `denies_a_quote_joined_name_in_a_heredoc_body`,
+/// `denies_a_quote_joined_name_in_an_inline_program`,
+/// `denies_a_name_split_by_a_backslash_newline_continuation`,
+/// `allows_program_text_that_only_looks_like_a_brace_group`.
+fn secret_files_named_in_program_text(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    push_program_text_words(text, &mut out);
+    // #7266: the shell strips `\<newline>` before it splits words, so the
+    // continuation-joined spelling is a second way to read the same text.
+    let joined = text.replace("\\\n", "");
+    if joined != text {
+        push_program_text_words(&joined, &mut out);
+    }
+    out
+}
+
+/// Append one spelling of PROGRAM TEXT's secret-naming words to `out`.
+///
+/// What: the per-line lexed-and-raw union [`secret_files_named_in_program_text`]
+/// documents. Split out so the same pass runs over the original text and over
+/// its continuation-joined spelling without a second implementation.
+/// Test: see [`secret_files_named_in_program_text`].
+fn push_program_text_words(text: &str, out: &mut Vec<String>) {
+    for line in text.lines() {
+        // #7266: the lexed spelling and the raw spelling are both scanned —
+        // neither is trusted to be the only way the shell reads the line.
+        let mut spellings = vec![line.to_string()];
+        if let Some(tokens) = shlex::split(line) {
+            spellings.extend(tokens);
+        }
+        for spelling in spellings {
+            for word in secret_files_named_in(&spelling, Scan::ProgramText) {
+                if !out.contains(&word) {
+                    out.push(word);
+                }
+            }
+        }
+    }
+}
+
+/// Programs that take an inline PROGRAM behind [`INLINE_PROGRAM_FLAGS`].
+///
+/// Why: see [`Scan`]. Source text handed to an interpreter in argv is the
+/// second place round 5's word scan read syntax as a path.
+/// What: matched against the segment's resolved program basename. `sh`/`bash`
+/// are listed for completeness — `split_shell_segments` already re-scans a
+/// `sh -c` string as its own segment, so the inner command is still classified
+/// as argv there.
+/// Test: `allows_an_inline_program_carrying_braces`,
+/// `denies_a_secret_named_inside_an_inline_program`.
+const INLINE_PROGRAM_INTERPRETERS: &[&str] = &[
+    "python", "python3", "perl", "ruby", "node", "deno", "php", "sh", "bash", "zsh", "dash",
+];
+
+/// The flags whose next token is an inline program rather than a path.
+///
+/// What: `-c` (`python`, `sh`), `-e` (`perl`, `node`, `ruby`), `-r` (`php`),
+/// and the long spellings. Only the SEPARATE form is recognised; a joined
+/// `perl -e'…'` lexes as one token and keeps the argv scan, which over-refuses
+/// rather than under-refuses.
+/// Test: `denies_a_secret_named_inside_an_inline_program`.
+const INLINE_PROGRAM_FLAGS: &[&str] = &["-c", "-e", "-r", "--eval", "--command"];
+
+/// The awk-family programs whose first positional argument IS the program.
+///
+/// Test: `allows_an_awk_program_carrying_braces`.
+const AWK_PROGRAMS: &[&str] = &["awk", "gawk", "nawk", "mawk"];
+
+/// awk flags taking a SEPARATE value, so the token after them is not the
+/// program (`awk -F ';' '{…}'`, `awk -v n=1 '{…}'`).
+const AWK_VALUE_FLAGS: &[&str] = &["-v", "-F", "--assign", "--field-separator"];
+
+/// Which token of `argv`, if any, is an inline PROGRAM rather than a path.
+///
+/// Why: see [`Scan`]. This is the same shape as [`pattern_argument_index`] —
+/// one token of one program class, identified by position, scanned by a rule
+/// that still screens every secret name.
+/// What: for an [`INLINE_PROGRAM_INTERPRETERS`] entry, the token after the
+/// first [`INLINE_PROGRAM_FLAGS`] spelling. For an [`AWK_PROGRAMS`] entry, the
+/// first token that is neither a flag nor an [`AWK_VALUE_FLAGS`] value —
+/// unless `-f`/`--file` supplies the program from a file, which withdraws the
+/// exemption entirely so every positional stays a path. `None` for every other
+/// program, so no ordinary file operand can reach the program-text scan.
+/// Test: `allows_an_awk_program_carrying_braces`,
+/// `allows_an_inline_program_carrying_braces`,
+/// `denies_a_secret_named_inside_an_inline_program`,
+/// `denies_a_secret_operand_beside_an_inline_program`.
+fn inline_program_index(argv: &[String]) -> Option<usize> {
+    let start = strip_wrapper_prefix(argv)?;
+    let program = command_basename(argv.get(start)?);
+    let rest_start = start + 1;
+    let rest = argv.get(rest_start..)?;
+    if INLINE_PROGRAM_INTERPRETERS.contains(&program.as_str()) {
+        let at = rest
+            .iter()
+            .position(|t| INLINE_PROGRAM_FLAGS.contains(&t.as_str()))?;
+        return Some(rest_start + at + 1).filter(|i| *i < argv.len());
+    }
+    if !AWK_PROGRAMS.contains(&program.as_str()) {
+        return None;
+    }
+    if rest
+        .iter()
+        .any(|t| t == "--file" || t.starts_with("--file=") || t.starts_with("-f"))
+    {
+        return None;
+    }
+    let mut i = 0;
+    while let Some(token) = rest.get(i) {
+        if AWK_VALUE_FLAGS.contains(&token.as_str()) {
+            i += 2;
+        } else if token.len() > 1 && token.starts_with('-') {
+            i += 1;
+        } else {
+            return Some(rest_start + i);
+        }
+    }
+    None
 }
 
 /// The operator spellings that separate a `${…}` parameter's NAME from the
@@ -689,13 +926,15 @@ fn walk_parameter_expansions(text: &str, splice: bool, names: &mut String) -> St
 /// What: rewrites every `${…}` parameter expansion first (see
 /// [`rewrite_parameter_expansions`]), then cuts `text` at every non-path byte
 /// and keeps the words [`names_a_secret_file`] answers for, without repeats.
+/// `scan` decides only what an unresolvable brace shape means — see [`Scan`].
 /// Test: `secret_files_named_in_finds_a_name_inside_a_program_string`,
-/// `allows_a_parameter_expansion_that_names_no_secret`.
-fn secret_files_named_in(text: &str) -> Vec<String> {
+/// `allows_a_parameter_expansion_that_names_no_secret`,
+/// `allows_program_text_that_only_looks_like_a_brace_group`.
+fn secret_files_named_in(text: &str, scan: Scan) -> Vec<String> {
     let scanned = rewrite_parameter_expansions(text);
     let mut out: Vec<String> = Vec::new();
     for word in scanned.split(|c: char| !is_path_byte(c)) {
-        if word.is_empty() || !names_a_secret_file(word) {
+        if word.is_empty() || !names_a_secret_file(word, scan) {
             continue;
         }
         if !out.iter().any(|seen| seen == word) {
@@ -720,9 +959,9 @@ fn secret_files_named_in(text: &str) -> Vec<String> {
 /// but not the directory `secrets/`).
 /// Test: `allows_the_ordinary_command_corpus`,
 /// `a_word_family_counts_only_when_it_is_written_as_a_path`.
-fn names_a_secret_file(word: &str) -> bool {
+fn names_a_secret_file(word: &str, scan: Scan) -> bool {
     let base = normalize_bracket_classes(&command_basename(word));
-    if base.is_empty() || !denies_as_a_read_target(&base) {
+    if base.is_empty() || !denies_as_a_read_target(&base, scan) {
         return false;
     }
     if base.starts_with('.') || Path::new(&base).extension().is_some() {
@@ -786,7 +1025,7 @@ fn segment_only_handles(segment: &str, named: &[String]) -> bool {
         .get(operand_start..)
         .unwrap_or_default()
         .iter()
-        .flat_map(|tok| secret_files_named_in(tok))
+        .flat_map(|tok| secret_files_named_in(tok, Scan::Argv))
         .collect();
     named.iter().all(|n| operands.iter().any(|o| o == n))
 }
@@ -847,7 +1086,8 @@ pub(crate) fn evaluate_secret_file_read_tool(
     match tool_name {
         "Read" => {
             let target = string_field(tool_input, "file_path")?;
-            denies_as_a_read_target(target).then(|| deny_reason(target, "the `Read` tool"))
+            denies_as_a_read_target(target, Scan::Argv)
+                .then(|| deny_reason(target, "the `Read` tool"))
         }
         "Grep" => evaluate_grep_tool(tool_input),
         _ => None,
@@ -876,12 +1116,12 @@ pub(crate) fn evaluate_secret_file_read_tool(
 /// `allows_a_grep_tool_call_over_a_directory_with_no_glob`.
 fn evaluate_grep_tool(tool_input: Option<&serde_json::Value>) -> Option<String> {
     if let Some(path) = string_field(tool_input, "path")
-        && denies_as_a_read_target(path)
+        && denies_as_a_read_target(path, Scan::Argv)
     {
         return Some(deny_reason(path, "the `Grep` tool"));
     }
     let glob = string_field(tool_input, "glob")?;
-    denies_as_a_read_target(glob).then(|| deny_reason(glob, "a `Grep` glob"))
+    denies_as_a_read_target(glob, Scan::Argv).then(|| deny_reason(glob, "a `Grep` glob"))
 }
 
 /// A non-empty string field of a tool-input object.
@@ -1372,19 +1612,19 @@ mod tests {
     #[test]
     fn secret_files_named_in_finds_a_name_inside_a_program_string() {
         assert_eq!(
-            secret_files_named_in("php -r 'readfile(\".env\");'"),
+            secret_files_named_in("php -r 'readfile(\".env\");'", Scan::Argv),
             vec![".env".to_string()]
         );
         assert_eq!(
-            secret_files_named_in("dd if=terraform.tfvars of=/dev/stdout"),
+            secret_files_named_in("dd if=terraform.tfvars of=/dev/stdout", Scan::Argv),
             vec!["terraform.tfvars".to_string()]
         );
         // Repeats collapse, order is kept.
         assert_eq!(
-            secret_files_named_in("cp .env .env.bak"),
+            secret_files_named_in("cp .env .env.bak", Scan::Argv),
             vec![".env".to_string(), ".env.bak".to_string()]
         );
-        assert!(secret_files_named_in("cargo test -p trusty-mpm").is_empty());
+        assert!(secret_files_named_in("cargo test -p trusty-mpm", Scan::Argv).is_empty());
     }
 
     #[test]
@@ -2051,6 +2291,197 @@ mod tests {
                 "documented residual `{command}` now denies — update the module doc"
             );
         }
+    }
+
+    /// The three shapes tm 1.5.26/1.5.27 refused live while naming no file
+    /// (#7266 follow-up). Each denied on a brace fragment — `` `{` ``,
+    /// `` `{p+` ``, `` `{a` `` — because `expand_brace_alternatives` cannot
+    /// resolve a lone brace and the scan fails CLOSED on that.
+    const CODE_BRACE_CORPUS: &[&str] = &[
+        // (a) a Rust body appended through a here-document.
+        "cat >> crates/x/src/verb.rs <<'RSEOF'\nstruct VerbStub {\n    cmd: String,\n}\nRSEOF",
+        // (a) the same body carrying a format placeholder.
+        "cat >> src/x.rs <<'RSEOF'\nfn f(cmd: &str) -> String { format!(\"{cmd:?}\") }\nRSEOF",
+        // (b) an awk program, with and without a field separator.
+        "awk -F'[ ;]' '{p+=$4} END {print p}' /tmp/x.txt",
+        "awk '{print $1}' /tmp/x.txt",
+        "awk -v n=1 '{print n}' /tmp/x.txt",
+        // (c) a python3 here-document whose body carries a dict and an f-string.
+        "python3 <<'PY'\nd = {\"a\": 1}\nprint(f\"{d!r}\")\nPY",
+        // The same syntax handed to an interpreter in argv.
+        "python3 -c 'print({\"a\": 1})'",
+        "node -e 'console.log({a: 1})'",
+    ];
+
+    #[test]
+    fn allows_program_text_that_only_looks_like_a_brace_group() {
+        // Pre-fix every row denies, naming a brace fragment as a secret file.
+        for command in CODE_BRACE_CORPUS {
+            assert_eq!(
+                eval(command),
+                None,
+                "code braces are syntax, not a brace alternation: `{command}`"
+            );
+        }
+    }
+
+    #[test]
+    fn allows_a_heredoc_body_of_code_that_names_no_secret() {
+        assert_eq!(eval(CODE_BRACE_CORPUS[0]), None);
+        // The body is lifted out of the argv text, so its words never reach
+        // the path scan — but the operator line still does.
+        let (argv_text, bodies) = split_heredoc_bodies(CODE_BRACE_CORPUS[0]);
+        assert!(argv_text.starts_with("cat >> crates/x/src/verb.rs <<'RSEOF'"));
+        assert!(!argv_text.contains("VerbStub"));
+        assert_eq!(bodies.len(), 1);
+        assert!(bodies[0].contains("struct VerbStub {"));
+    }
+
+    #[test]
+    fn allows_an_awk_program_carrying_braces() {
+        assert_eq!(
+            inline_program_index(&["awk".into(), "{print}".into()]),
+            Some(1)
+        );
+        assert_eq!(
+            inline_program_index(&["awk".into(), "-F".into(), ";".into(), "{print}".into()]),
+            Some(3)
+        );
+        // `-f` supplies the program from a file, so every positional is a path.
+        assert_eq!(
+            inline_program_index(&["awk".into(), "-f".into(), "p.awk".into(), ".env".into()]),
+            None
+        );
+        assert!(eval("awk -f p.awk .env").is_some());
+    }
+
+    #[test]
+    fn allows_an_inline_program_carrying_braces() {
+        assert_eq!(
+            inline_program_index(&["python3".into(), "-c".into(), "{}".into()]),
+            Some(2)
+        );
+        // No inline-program flag, so `script.py` stays an ordinary path operand.
+        assert_eq!(
+            inline_program_index(&["python3".into(), "script.py".into()]),
+            None
+        );
+        // Not an interpreter at all.
+        assert_eq!(inline_program_index(&["cat".into(), "{".into()]), None);
+    }
+
+    #[test]
+    fn denies_a_secret_named_inside_a_heredoc_body() {
+        // The body is scanned as program text, not skipped: a name still denies.
+        let reason = eval("python3 <<'PY'\nprint(open('.env').read())\nPY")
+            .expect("a here-document body naming a secret must deny");
+        assert!(reason.starts_with("naming `.env` in a here-document body"));
+        assert!(eval("cat <<'EOF'\nterraform.tfvars\nEOF").is_some());
+    }
+
+    #[test]
+    fn denies_a_secret_named_inside_an_inline_program() {
+        for command in [
+            "python3 -c 'print(open(\".env\").read())'",
+            "perl -e 'open F, \"<\", \"id_rsa\"'",
+            "node -e 'require(\"fs\").readFileSync(\".env\")'",
+            "awk '{print} END {while ((getline l < \".env\") > 0) print l}'",
+        ] {
+            assert!(
+                eval(command).is_some(),
+                "an inline program naming a secret must still deny: `{command}`"
+            );
+        }
+    }
+
+    #[test]
+    fn denies_a_secret_operand_beside_an_inline_program() {
+        // The program is exempt from the brace machinery; the OPERAND is not.
+        assert!(eval("awk '{print}' .env.local").is_some());
+        assert!(eval("awk -F, '{print $1}' terraform.tfvars").is_some());
+        // A here-document redirected INTO a secret file: the operator line is
+        // argv and keeps its scan.
+        assert!(eval("cat <<'EOF' > .env\nAPI_KEY=1\nEOF").is_some());
+        // A real brace alternation in argv still expands and denies.
+        assert!(eval("cat {.env,.env.prod}").is_some());
+    }
+
+    /// The names a shell reassembles out of quoting, in program text.
+    ///
+    /// Why: critic CRITICAL on 355a725a5 — the round-9 body scan read raw
+    /// bytes and cut at `"`, so each of these ALLOWED there while `origin/main`
+    /// denied them. With an UNQUOTED here-document delimiter bash expands the
+    /// substitution and prints the file, so this is a live read, not prose.
+    const QUOTE_JOIN_CORPUS: &[&str] = &[
+        "cat <<EOF\n$(cat .en\"v\")\nEOF",
+        "cat <<'EOF'\n$(cat .en\"v\")\nEOF",
+        "cat <<EOF\n$(cat '.en''v')\nEOF",
+        "cat <<EOF\n$(cat \"terraform\".tfvars)\nEOF",
+        "python3 <<PY\nopen('.en'\"v\")\nPY",
+    ];
+
+    #[test]
+    fn denies_a_quote_joined_name_in_a_heredoc_body() {
+        for command in QUOTE_JOIN_CORPUS {
+            assert!(
+                eval(command).is_some(),
+                "a shell rejoins this name — it must deny: `{command}`"
+            );
+        }
+    }
+
+    #[test]
+    fn denies_a_quote_joined_name_in_an_inline_program() {
+        // The inline-program token reaches the same join.
+        assert!(eval("sh -c 'cat .en\"v\"'").is_some());
+        assert!(eval("awk 'BEGIN {while ((getline l < \".en\"\"v\") > 0) print l}'").is_some());
+    }
+
+    /// Names a `\<newline>` continuation splits across two lines.
+    ///
+    /// Why: critic CRITICAL on 8ddc7d438 — the program-text pass lexed per
+    /// LINE, so the continuation was never removed and each of these ALLOWED
+    /// there. The shell strips `\<newline>` before it splits words:
+    /// `bash -c "cat <<EOF\n$(echo ab\<newline>cd)\nEOF"` prints `abcd`, so an
+    /// unquoted delimiter makes the first row a live read of `.env`.
+    const CONTINUATION_CORPUS: &[&str] = &[
+        "cat <<EOF\n$(cat .en\\\nv)\nEOF",
+        "cat <<EOF\n$(cat '.en'\\\n'v')\nEOF",
+        "python3 <<PY\nopen('.en\\\nv')\nPY",
+        "cat <<EOF\n$(cat terraform.tf\\\nvars)\nEOF",
+        "sh -c 'cat .en\\\nv'",
+    ];
+
+    #[test]
+    fn denies_a_name_split_by_a_backslash_newline_continuation() {
+        for command in CONTINUATION_CORPUS {
+            assert!(
+                eval(command).is_some(),
+                "the shell rejoins this name across the continuation: `{command}`"
+            );
+        }
+    }
+
+    #[test]
+    fn the_program_text_join_keeps_brace_leniency() {
+        // The join runs before the name test, so a `{` the expander cannot
+        // resolve is still ordinary text after it.
+        for command in CODE_BRACE_CORPUS {
+            assert_eq!(eval(command), None, "`{command}`");
+        }
+    }
+
+    #[test]
+    fn a_shell_heredoc_body_stays_live_shell_syntax() {
+        // Fail-open check: `bash <<'EOF'` runs its body, so the body is NOT
+        // lifted out — its segments keep the full argv scan and the safe-verb
+        // grant that goes with it.
+        let command = "bash <<'EOF'\nls .env\nEOF";
+        let (argv_text, bodies) = split_heredoc_bodies(command);
+        assert_eq!(argv_text, command);
+        assert!(bodies.is_empty());
+        assert_eq!(eval(command), None, "`ls` is a safe handling verb");
+        assert!(eval("bash <<'EOF'\ncat .env\nEOF").is_some());
     }
 
     #[test]
