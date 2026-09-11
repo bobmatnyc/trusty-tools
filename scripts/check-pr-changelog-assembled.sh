@@ -109,16 +109,31 @@ while IFS= read -r path; do
   # merge-base file. A heading that already existed at the merge base (a
   # --merge run folding fragments into a stale section, #5298) is not "new"
   # even if the diff happens to touch nearby lines.
+  # #7359: the `|| true` guards GREP ALONE, never the whole pipeline. A PR that
+  # DELETES a crate's CHANGELOG.md produces a pure-deletion diff with no
+  # `+## [` lines, so grep exits 1, pipefail propagates it, and `set -e` killed
+  # this assignment before the `-z` guard below could skip the crate — the job
+  # failed with NO output. Guarding the pipeline END instead would also swallow
+  # a git or sed failure: the result would be empty, the `-z` guard would read
+  # that as "no new headings", and the gate would go green on tool trouble.
+  # Grep's no-match is the ONE nonzero exit that means "nothing to check here".
   new_headings="$(
     git diff --unified=0 --no-renames "${MERGE_BASE}" HEAD -- "$path" \
-      | grep -E '^\+## \[' \
+      | { grep -E '^\+## \[' || true; } \
       | sed -E 's/^\+## \[([^]]+)\].*/\1/' \
       | LC_ALL=C sort -u
   )"
   [[ -z "$new_headings" ]] && continue
 
-  base_headings="$(git show "${MERGE_BASE}:${path}" 2>/dev/null \
-    | grep -oE '^## \[[^]]+\]' | sed -E 's/^## \[([^]]+)\].*/\1/' || true)"
+  # #7359: same narrowing here. `git show` gets its own guard because a path
+  # that does not exist at the merge base is expected, not an error — that is
+  # a crate whose CHANGELOG.md this PR ADDS, and it means "no prior headings".
+  # sed stays unguarded, so a genuine sed failure still fails the gate.
+  base_headings="$(
+    { git show "${MERGE_BASE}:${path}" 2>/dev/null || true; } \
+      | { grep -oE '^## \[[^]]+\]' || true; } \
+      | sed -E 's/^## \[([^]]+)\].*/\1/'
+  )"
 
   while IFS= read -r version; do
     [[ -z "$version" ]] && continue
