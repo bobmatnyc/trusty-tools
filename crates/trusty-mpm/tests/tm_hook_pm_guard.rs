@@ -3297,6 +3297,70 @@ fn pm_guard_allows_a_for_loop_word_list_of_branch_names() {
 }
 
 #[test]
+fn pm_guard_allows_a_git_ref_name_and_a_text_payload() {
+    // #7498 round 3, through the real binary. Every ALLOW row DENIED on
+    // 81a72d069: a git REF argument and a `--body` text payload were both read
+    // as an argv path operand, so a branch name and a sentence about a `.env`
+    // file each landed in the secret-bearing file class while this guard opened
+    // no file at all.
+    let (_dir, repo) = main_checkout_fixture();
+    for command in [
+        // No `\"` in any row: `bash_payload_at` interpolates the command into
+        // raw JSON, so a bare double quote would break the payload and the
+        // guard would never see the command.
+        "git checkout -b feat/7526-secrets-manager-agent",
+        "git switch -c feat/7527-tm-secrets-skill",
+        "git branch feat/7527-tm-secrets-skill",
+        "git branch -m feat/7527-tm-secrets-skill",
+        "git push origin feat/7527-tm-secrets-skill",
+        "gh issue comment 7517 --body 'the agent reads a .env file'",
+        "gh issue create --title 'add .env support' --body 'see terraform.tfvars'",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert!(
+            stdout.trim().is_empty(),
+            "`{command}` opens no file and must be allowed: {stdout}"
+        );
+    }
+    // The negative bound, in the SAME invocation: a ref position withdraws one
+    // arm and nothing else, a text payload is decided by exact flag spelling,
+    // and every reading verb keeps the pre-fix answer. An implementation that
+    // exempted `git` or `gh` as a VERB passes every row above and fails these.
+    for command in [
+        "git checkout -b .env",
+        "git branch secrets.txt",
+        "git push origin id_rsa",
+        "git checkout main -- config/credentials",
+        // The ref position shares `reads_as_a_branch_name`, so it inherits the
+        // `BRANCH_NAME_PREFIXES` allowlist the round-13 critic added.
+        "git checkout -b config/credentials",
+        "git branch vault/token",
+        "git checkout -b docs/secrets",
+        // A `.`/`..` traversal out of the prefix (b60f93cb5's clause).
+        "git checkout -b feat/../secrets/prod-credentials",
+        "git branch docs/../.aws/credentials",
+        "gh issue comment 1 --body-file .env",
+        "git commit -F .env",
+        "git show HEAD:.env",
+        "git diff -- config/credentials",
+        "git add -p .env",
+        "cat config/credentials",
+        "sed -n '1,5p' id_rsa",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert_denied(&stdout);
+    }
+}
+
+#[test]
 fn pm_guard_deny_text_advertises_no_flag_escape() {
     // #7266 round 6, critic HIGH + MEDIUM: round 5's reason offered
     // `--env-file`/`-var-file`/`-state` and no such escape was ever

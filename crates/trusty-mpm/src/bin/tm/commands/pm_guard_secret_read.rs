@@ -162,6 +162,39 @@
 //! "$f"; done`, `for f in *.pem; do sed -n 1p $f; done` and
 //! `for f in credentials.json; do cat $f; done` all still deny.
 //!
+//! Round 13's third round (#7498) withdraws the same over-refusal from two
+//! more positions that carry WORDS rather than paths. A git REF argument is
+//! the first: live on tm 1.5.33,
+//! `git checkout -b feat/7526-secrets-manager-agent`,
+//! `git switch -c feat/7527-tm-secrets-skill`,
+//! `git branch feat/7527-tm-secrets-skill` and `git branch -m …` were all
+//! refused, because a branch matched by `*secrets*` is admitted as a file by
+//! the `/` in front of it — the one proxy round 13 had already withdrawn from a
+//! word list. [`ref_name_start`] identifies the ref position the way
+//! [`for_word_list_start`] identifies its list, and the two compose onto the
+//! SAME predicate — [`reads_as_a_branch_name`], the branch-prefix allowlist
+//! included, so `git checkout -b .env`, `git branch secrets.txt`,
+//! `git push origin id_rsa`, `git checkout -b config/credentials` and
+//! `git branch vault/token` all still deny. Reusing it rather than writing a
+//! second discriminator is deliberate: a ref position is a claim about where
+//! the word sits, never about what the word may be, so the two positions
+//! cannot drift apart on which names a word list may launder.
+//! `git checkout`/`git switch` do take paths, so their tokens are refs only
+//! behind a [`NEW_REF_FLAGS`] spelling, and a `--` withdraws the position
+//! entirely.
+//!
+//! A TEXT PAYLOAD is the second: `gh issue comment 7517 --body …` naming a
+//! `.env` file in its prose was refused, and rewording that one word to
+//! "dotenv" let the identical command through. A payload is skipped OUTRIGHT
+//! rather than narrowed, because prose names a file with its real spelling, so
+//! the flag list is the whole safety argument — [`TEXT_PAYLOAD_FLAGS`] is four
+//! exact LONG spellings, matched by equality, which is what keeps
+//! `--body-file`, `--file` and `-F` out: `gh issue comment 1 --body-file .env`
+//! and `git commit -F .env` still deny. `-m` is absent on purpose, because
+//! `sort -m .env` merges and PRINTS the files after it. Both positions are
+//! withdrawn by a nested command, so `--body "$(cat .env)"` and
+//! `git branch $(basename config/credentials)` deny.
+//!
 //! What this costs, deliberately: naming a secret-shaped file in ANY command
 //! now denies, including one that reads nothing — `git log --grep .env`,
 //! `git commit -m "add .env.example"`, `cp .env .env.bak`. Rounds 1 to 4
@@ -210,6 +243,25 @@
 //! in a word list exactly as it does in argv, which is what round 13's two
 //! critic rounds measured and its first two cuts got wrong.
 //!
+//! Round 13's third round adds three more of that shape, each named rather
+//! than silently allowed. A `git tag`, `git merge` or `git rebase` argument is
+//! a ref this rule still reads as a path, so `git tag docs/secrets-plan`
+//! denies: an unlisted subcommand keeps the pre-fix answer, which is the
+//! fail-CLOSED side, and the list grows only on a reported false positive. A
+//! `--body` payload is skipped whole, so a file genuinely named `.env` reaches
+//! one unscreened — the price of reading prose as prose, bounded by the
+//! four-flag list and withdrawn by any nested command; the git REF position
+//! carries no such price, because it shares
+//! [`reads_as_a_branch_name`]'s allowlist, so `git branch config/credentials`
+//! denies exactly as `cat config/credentials` does. And a REGEX that overlaps a
+//! family's glob is untouched:
+//! `?` stands for one character in [`names_a_secret`]'s glob arm, so `.*?drop`
+//! overlaps `.env*` and both `perl -pi -e 's/.*?drop.*//' notes.md` and
+//! `gh issue list --search '.*?drop'` still deny. `--search` is therefore
+//! absent from [`TEXT_PAYLOAD_FLAGS`] on purpose — its payload is a PATTERN,
+//! and the fix for a pattern read as a glob belongs at that glob arm, not at a
+//! flag list that would hide one instance of it.
+//!
 //! `git show HEAD:terraform.tfvars` is DENIED, not residual: `:` is not a path
 //! byte, so `HEAD:terraform.tfvars` cuts into `HEAD` and `terraform.tfvars`,
 //! and `show` is not a [`SAFE_GIT_SUBCOMMANDS`] entry (round 5's doc listed it
@@ -251,6 +303,10 @@
 //! `the_documented_residuals_still_allow`,
 //! `allows_a_for_loop_word_list_of_branch_names`,
 //! `denies_a_secret_file_in_a_for_loop_word_list`,
+//! `allows_a_git_ref_name_carrying_a_word_family`,
+//! `denies_a_secret_file_in_a_git_ref_position`,
+//! `allows_a_filename_named_in_a_text_payload`,
+//! `denies_a_file_flag_beside_a_text_payload`,
 //! `reads_as_a_branch_name_needs_a_branch_prefix`, and the rest of this
 //! module's `tests` submodule. The rule is proved WIRED end to end through the
 //! real binary by `pm_guard_denies_a_line_range_read_of_a_secret_bearing_file`,
@@ -268,7 +324,8 @@
 //! `pm_guard_reads_a_parameter_expansion_as_its_operand` and
 //! `pm_guard_allows_code_braces_in_a_heredoc_body_and_an_inline_program` and
 //! `pm_guard_allows_a_brace_literal_passed_as_an_argument_value` and
-//! `pm_guard_allows_a_for_loop_word_list_of_branch_names` in
+//! `pm_guard_allows_a_for_loop_word_list_of_branch_names` and
+//! `pm_guard_allows_a_git_ref_name_and_a_text_payload` in
 //! `tests/tm_hook_pm_guard.rs`.
 
 use std::path::Path;
@@ -603,11 +660,16 @@ fn secret_words_in_segment(segment: &str) -> Vec<String> {
     let pattern_at = pattern_argument_index(segment, &argv);
     // #7266: an interpreter's inline program is source text, not a path list.
     let program_at = inline_program_index(&argv);
-    // #7498: the words after `in` are a loop's word LIST, not a path operand list.
-    let word_list_from = for_word_list_start(segment, &argv);
+    // #7498 round 3: a text payload is prose written for a human to read.
+    let text_payloads = text_payload_indices(segment, &argv);
+    // #7498: the words after `in` are a loop's word LIST, and the words in a
+    // ref-creating position are REF names — neither is a path operand list, and
+    // both withdraw the same one arm.
+    let word_list_from =
+        for_word_list_start(segment, &argv).or_else(|| ref_name_start(segment, &argv));
     let mut out: Vec<String> = Vec::new();
     for (index, token) in argv.iter().enumerate() {
-        if Some(index) == pattern_at {
+        if Some(index) == pattern_at || text_payloads.contains(&index) {
             continue;
         }
         let words = if Some(index) == program_at {
@@ -765,6 +827,136 @@ fn reads_as_a_branch_name(word: &str) -> bool {
     // #7498: a `..` after the prefix escapes it, so the prefix would say how
     // the word is SPELLED rather than where it lives.
     first_is_a_prefix && !components.any(|c| c == "." || c == "..")
+}
+
+/// git subcommands whose positional arguments name a REF, never a path (#7498
+/// round 3).
+///
+/// Why: `git branch <name>` and `git push <remote> <refspec>` take no path
+/// operand at all — every positional is a branch, a tag, a remote or a
+/// refspec. A branch called `docs/secrets-integration-spec` is then a "secret
+/// file" on the strength of its `/`, which is the same proxy round 13 withdrew
+/// from a `for` word list, reached through a different position.
+/// What: compared against `pm_guard_bash::git_subcommand`'s answer, so
+/// `git -C <path> branch …` resolves the same way. `git tag`, `git merge` and
+/// every other ref-taking subcommand are deliberately ABSENT: an unlisted
+/// subcommand keeps the pre-fix answer, which is the fail-CLOSED side.
+/// Test: `allows_a_git_ref_name_carrying_a_word_family`,
+/// `denies_a_secret_file_in_a_git_ref_position`.
+const REF_NAMING_GIT_SUBCOMMANDS: &[&str] = &["branch", "push"];
+
+/// `checkout`/`switch` flags whose next token is a NEW ref name (#7498 round 3).
+///
+/// Why: `git checkout` and `git switch` DO take paths — `git checkout main --
+/// src/x` restores a file — so their positionals cannot be read as refs the way
+/// [`REF_NAMING_GIT_SUBCOMMANDS`]'s are. The new-branch flag is what makes the
+/// token after it a ref: `-b`/`-B` for `checkout`, `-c`/`-C` for `switch`.
+/// Test: `allows_a_git_ref_name_carrying_a_word_family`,
+/// `denies_a_secret_file_in_a_git_ref_position`.
+const NEW_REF_FLAGS: &[&str] = &["-b", "-B", "-c", "-C"];
+
+/// Where a segment's git REF names begin, if it names refs at all (#7498
+/// round 3).
+///
+/// Why: live on tm 1.5.33, `git checkout -b feat/7526-secrets-manager-agent`,
+/// `git switch -c feat/7527-tm-secrets-skill`, `git branch
+/// feat/7527-tm-secrets-skill` and `git branch -m feat/7527-tm-secrets-skill`
+/// were all refused for naming a secret-bearing file. A git ref argument is
+/// never a file's bytes, and every child of an epic whose subject is secrets
+/// wants that word in its branch name.
+/// What: `Some(index)` — the first token that names a ref — for a
+/// [`REF_NAMING_GIT_SUBCOMMANDS`] call, or for a `checkout`/`switch` call at
+/// the token after its [`NEW_REF_FLAGS`] spelling. A nested command withdraws
+/// it, exactly as it withdraws [`for_word_list_start`], because the words are
+/// then whatever that command prints. A `--` at or after that index withdraws
+/// it too: `--` ends the ref list and begins a PATH list. `None` for every
+/// other segment, so no ordinary argv reaches the narrowed shape test. The
+/// position is what is identified, never the verb — this adds nothing to
+/// [`SAFE_HANDLING_VERBS`] or [`SAFE_GIT_SUBCOMMANDS`], and the narrowing it
+/// enables is the single predicate the word-list rule already uses
+/// ([`reads_as_a_branch_name`], [`BRANCH_NAME_PREFIXES`] allowlist included),
+/// so `git checkout -b .env`, `git push origin id_rsa` and
+/// `git checkout -b config/credentials` still deny.
+/// Test: `allows_a_git_ref_name_carrying_a_word_family`,
+/// `denies_a_secret_file_in_a_git_ref_position`.
+fn ref_name_start(segment: &str, argv: &[String]) -> Option<usize> {
+    if NESTED_COMMAND_MARKERS.iter().any(|m| segment.contains(m)) {
+        return None;
+    }
+    let sub = git_subcommand(segment)?;
+    let at = argv.iter().position(|t| *t == sub)?;
+    let from = if REF_NAMING_GIT_SUBCOMMANDS.contains(&sub.as_str()) {
+        at + 1
+    } else if matches!(sub.as_str(), "checkout" | "switch") {
+        // #7498: the new-branch flag is what makes the next token a ref.
+        at + 2
+            + argv
+                .get(at + 1..)?
+                .iter()
+                .position(|t| NEW_REF_FLAGS.contains(&t.as_str()))?
+    } else {
+        return None;
+    };
+    if argv.get(from..)?.iter().any(|t| t == "--") {
+        return None;
+    }
+    (from < argv.len()).then_some(from)
+}
+
+/// Flags whose next token is a human-readable TEXT PAYLOAD, never a path
+/// (#7498 round 3).
+///
+/// Why: live on tm 1.5.33, a `gh issue comment 7517 --body …` whose prose named
+/// a `.env` file was refused for naming `.env` in a `gh` command. The body is a
+/// value written for a person to read; rewording it to "dotenv" let the
+/// identical command through, which is the signature of a rule reading prose as
+/// argv.
+/// What: LONG spellings only, matched by exact token equality, plus the joined
+/// `--body=…` form. Exact equality is what keeps the FILE flags out — a
+/// `--body-file`, `--file` or `-F` token is not `--body`, so
+/// `gh issue comment 1 --body-file .env` and `git commit -F .env` still deny.
+/// `-m` is deliberately ABSENT even though `git commit -m` is the commonest
+/// spelling of a message: a bare `-m` is overloaded across programs, and
+/// `sort -m .env` MERGES and prints the files after it, so exempting the token
+/// after every `-m` would be a bypass rather than a false-positive fix. That
+/// keeps round 5's deliberate cost for `git commit -m "add .env"` in place.
+/// Test: `allows_a_filename_named_in_a_text_payload`,
+/// `denies_a_file_flag_beside_a_text_payload`.
+const TEXT_PAYLOAD_FLAGS: &[&str] = &["--body", "--title", "--message", "--note"];
+
+/// Which tokens of `argv` are a human-readable TEXT PAYLOAD (#7498 round 3).
+///
+/// Why: see [`TEXT_PAYLOAD_FLAGS`]. Unlike [`ref_name_start`], a payload is
+/// skipped OUTRIGHT rather than narrowed to one arm, because prose names a file
+/// with its real spelling — `--body "the agent reads .env"` carries the dotfile
+/// itself. That makes the flag list the whole safety argument, so it is exact
+/// spellings of long options and nothing else.
+/// What: the index of every token that is the joined `<flag>=…` form, and of
+/// every token whose PREDECESSOR is an exact [`TEXT_PAYLOAD_FLAGS`] spelling.
+/// Empty when the segment runs a nested command, so
+/// `gh issue comment 1 --body "$(cat .env)"` still denies. Empty is also the
+/// answer for every segment carrying none of the flags, which leaves the scan
+/// exactly as it was.
+/// Test: `allows_a_filename_named_in_a_text_payload`,
+/// `denies_a_file_flag_beside_a_text_payload`.
+fn text_payload_indices(segment: &str, argv: &[String]) -> Vec<usize> {
+    if NESTED_COMMAND_MARKERS.iter().any(|m| segment.contains(m)) {
+        return Vec::new();
+    }
+    argv.iter()
+        .enumerate()
+        .filter(|(index, token)| {
+            TEXT_PAYLOAD_FLAGS.iter().any(|flag| {
+                token
+                    .strip_prefix(*flag)
+                    .is_some_and(|rest| rest.starts_with('='))
+            }) || index
+                .checked_sub(1)
+                .and_then(|prev| argv.get(prev))
+                .is_some_and(|prev| TEXT_PAYLOAD_FLAGS.contains(&prev.as_str()))
+        })
+        .map(|(index, _)| index)
+        .collect()
 }
 
 /// Every distinct word of one PROGRAM TEXT block that names a secret file.
@@ -1427,6 +1619,144 @@ mod tests {
                 "`{word}` must keep the directory-prefix proxy"
             );
             assert!(names_a_secret_file(word, Scan::Argv), "{word}");
+        }
+    }
+
+    /// Git REF names carrying a word family, refused live on tm 1.5.33 (#7498
+    /// round 3).
+    ///
+    /// Why: a branch, tag or refspec argument is never a file's bytes, and
+    /// every child of an epic about secrets wants that word in its branch
+    /// name. Each row DENIED on 81a72d069 for "naming" the ref.
+    const REF_NAME_ALLOW_CORPUS: &[&str] = &[
+        // The four spellings reported, verbatim.
+        "git checkout -b feat/7526-secrets-manager-agent",
+        "git switch -c feat/7527-tm-secrets-skill",
+        "git branch feat/7527-tm-secrets-skill",
+        "git branch -m feat/7527-tm-secrets-skill",
+        // A push of the same ref, and a start-point beside a new branch.
+        "git push origin feat/7527-tm-secrets-skill",
+        "git checkout -b hotfix/token-refresh origin/main",
+        // A rename between two such names, and the uppercase force spellings.
+        "git branch -m docs/secrets-plan docs/secrets-plan-v2",
+        "git checkout -B feat/credentials-rotation",
+        "git switch -C feat/token-refresh",
+        // A global option in front of the subcommand still resolves.
+        "git -C /repo branch feat/7527-tm-secrets-skill",
+        // This round's own branch: the name the harness forced, because a
+        // `secrets`-with-a-slash branch could not be created at all (#7498).
+        "git switch -c fix/7498-round3-refs-and-bodies",
+    ];
+
+    #[test]
+    fn allows_a_git_ref_name_carrying_a_word_family() {
+        for command in REF_NAME_ALLOW_CORPUS {
+            assert_eq!(
+                eval(command),
+                None,
+                "a git ref name must allow: `{command}`"
+            );
+        }
+    }
+
+    /// The ref position withdraws ONE arm, and only in a ref position.
+    ///
+    /// Why: #7498 round 3's acceptance criterion — an implementation that
+    /// exempted `git` or `gh` as a VERB would pass
+    /// `allows_a_git_ref_name_carrying_a_word_family` and fail every row here.
+    #[test]
+    fn denies_a_secret_file_in_a_git_ref_position() {
+        for command in [
+            // A name with file shape of its own is still a file in a ref
+            // position: a leading dot, an extension, a filename-only family.
+            "git checkout -b .env",
+            "git branch secrets.txt",
+            "git push origin id_rsa",
+            "git switch -c terraform.tfvars",
+            // #7498 round 13 critic: the ref position shares
+            // `reads_as_a_branch_name`, so it inherits the
+            // `BRANCH_NAME_PREFIXES` allowlist. An unlisted first component,
+            // an absolute path, a `~` expansion and a bare family core under a
+            // listed prefix all keep the deny.
+            "git checkout -b config/credentials",
+            "git branch vault/token",
+            "git push origin /etc/secrets",
+            "git branch ~/.aws/credentials",
+            "git checkout -b docs/secrets",
+            // A `.`/`..` TRAVERSAL out of the prefix, which the shared
+            // predicate rejects since b60f93cb5 — the ref position inherits
+            // that clause with no code of its own.
+            "git checkout -b feat/../secrets/prod-credentials",
+            "git branch docs/../.aws/credentials",
+            // `checkout`/`switch` without a new-branch flag take PATHS, and a
+            // `--` ends the ref list and begins one.
+            "git checkout main -- config/credentials",
+            "git checkout config/credentials",
+            // A nested command withdraws the position entirely.
+            "git branch $(basename config/credentials)",
+            // Every other subcommand keeps the pre-fix answer, reading verbs
+            // included — this is the arm a verb exemption would have broken.
+            "git show HEAD:.env",
+            "git diff -- config/credentials",
+            "git log -p config/credentials",
+            "git add -p .env",
+            // And the rule is unchanged outside git.
+            "cat config/credentials",
+            "sed -n '1,5p' id_rsa",
+        ] {
+            assert!(eval(command).is_some(), "`{command}` must deny");
+        }
+    }
+
+    /// A filename named in PROSE, refused live on tm 1.5.33 (#7498 round 3).
+    ///
+    /// Why: `gh issue comment --body` carries a value written for a person to
+    /// read. Rewording `.env` to "dotenv" let the identical command through,
+    /// which is the signature of a rule reading prose as argv. Each row DENIED
+    /// on 81a72d069.
+    const TEXT_PAYLOAD_ALLOW_CORPUS: &[&str] = &[
+        // The reported shape, and the joined spelling of it.
+        "gh issue comment 7517 --body \"the agent reads a .env file\"",
+        "gh issue comment 7517 --body='the agent reads a .env file'",
+        // The other long spellings, including two payloads in one command.
+        "gh issue create --title 'add .env support' --body 'see terraform.tfvars'",
+        "git commit --message 'docs: mention .env'",
+        "tm issue transition 7498 closed --note 'verified against id_rsa handling'",
+    ];
+
+    #[test]
+    fn allows_a_filename_named_in_a_text_payload() {
+        for command in TEXT_PAYLOAD_ALLOW_CORPUS {
+            assert_eq!(
+                eval(command),
+                None,
+                "a text payload must allow: `{command}`"
+            );
+        }
+    }
+
+    /// A FILE flag beside a text-payload flag must keep denying.
+    ///
+    /// Why: `--body-file` and `-F` read the file and post its bytes, so the
+    /// exemption is decided by EXACT spelling — a prefix match would hand the
+    /// bypass straight over.
+    #[test]
+    fn denies_a_file_flag_beside_a_text_payload() {
+        for command in [
+            "gh issue comment 1 --body-file .env",
+            "gh issue create --body-file=terraform.tfvars",
+            "git commit -F .env",
+            // `-m` is not on the list, so round 5's deliberate cost stands —
+            // and `sort -m .env`, which prints both files, cannot be reached.
+            "git commit -m 'docs: mention .env'",
+            "sort -m .env",
+            // A nested command inside the payload runs and prints the file.
+            "gh issue comment 1 --body \"$(cat .env)\"",
+            // Only the payload token is prose; an operand beside it is not.
+            "gh issue comment 1 --body 'see below' .env",
+            "gh issue create --title 'x' --body 'y' -F id_rsa",
+        ] {
+            assert!(eval(command).is_some(), "`{command}` must deny");
         }
     }
 
