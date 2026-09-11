@@ -1,0 +1,4 @@
+# Fixture: a ROTTED NO-CFG row — demo/config does have a cfg site (#7466).
+LANE	features	demo/heavy
+NO-CFG	demo	config
+NO-CFG	demo	nogate

@@ -113,9 +113,11 @@
 #     check_line_cap.sh's own classification (basename `tests.rs`, or ending
 #     `_test.rs`/`_tests.rs`, or a `/tests/` or `/benches/` path segment). A
 #     test-only edit has no user-visible change to describe.
-#   - the crate no longer EXISTS at HEAD — i.e. the PR deleted it outright
-#     (`crates/<crate>/Cargo.toml` is gone). Deleting a crate deletes every
-#     `crates/<crate>/src/**` file, which reads as a source change and demanded
+#   - the crate no longer EXISTS in the tree being judged — i.e. the PR deleted
+#     it outright (`crates/<crate>/Cargo.toml` is gone at HEAD in the default
+#     mode, or gone from the INDEX under --staged; #7435). Deleting a crate
+#     deletes every `crates/<crate>/src/**` file, which reads as a source
+#     change and demanded
 #     a fragment; but the fragment would have to live in the very directory
 #     being removed, and `assemble-changelog.sh <crate>` cannot run for a crate
 #     that is not there. The requirement was unsatisfiable, so a crate deletion
@@ -154,12 +156,18 @@
 #                    `assemble-changelog.sh <crate> --stdout`, so it prints the
 #                    same ERROR lines.
 #
-#   Two ways --staged is weaker than the default run, which is why it is a
+#   One way --staged is weaker than the default run, which is why it is a
 #   pre-flight and not the verdict: it reads the WORKING TREE for a crate's
 #   CHANGELOG.md and changelog.d/, so an unstaged edit to either still counts as
-#   evidence; and it compares against HEAD, so the #3732 crate-dissolution
-#   exemption is unreachable — a staged `git rm` of `crates/<crate>/Cargo.toml`
-#   leaves the manifest present at HEAD.
+#   evidence.
+#
+#   #7435 removed the second way. The #3732 crate-dissolution exemption used to
+#   be unreachable here, because every "does this still exist" probe read HEAD
+#   and a staged `git rm` of `crates/<crate>/Cargo.toml` leaves the manifest
+#   present at HEAD — so a deletion-only change failed as an unrecorded source
+#   change and passed the moment it was committed. Those probes now read
+#   $NOW_REV, which is the INDEX in this mode; see NOW_REV below for what each
+#   of the three outcomes means.
 #
 # CI shape (issue #4468 caution): this job has NO `paths:` filter, so it always
 #   runs and always reports on every PR — including an exempt docs-only PR,
@@ -227,7 +235,10 @@
 #   scripts/check_changelog_staged_selftest.sh covers the #6947 author modes:
 #   --staged with and without a fragment, --file on a valid fragment, a
 #   two-heading fragment and one with no category line, and that a default run
-#   over the same tree is unchanged.
+#   over the same tree is unchanged. Its #7435 pair pins the index-vs-HEAD
+#   probe: `staged-crate-deletion-exempt` (a staged `git rm` of a whole crate
+#   is the dissolution exemption) and `staged-src-deletion-crate-survives-fails`
+#   (deleting source INSIDE a surviving crate is not).
 #
 # Portability: bash 3.2 (macOS system bash) and bash 5 (Linux CI). POSIX tools
 #   only — `git`, `grep`, `sed`, `sort`.
@@ -500,12 +511,29 @@ fi
 #   is the existence signal, so a git warning printed on an otherwise
 #   successful run would make an absent path read as present — turning the
 #   #3732 crate-deletion exemption into a false red.
+#
+#   `<rev>` may be the pseudo-rev `:index`, which reads the INDEX plus
+#   untracked-but-not-ignored paths instead of a commit — see NOW_REV below
+#   (#7435). `git ls-files` has the same shape as `ls-tree` for this purpose:
+#   exit 0 with empty output for an absent path, non-zero only on a real
+#   failure, which lands on the same hard-fail arm.
 path_exists_at_rev() {
   local rev="$1" path="$2" out err rc=0
   err="$(mktemp "${TMPDIR:-/tmp}/changelog.lstree.XXXXXX")"
-  out="$(git ls-tree -r --name-only "$rev" -- "$path" 2>"$err")" || rc=$?
+  if [[ "$rev" == ":index" ]]; then
+    # Two probes, either of which means "present now": staged in the index, or
+    # written but not yet added. The second matches what --staged already counts
+    # as a scanned path and as evidence, so a brand-new untracked crate is NOT
+    # read as a deletion of itself.
+    out="$(git ls-files --cached -- "$path" 2>"$err")" || rc=$?
+    if [[ "$rc" -eq 0 && -z "$out" ]]; then
+      out="$(git ls-files --others --exclude-standard -- "$path" 2>>"$err")" || rc=$?
+    fi
+  else
+    out="$(git ls-tree -r --name-only "$rev" -- "$path" 2>"$err")" || rc=$?
+  fi
   if [[ "$rc" -ne 0 ]]; then
-    echo "FAIL: TOOL ERROR — 'git ls-tree ${rev} -- ${path}' failed:" >&2
+    echo "FAIL: TOOL ERROR — probing '${path}' at '${rev}' failed:" >&2
     sed 's/^/       /' "$err" >&2
     echo "      Whether the path exists is unknown, so no exemption may be granted." >&2
     echo "      This is NOT a pass (issue #4618)." >&2
@@ -515,6 +543,24 @@ path_exists_at_rev() {
   rm -f "$err"
   [[ -n "$out" ]]
 }
+
+# #7435: what "exists NOW" means is decided by the MODE, not fixed at HEAD.
+#
+# Why: the #3732 crate-dissolution exemption asks whether `crates/<crate>/Cargo.toml`
+#   still exists in the tree this run is judging. In the default mode that tree is
+#   HEAD. In --staged it is the INDEX, and a staged `git rm` of a crate leaves the
+#   manifest present at HEAD — so the exemption never fired and a deletion-only
+#   change failed as an unrecorded source change (found folding trusty-agents-local,
+#   #7359). Committing the identical tree passed.
+# What: every "does this still exist" probe reads $NOW_REV; the historical probes
+#   keep reading $MERGE_BASE. In --staged the two are a commit and the index, which
+#   is what makes the exemption reachable there:
+#     present in the index or untracked -> NOT a deletion, evidence required;
+#     absent from the index, present at $MERGE_BASE -> the dissolution exemption;
+#     absent from BOTH -> no crate to attribute to, which is the #4576
+#       UNATTRIBUTED SOURCE hard failure, never an exemption.
+NOW_REV="HEAD"
+[[ "$MODE" == "staged" ]] && NOW_REV=":index"
 
 # The TRANSITIONAL CHANGELOG.md branch applies only to branches cut before the
 # fragment mechanism existed. Probing for the assembler at the merge base is a
@@ -555,8 +601,8 @@ fi
 # directory, which is the unit changelog.d/ and `assemble-changelog.sh <crate-dir>`
 # are keyed to — a nested member such as crates/trusty-audit/ui/src-tauri owns no
 # changelog.d/ of its own, so its changes are recorded by the crate that ships it.
-# HEAD is tried first, then the merge base, so a path whose crate this PR DELETED
-# still attributes and reaches the #3732 dissolution exemption below.
+# $NOW_REV is tried first, then the merge base, so a path whose crate this PR
+# DELETED still attributes and reaches the #3732 dissolution exemption below.
 #
 # Neither uses command substitution: `path_exists_at_rev` hard-exits the gate on
 # a genuine git failure, and a `$(...)` would trap that exit in a subshell and
@@ -596,7 +642,7 @@ resolve_source_crate() {
     return
   fi
   SOURCE_CRATE=""
-  if nearest_manifest_dir HEAD "$dir" || nearest_manifest_dir "$MERGE_BASE" "$dir"; then
+  if nearest_manifest_dir "$NOW_REV" "$dir" || nearest_manifest_dir "$MERGE_BASE" "$dir"; then
     SOURCE_CRATE="${OWNER_DIR#crates/}"
     SOURCE_CRATE="${SOURCE_CRATE%%/*}"
   fi
@@ -784,7 +830,7 @@ while IFS= read -r path; do
       # put a fragment in, and the assembler cannot run for it. See the
       # "crate no longer EXISTS at HEAD" exemption above. A git FAILURE here is
       # not the exemption; path_exists_at_rev hard-fails on one (#4618).
-      if path_exists_at_rev HEAD "crates/${crate}/Cargo.toml"; then
+      if path_exists_at_rev "$NOW_REV" "crates/${crate}/Cargo.toml"; then
         needs="${needs}${crate}"$'\n'
       elif ! path_exists_at_rev "$MERGE_BASE" "crates/${crate}/Cargo.toml"; then
         # #4576: not a dissolution — the top-level crate directory holds no

@@ -69,8 +69,9 @@ least one staged or untracked path".
 
 Both are pre-flights, not the verdict. `--staged` reads the working tree for a
 crate's `CHANGELOG.md` and `changelog.d/`, so an unstaged edit still counts as
-evidence, and it compares against `HEAD`, so the crate-dissolution exemption is
-unreachable. Run the default gate after committing.
+evidence. Since #7435 it resolves the crate-dissolution exemption against the
+INDEX rather than `HEAD`, so a staged `git rm` of a whole crate is exempt in
+this mode too. Run the default gate after committing.
 
 ## Preview the Pending Set
 

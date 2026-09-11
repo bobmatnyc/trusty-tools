@@ -292,6 +292,43 @@ assert_gate default-mode-unlabelled 0 \
   'changelog-fragment gate: scanned [0-9]+ changed path\(s\)' \
   '\-\-staged'
 
+# 9. THE #7435 DEFECT. A staged `git rm` of the whole crate is the #3732
+#    dissolution exemption: there is no changelog.d/ left to write a fragment
+#    into. Pre-fix every "does this still exist" probe read HEAD, where the
+#    manifest is still present, so the exemption never fired and the gate
+#    demanded a fragment in a directory the change deletes. Committing the
+#    identical tree passed, which is the tell.
+reset_tree
+g rm -r -q crates/demo
+assert_gate staged-crate-deletion-exempt 0 \
+  'attributed 1 crate-source path\(s\)' \
+  'FAIL' \
+  --staged
+
+# 10. THE EXEMPTION DOES NOT WIDEN. Deleting source INSIDE a crate that still
+#     exists is an ordinary unrecorded source change. The manifest probe is the
+#     only thing separating the two, so reading it from the index must not turn
+#     a large deletion into a dissolution.
+reset_tree
+g rm -q crates/demo/src/lib.rs
+assert_gate staged-src-deletion-crate-survives-fails 1 \
+  'FAIL demo: crates/demo/src/\*\* changed with no changelog record' \
+  '' \
+  --staged
+
+# 11. The other direction of the same probe: a crate that exists ONLY as
+#     untracked files is present, not deleted. Pre-fix it resolved to no crate
+#     at either rev and failed as UNATTRIBUTED SOURCE; it owes a fragment like
+#     any other new source.
+reset_tree
+mkdir -p "$REPO/crates/fresh/src" "$REPO/crates/fresh/changelog.d"
+printf '[package]\nname = "fresh"\nversion = "0.1.0"\n' >"$REPO/crates/fresh/Cargo.toml"
+printf 'pub fn v() -> u32 { 1 }\n' >"$REPO/crates/fresh/src/lib.rs"
+assert_gate staged-untracked-crate-not-a-deletion 1 \
+  'FAIL fresh: crates/fresh/src/\*\* changed with no changelog record' \
+  'UNATTRIBUTED SOURCE' \
+  --staged
+
 # ===========================================================================
 # --file
 # ===========================================================================

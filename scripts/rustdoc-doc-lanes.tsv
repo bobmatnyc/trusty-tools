@@ -1,0 +1,100 @@
+# Feature lanes for the broken intra-doc link gate (scripts/check_rustdoc_links.sh,
+# issue #7466).
+#
+# WHY THIS FILE EXISTS. `cargo doc` resolves DEFAULT features only, so a module
+# behind a non-default feature is never documented and its links are never
+# checked. The gate reported `0 broken link(s)` across every crate while
+# `cargo doc -p trusty-mcp --features config` exited 101 on an ambiguous link
+# inside the default-off `config` feature. `#![deny(rustdoc::broken_intra_doc_links)]`
+# then turns a link this gate missed into a RELEASE-TIME failure at
+# preflight-publish.sh Gate 1 — trusty-mcp 0.1.1 burned a version number that way.
+#
+# `--all-features` is not available here: trusty-common's `embedder-*` ORT
+# variants are mutually exclusive at the `ort-sys` level. So the coverage is
+# DECLARED, one row at a time, and the gate refuses to run until every declared
+# feature of every documented crate appears below. Adding a feature to a crate
+# fails this gate (FEATURE-UNCOVERED) until it is placed — which is the point:
+# the alternative is a feature lane nobody notices is missing.
+#
+# ROW KINDS (tab-separated, first field is the kind):
+#
+#   LANE    <lane-id>  <crate>/<feature>[,<crate>/<feature>...]
+#       One extra `cargo doc --workspace` pass per lane id, with `--features`
+#       set to the union of every LANE row carrying that id. Rows merge, so a
+#       lane is written one crate per row. Every crate a lane names must come
+#       back FRESHLY documented in that lane's own stream or the gate fails
+#       (LANE-NOT-EXAMINED) — an unbuildable feature set is a failure, never a
+#       silent skip.
+#
+#   NO-CFG  <crate>    <feature>
+#       Exempt because the feature gates no `cfg` site anywhere in that crate's
+#       `src/**`, so enabling it documents no additional item. THE GATE VERIFIES
+#       THIS: if the feature ever gains a `feature = "<name>"` site in that
+#       crate's source, the row becomes invalid and the gate fails
+#       (NO-CFG-STALE). A rotted exemption cannot sit here unnoticed.
+#
+#   SKIP    <crate>    <feature>   <reason>
+#       Exempt because the feature cannot be BUILT on a stock runner. The reason
+#       is mandatory and is not machine-checkable, so each row is a real
+#       coverage hole that has to earn its place. "It is slow" is not a reason.
+#       Same bar as scripts/semver-checks-feature-exclusions.tsv, which carries
+#       the matching rows for the same features.
+#
+# The three Tauri GUI crates the gate excludes outright (trusty-mpm-gui,
+# trusty-code-gui, trusty-agents-ui) need no rows: they are never documented.
+#
+# Regenerate the inventory this file must cover:
+#   cargo metadata --no-deps --format-version 1
+#
+# ---------------------------------------------------------------------------
+# LANE `features` — every feature-gated module in the workspace, in one pass.
+#
+# One lane, not one per crate: cargo unifies features across the workspace, so
+# enabling trusty-common's set re-documents nearly every member anyway and a
+# second pass would pay that cost again for no additional coverage. candle and
+# bundled-ort coexist (only load-dynamic and cuda conflict with bundled-ort at
+# the ort-sys level), so the single lane carries both backends.
+# ---------------------------------------------------------------------------
+LANE	features	tga/bedrock
+LANE	features	trusty-analyze/http-server,trusty-analyze/ner,trusty-analyze/review
+LANE	features	trusty-common/axum-server,trusty-common/bedrock,trusty-common/bedrock-client,trusty-common/blocking-http,trusty-common/bm25,trusty-common/bug-capture,trusty-common/catchup
+LANE	features	trusty-common/cli-help,trusty-common/codex-config,trusty-common/config-cli,trusty-common/console-metrics,trusty-common/crate-config,trusty-common/credentials,trusty-common/daemon-token
+LANE	features	trusty-common/docgen,trusty-common/embedder,trusty-common/embedder-candle,trusty-common/embedder-client,trusty-common/embedder-test-support,trusty-common/gh-cli,trusty-common/host-metrics
+LANE	features	trusty-common/inference-client,trusty-common/intent-source,trusty-common/keyring-store,trusty-common/log-drain,trusty-common/machine-tier,trusty-common/memory-core,trusty-common/memory-rpc
+LANE	features	trusty-common/migrations,trusty-common/monitor-tui,trusty-common/palace-resolve,trusty-common/redb-open,trusty-common/rpc,trusty-common/search-index,trusty-common/session-naming
+LANE	features	trusty-common/sld,trusty-common/stdio-mcp-client,trusty-common/symgraph,trusty-common/symgraph-parser,trusty-common/symgraph-server,trusty-common/tickets,trusty-common/uds
+LANE	features	trusty-common/uds-supervisor,trusty-common/update-check,trusty-common/webhook-hmac,trusty-common/webhook-relay
+LANE	features	trusty-embedderd/bundled-ort,trusty-embedderd/daemon
+LANE	features	trusty-mcp/config,trusty-mcp/daemon-bridge-json-rpc
+LANE	features	trusty-memory/daemon
+LANE	features	trusty-mpm/bedrock,trusty-mpm/daemon,trusty-mpm/manager-memory,trusty-mpm/mcp,trusty-mpm/slack,trusty-mpm/sm-memory,trusty-mpm/swagger-ui,trusty-mpm/telegram,trusty-mpm/tui
+LANE	features	trusty-review/http-server,trusty-review/mcp,trusty-review/report
+LANE	features	trusty-search/candle,trusty-search/clustering,trusty-search/ner,trusty-search/test-support
+#
+# ---------------------------------------------------------------------------
+# NO-CFG — gates no `cfg` site in the crate's own src/**, verified per run.
+#
+# A feature that only turns on ANOTHER feature needs no lane of its own: the
+# feature it enables is itself a declared feature and carries its own row, so
+# the coverage check reaches it either way.
+# ---------------------------------------------------------------------------
+NO-CFG	trusty-audit-ui	custom-protocol
+NO-CFG	trusty-common	embedder-bundled-ort
+NO-CFG	trusty-common	embedder-coreml
+NO-CFG	trusty-common	embedder-load-dynamic
+NO-CFG	trusty-common	unconditional-only
+NO-CFG	trusty-embedderd	coreml
+NO-CFG	trusty-embedderd	cuda
+NO-CFG	trusty-embedderd	http-server
+NO-CFG	trusty-embedderd	load-dynamic
+NO-CFG	trusty-mpm	cli
+NO-CFG	trusty-mpm	gui
+NO-CFG	trusty-search	bundled-ort
+NO-CFG	trusty-search	coreml
+NO-CFG	trusty-search	cuda
+NO-CFG	trusty-search	load-dynamic
+#
+# ---------------------------------------------------------------------------
+# SKIP — cannot be built on a stock runner. Reason mandatory.
+# ---------------------------------------------------------------------------
+SKIP	trusty-common	embedder-cuda	cudarc/candle-kernels build.rs panics with "`nvcc --version` failed" without the CUDA toolkit, which no CI runner here has; also mutually exclusive with embedder-bundled-ort, which the `features` lane carries. Matching row in scripts/semver-checks-feature-exclusions.tsv.

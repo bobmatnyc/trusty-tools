@@ -1,0 +1,14 @@
+{
+  "packages": [
+    {
+      "name": "demo",
+      "manifest_path": "scripts/test-data/rustdoc-links/demo/Cargo.toml",
+      "features": {
+        "default": [],
+        "config": [],
+        "nogate": [],
+        "heavy": []
+      }
+    }
+  ]
+}

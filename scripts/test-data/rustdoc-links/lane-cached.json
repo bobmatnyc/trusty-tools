@@ -1,0 +1,2 @@
+{"reason":"compiler-artifact","fresh":true,"target":{"name":"demo","kind":["lib"],"src_path":"crates/demo/src/lib.rs"},"filenames":["target/doc/demo/index.html"]}
+{"reason":"build-finished","success":true}
