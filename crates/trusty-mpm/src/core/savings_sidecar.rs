@@ -373,7 +373,7 @@ fn compiled_prompts_in(project_dir: &Path) -> Vec<PathBuf> {
             Some((modified, path))
         })
         .collect();
-    found.sort_by(|left, right| right.0.cmp(&left.0));
+    found.sort_by_key(|left| std::cmp::Reverse(left.0));
     found.into_iter().map(|(_, path)| path).collect()
 }
 
