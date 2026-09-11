@@ -183,6 +183,11 @@ pub(crate) fn run(
     deadline: Option<Instant>,
     project: Option<&str>,
     group_by: GroupBy,
+    // #7357: adopted anchors reach projects the repos-root walk cannot. They
+    // are INJECTED, never resolved here — resolving them internally makes this
+    // function's unit tests read the operator's real adoption store and walk
+    // whatever real worktrees it names. `&[]` is the pre-#7357 behaviour.
+    adopted: &[PathBuf],
 ) -> DiskSurvey {
     // #6929: nothing is STARTED once the budget is spent, and whatever is
     // started gets only the time actually left — no probe and no walk may
@@ -216,7 +221,7 @@ pub(crate) fn run(
         answer
     };
 
-    for scanned in scan_registered_worktrees(repos_root) {
+    for scanned in scan_registered_worktrees(repos_root, adopted) {
         if !selected(&scanned, repos_root, project) {
             continue;
         }

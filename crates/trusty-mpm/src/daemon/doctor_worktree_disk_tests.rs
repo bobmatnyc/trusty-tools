@@ -343,6 +343,7 @@ async fn a_dead_sessions_org_level_claim_no_longer_hides_orphaned_disk() {
         Some(&fx.repos_root),
         &mgr.workspace_claims(None).await,
         |_: &Path| merged_index("session/doctor-7259", 7259),
+        &[],
     )
     .await;
 
@@ -382,6 +383,7 @@ async fn an_unobservable_tmux_still_hides_the_same_worktree() {
         Some(&fx.repos_root),
         &mgr.workspace_claims(None).await,
         |_: &Path| merged_index("session/doctor-7259-failclosed", 7259),
+        &[],
     )
     .await;
 

@@ -507,6 +507,9 @@ fn survey_fixture_grouped(
         dirt: &inspect_dirt,
         measure: &measure,
     };
+    // #7357: no adopted anchors — the fixture's repos-root walk is the whole
+    // surface under test, and injecting `&[]` is what keeps this test off the
+    // operator's real adoption store.
     run(
         &fx.repos_root,
         &keep_list,
@@ -514,6 +517,7 @@ fn survey_fixture_grouped(
         deadline,
         None,
         group_by,
+        &[],
     )
 }
 
@@ -775,6 +779,7 @@ fn a_deadline_that_crosses_mid_inspection_yields_a_not_inspected_row() {
         Some(deadline),
         None,
         GroupBy::None,
+        &[],
     );
 
     assert_eq!(
@@ -846,6 +851,7 @@ fn the_survey_hands_each_measurement_only_the_time_left() {
         Some(deadline),
         None,
         GroupBy::None,
+        &[],
     );
     let budgets = seen.borrow().clone();
     assert!(
@@ -872,6 +878,7 @@ fn the_survey_hands_each_measurement_only_the_time_left() {
         None,
         None,
         GroupBy::None,
+        &[],
     );
     let unbounded = seen.borrow().clone();
     assert!(!unbounded.is_empty());
@@ -962,6 +969,7 @@ fn an_unreadable_keep_list_is_reported_and_keeps_every_row() {
         None,
         None,
         GroupBy::None,
+        &[],
     );
 
     assert_eq!(survey.root.counts.stale, 0, "{:#?}", survey.root);
@@ -1014,6 +1022,7 @@ fn a_project_filter_selects_only_that_project() {
         None,
         Some("someone-else/repo"),
         GroupBy::None,
+        &[],
     );
     assert!(miss.root.projects.is_empty(), "{:#?}", miss.root.projects);
 
@@ -1024,6 +1033,7 @@ fn a_project_filter_selects_only_that_project() {
         None,
         Some("owner/repo"),
         GroupBy::None,
+        &[],
     );
     assert_eq!(hit.root.projects.len(), 1, "{:#?}", hit.root.projects);
 }
@@ -1093,6 +1103,7 @@ fn a_budgeted_survey_answers_within_its_budget() {
         Some(started + BUDGET),
         None,
         GroupBy::None,
+        &[],
     );
     let elapsed = started.elapsed();
     assert!(
@@ -1149,6 +1160,7 @@ fn the_survey_hands_each_pull_request_lookup_only_the_time_left() {
         Some(Instant::now() + window),
         None,
         GroupBy::None,
+        &[],
     );
     let budgets = seen.borrow().clone();
     assert!(!budgets.is_empty(), "every worktree is looked up");
@@ -1169,6 +1181,7 @@ fn the_survey_hands_each_pull_request_lookup_only_the_time_left() {
         None,
         None,
         GroupBy::None,
+        &[],
     );
     assert!(
         seen.borrow().iter().all(Option::is_none),
@@ -1213,6 +1226,7 @@ fn a_survey_reports_whether_its_deadline_truncated_the_pass() {
         None,
         None,
         GroupBy::None,
+        &[],
     );
     assert!(
         !whole.partial,
@@ -1230,6 +1244,7 @@ fn a_survey_reports_whether_its_deadline_truncated_the_pass() {
         Some(spent),
         None,
         GroupBy::None,
+        &[],
     );
     assert!(truncated.partial, "{:#?}", truncated.root.counts);
     assert_eq!(

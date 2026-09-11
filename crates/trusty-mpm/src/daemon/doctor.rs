@@ -627,7 +627,10 @@ pub async fn run_doctor_for_manager(
     let active = mgr.workspace_claims(None).await;
     // #5947: the orphan count comes from the reconciled inventory — the same
     // classification `prune-worktrees` and `reconcile-worktrees` share.
-    let worktree_counts = gather_worktree_counts(mgr, &repos_root).await;
+    // #7357: the entry point resolves the adopted anchors; every scan beneath
+    // it takes them as a parameter.
+    let worktree_counts =
+        gather_worktree_counts(mgr, &repos_root, &crate::project::default_adopted_anchors()).await;
     run_doctor_with_claims(project_dir, Some(&repos_root), &active, worktree_counts).await
 }
 

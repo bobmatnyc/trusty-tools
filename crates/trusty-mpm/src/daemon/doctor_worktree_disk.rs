@@ -228,7 +228,17 @@ pub(super) async fn check_worktree_disk(
     repos_root: Option<&Path>,
     active: &LiveClaims,
 ) -> DoctorCheck {
-    check_worktree_disk_with_index(repos_root, active, PrIndex::from_gh).await
+    // #7357: doctor runs with no `DaemonState`, so this is one of the few
+    // places that resolves the anchors from the ambient framework root. It is
+    // an ENTRY POINT — the seam below takes them as a parameter so its own
+    // tests never read the operator's real adoption store.
+    check_worktree_disk_with_index(
+        repos_root,
+        active,
+        PrIndex::from_gh,
+        &crate::project::default_adopted_anchors(),
+    )
+    .await
 }
 
 /// [`check_worktree_disk`] against an injectable pull-request index (#7259).
@@ -250,6 +260,8 @@ async fn check_worktree_disk_with_index<F>(
     repos_root: Option<&Path>,
     active: &LiveClaims,
     index_for: F,
+    // #7357: injected, like `index_for` and for the same reason.
+    adopted: &[std::path::PathBuf],
 ) -> DoctorCheck
 where
     F: Fn(&Path) -> PrIndex + Send + 'static,
@@ -278,6 +290,7 @@ where
     // claim whose session the tmux probe found gone arrives already marked
     // `SessionGone`, and gate 2 discards it instead of obeying a tombstone.
     let active = active.clone();
+    let adopted = adopted.to_vec();
     // #2919: the deadline is passed INTO the blocking task, not wrapped around
     // it. `tokio::time::timeout` cannot cancel `spawn_blocking`, so an outer
     // timeout returns a verdict on schedule while the walk keeps running — and
@@ -317,6 +330,7 @@ where
                 budget,
                 false,
                 &keep_list,
+                &adopted,
             )
         }),
     )

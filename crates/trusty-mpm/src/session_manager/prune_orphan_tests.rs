@@ -28,7 +28,7 @@ fn prune_orphaned_worktrees_spares_active() {
     let fx = GitWorktreeFixture::new();
     let wt = fx.add_worktree("live-session");
     let active: std::collections::HashSet<_> = [wt.clone()].into_iter().collect();
-    let orphans = find_orphaned_worktrees(&fx.repos_root, &active);
+    let orphans = find_orphaned_worktrees(&fx.repos_root, &active, &[]);
     assert!(
         orphans.is_empty(),
         "live session must not be listed as orphan; got {orphans:?}"
@@ -45,7 +45,7 @@ fn prune_orphaned_worktrees_fresh_active_set_blocks_deletion() {
     // Empty initial snapshot → the worktree looks like an orphan candidate.
     let empty_initial: std::collections::HashSet<std::path::PathBuf> =
         std::collections::HashSet::new();
-    let candidates = find_orphaned_worktrees(&fx.repos_root, &empty_initial);
+    let candidates = find_orphaned_worktrees(&fx.repos_root, &empty_initial, &[]);
     assert!(
         candidates.contains(&wt),
         "empty initial set must find the worktree as a candidate; got {candidates:?}"
@@ -54,7 +54,7 @@ fn prune_orphaned_worktrees_fresh_active_set_blocks_deletion() {
     // A fresh active set containing it blocks the deletion (Phase 2, #1840).
     let fresh: std::collections::HashSet<std::path::PathBuf> = [wt.clone()].into_iter().collect();
     assert!(
-        find_orphaned_worktrees(&fx.repos_root, &fresh).is_empty(),
+        find_orphaned_worktrees(&fx.repos_root, &fresh, &[]).is_empty(),
         "a candidate in the fresh active set must not be proposed for deletion"
     );
     assert!(wt.exists(), "worktree must survive the TOCTOU check");
@@ -67,7 +67,7 @@ fn prune_orphaned_worktrees_collects_orphan() {
     let live = fx.add_worktree("live");
     let dead = fx.add_worktree("dead");
     let active: std::collections::HashSet<_> = [live.clone()].into_iter().collect();
-    let orphans = find_orphaned_worktrees(&fx.repos_root, &active);
+    let orphans = find_orphaned_worktrees(&fx.repos_root, &active, &[]);
     assert_eq!(
         orphans,
         vec![dead],
@@ -172,7 +172,7 @@ async fn prune_orphaned_worktrees_store_snapshot_blocks_deletion() {
     // runs — still never removed, now for the #3649 safe-default reason
     // rather than (only) the #1845 TOCTOU fresh-snapshot reason.
     let outcome = mgr
-        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip)
+        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip, &[])
         .await
         .expect("prune must not error");
 
@@ -205,7 +205,7 @@ fn find_orphaned_worktrees_discovers_worktree_at_unwalked_location() {
     let fx = GitWorktreeFixture::new();
     let parked = fx.add_worktree_at(&fx.repo.join("agents").join("scratch"), "wt-1");
     let empty: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
-    let orphans = find_orphaned_worktrees(&fx.repos_root, &empty);
+    let orphans = find_orphaned_worktrees(&fx.repos_root, &empty, &[]);
     assert!(
         orphans.contains(&parked),
         "a registered worktree must be found wherever it lives; got {orphans:?}"
@@ -225,7 +225,7 @@ fn find_orphaned_worktrees_ignores_plain_directory() {
     let fake = fx.repo.join(".worktrees").join("just-a-mkdir");
     std::fs::create_dir_all(&fake).expect("mkdir");
     let empty: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
-    let orphans = find_orphaned_worktrees(&fx.repos_root, &empty);
+    let orphans = find_orphaned_worktrees(&fx.repos_root, &empty, &[]);
     assert!(
         !orphans.contains(&fake),
         "a plain directory is not a registered worktree; got {orphans:?}"
@@ -254,7 +254,7 @@ async fn prune_orphaned_worktrees_never_deletes_claude_native_worktree() {
     );
 
     let outcome = mgr
-        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip)
+        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip, &[])
         .await
         .expect("prune must not error");
 
@@ -289,7 +289,7 @@ async fn prune_orphaned_worktrees_skips_owner_unknown() {
     let wt = fx.add_worktree("legacy-no-sentinel");
 
     let outcome = mgr
-        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip)
+        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip, &[])
         .await
         .expect("prune must not error");
 
@@ -345,7 +345,7 @@ async fn prune_orphaned_worktrees_skips_an_agent_owned_worktree() {
     .expect("write agent sentinel");
 
     let outcome = mgr
-        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip)
+        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip, &[])
         .await
         .expect("prune must not error");
 
@@ -419,7 +419,7 @@ async fn prune_orphaned_worktrees_reclaims_terminal_owner() {
     .expect("write sentinel");
 
     let outcome = mgr
-        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip)
+        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip, &[])
         .await
         .expect("prune must not error");
 
@@ -477,7 +477,7 @@ async fn prune_orphaned_worktrees_reclaims_owned_husk_at_an_unwalked_location() 
     GitWorktreeFixture::stamp_reclaimable_sentinel(&husk);
 
     let outcome = mgr
-        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip)
+        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip, &[])
         .await
         .expect("prune must not error");
 
@@ -522,12 +522,12 @@ async fn prune_orphaned_worktrees_spares_recent_unregistered_owner() {
     // The candidate IS discovered — otherwise this test would pass vacuously.
     let empty: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
     assert!(
-        find_orphaned_worktrees(&fx.repos_root, &empty).contains(&wt),
+        find_orphaned_worktrees(&fx.repos_root, &empty, &[]).contains(&wt),
         "test invariant: the worktree must reach the ownership gate"
     );
 
     let outcome = mgr
-        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip)
+        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip, &[])
         .await
         .expect("prune must not error");
 
@@ -591,12 +591,12 @@ async fn prune_orphaned_worktrees_spares_live_owner() {
     // The candidate IS discovered — otherwise this test would pass vacuously.
     let empty: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
     assert!(
-        find_orphaned_worktrees(&fx.repos_root, &empty).contains(&wt),
+        find_orphaned_worktrees(&fx.repos_root, &empty, &[]).contains(&wt),
         "test invariant: the worktree must reach the ownership gate"
     );
 
     let outcome = mgr
-        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip)
+        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip, &[])
         .await
         .expect("prune must not error");
 
@@ -894,7 +894,7 @@ async fn prune_orphaned_worktrees_reclaims_clean_pushed_worktree() {
     let (mgr, _store, fx, wt) = reclaimable_fixture("clean-pushed").await;
 
     let outcome = mgr
-        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip)
+        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip, &[])
         .await
         .expect("prune must not error");
 
@@ -948,7 +948,7 @@ async fn prune_orphaned_worktrees_rechecks_dirt_immediately_before_removal() {
     // Both are clean and reclaimable RIGHT NOW — assert it, so the test cannot
     // pass because the victim was dirty from the start.
     let preview = mgr
-        .prune_orphaned_worktrees(&fx.repos_root, &[], true, DirtyWorktreePolicy::Skip)
+        .prune_orphaned_worktrees(&fx.repos_root, &[], true, DirtyWorktreePolicy::Skip, &[])
         .await
         .expect("dry run must not error");
     assert!(
@@ -975,7 +975,7 @@ async fn prune_orphaned_worktrees_rechecks_dirt_immediately_before_removal() {
     };
 
     let outcome = mgr
-        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip)
+        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip, &[])
         .await
         .expect("prune must not error");
     watcher.join().expect("watcher thread");
@@ -1084,7 +1084,7 @@ async fn prune_orphaned_worktrees_skips_modified_tracked_file() {
     std::fs::write(wt.join("README.md"), "uncommitted edit\n").unwrap();
 
     let outcome = mgr
-        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip)
+        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip, &[])
         .await
         .expect("prune must not error");
 
@@ -1110,7 +1110,7 @@ async fn prune_orphaned_worktrees_skips_untracked_file() {
     std::fs::write(wt.join("scratch-notes.md"), "never added to git\n").unwrap();
 
     let outcome = mgr
-        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip)
+        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip, &[])
         .await
         .expect("prune must not error");
 
@@ -1137,7 +1137,7 @@ async fn prune_orphaned_worktrees_skips_unpushed_commit() {
     GitWorktreeFixture::commit_unpushed(&wt);
 
     let outcome = mgr
-        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip)
+        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip, &[])
         .await
         .expect("prune must not error");
 
@@ -1176,7 +1176,7 @@ async fn prune_orphaned_worktrees_skips_when_dirty_check_errors() {
     std::fs::create_dir(&index).expect("replace index with a directory");
 
     let outcome = mgr
-        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip)
+        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip, &[])
         .await
         .expect("prune must not error");
 
@@ -1215,6 +1215,7 @@ async fn prune_orphaned_worktrees_force_discards_dirty() {
             &[],
             false,
             DirtyWorktreePolicy::ForceDiscard,
+            &[],
         )
         .await
         .expect("prune must not error");
@@ -1245,7 +1246,13 @@ async fn prune_orphaned_worktrees_default_policy_cannot_delete_dirty_work() {
     std::fs::write(wt.join("precious.txt"), "hours of work\n").unwrap();
 
     let outcome = mgr
-        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::default())
+        .prune_orphaned_worktrees(
+            &fx.repos_root,
+            &[],
+            false,
+            DirtyWorktreePolicy::default(),
+            &[],
+        )
         .await
         .expect("prune must not error");
 
@@ -1273,7 +1280,7 @@ async fn prune_orphaned_worktrees_dry_run_reports_dirty_skip() {
     std::fs::write(wt.join("README.md"), "uncommitted edit\n").unwrap();
 
     let outcome = mgr
-        .prune_orphaned_worktrees(&fx.repos_root, &[], true, DirtyWorktreePolicy::Skip)
+        .prune_orphaned_worktrees(&fx.repos_root, &[], true, DirtyWorktreePolicy::Skip, &[])
         .await
         .expect("prune must not error");
 
@@ -1355,7 +1362,7 @@ async fn phase2_fresh_snapshot_spares_a_record_the_caller_set_missed() {
     // reclaimable candidate even with the record in the store. This proves
     // every earlier gate votes "reclaim" and that only Phase 2 can save it.
     let control = mgr
-        .prune_orphaned_worktrees(&fx.repos_root, &[], true, DirtyWorktreePolicy::Skip)
+        .prune_orphaned_worktrees(&fx.repos_root, &[], true, DirtyWorktreePolicy::Skip, &[])
         .await
         .expect("control sweep must not error");
     assert!(
@@ -1371,7 +1378,7 @@ async fn phase2_fresh_snapshot_spares_a_record_the_caller_set_missed() {
     // THE PIN: the real (deleting) sweep, caller set still empty. Only the
     // Phase 2 re-read of the store stands between this worktree and deletion.
     let outcome = mgr
-        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip)
+        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip, &[])
         .await
         .expect("prune must not error");
 

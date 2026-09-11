@@ -38,6 +38,7 @@ use tracing::warn;
 use crate::core::gh_account::{GH_DOCTOR_TIMEOUT, GhAuthProbe, probe_gh_auth};
 use crate::core::trusty_tools_config::GithubConfig;
 use crate::daemon::error::DaemonError;
+use crate::daemon::project_adoption::{RegisterProjectResponse, adopt_pre_existing_worktrees};
 use crate::daemon::state::DaemonState;
 use crate::project::{Project, ProjectStoreError};
 
@@ -188,7 +189,9 @@ pub async fn list_projects_registry_op(
 /// `stack_hint`/`tags`/`description`/`gh_user`/`gh_account`/`github`/
 /// `commit_name`/`commit_email` for every field the body omits, persists via
 /// [`ProjectRegistry::register`](crate::project::ProjectRegistry::register),
-/// and returns 201 with the stored record.
+/// runs the SHARED worktree backfill
+/// ([`crate::daemon::project_adoption::adopt_pre_existing_worktrees`], #7357),
+/// and returns 201 with the stored record plus that adoption report.
 /// Test: `tests/project_registry_routes.rs::register_get_list_status_round_trip`,
 /// `register_is_idempotent_upsert`, `register_preserves_identity_binding_not_expressible_in_body`,
 /// `register_preserves_unspecified_optional_fields_on_existing_project`,
@@ -199,7 +202,7 @@ pub async fn register_project_registry_route(
 ) -> impl IntoResponse {
     // #6288: the body is shared with `mpm.projects.registry.register`.
     match register_project_registry_op(&state, body).await {
-        Ok(project) => (StatusCode::CREATED, Json(project)).into_response(),
+        Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
         Err(e) => plain(e),
     }
 }
@@ -212,11 +215,13 @@ pub async fn register_project_registry_route(
 /// [`DaemonError::Internal`] when the registry write fails.
 ///
 /// Test: `parity_projects_registry_register_agrees_across_transports`,
-/// `rpc_projects_registry_register_rejects_a_blank_name`.
+/// `rpc_projects_registry_register_rejects_a_blank_name`,
+/// `parity_register_adopts_the_same_worktrees_across_transports`,
+/// `register_response_names_a_skipped_worktree`.
 pub async fn register_project_registry_op(
     state: &Arc<DaemonState>,
     body: RegisterProjectBody,
-) -> Result<Project, DaemonError> {
+) -> Result<RegisterProjectResponse, DaemonError> {
     if body.name.trim().is_empty() {
         return Err(DaemonError::InvalidRequest(
             "project name must not be empty".to_string(),
@@ -275,7 +280,11 @@ pub async fn register_project_registry_op(
             "project registry write failed".to_string(),
         ));
     }
-    Ok(project)
+    // #7357: the CLI transport (`tm projects register` → this body) used to
+    // persist the record and adopt nothing, so the fix reached only the MCP
+    // tool. Both now call the one shared function.
+    let adoption = adopt_pre_existing_worktrees(state, &project);
+    Ok(RegisterProjectResponse { project, adoption })
 }
 
 /// Fold a register-time `--gh-config-dir` into a project's `github` binding

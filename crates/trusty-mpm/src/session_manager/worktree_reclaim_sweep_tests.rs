@@ -280,6 +280,7 @@ fn reclaim_remove_mode_spares_a_live_agents_merged_worktree() {
             index_for: &|_: &Path| merged_index("wt/live-agent-sweep-5661", 5661),
         },
         ReclaimMode::Remove,
+        &[],
     );
     assert_eq!(
         out.survey.reclaimable, 0,
@@ -318,6 +319,7 @@ fn survey_discloses_a_live_agents_spared_worktree() {
             index_for: &|_: &Path| merged_index("wt/spared-agent-5829", 5829),
         },
         ReclaimMode::Remove,
+        &[],
     );
     assert!(
         out.removed.is_empty(),
@@ -360,6 +362,7 @@ fn survey_discloses_nothing_when_no_agent_was_spared() {
             index_for: &|_: &Path| merged_index("session/no-agent-5829", 5830),
         },
         ReclaimMode::Remove,
+        &[],
     );
     assert!(
         out.survey.agent_owned.is_empty(),
@@ -403,6 +406,7 @@ fn survey_reports_a_merged_worktree_as_reclaimable() {
         SurveyBudget::default(),
         false,
         &KeepList::default(),
+        &[],
     );
     let found = s
         .candidates
@@ -435,6 +439,7 @@ fn survey_reclaims_a_round_sibling_of_a_merged_pr() {
         SurveyBudget::default(),
         false,
         &KeepList::default(),
+        &[],
     );
     let found = s
         .candidates
@@ -459,6 +464,7 @@ fn survey_still_blocks_a_branch_no_merged_pr_relates_to() {
         SurveyBudget::default(),
         false,
         &KeepList::default(),
+        &[],
     );
     let found = s
         .candidates
@@ -492,6 +498,7 @@ fn survey_reclaims_a_worktree_claimed_only_by_the_calling_session() {
         SurveyBudget::default(),
         false,
         &KeepList::default(),
+        &[],
     );
     let found = s
         .candidates
@@ -521,6 +528,7 @@ fn survey_still_blocks_a_worktree_a_foreign_session_claims() {
         SurveyBudget::default(),
         false,
         &KeepList::default(),
+        &[],
     );
     let found = s
         .candidates
@@ -572,6 +580,7 @@ fn survey_reclaims_a_worktree_whose_two_commits_squash_merged_as_one() {
         SurveyBudget::default(),
         false,
         &KeepList::default(),
+        &[],
     );
     let found = s
         .candidates
@@ -606,6 +615,7 @@ fn survey_names_the_gate_that_blocked_each_candidate() {
         SurveyBudget::default(),
         false,
         &KeepList::default(),
+        &[],
     );
     let line = s
         .blocked_reasons
@@ -657,6 +667,7 @@ fn survey_excludes_a_worktree_trusty_mpm_cannot_remove() {
         SurveyBudget::default(),
         false,
         &KeepList::default(),
+        &[],
     );
     let found = s
         .candidates
@@ -696,6 +707,7 @@ fn survey_refuses_an_unattributed_agent_store_worktree() {
         SurveyBudget::default(),
         false,
         &KeepList::default(),
+        &[],
     );
     let found = s
         .candidates
@@ -729,6 +741,7 @@ fn survey_past_its_classify_deadline_reclaims_nothing() {
         },
         false,
         &KeepList::default(),
+        &[],
     );
     assert!(!s.candidates.is_empty(), "candidates must still be listed");
     assert_eq!(s.reclaimable, 0, "an out-of-time survey approves nothing");
@@ -754,6 +767,7 @@ fn survey_past_its_measure_deadline_still_classifies() {
         },
         false,
         &KeepList::default(),
+        &[],
     );
     let found = s
         .candidates
@@ -783,6 +797,7 @@ fn reclaim_report_mode_removes_nothing() {
             index_for: &|_: &Path| merged_index("session/report-2919", 30),
         },
         ReclaimMode::Report,
+        &[],
     );
     assert_eq!(out.survey.reclaimable, 1, "it IS reclaimable…");
     assert!(out.removed.is_empty(), "…but Report mode removed it");
@@ -819,6 +834,7 @@ fn a_dead_sessions_claim_does_not_block_the_dry_run() {
             index_for: &|_: &Path| merged_index("session/dead-claim-7232", 32),
         },
         ReclaimMode::Report,
+        &[],
     );
     assert_eq!(
         out.survey.reclaimable, 1,
@@ -850,6 +866,7 @@ fn a_live_sessions_claim_still_blocks_the_dry_run() {
             index_for: &|_: &Path| merged_index("session/live-claim-7232", 33),
         },
         ReclaimMode::Report,
+        &[],
     );
     assert_eq!(out.survey.reclaimable, 0);
     assert!(
@@ -898,6 +915,7 @@ fn reclaim_remove_mode_refuses_a_worktree_claimed_after_the_survey() {
             index_for: &|_: &Path| merged_index("session/claim-race-2919", 31),
         },
         ReclaimMode::Remove,
+        &[],
     );
     assert_eq!(out.survey.reclaimable, 1, "must reach the delete loop");
     assert!(
@@ -934,6 +952,7 @@ fn reclaim_remove_mode_refuses_a_worktree_dirtied_after_the_survey() {
             index_for: &|_: &Path| merged_index("session/dirt-race-2919", 32),
         },
         ReclaimMode::Remove,
+        &[],
     );
     assert_eq!(out.survey.reclaimable, 1, "must reach the delete loop");
     assert!(out.removed.is_empty(), "destroyed new work: {out:?}");
@@ -974,6 +993,7 @@ fn reclaim_remove_mode_refuses_a_worktree_locked_after_the_survey() {
             index_for: &|_: &Path| merged_index("session/lock-race-2919", 33),
         },
         ReclaimMode::Remove,
+        &[],
     );
     assert_eq!(out.survey.reclaimable, 1, "must reach the delete loop");
     assert!(out.removed.is_empty(), "deleted a locked worktree: {out:?}");
@@ -1007,6 +1027,7 @@ fn reclaim_remove_mode_refuses_when_the_pr_reopens_after_the_survey() {
             index_for: &index,
         },
         ReclaimMode::Remove,
+        &[],
     );
     assert_eq!(out.survey.reclaimable, 1, "must reach the delete loop");
     assert!(out.removed.is_empty(), "deleted a reopened branch: {out:?}");
@@ -1033,6 +1054,7 @@ fn reclaim_remove_mode_refuses_when_the_live_set_cannot_be_read() {
             index_for: &|_: &Path| merged_index("session/unreadable-race-2919", 36),
         },
         ReclaimMode::Remove,
+        &[],
     );
     assert_eq!(out.survey.reclaimable, 1, "must reach the delete loop");
     assert!(out.removed.is_empty(), "deleted on an unknown live set");
@@ -1113,6 +1135,7 @@ fn reclaim_remove_mode_refuses_a_worktree_keep_listed_after_the_survey() {
             index_for: &|_: &Path| merged_index("session/reclaim-keep-6927", 41),
         },
         ReclaimMode::Remove,
+        &[],
     );
     assert_eq!(
         out.survey.reclaimable, 1,
@@ -1181,6 +1204,7 @@ fn a_malformed_config_refuses_to_reclaim_a_merged_clean_worktree() {
             index_for: &|_: &Path| merged_index("session/keep-config-6927", 43),
         },
         ReclaimMode::Remove,
+        &[],
     );
 
     assert!(
@@ -1215,6 +1239,7 @@ fn reclaim_remove_mode_reclaims_a_clean_merged_worktree() {
             index_for: &|_: &Path| merged_index("session/reclaim-2919", 37),
         },
         ReclaimMode::Remove,
+        &[],
     );
     assert_eq!(out.removed, vec![path.clone()], "outcome: {out:?}");
     assert!(!path.exists(), "the directory must be gone");
@@ -1278,6 +1303,7 @@ fn e2e_survey_against_a_real_store() {
         budget,
         true,
         &KeepList::default(),
+        &[],
     );
     println!("--- #2919 e2e survey of {} ---", root.display());
     println!("elapsed           = {:?}", started.elapsed());
@@ -1339,6 +1365,7 @@ fn survey_measures_reclaimable_worktrees_before_blocked_ones() {
         SurveyBudget::default(),
         false,
         &KeepList::default(),
+        &[],
     );
     let r = s
         .candidates
@@ -1366,6 +1393,7 @@ fn survey_measures_reclaimable_worktrees_before_blocked_ones() {
         },
         false,
         &KeepList::default(),
+        &[],
     );
     assert_eq!(starved.reclaimable_bytes, 0);
     assert!(starved.unmeasured > 0, "and it is disclosed as unmeasured");
@@ -1397,6 +1425,7 @@ fn survey_discloses_a_partially_measured_reclaimable_set() {
         SurveyBudget::default(),
         false,
         &KeepList::default(),
+        &[],
     );
     assert_eq!(full.reclaimable, 2);
     assert_eq!(
@@ -1417,6 +1446,7 @@ fn survey_discloses_a_partially_measured_reclaimable_set() {
         },
         false,
         &KeepList::default(),
+        &[],
     );
     assert_eq!(starved.reclaimable, 2, "classification is unaffected");
     assert!(
@@ -1486,6 +1516,7 @@ fn survey_separates_deadline_skips_from_lookup_failures() {
         },
         false,
         &KeepList::default(),
+        &[],
     );
     assert!(
         skipped.not_inspected > 0,
@@ -1506,6 +1537,7 @@ fn survey_separates_deadline_skips_from_lookup_failures() {
         SurveyBudget::default(),
         false,
         &KeepList::default(),
+        &[],
     );
     assert_eq!(
         unresolved.not_inspected, 0,
@@ -1548,6 +1580,7 @@ fn survey_counts_a_failed_lookup_apart_from_an_unknown_state() {
         SurveyBudget::default(),
         false,
         &KeepList::default(),
+        &[],
     );
     assert!(out.lookup_failed > 0, "the failure must be counted");
     assert_eq!(
@@ -1610,6 +1643,7 @@ fn survey_offers_a_merged_agent_worktree_the_harness_released() {
             index_for: &|_: &Path| merged_index("wt/agent-6561e2e", 6561),
         },
         ReclaimMode::Report,
+        &[],
     );
     let found = out
         .survey
@@ -1642,6 +1676,7 @@ fn reclaim_reclaims_a_merged_agent_worktree_the_harness_released() {
             index_for: &|_: &Path| merged_index("wt/agent-6561reclaim", 6562),
         },
         ReclaimMode::Remove,
+        &[],
     );
     assert_eq!(out.removed, vec![path.clone()], "outcome: {out:?}");
     assert!(!path.exists(), "the directory must be gone");
@@ -1666,6 +1701,7 @@ fn reclaim_never_offers_an_agent_worktree_whose_pr_is_open() {
             index_for: &|_: &Path| open_index("wt/agent-6561open", 6563),
         },
         ReclaimMode::Remove,
+        &[],
     );
     assert_eq!(out.survey.reclaimable, 0, "outcome: {out:?}");
     assert!(out.removed.is_empty() && path.exists());
@@ -1698,6 +1734,7 @@ fn reclaim_never_offers_a_dirty_agent_worktree() {
             index_for: &|_: &Path| merged_index("wt/agent-6561dirty", 6564),
         },
         ReclaimMode::Remove,
+        &[],
     );
     assert_eq!(out.survey.reclaimable, 0, "outcome: {out:?}");
     assert!(out.removed.is_empty() && path.exists());
@@ -1735,6 +1772,7 @@ fn survey_discloses_a_harness_locked_agent_worktree() {
             index_for: &|_: &Path| merged_index("wt/agent-6561locked", 6565),
         },
         ReclaimMode::Remove,
+        &[],
     );
     assert!(out.removed.is_empty() && path.exists(), "outcome: {out:?}");
     let disclosed = out.survey.agent_owned.join("\n");
@@ -1911,6 +1949,7 @@ fn prune_resolves_each_projects_repo_from_its_own_origin_7057() {
             index_for: &index_for,
         },
         ReclaimMode::Report,
+        &[],
     );
 
     let seen = seen.into_inner();

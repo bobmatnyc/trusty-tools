@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 
+use crate::daemon::project_adoption::{RegisterProjectResponse, adopt_pre_existing_worktrees};
 use crate::daemon::state::DaemonState;
 use crate::project::record::Project;
 use crate::project::resolver;
@@ -63,9 +64,15 @@ pub async fn project_list(state: &Arc<DaemonState>) -> Result<Value, String> {
 /// current persisted value rather than clearing it (#3025 review follow-up
 /// item 4 — mirrors [`crate::daemon::managed_routes::project_registry_routes::register_project_registry_route`](crate::daemon::managed_routes::register_project_registry_route)'s
 /// identical fix; see that function's doc for the full rationale and the
-/// deliberate `default_branch` exception). Calls `registry.register` and
-/// returns the persisted record.
-/// Test: `dispatch_project_register_tool` in `crate::mcp::tests`.
+/// deliberate `default_branch` exception). Calls `registry.register`, then runs
+/// the SHARED [`adopt_pre_existing_worktrees`] (#7357 — the CLI transport runs
+/// the same function, so neither can adopt what the other does not), and
+/// returns the persisted record with that adoption report beside it as
+/// [`RegisterProjectResponse`].
+/// Test: `dispatch_project_register_tool` in `crate::mcp::tests`;
+/// `project_register_backfills_pre_existing_worktrees`,
+/// `project_register_backfill_is_idempotent`,
+/// `parity_register_adopts_the_same_worktrees_across_transports`.
 #[allow(clippy::too_many_arguments)]
 pub async fn project_register(
     state: &Arc<DaemonState>,
@@ -116,7 +123,10 @@ pub async fn project_register(
         .register(project.clone())
         .await
         .map_err(|e| format!("project_register: registry error: {e}"))?;
-    serde_json::to_value(&project).map_err(|e| e.to_string())
+    // #7357: the SAME function the CLI transport calls, so the two surfaces
+    // cannot diverge on what registration adopts.
+    let adoption = adopt_pre_existing_worktrees(state, &project);
+    serde_json::to_value(RegisterProjectResponse { project, adoption }).map_err(|e| e.to_string())
 }
 
 /// Look up a single project by name.
@@ -300,5 +310,103 @@ mod tests {
 
         assert_eq!(result["stack_hint"], "python");
         assert_eq!(result["gh_account"], "bob-work");
+    }
+
+    /// Register a project whose checkout ALREADY has worktrees, and both get a
+    /// record naming it (#7357).
+    ///
+    /// Why: this is the reported bug end to end. Before the fix registration
+    /// wrote a `Project` record and nothing else, so every worktree already on
+    /// disk stayed invisible to `reconcile-worktrees`, the `--merged-prs` sweep
+    /// and `tm doctor` — all three read one scan that reaches a project only at
+    /// `<repos_root>/<owner>/<repo>`.
+    /// Test: itself.
+    #[tokio::test]
+    async fn project_register_backfills_pre_existing_worktrees() {
+        let fx = crate::session_manager::worktree_git_fixture::GitWorktreeFixture::new();
+        let a = fx.add_worktree("pre-one");
+        let b = fx.add_worktree("pre-two");
+        let state = isolated_state().await;
+
+        project_register(
+            &state,
+            "gnomish",
+            fx.repo.to_str().expect("utf8 checkout"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("register");
+
+        let store = crate::project::AdoptionStore::load(&crate::project::registry_data_dir_under(
+            state.framework_root(),
+        ));
+        let paths: Vec<&std::path::PathBuf> = store.entries().iter().map(|e| &e.path).collect();
+        for wt in [&a, &b] {
+            let canonical = std::fs::canonicalize(wt).expect("canonical worktree");
+            assert!(
+                paths.contains(&&canonical),
+                "{} must have an adoption record; got {paths:?}",
+                canonical.display()
+            );
+        }
+        assert!(store.entries().iter().all(|e| e.project == "gnomish"));
+    }
+
+    /// Re-registering an already-registered project adds no duplicate records.
+    /// Test: itself.
+    #[tokio::test]
+    async fn project_register_backfill_is_idempotent() {
+        let fx = crate::session_manager::worktree_git_fixture::GitWorktreeFixture::new();
+        fx.add_worktree("pre-one");
+        fx.add_worktree("pre-two");
+        let state = isolated_state().await;
+        let checkout = fx.repo.to_str().expect("utf8 checkout");
+
+        for _ in 0..2 {
+            project_register(
+                &state, "gnomish", checkout, None, None, None, None, None, None,
+            )
+            .await
+            .expect("register");
+        }
+
+        let store = crate::project::AdoptionStore::load(&crate::project::registry_data_dir_under(
+            state.framework_root(),
+        ));
+        assert_eq!(store.entries().len(), 2, "two worktrees, two records");
+    }
+
+    /// The backfill is not a gate: a `repo_url` that is not a local repository
+    /// leaves registration succeeding and writes no records.
+    /// Test: itself.
+    #[tokio::test]
+    async fn project_register_succeeds_when_the_checkout_is_not_a_repository() {
+        let plain = tempfile::tempdir().expect("tempdir");
+        let state = isolated_state().await;
+
+        let result = project_register(
+            &state,
+            "plainly",
+            plain.path().to_str().expect("utf8 path"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("register must still succeed");
+
+        assert_eq!(result["name"], "plainly");
+        let store = crate::project::AdoptionStore::load(&crate::project::registry_data_dir_under(
+            state.framework_root(),
+        ));
+        assert!(store.entries().is_empty());
     }
 }

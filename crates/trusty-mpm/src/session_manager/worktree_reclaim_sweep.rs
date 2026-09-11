@@ -108,6 +108,10 @@ impl SurveyBudget {
 /// without `gh`.
 /// Test: `survey_reports_a_merged_worktree_as_reclaimable`,
 /// `survey_past_its_classify_deadline_reclaims_nothing`.
+// #7357 adds `adopted` to an already-wide signature. Grouping the seven into a
+// struct would rewrite every one of this module's ~20 call sites for no change
+// in what any of them pass.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn survey_with_index(
     repos_root: &Path,
     in_use: &LiveClaims,
@@ -118,10 +122,15 @@ pub(crate) fn survey_with_index(
     // #6927: the operator keep-list `classify`'s gate 0 applies. An empty list
     // is a no-op gate, so every pre-#6927 caller keeps its exact behaviour.
     keep_list: &KeepList,
+    // #7357: adopted anchors reach projects the repos-root walk cannot. They
+    // are INJECTED, never resolved here — resolving them internally makes this
+    // function's unit tests read the operator's real adoption store and survey
+    // whatever real worktrees it names. `&[]` is the pre-#7357 behaviour.
+    adopted: &[PathBuf],
 ) -> ReclaimSurvey {
     let mut indexes: BTreeMap<PathBuf, PrIndex> = BTreeMap::new();
     let mut candidates = Vec::new();
-    for scanned in scan_registered_worktrees(repos_root) {
+    for scanned in scan_registered_worktrees(repos_root, adopted) {
         if budget.classify.is_some_and(|d| Instant::now() >= d) {
             // #2919: fail closed. A candidate we ran out of time to inspect is
             // reported as blocked, never omitted and never approved.
@@ -403,6 +412,8 @@ pub(crate) fn reclaim_with_probes(
     repos_root: &Path,
     probes: &FreshProbes<'_>,
     mode: ReclaimMode,
+    // #7357: the caller's adopted anchors, passed straight through.
+    adopted: &[PathBuf],
 ) -> ReclaimOutcome {
     let initial = (probes.in_use_now)().unwrap_or_default();
     let survey = survey_with_index(
@@ -413,6 +424,7 @@ pub(crate) fn reclaim_with_probes(
         SurveyBudget::unbounded(),
         true,
         &(probes.keep_list)(),
+        adopted,
     );
     let mut out = ReclaimOutcome {
         removed: Vec::new(),
@@ -524,6 +536,8 @@ pub(crate) fn reclaim_merged_pr_worktrees(
     agent_state: AgentStateProbe<'_>,
     mode: ReclaimMode,
     keep_list: &dyn Fn() -> KeepList,
+    // #7357: resolved by the route that invokes this, never here.
+    adopted: &[PathBuf],
 ) -> ReclaimOutcome {
     reclaim_with_probes(
         repos_root,
@@ -534,6 +548,7 @@ pub(crate) fn reclaim_merged_pr_worktrees(
             keep_list,
         },
         mode,
+        adopted,
     )
 }
 

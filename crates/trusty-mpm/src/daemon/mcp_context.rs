@@ -350,6 +350,8 @@ pub async fn session_context_pause(
                 &active_workspace_paths,
                 false,
                 crate::session_manager::DirtyWorktreePolicy::Skip,
+                // #7357: resolved here, at the MCP entry point.
+                &crate::project::adopted_anchors_under(state.framework_root()),
             )
             .await
         {
