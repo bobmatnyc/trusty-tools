@@ -493,7 +493,7 @@ pub(crate) async fn run_doctor_with_claims(
         // name — and warns when two tiers hold the same one.
         check_skill_reachability(&paths, project_dir),
         check_output_style(project_dir, &home),
-        check_output_style_staleness(project_dir, &home),
+        check_output_style_staleness(project_dir, &home, &paths),
         check_output_style_legacy_ids(project_dir, &home),
         check_deployment_completeness(&workspace_paths),
         check_skill_staleness(&paths, project_dir),

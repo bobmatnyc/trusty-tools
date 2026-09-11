@@ -37,6 +37,17 @@ pub struct SkillDeployTier {
     pub label: &'static str,
     /// The `skills/` directory itself.
     pub dir: PathBuf,
+    /// Whether the WHOLE bundled roster is expected here (#7423).
+    ///
+    /// Why: only [`FrameworkPaths::skill_deploy_dir`] receives every bundled
+    /// skill — the 2026-09-01 ruling (#6586) made the operator home and the
+    /// project tier user-custom-only, and `tm install` declines bundled stems
+    /// at both. So "a bundled skill is absent here" is a finding at exactly one
+    /// tier and normal everywhere else; carrying the answer on the tier keeps
+    /// the audit from asserting a roster the deploy would never write.
+    /// What: `true` for the managed-config tier alone.
+    /// Test: `only_the_managed_tier_expects_the_bundled_roster`.
+    pub receives_bundled_roster: bool,
 }
 
 /// The project tier's skills directory: `<project_dir>/.claude/skills`.
@@ -77,18 +88,24 @@ pub fn skill_deploy_tiers(
     // launch's bundled deploy and `deploy_validate`'s probe.
     let managed = paths.skill_deploy_dir();
 
+    // #7423: the third element says whether the whole bundled roster belongs
+    // here. Only the managed tier — see `SkillDeployTier::receives_bundled_roster`.
     let candidates = [
-        Some(("managed config", managed)),
-        Some(("operator home", paths.claude_skills_dir())),
-        project_dir.map(|dir| ("project", project_skill_tier(dir))),
+        Some(("managed config", managed, true)),
+        Some(("operator home", paths.claude_skills_dir(), false)),
+        project_dir.map(|dir| ("project", project_skill_tier(dir), false)),
     ];
 
     let mut tiers: Vec<SkillDeployTier> = Vec::new();
-    for (label, dir) in candidates.into_iter().flatten() {
+    for (label, dir, receives_bundled_roster) in candidates.into_iter().flatten() {
         if tiers.iter().any(|t| t.dir == dir) {
             continue;
         }
-        tiers.push(SkillDeployTier { label, dir });
+        tiers.push(SkillDeployTier {
+            label,
+            dir,
+            receives_bundled_roster,
+        });
     }
     tiers
 }
@@ -109,6 +126,24 @@ mod tests {
         assert_eq!(tiers[0].label, "managed config");
         assert_eq!(tiers[0].dir, paths.skill_deploy_dir());
         assert!(tiers.iter().any(|t| t.dir == paths.claude_skills_dir()));
+    }
+
+    // #7423: a bundled skill missing from the managed tier is a finding; the
+    // same skill missing from the operator home or the project tier is the
+    // 2026-09-01 ruling working as intended (#6586).
+    #[test]
+    fn only_the_managed_tier_expects_the_bundled_roster() {
+        let base = TempDir::new().unwrap();
+        let project = TempDir::new().unwrap();
+        let paths = FrameworkPaths::under(base.path());
+        let tiers = skill_deploy_tiers(&paths, Some(project.path()));
+
+        let expecting: Vec<&str> = tiers
+            .iter()
+            .filter(|t| t.receives_bundled_roster)
+            .map(|t| t.label)
+            .collect();
+        assert_eq!(expecting, vec!["managed config"], "tiers: {tiers:?}");
     }
 
     #[test]

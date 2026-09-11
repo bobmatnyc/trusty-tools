@@ -59,6 +59,78 @@ fn hand_edit(dest: &Path, manifest_key: &str, new_content: &str) {
     fs::write(path, new_content).unwrap();
 }
 
+/// #7423: a skill this binary bundles but no deploy has ever written must be
+/// `Missing` at the tier that receives the roster.
+///
+/// Why: `audit_deployed_skills` iterated the ON-DISK ledger, so a brand-new
+/// bundled skill produced no key, no finding, and nothing for the repair to act
+/// on — `tm-prose-style` shipped embedded in 1.5.29 and `tm doctor --fix --yes`
+/// deployed it to no tier at all. Fails on `origin/main`, which has no roster
+/// union to make the absence expressible.
+/// Test: this test.
+#[test]
+fn a_bundled_skill_absent_from_the_manifest_is_missing_at_the_roster_tier() {
+    let dest = TempDir::new().unwrap();
+    let _src = deploy_real(dest.path(), "tm-workflow", "v1", None);
+
+    let reference = reference_of(&[("tm-workflow", "v1"), ("tm-prose-style", "brand new")]);
+    let audit = audit_deployed_skills_with_roster(&reference, dest.path(), true);
+
+    let finding = audit
+        .findings
+        .iter()
+        .find(|f| f.stem == "tm-prose-style")
+        .unwrap_or_else(|| panic!("no finding for the never-deployed skill: {audit:?}"));
+    assert_eq!(finding.state, SkillDrift::Missing);
+    // The already-deployed skill is untouched by the union.
+    assert!(
+        audit
+            .findings
+            .iter()
+            .any(|f| f.stem == "tm-workflow" && f.state == SkillDrift::Fresh),
+        "{audit:?}"
+    );
+}
+
+/// The roster union is OPT-IN, so the #6586 user-tier-only ruling still holds.
+///
+/// Why: asserting the full roster at the operator home or the project tier would
+/// turn every bundled skill into a `Missing` finding there, and the repair would
+/// then deploy into the tiers that ruling emptied.
+/// Test: this test.
+#[test]
+fn a_bundled_skill_absent_is_not_a_finding_without_the_roster_flag() {
+    let dest = TempDir::new().unwrap();
+    let _src = deploy_real(dest.path(), "tm-workflow", "v1", None);
+
+    let reference = reference_of(&[("tm-workflow", "v1"), ("tm-prose-style", "brand new")]);
+    let audit = audit_deployed_skills(&reference, dest.path());
+
+    assert!(
+        !audit.findings.iter().any(|f| f.stem == "tm-prose-style"),
+        "a tier that does not receive the roster must not report it missing: {audit:?}"
+    );
+}
+
+/// An un-attributable ledger still yields no findings, roster flag or not.
+///
+/// Why (#4622 review, MEDIUM): "nothing there can be attributed" is the reason
+/// those tiers report no findings; a roster union that manufactured `Missing`
+/// entries over an absent or corrupt ledger would turn that admission back into
+/// a claim.
+/// Test: this test.
+#[test]
+fn the_roster_flag_adds_nothing_when_the_ledger_is_unreadable() {
+    let dest = TempDir::new().unwrap();
+    fs::write(dest.path().join(SKILL_MANIFEST_FILE), "{ not json").unwrap();
+
+    let reference = reference_of(&[("tm-prose-style", "brand new")]);
+    let audit = audit_deployed_skills_with_roster(&reference, dest.path(), true);
+
+    assert!(matches!(audit.manifest, ManifestState::Unreadable(_)));
+    assert!(audit.findings.is_empty(), "{audit:?}");
+}
+
 #[test]
 fn reference_falls_back_to_embedded() {
     // With no submodule, the reference is the compiled-in table — never the

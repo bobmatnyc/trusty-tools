@@ -73,7 +73,7 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
     ),
     (
         "output_style_staleness",
-        "Deployed output-style file content matches the bundled catalog, and no orphaned files linger under `output-styles/` (issue #2333).",
+        "Deployed output-style file content matches the bundled catalog, and no orphaned files linger under `output-styles/` (issue #2333). Scans BOTH style tiers and names the tier in every finding: the operator's `~/.claude/output-styles/` and the managed `$CLAUDE_CONFIG_DIR/output-styles/`, which is the copy a tm-launched session actually reads. Scanning only the first let `tm doctor --fix --yes` redeploy the operator's copy and report clean while the managed copy stayed stale (issue #7423). `tm doctor --fix --yes` redeploys whichever tier drifted; an orphaned file is named and never deleted.",
     ),
     (
         "output_style_legacy_ids",
@@ -85,7 +85,7 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
     ),
     (
         "skill_staleness",
-        "Deployed skill content matches the RUNNING BINARY's own embedded bundled asset, at every deploy tier (`$CLAUDE_CONFIG_DIR/skills`, `~/.claude/skills`, the project's `.claude/skills`). Reads the deployed FILE, not the deploy manifest, and compares against the compiled-in asset rather than the `~/.trusty-mpm/framework/skills` extraction cache — that cache can itself lag the installed binary, which made every skill it covered report clean regardless of what shipped (issue #4604). Distinguishes drift a redeploy repairs from drift that is FROZEN (hand-edited, so `tm install` deliberately skips it), and reports UNKNOWN — never `Ok` — for anything it cannot verify. Read-only; `tm doctor --fix-skills` is the repair — a bare `--fix-skills` PREVIEWS the redeploy and writes nothing, and `tm doctor --fix-skills --yes` applies it, backing up each overwrite first (issues #2876, #4604, #6620).",
+        "Deployed skill content matches the RUNNING BINARY's own embedded bundled asset, at every deploy tier (`$CLAUDE_CONFIG_DIR/skills`, `~/.claude/skills`, the project's `.claude/skills`). Reads the deployed FILE, not the deploy manifest, and compares against the compiled-in asset rather than the `~/.trusty-mpm/framework/skills` extraction cache — that cache can itself lag the installed binary, which made every skill it covered report clean regardless of what shipped (issue #4604). Distinguishes drift a redeploy repairs from drift that is FROZEN (hand-edited, so `tm install` deliberately skips it), and reports UNKNOWN — never `Ok` — for anything it cannot verify. Read-only; `tm doctor --fix-skills` is the repair — a bare `--fix-skills` PREVIEWS the redeploy and writes nothing, and `tm doctor --fix-skills --yes` applies it, backing up each overwrite first (issues #2876, #4604, #6620). At the managed `$CLAUDE_CONFIG_DIR/skills` tier the audited set is the deploy ledger UNION this binary's own bundled roster, so a skill the binary ships and no deploy has ever written reports `Missing` there instead of producing no finding at all; `tm doctor --fix --yes` then deploys it. The operator-home and project tiers keep auditing the ledger alone — bundled skills are user-tier only since the 2026-09-01 owner ruling (issues #6586, #7423).",
     ),
     (
         "skill_unmanaged",

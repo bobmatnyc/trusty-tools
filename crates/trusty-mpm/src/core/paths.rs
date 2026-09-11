@@ -500,10 +500,31 @@ impl FrameworkPaths {
     /// Test: `skill_deploy_dir_is_managed_config_skills`,
     /// `skill_deploy_dir_is_not_project_local_for_managed_workspace`.
     pub fn skill_deploy_dir(&self) -> PathBuf {
+        self.managed_claude_config_dir().join("skills")
+    }
+
+    /// The tm-managed `CLAUDE_CONFIG_DIR` this layout deploys into (#7423).
+    ///
+    /// Why: a tm-launched session reads this directory as its `user` tier —
+    /// `core::model_inject`'s `SETTING_SOURCES_FLAG_RELOCATED` relocates it —
+    /// so framework-owned payloads live here, not only under `~/.claude`.
+    /// `skill_deploy_dir` already derived it privately; `tm doctor`'s
+    /// output-style probe and its repair need the SAME answer, and a second
+    /// derivation is how #7423 happened in the first place (the repair
+    /// hardcoded `~/.claude` and left this tier stale through a full
+    /// `tm doctor --fix --yes`). Resolved from [`agent_deploy`](Self::agent_deploy)
+    /// rather than `dirs::home_dir()` so [`under`](Self::under) stays hermetic.
+    /// What: the parent of [`agent_deploy_dir`](Self::agent_deploy_dir), i.e.
+    /// `<base>/.trusty-tools/trusty-mpm/claude-config`. A path with no parent
+    /// yields `agent_deploy` itself, which keeps the `skill_deploy_dir` fallback
+    /// it replaced byte-identical.
+    /// Test: `managed_claude_config_dir_is_the_agent_tier_parent`,
+    /// `skill_deploy_dir_is_managed_config_skills`.
+    pub fn managed_claude_config_dir(&self) -> PathBuf {
         self.agent_deploy
             .parent()
-            .map(|dir| dir.join("skills"))
-            .unwrap_or_else(|| self.agent_deploy.join("skills"))
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.agent_deploy.clone())
     }
 
     /// Directory Claude Code reads skill files from (`~/.claude/skills`).
@@ -667,6 +688,22 @@ mod tests {
             paths.skill_deploy_dir(),
             paths.claude_skills_dir(),
             "the bundled tier must not be `<base>/.claude/skills`"
+        );
+    }
+
+    // #7423: the output-style probe and its repair resolve the managed
+    // `CLAUDE_CONFIG_DIR` tier through this accessor rather than re-deriving it.
+    #[test]
+    fn managed_claude_config_dir_is_the_agent_tier_parent() {
+        let paths = FrameworkPaths::under("/base");
+        assert_eq!(
+            paths.managed_claude_config_dir(),
+            PathBuf::from("/base/.trusty-tools/trusty-mpm/claude-config"),
+        );
+        assert_eq!(
+            paths.managed_claude_config_dir().join("skills"),
+            paths.skill_deploy_dir(),
+            "skill_deploy_dir must stay the `skills` child of this one answer"
         );
     }
 

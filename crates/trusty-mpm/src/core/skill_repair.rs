@@ -46,7 +46,7 @@ use crate::core::doctor_repair::RepairMode;
 use crate::core::paths::FrameworkPaths;
 use crate::core::skill_deploy_tiers::{SkillDeployTier, project_skill_tier, skill_deploy_tiers};
 use crate::core::skill_drift::{
-    ManifestState, SkillDrift, SkillReference, audit_deployed_skills, deployed_path,
+    ManifestState, SkillDrift, SkillReference, audit_deployed_skills_with_roster, deployed_path,
 };
 use crate::core::skill_manifest::{
     SkillManifest, SkillManifestEntry, SkillManifestSave, with_skill_manifest_lock,
@@ -291,7 +291,10 @@ fn repair_tier_locked(
     deferred: &BTreeSet<String>,
 ) -> Vec<RepairOutcome> {
     let mut outcomes = Vec::new();
-    let audit = audit_deployed_skills(reference, &tier.dir);
+    // #7423: at the managed tier the audit also asks for skills the ledger has
+    // never heard of, so a bundled skill that reached no tier gets written here.
+    let audit =
+        audit_deployed_skills_with_roster(reference, &tier.dir, tier.receives_bundled_roster);
     // #4622 review: never write into a tier whose ownership ledger could not
     // be read. Saving a rebuilt manifest over an unparseable one would
     // silently reclassify every file there as tm-owned and make the next
@@ -309,7 +312,7 @@ fn repair_tier_locked(
         return outcomes;
     }
 
-    // #5626: `audit_deployed_skills` above already refuses an unreadable
+    // #5626: the audit above already refuses an unreadable
     // ledger, so reaching this arm means the file changed under us between the
     // two reads. Report it as the same unverifiable skip rather than repairing
     // against an empty ledger — that would stamp every file in the tier as
