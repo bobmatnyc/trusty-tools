@@ -1,26 +1,23 @@
-//! `GET /api/agents/:name/kg*` proxy tests (#4290, #6286).
+//! `GET /api/agents/:name/kg*` tests (#4290, #6286, #7430).
 //!
-//! Why: This module's entire contract is "pass trusty-memory's KG JSON
-//! through, and NEVER fail the route for a condition the browser should render
-//! as an empty state". Both halves need pinning: a pass-through that quietly
-//! reshaped the upstream body, or a degraded path that 500'd, would each be
-//! the bug this route was written to avoid. These tests drive `kg_proxy_at`
-//! directly against a `tempfile::TempDir` (the `agent_stores.rs` pattern, so
-//! they don't race sibling tests on cwd/`$HOME`) with a mock trusty-memory
-//! daemon on a temp socket, plus full-router tests proving all four routes are
-//! actually wired.
+//! Why: this module's contract has two halves, and both have been wrong before.
+//! The exposed graph must come from the assistant's OKG tree and nothing else —
+//! before #7430 these routes served trusty-memory's palace-scoped `kg_*` surface
+//! instead, so the pane labelled "Knowledge Graph" rendered the MEMORY graph.
+//! And the route must NEVER fail for a condition the browser should render as an
+//! empty state. These tests drive `kg_graph_at` directly against
+//! `tempfile::TempDir` roots (the `agent_stores.rs` pattern, so they don't race
+//! sibling tests on cwd/`$HOME`), plus full-router tests proving all four routes
+//! are wired.
 //!
-//! The mock is [`crate::uds_mock`] rather than an axum server on a loopback
-//! port: ADR-0032 moved trusty-memory onto a Unix socket, and a test that kept
-//! stubbing HTTP would pass against a transport the route no longer speaks.
-//!
-//! What: pass-through for each of the four reads; forwarded params;
-//! no-palace-bound → 200 empty state; daemon undiscoverable / unreachable /
-//! palace absent / a projected field missing → 200 + `connected: false` +
-//! reason; unknown agent → 404; traversal name → 400; missing `subject` → 400;
-//! malformed TOML → 200 + `config_error`; and the read-only posture (no
-//! POST/DELETE route).
+//! What: OKG triples AND definitions for each of the four reads; paging; the
+//! absent-tree, unresolvable-root and malformed-TOML empty states; unknown agent
+//! → 404; traversal name → 400; missing `subject` → 400; the read-only posture;
+//! and `no_memory_drawer_or_palace_triple_can_reach_the_exposed_graph`, the
+//! #7430 regression gate.
 //! Test: This module IS the test.
+
+use std::path::Path;
 
 use axum::Router;
 use axum::body::Body;
@@ -28,13 +25,11 @@ use axum::http::{Method, Request, StatusCode};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-use crate::api::server::agent_kg::{KgRead, kg_proxy_at};
+use crate::api::server::agent_kg::{KgRead, kg_graph_at};
 use crate::api::server::routes::build_router;
 use crate::api::server::state::AppState;
-use crate::uds_mock::{self, MockMemoryDaemon, RpcError};
 
-/// An agent binding a store WITH a palace — the only shape that can reach
-/// trusty-memory at all.
+/// An agent binding its own home-confined OKG tree (#4325's default layout).
 const BOUND_FIXTURE: &str = r#"[agent]
 name = "izzie"
 role = "assistant"
@@ -44,109 +39,77 @@ description = "test"
 [[stores]]
 name = "bob-kb"
 index = "bob-kb"
+root = "okg"
 palace = "owner-profile"
 "#;
 
-/// A store binding with NO palace — a document-only store. The ordinary
-/// "nothing to browse yet" state, not an error.
-const NO_PALACE_FIXTURE: &str = r#"[agent]
-name = "plain"
-role = "assistant"
-model = "claude-sonnet-4-6"
-description = "test"
-
-[[stores]]
-name = "docs-only"
-"#;
-
-/// A palace that the mock daemon does not know about.
-const GHOST_PALACE_FIXTURE: &str = r#"[agent]
-name = "ghosty"
-role = "assistant"
-model = "claude-sonnet-4-6"
-description = "test"
-
-[[stores]]
-name = "ghost-kb"
-palace = "no-such-palace"
-"#;
-
-fn subjects_read() -> KgRead {
-    KgRead::new(
-        "memory.kg_subjects_with_counts",
-        "palace_id",
-        Vec::new(),
-        json!([]),
-    )
+/// One test's four injected roots.
+struct Fixtures {
+    agents: tempfile::TempDir,
+    assistants: tempfile::TempDir,
+    knowledge: tempfile::TempDir,
 }
 
-fn count_read() -> KgRead {
-    KgRead::new(
-        "memory.kg_count",
-        "palace_id",
-        Vec::new(),
-        json!({ "active": 0 }),
-    )
+impl Fixtures {
+    /// Write `<agents>/<name>.toml` and return the roots. The OKG tree is NOT
+    /// created — `with_tree` does that.
+    fn new(name: &str, fixture: &str) -> Self {
+        let agents = tempfile::tempdir().unwrap();
+        std::fs::write(agents.path().join(format!("{name}.toml")), fixture).unwrap();
+        Self {
+            agents,
+            assistants: tempfile::tempdir().unwrap(),
+            knowledge: tempfile::tempdir().unwrap(),
+        }
+    }
+
+    /// The OKG tree `name` resolves to under these roots.
+    fn tree(&self, name: &str) -> std::path::PathBuf {
+        self.assistants.path().join(name).join("okg")
+    }
+
+    /// Populate `name`'s tree with two people and one organisation.
+    fn with_tree(self, name: &str) -> Self {
+        let root = self.tree(name);
+        write_entity(
+            &root,
+            "people",
+            "bob",
+            "---\ntype: Person\ntitle: Bob\ndescription: The owner.\nworks_at: \"[[Duetto]]\"\n---\n",
+        );
+        write_entity(
+            &root,
+            "people",
+            "ada",
+            "---\ntype: Person\ntitle: Ada\ndescription: A colleague.\nknows: \"[[Bob]]\"\n---\n",
+        );
+        write_entity(
+            &root,
+            "organizations",
+            "duetto",
+            "---\ntype: Organization\ntitle: Duetto\ndescription: A company.\n---\n",
+        );
+        self
+    }
+
+    async fn read(&self, name: &str, read: KgRead) -> Value {
+        let resp = kg_graph_at(
+            &[self.agents.path().to_path_buf()],
+            name,
+            Some(self.assistants.path()),
+            self.knowledge.path(),
+            read,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "expected a 200 envelope");
+        body_json(resp).await
+    }
 }
 
-/// Mock trusty-memory answering the four KG reads for palace `owner-profile`
-/// only; every other palace is refused not-found, which is the daemon's real
-/// behaviour for an unknown palace.
-///
-/// `memory.kg_all` and `kg_query` echo their params back inside the payload so
-/// a test can prove what was forwarded. `kg_query` answers the TOOL's wider
-/// `{subject, triples, …}` shape, because that is what the proxy projects.
-async fn mock_memory() -> MockMemoryDaemon {
-    uds_mock::spawn(|method: &str, params: Value| {
-        let method = method.to_string();
-        Box::pin(async move {
-            // Both key spellings, because the folded reads take `palace_id` and
-            // the `kg_query` tool takes `palace`.
-            let palace = params
-                .get("palace_id")
-                .or_else(|| params.get("palace"))
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            if palace == "unreadable" && method == "memory.kg_subjects_with_counts" {
-                // An answer without the field a projecting read wants; the
-                // JSON-RPC framing makes an unparseable BODY impossible, so
-                // this is the shape-disagreement degradation instead.
-                return Ok(json!({ "unexpected": true }));
-            }
-            if palace != "owner-profile" {
-                return Err(RpcError::new(
-                    trusty_common::memory_rpc::CODE_NOT_FOUND,
-                    format!("palace not found: {palace}"),
-                ));
-            }
-            match method.as_str() {
-                "memory.kg_subjects_with_counts" => Ok(json!([
-                    { "subject": "Bob", "count": 3 },
-                    { "subject": "trusty-search", "count": 1 },
-                ])),
-                "memory.kg_all" => Ok(json!([{
-                    "subject": "Bob",
-                    "predicate": "prefers",
-                    "object": "Rust",
-                    "echoed_limit": params.get("limit"),
-                    "echoed_offset": params.get("offset"),
-                }])),
-                "memory.kg_count" => Ok(json!({ "active": 4 })),
-                "kg_query" => Ok(json!({
-                    "subject": params.get("subject"),
-                    "kg_triple_count": 4,
-                    "triples": [{
-                        "subject": params.get("subject"),
-                        "predicate": "is",
-                        "object": "owner",
-                    }],
-                })),
-                other => Err(RpcError::method_not_found(other, &[])),
-            }
-        })
-    })
-    .await
+fn write_entity(root: &Path, collection: &str, slug: &str, content: &str) {
+    let dir = root.join(collection);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("{slug}.md")), content).unwrap();
 }
 
 async fn body_json(resp: axum::response::Response) -> Value {
@@ -156,136 +119,256 @@ async fn body_json(resp: axum::response::Response) -> Value {
     serde_json::from_slice(&bytes).unwrap()
 }
 
-/// Write `fixture` as `<name>.toml` into a fresh tempdir and return it.
-fn agent_dir(name: &str, fixture: &str) -> tempfile::TempDir {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join(format!("{name}.toml")), fixture).unwrap();
-    dir
+fn subjects_read() -> KgRead {
+    KgRead::Subjects { limit: 200 }
 }
 
 // ---------------------------------------------------------------------------
-// Pass-through
+// The #7430 regression gate
+// ---------------------------------------------------------------------------
+
+/// Why (#7430, epic #7425 item (f)): the owner's requirement is that the
+/// exposed graph carries OKG triples and definitions and never memory content.
+/// Before this change these routes called `memory.kg_subjects_with_counts`,
+/// `memory.kg_all`, `memory.kg_count` and the `kg_query` tool, so every subject
+/// the pane listed came out of a memory palace — this test's first assertion
+/// (`data` reflecting the OKG tree) failed against that code for all four reads,
+/// and so did the `definitions` assertion, which had no field to read at all.
+///
+/// What: the agent binds a palace AND has an OKG tree. Only the tree's content
+/// may appear: the palace-only subject must be absent from every read, the
+/// envelope must declare `source: "okg"`, and both halves of the graph must be
+/// present. The palace named in the fixture is deliberately one a developer's
+/// live trusty-memory might really hold — the point is that no daemon is
+/// consulted, so its content cannot arrive however the daemon is configured.
+/// Test: itself.
+#[tokio::test]
+async fn no_memory_drawer_or_palace_triple_can_reach_the_exposed_graph() {
+    let f = Fixtures::new("izzie", BOUND_FIXTURE).with_tree("izzie");
+
+    for read in [
+        subjects_read(),
+        KgRead::All {
+            limit: 50,
+            offset: 0,
+        },
+        KgRead::Subject("Bob".to_string()),
+        KgRead::Count,
+    ] {
+        let body = f.read("izzie", read.clone()).await;
+        assert_eq!(
+            body["source"], "okg",
+            "the envelope must name its source: {body}"
+        );
+        assert_eq!(body["connected"], true, "{body}");
+        assert!(
+            body.get("palace").is_none(),
+            "a memory palace has no place in the exposed graph envelope: {body}"
+        );
+        let rendered = body.to_string();
+        assert!(
+            !rendered.contains("owner-profile"),
+            "the bound PALACE id reached the payload for {read:?}: {rendered}"
+        );
+        assert!(
+            !rendered.contains("drawer"),
+            "a memory drawer reached the payload for {read:?}: {rendered}"
+        );
+    }
+
+    // Both halves, on the read that carries the graph itself.
+    let body = f
+        .read(
+            "izzie",
+            KgRead::All {
+                limit: 50,
+                offset: 0,
+            },
+        )
+        .await;
+    assert!(
+        !body["data"].as_array().unwrap().is_empty(),
+        "triples must be present: {body}"
+    );
+    assert!(
+        !body["definitions"].as_array().unwrap().is_empty(),
+        "definitions must be present beside the triples: {body}"
+    );
+}
+
+/// Why (#7430 security review): `tree` used to be `root.display()`, an absolute
+/// filesystem path, and the browser rendered it in its empty-state copy — so
+/// every viewer of the pane was shown the operator's home-directory layout. The
+/// retired memory-palace envelope disclosed only an opaque id. This asserts the
+/// property rather than one spelling: NO string anywhere in any envelope, on any
+/// route, in any state, may begin with `/`.
+///
+/// What: every read, against a tree that exists, a tree that does not, and an
+/// unresolvable binding — the three states that each build `tree` and `reason`
+/// differently. The tempdir roots are real absolute paths (`/var/folders/…` on
+/// macOS, `/tmp/…` on Linux), so a regression to `display()` is caught by the
+/// leading-`/` check and also by the explicit substring check on the root.
+/// Test: itself.
+#[tokio::test]
+async fn no_envelope_discloses_a_filesystem_path() {
+    /// Every string in the payload, recursively — keys are structure, values
+    /// are what a client renders.
+    fn strings(value: &Value, out: &mut Vec<String>) {
+        match value {
+            Value::String(s) => out.push(s.clone()),
+            Value::Array(items) => items.iter().for_each(|v| strings(v, out)),
+            Value::Object(map) => map.values().for_each(|v| strings(v, out)),
+            _ => {}
+        }
+    }
+
+    let populated = Fixtures::new("izzie", BOUND_FIXTURE).with_tree("izzie");
+    let absent = Fixtures::new("izzie", BOUND_FIXTURE);
+    let unresolvable = Fixtures::new(
+        "ghosty",
+        "[agent]\nname = \"ghosty\"\n\n[[stores]]\nname = \"g\"\ntree = \"https://example.com/kb\"\n",
+    );
+
+    for (f, agent) in [
+        (&populated, "izzie"),
+        (&absent, "izzie"),
+        (&unresolvable, "ghosty"),
+    ] {
+        for read in [
+            subjects_read(),
+            KgRead::All {
+                limit: 50,
+                offset: 0,
+            },
+            KgRead::Subject("Bob".to_string()),
+            KgRead::Count,
+        ] {
+            let body = f.read(agent, read.clone()).await;
+            let mut found = Vec::new();
+            strings(&body, &mut found);
+            for s in &found {
+                assert!(
+                    !s.starts_with('/'),
+                    "an absolute path reached the payload for {read:?}: {s:?} in {body}"
+                );
+            }
+            let root = f.tree(agent).display().to_string();
+            assert!(
+                !body.to_string().contains(&root),
+                "the tree's real root reached the payload for {read:?}: {body}"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Each read
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn kg_subjects_route_passes_upstream_through() {
-    let dir = agent_dir("izzie", BOUND_FIXTURE);
-    let daemon = mock_memory().await;
-
-    let resp = kg_proxy_at(
-        &[dir.path().to_path_buf()],
-        "izzie",
-        Some(daemon.socket()),
-        subjects_read(),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_json(resp).await;
-    assert_eq!(body["palace"], "owner-profile");
-    assert_eq!(body["connected"], true);
-    assert!(
-        body["reason"].is_null(),
-        "a connected read carries no reason"
-    );
-    // The upstream array must arrive unchanged — same order, same field names,
-    // no re-ranking or reshaping in this crate.
+async fn kg_subjects_route_lists_okg_subjects() {
+    let f = Fixtures::new("izzie", BOUND_FIXTURE).with_tree("izzie");
+    let body = f.read("izzie", subjects_read()).await;
     assert_eq!(
         body["data"],
         json!([
-            { "subject": "Bob", "count": 3 },
-            { "subject": "trusty-search", "count": 1 },
-        ])
+            { "subject": "Ada", "count": 1 },
+            { "subject": "Bob", "count": 1 },
+            { "subject": "Duetto", "count": 0 },
+        ]),
+        "{body}"
     );
-}
-
-#[tokio::test]
-async fn kg_count_route_passes_upstream_object_through() {
-    let dir = agent_dir("izzie", BOUND_FIXTURE);
-    let daemon = mock_memory().await;
-
-    let resp = kg_proxy_at(
-        &[dir.path().to_path_buf()],
-        "izzie",
-        Some(daemon.socket()),
-        count_read(),
-    )
-    .await;
-    let body = body_json(resp).await;
-    assert_eq!(body["connected"], true);
-    assert_eq!(body["data"], json!({ "active": 4 }));
-}
-
-#[tokio::test]
-async fn kg_all_route_forwards_limit_and_offset() {
-    let dir = agent_dir("izzie", BOUND_FIXTURE);
-    let daemon = mock_memory().await;
-
-    let read = KgRead::new(
-        "memory.kg_all",
-        "palace_id",
-        vec![("limit", json!(25)), ("offset", json!(50))],
-        json!([]),
-    );
-    let resp = kg_proxy_at(
-        &[dir.path().to_path_buf()],
-        "izzie",
-        Some(daemon.socket()),
-        read,
-    )
-    .await;
-    let body = body_json(resp).await;
-    assert_eq!(body["connected"], true);
     assert_eq!(
-        body["data"][0]["echoed_limit"], 25,
-        "the page params must arrive as numbers, not the strings the query \
-         string carried"
+        body["tree"], "izzie/okg",
+        "the envelope names the tree by its opaque label, not its path"
     );
-    assert_eq!(body["data"][0]["echoed_offset"], 50);
+    assert_eq!(
+        body["definitions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|d| d["type"].as_str())
+            .collect::<Vec<_>>(),
+        vec!["Organization", "Person", "Person"],
+    );
 }
 
-/// Why (#6286): `/kg?subject=` is the one read whose method answers a wider
-/// shape than this route's `data` contract — `kg_query` is a dispatcher tool
-/// returning `{subject, triples, kg_triple_count}` where the retired route
-/// returned a bare array. Passing the object through would change `data`'s TYPE
-/// for one of the four reads, which is exactly what the envelope promises never
-/// happens.
-/// What: drives the projecting read and asserts `data` is the triples array,
-/// with the subject forwarded intact.
+/// Why: a page of triples is only readable beside the definitions of the
+/// subjects on it, so the two are selected together rather than the client
+/// making a second round trip per subject.
 /// Test: itself.
 #[tokio::test]
-async fn kg_query_route_projects_the_triples_array() {
-    let dir = agent_dir("izzie", BOUND_FIXTURE);
-    let daemon = mock_memory().await;
+async fn kg_all_route_pages_triples_with_their_definitions() {
+    let f = Fixtures::new("izzie", BOUND_FIXTURE).with_tree("izzie");
 
-    let read = KgRead::new(
-        "kg_query",
-        "palace",
-        vec![("subject", json!("Bob & Co"))],
-        json!([]),
-    )
-    .projecting("triples");
-    let resp = kg_proxy_at(
-        &[dir.path().to_path_buf()],
-        "izzie",
-        Some(daemon.socket()),
-        read,
-    )
-    .await;
-    let body = body_json(resp).await;
-    assert_eq!(body["connected"], true);
-    assert!(
-        body["data"].is_array(),
-        "data must stay an array for this read: {}",
-        body["data"]
+    let first = f
+        .read(
+            "izzie",
+            KgRead::All {
+                limit: 1,
+                offset: 0,
+            },
+        )
+        .await;
+    assert_eq!(
+        first["data"],
+        json!([{
+            "subject": "Ada",
+            "predicate": "knows",
+            "object": "Bob",
+            "provenance": "people/ada.md",
+        }]),
+        "{first}"
     );
     assert_eq!(
-        body["data"][0]["subject"], "Bob & Co",
-        "the subject must arrive intact"
+        first["definitions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|d| d["subject"].as_str())
+            .collect::<Vec<_>>(),
+        vec!["Ada"],
+        "only the page's own subjects are defined: {first}"
     );
-    assert!(
-        body["data"][0].get("kg_triple_count").is_none(),
-        "only the triples array is lifted, not the whole envelope"
+
+    let second = f
+        .read(
+            "izzie",
+            KgRead::All {
+                limit: 1,
+                offset: 1,
+            },
+        )
+        .await;
+    assert_eq!(second["data"][0]["subject"], "Bob", "{second}");
+}
+
+#[tokio::test]
+async fn kg_query_route_returns_the_subjects_triples_and_definition() {
+    let f = Fixtures::new("izzie", BOUND_FIXTURE).with_tree("izzie");
+    let body = f.read("izzie", KgRead::Subject("Bob".to_string())).await;
+    assert_eq!(
+        body["data"],
+        json!([{
+            "subject": "Bob",
+            "predicate": "works_at",
+            "object": "Duetto",
+            "provenance": "people/bob.md",
+        }]),
+        "{body}"
     );
+    assert_eq!(body["definitions"][0]["summary"], "The owner.");
+}
+
+/// Why: the header badge reports the graph's size, and #7430 makes that both
+/// halves — a tree of definitions with no edges yet is not an empty graph.
+/// Test: itself.
+#[tokio::test]
+async fn kg_count_route_counts_both_halves() {
+    let f = Fixtures::new("izzie", BOUND_FIXTURE).with_tree("izzie");
+    let body = f.read("izzie", KgRead::Count).await;
+    assert_eq!(body["data"], json!({ "active": 2, "definition_count": 3 }));
+    assert_eq!(body["definitions"], json!([]));
 }
 
 // ---------------------------------------------------------------------------
@@ -293,31 +376,14 @@ async fn kg_query_route_projects_the_triples_array() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn kg_route_empty_state_when_no_palace_bound() {
-    let dir = agent_dir("plain", NO_PALACE_FIXTURE);
-    let daemon = mock_memory().await;
-
-    let resp = kg_proxy_at(
-        &[dir.path().to_path_buf()],
-        "plain",
-        Some(daemon.socket()),
-        subjects_read(),
-    )
-    .await;
-    assert_eq!(
-        resp.status(),
-        StatusCode::OK,
-        "an agent with no palace is an empty state, not an error"
-    );
-    let body = body_json(resp).await;
-    assert!(body["palace"].is_null());
+async fn kg_route_empty_state_when_the_tree_is_absent() {
+    let f = Fixtures::new("izzie", BOUND_FIXTURE);
+    let body = f.read("izzie", subjects_read()).await;
     assert_eq!(body["connected"], false);
     assert_eq!(body["data"], json!([]), "the empty shape is still an array");
+    assert_eq!(body["definitions"], json!([]));
     assert!(
-        body["reason"]
-            .as_str()
-            .unwrap()
-            .contains("no memory palace"),
+        body["reason"].as_str().unwrap().contains("no OKG tree"),
         "reason was: {}",
         body["reason"]
     );
@@ -327,140 +393,56 @@ async fn kg_route_empty_state_when_no_palace_bound() {
 async fn kg_count_route_empty_state_keeps_object_shape() {
     // The one read whose payload is an object: a client must never have to
     // branch on `data`'s TYPE, only on `connected`.
-    let dir = agent_dir("plain", NO_PALACE_FIXTURE);
-    let resp = kg_proxy_at(&[dir.path().to_path_buf()], "plain", None, count_read()).await;
-    let body = body_json(resp).await;
+    let f = Fixtures::new("izzie", BOUND_FIXTURE);
+    let body = f.read("izzie", KgRead::Count).await;
     assert_eq!(body["connected"], false);
-    assert_eq!(body["data"], json!({ "active": 0 }));
+    assert_eq!(body["data"], json!({ "active": 0, "definition_count": 0 }));
 }
 
+/// Why: an agent that declares no `[[stores]]` still has the #4325 default tree.
+/// Reporting "no store bound" there would hide a real graph.
+/// Test: itself.
 #[tokio::test]
-async fn kg_route_degrades_when_memory_undiscoverable() {
-    let dir = agent_dir("izzie", BOUND_FIXTURE);
-    let resp = kg_proxy_at(&[dir.path().to_path_buf()], "izzie", None, subjects_read()).await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_json(resp).await;
-    assert_eq!(
-        body["palace"], "owner-profile",
-        "the claim is still reported"
+async fn kg_route_reads_the_default_tree_for_an_unbound_agent() {
+    let f = Fixtures::new("plain", "[agent]\nname = \"plain\"\n").with_tree("plain");
+    let body = f.read("plain", subjects_read()).await;
+    assert_eq!(body["connected"], true, "{body}");
+    assert_eq!(body["data"][0]["subject"], "Ada");
+}
+
+/// Why: the binding a malformed `agent.toml` failed to parse is what names which
+/// tree to show, so guessing one could render another assistant's graph. A
+/// hand-edit typo degrades to an empty state, never a 500 and never a guess.
+/// Test: itself.
+#[tokio::test]
+async fn kg_route_degrades_on_malformed_toml() {
+    let f = Fixtures::new("broken", "not = = toml");
+    let body = f.read("broken", subjects_read()).await;
+    assert!(body["tree"].is_null());
+    assert_eq!(body["connected"], false);
+    assert!(body["config_error"].is_string());
+}
+
+/// Why: a binding naming a tree URI nothing can resolve is a configuration
+/// fault, and the reason must say so rather than showing an empty graph that
+/// looks like "nothing ingested".
+/// Test: itself.
+#[tokio::test]
+async fn kg_route_degrades_on_an_unresolvable_tree_uri() {
+    let f = Fixtures::new(
+        "ghosty",
+        "[agent]\nname = \"ghosty\"\n\n[[stores]]\nname = \"g\"\ntree = \"https://example.com/kb\"\n",
     );
+    let body = f.read("ghosty", subjects_read()).await;
     assert_eq!(body["connected"], false);
     assert!(
         body["reason"]
             .as_str()
             .unwrap()
-            .contains("not discoverable"),
+            .contains("does not resolve"),
         "reason was: {}",
         body["reason"]
     );
-}
-
-#[tokio::test]
-async fn kg_route_degrades_when_memory_unreachable() {
-    let dir = agent_dir("izzie", BOUND_FIXTURE);
-    let dead = tempfile::tempdir().unwrap();
-
-    let resp = kg_proxy_at(
-        &[dir.path().to_path_buf()],
-        "izzie",
-        Some(&dead.path().join("absent.sock")),
-        subjects_read(),
-    )
-    .await;
-    assert_eq!(
-        resp.status(),
-        StatusCode::OK,
-        "a down daemon must never 500 the browser"
-    );
-    let body = body_json(resp).await;
-    assert_eq!(body["connected"], false);
-    assert_eq!(body["data"], json!([]));
-    assert!(
-        body["reason"].as_str().unwrap().contains("unreachable"),
-        "reason was: {}",
-        body["reason"]
-    );
-}
-
-#[tokio::test]
-async fn kg_route_degrades_when_palace_missing() {
-    let dir = agent_dir("ghosty", GHOST_PALACE_FIXTURE);
-    let daemon = mock_memory().await;
-
-    let resp = kg_proxy_at(
-        &[dir.path().to_path_buf()],
-        "ghosty",
-        Some(daemon.socket()),
-        subjects_read(),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_json(resp).await;
-    assert_eq!(body["palace"], "no-such-palace");
-    assert_eq!(body["connected"], false);
-    assert!(
-        body["reason"].as_str().unwrap().contains("does not exist"),
-        "reason was: {}",
-        body["reason"]
-    );
-}
-
-/// Why (#6286): the framing makes an unparseable upstream BODY impossible — a
-/// malformed frame is a transport error, not a 2xx carrying garbage — so the
-/// old "unreadable body" degradation has no way to occur. What replaces it is a
-/// daemon whose answer does not carry the field a projecting read lifts. Both
-/// mean the same thing to the pane (the read did not produce data), and both
-/// must be a reason rather than a silent empty array, because an empty array
-/// says "this palace has no triples", which is a different claim.
-/// What: asks a projecting read against a palace the mock answers without a
-/// `triples` field.
-/// Test: itself.
-#[tokio::test]
-async fn kg_route_degrades_when_the_answer_lacks_the_projected_field() {
-    let dir = agent_dir(
-        "unreadable",
-        "[agent]\nname = \"unreadable\"\n\n[[stores]]\nname = \"g\"\npalace = \"unreadable\"\n",
-    );
-    let daemon = mock_memory().await;
-
-    let read = KgRead::new(
-        "memory.kg_subjects_with_counts",
-        "palace_id",
-        Vec::new(),
-        json!([]),
-    )
-    .projecting("triples");
-    let resp = kg_proxy_at(
-        &[dir.path().to_path_buf()],
-        "unreadable",
-        Some(daemon.socket()),
-        read,
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_json(resp).await;
-    assert_eq!(body["connected"], false);
-    assert_eq!(body["data"], json!([]));
-    assert!(
-        body["reason"].as_str().unwrap().contains("triples"),
-        "the reason must name the field that was missing: {}",
-        body["reason"]
-    );
-}
-
-#[tokio::test]
-async fn kg_route_degrades_on_malformed_toml() {
-    let dir = agent_dir("broken", "not = = toml");
-    let resp = kg_proxy_at(&[dir.path().to_path_buf()], "broken", None, subjects_read()).await;
-    assert_eq!(
-        resp.status(),
-        StatusCode::OK,
-        "a hand-edit typo must not 500 the pane"
-    );
-    let body = body_json(resp).await;
-    assert!(body["palace"].is_null());
-    assert_eq!(body["connected"], false);
-    assert!(body["config_error"].is_string());
 }
 
 // ---------------------------------------------------------------------------
@@ -470,14 +452,30 @@ async fn kg_route_degrades_on_malformed_toml() {
 #[tokio::test]
 async fn kg_route_unknown_agent_404() {
     let dir = tempfile::tempdir().unwrap();
-    let resp = kg_proxy_at(&[dir.path().to_path_buf()], "nobody", None, subjects_read()).await;
+    let roots = tempfile::tempdir().unwrap();
+    let resp = kg_graph_at(
+        &[dir.path().to_path_buf()],
+        "nobody",
+        Some(roots.path()),
+        roots.path(),
+        subjects_read(),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
 async fn kg_route_rejects_traversal_name() {
     let dir = tempfile::tempdir().unwrap();
-    let resp = kg_proxy_at(&[dir.path().to_path_buf()], "../etc", None, subjects_read()).await;
+    let roots = tempfile::tempdir().unwrap();
+    let resp = kg_graph_at(
+        &[dir.path().to_path_buf()],
+        "../etc",
+        Some(roots.path()),
+        roots.path(),
+        subjects_read(),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
@@ -523,9 +521,8 @@ async fn kg_routes_are_wired_into_router() {
     }
 }
 
-/// Owner decision (#4290): the proxy is READ-ONLY. trusty-memory's assert
-/// (`kg_assert`) and retract (`memory.kg_delete_triple`) are deliberately not
-/// exposed, so those verbs must not resolve to a handler here.
+/// Owner decision (#4290): the exposed graph is READ-ONLY. Writing an entity has
+/// its own confined OKG ingest tools, so those verbs must not resolve here.
 #[tokio::test]
 async fn kg_write_verbs_are_not_proxied() {
     for (method, path) in [
@@ -544,7 +541,7 @@ async fn kg_write_verbs_are_not_proxied() {
             resp.status() == StatusCode::METHOD_NOT_ALLOWED
                 || resp.status() == StatusCode::NOT_FOUND
                 || resp.status() == StatusCode::FORBIDDEN,
-            "{method} {path} resolved to a handler ({}) — the KG proxy must stay read-only",
+            "{method} {path} resolved to a handler ({}) — the KG route must stay read-only",
             resp.status()
         );
     }

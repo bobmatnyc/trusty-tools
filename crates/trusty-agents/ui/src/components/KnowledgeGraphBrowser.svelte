@@ -1,10 +1,11 @@
 <script lang="ts">
-  /** Read-only browser for the selected assistant's bound knowledge graph.
-   * ChatPane positions this over its mounted chat, matching preferences.
-   * Every request is scoped to the current assistant generation; triple
-   * selection requests additionally use a sequence so older results cannot
-   * replace a newer selection. Disconnected envelopes remain distinct from
-   * an empty connected graph. Tests cover takeover and asynchronous races.
+  /** Read-only browser for the selected assistant's OKG knowledge graph —
+   * triples and definitions out of its `okg/` tree, never a memory palace
+   * (#7430). ChatPane positions this over its mounted chat, matching
+   * preferences. Every request is scoped to the current assistant generation;
+   * triple selection requests additionally use a sequence so older results
+   * cannot replace a newer selection. Disconnected envelopes remain distinct
+   * from an empty connected graph. Tests cover takeover and asynchronous races.
    */
   import { AlertCircle, ArrowLeft, Loader2, Network, X } from 'lucide-svelte';
   import { onMount, onDestroy } from 'svelte';
@@ -13,11 +14,12 @@
     fetchKgCount,
     fetchKgSubject,
     fetchKgSubjects,
+    type KgDefinition,
     type KgSubjectCount,
     type KgTriple,
   } from '../lib/kg';
 
-  /** The agent whose bound palace this browses. Never Concierge — `ChatHeader`
+  /** The agent whose OKG tree this browses. Never Concierge — `ChatHeader`
    * hides the opening control when `activeAgentId === null` (owner decision:
    * Concierge has no `agent.toml`/`[[stores]]` binding). */
   export let agentName: string;
@@ -27,10 +29,13 @@
 
   type Mode = 'all' | 'subject';
 
-  /** `null` while the first request (which resolves palace-binding state) is
-   * in flight — distinct from `false`, which means "resolved: not connected". */
+  /** `null` while the first request (which resolves the tree) is in flight —
+   * distinct from `false`, which means "resolved: not connected". */
   let connected: boolean | null = null;
-  let palace: string | null = null;
+  /** The binding's opaque label for the tree (`okg://izzie`, `izzie/okg`) —
+   * never a filesystem path, so it is shown as a name and never as a location
+   * (#7430). */
+  let tree: string | null = null;
   let reason = '';
   let configError = '';
   /** 404 on the first request — an unknown agent, e.g. a stale roster
@@ -46,6 +51,9 @@
   let mode: Mode = 'all';
   let selectedSubject = '';
   let triples: KgTriple[] = [];
+  /** The definitions that came with the current page of triples — the "what is
+   * this subject" half of the graph (#7430). */
+  let definitions: KgDefinition[] = [];
   let triplesLoading = false;
   let triplesError = '';
 
@@ -72,11 +80,11 @@
   /**
    * Why (#4290 code-review finding, HIGH): every KG route can independently
    * flip to `connected: false` (still HTTP 200, `data: []`/`{active: 0}`) if
-   * trusty-memory or the palace goes away AFTER bootstrap already resolved
-   * `connected: true` — the daemon restarts mid-session, or the user pages
-   * through "all"/clicks a subject while it's down. Assigning `env.data`
-   * unconditionally in that case renders "0 active triples" / "No triples.",
-   * which is indistinguishable from a genuinely-connected-but-empty palace —
+   * the OKG tree goes away AFTER bootstrap already resolved
+   * `connected: true` — the directory is moved or the binding is rewritten, or
+   * the user pages through "all"/clicks a subject meanwhile. Assigning
+   * `env.data` unconditionally in that case renders "0 active triples" / "No
+   * triples.", which is indistinguishable from a connected-but-empty tree —
    * exactly the failure the owner's contract forbids. So `loadAll`,
    * `loadCount`, and `loadSubject` all check `env.connected` first and, when
    * false, route into the SAME disconnected state `bootstrap()` shows
@@ -93,8 +101,8 @@
 
   /**
    * Why: `/kg/subjects` is the cheapest route that also carries the
-   * palace/`connected`/`reason`/`config_error` state every other route would
-   * report identically (all four resolve the SAME agent → palace binding).
+   * tree/`connected`/`reason`/`config_error` state every other route would
+   * report identically (all four resolve the SAME agent → OKG tree).
    * Resolving it once here, rather than duplicating the check in `loadAll`
    * and `loadCount`, is what lets those two stay simple "fetch the data"
    * calls.
@@ -112,7 +120,7 @@
     notFound = false;
     loadError = '';
     connected = null;
-    palace = null;
+    tree = null;
     reason = '';
     configError = '';
     subjects = [];
@@ -120,6 +128,7 @@
     selectedSubject = '';
     offset = 0;
     triples = [];
+    definitions = [];
     activeCount = null;
     try {
       const env = await fetchKgSubjects(name, 200);
@@ -128,7 +137,7 @@
         notFound = true;
         return;
       }
-      palace = env.palace;
+      tree = env.tree;
       connected = env.connected;
       reason = env.reason ?? '';
       configError = env.config_error ?? '';
@@ -158,8 +167,9 @@
         return;
       }
       triples = env.data ?? [];
+      definitions = env.definitions ?? [];
     } catch (e) {
-      if (token === generation && request === triplesRequest) { triplesError = `${e}`; triples = []; }
+      if (token === generation && request === triplesRequest) { triplesError = `${e}`; triples = []; definitions = []; }
     } finally {
       if (token === generation && request === triplesRequest) triplesLoading = false;
     }
@@ -206,8 +216,9 @@
         return;
       }
       triples = env.data ?? [];
+      definitions = env.definitions ?? [];
     } catch (e) {
-      if (token === generation && request === triplesRequest) { triplesError = `${e}`; triples = []; }
+      if (token === generation && request === triplesRequest) { triplesError = `${e}`; triples = []; definitions = []; }
     } finally {
       if (token === generation && request === triplesRequest) triplesLoading = false;
     }
@@ -232,12 +243,10 @@
     loadAll(agentName);
   }
 
-  function humanTime(iso?: string): string {
-    if (!iso) return '—';
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return iso;
-    return d.toLocaleString();
-  }
+  /** The definitions to show above the triple table: the selected subject's
+   * own definition in subject mode, every definition on the page otherwise. */
+  $: visibleDefinitions =
+    mode === 'subject' ? definitions.filter((d) => d.subject === selectedSubject) : definitions;
 
   // Reactive rather than onMount: if the roster switch happens while the
   // panel is open (Concierge aside, which unmounts this component entirely —
@@ -316,12 +325,11 @@
           {/if}
         </div>
 
-      <!-- State: connected:true, genuinely empty graph (bound palace, zero
-           triples) — distinct copy from the not-connected case above. -->
+      <!-- State: connected:true, genuinely empty graph (readable OKG tree, no
+           entities) — distinct copy from the not-connected case above. -->
       {:else if subjects.length === 0}
         <p class="rounded-md border border-dashed border-foundry-light-border dark:border-foundry-border px-3 py-2 text-xs text-foundry-light-muted dark:text-foundry-text/40">
-          {palace ? `Palace "${palace}"` : 'This agent'} is connected, but its Knowledge Graph has no
-          triples yet.
+          {tree ? `The OKG tree "${tree}"` : 'This agent'} is readable, but holds nothing yet.
         </p>
 
       <!-- State: connected:true with data — the explorer. -->
@@ -404,6 +412,20 @@
               </p>
             {/if}
 
+            <!-- The definitions half of the graph (#7430): what each subject on
+                 this page IS, beside the edges it has. -->
+            {#if visibleDefinitions.length > 0}
+              <ul data-kg-definitions class="shrink-0 border-b border-foundry-light-border dark:border-foundry-border px-3 py-2 text-[11px]">
+                {#each visibleDefinitions as d (d.collection + '/' + d.slug)}
+                  <li class="py-0.5 text-foundry-light-muted dark:text-foundry-text/60">
+                    <strong class="font-mono text-foundry-light-text dark:text-foundry-text">{d.subject}</strong>
+                    {#if d.type}<span class="ml-1 rounded bg-foundry-light-border/50 dark:bg-black/30 px-1 py-0.5 font-mono text-[10px]">{d.type}</span>{/if}
+                    {#if d.summary}<span class="ml-1">— {d.summary}</span>{/if}
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+
             <div class="min-h-0 flex-1 overflow-y-auto">
               {#if triples.length === 0 && !triplesLoading}
                 <p class="px-3 py-3 text-center text-[11px] text-foundry-light-muted dark:text-foundry-text/40">
@@ -416,8 +438,7 @@
                       <th class="px-2 py-1.5 text-left font-mono text-[10px] uppercase tracking-wide text-foundry-light-muted dark:text-foundry-text/50">Subject</th>
                       <th class="px-2 py-1.5 text-left font-mono text-[10px] uppercase tracking-wide text-foundry-light-muted dark:text-foundry-text/50">Predicate</th>
                       <th class="px-2 py-1.5 text-left font-mono text-[10px] uppercase tracking-wide text-foundry-light-muted dark:text-foundry-text/50">Object</th>
-                      <th class="px-2 py-1.5 text-left font-mono text-[10px] uppercase tracking-wide text-foundry-light-muted dark:text-foundry-text/50">Conf.</th>
-                      <th class="px-2 py-1.5 text-left font-mono text-[10px] uppercase tracking-wide text-foundry-light-muted dark:text-foundry-text/50">Valid from</th>
+                      <th class="px-2 py-1.5 text-left font-mono text-[10px] uppercase tracking-wide text-foundry-light-muted dark:text-foundry-text/50">Source file</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -426,8 +447,7 @@
                         <td class="px-2 py-1.5 font-mono text-[11px] text-foundry-light-text dark:text-foundry-text">{t.subject}</td>
                         <td class="px-2 py-1.5 font-mono text-[11px] text-foundry-light-text dark:text-foundry-text">{t.predicate}</td>
                         <td class="px-2 py-1.5 text-foundry-light-text/90 dark:text-foundry-text/90">{t.object}</td>
-                        <td class="px-2 py-1.5 text-foundry-light-muted dark:text-foundry-text/50">{(t.confidence ?? 0).toFixed(2)}</td>
-                        <td class="px-2 py-1.5 text-[11px] text-foundry-light-muted dark:text-foundry-text/50">{humanTime(t.valid_from)}</td>
+                        <td class="px-2 py-1.5 font-mono text-[11px] text-foundry-light-muted dark:text-foundry-text/50">{t.provenance ?? '—'}</td>
                       </tr>
                     {/each}
                   </tbody>
