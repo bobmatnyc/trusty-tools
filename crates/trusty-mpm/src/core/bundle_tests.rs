@@ -130,6 +130,7 @@ fn tm_skills_are_in_bundle() {
         "skills/tm-issues-prune.md",
         "skills/tm-cli-operations.md",
         "skills/tm-slack.md",
+        "skills/tm-secrets.md",
     ] {
         assert!(
             skill_paths.contains(expected),
@@ -291,6 +292,7 @@ fn tm_skills_have_frontmatter() {
         ("tm-issues-prune", TM_ISSUES_PRUNE),
         ("tm-cli-operations", TM_CLI_OPERATIONS),
         ("tm-slack", TM_SLACK),
+        ("tm-secrets", TM_SECRETS),
     ];
     for (name, content) in skills {
         assert!(
@@ -508,11 +510,15 @@ fn bundle_table_is_complete() {
     // Issue #7423 (+1): `skills/tm-prose-style.md` is NEW — it carries the
     //   worked example and observed-instance inventories the output style and
     //   BASE-AGENT.md used to state inline. 178 + 1 = 179.
-    assert_eq!(ALL.len(), 179);
+    // Issue #7527 (epic #7517) (+1): `skills/tm-secrets.md` is NEW — the
+    //   operator/PM reference for `tm secrets` (1Password/Keeper/Keychain
+    //   behind trusty-common), bundled ahead of the CLI itself (#7521/#7525)
+    //   per the DOC-74 design. 179 + 1 = 180.
+    assert_eq!(ALL.len(), 180);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 179, "artifact paths must be unique");
+    assert_eq!(paths.len(), 180, "artifact paths must be unique");
     for artifact in ALL {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());
