@@ -460,7 +460,7 @@ pub(crate) fn git_subcommand(segment: &str) -> Option<String> {
 
 /// The parsed argv of a git segment, and the index of its subcommand token.
 ///
-/// Why: [`git_subcommand`] answers "which subcommand", and [`git_output_file`]
+/// Why: [`git_subcommand`] answers "which subcommand", and [`git_file_write_target`]
 /// asks the same parser "and what did that subcommand's arguments say". One
 /// walk over the global options serves both, so a rule about a git ARGUMENT
 /// cannot drift from the rule about the git VERB — a second argv parser is the
