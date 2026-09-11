@@ -240,6 +240,40 @@ const SECRET_BEARING_FILE_PATTERNS: &[&str] = &[
 /// `matches_only_name_substring_family_separates_word_families_from_file_families`.
 const NAME_SUBSTRING_PATTERNS: &[&str] = &["*credentials*", "*secrets*", "token*"];
 
+/// Final extensions that mark a file as a committed PLACEHOLDER rather than a
+/// secret (#7479).
+///
+/// Why: `.env.*` classes every suffix as secret-bearing, so a tracked
+/// `.env.example` — a file that exists to be read, copied and edited — could
+/// not be reached by any verb, and a review-required change to one was handed
+/// back to the operator. These three extensions are a naming CONVENTION for
+/// "this holds key names and no key values", the same kind of convention
+/// `is_ssh_public_key_name`'s `.pub` already reads.
+/// What: the extension is honoured only as the FINAL one, so
+/// `.env.example.bak` is still a `.env.*` secret.
+/// Deliberate trade: a file that really does hold a credential and is named
+/// `*.example` reads freely. A guard keyed on names cannot tell those apart,
+/// and refusing every placeholder to catch a misnamed secret is the
+/// over-blocking #7266 round 4 already had to reverse.
+/// Test: `placeholder_suffixes_are_readable`, `real_dotenv_files_still_deny`,
+/// `a_placeholder_suffix_is_honoured_only_as_the_final_extension`.
+const PLACEHOLDER_SUFFIXES: &[&str] = &["example", "sample", "template"];
+
+/// Whether `name`'s final extension marks it as a placeholder (#7479).
+///
+/// Why: the one place the placeholder convention is decided, so the read rule
+/// and the `cp`/`mv` rule can never disagree about `.env.example`.
+/// What: `true` when the lowercased final extension is a
+/// [`PLACEHOLDER_SUFFIXES`] entry.
+/// Test: see [`PLACEHOLDER_SUFFIXES`].
+fn is_placeholder_name(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .is_some_and(|e| PLACEHOLDER_SUFFIXES.contains(&e.as_str()))
+}
+
 /// Whether `name` is matched by the denylist AND only by its word-shaped
 /// families ([`NAME_SUBSTRING_PATTERNS`]).
 ///
@@ -257,7 +291,7 @@ pub(crate) fn matches_only_name_substring_family(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     let mut matched = false;
     for pattern in SECRET_BEARING_FILE_PATTERNS {
-        if glob_match(&pattern.to_ascii_lowercase(), &lower) {
+        if pattern_reaches(pattern, &lower) {
             if !NAME_SUBSTRING_PATTERNS.contains(pattern) {
                 return false;
             }
@@ -267,8 +301,46 @@ pub(crate) fn matches_only_name_substring_family(name: &str) -> bool {
     matched
 }
 
+/// Whether ONE denylist entry reaches `lower_candidate` — the per-entry
+/// question [`secret_pattern_overlaps`] and [`any_pattern_overlaps`] ask of the
+/// whole list (#7498).
+///
+/// Why: [`matches_only_name_substring_family`] decided WHICH family produced a
+/// deny by literal matching, while the deny itself was produced by GLOB
+/// overlap. The two disagreed on every glob: `s*` denied because it overlaps
+/// the word family `*secrets*`'s core, but matched no entry literally, so the
+/// shape gate read it as a file family and skipped the rule that a word family
+/// counts only when written as a path. A one-character regex fragment therefore
+/// refused `gh issue list --search` and the BASE-ENGINEER file-size precheck.
+/// Asking one question of one entry is what keeps the two halves in agreement.
+/// What: a literal [`glob_match`], then — for a candidate carrying a wildcard —
+/// [`globs_overlap`] against the entry's [`pattern_literal_core`], and against
+/// the FULL entry when the candidate carries the `?` [`glob_match`] does not
+/// implement. That is exactly the union the two list-level functions apply.
+/// Test: `a_one_character_glob_fragment_does_not_name_a_secret_family`,
+/// `matches_only_name_substring_family_separates_word_families_from_file_families`.
+fn pattern_reaches(pattern: &str, lower_candidate: &str) -> bool {
+    let lower_pattern = pattern.to_ascii_lowercase();
+    if glob_match(&lower_pattern, lower_candidate) {
+        return true;
+    }
+    if !lower_candidate.bytes().any(|b| b == b'*' || b == b'?') {
+        return false;
+    }
+    let core = pattern_literal_core(&lower_pattern);
+    if !core.is_empty() && globs_overlap(lower_candidate.as_bytes(), core.as_bytes()) {
+        return true;
+    }
+    lower_candidate.contains('?')
+        && globs_overlap(lower_candidate.as_bytes(), lower_pattern.as_bytes())
+}
+
 /// Whether `name` matches one of [`SECRET_BEARING_FILE_PATTERNS`], case-insensitively.
 fn is_secret_bearing_name(name: &str) -> bool {
+    // #7479: a placeholder name is not a secret under any family.
+    if is_placeholder_name(name) {
+        return false;
+    }
     let lower = name.to_ascii_lowercase();
     SECRET_BEARING_FILE_PATTERNS
         .iter()
@@ -314,6 +386,11 @@ fn pattern_literal_core(pattern: &str) -> String {
 /// `overlap_answers_where_literal_matching_did_not`.
 pub(crate) fn secret_pattern_overlaps(candidate: &str) -> bool {
     let lower = candidate.to_ascii_lowercase();
+    // #7479: `*.example`/`*.sample`/`*.template`, literal or glob, is a
+    // placeholder and reaches only placeholder names.
+    if is_placeholder_name(&lower) {
+        return false;
+    }
     if is_secret_bearing_name(&lower) {
         return true;
     }
@@ -379,6 +456,11 @@ fn globs_overlap(a: &[u8], b: &[u8]) -> bool {
 /// `single_character_wildcards_reach_the_full_entries`.
 pub(crate) fn any_pattern_overlaps(candidate: &str) -> bool {
     let lower = candidate.to_ascii_lowercase();
+    // #7479: same placeholder exemption the sibling matchers apply, so the
+    // `?` arm cannot reintroduce the deny the `*` arm just withdrew.
+    if is_placeholder_name(&lower) {
+        return false;
+    }
     SECRET_BEARING_FILE_PATTERNS
         .iter()
         .any(|pattern| globs_overlap(lower.as_bytes(), pattern.to_ascii_lowercase().as_bytes()))
@@ -431,6 +513,16 @@ pub(crate) fn expand_brace_alternatives(token: &str) -> Option<Vec<String>> {
     let after_open = &token[start + 1..];
     let end_rel = after_open.find('}')?;
     let alternatives = &after_open[..end_rel];
+    // #7499: a group with no `,` is not an alternation, so a shell leaves it
+    // literal — `{{.Id}}` names the file `{{.Id}}`, never `.Id`. Keeping the
+    // braces is therefore the FAITHFUL reading, not a relaxation: the group
+    // reaches no name it did not already reach.
+    if !alternatives.contains(',') {
+        let after_close = start + 1 + end_rel + 1;
+        let head = &token[..after_close];
+        let tails = expand_brace_alternatives(&token[after_close..])?;
+        return Some(tails.iter().map(|tail| format!("{head}{tail}")).collect());
+    }
     if alternatives.contains('{') {
         // Nested group — not a shape this expander resolves; caller fails closed.
         return None;
