@@ -39,9 +39,22 @@ vercel env add FEATURE_FLAG preview staging --value="enabled"
 
 # Pre-deployment audit: check for public exposure of secrets
 grep -r "NEXT_PUBLIC_.*SECRET\|NEXT_PUBLIC_.*KEY\|NEXT_PUBLIC_.*TOKEN" .
-vercel env ls production --format json | \
-  jq '.[] | select(.type != "encrypted") | .key'
+vercel env ls production
 ```
+
+### Env Audits — Table Form Only, Never `--json`
+
+`vercel env ls --json` (and `--format json`) prints the stored `value` field
+for every variable, including ones marked Non-sensitive that the default
+table view redacts (#7500). A name- or status-only audit MUST use the plain
+`vercel env ls [environment]` table form — never `--json`, `--format json`,
+or any other raw-value output shape, even when the result is immediately
+piped through `jq` to select just a key or a type.
+
+When a value is genuinely needed (not just its name or encrypted status),
+route it through the secrets model (epic #7517) instead of a `--json` read —
+resolve it into the target process's env or stdin there, never into this
+agent's own context.
 
 ### Variable Classification
 - **`NEXT_PUBLIC_` prefix**: client-accessible, non-sensitive (API base URLs, feature flags)
@@ -100,7 +113,7 @@ Add to `package.json` for consistent developer experience:
   "scripts": {
     "dev": "vercel env pull .env.local --yes && next dev",
     "sync-env": "vercel env pull .env.local --environment=development --yes",
-    "audit-env": "vercel env ls --format json | jq '[.[] | {key: .key, encrypted: (.type == \"encrypted\")}]'"
+    "audit-env": "vercel env ls"
   }
 }
 ```
