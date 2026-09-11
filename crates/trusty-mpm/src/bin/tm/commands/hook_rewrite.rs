@@ -42,6 +42,8 @@
 // #6566: the tool-name coverage predicate lives beside the filter dispatch it
 // predicts, in `trusty-agents-common`, so the two cannot drift apart.
 use trusty_agents_common::compress::has_filter_for;
+// #7120: the #6986 source-read predicate, asked of the whole command.
+use trusty_agents_common::compress::tool_output::is_source_file_read;
 
 /// Day-one orchestrator-command exclusion list.
 ///
@@ -106,7 +108,13 @@ const ORCHESTRATOR_EXCLUSIONS: &[&str] = &[
 /// stays in `trusty-agents-common` — this module asks
 /// `compress::has_filter_for` rather than keeping a second copy that could
 /// drift from the dispatch it is meant to predict.
+/// It also returns `None` for a read verb applied to a source file (#7120),
+/// asked of the whole command rather than the derived name: `cat foo.rs`
+/// already fails `has_filter_for`, but `cat -n foo.rs` derives `"cat -n"` and
+/// reaches the file-read filter, so the flagged spelling bypass-permissions
+/// mode uses paid a compress spawn for its own bytes back.
 /// Test: `rewrite_appends_compress_pipe_for_plain_command`,
+/// `rewrite_skips_a_flagged_source_read`,
 /// `rewrite_appends_compress_pipe_with_subcommand_tool_name`,
 /// `rewrite_skips_orchestrator_commands`, `rewrite_skips_piped_commands`,
 /// `rewrite_skips_chained_commands`, `rewrite_skips_empty_command`,
@@ -127,6 +135,14 @@ pub(crate) fn rewrite_bash_command_for_compression(command: &str) -> Option<Stri
     // #7384: a comment or a trailing `\` would swallow or absorb the brace
     // group's own `printf`, so such a command is never wrapped.
     if cannot_be_brace_wrapped(trimmed) {
+        return None;
+    }
+    // #7120: asked of the WHOLE command, because `effective_tool_name` keeps
+    // only the first two tokens and a flag displaces the path out of them —
+    // `cat -n <file>.rs` derives `"cat -n"`, which `classify_tool` routes to
+    // the file-read filter the #6986 passthrough exists to keep source away
+    // from.
+    if is_source_file_read(trimmed) {
         return None;
     }
     let tool = effective_tool_name(trimmed);
@@ -829,6 +845,37 @@ mod tests {
                 "expected no compress wrap for uncovered tool: {cmd}"
             );
         }
+    }
+
+    #[test]
+    fn rewrite_skips_a_flagged_source_read() {
+        // #7120: bypass-permissions mode reads files with `cat -n <path>`.
+        // `effective_tool_name` keeps only the first two tokens, so the flag
+        // pushed the path out and `"cat -n"` reached the file-read filter —
+        // one compress spawn per read, returning every byte it was given. The
+        // unflagged spelling was already skipped by #6986's passthrough.
+        for cmd in [
+            "cat -n crates/trusty-mpm/src/bin/tm/commands/hook_rewrite.rs",
+            "cat crates/trusty-mpm/src/bin/tm/commands/hook_rewrite.rs",
+            "cat -s src/lib.rs",
+            "/bin/cat -n README.md",
+        ] {
+            assert_eq!(
+                rewrite_bash_command_for_compression(cmd),
+                None,
+                "a source read must never be wrapped for compression: {cmd}"
+            );
+        }
+
+        // The negative bound: `> /tmp/gate.txt` then `cat` it back is this
+        // project's gate-capture pattern, which is real gate output and still
+        // reaches the file-read filter.
+        let expected = expected_rewrite("cat -n /tmp/gate.txt", "cat -n");
+        assert_eq!(
+            rewrite_bash_command_for_compression("cat -n /tmp/gate.txt").as_deref(),
+            Some(expected.as_str()),
+            "a captured gate log is not a source read"
+        );
     }
 
     #[test]
