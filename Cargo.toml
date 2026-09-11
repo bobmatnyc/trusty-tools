@@ -64,7 +64,6 @@ default-members = [
     "crates/tc-services",
     "crates/trusty-agents",
     "crates/trusty-agents-common",
-    "crates/trusty-agents-local",
     "crates/trusty-analyze",
     "crates/trusty-audit",
     "crates/trusty-channels",

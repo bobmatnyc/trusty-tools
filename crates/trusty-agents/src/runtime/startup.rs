@@ -76,8 +76,8 @@ use build_info::BuildInfo;
 /// What: Performs the bootstrap in argv order. Returns `Ok(false)` when an
 /// early-exit path already handled the invocation (so the caller should
 /// `return Ok(())`); returns `Ok(true)` to continue into the main dispatch.
-/// Test: Indirectly via `cargo run -p trusty-agents`/`trusty-agents-local` and the
-/// crate's integration tests (`--version`, `--api`, normal REPL startup).
+/// Test: Indirectly via `cargo run -p trusty-agents` and the crate's
+/// integration tests (`--version`, `--api`, normal REPL startup).
 pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
     // Handle --version / -V before anything else (no env/tracing/etc.).
     // Why: `--version` must be cheap and side-effect-free so it's safe to
@@ -126,15 +126,17 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
     }
 
     // Why: External agent plugins (cto-assistant, future personas) are
-    //      installed by private launchers BEFORE calling `run()`. The
+    //      installed by a downstream launcher BEFORE calling `run()`. The
     //      published `trusty-agents` crate has zero knowledge of those private
-    //      crates — see `install_plugins()` in `crate::lib` and the
-    //      sibling `trusty-agents-local` binary for the wiring point.
+    //      crates — see `install_plugins()` in `crate::lib` for the wiring
+    //      point.
     // What: Anything the launcher passed to `install_plugins(...)` has
     //       already populated the OnceLock; the ctrl loop will pick it
     //       up when it builds the persona's tool surface.
-    // Test: `trusty-agents-local` integration; `trusty-agents` standalone has an
-    //       empty plugin list.
+    // Test: `agent_plugin`'s unit tests; `tagent` installs no plugins, so its
+    //       plugin list is empty.
+    // #7359: the `trusty-agents-local` launcher this pointed at installed
+    // nothing and was removed; `tagent` is the only launcher here now.
 
     // #3700/#3656/#3732: unlike the launcher-injected plugins above, a Python
     // *skill*'s tools are generic and CTO-agnostic (`tools::python_skill`),

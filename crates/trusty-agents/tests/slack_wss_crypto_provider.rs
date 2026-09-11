@@ -77,9 +77,8 @@ async fn wss_handshake_survives_after_install() {
     );
 }
 
-/// Calling the installer twice must stay `Ok`, because both `tagent` and
-/// `trusty-agents-local` route through `run()` and a launcher may have
-/// installed a provider first.
+/// Calling the installer twice must stay `Ok`, because every launcher routes
+/// through `run()` and one may have installed a provider first.
 #[test]
 fn install_is_idempotent_and_leaves_a_default_provider() {
     trusty_agents::tls::install_crypto_provider().expect("first install");

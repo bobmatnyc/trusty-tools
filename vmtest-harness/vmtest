@@ -1741,10 +1741,12 @@ cmd_clean() {
 #
 # SOURCE OF TRUTH: the `[[bin]]` targets declared across the workspace, read via
 # `cargo metadata --no-deps`, NOT by parsing Cargo.toml files.  Three real
-# defects avoided, each of which this workspace actually contains:
-#   - `crates/trusty-agents-local` has a src/main.rs and NO [[bin]] section, so
-#     cargo infers the target and a manifest parser misses it entirely — it
-#     would report a spurious REMOVED on a binary that exists (§9.4);
+# defects avoided:
+#   - a crate with a src/main.rs and NO [[bin]] section gets its target INFERRED
+#     by cargo, so a manifest parser misses it entirely and reports a spurious
+#     REMOVED on a binary that exists (§9.4).  #7359 removed the last such crate
+#     (`crates/trusty-agents-local`), so nothing instantiates this shape today —
+#     the next crate added without a [[bin]] section instantiates it again;
 #   - workspace-inherited fields are resolved for free;
 #   - `crates/trusty-agents/ui/src-tauri` is a path member that is not
 #     `crates/*/Cargo.toml`, so a glob would skip it (§9.2, §9.3).

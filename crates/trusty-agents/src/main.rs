@@ -2,11 +2,14 @@
 //!
 //! Why: The entire startup pipeline (argv parsing, env load, tracing init,
 //!      subcommand dispatch, REPL/CTRL fallback) lives in the library at
-//!      `trusty_agents::runtime::run`. Hosting it in the library lets private
-//!      launchers (`trusty-agents-local`) install additional agent plugins via
+//!      `trusty_agents::runtime::run`. Hosting it in the library lets a
+//!      downstream launcher install additional agent plugins via
 //!      `trusty_agents::install_plugins(...)` BEFORE invoking `run()`, without
 //!      polluting the crate with references to `publish = false` agent crates
 //!      such as `cto-assistant`.
+//!      #7359: `tagent` is now the only launcher in this workspace — the
+//!      former `trusty-agents-local` binary was byte-for-byte this same
+//!      pass-through and was removed.
 //! What: Synchronous entry point that delegates straight to
 //!       `trusty_agents::run_to_completion()`, which owns the tokio runtime.
 //!       No additional setup, no plugin wiring — the binary ships with an

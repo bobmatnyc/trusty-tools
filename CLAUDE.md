@@ -511,7 +511,6 @@ everywhere: ticket descriptions, build commands, conversation.
 | `mpm` | trusty-mpm | `-p trusty-mpm` | `crates/trusty-mpm/` |
 | `tagent` or `t-agents` | trusty-agents | `-p trusty-agents` | `crates/trusty-agents/` (bin: `tagent`) |
 | `t-agents-common` | trusty-agents-common | `-p trusty-agents-common` | `crates/trusty-agents-common/` |
-| `t-agents-local` | trusty-agents-local | `-p trusty-agents-local` | `crates/trusty-agents-local/` |
 | `tcode` | trusty-code | `-p trusty-code` | `crates/trusty-code/` |
 | `tctl` | trusty-installer | `-p trusty-installer` | `crates/trusty-installer/` |
 | `taudit` | trusty-audit | `-p trusty-audit` | `crates/trusty-audit/` (bins: `trusty-audit`, `taudit`) |

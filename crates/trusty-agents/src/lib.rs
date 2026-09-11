@@ -169,14 +169,15 @@ pub mod runtime;
 /// Re-export `install_plugins` so external launchers can register agent
 /// plugins (e.g. `cto-assistant`) before calling `run()`.
 ///
-/// Why: `trusty-agents` cannot depend on `publish = false` agent crates.
-///      A private workspace binary (`trusty-agents-local`) wires the plugin
-///      registry at startup via this re-export, keeping the published
-///      surface free of those crates.
+/// Why: `trusty-agents` cannot depend on `publish = false` agent crates. A
+///      downstream launcher wires the plugin registry at startup via this
+///      re-export, keeping the published surface free of those crates.
+///      #7359: the in-workspace launcher that used this (`trusty-agents-local`)
+///      was a pass-through that installed nothing, and was removed. The
+///      re-export stays because it is published API.
 /// What: Forwards to `tools::agent_plugin::install_plugins`. The underlying
 ///       store is a OnceLock — call exactly once before `run()`.
-/// Test: Exercised by `trusty-agents-local`'s startup; locally by the existing
-///       agent_plugin unit tests.
+/// Test: `agent_plugin`'s unit tests; no in-workspace launcher installs plugins.
 pub use tools::agent_plugin::install_plugins;
 
 /// Re-export `run` at the crate root so launchers can call

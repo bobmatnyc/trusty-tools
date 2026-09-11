@@ -166,7 +166,6 @@ source, and documentation, use the [crate map](docs/reference/crate-map.md).
 | `tga` (`trusty-git-analytics` directory) | Developer productivity analytics from git history |
 | `trusty-agents` | Agent orchestration platform |
 | `trusty-agents-common` | Shared types and utilities for agent framework |
-| `trusty-agents-local` | Local agent runtime implementation |
 | `trusty-agents-ui` | Nested Tauri desktop client for trusty-agents |
 | `trusty-audit-ui` | Nested Tauri desktop client for trusty-audit |
 
