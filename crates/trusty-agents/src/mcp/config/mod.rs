@@ -1,27 +1,25 @@
-//! MCP service registry persisted at `~/.trusty-agents/config.toml`.
+//! `~/.trusty-agents/config.toml` — this crate's own global settings.
 //!
-//! Why: Agents that coordinate work (ctrl, PM, research, observe) need to know
-//! which external MCP tools are available so the LLM can request them. Keeping
-//! this declaration in a single global config file (a) survives upgrades of
-//! the binary, (b) lets a user enable/disable services without recompiling,
-//! and (c) gives a stable surface for prompt injection across all roles.
-//! What: `GlobalConfig` is the on-disk schema (formerly `McpConfig`; renamed
-//! in #245 to reflect that it composes multiple subsystems — MCP registry +
-//! GitHub identities — rather than only MCP). `load_or_create()` creates the
-//! file with default content (native trusty-mpm enabled, #3203) when missing.
-//! The registry only lists *remote/service-tier*
-//! MCPs that agents should know about — local native integrations
-//! (kuzu-memory, mcp-vector-search) are wired into the harness directly and
-//! deliberately do not appear here.
-//! `services_for_role()` returns enabled services applicable to a given agent
-//! role; `render_prompt_section()` formats them as a Markdown block suitable
-//! for `SystemPromptBuilder::add_mcp_layer`.
+//! Why: one global file that survives a binary upgrade, lets a user change
+//! behaviour without recompiling, and gives the prompt builder a stable
+//! surface to read. `GlobalConfig` is the on-disk schema (formerly
+//! `McpConfig`; renamed in #245 once it composed several subsystems).
+//!
+//! What it is NO LONGER (#7454, ADR-0060): the MCP server registry. The
+//! servers moved to the file `trusty-code` shares
+//! (`~/.trusty-tools/mcp/servers.toml`, [`crate::mcp::shared`]), and the
+//! per-assistant overrides live in the assistant's own home. What stays under
+//! `[mcp]` here is this crate's POLICY over those servers — which agent roles
+//! get the prompt layer, and whether a project's `.mcp.json` is trusted — so
+//! [`GlobalConfig::servers_for_role`] and
+//! [`GlobalConfig::render_prompt_section`] now take the effective server list
+//! their caller already resolved rather than reading one of their own.
 //!
 //! Module layout (see #366 split):
 //! - `mod.rs` — `GlobalConfig` struct + load/save/render behavior
 //! - `types.rs` — the config sub-section types + defaults
 //! - `defaults.rs` — the `DEFAULT_CONFIG_TOML` literal
-//! - `tests.rs` — unit tests
+//! - `tests/` — unit tests
 //!
 //! Test: `tests::*` cover create-on-absent, role gating, and rendering.
 
@@ -38,9 +36,11 @@ use serde::{Deserialize, Serialize};
 
 use defaults::DEFAULT_CONFIG_TOML;
 
-pub use types::{
-    GitConfig, LocalInferenceConfig, McpSection, McpService, McpTool, ProvidersSection,
-};
+pub use types::{GitConfig, LocalInferenceConfig, McpSection, ProvidersSection};
+
+use trusty_mcp::config::McpServerConfig;
+
+use crate::mcp::extensions;
 
 /// Roots of the global config tree (`~/.trusty-agents/config.toml`).
 const CONFIG_DIR_NAME: &str = ".trusty-agents";
@@ -318,133 +318,46 @@ impl GlobalConfig {
         Ok(())
     }
 
-    /// Add or replace a service by name. Persists immediately. (#244)
+    /// The servers applicable to `role`, after role gating.
     ///
-    /// Why: Allows the `mcp_add` tool to register a new service, or update
-    /// an existing one (re-add with same name) atomically. By persisting
-    /// inside the method the caller can't forget to save.
-    /// What: Removes any existing service with `service.name`, pushes the
-    /// new one, and calls `save()`.
-    /// Test: `tests::add_service_replaces_existing`.
-    pub async fn add_service(&mut self, service: McpService) -> Result<()> {
-        self.mcp.services.retain(|s| s.name != service.name);
-        self.mcp.services.push(service);
-        self.save().await
-    }
-
-    /// Remove a service by name. Persists immediately. (#244)
-    ///
-    /// Why: Backs the `mcp_remove` tool. Returns whether anything was
-    /// actually removed so the tool can give the LLM a meaningful message
-    /// (vs. silently no-op'ing on an unknown name).
-    /// What: Filters `services`, persists if a removal occurred, returns
-    /// `Ok(true)` when found and removed, `Ok(false)` otherwise.
-    /// Test: `tests::remove_service_*`.
-    pub async fn remove_service(&mut self, name: &str) -> Result<bool> {
-        let before = self.mcp.services.len();
-        self.mcp.services.retain(|s| s.name != name);
-        let removed = self.mcp.services.len() < before;
-        if removed {
-            self.save().await?;
-        }
-        Ok(removed)
-    }
-
-    /// Enable a service by name. Persists immediately. (#244)
-    ///
-    /// Why: Backs the `mcp_enable` tool. The service stays registered but
-    /// becomes visible in role-gated prompt rendering and dispatch.
-    /// What: Finds by name, sets `enabled = true`, persists. Returns
-    /// `Ok(true)` when found, `Ok(false)` when name unknown.
-    /// Test: `tests::enable_disable_toggles_flag`.
-    pub async fn enable_service(&mut self, name: &str) -> Result<bool> {
-        if let Some(s) = self.mcp.services.iter_mut().find(|s| s.name == name) {
-            s.enabled = true;
-            self.save().await?;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    /// Disable a service by name. Persists immediately. (#244)
-    ///
-    /// Why: Backs the `mcp_disable` tool. Lets the user temporarily turn
-    /// off a service without forgetting its configuration.
-    /// What: Finds by name, sets `enabled = false`, persists. Returns
-    /// `Ok(true)` when found, `Ok(false)` when name unknown.
-    /// Test: `tests::enable_disable_toggles_flag`.
-    pub async fn disable_service(&mut self, name: &str) -> Result<bool> {
-        if let Some(s) = self.mcp.services.iter_mut().find(|s| s.name == name) {
-            s.enabled = false;
-            self.save().await?;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    /// Render a human-readable list of all registered services. (#244)
-    ///
-    /// Why: The `mcp_list` tool returns this string to the LLM so it can
-    /// summarize available external capabilities for the user. Includes
-    /// disabled services (marked) so the user can see what's available to
-    /// re-enable.
-    /// What: Builds a multi-line string with a header count, then for each
-    /// service a line with a check/cross marker, name, transport,
-    /// description, and a wrapped tools list.
-    /// Test: `tests::render_list_format`.
-    pub fn render_list(&self) -> String {
-        let total = self.mcp.services.len();
-        if total == 0 {
-            return "No MCP services registered.".to_string();
-        }
-        let mut out = format!("Registered MCP services ({total}):\n\n");
-        for svc in &self.mcp.services {
-            let marker = if svc.enabled { "✓" } else { "✗" };
-            let disabled_suffix = if svc.enabled { "" } else { " (disabled)" };
-            out.push_str(&format!(
-                "{} {} [{}] — {}{}\n",
-                marker, svc.name, svc.transport, svc.description, disabled_suffix
-            ));
-            if !svc.tools.is_empty() {
-                let names: Vec<&str> = svc.tools.iter().map(|t| t.name.as_str()).collect();
-                out.push_str(&format!("  Tools: {}\n", names.join(", ")));
-            }
-            out.push('\n');
-        }
-        out.trim_end().to_string()
-    }
-
-    /// Services enabled for a given agent role.
-    ///
-    /// Why: The MCP layer is role-gated — engineer/coder/qa/ops agents have
-    /// their own purpose-built tools and don't benefit from MCP descriptions
-    /// in their prompt. Coordinating roles (ctrl, pm, research, observe) do.
-    /// What: If `role` is not in `inject_for_roles`, returns empty. Otherwise
-    /// returns references to all `enabled = true` services.
-    /// Test: `tests::services_for_role_gating`.
-    pub fn services_for_role(&self, role: &str) -> Vec<&McpService> {
+    /// Why: the MCP prompt layer is role-gated — engineer/coder/qa/ops agents
+    /// have their own purpose-built tools and do not benefit from MCP
+    /// descriptions in their prompt. Coordinating roles (ctrl, pm, research,
+    /// observe) do. The gate is this crate's POLICY, which is why it stayed
+    /// here when the servers themselves moved (#7454).
+    /// What: empty when `role` is not in `inject_for_roles`; otherwise every
+    /// ENABLED server from the effective set the caller already resolved.
+    /// Callers pass `resolved.servers`, not a list of their own — see
+    /// [`crate::mcp::shared::resolve_for_assistant`].
+    /// Test: `tests::render_tests::servers_for_role_gating`,
+    /// `tests::render_tests::servers_for_role_drops_disabled`.
+    pub fn servers_for_role<'a>(
+        &self,
+        role: &str,
+        servers: &'a [McpServerConfig],
+    ) -> Vec<&'a McpServerConfig> {
         if !self.mcp.inject_for_roles.iter().any(|r| r == role) {
             return Vec::new();
         }
-        self.mcp.services.iter().filter(|s| s.enabled).collect()
+        servers.iter().filter(|s| s.enabled).collect()
     }
 
     /// Render the prompt section listing MCP tools available to `role`.
     ///
-    /// Why: The model needs a textual description of what MCP tools exist so
-    /// it can request them via the standard tool-call protocol. Without this
-    /// the agent has no way to discover external capabilities.
-    /// What: Builds a Markdown block with one heading per service and a bullet
-    /// list of `tool_name — description` lines. Returns `None` when no services
-    /// apply to the role (so callers can skip injecting an empty layer).
+    /// Why: the model needs a textual description of what MCP servers exist so
+    /// it can request their tools. Without this the agent has no way to
+    /// discover external capability.
+    /// What: a Markdown block with one heading per server and its declared
+    /// tools. A disabled server is still listed, marked disabled — a pane or a
+    /// prompt that hides one is the fabrication class DOC-57 §4.4 rules out.
+    /// `None` when no server applies to the role, so callers can skip
+    /// injecting an empty layer.
     /// Test: `tests::render_prompt_section_*`.
-    pub fn render_prompt_section(&self, role: &str) -> Option<String> {
+    pub fn render_prompt_section(&self, role: &str, servers: &[McpServerConfig]) -> Option<String> {
         if !self.mcp.inject_for_roles.iter().any(|r| r == role) {
             return None;
         }
-        if self.mcp.services.is_empty() {
+        if servers.is_empty() {
             return None;
         }
 
@@ -454,22 +367,24 @@ impl GlobalConfig {
              available. Reference them by name when coordinating work that \
              involves these platforms.\n\n",
         );
-        for svc in &self.mcp.services {
-            if svc.enabled {
-                out.push_str(&format!("### {} — {}\n\n", svc.name, svc.description));
-                if svc.tools.is_empty() {
-                    out.push_str("_(no tools declared)_\n\n");
-                    continue;
-                }
-                let names: Vec<&str> = svc.tools.iter().map(|t| t.name.as_str()).collect();
-                out.push_str(&format!("Tools: {}\n\n", names.join(", ")));
-            } else {
+        for server in servers {
+            let description = extensions::description(server);
+            if !server.enabled {
                 out.push_str(&format!(
-                    "### {} — {} (disabled)\n\n",
-                    svc.name, svc.description
+                    "### {} — {description} (disabled)\n\n",
+                    server.name
                 ));
                 out.push_str("_(disabled — not available in this environment)_\n\n");
+                continue;
             }
+            out.push_str(&format!("### {} — {description}\n\n", server.name));
+            let tools = extensions::tools(server);
+            if tools.is_empty() {
+                out.push_str("_(no tools declared)_\n\n");
+                continue;
+            }
+            let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+            out.push_str(&format!("Tools: {}\n\n", names.join(", ")));
         }
         Some(out.trim_end().to_string())
     }

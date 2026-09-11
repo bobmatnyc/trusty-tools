@@ -38,6 +38,10 @@
 //!   2026-08-01). Runs on every launch, creates what is missing, and CANNOT
 //!   fail — a home the app cannot create becomes a reported issue with a
 //!   remedy, never a failed boot.
+//! - `mcp` — [`mcp::McpOverrides`]: the ASSISTANT tier of MCP configuration
+//!   (#7454, ADR-0060). `<home>/config.toml`'s `[mcp]` table adds a server,
+//!   replaces one by name, or disables one; the global tier and the resolver
+//!   live in [`crate::mcp::shared`].
 //! - `memory` — [`memory::MemoryConfig`] and [`memory::resolve_palace_plan`]:
 //!   one trusty-memory palace per assistant plus the opt-in fan-out to other
 //!   assistants' palaces (#7428). The binding's `palace` still wins where one
@@ -75,6 +79,7 @@ pub mod error;
 pub mod health;
 pub mod home;
 pub mod instance;
+pub mod mcp;
 pub mod memory;
 pub mod provision;
 pub mod roster;
@@ -90,6 +95,7 @@ pub use home::{
     assistants_root,
 };
 pub use instance::{ASSISTANT_ROLE, AssistantInstanceId, is_assistant_role};
+pub use mcp::{McpOverrides, OverridesRead, read_overrides, write_overrides};
 pub use memory::{
     MemoryConfig, PalacePlan, PalaceSource, own_palace, read_memory_config, resolve_palace_plan,
     resolve_palace_plan_in, write_memory_config,

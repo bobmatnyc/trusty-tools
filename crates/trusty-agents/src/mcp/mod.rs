@@ -1,23 +1,47 @@
-//! MCP (Model Context Protocol) registry and prompt injection.
+//! MCP (Model Context Protocol) connections: two tiers, one authority.
 //!
-//! Why: trusty-agents itself runs as an LLM-driven agent harness. To let coordinating
-//! agents (ctrl, PM, research, observe) discover and call external MCP tools
-//! (mcp-vector-search, granola-notes, …) we need a single declarative registry
-//! whose contents can be listed in the agent's system prompt so the model knows
-//! the tools exist.
-//! What: This module exposes `GlobalConfig` (formerly `McpConfig`; renamed in
-//! #245 once it grew to host the `[github]` ticketing section alongside the
-//! MCP registry), loaded from `~/.trusty-agents/config.toml` (created with sane
-//! defaults on first use). Project-memory recall is no longer routed through
-//! an external MCP binary — `ctrl` queries the in-process redb+usearch store
-//! directly (#275).
-//! Test: `mcp::config::tests::*` cover load/create/render.
+//! Why: trusty-agents itself runs as an LLM-driven agent harness, and its
+//! assistants reach external capability through MCP servers. Until #7454 this
+//! crate described those servers with THREE independent schemas of its own
+//! (`mcp::config::McpService`, `tools::registry::config::EndpointConfig`,
+//! `mcp::mcp_json::McpJsonServer`), all global-only, and ran a second parser
+//! over the identical `.mcp.json` format `trusty-mpm` already read. ADR-0060
+//! collapses all of that onto `trusty_mcp::config::McpServerConfig` and adds
+//! the tier the owner asked for on 2026-09-11: an MCP connection is set
+//! globally OR per assistant.
+//!
+//! What:
+//! - [`extensions`] — the consumer-specific keys this crate keeps inside
+//!   `McpServerConfig::extensions`, and the only place they are decoded.
+//! - [`shared`] — the global tier: the file shared with `trusty-code`
+//!   (`~/.trusty-tools/mcp/servers.toml`), the one-time migration off the
+//!   retired tables, the `.mcp.json` import, and
+//!   [`shared::resolve_for_assistant`], which layers an assistant's own
+//!   `[mcp]` overrides on top through `trusty_mcp::config::resolve`.
+//! - [`config`] — `GlobalConfig`, the rest of `~/.trusty-agents/config.toml`.
+//!   It no longer describes MCP SERVERS; what remains under `[mcp]` is this
+//!   crate's own policy (which agent roles get the prompt layer, whether a
+//!   project's `.mcp.json` is trusted).
+//!
+//! The assistant tier itself lives with the assistant:
+//! [`crate::assistants::mcp`].
+//!
+//! Test: `tests` — the submodules under `mcp/tests/`.
 
 pub mod config;
-pub mod mcp_json;
+pub mod extensions;
+pub mod shared;
+
+#[cfg(test)]
+mod tests;
 
 pub use config::GlobalConfig;
 #[allow(unused_imports)]
-pub use config::{LocalInferenceConfig, McpSection, McpService, McpTool};
+pub use config::{LocalInferenceConfig, McpSection};
 #[allow(unused_imports)]
-pub use mcp_json::{McpJsonServer, discover_mcp_json_paths, parse_mcp_json_servers};
+pub use extensions::{AuthKind, AuthSpec, DriverKind, ToolDescriptor, TransportLimits};
+#[allow(unused_imports)]
+pub use shared::{
+    GlobalTier, McpIssue, McpTier, ResolvedMcp, ServerStatus, discover_mcp_json_paths,
+    load_global_at, resolve_for_assistant, resolve_here, resolve_in,
+};

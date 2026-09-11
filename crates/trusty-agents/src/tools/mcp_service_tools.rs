@@ -29,7 +29,9 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, OnceCell};
 
-use crate::mcp::{GlobalConfig, McpService};
+use trusty_mcp::config::McpServerConfig;
+
+use crate::mcp::extensions;
 use crate::plugins::stdio_mcp::StdioMcpClient;
 use crate::tools::traits::{ToolExecutor, ToolResult};
 
@@ -61,18 +63,26 @@ pub(crate) struct ServiceClient {
 }
 
 impl ServiceClient {
-    fn new(service: &McpService) -> Self {
-        Self::with_parts(
-            service.name.clone(),
-            service.command.clone(),
-            service.args.clone(),
-            service.env.clone(),
-        )
+    /// Construct from a resolved server, when its transport is stdio.
+    ///
+    /// Why: `#[non_exhaustive]` `McpTransport` means the caller cannot match
+    /// it inline; [`extensions::stdio_parts`] owns that match, with its
+    /// wildcard arm, in one place.
+    /// What: `None` for any non-stdio transport — nothing here can spawn one.
+    /// Test: `mcp_service_tool_executors_returns_tools_for_enabled_services`.
+    fn from_server(server: &McpServerConfig) -> Option<Self> {
+        let (command, args, env) = extensions::stdio_parts(server)?;
+        Some(Self::with_parts(
+            server.name.clone(),
+            command.to_string(),
+            args.to_vec(),
+            env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        ))
     }
 
-    /// Construct from primitive parts rather than a full `McpService` — used
-    /// by `mcp_live`, whose server specs may originate from `.mcp.json`
-    /// (no `McpService` involved).
+    /// Construct from primitive parts rather than a resolved server — used
+    /// by `mcp_live`, whose server specs carry the same three fields already
+    /// flattened.
     pub(crate) fn with_parts(
         name: String,
         command: String,
@@ -139,14 +149,14 @@ impl ServiceClient {
 /// MCP defines as `{ "content": [{"type":"text","text":...}, ...] }`) into
 /// a single string for the tool-result message.
 /// Test: `formats_text_content`, `surfaces_call_errors`.
-struct McpServiceTool {
+struct StaticMcpTool {
     name: String,
     schema: Value,
     client: Arc<ServiceClient>,
 }
 
 #[async_trait]
-impl ToolExecutor for McpServiceTool {
+impl ToolExecutor for StaticMcpTool {
     fn name(&self) -> &str {
         &self.name
     }
@@ -240,56 +250,65 @@ pub(crate) fn format_mcp_call_result(value: &Value) -> String {
 /// at most one MCP subprocess per server, lazily on first call.
 /// Test: `mcp_service_tool_executors_returns_tools_for_enabled_services`,
 /// `disabled_services_are_skipped`.
-pub async fn mcp_service_tool_executors() -> Vec<Arc<dyn ToolExecutor>> {
-    let config = GlobalConfig::load().await;
-    build_executors_from_services(&config.mcp.services)
+pub async fn mcp_service_tool_executors(
+    assistant: Option<&str>,
+    project_dir: &std::path::Path,
+) -> Vec<Arc<dyn ToolExecutor>> {
+    let resolved = crate::mcp::resolve_for_assistant(assistant, project_dir).await;
+    build_executors_from_servers(&resolved.usable())
 }
 
-/// Pure helper that turns a service list into executors. Split out so tests
-/// can feed synthetic configs without touching `~/.trusty-agents/config.toml`.
-fn build_executors_from_services(services: &[McpService]) -> Vec<Arc<dyn ToolExecutor>> {
+/// Pure helper that turns a resolved server list into executors. Split out so
+/// tests can feed synthetic servers without touching any config file.
+///
+/// Why: the caller passes `ResolvedMcp::usable()`, so a server this assistant
+/// disabled, or one whose credential does not resolve, never reaches here —
+/// the per-assistant tier lands on the registry the model actually sees.
+/// Test: `mcp_service_tool_executors_returns_tools_for_enabled_services`,
+/// `disabled_services_are_skipped`.
+fn build_executors_from_servers(servers: &[&McpServerConfig]) -> Vec<Arc<dyn ToolExecutor>> {
     let mut executors: Vec<Arc<dyn ToolExecutor>> = Vec::new();
-    // Used to dedupe across services in case two servers advertise the same
-    // tool name — first declaration wins.
+    // Used to dedupe across servers in case two advertise the same tool name —
+    // first declaration wins.
     let mut seen: HashMap<String, String> = HashMap::new();
 
-    for svc in services {
+    for svc in servers {
         if !svc.enabled {
             continue;
         }
-        if svc.discover {
+        if extensions::discover(svc) {
             tracing::debug!(
                 service = %svc.name,
                 "MCP service has discover=true; skipping static tool list (crate::tools::mcp_live handles this service via live tools/list discovery)"
             );
             continue;
         }
-        if svc.tools.is_empty() {
+        let tools = extensions::tools(svc);
+        if tools.is_empty() {
             tracing::debug!(
                 service = %svc.name,
                 "MCP service has no static tools listed in config; skipping (live tools/list discovery would require spawning the server at registry build time)"
             );
             continue;
         }
-        // Stdio-only for now: HTTP MCP transport isn't wired into
+        // Stdio-only for now: remote MCP transports aren't wired into
         // StdioMcpClient. Skip rather than fail.
-        if svc.transport != "stdio" {
+        let Some(shared_client) = ServiceClient::from_server(svc).map(Arc::new) else {
             tracing::debug!(
                 service = %svc.name,
-                transport = %svc.transport,
+                transport = extensions::transport_label(svc),
                 "skipping non-stdio MCP service (only stdio transport supported)"
             );
             continue;
-        }
-        if svc.command.is_empty() {
+        };
+        if shared_client.command.is_empty() {
             tracing::debug!(
                 service = %svc.name,
                 "skipping MCP service with empty command"
             );
             continue;
         }
-        let shared_client = Arc::new(ServiceClient::new(svc));
-        for tool in &svc.tools {
+        for tool in &tools {
             if let Some(existing_service) = seen.get(&tool.name) {
                 tracing::debug!(
                     tool = %tool.name,
@@ -316,7 +335,7 @@ fn build_executors_from_services(services: &[McpService]) -> Vec<Arc<dyn ToolExe
                     }
                 }
             });
-            let exec: Arc<dyn ToolExecutor> = Arc::new(McpServiceTool {
+            let exec: Arc<dyn ToolExecutor> = Arc::new(StaticMcpTool {
                 name: tool.name.clone(),
                 schema,
                 client: shared_client.clone(),
@@ -334,27 +353,42 @@ fn build_executors_from_services(services: &[McpService]) -> Vec<Arc<dyn ToolExe
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mcp::{McpService, McpTool};
+    use crate::mcp::extensions::ToolDescriptor;
+    use trusty_mcp::config::McpTransport;
 
-    fn svc(name: &str, enabled: bool, tools: &[&str]) -> McpService {
-        McpService {
-            name: name.to_string(),
-            description: format!("{name} service"),
-            command: format!("{name}-bin"),
-            args: vec!["mcp".to_string()],
-            env: HashMap::new(),
-            url: None,
-            transport: "stdio".to_string(),
-            enabled,
-            tools: tools
-                .iter()
-                .map(|t| McpTool {
-                    name: (*t).to_string(),
-                    description: format!("{t} description"),
-                })
-                .collect(),
-            discover: false,
-        }
+    /// One stdio server with a static tool list, the shape #7454 replaced
+    /// `McpService` with.
+    fn svc(name: &str, enabled: bool, tools: &[&str]) -> McpServerConfig {
+        let mut server = McpServerConfig::new(
+            name,
+            McpTransport::Stdio {
+                command: format!("{name}-bin"),
+                args: vec!["mcp".to_string()],
+                env: Default::default(),
+            },
+        );
+        server.enabled = enabled;
+        extensions::set(
+            &mut server.extensions,
+            extensions::DESCRIPTION,
+            &format!("{name} service"),
+        );
+        let declared: Vec<ToolDescriptor> = tools
+            .iter()
+            .map(|t| ToolDescriptor {
+                name: (*t).to_string(),
+                description: format!("{t} description"),
+            })
+            .collect();
+        extensions::set(&mut server.extensions, extensions::TOOLS, &declared);
+        server
+    }
+
+    /// `build_executors_from_servers` takes the borrowed form
+    /// `ResolvedMcp::usable()` returns; the tests own their servers.
+    fn build(servers: &[McpServerConfig]) -> Vec<Arc<dyn ToolExecutor>> {
+        let refs: Vec<&McpServerConfig> = servers.iter().collect();
+        build_executors_from_servers(&refs)
     }
 
     /// Why: Enabled services with non-empty tool lists must produce one
@@ -369,7 +403,7 @@ mod tests {
             true,
             &["granola_search", "granola_get", "granola_list"],
         )];
-        let execs = build_executors_from_services(&services);
+        let execs = build(&services);
         assert_eq!(execs.len(), 3);
         let names: Vec<&str> = execs.iter().map(|e| e.name()).collect();
         assert!(names.contains(&"granola_search"));
@@ -394,7 +428,7 @@ mod tests {
     #[test]
     fn disabled_services_are_skipped() {
         let services = vec![svc("granola-mcp", false, &["granola_search"])];
-        assert!(build_executors_from_services(&services).is_empty());
+        assert!(build(&services).is_empty());
     }
 
     /// Why: Services without a static tool list (or empty list) get skipped
@@ -406,7 +440,7 @@ mod tests {
     #[test]
     fn services_with_no_tools_are_skipped() {
         let services = vec![svc("empty-svc", true, &[])];
-        assert!(build_executors_from_services(&services).is_empty());
+        assert!(build(&services).is_empty());
     }
 
     /// Why: Non-stdio transports aren't wired into StdioMcpClient yet;
@@ -416,9 +450,11 @@ mod tests {
     #[test]
     fn non_stdio_services_are_skipped() {
         let mut s = svc("http-svc", true, &["http_op"]);
-        s.transport = "http".to_string();
-        s.url = Some("https://example.com".to_string());
-        assert!(build_executors_from_services(&[s]).is_empty());
+        s.transport = McpTransport::Http {
+            url: "https://example.com".to_string(),
+            headers: Default::default(),
+        };
+        assert!(build(&[s]).is_empty());
     }
 
     /// Why: #3238 — a service with `discover = true` opts entirely into the
@@ -432,8 +468,8 @@ mod tests {
     #[test]
     fn discover_services_skip_static_tool_list() {
         let mut s = svc("discover-svc", true, &["static_tool"]);
-        s.discover = true;
-        assert!(build_executors_from_services(&[s]).is_empty());
+        extensions::set(&mut s.extensions, extensions::DISCOVER, &true);
+        assert!(build(&[s]).is_empty());
     }
 
     /// Why: Duplicate tool names across services would create ambiguous
@@ -447,7 +483,7 @@ mod tests {
             svc("a", true, &["shared_tool"]),
             svc("b", true, &["shared_tool", "b_only"]),
         ];
-        let execs = build_executors_from_services(&services);
+        let execs = build(&services);
         assert_eq!(execs.len(), 2);
         let names: Vec<&str> = execs.iter().map(|e| e.name()).collect();
         assert!(names.contains(&"shared_tool"));
@@ -508,22 +544,23 @@ mod tests {
     /// Test: This test.
     #[tokio::test]
     async fn execute_returns_error_when_binary_missing() {
-        let services = vec![McpService {
-            name: "nonexistent".to_string(),
-            description: "missing".to_string(),
-            command: "/nonexistent/mcp/binary/xyzzy-tool-test".to_string(),
-            args: vec![],
-            env: HashMap::new(),
-            url: None,
-            transport: "stdio".to_string(),
-            enabled: true,
-            tools: vec![McpTool {
+        let mut server = McpServerConfig::new(
+            "nonexistent",
+            McpTransport::Stdio {
+                command: "/nonexistent/mcp/binary/xyzzy-tool-test".to_string(),
+                args: vec![],
+                env: Default::default(),
+            },
+        );
+        extensions::set(
+            &mut server.extensions,
+            extensions::TOOLS,
+            &vec![ToolDescriptor {
                 name: "ghost_tool".to_string(),
                 description: "won't run".to_string(),
             }],
-            discover: false,
-        }];
-        let execs = build_executors_from_services(&services);
+        );
+        let execs = build(&[server]);
         assert_eq!(execs.len(), 1);
         let result = execs[0].execute(json!({})).await;
         assert!(result.is_error(), "should error when binary missing");

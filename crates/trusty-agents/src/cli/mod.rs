@@ -10,9 +10,12 @@
 //! Test: See `search_cmd::tests` for arg-parsing and formatter unit tests,
 //! and the `tests` module at the bottom of this file for `did_you_mean`.
 
+// #7454: `tagent mcp list [--assistant <id>]` — both MCP config tiers.
+pub mod mcp_cmd;
 pub mod memories_cmd;
 pub mod search_cmd;
 
+pub use mcp_cmd::run_mcp_command;
 pub use memories_cmd::run_memories_command;
 pub use search_cmd::run_search_command;
 

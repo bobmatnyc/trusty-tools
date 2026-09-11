@@ -288,6 +288,14 @@ pub fn build_router_with_origins(
             "/api/assistants/{id}/memory",
             axum::routing::get(super::assistant_memory::get).put(super::assistant_memory::put),
         )
+        // #7454 (ADR-0060): the two MCP config tiers for one assistant. GET
+        // answers `global`, `overrides` and `resolved` together, because an
+        // override is a DELTA and the pane must show what it applies to; PUT
+        // replaces the `[mcp]` table after validating every name.
+        .route(
+            "/api/assistants/{id}/mcp",
+            axum::routing::get(super::assistant_mcp::get).put(super::assistant_mcp::put),
+        )
         // #7370: chat-thread attachments, stored under
         // `<assistant home>/attachments/<session>/`. POST uploads one file
         // (multipart); the collection GET returns the session manifest a

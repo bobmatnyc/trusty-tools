@@ -49,6 +49,8 @@ mod agent_permissions;
 mod agent_skills;
 mod agent_stores;
 mod agent_subagents;
+// #7454: the two MCP tiers for one assistant — global, overrides, resolved.
+mod assistant_mcp;
 // #7428: one memory palace per assistant, with the opt-in fan-out setting.
 mod assistant_memory;
 // #7370: chat-thread attachments — upload, manifest listing, and

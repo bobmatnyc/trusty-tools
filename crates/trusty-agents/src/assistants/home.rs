@@ -360,8 +360,9 @@ impl Created {
 /// comes from `agent.toml`, and this file exists so instance-scoped settings
 /// (#4281's persisted selection, #4282's attached-index list) have a home to
 /// land in without another format decision.
-/// What: `id`, an optional `display_name`, and (#7428) the `[memory]` table
-/// naming this assistant's palace and its opt-in fan-out. Unknown keys are
+/// What: `id`, an optional `display_name`, (#7428) the `[memory]` table naming
+/// this assistant's palace and its opt-in fan-out, and (#7454) the `[mcp]`
+/// table overriding the global MCP server list. Unknown keys are
 /// IGNORED, not rejected — a user's hand-added key must never make their home
 /// "malformed" — and every field defaults, so a `config.toml` written before a
 /// field existed still parses unchanged.
@@ -378,6 +379,11 @@ pub struct AssistantHomeConfig {
     /// [`super::memory::MemoryConfig`] for the resolution rule.
     #[serde(default)]
     pub memory: super::memory::MemoryConfig,
+    /// #7454: this assistant's MCP overrides on the global server list. See
+    /// [`super::mcp::McpOverrides`]; additive, and absent means "no
+    /// overrides", never "no MCP servers".
+    #[serde(default)]
+    pub mcp: super::mcp::McpOverrides,
 }
 
 /// The seeded `instructions.md` body for a fresh home.

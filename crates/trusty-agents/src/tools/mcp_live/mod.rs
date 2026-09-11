@@ -63,7 +63,6 @@ use executor::{LiveMcpTool, build_tool_schema};
 use futures::future::join_all;
 pub use spec::{McpServerSpec, SpecSource, gather_specs};
 
-use crate::mcp::config::GlobalConfig;
 use crate::tools::traits::ToolExecutor;
 
 /// Build live-discovered `ToolExecutor`s for every eligible MCP server.
@@ -79,9 +78,13 @@ use crate::tools::traits::ToolExecutor;
 pub async fn live_mcp_tool_executors(
     project_dir: &Path,
     existing_names: &HashSet<String>,
+    assistant: Option<&str>,
 ) -> Vec<Arc<dyn ToolExecutor>> {
-    let config = GlobalConfig::load().await;
-    let specs = gather_specs(&config, project_dir).await;
+    // #7454: the servers come from THIS assistant's resolved set, so an
+    // assistant-level override reaches live discovery the same way it reaches
+    // the static path and the OpenRPC registry.
+    let resolved = crate::mcp::resolve_for_assistant(assistant, project_dir).await;
+    let specs = gather_specs(&resolved.usable());
     build_executors_from_specs(specs, existing_names).await
 }
 

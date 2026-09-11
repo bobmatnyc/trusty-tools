@@ -108,6 +108,8 @@ pub(super) async fn dispatch_subcommands(args: &[String]) -> Result<bool> {
         // `runtime::run`, before startup init; listed here only so a near-miss
         // typo still gets a suggestion).
         "mcp-serve",
+        // #7454: `mcp list [--assistant <id>]` — both MCP config tiers.
+        "mcp",
     ];
     if args.len() > 1 {
         let candidate = &args[1];
@@ -127,6 +129,15 @@ pub(super) async fn dispatch_subcommands(args: &[String]) -> Result<bool> {
     // These run against the local store only; no LLM key required.
     if args.len() > 1 && (args[1] == "memory" || args[1] == "code") {
         cli::run_search_command(&args[1..]).await?;
+        return Ok(false);
+    }
+
+    // #7454: `mcp list [--assistant <id>]` — the effective MCP servers for one
+    // assistant, with the tier each came from. Matched before the `mcp-serve`
+    // dispatch cannot reach here (that one runs earlier in `runtime::run`), and
+    // exact-matched so it never claims `mcp-serve`.
+    if args.len() > 1 && args[1] == "mcp" {
+        cli::run_mcp_command(&args[2..]).await?;
         return Ok(false);
     }
 

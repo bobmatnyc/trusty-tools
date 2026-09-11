@@ -12,7 +12,8 @@ use chrono::Utc;
 
 use super::{file_mtime_secs, render_mcp_description};
 use crate::init::{MCP_SEED_SESSION_ID, ProjectInitializer};
-use crate::mcp::mcp_json::{discover_mcp_json_paths, parse_mcp_json_servers};
+use crate::mcp::extensions;
+use crate::mcp::shared::discover_mcp_json_paths;
 use crate::memory::{Embedder, MemoryStore, Segment};
 
 impl ProjectInitializer {
@@ -62,7 +63,29 @@ impl ProjectInitializer {
                     continue;
                 }
             };
-            let servers = match parse_mcp_json_servers(&raw) {
+            // #7454: one decoder for `.mcp.json` across the workspace —
+            // `trusty_mcp::config::read_mcp_servers`. The blurb is read off
+            // the raw map beside it, because Claude Code's own format has no
+            // `description` key and the decoder therefore does not carry one.
+            let document: serde_json::Value = match serde_json::from_str(&raw) {
+                Ok(document) => document,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        path = %source.display(),
+                        "seed_mcp_connections: parse failed (skipping)"
+                    );
+                    continue;
+                }
+            };
+            let Some(value) = document.get("mcpServers") else {
+                tracing::debug!(
+                    path = %source.display(),
+                    "seed_mcp_connections: no mcpServers key, skipping"
+                );
+                continue;
+            };
+            let servers = match trusty_mcp::config::read_mcp_servers(value) {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::warn!(
@@ -97,16 +120,26 @@ impl ProjectInitializer {
                     continue;
                 }
 
-                let description = server.description.clone().unwrap_or_default();
-                let env_keys: Vec<String> = server.env.keys().cloned().collect();
+                let description = value
+                    .get(server_name)
+                    .and_then(|entry| entry.get("description"))
+                    .and_then(|d| d.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let (command, args, env) = match extensions::stdio_parts(server) {
+                    Some(parts) => parts,
+                    None => {
+                        tracing::debug!(
+                            server = %server_name,
+                            "seed_mcp_connections: non-stdio server, skipping"
+                        );
+                        continue;
+                    }
+                };
+                let env_keys: Vec<String> = env.keys().cloned().collect();
 
-                let content = render_mcp_description(
-                    server_name,
-                    &server.command,
-                    &server.args,
-                    &description,
-                    &env_keys,
-                );
+                let content =
+                    render_mcp_description(server_name, command, args, &description, &env_keys);
 
                 let vec = match embedder.embed_single(&content) {
                     Ok(v) => v,
@@ -125,8 +158,8 @@ impl ProjectInitializer {
                     "tag": "configuration/mcp",
                     "session_id": MCP_SEED_SESSION_ID,
                     "server_name": server_name,
-                    "command": server.command,
-                    "args": server.args,
+                    "command": command,
+                    "args": args,
                     "env_keys": env_keys,
                     "path": rel.clone(),
                     "created_at": Utc::now().to_rfc3339(),

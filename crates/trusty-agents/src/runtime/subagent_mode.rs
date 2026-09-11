@@ -322,8 +322,11 @@ pub(super) async fn run_subagent(name: &str) -> Result<()> {
     // a Markdown block listing the tools they can call.
     // #244: Use load() (no create-if-absent) so changes made by mcp_* tools
     // in earlier turns are reflected in this prompt build without caching.
+    // #7454: the servers come from the resolved set for this agent, not from
+    // `GlobalConfig`, which no longer describes servers at all.
     let mcp_cfg = mcp::GlobalConfig::load().await;
-    if let Some(section) = mcp_cfg.render_prompt_section(&cfg.agent.role) {
+    let mcp_resolved = mcp::resolve_here(Some(cfg.agent.name.as_str())).await;
+    if let Some(section) = mcp_cfg.render_prompt_section(&cfg.agent.role, &mcp_resolved.servers) {
         builder = builder.add_mcp_layer(section);
     }
 
@@ -423,7 +426,13 @@ pub(super) async fn run_subagent(name: &str) -> Result<()> {
                     .map(String::from)
             })
             .collect();
-        for tool in tools::mcp_live::live_mcp_tool_executors(&cwd, &existing_names).await {
+        for tool in tools::mcp_live::live_mcp_tool_executors(
+            &cwd,
+            &existing_names,
+            Some(cfg.agent.name.as_str()),
+        )
+        .await
+        {
             reg.register(tool);
         }
     }

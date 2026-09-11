@@ -3,11 +3,10 @@
 //! Why: `GlobalConfig` composes several independent sections (MCP registry,
 //! local-inference fast-path, git tools). Defining each section's shape +
 //! defaults here keeps `mod.rs` focused on load/save/render behavior.
-//! What: `LocalInferenceConfig`, `GitConfig`, `McpSection`, `McpService`,
-//! `McpTool`, plus the `serde` default helpers they share.
+//! What: `LocalInferenceConfig`, `GitConfig`, `McpSection` (MCP POLICY only
+//! since #7454 — the servers live in `trusty_mcp`'s shared file),
+//! `ProvidersSection`, plus the `serde` default helpers they share.
 //! Test: Defaults + round-trips exercised in `config::tests`.
-
-use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -132,13 +131,23 @@ impl Default for GitConfig {
     }
 }
 
-/// `[mcp]` section — the remote/service-tier MCP registry.
+/// `[mcp]` section — this crate's MCP POLICY, not its server list (#7454).
+///
+/// Why: the servers themselves moved to the file shared with `trusty-code`
+/// (ADR-0060, [`crate::mcp::shared`]), so what remains here is the policy this
+/// crate applies to them: which agent roles get the MCP prompt layer, and
+/// whether a project's repo-controlled `.mcp.json` may contribute servers at
+/// all. Keeping the section rather than deleting it means every existing
+/// `config.toml` still parses, and `trust_project_mcp_json` — a security gate
+/// with a deliberate `false` default — keeps its documented spelling.
+/// What: `inject_for_roles` gates the prompt layer. A `[[mcp.services]]` array
+/// left over from before #7454 is IGNORED by this struct and drained exactly
+/// once by [`crate::mcp::shared::migrate`].
+/// Test: `crate::mcp::tests::migrate_tests::migrates_once_and_never_again`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct McpSection {
     #[serde(default = "default_inject_roles")]
     pub inject_for_roles: Vec<String>,
-    #[serde(default)]
-    pub services: Vec<McpService>,
     /// Trust gate for auto-spawning servers discovered from a project's
     /// `.mcp.json` (security-critical, see #3266 BLOCK remediation).
     ///
@@ -146,16 +155,15 @@ pub struct McpSection {
     /// cloning a hostile repo that ships a malicious `.mcp.json` would
     /// otherwise cause trusty-agents to auto-spawn arbitrary binaries on
     /// every persona turn with zero gating. Defaulting this to `false`
-    /// means live discovery only ever sources servers from the
-    /// operator-curated `[[mcp.services]]` allowlist (`discover = true`
-    /// entries) unless the operator explicitly opts a project in.
-    /// What: When `false` (the default), `mcp_live::spec::gather_specs`
-    /// skips `.mcp.json` entirely and only considers `[[mcp.services]]`
-    /// `discover = true` entries. When `true`, `.mcp.json` entries are
-    /// merged in as before (config-service entries still win on name
-    /// collision).
-    /// Test: `mcp_live::spec::tests::gather_specs_skips_mcp_json_when_untrusted`,
-    /// `gather_specs_includes_mcp_json_when_trusted`.
+    /// means the effective server set only ever comes from the shared,
+    /// operator-curated file and this assistant's own `[mcp]` overrides
+    /// unless the operator explicitly opts a project in.
+    /// What: When `false` (the default),
+    /// [`crate::mcp::shared::merge_mcp_json`] contributes nothing. When
+    /// `true`, `.mcp.json` entries are merged in BEHIND the shared file, so a
+    /// shared-file entry still wins a name collision.
+    /// Test: `crate::mcp::tests::global_tests::untrusted_mcp_json_contributes_nothing`,
+    /// `crate::mcp::tests::global_tests::mcp_json_entries_are_marked_and_ranked_last`.
     #[serde(default)]
     pub trust_project_mcp_json: bool,
 }
@@ -164,50 +172,9 @@ impl Default for McpSection {
     fn default() -> Self {
         Self {
             inject_for_roles: default_inject_roles(),
-            services: Vec::new(),
             trust_project_mcp_json: false,
         }
     }
-}
-
-/// A single registered MCP service.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct McpService {
-    pub name: String,
-    pub description: String,
-    #[serde(default)]
-    pub command: String,
-    #[serde(default)]
-    pub args: Vec<String>,
-    /// Environment variables overlaid on the spawned server's process
-    /// environment (e.g. API keys). Empty by default — most services need
-    /// nothing beyond the inherited environment.
-    #[serde(default)]
-    pub env: HashMap<String, String>,
-    /// For HTTP-transport services, the endpoint URL. Stdio services leave
-    /// this `None` and use `command` + `args` instead.
-    #[serde(default)]
-    pub url: Option<String>,
-    /// "stdio" | "http". Currently only `stdio` is implemented in `kuzu.rs`.
-    pub transport: String,
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    #[serde(default)]
-    pub tools: Vec<McpTool>,
-    /// When `true`, ignore `tools` (the static list above) entirely and
-    /// live-discover the server's tools via `tools/list` at registry-build
-    /// time instead (#3238). Requires `transport = "stdio"` and a non-empty
-    /// `command` — non-stdio or command-less services with `discover = true`
-    /// are skipped with a warning, same as the static path.
-    #[serde(default)]
-    pub discover: bool,
-}
-
-/// A single tool advertised by an MCP service.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct McpTool {
-    pub name: String,
-    pub description: String,
 }
 
 /// `[providers]` section (#3766) — the default inference provider for agents
