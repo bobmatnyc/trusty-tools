@@ -289,6 +289,28 @@ impl AssistantHome {
     /// `super::tests::home_tests::ensure_is_idempotent`,
     /// `super::tests::home_tests::ensure_never_overwrites_user_edits`.
     pub fn ensure(&self) -> Result<Created, AssistantError> {
+        // #7454: split so a caller that publishes into `config.toml` under a
+        // lock can seed that one file inside it. Same work, same order.
+        let mut created = self.ensure_without_config()?;
+        self.seed(self.config_path(), self.seed_config_body(), &mut created)?;
+        Ok(created)
+    }
+
+    /// Everything [`Self::ensure`] creates except [`CONFIG_FILE`].
+    ///
+    /// Why: [`Self::seed`] is a check-then-act — it tests for absence, then
+    /// writes — so a caller that publishes into `config.toml` under a lock
+    /// must not seed that file outside the lock. Two concurrent FIRST writes
+    /// both decide "absent" before either has written, and the loser's seed
+    /// then truncates the winner's published table (#7454). Such a caller
+    /// creates the directories here, which `create_dir_all` makes genuinely
+    /// idempotent, and seeds `config.toml` from [`Self::seed_config_body`]
+    /// inside its own lock.
+    /// What: the home, [`AGENTS_DIR`], [`OKG_DIR`], [`ATTACHMENTS_DIR`],
+    /// [`STORES_DIR`] and [`INSTRUCTIONS_FILE`], in the order and with the
+    /// additive-only rule [`Self::ensure`] documents.
+    /// Test: `super::tests::home_tests::ensure_without_config_leaves_config_absent`.
+    pub fn ensure_without_config(&self) -> Result<Created, AssistantError> {
         let mut created = Created::default();
         for dir in [
             self.path.clone(),
@@ -310,8 +332,17 @@ impl AssistantHome {
             seed_instructions(&self.id),
             &mut created,
         )?;
-        self.seed(self.config_path(), seed_config(&self.id), &mut created)?;
         Ok(created)
+    }
+
+    /// The body a fresh [`CONFIG_FILE`] is seeded with.
+    ///
+    /// Why: [`Self::ensure_without_config`]'s caller owns that file's
+    /// lifecycle inside its own lock and needs the seed this module writes; a
+    /// second copy of the stub would drift from it (#7454).
+    /// Test: `super::tests::home_tests::ensure_without_config_leaves_config_absent`.
+    pub fn seed_config_body(&self) -> String {
+        seed_config(&self.id)
     }
 
     /// Write `body` to `path` only when nothing is there. See [`Self::ensure`].
@@ -360,8 +391,9 @@ impl Created {
 /// comes from `agent.toml`, and this file exists so instance-scoped settings
 /// (#4281's persisted selection, #4282's attached-index list) have a home to
 /// land in without another format decision.
-/// What: `id`, an optional `display_name`, and (#7428) the `[memory]` table
-/// naming this assistant's palace and its opt-in fan-out. Unknown keys are
+/// What: `id`, an optional `display_name`, (#7428) the `[memory]` table naming
+/// this assistant's palace and its opt-in fan-out, and (#7454) the `[mcp]`
+/// table overriding the global MCP server list. Unknown keys are
 /// IGNORED, not rejected — a user's hand-added key must never make their home
 /// "malformed" — and every field defaults, so a `config.toml` written before a
 /// field existed still parses unchanged.
@@ -378,6 +410,11 @@ pub struct AssistantHomeConfig {
     /// [`super::memory::MemoryConfig`] for the resolution rule.
     #[serde(default)]
     pub memory: super::memory::MemoryConfig,
+    /// #7454: this assistant's MCP overrides on the global server list. See
+    /// [`super::mcp::McpOverrides`]; additive, and absent means "no
+    /// overrides", never "no MCP servers".
+    #[serde(default)]
+    pub mcp: super::mcp::McpOverrides,
 }
 
 /// The seeded `instructions.md` body for a fresh home.

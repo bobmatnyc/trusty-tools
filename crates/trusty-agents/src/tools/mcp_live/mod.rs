@@ -14,7 +14,7 @@
 //! connectable to *any* configured MCP server, not just the ones someone
 //! remembered to hand-list.
 //!
-//! What: `live_mcp_tool_executors(project_dir, existing_names)` is the
+//! What: `live_mcp_tool_executors(servers, existing_names)` is the
 //! single construction helper both assembly points call:
 //! `ctrl::pm_task::dispatch::persona::run_pm_task_with_persona` (persona
 //! chat) and `runtime::subagent_mode` (sub-agent tool-registry
@@ -56,32 +56,37 @@ mod executor;
 mod spec;
 
 use std::collections::HashSet;
-use std::path::Path;
 use std::sync::Arc;
 
 use executor::{LiveMcpTool, build_tool_schema};
 use futures::future::join_all;
 pub use spec::{McpServerSpec, SpecSource, gather_specs};
+use trusty_mcp::config::McpServerConfig;
 
-use crate::mcp::config::GlobalConfig;
 use crate::tools::traits::ToolExecutor;
 
 /// Build live-discovered `ToolExecutor`s for every eligible MCP server.
 ///
 /// Why: The single entry point both assembly points call — see module docs.
-/// What: Loads `GlobalConfig`, gathers specs (`spec::gather_specs`), then for
-/// each spec spawns + `tools/list`s via a fresh `ServiceClient`, wrapping
-/// every advertised tool as a `LiveMcpTool`. `existing_names` seeds the
-/// dedup set so tools the caller already registered (from any other source)
-/// are never shadowed.
+///
+/// The caller resolves, not this function (#7454 review): the servers come
+/// from THIS assistant's resolved set, and taking that set as a parameter is
+/// what keeps live discovery, the static path and the OpenRPC registry built
+/// from ONE resolution per turn. Resolving here as well meant a concurrent
+/// `mcp_add` or disable between two reads could leave the three surfaces
+/// disagreeing about what the assistant connects to.
+/// What: gathers specs (`spec::gather_specs`) from `servers`, then for each
+/// spec spawns + `tools/list`s via a fresh `ServiceClient`, wrapping every
+/// advertised tool as a `LiveMcpTool`. `existing_names` seeds the dedup set so
+/// tools the caller already registered (from any other source) are never
+/// shadowed.
 /// Test: `discovery_registers_advertised_tools_as_executors` (integration,
 /// below).
 pub async fn live_mcp_tool_executors(
-    project_dir: &Path,
+    servers: &[&McpServerConfig],
     existing_names: &HashSet<String>,
 ) -> Vec<Arc<dyn ToolExecutor>> {
-    let config = GlobalConfig::load().await;
-    let specs = gather_specs(&config, project_dir).await;
+    let specs = gather_specs(servers);
     build_executors_from_specs(specs, existing_names).await
 }
 

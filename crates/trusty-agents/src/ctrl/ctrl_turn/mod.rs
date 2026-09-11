@@ -119,6 +119,9 @@ pub(crate) async fn build_ctrl_turn_system_prompt(
     agent_cfg_path: Option<&Path>,
     openai_tools_count: usize,
     mcp_cfg: &crate::mcp::GlobalConfig,
+    // #7454: the effective MCP servers for this turn, resolved by the caller.
+    // `GlobalConfig` no longer carries a server list of its own.
+    mcp_servers: &[trusty_mcp::config::McpServerConfig],
 ) -> String {
     let base_prompt = if agent_cfg.system_prompt.content.trim().is_empty() {
         CTRL_SYSTEM_PROMPT.to_string()
@@ -168,7 +171,7 @@ pub(crate) async fn build_ctrl_turn_system_prompt(
         }
     }
 
-    if let Some(section) = mcp_cfg.render_prompt_section("ctrl") {
+    if let Some(section) = mcp_cfg.render_prompt_section("ctrl", mcp_servers) {
         builder = builder.add_mcp_layer(section);
     }
 
@@ -233,7 +236,7 @@ pub(crate) async fn build_ctrl_turn_system_prompt(
             .as_ref()
             .map(|s| s.len())
             .unwrap_or(0);
-        let mcp_count = mcp_cfg.services_for_role("ctrl").len();
+        let mcp_count = mcp_cfg.servers_for_role("ctrl", mcp_servers).len();
         let project_label = ctrl
             .self_project
             .as_ref()
@@ -285,6 +288,9 @@ pub(crate) async fn ctrl_chat_turn(ctrl: &mut Ctrl, user_input: &str) -> Result<
     let (agent_cfg, agent_cfg_path) = resolve_ctrl_turn_agent_config(ctrl).await;
 
     let mcp_cfg = crate::mcp::GlobalConfig::load().await;
+    // #7454: the concierge is not an Assistant INSTANCE, so it resolves the
+    // global tier alone — there is no `<home>/config.toml` to override from.
+    let mcp_servers = crate::mcp::resolve_here(None).await.servers;
 
     let system_prompt = build_ctrl_turn_system_prompt(
         ctrl,
@@ -293,6 +299,7 @@ pub(crate) async fn ctrl_chat_turn(ctrl: &mut Ctrl, user_input: &str) -> Result<
         agent_cfg_path.as_deref(),
         openai_tools.len(),
         &mcp_cfg,
+        &mcp_servers,
     )
     .await;
 

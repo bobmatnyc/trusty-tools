@@ -40,6 +40,10 @@
   // assistants' palaces. Its own component because the palace is a separate
   // store from the OKG tree this pane's other sections describe.
   import AssistantMemoryFanOut from './AssistantMemoryFanOut.svelte';
+  // #7454 (ADR-0060): K-c is now two tiers, not one flat per-agent list — the
+  // shared file and this assistant's own overrides. Its own component because
+  // the pane must show the difference between them, not just the result.
+  import AssistantMcpConnections from './AssistantMcpConnections.svelte';
   export let agentName = '';
   import { KNOWLEDGE_MCP_ENDPOINTS, type OkgStoreBinding } from '../lib/agentConfig';
 
@@ -70,6 +74,7 @@
 <div class="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto">
   {#if agentName}<AssistantKnowledgePipeline {agentName} />{/if}
   {#if agentName}<AssistantMemoryFanOut {agentName} />{/if}
+  {#if agentName}<AssistantMcpConnections {agentName} />{/if}
   <section class="flex flex-col gap-2">
     <h3 class={heading}>Store bindings</h3>
     <p class="text-xs text-foundry-light-muted dark:text-foundry-text/60">
@@ -186,10 +191,11 @@
   </section>
 
   <section class="flex flex-col gap-2">
-    <h3 class={heading}>MCP knowledge connections</h3>
+    <h3 class={heading}>Shipped knowledge-connection defaults</h3>
     <p class="text-xs text-foundry-light-muted dark:text-foundry-text/60">
       Knowledge services reachable over MCP/OpenRPC, as <em>declared</em> in the shipped
-      <code class="font-mono">config.toml</code> defaults — not probed. Assistant pipeline status is shown above; these declarations do not verify a connection.
+      defaults — not probed, and not this assistant's effective set. What this assistant
+      actually connects to is above, under MCP connections (#7454).
     </p>
     {#each KNOWLEDGE_MCP_ENDPOINTS as endpoint (endpoint.name)}
       <div class="rounded-md border border-foundry-light-border dark:border-foundry-border px-3 py-2">

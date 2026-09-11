@@ -13,6 +13,8 @@ mod agent_permissions;
 mod agent_skills;
 mod agent_stores;
 mod agent_subagents;
+// #7454: the two MCP config tiers for one assistant.
+mod assistant_mcp;
 // #7428: one palace per assistant, and the opt-in fan-out setting.
 mod assistant_memory;
 // #4355: per-assistant task-stream attribution, retention, and retrieval.

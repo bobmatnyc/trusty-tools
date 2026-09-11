@@ -160,24 +160,24 @@ fn runner_label(runner: crate::agents::RunnerKind) -> String {
 /// needs its command on `PATH` (no process is spawned); an enabled `http`
 /// service gets one bounded GET.
 async fn mcp_server_status() -> Vec<McpServerStatus> {
-    let cfg = crate::mcp::config::GlobalConfig::load().await;
-    let mut out = Vec::with_capacity(cfg.mcp.services.len());
-    for svc in &cfg.mcp.services {
+    // #7454: the servers come from the shared file (ADR-0060), resolved for no
+    // particular assistant — `system status` reports the harness's own global
+    // tier, not one assistant's narrowed view.
+    let resolved = crate::mcp::resolve_here(None).await;
+    let mut out = Vec::with_capacity(resolved.servers.len());
+    for svc in &resolved.servers {
         let reachable = if !svc.enabled {
             false
+        } else if let Some((command, _, _)) = crate::mcp::extensions::stdio_parts(svc) {
+            !command.is_empty() && command_on_path(command)
+        } else if let Some(url) = crate::mcp::extensions::endpoint_url(svc) {
+            http_reachable(url).await
         } else {
-            match svc.transport.as_str() {
-                "stdio" => !svc.command.is_empty() && command_on_path(&svc.command),
-                "http" => match &svc.url {
-                    Some(url) => http_reachable(url).await,
-                    None => false,
-                },
-                _ => false,
-            }
+            false
         };
         out.push(McpServerStatus {
             name: svc.name.clone(),
-            transport: svc.transport.clone(),
+            transport: crate::mcp::extensions::transport_label(svc).to_string(),
             enabled: svc.enabled,
             reachable,
         });

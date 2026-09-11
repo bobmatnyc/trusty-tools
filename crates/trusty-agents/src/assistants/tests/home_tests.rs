@@ -222,6 +222,33 @@ fn ensure_creates_the_whole_layout() {
     assert_eq!(cfg.id, "izzie");
 }
 
+/// Why: #7454 — a caller that publishes into `config.toml` under a lock owns
+/// that file's whole lifecycle, so the split call must create everything else
+/// and leave `config.toml` alone, and its seed body must be the one this
+/// module writes rather than a second copy of the stub.
+#[test]
+fn ensure_without_config_leaves_config_absent() {
+    let (_tmp, home) = temp_home();
+    let created = home.ensure_without_config().expect("ensure_without_config");
+
+    assert!(home.instructions_path().is_file());
+    assert!(
+        !home.config_path().exists(),
+        "config.toml is the locked caller's to write"
+    );
+    assert_eq!(created.paths.len(), 6, "created: {:?}", created.paths);
+
+    // The seed the locked caller starts from is the same one `ensure` writes.
+    let cfg: AssistantHomeConfig =
+        toml::from_str(&home.seed_config_body()).expect("seed body parses");
+    assert_eq!(cfg.id, "izzie");
+    home.ensure().expect("ensure completes the home");
+    assert_eq!(
+        std::fs::read_to_string(home.config_path()).unwrap(),
+        home.seed_config_body()
+    );
+}
+
 #[test]
 fn ensure_is_idempotent() {
     let (_tmp, home) = temp_home();

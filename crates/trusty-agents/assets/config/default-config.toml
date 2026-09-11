@@ -1,6 +1,25 @@
 # trusty-agents global configuration
 # ~/.trusty-agents/config.toml
 
+# #7454 (ADR-0060) — READ THIS BEFORE EDITING THE MCP TABLES BELOW.
+#
+# MCP SERVERS NO LONGER LIVE IN THIS FILE. They live in the file trusty-agents
+# shares with trusty-code: ~/.trusty-tools/mcp/servers.toml, owned by the
+# `trusty-mcp` crate. Per-assistant overrides live in each assistant's own
+# `<assistant home>/config.toml` under `[mcp]`.
+#
+# The `[[mcp.services]]` and `[[tool_registry.endpoints]]` tables further down
+# are kept ON PURPOSE: they are the SEED the one-time migration drains into the
+# shared file on first run, which is how a fresh install keeps the connectors
+# this project has always shipped. Nothing reads them afterwards — the
+# migration writes the shared file only when it does not already exist, so a
+# later edit here changes nothing.
+#
+# To add or change a server, edit ~/.trusty-tools/mcp/servers.toml, or run
+# `tagent mcp list` to see what is in effect. What DOES still apply from this
+# file is `[mcp] inject_for_roles` and `[mcp] trust_project_mcp_json`, plus
+# `[tool_registry] scope_enforcement`.
+
 # Issue #3766: which inference provider serves the bundled agent templates.
 #
 # Every bundled template ships a bare model slug (e.g. `claude-sonnet-4-6`)

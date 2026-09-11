@@ -33,35 +33,50 @@ pub mod scope;
 use std::sync::Arc;
 
 use anyhow::Result;
+use trusty_mcp::config::McpServerConfig;
 
-use crate::mcp::config::GlobalConfig;
+use crate::mcp::extensions::{self, DriverKind};
 use crate::tools::traits::ToolExecutor;
 
 use self::adapter::RegistryToolExecutor;
-use self::config::{DriverKind, EndpointConfig, ToolRegistryConfig};
 use self::direct::DirectDriver;
 use self::discovery::DiscoveredTool;
 use self::driver::ArcDriver;
 use self::scope::{ScopePattern, filter_by_endpoint_scopes};
 
-/// Public builder. Constructed from a `GlobalConfig`; `build()` consumes it.
+/// Public builder. Constructed from a resolved server list; `build()` consumes it.
 ///
 /// Why: A builder keeps the construction parameters distinct from the
-/// (async) work that creates drivers and runs discovery. Callers in
-/// startup code only need to know `ToolRegistryBuilder::from_config(&cfg)
-/// .build().await`.
-/// What: Holds a clone of the `[tool_registry]` section (or `None`).
-/// Test: `builder_with_no_endpoints_returns_empty`.
+/// (async) work that creates drivers and runs discovery. Since #7454 the
+/// parameter is the list `crate::mcp::shared::resolve_for_assistant` already
+/// produced for ONE assistant — so the registry an assistant gets is exactly
+/// its resolved set, which is what makes a per-assistant override reach the
+/// tools the model can call.
+/// What: Holds only the servers that declare a registry `driver` extension;
+/// everything else in the resolved set belongs to another consumer.
+/// Test: `builder_with_no_endpoints_returns_empty`,
+/// `crate::mcp::tests::resolve_tests::an_assistant_level_disable_hides_a_global_server`.
 pub struct ToolRegistryBuilder {
-    config: Option<ToolRegistryConfig>,
+    endpoints: Vec<McpServerConfig>,
 }
 
 impl ToolRegistryBuilder {
-    /// Construct a builder from the global config. If `[tool_registry]` is
-    /// absent the builder is a no-op (returns empty on `build()`).
-    pub fn from_config(global: &GlobalConfig) -> Self {
+    /// Construct a builder from one assistant's resolved MCP servers.
+    ///
+    /// Why: an assistant's registry must be built from ITS effective set, not
+    /// from a global list every assistant shares — that is the whole point of
+    /// the assistant tier.
+    /// What: keeps the enabled servers carrying a `driver` extension; a server
+    /// with no `driver` is a plain MCP connection handled elsewhere, not a
+    /// registry endpoint, and is skipped silently rather than warned about.
+    /// Test: `builder_with_no_endpoints_returns_empty`.
+    pub fn from_servers<'a>(servers: impl IntoIterator<Item = &'a McpServerConfig>) -> Self {
         Self {
-            config: global.tool_registry.clone(),
+            endpoints: servers
+                .into_iter()
+                .filter(|server| extensions::driver(server).is_some())
+                .cloned()
+                .collect(),
         }
     }
 
@@ -106,13 +121,13 @@ impl ToolRegistryBuilder {
     pub async fn build_with_scope_vocabulary(
         self,
     ) -> Result<(Vec<Arc<dyn ToolExecutor>>, Vec<String>)> {
-        let Some(cfg) = self.config else {
+        if self.endpoints.is_empty() {
             return Ok((Vec::new(), Vec::new()));
-        };
+        }
         let mut executors: Vec<Arc<dyn ToolExecutor>> = Vec::new();
         let mut vocabulary: std::collections::BTreeSet<String> = Default::default();
 
-        for ep in &cfg.endpoints {
+        for ep in &self.endpoints {
             if !ep.enabled {
                 tracing::debug!(endpoint = %ep.name, "tool registry: endpoint disabled, skipping");
                 continue;
@@ -148,8 +163,14 @@ impl ToolRegistryBuilder {
 ///
 /// Returns an error if the driver itself fails to construct or eager
 /// discovery is requested and fails.
-async fn build_endpoint(ep: &EndpointConfig) -> Result<(Vec<Arc<dyn ToolExecutor>>, Vec<String>)> {
-    let driver: ArcDriver = match ep.driver {
+async fn build_endpoint(ep: &McpServerConfig) -> Result<(Vec<Arc<dyn ToolExecutor>>, Vec<String>)> {
+    // #7454: a server reaches this function only when `from_servers` saw a
+    // `driver` extension on it, so the `None` arm is unreachable in practice
+    // and bails rather than defaulting to a driver the operator never named.
+    let Some(kind) = extensions::driver(ep) else {
+        anyhow::bail!("endpoint declares no `driver` extension");
+    };
+    let driver: ArcDriver = match kind {
         DriverKind::Direct => Arc::new(DirectDriver::new(ep)?),
         DriverKind::StdioMcp => {
             // Stdio-MCP driver lives in `crate::plugins::stdio_mcp` and is
@@ -162,7 +183,7 @@ async fn build_endpoint(ep: &EndpointConfig) -> Result<(Vec<Arc<dyn ToolExecutor
         }
     };
 
-    if !ep.eager_discovery {
+    if !extensions::eager_discovery(ep) {
         tracing::debug!(
             endpoint = %ep.name,
             "tool registry: lazy discovery not yet implemented; endpoint contributes 0 tools",
@@ -205,10 +226,9 @@ async fn build_endpoint(ep: &EndpointConfig) -> Result<(Vec<Arc<dyn ToolExecutor
         );
     }
 
-    let patterns: Vec<ScopePattern> = ep
-        .scopes
-        .iter()
-        .map(|s| ScopePattern::new(s.clone()))
+    let patterns: Vec<ScopePattern> = extensions::scopes(ep)
+        .into_iter()
+        .map(ScopePattern::new)
         .collect();
 
     let filtered: Vec<DiscoveredTool> =
@@ -241,7 +261,6 @@ async fn build_endpoint(ep: &EndpointConfig) -> Result<(Vec<Arc<dyn ToolExecutor
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mcp::config::GlobalConfig;
     use async_trait::async_trait;
     use serde_json::Value;
 
@@ -285,21 +304,24 @@ mod tests {
 
     #[tokio::test]
     async fn builder_with_no_endpoints_returns_empty() {
-        let global = GlobalConfig::default();
-        let execs = ToolRegistryBuilder::from_config(&global)
-            .build()
-            .await
-            .unwrap();
+        let execs = ToolRegistryBuilder::from_servers([]).build().await.unwrap();
         assert!(execs.is_empty());
     }
 
+    /// #7454: a resolved set carrying only plain MCP connections (no `driver`
+    /// extension) contributes no registry endpoints — those servers belong to
+    /// the static/live tool paths, not to this registry.
     #[tokio::test]
-    async fn builder_with_empty_registry_section_returns_empty() {
-        let global = GlobalConfig {
-            tool_registry: Some(ToolRegistryConfig::default()),
-            ..Default::default()
-        };
-        let execs = ToolRegistryBuilder::from_config(&global)
+    async fn builder_skips_servers_that_are_not_registry_endpoints() {
+        let server = McpServerConfig::new(
+            "granola-notes",
+            trusty_mcp::config::McpTransport::Stdio {
+                command: "granola-mcp".into(),
+                args: Vec::new(),
+                env: Default::default(),
+            },
+        );
+        let execs = ToolRegistryBuilder::from_servers([&server])
             .build()
             .await
             .unwrap();

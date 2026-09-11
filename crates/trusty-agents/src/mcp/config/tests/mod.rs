@@ -4,15 +4,16 @@
 //! I/O to serialize global $HOME mutation between tests. See
 //! `crate::test_env` for the full rationale.
 //!
-//! Layout: `mod.rs` covers create/load/save/service-mutation; `render_tests.rs`
-//! covers role gating, prompt/list rendering, and the local-inference section.
+//! Layout: `mod.rs` covers create/load/save; `render_tests.rs` covers role
+//! gating, prompt rendering, and the local-inference section. The MCP SERVER
+//! surface these files used to cover moved to `crate::mcp::tests` with #7454.
 #![allow(clippy::await_holding_lock)]
 
 mod render_tests;
 
 use std::path::PathBuf;
 
-use crate::mcp::config::{GlobalConfig, McpService, McpTool};
+use crate::mcp::config::GlobalConfig;
 use crate::test_env::HOME_LOCK;
 
 /// Create a unique tempdir under the system temp for HOME sandboxing.
@@ -26,6 +27,11 @@ pub(super) fn tempdir() -> PathBuf {
     p
 }
 
+/// #7454: `load_or_create` still writes the default file when absent, and the
+/// file it writes still parses. What it no longer does is DESCRIBE MCP
+/// servers — those moved to `trusty_mcp`'s shared file (ADR-0060), and the
+/// legacy tables this asset still carries exist only as the migration's seed
+/// (`crate::mcp::shared::migrate`).
 #[tokio::test]
 async fn load_or_create_writes_default_when_absent() {
     let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -34,97 +40,54 @@ async fn load_or_create_writes_default_when_absent() {
         std::env::set_var("HOME", &home);
     }
 
-    let cfg = GlobalConfig::load_or_create()
-        .await
-        .expect("create default config");
+    let path = GlobalConfig::config_path().unwrap();
+    assert!(!path.exists());
 
-    let path = home.join(".trusty-agents").join("config.toml");
+    let cfg = GlobalConfig::load_or_create().await.unwrap();
+    assert!(path.exists(), "load_or_create must materialise the file");
     assert!(
-        path.exists(),
-        "config file should exist after load_or_create"
+        cfg.mcp.inject_for_roles.iter().any(|r| r == "ctrl"),
+        "the default must still gate the prompt layer on the coordinating roles"
     );
+    assert!(
+        !cfg.mcp.trust_project_mcp_json,
+        "#3266: the .mcp.json trust gate must stay off by default"
+    );
+}
 
-    // Defaults after ADR-0014 (#256, native-MCP retire) + #3203/#3204:
-    // trusty-mpm (enabled, native), granola-notes (enabled), trusty-memory
-    // (enabled, native — moved off the dead OpenRPC tool_registry.endpoints
-    // stub), trusty-search (same), duetto-memory (disabled). slack-user-proxy
-    // was retired as a dead external stub; gworkspace-mcp was removed
-    // (#3204) — its static tool list had drifted from the real binary and is
-    // superseded by the OpenRPC "gworkspace" tool_registry.endpoints entry.
-    assert_eq!(cfg.mcp.services.len(), 5);
-    let tm = cfg
-        .mcp
-        .services
-        .iter()
-        .find(|s| s.name == "trusty-mpm")
-        .expect("trusty-mpm present in defaults (#3203)");
-    assert!(tm.enabled);
-    let mem = cfg
-        .mcp
-        .services
-        .iter()
-        .find(|s| s.name == "trusty-memory")
-        .expect("trusty-memory present as a live mcp.services entry");
-    assert!(mem.enabled, "trusty-memory must ship enabled, not DISABLED");
-    let search = cfg
-        .mcp
-        .services
-        .iter()
-        .find(|s| s.name == "trusty-search")
-        .expect("trusty-search present as a live mcp.services entry");
+/// The shipped default asset is the migration's seed, so it must still carry
+/// the connectors #7454 moved — a default that drained to nothing would leave
+/// a fresh install with no MCP servers at all.
+#[tokio::test]
+async fn the_default_asset_still_seeds_the_shared_server_file() {
+    let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempdir();
+    unsafe {
+        std::env::set_var("HOME", &home);
+    }
+    GlobalConfig::load_or_create().await.unwrap();
+
+    let legacy = GlobalConfig::config_path().unwrap();
+    let raw = std::fs::read_to_string(&legacy).unwrap();
+    let (servers, report) = crate::mcp::shared::migrate::convert(&raw);
+
+    for expected in [
+        "trusty-mpm",
+        "granola-notes",
+        "trusty-memory",
+        "trusty-search",
+    ] {
+        assert!(
+            servers.iter().any(|s| s.name == expected),
+            "{expected} must survive the migration; moved: {}",
+            report.summary()
+        );
+    }
     assert!(
-        search.enabled,
-        "trusty-search must ship enabled, not DISABLED"
+        servers.iter().any(|s| s.name == "gworkspace"),
+        "the registry endpoint must migrate too; moved: {}",
+        report.summary()
     );
-    assert!(
-        !cfg.mcp
-            .services
-            .iter()
-            .any(|s| s.name == "slack-user-proxy"),
-        "slack-user-proxy retired per ADR-0014"
-    );
-    assert!(
-        !cfg.mcp.services.iter().any(|s| s.name == "gworkspace-mcp"),
-        "gworkspace-mcp mcp.services entry removed (#3204); live path is the \
-         OpenRPC tool_registry.endpoints \"gworkspace\" entry"
-    );
-    let granola = cfg
-        .mcp
-        .services
-        .iter()
-        .find(|s| s.name == "granola-notes")
-        .expect("granola-notes present in defaults (#256)");
-    assert!(granola.enabled);
-    let duetto = cfg
-        .mcp
-        .services
-        .iter()
-        .find(|s| s.name == "duetto-memory")
-        .expect("duetto-memory present in defaults (#256)");
-    assert!(
-        !duetto.enabled,
-        "duetto-memory should be disabled by default"
-    );
-    assert_eq!(duetto.transport, "http");
-    assert_eq!(
-        duetto.url.as_deref(),
-        Some("https://mcp-services.dev.duettosystems.com/memory/mcp")
-    );
-    // No native local integrations in the registry — those are wired into
-    // the harness directly (kuzu-memory, mcp-vector-search).
-    assert!(
-        !cfg.mcp.services.iter().any(|s| s.name == "kuzu-memory"),
-        "kuzu-memory must not appear in MCP registry"
-    );
-    assert!(
-        !cfg.mcp
-            .services
-            .iter()
-            .any(|s| s.name == "mcp-vector-search"),
-        "mcp-vector-search must not appear in MCP registry"
-    );
-    assert!(cfg.mcp.inject_for_roles.contains(&"ctrl".to_string()));
-    assert!(cfg.mcp.inject_for_roles.contains(&"pm".to_string()));
 }
 
 #[tokio::test]
@@ -134,113 +97,48 @@ async fn load_or_create_reads_existing_file() {
     unsafe {
         std::env::set_var("HOME", &home);
     }
-    let cfg_dir = home.join(".trusty-agents");
-    std::fs::create_dir_all(&cfg_dir).unwrap();
+    let dir = home.join(".trusty-agents");
+    std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
-        cfg_dir.join("config.toml"),
-        r#"
-[mcp]
-inject_for_roles = ["ctrl"]
-
-[[mcp.services]]
-name = "custom"
-description = "a custom service"
-command = "echo"
-transport = "stdio"
-enabled = true
-"#,
+        dir.join("config.toml"),
+        "[mcp]\ninject_for_roles = [\"ctrl\"]\ntrust_project_mcp_json = true\n",
     )
     .unwrap();
 
-    let cfg = GlobalConfig::load_or_create()
-        .await
-        .expect("load existing config");
-    assert_eq!(cfg.mcp.inject_for_roles, vec!["ctrl".to_string()]);
-    assert_eq!(cfg.mcp.services.len(), 1);
-    assert_eq!(cfg.mcp.services[0].name, "custom");
+    let cfg = GlobalConfig::load_or_create().await.unwrap();
+    assert_eq!(cfg.mcp.inject_for_roles, ["ctrl"]);
+    assert!(cfg.mcp.trust_project_mcp_json);
 }
 
 #[tokio::test]
 async fn load_returns_documented_defaults_when_absent() {
-    // (#244, #245) load() must not create the file (unlike load_or_create),
-    // but must return the documented defaults (native trusty-mpm,
-    // granola-notes, duetto-memory) so prompt-build paths see the same registry
-    // that `load_or_create` would write.
     let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempdir();
     unsafe {
         std::env::set_var("HOME", &home);
     }
+    // No side effects: `load()` must not create the file.
     let cfg = GlobalConfig::load().await;
-    let path = home.join(".trusty-agents").join("config.toml");
-    assert!(!path.exists(), "load() must not create the config file");
-    // #245/#256 + ADR-0014 + #3203/#3204: defaults mirror DEFAULT_CONFIG_TOML —
-    // 5 services (trusty-mpm, granola-notes, trusty-memory, trusty-search,
-    // duetto-memory) after slack-user-proxy retire and gworkspace-mcp
-    // removal. trusty-memory/trusty-search moved here from the dead
-    // tool_registry.endpoints OpenRPC stubs (see default-config.toml).
-    assert_eq!(cfg.mcp.services.len(), 5);
-    assert!(cfg.mcp.services.iter().any(|s| s.name == "trusty-mpm"));
-    assert!(!cfg.mcp.services.iter().any(|s| s.name == "gworkspace-mcp"));
-    assert!(
-        !cfg.mcp
-            .services
-            .iter()
-            .any(|s| s.name == "slack-user-proxy")
-    );
-    assert!(cfg.mcp.services.iter().any(|s| s.name == "granola-notes"));
-    assert!(cfg.mcp.services.iter().any(|s| s.name == "duetto-memory"));
-    let mem = cfg
-        .mcp
-        .services
-        .iter()
-        .find(|s| s.name == "trusty-memory")
-        .expect("trusty-memory present in defaults");
-    assert!(mem.enabled, "trusty-memory must ship enabled, not DISABLED");
-    let search = cfg
-        .mcp
-        .services
-        .iter()
-        .find(|s| s.name == "trusty-search")
-        .expect("trusty-search present in defaults");
-    assert!(
-        search.enabled,
-        "trusty-search must ship enabled, not DISABLED"
-    );
+    assert!(!GlobalConfig::config_path().unwrap().exists());
+    assert!(cfg.mcp.inject_for_roles.iter().any(|r| r == "pm"));
 }
 
 #[tokio::test]
 async fn save_and_reload_roundtrip() {
-    // (#244) save() then load() must round-trip identically.
     let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempdir();
     unsafe {
         std::env::set_var("HOME", &home);
     }
+
     let mut cfg = GlobalConfig::default();
-    cfg.mcp.inject_for_roles = vec!["ctrl".to_string(), "pm".to_string()];
-    cfg.mcp.services.push(McpService {
-        name: "test-svc".to_string(),
-        description: "A test service".to_string(),
-        command: "test-cmd".to_string(),
-        args: vec!["arg1".to_string()],
-        env: std::collections::HashMap::new(),
-        url: None,
-        transport: "stdio".to_string(),
-        enabled: true,
-        tools: vec![McpTool {
-            name: "test_tool".to_string(),
-            description: "A test tool".to_string(),
-        }],
-        discover: false,
-    });
-    cfg.save().await.expect("save should succeed");
+    cfg.mcp.inject_for_roles = vec!["ctrl".to_string(), "research".to_string()];
+    cfg.mcp.trust_project_mcp_json = true;
+    cfg.save().await.unwrap();
+
     let reloaded = GlobalConfig::load().await;
-    assert_eq!(reloaded.mcp.services.len(), 1);
-    assert_eq!(reloaded.mcp.services[0].name, "test-svc");
-    assert_eq!(reloaded.mcp.services[0].tools.len(), 1);
-    assert_eq!(reloaded.mcp.services[0].tools[0].name, "test_tool");
-    assert!(reloaded.mcp.services[0].enabled);
+    assert_eq!(reloaded.mcp.inject_for_roles, ["ctrl", "research"]);
+    assert!(reloaded.mcp.trust_project_mcp_json);
 }
 
 /// #3766: `[providers] default_provider_id` must survive a save driven by an
@@ -401,106 +299,6 @@ async fn save_leaves_no_scratch_file_behind() {
 
     let reloaded = GlobalConfig::load().await;
     assert_eq!(reloaded.mcp.inject_for_roles, vec!["ctrl".to_string()]);
-}
-
-#[tokio::test]
-async fn add_service_replaces_existing() {
-    // (#244) add_service with a name that already exists replaces, not appends.
-    let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let home = tempdir();
-    unsafe {
-        std::env::set_var("HOME", &home);
-    }
-    let mut cfg = GlobalConfig::default();
-    cfg.add_service(McpService {
-        name: "x".to_string(),
-        description: "first".to_string(),
-        command: "a".to_string(),
-        args: vec![],
-        env: std::collections::HashMap::new(),
-        url: None,
-        transport: "stdio".to_string(),
-        enabled: true,
-        tools: vec![],
-        discover: false,
-    })
-    .await
-    .unwrap();
-    cfg.add_service(McpService {
-        name: "x".to_string(),
-        description: "second".to_string(),
-        command: "b".to_string(),
-        args: vec![],
-        env: std::collections::HashMap::new(),
-        url: None,
-        transport: "stdio".to_string(),
-        enabled: true,
-        tools: vec![],
-        discover: false,
-    })
-    .await
-    .unwrap();
-    assert_eq!(cfg.mcp.services.len(), 1);
-    assert_eq!(cfg.mcp.services[0].description, "second");
-    assert_eq!(cfg.mcp.services[0].command, "b");
-}
-
-#[tokio::test]
-async fn remove_service_returns_correct_bool() {
-    let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let home = tempdir();
-    unsafe {
-        std::env::set_var("HOME", &home);
-    }
-    let mut cfg = GlobalConfig::default();
-    cfg.add_service(McpService {
-        name: "x".to_string(),
-        description: "d".to_string(),
-        command: "c".to_string(),
-        args: vec![],
-        env: std::collections::HashMap::new(),
-        url: None,
-        transport: "stdio".to_string(),
-        enabled: true,
-        tools: vec![],
-        discover: false,
-    })
-    .await
-    .unwrap();
-    assert!(cfg.remove_service("x").await.unwrap());
-    assert!(!cfg.remove_service("x").await.unwrap());
-    assert!(cfg.mcp.services.is_empty());
-}
-
-#[tokio::test]
-async fn enable_disable_toggles_flag() {
-    let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let home = tempdir();
-    unsafe {
-        std::env::set_var("HOME", &home);
-    }
-    let mut cfg = GlobalConfig::default();
-    cfg.add_service(McpService {
-        name: "x".to_string(),
-        description: "d".to_string(),
-        command: "c".to_string(),
-        args: vec![],
-        env: std::collections::HashMap::new(),
-        url: None,
-        transport: "stdio".to_string(),
-        enabled: false,
-        tools: vec![],
-        discover: false,
-    })
-    .await
-    .unwrap();
-    assert!(cfg.enable_service("x").await.unwrap());
-    assert!(cfg.mcp.services[0].enabled);
-    assert!(cfg.disable_service("x").await.unwrap());
-    assert!(!cfg.mcp.services[0].enabled);
-    // Unknown name returns false.
-    assert!(!cfg.enable_service("missing").await.unwrap());
-    assert!(!cfg.disable_service("missing").await.unwrap());
 }
 
 // --- [[listeners]] section (#3820, DOC-54 SPEC-AGENTS-06) ---------------

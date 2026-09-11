@@ -33,7 +33,10 @@ use tokio::time::timeout;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
-use super::config::EndpointConfig;
+use trusty_mcp::config::McpServerConfig;
+
+use crate::mcp::extensions;
+
 use super::discovery::{EndpointCapabilities, EndpointManifest, parse_manifest};
 use super::driver::{BatchCall, BatchResult, RegistryDriver};
 
@@ -84,24 +87,28 @@ impl DirectDriver {
     /// Test: Construction is exercised indirectly by the registry build
     /// path; failure modes (missing command, missing binary) covered by
     /// `new_requires_command` and `new_fails_on_missing_binary`.
-    pub fn new(config: &EndpointConfig) -> Result<Self> {
-        let command = config
-            .command
-            .clone()
-            .context("direct driver requires `command` field (path to OpenRPC binary)")?;
-        let args = config.args.clone().unwrap_or_default();
+    pub fn new(config: &McpServerConfig) -> Result<Self> {
+        // #7454: a registry endpoint is always a subprocess, so a non-stdio
+        // transport is a configuration error rather than a driver this module
+        // could pick. The wildcard arm keeps a transport variant added
+        // upstream from breaking the build (`McpTransport` is
+        // `#[non_exhaustive]`).
+        let (command, args) = match extensions::stdio_parts(config) {
+            Some((command, args, _)) if !command.is_empty() => (command.to_string(), args.to_vec()),
+            Some(_) => anyhow::bail!(
+                "direct driver requires a non-empty `command` (path to the OpenRPC binary)"
+            ),
+            None => anyhow::bail!("direct driver requires a `stdio` transport"),
+        };
 
-        let request_timeout = config
-            .transport
-            .as_ref()
-            .and_then(|t| t.timeout_ms)
+        let limits = extensions::transport_limits(config);
+        let request_timeout = limits
+            .timeout_ms
             .map(Duration::from_millis)
             .unwrap_or_else(|| Duration::from_millis(DEFAULT_TIMEOUT_MS));
 
-        let semaphore = config
-            .transport
-            .as_ref()
-            .and_then(|t| t.max_concurrency)
+        let semaphore = limits
+            .max_concurrency
             .filter(|n| *n > 0)
             .map(|n| Arc::new(Semaphore::new(n)));
 
@@ -351,23 +358,26 @@ fn extract_rpc_result(envelope: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::registry::config::DriverKind;
+    use crate::mcp::extensions::DriverKind;
 
-    fn cfg(name: &str, command: Option<&str>, args: Vec<&str>) -> EndpointConfig {
-        EndpointConfig {
-            name: name.to_string(),
-            driver: DriverKind::Direct,
-            description: None,
-            url: None,
-            command: command.map(str::to_string),
-            args: Some(args.into_iter().map(String::from).collect()),
-            enabled: true,
-            scopes: vec![],
-            discovery_ttl_secs: 0,
-            eager_discovery: false,
-            auth: None,
-            transport: None,
-        }
+    /// #7454: a registry endpoint is an `McpServerConfig` whose `driver`
+    /// extension names this driver. `command: None` spells "the operator
+    /// declared no command", which the constructor must still refuse.
+    fn cfg(name: &str, command: Option<&str>, args: Vec<&str>) -> McpServerConfig {
+        let mut server = McpServerConfig::new(
+            name,
+            trusty_mcp::config::McpTransport::Stdio {
+                command: command.unwrap_or_default().to_string(),
+                args: args.into_iter().map(String::from).collect(),
+                env: Default::default(),
+            },
+        );
+        extensions::set(
+            &mut server.extensions,
+            extensions::DRIVER,
+            &DriverKind::Direct,
+        );
+        server
     }
 
     #[test]
@@ -397,8 +407,7 @@ mod tests {
 
     #[tokio::test]
     async fn new_requires_command() {
-        let mut c = cfg("ep", Some("/bin/cat"), vec![]);
-        c.command = None;
+        let c = cfg("ep", None, vec![]);
         let r = DirectDriver::new(&c);
         let err = match r {
             Err(e) => e,

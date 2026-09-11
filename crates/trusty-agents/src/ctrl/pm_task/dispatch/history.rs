@@ -170,7 +170,13 @@ pub async fn run_pm_task_with_history(
         let mut builder = crate::agents::prompt_builder::SystemPromptBuilder::new(base)
             .with_agent_context(pm_cfg.agent.model.as_str(), runner_label);
         let mcp_cfg = crate::mcp::GlobalConfig::load().await;
-        if let Some(section) = mcp_cfg.render_prompt_section(&pm_cfg.agent.role) {
+        // #7454: this persona's own effective server set, so an
+        // assistant-level override reaches the prompt as well as the registry.
+        let mcp_resolved =
+            crate::mcp::resolve_for_assistant(Some(pm_cfg.agent.name.as_str()), project_path).await;
+        if let Some(section) =
+            mcp_cfg.render_prompt_section(&pm_cfg.agent.role, &mcp_resolved.servers)
+        {
             builder = builder.add_mcp_layer(section);
         }
         let q = &user_input[..200.min(user_input.len())];

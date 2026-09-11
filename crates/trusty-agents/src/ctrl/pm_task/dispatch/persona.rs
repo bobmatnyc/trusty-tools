@@ -256,36 +256,17 @@ pub async fn run_pm_task_with_persona(
                     crate::tools::listener_config::ListenerConfigTool::new(persona_name),
                 ));
             }
-            for tool in crate::tools::mcp_tools::mcp_tool_executors() {
-                crate::tools::listener_config::register_external(&mut registry, tool);
-            }
-            for tool in crate::tools::mcp_service_tools::mcp_service_tool_executors().await {
-                crate::tools::listener_config::register_external(&mut registry, tool);
-            }
-            // #3987: `advertised_scopes` is the UNFILTERED vocabulary every
-            // endpoint published, captured here because the registry only
-            // keeps what the operator's `[[endpoints]].scopes` policy let
-            // through. Feeding the dead-grant diagnostic the post-policy set
-            // would make an operator's deliberate narrowing look like a
-            // broken agent grant — see `build_with_scope_vocabulary`.
-            let mut advertised_scopes: Vec<String> = Vec::new();
-            {
-                let global_config = crate::mcp::config::GlobalConfig::load().await;
-                match crate::tools::registry::ToolRegistryBuilder::from_config(&global_config)
-                    .build_with_scope_vocabulary()
-                    .await
-                {
-                    Ok((execs, vocabulary)) => {
-                        for tool in execs {
-                            crate::tools::listener_config::register_external(&mut registry, tool);
-                        }
-                        advertised_scopes = vocabulary;
-                    }
-                    Err(e) => {
-                        tracing::warn!("tool registry init failed: {e}");
-                    }
-                }
-            }
+            // #7454: all three MCP surfaces are registered together, from ONE
+            // resolved server set, so an assistant-level override cannot reach
+            // one of them and miss the others. `advertised_scopes` is the
+            // UNFILTERED vocabulary the endpoints published (#3987) — see
+            // `super::persona_mcp`.
+            // `mcp_resolved` is this turn's ONE resolution of the persona's
+            // MCP servers (#7454 review). Live discovery below reuses it
+            // instead of reading the same files a second time.
+            let (mcp_resolved, advertised_scopes) =
+                super::persona_mcp::register_mcp_tools(&mut registry, persona_name, project_path)
+                    .await;
             // #4172 (epic #4167): resolve THIS persona's cross-project reach
             // once, and hand the same value to both consumers below — the git
             // tool surface and `vector_search`'s tier-2 index list. The tier
@@ -554,11 +535,13 @@ pub async fn run_pm_task_with_persona(
                 );
             }
 
-            // #3238: live-discover MCP servers (`[[mcp.services]] discover =
-            // true` and `.mcp.json`) and register whatever tools they
-            // actually advertise, on top of everything registered above.
+            // #3238: live-discover MCP servers (`discover = true` and
+            // `.mcp.json`) and register whatever tools they actually
+            // advertise, on top of everything registered above.
             // `existing_names` seeds the dedup set so a live-discovered tool
             // never shadows a tool already registered from another source.
+            // #7454 review: the servers are `mcp_resolved`, the same set the
+            // static path and the OpenRPC registry were built from above.
             {
                 let existing_names: std::collections::HashSet<String> = registry
                     .schemas()
@@ -570,9 +553,11 @@ pub async fn run_pm_task_with_persona(
                             .map(String::from)
                     })
                     .collect();
-                for tool in
-                    crate::tools::mcp_live::live_mcp_tool_executors(project_path, &existing_names)
-                        .await
+                for tool in crate::tools::mcp_live::live_mcp_tool_executors(
+                    &mcp_resolved.usable(),
+                    &existing_names,
+                )
+                .await
                 {
                     crate::tools::listener_config::register_external(&mut registry, tool);
                 }

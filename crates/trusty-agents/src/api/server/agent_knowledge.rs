@@ -63,10 +63,11 @@ use crate::agents::{SkillsConfig, ToolsConfig};
 // persona-chat dispatch gate uses, so a `*` allow cannot advertise an L0 or
 // exfil tool the real gate denies.
 use crate::ctrl::pm_task::tool_authz::persona_surface_grants_tool;
-use crate::mcp::config::McpService;
+use trusty_mcp::config::McpServerConfig;
+
+use crate::mcp::extensions::{self, DriverKind};
 use crate::skills::manifest::{SkillCatalog, SkillKind, effective_tool_patterns};
 use crate::stores::{StoresConfig, resolve_store_statuses};
-use crate::tools::registry::config::{DriverKind, EndpointConfig};
 
 /// `GET /api/agents/:name/knowledge` — HTTP entry point.
 ///
@@ -171,8 +172,14 @@ pub(super) async fn knowledge_at(
     // enabled this" from "THIS AGENT is granted a tool it would back" —
     // otherwise a bare agent with zero grants reports the same two
     // connections as a fully-provisioned one (see `agent_reaches_connection`).
-    let global_config = crate::mcp::config::GlobalConfig::load().await;
-    let mcp = knowledge_mcp_connections(&global_config, patterns.as_deref());
+    // #7454: resolved for THIS agent, so an assistant-level override shows in
+    // its own Knowledge pane and nowhere else. `project_root` is the injected
+    // root this route already resolves everything else against — deriving it
+    // from `current_dir` instead would make the `.mcp.json` tier depend on the
+    // server process's working directory rather than on the project the caller
+    // named, and would leave the tests unable to control it.
+    let resolved = crate::mcp::resolve_for_assistant(Some(name), project_root).await;
+    let mcp = knowledge_mcp_connections(&resolved.servers, patterns.as_deref());
 
     let mut body = json!({
         "stores": statuses,
@@ -291,36 +298,24 @@ fn knowledge_tool_cards(
 /// `knowledge_mcp_connections_reports_ungranted_for_a_bare_agent`,
 /// `knowledge_mcp_connections_reports_granted_when_agent_holds_a_backing_tool`.
 fn knowledge_mcp_connections(
-    global: &crate::mcp::config::GlobalConfig,
+    servers: &[McpServerConfig],
     patterns: Option<&[String]>,
 ) -> Vec<Value> {
     const KNOWLEDGE_NAMESPACES: &[&str] = &["memory", "search", "google"];
     const KNOWLEDGE_SERVICE_NAMES: &[&str] = &["trusty-memory", "trusty-search"];
 
-    let mut out: Vec<Value> = Vec::new();
-    if let Some(registry) = &global.tool_registry {
-        out.extend(
-            registry
-                .endpoints
-                .iter()
-                .filter(|ep| {
-                    ep.scopes.iter().any(|s| {
-                        let namespace = s.split('.').next().unwrap_or(s);
-                        KNOWLEDGE_NAMESPACES.contains(&namespace)
-                    })
-                })
-                .map(|ep| endpoint_card(ep, patterns)),
-        );
-    }
-    out.extend(
-        global
-            .mcp
-            .services
-            .iter()
-            .filter(|svc| KNOWLEDGE_SERVICE_NAMES.contains(&svc.name.as_str()))
-            .map(|svc| mcp_service_card(svc, patterns)),
-    );
-    out
+    servers
+        .iter()
+        .filter_map(|server| {
+            let scopes = extensions::scopes(server);
+            let scope_relevant = scopes.iter().any(|s| {
+                let namespace = s.split('.').next().unwrap_or(s);
+                KNOWLEDGE_NAMESPACES.contains(&namespace)
+            });
+            let name_relevant = KNOWLEDGE_SERVICE_NAMES.contains(&server.name.as_str());
+            (scope_relevant || name_relevant).then(|| connection_card(server, &scopes, patterns))
+        })
+        .collect()
 }
 
 /// Whether this agent's OWN resolved tool patterns grant a tool the named
@@ -392,33 +387,40 @@ fn connection_reason(enabled: bool, granted_for_agent: bool, noun: &str) -> Stri
     format!("{noun} is enabled in config.toml; this route does not probe live connectivity")
 }
 
-fn endpoint_card(ep: &EndpointConfig, patterns: Option<&[String]>) -> Value {
-    let kind = match ep.driver {
-        DriverKind::Direct => "openrpc",
-        DriverKind::StdioMcp => "mcp",
+/// One connection's card.
+///
+/// Why: #7454 collapsed the two card builders this route used to have. The
+/// three schemas they read are now one, so the shape of the card no longer
+/// depends on which table an entry happened to sit in — only on what the
+/// entry itself declares.
+/// What: `kind` is `"openrpc"` for a `driver = "direct"` registry endpoint,
+/// `"mcp"` for everything else (a `stdio-mcp` endpoint and a plain MCP
+/// connection reach the same client). `noun` follows the same split so the
+/// existing reason phrasings are unchanged.
+fn connection_card(
+    server: &McpServerConfig,
+    scopes: &[String],
+    patterns: Option<&[String]>,
+) -> Value {
+    let driver = extensions::driver(server);
+    let kind = match driver {
+        Some(DriverKind::Direct) => "openrpc",
+        _ => "mcp",
     };
-    let granted_for_agent = agent_reaches_connection(&ep.name, patterns);
+    let noun = if driver.is_some() {
+        "endpoint"
+    } else {
+        "service"
+    };
+    let granted_for_agent = agent_reaches_connection(&server.name, patterns);
     json!({
-        "name": ep.name,
+        "name": server.name,
         "kind": kind,
-        "enabled": ep.enabled,
+        "enabled": server.enabled,
         "connected": false,
-        "scopes": ep.scopes,
+        "scopes": scopes,
         "granted_for_agent": granted_for_agent,
-        "reason": connection_reason(ep.enabled, granted_for_agent, "endpoint"),
-    })
-}
-
-fn mcp_service_card(svc: &McpService, patterns: Option<&[String]>) -> Value {
-    let granted_for_agent = agent_reaches_connection(&svc.name, patterns);
-    json!({
-        "name": svc.name,
-        "kind": "mcp",
-        "enabled": svc.enabled,
-        "connected": false,
-        "scopes": Vec::<String>::new(),
-        "granted_for_agent": granted_for_agent,
-        "reason": connection_reason(svc.enabled, granted_for_agent, "service"),
+        "reason": connection_reason(server.enabled, granted_for_agent, noun),
     })
 }
 
@@ -556,11 +558,16 @@ allow = ["memory-recall"]
         );
     }
 
+    /// #7454: every connection is now one `McpServerConfig`, so the fixtures
+    /// are the migrated form of what `config.toml` used to declare.
+    fn servers_from(legacy: &str) -> Vec<McpServerConfig> {
+        crate::mcp::shared::migrate::convert(legacy).0
+    }
+
     #[test]
     fn knowledge_mcp_connections_flags_memory_and_search_by_scope() {
-        let global: crate::mcp::config::GlobalConfig = toml::from_str(
+        let servers = servers_from(
             r#"
-[tool_registry]
 [[tool_registry.endpoints]]
 name = "trusty-memory"
 driver = "direct"
@@ -575,11 +582,11 @@ command = "trusty-search"
 enabled = false
 scopes = ["search.read"]
 "#,
-        )
-        .unwrap();
-        let cards = knowledge_mcp_connections(&global, None);
+        );
+        let cards = knowledge_mcp_connections(&servers, None);
         assert_eq!(cards.len(), 2);
         let memory = cards.iter().find(|c| c["name"] == "trusty-memory").unwrap();
+        assert_eq!(memory["kind"], "openrpc");
         assert_eq!(memory["enabled"], false);
         assert_eq!(memory["connected"], false);
         assert!(
@@ -592,33 +599,30 @@ scopes = ["search.read"]
 
     #[test]
     fn knowledge_mcp_connections_ignores_an_unrelated_endpoint() {
-        let global: crate::mcp::config::GlobalConfig = toml::from_str(
+        let servers = servers_from(
             r#"
-[tool_registry]
 [[tool_registry.endpoints]]
 name = "some-ticketing-mcp"
 driver = "direct"
 command = "ticketing-rpc"
 scopes = ["ticketing.read"]
 "#,
-        )
-        .unwrap();
-        assert!(knowledge_mcp_connections(&global, None).is_empty());
+        );
+        assert!(knowledge_mcp_connections(&servers, None).is_empty());
     }
 
     #[test]
     fn knowledge_mcp_connections_empty_when_no_registry_configured() {
-        let global = crate::mcp::config::GlobalConfig::default();
-        assert!(knowledge_mcp_connections(&global, None).is_empty());
+        assert!(knowledge_mcp_connections(&[], None).is_empty());
     }
 
     /// Today's actual shape (see the module doc's "honest gap discovered"
-    /// note): `trusty-memory`/`trusty-search` live under `[[mcp.services]]`,
-    /// not `[[tool_registry.endpoints]]`. `McpService` carries no `scopes`
-    /// field, so these are classified by name.
+    /// note): `trusty-memory`/`trusty-search` ship as plain MCP connections,
+    /// not as scope-tagged registry endpoints, so those are classified by
+    /// NAME — a small, stable, first-party pair.
     #[test]
     fn knowledge_mcp_connections_flags_first_party_mcp_services_by_name() {
-        let global: crate::mcp::config::GlobalConfig = toml::from_str(
+        let servers = servers_from(
             r#"
 [[mcp.services]]
 name = "trusty-memory"
@@ -636,9 +640,8 @@ command = "tm"
 transport = "stdio"
 enabled = true
 "#,
-        )
-        .unwrap();
-        let cards = knowledge_mcp_connections(&global, None);
+        );
+        let cards = knowledge_mcp_connections(&servers, None);
         assert_eq!(cards.len(), 1, "{cards:?}");
         assert_eq!(cards[0]["name"], "trusty-memory");
         assert_eq!(cards[0]["kind"], "mcp");
@@ -646,14 +649,14 @@ enabled = true
         assert_eq!(cards[0]["connected"], false);
     }
 
-    /// MEDIUM (code-critic, PR #4119): `GlobalConfig::load()` falls back to
-    /// the compiled-in default, which enables `trusty-memory`/`trusty-search`
-    /// for EVERY agent. Without per-agent scoping a bare agent with zero
-    /// grants would report the same two "available" connections as a fully
-    /// provisioned one. `granted_for_agent` must be `false` here.
+    /// MEDIUM (code-critic, PR #4119): the shipped defaults enable
+    /// `trusty-memory`/`trusty-search` for EVERY agent. Without per-agent
+    /// scoping a bare agent with zero grants would report the same two
+    /// "available" connections as a fully provisioned one.
+    /// `granted_for_agent` must be `false` here.
     #[test]
     fn knowledge_mcp_connections_reports_ungranted_for_a_bare_agent() {
-        let global: crate::mcp::config::GlobalConfig = toml::from_str(
+        let servers = servers_from(
             r#"
 [[mcp.services]]
 name = "trusty-memory"
@@ -662,10 +665,9 @@ command = "trusty-memory"
 transport = "stdio"
 enabled = true
 "#,
-        )
-        .unwrap();
+        );
         // No patterns at all — the bare-agent case (`declares_capability: false`).
-        let cards = knowledge_mcp_connections(&global, None);
+        let cards = knowledge_mcp_connections(&servers, None);
         assert_eq!(cards[0]["enabled"], true, "operator turned it on");
         assert_eq!(
             cards[0]["granted_for_agent"], false,
@@ -680,7 +682,7 @@ enabled = true
         // A DIFFERENT agent granted an unrelated tool is still ungranted for
         // THIS connection — granting is per-backing-tool, not "has any grant".
         let unrelated = vec!["get_weather".to_string()];
-        let cards = knowledge_mcp_connections(&global, Some(&unrelated));
+        let cards = knowledge_mcp_connections(&servers, Some(&unrelated));
         assert_eq!(cards[0]["granted_for_agent"], false);
     }
 
@@ -689,7 +691,7 @@ enabled = true
     /// phrasing, not the "not granted" one.
     #[test]
     fn knowledge_mcp_connections_reports_granted_when_agent_holds_a_backing_tool() {
-        let global: crate::mcp::config::GlobalConfig = toml::from_str(
+        let servers = servers_from(
             r#"
 [[mcp.services]]
 name = "trusty-memory"
@@ -698,10 +700,9 @@ command = "trusty-memory"
 transport = "stdio"
 enabled = true
 "#,
-        )
-        .unwrap();
+        );
         let patterns = vec!["memory_recall".to_string()];
-        let cards = knowledge_mcp_connections(&global, Some(&patterns));
+        let cards = knowledge_mcp_connections(&servers, Some(&patterns));
         assert_eq!(cards[0]["granted_for_agent"], true);
         assert!(
             cards[0]["reason"]
