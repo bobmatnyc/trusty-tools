@@ -78,8 +78,10 @@ impl WorktreeOrphanCounts {
 pub(crate) async fn gather_worktree_counts(
     mgr: &crate::session_manager::SessionManager,
     repos_root: &Path,
+    // #7357: resolved by `run_doctor_for_manager`, never here.
+    adopted: &[std::path::PathBuf],
 ) -> Option<WorktreeOrphanCounts> {
-    match mgr.reconcile_worktree_inventory(repos_root).await {
+    match mgr.reconcile_worktree_inventory(repos_root, adopted).await {
         Ok(report) => Some(WorktreeOrphanCounts::from_reconcile(&report)),
         Err(e) => {
             tracing::error!("doctor: worktree inventory unavailable: {e}");

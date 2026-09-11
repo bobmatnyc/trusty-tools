@@ -171,7 +171,9 @@ pub fn register(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRouter {
     );
 
     let held = Arc::clone(state);
-    let r = r.typed::<reg::RegisterProjectBody, Project, _, _>(
+    // #7357: the response carries the worktree-adoption report beside the
+    // record, identically on both transports.
+    let r = r.typed::<reg::RegisterProjectBody, crate::daemon::project_adoption::RegisterProjectResponse, _, _>(
         "mpm.projects.registry.register",
         move |p| {
             let s = Arc::clone(&held);

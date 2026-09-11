@@ -88,7 +88,7 @@ async fn reap_orphaned_worktrees_removes_orphan_preserves_live() {
         .expect("create live record");
 
     let outcome = mgr
-        .reap_orphaned_worktrees(&fx.repos_root)
+        .reap_orphaned_worktrees(&fx.repos_root, &[])
         .await
         .expect("reap must not error");
     let removed = outcome.removed;
@@ -178,7 +178,13 @@ async fn reap_spares_a_stopped_records_workspace() {
     // CONTROL: with an EMPTY active set this fixture IS reclaimable. Dry-run,
     // so nothing is deleted before the real assertions run.
     let control = mgr
-        .prune_orphaned_worktrees(&fx.repos_root, &[], true, super::DirtyWorktreePolicy::Skip)
+        .prune_orphaned_worktrees(
+            &fx.repos_root,
+            &[],
+            true,
+            super::DirtyWorktreePolicy::Skip,
+            &[],
+        )
         .await
         .expect("control sweep must not error");
     assert!(
@@ -222,7 +228,7 @@ async fn reap_spares_a_stopped_records_workspace() {
     // The automatic sweep always really deletes (`dry_run: false` is hardcoded),
     // so this is the destructive path, not a preview.
     let outcome = mgr
-        .reap_orphaned_worktrees(&fx.repos_root)
+        .reap_orphaned_worktrees(&fx.repos_root, &[])
         .await
         .expect("reap must not error");
 

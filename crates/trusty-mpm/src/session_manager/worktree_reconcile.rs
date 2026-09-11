@@ -396,6 +396,12 @@ pub fn reconcile_worktrees(
     records: &[SessionRecord],
     live_cwds: &[PathBuf],
     now: DateTime<Utc>,
+    // #7357: adopted anchors reach projects the repos-root walk cannot. They
+    // are INJECTED, never resolved here — resolving them internally makes this
+    // function's unit tests read the operator's real adoption store and
+    // reconcile whatever real worktrees it names. `&[]` is the pre-#7357
+    // behaviour exactly.
+    adopted: &[PathBuf],
 ) -> ReconcileReport {
     // Grouped by path, but every (path, registry root) CLAIM is kept. Collapsing
     // to one entry per path — which this did until the #4382 review — makes a
@@ -403,8 +409,7 @@ pub fn reconcile_worktrees(
     // disagreement between two registries about one path is precisely the state
     // this whole slice exists to surface. See `classify`'s contested branch.
     let mut scanned: BTreeMap<PathBuf, Vec<ScannedWorktree>> = BTreeMap::new();
-    // #7357: adopted anchors reach projects the repos-root walk cannot.
-    for s in scan_registered_worktrees(repos_root, &crate::project::default_adopted_anchors()) {
+    for s in scan_registered_worktrees(repos_root, adopted) {
         scanned.entry(s.path.clone()).or_default().push(s);
     }
     let mut by_workspace: BTreeMap<PathBuf, Vec<&SessionRecord>> = BTreeMap::new();
@@ -812,6 +817,9 @@ impl super::manager::SessionManager {
     pub(crate) async fn reconcile_worktree_inventory(
         &self,
         repos_root: &Path,
+        // #7357: passed through to [`reconcile_worktrees`]; the route and the
+        // doctor entry point resolve them, this layer never does.
+        adopted: &[PathBuf],
     ) -> Result<ReconcileReport, anyhow::Error> {
         let records = self.list().await;
         let mut live_cwds: Vec<PathBuf> = Vec::new();
@@ -823,8 +831,9 @@ impl super::manager::SessionManager {
             }
         }
         let repos_root = repos_root.to_path_buf();
+        let adopted = adopted.to_vec();
         tokio::task::spawn_blocking(move || {
-            reconcile_worktrees(&repos_root, &records, &live_cwds, Utc::now())
+            reconcile_worktrees(&repos_root, &records, &live_cwds, Utc::now(), &adopted)
         })
         .await
         .map_err(|e| anyhow::anyhow!("reconcile-worktrees: inventory scan panicked: {e}"))

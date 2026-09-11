@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 
+use crate::daemon::project_adoption::{RegisterProjectResponse, adopt_pre_existing_worktrees};
 use crate::daemon::state::DaemonState;
 use crate::project::record::Project;
 use crate::project::resolver;
@@ -63,12 +64,15 @@ pub async fn project_list(state: &Arc<DaemonState>) -> Result<Value, String> {
 /// current persisted value rather than clearing it (#3025 review follow-up
 /// item 4 — mirrors [`crate::daemon::managed_routes::project_registry_routes::register_project_registry_route`](crate::daemon::managed_routes::register_project_registry_route)'s
 /// identical fix; see that function's doc for the full rationale and the
-/// deliberate `default_branch` exception). Calls `registry.register`, then
-/// adopts the checkout's PRE-EXISTING worktrees (#7357 — see
-/// [`backfill_pre_existing_worktrees`]), and returns the persisted record.
+/// deliberate `default_branch` exception). Calls `registry.register`, then runs
+/// the SHARED [`adopt_pre_existing_worktrees`] (#7357 — the CLI transport runs
+/// the same function, so neither can adopt what the other does not), and
+/// returns the persisted record with that adoption report beside it as
+/// [`RegisterProjectResponse`].
 /// Test: `dispatch_project_register_tool` in `crate::mcp::tests`;
 /// `project_register_backfills_pre_existing_worktrees`,
-/// `project_register_backfill_is_idempotent`.
+/// `project_register_backfill_is_idempotent`,
+/// `parity_register_adopts_the_same_worktrees_across_transports`.
 #[allow(clippy::too_many_arguments)]
 pub async fn project_register(
     state: &Arc<DaemonState>,
@@ -119,52 +123,10 @@ pub async fn project_register(
         .register(project.clone())
         .await
         .map_err(|e| format!("project_register: registry error: {e}"))?;
-    backfill_pre_existing_worktrees(state, &project);
-    serde_json::to_value(&project).map_err(|e| e.to_string())
-}
-
-/// Adopt the worktrees a project's checkout ALREADY has (#7357).
-///
-/// Why: before #7357 registration wrote a [`Project`] record and nothing else,
-/// so a repo that had agent activity before it was registered stayed invisible
-/// to `reconcile-worktrees`, `prune-worktrees --merged-prs`, `tm doctor` and the
-/// Disk survey — all four read one scan, and that scan reaches a project only at
-/// `<repos_root>/<owner>/<repo>`. The operator's only remaining move was
-/// `git worktree remove --force` by hand. Running the backfill here is what
-/// makes a pre-existing worktree indistinguishable, to every later pass, from
-/// one provisioned after registration.
-/// What: resolves the project's LOCAL checkout — `repo_url` when it names an
-/// existing directory — and hands it to
-/// [`crate::project::backfill_checkout`], which writes one adoption record per
-/// worktree it can read. A `repo_url` that is a remote URL needs nothing: its
-/// checkout lives at `<repos_root>/<owner>/<repo>`, which the walk already
-/// covers.
-///
-/// NOT A GATE. Every failure below is a warning: registration is bookkeeping and
-/// must not fail because a checkout moved, a disk is unreadable, or git will not
-/// answer. A skipped worktree is exactly as invisible as it was before.
-/// Test: `project_register_backfills_pre_existing_worktrees`,
-/// `project_register_backfill_is_idempotent`,
-/// `project_register_succeeds_when_the_checkout_is_not_a_repository`.
-fn backfill_pre_existing_worktrees(state: &Arc<DaemonState>, project: &Project) {
-    let checkout = std::path::Path::new(&project.repo_url);
-    if !checkout.is_dir() {
-        return;
-    }
-    let store_dir = crate::project::registry_data_dir_under(state.framework_root());
-    let report =
-        crate::project::backfill_checkout(&store_dir, &project.name, checkout, chrono::Utc::now());
-    if report != crate::project::BackfillReport::default() {
-        tracing::info!(
-            project = %project.name,
-            checkout = %checkout.display(),
-            recorded = report.recorded,
-            already_recorded = report.already_recorded,
-            claimed_by_another = report.claimed_by_another,
-            skipped = report.skipped,
-            "#7357: adopted pre-existing worktrees at project registration"
-        );
-    }
+    // #7357: the SAME function the CLI transport calls, so the two surfaces
+    // cannot diverge on what registration adopts.
+    let adoption = adopt_pre_existing_worktrees(state, &project);
+    serde_json::to_value(RegisterProjectResponse { project, adoption }).map_err(|e| e.to_string())
 }
 
 /// Look up a single project by name.

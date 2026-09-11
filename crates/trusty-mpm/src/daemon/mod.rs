@@ -40,8 +40,10 @@ pub mod mcp_console;
 pub mod mcp_context;
 pub mod mcp_disk;
 pub mod mcp_project;
+// #7357: the backfill both registration transports share.
 pub mod mcp_proxy;
 pub mod mcp_session;
+pub mod project_adoption;
 // #6431: record-only bulk deletion for the console's unknown-state bucket.
 pub mod mcp_session_bulk;
 pub mod openapi;
@@ -914,7 +916,12 @@ async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cance
                 // authoritative list. Inherits the orphan-GC env gate
                 // (`TRUSTY_MPM_ORPHAN_GC`) since it runs inside this loop.
                 let repos_root = managed_routes::inproject::repos_root();
-                match mgr.reap_orphaned_worktrees(&repos_root).await {
+                // #7357: this loop is the entry point for the unattended sweep,
+                // so it resolves the adopted anchors under the DAEMON's own
+                // framework root — the same root `project_register` writes them
+                // to.
+                let adopted = crate::project::adopted_anchors_under(state.framework_root());
+                match mgr.reap_orphaned_worktrees(&repos_root, &adopted).await {
                     Ok(outcome) => {
                         if !outcome.removed.is_empty() {
                             info!(

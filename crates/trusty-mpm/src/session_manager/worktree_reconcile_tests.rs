@@ -174,7 +174,7 @@ fn reconcile_keys_on_the_git_registry_not_the_path() {
     assert_eq!(key_b.admin_dir.as_deref(), Some("B"));
     assert_ne!(key_a, key_b);
 
-    let report = reconcile_worktrees(&fx.repos_root, &[], &[], Utc::now());
+    let report = reconcile_worktrees(&fx.repos_root, &[], &[], Utc::now(), &[]);
     let admitted: Vec<PathBuf> = report
         .entries
         .iter()
@@ -258,7 +258,13 @@ fn reconcile_keys_on_the_git_registry_not_the_path() {
     );
 
     let rec = record_at(ManagedSessionState::Active, Some(fake.clone()));
-    let report = reconcile_worktrees(&fx.repos_root, std::slice::from_ref(&rec), &[], Utc::now());
+    let report = reconcile_worktrees(
+        &fx.repos_root,
+        std::slice::from_ref(&rec),
+        &[],
+        Utc::now(),
+        &[],
+    );
     let fake_entry = entry_for(&report, &fake);
     assert_eq!(
         fake_entry.state,
@@ -332,7 +338,7 @@ fn two_registries_claiming_one_path_keep_both_verdicts() {
         record_at(ManagedSessionState::Active, Some(uncontested.clone())),
     ];
 
-    let report = reconcile_worktrees(&fx.repos_root, &records, &[], Utc::now());
+    let report = reconcile_worktrees(&fx.repos_root, &records, &[], Utc::now(), &[]);
     let want = canonical(&contested);
     let rows: Vec<&ReconciledWorktree> = report.entries.iter().filter(|e| e.path == want).collect();
     assert_eq!(
@@ -395,7 +401,13 @@ fn stopped_records_workspace_is_live_not_orphaned() {
     GitWorktreeFixture::stamp_reclaimable_sentinel(&wt);
     let rec = record_at(ManagedSessionState::Stopped, Some(wt.clone()));
 
-    let report = reconcile_worktrees(&fx.repos_root, std::slice::from_ref(&rec), &[], Utc::now());
+    let report = reconcile_worktrees(
+        &fx.repos_root,
+        std::slice::from_ref(&rec),
+        &[],
+        Utc::now(),
+        &[],
+    );
     let entry = entry_for(&report, &wt);
     assert_eq!(
         entry.state,
@@ -423,7 +435,7 @@ fn clean_ownerless_admitted_worktree_is_orphaned() {
     let wt = fx.add_worktree("genuinely-stale");
     GitWorktreeFixture::stamp_reclaimable_sentinel(&wt);
 
-    let report = reconcile_worktrees(&fx.repos_root, &[], &[], Utc::now());
+    let report = reconcile_worktrees(&fx.repos_root, &[], &[], Utc::now(), &[]);
     let entry = entry_for(&report, &wt);
     assert_eq!(
         entry.state,
@@ -443,7 +455,7 @@ fn an_observed_live_cwd_vetoes_reclamation() {
     GitWorktreeFixture::stamp_reclaimable_sentinel(&wt);
     let inside = canonical(&wt).join("crates");
 
-    let report = reconcile_worktrees(&fx.repos_root, &[], &[inside], Utc::now());
+    let report = reconcile_worktrees(&fx.repos_root, &[], &[inside], Utc::now(), &[]);
     let entry = entry_for(&report, &wt);
     assert_eq!(
         entry.state,
@@ -477,12 +489,12 @@ fn young_absent_sentinel_owner_is_live_not_orphaned() {
     .expect("write sentinel");
 
     let now = Utc::now();
-    let fresh = reconcile_worktrees(&fx.repos_root, &[], &[], now);
+    let fresh = reconcile_worktrees(&fx.repos_root, &[], &[], now, &[]);
     assert_eq!(entry_for(&fresh, &wt).state, ReconcileState::Live);
 
     // Same sentinel, clock advanced past the grace window.
     let later = now + OWNERLESS_GRACE + chrono::Duration::minutes(1);
-    let aged = reconcile_worktrees(&fx.repos_root, &[], &[], later);
+    let aged = reconcile_worktrees(&fx.repos_root, &[], &[], later, &[]);
     assert_eq!(entry_for(&aged, &wt).state, ReconcileState::Orphaned);
 }
 
@@ -495,7 +507,7 @@ fn a_dirty_ownerless_worktree_is_unknown_not_orphaned() {
     GitWorktreeFixture::stamp_reclaimable_sentinel(&wt);
     std::fs::write(wt.join("README.md"), "edited but never committed\n").expect("dirty it");
 
-    let report = reconcile_worktrees(&fx.repos_root, &[], &[], Utc::now());
+    let report = reconcile_worktrees(&fx.repos_root, &[], &[], Utc::now(), &[]);
     let entry = entry_for(&report, &wt);
     assert_eq!(
         entry.state,
@@ -528,7 +540,7 @@ fn a_bare_clone_reports_its_bare_verdict_not_a_repair_instruction() {
     let vanished = fx.add_worktree("directory-removed");
     std::fs::remove_dir_all(&vanished).expect("remove the worktree directory");
 
-    let report = reconcile_worktrees(&fx.repos_root, &[], &[], Utc::now());
+    let report = reconcile_worktrees(&fx.repos_root, &[], &[], Utc::now(), &[]);
 
     let bare = entry_for(&report, &base);
     assert_eq!(
@@ -589,7 +601,13 @@ fn report_unions_registry_and_session_records() {
     std::fs::create_dir_all(&record_only).expect("create record-only dir");
     let rec = record_at(ManagedSessionState::Active, Some(record_only.clone()));
 
-    let report = reconcile_worktrees(&fx.repos_root, std::slice::from_ref(&rec), &[], Utc::now());
+    let report = reconcile_worktrees(
+        &fx.repos_root,
+        std::slice::from_ref(&rec),
+        &[],
+        Utc::now(),
+        &[],
+    );
     assert_eq!(
         entry_for(&report, &registered).admission,
         Some(Admission::Admitted)
@@ -618,7 +636,7 @@ fn entries_are_ordered_deepest_first() {
     let parent = fx.add_worktree("container");
     let child = fx.add_nested_worktree(&parent, ".claude/worktrees", "nested");
 
-    let report = reconcile_worktrees(&fx.repos_root, &[], &[], Utc::now());
+    let report = reconcile_worktrees(&fx.repos_root, &[], &[], Utc::now(), &[]);
     let idx = |p: &std::path::Path| {
         let want = canonical(p);
         report
@@ -658,7 +676,13 @@ fn categories_are_descriptive_and_do_not_gate_state() {
     let owned = fx.add_worktree("owned-one");
     let rec = record_at(ManagedSessionState::Active, Some(owned.clone()));
 
-    let report = reconcile_worktrees(&fx.repos_root, std::slice::from_ref(&rec), &[], Utc::now());
+    let report = reconcile_worktrees(
+        &fx.repos_root,
+        std::slice::from_ref(&rec),
+        &[],
+        Utc::now(),
+        &[],
+    );
     let category = |p: &std::path::Path| entry_for(&report, p).category;
     let state = |p: &std::path::Path| entry_for(&report, p).state;
 
@@ -686,7 +710,13 @@ fn proposed_adoptions_name_owner_and_evidence() {
     let wt = fx.add_worktree("adoptable");
     let rec = record_at(ManagedSessionState::Active, Some(wt.clone()));
 
-    let report = reconcile_worktrees(&fx.repos_root, std::slice::from_ref(&rec), &[], Utc::now());
+    let report = reconcile_worktrees(
+        &fx.repos_root,
+        std::slice::from_ref(&rec),
+        &[],
+        Utc::now(),
+        &[],
+    );
     assert_eq!(
         report.proposed_adoptions.len(),
         1,
@@ -725,7 +755,7 @@ fn proposed_adoptions_refuse_a_worktree_containing_another_entry() {
     let sibling_rec = record_at(ManagedSessionState::Active, Some(sibling.clone()));
     let records = vec![container_rec, sibling_rec];
 
-    let report = reconcile_worktrees(&fx.repos_root, &records, &[], Utc::now());
+    let report = reconcile_worktrees(&fx.repos_root, &records, &[], Utc::now(), &[]);
     let proposed: Vec<PathBuf> = report
         .proposed_adoptions
         .iter()

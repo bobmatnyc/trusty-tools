@@ -591,6 +591,7 @@ fn counts_for(repos_root: &std::path::Path) -> WorktreeOrphanCounts {
         &[],
         &[],
         chrono::Utc::now(),
+        &[],
     );
     WorktreeOrphanCounts::from_reconcile(&report)
 }

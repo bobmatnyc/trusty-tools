@@ -271,8 +271,18 @@ pub(crate) async fn prune_worktrees_core(
     } else {
         DirtyWorktreePolicy::Skip
     };
+    // #7357: the route is the entry point, so it resolves the adopted anchors
+    // under the daemon's own framework root — the root `project_register`
+    // wrote them to. Every scan below takes them as a parameter.
+    let adopted = crate::project::adopted_anchors_under(state.framework_root());
     match mgr
-        .prune_orphaned_worktrees(&repos_root, &in_use_workspace_paths, req.dry_run, policy)
+        .prune_orphaned_worktrees(
+            &repos_root,
+            &in_use_workspace_paths,
+            req.dry_run,
+            policy,
+            &adopted,
+        )
         .await
     {
         Ok(outcome) => {
@@ -330,6 +340,9 @@ pub(crate) async fn prune_worktrees_core(
                 // `SubagentStop` signals, so it is read here and handed to the
                 // classifier as a probe rather than as a captured list.
                 let state_for_agents = Arc::clone(state);
+                // #7357: resolved on the route, moved into the blocking task.
+                let adopted_for_reclaim =
+                    crate::project::adopted_anchors_under(state.framework_root());
                 match tokio::task::spawn_blocking(move || {
                     let in_use_now = move || -> Option<LiveClaims> {
                         // `None` means "could not be determined", which REFUSES
@@ -362,7 +375,14 @@ pub(crate) async fn prune_worktrees_core(
                         )
                     };
                     let keep_list = crate::core::trusty_tools_config::load_disk_keep_list;
-                    reclaim_merged_pr_worktrees(&root, &in_use_now, &agent_state, mode, &keep_list)
+                    reclaim_merged_pr_worktrees(
+                        &root,
+                        &in_use_now,
+                        &agent_state,
+                        mode,
+                        &keep_list,
+                        &adopted_for_reclaim,
+                    )
                 })
                 .await
                 {
@@ -719,7 +739,7 @@ mod tests {
         // CONTROL: with an EMPTY active set the fixture IS reclaimable. Dry-run
         // so nothing is deleted before the real assertions run.
         let control = mgr
-            .prune_orphaned_worktrees(&fx.repos_root, &[], true, DirtyWorktreePolicy::Skip)
+            .prune_orphaned_worktrees(&fx.repos_root, &[], true, DirtyWorktreePolicy::Skip, &[])
             .await
             .expect("control sweep must not error");
         assert!(

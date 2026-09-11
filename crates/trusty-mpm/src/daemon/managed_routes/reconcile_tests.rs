@@ -33,7 +33,7 @@ async fn reconcile_inventory_reports_without_mutating_anything() {
     let mgr = state.session_manager().await;
 
     let report = mgr
-        .reconcile_worktree_inventory(&fx.repos_root)
+        .reconcile_worktree_inventory(&fx.repos_root, &[])
         .await
         .expect("inventory must not error");
 

@@ -298,16 +298,19 @@ fn matches_filter(record: &SessionRecord, filter: PruneFilter) -> bool {
 pub(crate) fn find_orphaned_worktrees(
     repos_root: &std::path::Path,
     active_set: &std::collections::HashSet<std::path::PathBuf>,
-) -> Vec<std::path::PathBuf> {
     // #7357: the repos-root walk reaches a project only at
-    // `<repos_root>/<owner>/<repo>`; the adopted anchors carry the rest.
-    super::worktree_registry::enumerate_registered_worktrees(
-        repos_root,
-        &crate::project::default_adopted_anchors(),
-    )
-    .into_iter()
-    .filter(|candidate| !active_set.contains(candidate))
-    .collect()
+    // `<repos_root>/<owner>/<repo>`; the adopted anchors carry the rest. They
+    // are INJECTED rather than resolved here — resolving them internally makes
+    // this function's own unit tests read the developer's real
+    // `~/.trusty-mpm/project-registry/worktrees.json` and survey whatever real
+    // worktrees it names. Entry points resolve; scans take. `&[]` is the
+    // pre-#7357 behaviour exactly.
+    adopted: &[std::path::PathBuf],
+) -> Vec<std::path::PathBuf> {
+    super::worktree_registry::enumerate_registered_worktrees(repos_root, adopted)
+        .into_iter()
+        .filter(|candidate| !active_set.contains(candidate))
+        .collect()
 }
 
 /// Outcome of an orphaned-worktree sweep (#3649): which candidates were (or
@@ -935,6 +938,9 @@ impl SessionManager {
         in_use_workspace_paths: &[std::path::PathBuf],
         dry_run: bool,
         policy: DirtyWorktreePolicy,
+        // #7357: the caller's adopted anchors, injected all the way down to
+        // `find_orphaned_worktrees` so this method's tests stay hermetic.
+        adopted: &[std::path::PathBuf],
     ) -> Result<OrphanSweepOutcome, anyhow::Error> {
         use super::decommission::{WorktreeRemoval, remove_session_worktree};
         use super::worktree_ownership::SentinelOwner;
@@ -950,9 +956,10 @@ impl SessionManager {
         // Phase 1: discover orphan candidates using the initial snapshot.
         // Propagate a spawn_blocking panic as Err (#1845 item 7) rather than
         // silently returning an empty candidate list.
+        let adopted = adopted.to_vec();
         let candidates = tokio::task::spawn_blocking({
             let initial_in_use = initial_in_use.clone();
-            move || find_orphaned_worktrees(&repos_root, &initial_in_use)
+            move || find_orphaned_worktrees(&repos_root, &initial_in_use, &adopted)
         })
         .await
         .map_err(|e| anyhow::anyhow!("prune-worktrees: orphan scan panicked: {e}"))?;
@@ -1254,6 +1261,9 @@ impl SessionManager {
     pub async fn reap_orphaned_worktrees(
         &self,
         repos_root: &std::path::Path,
+        // #7357: passed through to `prune_orphaned_worktrees`; the daemon's
+        // orphan-GC loop resolves them, this layer never does.
+        adopted: &[std::path::PathBuf],
     ) -> Result<OrphanSweepOutcome, anyhow::Error> {
         // #4288 (item 4 of #4207): DELIBERATELY UNFILTERED, exactly as in the
         // manual `prune_worktrees_route`. Do NOT "tidy this up" by adding
@@ -1303,7 +1313,8 @@ impl SessionManager {
             .into_iter()
             .filter_map(|r| r.workspace_path)
             .collect();
-        self.prune_orphaned_worktrees(repos_root, &in_use, false, DirtyWorktreePolicy::Skip)
+        let policy = DirtyWorktreePolicy::Skip;
+        self.prune_orphaned_worktrees(repos_root, &in_use, false, policy, adopted)
             .await
     }
 

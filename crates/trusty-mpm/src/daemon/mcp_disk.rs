@@ -134,6 +134,9 @@ pub async fn disk_survey(
     let state_for_agents = Arc::clone(state);
     let project = project.map(str::to_string);
     let deadline = budget_seconds.map(|s| Instant::now() + Duration::from_secs(s));
+    // #7357: this tool is the entry point, so it resolves the adopted anchors
+    // under the daemon's own framework root; `survey_run::run` takes them.
+    let adopted = crate::project::adopted_anchors_under(state.framework_root());
 
     tokio::task::spawn_blocking(move || {
         let agent_state = |owner: &AgentWorktreeOwner| {
@@ -178,6 +181,7 @@ pub async fn disk_survey(
             deadline,
             project.as_deref(),
             group_by,
+            &adopted,
         );
         let mut value = serde_json::to_value(survey)
             .map_err(|e| format!("disk_survey: serialize error: {e}"))?;

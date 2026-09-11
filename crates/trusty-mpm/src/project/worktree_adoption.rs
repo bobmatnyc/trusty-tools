@@ -29,7 +29,25 @@
 //! records and FEWER anchors, never more. A missing anchor means the sweep sees
 //! a worktree it saw before; a fabricated one would point a reclaim gate at a
 //! directory nothing vouched for.
+//!
+//! FAIL-OPEN IS NOT SILENT (#7357). Every candidate this pass declines to
+//! record lands in [`BackfillReport::unrecorded`] with the reason, and both
+//! registration transports return that report to their caller, so a skipped or
+//! foreign-claimed worktree is visible rather than a `tracing` line nobody
+//! reads.
 //! Test: `worktree_adoption_tests`.
+//!
+//! # Concurrency
+//!
+//! `worktrees.json` is written by the daemon and by any `tm` process that
+//! registers a project, so the load → mutate → save cycle needs the same
+//! cross-process critical section `projects.json` got in
+//! [`crate::project::store`]: two registrations interleaving read/read/write/
+//! write drop one project's records while both callers see success.
+//! [`AdoptionStore::update`] is the only write path and runs the whole cycle
+//! inside [`trusty_common::json_rmw::update`], which takes a file lock,
+//! re-reads under it, and publishes by atomic rename. There is deliberately no
+//! unlocked `save`.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -37,6 +55,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
+use trusty_common::json_rmw::{self, JsonRmwError};
 
 use crate::session_manager::worktree_registry::{list_registered_worktrees, registry_root_for};
 
@@ -105,18 +124,21 @@ pub enum RecordOutcome {
     ClaimedByAnother(String),
 }
 
-/// The adoption records, loaded from and saved to one JSON document.
+/// The adoption records, loaded from and published to one JSON document.
 ///
 /// Why: a flat list keyed by path is enough — the store answers exactly two
 /// questions ("who owns this path?" and "which checkouts should the scan
 /// interrogate?") and carries no state a reader could act on destructively.
-/// What: the entries plus the file they came from. Mutations are in memory
-/// until [`save`](Self::save).
+/// What: just the entries — the FILE is named by the directory each entry
+/// point passes, never cached on the value, so no caller can hold a store that
+/// remembers a path it is no longer allowed to write. Reads go through
+/// [`load`](Self::load) and take no lock; every WRITE goes through
+/// [`update`](Self::update), which holds the file lock across the whole
+/// read-modify-write cycle (see this module's Concurrency section).
 /// Test: every test in `worktree_adoption_tests`.
 #[derive(Debug, Default)]
 pub struct AdoptionStore {
     entries: Vec<AdoptedWorktree>,
-    file_path: PathBuf,
 }
 
 impl AdoptionStore {
@@ -128,10 +150,10 @@ impl AdoptionStore {
     /// rather than swallowed, because a corrupt store is a real fault even
     /// though it must not stop registration.
     /// What: reads `<dir>/worktrees.json`; any I/O or parse failure yields an
-    /// empty store whose `file_path` is still correct, so the next
-    /// [`save`](Self::save) republishes a valid document.
+    /// empty store. A corrupt document is never republished over by this path
+    /// — see [`update`](Self::update), which refuses instead.
     /// Test: `load_of_a_missing_file_is_empty`,
-    /// `load_of_a_corrupt_file_is_empty_and_still_saveable`.
+    /// `load_of_a_corrupt_file_is_empty`.
     pub fn load(dir: &Path) -> Self {
         let file_path = dir.join(ADOPTED_WORKTREES_FILE);
         let entries = match std::fs::read_to_string(&file_path) {
@@ -145,7 +167,7 @@ impl AdoptionStore {
             }),
             Err(_) => Vec::new(),
         };
-        Self { entries, file_path }
+        Self { entries }
     }
 
     /// Every record currently held.
@@ -181,24 +203,112 @@ impl AdoptionStore {
         RecordOutcome::Recorded
     }
 
-    /// Persist the store, creating its directory when needed.
+    /// Run one read-modify-write against `<dir>/worktrees.json` under a lock
+    /// (#7357).
     ///
-    /// Test: `record_writes_one_entry_per_worktree`.
-    pub fn save(&self) -> std::io::Result<()> {
-        if let Some(parent) = self.file_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let body = serde_json::to_string_pretty(&self.entries)
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-        std::fs::write(&self.file_path, body)
+    /// Why: this is the ONLY write path, and the fix for the lost-update race
+    /// the sibling `projects.json` store already closed (#4300). The previous
+    /// shape — [`load`](Self::load), mutate in memory, `fs::write` the whole
+    /// file back — left an unguarded window in which a second registering
+    /// process could publish its own document, which this one then clobbered;
+    /// nothing reported an error and one project's records simply vanished.
+    /// What: delegates the whole cycle to [`trusty_common::json_rmw::update`],
+    /// which takes an advisory exclusive lock on a `.lock` sidecar, re-reads
+    /// the entries from disk under it (a caller's in-memory copy is never
+    /// trusted), applies `f`, and publishes by atomic rename. The directory is
+    /// created first, because the lock sidecar lives in it.
+    ///
+    /// NEVER FAIL-OPEN, unlike the readers: a store that is present but will
+    /// not parse returns `Err` and is left byte-for-byte alone, rather than
+    /// being replaced with the caller's view of it. The caller's remedy is to
+    /// report the failure and record nothing.
+    ///
+    /// Not reentrant: `f` must not call [`update`](Self::update) again on the
+    /// same directory — the second acquisition uses a fresh descriptor and
+    /// self-deadlocks. Lock acquisition blocks, so an async caller must run
+    /// this on a blocking-safe thread.
+    ///
+    /// # Errors
+    ///
+    /// [`JsonRmwError`] when the lock cannot be taken, the document cannot be
+    /// read or parsed, or the publish fails.
+    ///
+    /// Test: `record_writes_one_entry_per_worktree`,
+    /// `update_refuses_to_clobber_a_corrupt_store`,
+    /// `concurrent_backfills_never_lose_a_projects_records`.
+    pub fn update<R, F>(dir: &Path, f: F) -> Result<R, JsonRmwError>
+    where
+        F: FnOnce(&mut Self) -> R,
+    {
+        let file_path = dir.join(ADOPTED_WORKTREES_FILE);
+        std::fs::create_dir_all(dir).map_err(|source| JsonRmwError::Io {
+            path: file_path.clone(),
+            source,
+        })?;
+        json_rmw::update::<Vec<AdoptedWorktree>, R, JsonRmwError, _>(&file_path, move |entries| {
+            let mut store = Self {
+                entries: std::mem::take(entries),
+            };
+            let out = f(&mut store);
+            *entries = store.entries;
+            Ok(out)
+        })
     }
 }
 
-/// What one backfill pass did, for the caller's log line.
+/// Why one candidate was NOT recorded (#7357).
 ///
+/// Why: "skipped" alone tells an operator a worktree is missing from the
+/// registry but not what to do about it, and the three causes need three
+/// different actions — fix the checkout path, repair the worktree, or accept
+/// that another project already owns it.
+/// What: one variant per refusal in [`backfill_checkout`], serialized
+/// internally-tagged so the reason and its detail are one flat JSON object
+/// beside the path.
+/// Test: `backfill_names_the_skipped_worktree_and_why`,
+/// `backfill_leaves_another_projects_worktree_alone`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum SkipReason {
+    /// The checkout is not a git repository root, so nothing under it was
+    /// interrogated at all.
+    NotARepositoryRoot,
+    /// A directory shaped like a worktree that git does not name and whose own
+    /// gitdir pointer is absent or unreadable.
+    NoGitdirPointer,
+    /// Another project already holds the record; it was left untouched.
+    ClaimedByAnother {
+        /// The project whose record stands.
+        project: String,
+    },
+}
+
+/// One candidate a backfill pass declined to record, and why (#7357).
+///
+/// Test: `backfill_names_the_skipped_worktree_and_why`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnrecordedWorktree {
+    /// The candidate directory (or, for [`SkipReason::NotARepositoryRoot`],
+    /// the checkout itself).
+    pub path: PathBuf,
+    /// Why it was left out.
+    #[serde(flatten)]
+    pub reason: SkipReason,
+}
+
+/// What one backfill pass did (#7357).
+///
+/// Why: before this was returned to callers it reached only `tracing`, so a
+/// registration that adopted nothing looked exactly like one that adopted
+/// everything. Both registration transports now serialize this into their
+/// response, which is the whole signal: registration still SUCCEEDS whatever
+/// is in here.
+/// What: the four counts, plus one [`UnrecordedWorktree`] per candidate that
+/// did not become a record — so `unrecorded.len() == skipped +
+/// claimed_by_another` — plus the persistence failure, if any.
 /// Test: `backfill_records_every_pre_existing_worktree`,
-/// `backfill_is_idempotent`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// `backfill_is_idempotent`, `backfill_names_the_skipped_worktree_and_why`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackfillReport {
     /// Records newly written.
     pub recorded: usize,
@@ -208,6 +318,13 @@ pub struct BackfillReport {
     pub claimed_by_another: usize,
     /// Candidate directories that could not be read, skipped with a warning.
     pub skipped: usize,
+    /// Every candidate that did not become a record, with its reason.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unrecorded: Vec<UnrecordedWorktree>,
+    /// Set when the store could not be published, so nothing was written even
+    /// though candidates were found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persist_error: Option<String>,
 }
 
 /// Adopt every worktree that already exists under `checkout` into `project`
@@ -232,7 +349,9 @@ pub struct BackfillReport {
 /// Test: `backfill_records_every_pre_existing_worktree`,
 /// `backfill_is_idempotent`,
 /// `backfill_leaves_another_projects_worktree_alone`,
-/// `backfill_skips_a_worktree_with_no_gitdir_pointer_and_still_succeeds`.
+/// `backfill_skips_a_worktree_with_no_gitdir_pointer_and_still_succeeds`,
+/// `backfill_names_the_skipped_worktree_and_why`,
+/// `concurrent_backfills_never_lose_a_projects_records`.
 pub fn backfill_checkout(
     store_dir: &Path,
     project: &str,
@@ -247,42 +366,70 @@ pub fn backfill_checkout(
             "#7357: not a git repository root, or git would not answer for it — no pre-existing \
              worktrees adopted"
         );
+        // #7357: reported, not merely logged — a caller that gets an empty
+        // report otherwise cannot tell this apart from a checkout with no
+        // worktrees at all.
+        report.skipped = 1;
+        report.unrecorded.push(UnrecordedWorktree {
+            path: checkout.to_path_buf(),
+            reason: SkipReason::NotARepositoryRoot,
+        });
         return report;
     };
-    let (candidates, skipped) = discover_worktrees(&canonical_checkout);
-    report.skipped = skipped;
+    let (candidates, unreadable) = discover_worktrees(&canonical_checkout);
+    report.skipped = unreadable.len();
+    report.unrecorded = unreadable;
+    if candidates.is_empty() {
+        return report;
+    }
 
-    let mut store = AdoptionStore::load(store_dir);
-    for (path, branch) in candidates {
-        let outcome = store.record(AdoptedWorktree {
-            path: path.clone(),
-            project: project.to_string(),
-            checkout: canonical_checkout.clone(),
-            branch,
-            adopted_at: now,
-        });
-        match outcome {
-            RecordOutcome::Recorded => report.recorded += 1,
-            RecordOutcome::AlreadyRecorded => report.already_recorded += 1,
-            RecordOutcome::ClaimedByAnother(other) => {
-                report.claimed_by_another += 1;
-                warn!(
-                    worktree = %path.display(),
-                    project,
-                    claimed_by = %other,
-                    "#7357: worktree is already attributed to another project — left untouched"
-                );
+    // #7357: one locked read-modify-write, so two concurrent registrations
+    // serialise instead of clobbering each other's records.
+    let written = AdoptionStore::update(store_dir, |store| {
+        let mut tally = BackfillReport::default();
+        for (path, branch) in candidates {
+            let outcome = store.record(AdoptedWorktree {
+                path: path.clone(),
+                project: project.to_string(),
+                checkout: canonical_checkout.clone(),
+                branch,
+                adopted_at: now,
+            });
+            match outcome {
+                RecordOutcome::Recorded => tally.recorded += 1,
+                RecordOutcome::AlreadyRecorded => tally.already_recorded += 1,
+                RecordOutcome::ClaimedByAnother(other) => {
+                    tally.claimed_by_another += 1;
+                    warn!(
+                        worktree = %path.display(),
+                        project,
+                        claimed_by = %other,
+                        "#7357: worktree is already attributed to another project — left untouched"
+                    );
+                    tally.unrecorded.push(UnrecordedWorktree {
+                        path,
+                        reason: SkipReason::ClaimedByAnother { project: other },
+                    });
+                }
             }
         }
-    }
-    if report.recorded > 0
-        && let Err(e) = store.save()
-    {
-        warn!(
-            store = %store_dir.display(),
-            "#7357: could not persist worktree adoption records ({e}); registration still \
-             succeeded"
-        );
+        tally
+    });
+    match written {
+        Ok(tally) => {
+            report.recorded = tally.recorded;
+            report.already_recorded = tally.already_recorded;
+            report.claimed_by_another = tally.claimed_by_another;
+            report.unrecorded.extend(tally.unrecorded);
+        }
+        Err(e) => {
+            warn!(
+                store = %store_dir.display(),
+                "#7357: could not persist worktree adoption records ({e}); registration still \
+                 succeeded"
+            );
+            report.persist_error = Some(e.to_string());
+        }
     }
     report
 }
@@ -301,12 +448,33 @@ pub fn adopted_anchors(store_dir: &Path) -> Vec<PathBuf> {
     set.into_iter().collect()
 }
 
+/// The adopted anchors under a framework root the caller already knows (#7357).
+///
+/// Why: the daemon WRITES its records under `state.framework_root()`, so a
+/// reader that resolves `$HOME` instead reads a different file whenever the two
+/// disagree — which is exactly what an isolated-managed daemon and every
+/// daemon test do. Every entry point holding a `DaemonState` resolves anchors
+/// through here rather than [`default_adopted_anchors`], which keeps the reader
+/// and the writer on one file and keeps those tests hermetic.
+/// What: [`adopted_anchors`] over
+/// [`crate::project::registry_data_dir_under`].
+/// Test: `parity_register_adopts_the_same_worktrees_across_transports`.
+pub fn adopted_anchors_under(framework_root: &Path) -> Vec<PathBuf> {
+    adopted_anchors(&super::registry_data_dir_under(framework_root))
+}
+
 /// The adopted anchors for a process with no `DaemonState` (#7357).
 ///
-/// Why: every consumer of the scan — `prune`, the reclaim sweep, reconcile, the
-/// Disk survey — is a synchronous function with no handle on the daemon, and
-/// resolving the framework root the same way [`crate::project::registry_data_dir`]
-/// does is what keeps the reader and the daemon's writer on one file.
+/// Why: a few entry points — `tm doctor`'s worktree-disk probe above all — run
+/// with no daemon handle, and resolving the framework root the same way
+/// [`crate::project::registry_data_dir`] does is what keeps them on the file
+/// the daemon writes.
+///
+/// RESOLVE THIS AT AN ENTRY POINT ONLY. A scan function that calls it
+/// internally reads the developer's real
+/// `~/.trusty-mpm/project-registry/worktrees.json` from its own unit tests,
+/// which is how #7357's first round lost test hermeticity; every scan below an
+/// entry point takes `adopted: &[PathBuf]` instead.
 /// What: [`adopted_anchors`] over [`crate::project::registry_data_dir`].
 /// Test: covered through `adopted_anchors`; the `$HOME`-derived root itself is
 /// covered by `core::paths`' own tests.
@@ -333,19 +501,22 @@ fn canonical_repo_root(checkout: &Path) -> Option<PathBuf> {
     (canonical_checkout == canonical_root).then_some(canonical_checkout)
 }
 
-/// Every worktree candidate under `checkout`, plus how many were unreadable.
+/// Every worktree candidate under `checkout`, plus the ones left out.
 ///
 /// Why: git's registry is the enumeration that matters, and reusing
 /// [`list_registered_worktrees`] rather than re-parsing porcelain here keeps
 /// one parser in the crate. The directory sweep afterwards exists for the
 /// remainder only — a directory shaped like a worktree that git does not name,
 /// which is either registered to some other checkout or broken.
-/// What: `(path, branch)` pairs, and the count of candidate directories with no
-/// readable gitdir pointer. The main checkout and bare records are dropped:
-/// neither is a worktree an operator could reclaim.
+/// What: `(path, branch)` pairs, and one [`UnrecordedWorktree`] per candidate
+/// directory with no readable gitdir pointer. The main checkout and bare
+/// records are dropped: neither is a worktree an operator could reclaim.
 /// Test: `backfill_records_every_pre_existing_worktree`,
-/// `backfill_skips_a_worktree_with_no_gitdir_pointer_and_still_succeeds`.
-fn discover_worktrees(checkout: &Path) -> (Vec<(PathBuf, Option<String>)>, usize) {
+/// `backfill_skips_a_worktree_with_no_gitdir_pointer_and_still_succeeds`,
+/// `backfill_names_the_skipped_worktree_and_why`.
+fn discover_worktrees(
+    checkout: &Path,
+) -> (Vec<(PathBuf, Option<String>)>, Vec<UnrecordedWorktree>) {
     let mut found: Vec<(PathBuf, Option<String>)> = Vec::new();
     let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
     for wt in list_registered_worktrees(checkout).unwrap_or_default() {
@@ -358,7 +529,7 @@ fn discover_worktrees(checkout: &Path) -> (Vec<(PathBuf, Option<String>)>, usize
         }
     }
 
-    let mut skipped = 0usize;
+    let mut skipped: Vec<UnrecordedWorktree> = Vec::new();
     for parent in WORKTREE_PARENTS {
         let Ok(entries) = std::fs::read_dir(checkout.join(parent)) else {
             continue;
@@ -383,7 +554,10 @@ fn discover_worktrees(checkout: &Path) -> (Vec<(PathBuf, Option<String>)>, usize
                     "#7357: no readable gitdir pointer — skipping this directory rather than \
                      adopting it"
                 );
-                skipped += 1;
+                skipped.push(UnrecordedWorktree {
+                    path,
+                    reason: SkipReason::NoGitdirPointer,
+                });
                 continue;
             }
             seen.insert(canonical.clone());

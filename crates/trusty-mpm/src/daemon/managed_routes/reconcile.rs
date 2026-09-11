@@ -83,7 +83,13 @@ pub(crate) async fn reconcile_worktrees_core(state: &Arc<DaemonState>) -> RouteO
     let mgr = state.session_manager().await;
     let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
     let repos_root = crate::core::trusty_tools_config::workspace_root(&config);
-    match mgr.reconcile_worktree_inventory(&repos_root).await {
+    // #7357: resolved here, at the entry point, under the daemon's own
+    // framework root.
+    let adopted = crate::project::adopted_anchors_under(state.framework_root());
+    match mgr
+        .reconcile_worktree_inventory(&repos_root, &adopted)
+        .await
+    {
         Ok(report) => RouteOutcome::ok(&report),
         Err(e) => {
             warn!("reconcile-worktrees route: inventory scan failed: {e}");
