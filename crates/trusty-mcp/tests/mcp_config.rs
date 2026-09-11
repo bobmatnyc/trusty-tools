@@ -265,6 +265,12 @@ fn save_round_trips_config_with_null_extension_value() {
         "scopes".into(),
         json!([{"name": "memory:read", "expires_at": null}]),
     );
+    // An object whose ONLY member is null. The drop empties it; the key itself
+    // must survive as an empty table, because a consumer reading `extensions`
+    // back distinguishes "absent" from "present but empty".
+    server
+        .extensions
+        .insert("empty_after_strip".into(), json!({"only_field": null}));
 
     let original = McpConfigFile::new(vec![server]);
     original
@@ -286,6 +292,15 @@ fn save_round_trips_config_with_null_extension_value() {
         ext["scopes"],
         json!([{"name": "memory:read"}]),
         "nulls are stripped at any depth"
+    );
+    assert!(
+        ext.contains_key("empty_after_strip"),
+        "an object emptied by the drop keeps its key: {ext:?}"
+    );
+    assert_eq!(
+        ext["empty_after_strip"],
+        json!({}),
+        "the emptied object round-trips as an empty table, not as an absent key"
     );
 }
 
@@ -317,6 +332,47 @@ fn save_rejects_null_inside_an_extension_array() {
         "the operator is told which key to fix: {err}"
     );
     assert!(!path.exists(), "a refused save writes nothing");
+}
+
+#[cfg(unix)]
+#[test]
+fn save_leaves_no_temp_file_when_the_write_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("servers.toml");
+    let scratch = tmp
+        .path()
+        .join(format!(".servers.toml.tmp.{}", std::process::id()));
+
+    // A leftover temp file from a crashed earlier save, made unwritable so the
+    // save's own write fails after the rendering succeeded. That is the only
+    // failure this test can provoke without a full disk.
+    std::fs::write(&scratch, "stale").unwrap();
+    std::fs::set_permissions(&scratch, std::fs::Permissions::from_mode(0o400)).unwrap();
+    if std::fs::OpenOptions::new()
+        .write(true)
+        .open(&scratch)
+        .is_ok()
+    {
+        // A uid that ignores the mode bits (root, or a filesystem mounted
+        // without permission support) would make the save succeed, leaving no
+        // failure to clean up after.
+        return;
+    }
+
+    let err = McpConfigFile::new(vec![stdio("one", "one", &[])])
+        .save(&path)
+        .expect_err("an unwritable temp path must fail the save");
+    assert!(
+        matches!(err, McpConfigError::Io { .. }),
+        "expected Io, got {err:?}"
+    );
+    assert!(
+        !scratch.exists(),
+        "the failed write must not leave its temp file beside the config"
+    );
+    assert!(!path.exists(), "a failed save writes no config");
 }
 
 #[test]

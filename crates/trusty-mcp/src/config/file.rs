@@ -169,7 +169,10 @@ impl McpConfigFile {
     /// `env` and a remote server's `headers` routinely carry API keys and
     /// bearer tokens, and the default umask would leave them world-readable.
     /// The mode is set on the temporary file, which the rename carries over,
-    /// so the config is never briefly readable at its real path.
+    /// so the config is never briefly readable at its real path. Both failure
+    /// arms remove the temporary file before returning, so a save that keeps
+    /// failing does not accumulate junk beside the real config; the removal is
+    /// best effort and never replaces the error the caller needs.
     ///
     /// A JSON null anywhere in an [`extensions`] map is handled before
     /// rendering, because `toml` refuses one with the bare string
@@ -184,7 +187,8 @@ impl McpConfigFile {
     /// `save_rejects_duplicate_names`, `save_replaces_existing_file`,
     /// `saved_config_file_is_owner_only`,
     /// `save_round_trips_config_with_null_extension_value`,
-    /// `save_rejects_null_inside_an_extension_array`.
+    /// `save_rejects_null_inside_an_extension_array`,
+    /// `save_leaves_no_temp_file_when_the_write_fails`.
     ///
     /// [`extensions`]: McpServerConfig::extensions
     pub fn save(&self, path: &Path) -> Result<(), McpConfigError> {
@@ -204,9 +208,16 @@ impl McpConfigFile {
         }
 
         let tmp = temp_sibling(path);
-        write_private(&tmp, rendered.as_bytes()).map_err(|source| McpConfigError::Io {
-            path: tmp.clone(),
-            source,
+        write_private(&tmp, rendered.as_bytes()).map_err(|source| {
+            // A write that fails partway still leaves the temporary file, so
+            // this arm cleans up for the same reason the rename arm below
+            // does. Best effort: the write error is what the caller must see,
+            // so a failed removal never replaces it.
+            let _ = std::fs::remove_file(&tmp);
+            McpConfigError::Io {
+                path: tmp.clone(),
+                source,
+            }
         })?;
         std::fs::rename(&tmp, path).map_err(|source| {
             // Leaving the temporary file behind after a failed rename would
