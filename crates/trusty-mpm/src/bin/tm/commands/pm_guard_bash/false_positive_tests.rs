@@ -133,6 +133,33 @@ mod dotenv_placeholder_files {
         }
     }
 
+    /// The exemption covers the dotenv family and no other.
+    ///
+    /// Why: review round on #7479. The first round keyed only on the final
+    /// extension, so it handed the SSH-key and word families a placeholder
+    /// convention neither the issue nor its reporter asked for — exactly the
+    /// two families where a misnamed file leaks a key rather than a variable
+    /// name.
+    /// What: asserts a `.env` placeholder allows while the same suffix on the
+    /// two PREFIX-typed families — the ones the exemption really did reach —
+    /// still denies.
+    ///
+    /// An EXTENSION-typed family is not testable here and is not a regression:
+    /// `server.pem.example` allowed before this change too, because `*.pem`
+    /// matches only a name ENDING `.pem` and the placeholder suffix displaces
+    /// it. That is the pre-existing `*.<ext>` rule, not the exemption.
+    /// Test: itself.
+    #[test]
+    fn the_placeholder_exemption_covers_only_the_dotenv_family() {
+        assert_eq!(evaluate_secret_file_read_command("cat .env.example"), None);
+        for command in ["cat id_rsa.sample", "cat secrets.example"] {
+            assert!(
+                evaluate_secret_file_read_command(command).is_some(),
+                "only the dotenv family is exempt: {command}"
+            );
+        }
+    }
+
     /// The placeholder suffix counts only as the FINAL extension.
     ///
     /// Why: the exemption is a naming convention, and a convention that
@@ -177,6 +204,58 @@ mod go_template_braces {
                 evaluate_secret_file_read_command(command),
                 None,
                 "a Go-template format argument must allow: {command}"
+            );
+        }
+    }
+
+    /// A Bash SEQUENCE group is expanded, not read as literal text.
+    ///
+    /// Why: review round on #7499. A comma-free body is not always literal —
+    /// `{v..v}` is a degenerate sequence a shell expands to `v`, so
+    /// `cat .en{v..v}` opens `.env`. `origin/main` denied that by ACCIDENT:
+    /// stripping the group produced `.env..v`, which `.env.*` matches. Reading
+    /// the group as literal removed the accident and the coverage with it.
+    /// Rows 2 and 4 are the wider hole the accident never covered — open on
+    /// `origin/main` too — closed here because the fix is in this function.
+    /// What: asserts every sequence spelling that expands onto a secret name
+    /// denies.
+    /// Test: itself.
+    #[test]
+    fn a_sequence_group_that_expands_onto_a_secret_name_denies() {
+        for command in [
+            "cat .en{v..v}",
+            "cat .en{u..v}",
+            "cat id_rs{a..a}",
+            "cat id_rs{a..c}",
+            "cat secret{s..s}.txt",
+            "cp .en{v..v} /tmp/x/",
+        ] {
+            assert!(
+                evaluate_secret_file_read_command(command).is_some(),
+                "a sequence group reaching a secret name must deny: {command}"
+            );
+        }
+    }
+
+    /// An ordinary sequence group naming no secret still allows.
+    ///
+    /// Why: expanding sequences is only affordable while the shapes an agent
+    /// writes all day stay allowed. These are the two common ones.
+    /// What: asserts a numeric and an alphabetic range allow, alongside the
+    /// Go-template rows above.
+    /// Test: itself.
+    #[test]
+    fn an_ordinary_sequence_group_is_allowed() {
+        for command in [
+            "for i in {1..5}; do echo $i; done",
+            "echo {a..e}",
+            "mkdir -p build/{1..3}",
+            "echo {1..5000}",
+        ] {
+            assert_eq!(
+                evaluate_secret_file_read_command(command),
+                None,
+                "an ordinary sequence group must allow: {command}"
             );
         }
     }
@@ -262,20 +341,27 @@ mod harness_refusals_are_not_this_guard {
         }
     }
 
-    /// The same command evaluated 50 times yields the same verdict every time.
+    /// The same command evaluated 50 times IN ONE PROCESS yields the same
+    /// verdict every time.
     ///
     /// Why: #7477 reports "no complexity pattern predicts the refusal" and
     /// #7436's comment reports an identical command flipping PASS to REFUSED
     /// four calls later. Both readings blame a nondeterministic decision. This
     /// guard's decision is a pure function of the command string — no clock, no
     /// filesystem read, no environment read, no map iteration — so it cannot be
-    /// the varying party, and a future report of the same flip should not spend
-    /// a second session re-establishing that.
+    /// the varying party.
+    ///
+    /// Scope, narrowed in review: one process is all this row proves, and the
+    /// reported flips happened BETWEEN `tm hook` invocations — separate
+    /// processes with separate `RandomState` seeds and separate environments.
+    /// `pm_guard_gives_one_command_the_same_verdict_across_separate_processes`
+    /// in `tests/tm_hook_pm_guard_false_positives.rs` is the row that covers
+    /// that; this one covers the pure policy underneath it.
     /// What: evaluates each row 50 times and asserts every verdict equals the
     /// first.
     /// Test: itself.
     #[test]
-    fn the_verdict_for_one_command_never_varies() {
+    fn the_verdict_for_one_command_never_varies_within_one_process() {
         for command in REPORTED_REFUSALS {
             let first = (
                 unclassifiable_command(command),

@@ -162,6 +162,60 @@ fn pm_guard_allows_every_shape_the_harness_refused_as_unverifiable() {
     );
 }
 
+/// #7477 and #7436: one command gets the same verdict across SEPARATE
+/// `tm hook --pm-guard` processes.
+///
+/// Why: both issues report a verdict FLIPPING between tool calls, which are
+/// separate `tm hook` invocations — separate processes, separate `RandomState`
+/// seeds, separate environments. A single-process loop cannot speak to that, so
+/// this row spawns the real binary repeatedly and asserts the answer is stable
+/// across process boundaries. Twelve spawns is the most this can cost without
+/// the row becoming the slowest test in the crate; each takes ~60ms.
+/// What: runs one allowed and one denied command six times each and asserts
+/// every run matches the first.
+#[test]
+fn pm_guard_gives_one_command_the_same_verdict_across_separate_processes() {
+    let home = tempfile::tempdir().expect("tempdir");
+    for command in ["grep -rl healthz services", "cat .env"] {
+        let payload = bash_payload(command);
+        let first = run_pm_guard(&payload, home.path());
+        for round in 1..6 {
+            let again = run_pm_guard(&payload, home.path());
+            assert_eq!(
+                again, first,
+                "verdict changed in process {round} for: {command}"
+            );
+        }
+    }
+}
+
+/// #7479 review round: the placeholder exemption covers the dotenv family only.
+///
+/// Why: the first round exempted `*.example`/`*.sample`/`*.template` on every
+/// family, so `cat id_rsa.sample` and `cat secrets.example` went DENY to ALLOW
+/// — a convention neither #7479 nor its reporter asked for, on the two families
+/// where a misnamed file leaks a key rather than a variable name.
+#[test]
+fn pm_guard_exempts_only_the_dotenv_family_as_a_placeholder() {
+    assert_allowed("cat .env.example");
+    assert_denied("cat id_rsa.sample");
+    assert_denied("cat secrets.example");
+}
+
+/// #7499 review round: a Bash sequence group is expanded, not read as literal.
+///
+/// Why: the first round read every comma-free group as literal text, which
+/// dropped the one coverage `origin/main` had of a degenerate sequence —
+/// `cat .en{v..v}`, which a shell expands to `cat .env`.
+#[test]
+fn pm_guard_denies_a_sequence_group_that_expands_onto_a_secret() {
+    assert_denied("cat .en{v..v}");
+    assert_denied("cat .en{u..v}");
+    assert_denied("cat id_rs{a..c}");
+    assert_allowed("for i in {1..5}; do echo $i; done");
+    assert_allowed("echo {a..e}");
+}
+
 /// The denies these three fixes must not weaken, through the real binary.
 ///
 /// Why: every row above withdraws a refusal, and a withdrawal is only correct
