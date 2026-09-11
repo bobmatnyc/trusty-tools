@@ -50,11 +50,20 @@ current-state gap against each item:
    carries only OKG triples and definitions. Memory drawers are never exposed
    through it; they stay fenced behind the untrusted-content boundary
    (DOC-63 §6). (#7430)
+8. **MCP connectors, global and per-assistant.** `trusty-mcp` is the one
+   config authority for MCP connections, in a file shared by `trusty-code` and
+   `trusty-agents`; `trusty-mpm` keeps using Claude Code's own MCP config
+   through a `trusty-mcp` adapter. For an Assistant, an MCP connection is set
+   at the global tier or overridden at the assistant tier. §5.4 below states
+   the two tiers and the resolution rule. (#7451, #7452, #7453, #5428, #7454)
 
 Scope boundary: changes for these items land in `trusty-agents`,
 `trusty-agents-common`, and (for item 1) the retirement of
 `trusty-agents-local`. `trusty-kb`, `trusty-channels`, and `trusty-gworkspace`
-are consumed as dependencies, not modified as part of this epic.
+are consumed as dependencies, not modified as part of this epic. Item 8's
+config-authority half lands in `trusty-mcp` (and touches `trusty-mpm` /
+`trusty-code`), owned by the other core session; only the `trusty-agents`
+tier of item 8 (#7454) is this session's to implement.
 
 ---
 
@@ -196,6 +205,39 @@ Listeners are **NOT** MCP tools — they are inbound API connections to upstream
   1. **Listener-level filter** — narrows what the listener pulls from the provider (e.g., Gmail `labelIds: ["INBOX"]`). Defined once per listener in `config.toml`.
   2. **Per-agent-binding filter** — further narrows which events reach a *specific* agent (event type, sender pattern, calendar, label exclusions). Defined in `agent.toml` `[[listeners]]` entries. Two agents can bind the same listener with different filters.
 - **Configuration:** `agent.toml` `[[listeners]]` entries, each naming a listener defined in `config.toml` and specifying agent-specific filter overrides.
+
+### 5.4 MCP connections: two tiers, one authority (owner, 2026-09-11)
+
+Added 2026-09-11 for epic #7425 item (g) (#7451) — this subsection states
+current direction, not the 2026-07-24 history the rest of §5 records.
+
+MCP connection-management code belongs to `trusty-mcp`, not to this crate.
+Two config tiers apply to an Assistant's MCP connections:
+
+- **Global tier.** A file shared by `trusty-agents` and `trusty-code`,
+  `~/.trusty-tools/mcp/servers.toml`, holding `trusty_mcp::config::McpServerConfig`
+  entries (#7452). `trusty-mpm` does not read this file; it keeps using
+  Claude Code's own `mcpServers` config, through a `trusty-mcp` adapter
+  (#7453).
+- **Assistant tier.** `<assistant home>/config.toml`'s `[mcp]` table
+  (`trusty_mcp::config::McpServerOverride`, additive to `AssistantHomeConfig`,
+  `crates/trusty-agents/src/assistants/home.rs`). An override adds a server,
+  replaces one by name (wholesale — no field merge with the global entry), or
+  disables one by name. An assistant may re-enable a server the global file
+  disabled.
+
+`trusty_mcp::config::resolve(global, overrides)` computes the effective
+per-assistant server list. Resolution fails closed but never fatally: a
+malformed global file starts the assistant with zero MCP servers and a
+visible warning; a malformed assistant override falls back to the global set
+with a visible status; a server whose credential does not resolve is skipped
+with a per-server status. No credential-reference field exists yet — #4568
+owns that design.
+
+Full detail on the resulting Knowledge-pane surface:
+[DOC-57 §4.4](./agent-config-five-sections.md#SPEC-AGENTCFG-03~draft).
+Evidence: `docs/research/trusty-agents-mcp-connectors-gap-analysis-2026-09-11.md`.
+Authority: [ADR-0060](../adr/0060-mcp-config-authority-in-trusty-mcp.md).
 
 ---
 
@@ -582,6 +624,7 @@ Focused context is a **starting point, not a wall**. The agent has full agency:
 - #4358 — (d) per-chat/per-Assistant project workspaces
 - #7370 — (e) chat attachments as objects
 - #7430 — (f) knowledge-graph cleanup, OKG-only exposed graph
+- #7451 — (g) MCP connectors, global and per-assistant tiers (epic for #7452, #7453, #5428, #7454)
 
 **Related Specs:**
 - DOC-41 (SPEC-AGENTFW-01~draft …) — Eve-Style Agent Framework (agent definition format, runtime)
@@ -590,6 +633,7 @@ Focused context is a **starting point, not a wall**. The agent has full agency:
 - DOC-38 (SPEC-SLD-01~draft …) — Spec-Linked Documentation standard
 - [DOC-57 — Five-Section Agent Configuration](./agent-config-five-sections.md) §4.7 — the one-index-multiple-roots and two-way-channel model
 - [DOC-63 — OKG Sources](./DOC-63-okg-sources.md) §10.2, §10.5 — the superseded two-tier fan-out design
+- [ADR-0060](../adr/0060-mcp-config-authority-in-trusty-mcp.md) — one MCP config authority in `trusty-mcp`; global and per-assistant tiers
 
 ---
 
@@ -603,3 +647,9 @@ Focused context is a **starting point, not a wall**. The agent has full agency:
   objects, and an OKG-only exposed knowledge graph. Amended §5.1's
   cross-agent-knowledge line, superseded by the opt-in palace fan-out model.
   Evidence: `docs/research/trusty-agents-1.0-gap-analysis-2026-09-11.md`.
+- **2026-09-11** — Added item (g) to §1a and new §5.4, MCP connectors: one
+  config authority in `trusty-mcp`, a global tier shared with `trusty-code`,
+  and a per-assistant override tier resolved by `trusty_mcp::config::resolve`
+  (epic #7425 item (g), #7451). Evidence:
+  `docs/research/trusty-agents-mcp-connectors-gap-analysis-2026-09-11.md`.
+  Authority: [ADR-0060](../adr/0060-mcp-config-authority-in-trusty-mcp.md).
