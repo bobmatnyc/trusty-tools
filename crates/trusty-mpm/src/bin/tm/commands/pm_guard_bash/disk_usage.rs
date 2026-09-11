@@ -10,7 +10,7 @@
 //! What: [`evaluate_worktree_add_disk_usage`] reuses
 //! [`super::worktree_add_targets`] — the same `cd` / `git -C` / flag-skipping
 //! resolution the temp-root rule uses — and asks
-//! [`crate::core::disk_usage_guard`] whether the mount holding each target is at
+//! [`trusty_mpm::core::disk_usage_guard`] whether the mount holding each target is at
 //! or above the threshold. Only `worktree add` is examined;
 //! `list`/`remove`/`prune` are never gated.
 //!
