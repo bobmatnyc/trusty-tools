@@ -35,7 +35,8 @@
 //!
 //! What: [`RepairMode`], the [`RepairStep`] outcome model, and the repairs
 //! `--fix` drives — [`repair_build_tree_binary`] (#7262, the repoint that runs
-//! first), [`repair_hooks_contamination`],
+//! first), [`repair_hooks_contamination`], [`repair_missing_hook_group`]
+//! (#7490 — runs after that strip and restores what a launch would write),
 //! [`repair_push_guard`], [`repair_output_style`] (#5866 — the one check whose
 //! remedy string named a command with no such step), and (via
 //! [`crate::core::skill_repair`]) the skill redeploy — plus
@@ -215,6 +216,95 @@ pub fn repair_hooks_contamination(project_dir: &Path, mode: RepairMode) -> Vec<R
         }
     }
     steps
+}
+
+/// The `tm doctor` check [`repair_missing_hook_group`] answers.
+///
+/// Why: named once so the repair, its tests, and the driver's ordering comment
+/// cannot drift onto a check name the report does not emit.
+/// What: the string `hooks_missing_tm_group`, as
+/// `daemon::doctor_hooks_hygiene` publishes it.
+/// Test: `missing_group_repair_merges_the_sessionstart_group_back`.
+const MISSING_GROUP_CHECK: &str = "hooks_missing_tm_group";
+
+/// Merge the tm hook lifecycle groups back into a project settings file that
+/// is missing one (issue #7490).
+///
+/// Why: `hooks_missing_tm_group` reports an event `tm hook` never fires for,
+/// and nothing else puts it back — `prepare_session` is the only writer and no
+/// resume or relaunch reached it before #7490. The operator's alternative was
+/// a hand-edit of `.claude/settings.json`.
+///
+/// This runs AFTER [`repair_hooks_contamination`] in the driver, deliberately.
+/// That pass STRIPS every `<exe> hook` entry it finds, including the ones this
+/// pass exists to restore, so running first would report a merge the strip
+/// then undid. Running last means a managed project ends the `--fix` in the
+/// state its next launch would write, rather than with PM lifecycle hooks
+/// offline until then.
+/// What: one step for `<project>/.claude/settings.json` when
+/// [`crate::core::session_launch::missing_lifecycle_hook_events`] names at
+/// least one gap — no step for a complete file, a missing file, or one tm
+/// never provisioned. Applying calls
+/// [`crate::core::session_launch::ensure_project_hooks`], the SAME merge a
+/// launch runs: tm's own prior entries are replaced by identity, every other
+/// entry (the `trusty-memory inbox-check` under `SessionStart`) is preserved,
+/// and the file is snapshotted before the atomic write. A refusal to resolve
+/// an installed binary surfaces as [`StepStatus::Refused`], never a silent
+/// skip.
+/// Test: `missing_group_repair_merges_the_sessionstart_group_back`,
+/// `missing_group_repair_dry_run_changes_nothing`,
+/// `missing_group_repair_is_silent_for_a_complete_file`.
+pub fn repair_missing_hook_group(project_dir: &Path, mode: RepairMode) -> Vec<RepairStep> {
+    repair_missing_hook_group_with(project_dir, None, mode)
+}
+
+/// [`repair_missing_hook_group`] with the hook binary pinned by the caller.
+///
+/// Why (#7244's seam, reused): `resolve_stable_hook_exe` refuses a `cargo test`
+/// harness binary, so a test driving the apply arm through
+/// [`repair_missing_hook_group`] would assert the refusal rather than the
+/// merge on any host without `tm` installed.
+/// What: as [`repair_missing_hook_group`]; `exe_override` is `None` in
+/// production.
+/// Test: see [`repair_missing_hook_group`].
+pub(crate) fn repair_missing_hook_group_with(
+    project_dir: &Path,
+    exe_override: Option<&Path>,
+    mode: RepairMode,
+) -> Vec<RepairStep> {
+    let path = project_dir.join(".claude").join("settings.json");
+    let Some(val) = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+    else {
+        return Vec::new();
+    };
+    let gaps = crate::core::session_launch::missing_lifecycle_hook_events(&val);
+    if gaps.is_empty() {
+        return Vec::new();
+    }
+    let what = format!("merge the tm hook group back under [{}]", gaps.join(", "));
+    let status = match mode {
+        RepairMode::DryRun => StepStatus::Planned,
+        RepairMode::Apply => {
+            match crate::core::session_launch::ensure_project_hooks(project_dir, exe_override) {
+                Ok(()) => StepStatus::Applied { backup: None },
+                // #7490: an unresolvable installed binary is the fail-closed
+                // rule working (#7244), not a failure — a step that wrote
+                // nothing on purpose must not render like one that broke.
+                Err(e @ crate::core::session_launch::PrepError::HookExe { .. }) => {
+                    StepStatus::Refused(e.to_string())
+                }
+                Err(e) => StepStatus::Failed(e.to_string()),
+            }
+        }
+    };
+    vec![RepairStep {
+        check: MISSING_GROUP_CHECK,
+        path,
+        what,
+        status,
+    }]
 }
 
 /// The `tm doctor` check [`repair_build_tree_binary`] answers.

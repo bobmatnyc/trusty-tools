@@ -29,6 +29,10 @@ mod palace_alias;
 // `prepare_session_inner` and `sync_session_assets`.
 mod project_hooks;
 mod quarantine_shadows;
+// #7490: the project-tier hook merge every resume and relaunch path was
+// missing, plus the read-only gap predicate `tm doctor` reports from.
+mod resume_hooks;
+pub use resume_hooks::{ensure_project_hooks, missing_lifecycle_hook_events};
 mod search_index;
 mod settings;
 mod skills;

@@ -391,7 +391,7 @@ const PROBE_RETRY_DELAY: Duration = Duration::from_millis(500);
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_forty_six_checks`,
+/// Test: `run_doctor_produces_forty_seven_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -548,9 +548,17 @@ pub(crate) async fn run_doctor_with_claims(
     checks.push(check_oauth_token_config());
     // #7262: the third check names each hook/statusLine command whose binary
     // lives in a Cargo build tree, which the file-counting check above cannot.
-    let (contamination, foreign_conflict, build_tree_binary) =
+    // #7490: the fourth is the inverse of the first — a lifecycle event a
+    // tm-provisioned file has NO tm hook group for, which no file-counting
+    // check can see because the evidence is what is absent.
+    let (contamination, foreign_conflict, build_tree_binary, missing_tm_group) =
         check_hooks_hygiene(project_dir, active_workspace_paths);
-    checks.extend([contamination, foreign_conflict, build_tree_binary]);
+    checks.extend([
+        contamination,
+        foreign_conflict,
+        build_tree_binary,
+        missing_tm_group,
+    ]);
     // Issue #2997: surface whether managed panes disclaim TCC responsibility so
     // the "trusty-mpm/tmux would like to access data…" prompt class is
     // diagnosable rather than silent. Synchronous + instantaneous (no log scan).
