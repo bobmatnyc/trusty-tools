@@ -99,6 +99,14 @@ fn spawn_pm_guard(
         .env_remove("TRUSTY_MPM_PM_UNRESTRICTED")
         .env_remove("TRUSTY_MPM_PM_DENY_BY_DEFAULT")
         .env_remove("TM_MANAGED_SESSION_ID")
+        // #7497: the child is `target/<profile>/tm`, outside `deps/`, so it
+        // does not detect itself as a test process. Without this the
+        // `disk.max_usage_pct` gate would apply its production default to every
+        // `git worktree add` payload below, and whether those cases denied
+        // would depend on how full the runner's disk happens to be. The two
+        // disk cases that DO exercise the gate pin an explicit threshold in
+        // their own config home, which outranks this.
+        .env(trusty_common::test_harness::FORCE_ENV, "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -670,6 +678,77 @@ fn in_project_worktree_add_payload(agent_id: Option<&str>) -> String {
     format!(
         r#"{{"hook_event_name":"PreToolUse",{agent}"cwd":"{NON_DENYLISTED_CWD}","tool_name":"Bash","tool_input":{{"command":"git worktree add .claude/worktrees/wt-x"}}}}"#
     )
+}
+
+/// Write a `disk.max_usage_pct` config into a scratch `$HOME` and hand back
+/// that home (#7497).
+///
+/// Why: an EXPLICIT threshold applies in a test process exactly as in
+/// production, which is what lets these two cases drive the real gate — the
+/// absent-key default is disabled under a test harness on purpose.
+fn disk_threshold_home(max_usage_pct: u8) -> tempfile::TempDir {
+    let home = isolated_home();
+    let dir = home.path().join(".trusty-tools").join("trusty-mpm");
+    std::fs::create_dir_all(&dir).expect("create config dir");
+    std::fs::write(
+        dir.join("config.yaml"),
+        format!("disk:\n  max_usage_pct: {max_usage_pct}\n"),
+    )
+    .expect("write config");
+    home
+}
+
+#[test]
+fn pm_guard_denies_worktree_add_over_the_disk_threshold() {
+    // #7497: with the threshold pinned at 1%, any real volume is at or above
+    // it, so an in-project `git worktree add` — the shape the PM and a
+    // dispatched subagent both use — must be DENIED, and the reason must carry
+    // the measured percent, the threshold and the key that changes it.
+    let home = disk_threshold_home(1);
+    let home_s = home.path().to_string_lossy().to_string();
+    for agent_id in [None, Some("agent-xyz789")] {
+        let stdout = run_pm_guard(
+            &in_project_worktree_add_payload(agent_id),
+            &[("HOME", &home_s)],
+        );
+        assert_denied(&stdout);
+        assert!(
+            stdout.contains("disk.max_usage_pct"),
+            "the deny must name the config key: {stdout}"
+        );
+        assert!(
+            stdout.contains("threshold of 1%"),
+            "the deny must name the threshold in force: {stdout}"
+        );
+        assert!(
+            stdout.contains("% disk usage"),
+            "the deny must name the measured percent: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_allows_worktree_add_under_the_disk_threshold() {
+    // #7497: the same payload with the threshold at 100% must be allowed —
+    // nothing changes below the line. `git worktree list` is never gated at
+    // all, whatever the threshold.
+    let home = disk_threshold_home(100);
+    let home_s = home.path().to_string_lossy().to_string();
+    assert_eq!(
+        run_pm_guard(&in_project_worktree_add_payload(None), &[("HOME", &home_s)]).trim(),
+        "",
+        "a worktree target under the threshold must stay allowed"
+    );
+    let list = format!(
+        r#"{{"hook_event_name":"PreToolUse","cwd":"{NON_DENYLISTED_CWD}","tool_name":"Bash","tool_input":{{"command":"git worktree list"}}}}"#
+    );
+    let home_full = disk_threshold_home(1);
+    let full_s = home_full.path().to_string_lossy().to_string();
+    assert_eq!(
+        run_pm_guard(&list, &[("HOME", &full_s)]).trim(),
+        "",
+        "`git worktree list` is never gated on disk usage"
+    );
 }
 
 #[test]

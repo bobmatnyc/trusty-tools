@@ -539,7 +539,14 @@ pub fn worktree_name_collides(base_path: &Path, worktree_name: &str) -> bool {
 /// payload, replacing the pre-#3649 zero-byte convention) so the orphan-GC
 /// sweep and the `decommission` owner gate can later resolve who is entitled
 /// to reclaim this worktree.
+/// #7497: refuses BEFORE any directory or branch is created when the mount
+/// holding the target is at or above `disk.max_usage_pct` (default 90) — see
+/// [`crate::core::disk_usage_guard`] for the threshold, the fail-closed posture
+/// on an unmeasurable mount, and why an absent key gates nothing in a test
+/// process.
 /// Test: covered by integration tests against a real temp repo;
+/// `create_session_worktree_refuses_at_or_above_the_threshold` in
+/// `tests/worktree_disk_usage_gate.rs`;
 /// `create_session_worktree_rejects_existing_worktree_dir`,
 /// `create_session_worktree_writes_owner_sentinel` (#3649),
 /// `session_worktree_branches_from_fetched_origin_not_stale_local_main` (#4957).
@@ -550,6 +557,12 @@ pub fn create_session_worktree(
 ) -> Result<PathBuf, String> {
     let worktree_path = worktree_path_for(base_path, worktree_name);
     let branch = worktree_branch_for(worktree_name);
+
+    // #7497: refuse before creating anything when the mount is at or above
+    // `disk.max_usage_pct`. Fail-closed (ADR-0037): an unmeasurable mount is a
+    // refusal here, not an assumption that it is fine.
+    crate::core::disk_usage_guard::check_worktree_creation(&worktree_path)
+        .map_err(|e| e.to_string())?;
 
     if worktree_path.exists() {
         return Err(format!(

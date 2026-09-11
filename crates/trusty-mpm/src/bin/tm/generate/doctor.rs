@@ -133,6 +133,12 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
          pull requests with no unsaved work (issue #2919).",
     ),
     (
+        "disk_usage",
+        "The MOUNT holding the worktree store against `disk.max_usage_pct` (default 90): Ok below \
+         the threshold, Warn at or above it — where new worktrees are being REFUSED — and Unknown \
+         when the mount could not be measured (issue #7497).",
+    ),
+    (
         "base_clone",
         "The base clone each live worktree resolves through still has its git identity — \
          fails naming the base path and how many worktrees hang off it (issue #3605).",

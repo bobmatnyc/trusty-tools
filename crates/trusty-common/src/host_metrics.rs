@@ -38,8 +38,9 @@
 //!   reports whatever the OS lists and never fails when a set is empty.
 
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use std::time::Instant;
-use sysinfo::{CpuRefreshKind, Disks, MemoryRefreshKind, Networks, RefreshKind, System};
+use sysinfo::{CpuRefreshKind, Disk, Disks, MemoryRefreshKind, Networks, RefreshKind, System};
 
 // #6641: the bounded sample history the console's real-time graphs read. It
 // lives beside the sampler rather than in trusty-console because the buffer has
@@ -446,25 +447,12 @@ impl HostSampler {
         let mut mounts = Vec::with_capacity(self.disks.list().len());
         let (mut agg_total, mut agg_avail) = (0u64, 0u64);
         for disk in self.disks.list() {
-            let total = disk.total_space();
-            let avail = disk.available_space();
-            let used = total.saturating_sub(avail);
-            let removable = disk.is_removable();
-            if !removable {
-                agg_total = agg_total.saturating_add(total);
-                agg_avail = agg_avail.saturating_add(avail);
+            let mount = mount_metrics_from(disk, t);
+            if !mount.is_removable {
+                agg_total = agg_total.saturating_add(mount.total_bytes);
+                agg_avail = agg_avail.saturating_add(mount.available_bytes);
             }
-            let usage_pct = pct(used, total);
-            mounts.push(MountMetrics {
-                mount_point: disk.mount_point().to_string_lossy().into_owned(),
-                name: disk.name().to_string_lossy().into_owned(),
-                total_bytes: total,
-                available_bytes: avail,
-                used_bytes: used,
-                usage_pct,
-                is_removable: removable,
-                pressure: Pressure::classify(usage_pct, t.disk_warning_pct, t.disk_critical_pct),
-            });
+            mounts.push(mount);
         }
         let agg_used = agg_total.saturating_sub(agg_avail);
         let agg_pct = pct(agg_used, agg_total);
@@ -514,6 +502,142 @@ fn build_network_metrics(networks: &Networks, window: f64) -> NetworkMetrics {
         tx_total_bytes: tx_total,
         window_secs: window,
     }
+}
+
+/// Build one [`MountMetrics`] from a refreshed `sysinfo` disk.
+///
+/// Why: both the whole-machine snapshot and the single-mount lookup
+///      ([`mount_for_path`]) need the identical shape, and a second hand-rolled
+///      mapping is how the two drift into disagreeing about what `used_bytes`
+///      means.
+/// What: `used_bytes` is `total - available`; `usage_pct` is that over total
+///      (`0.0` for a zero-capacity mount); `pressure` classifies against `t`.
+/// Test: `sampler_produces_plausible_snapshot`,
+///      `mount_for_path_reports_a_plausible_mount_for_the_cwd`.
+fn mount_metrics_from(disk: &Disk, t: &HostThresholds) -> MountMetrics {
+    let total = disk.total_space();
+    let available = disk.available_space();
+    let used = total.saturating_sub(available);
+    let usage_pct = pct(used, total);
+    MountMetrics {
+        mount_point: disk.mount_point().to_string_lossy().into_owned(),
+        name: disk.name().to_string_lossy().into_owned(),
+        total_bytes: total,
+        available_bytes: available,
+        used_bytes: used,
+        usage_pct,
+        is_removable: disk.is_removable(),
+        pressure: Pressure::classify(usage_pct, t.disk_warning_pct, t.disk_critical_pct),
+    }
+}
+
+/// The usage of the mount that holds `path` (#7497).
+///
+/// Why: a caller that has to decide something about ONE directory — "is the
+///      volume this worktree would land on nearly full?" — needs that mount,
+///      not the cross-mount aggregate, which stays healthy while a single
+///      volume fills. Nothing offered that lookup, so per the workspace
+///      "common entry point" rule it lives here beside the sampling it reuses
+///      rather than being re-derived by each consumer.
+/// What: resolves `path` to its nearest EXISTING ancestor (the target of a
+///      creation gate usually does not exist yet), canonicalises it, and picks
+///      the mount by device id — the same `st_dev` the OS reports for the
+///      ancestor and for the mount point. The device match is what makes this
+///      correct on macOS, where `/Users/...` is firmlinked onto the
+///      `/System/Volumes/Data` mount and is therefore NOT a lexical child of
+///      its own mount point. Where device ids are unavailable (non-unix) it
+///      falls back to [`select_mount_for_path`]'s longest-prefix rule.
+///      `None` when no ancestor exists or the OS lists no matching mount — an
+///      unmeasurable result a caller must handle, never a silent `0`.
+/// Test: `mount_for_path_reports_a_plausible_mount_for_the_cwd`.
+#[must_use]
+pub fn mount_for_path(path: &Path) -> Option<MountMetrics> {
+    let probe = nearest_existing_ancestor(path)?;
+    let mounts = sample_mounts(&HostThresholds::default());
+    select_mount_by_device(&mounts, &probe)
+        .or_else(|| select_mount_for_path(&mounts, &probe))
+        .cloned()
+}
+
+/// The mount whose mount point is the LONGEST lexical prefix of `path`.
+///
+/// Why: the portable half of [`mount_for_path`], kept separate so the
+///      selection rule is testable against synthetic mounts — no real
+///      filesystem, no host-dependent assertion.
+/// What: component-wise prefix matching (so `/var` never matches `/variable`),
+///      resolving ties toward the deeper mount point, which is the nested
+///      filesystem actually holding the path. `None` when nothing matches.
+/// Test: `select_mount_for_path_picks_the_deepest_matching_mount`,
+///      `select_mount_for_path_is_component_wise`.
+#[must_use]
+pub fn select_mount_for_path<'a>(
+    mounts: &'a [MountMetrics],
+    path: &Path,
+) -> Option<&'a MountMetrics> {
+    mounts
+        .iter()
+        .filter(|m| path.starts_with(Path::new(&m.mount_point)))
+        .max_by_key(|m| Path::new(&m.mount_point).components().count())
+}
+
+/// Every mount the OS currently reports, classified against `thresholds`.
+fn sample_mounts(thresholds: &HostThresholds) -> Vec<MountMetrics> {
+    Disks::new_with_refreshed_list()
+        .list()
+        .iter()
+        .map(|disk| mount_metrics_from(disk, thresholds))
+        .collect()
+}
+
+/// The mount whose mount point sits on the SAME device as `path`.
+///
+/// Why: the firmlink case above — a lexical rule answers `/` for a path that
+///      really lives on the data volume, and a gate reading the root volume's
+///      4% while the data volume is at 92% never fires.
+/// What: compares `st_dev` of `path` against `st_dev` of each mount point,
+///      deepest mount point winning a tie (a nested mount shares no device
+///      with its parent, so ties are rare and the deeper one is the closer
+///      answer). `None` off unix, or when the device cannot be read.
+fn select_mount_by_device<'a>(mounts: &'a [MountMetrics], path: &Path) -> Option<&'a MountMetrics> {
+    let device = device_id(path)?;
+    mounts
+        .iter()
+        .filter(|m| device_id(Path::new(&m.mount_point)) == Some(device))
+        .max_by_key(|m| Path::new(&m.mount_point).components().count())
+}
+
+/// `st_dev` for `path`, or `None` where the platform does not expose one.
+#[cfg(unix)]
+fn device_id(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| m.dev())
+}
+
+/// No device ids off unix — [`mount_for_path`] falls back to prefix matching.
+#[cfg(not(unix))]
+fn device_id(_path: &Path) -> Option<u64> {
+    None
+}
+
+/// The closest ancestor of `path` that exists, canonicalised.
+///
+/// Why: [`mount_for_path`]'s callers ask about a directory they are ABOUT to
+///      create, which no `stat` can answer. Its parent is on the same mount,
+///      and walking up terminates at `/`, which always exists.
+/// What: makes `path` absolute against the working directory, walks its
+///      ancestors, and canonicalises the first that exists (falling back to the
+///      uncanonicalised form if that read fails). `None` only when no ancestor
+///      exists at all.
+fn nearest_existing_ancestor(path: &Path) -> Option<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+    absolute
+        .ancestors()
+        .find(|a| a.exists())
+        .map(|a| a.canonicalize().unwrap_or_else(|_| a.to_path_buf()))
 }
 
 #[cfg(test)]
@@ -647,5 +771,76 @@ mod tests {
         assert_eq!(back.memory.total_bytes, m.memory.total_bytes);
         assert_eq!(back.disks.mounts.len(), m.disks.mounts.len());
         assert_eq!(back.overall_pressure, m.overall_pressure);
+    }
+
+    /// A synthetic mount at `mount_point` with `usage_pct`.
+    fn mount(mount_point: &str, usage_pct: f32) -> MountMetrics {
+        MountMetrics {
+            mount_point: mount_point.to_string(),
+            name: "synthetic".to_string(),
+            total_bytes: 100,
+            available_bytes: 100 - usage_pct as u64,
+            used_bytes: usage_pct as u64,
+            usage_pct,
+            is_removable: false,
+            pressure: Pressure::Nominal,
+        }
+    }
+
+    /// Why (#7497): a gate that picked the ROOT mount for a path living on a
+    ///      nested volume reads that volume's headroom, not the one it is
+    ///      about to consume.
+    /// What: `/` and `/System/Volumes/Data` both prefix the probe; the deeper
+    ///      mount must win.
+    /// Test: this test.
+    #[test]
+    fn select_mount_for_path_picks_the_deepest_matching_mount() {
+        let mounts = vec![mount("/", 4.0), mount("/System/Volumes/Data", 92.0)];
+        let picked = select_mount_for_path(&mounts, Path::new("/System/Volumes/Data/Users/x"))
+            .expect("a mount must match an absolute path when `/` is listed");
+        assert_eq!(picked.mount_point, "/System/Volumes/Data");
+        assert_eq!(picked.usage_pct, 92.0);
+    }
+
+    /// Why (#7497): a substring rule would match `/var` against `/variable`
+    ///      and report a completely unrelated volume's usage.
+    /// What: `/variable/x` must select `/`, never `/var`; a path under no
+    ///      listed mount selects nothing.
+    /// Test: this test.
+    #[test]
+    fn select_mount_for_path_is_component_wise() {
+        let mounts = vec![mount("/", 4.0), mount("/var", 92.0)];
+        assert_eq!(
+            select_mount_for_path(&mounts, Path::new("/variable/x"))
+                .expect("`/` matches")
+                .mount_point,
+            "/"
+        );
+        assert!(
+            select_mount_for_path(&[mount("/var", 92.0)], Path::new("/home/x")).is_none(),
+            "a path under no listed mount must be unmeasurable, not defaulted"
+        );
+    }
+
+    /// Why (#7497): the live lookup is what a creation gate calls, and it must
+    ///      answer for a path that DOES NOT EXIST yet (the worktree it is
+    ///      about to create).
+    /// What: asks for a not-yet-created child of the working directory and
+    ///      asserts a plausible mount comes back — a percentage in range and a
+    ///      non-empty mount point.
+    /// Test: this test.
+    #[test]
+    fn mount_for_path_reports_a_plausible_mount_for_the_cwd() {
+        let target = std::env::current_dir()
+            .expect("cwd")
+            .join("does-not-exist-7497")
+            .join("nor-this");
+        let m = mount_for_path(&target).expect("the working directory sits on some mount");
+        assert!(!m.mount_point.is_empty());
+        assert!(
+            (0.0..=100.0).contains(&m.usage_pct),
+            "usage must be a percentage, got {}",
+            m.usage_pct
+        );
     }
 }

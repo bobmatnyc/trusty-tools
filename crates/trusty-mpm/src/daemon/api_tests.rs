@@ -1232,6 +1232,8 @@ async fn doctor_endpoint_returns_report() {
         "search_index_pin",
         "worktrees",
         "worktree_disk",
+        // #7497: the mount that store sits on, against `disk.max_usage_pct`.
+        "disk_usage",
         // #3605: the base clone a live worktree resolves through.
         "base_clone",
         "gh_account",

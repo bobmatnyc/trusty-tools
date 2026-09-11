@@ -46,6 +46,9 @@
 //! `sed_awk::tests` for the sed/awk-specific safety analysis.
 
 mod destructive_delete;
+// #7497: the disk-usage half of the worktree-add gate, beside the temp-root
+// half it shares a target resolver with.
+mod disk_usage;
 mod heredoc;
 mod main_checkout;
 mod path_tokens;
@@ -88,7 +91,7 @@ pub(crate) use worktree_remove::{
 };
 pub(crate) use worktree_remove_rechecks::evaluate_removal_rechecks;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::commands::hook_rewrite::{effective_tool_name, first_command_token};
 // Reached by the sibling rule modules through `super::…` — one answer to "what
@@ -941,6 +944,23 @@ pub(crate) fn evaluate_worktree_add_command(command: &str, cwd: &Path) -> Option
     evaluate_worktree_add_command_in(command, cwd, &PathEnv::from_process())
 }
 
+/// Both `git worktree add` gates in one call: the temp-root denylist (#3955)
+/// and the disk-usage threshold (#7497).
+///
+/// Why: `pm_guard()` must run both BEFORE its Guard 4 subagent exemption, and
+/// two call sites there are two places for the next rule to be added to only
+/// one of them. The placement requirement is identical, so the call is too.
+/// What: the temp-root reason wins when both apply — it names a location that
+/// is wrong regardless of how full the disk is. Returns `None` when the command
+/// creates no worktree.
+/// Test: `evaluate_worktree_add_command_*` for the first rule, `disk_usage`'s
+/// own tests for the second, and `tests/tm_hook_pm_guard.rs` for both end to end.
+pub(crate) fn evaluate_worktree_add(command: &str, cwd: &Path) -> Option<String> {
+    evaluate_worktree_add_command(command, cwd)
+        .map(str::to_string)
+        .or_else(|| disk_usage::evaluate_worktree_add_disk_usage(command, cwd))
+}
+
 /// [`evaluate_worktree_add_command`] against an explicit environment.
 ///
 /// Why: see [`PathEnv`] — this is the seam that lets the expansion rules be
@@ -951,6 +971,31 @@ fn evaluate_worktree_add_command_in(
     cwd: &Path,
     env: &PathEnv,
 ) -> Option<&'static str> {
+    worktree_add_targets_in(command, cwd, env)
+        .iter()
+        .any(|target| resolves_under_denylisted_tmp(target))
+        .then_some(WORKTREE_TMP_REASON)
+}
+
+/// Every path a `git worktree add` in `command` would create.
+///
+/// Why (#7497): the disk-usage gate asks a DIFFERENT question of the SAME
+/// targets — "is the volume this lands on full?" rather than "is it under a
+/// denylisted temp root?" — and a second walk of the command line is how the
+/// two would drift into resolving `cd`, `git -C`, `~` and `$TMPDIR` differently.
+/// One resolver, two rules.
+/// What: the resolved, lexically normalised targets, in command order. Empty
+/// when the command contains no `worktree add`, which is the fast path every
+/// other Bash call takes.
+/// Test: `worktree_add_targets_resolves_cd_and_dash_c`, and the disk rule's own
+/// cases in `pm_guard_bash::disk_usage`.
+pub(crate) fn worktree_add_targets(command: &str, cwd: &Path) -> Vec<PathBuf> {
+    worktree_add_targets_in(command, cwd, &PathEnv::from_process())
+}
+
+/// [`worktree_add_targets`] against an explicit environment — see [`PathEnv`].
+fn worktree_add_targets_in(command: &str, cwd: &Path, env: &PathEnv) -> Vec<PathBuf> {
+    let mut targets = Vec::new();
     let mut effective_cwd = cwd.to_path_buf();
     for segment in split_shell_segments(command) {
         let trimmed = segment.trim();
@@ -986,12 +1031,9 @@ fn evaluate_worktree_add_command_in(
         let Some(target) = worktree_add_target_token(&argv[worktree_idx + 2..]) else {
             continue;
         };
-        let resolved = resolve_target_path(&target, &base, env);
-        if resolves_under_denylisted_tmp(&resolved) {
-            return Some(WORKTREE_TMP_REASON);
-        }
+        targets.push(resolve_target_path(&target, &base, env));
     }
-    None
+    targets
 }
 
 /// The `-C <path>` value preceding a resolved `worktree` subcommand token, if

@@ -211,7 +211,7 @@ use crate::commands::pm_guard_bash::{
     CommitVerdict, DispatchIdentity, SHELL_EDIT_REASON, WorktreeRemoveVerdict,
     docs_commit_deny_reason, evaluate_bash_command, evaluate_destructive_delete_command,
     evaluate_main_checkout_commit_command, evaluate_main_checkout_destructive_command,
-    evaluate_removal_rechecks, evaluate_secret_file_copy_command, evaluate_worktree_add_command,
+    evaluate_removal_rechecks, evaluate_secret_file_copy_command, evaluate_worktree_add,
     evaluate_worktree_remove_command, extract_shell_edit_target, head_move_deny_reason,
     main_checkout_head_move, unclassifiable_command,
 };
@@ -419,9 +419,11 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
             println!("{}", build_pretooluse_deny_response(reason));
             return Ok(());
         }
-        if let Some(reason) = evaluate_worktree_add_command(command, &hook_cwd) {
-            audit_denied_tool(url, session_id, tool_name, reason).await;
-            println!("{}", build_pretooluse_deny_response(reason));
+        // #7497 joins #3955 here: same placement, same reason. `evaluate_worktree_add`
+        // runs the temp-root denylist and the `disk.max_usage_pct` threshold.
+        if let Some(reason) = evaluate_worktree_add(command, &hook_cwd) {
+            audit_denied_tool(url, session_id, tool_name, &reason).await;
+            println!("{}", build_pretooluse_deny_response(&reason));
             return Ok(());
         }
         // ABSOLUTE guard (issue #4031) — the same placement, and for the same
