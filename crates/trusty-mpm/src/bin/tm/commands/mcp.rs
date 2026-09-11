@@ -91,6 +91,7 @@ pub(crate) fn add_cmd(
     env: &[String],
     header: &[String],
     command_and_args: &[String],
+    project: bool,
 ) -> Result<()> {
     let config_dir = resolve_config_dir(root)?;
     let command_or_url = command_and_args.first().map(String::as_str);
@@ -138,11 +139,45 @@ pub(crate) fn add_cmd(
         }
     };
 
+    // #7422: `--project` writes the project's own `.mcp.json`, which a session
+    // loads unconditionally — one declaration point, per ADR-0042, instead of a
+    // shared definition plus a separate opt-in naming it.
+    if project {
+        let cwd = std::env::current_dir().context("cannot resolve the current directory")?;
+        // #7422: the trust store answers for the WHOLE directory, so writing one
+        // server must not mint a grant covering every other declaration already
+        // in that `.mcp.json`. Require the grant instead of recording it.
+        if !trusty_mpm::core::project_trust::is_project_trusted(&cwd) {
+            anyhow::bail!(
+                "{} is not a trusted project, so a server declared in its .mcp.json \
+                 would not load.\n  Review what this repository already declares, then \
+                 grant it once:\n    tm project trust {}",
+                cwd.display(),
+                cwd.display()
+            );
+        }
+        let target = cwd.join(mcp_config::MCP_JSON);
+        let changed = mcp_config::add_project_server(&cwd, name, entry)?;
+        if changed {
+            println!("Added MCP server '{name}' to {}", target.display());
+            println!("  Sessions started in this trusted project load it with no opt-in needed.");
+        } else {
+            println!(
+                "MCP server '{name}' already present in {} (no change)",
+                target.display()
+            );
+        }
+        return Ok(());
+    }
+
     let changed = mcp_config::add_server(&config_dir, name, entry)?;
     if changed {
         println!(
             "Added MCP server '{name}' to {}",
             config_dir.join(".claude.json").display()
+        );
+        println!(
+            "  This is the SHARED user scope. Since #7422 a session loads it only in a \n               TRUSTED project whose .trusty-mpm.toml names it: [session] mcp_servers = [\"{name}\"]"
         );
     } else {
         println!("MCP server '{name}' already present (no change)");
@@ -171,7 +206,11 @@ pub(crate) fn remove_cmd(root: Option<&str>, name: &str) -> Result<()> {
 /// Why: operators need an overview of which user-scope servers managed sessions
 /// will load.
 /// What: lists the top-level `mcpServers` map as a table (name → type + target)
-/// or, with `--json`, the raw map.
+/// or, with `--json`, the raw map. Each row is marked `opted-in` or
+/// `scoped-out` for the current directory, and when the scope came back
+/// degraded — an untrusted project, or an unreadable `.mcp.json` — that reason
+/// prints above the opt-in hint, because until it is resolved the suggested
+/// `[session] mcp_servers` edit changes nothing (#7422).
 /// Test: `cli_parses_mcp_list`; CRUD in `core::mcp_config`.
 pub(crate) fn list_cmd(root: Option<&str>, json: bool) -> Result<()> {
     let config_dir = resolve_config_dir(root)?;
@@ -194,14 +233,40 @@ pub(crate) fn list_cmd(root: Option<&str>, json: bool) -> Result<()> {
         config_dir.display(),
         servers.len()
     );
-    println!("  {:<name_w$}  TYPE   TARGET", "NAME");
+    // #7422: a shared declaration is no longer the same thing as a session
+    // loading it, so each row says which it is FOR THIS PROJECT.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let scope = trusty_mpm::core::session_mcp_scope::resolve_scope(&cwd, &config_dir);
+    println!("  {:<name_w$}  TYPE   SCOPE       TARGET", "NAME");
     for (name, entry) in &servers {
+        let marker = if scope.excluded.iter().any(|n| n == name) {
+            "scoped-out"
+        } else {
+            "opted-in"
+        };
         println!(
-            "  {:<name_w$}  {:<5}  {}",
+            "  {:<name_w$}  {:<5}  {:<10}  {}",
             name,
             entry_type(entry),
+            marker,
             entry_target(entry)
         );
+    }
+    // #7422: in an untrusted project the opt-in hint below changes nothing until
+    // the grant exists, so the reason that made it a no-op prints above it.
+    if let Some(reason) = &scope.degraded {
+        println!();
+        println!("  {reason}");
+    }
+    if !scope.excluded.is_empty() {
+        println!();
+        println!(
+            "  {} server(s) are scoped-out for {} — add them to .trusty-mpm.toml:",
+            scope.excluded.len(),
+            cwd.display()
+        );
+        println!("    [session]");
+        println!("    mcp_servers = {:?}", scope.excluded);
     }
     Ok(())
 }
@@ -411,6 +476,7 @@ mod tests {
             &[],
             &[],
             &command_and_args,
+            false,
         )
         .unwrap();
 
@@ -447,6 +513,7 @@ mod tests {
             &[],
             &[],
             &command_and_args,
+            false,
         )
         .unwrap();
 

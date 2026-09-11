@@ -54,6 +54,17 @@ pub(crate) enum McpCmd {
         /// Note: do NOT use `env = "TRUSTY_MPM_ROOT"` here — see `Register`.
         #[arg(long)]
         root: Option<String>,
+        /// Declare the server in THIS project's `.mcp.json` instead of the
+        /// shared user scope (#7422).
+        ///
+        /// One declaration point, tracked in git, reviewed in the PR that
+        /// needed it. Requires the project to be trusted (`tm project trust`),
+        /// because an in-repo declaration cannot be its own permission. Without
+        /// the flag the server goes to the shared user scope, where it loads
+        /// only in a TRUSTED project whose `.trusty-mpm.toml` names it under
+        /// `[session] mcp_servers`.
+        #[arg(long)]
+        project: bool,
     },
     /// Remove a user-scope MCP server by name.
     Remove {
@@ -64,6 +75,10 @@ pub(crate) enum McpCmd {
         root: Option<String>,
     },
     /// List all user-scope MCP servers in the tm config dir.
+    ///
+    /// Each row is marked `opted-in` or `scoped-out` for the current project
+    /// (#7422): a `scoped-out` server is declared here but will NOT load in a
+    /// session started in this directory.
     List {
         /// Output as JSON instead of a table.
         #[arg(long)]

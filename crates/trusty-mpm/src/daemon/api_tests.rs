@@ -1254,6 +1254,8 @@ async fn doctor_endpoint_returns_report() {
         // #5007: `sessions.json` integrity — a corrupt store blocks every write.
         "session_store",
         "stray_mcp_json",
+        // #7422: what this project's sessions will NOT load, and where to opt in.
+        "session_scope",
         // #6469: the tmux server globals a resurrect restore leaves unset.
         "tmux_options",
         // #6529: pseudo-terminal headroom — a session leak exhausts it and the
