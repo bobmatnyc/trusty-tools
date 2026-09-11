@@ -88,7 +88,7 @@ describe('KnowledgeGraphBrowser — mid-session disconnection (#4290)', () => {
   it('loadAll/loadCount degrading after a connected bootstrap render the disconnected reason, never empty data', async () => {
     stubRoutes({
       subjects: {
-        tree: '/homes/izzie/okg',
+        tree: 'izzie/okg',
         connected: true,
         data: [{ subject: 'bob', count: 2 }],
       },
@@ -97,13 +97,13 @@ describe('KnowledgeGraphBrowser — mid-session disconnection (#4290)', () => {
       // daemon has gone away — exactly the ticket's "daemon restarts
       // mid-session" scenario.
       all: {
-        tree: '/homes/izzie/okg',
+        tree: 'izzie/okg',
         connected: false,
         reason: 'the OKG tree is unreadable',
         data: [],
       },
       count: {
-        tree: '/homes/izzie/okg',
+        tree: 'izzie/okg',
         connected: false,
         reason: 'the OKG tree is unreadable',
         data: { active: 0, definition_count: 0 },
@@ -120,20 +120,20 @@ describe('KnowledgeGraphBrowser — mid-session disconnection (#4290)', () => {
   it('loadSubject degrading after a connected bootstrap renders the disconnected reason, not "No triples."', async () => {
     stubRoutes({
       subjects: {
-        tree: '/homes/izzie/okg',
+        tree: 'izzie/okg',
         connected: true,
         data: [{ subject: 'bob', count: 2 }],
       },
       all: {
-        tree: '/homes/izzie/okg',
+        tree: 'izzie/okg',
         connected: true,
         data: [{ subject: 'bob', predicate: 'likes', object: 'cats' }],
       },
-      count: { tree: '/homes/izzie/okg', connected: true, data: { active: 5, definition_count: 1 } },
+      count: { tree: 'izzie/okg', connected: true, data: { active: 5, definition_count: 1 } },
       // The daemon goes away between the initial connected bootstrap and the
       // user clicking a subject row.
       subject: {
-        tree: '/homes/izzie/okg',
+        tree: 'izzie/okg',
         connected: false,
         reason: 'the OKG tree went away mid-session',
         data: [],
@@ -150,11 +150,14 @@ describe('KnowledgeGraphBrowser — mid-session disconnection (#4290)', () => {
     expect(panelText()).not.toContain('No triples.');
   });
 
+  // #7430 security review: `tree` is an opaque label, so the empty-state copy
+  // quotes it as a name. A regression to an absolute path would show up here as
+  // a leading slash in the rendered sentence.
   it('a genuinely connected, empty tree renders the empty copy, not the disconnected one', async () => {
     stubRoutes({
-      subjects: { tree: '/homes/izzie/okg', connected: true, data: [] },
-      all: { tree: '/homes/izzie/okg', connected: true, data: [] },
-      count: { tree: '/homes/izzie/okg', connected: true, data: { active: 0, definition_count: 0 } },
+      subjects: { tree: 'izzie/okg', connected: true, data: [] },
+      all: { tree: 'izzie/okg', connected: true, data: [] },
+      count: { tree: 'izzie/okg', connected: true, data: { active: 0, definition_count: 0 } },
     });
 
     render();
@@ -162,6 +165,8 @@ describe('KnowledgeGraphBrowser — mid-session disconnection (#4290)', () => {
     await waitFor(() => normalized().includes('is readable, but holds nothing yet'));
 
     expect(normalized()).not.toContain('is not reachable right now');
+    expect(normalized()).toContain('The OKG tree "izzie/okg"');
+    expect(normalized()).not.toMatch(/tree "\//);
   });
 });
 
@@ -191,9 +196,9 @@ it('keeps the selected subject when an older all-triples request finishes late',
 // condition, so the definition list is asserted in the DOM.
 it('renders the definitions that come with a page of triples', async () => {
   stubRoutes({
-    subjects: { tree: '/homes/izzie/okg', connected: true, data: [{ subject: 'Bob', count: 1 }] },
+    subjects: { tree: 'izzie/okg', connected: true, data: [{ subject: 'Bob', count: 1 }] },
     all: {
-      tree: '/homes/izzie/okg',
+      tree: 'izzie/okg',
       source: 'okg',
       connected: true,
       data: [{ subject: 'Bob', predicate: 'works_at', object: 'Duetto', provenance: 'people/bob.md' }],
@@ -201,7 +206,7 @@ it('renders the definitions that come with a page of triples', async () => {
         { subject: 'Bob', collection: 'people', slug: 'bob', type: 'Person', summary: 'The owner.', path: 'people/bob.md' },
       ],
     },
-    count: { tree: '/homes/izzie/okg', connected: true, data: { active: 1, definition_count: 1 } },
+    count: { tree: 'izzie/okg', connected: true, data: { active: 1, definition_count: 1 } },
   });
 
   render();

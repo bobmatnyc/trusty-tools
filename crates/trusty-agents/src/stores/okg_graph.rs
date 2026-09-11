@@ -37,7 +37,7 @@ use trusty_kb::entity::link_values;
 use trusty_kb::schema::{Profile, base_envelope};
 use trusty_kb::store::{KbStore, summarise};
 
-use crate::assistants::AssistantHome;
+use crate::assistants::{AssistantHome, OKG_DIR};
 use crate::stores::StoresConfig;
 
 /// One relationship edge, as a subject-predicate-object triple.
@@ -134,7 +134,11 @@ impl OkgGraph {
 /// base envelope's own fields are description, not relationship — a `[[link]]`
 /// written inside a prose `description` must not become a predicate.
 /// What: every key EXCEPT the base-envelope names, which come from
-/// [`base_envelope`] rather than a second hand-kept list.
+/// [`base_envelope`] rather than a second hand-kept list. The rule is
+/// exclusion, so it fails OPEN: a new OKF envelope key that is NOT added to
+/// [`base_envelope`] reads as a relationship here, and any `[[wiki-link]]` in
+/// its value becomes a triple. Adding the key to that function is what keeps
+/// the two in step — there is no second list to update.
 /// Test: `envelope_fields_are_not_edges`.
 fn is_edge_field(key: &str) -> bool {
     !base_envelope().iter().any(|f| f.name == key)
@@ -145,6 +149,14 @@ fn is_edge_field(key: &str) -> bool {
 /// Why/What: see the module doc. A malformed entity file is SKIPPED rather than
 /// failing the read — the same fail-open posture `KbStore::list` takes, so one
 /// hand-edited file cannot blank the whole pane.
+///
+/// This walks and parses the whole tree on every call, so one browser page load
+/// costs four walks. Deliberately uncached: the only cheap key is a directory
+/// mtime, and a directory's mtime does not move when an entity file already in
+/// it is edited in place — so an mtime cache would serve a stale graph after
+/// exactly the edit a reader opened the pane to see. A cache here needs a
+/// per-file stamp or an ingest-side invalidation hook. See #7430.
+///
 /// Test: `reads_triples_and_definitions_from_a_tree`,
 /// `malformed_entity_is_skipped`.
 pub fn read_graph(root: &Path) -> anyhow::Result<OkgGraph> {
@@ -159,11 +171,14 @@ pub fn read_graph(root: &Path) -> anyhow::Result<OkgGraph> {
                 .get_str("title")
                 .map(str::to_string)
                 .unwrap_or_else(|| slug.clone());
+            // Tree-relative by construction; the fallback rebuilds the same
+            // relative spelling rather than falling back to the absolute path,
+            // which would put the operator's directory layout in a payload
+            // clients receive (#7430 security review).
             let rel = path
                 .strip_prefix(root)
-                .unwrap_or(&path)
-                .display()
-                .to_string();
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| format!("{collection}/{slug}.md"));
             graph.definitions.push(OkgDefinition {
                 subject: subject.clone(),
                 collection: collection.clone(),
@@ -199,6 +214,21 @@ pub fn read_graph(root: &Path) -> anyhow::Result<OkgGraph> {
     Ok(graph)
 }
 
+/// One resolved OKG tree: where to read it, and what to CALL it.
+///
+/// Why (#7430 security review): the two are deliberately separate. `root` is an
+/// absolute filesystem path and belongs only to this process; `label` is the
+/// name a client may see. Serving the path would hand every viewer of the
+/// Knowledge-Graph pane the operator's home-directory layout, which no caller
+/// needs and the retired memory-palace envelope never disclosed.
+pub struct OkgTree {
+    /// Absolute directory to read. Never leaves the server.
+    pub root: PathBuf,
+    /// The binding's own opaque name for the tree — `okg://<agent>`, or the
+    /// home-relative `<agent>/<root>`. Never absolute, never a real path.
+    pub label: String,
+}
+
 /// The OKG tree `agent` browses.
 ///
 /// Why: an agent addresses its tree two ways — a `[[stores]].root` relative to
@@ -209,35 +239,45 @@ pub fn read_graph(root: &Path) -> anyhow::Result<OkgGraph> {
 /// What: `assistants_root` and `knowledge_dir` are injected so a test can point
 /// both at a tempdir. An agent with no `[[stores]]` binding at all still has its
 /// home's `okg/` tree, which is the #4325 default layout — that is a real tree,
-/// not an error.
+/// not an error. The label is derived from what the BINDING declares, never from
+/// the resolved path, so it cannot pick up an absolute prefix.
 /// Test: `resolves_the_home_tree_for_a_rooted_binding`,
 /// `resolves_the_shared_pool_for_a_plain_binding`,
-/// `resolves_the_home_tree_when_no_store_is_bound`.
+/// `resolves_the_home_tree_when_no_store_is_bound`,
+/// `every_resolution_arm_labels_the_tree_without_a_path`.
 pub fn resolve_okg_root(
     agent: &str,
     stores: &StoresConfig,
     assistants_root: &Path,
     knowledge_dir: &Path,
-) -> Result<PathBuf, String> {
+) -> Result<OkgTree, String> {
     let home = || -> Result<AssistantHome, String> {
         let id = crate::assistants::AssistantInstanceId::new(agent).map_err(|e| e.to_string())?;
         Ok(AssistantHome::under(assistants_root, id))
     };
     match stores.primary() {
         Some(binding) if binding.root.is_some() => {
-            home()?.store_root(binding).map_err(|e| e.to_string())
+            let declared = binding.root.as_deref().unwrap_or(OKG_DIR).trim();
+            Ok(OkgTree {
+                root: home()?.store_root(binding).map_err(|e| e.to_string())?,
+                label: format!("{agent}/{}", declared.trim_start_matches("./")),
+            })
         }
         Some(binding) => {
-            let tree = binding.resolved_tree(agent);
-            super::binding::okg_tree_path(knowledge_dir, &tree).ok_or_else(|| {
+            let label = binding.resolved_tree(agent);
+            let root = super::binding::okg_tree_path(knowledge_dir, &label).ok_or_else(|| {
                 format!(
-                    "store `{}` declares tree `{tree}`, which does not resolve to a \
+                    "store `{}` declares tree `{label}`, which does not resolve to a \
                      knowledge-tree directory",
                     binding.name
                 )
-            })
+            })?;
+            Ok(OkgTree { root, label })
         }
-        None => Ok(home()?.okg_dir()),
+        None => Ok(OkgTree {
+            root: home()?.okg_dir(),
+            label: format!("{agent}/{OKG_DIR}"),
+        }),
     }
 }
 

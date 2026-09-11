@@ -72,12 +72,18 @@ export interface KgActiveCount {
  * returns (`agent_kg.rs`'s module doc). `connected: false` is a first-class,
  * non-error state carrying a human-readable `reason` — render it directly,
  * never as a generic failure or an empty list that looks like "no data".
- * `tree` is the OKG directory the graph was read from, and `source` is always
- * `"okg"` — the payload states what it is made of rather than leaving a reader
- * to infer it. `config_error` is present only when the agent's own `agent.toml`
- * failed to parse (in which case `connected` is also `false`).
+ * `source` is always `"okg"` — the payload states what it is made of rather
+ * than leaving a reader to infer it. `config_error` is present only when the
+ * agent's own `agent.toml` failed to parse (in which case `connected` is also
+ * `false`).
  */
 export interface KgEnvelope<T> {
+  /**
+   * The binding's OPAQUE label for the tree — `okg://<agent>` or the
+   * home-relative `<agent>/okg`. Never a filesystem path: the server does not
+   * send one (#7430), so do not present this as somewhere the reader can open,
+   * and do not join it onto anything.
+   */
   tree: string | null;
   source?: string;
   connected: boolean;

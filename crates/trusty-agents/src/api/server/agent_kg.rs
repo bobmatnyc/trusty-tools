@@ -37,7 +37,7 @@
 //! all four routes:
 //!
 //! ```json
-//! { "tree": "/…/izzie/okg", "source": "okg", "connected": true,
+//! { "tree": "izzie/okg", "source": "okg", "connected": true,
 //!   "data": <per-route>, "definitions": [ … ] }
 //! { "tree": null, "source": "okg", "connected": false, "reason": "…",
 //!   "data": [], "definitions": [] }
@@ -50,6 +50,13 @@
 //! payload's TYPE, only on `connected`. `definitions` is ALWAYS an array — it is
 //! the half of the graph that says what a subject is, and the owner's closure
 //! condition for #7430 requires it beside the triples.
+//!
+//! **`tree` is an opaque LABEL, never a filesystem path** (#7430 security
+//! review): the binding's own `okg://<agent>` URI, or the home-relative
+//! `<agent>/<root>`. Every `reason` obeys the same rule, and the underlying
+//! error text is logged instead. Serving the absolute root would hand every
+//! viewer of the pane the operator's home-directory layout, which the retired
+//! memory-palace envelope never disclosed and no client needs.
 //! Test: `kg_subjects_route_lists_okg_subjects`,
 //! `no_memory_drawer_or_palace_triple_can_reach_the_exposed_graph`.
 
@@ -279,7 +286,8 @@ async fn graph_at_defaults(name: &str, read: KgRead) -> Response {
 /// Test: `kg_subjects_route_lists_okg_subjects`,
 /// `kg_route_empty_state_when_the_tree_is_absent`,
 /// `kg_route_unknown_agent_404`, `kg_route_rejects_traversal_name`,
-/// `kg_route_degrades_on_malformed_toml`.
+/// `kg_route_degrades_on_malformed_toml`,
+/// `no_envelope_discloses_a_filesystem_path`.
 pub(super) async fn kg_graph_at(
     dirs: &[PathBuf],
     name: &str,
@@ -333,33 +341,37 @@ pub(super) async fn kg_graph_at(
         );
     };
 
-    let root = match okg_graph::resolve_okg_root(name, &stores, assistants_root, knowledge_dir) {
-        Ok(root) => root,
+    let tree = match okg_graph::resolve_okg_root(name, &stores, assistants_root, knowledge_dir) {
+        Ok(tree) => tree,
         Err(reason) => return envelope(None, Err(reason), &read, None),
     };
-    let tree = Some(root.display().to_string());
-    if !root.is_dir() {
+    // #7430: the envelope carries the binding's own opaque label, never
+    // `tree.root` — an absolute path would disclose the operator's home layout
+    // to every viewer of the pane. The same rule governs every `reason` below,
+    // so the upstream error text is logged rather than rendered.
+    let label = Some(tree.label.clone());
+    if !tree.root.is_dir() {
         return envelope(
-            tree,
+            label,
             Err(format!(
-                "this assistant has no OKG tree at {} yet — nothing has been ingested",
-                root.display()
+                "this assistant has no OKG tree `{}` yet — nothing has been ingested",
+                tree.label
             )),
             &read,
             None,
         );
     }
-    match okg_graph::read_graph(&root) {
-        Ok(graph) => envelope(tree, Ok(read.project(&graph)), &read, None),
-        Err(e) => envelope(
-            tree,
-            Err(format!(
-                "the OKG tree at {} is unreadable: {e:#}",
-                root.display()
-            )),
-            &read,
-            None,
-        ),
+    match okg_graph::read_graph(&tree.root) {
+        Ok(graph) => envelope(label, Ok(read.project(&graph)), &read, None),
+        Err(e) => {
+            tracing::warn!(?e, agent = name, tree = %tree.label, "kg_graph_at: tree unreadable");
+            envelope(
+                label,
+                Err(format!("the OKG tree `{}` is unreadable", tree.label)),
+                &read,
+                None,
+            )
+        }
     }
 }
 

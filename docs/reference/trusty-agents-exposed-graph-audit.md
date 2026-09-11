@@ -48,6 +48,11 @@ Both halves, from `crates/trusty-agents/src/stores/okg_graph.rs`:
 content routes return triples in `data` and the matching definitions in
 `definitions`. Every envelope declares `"source": "okg"`.
 
+`tree` is the binding's own opaque label — `okg://<agent>`, or the home-relative
+`<agent>/okg` — never a filesystem path, and neither is any `reason`. The
+underlying error text is logged instead. A triple's `provenance` and a
+definition's `path` are tree-relative for the same reason.
+
 ## The gate
 
 `no_memory_drawer_or_palace_triple_can_reach_the_exposed_graph`
@@ -55,3 +60,7 @@ content routes return triples in `data` and the matching definitions in
 against an agent that binds a memory palace AND has an OKG tree, and fails if
 the palace id or the word "drawer" appears in any payload, if the envelope stops
 declaring `source: "okg"`, or if either half of the graph goes missing.
+
+`no_envelope_discloses_a_filesystem_path`, in the same file, walks every string
+in every envelope on every route in three states and fails on any that starts
+with `/` or contains the tree's real root.

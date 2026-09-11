@@ -32,7 +32,9 @@
   /** `null` while the first request (which resolves the tree) is in flight —
    * distinct from `false`, which means "resolved: not connected". */
   let connected: boolean | null = null;
-  /** The OKG directory the graph was read from. */
+  /** The binding's opaque label for the tree (`okg://izzie`, `izzie/okg`) —
+   * never a filesystem path, so it is shown as a name and never as a location
+   * (#7430). */
   let tree: string | null = null;
   let reason = '';
   let configError = '';
@@ -327,7 +329,7 @@
            entities) — distinct copy from the not-connected case above. -->
       {:else if subjects.length === 0}
         <p class="rounded-md border border-dashed border-foundry-light-border dark:border-foundry-border px-3 py-2 text-xs text-foundry-light-muted dark:text-foundry-text/40">
-          {tree ? `The OKG tree at ${tree}` : 'This agent'} is readable, but holds nothing yet.
+          {tree ? `The OKG tree "${tree}"` : 'This agent'} is readable, but holds nothing yet.
         </p>
 
       <!-- State: connected:true with data — the explorer. -->

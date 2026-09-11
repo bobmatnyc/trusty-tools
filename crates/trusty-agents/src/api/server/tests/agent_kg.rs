@@ -196,6 +196,71 @@ async fn no_memory_drawer_or_palace_triple_can_reach_the_exposed_graph() {
     );
 }
 
+/// Why (#7430 security review): `tree` used to be `root.display()`, an absolute
+/// filesystem path, and the browser rendered it in its empty-state copy — so
+/// every viewer of the pane was shown the operator's home-directory layout. The
+/// retired memory-palace envelope disclosed only an opaque id. This asserts the
+/// property rather than one spelling: NO string anywhere in any envelope, on any
+/// route, in any state, may begin with `/`.
+///
+/// What: every read, against a tree that exists, a tree that does not, and an
+/// unresolvable binding — the three states that each build `tree` and `reason`
+/// differently. The tempdir roots are real absolute paths (`/var/folders/…` on
+/// macOS, `/tmp/…` on Linux), so a regression to `display()` is caught by the
+/// leading-`/` check and also by the explicit substring check on the root.
+/// Test: itself.
+#[tokio::test]
+async fn no_envelope_discloses_a_filesystem_path() {
+    /// Every string in the payload, recursively — keys are structure, values
+    /// are what a client renders.
+    fn strings(value: &Value, out: &mut Vec<String>) {
+        match value {
+            Value::String(s) => out.push(s.clone()),
+            Value::Array(items) => items.iter().for_each(|v| strings(v, out)),
+            Value::Object(map) => map.values().for_each(|v| strings(v, out)),
+            _ => {}
+        }
+    }
+
+    let populated = Fixtures::new("izzie", BOUND_FIXTURE).with_tree("izzie");
+    let absent = Fixtures::new("izzie", BOUND_FIXTURE);
+    let unresolvable = Fixtures::new(
+        "ghosty",
+        "[agent]\nname = \"ghosty\"\n\n[[stores]]\nname = \"g\"\ntree = \"https://example.com/kb\"\n",
+    );
+
+    for (f, agent) in [
+        (&populated, "izzie"),
+        (&absent, "izzie"),
+        (&unresolvable, "ghosty"),
+    ] {
+        for read in [
+            subjects_read(),
+            KgRead::All {
+                limit: 50,
+                offset: 0,
+            },
+            KgRead::Subject("Bob".to_string()),
+            KgRead::Count,
+        ] {
+            let body = f.read(agent, read.clone()).await;
+            let mut found = Vec::new();
+            strings(&body, &mut found);
+            for s in &found {
+                assert!(
+                    !s.starts_with('/'),
+                    "an absolute path reached the payload for {read:?}: {s:?} in {body}"
+                );
+            }
+            let root = f.tree(agent).display().to_string();
+            assert!(
+                !body.to_string().contains(&root),
+                "the tree's real root reached the payload for {read:?}: {body}"
+            );
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Each read
 // ---------------------------------------------------------------------------
@@ -214,9 +279,8 @@ async fn kg_subjects_route_lists_okg_subjects() {
         "{body}"
     );
     assert_eq!(
-        body["tree"],
-        f.tree("izzie").display().to_string(),
-        "the envelope names the tree it read"
+        body["tree"], "izzie/okg",
+        "the envelope names the tree by its opaque label, not its path"
     );
     assert_eq!(
         body["definitions"]

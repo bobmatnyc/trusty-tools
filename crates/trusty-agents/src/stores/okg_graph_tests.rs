@@ -174,8 +174,9 @@ fn resolves_the_home_tree_for_a_rooted_binding() {
     let assistants = tempfile::tempdir().unwrap();
     let knowledge = tempfile::tempdir().unwrap();
     let stores = stores_from("[[stores]]\nname = \"k\"\nroot = \"okg\"\n");
-    let root = resolve_okg_root("izzie", &stores, assistants.path(), knowledge.path()).unwrap();
-    assert_eq!(root, assistants.path().join("izzie").join("okg"));
+    let tree = resolve_okg_root("izzie", &stores, assistants.path(), knowledge.path()).unwrap();
+    assert_eq!(tree.root, assistants.path().join("izzie").join("okg"));
+    assert_eq!(tree.label, "izzie/okg");
 }
 
 /// Why: a binding with no `root` still addresses `okg://<agent>` in the shared
@@ -188,8 +189,9 @@ fn resolves_the_shared_pool_for_a_plain_binding() {
     let assistants = tempfile::tempdir().unwrap();
     let knowledge = tempfile::tempdir().unwrap();
     let stores = stores_from("[[stores]]\nname = \"k\"\nindex = \"k\"\n");
-    let root = resolve_okg_root("izzie", &stores, assistants.path(), knowledge.path()).unwrap();
-    assert_eq!(root, knowledge.path().join("izzie"));
+    let tree = resolve_okg_root("izzie", &stores, assistants.path(), knowledge.path()).unwrap();
+    assert_eq!(tree.root, knowledge.path().join("izzie"));
+    assert_eq!(tree.label, "okg://izzie");
 }
 
 /// Why: an agent that declares no `[[stores]]` still has the #4325 default tree
@@ -199,12 +201,55 @@ fn resolves_the_shared_pool_for_a_plain_binding() {
 fn resolves_the_home_tree_when_no_store_is_bound() {
     let assistants = tempfile::tempdir().unwrap();
     let knowledge = tempfile::tempdir().unwrap();
-    let root = resolve_okg_root(
+    let tree = resolve_okg_root(
         "izzie",
         &StoresConfig::default(),
         assistants.path(),
         knowledge.path(),
     )
     .unwrap();
-    assert_eq!(root, assistants.path().join("izzie").join("okg"));
+    assert_eq!(tree.root, assistants.path().join("izzie").join("okg"));
+    assert_eq!(tree.label, "izzie/okg");
+}
+
+/// Why (#7430 security review): the label is what a client sees, so no
+/// resolution arm may derive it from the resolved path. The `./` and nested
+/// spellings are the ones most likely to pick up a prefix by accident.
+/// What: every arm, including a `root` written `./knowledge` and one nested two
+/// deep, must yield a relative, `/`-free label.
+/// Test: itself.
+#[test]
+fn every_resolution_arm_labels_the_tree_without_a_path() {
+    let assistants = tempfile::tempdir().unwrap();
+    let knowledge = tempfile::tempdir().unwrap();
+    let cases = [
+        ("[[stores]]\nname = \"k\"\nroot = \"okg\"\n", "izzie/okg"),
+        (
+            "[[stores]]\nname = \"k\"\nroot = \"./knowledge\"\n",
+            "izzie/knowledge",
+        ),
+        (
+            "[[stores]]\nname = \"k\"\nroot = \"okg/personal\"\n",
+            "izzie/okg/personal",
+        ),
+        ("[[stores]]\nname = \"k\"\nindex = \"k\"\n", "okg://izzie"),
+    ];
+    for (src, expected) in cases {
+        let tree = resolve_okg_root(
+            "izzie",
+            &stores_from(src),
+            assistants.path(),
+            knowledge.path(),
+        )
+        .unwrap();
+        assert_eq!(tree.label, expected, "for {src:?}");
+        assert!(!tree.label.starts_with('/'), "for {src:?}");
+        assert!(
+            !tree
+                .label
+                .contains(&assistants.path().display().to_string()),
+            "the label leaked the assistants root for {src:?}: {}",
+            tree.label
+        );
+    }
 }

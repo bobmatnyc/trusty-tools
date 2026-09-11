@@ -49,7 +49,7 @@ describe('fetchKgSubjects_returns_null_on_404', () => {
 describe('fetchKgSubjects_parses_envelope', () => {
   it('passes the tree/connected/data envelope through verbatim', async () => {
     const payload = {
-      tree: '/homes/izzie/okg',
+      tree: 'izzie/okg',
       source: 'okg',
       connected: true,
       data: [{ subject: 'bob', count: 3 }],
@@ -59,7 +59,7 @@ describe('fetchKgSubjects_parses_envelope', () => {
     };
     stubFetch(200, payload);
     const got = await fetchKgSubjects('izzie');
-    expect(got?.tree).toBe('/homes/izzie/okg');
+    expect(got?.tree).toBe('izzie/okg');
     expect(got?.source).toBe('okg');
     expect(got?.connected).toBe(true);
     expect(got?.data).toEqual([{ subject: 'bob', count: 3 }]);
