@@ -108,17 +108,24 @@ pub trait PauseVcs {
 /// Why: the snapshot writer already knows the session id, the timestamp, and
 /// exactly which files it touched; re-deriving any of them here would be a
 /// second answer to a question already settled.
-/// What: the checkout, the session id, the pause timestamp, the repo-relative
-/// paths to publish, and the project's configured default branch when one is
-/// declared. The scratch directory is NOT a field: this module makes its own,
-/// so no caller can hand two concurrent pauses the same one (#7282 review).
-/// Test: `publish_commits_only_the_allowlisted_paths`.
+/// What: the checkout, the session id, the session's NAME, the pause timestamp,
+/// the repo-relative paths to publish, and the project's configured default
+/// branch when one is declared. The scratch directory is NOT a field: this
+/// module makes its own, so no caller can hand two concurrent pauses the same
+/// one (#7282 review).
+/// Test: `publish_commits_only_the_allowlisted_paths`,
+/// `the_workstream_label_comes_from_the_session_name`.
 #[derive(Debug)]
 pub struct PublishRequest<'a> {
     /// The git checkout holding `.trusty-mpm/sessions/`.
     pub repo: &'a Path,
     /// The session id the snapshot was filed under.
     pub session_id: &'a str,
+    /// The session's NAME — what the `ws/<session>` label is built from.
+    ///
+    /// #7464: `None` falls back to [`PublishRequest::session_id`], which is a
+    /// UUID for a managed session and names no existing label.
+    pub session_name: Option<&'a str>,
     /// The pause timestamp, used for the branch suffix and the title.
     pub timestamp: DateTime<Utc>,
     /// Repo-relative paths to commit. Every one must start with
@@ -424,8 +431,9 @@ pub fn publish_pause_snapshot<V: PauseVcs>(
                 "--docs-only",
                 "--rung",
                 "1",
+                // #7464: the NAME, never the UUID — `ws/<uuid>` names no label.
                 "--session",
-                req.session_id,
+                workstream_session(req),
             ]),
         )
         .map_err(|e| {
@@ -597,6 +605,26 @@ fn branch_name(session_id: &str, ts: DateTime<Utc>) -> String {
         slug(session_id),
         ts.format("%Y%m%d-%H%M%S")
     )
+}
+
+/// The workstream name `tm pr open --session` is given, and so the `ws/<name>`
+/// label the PR is opened with.
+///
+/// Why (#7464): a managed session's id is a UUID, and the `ws/` label seeded at
+/// launch and by `tm issue seed-labels` carries the session's NAME. Handing the
+/// UUID over made `gh pr create` fail with `could not add label:
+/// 'ws/<uuid>' not found`, stranding the snapshot commit on a local branch with
+/// no PR.
+/// What: the trimmed session name when the caller resolved one; otherwise the
+/// session id — the documented fallback, which is the pre-#7464 behaviour and
+/// is still the best available answer when no record names the session.
+/// Test: `the_workstream_label_comes_from_the_session_name`,
+/// `an_unnamed_session_falls_back_to_the_session_id`.
+fn workstream_session<'a>(req: &'a PublishRequest<'a>) -> &'a str {
+    req.session_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(req.session_id)
 }
 
 /// The PR and commit-subject line.

@@ -183,6 +183,8 @@ fn request<'a>(dir: &'a Path, paths: Vec<String>) -> PublishRequest<'a> {
     PublishRequest {
         repo: dir,
         session_id: "trusty-tools-95",
+        // #7464: `None` exercises the documented fallback to the session id.
+        session_name: None,
         timestamp: ts(),
         paths,
         default_branch: None,
@@ -202,6 +204,73 @@ fn snapshot_paths() -> Vec<String> {
         ".trusty-mpm/sessions/abc/session-20260909-183015.md".to_string(),
         ".trusty-mpm/sessions/sessions-log.jsonl".to_string(),
     ]
+}
+
+/// The `--session` value the publish handed `tm pr open`.
+///
+/// Why (#7464): that value is the whole `ws/<session>` label, so a test has to
+/// read it off the recorded argv rather than infer it.
+fn pr_open_session(vcs: &FakeVcs) -> String {
+    let call = vcs
+        .calls()
+        .into_iter()
+        .find(|c| c.program == "tm" && c.args.first().is_some_and(|a| a == "pr"))
+        .expect("the publish must call `tm pr open`");
+    let at = call
+        .args
+        .iter()
+        .position(|a| a == "--session")
+        .expect("`tm pr open` must be given a session");
+    call.args[at + 1].clone()
+}
+
+/// Why (#7464): the publish handed `tm pr open` the managed session's UUID, so
+/// `gh pr create` failed with `could not add label: 'ws/<uuid>' not found` and
+/// the snapshot commit stranded on a local branch with no PR. The label carries
+/// the session NAME — the one session launch and `tm issue seed-labels` create.
+/// Test: itself.
+#[test]
+fn the_workstream_label_comes_from_the_session_name() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vcs = happy();
+    let uuid = "b175bb88-af7f-5ba5-b75d-85795d60b234";
+    let req = PublishRequest {
+        session_id: uuid,
+        session_name: Some("tm-agents"),
+        ..request(dir.path(), snapshot_paths())
+    };
+
+    publish_pause_snapshot(&vcs, &req)
+        .unwrap()
+        .expect("a changed tree publishes");
+
+    let session = pr_open_session(&vcs);
+    assert_eq!(session, "tm-agents", "the NAME, not the managed id");
+    assert_ne!(session, uuid);
+    let label = crate::core::policy_labels::workstream_label(&session)
+        .expect("a non-blank name derives a label");
+    assert_eq!(label.name, "ws/tm-agents");
+}
+
+/// Why (#7464): a caller that cannot resolve a name — an unmanaged session, or
+/// one already pruned from the store — must still publish. The documented
+/// fallback is the session id itself, which is the pre-#7464 behaviour.
+/// Test: itself.
+#[test]
+fn an_unnamed_session_falls_back_to_the_session_id() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vcs = happy();
+    let req = PublishRequest {
+        session_name: Some("   "),
+        ..request(dir.path(), snapshot_paths())
+    };
+
+    publish_pause_snapshot(&vcs, &req)
+        .unwrap()
+        .expect("a changed tree publishes");
+
+    // The DOCUMENTED fallback: `PublishRequest::session_id`.
+    assert_eq!(pr_open_session(&vcs), "trusty-tools-95");
 }
 
 /// Why: the defect was a commit on whatever branch the checkout was on. The

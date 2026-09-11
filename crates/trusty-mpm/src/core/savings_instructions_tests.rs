@@ -17,6 +17,16 @@ fn sonnet_price() -> Option<(String, f64)> {
     Some(("claude-sonnet-4-6".to_string(), 3.0))
 }
 
+/// A compiled prompt that is a genuine fold: far smaller than the source set,
+/// but large enough to be a real assembly of the bundled sections.
+///
+/// Why (#7491): the producer now refuses anything below
+/// [`min_plausible_compiled_bytes`], so a four-byte stand-in no longer stands in
+/// for a compiled prompt. This is the smallest fixture the contract accepts.
+fn plausible_prompt() -> String {
+    "x".repeat(min_plausible_compiled_bytes().max(1))
+}
+
 /// Why (#6958, required acceptance): the common case is a project that
 /// overrides nothing, where the composer ADDS generated context and the
 /// delivered prompt is larger than its sources. Writing a row there would put a
@@ -228,7 +238,7 @@ fn the_row_is_keyed_by_the_claude_session_id() {
     record_instruction_compression_to(
         framework_root.path(),
         &dest,
-        "a compiled prompt far smaller than its sources",
+        &plausible_prompt(),
         Some("claude-abc-123".to_string()),
         sonnet_price,
     );
@@ -263,7 +273,13 @@ fn no_claude_id_stages_the_row_instead_of_writing_an_unfoldable_one() {
     let framework_root = tempfile::tempdir().expect("temp framework root");
     let dest = compiled_prompt_dest(project.path(), "sess-42");
 
-    record_instruction_compression_to(framework_root.path(), &dest, "tiny", None, sonnet_price);
+    record_instruction_compression_to(
+        framework_root.path(),
+        &dest,
+        &plausible_prompt(),
+        None,
+        sonnet_price,
+    );
 
     let ledger = crate::core::savings::savings_log_in(framework_root.path());
     assert!(
@@ -291,7 +307,13 @@ fn a_staged_row_becomes_foldable_at_the_first_hook_invocation() {
     let dest = compiled_prompt_dest(project.path(), "m1");
     let ledger = crate::core::savings::savings_log_in(framework_root.path());
 
-    record_instruction_compression_to(framework_root.path(), &dest, "tiny", None, sonnet_price);
+    record_instruction_compression_to(
+        framework_root.path(),
+        &dest,
+        &plausible_prompt(),
+        None,
+        sonnet_price,
+    );
     assert!(
         crate::core::savings::fold_session(&ledger, "c1").is_zero(),
         "before the hook there is nothing for the statusline to fold"
@@ -360,7 +382,7 @@ fn rederiving_from_the_compiled_prompt_appends_under_the_session_id() {
     let project = tempfile::tempdir().expect("temp project");
     let framework_root = tempfile::tempdir().expect("temp framework root");
     let dest = compiled_prompt_dest(project.path(), "local");
-    std::fs::write(&dest, "tiny").expect("compiled prompt");
+    std::fs::write(&dest, plausible_prompt()).expect("compiled prompt");
     let ledger = crate::core::savings::savings_log_in(framework_root.path());
 
     assert!(
@@ -396,6 +418,88 @@ fn rederiving_a_prompt_that_folds_nothing_appends_nothing() {
         "a prompt that folded nothing must report no row"
     );
     assert!(crate::core::savings::fold_session(&ledger, "c1").is_zero());
+}
+
+/// Why (#7491): the row's `compiled_bytes` must be the size of the compiled
+/// prompt the producer actually measured. The owner's ledger carried
+/// `sources 22559 B - compiled 13 B` — a claimed ~100% reduction — so nothing
+/// pinned that the number describes the file at the compiled-prompt path.
+/// Test: itself.
+#[test]
+fn the_row_reports_the_compiled_prompts_own_size() {
+    let project = tempfile::tempdir().expect("temp project");
+    let framework_root = tempfile::tempdir().expect("temp framework root");
+    let dest = compiled_prompt_dest(project.path(), "local");
+    // A known size, comfortably above the floor and below the source set.
+    let staged_bytes = min_plausible_compiled_bytes() + 137;
+    std::fs::write(&dest, "x".repeat(staged_bytes)).expect("compiled prompt");
+    let on_disk = std::fs::metadata(&dest).expect("compiled prompt").len() as usize;
+    assert_eq!(
+        on_disk, staged_bytes,
+        "the fixture must be the size it claims"
+    );
+    let ledger = crate::core::savings::savings_log_in(framework_root.path());
+
+    assert!(
+        rederive_from_compiled_prompt(framework_root.path(), &dest, "c1"),
+        "a plausible compiled prompt must produce a row"
+    );
+
+    let written = std::fs::read_to_string(&ledger).expect("the ledger must exist");
+    assert!(
+        written.contains(&format!("compiled {on_disk} B")),
+        "the row must report the compiled prompt's own size ({on_disk} B): {written}"
+    );
+    assert!(
+        !written.contains("compiled 13 B"),
+        "the #7491 placeholder measurement must be unreachable: {written}"
+    );
+}
+
+/// Why (#7491): a stub, a truncated write, or a stale file at the
+/// compiled-prompt path is smaller than any real compiled prompt, and the only
+/// plausibility test was `compiled < sources` — which such a file passes
+/// trivially, producing a near-100% saving that inflates the `💸` percentage for
+/// as long as the append-only ledger keeps it. A missing file must likewise
+/// produce nothing.
+/// Test: itself.
+#[test]
+fn a_stub_compiled_prompt_writes_no_row() {
+    let project = tempfile::tempdir().expect("temp project");
+    let framework_root = tempfile::tempdir().expect("temp framework root");
+    let dest = compiled_prompt_dest(project.path(), "local");
+    let ledger = crate::core::savings::savings_log_in(framework_root.path());
+
+    // The exact shape the owner's ledger recorded: 13 bytes against a 22 kB
+    // source set.
+    std::fs::write(&dest, "placeholder\n\n").expect("compiled prompt");
+    assert_eq!(
+        std::fs::metadata(&dest).expect("compiled prompt").len(),
+        13,
+        "the fixture reproduces the reported 13-byte compiled row"
+    );
+    assert!(
+        !rederive_from_compiled_prompt(framework_root.path(), &dest, "c1"),
+        "a stub compiled prompt must report no row"
+    );
+    assert!(
+        !ledger.exists(),
+        "a stub compiled prompt must not reach the ledger: {}",
+        std::fs::read_to_string(&ledger).unwrap_or_default()
+    );
+    assert!(
+        !crate::core::savings_sidecar::pending_row_path_in(framework_root.path(), &dest).exists(),
+        "a stub compiled prompt must not be staged either"
+    );
+
+    // A path with no file at all is the other arm: still no row, no panic.
+    let missing = compiled_prompt_dest(project.path(), "gone");
+    std::fs::remove_file(&missing).ok();
+    assert!(
+        !rederive_from_compiled_prompt(framework_root.path(), &missing, "c2"),
+        "a missing compiled prompt must report no row"
+    );
+    assert!(!ledger.exists(), "a missing file must write nothing");
 }
 
 /// Why (#7209): the producers must read one variable name. A rename on one side

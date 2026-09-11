@@ -63,7 +63,17 @@
 //! `the_row_is_keyed_by_the_claude_session_id`,
 //! `no_claude_id_stages_the_row_instead_of_writing_an_unfoldable_one`,
 //! `a_staged_row_becomes_foldable_at_the_first_hook_invocation`,
-//! `a_prompt_that_folds_nothing_warns_once_and_writes_no_row`.
+//! `a_prompt_that_folds_nothing_warns_once_and_writes_no_row`,
+//! `the_row_reports_the_compiled_prompts_own_size`,
+//! `a_stub_compiled_prompt_writes_no_row`.
+//!
+//! **The implausibly small compiled prompt (#7491).** `compiled < sources` was
+//! the producer's only plausibility test, and a stub, a truncated write, or a
+//! stale file at the compiled-prompt path passes it trivially — the owner's
+//! ledger carried `sources 22559 B - compiled 13 B`, a claimed ~100% reduction
+//! that inflated the `💸` percentage for as long as the append-only ledger kept
+//! it. [`min_plausible_compiled_bytes`] is now the floor, and a file below it
+//! declines the row with a `warn!` naming the path and both byte counts.
 
 use std::path::Path;
 
@@ -128,6 +138,20 @@ fn record_instruction_compression_to(
     };
     let source_bytes = folded_source_bytes(&harness_root);
     let compiled_bytes = prompt.len();
+    // #7491: a compiled prompt this small is not a fold, it is a stub,
+    // a truncated write, or a stale file at the compiled-prompt path.
+    if compiled_bytes < min_plausible_compiled_bytes() {
+        tracing::warn!(
+            compiled_prompt = %dest.display(),
+            compiled_bytes,
+            source_bytes,
+            floor = min_plausible_compiled_bytes(),
+            "the compiled prompt is smaller than the smallest instruction section \
+             it is assembled from, so it cannot be a real compiled prompt; writing \
+             no instruction-compression savings row rather than a near-100% one"
+        );
+        return;
+    }
     // #7245: checked here, where the project root is in hand, so the decline that
     // makes the 💸 segment structurally absent for an override-free project is
     // stated once instead of hidden at `debug!` inside the row builder.
@@ -248,6 +272,28 @@ fn folded_source_bytes(project_dir: &Path) -> usize {
         .map(|applied| applied.body.len())
         .sum();
     bundled + overrides
+}
+
+/// The smallest byte count a real compiled PM prompt can have.
+///
+/// Why (#7491): the ledger recorded `sources 22559 B - compiled 13 B` — a
+/// claimed ~100% reduction — because the producer's only plausibility test was
+/// `compiled < sources`, which a stub, a truncated write, or a stale file at the
+/// compiled-prompt path passes trivially. The ledger is append-only, so one such
+/// row inflates the `💸` percentage for as long as it is folded.
+/// What: the smallest single bundled instruction section. The compiled prompt is
+/// an assembly of those sections (with overrides substituted for some of them),
+/// so anything below one whole section cannot be such an assembly. Derived from
+/// the corpus rather than spelled as a constant, so it re-derives when the
+/// sections change.
+/// Test: `a_stub_compiled_prompt_writes_no_row`,
+/// `the_row_reports_the_compiled_prompts_own_size`.
+pub(crate) fn min_plausible_compiled_bytes() -> usize {
+    crate::core::instruction_pipeline::SECTION_SOURCES
+        .iter()
+        .map(|(_, body)| body.len())
+        .min()
+        .unwrap_or(0)
 }
 
 /// Build the row, or decline to.
