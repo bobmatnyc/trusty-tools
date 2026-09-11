@@ -382,6 +382,37 @@ fn fold_ignores_other_sessions() {
     assert!(fold_session(&ledger, "sess-c").is_zero());
 }
 
+/// Why (#7411): the hook re-derives an instruction-compression row when nothing
+/// was staged, and guards that on "this session has one already". A guard built
+/// on [`fold_session`] would read a session that has only a `divert` row as
+/// already covered and never write the row the segment is missing.
+/// Test: itself.
+#[test]
+fn has_row_sees_only_the_named_technique() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let ledger = savings_log_in(dir.path());
+    let mut diverted = row("sess-a", 4_000, 0.012);
+    diverted.technique = TECHNIQUE_DIVERT.to_string();
+    append_row(&ledger, &diverted).expect("append");
+
+    assert!(
+        !has_row(&ledger, "sess-a", TECHNIQUE_INSTRUCTION_COMPRESSION),
+        "a divert row must not mask a missing instruction-compression row"
+    );
+    assert!(has_row(&ledger, "sess-a", TECHNIQUE_DIVERT));
+
+    append_row(&ledger, &row("sess-a", 6_000, 0.018)).expect("append");
+    assert!(has_row(
+        &ledger,
+        "sess-a",
+        TECHNIQUE_INSTRUCTION_COMPRESSION
+    ));
+    assert!(
+        !has_row(&ledger, "sess-b", TECHNIQUE_INSTRUCTION_COMPRESSION),
+        "another session's row must not answer for this one"
+    );
+}
+
 /// Why: the machine-wide fold must use the identical skip rules, or a future
 /// `tm usage` surface and the status bar would disagree about a total.
 /// Test: itself.

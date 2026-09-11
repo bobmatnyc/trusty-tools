@@ -161,6 +161,48 @@ fn record_instruction_compression_to(
     }
 }
 
+/// Re-measure the fold from a compiled prompt already on disk and append the
+/// row under a known Claude session id.
+///
+/// Why (#7411): staging is the only way this producer's row reaches the ledger
+/// for a normal launch, so a staged file that is lost — an unwritable
+/// `pending-savings/`, a compile whose row was discarded, a `tm` upgraded
+/// between the compile and the hook — leaves the session with no row at all and
+/// the `💸` segment blank for the rest of it. The compiled prompt itself
+/// survives on disk, and it is the same input the producer measured, so the
+/// hook can redo the measurement instead of inventing a second staging
+/// mechanism to protect the first.
+/// What: reads `compiled_prompt`, then runs the ordinary producer against it
+/// with `claude_session_id` supplied, which makes it append rather than stage.
+/// Reports whether a row landed, read back off the ledger — the producer
+/// declines silently for an unpriceable model or a prompt that folded nothing,
+/// and a caller must not report those as a row. Callers guard against the
+/// double-append themselves with [`crate::core::savings::has_row`].
+/// Test: `rederiving_from_the_compiled_prompt_appends_under_the_session_id`,
+/// `rederiving_a_prompt_that_folds_nothing_appends_nothing`.
+pub(crate) fn rederive_from_compiled_prompt(
+    framework_root: &Path,
+    compiled_prompt: &Path,
+    claude_session_id: &str,
+) -> bool {
+    let Ok(prompt) = std::fs::read_to_string(compiled_prompt) else {
+        return false;
+    };
+    let ledger = savings_log_in(framework_root);
+    record_instruction_compression_to(
+        framework_root,
+        compiled_prompt,
+        &prompt,
+        Some(claude_session_id.to_string()),
+        resolve_pm_price,
+    );
+    crate::core::savings::has_row(
+        &ledger,
+        claude_session_id,
+        TECHNIQUE_INSTRUCTION_COMPRESSION,
+    )
+}
+
 /// Split `<harness-root>/.trusty-mpm/sessions/<id>/INSTRUCTIONS-COMPILED.md`
 /// into its session id and its harness root.
 ///

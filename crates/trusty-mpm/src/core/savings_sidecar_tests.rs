@@ -232,6 +232,36 @@ fn two_compiled_prompts_stage_to_different_files() {
     );
 }
 
+/// Why (#7411): the staging file's name is a one-way digest, so a hook that
+/// derives a different compiled-prompt path than the compile did cannot tell
+/// what the file is for, whether its prompt still exists, or whose project it
+/// belongs to. That is why rows staged under a managed session scope sat
+/// unclaimed forever. The path has to be IN the file — and the file has to stay
+/// readable as a bare row, so nothing that reads it that way breaks.
+/// Test: itself.
+#[test]
+fn a_staged_row_remembers_its_compiled_prompt() {
+    let root = tempfile::tempdir().expect("temp root");
+    let compiled = root
+        .path()
+        .join("project/.trusty-mpm/sessions/m1/INSTRUCTIONS-COMPILED.md");
+
+    stage_row(root.path(), &compiled, &staged_row("m1"));
+
+    let text = std::fs::read_to_string(pending_row_path_in(root.path(), &compiled))
+        .expect("the staged file must be readable");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&text).expect("the staged file must be one JSON object");
+    assert_eq!(
+        parsed.get("compiled_prompt").and_then(|v| v.as_str()),
+        Some(compiled.to_string_lossy().as_ref()),
+        "the staged row must name the compiled prompt it measures: {text}"
+    );
+    let row: SavingsRow =
+        serde_json::from_str(&text).expect("a staged file must still read back as a bare row");
+    assert_eq!(row.tokens_saved, 600, "the measurement must survive intact");
+}
+
 /// Why (#7245): the decline is permanent for a project that overrides no
 /// instruction section, so a warning on every launch is one an operator stops
 /// reading. It has to be visible once and then quiet.
