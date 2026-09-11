@@ -82,6 +82,51 @@ fn omitted_enabled_defaults_to_true() {
     assert!(parsed.servers[0].enabled);
 }
 
+#[test]
+fn debug_redacts_env_and_header_values() {
+    let mut server = stdio("srv", "srv", &[]);
+    server.transport = McpTransport::Stdio {
+        command: "srv".into(),
+        args: Vec::new(),
+        env: map(&[("API_KEY", "secret-value")]),
+    };
+    let rendered = format!("{server:?}");
+    assert!(
+        !rendered.contains("secret-value"),
+        "a derived Debug would put the key straight into every log line: {rendered}"
+    );
+    assert!(
+        rendered.contains("API_KEY") && rendered.contains("<redacted>"),
+        "the key name is the diagnostic value and must survive: {rendered}"
+    );
+    // `command` is not a credential and stays legible.
+    assert!(rendered.contains("srv"), "{rendered}");
+
+    let remote = McpServerConfig::new(
+        "remote",
+        McpTransport::Http {
+            url: "https://x/mcp".into(),
+            headers: map(&[("Authorization", "Bearer t")]),
+        },
+    );
+    let rendered = format!("{remote:?}");
+    assert!(!rendered.contains("Bearer t"), "{rendered}");
+    assert!(rendered.contains("Authorization"), "{rendered}");
+    assert!(rendered.contains("https://x/mcp"), "{rendered}");
+
+    // Sse shares the redaction, not just http.
+    let events = McpServerConfig::new(
+        "events",
+        McpTransport::Sse {
+            url: "https://x/sse".into(),
+            headers: map(&[("Authorization", "Bearer t")]),
+        },
+    );
+    let rendered = format!("{events:?}");
+    assert!(!rendered.contains("Bearer t"), "{rendered}");
+    assert!(rendered.contains("Authorization"), "{rendered}");
+}
+
 // ----------------------------------------------------------------- file ----
 
 #[test]
@@ -148,6 +193,37 @@ fn toml_round_trip_preserves_extensions() {
     assert!(
         text.contains("type = \"sse\""),
         "the sse discriminant is what distinguishes it from http: {text}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn saved_config_file_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("servers.toml");
+
+    // A pre-existing world-readable file at the temp path must be tightened,
+    // not inherited — `.mode()` alone applies only when the open creates it.
+    let stale = tmp
+        .path()
+        .join(format!(".servers.toml.tmp.{}", std::process::id()));
+    std::fs::write(&stale, "stale").unwrap();
+    std::fs::set_permissions(&stale, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    let mut secret = stdio("srv", "srv", &[]);
+    secret.transport = McpTransport::Stdio {
+        command: "srv".into(),
+        args: Vec::new(),
+        env: map(&[("API_KEY", "secret-value")]),
+    };
+    McpConfigFile::new(vec![secret]).save(&path).unwrap();
+
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        mode, 0o600,
+        "env and headers hold credentials, so the file must not be group- or world-readable"
     );
 }
 

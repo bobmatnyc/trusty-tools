@@ -130,10 +130,15 @@ pub enum McpConfigError {
 /// which protocol the client speaks. Every collection is a `BTreeMap`, so the
 /// serialised form is byte-stable across runs — a config file that round-trips
 /// through load/save must not reorder on every write.
+///
+/// `Debug` is hand-written and prints `<redacted>` for every `env` and
+/// `headers` VALUE, keeping the key names — see the impl below. `Serialize` is
+/// untouched, because the file must round-trip.
 /// Test: `toml_round_trip_preserves_extensions`,
 /// `claude_code_remote_entry_matches_trusty_mpm_golden`,
-/// `claude_code_sse_entry_matches_trusty_mpm_golden`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// `claude_code_sse_entry_matches_trusty_mpm_golden`,
+/// `debug_redacts_env_and_header_values`.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum McpTransport {
@@ -166,6 +171,66 @@ pub enum McpTransport {
     },
 }
 
+/// A string map rendered with its keys intact and its values hidden.
+///
+/// Why: an `env` or `headers` map holds API keys and bearer tokens, and a
+/// derived `Debug` puts them verbatim into every log line, panic message and
+/// error report that formats a config. The key names carry the diagnostic
+/// value — which variables are set — and the values carry none.
+/// What: a `Debug` wrapper rendering `{"API_KEY": <redacted>}`.
+/// Test: `debug_redacts_env_and_header_values`.
+struct RedactedValues<'a>(&'a BTreeMap<String, String>);
+
+impl std::fmt::Debug for RedactedValues<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_map()
+            .entries(self.0.keys().map(|key| (key, &Redacted)))
+            .finish()
+    }
+}
+
+/// Stands in for one hidden value.
+///
+/// Why: a bare `"<redacted>"` string would print with quotes, reading like a
+/// value that really is that text.
+/// Test: `debug_redacts_env_and_header_values`.
+struct Redacted;
+
+impl std::fmt::Debug for Redacted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
+impl std::fmt::Debug for McpTransport {
+    /// Why: see [`RedactedValues`] — a derived impl would leak every secret in
+    /// `env` and `headers`.
+    /// What: the derived rendering, with each secret-bearing map's values
+    /// replaced. `command`, `args` and `url` print in full; they are what an
+    /// operator needs to identify the server, and none is a credential.
+    /// Test: `debug_redacts_env_and_header_values`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            McpTransport::Stdio { command, args, env } => f
+                .debug_struct("Stdio")
+                .field("command", command)
+                .field("args", args)
+                .field("env", &RedactedValues(env))
+                .finish(),
+            McpTransport::Http { url, headers } => f
+                .debug_struct("Http")
+                .field("url", url)
+                .field("headers", &RedactedValues(headers))
+                .finish(),
+            McpTransport::Sse { url, headers } => f
+                .debug_struct("Sse")
+                .field("url", url)
+                .field("headers", &RedactedValues(headers))
+                .finish(),
+        }
+    }
+}
+
 /// One configured MCP server, as every trusty-* consumer should describe it.
 ///
 /// Why: the single shape the four existing ones collapse onto. It is
@@ -186,8 +251,11 @@ pub enum McpTransport {
 /// shape, not the secret handling.
 ///
 /// `#[non_exhaustive]` keeps future fields additive, so construct with
-/// [`McpServerConfig::new`] and adjust the public fields afterwards.
-/// Test: `toml_round_trip_preserves_extensions`, `new_defaults_to_enabled`.
+/// [`McpServerConfig::new`] and adjust the public fields afterwards. `Debug`
+/// is derived, and inherits [`McpTransport`]'s redaction of `env` and
+/// `headers` values through the `transport` field.
+/// Test: `toml_round_trip_preserves_extensions`, `new_defaults_to_enabled`,
+/// `debug_redacts_env_and_header_values`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct McpServerConfig {

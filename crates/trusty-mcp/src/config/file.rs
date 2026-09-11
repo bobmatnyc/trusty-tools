@@ -162,9 +162,14 @@ impl McpConfigFile {
     /// directory is atomic on every platform this workspace targets, so a
     /// concurrent reader sees either the old file or the new one. Rejects a
     /// duplicate name before writing, so `save` cannot produce a file `load`
-    /// refuses.
+    /// refuses. On unix the file is owner-read/write only — a stdio server's
+    /// `env` and a remote server's `headers` routinely carry API keys and
+    /// bearer tokens, and the default umask would leave them world-readable.
+    /// The mode is set on the temporary file, which the rename carries over,
+    /// so the config is never briefly readable at its real path.
     /// Test: `toml_round_trip_preserves_extensions`, `save_creates_parent_directory`,
-    /// `save_rejects_duplicate_names`, `save_replaces_existing_file`.
+    /// `save_rejects_duplicate_names`, `save_replaces_existing_file`,
+    /// `saved_config_file_is_owner_only`.
     pub fn save(&self, path: &Path) -> Result<(), McpConfigError> {
         self.reject_duplicate_names(path)?;
         let rendered = toml::to_string_pretty(self).map_err(|e| McpConfigError::Serialize {
@@ -180,7 +185,7 @@ impl McpConfigFile {
         }
 
         let tmp = temp_sibling(path);
-        std::fs::write(&tmp, rendered.as_bytes()).map_err(|source| McpConfigError::Io {
+        write_private(&tmp, rendered.as_bytes()).map_err(|source| McpConfigError::Io {
             path: tmp.clone(),
             source,
         })?;
@@ -214,6 +219,41 @@ impl McpConfigFile {
             }
         }
         Ok(())
+    }
+}
+
+/// Write `bytes` to `path`, readable only by its owner.
+///
+/// Why: this file holds whatever an operator put in a server's `env` or
+/// `headers`, which in practice is API keys and bearer tokens (#4568 is the
+/// work to stop storing them inline at all). `std::fs::write` creates at
+/// `0666 & !umask`, which on a default umask is `0644` — every local account
+/// can read it.
+/// What: on unix, creates the file with mode `0600`, then sets the mode again
+/// so a leftover temporary file from a crashed earlier save is tightened
+/// rather than inherited. Elsewhere it is a plain write: Windows has no mode
+/// bits and no equivalent single call, and no trusty-* daemon runs there.
+/// Test: `saved_config_file_is_owner_only`.
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        // `.mode()` applies only when the open CREATES the file.
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        file.write_all(bytes)?;
+        file.flush()
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, bytes)
     }
 }
 
