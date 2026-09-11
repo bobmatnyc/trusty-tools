@@ -31,6 +31,10 @@
 //! Test: `disk_usage_guard_tests.rs`, plus the end-to-end
 //! `tests/worktree_disk_usage_gate.rs` and the `pm_guard_*disk*` cases in
 //! `tests/tm_hook_pm_guard.rs`.
+//!
+//! [`DEFAULT_MAX_USAGE_PCT`]: crate::core::disk_usage_guard::DEFAULT_MAX_USAGE_PCT
+//! [`check_measured`]: crate::core::disk_usage_guard::check_measured
+//! [`bash_refusal`]: crate::core::disk_usage_guard::bash_refusal
 
 use std::path::Path;
 
