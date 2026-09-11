@@ -147,6 +147,27 @@ pub(crate) struct InboundOutcome {
 /// Test: `gworkspace_binding_dispatches_once_per_poll_cycle`.
 #[async_trait::async_trait]
 trait InboundDispatch: Sync {
+    /// Build the wake prompt this event becomes, or `Ok(None)` when it earns
+    /// none.
+    ///
+    /// Why (#7427 code-critic MEDIUM): the cycle's dispatch is spent only after
+    /// this succeeds, and no test could state that ordering while the adapter
+    /// was reached directly — every registered adapter's `receive` is
+    /// infallible in process, so nothing could make one fail. Overriding this
+    /// is what lets a test fail one binding and watch the cycle's single
+    /// dispatch survive for the next.
+    /// What: the default is the live lookup. A provider this build carries no
+    /// adapter for earns no prompt, which is the skip the caller used to write
+    /// inline.
+    /// Test: `a_failed_wake_prompt_leaves_the_cycle_dispatch_for_the_next_binding`.
+    async fn prepare(
+        &self,
+        binding: &Binding,
+        event: crate::channels::InboundEvent<'_>,
+    ) -> Result<Option<crate::channels::WakePrompt>, crate::channels::ChannelError> {
+        prepare_via_adapter(binding, event).await
+    }
+
     /// Start `agent`'s turn for `wake`, recording the result on `binding_id`.
     async fn dispatch(
         &self,
@@ -156,6 +177,20 @@ trait InboundDispatch: Sync {
         root: &std::path::Path,
         user: &crate::rbac::UserIdentity,
     );
+}
+
+/// The live prompt build: the binding's own provider adapter.
+///
+/// What: `Ok(None)` for a provider this build has no adapter for, so an
+/// unsupported binding is skipped rather than dispatched or counted as failed.
+async fn prepare_via_adapter(
+    binding: &Binding,
+    event: crate::channels::InboundEvent<'_>,
+) -> Result<Option<crate::channels::WakePrompt>, crate::channels::ChannelError> {
+    match crate::channels::adapter(&binding.provider) {
+        Some(adapter) => adapter.receive(binding, event).await,
+        None => Ok(None),
+    }
 }
 
 /// The live dispatcher: a detached persona turn, its result recorded.
@@ -274,7 +309,8 @@ pub(crate) async fn receive_inbound(
 /// A binding the budget refuses is counted on the binding and left alone — the
 /// event is already durably in the store, and it is still reported as `claimed`
 /// so the listener wake does not pick up what a binding owns.
-/// Test: `gworkspace_binding_dispatches_once_per_poll_cycle`.
+/// Test: `gworkspace_binding_dispatches_once_per_poll_cycle`,
+/// `a_failed_wake_prompt_leaves_the_cycle_dispatch_for_the_next_binding`.
 #[allow(clippy::too_many_arguments)]
 async fn receive_inbound_at(
     loaded: &[(String, Vec<Binding>)],
@@ -300,11 +336,8 @@ async fn receive_inbound_at(
         let Some(binding) = binding else {
             continue;
         };
-        let Some(adapter) = crate::channels::adapter(&binding.provider) else {
-            continue;
-        };
-        let wake = adapter
-            .receive(
+        let wake = dispatcher
+            .prepare(
                 binding,
                 crate::channels::InboundEvent { agent: name, event },
             )
@@ -496,12 +529,31 @@ mod receive_tests {
         assert!(!receive_selection(bound, "slack", "alice@example.com", &alice, true).0);
     }
 
-    /// Records who was dispatched, instead of starting a model turn.
+    /// Records who was dispatched, instead of starting a model turn, and can
+    /// fail one named binding's prompt build.
     #[derive(Default)]
-    struct RecordingDispatch(std::sync::Mutex<Vec<(String, String)>>);
+    struct RecordingDispatch {
+        /// `(assistant, binding id)` per started turn, in order.
+        dispatched: std::sync::Mutex<Vec<(String, String)>>,
+        /// Binding id whose wake prompt fails to build, if any.
+        fails: Option<String>,
+    }
 
     #[async_trait::async_trait]
     impl InboundDispatch for RecordingDispatch {
+        async fn prepare(
+            &self,
+            binding: &Binding,
+            event: crate::channels::InboundEvent<'_>,
+        ) -> Result<Option<crate::channels::WakePrompt>, crate::channels::ChannelError> {
+            if self.fails.as_deref() == Some(binding.id.as_str()) {
+                return Err(crate::channels::ChannelError::Provider {
+                    provider: "gworkspace",
+                });
+            }
+            prepare_via_adapter(binding, event).await
+        }
+
         async fn dispatch(
             &self,
             agent: &str,
@@ -510,7 +562,7 @@ mod receive_tests {
             _root: &std::path::Path,
             _user: &crate::rbac::UserIdentity,
         ) {
-            self.0
+            self.dispatched
                 .lock()
                 .unwrap()
                 .push((agent.to_string(), binding_id.to_string()));
@@ -600,7 +652,7 @@ mod receive_tests {
             "the second message belongs to the binding but must not buy a turn"
         );
         assert_eq!(
-            dispatcher.0.into_inner().unwrap(),
+            dispatcher.dispatched.into_inner().unwrap(),
             vec![(agent.to_string(), "family-cycle".to_string())]
         );
         // Skipped, not silently dropped: the message id is on the counter the
@@ -609,6 +661,104 @@ mod receive_tests {
             crate::channels::status::rate_limited(agent, "family-cycle"),
             1
         );
+        assert!(budget.is_spent());
+    }
+
+    /// A binding whose wake prompt fails to build does not spend the cycle's
+    /// one dispatch — the next matching binding still buys its turn.
+    ///
+    /// Why (#7427 code-critic MEDIUM): the ordering of `budget.take()` against
+    /// the prompt build is the whole behaviour, and no existing test could tell
+    /// the two orders apart. Spending the budget first means one unpreparable
+    /// message silently costs every other assistant bound to the same mailbox
+    /// its turn for that cycle — a failure on one binding rate-limiting a
+    /// different one, with nothing in the logs connecting them.
+    ///
+    /// Moving `budget.take()` above the `match wake` fails this test twice: the
+    /// second assistant comes back `dispatched: false, rate_limited: 1`, and
+    /// the recorded dispatch list is empty.
+    #[tokio::test]
+    async fn a_failed_wake_prompt_leaves_the_cycle_dispatch_for_the_next_binding() {
+        let unpreparable = "fixture-prepare-fails";
+        let healthy = "fixture-prepare-ok";
+        let binding = |id: &str| -> Binding {
+            serde_json::from_value(json!({
+                "id":id,"name":"Family mail","provider":"gworkspace",
+                "target":"from:alice@example.com","enabled":true,"receive_enabled":true
+            }))
+            .unwrap()
+        };
+        // Both assistants are bound to the same correspondent, so one event
+        // selects a binding under each — exactly the shape that shares a cycle.
+        let loaded = vec![
+            (unpreparable.to_string(), vec![binding("family-broken")]),
+            (healthy.to_string(), vec![binding("family-healthy")]),
+        ];
+        let event = crate::listeners::store::StoredEvent {
+            id: "gmail-personal:19abe".into(),
+            listener_id: "gmail-personal".into(),
+            provider: "gmail".into(),
+            event_type: "message.received".into(),
+            ts: "2026-09-11T00:00:00Z".into(),
+            from: Some("Alice <alice@example.com>".into()),
+            subject: Some("Dinner".into()),
+            snippet: Some("Are we still on?".into()),
+            included: true,
+            labels: vec!["INBOX".into()],
+        };
+        let user = crate::rbac::UserIdentity::new(
+            "gworkspace:gmail-personal".to_string(),
+            "Alice".to_string(),
+            crate::rbac::ServiceTier::default(),
+        );
+        let dispatcher = RecordingDispatch {
+            fails: Some("family-broken".to_string()),
+            ..Default::default()
+        };
+
+        let mut budget = DispatchBudget::one_per_cycle();
+        let outcome = receive_inbound_at(
+            &loaded,
+            "gworkspace",
+            event.from.as_deref().unwrap(),
+            &event,
+            std::path::Path::new("/nonexistent"),
+            &user,
+            None,
+            &mut budget,
+            &dispatcher,
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            InboundOutcome {
+                claimed: true,
+                dispatched: true,
+                rate_limited: 0
+            },
+            "the failed prompt must not be charged to the cycle, and must not \
+             rate-limit the binding behind it"
+        );
+        assert_eq!(
+            dispatcher.dispatched.into_inner().unwrap(),
+            vec![(healthy.to_string(), "family-healthy".to_string())]
+        );
+        // The failure is counted, not swallowed, and it bought nothing.
+        assert_eq!(
+            crate::channels::status::dispatch_failures(unpreparable, "family-broken"),
+            1
+        );
+        assert_eq!(
+            crate::channels::status::rate_limited(unpreparable, "family-broken"),
+            0
+        );
+        assert_eq!(
+            crate::channels::status::rate_limited(healthy, "family-healthy"),
+            0
+        );
+        // Exactly one dispatch was bought for the cycle — by the binding that
+        // had a prompt to dispatch.
         assert!(budget.is_spent());
     }
 
