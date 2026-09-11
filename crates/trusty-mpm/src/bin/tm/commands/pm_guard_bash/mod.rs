@@ -1056,3 +1056,8 @@ fn resolves_under_denylisted_tmp(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+// #7498, #7479, #7499: reported false positives get their own test file, so
+// the allow case and the deny case bounding it sit side by side per issue.
+#[cfg(test)]
+mod false_positive_tests;

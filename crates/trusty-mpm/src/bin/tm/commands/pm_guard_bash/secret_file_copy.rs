@@ -107,14 +107,26 @@
 //! - A directory copy (`cp -r secrets/ dest/`) is not inspected recursively —
 //!   only the literal source token's basename is checked against the
 //!   denylist.
-//! - [`expand_brace_alternatives`] resolves only a single-level,
-//!   comma-separated alternation (`secret.{tfvars,bak}`); a NESTED group
-//!   (`{a,{b,c}}`) or an unbalanced `{`/`}` is not expanded — it fails closed
-//!   (denied outright by [`is_secret_bearing_source`]) rather than allowing
-//!   an unexamined source through, so this is a residual over-match, not a
-//!   bypass. A Bash sequence expansion (`{1..3}`) is likewise not expanded as
-//!   a sequence, but since its literal text still matches this guard's
-//!   `*.<ext>` suffix patterns unchanged, it costs no coverage either way.
+//! - [`expand_brace_alternatives`] reads a brace group by what is inside it
+//!   (corrected in #7499's review round, which found the previous two
+//!   sentences here false):
+//!   * a COMMA-separated body is a single-level alternation
+//!     (`secret.{tfvars,bak}`) and is expanded. A NESTED group inside a
+//!     comma-carrying body (`{a,{b,c}}`) is not, and neither is an unbalanced
+//!     `{`/`}` — both fail closed (denied outright by
+//!     [`is_secret_bearing_source`]) rather than letting an unexamined source
+//!     through, so that is a residual over-match, not a bypass.
+//!   * a COMMA-FREE body yields TWO readings, because a shell gives it two.
+//!     The literal spelling covers a Go template (`{{.Id}}` names `{{.Id}}`),
+//!     and [`expand_sequence`] covers a range (`.en{v..v}` also names `.env`).
+//!     A nested group is reached here only through the literal reading, so a
+//!     comma-free outer body returns `Some` where the alternation arm returns
+//!     `None`.
+//!   * a sequence this expander declines — a multi-character or mixed
+//!     endpoint, or more than [`SEQUENCE_ELEMENT_CAP`] elements — keeps the
+//!     literal reading alone, which is what a shell does with a group it
+//!     cannot expand either. A long range is always numeric, and a digit
+//!     string spells no family core, so declining it costs no coverage.
 //!
 //! Test: `denies_tfvars_copy_into_a_worktree`, `denies_dotenv_copy_into_a_worktree`,
 //! `denies_pem_copy_into_a_worktree`, `denies_credentials_named_source`,
@@ -240,6 +252,47 @@ const SECRET_BEARING_FILE_PATTERNS: &[&str] = &[
 /// `matches_only_name_substring_family_separates_word_families_from_file_families`.
 const NAME_SUBSTRING_PATTERNS: &[&str] = &["*credentials*", "*secrets*", "token*"];
 
+/// Final extensions that mark a DOTENV file as a committed PLACEHOLDER rather
+/// than a secret (#7479).
+///
+/// Why: `.env.*` classes every suffix as secret-bearing, so a tracked
+/// `.env.example` — a file that exists to be read, copied and edited — could
+/// not be reached by any verb, and a review-required change to one was handed
+/// back to the operator. These three extensions are a naming CONVENTION for
+/// "this holds key names and no key values", the same kind of convention
+/// `is_ssh_public_key_name`'s `.pub` already reads.
+/// What: honoured only as the FINAL extension, and only on a `.env`-family
+/// name, so `.env.example.bak`, `id_rsa.sample` and `secrets.example` all stay
+/// secret. Review round on #7479: the exemption was family-wide, which handed
+/// the SSH-key and word families a convention neither issue asked for.
+/// Deliberate trade, now bounded to one family: a file that really does hold
+/// credentials and is named `.env.example` reads freely. A guard keyed on names
+/// cannot tell that from a genuine placeholder, and refusing every placeholder
+/// to catch a misnamed secret is the over-blocking #7266 round 4 reversed.
+/// Test: `placeholder_suffixes_are_readable`, `real_dotenv_files_still_deny`,
+/// `a_placeholder_suffix_is_honoured_only_as_the_final_extension`,
+/// `the_placeholder_exemption_covers_only_the_dotenv_family`.
+const PLACEHOLDER_SUFFIXES: &[&str] = &["example", "sample", "template"];
+
+/// Whether `name` is a `.env`-family placeholder (#7479).
+///
+/// Why: the one place the placeholder convention is decided, so the read rule
+/// and the `cp`/`mv` rule can never disagree about `.env.example`.
+/// What: `true` when the name begins `.env` AND its lowercased final extension
+/// is a [`PLACEHOLDER_SUFFIXES`] entry. `name` is a basename by the time every
+/// caller here has it.
+/// Test: see [`PLACEHOLDER_SUFFIXES`].
+fn is_placeholder_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if !lower.starts_with(".env") {
+        return false;
+    }
+    Path::new(&lower)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| PLACEHOLDER_SUFFIXES.contains(&e))
+}
+
 /// Whether `name` is matched by the denylist AND only by its word-shaped
 /// families ([`NAME_SUBSTRING_PATTERNS`]).
 ///
@@ -257,7 +310,7 @@ pub(crate) fn matches_only_name_substring_family(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     let mut matched = false;
     for pattern in SECRET_BEARING_FILE_PATTERNS {
-        if glob_match(&pattern.to_ascii_lowercase(), &lower) {
+        if pattern_reaches(pattern, &lower) {
             if !NAME_SUBSTRING_PATTERNS.contains(pattern) {
                 return false;
             }
@@ -267,8 +320,51 @@ pub(crate) fn matches_only_name_substring_family(name: &str) -> bool {
     matched
 }
 
+/// Whether ONE denylist entry reaches `lower_candidate` — the per-entry
+/// question [`secret_pattern_overlaps`] and [`any_pattern_overlaps`] ask of the
+/// whole list (#7498).
+///
+/// Why: [`matches_only_name_substring_family`] decided WHICH family produced a
+/// deny by literal matching, while the deny itself was produced by GLOB
+/// overlap. The two disagreed on every glob: `s*` denied because it overlaps
+/// the word family `*secrets*`'s core, but matched no entry literally, so the
+/// shape gate read it as a file family and skipped the rule that a word family
+/// counts only when written as a path. A one-character regex fragment therefore
+/// refused `gh issue list --search` and the BASE-ENGINEER file-size precheck.
+/// Asking one question of one entry is what keeps the two halves in agreement.
+/// What: a literal [`glob_match`], then — for a candidate carrying a wildcard —
+/// [`globs_overlap`] against the entry's [`pattern_literal_core`], and against
+/// the FULL entry when the candidate carries the `?` [`glob_match`] does not
+/// implement. That is exactly the union the two list-level functions apply.
+/// Test: `a_one_character_glob_fragment_does_not_name_a_secret_family`,
+/// `matches_only_name_substring_family_separates_word_families_from_file_families`.
+// #7479 review round, LOW 1: this is the one matcher over the denylist with no
+// `is_placeholder_name` early return, and it needs none. A placeholder always
+// carries an extension, and the sole caller reaches it only for a name that has
+// neither a leading `.` nor an extension — so the predicate is unreachable here,
+// and adding the call would be dead code rather than a second decision site.
+fn pattern_reaches(pattern: &str, lower_candidate: &str) -> bool {
+    let lower_pattern = pattern.to_ascii_lowercase();
+    if glob_match(&lower_pattern, lower_candidate) {
+        return true;
+    }
+    if !lower_candidate.bytes().any(|b| b == b'*' || b == b'?') {
+        return false;
+    }
+    let core = pattern_literal_core(&lower_pattern);
+    if !core.is_empty() && globs_overlap(lower_candidate.as_bytes(), core.as_bytes()) {
+        return true;
+    }
+    lower_candidate.contains('?')
+        && globs_overlap(lower_candidate.as_bytes(), lower_pattern.as_bytes())
+}
+
 /// Whether `name` matches one of [`SECRET_BEARING_FILE_PATTERNS`], case-insensitively.
 fn is_secret_bearing_name(name: &str) -> bool {
+    // #7479: a placeholder name is not a secret under any family.
+    if is_placeholder_name(name) {
+        return false;
+    }
     let lower = name.to_ascii_lowercase();
     SECRET_BEARING_FILE_PATTERNS
         .iter()
@@ -314,6 +410,11 @@ fn pattern_literal_core(pattern: &str) -> String {
 /// `overlap_answers_where_literal_matching_did_not`.
 pub(crate) fn secret_pattern_overlaps(candidate: &str) -> bool {
     let lower = candidate.to_ascii_lowercase();
+    // #7479: `*.example`/`*.sample`/`*.template`, literal or glob, is a
+    // placeholder and reaches only placeholder names.
+    if is_placeholder_name(&lower) {
+        return false;
+    }
     if is_secret_bearing_name(&lower) {
         return true;
     }
@@ -379,6 +480,11 @@ fn globs_overlap(a: &[u8], b: &[u8]) -> bool {
 /// `single_character_wildcards_reach_the_full_entries`.
 pub(crate) fn any_pattern_overlaps(candidate: &str) -> bool {
     let lower = candidate.to_ascii_lowercase();
+    // #7479: same placeholder exemption the sibling matchers apply, so the
+    // `?` arm cannot reintroduce the deny the `*` arm just withdrew.
+    if is_placeholder_name(&lower) {
+        return false;
+    }
     SECRET_BEARING_FILE_PATTERNS
         .iter()
         .any(|pattern| globs_overlap(lower.as_bytes(), pattern.to_ascii_lowercase().as_bytes()))
@@ -411,13 +517,16 @@ pub(crate) fn strip_process_substitution(token: &str) -> &str {
 /// [`SECRET_BEARING_FILE_PATTERNS`] even though a real shell would copy BOTH
 /// `secret.tfvars` (denylisted) and `secret.bak` (not) — critic finding on
 /// the original #7122 PR.
-/// What: recursively expands every `{comma,separated,alternative}` group in
-/// `token`, left to right, returning every resulting literal string. A token
-/// with no `{` returns `Some(vec![token])` unchanged. `None` — never a
-/// partial answer — when a group is unbalanced (no matching `}`) or nested (a
-/// `{` inside a `{…}` group's alternatives): both are residual shapes the
-/// module doc's bypass list names, and [`is_secret_bearing_source`] treats
-/// `None` as secret-shaped rather than guessing.
+/// What: recursively expands every brace group in `token`, left to right,
+/// returning every resulting string. A token with no `{` returns
+/// `Some(vec![token])` unchanged. A COMMA-separated body expands to its
+/// alternatives; a COMMA-FREE body yields both its literal spelling and, when
+/// [`expand_sequence`] reads it as a range, that range's elements — see the
+/// module doc for why a shell gives it two readings. `None` — never a partial
+/// answer — when a group is unbalanced (no matching `}`), when a `{` is nested
+/// inside a COMMA-carrying body, or when the readings would exceed
+/// [`BRACE_READING_CAP`]; [`is_secret_bearing_source`] treats `None` as
+/// secret-shaped rather than guessing.
 /// Test: `denies_brace_expanded_source_copy_into_a_worktree`,
 /// `allows_brace_expanded_source_with_no_secret_alternative`,
 /// `denies_source_with_an_unresolved_brace_group`.
@@ -431,6 +540,27 @@ pub(crate) fn expand_brace_alternatives(token: &str) -> Option<Vec<String>> {
     let after_open = &token[start + 1..];
     let end_rel = after_open.find('}')?;
     let alternatives = &after_open[..end_rel];
+    // #7499, corrected in review: a comma-free group has TWO readings, and the
+    // guard owes both. A shell leaves `{{.Id}}` literal, but expands the
+    // sequence `{v..v}` to `v`, so `cat .en{v..v}` opens `.env`.
+    if !alternatives.contains(',') {
+        let after_close = start + 1 + end_rel + 1;
+        let literal_head = &token[..after_close];
+        let prefix = &token[..start];
+        let tails = expand_brace_alternatives(&token[after_close..])?;
+        let elements = expand_sequence(alternatives);
+        if tails.len().saturating_mul(elements.len() + 1) > BRACE_READING_CAP {
+            return None;
+        }
+        let mut out = Vec::with_capacity(tails.len() * (elements.len() + 1));
+        for tail in &tails {
+            out.push(format!("{literal_head}{tail}"));
+            for element in &elements {
+                out.push(format!("{prefix}{element}{tail}"));
+            }
+        }
+        return Some(out);
+    }
     if alternatives.contains('{') {
         // Nested group — not a shape this expander resolves; caller fails closed.
         return None;
@@ -445,6 +575,77 @@ pub(crate) fn expand_brace_alternatives(token: &str) -> Option<Vec<String>> {
         }
     }
     Some(out)
+}
+
+/// The most readings one brace group may contribute before the expander gives
+/// up and fails closed.
+///
+/// Why: two readings per comma-free group multiply through a nested suffix, and
+/// a `PreToolUse` hook must not be turned into a fork bomb by an argument. A
+/// command spelling more than this many brace readings is pathological, and
+/// failing closed on it is this module's standing bias.
+/// Test: `an_ordinary_sequence_group_is_allowed`.
+const BRACE_READING_CAP: usize = 4096;
+
+/// The most elements one `{x..y}` sequence may expand to (#7499 review round).
+///
+/// Why: an alphabetic Bash sequence is single-character, so it can never exceed
+/// 26 useful elements; anything longer is a NUMERIC range, whose elements are
+/// digit strings and therefore cannot spell any denylist family's literal core.
+/// Declining to enumerate a long range costs no coverage, and enumerating one
+/// would let `echo {1..100000}` cost real time.
+/// Test: `an_ordinary_sequence_group_is_allowed`.
+const SEQUENCE_ELEMENT_CAP: usize = 128;
+
+/// Expand a Bash sequence body (`v..v`, `a..e`, `1..5`) to its elements.
+///
+/// Why: #7499's first round read every comma-free group as literal text, which
+/// is right for a Go template (`{{.Id}}`) and wrong for a sequence: a shell
+/// expands `{v..v}` to `v`, so `cat .en{v..v}` opens `.env`. `origin/main`
+/// denied that spelling by accident — stripping the braces left `.env..v`,
+/// which `.env.*` matches — and reading the group as literal removed the
+/// accident without replacing it. Expanding the sequence replaces it on
+/// purpose, and also closes `cat .en{u..v}`, which the accident never caught.
+/// What: the elements of an inclusive single-character alphabetic or integer
+/// range, or an EMPTY vector when `body` is not a sequence this expander reads
+/// — no `..`, a multi-character endpoint, a mixed range, or more than
+/// [`SEQUENCE_ELEMENT_CAP`] elements. An empty vector leaves the caller with
+/// the literal reading alone, which is what a shell would do with a group it
+/// cannot expand either.
+/// Test: `a_sequence_group_that_expands_onto_a_secret_name_denies`,
+/// `an_ordinary_sequence_group_is_allowed`.
+fn expand_sequence(body: &str) -> Vec<String> {
+    let mut parts = body.split("..");
+    let (Some(from), Some(to)) = (parts.next(), parts.next()) else {
+        return Vec::new();
+    };
+    // A third `..` field is Bash's STEP; the range is still bounded by its
+    // endpoints, so enumerating every element over-approximates it safely.
+    if parts.next().is_some() && parts.next().is_some() {
+        return Vec::new();
+    }
+    let one_char = |s: &str| {
+        let mut chars = s.chars();
+        match (chars.next(), chars.next()) {
+            (Some(c), None) if c.is_ascii_alphabetic() => Some(c as u8),
+            _ => None,
+        }
+    };
+    if let (Some(lo), Some(hi)) = (one_char(from), one_char(to)) {
+        let (lo, hi) = (lo.min(hi), lo.max(hi));
+        if usize::from(hi - lo) + 1 > SEQUENCE_ELEMENT_CAP {
+            return Vec::new();
+        }
+        return (lo..=hi).map(|b| (b as char).to_string()).collect();
+    }
+    let (Ok(lo), Ok(hi)) = (from.parse::<i64>(), to.parse::<i64>()) else {
+        return Vec::new();
+    };
+    let (lo, hi) = (lo.min(hi), lo.max(hi));
+    if hi.saturating_sub(lo).saturating_add(1) > SEQUENCE_ELEMENT_CAP as i64 {
+        return Vec::new();
+    }
+    (lo..=hi).map(|n| n.to_string()).collect()
 }
 
 /// Whether a `cp`/`mv` source basename is secret-shaped, expanding a brace
