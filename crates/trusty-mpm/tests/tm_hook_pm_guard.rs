@@ -3066,6 +3066,51 @@ fn pm_guard_allows_code_braces_in_a_heredoc_body_and_an_inline_program() {
 }
 
 #[test]
+fn pm_guard_allows_a_brace_literal_passed_as_an_argument_value() {
+    // #7414, and the residual third case of #7397, through the real binary.
+    // Every ALLOW row here DENIED on installed tm 1.5.27: a JSON or jq literal
+    // splits at `"` and `:`, so its `{` and its `}` land in different fragments
+    // and the orphaned one fails closed — `naming `{``, `naming `{title,labels``,
+    // `naming `{p+``. Round 9's program-text leniency cannot reach them:
+    // `curl`, `jq` and `gh` take argv, not an interpreter body. The reported
+    // `curl -d '{…}'` shape is spelled with `printf`/`jq` here because the
+    // network prohibition denies a `curl` before this rule is ever consulted;
+    // the unit corpus keeps the reported spelling.
+    let (_dir, repo) = main_checkout_fixture();
+    for command in [
+        "printf '%s' '{\\\"position\\\":\\\"above\\\"}'",
+        "jq -n '{\\\"outer\\\":{\\\"inner\\\":1}}'",
+        "gh issue view 7414 --json title,labels -q '{title,labels:[.labels[].name]}'",
+        "gh issue create --title t --body 'the awk program {p+=$4} END {print p} counts'",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert!(
+            stdout.trim().is_empty(),
+            "`{command}` names no file and must be allowed: {stdout}"
+        );
+    }
+    // The negative bound: a brace group that survives the cut whole still
+    // expands, and a secret named INSIDE a JSON literal is still a named
+    // secret.
+    for command in [
+        "cp secret.{tfvars,bak} dst",
+        "jq -n '{\\\"file\\\":\\\".env\\\"}'",
+        "cat ${VAR",
+    ] {
+        let stdout = run_pm_guard_at(
+            &bash_payload_at(command, &repo, ""),
+            UNREACHABLE_DAEMON,
+            &repo,
+        );
+        assert_denied(&stdout);
+    }
+}
+
+#[test]
 fn pm_guard_deny_text_advertises_no_flag_escape() {
     // #7266 round 6, critic HIGH + MEDIUM: round 5's reason offered
     // `--env-file`/`-var-file`/`-state` and no such escape was ever

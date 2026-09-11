@@ -1,0 +1,3 @@
+Fixed
+
+- `tm hook --pm-guard` no longer denies a JSON or brace literal passed as a plain argument value. The secret-read word scan cuts a command at every byte a path cannot contain, including `"` and `:`, so `curl -d '{"position":"above"}'`, `gh issue view -q '{title,labels:[…]}'` and `gh issue create --body '… {p+=$4} …'` split with their `{` and `}` in different fragments, and the orphaned brace failed closed. A brace the cut orphaned is now dropped, while a brace group that survives the cut whole still expands and still denies (`cp secret.{tfvars,bak} dst`, `cat {.env,.env.prod}`). Refs #7414 #7397
