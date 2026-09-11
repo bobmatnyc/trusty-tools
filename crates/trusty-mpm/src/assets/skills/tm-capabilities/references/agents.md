@@ -6,7 +6,7 @@ Generated from `bundle::ALL` (filtered to `agents/*.md`) + `agent_metadata::agen
 
 Every agent below transitively `extends: base-agent` (directly, or via `base-engineer`/`base-qa`/`base-ops`/`base-research`) — see `agents/BASE-AGENT.md` and its four role-specific bases for the shared foundation, not repeated per row here.
 
-37 concrete agents.
+38 concrete agents.
 
 | Agent | Category | Deploys When | Role | Extends | Description | Declared Skills |
 |---|---|---|---|---|---|---|
@@ -38,6 +38,7 @@ Every agent below transitively `extends: base-agent` (directly, or via `base-eng
 | `research` | universal | always | research | base-research | Expert research analyst. Investigates codebases, maps architectures, assesses technology stacks, and captures structured findings. |  |
 | `ruby-engineer` | language | `Gemfile` or `Gemfile.lock` or `.ruby-version` | engineer | base-engineer | Ruby 3.4 + YJIT + Rails 8 specialist: 30% faster method calls, Kamal deployment, service objects, production-ready Rails applications | systematic-debugging, test-driven-development |
 | `rust-engineer` | language | `Cargo.toml` | engineer | base-engineer | Rust 2024 edition specialist: memory-safe systems, zero-cost abstractions, ownership/borrowing mastery, async patterns with tokio. Defers all pattern decisions to the toolchains-rust-core skill. | systematic-debugging, test-driven-development, rust-build-performance |
+| `secrets-manager` | universal | always | secrets-manager | base-agent | Secrets specialist. Operates `tm secrets` (configure/import/add/list/copy/exec/doctor) on behalf of the PM and other agents, never a value. |  |
 | `security` | universal | always | security | base-agent | Security specialist. Performs vulnerability assessment, attack vector detection, secret scanning, and compliance review. | security-scanning |
 | `svelte-engineer` | framework | `svelte.config.js` or `svelte.config.ts` or `package.json::"svelte"` | engineer | base-engineer | Specialized agent for modern Svelte 5 (Runes API) and SvelteKit development. Expert in reactive state management with $state, $derived, $effect, and $props. Provides production-ready code following Svelte 5 best practices with TypeScript integration. | systematic-debugging, test-driven-development |
 | `tauri-engineer` | framework | `src-tauri/tauri.conf.json` or `tauri.conf.json` | engineer | base-engineer | Tauri desktop application specialist: hybrid web UI + Rust backend, IPC patterns, state management, system integration, cross-platform development with <10MB bundle sizes | systematic-debugging, test-driven-development, rust-build-performance |

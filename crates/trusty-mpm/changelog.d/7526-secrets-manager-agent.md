@@ -1,0 +1,2 @@
+Added
+- Bundled a `secrets-manager` framework agent (`agents/secrets-manager.md`), deployed universally alongside `ticketing` and `version-control`. It operates `tm secrets configure/import/add/list/copy/exec/doctor` on behalf of the PM and other agents, never reads a `.env`/credentials file directly, and never prints, echoes, or logs a resolved secret value — it points at DOC-74 (`docs/specs/DOC-74-secrets-integration.md`) and refuses to improvise with `op`/`keeper`/`security` CLIs when a `tm secrets` subcommand has not landed yet (#7526).

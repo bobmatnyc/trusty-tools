@@ -103,6 +103,7 @@ universal = [
   "qa",
   "refactoring-engineer",
   "research",
+  "secrets-manager",
   "security",
   "ticketing",
   "version-control",

@@ -16,7 +16,7 @@
 //! whole makes this directory a self-contained composable unit, which is what
 //! every consumer's compose step (and `trusty-mpm`'s asset tests) needs.
 //!
-//! What: 42 `pub const &str` items, each an `include_str!` of the matching file
+//! What: 43 `pub const &str` items, each an `include_str!` of the matching file
 //! under `assets/agents/`, plus [`AGENT_ASSETS`] pairing every original
 //! filename with its content.
 //! Test: `agent_assets::tests` — every const non-empty, filenames unique, each
@@ -133,6 +133,10 @@ pub const RUBY_ENGINEER: &str = include_str!("assets/agents/ruby-engineer.md");
 /// Rust engineer (`extends: base-engineer`).
 pub const RUST_ENGINEER: &str = include_str!("assets/agents/rust-engineer.md");
 
+/// Secrets-vault operator — `tm secrets` configure/import/add/copy/exec/doctor
+/// (`extends: base-agent`).
+pub const SECRETS_MANAGER: &str = include_str!("assets/agents/secrets-manager.md");
+
 /// Security / vulnerability-assessment specialist (`extends: base-agent`).
 pub const SECURITY: &str = include_str!("assets/agents/security.md");
 
@@ -207,6 +211,7 @@ pub const AGENT_ASSETS: &[(&str, &str)] = &[
     ("research.md", RESEARCH),
     ("ruby-engineer.md", RUBY_ENGINEER),
     ("rust-engineer.md", RUST_ENGINEER),
+    ("secrets-manager.md", SECRETS_MANAGER),
     ("security.md", SECURITY),
     ("svelte-engineer.md", SVELTE_ENGINEER),
     ("tauri-engineer.md", TAURI_ENGINEER),
@@ -252,7 +257,7 @@ mod tests {
         seen.sort_unstable();
         seen.dedup();
         assert_eq!(total, seen.len(), "duplicate filename in AGENT_ASSETS");
-        assert_eq!(total, 42, "AGENT_ASSETS must carry all 42 agent assets");
+        assert_eq!(total, 43, "AGENT_ASSETS must carry all 43 agent assets");
     }
 
     /// Each row's content must be the file its filename names. Catches the

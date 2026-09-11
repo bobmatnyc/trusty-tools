@@ -53,6 +53,9 @@ pub const QA_AGENT: &str = trusty_agents_common::agent_assets::QA;
 /// Concrete research agent (`extends: base-research`).
 pub const RESEARCH_AGENT: &str = trusty_agents_common::agent_assets::RESEARCH;
 
+/// Concrete secrets-manager agent (`extends: base-agent`).
+pub const SECRETS_MANAGER_AGENT: &str = trusty_agents_common::agent_assets::SECRETS_MANAGER;
+
 /// Concrete security agent (`extends: base-agent`).
 pub const SECURITY_AGENT: &str = trusty_agents_common::agent_assets::SECURITY;
 

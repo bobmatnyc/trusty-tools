@@ -22,6 +22,7 @@ fn constants_are_non_empty() {
     assert!(!ENGINEER_AGENT.trim().is_empty());
     assert!(!QA_AGENT.trim().is_empty());
     assert!(!RESEARCH_AGENT.trim().is_empty());
+    assert!(!SECRETS_MANAGER_AGENT.trim().is_empty());
     assert!(!SECURITY_AGENT.trim().is_empty());
     assert!(!DOCUMENTATION_AGENT.trim().is_empty());
     assert!(!DATA_ENGINEER_AGENT.trim().is_empty());
@@ -514,11 +515,14 @@ fn bundle_table_is_complete() {
     //   operator/PM reference for `tm secrets` (1Password/Keeper/Keychain
     //   behind trusty-common), bundled ahead of the CLI itself (#7521/#7525)
     //   per the DOC-74 design. 179 + 1 = 180.
-    assert_eq!(ALL.len(), 180);
+    // Issue #7526 (epic #7517) (+1): `agents/secrets-manager.md` is NEW — the
+    //   bundled framework agent that operates `tm secrets` on behalf of the PM
+    //   and other agents (DOC-74). 180 + 1 = 181.
+    assert_eq!(ALL.len(), 181);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 180, "artifact paths must be unique");
+    assert_eq!(paths.len(), 181, "artifact paths must be unique");
     for artifact in ALL {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());

@@ -112,6 +112,7 @@ pub const ALL: &[BundledArtifact] = &[
     overwrite("agents/engineer.md", ENGINEER_AGENT),
     overwrite("agents/qa.md", QA_AGENT),
     overwrite("agents/research.md", RESEARCH_AGENT),
+    overwrite("agents/secrets-manager.md", SECRETS_MANAGER_AGENT),
     overwrite("agents/security.md", SECURITY_AGENT),
     overwrite("agents/documentation.md", DOCUMENTATION_AGENT),
     overwrite("agents/data-engineer.md", DATA_ENGINEER_AGENT),
