@@ -430,7 +430,8 @@ const GIT_GLOBAL_OPTS_WITH_ARG: &[&str] = &[
 /// -` and `command git worktree remove --force <path>` reached the git guards
 /// unresolved. It now shares [`crate::commands::hook_rewrite::strip_wrapper_prefix`]
 /// with that function instead of re-enumerating.
-/// What: shlex-splits `segment` (quote-aware; `None` on unbalanced quotes →
+/// What: through [`git_argv_at_subcommand`], shlex-splits `segment`
+/// (quote-aware; `None` on unbalanced quotes →
 /// caller falls back), delegates the leading `KEY=value`/wrapper skip to
 /// [`strip_wrapper_prefix`], requires the program basename to be `git`, then
 /// walks past global options — those in [`GIT_GLOBAL_OPTS_WITH_ARG`] consume
@@ -453,6 +454,24 @@ const GIT_GLOBAL_OPTS_WITH_ARG: &[&str] = &[
 /// `git_is_only_a_git_command_in_command_position`,
 /// `git_in_command_position_is_still_a_git_command`.
 pub(crate) fn git_subcommand(segment: &str) -> Option<String> {
+    let (argv, i) = git_argv_at_subcommand(segment)?;
+    Some(argv[i].clone())
+}
+
+/// The parsed argv of a git segment, and the index of its subcommand token.
+///
+/// Why: [`git_subcommand`] answers "which subcommand", and [`git_output_file`]
+/// asks the same parser "and what did that subcommand's arguments say". One
+/// walk over the global options serves both, so a rule about a git ARGUMENT
+/// cannot drift from the rule about the git VERB — a second argv parser is the
+/// defect this shape prevents.
+/// What: the body [`git_subcommand`] used to carry — shlex-split (`None` on
+/// unbalanced quotes), [`strip_wrapper_prefix`], a `git` basename check, then
+/// the global-option walk described on [`git_subcommand`]. Returns the argv
+/// alongside the index of the first non-option token.
+/// Test: every `git_subcommand_*` test, plus
+/// `git_output_file_finds_both_spellings`.
+fn git_argv_at_subcommand(segment: &str) -> Option<(Vec<String>, usize)> {
     let argv = shlex::split(segment)?;
     let mut i = strip_wrapper_prefix(&argv)?;
     let program = argv.get(i)?;
@@ -487,6 +506,159 @@ pub(crate) fn git_subcommand(segment: &str) -> Option<String> {
                 continue;
             }
             i += 1;
+            continue;
+        }
+        return Some((argv, i));
+    }
+    None
+}
+
+/// Per-subcommand options whose value is a path git WRITES, beyond the
+/// `--output` every diff-generating subcommand takes.
+///
+/// Why (#7399 round 2): `--output` alone left three writes through —
+/// `git format-patch -o <dir>`, `git format-patch --output-directory=<dir>`
+/// and `git archive -o <file>` each produced a file against git 2.54.0. The
+/// options are subcommand-specific, unlike `--output`: `-o` on `git diff` is
+/// a revision (git answers `fatal: ambiguous argument`), and `-o` on
+/// `git clone` names the origin remote, so a global `-o` rule would deny
+/// reads. A row here is a spelling verified against `git <sub> --help`.
+/// What: `(subcommand, options)`; each option is matched whole and takes its
+/// value attached (`-o<dir>`, `--output-directory=<dir>`) or separated.
+/// Test: `git_file_write_target_finds_the_short_output_options`.
+const GIT_SUBCOMMAND_WRITE_OPTS: &[(&str, &[&str])] = &[
+    ("format-patch", &["-o", "--output-directory"]),
+    ("archive", &["-o"]),
+];
+
+/// The `--output` option every diff-generating subcommand accepts.
+///
+/// Why: `diff`, `log`, `show` and `format-patch` all take it, so it is asked
+/// of every subcommand rather than listed per row above.
+const GIT_OUTPUT_OPT: &[&str] = &["--output"];
+
+/// The file or directory a git command would WRITE, if its arguments name one.
+///
+/// Why (#7399): `git diff --output=/tmp/o.diff` writes a file exactly as
+/// `git diff > /tmp/o.diff` does, but carries no `>`, so
+/// [`super::has_file_write_redirection`] never saw it and the PM's write
+/// boundary (ADR-0044, ADR-0048) had an uncaught hole. Round 2 found three
+/// more spellings of the same hole — `format-patch -o`,
+/// `format-patch --output-directory=`, `archive -o` — plus two writes that
+/// need no option at all: a bare `git format-patch` drops `NNNN-*.patch`
+/// files into the working directory, and `git bundle create <file>` names its
+/// output as a positional.
+/// What: walks the subcommand's own arguments from
+/// [`git_argv_at_subcommand`] and returns the first write target it finds —
+/// [`GIT_OUTPUT_OPT`] on any subcommand, plus that subcommand's row in
+/// [`GIT_SUBCOMMAND_WRITE_OPTS`], in the attached and separated spellings git
+/// accepts (all verified against git 2.54.0). Every match is on the whole
+/// option token, never a prefix, so `--output-indicator-new=+` — which
+/// changes one character of the patch body and writes nothing — is untouched.
+/// Option scanning stops at `--`, past which git parses pathspecs rather than
+/// options. Two subcommands are decided by shape rather than by an option:
+/// `format-patch` writes unless `--stdout` is present, and `bundle create`
+/// writes to its first positional unless that positional is `-` (stdout).
+/// `Some("")` when the write is real but names no readable path — a valueless
+/// flag, or `format-patch`'s implicit working directory: the caller still
+/// denies and has no path to report. `None` when the segment is not a git
+/// command, cannot be lexed, or names no write — a lexing failure therefore
+/// withholds a NEW deny and can never turn an existing deny into an allow.
+/// Test: `git_file_write_target_finds_both_output_spellings`,
+/// `git_file_write_target_finds_the_short_output_options`,
+/// `git_file_write_target_reads_format_patch_and_bundle_by_shape`,
+/// `git_file_write_target_ignores_the_indicator_options`,
+/// `git_file_write_target_stops_at_the_pathspec_separator`,
+/// `git_file_write_target_none_when_unbalanced`, and end to end in
+/// `git_diff_output_flag_is_refused_as_a_file_write` and
+/// `git_short_output_options_are_refused_as_file_writes`.
+pub(crate) fn git_file_write_target(segment: &str) -> Option<String> {
+    let (argv, subcommand) = git_argv_at_subcommand(segment)?;
+    let sub = argv[subcommand].as_str();
+    let args = &argv[subcommand + 1..];
+    if sub == "bundle" {
+        return bundle_create_target(args);
+    }
+    let extra = GIT_SUBCOMMAND_WRITE_OPTS
+        .iter()
+        .find(|(name, _)| *name == sub)
+        .map_or(&[] as &[&str], |(_, opts)| *opts);
+    let mut stdout_requested = false;
+    for (i, tok) in args.iter().enumerate() {
+        if tok == "--" {
+            break;
+        }
+        if tok == "--stdout" {
+            stdout_requested = true;
+            continue;
+        }
+        let next = args.get(i + 1);
+        if let Some(target) =
+            option_value(tok, next, GIT_OUTPUT_OPT).or_else(|| option_value(tok, next, extra))
+        {
+            return Some(target);
+        }
+    }
+    // A `format-patch` that was not told to write to stdout writes its patch
+    // files into the working directory, naming no path at all.
+    if sub == "format-patch" && !stdout_requested {
+        return Some(String::new());
+    }
+    None
+}
+
+/// The value `tok` carries for one of `opts`, in either spelling.
+///
+/// Why: an option's value reaches git three ways — a separate token, joined
+/// with `=` on a long option, or attached to a short one (`-o/tmp/d`, which
+/// git 2.54.0 accepts). Deciding all three in one place is what keeps the
+/// match on the whole option and off its prefix.
+/// What: `Some(value)` when `tok` IS one of `opts` (value = the next token, or
+/// `""` when the option ends the argv), when it is `<opt>=<value>`, or when it
+/// is a short option with the value attached. `None` otherwise.
+/// Test: `git_file_write_target_finds_the_short_output_options`.
+fn option_value(tok: &str, next: Option<&String>, opts: &[&str]) -> Option<String> {
+    for opt in opts {
+        if tok == *opt {
+            return Some(next.cloned().unwrap_or_default());
+        }
+        if let Some(rest) = tok.strip_prefix(opt)
+            && let Some(value) = rest.strip_prefix('=')
+        {
+            return Some(value.to_string());
+        }
+        // A short option (`-o`) takes its value attached; a long one does not.
+        if !opt.starts_with("--")
+            && let Some(value) = tok.strip_prefix(opt)
+            && !value.is_empty()
+        {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+/// The file `git bundle create` would write, if it names one.
+///
+/// Why: `bundle create` takes its output as a POSITIONAL — `git bundle create
+/// /tmp/x.bundle HEAD` wrote 6477 bytes against git 2.54.0 — so no option
+/// scan can see it. `-` is the documented stdout spelling and stays allowed.
+/// What: requires `create` as the first argument, skips its own valueless
+/// flags (`-q`, `--quiet`, `--progress`, `--version=<n>`), and returns the
+/// first positional. `None` for `-`, for another `bundle` subcommand
+/// (`verify`, `list-heads`, `unbundle` name a file they READ), and when no
+/// positional follows.
+/// Test: `git_file_write_target_reads_format_patch_and_bundle_by_shape`.
+fn bundle_create_target(args: &[String]) -> Option<String> {
+    let mut rest = args.iter();
+    if rest.next().map(String::as_str) != Some("create") {
+        return None;
+    }
+    for tok in rest {
+        if tok == "-" {
+            return None;
+        }
+        if tok.starts_with('-') {
             continue;
         }
         return Some(tok.clone());
@@ -620,6 +792,146 @@ mod tests {
         assert_eq!(
             git_subcommand("nice git reset --hard").as_deref(),
             Some("reset")
+        );
+    }
+
+    // #7399: both spellings of `--output` name a file git writes.
+    #[test]
+    fn git_file_write_target_finds_both_output_spellings() {
+        assert_eq!(
+            git_file_write_target("git diff --output=/tmp/o.diff").as_deref(),
+            Some("/tmp/o.diff")
+        );
+        assert_eq!(
+            git_file_write_target("git diff --output /tmp/o.diff HEAD").as_deref(),
+            Some("/tmp/o.diff")
+        );
+        assert_eq!(
+            git_file_write_target("git -C /repo --no-pager log -1 --output=/tmp/l.txt").as_deref(),
+            Some("/tmp/l.txt")
+        );
+        assert_eq!(
+            git_file_write_target(r#"git diff --output="/tmp/my out.diff""#).as_deref(),
+            Some("/tmp/my out.diff")
+        );
+        // Present but valueless: still a flag to deny on, with no path to
+        // report.
+        assert_eq!(
+            git_file_write_target("git diff --output").as_deref(),
+            Some("")
+        );
+    }
+
+    // #7399 round 2: the short and directory spellings, each verified to write
+    // against git 2.54.0.
+    #[test]
+    fn git_file_write_target_finds_the_short_output_options() {
+        for (command, target) in [
+            ("git format-patch -o /tmp/d -1 HEAD", "/tmp/d"),
+            ("git format-patch -1 -o/tmp/d HEAD", "/tmp/d"),
+            (
+                "git format-patch --output-directory=/tmp/d -1 HEAD",
+                "/tmp/d",
+            ),
+            (
+                "git format-patch --output-directory /tmp/d -1 HEAD",
+                "/tmp/d",
+            ),
+            ("git archive -o /tmp/a.tar HEAD", "/tmp/a.tar"),
+            ("git archive -o/tmp/a.tar HEAD", "/tmp/a.tar"),
+            ("git archive --output=/tmp/a.tar HEAD", "/tmp/a.tar"),
+        ] {
+            assert_eq!(
+                git_file_write_target(command).as_deref(),
+                Some(target),
+                "{command}"
+            );
+        }
+        // `-o` is subcommand-scoped: on `diff` it is a revision (git answers
+        // `fatal: ambiguous argument`), on `clone` it names the origin remote.
+        assert_eq!(git_file_write_target("git diff -o /tmp/o.diff HEAD"), None);
+        assert_eq!(
+            git_file_write_target("git clone -o upstream https://x/y.git"),
+            None
+        );
+    }
+
+    // #7399 round 2: two writes carry no option at all.
+    #[test]
+    fn git_file_write_target_reads_format_patch_and_bundle_by_shape() {
+        // A `format-patch` writes `NNNN-*.patch` into the working directory
+        // unless it was told to write to stdout.
+        assert_eq!(
+            git_file_write_target("git format-patch -1 HEAD").as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            git_file_write_target("git format-patch --stdout -1 HEAD"),
+            None
+        );
+        assert_eq!(
+            git_file_write_target("git format-patch -1 HEAD --stdout"),
+            None
+        );
+        // `bundle create` names its output as a positional; `-` is stdout.
+        assert_eq!(
+            git_file_write_target("git bundle create /tmp/x.bundle HEAD").as_deref(),
+            Some("/tmp/x.bundle")
+        );
+        assert_eq!(
+            git_file_write_target("git bundle create -q /tmp/x.bundle --all").as_deref(),
+            Some("/tmp/x.bundle")
+        );
+        assert_eq!(git_file_write_target("git bundle create - HEAD"), None);
+        assert_eq!(
+            git_file_write_target("git bundle verify /tmp/x.bundle"),
+            None
+        );
+        assert_eq!(
+            git_file_write_target("git bundle list-heads /tmp/x.bundle"),
+            None
+        );
+    }
+
+    // #7399: the rule matches the option, never its prefix.
+    #[test]
+    fn git_file_write_target_ignores_the_indicator_options() {
+        for command in [
+            "git diff --output-indicator-new=+",
+            "git diff --output-indicator-old=- --stat",
+            "git diff --output-indicator-context= ",
+            "git diff --stat -- docs/",
+            "git diff --no-index /tmp/a.txt /tmp/b.txt",
+            "git archive --format=tar HEAD",
+        ] {
+            assert_eq!(git_file_write_target(command), None, "{command}");
+        }
+    }
+
+    // #7399: past `--`, git parses pathspecs, so `--output=…` writes nothing.
+    #[test]
+    fn git_file_write_target_stops_at_the_pathspec_separator() {
+        assert_eq!(
+            git_file_write_target("git diff -- --output=/tmp/o.diff"),
+            None
+        );
+        assert_eq!(
+            git_file_write_target("git diff --output=/tmp/o.diff -- docs/").as_deref(),
+            Some("/tmp/o.diff")
+        );
+    }
+
+    // #7399: a segment that will not lex withholds the deny; it never grants
+    // an allow that did not already exist.
+    #[test]
+    fn git_file_write_target_none_when_unbalanced() {
+        assert_eq!(
+            git_file_write_target("git diff --output='/tmp/o.diff"),
+            None
+        );
+        assert_eq!(
+            git_file_write_target("cargo run -- --output=/tmp/o.diff"),
+            None
         );
     }
 }

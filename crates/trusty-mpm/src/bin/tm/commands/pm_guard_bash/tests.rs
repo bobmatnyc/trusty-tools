@@ -2149,3 +2149,173 @@ fn a_quoted_path_to_a_forbidden_verb_is_still_refused() {
     );
     assert_eq!(evaluate_bash_command(r#""/opt/make tools/echo" hi"#), None);
 }
+
+/// #7399: a git `--output` option writes a file and is refused as one.
+///
+/// Why: `git diff --output=/tmp/o.diff` puts the same bytes on disk that
+/// `git diff > /tmp/o.diff` does, but carries no `>`, so
+/// [`has_file_write_redirection`] never saw it and the write boundary
+/// (ADR-0044, ADR-0048) had a hole a PM could walk through. `--output` is a
+/// git DIFF option, so the rows below cover every subcommand that generates a
+/// diff, both spellings git accepts, and the wrapper and global-flag
+/// positions that hid other git verbs before.
+/// What: asserts each spelling denies with [`SHELL_EDIT_REASON`] — the same
+/// reason a `>` redirection denies with — and that the denial names the file,
+/// so the routing hint points at the written path rather than falling back.
+/// Test: itself.
+#[test]
+fn git_diff_output_flag_is_refused_as_a_file_write() {
+    for command in [
+        "git diff --output=/tmp/o.diff",
+        "git diff --output=/tmp/o.diff origin/main...HEAD",
+        "git diff --output /tmp/o.diff origin/main...HEAD",
+        "git diff origin/main...HEAD --output=/tmp/o.diff -- docs/",
+        "git --no-pager diff --output=/tmp/o.diff",
+        "git -C /repo diff --output /tmp/o.diff",
+        "git log -1 --output=/tmp/log.txt",
+        "git show HEAD --output=/tmp/show.txt",
+        "git format-patch -1 --output=/tmp/p.patch",
+        r#"git diff --output="/tmp/my out.diff""#,
+        "sh -c 'git diff --output=/tmp/o.diff'",
+        "cargo check -p trusty-mpm && git diff --output=/tmp/o.diff",
+    ] {
+        assert_eq!(
+            evaluate_bash_command(command),
+            Some(SHELL_EDIT_REASON),
+            "a git --output option is a file write: {command}"
+        );
+    }
+    assert_eq!(
+        extract_shell_edit_target("git diff --output=/tmp/o.diff"),
+        Some("/tmp/o.diff".to_string())
+    );
+    assert_eq!(
+        extract_shell_edit_target("git diff --output /tmp/o.diff HEAD"),
+        Some("/tmp/o.diff".to_string())
+    );
+}
+
+/// #7399 round 2: `-o`, `--output-directory` and `bundle create` write too.
+///
+/// Why: the round-1 rule matched only `--output`, and a critic ran the three
+/// gaps against git 2.54.0 in a scratch repo: `git format-patch -o <dir> -1
+/// HEAD` wrote `0001-init.patch`, `git format-patch --output-directory=<dir>
+/// -1 HEAD` wrote a patch, `git archive -o <file> HEAD` wrote a 10KB tar. Two
+/// more writes carry no option at all — a bare `git format-patch` drops patch
+/// files into the working directory, and `git bundle create <file>` names its
+/// output as a positional.
+/// What: asserts every write spelling denies with [`SHELL_EDIT_REASON`], and
+/// that the read-only siblings still allow — `--stdout`, an archive to stdout,
+/// `git diff -o` (a revision there), and `git clone -o` (the origin remote).
+/// Test: itself.
+#[test]
+fn git_short_output_options_are_refused_as_file_writes() {
+    for command in [
+        "git format-patch -o /tmp/d -1 HEAD",
+        "git format-patch -1 -o/tmp/d HEAD",
+        "git format-patch --output-directory=/tmp/d -1 HEAD",
+        "git format-patch --output-directory /tmp/d -1 HEAD",
+        "git format-patch -1 HEAD",
+        "git archive -o /tmp/a.tar HEAD",
+        "git archive -o/tmp/a.tar HEAD",
+        "git archive --output=/tmp/a.tar HEAD",
+        "git bundle create /tmp/x.bundle HEAD",
+        "git bundle create -q /tmp/x.bundle --all",
+        "git -C /repo format-patch -o /tmp/d -1 HEAD",
+        "sh -c 'git archive -o /tmp/a.tar HEAD'",
+    ] {
+        assert_eq!(
+            evaluate_bash_command(command),
+            Some(SHELL_EDIT_REASON),
+            "a git write option is a file write: {command}"
+        );
+    }
+    for command in [
+        "git format-patch --stdout -1 HEAD",
+        "git format-patch -1 HEAD --stdout",
+        "git archive --format=tar HEAD | tar -t",
+        "git bundle create - HEAD",
+        "git bundle verify /tmp/x.bundle",
+        "git diff -o /tmp/o.diff HEAD",
+        "git clone -o upstream https://x/y.git",
+    ] {
+        assert_eq!(
+            evaluate_bash_command(command),
+            None,
+            "a read-only spelling must stay allowed: {command}"
+        );
+    }
+    assert_eq!(
+        extract_shell_edit_target("git archive -o /tmp/a.tar HEAD"),
+        Some("/tmp/a.tar".to_string())
+    );
+}
+
+/// #7399: the read-only `git diff` shapes stay allowed beside that deny.
+///
+/// Why: the deny above must match the OPTION, not its prefix.
+/// `--output-indicator-new=+` changes one character of the patch body and
+/// writes nothing; a `--output=…` past the `--` separator is a pathspec git
+/// never parses as an option (verified against git 2.x — no file appears).
+/// `git diff --no-index a b` between two readable paths is a pure read and is
+/// the shape #7368 already pinned as allowed.
+/// What: asserts each row still allows, in both bands —
+/// [`unclassifiable_command`] and [`evaluate_bash_command`].
+/// Test: itself.
+#[test]
+fn git_diff_read_only_shapes_survive_the_output_deny() {
+    for command in [
+        "git diff --no-index /tmp/a.txt /tmp/b.txt",
+        "git diff --stat",
+        "git diff -- docs/",
+        "git diff --output-indicator-new=+",
+        "git diff --output-indicator-old=- --stat main..HEAD",
+        "git diff -- --output=/tmp/o.diff",
+        "git log --oneline -5",
+        "git show HEAD --stat",
+    ] {
+        assert_eq!(
+            unclassifiable_command(command),
+            None,
+            "read-only diff must stay classifiable: {command}"
+        );
+        assert_eq!(
+            evaluate_bash_command(command),
+            None,
+            "read-only diff must stay allowed: {command}"
+        );
+    }
+}
+
+/// #7399: a git segment the guard cannot lex loses no existing deny.
+///
+/// Why: the `--output` rule reads its answer from a shlex split, which fails
+/// on unbalanced quotes. The failure direction must be "no NEW deny", never
+/// "an existing deny becomes an allow" — a bypass that would be worse than
+/// the hole being closed.
+/// What: asserts the unlexable spellings of already-denied shapes still deny,
+/// and that the unlexable `--output` spelling is merely no worse than before
+/// the fix (it allows here, as it did before, and bash refuses to run an
+/// unterminated quote at all).
+/// Test: itself.
+#[test]
+fn an_unlexable_git_segment_keeps_every_deny_it_already_had() {
+    assert_eq!(
+        evaluate_bash_command("git diff '/tmp/o.diff > /tmp/w.diff"),
+        Some(SHELL_EDIT_REASON)
+    );
+    assert_eq!(
+        evaluate_bash_command("sed -i s/a/b/ '/tmp/f.rs"),
+        Some(SHELL_EDIT_REASON)
+    );
+    assert_eq!(
+        shell_lex::git_file_write_target("git diff --output='/tmp/o.diff"),
+        None,
+        "an unbalanced segment withholds the new deny rather than granting one"
+    );
+    assert_eq!(
+        shell_lex::git_file_write_target("git archive -o '/tmp/a.tar"),
+        None,
+        "the round-2 spellings inherit the same withhold-only failure"
+    );
+}
