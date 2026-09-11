@@ -49,6 +49,8 @@ mod agent_permissions;
 mod agent_skills;
 mod agent_stores;
 mod agent_subagents;
+// #7428: one memory palace per assistant, with the opt-in fan-out setting.
+mod assistant_memory;
 mod auth;
 mod cancel;
 pub(crate) mod knowledge_pipeline;

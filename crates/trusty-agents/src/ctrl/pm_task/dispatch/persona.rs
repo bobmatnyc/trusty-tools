@@ -167,11 +167,13 @@ pub async fn run_pm_task_with_persona(
     // truthfully-but-wrongly reported themselves as stateless. Resolved here,
     // alongside the DOC-54 turn context, so both land before the system
     // prompt is assembled.
-    let memory_search_base = trusty_common::resolve_daemon_base_url("trusty-search");
+    // #7428: `persona_name` is the assistant INSTANCE id, which is now what the
+    // palace defaults to when no `[[stores]] palace` pins one.
     let persona_memory = persona_memory::build_persona_memory(
         &persona_cfg.stores,
+        persona_name,
         Some(&workstreams_socket),
-        memory_search_base.as_deref(),
+        trusty_common::resolve_daemon_base_url("trusty-search").as_deref(),
         user_input,
     )
     .await;

@@ -144,6 +144,9 @@ impl TrustyBackedMemoryStore {
     }
 
     /// Stable string identifier for the palace backing `segment`.
+    // #7428: process-global AgentMemory palace is a cross-assistant leak vector;
+    // fenced by `native_memory_tools_are_registered_without_a_backend`, re-key
+    // per assistant in a follow-up.
     fn palace_id_for(segment: Segment) -> PalaceId {
         PalaceId::new(format!("trusty-agents-{}", segment.prefix()))
     }

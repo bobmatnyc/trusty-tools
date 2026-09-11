@@ -13,6 +13,8 @@
 mod health_tests;
 mod home_tests;
 mod instance_tests;
+// #7428: one palace per assistant, opt-in fan-out.
+mod memory_tests;
 mod provision_tests;
 mod roster_tests;
 mod store_root_tests;

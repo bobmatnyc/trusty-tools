@@ -181,7 +181,13 @@ fn binding_for(
 /// `agent.toml` deliberately omits — the same partial-read precedent as
 /// `api::server::agent_stores::parse_stores`. A malformed file degrades to "no
 /// bindings", which the caller reports as a reason.
-fn load_stores(dirs: &[PathBuf], agent: &str) -> Option<StoresConfig> {
+///
+/// #7428: `pub(crate)` so per-assistant palace resolution
+/// (`crate::assistants::memory::palace_for_instance`) reads a FAN-OUT target's
+/// binding through this same partial parse instead of growing a second copy —
+/// two readers disagreeing about what a binding says is how a recall reaches a
+/// palace its owner never writes to.
+pub(crate) fn load_stores(dirs: &[PathBuf], agent: &str) -> Option<StoresConfig> {
     if agent.is_empty() || agent.contains(['/', '\\']) || agent == "." || agent == ".." {
         return None;
     }
