@@ -191,13 +191,21 @@ pub(crate) fn is_aws_access_key_id(token: &str) -> bool {
 /// only allowlist in this module keyed on a vendor string rather than on shape,
 /// so each entry must be a prefix no credential issuer mints. `dpl_` qualifies
 /// against what this module knows: no [`SECRET_PREFIXES`] entry opens with it,
-/// and Vercel's own API tokens carry no prefix at all. The
-/// entry's cost if that is ever wrong is bounded by
-/// [`is_public_resource_id`]'s whole-token tail contract: a credential pasted
-/// behind the prefix breaks the tail's charset or length, so the exemption never
-/// covers it and the heuristics decide the token exactly as before. What they
-/// then decide is unchanged too — including the one pre-existing structural miss
-/// of that shape, pinned in
+/// and Vercel's own API tokens carry no prefix at all.
+///
+/// THE COST, STATED TRUE (#7482 review round 1): this exemption does have a
+/// blind spot, and it is not "nothing gets through". A Vercel deployment id is
+/// character-for-character indistinguishable from any other 28-character
+/// alphanumeric run, so a credential whose body is EXACTLY
+/// [`PUBLIC_ID_TAIL_LEN`] alphanumeric characters is exempted when it is written
+/// flush behind the prefix — `dpl_<28-char key>` passes though the bare key
+/// flags. No predicate can separate those two, which is why the exemption is
+/// pinned to one exact length instead of a window: at `20..=40` the blind spot
+/// also swallowed a 24-char Vercel API token, a Google `AIza` key, a 32-char
+/// generic key, a SendGrid body and a base64 blob (whose trailing `=` padding
+/// [`find_secret_token`] strips before classification, so the charset check
+/// never saw it). One length reduces the blind spot to the single shape it
+/// cannot avoid. It is pinned as a KNOWN MISS in
 /// `real_secrets_still_blocked_after_7482_public_id_exemption`.
 /// What: case-sensitive prefixes, matched verbatim by
 /// [`is_public_resource_id`]. A neighbouring Vercel id kind (`prj_`, `team_`)
@@ -205,27 +213,41 @@ pub(crate) fn is_aws_access_key_id(token: &str) -> bool {
 /// Test: `vercel_deployment_ids_are_not_flagged`, `known_accepted_bounds_after_7482`.
 pub(crate) const PUBLIC_ID_PREFIXES: &[&str] = &["dpl_"];
 
-/// Inclusive length window for the alphanumeric tail of a
-/// [`PUBLIC_ID_PREFIXES`] id.
+/// Exact length of the alphanumeric tail of a [`PUBLIC_ID_PREFIXES`] id.
 ///
-/// Why (issue #7482): Vercel mints 24- and 28-character tails and the issue
-/// reported 32, so the window has to span them; bounding it at all is what keeps
-/// the exemption from covering an arbitrarily long blob wearing the prefix.
-/// What: the tail length [`is_public_resource_id`] requires, ends included.
-/// Test: `real_secrets_still_blocked_after_7482_public_id_exemption`.
-pub(crate) const PUBLIC_ID_TAIL_LEN: std::ops::RangeInclusive<usize> = 20..=40;
+/// Why one length and not a window (issue #7482 review round 1): the window
+/// this replaced was pinned by nothing at its low end — mutating it to `4..=40`
+/// left the whole test corpus green — and every character of slack in it is
+/// blind spot, because a longer or shorter alphanumeric run is exactly what a
+/// foreign credential body looks like. A single length is the narrowest bound
+/// that still accepts the reported id.
+///
+/// Why 28: both deployment ids in Vercel's REST API reference (`uid` in
+/// `GET /v13/deployments/{idOrUrl}` and in `GET /v7/deployments`) carry a
+/// 28-character tail, which is also the "32 hex/alphanumeric chars" #7482
+/// reported once the 4-character prefix is counted in. If Vercel ever mints
+/// another length, that length is not exempt and #7482 reopens for it —
+/// deliberately, because widening on speculation is what produced the blind
+/// spot above.
+/// What: the tail length [`is_public_resource_id`] requires, exactly.
+/// Test: `vercel_deployment_ids_are_not_flagged`,
+/// `real_secrets_still_blocked_after_7482_public_id_exemption`,
+/// `known_accepted_bounds_after_7482`.
+pub(crate) const PUBLIC_ID_TAIL_LEN: usize = 28;
 
 /// True when `token` is, in its ENTIRETY, a known public resource id: a
-/// [`PUBLIC_ID_PREFIXES`] prefix followed by an ASCII-alphanumeric tail whose
-/// length is inside [`PUBLIC_ID_TAIL_LEN`].
+/// [`PUBLIC_ID_PREFIXES`] prefix followed by exactly [`PUBLIC_ID_TAIL_LEN`]
+/// ASCII-alphanumeric characters.
 ///
 /// Why it is a whole-token predicate, unlike [`is_aws_access_key_id`] (issue
 /// #7482): the AWS gate widens detection, so prefix semantics there cost
 /// nothing; this one narrows it, so anything after the id must disqualify the
-/// token. `dpl_<32 chars>` is an id; `dpl_ghp_…` and `dpl_<blob>==` are a
-/// credential with an id's prefix typed in front, and both fall through to the
-/// heuristics unchanged.
-/// What: case-sensitive prefix strip, then a length-windowed alphanumeric check
+/// token. A tail that carries punctuation, or that is one character longer or
+/// shorter than an id, is not an id — the exemption declines it and the
+/// heuristics decide the token exactly as they did before. What they then decide
+/// is unchanged too, including two pre-existing misses of that shape pinned in
+/// `real_secrets_still_blocked_after_7482_public_id_exemption`.
+/// What: case-sensitive prefix strip, then an exact-length alphanumeric check
 /// over the whole remaining tail. Returns `false` — never a default accept — for
 /// any prefix not on the list.
 /// Test: `vercel_deployment_ids_are_not_flagged`,
@@ -234,8 +256,7 @@ pub(crate) const PUBLIC_ID_TAIL_LEN: std::ops::RangeInclusive<usize> = 20..=40;
 pub(crate) fn is_public_resource_id(token: &str) -> bool {
     PUBLIC_ID_PREFIXES.iter().any(|p| {
         token.strip_prefix(p).is_some_and(|tail| {
-            PUBLIC_ID_TAIL_LEN.contains(&tail.len())
-                && tail.bytes().all(|b| b.is_ascii_alphanumeric())
+            tail.len() == PUBLIC_ID_TAIL_LEN && tail.bytes().all(|b| b.is_ascii_alphanumeric())
         })
     })
 }
@@ -1075,11 +1096,6 @@ pub(crate) fn looks_like_secret(token: &str) -> bool {
     if is_issue_number_list(token) {
         return false;
     }
-    // #7482: a vendor-issued PUBLIC resource id (a Vercel `dpl_` deployment id)
-    // has a credential's character-class profile but is not a credential.
-    if is_public_resource_id(token) {
-        return false;
-    }
     // #4898: the length floor now runs BEFORE the prefix test. It used to run
     // after, so a 4-char token equal to a prefix (`Asia`) was flagged.
     if token.len() < SECRET_MIN_LEN {
@@ -1088,6 +1104,13 @@ pub(crate) fn looks_like_secret(token: &str) -> bool {
     let lower = token.to_ascii_lowercase();
     if SECRET_PREFIXES.iter().any(|p| lower.starts_with(p)) || is_aws_access_key_id(token) {
         return true;
+    }
+    // #7482: a vendor-issued PUBLIC resource id (a Vercel `dpl_` deployment id)
+    // has a credential's character-class profile but is not a credential. Placed
+    // BELOW the known-credential prefixes so a public-id prefix can never
+    // pre-empt one; both anchor at offset 0, so this is order-independent today.
+    if is_public_resource_id(token) {
+        return false;
     }
     // Issue #1667: structural tokens (paths, slugs, key=value pairs, and
     // hyphen-segmented compound identifiers) must not be flagged as secrets
