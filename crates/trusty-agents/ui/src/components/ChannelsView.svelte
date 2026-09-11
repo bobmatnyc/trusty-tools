@@ -70,13 +70,16 @@
       <fieldset disabled={saving||sending}>
       {#each bindings as binding,i (binding.id)}
         {@const provider=configuration.providers.find(p=>p.id===binding.provider)}
+        {@const health=configuration.status?.[binding.id]}
         <article>
           <div class="row"><input aria-label="Channel name" bind:value={binding.name} maxlength="100"/><button aria-label={`Remove ${binding.name}`} on:click={()=>bindings=bindings.filter((_,j)=>j!==i)}><Trash2 size={15}/></button></div>
           <div class="row"><label>Service<select bind:value={binding.provider} on:change={()=>changeProvider(i)}>{#each configuration.providers as p}<option value={p.id}>{p.name}</option>{/each}</select></label><label class="grow">Channel or chat ID<input bind:value={binding.target} placeholder={binding.provider==='slack'?'Slack channel ID':'Telegram chat ID'}/></label></div>
           {#if !provider?.configured}<p class="muted">Connect {provider?.name??binding.provider} in the channel service settings to use this channel.</p>{/if}
           <div class="row"><label><input type="checkbox" bind:checked={binding.enabled}/>Enabled</label><label><input type="checkbox" bind:checked={binding.send_enabled} disabled={!provider?.can_send}/>Allow sending</label><label><input type="checkbox" bind:checked={binding.receive_enabled} disabled={!provider?.can_receive}/>Receive updates</label></div>
-          {#if binding.provider==='slack'&&binding.receive_enabled}<p class="muted">Automatic updates require the Slack bot listener to be running.</p>{/if}
+          {#if binding.receive_enabled&&provider?.receive_reason}<p class="muted">{provider.receive_reason}.</p>{/if}
           {#if !provider?.can_receive}<p class="muted">Automatic updates are not available for this service.</p>{/if}
+          <!-- #7427: a binding that has been dropping inbound wakes says so here rather than reading as healthy. -->
+          {#if health&&health.dispatch_failures>0}<p class="error" role="status">{health.dispatch_failures} incoming {health.dispatch_failures===1?'message':'messages'} could not reach the assistant since this service started.{#if health.last_error}<br/>Last error: {health.last_error}{/if}</p>{/if}
           {#if binding.receive_enabled}<details><summary>Update filters and instructions</summary><p class="muted">One value per line. Match any value within a field and every configured field. Excluded labels take priority.</p>{#each filterFields as [key,label]}<label>{label}<textarea rows="2" value={(binding.filter?.[key]??[]).join('\n')} on:input={e=>{binding.filter={...binding.filter,[key]:e.currentTarget.value.split('\n').map(v=>v.trim()).filter(Boolean)};bindings=[...bindings];}}></textarea></label>{/each}<label>Instructions for this channel<textarea rows="4" maxlength="8000" bind:value={binding.instructions}></textarea></label></details>{/if}
         </article>
       {/each}

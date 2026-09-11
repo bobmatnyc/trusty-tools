@@ -476,7 +476,10 @@ pub(super) async fn handle_message(
             labels: vec![],
         };
         let connected_project = channel_project(&sessions, &channel, &project_path).await;
-        if crate::api::server::agent_channels::receive_slack(
+        // #7427: was `receive_slack`; the inbound path is provider-neutral now,
+        // so Slack and Telegram produce one wake envelope through one function.
+        if crate::api::server::agent_channels::receive_inbound(
+            "slack",
             &channel,
             &event,
             &connected_project,
