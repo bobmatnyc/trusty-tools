@@ -237,9 +237,11 @@ pub mod skill_unmanaged;
 pub mod sm;
 pub mod spawn_disclaim;
 pub mod stack_profile;
+// #7424: the turn-1 startup-context reading, its store, and the doctor verdict.
 pub mod staged_paths;
 pub mod stale_skills;
 pub mod standalone;
+pub mod startup_context;
 pub mod stray_mcp;
 pub mod tmux;
 pub mod transcript_usage;

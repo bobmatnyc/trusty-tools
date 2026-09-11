@@ -1,0 +1,17 @@
+# context-budget baseline (#7424) — bytes per startup-context source.
+# Regenerate with: bash scripts/check_context_budget.sh --update
+# Growing TOTAL past 5%, or one file past 10%, fails the gate until
+# the growth is recorded here in the same PR.
+CLAUDE.md	24948
+crates/trusty-mpm/src/assets/instructions/sections/README.md	11635
+crates/trusty-mpm/src/assets/instructions/sections/agent-delegation.md	2029
+crates/trusty-mpm/src/assets/instructions/sections/core.md	7172
+crates/trusty-mpm/src/assets/instructions/sections/enforcement.md	3916
+crates/trusty-mpm/src/assets/instructions/sections/framework-guaranteed-conventions.md	829
+crates/trusty-mpm/src/assets/instructions/sections/identity.md	466
+crates/trusty-mpm/src/assets/instructions/sections/memory.md	308
+crates/trusty-mpm/src/assets/instructions/sections/non-overridable-rules.md	3614
+crates/trusty-mpm/src/assets/instructions/sections/search.md	202
+crates/trusty-mpm/src/assets/instructions/sections/workflow.md	4023
+crates/trusty-mpm/src/assets/output-styles/trusty-mpm.md	7962
+TOTAL	67104

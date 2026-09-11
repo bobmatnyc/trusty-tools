@@ -247,6 +247,18 @@ jobs:
       - name: Crate-relevance selftest (#7063)
         run: bash scripts/ci-crate-relevance-selftest.sh
 
+      # #7424: the startup-context size gate. It is a STEP of this existing job
+      # rather than a job of its own — promoting a new required context wedges
+      # every open PR that predates it (#5962), and this job already runs on
+      # every PR with no toolchain. Its own mutation fixtures run first, for the
+      # same reason the two selftests above do: a gate that cannot fail makes
+      # its own green meaningless.
+      - name: Startup-context budget selftest (#7424)
+        run: bash scripts/check_context_budget_selftest.sh
+
+      - name: Startup-context budget gate (#7424)
+        run: bash scripts/check_context_budget.sh
+
       # Refresh the base branch ref (same fix as #4688 in version-parity.yml's
       # pr-version-bump job). `github.event.pull_request.base.sha` is a
       # SNAPSHOT taken when the triggering event was delivered, but

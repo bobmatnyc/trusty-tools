@@ -222,6 +222,22 @@ pub struct TrustyToolsConfig {
     /// hard-coded here — a keep-list is only ever what the operator wrote.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk: Option<DiskConfig>,
+
+    /// Startup-context budget (the `startup_context:` YAML section, #7424).
+    ///
+    /// `None` → the shipped defaults: the `tm doctor` check is on, warns at
+    /// 50,000 tokens, and samples the project's ten newest sessions. The
+    /// section type and its resolver live in
+    /// [`crate::core::startup_context`] beside the policy they configure, the
+    /// same arrangement `log_drain` and `agents` use.
+    ///
+    /// ```yaml
+    /// startup_context:
+    ///   ceiling_tokens: 50000
+    ///   sessions: 10
+    /// ```
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_context: Option<crate::core::startup_context::StartupContextConfig>,
 }
 
 /// The `disk:` section of `~/.trusty-tools/trusty-mpm/config.yaml` (#6927).

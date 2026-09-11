@@ -1263,6 +1263,8 @@ async fn doctor_endpoint_returns_report() {
         "pty_headroom",
         // #6535: the cloud log drain's state and last-run verdict.
         "log_drain",
+        // #7424: this project's turn-1 startup context against its ceiling.
+        "startup_context",
     ];
     assert_eq!(names, expected);
     // Count derived from the list above, never a standalone literal:

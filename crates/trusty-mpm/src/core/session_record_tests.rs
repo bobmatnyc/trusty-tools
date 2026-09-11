@@ -258,3 +258,34 @@ fn the_containment_screen_never_leans_on_frameworkpaths_default() {
         "the boundary resolver must take an explicit, fallible home directory"
     );
 }
+
+/// Why (#7424): the doctor sample has no index — the ids ARE the file names —
+/// so the listing is the only way back from the store to the sessions in it,
+/// and a hand-dropped file must not become an id a later read joins onto a
+/// path.
+/// Test: itself.
+#[test]
+fn session_record_ids_lists_written_ids() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    record_session_value(root, KIND_STARTUP_CONTEXT, "sess-a", "{\"tokens\":1}");
+    record_session_value(root, KIND_STARTUP_CONTEXT, "sess-b", "{\"tokens\":2}");
+    std::fs::write(
+        session_record_dir_in(root, KIND_STARTUP_CONTEXT).join("not a session id"),
+        "x",
+    )
+    .expect("write stray file");
+
+    let mut ids = session_record_ids(root, KIND_STARTUP_CONTEXT);
+    ids.sort();
+    assert_eq!(ids, vec!["sess-a".to_string(), "sess-b".to_string()]);
+}
+
+/// Why: a machine that has never recorded a startup reading has no directory at
+/// all, and the doctor check must read that as "no sessions" rather than fail.
+/// Test: itself.
+#[test]
+fn session_record_ids_of_a_missing_kind_is_empty() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    assert!(session_record_ids(dir.path(), KIND_STARTUP_CONTEXT).is_empty());
+}

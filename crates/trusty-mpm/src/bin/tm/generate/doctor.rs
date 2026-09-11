@@ -214,6 +214,10 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "log_drain",
         "Whether the cloud log drain is configured, where it points, and how its last pass ended (issue #6535). The drain uploads the daemon's own log files to an object store on an interval; it is OFF unless `log_drain.enabled` is set in `~/.trusty-tools/trusty-mpm/config.yaml`, and a host that never configured one reports `Ok`. A `log_drain:` section that does not resolve — a malformed destination URI, a zero interval, a source with no root — reports `Fail`, because the daemon refuses to start the scheduler and no bytes move. Enabled but never observed running reports `Warn`. The last pass's verdict is read from `~/.trusty-mpm/log-drain/status.json`, and a pass that errored — including one that finished with per-file failures — reports `Fail`, never a drained-looking `Ok`. Read-only: this probe never drains and never connects to the destination.",
     ),
+    (
+        "startup_context",
+        "Whether this project's turn-1 startup context — what the first assistant turn re-sent, `input + cache_creation + cache_read` — sits inside its budget (issue #7424, parent #4513). Every managed session records that one number when its first turn lands, keyed by Claude session id beside the savings ledger under `~/.trusty-mpm/usage/`; this row samples the newest ones recorded for the project `tm doctor` was run in and compares the median and the latest against `startup_context.ceiling_tokens` in `~/.trusty-tools/trusty-mpm/config.yaml` (default 50,000 tokens over 10 sessions). Warns — never Fails — when either reaches the ceiling, because the ceiling is an operator budget and a prompt the operator deliberately grew is a preference, not a defect. A project with no reading yet reports UNKNOWN rather than `Ok`: nothing was measured, so nothing passed. It opens NO transcript — each number was measured by the session that owned it — so it cannot read another project's session data.",
+    ),
 ];
 
 /// Render the full doctor-check reference.

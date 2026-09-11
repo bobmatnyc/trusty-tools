@@ -42,7 +42,9 @@
 //! `rejects_a_traversing_transcript_path`,
 //! `rejects_a_symlink_under_the_config_dir_aimed_outside_it`,
 //! `accepts_a_transcript_path_under_the_config_dir`,
-//! `the_containment_screen_never_leans_on_frameworkpaths_default`.
+//! `the_containment_screen_never_leans_on_frameworkpaths_default`,
+//! `session_record_ids_lists_written_ids`,
+//! `session_record_ids_of_a_missing_kind_is_empty`.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -58,6 +60,23 @@ pub const KIND_MODEL: &str = "session-model";
 /// the render that learns the path.
 /// Test: `two_kinds_do_not_collide`.
 pub const KIND_TRANSCRIPT: &str = "session-transcript";
+
+/// Record kind holding the session's turn-1 startup-context reading (#7424).
+///
+/// Why: the startup figure is measured once, at the render that first sees an
+/// assistant turn, and read back much later by `tm session ls` and `tm doctor`
+/// in other processes — the same shape as the two kinds above, so it uses the
+/// same store rather than a fourth one. It sits under `usage/` beside the
+/// savings ledger the `💸` segment folds, because "what this session spent
+/// before it started" and "what the harness avoided spending" are read
+/// together.
+/// What: the value is one JSON object — see
+/// [`crate::core::startup_context::StartupContextRecord`] — rather than the
+/// bare scalar the other two kinds hold, because a reading is only usable
+/// alongside the project it belongs to and the time it was taken.
+/// Test: `two_kinds_do_not_collide`, and the startup-context suite in
+/// `startup_context_tests.rs`.
+pub const KIND_STARTUP_CONTEXT: &str = "session-startup-context";
 
 /// Is `session_id` a safe single path segment?
 ///
@@ -200,7 +219,41 @@ pub fn claude_config_dir() -> Option<PathBuf> {
 /// file name.
 /// Test: `a_recorded_value_reads_back`, `rejects_a_path_traversal_session_id`.
 pub fn session_record_path_in(root: &Path, kind: &str, session_id: &str) -> Option<PathBuf> {
-    is_safe_session_id(session_id).then(|| root.join("usage").join(kind).join(session_id))
+    is_safe_session_id(session_id).then(|| session_record_dir_in(root, kind).join(session_id))
+}
+
+/// The directory every record of `kind` is written into.
+///
+/// Why (#7424): a reader that wants EVERY session's record — the doctor
+/// startup-context sample — needs the directory, and rebuilding
+/// `<root>/usage/<kind>` at that call site would be a second spelling of the
+/// layout this module owns.
+/// What: `<root>/usage/<kind>`.
+/// Test: `a_recorded_value_reads_back`, `session_record_ids_lists_written_ids`.
+pub fn session_record_dir_in(root: &Path, kind: &str) -> PathBuf {
+    root.join("usage").join(kind)
+}
+
+/// Every session id that has a record of `kind`.
+///
+/// Why (#7424): the doctor check samples recent sessions, and there is no
+/// index — the ids ARE the file names. Screening each with
+/// [`is_safe_session_id`] on the way out means a stray file dropped into the
+/// directory by hand cannot become a session id a later read joins onto a path.
+/// What: the directory's entries, unsorted, filtered to safe ids. An absent or
+/// unreadable directory yields an empty vector, never an error — every reader
+/// of this store fails soft.
+/// Test: `session_record_ids_lists_written_ids`,
+/// `session_record_ids_of_a_missing_kind_is_empty`.
+pub fn session_record_ids(root: &Path, kind: &str) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(session_record_dir_in(root, kind)) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+        .filter(|name| is_safe_session_id(name))
+        .collect()
 }
 
 /// Read the value recorded for `session_id` under `kind`.
