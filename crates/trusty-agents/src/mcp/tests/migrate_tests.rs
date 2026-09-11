@@ -212,6 +212,66 @@ fn an_existing_shared_file_is_left_alone() {
     assert_eq!(after.servers[0].name, "mine");
 }
 
+/// #7454: the absence guard has to be read INSIDE the cross-process lock.
+/// Every mutation of the shared file (`mcp_add` and friends, through
+/// `crate::tools::mcp_tools::dispatch::mutate`) holds that lock across its own
+/// read-modify-write, so a migration that decides from `shared.exists()`
+/// beforehand can be overtaken: the add creates the file and adds a server,
+/// and the lock-free migration write then publishes the legacy set over the
+/// top of it.
+///
+/// The main thread models that add — it holds the same lock through
+/// `state_writer::atomic_update` and publishes one added server — while the
+/// migration races it on another thread. Two assertions catch the
+/// check-then-act shape whichever way the two interleave: the migration either
+/// writes while the lock is held, or it clobbers the published add afterwards.
+#[test]
+fn migration_waits_for_the_shared_file_lock() {
+    let dir = tempdir("migrate-lock");
+    let legacy = dir.join("config.toml");
+    let shared = dir.join("servers.toml");
+    std::fs::write(&legacy, LEGACY).unwrap();
+
+    let added = McpConfigFile::new(vec![super::stdio("added-by-mcp-add", "add-bin")])
+        .render(&shared)
+        .unwrap();
+    let racing_legacy = legacy.clone();
+    let racing_shared = shared.clone();
+    let mut migration = None;
+
+    crate::state_writer::atomic_update(&shared, |existing| {
+        assert!(existing.is_none(), "the shared file must start absent");
+        migration = Some(std::thread::spawn(move || {
+            migrate::migrate_if_absent(&racing_legacy, &racing_shared)
+        }));
+        // Long enough for that thread to start and reach its decision; a
+        // lock-free migration publishes within microseconds of reaching it.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(
+            !shared.exists(),
+            "the migration wrote the shared file while another writer held the lock"
+        );
+        Ok(Some(added.into_bytes()))
+    })
+    .unwrap();
+
+    assert!(
+        migration
+            .expect("thread spawned")
+            .join()
+            .expect("joined")
+            .is_none(),
+        "the file existed when the lock was granted, so nothing may be migrated"
+    );
+    let after = McpConfigFile::load(&shared).unwrap();
+    let names: Vec<&str> = after.servers.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["added-by-mcp-add"],
+        "lost update: the migration overwrote a concurrent add"
+    );
+}
+
 /// A `config.toml` with neither retired table is not a migration — writing an
 /// empty shared file would make the absence-guard lie on the next run.
 #[test]

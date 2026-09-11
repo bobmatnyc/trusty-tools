@@ -267,34 +267,58 @@ fn from_endpoint(endpoint: LegacyEndpoint) -> McpServerConfig {
 /// Why: see the module doc. Guarding on the shared file's ABSENCE rather than
 /// on a "migrated" marker means the guard is the same fact the user can see —
 /// there is no hidden state that can disagree with the file on disk.
-/// What: returns `None` when the shared file already exists, when the legacy
-/// file is absent or unreadable, or when it declares no servers. Otherwise
-/// writes the shared file and returns the report. A failed write is logged and
+///
+/// That absence is read INSIDE the lock, never from a `shared.exists()` call
+/// beforehand. A `shared.exists()` guard is check-then-act: every mutation of
+/// this file (`mcp_add`, `mcp_remove`, `mcp_enable`, `mcp_disable`, through
+/// `crate::tools::mcp_tools::dispatch`) takes the cross-process lock on the
+/// sibling `.lock` file, so a locked `mcp_add` can create the file and add a
+/// server between the check and this write — and a lock-free write would then
+/// publish the legacy set over the top of it, losing the added server (#7454).
+/// What: returns `None` when the legacy file is absent or unreadable, when it
+/// declares no servers, or when the shared file already existed at the moment
+/// this call held the lock. Otherwise publishes the shared file through
+/// [`crate::state_writer::atomic_update`] and returns the report. The bytes are
+/// rendered with `McpConfigFile::render`, which is what `save` renders, and
+/// published through the same 0600 tmp+rename, so neither the content nor the
+/// file mode differs from the previous write. A failed write is logged and
 /// returns `None`: the connectors are then unavailable for this run, which the
 /// caller reports as an issue, but nothing is lost from the legacy file.
 /// Test: `super::super::tests::migrate_tests::migrates_once_and_never_again`,
-/// `super::super::tests::migrate_tests::an_existing_shared_file_is_left_alone`.
+/// `super::super::tests::migrate_tests::an_existing_shared_file_is_left_alone`,
+/// `super::super::tests::migrate_tests::migration_waits_for_the_shared_file_lock`.
 pub fn migrate_if_absent(legacy_config: &Path, shared: &Path) -> Option<MigrationReport> {
-    if shared.exists() {
-        return None;
-    }
     let raw = std::fs::read_to_string(legacy_config).ok()?;
     let (servers, report) = convert(&raw);
     if servers.is_empty() {
         return None;
     }
-    if let Err(e) = McpConfigFile::new(servers).save(shared) {
-        tracing::warn!(
-            path = %shared.display(),
-            error = %e,
-            "mcp migration: could not write the shared server file; the legacy tables are untouched",
-        );
-        return None;
+    // #7454: the absence guard belongs inside the lock — see the doc above.
+    let wrote = crate::state_writer::atomic_update(shared, move |existing| {
+        if existing.is_some() {
+            return Ok(None);
+        }
+        Ok(Some(
+            McpConfigFile::new(servers).render(shared)?.into_bytes(),
+        ))
+    });
+    match wrote {
+        Ok(true) => {
+            tracing::info!(
+                path = %shared.display(),
+                moved = %report.summary(),
+                "mcp migration: moved the legacy MCP tables into the shared server file (#7454)",
+            );
+            Some(report)
+        }
+        Ok(false) => None,
+        Err(e) => {
+            tracing::warn!(
+                path = %shared.display(),
+                error = %e,
+                "mcp migration: could not write the shared server file; the legacy tables are untouched",
+            );
+            None
+        }
     }
-    tracing::info!(
-        path = %shared.display(),
-        moved = %report.summary(),
-        "mcp migration: moved the legacy MCP tables into the shared server file (#7454)",
-    );
-    Some(report)
 }

@@ -29,6 +29,13 @@
 //! and a value that arrives still carrying [`REDACTED`] is refused rather than
 //! written — persisting the marker would destroy the real credential.
 //!
+//! That optional field is also why the write is LOCKED: filling it means
+//! reading the stored table, and a read outside the write is a lost update.
+//! [`write_at`] therefore reads, validates and publishes inside one
+//! `crate::state_writer::atomic_update` over the assistant's `config.toml` —
+//! the shape `crate::tools::mcp_tools::dispatch` uses for the global file
+//! (#7454).
+//!
 //! Test: `super::tests::assistant_mcp`.
 
 use std::path::{Path, PathBuf};
@@ -43,9 +50,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use trusty_mcp::config::McpServerConfig;
 
-use crate::assistants::mcp::{McpOverrides, read_overrides, write_overrides};
+use crate::assistants::mcp::{McpOverrides, parse_overrides, read_overrides, render_overrides};
 use crate::assistants::{AssistantHome, AssistantInstanceId, discover_instances};
-use crate::mcp::shared::{GlobalTier, ResolvedMcp, load_global, resolve_in};
+use crate::mcp::shared::{GlobalTier, McpIssue, McpTier, ResolvedMcp, load_global, resolve_in};
 
 /// What one hidden `env` or `headers` value renders as.
 ///
@@ -96,12 +103,42 @@ pub(super) async fn put(AxumPath(name): AxumPath<String>, Json(body): Json<McpBo
     }
 }
 
-/// The global tier, or an empty one when no path resolves.
+/// The global tier, or one carrying the issue when no path resolves.
 ///
 /// Why: no home directory is a degraded environment, not a 500 — the route
 /// still answers with this assistant's own overrides and an empty global list.
+/// But an EMPTY tier is what a clean fresh install looks like, so returning
+/// one here (what `unwrap_or_default()` did) made an unlocatable file
+/// indistinguishable from no configured servers, which is exactly the silent
+/// fallback ADR-0060 decision 6 rules out (#7454).
+/// Test: `super::tests::assistant_mcp::an_unlocatable_shared_file_reports_an_issue`.
 fn load_tier() -> GlobalTier {
-    load_global().unwrap_or_default()
+    // #7454: fold the error into the tier, as `load_global_at`'s own error arm
+    // already does for a file that exists and does not parse.
+    load_global().unwrap_or_else(|e| unlocatable_tier(&e))
+}
+
+/// The global tier for a process with no resolvable home directory.
+///
+/// Why: split out so the degraded answer is testable without an environment
+/// in which `dirs::home_dir()` actually fails.
+/// What: zero servers plus one [`McpIssue`] naming the failure. The path is
+/// empty because there IS no path — that is the whole failure.
+/// Test: `super::tests::assistant_mcp::an_unlocatable_shared_file_reports_an_issue`.
+pub(super) fn unlocatable_tier(error: &dyn std::fmt::Display) -> GlobalTier {
+    GlobalTier {
+        servers: Vec::new(),
+        issues: vec![McpIssue {
+            tier: McpTier::Global,
+            path: PathBuf::new(),
+            detail: format!("the shared MCP server file could not be located: {error}"),
+            remedy: "Run this service with a resolvable home directory. Until then the \
+                     global MCP server list is unavailable and this assistant connects \
+                     only to the servers it configures itself."
+                .to_string(),
+        }],
+        path: PathBuf::new(),
+    }
 }
 
 /// The live agent directories and assistants root, or the response to send
@@ -165,10 +202,19 @@ pub(super) fn read_at(dirs: &[PathBuf], root: &Path, name: &str, global: GlobalT
 /// trims, so an untrimmed store would accept `" github"` as a valid disable of
 /// `github` and then match nothing — a dead entry rather than the override the
 /// user asked for.
+///
+/// Read, validate and write happen inside ONE `state_writer::atomic_update`
+/// over the assistant's `config.toml`, the same shape
+/// `crate::tools::mcp_tools::dispatch::mutate` uses for the global file.
+/// Filling an absent `servers` from a read OUTSIDE that write is a lost
+/// update: two concurrent PUTs, one changing only `disabled` and one changing
+/// `servers`, let the first's stale read publish the assistant's servers as
+/// they were before the second wrote them (#7454).
 /// Test: `put_replaces_the_whole_table`, `put_refuses_a_blank_name`,
 /// `put_refuses_a_duplicate_name`, `put_refuses_a_name_in_both_lists`,
 /// `put_refuses_a_redacted_value`, `put_trims_a_stored_name`,
-/// `put_without_servers_keeps_the_stored_ones`.
+/// `put_without_servers_keeps_the_stored_ones`,
+/// `concurrent_write_at_calls_do_not_lose_servers`.
 pub(super) fn write_at(
     dirs: &[PathBuf],
     root: &Path,
@@ -181,89 +227,147 @@ pub(super) fn write_at(
         Err(response) => return response,
     };
     let home = AssistantHome::under(root, id.clone());
+    // #7454: the home and its seeded `config.toml` are created before the
+    // locked update, so the document the render preserves is the seeded one.
+    // `ensure` is additive and idempotent, so it is safe outside the lock.
+    if let Err(e) = home.ensure() {
+        return fail(StatusCode::INTERNAL_SERVER_ERROR, e);
+    }
 
-    // Absent `servers` keeps what is stored, so a client editing only the
-    // disable list never restates a transport it was shown redacted.
-    let read = read_overrides(&home);
-    let submitted = match body.servers {
-        Some(servers) => servers,
-        None => {
-            if let Some(detail) = read.error {
-                return fail(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    format!(
-                        "this assistant's `[mcp]` table could not be read, so its servers \
-                         cannot be kept across this write: {detail}. Send the full `servers` \
-                         list, or fix {}.",
-                        read.path.display()
-                    ),
-                );
+    let path = home.config_path();
+    let mut decided: Option<Result<McpOverrides, Response>> = None;
+    // #7454: read, decide and publish under one held lock — see the doc above.
+    let write = crate::state_writer::atomic_update(&path, |existing| {
+        let raw = match existing {
+            Some(bytes) => std::str::from_utf8(bytes)
+                .map_err(|e| anyhow::anyhow!("`config.toml` is not UTF-8: {e}"))?
+                .to_string(),
+            None => String::new(),
+        };
+        // Absent `servers` keeps what is stored, so a client editing only the
+        // disable list never restates a transport it was shown redacted.
+        let read = parse_overrides(&raw, path.clone());
+        let submitted = match body.servers {
+            Some(servers) => servers,
+            None => match read.error {
+                Some(detail) => {
+                    decided = Some(Err(fail(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        format!(
+                            "this assistant's `[mcp]` table could not be read, so its servers \
+                             cannot be kept across this write: {detail}. Send the full \
+                             `servers` list, or fix {}.",
+                            read.path.display()
+                        ),
+                    )));
+                    return Ok(None);
+                }
+                None => read.overrides.servers,
+            },
+        };
+        let overrides = match validated(submitted, &body.disabled) {
+            Ok(overrides) => overrides,
+            Err(response) => {
+                decided = Some(Err(response));
+                return Ok(None);
             }
-            read.overrides.servers
+        };
+        let rendered = render_overrides(&raw, &overrides, &path)?;
+        decided = Some(Ok(overrides));
+        Ok(Some(rendered.into_bytes()))
+    });
+
+    if let Err(e) = write {
+        return fail(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}"));
+    }
+    let overrides = match decided {
+        Some(Ok(overrides)) => overrides,
+        Some(Err(response)) => return response,
+        // Unreachable: `atomic_update` runs the closure unless it fails, which
+        // the arm above returned, and every closure path records a decision.
+        None => {
+            return fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "this assistant's `[mcp]` table was not written",
+            );
         }
     };
+    let resolved = resolve_in(Some(id.as_str()), global, overrides, None);
+    Json(body_for(&resolved)).into_response()
+}
 
+/// The submitted table as one validated [`McpOverrides`], or the refusal.
+///
+/// Why: pulled out of [`write_at`] so the four refusals it owns are one unit
+/// the locked closure calls, rather than four early returns interleaved with
+/// the lock's read-decide-write. Each refusal names what to change — see
+/// [`write_at`]'s doc for why each one is refused here rather than left to the
+/// resolver.
+/// What: every name trimmed and checked non-blank, unique within `servers`,
+/// free of the [`REDACTED`] marker, and absent from `disabled`. Blank disable
+/// entries are refused and duplicate ones collapse, since `disabled` is a set.
+/// Test: `super::tests::assistant_mcp::put_refuses_a_blank_name`,
+/// `super::tests::assistant_mcp::put_refuses_a_duplicate_name`,
+/// `super::tests::assistant_mcp::put_refuses_a_name_in_both_lists`,
+/// `super::tests::assistant_mcp::put_refuses_a_redacted_value`,
+/// `super::tests::assistant_mcp::put_trims_a_stored_name`.
+fn validated(
+    submitted: Vec<McpServerConfig>,
+    requested_disabled: &[String],
+) -> Result<McpOverrides, Response> {
     let mut servers: Vec<McpServerConfig> = Vec::with_capacity(submitted.len());
     for mut server in submitted {
         let trimmed = server.name.trim().to_string();
         if trimmed.is_empty() {
-            return fail(
+            return Err(fail(
                 StatusCode::BAD_REQUEST,
                 "every MCP server needs a name; overrides match the global list by name",
-            );
+            ));
         }
         if servers.iter().any(|s| s.name == trimmed) {
-            return fail(
+            return Err(fail(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 format!("MCP server `{trimmed}` is listed twice; each name may appear once"),
-            );
+            ));
         }
         if let Some(key) = redacted_secret_key(&server) {
-            return fail(
+            return Err(fail(
                 StatusCode::BAD_REQUEST,
                 format!(
                     "MCP server `{trimmed}` sends `{key}` as `{REDACTED}`, which is what this \
                      route renders in place of a secret. Send the real value, or omit \
                      `servers` to leave this assistant's servers unchanged."
                 ),
-            );
+            ));
         }
         server.name = trimmed;
         servers.push(server);
     }
 
-    let mut disabled: Vec<String> = Vec::with_capacity(body.disabled.len());
-    for raw in &body.disabled {
+    let mut disabled: Vec<String> = Vec::with_capacity(requested_disabled.len());
+    for raw in requested_disabled {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
-            return fail(
+            return Err(fail(
                 StatusCode::BAD_REQUEST,
                 "a disabled entry names a server; it cannot be blank",
-            );
+            ));
         }
         if servers.iter().any(|s| s.name == trimmed) {
-            return fail(
+            return Err(fail(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 format!(
                     "MCP server `{trimmed}` is both configured and disabled here; \
                      remove it from one of the two lists"
                 ),
-            );
+            ));
         }
         if !disabled.iter().any(|d| d == trimmed) {
             disabled.push(trimmed.to_string());
         }
     }
 
-    let overrides = McpOverrides { servers, disabled };
-    if let Err(e) = home
-        .ensure()
-        .and_then(|_| write_overrides(&home, &overrides))
-    {
-        return fail(StatusCode::INTERNAL_SERVER_ERROR, e);
-    }
-    let resolved = resolve_in(Some(id.as_str()), global, overrides, None);
-    Json(body_for(&resolved)).into_response()
+    Ok(McpOverrides { servers, disabled })
 }
 
 /// The first `env` or `headers` key whose value is the redaction marker.

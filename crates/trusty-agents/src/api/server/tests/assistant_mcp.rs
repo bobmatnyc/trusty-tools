@@ -16,10 +16,12 @@ use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 use trusty_mcp::config::{McpServerConfig, McpTransport};
 
-use crate::api::server::assistant_mcp::{McpBody, read_at, write_at};
+use crate::api::server::assistant_mcp::{McpBody, read_at, unlocatable_tier, write_at};
 use crate::api::server::routes::build_router;
 use crate::api::server::state::AppState;
-use crate::mcp::shared::GlobalTier;
+use crate::assistants::mcp::read_overrides;
+use crate::assistants::{AssistantHome, AssistantInstanceId};
+use crate::mcp::shared::{GlobalTier, McpTier};
 
 const ASSISTANT: &str = r#"[agent]
 name = "izzie"
@@ -431,6 +433,102 @@ async fn get_reports_a_malformed_override_table() {
             .ends_with("config.toml"),
         "{:?}",
         body["issues"][0]["path"]
+    );
+}
+
+/// The `config.toml` a concurrent writer publishes while holding the lock.
+const WITH_SERVER: &str = r#"[agent]
+name = "izzie"
+
+[mcp]
+disabled = []
+
+[[mcp.servers]]
+name = "izzie-only"
+enabled = true
+
+[mcp.servers.transport]
+type = "stdio"
+command = "izzie-bin"
+"#;
+
+/// #7454: `servers` is optional, so filling it means reading the stored table
+/// — and a read outside the write is a lost update. Two PUTs, one changing
+/// only `disabled` and one changing `servers`, otherwise let the first's stale
+/// read publish the assistant's servers as they were before the second wrote
+/// them.
+///
+/// The main thread models the servers-changing PUT: it holds the same
+/// `config.toml` lock through `state_writer::atomic_update` and publishes a
+/// document carrying `izzie-only`, while a disable-only [`write_at`] races it
+/// on another thread. A `write_at` that reads before taking the lock reads the
+/// pre-publish document and drops `izzie-only`.
+///
+/// Threads rather than tasks, because `write_at` is synchronous and each
+/// writer must take its own file descriptor on the sibling `.lock` — which is
+/// what makes `flock` serialize them within one process as well as across
+/// processes.
+#[test]
+fn concurrent_write_at_calls_do_not_lose_servers() {
+    let (_tmp, dirs, root) = fixture();
+    let config = root.join("izzie").join("config.toml");
+
+    let racing_dirs = dirs.clone();
+    let racing_root = root.clone();
+    let mut racer = None;
+    crate::state_writer::atomic_update(&config, |existing| {
+        assert!(existing.is_none(), "the config file must start absent");
+        racer = Some(std::thread::spawn(move || {
+            write_at(
+                &racing_dirs,
+                &racing_root,
+                "izzie",
+                disabled_only(&["github"]),
+                tier(),
+            )
+            .status()
+        }));
+        // Long enough for that thread to reach its read of `config.toml`; an
+        // unlocked read happens within microseconds of reaching it.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        Ok(Some(WITH_SERVER.as_bytes().to_vec()))
+    })
+    .unwrap();
+
+    let status = racer.expect("thread spawned").join().expect("joined");
+    assert_eq!(status, StatusCode::OK, "the racing PUT must succeed");
+
+    let home = AssistantHome::under(&root, AssistantInstanceId::new("izzie").unwrap());
+    let stored = read_overrides(&home);
+    assert_eq!(stored.error, None, "{:?}", stored.error);
+    let names: Vec<&str> = stored
+        .overrides
+        .servers
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        ["izzie-only"],
+        "lost update: the disable-only write dropped a concurrently stored server"
+    );
+    assert_eq!(stored.overrides.disabled, ["github"]);
+}
+
+/// #7454: `load_global().unwrap_or_default()` rendered an unlocatable shared
+/// file as an EMPTY tier, which is exactly what a clean fresh install looks
+/// like. The degraded answer carries the issue instead, the way
+/// `load_global_at`'s own error arm already does.
+#[test]
+fn an_unlocatable_shared_file_reports_an_issue() {
+    let degraded = unlocatable_tier(&trusty_mcp::config::McpConfigError::NoHome);
+    assert!(degraded.servers.is_empty());
+    assert_eq!(degraded.issues.len(), 1);
+    assert_eq!(degraded.issues[0].tier, McpTier::Global);
+    assert!(
+        degraded.issues[0].detail.contains("could not be located"),
+        "{}",
+        degraded.issues[0].detail
     );
 }
 

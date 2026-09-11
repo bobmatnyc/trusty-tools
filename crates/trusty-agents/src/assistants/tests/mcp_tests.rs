@@ -14,7 +14,7 @@ use trusty_mcp::config::{McpServerConfig, McpServerOverride, McpTransport};
 
 use crate::assistants::home::AssistantHome;
 use crate::assistants::instance::AssistantInstanceId;
-use crate::assistants::mcp::{McpOverrides, read_overrides, write_overrides};
+use crate::assistants::mcp::{McpOverrides, parse_overrides, read_overrides, write_overrides};
 
 fn home(tag: &str) -> (PathBuf, AssistantHome) {
     let root =
@@ -34,6 +34,18 @@ fn server(name: &str, command: &str) -> McpServerConfig {
             env: Default::default(),
         },
     )
+}
+
+/// #7454: a caller reading inside its own lock hands the parse an empty string
+/// when the file does not exist yet, and that must answer exactly the way an
+/// unreadable file does — no overrides, and no error, because "you have not
+/// configured this" is not a fault.
+#[test]
+fn parsing_an_empty_document_is_no_overrides() {
+    let read = parse_overrides("", PathBuf::from("config.toml"));
+    assert!(read.overrides.is_empty());
+    assert_eq!(read.error, None);
+    assert_eq!(read.path, PathBuf::from("config.toml"));
 }
 
 #[test]

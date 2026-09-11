@@ -12,10 +12,12 @@
 //! What: [`McpOverrides`] is the `[mcp]` table — `servers` (each a
 //! `trusty_mcp::config::McpServerOverride::Set`) and `disabled` (each a
 //! `Disable`). [`read_overrides`] is the fail-soft reader the runtime uses and
-//! [`write_overrides`] the `toml_edit` writer the HTTP route uses, mirroring
-//! [`super::memory`]'s pair exactly — the home is the USER's file, so a write
-//! replaces one table and leaves every other byte, including their comments,
-//! alone.
+//! [`write_overrides`] the `toml_edit` writer, mirroring [`super::memory`]'s
+//! pair exactly — the home is the USER's file, so a write replaces one table
+//! and leaves every other byte, including their comments, alone.
+//! [`parse_overrides`] and [`render_overrides`] are those two with the file
+//! I/O removed, for the HTTP route, which has to read and write inside ONE
+//! held lock (#7454).
 //!
 //! Reading is deliberately fail-soft AND reporting: a malformed `[mcp]` table
 //! resolves to the global set (ADR-0060 decision 6) and carries the parse
@@ -132,7 +134,25 @@ pub fn read_overrides(home: &AssistantHome) -> OverridesRead {
             path,
         };
     };
-    let document: toml::Value = match toml::from_str(&raw) {
+    parse_overrides(&raw, path)
+}
+
+/// The parse half of [`read_overrides`], for a caller holding the bytes.
+///
+/// Why: `PUT /api/assistants/:id/mcp` fills an absent `servers` field from
+/// what is stored, and that read has to happen INSIDE the lock it writes
+/// under — a read through [`read_overrides`] would be a second, unlocked read
+/// of the same path and a lost update (#7454). Exposing the parse step is what
+/// lets that route keep one read, while still answering exactly the way
+/// [`read_overrides`] does.
+/// What: `path` names the file the text came from and is only carried into the
+/// answer; nothing here touches the filesystem. An empty `raw` — what an
+/// absent file hands a locked reader — parses as no overrides with no error,
+/// the same as an unreadable file.
+/// Test: `super::tests::mcp_tests::parsing_an_empty_document_is_no_overrides`,
+/// and every [`read_overrides`] test through the delegation.
+pub(crate) fn parse_overrides(raw: &str, path: PathBuf) -> OverridesRead {
+    let document: toml::Value = match toml::from_str(raw) {
         Ok(document) => document,
         Err(e) => {
             return OverridesRead {
@@ -170,11 +190,19 @@ pub fn read_overrides(home: &AssistantHome) -> OverridesRead {
 /// rewrites ONE table through `toml_edit` and leaves every other byte alone.
 /// Serialising the whole [`super::home::AssistantHomeConfig`] back out would
 /// delete whatever the struct does not model.
-/// What: parses the current document (an absent file starts empty), replaces
-/// `[mcp]`, and writes it back atomically. `disabled` is always written, even
-/// when empty, so clearing the list is a durable edit rather than a no-op;
-/// `servers` is written as an array of tables only when non-empty, because an
-/// empty `[[mcp.servers]]` renders as nothing either way.
+/// What: reads the current document (an absent file starts empty), replaces
+/// `[mcp]` through [`render_overrides`], and writes the result atomically.
+/// `disabled` is always written, even when empty, so clearing the list is a
+/// durable edit rather than a no-op; `servers` is written as an array of tables
+/// only when non-empty, because an empty `[[mcp.servers]]` renders as nothing
+/// either way.
+///
+/// The read here is NOT inside the write's lock, so this is the entry point
+/// for a caller whose new table does not depend on the stored one. A caller
+/// that fills part of its table from what is stored — the HTTP route, whose
+/// `servers` field is optional — must do that read inside its own
+/// `state_writer::atomic_update` and publish [`render_overrides`]'s output
+/// instead (#7454).
 /// Test: `super::tests::mcp_tests::writing_overrides_preserves_other_keys`,
 /// `super::tests::mcp_tests::writing_an_empty_disable_list_clears_it`.
 pub fn write_overrides(
@@ -183,6 +211,32 @@ pub fn write_overrides(
 ) -> Result<(), AssistantError> {
     let path = home.config_path();
     let raw = std::fs::read_to_string(&path).unwrap_or_default();
+    let rendered = render_overrides(&raw, overrides, &path)?;
+    crate::state_writer::atomic_write(&path, rendered.as_bytes()).map_err(|e| AssistantError::Io {
+        path,
+        source: std::io::Error::other(e.to_string()),
+    })
+}
+
+/// The document [`write_overrides`] would write, without writing it.
+///
+/// Why: the mirror of [`parse_overrides`] — the HTTP route publishes these
+/// bytes through its own locked writer (`state_writer::atomic_update`), and
+/// calling [`write_overrides`] from inside that lock would take the same
+/// advisory lock twice and deadlock (#7454). One renderer means the two
+/// writers cannot disagree about what replacing `[mcp]` does to the rest of
+/// the user's file.
+/// What: parses `raw` (an empty string starts an empty document), replaces the
+/// `[mcp]` table, and returns the whole document as text. `path` labels errors
+/// only; nothing here touches the filesystem.
+/// Test: `super::tests::mcp_tests::writing_overrides_preserves_other_keys`,
+/// `super::tests::mcp_tests::writing_an_empty_disable_list_clears_it`.
+pub(crate) fn render_overrides(
+    raw: &str,
+    overrides: &McpOverrides,
+    path: &std::path::Path,
+) -> Result<String, AssistantError> {
+    let path = path.to_path_buf();
     let mut document = raw
         .parse::<toml_edit::DocumentMut>()
         .map_err(|e| AssistantError::Io {
@@ -210,11 +264,5 @@ pub fn write_overrides(
         table["disabled"] = toml_edit::value(toml_edit::Array::new());
     }
     document["mcp"] = toml_edit::Item::Table(table);
-
-    crate::state_writer::atomic_write(&path, document.to_string().as_bytes()).map_err(|e| {
-        AssistantError::Io {
-            path,
-            source: std::io::Error::other(e.to_string()),
-        }
-    })
+    Ok(document.to_string())
 }
