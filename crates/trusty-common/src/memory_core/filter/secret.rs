@@ -4,7 +4,7 @@
 //! the 500-SLOC production cap. This is the credential-detection domain —
 //! `find_secret_token` and the `looks_like_secret` predicate tree it drives —
 //! that accreted across issues #1481, #2442, #2800, #4312, #4739, #4898, #4977,
-//! #5043 and #5513.
+//! #5043, #5513 and #7482.
 //! What: `check_secret` (the entry point `super::FilterConfig::apply` calls),
 //! `find_secret_token`, and the structural-token / charset predicates that
 //! separate real credentials from git SHAs, paths, URLs, and symbol paths.
@@ -175,6 +175,69 @@ pub(crate) fn is_aws_access_key_id(token: &str) -> bool {
             .bytes()
             .take(SECRET_MIN_LEN)
             .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+}
+
+/// Prefixes of vendor-issued PUBLIC resource ids — identifiers that appear in
+/// dashboard URLs and CLI output and are not credentials.
+///
+/// Why (issue #7482): a Vercel deployment id (`dpl_` + an alphanumeric run) is
+/// public, but it has a credential's character-class profile, so the mixed-case
+/// fallback of [`looks_like_secret`] flagged it and no memory could mention a
+/// deployment. It is the #4898 family one shape further on: `is_structural_token`
+/// finds no `+`, `=` or `/` to decompose, and the single `_` leaves a tail that
+/// is neither case-uniform nor a human word.
+///
+/// Why a list keyed on the prefix is safe HERE and not in general: this is the
+/// only allowlist in this module keyed on a vendor string rather than on shape,
+/// so each entry must be a prefix no credential issuer mints. `dpl_` qualifies
+/// against what this module knows: no [`SECRET_PREFIXES`] entry opens with it,
+/// and Vercel's own API tokens carry no prefix at all. The
+/// entry's cost if that is ever wrong is bounded by
+/// [`is_public_resource_id`]'s whole-token tail contract: a credential pasted
+/// behind the prefix breaks the tail's charset or length, so the exemption never
+/// covers it and the heuristics decide the token exactly as before. What they
+/// then decide is unchanged too — including the one pre-existing structural miss
+/// of that shape, pinned in
+/// `real_secrets_still_blocked_after_7482_public_id_exemption`.
+/// What: case-sensitive prefixes, matched verbatim by
+/// [`is_public_resource_id`]. A neighbouring Vercel id kind (`prj_`, `team_`)
+/// is deliberately absent — #7482 produced evidence for `dpl_` only.
+/// Test: `vercel_deployment_ids_are_not_flagged`, `known_accepted_bounds_after_7482`.
+pub(crate) const PUBLIC_ID_PREFIXES: &[&str] = &["dpl_"];
+
+/// Inclusive length window for the alphanumeric tail of a
+/// [`PUBLIC_ID_PREFIXES`] id.
+///
+/// Why (issue #7482): Vercel mints 24- and 28-character tails and the issue
+/// reported 32, so the window has to span them; bounding it at all is what keeps
+/// the exemption from covering an arbitrarily long blob wearing the prefix.
+/// What: the tail length [`is_public_resource_id`] requires, ends included.
+/// Test: `real_secrets_still_blocked_after_7482_public_id_exemption`.
+pub(crate) const PUBLIC_ID_TAIL_LEN: std::ops::RangeInclusive<usize> = 20..=40;
+
+/// True when `token` is, in its ENTIRETY, a known public resource id: a
+/// [`PUBLIC_ID_PREFIXES`] prefix followed by an ASCII-alphanumeric tail whose
+/// length is inside [`PUBLIC_ID_TAIL_LEN`].
+///
+/// Why it is a whole-token predicate, unlike [`is_aws_access_key_id`] (issue
+/// #7482): the AWS gate widens detection, so prefix semantics there cost
+/// nothing; this one narrows it, so anything after the id must disqualify the
+/// token. `dpl_<32 chars>` is an id; `dpl_ghp_…` and `dpl_<blob>==` are a
+/// credential with an id's prefix typed in front, and both fall through to the
+/// heuristics unchanged.
+/// What: case-sensitive prefix strip, then a length-windowed alphanumeric check
+/// over the whole remaining tail. Returns `false` — never a default accept — for
+/// any prefix not on the list.
+/// Test: `vercel_deployment_ids_are_not_flagged`,
+/// `real_secrets_still_blocked_after_7482_public_id_exemption`,
+/// `known_accepted_bounds_after_7482`.
+pub(crate) fn is_public_resource_id(token: &str) -> bool {
+    PUBLIC_ID_PREFIXES.iter().any(|p| {
+        token.strip_prefix(p).is_some_and(|tail| {
+            PUBLIC_ID_TAIL_LEN.contains(&tail.len())
+                && tail.bytes().all(|b| b.is_ascii_alphanumeric())
+        })
+    })
 }
 
 /// Minimum token length before [`looks_like_secret`] will call anything a
@@ -1000,7 +1063,8 @@ pub(crate) fn is_structural_token(token: &str) -> bool {
 /// Test: `secret_token_is_blocked`, `base64_blob_is_blocked`,
 /// `git_sha_like_is_not_secret`, `ordinary_words_are_not_secret`,
 /// `aws_access_key_ids_are_blocked`, `mixed_case_no_digit_limitation`,
-/// `structural_tokens_are_not_flagged`.
+/// `structural_tokens_are_not_flagged`,
+/// `vercel_deployment_ids_are_not_flagged`.
 pub(crate) fn looks_like_secret(token: &str) -> bool {
     // Allowlist git SHAs first — the whole point of issue #1481.
     if is_git_sha_like(token) {
@@ -1009,6 +1073,11 @@ pub(crate) fn looks_like_secret(token: &str) -> bool {
     // Allowlist issue/PR-number lists — issue #2800, same spirit as the SHA
     // carve-out above.
     if is_issue_number_list(token) {
+        return false;
+    }
+    // #7482: a vendor-issued PUBLIC resource id (a Vercel `dpl_` deployment id)
+    // has a credential's character-class profile but is not a credential.
+    if is_public_resource_id(token) {
         return false;
     }
     // #4898: the length floor now runs BEFORE the prefix test. It used to run
