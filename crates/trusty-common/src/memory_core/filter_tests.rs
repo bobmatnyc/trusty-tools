@@ -2792,3 +2792,265 @@ fn custom_patterns_compile_once() {
         );
     }
 }
+
+// ---- Issue #7482: public resource ids (Vercel `dpl_` deployment ids) ----
+
+/// Why (issue #7482, the same family as #4898 and one shape further on): a
+/// Vercel deployment id is a PUBLIC identifier — it is what `vercel` CLI output
+/// and the REST API's `uid` field carry — but `dpl_` is not a `SECRET_PREFIXES`
+/// entry, the token carries no `+`, `=` or `/` for `is_structural_token` to
+/// decompose, and its single `_` leaves one segment that is neither case-uniform
+/// nor a human word. So it fell to the mixed-case fallback of
+/// `looks_like_secret`, which its upper+lower+digit tail satisfies, and every
+/// memory write mentioning a deployment was rejected.
+///
+/// What: pins the reproduction shape at both the token predicate and the
+/// `FilterConfig::apply` gate a write actually hits. The first two entries are
+/// the two ids that appear VERBATIM in Vercel's REST API reference, so the
+/// accepted shape is anchored to the vendor's own documented output rather than
+/// to an invented sample; both carry a 28-character tail, which is the "32
+/// hex/alphanumeric chars" #7482 reported with the 4-character prefix counted in.
+/// Test: itself.
+#[test]
+fn vercel_deployment_ids_are_not_flagged() {
+    let cfg = FilterConfig::default();
+    for (label, tok) in [
+        // Verbatim from Vercel's REST API reference: `uid` in the response of
+        // `GET /v7/deployments` and of `GET /v13/deployments/{idOrUrl}`.
+        (
+            "vercel docs, list-deployments",
+            "dpl_2euZBFqxYdDMDG1jTrHFnNZ2eUVa",
+        ),
+        (
+            "vercel docs, get-a-deployment",
+            "dpl_89qyp1cskzkLrVicDaZoDbjyHuDJ",
+        ),
+        // A constructed tail of the same length and class mix, so the exemption
+        // is shown to key on the SHAPE rather than on those two literals. Every
+        // entry in this list must mix case AND carry a digit — that is what the
+        // pre-fix detector flagged, so an entry without it would pass in both
+        // the fixed and the broken world and discriminate nothing (#4898 review).
+        (
+            "constructed 28-char tail",
+            "dpl_Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9S",
+        ),
+    ] {
+        assert!(
+            find_secret_token(tok).is_none(),
+            "#7482 ({label}): a public Vercel deployment id must NOT be flagged: \
+             {tok}; got {:?}",
+            find_secret_token(tok)
+        );
+        let prose = format!("Deployment {tok} is live on preview as of this morning");
+        assert!(
+            cfg.apply(&prose, true).is_ok(),
+            "#7482 ({label}): the gate must ACCEPT prose carrying {tok}; got {:?}",
+            cfg.apply(&prose, true)
+        );
+    }
+}
+
+/// Why (issue #7482): the exemption is an allowlist, so it can only LOSE
+/// detection. The corpus the last narrowing (#4898) pinned is re-asserted
+/// against the post-change code rather than assumed intact, and the shapes that
+/// probe the new predicate's own bounds are added to it.
+///
+/// The load-bearing entries are the ones that wear the `dpl_` prefix while
+/// breaking the tail contract. Each must fail for exactly ONE reason, or it
+/// pins nothing (#7482 review round 1 caught a base64 entry that passed on
+/// LENGTH — `find_secret_token` strips the trailing `==` before classification,
+/// so the charset check it was labelled for never ran):
+///
+/// - CHARSET: a `/` INSIDE a tail that is otherwise exactly
+///   `PUBLIC_ID_TAIL_LEN` characters, so only the alphanumeric check can reject
+///   it.
+/// - LENGTH: one character under and one character over the exact tail length,
+///   so either end of the bound fails on loosening.
+/// - CASE: `DPL_`, which Vercel does not mint.
+///
+/// What: asserts every provider-prefix, base64, base64url, JWT, bare-blob,
+/// connection-string and AWS shape stays flagged, then the one-reason near-miss
+/// `dpl_` shapes, then pins the three pre-existing misses of this family.
+/// Test: itself.
+#[test]
+fn real_secrets_still_blocked_after_7482_public_id_exemption() {
+    for (label, tok) in [
+        // LOAD-BEARING for the CHARSET half of the tail contract, and for that
+        // half ALONE: the tail is 28 characters — exactly `PUBLIC_ID_TAIL_LEN` —
+        // so the length check passes and the interior `/` is the only thing that
+        // can reject it. Put a character outside the alphanumeric set anywhere
+        // in the tail and the exemption must decline the token.
+        (
+            "interior slash, tail at the exact length",
+            "dpl_AbCd1234/EfGh5678IjKl9012MnO",
+        ), // pragma: allowlist secret
+        (
+            "interior plus, tail at the exact length",
+            "dpl_AbCd1234+EfGh5678IjKl9012MnO",
+        ), // pragma: allowlist secret
+        (
+            "second underscore, tail at the exact length",
+            "dpl_AbCd1234_EfGh5678IjKl9012MnO",
+        ), // pragma: allowlist secret
+        // LOAD-BEARING for the LENGTH half, at BOTH ends: the bound is one exact
+        // length, so 27 and 29 are the two shapes that catch any loosening of it.
+        (
+            "tail one character short",
+            "dpl_Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9",
+        ), // pragma: allowlist secret
+        (
+            "tail one character long",
+            "dpl_Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St",
+        ), // pragma: allowlist secret
+        // LOAD-BEARING for case sensitivity: Vercel mints `dpl_`, not `DPL_`.
+        ("uppercase prefix", "DPL_Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9S"), // pragma: allowlist secret
+        // The #4898 corpus, re-asserted in full.
+        ("AWS key id", "AKIAIOSFODNN7EXAMPLE"), // pragma: allowlist secret
+        ("AWS STS id", "ASIAY34FZKBOKMUTVV7A"), // pragma: allowlist secret
+        ("AWS key id + suffix", "AKIAIOSFODNN7EXAMPLE-old"), // pragma: allowlist secret
+        ("GitHub PAT", "ghp_abcdefghijklmnopqrstuvwxyz0123456789"), // pragma: allowlist secret
+        ("OpenAI key", "sk-abcdefghijklmnopqrstuvwxyz01234567890123"), // pragma: allowlist secret
+        ("Slack token", "xoxb-1234-5678-abcdEFGH"), // pragma: allowlist secret
+        ("bare mixed-case blob", "AbCd1234EfGh5678IjKl9012"), // pragma: allowlist secret
+        ("base64url token", "AbCd1234EfGh5678IjKl9012_MnOp-QrSt="), // pragma: allowlist secret
+        ("base64 of 15 random bytes", "j1u7nJd+tvZers+wdZyr"), // pragma: allowlist secret
+        (
+            "JWT",
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+        ), // pragma: allowlist secret
+        (
+            "basic-auth URL",
+            "https://admin:Sup3rS3cret@internal.example.com/api",
+        ), // pragma: allowlist secret
+        (
+            "lowercase postgres conn",
+            "postgres://user:password@host/database",
+        ), // pragma: allowlist secret
+    ] {
+        assert!(
+            find_secret_token(tok).is_some(),
+            "#7482 ({label}) must STILL be flagged after the public-id \
+             exemption: {tok}"
+        );
+    }
+
+    // End-to-end, not just the token predicate: the gate is what a write hits.
+    let cfg = FilterConfig::default();
+    for content in [
+        "Deploy creds leaked: access key AKIAIOSFODNN7EXAMPLE in the log", // pragma: allowlist secret
+        "Use this token AbCd1234EfGh5678IjKl9012 to authenticate the webhook", // pragma: allowlist secret
+        "Rotate dpl_AbCd1234_EfGh5678_IjKl9012 before Friday", // pragma: allowlist secret
+    ] {
+        assert!(
+            matches!(
+                cfg.apply(content, false),
+                Err(FilterReject::PotentialSecret { .. })
+            ),
+            "#7482: the gate must still REJECT leaked-credential prose; got {:?}",
+            cfg.apply(content, false)
+        );
+    }
+
+    // KNOWN MISS 1 — THE COST OF THIS EXEMPTION, stated as it actually is
+    // (#7482 review round 1). A deployment id is character-for-character
+    // indistinguishable from any other 28-character alphanumeric run, so a
+    // credential whose body is EXACTLY that long is exempted when written flush
+    // behind the prefix. No predicate separates the two; one exact length is
+    // what shrinks the hole to this single shape (a window of 20..=40 also
+    // swallowed a 24-char Vercel API token, a Google `AIza` key, a 32-char
+    // generic key, a SendGrid body and a base64 blob).
+    //
+    // The two assertions are a PAIR and must be read together: the first shows
+    // the body IS a credential this detector catches, the second shows the
+    // prefix hides it. An assertion on the glued form alone would pass in a
+    // world where the detector caught neither, and discriminate nothing.
+    let body_28 = "AbCd1234EfGh5678IjKl9012MnOp"; // pragma: allowlist secret
+    assert_eq!(body_28.len(), PUBLIC_ID_TAIL_LEN);
+    assert!(
+        find_secret_token(body_28).is_some(),
+        "the 28-char credential body must be flagged BARE, or the miss below \
+         proves nothing about the prefix"
+    );
+    assert!(
+        find_secret_token(&format!("dpl_{body_28}")).is_none(),
+        "KNOWN MISS (#7482, accepted): a credential body of exactly \
+         PUBLIC_ID_TAIL_LEN alphanumeric characters is exempt when glued behind \
+         `dpl_`. This is the documented cost of the exemption, not a defect to \
+         patch with another predicate — the two shapes are identical. If it now \
+         FLAGS, something separated them; delete this assertion and say how."
+    );
+
+    // KNOWN MISS 2, pre-existing and unrelated to #7482: an all-lowercase
+    // `_`-segmented token is a segmented identifier, so a provider key with ANY
+    // lowercase prefix typed in front of it is rescued by `is_structural_token`
+    // branch (c) before the prefix test can see it. The exemption is not
+    // involved — that tail carries a second `_` and is 40 characters, so
+    // `is_public_resource_id` declines it twice over.
+    assert!(
+        find_secret_token("dpl_ghp_abcdefghijklmnopqrstuvwxyz0123456789").is_none(), // pragma: allowlist secret
+        "KNOWN MISS (pre-existing, re-pinned by #7482): the structural rescue \
+         for `_`-segmented lowercase tokens hides a prefixed provider key. If \
+         this now FLAGS, that bypass was closed elsewhere — delete this \
+         assertion rather than widening anything."
+    );
+
+    // KNOWN REJECTION, and the bound on what #7482 fixed: a deployment id inside
+    // a dashboard URL is still refused. `find_secret_token` splits on whitespace
+    // and backticks only, so the whole URL is ONE token and the exemption — a
+    // whole-token predicate — never sees the id as a token at all. Covering it
+    // means teaching `is_readable_path_segment` about public ids, which is shared
+    // with #5513's URL-path-secret corpus; out of scope here, where the reported
+    // evidence is a bare token. Pinned so the next report of the URL form is
+    // recognised as this known gap and not as a regression.
+    assert!(
+        find_secret_token("https://vercel.com/acme/site/dpl_2euZBFqxYdDMDG1jTrHFnNZ2eUVa")
+            .is_some(),
+        "KNOWN REJECTION (#7482 bound): the URL-embedded form of a deployment id \
+         is still flagged — only the bare token is fixed. If this now passes, the \
+         exemption reached into URL path segments; that is a #5513-adjacent \
+         change and needs its corpus re-run."
+    );
+}
+
+/// Why (issue #7482): the exemption is keyed on a literal prefix list, not on a
+/// general notion of "public id". Every other vendor's public id — and every
+/// `dpl_`-shaped token a future provider might mint as a credential — keeps
+/// today's behaviour. Pinning both sides of that bound is what makes a later
+/// widening visible instead of silent.
+/// What: pins the accepted side (the prefix list's exact membership) and the
+/// unchanged side (a neighbouring vendor prefix).
+/// Test: itself.
+#[test]
+fn known_accepted_bounds_after_7482() {
+    assert_eq!(
+        PUBLIC_ID_PREFIXES,
+        &["dpl_"],
+        "KNOWN ACCEPTED BOUND (#7482): exactly one public-id prefix is exempt. \
+         Adding an entry widens the only prefix-keyed bypass in this detector — \
+         state the vendor's id format and its length bound on \
+         `PUBLIC_ID_PREFIXES` first."
+    );
+    // The exemption's width IS this number: every character of slack in it is a
+    // foreign credential body that gets exempted too (see KNOWN MISS 1 in
+    // `real_secrets_still_blocked_after_7482_public_id_exemption`). 28 is what
+    // Vercel's REST API reference documents. Raising it, or turning it back into
+    // a range, must be a deliberate edit with new vendor evidence — not a
+    // by-the-way loosening, which is how the first cut of #7482 shipped a bound
+    // that `4..=40` satisfied just as well.
+    assert_eq!(
+        PUBLIC_ID_TAIL_LEN, 28,
+        "KNOWN ACCEPTED BOUND (#7482): the exempt tail is exactly 28 \
+         alphanumeric characters, per the two `uid` samples in Vercel's REST API \
+         reference. Changing this widens or narrows the blind spot directly."
+    );
+    // A neighbouring Vercel id kind is NOT exempt: `dpl_` is the only prefix
+    // #7482 produced evidence for, and a mixed-case tail still flags. This is
+    // unchanged pre-#7482 behaviour, recorded so the next false positive of this
+    // family is recognised as the same bug rather than a new one.
+    assert!(
+        find_secret_token("prj_5m8CQaRBm3FnPPiRHUBhAhY5RmVy").is_some(),
+        "KNOWN ACCEPTED BOUND (#7482): a Vercel PROJECT id (`prj_`) is not on \
+         the exemption list and still flags. If it now passes, the list grew — \
+         add it to the assertion above."
+    );
+}
