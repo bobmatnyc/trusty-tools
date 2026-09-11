@@ -8,7 +8,9 @@ name = "trusty-agents"
 # 0.39.1: patch bump for a reinstall carrying #6537/#7158 for live verification
 # (owner ruling 2026-09-08 — every reinstall carries a patch bump so
 # `--version` identifies the build); no public API change.
-version = "0.39.1"
+# 0.39.2: patch bump for an owner-authorized reinstall carrying #7454/#7427
+# for live verification; no public API change.
+version = "0.39.2"
 edition = "2024"
 description = "Trusty Agents: Rust-native agentic harness with multi-model routing, tool execution, and subprocess delegation."
 license.workspace = true
