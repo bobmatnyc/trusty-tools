@@ -2,7 +2,7 @@
 
 Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` roster — the authority for which skills are bundled — joined to `bundle::ALL` for each skill's frontmatter via a shared line parser. Every declared skill is `universal`: it deploys to every project, with no detection. Regenerate with `tm generate capabilities`.
 
-52 bundled skills.
+53 bundled skills.
 
 | Skill | Category | User-invocable | Description |
 |---|---|---|---|
@@ -44,6 +44,7 @@ Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` rost
 | `tm-issues-prune` | pm-workflow | yes | Prune, organize, prioritize, and suggest next tasks from a project's GitHub issue backlog — natural-language PM delegation pattern (gh-first, JIRA deferred) |
 | `tm-postmortem` | pm-workflow | yes | Analyze session errors captured across trusty-* daemons and route them through the bug-reporting pipeline |
 | `tm-prose-style` | pm-workflow | yes | Worked examples and banned-phrase inventories behind the Write Plainly voice rules — the BEFORE/AFTER embellishment example, the "instances observed so far" lists, and the ASD-STE-100 spirit adoption. The rules themselves are resident in the output style and in BASE-AGENT.md; this is the evidence behind them. |
+| `tm-secrets` | pm-reference | yes | Operate tm secrets — 1Password / Keeper / macOS Keychain behind trusty-common, reference-key access, and exec-wrapper recipes for gh and other CLI integrations |
 | `tm-session-management` | pm-workflow | yes | PM context-limit pause/resume, project-local session snapshots, worktree pruning, and task-list integration |
 | `tm-session-pause` | pm-workflow | yes | Pause the current PM session — snapshot todos, git state, and context to a project-local session file, prune stale worktrees, and print the resume path |
 | `tm-session-resume` | pm-workflow | yes | Resume from a paused PM session — scan project-local snapshots, validate the project matches, load the latest (or a selected) session, and restore todos and context |

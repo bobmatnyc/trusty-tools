@@ -112,6 +112,7 @@ pub const ALL: &[BundledArtifact] = &[
     overwrite("agents/engineer.md", ENGINEER_AGENT),
     overwrite("agents/qa.md", QA_AGENT),
     overwrite("agents/research.md", RESEARCH_AGENT),
+    overwrite("agents/secrets-manager.md", SECRETS_MANAGER_AGENT),
     overwrite("agents/security.md", SECURITY_AGENT),
     overwrite("agents/documentation.md", DOCUMENTATION_AGENT),
     overwrite("agents/data-engineer.md", DATA_ENGINEER_AGENT),
@@ -183,6 +184,8 @@ pub const ALL: &[BundledArtifact] = &[
     // generalized to every delivery shape, routed through native slack-mcp
     // (ADR-0014) ---
     overwrite("skills/tm-slack.md", TM_SLACK),
+    // --- Issue #7527 (epic #7517): tm secrets operator/PM reference skill ---
+    overwrite("skills/tm-secrets.md", TM_SECRETS),
     // --- DOC-28 R1: canonical self-description doc ---
     overwrite("docs/WHAT-IS-TRUSTY-MPM.md", WHAT_IS_TRUSTY_MPM),
     // --- Issue #2034: architecture doc covering memory/sessions/search ---

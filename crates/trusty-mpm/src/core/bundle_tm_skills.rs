@@ -240,3 +240,17 @@ pub const TM_ISSUES_PRUNE: &str = include_str!("../assets/skills/tm-issues-prune
 /// What: embedded markdown skill file deployed to `skills/tm-slack.md`.
 /// Test: `tm_skills_are_in_bundle`, `tm_skills_have_frontmatter`.
 pub const TM_SLACK: &str = include_str!("../assets/skills/tm-slack.md");
+
+/// `tm secrets` operator/PM reference — store model, command grammar,
+/// exec-only value handoff, copy/import flows, and the "never print a
+/// value" rules (issue #7527, epic #7517).
+///
+/// Why: `tm secrets` is a framework feature (owner clarification on #7517),
+/// so the PM and the bundled `secrets-manager` agent (#7526) need a bundled
+/// skill covering the DOC-74 design without restating it — no `tm secrets`
+/// verb exists in this checkout yet (#7521, #7522, #7525 land the CLI, the
+/// MCP tools, and `exec` respectively), so every command in this skill is
+/// marked with the issue that ships it.
+/// What: embedded markdown skill file deployed to `skills/tm-secrets.md`.
+/// Test: `tm_skills_are_in_bundle`, `tm_skills_have_frontmatter`.
+pub const TM_SECRETS: &str = include_str!("../assets/skills/tm-secrets.md");

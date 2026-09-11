@@ -22,6 +22,7 @@ fn constants_are_non_empty() {
     assert!(!ENGINEER_AGENT.trim().is_empty());
     assert!(!QA_AGENT.trim().is_empty());
     assert!(!RESEARCH_AGENT.trim().is_empty());
+    assert!(!SECRETS_MANAGER_AGENT.trim().is_empty());
     assert!(!SECURITY_AGENT.trim().is_empty());
     assert!(!DOCUMENTATION_AGENT.trim().is_empty());
     assert!(!DATA_ENGINEER_AGENT.trim().is_empty());
@@ -130,6 +131,7 @@ fn tm_skills_are_in_bundle() {
         "skills/tm-issues-prune.md",
         "skills/tm-cli-operations.md",
         "skills/tm-slack.md",
+        "skills/tm-secrets.md",
     ] {
         assert!(
             skill_paths.contains(expected),
@@ -291,6 +293,7 @@ fn tm_skills_have_frontmatter() {
         ("tm-issues-prune", TM_ISSUES_PRUNE),
         ("tm-cli-operations", TM_CLI_OPERATIONS),
         ("tm-slack", TM_SLACK),
+        ("tm-secrets", TM_SECRETS),
     ];
     for (name, content) in skills {
         assert!(
@@ -508,11 +511,18 @@ fn bundle_table_is_complete() {
     // Issue #7423 (+1): `skills/tm-prose-style.md` is NEW — it carries the
     //   worked example and observed-instance inventories the output style and
     //   BASE-AGENT.md used to state inline. 178 + 1 = 179.
-    assert_eq!(ALL.len(), 179);
+    // Issue #7527 (epic #7517) (+1): `skills/tm-secrets.md` is NEW — the
+    //   operator/PM reference for `tm secrets` (1Password/Keeper/Keychain
+    //   behind trusty-common), bundled ahead of the CLI itself (#7521/#7525)
+    //   per the DOC-74 design. 179 + 1 = 180.
+    // Issue #7526 (epic #7517) (+1): `agents/secrets-manager.md` is NEW — the
+    //   bundled framework agent that operates `tm secrets` on behalf of the PM
+    //   and other agents (DOC-74). 180 + 1 = 181.
+    assert_eq!(ALL.len(), 181);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 179, "artifact paths must be unique");
+    assert_eq!(paths.len(), 181, "artifact paths must be unique");
     for artifact in ALL {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());
