@@ -101,7 +101,8 @@
 //! a SHELL is left in place, because it is shell source whose own segments
 //! must still be classified. Program text is lexed before its words are
 //! matched, so a name a shell rejoins out of quoting — `$(cat .en"v")` in a
-//! body, `sh -c 'cat .en"v"'` — denies exactly as it did before round 9 (see
+//! body, `sh -c 'cat .en"v"'` — denies exactly as it did before round 9, and
+//! so does one a `\<newline>` continuation splits across two lines (see
 //! [`secret_files_named_in_program_text`]).
 //!
 //! What this costs, deliberately: naming a secret-shaped file in ANY command
@@ -169,6 +170,7 @@
 //! `a_shell_heredoc_body_stays_live_shell_syntax`,
 //! `denies_a_quote_joined_name_in_a_heredoc_body`,
 //! `denies_a_quote_joined_name_in_an_inline_program`,
+//! `denies_a_name_split_by_a_backslash_newline_continuation`,
 //! `the_program_text_join_keeps_brace_leniency`,
 //! `the_documented_residuals_still_allow`, and the rest of this
 //! module's `tests` submodule. The rule is proved WIRED end to end through the
@@ -625,11 +627,36 @@ fn secret_words_in_segment(segment: &str) -> Vec<String> {
 /// cost the join for the rest. Brace leniency is untouched: the join runs
 /// BEFORE [`names_a_secret_file`], which still reads an unresolvable `{` as
 /// ordinary text under [`Scan::ProgramText`].
+///
+/// Round 11: a per-LINE pass cannot see a name a `\<newline>` CONTINUATION
+/// splits across two lines. The shell removes that pair before any word
+/// splitting — `bash -c "cat <<EOF\n$(echo ab\<newline>cd)\nEOF"` prints
+/// `abcd` — so `$(cat .en\<newline>v)` in a body reads `.env` and ALLOWED on
+/// `8ddc7d438`. The continuation-joined spelling is now scanned ALONGSIDE the
+/// original, so this too only adds denials.
 /// Test: `denies_a_quote_joined_name_in_a_heredoc_body`,
 /// `denies_a_quote_joined_name_in_an_inline_program`,
+/// `denies_a_name_split_by_a_backslash_newline_continuation`,
 /// `allows_program_text_that_only_looks_like_a_brace_group`.
 fn secret_files_named_in_program_text(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
+    push_program_text_words(text, &mut out);
+    // #7266: the shell strips `\<newline>` before it splits words, so the
+    // continuation-joined spelling is a second way to read the same text.
+    let joined = text.replace("\\\n", "");
+    if joined != text {
+        push_program_text_words(&joined, &mut out);
+    }
+    out
+}
+
+/// Append one spelling of PROGRAM TEXT's secret-naming words to `out`.
+///
+/// What: the per-line lexed-and-raw union [`secret_files_named_in_program_text`]
+/// documents. Split out so the same pass runs over the original text and over
+/// its continuation-joined spelling without a second implementation.
+/// Test: see [`secret_files_named_in_program_text`].
+fn push_program_text_words(text: &str, out: &mut Vec<String>) {
     for line in text.lines() {
         // #7266: the lexed spelling and the raw spelling are both scanned —
         // neither is trusted to be the only way the shell reads the line.
@@ -645,7 +672,6 @@ fn secret_files_named_in_program_text(text: &str) -> Vec<String> {
             }
         }
     }
-    out
 }
 
 /// Programs that take an inline PROGRAM behind [`INLINE_PROGRAM_FLAGS`].
@@ -2409,6 +2435,31 @@ mod tests {
         // The inline-program token reaches the same join.
         assert!(eval("sh -c 'cat .en\"v\"'").is_some());
         assert!(eval("awk 'BEGIN {while ((getline l < \".en\"\"v\") > 0) print l}'").is_some());
+    }
+
+    /// Names a `\<newline>` continuation splits across two lines.
+    ///
+    /// Why: critic CRITICAL on 8ddc7d438 — the program-text pass lexed per
+    /// LINE, so the continuation was never removed and each of these ALLOWED
+    /// there. The shell strips `\<newline>` before it splits words:
+    /// `bash -c "cat <<EOF\n$(echo ab\<newline>cd)\nEOF"` prints `abcd`, so an
+    /// unquoted delimiter makes the first row a live read of `.env`.
+    const CONTINUATION_CORPUS: &[&str] = &[
+        "cat <<EOF\n$(cat .en\\\nv)\nEOF",
+        "cat <<EOF\n$(cat '.en'\\\n'v')\nEOF",
+        "python3 <<PY\nopen('.en\\\nv')\nPY",
+        "cat <<EOF\n$(cat terraform.tf\\\nvars)\nEOF",
+        "sh -c 'cat .en\\\nv'",
+    ];
+
+    #[test]
+    fn denies_a_name_split_by_a_backslash_newline_continuation() {
+        for command in CONTINUATION_CORPUS {
+            assert!(
+                eval(command).is_some(),
+                "the shell rejoins this name across the continuation: `{command}`"
+            );
+        }
     }
 
     #[test]
