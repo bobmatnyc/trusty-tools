@@ -12,7 +12,8 @@
 //! truncated file and a crashed writer never destroys the previous config.
 //!
 //! Test: `crates/trusty-mcp/tests/mcp_config.rs` — `toml_round_trip_preserves_extensions`,
-//! `save_creates_parent_directory`, `load_rejects_malformed_toml`.
+//! `save_creates_parent_directory`, `load_rejects_malformed_toml`,
+//! `save_round_trips_config_with_null_extension_value`.
 //!
 //! [`load`]: McpConfigFile::load
 //! [`load_or_default`]: McpConfigFile::load_or_default
@@ -31,9 +32,11 @@ use super::{McpConfigError, McpServerConfig};
 /// whole workspace. This module cannot import it — `trusty-common` is an
 /// optional dependency behind `daemon-bridge-json-rpc`, and making `config`
 /// pull it in would undo the lean-rlib property ADR-0040 protects — so the
-/// constant is mirrored here and must stay equal to it.
+/// constant is mirrored here and must stay equal to it. A `[dev-dependencies]`
+/// edge on `trusty-common` lets the test assert that equality without the
+/// `config` feature carrying the dependency at runtime.
 /// What: `".trusty-tools"`.
-/// Test: `default_path_at_layout`.
+/// Test: `default_path_at_layout`, `mirrored_trusty_tools_dir_matches_trusty_common`.
 pub const TRUSTY_TOOLS_DIR: &str = ".trusty-tools";
 
 /// The MCP subdirectory within that tree.
@@ -167,15 +170,31 @@ impl McpConfigFile {
     /// bearer tokens, and the default umask would leave them world-readable.
     /// The mode is set on the temporary file, which the rename carries over,
     /// so the config is never briefly readable at its real path.
+    ///
+    /// A JSON null anywhere in an [`extensions`] map is handled before
+    /// rendering, because `toml` refuses one with the bare string
+    /// `unsupported unit type` and names neither the server nor the key — one
+    /// absent optional field would make the whole file unsavable with nothing
+    /// saying which field. A null MEMBER of an object (including a top-level
+    /// `extensions` key) is dropped, which is what a consumer serialising an
+    /// `Option::None` means. A null ELEMENT of an array returns
+    /// [`McpConfigError::NullExtensionValue`] naming the server and the dotted
+    /// key, because dropping it would renumber the surviving elements.
     /// Test: `toml_round_trip_preserves_extensions`, `save_creates_parent_directory`,
     /// `save_rejects_duplicate_names`, `save_replaces_existing_file`,
-    /// `saved_config_file_is_owner_only`.
+    /// `saved_config_file_is_owner_only`,
+    /// `save_round_trips_config_with_null_extension_value`,
+    /// `save_rejects_null_inside_an_extension_array`.
+    ///
+    /// [`extensions`]: McpServerConfig::extensions
     pub fn save(&self, path: &Path) -> Result<(), McpConfigError> {
         self.reject_duplicate_names(path)?;
-        let rendered = toml::to_string_pretty(self).map_err(|e| McpConfigError::Serialize {
-            path: path.to_path_buf(),
-            message: e.to_string(),
-        })?;
+        let renderable = self.without_null_extensions(path)?;
+        let rendered =
+            toml::to_string_pretty(&renderable).map_err(|e| McpConfigError::Serialize {
+                path: path.to_path_buf(),
+                message: e.to_string(),
+            })?;
 
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|source| McpConfigError::Io {
@@ -200,6 +219,30 @@ impl McpConfigFile {
         })
     }
 
+    /// A copy of this config whose `extensions` hold no JSON null.
+    ///
+    /// Why: kept separate from [`save`](Self::save) so the sanitising is one
+    /// named step rather than a branch inside the write path, and so the
+    /// caller's own config is never mutated by saving it.
+    /// What: clones, then drops every null object member — top-level
+    /// `extensions` keys included — and errors on the first null array
+    /// element. An object left empty by the drop stays, rendering as an empty
+    /// TOML table, because absence and "present but empty" are different
+    /// answers to a consumer reading the key back.
+    /// Test: `save_round_trips_config_with_null_extension_value`,
+    /// `save_rejects_null_inside_an_extension_array`.
+    fn without_null_extensions(&self, path: &Path) -> Result<Self, McpConfigError> {
+        let mut out = self.clone();
+        for server in &mut out.servers {
+            let name = server.name.clone();
+            for (key, value) in server.extensions.iter_mut() {
+                strip_null_members(value, &name, key, path)?;
+            }
+            server.extensions.retain(|_, value| !value.is_null());
+        }
+        Ok(out)
+    }
+
     /// Fail when two servers claim one name.
     ///
     /// Why: names are the key overrides match on, so a duplicate makes
@@ -219,6 +262,51 @@ impl McpConfigFile {
             }
         }
         Ok(())
+    }
+}
+
+/// Drop null members of `value` in place, refusing a null array element.
+///
+/// Why: the recursive half of
+/// [`without_null_extensions`](McpConfigFile::without_null_extensions). A
+/// consumer's `Option::None` can sit at any depth once it serialises a nested
+/// struct into `extensions`, so checking only the top level would leave the
+/// same unnamed `unsupported unit type` failure one field deeper.
+/// What: for an object, removes null members and recurses into what remains;
+/// for an array, errors on a null element and recurses into the rest; every
+/// scalar is left alone. `key_path` accumulates the dotted and indexed path so
+/// the error names the exact location (`auth.endpoints[1]`).
+/// Test: `save_round_trips_config_with_null_extension_value`,
+/// `save_rejects_null_inside_an_extension_array`.
+fn strip_null_members(
+    value: &mut serde_json::Value,
+    server: &str,
+    key_path: &str,
+    path: &Path,
+) -> Result<(), McpConfigError> {
+    match value {
+        serde_json::Value::Object(members) => {
+            members.retain(|_, member| !member.is_null());
+            for (key, member) in members.iter_mut() {
+                strip_null_members(member, server, &format!("{key_path}.{key}"), path)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Array(items) => {
+            for (index, item) in items.iter_mut().enumerate() {
+                let child = format!("{key_path}[{index}]");
+                if item.is_null() {
+                    return Err(McpConfigError::NullExtensionValue {
+                        path: path.to_path_buf(),
+                        server: server.to_string(),
+                        key: child,
+                    });
+                }
+                strip_null_members(item, server, &child, path)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
     }
 }
 

@@ -139,6 +139,20 @@ fn default_path_at_layout() {
 }
 
 #[test]
+fn mirrored_trusty_tools_dir_matches_trusty_common() {
+    // `config::file` mirrors the constant instead of importing it, so that the
+    // `config` feature does not pull `trusty-common` into the lean rlib
+    // ADR-0040 protects. Nothing but this assertion keeps the copy honest: a
+    // rename on either side would otherwise leave the MCP config file at a
+    // path no other trusty-* crate looks in.
+    assert_eq!(
+        trusty_mcp::config::file::TRUSTY_TOOLS_DIR,
+        trusty_common::crate_config::TRUSTY_TOOLS_DIR,
+        "the mirrored copy drifted from the workspace-wide constant"
+    );
+}
+
+#[test]
 fn toml_round_trip_preserves_extensions() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("nested").join("servers.toml");
@@ -225,6 +239,84 @@ fn saved_config_file_is_owner_only() {
         mode, 0o600,
         "env and headers hold credentials, so the file must not be group- or world-readable"
     );
+}
+
+#[test]
+fn save_round_trips_config_with_null_extension_value() {
+    // trusty-agents' auth block goes in `extensions` under #7454, and a struct
+    // with an `Option::None` field serialises to a JSON null. TOML has no
+    // null, so `toml::to_string_pretty` used to fail the WHOLE file with the
+    // bare string "unsupported unit type", naming neither server nor key.
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("servers.toml");
+
+    let mut server = stdio("agents", "tagent", &["serve"]);
+    // A top-level null, the shape a whole absent optional block takes.
+    server
+        .extensions
+        .insert("auth".into(), serde_json::Value::Null);
+    // A null nested one level down, beside a sibling that must survive.
+    server.extensions.insert(
+        "discovery".into(),
+        json!({"ttl_secs": 900, "last_seen": null}),
+    );
+    // And one two levels down, inside an object inside an array.
+    server.extensions.insert(
+        "scopes".into(),
+        json!([{"name": "memory:read", "expires_at": null}]),
+    );
+
+    let original = McpConfigFile::new(vec![server]);
+    original
+        .save(&path)
+        .expect("a null extension must not fail the save");
+
+    let loaded = McpConfigFile::load(&path).expect("load");
+    let ext = &loaded.servers[0].extensions;
+    assert!(
+        !ext.contains_key("auth"),
+        "a wholly null extension is dropped, not rendered: {ext:?}"
+    );
+    assert_eq!(
+        ext["discovery"],
+        json!({"ttl_secs": 900}),
+        "the null member goes, its sibling stays"
+    );
+    assert_eq!(
+        ext["scopes"],
+        json!([{"name": "memory:read"}]),
+        "nulls are stripped at any depth"
+    );
+}
+
+#[test]
+fn save_rejects_null_inside_an_extension_array() {
+    // Dropping an array element renumbers the rest, so this one fails closed
+    // instead — and says which server and which key, which the `toml` error
+    // never did.
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("servers.toml");
+
+    let mut server = stdio("agents", "tagent", &[]);
+    server
+        .extensions
+        .insert("scopes".into(), json!(["memory:read", null]));
+
+    let err = McpConfigFile::new(vec![server])
+        .save(&path)
+        .expect_err("a null array element is not representable");
+    match &err {
+        McpConfigError::NullExtensionValue { server, key, .. } => {
+            assert_eq!(server, "agents");
+            assert_eq!(key, "scopes[1]");
+        }
+        other => panic!("expected NullExtensionValue, got {other:?}"),
+    }
+    assert!(
+        err.to_string().contains("scopes[1]"),
+        "the operator is told which key to fix: {err}"
+    );
+    assert!(!path.exists(), "a refused save writes nothing");
 }
 
 #[test]
@@ -401,6 +493,33 @@ fn resolve_set_reenables_disabled_global() {
 
     assert_eq!(got.len(), 1);
     assert!(got[0].enabled, "the override's enabled flag wins outright");
+}
+
+#[test]
+fn resolve_set_with_enabled_false_stays_disabled_in_output() {
+    // The mirror of `resolve_set_reenables_disabled_global`, and the reason
+    // `Disable` is a separate variant rather than a synonym for this: a `Set`
+    // carrying `enabled = false` STAYS in the list, disabled, so a consumer
+    // can still see the entry it is choosing not to connect to. `Disable`
+    // removes it outright. Nothing else pinned that difference.
+    let global = vec![
+        stdio("memory", "trusty-mcp", &["memory"]),
+        stdio("b", "b", &[]),
+    ];
+
+    let mut off = stdio("memory", "trusty-mcp", &["memory"]);
+    off.enabled = false;
+    let got = resolve(&global, &[McpServerOverride::Set(off)]);
+
+    assert_eq!(
+        got.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+        ["memory", "b"],
+        "a disabled Set keeps the global entry's position, unlike Disable"
+    );
+    assert!(
+        !got[0].enabled,
+        "the override's enabled flag wins in this direction too"
+    );
 }
 
 #[test]

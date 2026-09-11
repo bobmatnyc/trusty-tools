@@ -86,3 +86,14 @@ config = ["dep:toml", "dep:thiserror"]
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
 tempfile = { workspace = true }
+# #7452: `config::file::TRUSTY_TOOLS_DIR` hand-mirrors
+# `trusty_common::crate_config::TRUSTY_TOOLS_DIR` rather than importing it, so
+# that the `config` feature does not drag `trusty-common` into the lean rlib
+# ADR-0040 protects. `mirrored_trusty_tools_dir_matches_trusty_common` asserts
+# the two strings are equal, which needs the real constant — hence a
+# DEV-dependency: cargo builds dev-dependencies only for test, bench and
+# example targets, so `cargo check -p trusty-mcp` and `cargo check --workspace`
+# (lib and bins only) still compile none of it. `crate-config` is the minimal
+# feature that compiles the module holding the constant; trusty-common's
+# default feature set is empty, so without it the module is absent.
+trusty-common = { workspace = true, features = ["crate-config"] }

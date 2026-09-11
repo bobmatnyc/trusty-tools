@@ -29,8 +29,12 @@ use super::McpServerConfig;
 /// globally configured server switched off should not have to restate the
 /// server's entire transport to say so.
 /// What: `Set` supplies a complete replacement (or an addition, when the name
-/// is not in the global list); `Disable` removes the global entry by name.
-/// Test: `resolve_set_replaces_wholesale`, `resolve_disable_removes_global_entry`.
+/// is not in the global list); `Disable` removes the global entry by name. A
+/// `Set` carrying `enabled = false` is the third answer and not a synonym for
+/// either: the entry stays in the output, disabled, so a consumer can still
+/// see what it is choosing not to connect to.
+/// Test: `resolve_set_replaces_wholesale`, `resolve_disable_removes_global_entry`,
+/// `resolve_set_with_enabled_false_stays_disabled_in_output`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum McpServerOverride {

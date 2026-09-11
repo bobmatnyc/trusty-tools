@@ -53,7 +53,8 @@ pub use resolve::{McpServerOverride, resolve};
 /// parse failures carry the offending path; the Claude-Code variants carry the
 /// entry name instead, because those functions are pure and never see a file.
 /// Test: `load_missing_file_is_io_error`, `load_rejects_malformed_toml`,
-/// `load_rejects_duplicate_names`, `read_rejects_unknown_transport`.
+/// `load_rejects_duplicate_names`, `read_rejects_unknown_transport`,
+/// `save_rejects_null_inside_an_extension_array`.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum McpConfigError {
@@ -91,6 +92,24 @@ pub enum McpConfigError {
         path: PathBuf,
         /// The name that appears more than once.
         name: String,
+    },
+
+    /// An `extensions` value holds a JSON null TOML cannot represent.
+    ///
+    /// Carries the server and the dotted path to the null, because the
+    /// underlying `toml` error is the bare string `unsupported unit type` and
+    /// names neither — see [`McpConfigFile::save`](file::McpConfigFile::save).
+    #[error(
+        "MCP server {server:?} in {path}: extension {key} is null, and TOML has no null; \
+         dropping it would renumber the array"
+    )]
+    NullExtensionValue {
+        /// The file the save was destined for.
+        path: PathBuf,
+        /// The server whose `extensions` carry the null.
+        server: String,
+        /// Dotted path to the null within that server's `extensions`.
+        key: String,
     },
 
     /// The home directory could not be determined, so no default path exists.
@@ -273,6 +292,15 @@ pub struct McpServerConfig {
     pub transport: McpTransport,
 
     /// Consumer-specific keys, never interpreted by this crate.
+    ///
+    /// A null here is dropped on save — TOML has no null, and a consumer
+    /// serialising a struct with an `Option::None` field produces one. A null
+    /// INSIDE an array is refused instead, because dropping an element
+    /// renumbers the rest. See
+    /// [`McpConfigFile::save`](file::McpConfigFile::save).
+    // See #7454: the derived `Debug` prints these values verbatim. Redaction
+    // stops at `transport`, so a consumer that stores a token here (the auth
+    // block) leaks it into any formatted config.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extensions: BTreeMap<String, serde_json::Value>,
 }
