@@ -74,6 +74,24 @@ fn compact_tool_response(response: &Value) -> Option<Value> {
     (!out.is_empty()).then_some(Value::Object(out))
 }
 
+/// Which tools' `tool_response` the daemon is given (#2864, #7487).
+///
+/// Why: the projection is an ALLOWLIST, not a filter — a `tool_response` is
+/// unbounded output and every tool not named here forwards none of it. Two
+/// tools earn it: a subagent dispatch, whose response carries the `agentId`
+/// that joins `tool_use_id` to `SubagentStop`, and `TaskStop`, whose response
+/// is the only signal that a cancellation actually took.
+/// What: [`is_subagent_dispatch_tool`](trusty_mpm::core::agent::is_subagent_dispatch_tool)
+/// or an exact [`TASK_STOP_TOOL`](trusty_mpm::core::agent::TASK_STOP_TOOL)
+/// match.
+/// Test: `compacts_tool_response_to_correlation_keys`,
+/// `forwards_the_task_stop_tool_response`,
+/// `forwards_no_tool_response_for_an_ordinary_tool`.
+fn carries_tool_response(tool_name: &str) -> bool {
+    trusty_mpm::core::agent::is_subagent_dispatch_tool(tool_name)
+        || tool_name == trusty_mpm::core::agent::TASK_STOP_TOOL
+}
+
 /// Build the `payload` object for one `POST /hooks` relay.
 ///
 /// Why: one place that decides what the daemon is told about a hook event, so
@@ -128,9 +146,11 @@ pub(crate) fn build_hook_payload(
         }
     }
 
-    // #2864: the dispatch response, compacted, and only for a subagent-dispatch
-    // tool — this is where `agentId` comes from.
-    if tool_name.is_some_and(trusty_mpm::core::agent::is_subagent_dispatch_tool)
+    // #2864: the dispatch response, compacted — this is where `agentId` comes
+    // from. #7487 adds `TaskStop`, whose response is the only thing that says
+    // whether the stop actually took; without it the daemon would release a
+    // shared-tree claim on a stop that failed and the agent is still writing.
+    if tool_name.is_some_and(carries_tool_response)
         && let Some(response) = stdin.get("tool_response")
         && let Some(compact) = compact_tool_response(response)
     {
@@ -286,5 +306,40 @@ mod tests {
         assert!(p.get("agent_id").is_none());
         assert!(p.get("tool_use_id").is_none());
         assert!(p.get("transcript_path").is_none());
+    }
+
+    /// 🔴 #7487: `TaskStop`'s response is the only thing on the wire that says
+    /// whether a cancellation took, and the daemon releases a shared-tree claim
+    /// on it. Without this forward the daemon cannot tell a stop that failed
+    /// from one that succeeded. Fails on c7eb75d5b, which forwarded a
+    /// `tool_response` for dispatch tools alone.
+    #[test]
+    fn forwards_the_task_stop_tool_response() {
+        let stdin = serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "TaskStop",
+            "tool_use_id": "toolu_stop",
+            "tool_input": { "task_id": "a403cdbc078b5c474" },
+            "tool_response": { "is_error": true, "stderr": "no such task" }
+        });
+        let p = build_hook_payload("/w", Some(&stdin), None);
+        assert_eq!(p["input"]["task_id"], "a403cdbc078b5c474");
+        assert_eq!(p["tool_response"]["is_error"], true);
+        // Still an allowlist: the bulk field never travels.
+        assert!(p["tool_response"].get("stderr").is_none());
+    }
+
+    /// The forward stays an ALLOWLIST — an ordinary tool's response is dropped
+    /// whole, however small it looks.
+    #[test]
+    fn forwards_no_tool_response_for_an_ordinary_tool() {
+        let stdin = serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": { "command": "ls" },
+            "tool_response": { "is_error": false }
+        });
+        let p = build_hook_payload("/w", Some(&stdin), None);
+        assert!(p.get("tool_response").is_none());
     }
 }

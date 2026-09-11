@@ -327,6 +327,17 @@ pub fn shared_tree_dispatch_op(
             );
         });
 
+    // #7487: `eligible && !claimed` IS the guard's deny — `claimed` is
+    // `eligible && occupants.is_empty()`, and `evaluate_shared_tree_dispatch`
+    // denies on exactly that non-empty answer. The dispatch will not run, so the
+    // record the tracker's own `matcher: "*"` hook writes for it (before or
+    // after this call) must not go on occupying the tree.
+    if eligible && !claimed {
+        crate::daemon::services::delegation_tracker::release_denied_dispatch(
+            state, session, payload,
+        );
+    }
+
     Ok(writers_response(&names, claimed))
 }
 

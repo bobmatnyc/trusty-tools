@@ -115,8 +115,8 @@ use chrono::Utc;
 use serde_json::Value;
 
 use crate::core::agent::{
-    Delegation, DelegationId, DelegationSource, DelegationStatus, ModelTier, TOOL_RESPONSE_KEYS,
-    is_subagent_dispatch_tool,
+    Delegation, DelegationId, DelegationSource, DelegationStatus, ModelTier, TASK_STOP_TOOL,
+    TOOL_RESPONSE_KEYS, is_subagent_dispatch_tool,
 };
 use crate::core::dispatch_isolation::{dispatch_isolation, isolation_separates_working_tree};
 use crate::core::hook::HookEvent;
@@ -149,8 +149,9 @@ const DEDUP_WINDOW_SECS: i64 = 120;
 /// calls, so the hook pipeline gains delegation tracking by way of one line and
 /// all the correlation rules stay here.
 /// What: routes a subagent-dispatch `PreToolUse` to [`on_dispatch`], its
-/// `PostToolUse`/`PostToolUseFailure` to [`on_launched`], and
-/// `SubagentStop`/`SubagentStopFailure` to [`on_subagent_stop`]. Every other
+/// `PostToolUse`/`PostToolUseFailure` to [`on_launched`], a `PostToolUse` on
+/// any OTHER tool to [`on_task_stop`] (which acts only on `TaskStop`, #7487),
+/// and `SubagentStop`/`SubagentStopFailure` to [`on_subagent_stop`]. Every other
 /// event returns immediately. Never panics and never blocks; a payload missing
 /// the fields it needs is skipped silently (fail-open — tracking is
 /// observational and must never affect the hook verdict).
@@ -173,6 +174,10 @@ pub fn observe(state: &DaemonState, session: SessionId, event: HookEvent, payloa
         HookEvent::PostToolUse | HookEvent::PostToolUseFailure => {
             if dispatch_tool(payload).is_some() {
                 on_launched(state, session, payload, event);
+            } else if event == HookEvent::PostToolUse {
+                // #7487: a stopped agent emits no `SubagentStop`, so this is the
+                // only signal that its claim on a shared tree is over.
+                on_task_stop(state, session, payload);
             }
         }
         HookEvent::SubagentStop | HookEvent::SubagentStopFailure => {
@@ -180,6 +185,157 @@ pub fn observe(state: &DaemonState, session: SessionId, event: HookEvent, payloa
         }
         _ => {}
     }
+}
+
+/// Does this `tool_response` say the call it answers FAILED (#7487)?
+///
+/// Why: `TaskStop` "returns a success or failure status", and a stop that did
+/// not take leaves the agent running in the tree. The wire shape is
+/// `is_error` — the one [`TOOL_RESPONSE_KEYS`] member whose meaning is the same
+/// for every tool, and the same key [`on_launched`] already trusts for exactly
+/// this question. `HookEvent::PostToolUseFailure` is NOT the production signal:
+/// no hook block `tm` writes registers that name, so it can never arrive.
+/// What: `true` only for an explicit `is_error: true`. An absent, non-object or
+/// `is_error`-less response is "cannot tell", which does not refuse — see
+/// [`on_task_stop`]'s own note on why that is the right direction here.
+/// Test: `a_failed_task_stop_releases_nothing`,
+/// `a_task_stop_with_no_response_still_releases`.
+fn stop_reported_failure(payload: &Value) -> bool {
+    payload
+        .get("tool_response")
+        .and_then(|r| r.get("is_error"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// `TaskStop` returned: the agent it names is gone, so release its claim.
+///
+/// Why: the tracker terminalizes on `SubagentStop`, and a subagent cancelled
+/// with `TaskStop` emits none — it is killed, it does not finish. Its record
+/// therefore stayed live for the six hours of `RUNNING_STALE_AFTER_SECS`, and
+/// [`crate::daemon::state::DaemonState::shared_tree_occupants`] kept naming it,
+/// so every later unisolated file-mutating dispatch into that directory was
+/// denied for a collision that had already ended. Observed 2026-09-11: one
+/// stopped `qa` agent blocked the cwd for the rest of the session (#7487).
+/// What: on the `PostToolUse` for a successful `TaskStop`, terminalizes the
+/// delegation whose `agent_id` equals the stopped `task_id` with
+/// [`DelegationStatus::Cancelled`] — the status that already exists for exactly
+/// this fact, and is terminal, so nothing counts the record as a writer again.
+/// Returns whether it wrote.
+///
+/// Three refusals:
+/// * [`stop_reported_failure`] — the stop did not take, so the agent is still
+///   in the tree and releasing it would admit a second writer.
+/// * No `task_id` (nor its deprecated `shell_id` alias) matches nothing.
+/// * A `task_id` naming a background shell, a teammate, or an agent this
+///   session never dispatched matches no record and writes nothing. The match
+///   is on `agent_id` alone — the exact key `SubagentStop` uses — because a
+///   "most recent live record" guess would close the wrong one under
+///   concurrency, which is what the module note forbids. A dispatch whose
+///   `agent_id` was never taught is unreachable here for the same reason it is
+///   unreachable by a stop; the staleness sweep remains its only route out.
+///
+/// # A response that says nothing releases, and that is deliberate
+///
+/// This is the module's ONE fail-open branch, chosen against its own default
+/// because the alternative is worse HERE. `TaskStop`'s response shape is not
+/// pinned by any contract this repo owns, and `tm hook`'s projection keeps only
+/// [`TOOL_RESPONSE_KEYS`] — so a plain-string or `is_error`-less answer yields
+/// no forwarded response at all. Requiring positive proof of success would then
+/// release nothing, ever, which is #7487 itself reinstated silently and
+/// invisibly to every test. Refusing on the one shape that positively says
+/// "failed" closes the hazard the response can actually express; the residual
+/// is a stop that failed and said so in a spelling this cannot read, whose cost
+/// is the pre-#7487 six-hour lock arriving by a different route.
+///
+/// Test: `a_task_stop_releases_the_stopped_agents_claim`,
+/// `a_failed_task_stop_releases_nothing`,
+/// `a_task_stop_with_no_response_still_releases`,
+/// `a_task_stop_naming_an_unknown_id_terminalizes_nothing`.
+fn on_task_stop(state: &DaemonState, session: SessionId, payload: &Value) -> bool {
+    if payload.get("tool").and_then(Value::as_str) != Some(TASK_STOP_TOOL) {
+        return false;
+    }
+    if stop_reported_failure(payload) {
+        tracing::debug!("delegation: a TaskStop reported failure — the agent stays live (#7487)");
+        return false;
+    }
+    let Some(task_id) = payload
+        .get("input")
+        .and_then(|i| i.get("task_id").or_else(|| i.get("shell_id")))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    else {
+        return false;
+    };
+    let Some(id) = state.find_delegation(session, |d| {
+        d.agent_id.as_deref() == Some(task_id) && !d.status.is_terminal()
+    }) else {
+        return false;
+    };
+    tracing::info!(
+        task_id,
+        "delegation: a TaskStop cancelled this agent — releasing the tree it claimed (#7487)"
+    );
+    state.terminate_delegation(id, DelegationStatus::Cancelled)
+}
+
+/// The guard denied this dispatch: it never ran, so it holds nothing (#7487).
+///
+/// Why: two `PreToolUse` hooks see one dispatch. `tm hook --pm-guard` decides,
+/// and the `matcher: "*"` tracker hook records — independently, and whatever
+/// the guard decided. A denied dispatch therefore left a live record carrying
+/// its `cwd`, which [`crate::daemon::state::DaemonState::shared_tree_occupants`]
+/// then counted as a writer, so the deny for one collision manufactured the
+/// next one. Observed 2026-09-11: the second refusal named "qa, rust-engineer",
+/// the `rust-engineer` being the dispatch the guard had just refused (#7487).
+/// What: with the dispatch-record lock held, terminalizes the record carrying
+/// this `tool_use_id` as [`DelegationStatus::Cancelled`], or writes one in that
+/// status when none exists yet. Returns whether it wrote.
+///
+/// The write-when-absent arm is not bookkeeping for its own sake: the two hooks
+/// race, so the tracker's POST can land AFTER this one. A terminal record on the
+/// `tool_use_id` is what [`on_dispatch_locked`]'s existing idempotence check
+/// then finds, so the late observation records nothing rather than resurrecting
+/// the claim this call just released. The lock is what makes those two orders
+/// converge instead of one of them deciding.
+///
+/// Scope: the shared-tree dispatch route only. The grant route's own denial is a
+/// different shape — the guard rewrites the payload there — and is not addressed
+/// here.
+/// Test: `a_late_observation_of_a_denied_dispatch_records_nothing`,
+/// `a_denied_dispatch_cancels_a_record_the_tracker_already_wrote`.
+pub fn release_denied_dispatch(state: &DaemonState, session: SessionId, payload: &Value) -> bool {
+    let Some(tool_use_id) = field(payload, "tool_use_id") else {
+        return false;
+    };
+    let _guard = state.dispatch_record_guard();
+    if let Some(id) =
+        state.find_delegation(session, |d| d.tool_use_id.as_deref() == Some(tool_use_id))
+    {
+        return state.mutate_delegation(id, |d| {
+            if !d.status.is_terminal() {
+                d.status = DelegationStatus::Cancelled;
+                d.ended_at = Some(Utc::now());
+            }
+        });
+    }
+    let input = payload.get("input");
+    let agent = input
+        .and_then(|i| i.get("subagent_type"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let task = input
+        .and_then(|i| i.get("description"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let mut delegation = Delegation::observed(session, agent, task, Some(tool_use_id.to_string()));
+    delegation.cwd = field(payload, "cwd").map(std::path::PathBuf::from);
+    delegation.isolation = dispatch_isolation(input).map(str::to_string);
+    delegation.status = DelegationStatus::Cancelled;
+    delegation.ended_at = Some(Utc::now());
+    state.upsert_delegation(delegation);
+    true
 }
 
 /// The tool name, when this payload names a subagent-dispatch tool.
