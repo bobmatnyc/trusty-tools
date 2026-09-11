@@ -3,7 +3,7 @@
 **Status:** Draft  
 **Subsystem:** trusty-agents — product vision / agent model / eventstream processing  
 **Owner:** Engineering (trusty-agents) / Bob Matsuoka  
-**Last-updated:** 2026-07-24  
+**Last-updated:** 2026-09-11  
 **Spec ID:** `SPEC-AGENTS-01~draft` … `SPEC-AGENTS-08~draft` (DOC-54)
 
 ---
@@ -11,6 +11,50 @@
 ## 1. Executive Summary
 
 Trusty Agents is a personal-productivity agent platform focused on three things: **tasks** (user-facing workstreams), **workstreams** (resumable, agent-tagged memory history), and **eventstream processing** (the primary capability). The product is NOT a general coding/project-work agent — that domain belongs to Co-work. Instead, Trusty Agents connects assistants to event sources (Gmail, Google Calendar, Slack, etc.), delivers events as they arrive, asks how to respond, learns preferences in trusty-memory, and adapts over time. All agents are declarative-only, instantiated from templates into local configuration packages, never coded.
+
+---
+
+## 1a. 1.0 Scope — the Assistant Platform (owner, 2026-09-11)
+
+The owner set six items as the 1.0 assistant-platform scope for `trusty-agents`
+and `trusty-agents-common`, reviewed 2026-09-11 (epic #7425). Evidence for the
+current-state gap against each item:
+`docs/research/trusty-agents-1.0-gap-analysis-2026-09-11.md`.
+
+1. **Two crates, not three.** `trusty-agents` and `trusty-agents-common` are
+   the only agents crates; `trusty-agents-local` folds away — it is a
+   15-line pass-through binary with no remaining reason to exist. (#7359)
+2. **Two-way channel connectors.** gworkspace, Slack, Telegram, and Notion are
+   native connectors with messages IN and OUT, configured per Assistant — not
+   one-way ingestion sources. Today Telegram is send-only and gworkspace is
+   not modeled as a bound channel (`crates/trusty-agents/src/tools/channel.rs`
+   `context()`). (#7427)
+3. **One memory palace per Assistant, opt-in fan-out.** Each Assistant has one
+   trusty-memory palace. Reading another Assistant's palace requires that
+   Assistant to be selected in settings — it is never automatic. §5.1 above
+   amends the prior "no shared stores" framing. (#7428)
+4. **One search index per Assistant, multiple roots.** Each Assistant has one
+   trusty-search index, not one index per source. The OKG tree is one root;
+   each attached project is another root. No concurrent fan-out across
+   separate named indexes. Supersedes DOC-63 §10.2/§10.5 and the two-index
+   framing in `agent-config-five-sections.md` §4.7. (#7429)
+5. **Projects per Assistant or per chat thread.** A project's path is
+   auto-added as a root of the Assistant's index on attachment. Assistant
+   projects are configured in settings. (#4358)
+6. **Chat attachments as objects.** Text, binary, and CSV attachments on a
+   chat thread render as thumbnail, click-expandable objects, stored at
+   `<assistant home>/attachments/<session>/<file>`
+   (`AssistantHome::attachments_dir`, sibling to `AssistantHome::okg_dir` —
+   `crates/trusty-agents/src/assistants/home.rs`). (#7370)
+7. **OKG-only exposed knowledge graph.** The graph a user or agent can browse
+   carries only OKG triples and definitions. Memory drawers are never exposed
+   through it; they stay fenced behind the untrusted-content boundary
+   (DOC-63 §6). (#7430)
+
+Scope boundary: changes for these items land in `trusty-agents`,
+`trusty-agents-common`, and (for item 1) the retirement of
+`trusty-agents-local`. `trusty-kb`, `trusty-channels`, and `trusty-gworkspace`
+are consumed as dependencies, not modified as part of this epic.
 
 ---
 
@@ -119,8 +163,18 @@ specialist and delegated agents do not receive independent stores.
 [DOC-57 §4.7](./agent-config-five-sections.md#SPEC-AGENTCFG-03~draft) governs
 project/channel business-entity extraction, monthly history, and ongoing updates.
 
-- **Contents:** The agent's OKF knowledge tree (structured markdown KG) + search index over that tree.
-- **Cross-agent knowledge:** Flows via agent-to-agent communication (via MCP tools or chat), NOT via shared stores.
+- **Contents:** The agent's OKF knowledge tree (structured markdown KG) + one
+  trusty-search index over that tree, with an additional root per attached
+  project (**superseded 2026-09-11** from a two-index design — one for the
+  tree, one per project — by the one-index-multiple-roots model; #7425,
+  tracked for search in #7429).
+- **Cross-agent knowledge:** **Superseded 2026-09-11** ("flows via
+  agent-to-agent communication, NOT via shared stores") by the owner's
+  one-memory-palace-per-assistant model: each Assistant has one trusty-memory
+  palace, and cross-assistant reads happen only as an opt-in fan-out to
+  another Assistant's palace, selected in that Assistant's settings (#7425,
+  tracked in #7428). Agent-to-agent communication (MCP tools or chat) remains
+  a separate path and is not replaced by palace fan-out.
 - **Configuration:** `agent.toml` lists the store name; the harness initializes/attaches it on agent startup.
 
 ### 5.2 Tools (Actions): MCP allow-list
@@ -486,9 +540,10 @@ Focused context is a **starting point, not a wall**. The agent has full agency:
 | Listeners as inbound API bindings, NOT MCP tools; two-stage filtering (listener-level + per-agent) | 2026-07-24 | #3820 |
 | Gmail: Pub/Sub pull + history.list fallback; Calendar: syncToken polling | 2026-07-24 | #3820 |
 | Eventstream processing is primary product focus | 2026-07-24 | #3798 |
-| One OKG store per agent; cross-agent knowledge via agent-to-agent communication | 2026-07-24 | 3820 (config triple discussion) |
+| One OKG store per agent; cross-agent knowledge via agent-to-agent communication (superseded 2026-09-11 — see below) | 2026-07-24 | 3820 (config triple discussion) |
 | Demo three agents: Izzie (personal), CTO Assistant (work), Concierge (fixed/ctrl) | 2026-07-24 | #3818, #3816 |
 | Declarative-only agents (no coded agents) | 2026-07-16 | #2791, reaffirmed 2026-07-24 |
+| 1.0 assistant-platform scope: 2 crates; two-way channels; one memory palace per Assistant with opt-in fan-out; one search index per Assistant with multiple roots; projects per Assistant/thread; chat attachments as objects; OKG-only exposed graph | 2026-09-11 | #7425 (epic), #7359/#7427/#7428/#7429/#4358/#7370/#7430 |
 
 ---
 
@@ -519,15 +574,32 @@ Focused context is a **starting point, not a wall**. The agent has full agency:
 - #3790 — Personal Assistant onboarding epic
 - #3795 — Multi-tenancy foundations (gworkspace named identities)
 - #2791 — Declarative-only agents (standing rule)
+- #7425 — Epic: 1.0 assistant platform (owner scope, 2026-09-11)
+- #7359 — (a) two-crate consolidation
+- #7427 — (b) two-way channel connectors
+- #7428 — (c1) one memory palace per Assistant, opt-in fan-out
+- #7429 — (c2) one search index per Assistant, multiple roots
+- #4358 — (d) per-chat/per-Assistant project workspaces
+- #7370 — (e) chat attachments as objects
+- #7430 — (f) knowledge-graph cleanup, OKG-only exposed graph
 
 **Related Specs:**
 - DOC-41 (SPEC-AGENTFW-01~draft …) — Eve-Style Agent Framework (agent definition format, runtime)
 - DOC-47 (SPEC-EVTING-01~draft …) — External Event Ingestion (webhooks & connector push)
 - DOC-48 (SPEC-WS-01~draft …) — tcode Workstreams (durable work aggregation)
 - DOC-38 (SPEC-SLD-01~draft …) — Spec-Linked Documentation standard
+- [DOC-57 — Five-Section Agent Configuration](./agent-config-five-sections.md) §4.7 — the one-index-multiple-roots and two-way-channel model
+- [DOC-63 — OKG Sources](./DOC-63-okg-sources.md) §10.2, §10.5 — the superseded two-tier fan-out design
 
 ---
 
 ## 13. Change Log
 
 - **2026-07-24** — Initial spec (DOC-54, SPEC-AGENTS-01~draft … 08~draft), consolidating Bob's product vision decisions from 2026-07-24 demo and morning directives. Eight sections covering product vision, agent model, config triple, persona/instructions, listeners (Gmail/Calendar detail), GUI structure, memory/workstreams, and open questions. Demo roster (Izzie, CTO Assistant, Concierge) established. User-facing terminology (Tasks = Workstreams) recorded.
+- **2026-09-11** — Added §1a, the owner's 1.0 assistant-platform scope (epic
+  #7425): two-crate consolidation, two-way channel connectors, one memory
+  palace per Assistant with opt-in fan-out, one search index per Assistant
+  with multiple roots, projects per Assistant/thread, chat attachments as
+  objects, and an OKG-only exposed knowledge graph. Amended §5.1's
+  cross-agent-knowledge line, superseded by the opt-in palace fan-out model.
+  Evidence: `docs/research/trusty-agents-1.0-gap-analysis-2026-09-11.md`.

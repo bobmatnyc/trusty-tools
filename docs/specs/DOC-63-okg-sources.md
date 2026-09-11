@@ -18,7 +18,7 @@ spec_refs:
 **Spec ID:** `SPEC-OKGSRC-01~draft` … `SPEC-OKGSRC-14~draft` (DOC-63)
 **Subsystem:** trusty-agents — assistant home / OKG store, source catalog, scheduled refresh, credentials consumption, Knowledge config pane; trusty-kb — `okg` engine (ledger, registry, entity tree); trusty-search — index over the store
 **Owner:** Engineering (trusty-agents) / Bob Matsuoka
-**Last-updated:** 2026-08-01
+**Last-updated:** 2026-09-11
 **DOC-N claim:** `DOC-63`, scan-before-claim per DOC-38 §4.1. **This document originally claimed `DOC-62` and was renumbered.** Two concurrent spec passes both claimed DOC-62 — this one and PR #4529 (Style Modes for Coding Delegation) — because each correctly scanned `origin/main` and found `DOC-61` as the highest claimed number, and neither could see the other's unmerged branch. #4529 keeps `DOC-62` as the earlier and further-advanced PR; this is a mechanical tie-break. `DOC-63` was verified free three ways: no filename claim or header self-label under `docs/specs/**` or `docs/trusty-installer/research/02-design/**` on `origin/main`; no claim on any remote branch; and **no claim in any open PR** — the last check being precisely the gap that produced the original collision, since `scripts/check_doc_numbers.sh` scans the tree and cannot see an unmerged reservation (its own header states this limitation explicitly). Note also that `DOC-55` is claimed by `okg-universal-importer.md` via self-label only, its filename carrying no number, so a filename scan alone is insufficient in either direction.
 **Builds on:** DOC-55 [Universal OKG Importer](./okg-universal-importer.md) `SPEC-OKGIMPORT-03~draft`/`-04~draft` (the extraction layer and the `Connector` contract this document does **not** re-specify); DOC-57 [Five-Section Agent Configuration](./agent-config-five-sections.md) `SPEC-AGENTCFG-03~draft` (the Knowledge section this document adds a sub-surface to) and `SPEC-AGENTCFG-05~draft` (Listeners, the existing poll machinery); DOC-58 [K-d Attached Search Indexes](./DOC-58-knowledge-kd-attached-indexes.md) `SPEC-KDIDX-01~draft` (the two-tier curated-vs-attached principle this document depends on)
 **Related issues:** #4325 (per-assistant home directory — **in flight, PR #4523**); #3904 (epic: universal assistant-driven OKG importer); #4283 (index→OKG entity extraction); #4007 (epic: curated stores vs attached indexes); #4289 (index a new directory from the config UI); #4363 (extract-entities UI trigger); #4590 (concierge offers to build an assistant — the build path, §2.1a); #4591 (templates excluded from provisioning only incidentally); #4406 (which store is canonical — superseded in framing by §2 here); #4040 (epic: unified credential authority — this document is a **consumer**, never a parallel mechanism)
@@ -914,7 +914,16 @@ or URL query string that could carry one.
 ### 7.1b What OKG Sources needs from #4040
 
 Offered as concrete input to an epic that currently carries no child checklist.
-OKG Sources needs exactly five things, and nothing beyond them:
+OKG Sources needs exactly five things, and nothing beyond them.
+
+**Clarification, 2026-09-11 (#7425).** The read-scoped credential this section
+specifies is for the OKG entity-extraction pipeline (this document), not for
+the connector's own chat channel. Gmail, Drive, Slack, and Notion are, as of
+the owner's 1.0 assistant-platform revision, two-way channel connectors with
+independent inbound and outbound bindings (#7427; `agent-config-five-sections.md`
+§4.7). A channel's send/receive credential and an OKG source's read-scoped
+credential are two separate grants against the same provider, both routed
+through #4040, and neither implies the other.
 
 1. **A durable, opaque reference** a store row can hold in plain text under the
    home without that text being a secret.
@@ -1200,6 +1209,13 @@ and the push feed never assumes the watcher ran.
 
 ### 10.2 Index cardinality
 
+**Superseded 2026-09-11 by the one-index-multiple-roots model (#7425, tracked
+for search in #7429).** §10.5 below no longer holds: an attached project is a
+root of the assistant's one index, not a second, separately-queried K-d index.
+The K-a/K-d two-tier distinction this subsection and DOC-58 build on is
+retained below for historical record of the pre-1.0 architecture; it governs
+the current implementation until #7429 lands.
+
 **S-8.2** **One index per assistant store**, not one per source. The store is one
 tree; sources are rows within it; a search over "what this assistant knows" is
 one query. Per-source indexes would multiply index count by source count, fragment
@@ -1252,6 +1268,17 @@ the store's index is registered against the stable assistant home — never agai
 a worktree or temporary path.
 
 ### 10.5 Search tiering: OKG first, attached stores as fan-out {#SPEC-OKGSRC-14~draft}
+
+**Superseded 2026-09-11 by the one-index-multiple-roots model (#7425, tracked
+for search in #7429).** The owner's 2026-08-01 two-tier fan-out requirement
+below is replaced: there is one trusty-search index per Assistant, the OKG
+tree is one root of it, and each attached project is another root of the
+*same* index, so a query reaches one index, not two tiers reached
+concurrently. The tier/origin provenance requirement (§10.6, S-14.7/S-14.8)
+becomes root/origin provenance under the new model — which root within the one
+index produced a result — and needs its own normative pass under #7429. S-14.1
+through S-14.6 are retained below for historical record of the pre-1.0
+architecture; they govern the current implementation until #7429 lands.
 
 **Owner requirement (2026-08-01):** *"the internal OKG has priority for search,
 then attached stores for fan out."*
@@ -1706,3 +1733,4 @@ Phase B's runner ticket.
 | 2026-08-01 | Restructured around the owner's canonical model — one built OKG per agent, populated by many stores of two kinds (`SPEC-OKGSRC-12~draft`); "store" adopted as the single canonical noun with "OKG Source" recorded as an earlier synonym; bound-store extraction split into its own section (`SPEC-OKGSRC-13~draft`). |
 | 2026-08-01 | §3.4 added: searchable-corpus and OKG-contributor capacities are orthogonal, and search-only is a complete end state, never pending. §10.5–§10.6 added: OKG-first search tiering with attached-store fan-out, and per-result tier/origin provenance (`SPEC-OKGSRC-14~draft`), verified absent today. |
 | 2026-08-01 | §2.4–§2.7 added: `stores/<store-identifier>/` extraction targets for remote stores with the local/remote asymmetry made explicit (`SPEC-OKGSRC-11~draft`); `${TRUSTY_AGENTS_HOME}` recorded as one system value with migration deferred; config-format, dotless, and not-access-controlled recorded as settled. |
+| 2026-09-11 | Amended for the owner's 1.0 assistant-platform scope (epic #7425). Marked §10.2 (`S-8.2`/`S-8.3`, index cardinality) and §10.5 (`SPEC-OKGSRC-14~draft`, OKG-first tiering with attached-store fan-out) superseded by the one-index-multiple-roots model (#7429): one trusty-search index per Assistant, with the OKG tree and each attached project as roots of that single index, not separate K-a/K-d indexes queried by fan-out. Pre-1.0 tier/fan-out text is retained for historical record; it governs the current implementation until #7429 lands. Clarified §7.1b that an OKG source's read-scoped credential and a two-way channel's send/receive credential (#7427) are separate grants against the same provider. Evidence: `docs/research/trusty-agents-1.0-gap-analysis-2026-09-11.md`. |

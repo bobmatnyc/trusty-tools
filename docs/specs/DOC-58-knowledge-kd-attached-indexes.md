@@ -10,7 +10,7 @@ spec_refs:
 **Status:** Draft
 **Subsystem:** trusty-agents — agent configuration model (Knowledge section, DOC-57 §4); `tools.search_indexes` config surface; trusty-search — index attachment
 **Owner:** Engineering (trusty-agents) / Bob Matsuoka
-**Last-updated:** 2026-07-26
+**Last-updated:** 2026-09-11
 **Spec ID:** `SPEC-KDIDX-01~draft` … `SPEC-KDIDX-06~draft` (DOC-58)
 **Epic:** #4007 (Two-tier knowledge architecture: curated OKG stores vs arbitrary attached search indexes)
 **Builds on:** DOC-57 [Five-Section Agent Configuration](./agent-config-five-sections.md) §4 `SPEC-AGENTCFG-03~draft` (the Knowledge section this addendum extends with a fourth sub-surface, K-d, alongside K-a/K-b/K-c); the backend ticket #3935 (`GET /api/agents/:name/knowledge`), whose scope this addendum amends rather than forks (§1)
@@ -18,6 +18,21 @@ spec_refs:
 **Related issues:** #4007 (epic), #4008 (this ticket), #3232 (`tools.search_indexes` primitive — depended on), #3935 (Knowledge backend — amended, not reopened), #3890 (store-PATCH pattern, referenced for its read-only-until posture), #3936 (permissions backend, referenced not duplicated), #4009 (vector_search schema enrichment + optional allowlist enforcement), #4010 (Knowledge pane GUI: K-d sub-surface), #4011 (ops runbook + guardrail for `create_index` over an external/cross-org directory), #4012 (memory↔search M1), #4013/#4014 (memory↔search stretch tiers — out of scope here), #4015 (concrete driver: attach APEX to `cto-assistant`)
 
 ---
+
+> **SUPERSEDED IN PART (2026-09-11) by the one-index-multiple-roots model
+> (epic #7425, tracked for search in #7429).** The owner's 1.0
+> assistant-platform revision replaces this document's two-tier principle —
+> curated OKG stores (K-a) plus arbitrary attached indexes (K-d) as a
+> *second, separately-queried index* — with one trusty-search index per
+> Assistant, where an attached project is a **root** of that single index
+> rather than a second index reached through `tools.search_indexes`. This
+> document is retained below for historical record of the pre-1.0
+> architecture and continues to govern the current implementation until
+> #7429 lands and a K-d successor spec is written. See
+> `agent-config-five-sections.md` §4.7 and `DOC-63-okg-sources.md` §10.2/§10.5
+> for the corresponding supersession notes, and
+> `docs/research/trusty-agents-1.0-gap-analysis-2026-09-11.md` for the
+> evidence.
 
 ## 1. Why this is a new document, not an edit to DOC-57 or #3935
 
@@ -312,6 +327,14 @@ This walks the two-tier principle (§2) and K-d (§3–§7) through epic #4007's
 
 ## 12. Change Log
 
+- **2026-09-11** — Added a superseded-in-part notice for the owner's 1.0
+  assistant-platform scope (epic #7425): the K-a/K-d two-tier attached-index
+  architecture this document specifies is replaced by the one-index-
+  multiple-roots model (#7429), where an attached project becomes a root of
+  the Assistant's one search index rather than a second index reached
+  through `tools.search_indexes`. No normative section text changed; this
+  document continues to govern the current implementation until #7429 lands.
+  Evidence: `docs/research/trusty-agents-1.0-gap-analysis-2026-09-11.md`.
 - **2026-07-26 (second revision)** — Amended per code-critic review of PR #4019: §5.3's source table said `/stores.search_indexes` sources verbatim from `ToolsConfig::resolved_search_indexes()`, which the critic ruled wrong and self-contradictory — KD-21 requires an id that is both bound (K-a) and attached (K-d) to be deduped and presented once under its bound role, and KD-18/C-KD.8 require this route's id set to match `/knowledge.attached_indexes[]` exactly, so a verbatim list would carry an id absent from the future `attached_indexes[]`. Changed the `search_indexes` source column to `attached_indexes_deduped()` — the resolved attached list with any id whose resolved index matches a store binding filtered out, dedupe keyed on `resolved_index()` per KD-21 — and added a one-sentence rationale citing KD-18/KD-21/C-KD.8 so the derivation is not "fixed" back to the verbatim resolver. Also fixed §5.3's citations: commit `7dc401dd` is superseded and no longer reachable on `feat-3232-4009-attached-search-indexes` (PR #4019 is the current implementation), and `agent_stores.rs:115-116` had drifted to the `"search_indexes"`/`"enforce_search_indexes"` insertion at lines 127-128 in `stores_at` and `attached_indexes_deduped` at line 151 — now cited by symbol name first, with line numbers as a secondary, degrading pointer, since the branch is still in-flight.
 - **2026-07-26 (revision)** — Amended per code-critic review of PR #4017 (WARN, one HIGH): the concurrent `feat-3232-4009-attached-search-indexes` implementation branch (commit `7dc401dd`) already adds `search_indexes`/`enforce_search_indexes` to `GET /api/agents/:name/stores`, which contradicted the original KD-8/C-KD.7 "byte-identical" wording. Added §5.3 ("Interim raw surface on `/stores`") licensing those two fields as an interim, non-authoritative-for-UI raw surface, and defining the id-set consistency relationship to the future `/knowledge.attached_indexes[]` (KD-17…KD-20, C-KD.8). Reworded KD-8 and C-KD.7 to scope the "unchanged" guarantee to *pre-existing* fields rather than to the whole route, so they no longer contradict the licensed addition. Added KD-21 resolving the reviewer's minor note: an id legally overlapping both `[[stores]]` (K-a) and `tools.search_indexes` (K-d) MUST be deduped and presented once, under its bound (K-a) role.
 - **2026-07-26** — Initial addendum (DOC-58, `SPEC-KDIDX-01~draft` … `-06~draft`). Introduces K-d (attached search indexes) as a fourth Knowledge sub-surface alongside DOC-57 §4's K-a/K-b/K-c, backed by `tools.search_indexes` (#3232) with union-extends merge semantics. Specifies the `attached_indexes[]` addition to #3935's `/knowledge` route (declarative, degrade-never-fail, read-only), an M1 enforcement posture of opt-in-allowlist-declared-but-not-enforced, GUI expectations for #4010 (attach/detach existing indexes only, creation stays CLI-only per #4011), and the permissions interaction with `search.read` (category-level, unchanged). Records the APEX/`cto-assistant` driver (#4015) as a worked example and lists explicit non-goals, including the #4013/#4014 stretch tiers. Amends #3935's scope per #4008's acceptance criteria; does not edit DOC-57's or #3935's existing text.
