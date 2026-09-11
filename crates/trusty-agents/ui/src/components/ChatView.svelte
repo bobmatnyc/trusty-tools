@@ -24,6 +24,11 @@
   import ActionIcon from '../lib/icons/ActionIcon.svelte';
   import ToolActivity from './ToolActivity.svelte';
   import { renderChatMarkdown, assistantEmptyNotice } from '../lib/chatRendering';
+  // #7370: a turn's attachments render as cards, and the rendered attachment
+  // blocks the model saw are hidden from the bubble — the cards ARE the
+  // presentation of that content.
+  import AttachmentCard from './AttachmentCard.svelte';
+  import { visibleText } from '../lib/attachments';
   import WorkflowPhaseCard from './WorkflowPhaseCard.svelte';
   import { workflowState } from '../stores/workflow';
 
@@ -238,7 +243,16 @@
       {#if msg.role === 'user' || msg.role === 'event'}
         <div class="flex w-full justify-end" data-incoming-message>
           <div class="incoming-bubble min-w-0 px-4 py-3 text-foundry-light-text dark:text-foundry-text">
-            <p class="whitespace-pre-wrap break-words text-left text-sm leading-7">{msg.content}</p>
+            {#if visibleText(msg.content)}
+              <p class="whitespace-pre-wrap break-words text-left text-sm leading-7">{visibleText(msg.content)}</p>
+            {/if}
+            {#if msg.attachments?.length}
+              <div class="flex flex-col" data-attachment-list>
+                {#each msg.attachments as attachment (attachment.id)}
+                  <AttachmentCard {attachment} />
+                {/each}
+              </div>
+            {/if}
             <p class="mt-1 text-right text-[10px] text-foundry-light-muted dark:text-foundry-text/50">{fmtTime(msg.timestamp)}</p>
           </div>
         </div>

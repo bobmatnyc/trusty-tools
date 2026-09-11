@@ -393,6 +393,41 @@ describe('fetchChatHistory', () => {
 // ---------------------------------------------------------------------------
 
 describe('historyToMessages', () => {
+  // #7370: the regression for "a reload still shows what was attached". The
+  // persisted turn carries only a `[[attachment:<id>]]` marker inside its
+  // content — chat messages stay `{role, content}` — so if the marker were not
+  // resolved back to a row here, a reloaded thread would show the turn with no
+  // card and no way to get one.
+  test('historyToMessages_resolves_attachment_markers_to_rows', () => {
+    const id = 'a'.repeat(32);
+    const ref = {
+      id,
+      session_id: 'persona-izzie',
+      file_name: 'data.csv',
+      media_type: 'text/csv',
+      size: 8,
+      sha256: 'deadbeef',
+      url: `/api/agents/izzie/sessions/persona-izzie/attachments/${id}`,
+    };
+    const withMarker: ChatHistoryPage = {
+      ...page(),
+      messages: [
+        { role: 'user', content: `look at this\n\n[[attachment:${id}]] data.csv` },
+      ],
+    };
+
+    const out = historyToMessages(withMarker, 'Izzie', 999, new Map([[id, ref]]));
+    expect(out[0].attachments).toEqual([ref]);
+
+    // No index, or an id the manifest no longer holds: no card, never a broken
+    // one, and the turn still renders.
+    expect(historyToMessages(withMarker, 'Izzie', 999)[0].attachments).toBeUndefined();
+    expect(
+      historyToMessages(withMarker, 'Izzie', 999, new Map([['b'.repeat(32), ref]]))[0]
+        .attachments,
+    ).toBeUndefined();
+  });
+
   test('historyToMessages_maps_roles_and_preserves_order', () => {
     const out = historyToMessages(page(), 'Izzie', 999);
     expect(out.map((m) => m.role)).toEqual(['user', 'assistant']);

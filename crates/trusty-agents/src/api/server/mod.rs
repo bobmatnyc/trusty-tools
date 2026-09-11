@@ -51,6 +51,9 @@ mod agent_stores;
 mod agent_subagents;
 // #7428: one memory palace per assistant, with the opt-in fan-out setting.
 mod assistant_memory;
+// #7370: chat-thread attachments — upload, manifest listing, and
+// id-addressed retrieval under `<assistant home>/attachments/<session>/`.
+mod attachments;
 mod auth;
 mod cancel;
 pub(crate) mod knowledge_pipeline;

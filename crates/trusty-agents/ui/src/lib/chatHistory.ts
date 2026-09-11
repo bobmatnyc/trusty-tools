@@ -29,6 +29,11 @@ import { get } from 'svelte/store';
 
 import { apiBase } from './api-config';
 import {
+  fetchSessionAttachments,
+  parseAttachmentIds,
+  type AttachmentRef,
+} from './attachments';
+import {
   canLoadOlderChat,
   conversationKey,
   activeConversationKey,
@@ -173,6 +178,7 @@ export function historyToMessages(
   page: ChatHistoryPage,
   speaker: string,
   now: number,
+  attachments?: Map<string, AttachmentRef>,
 ): Message[] {
   const ts = page.updated_at ? Date.parse(page.updated_at) : NaN;
   const timestamp = Number.isNaN(ts) ? now : ts;
@@ -192,6 +198,16 @@ export function historyToMessages(
         }
       } catch { /* Ordinary system content stays an ordinary banner. */ }
     }
+    // #7370: a persisted turn carries its attachments as `[[attachment:<id>]]`
+    // markers inside `content` — the only place they can live while chat
+    // messages stay `{role, content}`. Resolving them here is what makes a
+    // reload show the same cards the live turn showed; an id whose row is
+    // gone simply yields no card, never a broken one.
+    const refs = attachments?.size
+      ? parseAttachmentIds(content)
+          .map((id) => attachments.get(id))
+          .filter((ref): ref is AttachmentRef => !!ref)
+      : [];
     return {
       // Stable and collision-free against live ids, which are uuid/task-based.
       id: `history-${page.start + i}`,
@@ -199,6 +215,7 @@ export function historyToMessages(
       content,
       timestamp,
       ...activity,
+      ...(refs.length ? { attachments: refs } : {}),
       ...(role === 'assistant' ? { speaker } : {}),
     };
   });
@@ -290,7 +307,14 @@ export async function rehydrateChat(
     if (selected()) chatHistoryCursor.set(null);
     return { seeded: 0, hasMore: false, reason: page.reason };
   }
-  const restored = historyToMessages(page, speaker, Date.now());
+  // #7370: one manifest read answers every marker in the thread; a metadata
+  // request per marker would not. A thread whose turns carry NO marker skips
+  // the read entirely, so rehydrating an ordinary conversation costs exactly
+  // the requests it always did.
+  const refs = page.messages.some((m) => parseAttachmentIds(m.content ?? '').length > 0)
+    ? await fetchSessionAttachments(agentId)
+    : undefined;
+  const restored = historyToMessages(page, speaker, Date.now(), refs);
   const seeded = hydrateMessages(key, restored);
   if (seeded) rememberCursor(key, { agentId, speaker, projectId, start: page.start, hasMore: page.has_more });
   const cursor = cachedCursor(key);

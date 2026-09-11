@@ -112,6 +112,22 @@ pub struct TaskRequest {
     /// Test: `session_overrides_for_passes_through_focused_workstream`.
     #[serde(default)]
     pub focused_workstream: Option<String>,
+    /// #7370: ids of attachments this turn references, already uploaded
+    /// through the session's attachment route.
+    ///
+    /// Why: the upload is a separate request so a large file is transferred
+    /// once, validated once, and referenced by id thereafter. Sending the
+    /// bytes with the turn would re-upload on every retask and give the
+    /// server no chance to refuse a file before a turn exists.
+    /// What: `None`/empty for every turn that carries no attachment, which is
+    /// what keeps the wire shape identical to every pre-#7370 submission. Each
+    /// id is resolved against the addressed assistant's own manifest BEFORE
+    /// the task is accepted (see [`resolve_attachments`]) - an id that is not
+    /// there fails the request outright rather than dispatching a turn whose
+    /// references cannot be resolved.
+    /// Test: `super::tests::attachments::send_with_an_unknown_attachment_is_refused`.
+    #[serde(default)]
+    pub attachments: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -351,8 +367,20 @@ fn drain_last_responder(
 /// by `crate::intent` unit tests.
 pub(super) async fn submit_task(
     State(state): State<AppState>,
-    Json(req): Json<TaskRequest>,
-) -> impl IntoResponse {
+    Json(mut req): Json<TaskRequest>,
+) -> Response {
+    // #7370: VALIDATE BEFORE ANYTHING IS PERSISTED. Every write this handler
+    // performs - the `running` placeholder, the attendance turn, the session
+    // announcement, and downstream `spawn_persist_turn`'s chat-history append
+    // - happens below this point, so a turn naming an attachment that is not
+    // in the manifest is refused with the conversation exactly as it was. The
+    // prior attempt on this issue persisted first and checked afterwards, and
+    // a rejected send therefore polluted chat history and duplicated on retry.
+    let attachment_blocks = match resolve_attachments(&state, &req).await {
+        Ok(blocks) => blocks,
+        Err(response) => return response,
+    };
+
     let id = uuid::Uuid::new_v4().to_string();
     // #4355: stamp the stream on the placeholder, not just on the final
     // result — a task is listed and polled from the moment it is accepted, so
@@ -427,6 +455,14 @@ pub(super) async fn submit_task(
     } else {
         classify_intent(&req.task)
     };
+
+    // #7370: the attachment bodies are appended only AFTER routing has been
+    // decided from the user's own words. Appending before would let a dropped
+    // spreadsheet re-classify "list projects" as a research turn.
+    if !attachment_blocks.is_empty() {
+        req.task =
+            crate::attachments::model_input::augment_user_turn(&req.task, &attachment_blocks);
+    }
 
     // #3223 (Trusty Agents agent roster, epic #3052): CTRL management
     // commands ("add project …", "list projects", …) must always run
@@ -582,6 +618,77 @@ pub(super) async fn submit_task(
             status: "running",
         }),
     )
+        .into_response()
+}
+
+/// Resolve the attachment ids a request names into the blocks its turn carries.
+///
+/// Why (#7370): this is the validate-before-persist gate. It runs before the
+/// `running` placeholder is stored and before anything is dispatched, so a turn
+/// naming an attachment the manifest does not hold is refused with the
+/// conversation untouched - the defect that blocked the prior attempt on this
+/// issue was doing this the other way round.
+/// What: `Ok(vec![])` for a request with no attachments, which is every
+/// pre-#7370 request. Otherwise each id is looked up in the ADDRESSED
+/// assistant's own session manifest - never a session the caller names - and
+/// rendered through `attachments::model_input`. The file's bytes are read only
+/// when the media type is one that gets inlined, so a large binary costs a
+/// manifest lookup rather than a 10 MiB read. Any refusal becomes the response,
+/// and no block is returned: a partial resolution must never dispatch.
+/// Test: `super::tests::attachments::send_with_an_unknown_attachment_is_refused`,
+/// `super::tests::attachments::send_with_a_known_attachment_is_accepted`.
+async fn resolve_attachments(state: &AppState, req: &TaskRequest) -> Result<Vec<String>, Response> {
+    let ids = req.attachments.clone().unwrap_or_default();
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    if ids.len() > crate::attachments::MAX_ATTACHMENTS_PER_TURN {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!(
+                    "a turn may carry at most {} attachments, not {}",
+                    crate::attachments::MAX_ATTACHMENTS_PER_TURN,
+                    ids.len()
+                ),
+            })),
+        )
+            .into_response());
+    }
+    let agent = addressed_agent_for(req);
+    // The session is DERIVED from the addressed assistant, never taken from
+    // the request: it is what keeps one assistant's turn from referencing
+    // another's stored files.
+    let session = crate::ctrl::pm_task::session_id_for(&agent);
+    let store = super::attachments::resolve_store(state, &agent)?;
+
+    let resolved = tokio::task::spawn_blocking(move || {
+        let mut blocks = Vec::with_capacity(ids.len());
+        for id in &ids {
+            let row = store.get(&session, id)?;
+            let bytes = if crate::attachments::model_input::is_inlinable_text(&row.media_type) {
+                store.read(&session, id)?.1
+            } else {
+                Vec::new()
+            };
+            blocks.push(crate::attachments::model_input::render(&row, &bytes));
+        }
+        Ok::<Vec<String>, crate::attachments::AttachmentError>(blocks)
+    })
+    .await;
+
+    match resolved {
+        Ok(Ok(blocks)) => Ok(blocks),
+        Ok(Err(e)) => Err(super::attachments::refuse(e)),
+        Err(e) => {
+            tracing::warn!(error = %e, "submit_task: attachment resolution task failed");
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "attachment resolution failed" })),
+            )
+                .into_response())
+        }
+    }
 }
 
 /// `GET /api/task/:id` — fetch a cached task response.
@@ -797,6 +904,7 @@ mod tests {
             model_id: None,
             provider_id: None,
             focused_workstream: None,
+            attachments: None,
         }
     }
 
