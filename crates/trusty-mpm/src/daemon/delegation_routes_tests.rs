@@ -702,8 +702,15 @@ async fn shared_tree_dispatch_route_does_not_reserve_when_it_denies() {
         vec!["rust-engineer".to_string()],
         "the denied dispatch must not occupy the directory"
     );
-    let denied = state
-        .delegations_for(session)
+    // The record pin the occupancy assertion cannot make: exactly ONE tombstone
+    // is added, so a deny can never multiply records for one `tool_use_id`.
+    let records = state.delegations_for(session);
+    assert_eq!(
+        records.len(),
+        2,
+        "the live writer plus exactly one tombstone: {records:?}"
+    );
+    let denied = records
         .into_iter()
         .find(|d| d.tool_use_id.as_deref() == Some("toolu_B"))
         .expect("the deny records a tombstone so a late observation cannot revive it");
@@ -1074,23 +1081,38 @@ fn launch(state: &Arc<DaemonState>, session: SessionId, tool_use_id: &str, agent
 }
 
 /// The `PostToolUse` a `TaskStop` emits, as `tm hook` forwards it (#7487).
-fn task_stop(state: &Arc<DaemonState>, session: SessionId, task_id: &str, ok: bool) {
-    let event = if ok {
-        crate::core::hook::HookEvent::PostToolUse
-    } else {
-        crate::core::hook::HookEvent::PostToolUseFailure
-    };
+///
+/// `outcome` is the `tool_response` the hook projection carries — the REAL wire
+/// discrimination between a stop that took and one that did not (#7511 review).
+/// `HookEvent::PostToolUseFailure` is deliberately not used: no hook block `tm`
+/// writes registers that name, so a test driving it would prove the branch and
+/// not the production path.
+fn task_stop(state: &Arc<DaemonState>, session: SessionId, task_id: &str, outcome: Option<Value>) {
+    let mut payload = serde_json::json!({
+        "cwd": "/repo",
+        "tool": "TaskStop",
+        "tool_use_id": "toolu_stop",
+        "input": {"task_id": task_id},
+    });
+    if let Some(response) = outcome {
+        payload["tool_response"] = response;
+    }
     crate::daemon::services::delegation_tracker::observe(
         state,
         session,
-        event,
-        &serde_json::json!({
-            "cwd": "/repo",
-            "tool": "TaskStop",
-            "tool_use_id": "toolu_stop",
-            "input": {"task_id": task_id},
-        }),
+        crate::core::hook::HookEvent::PostToolUse,
+        &payload,
     );
+}
+
+/// What `tm hook` forwards for a stop that took: `is_error` present and false.
+fn stop_succeeded() -> Option<Value> {
+    Some(serde_json::json!({"is_error": false}))
+}
+
+/// What `tm hook` forwards for a stop that did NOT take.
+fn stop_failed() -> Option<Value> {
+    Some(serde_json::json!({"is_error": true}))
 }
 
 /// 🔴 REGRESSION (#7487a): a `TaskStop`-cancelled agent releases the tree.
@@ -1122,7 +1144,7 @@ async fn a_task_stop_releases_the_stopped_agents_claim() {
     assert_eq!(while_running.total, 1, "a live claim must still refuse");
     assert!(!while_running.claimed);
 
-    task_stop(&state, session, "agent-qa-1", true);
+    task_stop(&state, session, "agent-qa-1", stop_succeeded());
 
     let after_stop = call(
         &state,
@@ -1139,6 +1161,10 @@ async fn a_task_stop_releases_the_stopped_agents_claim() {
 }
 
 /// 🔴 A stop that did NOT take leaves the agent running, so it releases nothing.
+///
+/// The discrimination is the forwarded `tool_response`, which is the only thing
+/// on the wire that says whether the stop succeeded (#7511 review, MEDIUM 2+3).
+/// Fails on c7eb75d5b, which released on the `PostToolUse` event alone.
 #[tokio::test]
 async fn a_failed_task_stop_releases_nothing() {
     let (state, _dir, session) = hermetic();
@@ -1150,7 +1176,7 @@ async fn a_failed_task_stop_releases_nothing() {
     .await;
     launch(&state, session, "toolu_qa", "agent-qa-1");
 
-    task_stop(&state, session, "agent-qa-1", false);
+    task_stop(&state, session, "agent-qa-1", stop_failed());
 
     let after = call(
         &state,
@@ -1160,6 +1186,41 @@ async fn a_failed_task_stop_releases_nothing() {
     .await;
     assert_eq!(after.total, 1, "a failed stop must not release the tree");
     assert!(!after.claimed);
+}
+
+/// 🔴 The documented fail-OPEN branch: a stop whose response says nothing still
+/// releases.
+///
+/// Why: `TaskStop`'s response shape is pinned by no contract this repo owns, and
+/// `tm hook` forwards only `TOOL_RESPONSE_KEYS` — so a plain-string or
+/// `is_error`-less answer arrives as no response at all. Requiring positive
+/// proof of success would release nothing, ever, reinstating #7487 silently.
+/// This pins the choice so a later tightening has to argue with it rather than
+/// make it by accident.
+#[tokio::test]
+async fn a_task_stop_with_no_response_still_releases() {
+    let (state, _dir, session) = hermetic();
+    call(
+        &state,
+        session,
+        dispatch("/repo", "qa", None, Some("toolu_qa")),
+    )
+    .await;
+    launch(&state, session, "toolu_qa", "agent-qa-1");
+
+    task_stop(&state, session, "agent-qa-1", None);
+
+    let after = call(
+        &state,
+        session,
+        dispatch("/repo", "rust-engineer", None, Some("toolu_a")),
+    )
+    .await;
+    assert_eq!(
+        after.total, 0,
+        "a response that cannot say either way must not re-lock the tree"
+    );
+    assert!(after.claimed);
 }
 
 /// 🔴 A `task_id` no delegation carries terminalizes nothing.
@@ -1174,7 +1235,7 @@ async fn a_task_stop_naming_an_unknown_id_terminalizes_nothing() {
     .await;
     launch(&state, session, "toolu_qa", "agent-qa-1");
 
-    task_stop(&state, session, "some-background-shell", true);
+    task_stop(&state, session, "some-background-shell", stop_succeeded());
 
     let after = call(
         &state,

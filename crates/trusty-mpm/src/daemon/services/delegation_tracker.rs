@@ -115,8 +115,8 @@ use chrono::Utc;
 use serde_json::Value;
 
 use crate::core::agent::{
-    Delegation, DelegationId, DelegationSource, DelegationStatus, ModelTier, TOOL_RESPONSE_KEYS,
-    is_subagent_dispatch_tool,
+    Delegation, DelegationId, DelegationSource, DelegationStatus, ModelTier, TASK_STOP_TOOL,
+    TOOL_RESPONSE_KEYS, is_subagent_dispatch_tool,
 };
 use crate::core::dispatch_isolation::{dispatch_isolation, isolation_separates_working_tree};
 use crate::core::hook::HookEvent;
@@ -149,8 +149,9 @@ const DEDUP_WINDOW_SECS: i64 = 120;
 /// calls, so the hook pipeline gains delegation tracking by way of one line and
 /// all the correlation rules stay here.
 /// What: routes a subagent-dispatch `PreToolUse` to [`on_dispatch`], its
-/// `PostToolUse`/`PostToolUseFailure` to [`on_launched`], and
-/// `SubagentStop`/`SubagentStopFailure` to [`on_subagent_stop`]. Every other
+/// `PostToolUse`/`PostToolUseFailure` to [`on_launched`], a `PostToolUse` on
+/// any OTHER tool to [`on_task_stop`] (which acts only on `TaskStop`, #7487),
+/// and `SubagentStop`/`SubagentStopFailure` to [`on_subagent_stop`]. Every other
 /// event returns immediately. Never panics and never blocks; a payload missing
 /// the fields it needs is skipped silently (fail-open — tracking is
 /// observational and must never affect the hook verdict).
@@ -186,8 +187,26 @@ pub fn observe(state: &DaemonState, session: SessionId, event: HookEvent, payloa
     }
 }
 
-/// The tool a PM calls to cancel a running subagent (#7487).
-const TASK_STOP_TOOL: &str = "TaskStop";
+/// Does this `tool_response` say the call it answers FAILED (#7487)?
+///
+/// Why: `TaskStop` "returns a success or failure status", and a stop that did
+/// not take leaves the agent running in the tree. The wire shape is
+/// `is_error` — the one [`TOOL_RESPONSE_KEYS`] member whose meaning is the same
+/// for every tool, and the same key [`on_launched`] already trusts for exactly
+/// this question. `HookEvent::PostToolUseFailure` is NOT the production signal:
+/// no hook block `tm` writes registers that name, so it can never arrive.
+/// What: `true` only for an explicit `is_error: true`. An absent, non-object or
+/// `is_error`-less response is "cannot tell", which does not refuse — see
+/// [`on_task_stop`]'s own note on why that is the right direction here.
+/// Test: `a_failed_task_stop_releases_nothing`,
+/// `a_task_stop_with_no_response_still_releases`.
+fn stop_reported_failure(payload: &Value) -> bool {
+    payload
+        .get("tool_response")
+        .and_then(|r| r.get("is_error"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
 
 /// `TaskStop` returned: the agent it names is gone, so release its claim.
 ///
@@ -204,9 +223,9 @@ const TASK_STOP_TOOL: &str = "TaskStop";
 /// this fact, and is terminal, so nothing counts the record as a writer again.
 /// Returns whether it wrote.
 ///
-/// Three refusals, each fail-CLOSED in the module's own direction:
-/// * `PostToolUseFailure` never reaches here — a stop that did not take leaves
-///   the agent running, and releasing its tree would admit a second writer.
+/// Three refusals:
+/// * [`stop_reported_failure`] — the stop did not take, so the agent is still
+///   in the tree and releasing it would admit a second writer.
 /// * No `task_id` (nor its deprecated `shell_id` alias) matches nothing.
 /// * A `task_id` naming a background shell, a teammate, or an agent this
 ///   session never dispatched matches no record and writes nothing. The match
@@ -216,11 +235,29 @@ const TASK_STOP_TOOL: &str = "TaskStop";
 ///   `agent_id` was never taught is unreachable here for the same reason it is
 ///   unreachable by a stop; the staleness sweep remains its only route out.
 ///
+/// # A response that says nothing releases, and that is deliberate
+///
+/// This is the module's ONE fail-open branch, chosen against its own default
+/// because the alternative is worse HERE. `TaskStop`'s response shape is not
+/// pinned by any contract this repo owns, and `tm hook`'s projection keeps only
+/// [`TOOL_RESPONSE_KEYS`] — so a plain-string or `is_error`-less answer yields
+/// no forwarded response at all. Requiring positive proof of success would then
+/// release nothing, ever, which is #7487 itself reinstated silently and
+/// invisibly to every test. Refusing on the one shape that positively says
+/// "failed" closes the hazard the response can actually express; the residual
+/// is a stop that failed and said so in a spelling this cannot read, whose cost
+/// is the pre-#7487 six-hour lock arriving by a different route.
+///
 /// Test: `a_task_stop_releases_the_stopped_agents_claim`,
 /// `a_failed_task_stop_releases_nothing`,
+/// `a_task_stop_with_no_response_still_releases`,
 /// `a_task_stop_naming_an_unknown_id_terminalizes_nothing`.
 fn on_task_stop(state: &DaemonState, session: SessionId, payload: &Value) -> bool {
     if payload.get("tool").and_then(Value::as_str) != Some(TASK_STOP_TOOL) {
+        return false;
+    }
+    if stop_reported_failure(payload) {
+        tracing::debug!("delegation: a TaskStop reported failure — the agent stays live (#7487)");
         return false;
     }
     let Some(task_id) = payload

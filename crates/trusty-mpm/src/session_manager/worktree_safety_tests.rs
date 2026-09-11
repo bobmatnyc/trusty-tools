@@ -1129,7 +1129,7 @@ fn git_try(dir: &Path, args: &[&str]) -> (bool, String) {
 #[test]
 fn a_worktree_holding_only_the_harness_marker_is_removable_by_plain_git() {
     use crate::core::worktree_removal_facts::{GitAndGhProbe, WorktreeRemovalProbe};
-    use crate::session_manager::worktree_ownership::clear_worktree_sentinel;
+    use crate::session_manager::worktree_ownership::take_worktree_sentinel;
 
     let fx = GitWorktreeFixture::new();
     let wt = fx.add_worktree("marker-only");
@@ -1158,7 +1158,11 @@ fn a_worktree_holding_only_the_harness_marker_is_removable_by_plain_git() {
          the clearing step below is no longer needed; stderr: {stderr}"
     );
 
-    clear_worktree_sentinel(&wt).expect("the harness marker must be clearable");
+    let taken = take_worktree_sentinel(&wt).expect("the harness marker must be clearable");
+    assert!(
+        taken.is_some_and(|b| !b.is_empty()),
+        "taking the marker must hand back the bytes a failed removal would restore"
+    );
     let (removed, stderr) = git_try(&fx.repo, &["worktree", "remove", wt.to_str().unwrap()]);
     assert!(
         removed,
@@ -1171,7 +1175,9 @@ fn a_worktree_holding_only_the_harness_marker_is_removable_by_plain_git() {
 #[test]
 fn clearing_the_marker_leaves_every_other_file_alone() {
     use crate::core::worktree_removal_facts::{GitAndGhProbe, WorktreeRemovalProbe};
-    use crate::session_manager::worktree_ownership::clear_worktree_sentinel;
+    use crate::session_manager::worktree_ownership::{
+        restore_worktree_sentinel, take_worktree_sentinel,
+    };
 
     let fx = GitWorktreeFixture::new();
     let wt = fx.add_worktree("marker-plus-work");
@@ -1191,11 +1197,35 @@ fn clearing_the_marker_leaves_every_other_file_alone() {
         "the removal guard must count the same two files"
     );
 
-    clear_worktree_sentinel(&wt).expect("clearing must succeed");
+    let taken = take_worktree_sentinel(&wt)
+        .expect("clearing must succeed")
+        .expect("the marker was there, so its bytes come back");
     assert!(
         untracked.exists() && wt.join("README.md").exists(),
         "clearing the marker must remove the marker and nothing else"
     );
-    // Clearing is idempotent: an absent marker is the state it exists to reach.
-    clear_worktree_sentinel(&wt).expect("a second clear must be a no-op");
+    // An absent marker is the state this exists to reach, so a second take is a
+    // no-op that reports nothing to restore.
+    assert!(
+        take_worktree_sentinel(&wt)
+            .expect("a second take must be a no-op")
+            .is_none()
+    );
+
+    // The round trip a failed removal relies on: the bytes go back verbatim.
+    restore_worktree_sentinel(&wt, &taken).expect("restore must succeed");
+    assert_eq!(
+        std::fs::read(wt.join(super::super::decommission::WORKTREE_SENTINEL_FILE))
+            .expect("read restored marker"),
+        taken,
+        "the restore must be byte-faithful"
+    );
+    // And the restored marker is still excused by both decisions.
+    assert_eq!(
+        GitAndGhProbe
+            .dirty_entries(&wt)
+            .expect("status must be readable"),
+        2,
+        "a restored marker must not become work"
+    );
 }

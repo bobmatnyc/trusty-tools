@@ -1610,6 +1610,78 @@ async fn cleanup_clears_the_harness_marker_before_removing_the_tree() {
     );
 }
 
+/// 🔴 REGRESSION (#7511 review, MEDIUM 1): a removal that fails AFTER the clear
+/// puts the marker back.
+///
+/// Why: taking the marker is safe only because the removal that follows deletes
+/// the directory. When the removal fails the tree survives, and without the
+/// marker it is unattributed — `agent_ownership_blocks` refuses it and
+/// `prune_orphaned_worktrees` reports it `owner_unknown`, so it is stranded
+/// rather than lost, which is the #7185 symptom in a rarer branch. The failure
+/// is forced by leaving `git worktree remove` unrouted on the fake, which is
+/// what `Scripted` turns into an `Err` — the same arm a locked worktree or a
+/// permission error reaches in production.
+#[tokio::test]
+async fn cleanup_restores_the_harness_marker_when_the_removal_fails() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let tree = tmp.path().join("agent-aa11");
+    std::fs::create_dir_all(&tree).expect("tree");
+    let marker = tree.join(crate::session_manager::decommission::WORKTREE_SENTINEL_FILE);
+    // Real sentinel bytes, so the restore is proved faithful and not merely present.
+    let original = br#"{"owner_session_id":"s-1","created_at":"2026-09-11T00:00:00Z"}"#;
+    std::fs::write(&marker, original).expect("marker");
+    let shown = tree.display().to_string();
+
+    let listing = format!(
+        "worktree /repo\nHEAD 1111111111111111111111111111111111111111\n\
+         branch refs/heads/main\n\n\
+         worktree {shown}\nHEAD {HEAD_OID}\nbranch refs/heads/{BRANCH}\n\n"
+    );
+    // Every route the run needs EXCEPT `worktree remove`, which therefore errors.
+    let git = Scripted::new()
+        .on(ORIGIN_QUERY, ORIGIN_URL)
+        .on(
+            "git ls-remote",
+            &format!("{HEAD_OID}\trefs/heads/{BRANCH}\n"),
+        )
+        .on("git push origin --delete", "")
+        .on("git worktree list", &listing)
+        .on("git branch --format", &branch_listing())
+        .on("git branch -D", "")
+        .on("git worktree prune", "")
+        .on("git fetch --prune", "");
+
+    let report = run(
+        &gh_merged(),
+        &git,
+        &FakeClaims::none(),
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req(false),
+    )
+    .await;
+
+    assert!(
+        report.failed(),
+        "an unroutable removal must fail the step: {}",
+        report.render()
+    );
+    assert!(
+        marker.exists(),
+        "a removal that did not happen must leave the tree attributed"
+    );
+    assert_eq!(
+        std::fs::read(&marker).expect("read restored marker"),
+        original,
+        "the restore must write back the ORIGINAL bytes, not a re-serialised payload"
+    );
+    assert!(
+        !report.render().contains("could not be restored"),
+        "a successful restore must add no note: {}",
+        report.render()
+    );
+}
+
 /// 🔴 A dry run inspects and reports; it must not touch the tree.
 ///
 /// Why: `--dry-run` exists so an operator can see what cleanup would do. A

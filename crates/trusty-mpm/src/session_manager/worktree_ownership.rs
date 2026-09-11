@@ -333,7 +333,7 @@ pub(crate) fn write_agent_sentinel(
     std::fs::write(worktree_path.join(WORKTREE_SENTINEL_FILE), bytes)
 }
 
-/// Delete the harness's own ownership sentinel from `worktree_path` (#7185).
+/// Take the harness's own ownership sentinel out of `worktree_path` (#7185).
 ///
 /// Why: tm's clean-tree decision
 /// ([`super::worktree_safety::count_dirty_files`]) excuses this file — it is
@@ -345,17 +345,36 @@ pub(crate) fn write_agent_sentinel(
 /// disk. Clearing the marker is what makes git's answer match the decision tm
 /// already made; adding `--force` would instead override the one gate standing
 /// between the removal and an operator's unsaved work.
-/// What: removes `<worktree_path>/.trusty-mpm-worktree`. An absent file is
-/// success — this runs immediately before a removal, and "the marker is not
-/// there" is the state it exists to reach. Any other error is propagated so the
-/// caller reports a removal it could not prepare rather than one that will fail.
+/// What: reads `<worktree_path>/.trusty-mpm-worktree`, removes it, and hands
+/// the bytes back so a caller whose removal then fails can put them back with
+/// [`restore_worktree_sentinel`] — the removal is what makes the deletion safe,
+/// so a removal that does not happen must not leave the tree unattributed
+/// (#7511 review). `Ok(None)` means there was no marker, which is the state
+/// this exists to reach and so is success. Any other error is propagated, so
+/// the caller reports a removal it could not prepare rather than one that will
+/// fail.
 /// Test: `a_worktree_holding_only_the_harness_marker_is_removable_by_plain_git`,
-/// `clearing_the_marker_leaves_every_other_file_alone`.
-pub(crate) fn clear_worktree_sentinel(worktree_path: &Path) -> std::io::Result<()> {
-    match std::fs::remove_file(worktree_path.join(WORKTREE_SENTINEL_FILE)) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
-        _ => Ok(()),
-    }
+/// `clearing_the_marker_leaves_every_other_file_alone`,
+/// `cleanup_restores_the_harness_marker_when_the_removal_fails`.
+pub(crate) fn take_worktree_sentinel(worktree_path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    let path = worktree_path.join(WORKTREE_SENTINEL_FILE);
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    std::fs::remove_file(&path)?;
+    Ok(Some(bytes))
+}
+
+/// Put back the exact bytes [`take_worktree_sentinel`] removed (#7185).
+///
+/// Why: the only caller is the error arm of a removal that did not happen.
+/// Writing the ORIGINAL bytes rather than a freshly serialised payload is what
+/// keeps the restore faithful — this code does not know whose sentinel it is.
+/// Test: `cleanup_restores_the_harness_marker_when_the_removal_fails`.
+pub(crate) fn restore_worktree_sentinel(worktree_path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    std::fs::write(worktree_path.join(WORKTREE_SENTINEL_FILE), bytes)
 }
 
 /// Rebuild one agent worktree's ownership from disk alone (#4311).

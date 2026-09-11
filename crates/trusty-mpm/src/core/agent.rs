@@ -81,6 +81,17 @@ pub fn is_subagent_dispatch_tool(tool_name: &str) -> bool {
     SUBAGENT_DISPATCH_TOOLS.contains(&tool_name)
 }
 
+/// The tool a PM calls to cancel a running subagent (#7487).
+///
+/// Why: a cancelled subagent emits no `SubagentStop`, so this tool's own
+/// `PostToolUse` is the only evidence that its claim on a shared working tree
+/// has ended. Named here beside [`SUBAGENT_DISPATCH_TOOLS`] because the same
+/// two halves must agree on it: `tm hook` decides whether to forward the
+/// `tool_response` and the daemon's tracker decides what to do with it.
+/// Test: `forwards_the_task_stop_tool_response`,
+/// `a_failed_task_stop_releases_nothing`.
+pub const TASK_STOP_TOOL: &str = "TaskStop";
+
 /// Keys retained from (and recognised in) a subagent-dispatch `tool_response`.
 ///
 /// Why: this list is the contract between the two halves of #2864, and both

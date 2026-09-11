@@ -102,7 +102,9 @@ pub use registry::{CleanupRegistry, OpenedPr};
 pub use sweep::{SweepDecision, sweep_decision};
 
 use crate::session_manager::DirtyWorktree;
-use crate::session_manager::worktree_ownership::clear_worktree_sentinel;
+use crate::session_manager::worktree_ownership::{
+    restore_worktree_sentinel, take_worktree_sentinel,
+};
 
 /// The `--json` field set step 1 reads.
 const VIEW_FIELDS: &str = "state,headRefName,headRefOid,mergeCommit,baseRefName";
@@ -547,14 +549,17 @@ async fn remove_one<T: Git, C: ClaimEnder>(
     }
     // #7185: git's own clean check has no exemption for the harness marker tm's
     // dirty gate just excused, so a tree whose only untracked entry is that
-    // marker is authorised here and refused by git below. Clear it, and report
-    // a marker that cannot be cleared rather than running into that refusal.
-    if let Err(e) = clear_worktree_sentinel(path) {
-        return StepLine::failed(
-            STEP,
-            format!("{shown}: the harness ownership marker could not be cleared: {e} (#7185)"),
-        );
-    }
+    // marker is authorised here and refused by git below. Take it, and report a
+    // marker that cannot be taken rather than running into that refusal.
+    let marker = match take_worktree_sentinel(path) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return StepLine::failed(
+                STEP,
+                format!("{shown}: the harness ownership marker could not be cleared: {e} (#7185)"),
+            );
+        }
+    };
     // Never `--force`: the dirty gate above is the only thing standing between
     // this call and an operator's unsaved work.
     match run_git(git, req, &["worktree", "remove", &shown]) {
@@ -565,7 +570,34 @@ async fn remove_one<T: Git, C: ClaimEnder>(
                 claim_note(&holders, "ended ")
             ),
         ),
-        Err(e) => StepLine::failed(STEP, format!("{e:#}")),
+        // The removal the clear above prepared did not happen, so the tree is
+        // still here and must not be left unattributed (#7511 review).
+        Err(e) => StepLine::failed(STEP, format!("{e:#}{}", restore_marker(path, &marker))),
+    }
+}
+
+/// Put the harness marker back after a removal that did not happen (#7185).
+///
+/// Why: taking the marker is only safe because the removal that follows deletes
+/// the whole directory. When that removal fails, the tree survives with no
+/// ownership record — `agent_ownership_blocks` then refuses it and
+/// `prune_orphaned_worktrees` reports it `owner_unknown`, so nothing destroys
+/// it, but nothing reclaims it either and `disk_survey` charges it to no
+/// session. The cost is a stranded tree, and the restore removes it.
+/// What: `None` (no marker was taken) contributes nothing. A restore that
+/// itself fails is reported in the step line beside git's own error, because
+/// the operator is the only one who can then re-attribute the tree.
+/// Test: `cleanup_restores_the_harness_marker_when_the_removal_fails`.
+fn restore_marker(path: &Path, marker: &Option<Vec<u8>>) -> String {
+    let Some(bytes) = marker.as_deref() else {
+        return String::new();
+    };
+    match restore_worktree_sentinel(path, bytes) {
+        Ok(()) => String::new(),
+        Err(e) => format!(
+            " — and its harness ownership marker could not be restored ({e}), so the tree is \
+             now unattributed and no sweep will reclaim it (#7185)"
+        ),
     }
 }
 
