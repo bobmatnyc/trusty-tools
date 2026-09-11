@@ -72,6 +72,7 @@ fn constants_are_non_empty() {
     assert!(!TM_WORKFLOW.trim().is_empty());
     assert!(!TM_AGENT_ARCHITECTURE.trim().is_empty());
     assert!(!TM_POSTMORTEM.trim().is_empty());
+    assert!(!TM_PROSE_STYLE.trim().is_empty());
     assert!(!TM_BUG_REPORTING.trim().is_empty());
     assert!(!TM_TEACHING_TEMPLATES.trim().is_empty());
     assert!(!TM_TICKETING.trim().is_empty());
@@ -116,6 +117,7 @@ fn tm_skills_are_in_bundle() {
         "skills/tm-workflow.md",
         "skills/tm-agent-architecture.md",
         "skills/tm-postmortem.md",
+        "skills/tm-prose-style.md",
         "skills/tm-bug-reporting.md",
         "skills/tm-teaching-templates.md",
         "skills/tm-ticketing.md",
@@ -276,6 +278,7 @@ fn tm_skills_have_frontmatter() {
         ("tm-workflow", TM_WORKFLOW),
         ("tm-agent-architecture", TM_AGENT_ARCHITECTURE),
         ("tm-postmortem", TM_POSTMORTEM),
+        ("tm-prose-style", TM_PROSE_STYLE),
         ("tm-bug-reporting", TM_BUG_REPORTING),
         ("tm-teaching-templates", TM_TEACHING_TEMPLATES),
         ("tm-ticketing", TM_TICKETING),
@@ -502,11 +505,14 @@ fn bundle_table_is_complete() {
     // Issue #5202 (-1): `skills/tm-pr-workflow.md` is RETIRED — its live policy
     //   was consolidated into `tm-workflow`, leaving one workflow skill rather
     //   than an alias or a second editable source. 179 - 1 = 178.
-    assert_eq!(ALL.len(), 178);
+    // Issue #7423 (+1): `skills/tm-prose-style.md` is NEW — it carries the
+    //   worked example and observed-instance inventories the output style and
+    //   BASE-AGENT.md used to state inline. 178 + 1 = 179.
+    assert_eq!(ALL.len(), 179);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 178, "artifact paths must be unique");
+    assert_eq!(paths.len(), 179, "artifact paths must be unique");
     for artifact in ALL {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());
@@ -1351,28 +1357,48 @@ fn output_styles_keep_claude_code_coding_instructions() {
     }
 }
 
+/// Every prose RULE the output styles must state resident, as a short anchor.
+///
+/// Why: #7423 moved the worked example and the observed-instance inventories
+/// into `tm-prose-style` and left each rule as a one-line statement. Pinning the
+/// paragraph wording would re-forbid that trim on the next pass; pinning one
+/// anchor per rule still fails the moment a rule is dropped.
+/// What: one substring per surviving rule, plus the #2647 rationale and the
+/// `tm-prose-style` pointer that carries the evidence.
+/// Test: `bundle_tests::output_styles_state_every_pm_prose_rule`.
+const PROSE_RULE_ANCHORS: &[&str] = &[
+    "## Communication — Write Plainly",
+    "issue #2647",
+    "**Tone**",
+    "**No mocks**",
+    "**no placeholders**",
+    "concrete referent",
+    "closing aphorisms",
+    "**Do not embellish.**",
+    "**Don't justify the restraint**",
+    "trailing emphatic negation",
+    "**No praise for the user.**",
+    "**If you are saying it, its worth is implied.**",
+    "**Banned word — \"honest\"**",
+    "**No borrowed-metaphor jargon.**",
+    "ASD-STE-100",
+    "**Ticket and PR bodies**",
+    "never whether it is said",
+    "Skill(skill=\"tm-prose-style\")",
+];
+
 #[test]
-fn output_styles_mirror_the_pm_prose_rules() {
+fn output_styles_state_every_pm_prose_rule() {
     // #2647: the output style is the only channel that survives a manual
-    // `claude` launch with no tm-appended system prompt, so the PM prose rules
-    // in `assets/instructions/sections/core.md` are MIRRORED here rather than
-    // referenced. Guard every load-bearing rule plus the #2647 rationale, so a
-    // future edit cannot quietly drop the mirror back to a dangling reference.
-    const REQUIRED: &[&str] = &[
-        "## Communication — Write Plainly",
-        "issue #2647",
-        "**No praise for the user.**",
-        "**If you are saying it, its worth is implied.**",
-        "**Do not embellish.**",
-        "**Banned word — \"honest\", and every variation.**",
-        "**Ticket and PR bodies**",
-        "never whether it is said",
-    ];
+    // `claude` launch with no tm-appended system prompt, so every PM prose rule
+    // is stated RESIDENT here rather than referenced. #7423 kept the rules and
+    // moved their examples behind `Skill(skill="tm-prose-style")`, so the
+    // contract is "the rule is still stated, and its evidence is one hop away".
     for style in OUTPUT_STYLES {
-        for needle in REQUIRED {
+        for needle in PROSE_RULE_ANCHORS {
             assert!(
                 style.content.contains(needle),
-                "{} is missing mirrored prose rule {needle:?} (#2647)",
+                "{} is missing prose rule anchor {needle:?} (#2647, #7423)",
                 style.id
             );
         }
@@ -1391,20 +1417,17 @@ fn output_styles_mirror_the_pm_prose_rules() {
 fn the_borrowed_metaphor_ban_reaches_both_prose_channels() {
     // The owner banned "load-bearing" on 2026-08-10 as an instance of a
     // category. It has to bind PM prose (the output styles, #2647) and agent
-    // prose (BASE-AGENT.md composition) alike, and it has to state the
-    // CATEGORY — asserting only the word would rebuild the phrase-list failure
-    // the sycophancy and framing-opener rules were rewritten to avoid.
+    // prose (BASE-AGENT.md composition) alike. #7423 split the two halves: the
+    // RULE stays resident in both channels, and the category statement that
+    // keeps it from degenerating into a phrase list moved to `tm-prose-style`.
+    // Both halves are asserted, in their new homes.
     use crate::core::agent_builder::compose_agent;
     use std::path::Path;
 
-    const REQUIRED: &[&str] = &[
-        "**No borrowed-metaphor jargon.**",
-        "an engineering metaphor borrowed to signal precision",
-        "Scope: PM and agent prose.",
-    ];
+    const RESIDENT: &[&str] = &["**No borrowed-metaphor jargon.**", "load-bearing"];
 
     for style in OUTPUT_STYLES {
-        for needle in REQUIRED {
+        for needle in RESIDENT {
             assert!(
                 style.content.contains(needle),
                 "{} is missing the borrowed-metaphor ban {needle:?}",
@@ -1416,10 +1439,22 @@ fn the_borrowed_metaphor_ban_reaches_both_prose_channels() {
     let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
     let composed =
         compose_agent("version-control", assets_dir).expect("compose_agent must succeed");
-    for needle in REQUIRED {
+    for needle in RESIDENT {
         assert!(
             composed.contains(needle),
             "composed agent is missing the borrowed-metaphor ban {needle:?}"
+        );
+    }
+
+    // The category statement and the scope note are what stop the ban becoming
+    // a word list; they now live one Skill call away, not in either channel.
+    for needle in [
+        "an engineering metaphor borrowed to signal precision",
+        "Scope: PM and agent prose.",
+    ] {
+        assert!(
+            TM_PROSE_STYLE.contains(needle),
+            "tm-prose-style must carry the borrowed-metaphor category statement {needle:?}"
         );
     }
 }
@@ -1434,14 +1469,10 @@ fn the_honest_ban_reaches_both_prose_channels() {
     use crate::core::agent_builder::compose_agent;
     use std::path::Path;
 
-    const REQUIRED: &[&str] = &[
-        "**Banned word — \"honest\", and every variation.**",
-        "adjective, adverb, heading modifier, parenthetical",
-        "\"Distribution, stated honestly:\"",
-    ];
+    const RESIDENT: &[&str] = &["**Banned word — \"honest\"**", "label on your own register"];
 
     for style in OUTPUT_STYLES {
-        for needle in REQUIRED {
+        for needle in RESIDENT {
             assert!(
                 style.content.contains(needle),
                 "{} is missing the \"honest\" ban {needle:?}",
@@ -1453,10 +1484,24 @@ fn the_honest_ban_reaches_both_prose_channels() {
     let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
     let composed =
         compose_agent("version-control", assets_dir).expect("compose_agent must succeed");
-    for needle in REQUIRED {
+    for needle in RESIDENT {
         assert!(
             composed.contains(needle),
             "composed agent is missing the \"honest\" ban {needle:?}"
+        );
+    }
+
+    // Every position the word can take, and the owner's flagged instance, moved
+    // to `tm-prose-style` in #7423. The ban is useless without them, so they are
+    // asserted there rather than dropped.
+    for needle in [
+        "adjective, adverb, heading modifier, parenthetical",
+        "\"Distribution, stated honestly:\"",
+        "plainly, candidly, bluntly,",
+    ] {
+        assert!(
+            TM_PROSE_STYLE.contains(needle),
+            "tm-prose-style must carry the \"honest\" ban's detail {needle:?}"
         );
     }
 }
@@ -1474,18 +1519,16 @@ fn the_asd_ste_100_layer_reaches_both_prose_channels() {
     use crate::core::agent_builder::compose_agent;
     use std::path::Path;
 
-    const REQUIRED: &[&str] = &[
-        "**Sentence construction — ASD-STE-100, applied in spirit.**",
-        "approved vocabulary does NOT",
-        "Never tighten it into literal conformance with the word list.",
-        "One idea per sentence; one instruction per sentence.",
-        "No noun cluster longer than three words.",
+    const RESIDENT: &[&str] = &[
+        "ASD-STE-100, applied in spirit",
+        "one idea per",
+        "active voice",
         // ADD, not replace: the stance rules the layer sits on top of.
         "**No praise for the user.**",
     ];
 
     for style in OUTPUT_STYLES {
-        for needle in REQUIRED {
+        for needle in RESIDENT {
             assert!(
                 style.content.contains(needle),
                 "{} is missing the ASD-STE-100 construction layer {needle:?}",
@@ -1505,20 +1548,53 @@ fn the_asd_ste_100_layer_reaches_both_prose_channels() {
     let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
     let composed =
         compose_agent("version-control", assets_dir).expect("compose_agent must succeed");
-    for needle in REQUIRED {
+    for needle in RESIDENT {
         assert!(
             composed.contains(needle),
             "composed agent is missing the ASD-STE-100 construction layer {needle:?}"
         );
     }
+
+    // The seven construction rules in full, and the refusal that stops a future
+    // reader "fixing" the spirit adoption into literal conformance, moved to
+    // `tm-prose-style` in #7423.
+    for needle in [
+        "approved vocabulary does NOT",
+        "literal conformance with the word list",
+        "One idea per sentence; one instruction per sentence.",
+        "No noun cluster longer than three words.",
+    ] {
+        assert!(
+            TM_PROSE_STYLE.contains(needle),
+            "tm-prose-style must carry the ASD-STE-100 detail {needle:?}"
+        );
+    }
 }
 
 #[test]
-fn base_agent_graduated_verbosity_survives_composition() {
+fn the_default_output_style_stays_within_its_resident_budget() {
+    // #7423: the style is resident in every PM turn, so its size is a cost paid
+    // continuously. 8 KB is the budget the trim landed under — a rule added here
+    // must displace text, not extend the file. Examples and inventories belong
+    // in `tm-prose-style`, which loads on demand.
+    const BUDGET_BYTES: usize = 8_000;
+    assert!(
+        OUTPUT_STYLE.len() <= BUDGET_BYTES,
+        "output style `{DEFAULT_OUTPUT_STYLE_ID}` is {} bytes, over the \
+         {BUDGET_BYTES}-byte resident budget — move examples into \
+         `tm-prose-style` rather than growing it",
+        OUTPUT_STYLE.len()
+    );
+}
+
+#[test]
+fn base_agent_prose_rules_survive_composition() {
     // Output styles do NOT apply to subagents (they run their own system
-    // prompt), so the sparse-on-success rule has to reach agents through
-    // BASE-AGENT.md composition instead. Assert it lands in a composed agent,
-    // and that it did not weaken the raw-output evidence rule it sits beside.
+    // prompt), so the prose rules have to reach agents through BASE-AGENT.md
+    // composition instead. #7423 trimmed that section to one line per rule and
+    // pointed it at the same skill the output style points at, so assert the
+    // heading, the pointer, and one anchor per rule — plus the sparse-on-success
+    // rule and the raw-output evidence floor it must not weaken.
     use crate::core::agent_builder::compose_agent;
     use std::path::Path;
 
@@ -1526,6 +1602,30 @@ fn base_agent_graduated_verbosity_survives_composition() {
 
     let composed =
         compose_agent("version-control", assets_dir).expect("compose_agent must succeed");
+
+    // The agent-facing variant is kept in step with the output style, so it
+    // states the same rules under a heading naming the same standard.
+    for needle in [
+        "Write Plainly",
+        "Skill(skill=\"tm-prose-style\")",
+        "concrete referent",
+        "closing aphorisms",
+        "**Do not embellish.**",
+        "**Don't justify the restraint**",
+        "trailing emphatic negation",
+        "**No praise for the user.**",
+        "**If you are saying it, its worth is implied.**",
+        "**Banned word — \"honest\"**",
+        "**No borrowed-metaphor jargon.**",
+        "ASD-STE-100",
+        "**Ticket and PR bodies you draft**",
+        "never whether it is said",
+    ] {
+        assert!(
+            composed.contains(needle),
+            "composed agent is missing prose rule anchor {needle:?} (#7423)"
+        );
+    }
 
     assert!(
         composed.contains("Verbosity scales with what went wrong"),

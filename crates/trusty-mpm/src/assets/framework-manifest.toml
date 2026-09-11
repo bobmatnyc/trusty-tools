@@ -296,6 +296,7 @@ universal = [
   "tm-init",
   "tm-issues-prune",
   "tm-postmortem",
+  "tm-prose-style",
   "tm-session-management",
   "tm-session-pause",
   "tm-session-resume",

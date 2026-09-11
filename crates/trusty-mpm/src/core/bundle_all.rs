@@ -164,6 +164,7 @@ pub const ALL: &[BundledArtifact] = &[
     overwrite("skills/tm-workflow.md", TM_WORKFLOW),
     overwrite("skills/tm-agent-architecture.md", TM_AGENT_ARCHITECTURE),
     overwrite("skills/tm-postmortem.md", TM_POSTMORTEM),
+    overwrite("skills/tm-prose-style.md", TM_PROSE_STYLE),
     overwrite("skills/tm-bug-reporting.md", TM_BUG_REPORTING),
     overwrite("skills/tm-teaching-templates.md", TM_TEACHING_TEMPLATES),
     overwrite("skills/tm-ticketing.md", TM_TICKETING),

@@ -179,6 +179,18 @@ This governs issue bodies only. It does **not** relax the evidence rule for
 claiming a gate passed: raw test output stays mandatory there (`BASE-AGENT.md` —
 never summarise test results in your own words).
 
+## Clickable References — the Link Shapes
+
+Moved out of the instruction package by #7423, which keeps the rule itself:
+every reference to an issue, PR, ticket, or commit renders as a clickable
+markdown link, never a bare number, in every artifact you author.
+
+- Issues and PRs: `[#4318](https://github.com/<owner>/<repo>/issues/4318)`.
+  GitHub resolves the `/issues/` form to a PR, so one shape covers both.
+- Commits: `[d027ef1](https://github.com/<owner>/<repo>/commit/d027ef1)`. A bare
+  short SHA is acceptable only inside a table of many.
+- Tickets in another tracker: link to that tracker's issue URL.
+
 ## The Labels, Project, Milestone Standard
 
 🔴 **Every issue and every pull request carries the same four things: the

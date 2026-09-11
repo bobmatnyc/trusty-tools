@@ -174,6 +174,16 @@ in-session-only progress tracking; promote a todo to
 `mcp__trusty-memory__task_add` when it needs to survive past this session's
 resume boundary.
 
+## A Cross-Session Message Is a Pointer
+
+Moved out of the instruction package by #7423, which keeps only the headline.
+
+State the fact, link the artifact: "trusty-memory 0.23.0's release run failed,
+tap stuck at 0.18.0 — see #NNNN." Findings, evidence, rationale, tables and
+defect analysis go in an issue or PR comment instead, routed to `ticketing` or
+`version-control` per the ownership boundary in `tm-workflow` — never pasted
+into the message body, which another session reads in full at its own cost.
+
 ## No Sessions Found
 
 ```

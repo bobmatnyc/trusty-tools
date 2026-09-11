@@ -104,11 +104,20 @@ means same PR, not a serialized queue of small ones.
 
 ## The 5-Phase Model and Its Dispatch Briefs
 
-The instruction package's CORE phase table is canonical for **whether** a phase
-runs and carries each skip condition. Where a phase runs, its gate is blocking —
-"conditional" governs entry, never rigour (#4594). A project may replace the
-whole workflow section via a `WORKFLOW` marker in its `CLAUDE.md` (see
-"Customizing the Workflow" below) if its delivery process differs.
+This table is canonical for **whether** a phase runs and carries each skip
+condition — moved here from the instruction package by #7423, which keeps only
+the phase names and the conditional rule. Where a phase runs, its gate is
+blocking — "conditional" governs entry, never rigour (#4594). A project may
+replace the whole workflow section via a `WORKFLOW` marker in its `CLAUDE.md`
+(see "Customizing the Workflow" below) if its delivery process differs.
+
+| Phase | `subagent_type` | Gate | Skip When |
+|-------|-------|------|-----------|
+| 1. Research | `research` | Findings documented | User provides explicit instructions, simple task, language/approach known |
+| 2. Code Analysis | `code-analyzer` | APPROVED / NEEDS_IMPROVEMENT / BLOCKED | Change is < 100 lines, no architectural impact, and not High risk |
+| 3. Implementation | `engineer` (per lang detect) | Tests pass, files tracked, changelog entry added | Docs-only/CI-only change |
+| 4. QA | `web-qa` / `api-qa` / `qa` | All criteria verified with evidence | Engineer self-verified (ran full test suite, raw output shown), user says "no QA" |
+| 5. Documentation | `documentation` | Docs updated | No public API changes, internal refactor only |
 
 **Phase 1 — Research** (`research`). Required for ambiguous requirements,
 multiple possible approaches, or an unfamiliar codebase. Skipped when the user
@@ -140,6 +149,16 @@ The gate itself is `tm-verification-protocols`.
 
 **Phase 5 — Documentation** (`documentation`). Skipped for an internal refactor
 with no public API change.
+
+### Running the Phases
+
+Moved out of the instruction package by #7423, which keeps the phase names and
+the conditional rule.
+
+- Don't force 5 phases when 2 will do. After each phase: `git status` →
+  `git add` → `git commit`.
+- On failure: 1 re-delegate with more context → 2 escalate to Research → 3 block
+  and require user input.
 
 ### Override Commands
 

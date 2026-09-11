@@ -81,6 +81,22 @@ console error check, and relevant network request status.
 ❌ WRONG:   "The page loads correctly at localhost:3000"  (no agent evidence)
 ```
 
+## What a Task-Completion Report Carries
+
+Moved out of the instruction package by #7423, which keeps only the headline.
+
+A **task-completion report** carries four things:
+
+1. what was delegated, and to whom;
+2. the QA evidence — actual output, not claims;
+3. the files tracked, with their commits;
+4. each claim mapped to its evidence source.
+
+In-flight responses answer the question instead; only a completion claim owes
+all four. Route each agent's **Improvement recommendations** block to
+`bobmatnyc/trusty-tools` issues through the `ticketing` agent, whatever project
+the agent ran in (#6935).
+
 ## Example Good Report
 
 ```

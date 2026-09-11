@@ -28,6 +28,10 @@ pnpm dev        # http://localhost:5173
 pnpm `9.15.9`, pinned in `packageManager` to match the seven UI packages under
 `crates/*/ui/`.
 
+🟡 Run `pnpm test` by hand from INSIDE `website/` before pushing, where pnpm is
+pinned. The workflow runs Node 20 — a newer local Node reports spurious
+`localStorage` failures in `theme.test.ts`. (Moved from `CLAUDE.md` by #7423.)
+
 `pnpm test` runs in CI as `.github/workflows/website-tests.yml` (#5200), on
 Node 20 with Chromium installed for the mobile-overflow smoke test. It is a
 separate workflow rather than a leg on `ci.yml`'s `ui-checks` matrix because
