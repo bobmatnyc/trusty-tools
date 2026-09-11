@@ -49,6 +49,21 @@ use crate::commands::pm_guard::build_pretooluse_deny_response;
 /// Test: `divert_targets_matches_bulk_bash_readers`.
 const BULK_READ_COMMANDS: [&str; 5] = ["cat", "head", "tail", "less", "more"];
 
+/// The bulk readers whose short flags actually cap how much is printed.
+///
+/// Why (#7120): the classifier used to decline EVERY single-dash flag as
+/// already-bounding. That is true of `head -n 40` and false of `cat -n`, where
+/// `-n` only numbers the lines it prints. Claude Code's bypass-permissions
+/// instruction tells the agent to read files with `cat`, which it spells
+/// `cat -n <path>`, so that one rule let every bypass-mode whole-file read past
+/// the diverter while the identical `Read` payload was diverted.
+/// What: `head` and `tail` take a count through a short flag (`-n 40`,
+/// `-c 200`, `-40`); for the rest of [`BULK_READ_COMMANDS`] a short flag is
+/// formatting, so the file operands still name an unbounded read.
+/// Test: `divert_targets_diverts_a_line_numbered_cat`,
+/// `divert_targets_skips_bounded_reads`.
+const BOUNDED_BY_SHORT_FLAG: [&str; 2] = ["head", "tail"];
+
 /// What the hook decided about one tool call.
 ///
 /// Why: separating the decision from the I/O (stdin, the filesystem, stdout)
@@ -219,8 +234,9 @@ pub(crate) fn block_reason(path: &str, lines: u32) -> String {
 /// `Bash`, the file operands of a SINGLE simple [`BULK_READ_COMMANDS`]
 /// invocation: a command containing a pipe, redirect, or separator is left
 /// alone (it is not a plain read), and a `head`/`tail` carrying an explicit
-/// count (`-n`, `-c`, `-100`) is already bounded. Every other tool yields
-/// nothing.
+/// count (`-n`, `-c`, `-100`) is already bounded. A `cat` flag is formatting,
+/// not a bound, so `cat -n <path>` diverts exactly like the `Read` payload for
+/// the same file (#7120). Every other tool yields nothing.
 /// Test: `divert_targets_matches_bulk_bash_readers`,
 /// `divert_targets_skips_bounded_reads`, `divert_targets_ignores_other_tools`.
 pub(crate) fn divert_targets(tool_name: &str, tool_input: Option<&Value>) -> Vec<String> {
@@ -255,10 +271,12 @@ pub(crate) fn divert_targets(tool_name: &str, tool_input: Option<&Value>) -> Vec
 /// agent legitimately needs.
 /// What: returns empty when the command contains a shell composition character
 /// (`| & ; < > $ ( ` \n`), when the first word is not in
-/// [`BULK_READ_COMMANDS`], or when a bounding flag is present. Otherwise
-/// returns every non-flag operand after the command word.
+/// [`BULK_READ_COMMANDS`], or when a bounding flag is present on one of the
+/// [`BOUNDED_BY_SHORT_FLAG`] commands. Otherwise returns every non-flag operand
+/// after the command word.
 /// Test: `divert_targets_matches_bulk_bash_readers`,
-/// `divert_targets_skips_bounded_reads`.
+/// `divert_targets_skips_bounded_reads`,
+/// `divert_targets_diverts_a_line_numbered_cat`.
 fn bash_read_targets(command: &str) -> Vec<String> {
     if command
         .chars()
@@ -279,10 +297,12 @@ fn bash_read_targets(command: &str) -> Vec<String> {
     }
 
     let rest: Vec<&str> = words.collect();
-    // A bounding flag (`-n 40`, `-c 200`, `-40`) already caps the read.
-    if rest
-        .iter()
-        .any(|w| w.starts_with('-') && w.len() > 1 && !w.starts_with("--"))
+    // #7120: a bounding flag (`-n 40`, `-c 200`, `-40`) caps the read only for
+    // the commands that take a count that way — `cat -n` prints the whole file.
+    if BOUNDED_BY_SHORT_FLAG.contains(&bare)
+        && rest
+            .iter()
+            .any(|w| w.starts_with('-') && w.len() > 1 && !w.starts_with("--"))
     {
         return Vec::new();
     }

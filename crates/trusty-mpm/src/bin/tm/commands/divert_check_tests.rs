@@ -213,6 +213,62 @@ fn divert_targets_skips_bounded_reads() {
     }
 }
 
+/// Why (#7120): Claude Code's bypass-permissions instruction tells the agent to
+/// read files with `cat`, and the spelling it uses is `cat -n <path>`. The
+/// classifier read every single-dash flag as a bound, so that whole-file read
+/// went through undiverted while the `Read` payload naming the same file was
+/// diverted — the two modes disagreed about the identical read.
+/// What: for one oversized file and one small one, the `Bash` `cat -n` payload
+/// must reach the same [`super::DivertDecision`] as the `Read` payload.
+/// `head -n 40` stays bounded, because there the flag really is a count.
+#[test]
+fn divert_targets_diverts_a_line_numbered_cat() {
+    let read = read_input("/repo/huge.rs");
+    let numbered = serde_json::json!({ "command": "cat -n /repo/huge.rs" });
+    assert_eq!(
+        divert_targets("Bash", Some(&numbered)),
+        vec!["/repo/huge.rs".to_string()],
+        "`cat -n` prints the whole file; the flag is formatting, not a bound"
+    );
+
+    // Over threshold: both modes block, naming the same file.
+    let via_read = decide("Read", Some(&read), 350, true, &fixed(900));
+    let via_cat = decide("Bash", Some(&numbered), 350, true, &fixed(900));
+    assert!(
+        matches!(via_cat, DivertDecision::Block(_)),
+        "bypass-mode `cat -n` must divert like the Read tool, got {via_cat:?}"
+    );
+    assert_eq!(
+        via_cat, via_read,
+        "the two modes must reach the same decision for the same file"
+    );
+
+    // Under threshold: both modes leave a small read untouched.
+    let small_cat = decide("Bash", Some(&numbered), 350, true, &fixed(12));
+    assert_eq!(
+        small_cat,
+        decide("Read", Some(&read), 350, true, &fixed(12)),
+        "a small read must stay untouched in both modes"
+    );
+    assert_eq!(small_cat, DivertDecision::Allow);
+
+    // The flag really is a count for `head`/`tail`, so those stay bounded.
+    for cmd in ["head -n 40 /repo/huge.rs", "tail -100 /repo/huge.rs"] {
+        let bash = serde_json::json!({ "command": cmd });
+        assert!(
+            divert_targets("Bash", Some(&bash)).is_empty(),
+            "an explicit count still bounds the read: {cmd}"
+        );
+    }
+
+    // Every other `cat` flag has the same shape.
+    let squeezed = serde_json::json!({ "command": "cat -s -n /repo/huge.rs" });
+    assert_eq!(
+        divert_targets("Bash", Some(&squeezed)),
+        vec!["/repo/huge.rs".to_string()]
+    );
+}
+
 /// Why: the hook is registered with matcher `Read` and matcher `Bash`, but
 /// Claude Code matchers are regex — a future matcher change must not silently
 /// start diverting edits. Scope is bulk READS only (#6887).
