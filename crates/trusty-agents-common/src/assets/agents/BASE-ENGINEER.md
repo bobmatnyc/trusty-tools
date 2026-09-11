@@ -25,10 +25,15 @@ layer adds engineering discipline. Do not restate BASE-AGENT content here.
 ## Escape-Sensitive Edits — Write Verbatim, Verify Byte-Exact
 
 Content containing a regex character class (`\d`, `\s`, `[\w-]`), a literal
-backslash, or a comment delimiter (`*/`) is easy to corrupt through a layer
-that re-interprets escapes it should pass through unchanged — the corruption
-is invisible in a normal review pass and silently breaks `grep`/regex use
-against the file (issue #7121).
+backslash, a numeric escape (`\uXXXX`, `\xXX`, an octal `\NNN`), or a comment
+delimiter (`*/`) is easy to corrupt two ways: through a shell or interpreter
+layer that re-interprets escapes it should pass through unchanged, or
+directly through the Edit/Write tool's own `new_string`/`content` argument —
+a numeric escape there can be written as the literal byte it encodes (a
+`\x00`-shaped sequence became an actual NUL byte mid-file, #7480). Either
+route is invisible in a normal review pass; the shell-routed one silently
+breaks `grep`/regex use against the file (#7121), and the direct-write one
+corrupts the file outright (#7480).
 
 - Prefer the Write/Edit tool's own `content`/`new_string` argument over a
   shell one-liner for any change containing that kind of content.
