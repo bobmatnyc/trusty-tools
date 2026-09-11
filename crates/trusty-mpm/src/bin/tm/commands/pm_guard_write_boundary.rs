@@ -39,13 +39,25 @@
 //! non-source extension is not this rule's business. The guard denies only on
 //! positive evidence of both halves.
 //!
+//! **A `Bash` write lands here too (#7399).** A shell write used to reach only
+//! `pm_guard_bash`'s `SHELL_EDIT_REASON`, which asks WHO is writing: it is
+//! budget-tiered and both subagent exemptions skip it, so `git diff
+//! --output=<file>` and `echo … > <file>` each landed a source file in a shared
+//! main checkout within budget. `Bash` now takes the same two halves as an edit
+//! tool, reading its target from
+//! [`pm_guard_bash::shell_write_target`](super::pm_guard_bash::shell_write_target)
+//! — the redirect-or-git-write-option half of the one detector `pm_guard_bash`
+//! already keeps, never a second parser. `SHELL_EDIT_REASON` is unchanged and
+//! still fires for the PM on every shell write; this rule adds the WHERE
+//! dimension ADR-0048's Consequences recorded as open.
+//!
 //! Residual bypasses, stated rather than hidden: the path is resolved
 //! lexically, so a symlink into a checkout is not followed — the same limit
-//! [`is_main_checkout`] carries and documents. A write performed through `Bash`
-//! rather than an edit tool is classified by `pm_guard_bash` instead, which
-//! reaches the same deny through `SHELL_EDIT_REASON` for the PM but does not
-//! yet carry the main-checkout dimension for dispatched agents; that is stated
-//! in ADR-0048's Consequences rather than closed here.
+//! [`is_main_checkout`] carries and documents. The `Bash` half sees only a
+//! write it can positively identify, so a write performed by an interpreter
+//! (`python -c`), by a verb whose target sits in a trailing position
+//! (`sed -i`), or through a variable the guard does not expand is not resolved
+//! into a path and keeps only the `SHELL_EDIT_REASON` treatment.
 //!
 //! Test: `denies_*`, `allows_*` below; `pm_guard_denies_a_source_write_in_a_main_checkout`
 //! and siblings in `tests/tm_hook_pm_guard.rs` run the real binary, including
@@ -56,31 +68,56 @@ use std::path::{Path, PathBuf};
 use trusty_mpm::core::project_aliases::is_main_checkout;
 
 use super::pm_guard::{EDIT_TOOLS, edit_tool_target_path, is_source_code_path};
+use super::pm_guard_bash::shell_write_target;
 
 /// Deny a source-file write whose target lives in a project's main checkout.
 ///
 /// Why: the one entry point `pm_guard` calls, ordered cheapest test first so
-/// the overwhelming majority of tool calls — everything that is not an edit —
-/// costs one slice comparison and nothing else.
-/// What: `Some(reason)` when `tool_name` is an [`EDIT_TOOLS`] member, its
-/// target path [`is_source_code_path`], and the directory that path resolves
-/// into [`is_main_checkout`]. `None` (ALLOW) in every other case.
+/// the overwhelming majority of tool calls — everything that is neither an edit
+/// nor a `Bash` call — costs one slice comparison and nothing else.
+/// What: `Some(reason)` when the call names a write target, that target
+/// [`is_source_code_path`], and the directory it resolves into
+/// [`is_main_checkout`]. The target comes from [`edit_tool_target_path`] for an
+/// [`EDIT_TOOLS`] member and from [`shell_write_target`] for `Bash` (#7399).
+/// `None` (ALLOW) in every other case.
 /// Test: `denies_a_source_write_in_a_main_checkout`,
-/// `allows_documents_and_configuration`, `allows_a_write_inside_a_worktree`.
+/// `allows_documents_and_configuration`, `allows_a_write_inside_a_worktree`,
+/// `denies_a_git_output_write_in_a_main_checkout`,
+/// `allows_a_git_read_in_a_main_checkout`.
 pub(crate) fn evaluate_main_checkout_write(
     tool_name: &str,
     tool_input: Option<&serde_json::Value>,
     cwd: &Path,
 ) -> Option<String> {
-    if !EDIT_TOOLS.contains(&tool_name) {
+    let target = write_target(tool_name, tool_input)?;
+    if !is_source_code_path(&target) {
         return None;
     }
-    let target = edit_tool_target_path(tool_input)?;
-    if !is_source_code_path(target) {
+    let resolved = resolve_write_target(&target, cwd);
+    is_main_checkout(&resolved).then(|| deny_reason(&target))
+}
+
+/// The file this tool call would write, whichever tool named it.
+///
+/// Why (#7399): the boundary's question is WHERE a write lands, and the answer
+/// is the same question for an edit tool and for a shell write — only the place
+/// the path is written down differs. Resolving both here keeps one deny, one
+/// message and one pair of halves rather than a second rule for `Bash`.
+/// What: `tool_input.file_path` for an [`EDIT_TOOLS`] member, and for `Bash`
+/// the positively identified write target of its command
+/// ([`shell_write_target`]). `None` for every other tool, and for a command
+/// that names no write.
+/// Test: `denies_a_git_output_write_in_a_main_checkout`,
+/// `denies_a_shell_redirect_into_a_main_checkout`.
+fn write_target(tool_name: &str, tool_input: Option<&serde_json::Value>) -> Option<String> {
+    if EDIT_TOOLS.contains(&tool_name) {
+        return edit_tool_target_path(tool_input).map(str::to_owned);
+    }
+    if tool_name != "Bash" {
         return None;
     }
-    let resolved = resolve_write_target(target, cwd);
-    is_main_checkout(&resolved).then(|| deny_reason(target))
+    let command = tool_input?.get("command")?.as_str()?;
+    shell_write_target(command)
 }
 
 /// The directory a write to `target` would land in.
@@ -218,7 +255,10 @@ mod tests {
     }
 
     #[test]
-    fn allows_every_non_edit_tool() {
+    fn allows_every_tool_that_names_no_write() {
+        // `Bash` is in the list since #7399, and stays here: this payload
+        // carries a `file_path` and no `command`, so the shell half finds
+        // nothing to resolve.
         let dir = main_checkout();
         for tool in ["Read", "Bash", "Grep", "Agent", "SendMessage"] {
             assert_eq!(
@@ -228,9 +268,102 @@ mod tests {
                     dir.path()
                 ),
                 None,
-                "{tool} is not an edit tool"
+                "{tool} names no write here"
             );
         }
+    }
+
+    /// A `Bash` payload running `command`.
+    fn bash_input(command: &str) -> serde_json::Value {
+        serde_json::json!({"command": command})
+    }
+
+    // #7399: `git diff --output=<file>` writes exactly as `> <file>` does, so
+    // the boundary must answer the same way for both.
+    #[test]
+    fn denies_a_git_output_write_in_a_main_checkout() {
+        let dir = main_checkout();
+        let target = dir.path().join("crates/x/src/lib.rs");
+        let target = target.display().to_string();
+        for command in [
+            format!("git diff --output={target} HEAD~1 HEAD"),
+            format!("git diff --output {target} HEAD"),
+            format!("git log -1 --output={target}"),
+            format!("git show HEAD --output={target}"),
+            // `format-patch -o` and `archive -o` reach the same detector; they
+            // name a directory and an archive, which `is_source_code_path`
+            // does not classify as source, so the boundary leaves them to the
+            // `SHELL_EDIT_REASON` deny #7405 already gives them.
+            format!("git -C {} diff --output={target}", dir.path().display()),
+        ] {
+            let reason =
+                evaluate_main_checkout_write("Bash", Some(&bash_input(&command)), dir.path())
+                    .unwrap_or_else(|| {
+                        panic!("`{command}` writes into a main checkout and must deny")
+                    });
+            assert!(reason.contains("ADR-0044"), "{reason}");
+        }
+    }
+
+    // #7399: the redirect the boundary is made to match, proving both spellings
+    // reach one deny with one message.
+    #[test]
+    fn denies_a_shell_redirect_into_a_main_checkout() {
+        let dir = main_checkout();
+        let target = dir.path().join("crates/x/src/lib.rs");
+        let command = format!("echo 'fn main() {{}}' > {}", target.display());
+        let reason = evaluate_main_checkout_write("Bash", Some(&bash_input(&command)), dir.path())
+            .expect("a redirect into a main checkout's source must deny");
+        assert!(reason.contains("ADR-0044"), "{reason}");
+    }
+
+    // #7399: the worktree is where the write is SUPPOSED to land.
+    #[test]
+    fn allows_a_git_output_write_inside_a_worktree() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join(".git"), "gitdir: /elsewhere").expect("write .git");
+        let target = dir.path().join("crates/x/src/lib.rs");
+        let command = format!("git diff --output={} HEAD", target.display());
+        assert_eq!(
+            evaluate_main_checkout_write("Bash", Some(&bash_input(&command)), dir.path()),
+            None
+        );
+    }
+
+    // #7399 must not cost a single read. `--no-index` compares two files and
+    // writes none; the plain forms write nothing either.
+    #[test]
+    fn allows_a_git_read_in_a_main_checkout() {
+        let dir = main_checkout();
+        let a = dir.path().join("crates/x/src/lib.rs");
+        let a = a.display().to_string();
+        for command in [
+            format!("git diff --no-index {a} {a}"),
+            "git diff HEAD~1 HEAD".to_string(),
+            "git diff --stat".to_string(),
+            format!("git diff --output-indicator-new=+ -- {a}"),
+            format!("git format-patch --stdout -1 HEAD -- {a}"),
+            // The sed/awk trailing token names a file `sed -n` only READS, so
+            // the boundary deliberately does not resolve it.
+            format!("sed -n '1,5p' {a}"),
+        ] {
+            assert_eq!(
+                evaluate_main_checkout_write("Bash", Some(&bash_input(&command)), dir.path()),
+                None,
+                "`{command}` writes nothing"
+            );
+        }
+    }
+
+    // #7399: documents keep the ADR-0049 carve-out through the shell too.
+    #[test]
+    fn allows_a_git_output_write_of_a_document() {
+        let dir = main_checkout();
+        let command = format!("git diff --output={}/notes.md HEAD", dir.path().display());
+        assert_eq!(
+            evaluate_main_checkout_write("Bash", Some(&bash_input(&command)), dir.path()),
+            None
+        );
     }
 
     #[test]
