@@ -116,11 +116,21 @@
 //! verbs is the shape that failed four times. The cut itself is what creates
 //! the orphan, so the cut is what repairs it — [`drop_split_orphan_braces`](super::pm_guard_secret_words::drop_split_orphan_braces)
 //! removes a brace with no partner in its own fragment, which also GLUES the
-//! prefix to the first alternative, and [`bounded_brace_expansion`](super::pm_guard_secret_words::bounded_brace_expansion) is scanned
-//! beside it so a join in a middle alternative is not lost. A brace pair that
-//! survives the cut whole is untouched, so `cp secret.{tfvars,bak}`,
-//! `cat {.env,.env.prod}` and a `Grep` `glob` still resolve and still fail
-//! closed on a shape the shared expander cannot read.
+//! prefix to the first alternative. A brace pair that survives the cut whole is
+//! untouched, so `cp secret.{tfvars,bak}`, `cat {.env,.env.prod}` and a `Grep`
+//! `glob` still resolve and still fail closed on a shape the shared expander
+//! cannot read.
+//!
+//! That drop REMOVES bytes, and round 12's critic found the two ways it lost a
+//! name: `cat .{e:x,{y,env}}` and `cat .{x:1,<70 more>,env}` both ALLOWED on
+//! `cd8c42991`, because a NESTED group and a group past the bound each left the
+//! drop as the only reading and the middle alternative `.env` was never seen.
+//! The drop is therefore no longer applied to the raw text at all:
+//! [`bounded_brace_readings`](super::pm_guard_secret_words::bounded_brace_readings) resolves the alternation the way a shell does —
+//! nesting included — and the drop runs over each reading, where the braces
+//! left are literal. A product past that bound has no readings, and the raw
+//! text is scanned so its brace fails CLOSED. Deliberate cost: a literal brace
+//! group with more than 64 alternatives now denies.
 //!
 //! What this costs, deliberately: naming a secret-shaped file in ANY command
 //! now denies, including one that reads nothing — `git log --grep .env`,
@@ -192,6 +202,7 @@
 //! `allows_a_brace_literal_passed_as_an_argument_value`,
 //! `a_real_brace_alternation_in_argv_still_denies`,
 //! `drops_only_the_braces_the_cut_orphaned`,
+//! `denies_a_secret_hidden_by_nesting_or_cap_overflow`,
 //! `the_documented_residuals_still_allow`, and the rest of this
 //! module's `tests` submodule. The rule is proved WIRED end to end through the
 //! real binary by `pm_guard_denies_a_line_range_read_of_a_secret_bearing_file`,
@@ -1043,7 +1054,7 @@ mod tests {
     // #7414: the word-cutting layer's own helpers — this module owns every
     // caller of them, so its tests stay the place they are exercised.
     use crate::commands::pm_guard_secret_words::{
-        bounded_brace_expansion, drop_split_orphan_braces, matching_close_brace,
+        bounded_brace_readings, drop_split_orphan_braces, matching_close_brace,
         rewrite_parameter_expansions, split_parameter_expansion, walk_parameter_expansions,
     };
 
@@ -2343,6 +2354,38 @@ mod tests {
     }
 
     #[test]
+    fn denies_a_secret_hidden_by_nesting_or_cap_overflow() {
+        // Round-2 critic CRITICAL on #7414: the orphan drop is a LOSSY repair,
+        // so it may be trusted only while the expansion agrees. A NESTED group
+        // and a group past `MAX_BRACE_EXPANSION` each defeated the expander,
+        // leaving the glued spelling — which matches nothing — as the only
+        // reading, and the middle alternative `.env` was never seen.
+        let over_cap: String = (0..70).map(|n| format!("j{n},")).collect();
+        let corpus = [
+            ("a nested group", "cat .{e:x,{y,env}}".to_string()),
+            (
+                "a nested group in a jq filter",
+                "gh issue view 7414 -q '{x:1,{y,.env}}'".to_string(),
+            ),
+            (
+                "a group past the cap",
+                format!("cat .{{x:1,{over_cap}env}}"),
+            ),
+            ("a flat split group", "cat .{env,x:y}".to_string()),
+            ("a flat split group", "head -c 1 .{e:x,env}".to_string()),
+        ];
+        let allowed: Vec<&str> = corpus
+            .iter()
+            .filter(|(_, command)| eval(command).is_none())
+            .map(|(label, _)| *label)
+            .collect();
+        assert!(allowed.is_empty(), "these must deny: {allowed:?}");
+        // The same flat group UNDER the cap already denied before this round;
+        // asserted as the control the two rows above are measured against.
+        assert!(eval("cat .{x:1,a,b,c,d,env}").is_some());
+    }
+
+    #[test]
     fn drops_only_the_braces_the_cut_orphaned() {
         // A `{` and its `}` in the SAME fragment are alternation and stay; a
         // brace whose partner the cut removed is ordinary text and goes.
@@ -2358,15 +2401,40 @@ mod tests {
         // A `${` is a parameter expansion, not an alternation: its brace stays,
         // so an unbalanced one keeps failing closed.
         assert_eq!(drop_split_orphan_braces("cat ${VAR"), "cat ${VAR");
-        // The expansion spelling carries a join the cut would otherwise lose,
-        // and refuses a group it cannot resolve or bound.
+        // The readings the drop is applied to: bash's own expansion, so a
+        // middle alternative and a NESTED group both survive it.
         assert_eq!(
-            bounded_brace_expansion(".{e:x,env}"),
+            bounded_brace_readings(".{e:x,env}"),
             Some(vec![".e:x".to_string(), ".env".to_string()])
         );
-        assert_eq!(bounded_brace_expansion("{\"a\":{\"b\":1}}"), None);
-        assert_eq!(bounded_brace_expansion("no braces here"), None);
-        assert_eq!(bounded_brace_expansion("cat ${VAR"), None);
+        assert_eq!(
+            bounded_brace_readings(".{e:x,{y,env}}"),
+            Some(vec![
+                ".e:x".to_string(),
+                ".y".to_string(),
+                ".env".to_string()
+            ])
+        );
+        // No comma at any depth: not an alternation, so the text reads as
+        // itself and nested JSON is left alone.
+        assert_eq!(
+            bounded_brace_readings("{\"a\":{\"b\":1}}"),
+            Some(vec!["{\"a\":{\"b\":1}}".to_string()])
+        );
+        assert_eq!(
+            bounded_brace_readings("no braces here"),
+            Some(vec!["no braces here".to_string()])
+        );
+        // A `${` is a parameter expansion and an unbalanced brace is literal:
+        // neither is an alternation, and both still fail closed downstream.
+        assert_eq!(
+            bounded_brace_readings("cat ${VAR"),
+            Some(vec!["cat ${VAR".to_string()])
+        );
+        // Past the bound there are no readings at all — the caller scans the
+        // raw text and its brace fails closed (#7414 round 2).
+        let over_cap: String = (0..70).map(|n| format!("j{n},")).collect();
+        assert_eq!(bounded_brace_readings(&format!(".{{{over_cap}env}}")), None);
     }
 
     #[test]

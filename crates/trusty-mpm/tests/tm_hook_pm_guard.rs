@@ -3100,6 +3100,9 @@ fn pm_guard_allows_a_brace_literal_passed_as_an_argument_value() {
         "cp secret.{tfvars,bak} dst",
         "jq -n '{\\\"file\\\":\\\".env\\\"}'",
         "cat ${VAR",
+        // #7414 round 2: a NESTED group the cut splits. bash reads this as
+        // `.e:x`, `.y` and `.env`, so the middle alternative names a secret.
+        "cat .{e:x,{y,env}}",
     ] {
         let stdout = run_pm_guard_at(
             &bash_payload_at(command, &repo, ""),

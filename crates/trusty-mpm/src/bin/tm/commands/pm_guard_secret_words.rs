@@ -16,6 +16,12 @@
 //! it returns every reading of one text the caller must screen, because no
 //! single spelling is trusted to be the only way a shell reads it.
 //!
+//! One residual is named rather than silently allowed: a text whose brace
+//! alternatives multiply past [`MAX_BRACE_EXPANSION`] is scanned raw, so a
+//! literal brace the cut splits there fails CLOSED. That is a false-positive
+//! trade taken deliberately — the alternative is the round-12 hole, where an
+//! unbounded group was scanned through the lossy orphan drop alone.
+//!
 //! Test: `allows_a_parameter_expansion_that_names_no_secret`,
 //! `denies_a_parameter_expansion_whose_operand_names_a_secret`,
 //! `splits_a_parameter_expansion_into_its_name_and_operand`,
@@ -24,29 +30,43 @@
 //! `allows_a_brace_literal_passed_as_an_argument_value`,
 //! `a_real_brace_alternation_in_argv_still_denies`,
 //! `drops_only_the_braces_the_cut_orphaned`,
+//! `denies_a_secret_hidden_by_nesting_or_cap_overflow`,
 //! `normalize_bracket_classes_collapses_a_class_and_drops_a_stray` in
 //! `pm_guard_secret_read`'s `tests` submodule, which owns every caller of this
 //! layer.
-
-use crate::commands::pm_guard_bash::expand_brace_alternatives;
 
 /// Every reading of `text` the word scan must screen.
 ///
 /// Why: a shell can read one string more than one way, and round 8 established
 /// that the guard scans ALL of them rather than picking a winner — scanning an
 /// extra spelling can only ADD a deny word, while picking wrong loses one.
-/// What: [`rewrite_parameter_expansions`] first, then the brace readings —
-/// [`drop_split_orphan_braces`], which is what stops a JSON literal's
-/// split-apart brace failing closed, and beside it [`bounded_brace_expansion`],
-/// which carries a join the cut would otherwise lose. The raw text is NOT a
-/// spelling: its orphaned braces are the #7414 false positive being withdrawn.
+/// [`drop_split_orphan_braces`] is the exception to that discipline: it REMOVES
+/// bytes, so it is the one repair that can lose a name, and round 12's critic
+/// found both ways it did. `cat .{e:x,{y,env}}` and
+/// `cat .{x:1,<70 more>,env}` each ALLOWED on `cd8c42991` while bash reads
+/// `.env` out of the middle alternative.
+/// What: [`rewrite_parameter_expansions`] first, then
+/// [`bounded_brace_readings`] — every string the shell's own brace expansion
+/// can produce — and the orphan drop is applied to EACH of those readings
+/// rather than to the raw text. A reading is therefore braceless wherever the
+/// expansion resolved, so the drop can only touch a brace that is literal.
+/// When the expansion cannot be bounded the readings are unavailable, and the
+/// raw text is scanned instead so its unresolved brace fails CLOSED — the same
+/// answer [`is_secret_read_target`](super::pm_guard_secret_read::is_secret_read_target) gives a brace it cannot expand.
 /// Test: `allows_a_brace_literal_passed_as_an_argument_value`,
-/// `a_real_brace_alternation_in_argv_still_denies`.
+/// `a_real_brace_alternation_in_argv_still_denies`,
+/// `denies_a_secret_hidden_by_nesting_or_cap_overflow`.
 pub(crate) fn scan_spellings(text: &str) -> Vec<String> {
     let scanned = rewrite_parameter_expansions(text);
-    let mut spellings = vec![drop_split_orphan_braces(&scanned)];
-    spellings.extend(bounded_brace_expansion(&scanned).unwrap_or_default());
-    spellings
+    // #7414: an expansion this layer cannot bound leaves the orphan drop
+    // unchecked, so the raw spelling is scanned and its brace fails closed.
+    let Some(readings) = bounded_brace_readings(&scanned) else {
+        return vec![scanned];
+    };
+    readings
+        .iter()
+        .map(|reading| drop_split_orphan_braces(reading))
+        .collect()
 }
 
 /// Bytes a filename can carry, for the purpose of cutting a raw segment into
@@ -289,15 +309,17 @@ pub(crate) fn walk_parameter_expansions(text: &str, splice: bool, names: &mut St
     out
 }
 
-/// Upper bound on how many alternatives [`bounded_brace_expansion`] will build.
+/// Upper bound on how many readings [`bounded_brace_readings`] will build.
 ///
-/// Why: the expansion is a cartesian product over every group in the text, so a
-/// crafted argument with many comma-heavy groups could ask for an unbounded
-/// allocation. The bound is counted BEFORE the product is built, so the refusal
-/// costs nothing.
-/// What: 64 — far above any real `cp a.{x,y,z} dst` and far below a shape that
-/// costs memory. Over the bound the expansion spelling is dropped and only
-/// [`drop_split_orphan_braces`] is scanned.
+/// Why: the expansion is a cartesian product over every alternation group in
+/// the text, so a crafted argument with many comma-heavy groups could ask for
+/// an unbounded allocation.
+/// What: 64 — far above any real `cp a.{x,y,z} dst`, and the recursion stops
+/// the moment the product reaches it, so the refusal costs one allocation per
+/// reading already built. Over the bound the readings are NOT available and
+/// [`scan_spellings`] falls back to the raw text, which fails closed; round 12
+/// dropped the expansion spelling and kept scanning, and that is the hole
+/// `cat .{x:1,<70 more>,env}` walked through.
 const MAX_BRACE_EXPANSION: usize = 64;
 
 /// `text` with every brace the CUT orphaned removed (#7414).
@@ -322,6 +344,11 @@ const MAX_BRACE_EXPANSION: usize = 64;
 /// preceded by `$` is a PARAMETER expansion, not an alternation, and is never
 /// dropped — that is what keeps an unbalanced `${VAR` failing closed
 /// (#7266 round 7).
+///
+/// Removing bytes can lose a name, so [`scan_spellings`] runs this over each
+/// [`bounded_brace_readings`] reading rather than over the raw text: by then
+/// every alternation has already been resolved, and the braces this sees are
+/// literal ones.
 /// Test: `drops_only_the_braces_the_cut_orphaned`,
 /// `allows_a_brace_literal_passed_as_an_argument_value`,
 /// `a_real_brace_alternation_in_argv_still_denies`.
@@ -367,42 +394,122 @@ fn mark_orphan_braces(chars: &[char], start: usize, end: usize, keep: &mut [bool
     }
 }
 
-/// Every alternative `text`'s brace groups expand to, or `None`.
+/// Every string the shell's brace expansion can read `text` as, or `None` past
+/// [`MAX_BRACE_EXPANSION`].
 ///
 /// Why: [`drop_split_orphan_braces`] reconstructs only the first and last
 /// alternative of a group the cut split, so a group whose MIDDLE alternative
-/// carries the secret would be lost: bash reads `cat .{e:x,env}` as `.e:x` and
-/// `.env`, and the dropped spelling yields neither `.env` nor anything matching
-/// it. Expanding the whole text is the other reading, scanned beside the
-/// dropped one, so this can only ADD deny words — the same both-spellings
-/// discipline rounds 8 and 11 use.
-/// What: `None` when the text carries no `{`, when a group is unbalanced or
-/// nested (the shared expander resolves neither), or when the product would
-/// exceed [`MAX_BRACE_EXPANSION`]; otherwise `expand_brace_alternatives` over
-/// the whole text. The product is counted with the expander's own left-to-right
-/// first-`{`-then-first-`}` walk, so the count and the expansion agree.
+/// carries the secret is lost — bash reads `cat .{e:x,env}` as `.e:x` and
+/// `.env`, and the dropped spelling yields neither. Round 12 answered that with
+/// the shared [`expand_brace_alternatives`](super::pm_guard_bash::expand_brace_alternatives), which resolves neither a NESTED
+/// group nor one past the bound and returned `None` for both; the orphan-drop
+/// spelling was then trusted alone and `cat .{e:x,{y,env}}` and
+/// `cat .{x:1,<70 more>,env}` both ALLOWED. Resolving nesting here is what
+/// makes the drop safe to apply afterwards.
+/// What: bash's own rule, so a reading is a string the shell really produces.
+/// The first `{` that has a matching `}` AND a comma at its own depth is the
+/// alternation; every other `{` is literal and the scan continues INSIDE it, so
+/// `{"outer":{"inner":1}}` — no comma at any depth — reads as itself while
+/// `{a:{b,c}}` reads as `{a:b}` and `{a:c}`. A `{` behind `$` is a parameter
+/// expansion and is never a group. An UNBALANCED brace is literal text, as it
+/// is in a shell, so that shape needs no refusal here — it still fails closed
+/// later, where [`drop_split_orphan_braces`] leaves it inside one fragment.
+/// `None` is reserved for the one thing the reading cannot survive: a cartesian
+/// product past [`MAX_BRACE_EXPANSION`].
 /// Test: `drops_only_the_braces_the_cut_orphaned`,
-/// `a_real_brace_alternation_in_argv_still_denies`.
-pub(crate) fn bounded_brace_expansion(text: &str) -> Option<Vec<String>> {
-    let mut rest = text;
-    let mut product = 1usize;
-    let mut groups = 0usize;
-    while let Some(start) = rest.find('{') {
-        let after = rest.get(start + 1..)?;
-        let end = after.find('}')?;
-        let alternatives = after.get(..end)?;
-        if alternatives.contains('{') {
-            return None;
+/// `a_real_brace_alternation_in_argv_still_denies`,
+/// `denies_a_secret_hidden_by_nesting_or_cap_overflow`.
+pub(crate) fn bounded_brace_readings(text: &str) -> Option<Vec<String>> {
+    let Some((open, close, alternatives)) = alternation_group(text) else {
+        return Some(vec![text.to_string()]);
+    };
+    let prefix = text.get(..open)?;
+    let tails = bounded_brace_readings(text.get(close + 1..)?)?;
+    let mut out = Vec::new();
+    for alternative in alternatives {
+        for head in bounded_brace_readings(alternative)? {
+            for tail in &tails {
+                if out.len() >= MAX_BRACE_EXPANSION {
+                    return None;
+                }
+                out.push(format!("{prefix}{head}{tail}"));
+            }
         }
-        product = product.checked_mul(alternatives.split(',').count())?;
-        if product > MAX_BRACE_EXPANSION {
-            return None;
+    }
+    Some(out)
+}
+
+/// The first alternation group in `text`: its `{`, its `}`, and its
+/// alternatives.
+///
+/// What: the leftmost `{` that is not a `${`, has a matching `}`, and carries a
+/// comma at its own depth. A `{` failing any of those is literal, and the walk
+/// continues at the next byte — which is how a group NESTED inside a
+/// comma-less one is still found.
+/// Test: `drops_only_the_braces_the_cut_orphaned`.
+fn alternation_group(text: &str) -> Option<(usize, usize, Vec<&str>)> {
+    let bytes = text.as_bytes();
+    for (open, byte) in bytes.iter().enumerate() {
+        // #7414: `${` is a parameter expansion — round 7 owns that shape.
+        if *byte != b'{' || (open > 0 && bytes[open - 1] == b'$') {
+            continue;
         }
-        groups += 1;
-        rest = after.get(end + 1..)?;
+        let Some(close) = matching_brace_byte(bytes, open) else {
+            continue;
+        };
+        let alternatives = top_level_alternatives(text.get(open + 1..close)?);
+        if alternatives.len() > 1 {
+            return Some((open, close, alternatives));
+        }
     }
-    if groups == 0 {
-        return None;
+    None
+}
+
+/// Byte index of the `}` closing the `{` at `open`, or `None` when nothing
+/// does.
+///
+/// What: the byte-index twin of [`matching_close_brace`], which the parameter
+/// walk needs in char indices. `{` and `}` are ASCII, so every index it returns
+/// is a char boundary.
+/// Test: `drops_only_the_braces_the_cut_orphaned`.
+fn matching_brace_byte(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (index, byte) in bytes.iter().enumerate().skip(open) {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
     }
-    expand_brace_alternatives(text)
+    None
+}
+
+/// One group's alternatives: `inner` split at every comma at depth zero.
+///
+/// What: a comma inside a nested `{…}` belongs to that group, not this one, so
+/// `"outer":{"inner":1,"z":2}` is ONE alternative and the outer braces stay
+/// literal. A single element means the group is not an alternation at all.
+/// Test: `drops_only_the_braces_the_cut_orphaned`.
+fn top_level_alternatives(inner: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (index, byte) in inner.as_bytes().iter().enumerate() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => {
+                out.push(&inner[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(&inner[start..]);
+    out
 }
