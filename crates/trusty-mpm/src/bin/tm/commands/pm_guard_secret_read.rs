@@ -99,7 +99,10 @@
 //! Every pattern and every family still applies, so `python -c 'open(".env")'`
 //! and a body carrying `.env` both deny, and a body whose operator line names
 //! a SHELL is left in place, because it is shell source whose own segments
-//! must still be classified.
+//! must still be classified. Program text is lexed before its words are
+//! matched, so a name a shell rejoins out of quoting — `$(cat .en"v")` in a
+//! body, `sh -c 'cat .en"v"'` — denies exactly as it did before round 9 (see
+//! [`secret_files_named_in_program_text`]).
 //!
 //! What this costs, deliberately: naming a secret-shaped file in ANY command
 //! now denies, including one that reads nothing — `git log --grep .env`,
@@ -164,6 +167,9 @@
 //! `denies_a_secret_named_inside_an_inline_program`,
 //! `denies_a_secret_operand_beside_an_inline_program`,
 //! `a_shell_heredoc_body_stays_live_shell_syntax`,
+//! `denies_a_quote_joined_name_in_a_heredoc_body`,
+//! `denies_a_quote_joined_name_in_an_inline_program`,
+//! `the_program_text_join_keeps_brace_leniency`,
 //! `the_documented_residuals_still_allow`, and the rest of this
 //! module's `tests` submodule. The rule is proved WIRED end to end through the
 //! real binary by `pm_guard_denies_a_line_range_read_of_a_secret_bearing_file`,
@@ -484,7 +490,7 @@ pub(crate) fn evaluate_secret_file_read_command(command: &str) -> Option<String>
         return Some(deny_reason(first, &describe_command(trimmed)));
     }
     for body in &bodies {
-        if let Some(first) = secret_files_named_in(body, Scan::ProgramText).first() {
+        if let Some(first) = secret_files_named_in_program_text(body).first() {
             return Some(deny_reason(first, "a here-document body"));
         }
     }
@@ -587,14 +593,55 @@ fn secret_words_in_segment(segment: &str) -> Vec<String> {
         if Some(index) == pattern_at {
             continue;
         }
-        let scan = if Some(index) == program_at {
-            Scan::ProgramText
+        let words = if Some(index) == program_at {
+            secret_files_named_in_program_text(token)
         } else {
-            Scan::Argv
+            secret_files_named_in(token, Scan::Argv)
         };
-        for word in secret_files_named_in(token, scan) {
+        for word in words {
             if !out.contains(&word) {
                 out.push(word);
+            }
+        }
+    }
+    out
+}
+
+/// Every distinct word of one PROGRAM TEXT block that names a secret file.
+///
+/// Why: critic CRITICAL on the round-9 fix. [`secret_files_named_in`] cuts at
+/// every byte a path cannot contain, and `"` is one of them, so a here-document
+/// body carrying `$(cat .en"v")` cut into `.en` and `v` and ALLOWED — while
+/// with an unquoted delimiter bash runs that substitution and prints the file.
+/// The ARGV path never had the hole, because [`secret_words_in_segment`] lexes
+/// first; before round 9 the whole here-document reached it as one segment and
+/// `shlex` glued the name back together. Program text needs the same join.
+/// What: scans each LINE twice and unions the words — once through
+/// `shlex::split`, which performs the quote removal, and once raw, which is
+/// what round 9 did. Scanning BOTH means this can only ADD denials to round 9,
+/// never remove one, so a line the lexer reads differently from the byte scan
+/// cannot open a gap either way. A line `shlex` cannot read contributes its raw
+/// scan alone. Per line rather than per block, so one unlexable line does not
+/// cost the join for the rest. Brace leniency is untouched: the join runs
+/// BEFORE [`names_a_secret_file`], which still reads an unresolvable `{` as
+/// ordinary text under [`Scan::ProgramText`].
+/// Test: `denies_a_quote_joined_name_in_a_heredoc_body`,
+/// `denies_a_quote_joined_name_in_an_inline_program`,
+/// `allows_program_text_that_only_looks_like_a_brace_group`.
+fn secret_files_named_in_program_text(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines() {
+        // #7266: the lexed spelling and the raw spelling are both scanned —
+        // neither is trusted to be the only way the shell reads the line.
+        let mut spellings = vec![line.to_string()];
+        if let Some(tokens) = shlex::split(line) {
+            spellings.extend(tokens);
+        }
+        for spelling in spellings {
+            for word in secret_files_named_in(&spelling, Scan::ProgramText) {
+                if !out.contains(&word) {
+                    out.push(word);
+                }
             }
         }
     }
@@ -2331,6 +2378,46 @@ mod tests {
         assert!(eval("cat <<'EOF' > .env\nAPI_KEY=1\nEOF").is_some());
         // A real brace alternation in argv still expands and denies.
         assert!(eval("cat {.env,.env.prod}").is_some());
+    }
+
+    /// The names a shell reassembles out of quoting, in program text.
+    ///
+    /// Why: critic CRITICAL on 355a725a5 — the round-9 body scan read raw
+    /// bytes and cut at `"`, so each of these ALLOWED there while `origin/main`
+    /// denied them. With an UNQUOTED here-document delimiter bash expands the
+    /// substitution and prints the file, so this is a live read, not prose.
+    const QUOTE_JOIN_CORPUS: &[&str] = &[
+        "cat <<EOF\n$(cat .en\"v\")\nEOF",
+        "cat <<'EOF'\n$(cat .en\"v\")\nEOF",
+        "cat <<EOF\n$(cat '.en''v')\nEOF",
+        "cat <<EOF\n$(cat \"terraform\".tfvars)\nEOF",
+        "python3 <<PY\nopen('.en'\"v\")\nPY",
+    ];
+
+    #[test]
+    fn denies_a_quote_joined_name_in_a_heredoc_body() {
+        for command in QUOTE_JOIN_CORPUS {
+            assert!(
+                eval(command).is_some(),
+                "a shell rejoins this name — it must deny: `{command}`"
+            );
+        }
+    }
+
+    #[test]
+    fn denies_a_quote_joined_name_in_an_inline_program() {
+        // The inline-program token reaches the same join.
+        assert!(eval("sh -c 'cat .en\"v\"'").is_some());
+        assert!(eval("awk 'BEGIN {while ((getline l < \".en\"\"v\") > 0) print l}'").is_some());
+    }
+
+    #[test]
+    fn the_program_text_join_keeps_brace_leniency() {
+        // The join runs before the name test, so a `{` the expander cannot
+        // resolve is still ordinary text after it.
+        for command in CODE_BRACE_CORPUS {
+            assert_eq!(eval(command), None, "`{command}`");
+        }
     }
 
     #[test]

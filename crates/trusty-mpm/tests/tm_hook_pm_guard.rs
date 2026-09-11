@@ -2610,6 +2610,22 @@ fn pm_guard_denies_a_secret_laundered_to_an_unsuspicious_name() {
     // transparent SOURCE extensions, so `cp .env ./notes.txt` from a main
     // checkout was allowed and `cat notes.txt` afterwards was allowed too.
     let (_dir, repo) = main_checkout_fixture();
+    // #7266: a session id of this test's own. The ALLOW rows below are file
+    // WRITES, so they draw on the per-turn file-change budget, and with no
+    // `session_id` every such test in this binary shares
+    // `state/pm_guard_turn_budget/_default.json` under the runner's real HOME.
+    // That counter's window is 600s, so a second suite run inside ten minutes
+    // found 3/3 spent and this test failed with no code change behind it. The
+    // id is unique per RUN, not merely per test: a fixed one would carry its
+    // own spent window into the next run inside those ten minutes.
+    let session = format!(
+        r#""session_id":"issue-7266-laundered-{}","#,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    );
+    let session = session.as_str();
     // The last one is #7266 round 4: bash expands it to
     // `cp terraform.tfvars notes.txt`, but `shlex::split` keeps it as one
     // token, so round 3 saw a destination with no source behind it and allowed
@@ -2621,7 +2637,7 @@ fn pm_guard_denies_a_secret_laundered_to_an_unsuspicious_name() {
         "cp {terraform.tfvars,notes.txt}",
     ] {
         let stdout = run_pm_guard_at(
-            &bash_payload_at(command, &repo, ""),
+            &bash_payload_at(command, &repo, session),
             UNREACHABLE_DAEMON,
             &repo,
         );
@@ -2642,7 +2658,7 @@ fn pm_guard_denies_a_secret_laundered_to_an_unsuspicious_name() {
         "mv crates/trusty-audit/src/grounding/secrets.rs renamed.rs",
     ] {
         let stdout = run_pm_guard_at(
-            &bash_payload_at(command, &repo, ""),
+            &bash_payload_at(command, &repo, session),
             UNREACHABLE_DAEMON,
             &repo,
         );
@@ -3002,17 +3018,24 @@ fn pm_guard_allows_code_braces_in_a_heredoc_body_and_an_inline_program() {
     // command`, `naming `{a` in a `python3` command`. The scan read a
     // here-document body and an interpreter's inline program as argv, and
     // `expand_brace_alternatives` fails CLOSED on a lone `{`.
+    // A private HOME: one row below is a file-write redirect, and the per-turn
+    // file-change budget lives under HOME and is shared by every test in this
+    // binary. Without this, whichever test ran first won (#4162 family).
     let (_dir, repo) = main_checkout_fixture();
+    let home = isolated_home();
+    let home_s = home.path().to_string_lossy().to_string();
+    let env = [("HOME", home_s.as_str())];
     for command in [
         "cat <<'RSEOF'\\nstruct VerbStub {\\n    cmd: String,\\n}\\nRSEOF",
         "python3 <<'PY'\\nd = {'a': 1}\\nprint(f'{d!r}')\\nPY",
         "awk -F'[ ;]' '{p+=$4} END {print p}' /tmp/x.txt",
         "node -e 'console.log({a: 1})'",
     ] {
-        let stdout = run_pm_guard_at(
+        let stdout = run_pm_guard_at_with_env(
             &bash_payload_at(command, &repo, ""),
             UNREACHABLE_DAEMON,
             &repo,
+            &env,
         );
         assert!(
             stdout.trim().is_empty(),
@@ -3020,18 +3043,23 @@ fn pm_guard_allows_code_braces_in_a_heredoc_body_and_an_inline_program() {
         );
     }
     // The body and the program are SCANNED, not skipped, and every argv
-    // operand beside them keeps the full rule.
+    // operand beside them keeps the full rule. The last two rows are the
+    // critic's quote-join cases: a shell rejoins `.en"v"` into `.env`, and
+    // with an unquoted delimiter it runs the substitution and prints the file.
     for command in [
         "python3 <<'PY'\\nprint(open('.env').read())\\nPY",
         "python3 -c 'print(open(\\\".env\\\").read())'",
         "awk '{print}' .env.local",
         "cat <<'EOF' > .env\\nAPI_KEY=1\\nEOF",
         "cat {.env,.env.prod}",
+        "cat <<EOF\\n$(cat .en\\\"v\\\")\\nEOF",
+        "sh -c 'cat .en\\\"v\\\"'",
     ] {
-        let stdout = run_pm_guard_at(
+        let stdout = run_pm_guard_at_with_env(
             &bash_payload_at(command, &repo, ""),
             UNREACHABLE_DAEMON,
             &repo,
+            &env,
         );
         assert_denied(&stdout);
     }
