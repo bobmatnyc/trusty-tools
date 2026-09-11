@@ -16,12 +16,13 @@
 // #7427: one table, four former `match binding.provider` sites.
 use super::ChannelAdapter;
 use super::ChannelError;
+use super::gworkspace::GworkspaceAdapter;
 use super::slack::SlackAdapter;
 use super::telegram::TelegramAdapter;
 use serde_json::{Value, json};
 
 /// Every channel provider this build supports, in display order.
-static ADAPTERS: &[&dyn ChannelAdapter] = &[&SlackAdapter, &TelegramAdapter];
+static ADAPTERS: &[&dyn ChannelAdapter] = &[&SlackAdapter, &TelegramAdapter, &GworkspaceAdapter];
 
 /// The adapter for `provider`, or `None` when the id is unsupported.
 ///
@@ -73,10 +74,14 @@ mod tests {
     fn channel_registry_resolves_known_providers_and_rejects_notion() {
         assert_eq!(adapter("slack").map(|a| a.provider()), Some("slack"));
         assert_eq!(adapter("telegram").map(|a| a.provider()), Some("telegram"));
+        // #7427 PR 3: was `assert!(adapter("gworkspace").is_none())`.
+        assert_eq!(
+            adapter("gworkspace").map(|a| a.provider()),
+            Some("gworkspace")
+        );
         // Pins the current state: there is no `trusty-channels` Notion
-        // connector, so a Notion binding is unsupported (#7427 PR 3).
+        // connector (#7437), so a Notion binding is unsupported.
         assert!(adapter("notion").is_none());
-        assert!(adapter("gworkspace").is_none());
         assert!(adapter("").is_none());
     }
 
@@ -84,7 +89,10 @@ mod tests {
     fn channel_providers_json_reports_registry_capabilities() {
         let providers = providers_json();
         let list = providers.as_array().unwrap();
-        assert_eq!(list.len(), 2);
+        // #7427 PR 3: was 2. The channel view builds its Service dropdown from
+        // this listing, so gworkspace has to appear here or the UI cannot offer
+        // what the registry now supports.
+        assert_eq!(list.len(), 3);
         assert_eq!(list[0]["id"], json!("slack"));
         assert_eq!(list[0]["can_send"], json!(true));
         assert_eq!(list[0]["can_receive"], json!(true));
@@ -95,6 +103,10 @@ mod tests {
         // be visible here or the UI keeps refusing what the adapter now allows.
         assert_eq!(list[1]["can_receive"], json!(true));
         assert_eq!(list[1]["can_read"], json!(false));
+        assert_eq!(list[2]["id"], json!("gworkspace"));
+        assert_eq!(list[2]["can_send"], json!(true));
+        assert_eq!(list[2]["can_receive"], json!(true));
+        assert_eq!(list[2]["can_read"], json!(false));
         assert!(!list.iter().any(|p| p["id"] == json!("notion")));
     }
 }

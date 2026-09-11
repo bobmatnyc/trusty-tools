@@ -64,7 +64,11 @@ kind of event.";
 /// `ctrl::pm_task::helpers::match_any_glob` (tool-name globs, trailing-only)
 /// because DOC-54's own binding examples use a LEADING wildcard for sender
 /// patterns (`from = ["*@family.com"]`).
-fn sender_glob_matches(value: &str, pattern: &str) -> bool {
+///
+/// #7427: also the matcher a gworkspace channel binding's `from:<address>`
+/// target uses, so a pattern means the same thing in a binding target as in a
+/// listener filter rather than being re-implemented beside it.
+pub(crate) fn sender_glob_matches(value: &str, pattern: &str) -> bool {
     let value = value
         .rsplit_once('<')
         .and_then(|(_, rest)| rest.split_once('>').map(|(mail, _)| mail))

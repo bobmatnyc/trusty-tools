@@ -1,4 +1,10 @@
 //! Assistant-bound channel destinations over trusty-channels provider clients.
+//!
+//! This module is the configuration surface: load, validate, save, and send on
+//! a binding. The provider-neutral INBOUND path — which binding owns an arriving
+//! message, and whether it may spend a model dispatch — is [`inbound`] (#7427).
+pub(crate) mod inbound;
+
 use super::{agent_listeners, agent_patch::resolve_agent_paths, agent_stores::is_valid_agent_name};
 use crate::listeners::config::{AgentBindingFilter, AgentListenerBinding};
 use axum::{Json, extract::Path as AxumPath, http::StatusCode};
@@ -56,8 +62,9 @@ impl Binding {
     /// work never reaches the point where a send silently goes nowhere.
     /// What: identity and name limits, then the provider's own rules —
     /// #7427 resolves the provider through [`crate::channels::adapter`], so an
-    /// unregistered id (Notion, gworkspace) is refused here rather than
-    /// accepted and left inert, and a `receive_enabled` binding is refused on a
+    /// unregistered id (Notion, until `trusty-channels` grows a connector) is
+    /// refused here rather than accepted and left inert, and a
+    /// `receive_enabled` binding is refused on a
     /// provider whose [`crate::channels::Capabilities`] say it has no inbound
     /// path.
     /// Test: `agent_channels_validates_provider_destination_and_permissions`,
@@ -75,8 +82,10 @@ impl Binding {
             return Err(bad("Unsupported channel provider"));
         };
         if !adapter.validate_target(&self.target) {
+            // #7427: gworkspace targets are `from:<address>` / `label:<id>`,
+            // so the copy can no longer name only the two id-shaped providers.
             return Err(bad(
-                "Choose Slack channel ID or Telegram chat ID for the selected provider",
+                "Choose a Slack channel ID, a Telegram chat ID, or a Gmail from:<address> or label:<label> for the selected provider",
             ));
         }
         if self.receive_enabled && !adapter.capabilities().can_receive {
@@ -256,6 +265,14 @@ fn channel_failure(binding_id: &str, error: crate::channels::ChannelError) -> Er
                 "Channel provider request failed; check connection and access",
             )
         }
+        // #7427: a gworkspace `label:` binding can answer an incoming message
+        // but has no correspondent of its own to open a thread to.
+        crate::channels::ChannelError::Destination { .. } => {
+            tracing::warn!(binding = binding_id, %error, "channel operation failed");
+            bad(
+                "This channel destination cannot start a message; bind a sender address, or reply to an incoming message",
+            )
+        }
     }
 }
 /// The credential reference the Telegram long-poll gateway authenticates with.
@@ -371,156 +388,6 @@ pub(super) async fn messages_route(
     messages(&name, &id).await.map(Json)
 }
 
-/// Which saved destination, if any, this inbound event belongs to.
-///
-/// Why (#7427 PR 2): the provider was hard-coded to `"slack"`, so a Telegram
-/// update could not select a binding however it was configured. Taking the
-/// provider as an argument is what lets one inbound path serve both, and it is
-/// what confines a Telegram update to bindings that name a Telegram chat id —
-/// a message from an unbound chat matches nothing and is never dispatched.
-/// What: returns `(claimed, selected)` — `claimed` is true when any binding
-/// names this destination at all (so the gateway knows the assistant owns this
-/// conversation even when the binding is disabled), `selected` is the one
-/// enabled, receive-enabled binding whose filter the event passes.
-/// Test: `agent_channels_receive_never_falls_back_for_disabled_bound_destination`,
-/// `agent_channels_inbound_ignores_an_unbound_telegram_chat`.
-fn receive_selection<'a>(
-    bindings: &'a [Binding],
-    provider: &str,
-    channel: &str,
-    event: &crate::listeners::store::StoredEvent,
-    persona_allowed: bool,
-) -> (bool, Option<&'a Binding>) {
-    let destinations: Vec<_> = bindings
-        .iter()
-        .filter(|b| b.provider == provider && b.target == channel)
-        .collect();
-    let claimed = !destinations.is_empty();
-    let selected = if persona_allowed {
-        destinations.into_iter().find(|b| {
-            b.enabled
-                && b.receive_enabled
-                && crate::listeners::wake::binding_matches_event(
-                    &AgentListenerBinding {
-                        name: event.listener_id.clone(),
-                        enabled: true,
-                        event_types: vec![],
-                        filter: b.filter.clone(),
-                        instructions: b.instructions.clone(),
-                    },
-                    event,
-                )
-        })
-    } else {
-        None
-    };
-    (claimed, selected)
-}
-
-/// The one inbound path: an authenticated provider event, matched against every
-/// assistant's saved destinations and dispatched as a wake.
-///
-/// Why (#7427): this was `receive_slack`, with `"slack"` written into its
-/// binding filter, so Telegram had to grow a second dispatch path of its own —
-/// which is how the two ended up on different prompt shapes and different
-/// failure handling. One function, with the provider as an argument, is what
-/// makes DOC-60 §8's "one envelope regardless of channel" true rather than
-/// merely intended. The wake dispatch also used to be spawned and its result
-/// discarded (`let _result = …`), so a failed `run_pm_task_with_persona`
-/// produced no log line and no visible change — the binding read as healthy
-/// while every inbound message was dropped. The dispatch now goes through
-/// [`crate::channels::status::record_dispatch`], which logs at error level and
-/// increments the per-binding counter the channel view reads.
-/// What: per assistant, selects the bound destination this event matches, asks
-/// the provider's adapter for a wake prompt, and spawns the dispatch. Returns
-/// whether any assistant claimed the destination — a caller with its own
-/// fallback (the Slack session map, the Telegram long-poll gateway) uses that
-/// to decide whether to handle the message itself.
-/// Test: `agent_channels_receive_never_falls_back_for_disabled_bound_destination`,
-/// `agent_channels_inbound_ignores_an_unbound_telegram_chat`,
-/// `channel_dispatch_failure_is_counted_per_binding`.
-pub(crate) async fn receive_inbound(
-    provider: &str,
-    channel: &str,
-    event: &crate::listeners::store::StoredEvent,
-    root: &std::path::Path,
-    user: &crate::rbac::UserIdentity,
-    allowed_personas: Option<&[String]>,
-) -> bool {
-    let dirs = crate::agents::agents_dir_candidates();
-    let Ok(names) = crate::listeners::wake::candidate_agent_names().await else {
-        return false;
-    };
-    let mut claimed = false;
-    for name in names {
-        let Ok((_, _, bindings)) = load_at(&dirs, &name).await else {
-            continue;
-        };
-        let (bound, binding) = receive_selection(
-            &bindings,
-            provider,
-            channel,
-            event,
-            allowed_personas.is_none_or(|allowed| allowed.iter().any(|v| v == &name)),
-        );
-        claimed |= bound;
-        let Some(binding) = binding else {
-            continue;
-        };
-        let Some(adapter) = crate::channels::adapter(&binding.provider) else {
-            continue;
-        };
-        let wake = adapter
-            .receive(
-                binding,
-                crate::channels::InboundEvent {
-                    agent: &name,
-                    event,
-                },
-            )
-            .await;
-        let binding_id = binding.id.clone();
-        let wake = match wake {
-            Ok(Some(wake)) => wake,
-            Ok(None) => continue,
-            Err(e) => {
-                // #7427: an inbound event that cannot even produce a prompt is
-                // counted too, not dropped.
-                tracing::error!(assistant = %name, binding = %binding_id, %e, "channel inbound could not be prepared");
-                crate::channels::status::record_failure(&name, &binding_id, &e.to_string());
-                continue;
-            }
-        };
-        let name = name.clone();
-        let root = root.to_path_buf();
-        let user = user.clone();
-        tokio::spawn(async move {
-            let dispatch = crate::listeners::wake::LISTENER_CHAT_EVENT.scope(
-                wake.metadata,
-                crate::ctrl::pm_task::run_pm_task_with_persona(
-                    &root,
-                    &name,
-                    &wake.prompt,
-                    &[],
-                    None,
-                    crate::ctrl::config::SessionOverrides {
-                        user: Some(user),
-                        ..Default::default()
-                    },
-                ),
-            );
-            // Incoming updates remain private in the assistant chat; sending
-            // requires an explicit UI or tool request. #7427 keeps Telegram on
-            // that same rule: a turn woken by a Telegram message reaches the
-            // chat only when the persona calls the `channel` tool, which routes
-            // through `send` above and therefore `TelegramAdapter::send`. The
-            // reply is never auto-posted, so a binding with `send_enabled`
-            // false can receive without being able to answer.
-            crate::channels::status::record_dispatch(&name, &binding_id, dispatch).await;
-        });
-    }
-    claimed
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -644,122 +511,6 @@ mod tests {
             StatusCode::CONFLICT
         );
         assert!(load_at(&dirs, "../escape").await.is_err());
-    }
-}
-
-#[cfg(test)]
-mod receive_tests {
-    use super::*;
-    #[test]
-    fn agent_channels_receive_never_falls_back_for_disabled_bound_destination() {
-        let mut binding:Binding=serde_json::from_value(json!({"id":"team","name":"Team","provider":"slack","target":"C123","enabled":true,"receive_enabled":true,"filter":{"from":["Owner"]}})).unwrap();
-        let event = crate::listeners::store::StoredEvent {
-            id: "x".into(),
-            listener_id: "slack".into(),
-            provider: "slack".into(),
-            event_type: "message.im".into(),
-            ts: "now".into(),
-            from: Some("Owner".into()),
-            subject: None,
-            snippet: Some("Hello".into()),
-            included: true,
-            labels: vec![],
-        };
-        assert!(
-            receive_selection(
-                std::slice::from_ref(&binding),
-                "slack",
-                "C123",
-                &event,
-                true
-            )
-            .1
-            .is_some()
-        );
-        assert!(
-            !receive_selection(
-                std::slice::from_ref(&binding),
-                "slack",
-                "COTHER",
-                &event,
-                true
-            )
-            .0
-        );
-        assert!(
-            receive_selection(
-                std::slice::from_ref(&binding),
-                "slack",
-                "C123",
-                &event,
-                false
-            )
-            .1
-            .is_none()
-        );
-        binding.receive_enabled = false;
-        let (claimed, selected) = receive_selection(
-            std::slice::from_ref(&binding),
-            "slack",
-            "C123",
-            &event,
-            true,
-        );
-        assert!(claimed);
-        assert!(selected.is_none());
-        binding.receive_enabled = true;
-        binding.filter.from = vec!["Other".into()];
-        assert!(
-            receive_selection(
-                std::slice::from_ref(&binding),
-                "slack",
-                "C123",
-                &event,
-                true
-            )
-            .1
-            .is_none()
-        );
-    }
-
-    /// A Telegram update selects only the binding naming its own chat id, and a
-    /// message from an unbound chat is never dispatched.
-    ///
-    /// Pre-change this test does not compile: `receive_selection` filtered on a
-    /// literal `"slack"`, so no Telegram binding could ever be selected and the
-    /// function took no provider to ask about.
-    #[test]
-    fn agent_channels_inbound_ignores_an_unbound_telegram_chat() {
-        let binding: Binding = serde_json::from_value(json!({
-            "id":"owner","name":"Owner DM","provider":"telegram","target":"123456",
-            "enabled":true,"receive_enabled":true
-        }))
-        .unwrap();
-        let event = crate::listeners::store::StoredEvent {
-            id: "telegram:123456:42".into(),
-            listener_id: "telegram".into(),
-            provider: "telegram".into(),
-            event_type: "message.private".into(),
-            ts: "2026-09-11T00:00:00Z".into(),
-            from: Some("Masa".into()),
-            subject: None,
-            snippet: Some("Move the 3pm".into()),
-            included: true,
-            labels: vec![],
-        };
-        let bound = std::slice::from_ref(&binding);
-        let (claimed, selected) = receive_selection(bound, "telegram", "123456", &event, true);
-        assert!(claimed);
-        assert_eq!(selected.map(|b| b.id.as_str()), Some("owner"));
-
-        // An unbound chat id: not claimed, not selected, so the gateway's own
-        // fallback keeps handling it.
-        let (claimed, selected) = receive_selection(bound, "telegram", "999999", &event, true);
-        assert!(!claimed);
-        assert!(selected.is_none());
-
-        // The same chat id under another provider is a different destination.
-        assert!(!receive_selection(bound, "slack", "123456", &event, true).0);
     }
 }
 

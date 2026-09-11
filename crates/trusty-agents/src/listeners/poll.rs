@@ -15,10 +15,20 @@
 //! fetch each new message's summary fields, append a `StoredEvent`
 //! (unconditionally — every event is durably stored regardless of wake
 //! outcome), and hand the event to `wake::wake_bound_agents` when it's
-//! event-type-included. A cycle-local `woke_this_cycle` flag threads through
+//! event-type-included. A cycle-local `DispatchBudget` threads through
 //! the per-event loop so at most ONE wake actually dispatches per
 //! `poll_once` call — every qualifying event after the first is rate-limited
-//! (`wake::WakeOutcome::RateLimited`), never dispatched. `run_gmail_poll_loop`
+//! (`wake::WakeOutcome::RateLimited`), never dispatched.
+//!
+//! That budget covers BOTH inbound paths (#7427): the channel-binding path and
+//! the `[[listeners]]` wake share one allowance, so a cycle spends one LLM
+//! dispatch no matter which path claims the mail. A message the budget refuses
+//! is appended to the store, published on the event bus, and counted on its
+//! binding by `crate::channels::status::record_rate_limited` — it does NOT come
+//! back next cycle. The dedup set holds its id and the cursor advances past it
+//! at the end of the cycle, so the store's semantics are "stored and visible,
+//! but no assistant turn", exactly as they already were for a listener-path
+//! event the #3820 cap rate-limited. `run_gmail_poll_loop`
 //! wraps that in exponential backoff-with-jitter on transient errors and an
 //! immediate cursor reset on `410 GONE`, per DOC-54 §7.3.4. The cursor file
 //! itself is written atomically (temp-then-rename) and a parse failure on
@@ -28,7 +38,10 @@
 //! `load_cursor_warns_and_defaults_on_malformed_json`,
 //! `save_cursor_then_load_cursor_round_trips`. The wake-cycle cap itself is
 //! pinned in `wake::tests::gate_wake_caps_to_one_dispatch_per_cycle` (the
-//! pure decision `wake_bound_agents` delegates to). The network-calling
+//! pure decision `wake_bound_agents` delegates to) and, for the channel-binding
+//! path, in
+//! `agent_channels::inbound::receive_tests::gworkspace_binding_dispatches_once_per_poll_cycle`.
+//! The network-calling
 //! path is exercised manually against a live `bob-personal` mailbox (see the
 //! PR body's proof plan) — no mock Gmail server exists in this crate.
 
@@ -291,7 +304,12 @@ async fn poll_once(
     // after the first is rate-limited (see `wake::gate_wake`), never
     // dispatched. Every event is still appended to the store above
     // regardless of this flag — only the LLM dispatch is gated.
-    let mut woke_this_cycle = false;
+    //
+    // #7427 code-critic CRITICAL fix: the cap is ONE budget covering BOTH
+    // inbound paths, not a flag the listener wake owns. A channel binding that
+    // dispatches spends it, so a message arriving after it takes neither path's
+    // dispatch — before this, the binding path had no cap at all.
+    let mut budget = crate::api::server::agent_channels::inbound::DispatchBudget::one_per_cycle();
     if let Some(history) = resp.get("history").and_then(|v| v.as_array()) {
         for record in history {
             let Some(added) = record.get("messagesAdded").and_then(|v| v.as_array()) else {
@@ -348,15 +366,29 @@ async fn poll_once(
                     included,
                 });
 
-                if included {
-                    let outcome =
-                        wake::wake_bound_agents(project_path, &event, woke_this_cycle).await;
-                    if matches!(outcome, wake::WakeOutcome::Woke { .. }) {
-                        woke_this_cycle = true;
-                    }
-                    tracing::info!(listener = %cfg.name, event_id = %event.id, outcome = ?outcome, "wake decision recorded");
+                // #7427: a message a gworkspace channel binding addresses is
+                // dispatched through that binding, and therefore NOT also
+                // through the listener wake.
+                let claim = if included {
+                    channel_binding_claim(&event, project_path, &mut budget).await
                 } else {
-                    tracing::debug!(listener = %cfg.name, event_id = %event.id, "event type excluded; no wake attempted");
+                    crate::api::server::agent_channels::inbound::InboundOutcome::default()
+                };
+                match wake_path(included, claim.claimed) {
+                    WakePath::ChannelBinding => {
+                        tracing::info!(listener = %cfg.name, event_id = %event.id, dispatched = claim.dispatched, rate_limited = claim.rate_limited, "wake decision: claimed by a channel binding");
+                    }
+                    WakePath::Listener => {
+                        let outcome =
+                            wake::wake_bound_agents(project_path, &event, budget.is_spent()).await;
+                        if matches!(outcome, wake::WakeOutcome::Woke { .. }) {
+                            budget.take();
+                        }
+                        tracing::info!(listener = %cfg.name, event_id = %event.id, outcome = ?outcome, "wake decision recorded");
+                    }
+                    WakePath::Excluded => {
+                        tracing::debug!(listener = %cfg.name, event_id = %event.id, "event type excluded; no wake attempted");
+                    }
                 }
             }
         }
@@ -373,6 +405,71 @@ async fn poll_once(
     }
 
     Ok(new_count)
+}
+
+/// Which inbound path one stored event takes — exactly one, never both.
+///
+/// Why (#7427): Gmail now reaches an assistant two ways. A channel binding
+/// addresses a correspondent or a label, and the listener wake matches the
+/// agent's own `[[listeners]]` declaration. Running both on one message would
+/// wake the same assistant twice for the same mail, from two different prompts.
+/// Making the choice an enum is what makes "never both" a property a test can
+/// state rather than a reading of the `if` that used to be here.
+/// Test: `gmail_event_takes_exactly_one_wake_path`.
+#[derive(Debug, PartialEq, Eq)]
+enum WakePath {
+    /// The event type is excluded; nothing is dispatched.
+    Excluded,
+    /// A saved channel binding addressed it and has already dispatched.
+    ChannelBinding,
+    /// No binding addressed it, so the `[[listeners]]` wake still applies.
+    Listener,
+}
+
+/// Test: `gmail_event_takes_exactly_one_wake_path`.
+fn wake_path(included: bool, claimed_by_binding: bool) -> WakePath {
+    match (included, claimed_by_binding) {
+        (false, _) => WakePath::Excluded,
+        (true, true) => WakePath::ChannelBinding,
+        (true, false) => WakePath::Listener,
+    }
+}
+
+/// Offer this event to every assistant's gworkspace channel bindings.
+///
+/// Why: the poll loop is the mailbox reader for both paths, so this is where an
+/// addressed message is handed to the binding. Nothing else reads Gmail.
+/// What: returns what the bindings did with it. `claimed` is true when a binding
+/// addressed the event — including one that is saved but disabled, which is the
+/// operator saying they own this correspondent, so the listener wake stands down
+/// either way. `dispatched` is true only when the cycle's `budget` allowed the
+/// wake; the messages after that are counted by
+/// [`crate::channels::status::record_rate_limited`] and produce no turn. Every
+/// failure past this point is counted on the binding by
+/// `crate::channels::status`.
+/// Test: `agent_channels_gmail_binding_claims_only_its_own_correspondent` pins
+/// the selection rule this delegates to;
+/// `gworkspace_binding_dispatches_once_per_poll_cycle` pins the budget.
+async fn channel_binding_claim(
+    event: &StoredEvent,
+    project_path: &Path,
+    budget: &mut crate::api::server::agent_channels::inbound::DispatchBudget,
+) -> crate::api::server::agent_channels::inbound::InboundOutcome {
+    let identity = crate::rbac::UserIdentity::new(
+        format!("gworkspace:{}", event.listener_id),
+        event.from.clone().unwrap_or_else(|| "gworkspace".into()),
+        crate::rbac::ServiceTier::default(),
+    );
+    crate::api::server::agent_channels::inbound::receive_inbound(
+        "gworkspace",
+        event.from.as_deref().unwrap_or_default(),
+        event,
+        project_path,
+        &identity,
+        None,
+        budget,
+    )
+    .await
 }
 
 /// Fetch a new message's headers/snippet and build its `StoredEvent`.
@@ -463,6 +560,26 @@ fn stored_event_from_message(listener_id: &str, event_id: &str, msg: &Value) -> 
 #[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
+
+    /// One message, one wake path — a claimed message never also runs the
+    /// `[[listeners]]` wake, and an unclaimed one always does.
+    ///
+    /// Why: this is the no-double-dispatch property stated directly. Paired
+    /// with `agent_channels_gmail_binding_claims_only_its_own_correspondent`,
+    /// which pins what `claimed` answers for a bound and an unbound sender, it
+    /// covers both halves: alice's mail reaches the binding and nothing else,
+    /// bob's reaches the listener and nothing else.
+    ///
+    /// Pre-change this test does not compile: `poll_once` chose between a wake
+    /// and a debug log inline, and there was no channel path to choose against.
+    #[test]
+    fn gmail_event_takes_exactly_one_wake_path() {
+        assert_eq!(wake_path(true, true), WakePath::ChannelBinding);
+        assert_eq!(wake_path(true, false), WakePath::Listener);
+        // An excluded event type dispatches nothing, however it is addressed.
+        assert_eq!(wake_path(false, true), WakePath::Excluded);
+        assert_eq!(wake_path(false, false), WakePath::Excluded);
+    }
 
     #[test]
     fn next_backoff_doubles_and_caps() {

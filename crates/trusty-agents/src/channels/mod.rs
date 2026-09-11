@@ -13,13 +13,18 @@
 //! [`credentials`] resolves a binding's `credential_ref` to a
 //! [`trusty_common::credentials::Secret`]; [`status`] holds the per-binding
 //! dispatch-failure counter the assistant's channel view reads.
+//! [`ChannelAdapter::addresses`] is how a binding claims an inbound event —
+//! equality on a destination id for Slack and Telegram, a sender or label match
+//! for Gmail (#7427).
 //! Test: `channel_registry_resolves_known_providers_and_rejects_notion`,
 //! `channel_adapter_receive_defaults_to_unsupported`,
 //! `channel_credential_ref_resolves_through_the_authority`,
-//! `channel_dispatch_failure_is_counted_per_binding`.
+//! `channel_dispatch_failure_is_counted_per_binding`,
+//! `gworkspace_adapter_addresses_sender_and_label_targets`.
 
 // #7427: adapter model for two-way channel connectors (epic #7425 item b).
 pub(crate) mod credentials;
+mod gworkspace;
 mod registry;
 mod slack;
 pub(crate) mod status;
@@ -108,6 +113,18 @@ pub(crate) enum ChannelError {
         /// Provider id whose request failed.
         provider: &'static str,
     },
+
+    /// The binding's destination cannot be addressed for this operation.
+    ///
+    /// Why (#7427): a gworkspace `label:` binding can answer a message that
+    /// arrived under that label, but has no correspondent to open a fresh
+    /// thread to. That is the operator's configuration, not an upstream
+    /// failure, so it answers 400 rather than 502.
+    #[error("channel destination `{target}` cannot be addressed for an outbound message")]
+    Destination {
+        /// The binding target that has no outbound address.
+        target: String,
+    },
 }
 
 /// One provider's half of the channel model: capabilities, destinations, send,
@@ -163,6 +180,25 @@ pub(crate) trait ChannelAdapter: Send + Sync {
 
     /// Whether `target` is a well-formed destination for this provider.
     fn validate_target(&self, target: &str) -> bool;
+
+    /// Whether `target` addresses the destination this inbound event arrived
+    /// on.
+    ///
+    /// Why (#7427): Slack and Telegram bind to one destination id, so the
+    /// inbound path compared `binding.target` to the channel or chat id and
+    /// equality answered. Gmail has no such id — a gworkspace binding names a
+    /// correspondent (`from:alice@example.com`) or a label (`label:INBOX`), and
+    /// only the event can say whether it matches. Asking the adapter keeps that
+    /// difference inside the adapter rather than adding a provider arm to the
+    /// inbound path.
+    /// What: the default is the equality the two id-shaped providers need.
+    /// `destination` is the caller's id for where the event arrived — a channel
+    /// id, a chat id, or for Gmail the message's `From` header.
+    /// Test: `gworkspace_adapter_addresses_sender_and_label_targets`.
+    fn addresses(&self, target: &str, destination: &str, event: &StoredEvent) -> bool {
+        let _ = event;
+        target == destination
+    }
 
     /// Send `text` to the binding's destination, returning the provider's
     /// acknowledgement.

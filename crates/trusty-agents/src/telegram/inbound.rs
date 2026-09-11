@@ -7,7 +7,7 @@
 //! gateway's prompt, the gateway's persona, and none of the binding's filters,
 //! instructions, or dispatch-failure counter. This module converts one Telegram
 //! update into the same [`StoredEvent`] the Slack intake builds and hands it to
-//! [`receive_inbound`](crate::api::server::agent_channels::receive_inbound), so
+//! [`receive_inbound`](crate::api::server::agent_channels::inbound::receive_inbound), so
 //! both channels reach the assistant through one envelope (DOC-60 §8).
 //!
 //! What: [`route`] returns whether a saved binding claimed the chat. `false`
@@ -73,7 +73,7 @@ fn event_from(msg: &Message, text: &str, included: bool) -> StoredEvent {
 /// it also paired. A chat no binding names is not dispatched here at all; it
 /// falls through to the gateway, pairing gate included.
 /// What: builds the event, then asks
-/// [`receive_inbound`](crate::api::server::agent_channels::receive_inbound)
+/// [`receive_inbound`](crate::api::server::agent_channels::inbound::receive_inbound)
 /// whether any assistant claims this chat id. Returns that answer. Every
 /// failure past this point — an adapter that cannot build a prompt, a dispatch
 /// that fails — is counted on the binding by `crate::channels::status`, so a
@@ -90,15 +90,19 @@ pub(super) async fn route(msg: &Message, text: &str, project_path: &Path) -> boo
         event.from.clone().unwrap_or_else(|| "telegram".into()),
         crate::rbac::ServiceTier::default(),
     );
-    let claimed = crate::api::server::agent_channels::receive_inbound(
+    // One update in, one turn per bound assistant out: there is no poll cycle
+    // to share a dispatch allowance with (#7427).
+    let claimed = crate::api::server::agent_channels::inbound::receive_inbound(
         "telegram",
         &chat_id,
         &event,
         project_path,
         &identity,
         None,
+        &mut crate::api::server::agent_channels::inbound::DispatchBudget::PerEvent,
     )
-    .await;
+    .await
+    .claimed;
     if !claimed {
         tracing::debug!(
             chat_id = %chat_id,

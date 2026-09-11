@@ -477,16 +477,21 @@ pub(super) async fn handle_message(
         };
         let connected_project = channel_project(&sessions, &channel, &project_path).await;
         // #7427: was `receive_slack`; the inbound path is provider-neutral now,
-        // so Slack and Telegram produce one wake envelope through one function.
-        if crate::api::server::agent_channels::receive_inbound(
+        // so Slack, Telegram and gworkspace produce one wake envelope through
+        // one function, and Slack names itself rather than being assumed.
+        // One Slack message in, one turn per bound assistant out: there is no
+        // poll cycle to share a dispatch allowance with (#7427).
+        if crate::api::server::agent_channels::inbound::receive_inbound(
             "slack",
             &channel,
             &event,
             &connected_project,
             &user_identity,
             user_cfg.allowed_personas.as_deref(),
+            &mut crate::api::server::agent_channels::inbound::DispatchBudget::PerEvent,
         )
         .await
+        .claimed
         {
             return Ok(());
         }

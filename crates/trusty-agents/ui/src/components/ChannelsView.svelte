@@ -3,7 +3,11 @@
   import { Plus, RefreshCw, Trash2, ArrowUp } from 'lucide-svelte';
   import { activeAgentId, agentRoster } from '../stores/app';
   import { CONCIERGE_AGENT_ID, rosterDisplayName } from '../lib/roster';
-  import { fetchChannels, saveChannels, fetchChannelMessages, sendChannelMessage, type ChannelConfiguration, type ChannelBinding, type ChannelMessages } from '../lib/channels';
+  import { fetchChannels, saveChannels, fetchChannelMessages, sendChannelMessage, type ChannelConfiguration, type ChannelBinding, type ChannelMessages, type ChannelProviderId } from '../lib/channels';
+  // #7427: a gworkspace target is a correspondent or a label, so the hint text
+  // cannot be one Slack-or-Telegram ternary any more.
+  const targetHints:Record<ChannelProviderId,string>={slack:'Slack channel ID',telegram:'Telegram chat ID',gworkspace:'from:someone@example.com or label:INBOX'};
+  const targetHint=(provider:ChannelProviderId)=>targetHints[provider]??'Destination';
   import AgentConfigListeners from './AgentConfigListeners.svelte';
   let configuration:ChannelConfiguration|null=null;
   let bindings:ChannelBinding[]=[];
@@ -73,9 +77,10 @@
         {@const health=configuration.status?.[binding.id]}
         <article>
           <div class="row"><input aria-label="Channel name" bind:value={binding.name} maxlength="100"/><button aria-label={`Remove ${binding.name}`} on:click={()=>bindings=bindings.filter((_,j)=>j!==i)}><Trash2 size={15}/></button></div>
-          <div class="row"><label>Service<select bind:value={binding.provider} on:change={()=>changeProvider(i)}>{#each configuration.providers as p}<option value={p.id}>{p.name}</option>{/each}</select></label><label class="grow">Channel or chat ID<input bind:value={binding.target} placeholder={binding.provider==='slack'?'Slack channel ID':'Telegram chat ID'}/></label></div>
+          <div class="row"><label>Service<select bind:value={binding.provider} on:change={()=>changeProvider(i)}>{#each configuration.providers as p}<option value={p.id}>{p.name}</option>{/each}</select></label><label class="grow">Destination<input bind:value={binding.target} placeholder={targetHint(binding.provider)}/></label></div>
           {#if !provider?.configured}<p class="muted">Connect {provider?.name??binding.provider} in the channel service settings to use this channel.</p>{/if}
           <div class="row"><label><input type="checkbox" bind:checked={binding.enabled}/>Enabled</label><label><input type="checkbox" bind:checked={binding.send_enabled} disabled={!provider?.can_send}/>Allow sending</label><label><input type="checkbox" bind:checked={binding.receive_enabled} disabled={!provider?.can_receive}/>Receive updates</label></div>
+          <!-- #7427: every provider's inbound caveat now comes from its adapter's `receive_reason`, gworkspace included, so this stays one line rather than one per provider. -->
           {#if binding.receive_enabled&&provider?.receive_reason}<p class="muted">{provider.receive_reason}.</p>{/if}
           {#if !provider?.can_receive}<p class="muted">Automatic updates are not available for this service.</p>{/if}
           <!-- #7427: a binding that has been dropping inbound wakes says so here rather than reading as healthy. -->
