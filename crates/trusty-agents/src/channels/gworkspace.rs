@@ -39,6 +39,7 @@
 //! Test: `gworkspace_adapter_addresses_sender_and_label_targets`,
 //! `gworkspace_adapter_validates_target_grammar`,
 //! `gworkspace_send_threads_a_reply_and_opens_a_fresh_message`,
+//! `gworkspace_send_refuses_a_fresh_message_to_a_glob_sender`,
 //! `gworkspace_receive_builds_a_wake_prompt_naming_the_binding`,
 //! `channel_gworkspace_binding_cannot_name_an_okg_source_credential`,
 //! `agent_channels_gmail_binding_claims_only_its_own_correspondent`.
@@ -155,11 +156,15 @@ impl GmailSend for LiveGmail {
 /// `compose_email` defaults the recipient and subject from the original and
 /// rides its thread — while a fresh message has to address the binding's own
 /// correspondent.
-/// What: a `label:` binding has no address to open a fresh thread to, so it can
-/// answer an incoming message and nothing else; that is
-/// [`ChannelError::Destination`], a 400, rather than a request Gmail would
-/// reject.
-/// Test: `gworkspace_send_threads_a_reply_and_opens_a_fresh_message`.
+/// What: two kinds of binding can answer an incoming message and nothing else,
+/// and both are [`ChannelError::Destination`], a 400, rather than a request
+/// Gmail would reject. A `label:` binding has no address at all. A `from:` GLOB
+/// — `from:*@example.com`, which `parse_target` accepts and the inbound path
+/// matches against many senders — names a SET of correspondents, so it has no
+/// one address either; composing `to: "*@example.com"` would hand Gmail a
+/// literal asterisk as a recipient (#7427 code-critic MEDIUM).
+/// Test: `gworkspace_send_threads_a_reply_and_opens_a_fresh_message`,
+/// `gworkspace_send_refuses_a_fresh_message_to_a_glob_sender`.
 fn compose_args(
     binding: &Binding,
     text: &str,
@@ -169,7 +174,7 @@ fn compose_args(
         return Ok(json!({"action":"reply","message_id":message_id,"body":text}));
     }
     match parse_target(&binding.target) {
-        Some(Destination::Sender(address)) => {
+        Some(Destination::Sender(address)) if !address.contains('*') => {
             Ok(json!({"action":"send","to":address,"subject":binding.name,"body":text}))
         }
         _ => Err(ChannelError::Destination {
@@ -460,6 +465,54 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+
+    /// A glob sender target can answer a message but cannot open a fresh one.
+    ///
+    /// Why: `from:*@example.com` is a valid binding target — the inbound path
+    /// matches it against every sender at that domain — but it is not an
+    /// address. A non-reply send on it has no one recipient to name.
+    ///
+    /// Pre-change the first assertion fails: `compose_args` matched any
+    /// `Destination::Sender` and composed `to: "*@example.com"`, handing Gmail a
+    /// literal asterisk as a recipient.
+    #[tokio::test]
+    async fn gworkspace_send_refuses_a_fresh_message_to_a_glob_sender() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let gmail = RecordingGmail(Arc::clone(&seen));
+
+        for glob in ["from:*@example.com", "from:alice@*"] {
+            let binding = binding_with(glob);
+            assert!(
+                matches!(
+                    send_via(&gmail, &binding, "hello", None).await,
+                    Err(ChannelError::Destination { .. })
+                ),
+                "`{glob}` must not compose a fresh message"
+            );
+            // A reply rides the thread of the message it answers, which is one
+            // real correspondent however many the binding matches.
+            assert!(
+                send_via(&gmail, &binding, "hello", Some("19abc"))
+                    .await
+                    .is_ok()
+            );
+        }
+
+        // An exact address is unaffected.
+        send_via(&gmail, &binding_with("from:alice@example.com"), "hi", None)
+            .await
+            .unwrap();
+
+        let sent = seen.lock().unwrap().clone();
+        assert_eq!(sent.len(), 3, "two replies and one fresh message");
+        assert!(
+            sent[..2]
+                .iter()
+                .all(|args| args["action"] == json!("reply"))
+        );
+        assert_eq!(sent[2]["action"], json!("send"));
+        assert_eq!(sent[2]["to"], json!("alice@example.com"));
     }
 
     /// The wake prompt names the binding and carries the message a reply needs.

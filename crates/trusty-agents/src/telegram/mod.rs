@@ -12,7 +12,7 @@
 //!
 //! Since #7427 PR 2 this loop is also the Telegram INBOUND SOURCE for the
 //! per-assistant channel bindings: a plain-text update whose chat id a saved
-//! binding names goes to `agent_channels::receive_inbound`, the same dispatch
+//! binding names goes to `agent_channels::inbound::receive_inbound`, the same dispatch
 //! Slack's intake uses, and the `ChatSession` path above handles only the
 //! updates no binding claims. The bot token comes from the credential authority
 //! under the binding's own reference, not from a direct environment read.
@@ -33,7 +33,7 @@ mod format;
 mod handlers;
 // #7427: the bridge from a long-poll update into the per-assistant channel
 // bindings. The gateway below is now the Telegram inbound SOURCE; the dispatch
-// it feeds is `agent_channels::receive_inbound`, the same one Slack uses.
+// it feeds is `agent_channels::inbound::receive_inbound`, the same one Slack uses.
 mod inbound;
 mod pairing;
 

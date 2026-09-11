@@ -1,6 +1,6 @@
 //! Per-binding dispatch health, so a failed inbound wake stops being invisible.
 //!
-//! Why: `agent_channels::receive_inbound` spawned the wake dispatch and threw
+//! Why: `agent_channels::inbound::receive_inbound` spawned the wake dispatch and threw
 //! the result away — `let _result = …`. A `run_pm_task_with_persona` that failed
 //! (model error, missing persona, cancelled session) produced no log line, no
 //! counter, and no change in what the channel view showed: the binding still
@@ -22,9 +22,15 @@
 //! silently, which is what dropping the write or over-running the payload
 //! budget would be.
 //!
+//! [`record_rate_limited`] is the same fence for the other way an inbound
+//! message produces no turn: the poll cycle's single wake dispatch was already
+//! spent (#7427). That is not a failure — the message is stored and visible —
+//! so it is counted on its own key rather than inflating `dispatch_failures`.
+//!
 //! Test: `channel_dispatch_failure_is_counted_per_binding`,
 //! `channel_dispatch_success_leaves_the_counter_alone`,
-//! `channel_dispatch_reason_is_bounded_in_bytes_at_a_char_boundary`.
+//! `channel_dispatch_reason_is_bounded_in_bytes_at_a_char_boundary`,
+//! `channel_rate_limited_inbound_is_counted_per_binding`.
 
 // #7427: the discarded wake-dispatch result becomes an observable failure.
 use serde_json::{Value, json};
@@ -80,6 +86,10 @@ struct BindingHealth {
     failures: u64,
     /// Text of the most recent failure.
     last_error: Option<String>,
+    /// Inbound messages the poll cycle's dispatch budget refused.
+    rate_limited: u64,
+    /// Id of the most recent message the budget refused.
+    last_rate_limited_event: Option<String>,
 }
 
 /// Process-wide dispatch health, keyed by `(assistant, binding id)`.
@@ -128,14 +138,45 @@ pub(crate) fn record_failure(agent: &str, binding_id: &str, reason: &str) {
     entry.last_error = Some(truncate_reason(reason));
 }
 
+/// Note an inbound message the poll cycle's dispatch budget refused.
+///
+/// Why (#7427 code-critic CRITICAL): a Gmail poll cycle spends at most one wake
+/// dispatch, so a burst from one bound correspondent between two polls leaves
+/// every message after the first without an assistant turn. Dropping those
+/// silently is the same invisibility `record_dispatch` exists to end: the
+/// operator sees a binding that answered one email and ignored four, with
+/// nothing anywhere saying why. This is the counter that says why.
+/// What: warns with the assistant, the binding and the message id, then bumps a
+/// counter `status_json` publishes beside the failure counter. Not a failure —
+/// the message is durably stored and visible in the Events pane, it simply
+/// produces no turn.
+/// Test: `channel_rate_limited_inbound_is_counted_per_binding`.
+pub(crate) fn record_rate_limited(agent: &str, binding_id: &str, event_id: &str) {
+    tracing::warn!(
+        assistant = agent,
+        binding = binding_id,
+        event_id = event_id,
+        "channel inbound rate-limited: this poll cycle already spent its one wake dispatch; the message is stored but produces no assistant turn"
+    );
+    let mut health = health();
+    let entry = health
+        .entry((agent.to_string(), binding_id.to_string()))
+        .or_default();
+    entry.rate_limited = entry.rate_limited.saturating_add(1);
+    entry.last_rate_limited_event = Some(truncate_reason(event_id));
+}
+
 /// This assistant's per-binding dispatch health, for the channel view.
 ///
 /// Why: the counter is only a fence if someone sees it. `agent_channels::read`
 /// publishes this beside `bindings` and `providers`, which is what the UI and
 /// the `channel` tool already read.
-/// What: an object keyed by binding id; bindings with no failures are absent,
-/// so a healthy assistant returns `{}`.
-/// Test: `channel_dispatch_failure_is_counted_per_binding`.
+/// What: an object keyed by binding id; bindings with nothing recorded are
+/// absent, so a healthy assistant returns `{}`. `rate_limited` counts inbound
+/// messages the poll cycle's dispatch budget refused (#7427) — those are not
+/// failures, so they are reported on their own key.
+/// Test: `channel_dispatch_failure_is_counted_per_binding`,
+/// `channel_rate_limited_inbound_is_counted_per_binding`.
 pub(crate) fn status_json(agent: &str) -> Value {
     let health = health();
     let mut out = serde_json::Map::new();
@@ -145,7 +186,12 @@ pub(crate) fn status_json(agent: &str) -> Value {
         }
         out.insert(
             binding_id.clone(),
-            json!({"dispatch_failures":entry.failures,"last_error":entry.last_error}),
+            json!({
+                "dispatch_failures":entry.failures,
+                "last_error":entry.last_error,
+                "rate_limited":entry.rate_limited,
+                "last_rate_limited_event":entry.last_rate_limited_event,
+            }),
         );
     }
     Value::Object(out)
@@ -157,6 +203,14 @@ pub(crate) fn dispatch_failures(agent: &str, binding_id: &str) -> u64 {
     health()
         .get(&(agent.to_string(), binding_id.to_string()))
         .map_or(0, |e| e.failures)
+}
+
+/// Budget-refused inbound messages recorded for one binding.
+#[cfg(test)]
+pub(crate) fn rate_limited(agent: &str, binding_id: &str) -> u64 {
+    health()
+        .get(&(agent.to_string(), binding_id.to_string()))
+        .map_or(0, |e| e.rate_limited)
 }
 
 #[cfg(test)]
@@ -204,6 +258,28 @@ mod tests {
         // A reason inside the budget is stored whole, multi-byte or not.
         assert_eq!(truncate_reason("persona dispatch exploded 💥").len(), 30);
         assert_eq!(truncate_reason(""), "");
+    }
+
+    /// A budget-refused inbound message is counted, and counted apart from a
+    /// dispatch failure — the binding is healthy, it just did not get a turn.
+    ///
+    /// Pre-change this test does not compile: there was no rate-limit counter,
+    /// because nothing rate-limited the channel-binding inbound path at all.
+    #[test]
+    fn channel_rate_limited_inbound_is_counted_per_binding() {
+        let agent = "fixture-rate-limited";
+        record_rate_limited(agent, "family", "gmail-personal:19abd");
+        record_rate_limited(agent, "family", "gmail-personal:19abe");
+
+        assert_eq!(rate_limited(agent, "family"), 2);
+        assert_eq!(dispatch_failures(agent, "family"), 0);
+        let status = status_json(agent);
+        assert_eq!(status["family"]["rate_limited"], json!(2));
+        assert_eq!(status["family"]["dispatch_failures"], json!(0));
+        assert_eq!(
+            status["family"]["last_rate_limited_event"],
+            json!("gmail-personal:19abe")
+        );
     }
 
     #[tokio::test]
