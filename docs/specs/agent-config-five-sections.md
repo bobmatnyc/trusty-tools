@@ -235,22 +235,53 @@ under it, not as a free-floating chip.
 
 ### 4.4 K-c — MCP knowledge connections
 
-The knowledge services reachable over MCP/OpenRPC, with live status:
+**Superseded 2026-09-11** (epic #7425 item (g), #7451). This crate previously
+defined three independent, per-agent-only MCP-server schemas —
+`mcp::config::McpService`, `tools::registry::config::EndpointConfig`, and
+`mcp::mcp_json::McpJsonServer`
+(`docs/research/trusty-agents-mcp-connectors-gap-analysis-2026-09-11.md` §4-5).
+These collapse onto `trusty_mcp::config::McpServerConfig` (#7454), resolved
+through two config tiers rather than one flat per-agent list:
 
-| Endpoint | Config | Declared scopes | Status on main |
+- **Global tier** — the file shared with `trusty-code`,
+  `~/.trusty-tools/mcp/servers.toml`, owned by `trusty-mcp` (#7452).
+- **Assistant tier** — `<assistant home>/config.toml`'s `[mcp]` table
+  (`trusty_mcp::config::McpServerOverride`), additive to `AssistantHomeConfig`
+  (`crates/trusty-agents/src/assistants/home.rs`). An override adds a server,
+  replaces one by name (wholesale — no field merge with the global entry), or
+  disables one by name; an assistant may re-enable a server the global file
+  disabled.
+
+`trusty_mcp::config::resolve(global, overrides) -> Vec<McpServerConfig>`
+returns the effective set for one assistant. Failure handling is fail-closed
+but never fatal to the assistant: a malformed global file starts the
+assistant with zero servers and a visible warning; a malformed assistant
+override falls back to the global set with a visible status; a server whose
+credential does not resolve is skipped with a per-server status. No
+credential-reference field ships yet — #4568 owns that design.
+
+§4.3's K-b linkage is unaffected: a knowledge tool still resolves to whichever
+MCP connection — global or assistant-level — the tool registry surfaces after
+`resolve` runs.
+
+The knowledge services reachable over MCP/OpenRPC today, with live status:
+
+| Endpoint | Tier | Declared scopes | Status on main |
 |---|---|---|---|
-| `trusty-memory` | `[[tool_registry.endpoints]]`, `driver = "direct"` | `["memory.read", "memory.write"]` | **`enabled = false`** — awaiting `--rpc` mode on the binary |
-| `trusty-search` | `[[tool_registry.endpoints]]`, `driver = "direct"` | `["search.read"]` | **`enabled = false`** — same reason |
-| `gworkspace` | `[[tool_registry.endpoints]]` | `google.*` families | `enabled = true`, self-discovering via `rpc.discover` |
+| `trusty-memory` | Global (`servers.toml`, pending #7452) | `["memory.read", "memory.write"]` | **disabled** — awaiting `--rpc` mode on the binary |
+| `trusty-search` | Global (`servers.toml`, pending #7452) | `["search.read"]` | **disabled** — same reason |
+| `gworkspace` | Global (`servers.toml`, pending #7452) | `google.*` families | enabled, self-discovering via `rpc.discover` |
 
-> **Honest gap.** The two endpoints most obviously "MCP connections to knowledge
-> stores" are disabled by default in `assets/config/default-config.toml:193-221`.
-> The agent's memory and search capability today flows through *in-process*
-> tools, not through those endpoints. The Knowledge pane MUST report this
-> truthfully — an endpoint that is configured-but-disabled renders as
-> **DISABLED** with its reason, never as connected, and never hidden. Rendering a
-> disabled endpoint as absent is the same class of defect as #3891's fabricated
-> listener pane.
+> **Honest gap**, unchanged by this supersession. The two endpoints most
+> obviously "MCP connections to knowledge stores" are disabled by default in
+> `assets/config/default-config.toml:193-221`. The agent's memory and search
+> capability today flows through *in-process* tools, not through those
+> endpoints. The Knowledge pane MUST report this truthfully — an endpoint that
+> is configured-but-disabled renders as **DISABLED** with its reason, never as
+> connected, and never hidden. Rendering a disabled endpoint as absent is the
+> same class of defect as #3891's fabricated listener pane.
+>
+> Authority for the two-tier model: [ADR-0060](../adr/0060-mcp-config-authority-in-trusty-mcp.md).
 
 ### 4.5 Backend contract (NEW)
 
@@ -1361,6 +1392,11 @@ tools *and* MCP connections. Users may read "Knowledge" as documents only.
 - #3816 / #3818 — Declarative templates / GUI reshape.
 - #3074 / #3075 — `user_authority` field and its `extends` test (§7.1, PM-3).
 - #2791 — Declarative-only agents (§5.8).
+- #7451 — Epic: MCP connectors, global and per-assistant tiers (§4.4).
+- #7452 — trusty-mcp: `McpServerConfig`, shared config file, resolver.
+- #7454 — trusty-agents: MCP connections from shared config, per-assistant
+  overrides (§4.4).
+- #4568 — Credential-reference field for `McpServerConfig` (not yet defined).
 
 ---
 
@@ -1404,3 +1440,11 @@ tools *and* MCP connections. Users may read "Knowledge" as documents only.
   carries independent inbound and outbound bindings, and separately backs a
   read-only OKG entity-extraction source (DOC-63 §5.1). Evidence:
   `docs/research/trusty-agents-1.0-gap-analysis-2026-09-11.md`.
+- **2026-09-11** — Superseded §4.4's per-agent-only, three-schema MCP
+  connections model with the shared-file, two-tier model (epic #7425 item
+  (g), #7451, #7454): `trusty_mcp::config::McpServerConfig` at a global tier
+  shared with `trusty-code`, `trusty_mcp::config::McpServerOverride` at a
+  per-assistant tier on `AssistantHomeConfig`, and
+  `trusty_mcp::config::resolve` computing the effective set. Evidence:
+  `docs/research/trusty-agents-mcp-connectors-gap-analysis-2026-09-11.md`.
+  Authority: [ADR-0060](../adr/0060-mcp-config-authority-in-trusty-mcp.md).
