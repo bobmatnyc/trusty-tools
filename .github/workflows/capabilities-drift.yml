@@ -5,22 +5,37 @@
 # exactly what `tm generate capabilities` produces right now — a stale
 # generated file fails the job instead of silently rotting.
 #
-# This optional gate's generated output is owned by trusty-mpm. Explicit path
-# filters avoid a second checkout/classifier job and prevent unrelated script,
-# workflow, documentation, UI, and crate changes from installing Rust merely
-# to regenerate an unchanged catalog. Workspace manifests stay in scope so a
-# dependency/build-input change still exercises the command fail closed.
+# REQUIRED CONTEXT since 2026-09-11 (owner ruling, decision a). Before that
+# date this job carried `paths:` filters on both triggers and was NOT a
+# required branch-protection context, so a PR outside those paths simply
+# never got a check run for it — the filters were invisible from the PR's own
+# checks list. #7471 and #7472 both merged with this job never having run.
+# Promoting the job to required exposed the real failure mode of a `paths:`
+# filter on a required check: GitHub blocks the merge on a required context
+# that a filtered trigger never produces, wedging the PR forever. The filters
+# are therefore GONE from both triggers — this job now runs on every push to
+# main and every pull request, unconditionally.
+#
+# In their place, the job classifies relevance ITSELF, in its own first step,
+# never at the job or trigger level: a job skipped via `if:` reports nothing,
+# and GitHub treats a required context with no check run as still pending,
+# not as passing (the reason `.github/workflows/ci.yml`'s `changes` job
+# gates the four required Tauri UI clippy jobs the same way — see that job's
+# `agents-ui` sibling for the identical shape). When the diff cannot affect
+# `tm generate capabilities` — nothing under crates/trusty-mpm/**, no change
+# to `scripts/check_capabilities.sh` or to this workflow file itself, and no
+# change reachable through trusty-mpm's own dependency closure (via
+# `scripts/ci-crate-relevance.sh`, issue #7063's shared detector, which also
+# treats Cargo.toml/Cargo.lock as workspace-wide) — the later steps are
+# skipped and the job still reports success, cheaply. Every failure arm of
+# that classification (an unresolvable base ref, a failed `git diff`, a
+# failed closure computation) answers "relevant" and runs the full check:
+# fail closed, matching #7063.
 name: Capabilities drift
 
 on:
   push:
     branches: [main]
-    paths:
-      - "crates/trusty-mpm/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "scripts/check_capabilities.sh"
-      - ".github/workflows/capabilities-drift.yml"
   pull_request:
     # Explicit activity types (#4179). `edited` is NOT in GitHub's default set
     # (opened/synchronize/reopened) and is the event a base-branch RETARGET
@@ -29,12 +44,6 @@ on:
     # `ready_for_review` covers a draft being marked ready. Matches ci.yml.
     types: [opened, synchronize, reopened, ready_for_review, edited]
     branches: [main]
-    paths:
-      - "crates/trusty-mpm/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "scripts/check_capabilities.sh"
-      - ".github/workflows/capabilities-drift.yml"
 
 # Per-COMMIT concurrency group on push so a merge never cancels the previous
 # merge's verification (#4179); per-ref group on pull_request so a new push
@@ -46,19 +55,129 @@ concurrency:
 jobs:
   capabilities-drift:
     name: tm-capabilities generated-skill drift check
-    if: github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null
+    # No job-level `if:` keyed on `github.event.action` here — ci.yml's
+    # `changes` job carries an explicit warning against exactly that pattern
+    # (issue #5407): a title/body `edited` event shares this workflow's PR
+    # concurrency group with the real run (cancel-in-progress excludes
+    # `edited`), so an edit-triggered run that reports without doing the work
+    # coexists with the genuine one and GitHub shows only whichever finishes
+    # LAST for this context name — a fast, empty "skipped" run can bury a
+    # real failure. Now that this job is a required context, that risk is not
+    # acceptable here either: the job always runs; the relevance step inside
+    # it (below) is what stays cheap on an inert diff.
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
       SKIP_UI_BUILD: "1"
     steps:
+      # fetch-depth: 0 — the relevance classifier below needs `git
+      # merge-base` against the base branch (pull_request) or the push's
+      # `before` SHA, which a shallow checkout cannot resolve. Matches
+      # ci.yml's `changes` job.
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      # Refresh the base branch ref, same fix as ci.yml's `changes` job
+      # (#4688 pattern): `actions/checkout`'s default ref for a pull_request
+      # event tracks the base branch's current tip, which can have moved past
+      # the event's own snapshot by the time this job runs on a busy repo.
+      - name: Refresh the base branch ref (#4688 pattern — avoid a stale merge-base)
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --no-tags --quiet origin \
+            "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          git rev-parse --verify "refs/remotes/origin/${BASE_REF}"
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+
+      # Classify whether this diff can affect `tm generate capabilities`
+      # output. Runs unconditionally so the reason is always in the log, even
+      # when the later steps end up skipped. FAIL CLOSED on every error arm
+      # (#7063): an unresolvable base, a failed diff, or a failed closure
+      # computation all answer "relevant" and cost a full build rather than a
+      # silent skip.
+      - name: Classify capabilities-drift relevance
+        id: relevance
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -uo pipefail
+
+          fail_closed() {
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            echo "capabilities-drift: $1 — running the full check (fail closed)"
+            exit 0
+          }
+
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            base="origin/${BASE_REF}"
+          else
+            base="${PUSH_BEFORE}"
+          fi
+
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            fail_closed "no usable base SHA"
+          fi
+
+          if ! merge_base="$(git merge-base "$base" HEAD)"; then
+            fail_closed "cannot resolve merge-base against '${base}'"
+          fi
+
+          # #7063: `-z` — without it git C-quotes any path carrying a
+          # non-ASCII byte, a double quote or a backslash, and the quoted
+          # string matches neither a crate directory nor our two exact paths
+          # below, so a real change reads as inert.
+          changed="${RUNNER_TEMP}/capabilities-drift-changed.txt"
+          if ! git diff -z --name-only --no-renames "$merge_base" HEAD > "$changed"; then
+            fail_closed "git diff against ${merge_base} failed"
+          fi
+
+          # Two paths ci-crate-relevance.sh's trusty-mpm closure does not
+          # cover: the check script itself, and this workflow file. Cargo.toml
+          # / Cargo.lock and everything under crates/trusty-mpm/** (the
+          # bundled tm-capabilities skill included) are covered below, via
+          # the shared closure detector.
+          changed_nl="${RUNNER_TEMP}/capabilities-drift-changed.lines"
+          tr '\0' '\n' < "$changed" > "$changed_nl"
+          if grep -qxF "scripts/check_capabilities.sh" "$changed_nl" ||
+             grep -qxF ".github/workflows/capabilities-drift.yml" "$changed_nl"; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            echo "capabilities-drift: running — the check script or this workflow changed"
+            exit 0
+          fi
+
+          # #7063's shared per-crate detector: relevant when the diff touches
+          # crates/trusty-mpm/** (own directory), any crate in trusty-mpm's
+          # transitive dependency closure, or a workspace-wide cargo input
+          # (Cargo.toml, Cargo.lock, …). GITHUB_OUTPUT is unset for this call
+          # so the script's own trusty_mpm_relevant/_reason outputs are not
+          # also written into this step's output set.
+          if ! crate_relevant="$(env -u GITHUB_OUTPUT bash scripts/ci-crate-relevance.sh trusty-mpm < "$changed")"; then
+            fail_closed "ci-crate-relevance.sh failed"
+          fi
+
+          case "$crate_relevant" in
+            true | false) ;;
+            *) fail_closed "ci-crate-relevance.sh printed an unusable verdict '${crate_relevant}'" ;;
+          esac
+
+          echo "relevant=${crate_relevant}" >> "$GITHUB_OUTPUT"
+          if [ "$crate_relevant" = "true" ]; then
+            echo "capabilities-drift: running — change touches the trusty-mpm build closure"
+          else
+            echo "capabilities-drift: skipped — no changed path touches trusty-mpm, its dependency closure, the check script, or this workflow"
+          fi
 
       # MSRV floor is 1.94 (root Cargo.toml rust-version), matching ci.yml.
       - name: Install Rust toolchain (1.94)
+        if: steps.relevance.outputs.relevant != 'false'
         uses: dtolnay/rust-toolchain@1.94
 
       - name: Cache cargo build
+        if: steps.relevance.outputs.relevant != 'false'
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: capabilities-drift
@@ -68,4 +187,5 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Check tm-capabilities generated skill for drift
+        if: steps.relevance.outputs.relevant != 'false'
         run: bash scripts/check_capabilities.sh
