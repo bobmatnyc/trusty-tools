@@ -141,6 +141,13 @@ async fn recall_one(
 /// and rendered as "temporarily unreachable". A FAN-OUT palace that fails is
 /// logged and skipped, because another assistant's memory being unreadable does
 /// not make this assistant's memory unavailable.
+///
+/// The own palace is awaited first and alone — it gates the turn, so nothing
+/// else is worth issuing until it answers. The fan-out calls then run
+/// CONCURRENTLY (`join_all`), because they are independent reads on a chat hot
+/// path and serializing them would add one call timeout per selected assistant.
+/// Results are collected in `plan.fan_out` order regardless of completion order,
+/// so the merge stays deterministic.
 /// Test: `build_persona_memory_recalls_across_fan_out_palaces`,
 /// `recall_without_fan_out_makes_exactly_one_recall_call`,
 /// `recall_ranks_across_palaces_with_own_winning_ties`.
@@ -154,8 +161,14 @@ pub(super) async fn recall_across(
         return Ok(Vec::new());
     };
     let mut merged = recall_one(socket, own, query, top_k).await?;
-    for palace in &plan.fan_out {
-        match recall_one(socket, palace, query, top_k).await {
+    let fanned = futures::future::join_all(
+        plan.fan_out
+            .iter()
+            .map(|palace| recall_one(socket, palace, query, top_k)),
+    )
+    .await;
+    for (palace, result) in plan.fan_out.iter().zip(fanned) {
+        match result {
             Ok(rows) => merged.extend(rows),
             Err(reason) => tracing::warn!(
                 %palace,
@@ -182,14 +195,56 @@ pub(super) async fn recall_across(
 /// else's, which is precisely what one-palace-per-assistant exists to prevent.
 /// A creation failure is therefore reported as unavailable memory, never
 /// substituted.
-/// What: `palace_create` with `force: true` — idempotent, matching
-/// `TrustyMemoryClient::ensure_palace` and `workstreams::create_tagged_drawer_at`,
-/// so this is safe to issue on every turn. Only called for a DERIVED palace: a
-/// palace named by a `[[stores]]` binding is operator-declared and already
-/// exists (see `PalacePlan::own_is_bound`).
+///
+/// What: ASK FIRST, create only on a not-found. `palace_create` does not refuse
+/// an existing name — `trusty-memory`'s `handle_palace_create` builds a fresh
+/// `Palace` with `created_at: Utc::now()` and hands it to `create_palace`, which
+/// rewrites `palace.json` (the same metadata-destroying create that #4911
+/// guards against in `crate::memory::trusty_backed`). So a create issued blindly
+/// on every turn would overwrite the metadata of whatever palace the resolved id
+/// happens to name, including another assistant's. The `memory.palace_get` probe
+/// is the same check-then-create the installer performs
+/// (`trusty-installer`'s `ensure::project_setup::create_palace`), and it follows
+/// that module's rule that ONLY a not-found refusal falls through: any other
+/// error is the daemon reporting a problem, and creating on top of it would turn
+/// a reportable failure into an overwrite.
+///
+/// `force: true` stays on the create. It bypasses the daemon's project-slug name
+/// enforcement (`project_root::validate_palace_name`), which a palace named
+/// after an assistant instance can never satisfy — spec-001 Phase 1 licenses
+/// exactly this "one palace per app/tenant" use. It does NOT bypass any
+/// existence check, because the daemon has none; the probe above is the whole
+/// protection.
+///
+/// Only called for a DERIVED palace: one named by a `[[stores]]` binding is
+/// operator-declared and already exists (see `PalacePlan::own_is_bound`).
+///
+/// The derived id is the bare instance id (`izzie`), per product spec §5.1 —
+/// `izzie` and `cto` are already palace names on the daemon, so namespacing them
+/// now would strand existing data. Multi-tenant namespacing is a follow-up,
+/// `// See #7425`.
 /// Test: `build_persona_memory_uses_the_instance_id_palace_without_a_binding`,
-/// `build_persona_memory_reports_unavailable_when_palace_create_fails`.
+/// `build_persona_memory_reports_unavailable_when_palace_create_fails`,
+/// `ensure_palace_does_not_recreate_an_existing_palace`.
 pub(super) async fn ensure_palace(socket: &Path, palace: &str) -> Result<(), String> {
+    match trusty_common::memory_rpc::call_memory_tool_at(
+        socket,
+        "memory.palace_get",
+        json!({ "palace_id": palace }),
+    )
+    .await
+    {
+        // It exists. Touching it at all is the failure mode this guards.
+        Ok(_) => return Ok(()),
+        Err(e) => {
+            let missing = e
+                .downcast_ref::<trusty_common::memory_rpc::MemoryRpcError>()
+                .is_some_and(trusty_common::memory_rpc::MemoryRpcError::is_not_found);
+            if !missing {
+                return Err(format!("trusty-memory unreachable or refused: {e:#}"));
+            }
+        }
+    }
     memory_call(
         socket,
         "palace_create",

@@ -620,6 +620,48 @@ async fn build_persona_memory_uses_the_instance_id_palace_without_a_binding() {
     );
 }
 
+/// #7428 SECURITY REGRESSION: an existing palace is never re-created.
+///
+/// Why: trusty-memory's `handle_palace_create` does not refuse an existing name
+/// — it builds a fresh `Palace` with `created_at: Utc::now()` and hands it to
+/// `create_palace`, which rewrites `palace.json`. The first cut issued
+/// `palace_create` with `force: true` on every turn for a derived palace, so any
+/// palace the resolved id happened to name had its metadata overwritten. Against
+/// that cut this test fails on the create count.
+#[tokio::test]
+async fn ensure_palace_does_not_recreate_an_existing_palace() {
+    let (_addr, memory, state) = mock_daemon::spawn().await;
+    state.palace_exists("izzie");
+
+    persona_palace::ensure_palace(memory.socket(), "izzie")
+        .await
+        .expect("an existing palace is a success, not a create");
+
+    let methods: Vec<String> = state
+        .direct_calls()
+        .into_iter()
+        .map(|(method, _)| method)
+        .collect();
+    assert_eq!(
+        methods,
+        vec!["memory.palace_get".to_string()],
+        "asked, then stopped — no create against a palace that already exists"
+    );
+
+    // The absent case still creates, so the probe is a guard and not a block.
+    persona_palace::ensure_palace(memory.socket(), "fresh-palace")
+        .await
+        .expect("an absent palace is created");
+    assert!(
+        state
+            .direct_calls()
+            .iter()
+            .any(|(method, params)| method == "palace_create" && params["name"] == "fresh-palace"),
+        "an absent palace is still created: {:?}",
+        state.direct_calls()
+    );
+}
+
 /// #7428 REGRESSION (e): a `palace_create` failure reports unavailable memory
 /// and substitutes nothing.
 ///
@@ -908,6 +950,10 @@ mod mock_daemon {
         fail_rpc: StdMutex<bool>,
         /// When set, `palace_create` alone answers an error.
         fail_palace_create: StdMutex<bool>,
+        /// #7428: palaces the daemon already holds. `memory.palace_get` answers
+        /// for these and NOT-FOUNDs everything else, which is what lets a test
+        /// tell "created it" from "found it and left it alone".
+        existing_palaces: StdMutex<Vec<String>>,
     }
 
     impl MockState {
@@ -925,6 +971,14 @@ mod mock_daemon {
 
         pub(super) fn fail_palace_create(&self) {
             *self.fail_palace_create.lock().unwrap() = true;
+        }
+
+        /// Tell the mock this palace already exists on the daemon.
+        pub(super) fn palace_exists(&self, palace: &str) {
+            self.existing_palaces
+                .lock()
+                .unwrap()
+                .push(palace.to_string());
         }
     }
 
@@ -956,6 +1010,25 @@ mod mock_daemon {
                         .push((method.clone(), params.clone()));
                 }
                 match method.as_str() {
+                    // #7428: the existence probe `ensure_palace` asks before it
+                    // ever creates. NOT-FOUND carries the daemon's real code, so
+                    // the caller's `is_not_found` downcast is genuinely tested.
+                    "memory.palace_get" => {
+                        let id = params["palace_id"].as_str().unwrap_or_default();
+                        if state
+                            .existing_palaces
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .any(|p| p == id)
+                        {
+                            return Ok(serde_json::json!({"id": id, "name": id}));
+                        }
+                        Err(RpcError::new(
+                            trusty_common::memory_rpc::CODE_NOT_FOUND,
+                            format!("palace {id:?} not found"),
+                        ))
+                    }
                     "palace_create" => {
                         if *state.fail_palace_create.lock().unwrap() {
                             return Err(RpcError::internal("no disk space for a new palace"));

@@ -177,6 +177,51 @@ async fn put_refuses_a_palace_the_binding_pins() {
     );
 }
 
+/// Why: this is the containment boundary, not a usability nicety. `izzie` binds
+/// no palace, so a `PUT {"palace": "cto"}` used to be accepted: `own_palace`
+/// resolved it as `PalaceSource::Config`, `own_is_bound()` answered false, and
+/// the chat path then treated `cto-assistant`'s palace as a derived one of
+/// izzie's — recalling from it, persisting izzie's turns into it, and issuing a
+/// `palace_create` that trusty-memory does not refuse for an existing name
+/// (`handle_palace_create` rewrites `palace.json` with a fresh `created_at`).
+#[tokio::test]
+async fn put_refuses_a_palace_another_assistant_already_owns() {
+    let (_tmp, dirs, root) = fixture();
+
+    // `cto-assistant` binds `cto`; izzie may not claim it.
+    let bound = write_at(&dirs, &root, "izzie", put_body(Some("cto"), &[]));
+    assert_eq!(bound.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let reason = body_json(bound).await;
+    assert!(
+        reason["error"]
+            .as_str()
+            .unwrap()
+            .contains("already belongs to assistant `cto-assistant`"),
+        "the refusal names the owner: {reason}"
+    );
+
+    // And the DERIVED case: an unbound assistant's palace is its instance id,
+    // which is equally taken.
+    let derived = write_at(&dirs, &root, "cto-assistant", put_body(Some("izzie"), &[]));
+    assert_eq!(derived.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Neither refusal wrote anything.
+    let mine = body_json(read_at(&dirs, &root, "izzie")).await;
+    assert_eq!(mine["palace"], serde_json::Value::Null);
+    assert_eq!(mine["resolved"]["own"], "izzie");
+    assert_eq!(mine["resolved"]["source"], "instance-id");
+
+    // An unclaimed name is still accepted, so the guard is a collision check and
+    // not a blanket ban on setting a palace.
+    let free = write_at(&dirs, &root, "izzie", put_body(Some("izzie-notes"), &[]));
+    assert_eq!(free.status(), StatusCode::OK);
+    assert_eq!(
+        body_json(free).await["resolved"]["own"],
+        "izzie-notes",
+        "a free name is still settable"
+    );
+}
+
 #[tokio::test]
 async fn get_rejects_an_unknown_assistant() {
     let (_tmp, dirs, root) = fixture();

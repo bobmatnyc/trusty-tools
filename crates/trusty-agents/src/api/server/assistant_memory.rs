@@ -18,6 +18,13 @@
 //! REFUSED here — while the recall path (`crate::assistants::memory`) merely
 //! drops it, because a stale setting must never break a chat turn.
 //!
+//! A `palace` naming an assistant that already owns it is refused too, and that
+//! one is a containment boundary rather than a usability nicety: an accepted
+//! collision points this assistant's reads AND its turn writes at the other
+//! assistant's memory. Nothing downstream catches it — trusty-memory's
+//! `palace_create` does not refuse an existing name, so the chat path would
+//! treat the borrowed palace as its own to create.
+//!
 //! Test: `super::tests::assistant_memory`.
 
 use std::path::{Path, PathBuf};
@@ -31,6 +38,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::assistants::memory::palace_for_instance;
 use crate::assistants::{
     AssistantHome, AssistantInstanceId, MemoryConfig, discover_instances, read_memory_config,
     resolve_palace_plan_in, write_memory_config,
@@ -119,12 +127,15 @@ pub(super) fn read_at(dirs: &[PathBuf], root: &Path, name: &str) -> Response {
 
 /// Replace the `[memory]` table after validating every entry.
 ///
-/// Why/What: see the module doc. A `palace` that contradicts the assistant's
-/// `[[stores]]` binding is refused rather than silently ignored — the binding
-/// wins by rule, so accepting the write would leave the user looking at a value
-/// nothing reads.
+/// Why/What: see the module doc. Two refusals on `palace`. One that contradicts
+/// the assistant's own `[[stores]]` binding is refused rather than silently
+/// ignored — the binding wins by rule, so accepting the write would leave the
+/// user looking at a value nothing reads. One that names ANOTHER assistant's own
+/// palace is refused because accepting it would point this assistant's reads and
+/// writes at that assistant's memory (see [`owner_of_palace`]).
 /// Test: `put_replaces_the_whole_table`, `put_rejects_self_and_bad_ids`,
-/// `put_refuses_a_palace_the_binding_pins`.
+/// `put_refuses_a_palace_the_binding_pins`,
+/// `put_refuses_a_palace_another_assistant_already_owns`.
 pub(super) fn write_at(dirs: &[PathBuf], root: &Path, name: &str, body: MemoryBody) -> Response {
     let id = match instance(dirs, name) {
         Ok(id) => id,
@@ -166,6 +177,27 @@ pub(super) fn write_at(dirs: &[PathBuf], root: &Path, name: &str, body: MemoryBo
         );
     }
 
+    // #7428: a requested palace that is ALREADY some other assistant's own
+    // palace must be refused. Accepting it would make this assistant recall
+    // from, and persist into, that assistant's memory — the exact
+    // cross-assistant leak one-palace-per-assistant exists to prevent — and,
+    // because the id would resolve as `PalaceSource::Config` rather than
+    // `Binding`, the chat path would treat it as derived and try to create it.
+    // The guard is here rather than in the recall path because this is where a
+    // person can be told which assistant already owns the name.
+    if let Some(requested) = body
+        .palace
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        && let Some(owner) = owner_of_palace(dirs, root, &id, requested)
+    {
+        return fail(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("palace `{requested}` already belongs to assistant `{owner}`"),
+        );
+    }
+
     let config = MemoryConfig {
         palace: body.palace,
         fan_out,
@@ -178,6 +210,26 @@ pub(super) fn write_at(dirs: &[PathBuf], root: &Path, name: &str, body: MemoryBo
         return fail(StatusCode::INTERNAL_SERVER_ERROR, e);
     }
     Json(body_for(dirs, root, &id, &config)).into_response()
+}
+
+/// The assistant, other than `mine`, whose own palace is already `requested`.
+///
+/// Why: `own_palace` resolves every instance by the same rule, so "is this name
+/// taken" is answerable without asking the memory daemon — and has to be,
+/// because the daemon's `palace_create` does not refuse an existing name.
+/// What: `Some(id)` for the first other instance resolving to `requested`,
+/// `None` when the name is free. Compared case-sensitively on the exact string,
+/// which is what the daemon keys palaces by.
+/// Test: `put_refuses_a_palace_another_assistant_already_owns`.
+fn owner_of_palace(
+    dirs: &[PathBuf],
+    root: &Path,
+    mine: &AssistantInstanceId,
+    requested: &str,
+) -> Option<AssistantInstanceId> {
+    discover_instances(dirs)
+        .into_iter()
+        .find(|other| other != mine && palace_for_instance(dirs, root, other) == requested)
 }
 
 /// The response body shared by both routes: stored settings plus what they

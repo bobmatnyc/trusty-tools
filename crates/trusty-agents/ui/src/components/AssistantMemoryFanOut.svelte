@@ -85,6 +85,8 @@
       {#if data.resolved.source === 'binding'}
         (pinned by <code class="font-mono">[[stores]]</code> in
         <code class="font-mono">agent.toml</code>)
+      {:else if data.resolved.source === 'config'}
+        (set in memory settings)
       {:else if data.resolved.source === 'instance-id'}
         (named after the assistant)
       {/if}. Everything it stores goes here and nowhere else.
