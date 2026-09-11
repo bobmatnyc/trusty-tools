@@ -39,6 +39,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+// #7452: the shared MCP-server configuration authority. Behind `config` for
+// the same reason the forwarder is behind its own feature — a consumer that
+// links this crate only for the wire types must not gain `toml`.
+#[cfg(feature = "config")]
+pub mod config;
 pub mod daemon_bridge;
 // #6316: shared stdio↔UDS forwarder. Behind `daemon-bridge-json-rpc` because
 // it is the crate's only `trusty-common` consumer — see the README's Features
@@ -49,6 +54,12 @@ pub mod openrpc;
 pub mod service;
 pub mod single_flight;
 
+// #7452: the config authority's entry points, re-exported so a consumer
+// writes `trusty_mcp::McpServerConfig` rather than the module path.
+#[cfg(feature = "config")]
+pub use config::{
+    McpConfigError, McpConfigFile, McpServerConfig, McpServerOverride, McpTransport, resolve,
+};
 pub use daemon_bridge::{DaemonBridgeConfig, ensure_daemon_up};
 // #6316: shared stdio↔UDS forwarder.
 #[cfg(feature = "daemon-bridge-json-rpc")]
