@@ -408,6 +408,53 @@ fn save_replaces_existing_file() {
     assert!(strays.is_empty(), "temp files left behind: {strays:?}");
 }
 
+/// A locked read-modify-write parses the bytes it already read rather than
+/// reading the path again (#7454). The pair must answer exactly as `load`
+/// does, or the two entry points would disagree about what a valid file is.
+#[test]
+fn parse_matches_load() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("servers.toml");
+    McpConfigFile::new(vec![stdio("one", "one", &[])])
+        .save(&path)
+        .unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+
+    assert_eq!(
+        McpConfigFile::parse(&text, &path).unwrap(),
+        McpConfigFile::load(&path).unwrap()
+    );
+
+    let err = McpConfigFile::parse("[[servers]\nname = \"broken\"\n", &path)
+        .expect_err("malformed TOML must not parse");
+    assert!(
+        matches!(&err, McpConfigError::Parse { path: p, .. } if p == &path),
+        "expected a Parse error naming the path, got: {err}"
+    );
+}
+
+/// `render` is the bytes `save` publishes, so a caller writing them through
+/// its own locked writer produces a byte-identical file.
+#[test]
+fn render_matches_what_save_writes() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("servers.toml");
+    let file = McpConfigFile::new(vec![stdio("one", "one", &["--flag"])]);
+    file.save(&path).unwrap();
+
+    assert_eq!(
+        file.render(&path).unwrap(),
+        std::fs::read_to_string(&path).unwrap()
+    );
+
+    // It inherits `save`'s refusals rather than restating them.
+    let dup = McpConfigFile::new(vec![stdio("same", "a", &[]), stdio("same", "b", &[])]);
+    assert!(matches!(
+        dup.render(&path),
+        Err(McpConfigError::DuplicateName { .. })
+    ));
+}
+
 #[test]
 fn empty_file_loads_as_no_servers() {
     let tmp = TempDir::new().unwrap();

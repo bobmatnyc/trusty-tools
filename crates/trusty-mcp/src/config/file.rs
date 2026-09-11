@@ -128,7 +128,23 @@ impl McpConfigFile {
             path: path.to_path_buf(),
             source,
         })?;
-        let parsed: Self = toml::from_str(&text).map_err(|e| McpConfigError::Parse {
+        Self::parse(&text, path)
+    }
+
+    /// The parse half of [`load`](Self::load), for a caller holding the bytes.
+    ///
+    /// Why: a consumer doing a locked read-modify-write already has the file's
+    /// bytes in hand from inside its lock, and re-reading through
+    /// [`load`](Self::load) would read the path a second time — outside the
+    /// decision the lock protects. Exposing the parse step is what lets that
+    /// caller keep ONE read, while still failing exactly the way `load` does
+    /// (see `trusty_agents::tools::mcp_tools::dispatch`, #7454).
+    /// What: `path` names the file the bytes came from and is used only to
+    /// label an error; nothing here touches the filesystem.
+    /// Test: `parse_matches_load`, `load_rejects_malformed_toml`,
+    /// `load_rejects_duplicate_names`.
+    pub fn parse(text: &str, path: &Path) -> Result<Self, McpConfigError> {
+        let parsed: Self = toml::from_str(text).map_err(|e| McpConfigError::Parse {
             path: path.to_path_buf(),
             message: e.to_string(),
         })?;
@@ -192,13 +208,7 @@ impl McpConfigFile {
     ///
     /// [`extensions`]: McpServerConfig::extensions
     pub fn save(&self, path: &Path) -> Result<(), McpConfigError> {
-        self.reject_duplicate_names(path)?;
-        let renderable = self.without_null_extensions(path)?;
-        let rendered =
-            toml::to_string_pretty(&renderable).map_err(|e| McpConfigError::Serialize {
-                path: path.to_path_buf(),
-                message: e.to_string(),
-            })?;
+        let rendered = self.render(path)?;
 
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|source| McpConfigError::Io {
@@ -227,6 +237,28 @@ impl McpConfigFile {
                 path: path.to_path_buf(),
                 source,
             }
+        })
+    }
+
+    /// The TOML [`save`](Self::save) would write, without writing it.
+    ///
+    /// Why: the mirror of [`parse`](Self::parse) — a caller publishing these
+    /// bytes through its own locked writer (`state_writer::atomic_update`)
+    /// needs the same rendering `save` produces, including the duplicate-name
+    /// refusal and the null-extension handling, or the two writers would
+    /// disagree about what a valid file is.
+    /// What: refuses a duplicate name, strips null extension members, and
+    /// renders. `path` labels errors only; nothing here touches the
+    /// filesystem. The caller owns the atomicity and the file mode — `save`
+    /// itself is still the right entry point for a plain write.
+    /// Test: `render_matches_what_save_writes`, `save_rejects_duplicate_names`,
+    /// `save_rejects_null_inside_an_extension_array`.
+    pub fn render(&self, path: &Path) -> Result<String, McpConfigError> {
+        self.reject_duplicate_names(path)?;
+        let renderable = self.without_null_extensions(path)?;
+        toml::to_string_pretty(&renderable).map_err(|e| McpConfigError::Serialize {
+            path: path.to_path_buf(),
+            message: e.to_string(),
         })
     }
 

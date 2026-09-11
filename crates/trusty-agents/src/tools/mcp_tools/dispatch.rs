@@ -106,29 +106,61 @@ fn by_name(
 }
 
 /// Read the shared file, or the message to hand the model instead.
+///
+/// Read-only: `mcp_list` alone. Every mutation goes through [`mutate`], which
+/// reads inside the lock.
 fn load() -> Result<(McpConfigFile, std::path::PathBuf), String> {
-    let path = trusty_mcp::config::default_path()
-        .map_err(|e| format!("Failed to locate the MCP server file: {e}"))?;
+    let path = shared_path()?;
     let file = McpConfigFile::load_or_default(&path)
         .map_err(|e| format!("Failed to read the MCP server file: {e}"))?;
     Ok((file, path))
 }
 
-/// Read-modify-write the shared file, skipping the write when nothing changed.
+/// The shared file's path, or the message to hand the model instead.
+fn shared_path() -> Result<std::path::PathBuf, String> {
+    trusty_mcp::config::default_path()
+        .map_err(|e| format!("Failed to locate the MCP server file: {e}"))
+}
+
+/// Read-modify-write the shared file under one held lock, skipping the write
+/// when nothing changed.
 ///
-/// Why: `mcp_enable` on an already-enabled server should not rewrite the file
-/// and should not claim it did something it did not.
-/// What: `Ok(false)` when `apply` reports no change; `Ok(true)` after a
-/// successful save; `Err(message)` for a read or write failure, already
-/// phrased for the model.
+/// Why: `~/.trusty-tools/mcp/servers.toml` is shared across processes — a
+/// durable API server, a GUI, `trusty-code`, and any `tagent` invocation can
+/// all reach it — so reading it OUTSIDE the write is a lost update, not a torn
+/// one. `McpConfigFile::save`'s tmp+rename already makes each individual write
+/// atomic; what it cannot do is stop two `mcp_add` calls from both reading the
+/// same list and the later save dropping the earlier server (#7454).
+/// [`crate::state_writer::atomic_update`] holds the advisory lock across read,
+/// decide and publish, which is the only place that window closes. It
+/// publishes through the same 0600 tmp+rename `save` uses, so the file mode is
+/// unchanged.
+/// What: the bytes the lock protects are parsed INSIDE the closure via
+/// `McpConfigFile::parse` — no second read of the path. `Ok(false)` when
+/// `apply` reports no change (the closure returns `None` and nothing is
+/// written); `Ok(true)` after a successful publish; `Err(message)` for a read,
+/// parse or write failure, already phrased for the model.
+/// Test: `super::tests::concurrent_mcp_add_calls_all_survive`,
+/// `super::tests::dispatch_mcp_enable_on_a_missing_server_writes_nothing`.
 fn mutate(apply: impl FnOnce(&mut Vec<McpServerConfig>) -> bool) -> Result<bool, String> {
-    let (mut file, path) = load()?;
-    if !apply(&mut file.servers) {
-        return Ok(false);
-    }
-    file.save(&path)
-        .map_err(|e| format!("Failed to write the MCP server file: {e}"))?;
-    Ok(true)
+    let path = shared_path()?;
+    crate::state_writer::atomic_update(&path, |existing| {
+        let mut file = match existing {
+            // An absent file is an empty list, matching `load_or_default`: a
+            // fresh install has no connectors, which is not a fault.
+            None => McpConfigFile::default(),
+            Some(bytes) => {
+                let text = std::str::from_utf8(bytes)
+                    .map_err(|e| anyhow::anyhow!("the MCP server file is not UTF-8: {e}"))?;
+                McpConfigFile::parse(text, &path)?
+            }
+        };
+        if !apply(&mut file.servers) {
+            return Ok(None);
+        }
+        Ok(Some(file.render(&path)?.into_bytes()))
+    })
+    .map_err(|e| format!("Failed to update the MCP server file: {e:#}"))
 }
 
 /// Render the configured servers for the `mcp_list` tool result.

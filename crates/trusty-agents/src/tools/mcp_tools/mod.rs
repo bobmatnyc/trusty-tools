@@ -309,4 +309,72 @@ mod tests {
             "discover must be forced to false for LLM-originated mcp_add calls"
         );
     }
+
+    /// #7454: the shared file is multi-process state, so a read outside the
+    /// write is a LOST update — two `mcp_add` calls both read the same list
+    /// and the later save drops the earlier server. `McpConfigFile::save`'s
+    /// tmp+rename prevents a torn file, never this. Eight concurrent adds of
+    /// distinct names must all survive; any missing name is the lost update.
+    ///
+    /// Threads rather than tasks, because the mutation is synchronous and each
+    /// one takes its own file descriptor on the sibling `.lock` — which is what
+    /// makes `flock` serialize them within one process as well as across
+    /// processes.
+    #[test]
+    fn concurrent_mcp_add_calls_all_survive() {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir();
+        unsafe {
+            std::env::set_var("HOME", &home);
+        }
+
+        std::thread::scope(|scope| {
+            for index in 0..8 {
+                scope.spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .build()
+                        .unwrap();
+                    let out = runtime.block_on(dispatch_mcp_tool(
+                        "mcp_add",
+                        &json!({
+                            "name": format!("racer-{index}"),
+                            "description": "concurrent",
+                            "transport": "stdio",
+                            "command": "racer"
+                        }),
+                    ));
+                    assert!(out.contains("Added"), "got: {out}");
+                });
+            }
+        });
+
+        let names: Vec<String> = reload().into_iter().map(|s| s.name).collect();
+        for index in 0..8 {
+            let expected = format!("racer-{index}");
+            assert!(
+                names.contains(&expected),
+                "lost update: {expected} is missing from {names:?}"
+            );
+        }
+    }
+
+    /// The lock does not change the no-op answer: enabling an already-enabled
+    /// server still reports the change it did make (the server existed), and a
+    /// name that matches nothing still writes nothing.
+    #[tokio::test]
+    async fn dispatch_mcp_enable_on_a_missing_server_writes_nothing() {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir();
+        unsafe {
+            std::env::set_var("HOME", &home);
+        }
+        let path = trusty_mcp::config::default_path().unwrap();
+
+        let out = dispatch_mcp_tool("mcp_enable", &json!({"name": "ghost"})).await;
+        assert!(out.contains("No MCP server"), "got: {out}");
+        assert!(
+            !path.exists(),
+            "a declined mutation created the shared file anyway"
+        );
+    }
 }

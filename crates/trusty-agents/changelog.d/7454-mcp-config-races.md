@@ -1,0 +1,6 @@
+Fixed
+
+- The `mcp_add`/`mcp_remove`/`mcp_enable`/`mcp_disable` tools no longer lose an update to `~/.trusty-tools/mcp/servers.toml` (#7454). The read sat outside the write, so two processes sharing that file could both read the same list and the later save drop the earlier server; the whole read-modify-write now runs under one advisory lock through `state_writer::atomic_update`, at the same owner-only mode.
+- A persona turn and a sub-agent run each resolve their MCP configuration exactly once (#7454). The static tool path, live discovery and the OpenRPC registry each resolved for themselves, so a concurrent `mcp_add` or disable between two of those reads left the three surfaces disagreeing about what the assistant connects to. They now take the resolved set as a parameter, which makes the single read structural rather than a comment.
+- `PUT /api/assistants/{id}/mcp` stores a server name trimmed, matching the name it validated (#7454). A name with stray whitespace was validated trimmed and stored untrimmed, so it matched no global server and became a dead entry instead of the override the user asked for.
+- The assistant Knowledge route resolves MCP servers against the project root it was given rather than the server process's working directory (#7454).

@@ -426,12 +426,12 @@ pub(super) async fn run_subagent(name: &str) -> Result<()> {
                     .map(String::from)
             })
             .collect();
-        for tool in tools::mcp_live::live_mcp_tool_executors(
-            &cwd,
-            &existing_names,
-            Some(cfg.agent.name.as_str()),
-        )
-        .await
+        // #7454 review: `mcp_resolved` is this run's ONE resolution, taken
+        // above for the prompt's MCP section. Resolving again here would read
+        // the same two files a second time and could disagree with what the
+        // prompt already told the model it can reach.
+        for tool in
+            tools::mcp_live::live_mcp_tool_executors(&mcp_resolved.usable(), &existing_names).await
         {
             reg.register(tool);
         }

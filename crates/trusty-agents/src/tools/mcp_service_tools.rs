@@ -1,26 +1,31 @@
-//! Live MCP service tools — wraps tools advertised by enabled MCP services
-//! in `GlobalConfig` as `ToolExecutor` instances so persona registries can
-//! invoke them (e.g. `granola_*`, `gmail_*`, calendar tools).
+//! The STATIC MCP tool path — one `ToolExecutor` per tool a configured server
+//! DECLARES, so a persona registry can dispatch `granola_*`, `gmail_*` and the
+//! calendar tools without spawning anything at registry-build time.
 //!
-//! Why: Previously the persona registry (see `ctrl/mod.rs` ~line 1601) only
-//! registered the five `mcp_*` management tools (mcp_list/add/remove/enable/
-//! disable) plus git and ticketing. The actual tools exposed by running MCP
-//! servers — `granola_search`, `gmail_send`, etc. listed in
-//! `~/.trusty-agents/config.toml` — were never instantiated as `ToolExecutor`s,
-//! so personas like Izzie could *see* `granola_*` in their `allow = [...]`
-//! glob but the registry would dispatch nothing.
+//! Why: the persona registry once registered only the five `mcp_*` management
+//! tools plus git and ticketing, so a persona could *see* `granola_*` in its
+//! `allow = [...]` glob while the registry dispatched nothing. This module is
+//! what closes that gap for a server that lists its tools in configuration;
+//! [`crate::tools::mcp_live`] is the other half, for a server marked
+//! `discover = true` that must be asked at runtime.
 //!
-//! What: `mcp_service_tool_executors()` reads `GlobalConfig::load()`, walks
-//! each enabled service, and builds one `Arc<dyn ToolExecutor>` per
-//! advertised tool. Each executor lazily spawns an `StdioMcpClient` on first
-//! call (cached per-service via a `OnceCell<Arc<Mutex<StdioMcpClient>>>`),
-//! then forwards `tools/call` requests. Failures (server not on PATH,
-//! handshake failure, JSON-RPC error) surface as `ToolResult::Error` so the
-//! LLM can recover instead of panicking the loop.
+//! What: [`mcp_service_tool_executors`] takes the servers the CALLER already
+//! resolved — `crate::mcp::ResolvedMcp::usable()`, the global
+//! `~/.trusty-tools/mcp/servers.toml` tier layered with this assistant's
+//! `[mcp]` overrides (#7454, ADR-0060) — and builds one
+//! `Arc<dyn ToolExecutor>` per tool in each server's `tools` extension. It
+//! reads no configuration file itself, which is what keeps this surface, live
+//! discovery and the OpenRPC registry built from ONE resolved set per turn
+//! rather than three independent reads. Each executor lazily spawns an
+//! `StdioMcpClient` on first call (cached per-service via a
+//! `OnceCell<Arc<Mutex<StdioMcpClient>>>`), then forwards `tools/call`
+//! requests. Failures (server not on PATH, handshake failure, JSON-RPC error)
+//! surface as `ToolResult::Error` so the LLM can recover instead of panicking
+//! the loop.
 //!
-//! Test: `mcp_service_tool_executors_returns_tools_for_enabled_services` and
-//! `disabled_services_are_skipped` cover the static path; the live spawn
-//! path is exercised opportunistically when binaries are present.
+//! Test: `build_executors_emits_one_per_tool` and `disabled_services_are_skipped`
+//! cover the static path; the live spawn path is exercised opportunistically
+//! when binaries are present.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -239,34 +244,29 @@ pub(crate) fn format_mcp_call_result(value: &Value) -> String {
     value.to_string()
 }
 
-/// Build live MCP service tool executors from the global config (#447-followup).
+/// Build MCP service tool executors from an already-resolved server list.
 ///
 /// Why: Persona registries (Izzie etc.) need to invoke `granola_*`,
 /// `gmail_*`, etc. — tools advertised by enabled MCP services. This builder
-/// is the single entry point: read `GlobalConfig`, walk enabled services,
-/// emit one executor per advertised tool. Disabled services are skipped.
-/// What: Async because `GlobalConfig::load()` is async. Per-service
-/// `Arc<ServiceClient>` is shared across that service's tools so we spawn
-/// at most one MCP subprocess per server, lazily on first call.
-/// Test: `mcp_service_tool_executors_returns_tools_for_enabled_services`,
-/// `disabled_services_are_skipped`.
-pub async fn mcp_service_tool_executors(
-    assistant: Option<&str>,
-    project_dir: &std::path::Path,
-) -> Vec<Arc<dyn ToolExecutor>> {
-    let resolved = crate::mcp::resolve_for_assistant(assistant, project_dir).await;
-    build_executors_from_servers(&resolved.usable())
-}
-
-/// Pure helper that turns a resolved server list into executors. Split out so
-/// tests can feed synthetic servers without touching any config file.
+/// is the single entry point: walk the servers, emit one executor per
+/// advertised tool.
 ///
-/// Why: the caller passes `ResolvedMcp::usable()`, so a server this assistant
-/// disabled, or one whose credential does not resolve, never reaches here —
-/// the per-assistant tier lands on the registry the model actually sees.
+/// The caller resolves, not this function (#7454 review): three surfaces are
+/// built per turn — this one, live discovery, and the OpenRPC registry — and
+/// each resolving for itself meant two or three reads of the same files per
+/// turn, with a concurrent `mcp_add` or disable between them leaving the three
+/// surfaces disagreeing about what the assistant connects to. Taking the
+/// resolved slice is what makes "built from the SAME resolved set" a fact the
+/// signature enforces rather than a comment.
+/// What: the caller passes [`crate::mcp::ResolvedMcp::usable`], so a server
+/// this assistant disabled, or one whose credential does not resolve, never
+/// reaches here. Per-service `Arc<ServiceClient>` is shared across that
+/// service's tools so we spawn at most one MCP subprocess per server, lazily
+/// on first call.
 /// Test: `mcp_service_tool_executors_returns_tools_for_enabled_services`,
-/// `disabled_services_are_skipped`.
-fn build_executors_from_servers(servers: &[&McpServerConfig]) -> Vec<Arc<dyn ToolExecutor>> {
+/// `disabled_services_are_skipped`,
+/// `crate::ctrl::pm_task::dispatch::persona_mcp` (one resolution per turn).
+pub fn mcp_service_tool_executors(servers: &[&McpServerConfig]) -> Vec<Arc<dyn ToolExecutor>> {
     let mut executors: Vec<Arc<dyn ToolExecutor>> = Vec::new();
     // Used to dedupe across servers in case two advertise the same tool name —
     // first declaration wins.
@@ -384,11 +384,11 @@ mod tests {
         server
     }
 
-    /// `build_executors_from_servers` takes the borrowed form
+    /// `mcp_service_tool_executors` takes the borrowed form
     /// `ResolvedMcp::usable()` returns; the tests own their servers.
     fn build(servers: &[McpServerConfig]) -> Vec<Arc<dyn ToolExecutor>> {
         let refs: Vec<&McpServerConfig> = servers.iter().collect();
-        build_executors_from_servers(&refs)
+        mcp_service_tool_executors(&refs)
     }
 
     /// Why: Enabled services with non-empty tool lists must produce one

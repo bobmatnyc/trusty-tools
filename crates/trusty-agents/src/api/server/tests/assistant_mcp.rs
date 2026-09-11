@@ -5,9 +5,10 @@
 //! collapse (a duplicate, or one in both lists) must be refused at the moment
 //! it is written, because that is the only point where the user can be told
 //! which instruction would have won.
-//! What: the three-view read, a round-trip write, the three refusals, and one
-//! full-router test proving the route is wired. Driven against a
-//! `tempfile::TempDir`, so nothing races on `$HOME`.
+//! What: the three-view read, a round-trip write, the four refusals, the
+//! transport-secret redaction both ways, and one full-router test proving the
+//! route is wired. Driven against a `tempfile::TempDir`, so nothing races on
+//! `$HOME`.
 //! Test: This module IS the test.
 
 use axum::body::Body;
@@ -86,6 +87,12 @@ fn put_body(servers: serde_json::Value, disabled: &[&str]) -> McpBody {
         "disabled": disabled,
     }))
     .unwrap()
+}
+
+/// A body that omits `servers` entirely — what a client editing only the
+/// disable list sends, so it never echoes a redacted transport back.
+fn disabled_only(disabled: &[&str]) -> McpBody {
+    serde_json::from_value(serde_json::json!({ "disabled": disabled })).unwrap()
 }
 
 fn stdio_json(name: &str, command: &str) -> serde_json::Value {
@@ -198,6 +205,201 @@ async fn put_refuses_a_name_in_both_lists() {
         tier(),
     );
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+/// A stdio server whose `env` carries a secret, and a remote one whose
+/// `headers` carry a bearer token — the two shapes that must never leave here.
+fn tier_with_secrets() -> GlobalTier {
+    let mut stdio = McpServerConfig::new(
+        "github",
+        McpTransport::Stdio {
+            command: "github-mcp".to_string(),
+            args: Vec::new(),
+            env: [("API_KEY".to_string(), "secret-value".to_string())]
+                .into_iter()
+                .collect(),
+        },
+    );
+    stdio.extensions.insert(
+        "description".to_string(),
+        serde_json::json!("issue tooling"),
+    );
+    let remote = McpServerConfig::new(
+        "remote",
+        McpTransport::Http {
+            url: "https://mcp.example/api".to_string(),
+            headers: [("Authorization".to_string(), "Bearer t".to_string())]
+                .into_iter()
+                .collect(),
+        },
+    );
+    GlobalTier {
+        servers: vec![stdio, remote],
+        issues: Vec::new(),
+        path: std::path::PathBuf::from("servers.toml"),
+    }
+}
+
+/// `McpTransport`'s `Serialize` is deliberately unredacted so the config file
+/// round-trips, so serialising a resolved server straight into the response
+/// would return every inline API key and bearer token over the loopback API.
+/// Key NAMES survive; no value does — in any of the three views.
+#[tokio::test]
+async fn get_redacts_env_and_header_values() {
+    let (_tmp, dirs, root) = fixture();
+    let response = read_at(&dirs, &root, "izzie", tier_with_secrets());
+    let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let raw = String::from_utf8(bytes.to_vec()).unwrap();
+
+    assert!(
+        !raw.contains("secret-value"),
+        "the stdio server's env value leaked: {raw}"
+    );
+    assert!(
+        !raw.contains("Bearer t"),
+        "the remote server's header value leaked: {raw}"
+    );
+
+    let body: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    for view in ["global", "resolved"] {
+        assert_eq!(
+            body[view][0]["transport"]["env"]["API_KEY"], "<redacted>",
+            "{view}: the key name must survive, marked"
+        );
+        assert_eq!(
+            body[view][1]["transport"]["headers"]["Authorization"], "<redacted>",
+            "{view}: the header name must survive, marked"
+        );
+    }
+    // Everything an operator identifies the server by is untouched.
+    assert_eq!(body["resolved"][0]["transport"]["command"], "github-mcp");
+    assert_eq!(
+        body["resolved"][1]["transport"]["url"],
+        "https://mcp.example/api"
+    );
+    assert_eq!(
+        body["resolved"][0]["extensions"]["description"],
+        "issue tooling"
+    );
+}
+
+/// The write half of that redaction: a client that edits what the GET rendered
+/// sends the marker back, and storing it would replace a working credential
+/// with the word that stood in for it.
+#[tokio::test]
+async fn put_refuses_a_redacted_value() {
+    let (_tmp, dirs, root) = fixture();
+    let response = write_at(
+        &dirs,
+        &root,
+        "izzie",
+        put_body(
+            serde_json::json!([{
+                "name": "mine",
+                "enabled": true,
+                "transport": {
+                    "type": "stdio",
+                    "command": "mine-bin",
+                    "env": {"API_KEY": "<redacted>"},
+                },
+            }]),
+            &[],
+        ),
+        tier(),
+    );
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = body_json(response).await;
+    assert!(
+        body["error"].as_str().unwrap().contains("API_KEY"),
+        "the refusal names the value to re-enter: {:?}",
+        body["error"]
+    );
+
+    // Nothing was written: the assistant still has no overrides.
+    let reread = body_json(read_at(&dirs, &root, "izzie", tier())).await;
+    assert_eq!(reread["overrides"]["servers"], serde_json::json!([]));
+}
+
+/// The route a client editing only the disable list takes. It never restates a
+/// transport, so it can never round-trip a marker — and the servers it did not
+/// send survive.
+#[tokio::test]
+async fn put_without_servers_keeps_the_stored_ones() {
+    let (_tmp, dirs, root) = fixture();
+    write_at(
+        &dirs,
+        &root,
+        "izzie",
+        put_body(
+            serde_json::json!([stdio_json("izzie-only", "izzie-bin")]),
+            &[],
+        ),
+        tier(),
+    );
+
+    let written = body_json(write_at(
+        &dirs,
+        &root,
+        "izzie",
+        disabled_only(&["github"]),
+        tier(),
+    ))
+    .await;
+    assert_eq!(written["overrides"]["servers"][0]["name"], "izzie-only");
+    assert_eq!(
+        written["overrides"]["disabled"],
+        serde_json::json!(["github"])
+    );
+
+    // Sending an explicit empty list still clears them — absence and "none"
+    // are different answers.
+    let cleared = body_json(write_at(
+        &dirs,
+        &root,
+        "izzie",
+        put_body(serde_json::json!([]), &["github"]),
+        tier(),
+    ))
+    .await;
+    assert_eq!(cleared["overrides"]["servers"], serde_json::json!([]));
+}
+
+/// Validation trims, so storing the untrimmed name would accept `" github"` as
+/// a disable of `github` and then match nothing — a dead entry rather than the
+/// override the user asked for.
+#[tokio::test]
+async fn put_trims_a_stored_name() {
+    let (_tmp, dirs, root) = fixture();
+    let written = body_json(write_at(
+        &dirs,
+        &root,
+        "izzie",
+        put_body(
+            serde_json::json!([stdio_json("  izzie-only  ", "izzie-bin")]),
+            &["  github  "],
+        ),
+        tier(),
+    ))
+    .await;
+
+    assert_eq!(written["overrides"]["servers"][0]["name"], "izzie-only");
+    assert_eq!(
+        written["overrides"]["disabled"],
+        serde_json::json!(["github"])
+    );
+    let resolved: Vec<&str> = written["resolved"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        resolved,
+        ["izzie-only"],
+        "a trimmed disable actually matches the global server"
+    );
 }
 
 #[tokio::test]

@@ -7,6 +7,12 @@
  * answer. `statuses` runs parallel to `resolved`: a server that is configured
  * but not usable (disabled, or a credential that does not resolve) is present
  * with a reason, never omitted.
+ *
+ * Every transport secret arrives REDACTED: an `env` or `headers` value reads
+ * `<redacted>` while its key name survives, so a client can show THAT a
+ * variable is set without ever holding what it is. Nothing here may send one
+ * of those values back — the route refuses the marker, because writing it
+ * would replace a working credential with the word that stood in for it.
  */
 import { apiBase } from './api-config';
 import { getCurrentApiToken } from '../stores/app';
@@ -19,6 +25,10 @@ export interface McpTransport {
   command?: string;
   args?: string[];
   url?: string;
+  /** Key names only — every value is the redaction marker, never the secret. */
+  env?: Record<string, string>;
+  /** Key names only — every value is the redaction marker, never the secret. */
+  headers?: Record<string, string>;
 }
 
 export interface McpServer {
@@ -82,12 +92,16 @@ async function request(assistant: string, body?: unknown): Promise<AssistantMcp>
 
 export const fetchAssistantMcp = (assistant: string) => request(assistant);
 
-/** Replace the `[mcp]` table, keeping this assistant's own added servers. */
-export const saveAssistantMcpDisabled = (
-  assistant: string,
-  current: AssistantMcp,
-  disabled: string[],
-) => request(assistant, { servers: current.overrides.servers, disabled });
+/**
+ * Replace the disable list, keeping this assistant's own added servers.
+ *
+ * `servers` is deliberately OMITTED rather than echoed back: the servers this
+ * client holds came from a GET with their transport secrets redacted, so
+ * restating them would write `<redacted>` over a real credential. An absent
+ * `servers` tells the route to leave the stored ones alone.
+ */
+export const saveAssistantMcpDisabled = (assistant: string, disabled: string[]) =>
+  request(assistant, { disabled });
 
 /** A short, human label for where a server is reached. */
 export function transportLabel(server: McpServer): string {

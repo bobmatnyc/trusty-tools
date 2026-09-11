@@ -15,6 +15,20 @@
 //! at the moment the user writes it, which is the only point where they can be
 //! told why.
 //!
+//! Every server this route RENDERS is redacted first ([`redacted`]): a stdio
+//! server's `transport.env` and a remote one's `transport.headers` routinely
+//! carry API keys and bearer tokens, and `McpTransport`'s `Serialize` is
+//! deliberately unredacted so the config file round-trips. Serialising a
+//! resolved server straight into the response would hand every one of those
+//! secrets back over the API. Key NAMES survive, because which variables a
+//! server needs is the diagnostic the pane renders; the values are replaced
+//! with [`REDACTED`].
+//!
+//! The write side is the other half of that: `servers` is OPTIONAL, so a
+//! client changing only the disable list never echoes a server back at all,
+//! and a value that arrives still carrying [`REDACTED`] is refused rather than
+//! written — persisting the marker would destroy the real credential.
+//!
 //! Test: `super::tests::assistant_mcp`.
 
 use std::path::{Path, PathBuf};
@@ -33,17 +47,33 @@ use crate::assistants::mcp::{McpOverrides, read_overrides, write_overrides};
 use crate::assistants::{AssistantHome, AssistantInstanceId, discover_instances};
 use crate::mcp::shared::{GlobalTier, ResolvedMcp, load_global, resolve_in};
 
-/// The `PUT` body: the whole `[mcp]` table, replaced wholesale.
+/// What one hidden `env` or `headers` value renders as.
 ///
-/// Why replace rather than patch: the disable list is a SET the user edits in
-/// one control, so a partial update has no meaning — "remove the last entry"
-/// and "send no entries" would be indistinguishable.
-/// Test: `put_replaces_the_whole_table`.
+/// Why: a fixed marker rather than an empty string or a dropped key, so the
+/// pane can show that a variable IS set without showing what it is, and so the
+/// write side can recognise a round-tripped value and refuse it.
+/// Test: `get_redacts_env_and_header_values`, `put_refuses_a_redacted_value`.
+pub(super) const REDACTED: &str = "<redacted>";
+
+/// The `PUT` body: the `[mcp]` table.
+///
+/// Why `disabled` replaces wholesale: it is a SET the user edits in one
+/// control, so a partial update has no meaning — "remove the last entry" and
+/// "send no entries" would be indistinguishable.
+///
+/// Why `servers` is optional: the GET that a client edits from carries
+/// REDACTED transport secrets, so a body that always had to restate `servers`
+/// would make the disable toggle round-trip a marker back into the file and
+/// destroy the credential. Absent means "leave this assistant's own servers as
+/// they are"; present still replaces them wholesale, for the same reason
+/// `disabled` does.
+/// Test: `put_replaces_the_whole_table`,
+/// `put_without_servers_keeps_the_stored_ones`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct McpBody {
     #[serde(default)]
-    servers: Vec<McpServerConfig>,
+    servers: Option<Vec<McpServerConfig>>,
     #[serde(default)]
     disabled: Vec<String>,
 }
@@ -120,15 +150,25 @@ pub(super) fn read_at(dirs: &[PathBuf], root: &Path, name: &str, global: GlobalT
 
 /// Replace the `[mcp]` table after validating every entry.
 ///
-/// Why/What: see the module doc. Three refusals, each naming what to change: a
+/// Why/What: see the module doc. Four refusals, each naming what to change: a
 /// blank name (unaddressable — overrides match by name), a name repeated
 /// within `servers` (the shared file's own rule, and the resolver would keep
-/// only one), and a name in `servers` that is ALSO in `disabled` when the user
-/// probably meant one or the other. The last is the only one the resolver
-/// could answer on its own; refusing it here means the user finds out now
-/// rather than wondering later which instruction won.
+/// only one), a name in `servers` that is ALSO in `disabled` when the user
+/// probably meant one or the other, and a transport value still carrying
+/// [`REDACTED`]. The third is the only one the resolver could answer on its
+/// own; refusing it here means the user finds out now rather than wondering
+/// later which instruction won. The fourth is the write half of the read
+/// side's redaction: persisting the marker would replace a working credential
+/// with the word that stood in for it.
+///
+/// A validated name is stored TRIMMED, not as it arrived. Validation already
+/// trims, so an untrimmed store would accept `" github"` as a valid disable of
+/// `github` and then match nothing — a dead entry rather than the override the
+/// user asked for.
 /// Test: `put_replaces_the_whole_table`, `put_refuses_a_blank_name`,
-/// `put_refuses_a_duplicate_name`, `put_refuses_a_name_in_both_lists`.
+/// `put_refuses_a_duplicate_name`, `put_refuses_a_name_in_both_lists`,
+/// `put_refuses_a_redacted_value`, `put_trims_a_stored_name`,
+/// `put_without_servers_keeps_the_stored_ones`.
 pub(super) fn write_at(
     dirs: &[PathBuf],
     root: &Path,
@@ -140,23 +180,56 @@ pub(super) fn write_at(
         Ok(id) => id,
         Err(response) => return response,
     };
+    let home = AssistantHome::under(root, id.clone());
 
-    let mut seen: Vec<&str> = Vec::with_capacity(body.servers.len());
-    for server in &body.servers {
-        let trimmed = server.name.trim();
+    // Absent `servers` keeps what is stored, so a client editing only the
+    // disable list never restates a transport it was shown redacted.
+    let read = read_overrides(&home);
+    let submitted = match body.servers {
+        Some(servers) => servers,
+        None => {
+            if let Some(detail) = read.error {
+                return fail(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    format!(
+                        "this assistant's `[mcp]` table could not be read, so its servers \
+                         cannot be kept across this write: {detail}. Send the full `servers` \
+                         list, or fix {}.",
+                        read.path.display()
+                    ),
+                );
+            }
+            read.overrides.servers
+        }
+    };
+
+    let mut servers: Vec<McpServerConfig> = Vec::with_capacity(submitted.len());
+    for mut server in submitted {
+        let trimmed = server.name.trim().to_string();
         if trimmed.is_empty() {
             return fail(
                 StatusCode::BAD_REQUEST,
                 "every MCP server needs a name; overrides match the global list by name",
             );
         }
-        if seen.contains(&trimmed) {
+        if servers.iter().any(|s| s.name == trimmed) {
             return fail(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 format!("MCP server `{trimmed}` is listed twice; each name may appear once"),
             );
         }
-        seen.push(trimmed);
+        if let Some(key) = redacted_secret_key(&server) {
+            return fail(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "MCP server `{trimmed}` sends `{key}` as `{REDACTED}`, which is what this \
+                     route renders in place of a secret. Send the real value, or omit \
+                     `servers` to leave this assistant's servers unchanged."
+                ),
+            );
+        }
+        server.name = trimmed;
+        servers.push(server);
     }
 
     let mut disabled: Vec<String> = Vec::with_capacity(body.disabled.len());
@@ -168,7 +241,7 @@ pub(super) fn write_at(
                 "a disabled entry names a server; it cannot be blank",
             );
         }
-        if seen.contains(&trimmed) {
+        if servers.iter().any(|s| s.name == trimmed) {
             return fail(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 format!(
@@ -182,11 +255,7 @@ pub(super) fn write_at(
         }
     }
 
-    let overrides = McpOverrides {
-        servers: body.servers,
-        disabled,
-    };
-    let home = AssistantHome::under(root, id.clone());
+    let overrides = McpOverrides { servers, disabled };
     if let Err(e) = home
         .ensure()
         .and_then(|_| write_overrides(&home, &overrides))
@@ -197,7 +266,30 @@ pub(super) fn write_at(
     Json(body_for(&resolved)).into_response()
 }
 
+/// The first `env` or `headers` key whose value is the redaction marker.
+///
+/// Why: a client that edits what [`redacted`] rendered sends the marker back,
+/// and storing it would overwrite a working credential with the word that
+/// stood in for it. Naming the KEY is what lets the refusal say which value to
+/// re-enter.
+/// Test: `put_refuses_a_redacted_value`.
+fn redacted_secret_key(server: &McpServerConfig) -> Option<String> {
+    let map = match &server.transport {
+        trusty_mcp::config::McpTransport::Stdio { env, .. } => env,
+        trusty_mcp::config::McpTransport::Http { headers, .. } => headers,
+        trusty_mcp::config::McpTransport::Sse { headers, .. } => headers,
+        // `McpTransport` is `#[non_exhaustive]`: a transport this build does
+        // not know carries no map it can check, so there is nothing to refuse.
+        _ => return None,
+    };
+    map.iter()
+        .find(|(_, value)| value.as_str() == REDACTED)
+        .map(|(key, _)| key.clone())
+}
+
 /// The response body shared by both routes.
+///
+/// Every server list goes through [`redacted`] — see the module doc.
 fn body_for(resolved: &ResolvedMcp) -> Value {
     let issues: Vec<Value> = resolved
         .issues
@@ -213,13 +305,57 @@ fn body_for(resolved: &ResolvedMcp) -> Value {
         .collect();
     json!({
         "assistant": resolved.assistant,
-        "global": resolved.global,
+        "global": redacted_all(&resolved.global),
         "overrides": {
-            "servers": resolved.overrides.servers,
+            "servers": redacted_all(&resolved.overrides.servers),
             "disabled": resolved.overrides.disabled,
         },
-        "resolved": resolved.servers,
+        "resolved": redacted_all(&resolved.servers),
         "statuses": resolved.statuses,
         "issues": issues,
     })
+}
+
+/// [`redacted`] over a whole list.
+fn redacted_all(servers: &[McpServerConfig]) -> Vec<Value> {
+    servers.iter().map(redacted).collect()
+}
+
+/// One server as JSON, with every `env` and `headers` VALUE hidden.
+///
+/// Why: `McpTransport`'s `Serialize` is deliberately unredacted so the config
+/// file round-trips (its `Debug` is the redacting one, and a route does not go
+/// through `Debug`). Serialising a resolved server straight into the response
+/// therefore returns every inline API key and bearer token over the API. This
+/// is the route's own redaction, applied to what it RENDERS rather than to
+/// what it stores.
+/// What: serialises, then replaces each value under `transport.env` and
+/// `transport.headers` with [`REDACTED`]. Keys survive — which variables a
+/// server needs is the diagnostic; the values are not. `command`, `args` and
+/// `url` are untouched: they identify the server and none is a credential,
+/// which is the same line `McpTransport`'s `Debug` draws.
+///
+/// `extensions` is untouched too. Its documented shapes carry credential
+/// REFERENCES, never secrets — an `auth` block names an environment variable
+/// (`crate::mcp::extensions::AuthSpec`) — and the pane reads `tools`,
+/// `description` and `source` out of it.
+/// Test: `get_redacts_env_and_header_values`.
+fn redacted(server: &McpServerConfig) -> Value {
+    let mut value = match serde_json::to_value(server) {
+        Ok(value) => value,
+        // Unreachable for this shape; a bare error object is still safer than
+        // a fallback that could serialise the server unredacted.
+        Err(e) => return json!({ "name": server.name, "error": e.to_string() }),
+    };
+    if let Some(transport) = value.get_mut("transport").and_then(Value::as_object_mut) {
+        for key in ["env", "headers"] {
+            let Some(map) = transport.get_mut(key).and_then(Value::as_object_mut) else {
+                continue;
+            };
+            for secret in map.values_mut() {
+                *secret = Value::String(REDACTED.to_string());
+            }
+        }
+    }
+    value
 }

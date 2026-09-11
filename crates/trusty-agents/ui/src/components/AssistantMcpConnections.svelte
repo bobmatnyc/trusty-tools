@@ -65,7 +65,7 @@
     busy = true;
     error = '';
     try {
-      const result = await saveAssistantMcpDisabled(name, data, next);
+      const result = await saveAssistantMcpDisabled(name, next);
       if (version === requestVersion && name === agentName) data = result;
     } catch (cause) {
       if (version === requestVersion && name === agentName)

@@ -173,8 +173,12 @@ pub(super) async fn knowledge_at(
     // otherwise a bare agent with zero grants reports the same two
     // connections as a fully-provisioned one (see `agent_reaches_connection`).
     // #7454: resolved for THIS agent, so an assistant-level override shows in
-    // its own Knowledge pane and nowhere else.
-    let resolved = crate::mcp::resolve_here(Some(name)).await;
+    // its own Knowledge pane and nowhere else. `project_root` is the injected
+    // root this route already resolves everything else against — deriving it
+    // from `current_dir` instead would make the `.mcp.json` tier depend on the
+    // server process's working directory rather than on the project the caller
+    // named, and would leave the tests unable to control it.
+    let resolved = crate::mcp::resolve_for_assistant(Some(name), project_root).await;
     let mcp = knowledge_mcp_connections(&resolved.servers, patterns.as_deref());
 
     let mut body = json!({

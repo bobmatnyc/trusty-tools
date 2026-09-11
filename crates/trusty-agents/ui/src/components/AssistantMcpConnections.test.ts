@@ -47,7 +47,10 @@ it('switching a shared connection off sends it as this assistant disabled list',
   });
   component = mount(AssistantMcpConnections, { target: document.body, props: { agentName: 'izzie' } }); await settle();
   box().click(); await settle();
-  expect(saveAssistantMcpDisabled).toHaveBeenCalledWith('izzie', fixture, ['github']);
+  // Only the disable list — never the servers the GET returned. Those carry
+  // `<redacted>` in place of every transport secret, so echoing them back
+  // would write the marker over a real credential.
+  expect(saveAssistantMcpDisabled).toHaveBeenCalledWith('izzie', ['github']);
   expect(document.body.textContent).toContain('connects to no MCP server');
   expect(box().checked).toBe(false);
 });
@@ -100,6 +103,29 @@ it('shows a configuration issue with its remedy rather than an empty pane', asyn
   component = mount(AssistantMcpConnections, { target: document.body, props: { agentName: 'izzie' } }); await settle();
   expect(document.body.textContent).toContain('could not be read');
   expect(document.body.textContent).toContain('Fix the TOML in that file.');
+});
+
+it('renders a server whose transport secrets came back redacted', async () => {
+  const secretive = {
+    name: 'github',
+    enabled: true,
+    transport: {
+      type: 'stdio',
+      command: 'github-mcp',
+      env: { API_KEY: '<redacted>' },
+    },
+  };
+  vi.mocked(fetchAssistantMcp).mockResolvedValue({
+    ...fixture,
+    global: [secretive],
+    resolved: [secretive],
+  });
+  component = mount(AssistantMcpConnections, { target: document.body, props: { agentName: 'izzie' } }); await settle();
+  // The pane identifies a server by its command, never by its credentials, so
+  // the redacted shape changes nothing it renders.
+  expect(document.body.textContent).toContain('github-mcp');
+  expect(document.body.textContent).not.toContain('<redacted>');
+  expect(box().checked).toBe(true);
 });
 
 it('shows a failed read as unavailable rather than as an assistant with no connections', async () => {

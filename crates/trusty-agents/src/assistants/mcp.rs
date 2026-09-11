@@ -46,7 +46,8 @@ use super::home::AssistantHome;
 /// every `config.toml` written before this table existed still parses.
 ///
 /// A name appearing in BOTH lists resolves as a `Set`: `trusty_mcp`'s resolver
-/// folds overrides left to right, [`as_overrides`] emits the disables first,
+/// folds overrides left to right, [`as_overrides`](Self::as_overrides) emits
+/// the disables first,
 /// and a later `Set` wins — which is the reading that matches the more
 /// specific instruction.
 /// Test: `super::tests::mcp_tests::overrides_default_when_the_table_is_absent`,
