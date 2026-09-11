@@ -488,3 +488,66 @@ fn seed_builtin_servers_errors_when_claude_json_is_unreadable() {
         "an unreadable path must be left alone"
     );
 }
+
+// ─── #7422: `tm mcp add --project` writes the project's own `.mcp.json` ────
+
+/// A project with no `.mcp.json` gets one, holding just this server.
+#[test]
+fn add_project_server_creates_the_file() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let entry = build_stdio_entry("echo", &[], &Map::new());
+
+    assert!(add_project_server(tmp.path(), "local-thing", entry).unwrap());
+
+    let raw = std::fs::read_to_string(tmp.path().join(MCP_JSON)).unwrap();
+    let parsed: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(parsed["mcpServers"]["local-thing"]["command"], "echo");
+}
+
+/// A second add keeps the first; this file is usually git-tracked.
+#[test]
+fn add_project_server_preserves_other_servers() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    add_project_server(
+        tmp.path(),
+        "first",
+        build_stdio_entry("a", &[], &Map::new()),
+    )
+    .unwrap();
+    add_project_server(
+        tmp.path(),
+        "second",
+        build_stdio_entry("b", &[], &Map::new()),
+    )
+    .unwrap();
+
+    let raw = std::fs::read_to_string(tmp.path().join(MCP_JSON)).unwrap();
+    let parsed: Value = serde_json::from_str(&raw).unwrap();
+    assert!(parsed["mcpServers"]["first"].is_object());
+    assert!(parsed["mcpServers"]["second"].is_object());
+}
+
+/// Re-adding an identical entry reports no change and writes nothing.
+#[test]
+fn add_project_server_is_idempotent() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let entry = build_stdio_entry("echo", &[], &Map::new());
+    assert!(add_project_server(tmp.path(), "x", entry.clone()).unwrap());
+    assert!(!add_project_server(tmp.path(), "x", entry).unwrap());
+}
+
+/// A malformed `.mcp.json` is an error, never a silent overwrite — the file is
+/// usually tracked, so replacing it would land in someone's commit.
+#[test]
+fn add_project_server_refuses_a_malformed_file() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::write(tmp.path().join(MCP_JSON), "{ not json").unwrap();
+
+    let err = add_project_server(tmp.path(), "x", build_stdio_entry("echo", &[], &Map::new()))
+        .expect_err("a malformed project file must not be overwritten");
+
+    assert!(
+        err.to_string().contains("not valid JSON"),
+        "the error must name the problem: {err}"
+    );
+}

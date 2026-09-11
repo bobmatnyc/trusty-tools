@@ -91,6 +91,7 @@ pub(crate) fn add_cmd(
     env: &[String],
     header: &[String],
     command_and_args: &[String],
+    project: bool,
 ) -> Result<()> {
     let config_dir = resolve_config_dir(root)?;
     let command_or_url = command_and_args.first().map(String::as_str);
@@ -138,11 +139,33 @@ pub(crate) fn add_cmd(
         }
     };
 
+    // #7422: `--project` writes the project's own `.mcp.json`, which a session
+    // loads unconditionally — one declaration point, per ADR-0042, instead of a
+    // shared definition plus a separate opt-in naming it.
+    if project {
+        let cwd = std::env::current_dir().context("cannot resolve the current directory")?;
+        let target = cwd.join(mcp_config::MCP_JSON);
+        let changed = mcp_config::add_project_server(&cwd, name, entry)?;
+        if changed {
+            println!("Added MCP server '{name}' to {}", target.display());
+            println!("  Sessions started in this project load it with no opt-in needed.");
+        } else {
+            println!(
+                "MCP server '{name}' already present in {} (no change)",
+                target.display()
+            );
+        }
+        return Ok(());
+    }
+
     let changed = mcp_config::add_server(&config_dir, name, entry)?;
     if changed {
         println!(
             "Added MCP server '{name}' to {}",
             config_dir.join(".claude.json").display()
+        );
+        println!(
+            "  This is the SHARED user scope. Since #7422 a session loads it only in a \n               project whose .trusty-mpm.toml names it: [session] mcp_servers = [\"{name}\"]"
         );
     } else {
         println!("MCP server '{name}' already present (no change)");
@@ -194,14 +217,34 @@ pub(crate) fn list_cmd(root: Option<&str>, json: bool) -> Result<()> {
         config_dir.display(),
         servers.len()
     );
-    println!("  {:<name_w$}  TYPE   TARGET", "NAME");
+    // #7422: a shared declaration is no longer the same thing as a session
+    // loading it, so each row says which it is FOR THIS PROJECT.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let scope = trusty_mpm::core::session_mcp_scope::resolve_scope(&cwd, &config_dir);
+    println!("  {:<name_w$}  TYPE   SCOPE       TARGET", "NAME");
     for (name, entry) in &servers {
+        let marker = if scope.excluded.iter().any(|n| n == name) {
+            "scoped-out"
+        } else {
+            "opted-in"
+        };
         println!(
-            "  {:<name_w$}  {:<5}  {}",
+            "  {:<name_w$}  {:<5}  {:<10}  {}",
             name,
             entry_type(entry),
+            marker,
             entry_target(entry)
         );
+    }
+    if !scope.excluded.is_empty() {
+        println!();
+        println!(
+            "  {} server(s) are scoped-out for {} — add them to .trusty-mpm.toml:",
+            scope.excluded.len(),
+            cwd.display()
+        );
+        println!("    [session]");
+        println!("    mcp_servers = {:?}", scope.excluded);
     }
     Ok(())
 }
@@ -411,6 +454,7 @@ mod tests {
             &[],
             &[],
             &command_and_args,
+            false,
         )
         .unwrap();
 
@@ -447,6 +491,7 @@ mod tests {
             &[],
             &[],
             &command_and_args,
+            false,
         )
         .unwrap();
 

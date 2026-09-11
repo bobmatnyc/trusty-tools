@@ -90,6 +90,13 @@ pub fn build_launch_command(
     // Always add bypass-permissions for fully automated orchestration (consistent with
     // all other tm launch paths that use PERMISSION_MODE_FLAG).
     cmd.arg(crate::core::model_inject::PERMISSION_MODE_FLAG);
+    // #7422: default-deny MCP scoping. This spawn always relocates
+    // `CLAUDE_CONFIG_DIR`, so the flags always apply; `run_alias` wrote the file
+    // before calling here and aborts the launch if it could not. Argv tokens go
+    // straight to `exec`, so the path is unquoted.
+    cmd.args(crate::core::session_mcp_scope::strict_mcp_argv(Some(
+        &crate::core::session_mcp_scope::session_mcp_path(repo_path),
+    )));
     // WI-10: when ANTHROPIC_API_KEY is set, add --bare so Claude Code bypasses
     // keychain/OAuth reads and uses the API key directly. When the key is absent
     // the session relies on the keychain entry created by `tm login`.
@@ -226,6 +233,12 @@ pub fn run_alias(alias: &str, managed_root: &Path, claude_config_dir: &Path) -> 
         }
     }
 
+    // #7422: compose this session's MCP config before building the command that
+    // names it. A failure aborts `tm run` rather than launching with the
+    // unscoped shared server map.
+    crate::core::session_mcp_scope::provision(&repo_path, claude_config_dir)
+        .context("failed to compose the session-scoped MCP config")?;
+
     let mut cmd = build_launch_command(&repo_path, claude_config_dir, api_key.as_deref());
     // Routed through the disclaim-aware spawn (issue #2997) rather than
     // `cmd.status()` directly: on macOS this disclaims TCC responsibility for
@@ -267,6 +280,37 @@ pub fn resolve_repo_path(alias: &str, managed_root: &Path) -> anyhow::Result<Pat
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// #7422: `tm run` always relocates `CLAUDE_CONFIG_DIR`, so its argv always
+    /// carries the default-deny MCP flags naming the repo's own composed file.
+    #[test]
+    fn test_build_launch_command_carries_the_strict_mcp_flags() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        let cfg = tmp.path().join("claude-config");
+
+        let cmd = build_launch_command(&repo, &cfg, None);
+
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            args.iter().any(|a| a == "--strict-mcp-config"),
+            "tm run must refuse every server outside its composed file: {args:?}"
+        );
+        let pos = args
+            .iter()
+            .position(|a| a == "--mcp-config")
+            .expect("--mcp-config must be present");
+        assert_eq!(
+            args[pos + 1],
+            crate::core::session_mcp_scope::session_mcp_path(&repo)
+                .display()
+                .to_string(),
+            "the flag must name this repo's own composed file, unquoted for exec"
+        );
+    }
 
     #[test]
     fn test_build_launch_command_sets_env_and_cwd() {

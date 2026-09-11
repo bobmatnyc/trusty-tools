@@ -274,13 +274,21 @@ pub fn build_claude_command(
     prompt_file: Option<&Path>,
     config_dir: Option<&Path>,
     mcp_env: &[(String, String)],
+    scoped_mcp: Option<&Path>,
 ) -> String {
     // #4181: a relocated spawn reads its credentials from a Keychain entry keyed
     // by a hash of CLAUDE_CONFIG_DIR, so it needs the token; a non-relocated one
     // already resolves the operator's own login and must not be handed a token
     // the operator did not ask this path to use (#2246).
     let token = config_dir.and_then(|_| crate::core::oauth_token::resolve_oauth_token());
-    build_claude_command_with(model, prompt_file, config_dir, token.as_deref(), mcp_env)
+    build_claude_command_with(
+        model,
+        prompt_file,
+        config_dir,
+        token.as_deref(),
+        mcp_env,
+        scoped_mcp,
+    )
 }
 
 /// Hermetic core of [`build_claude_command`], taking the OAuth token explicitly.
@@ -329,6 +337,7 @@ pub fn build_claude_command_with(
     config_dir: Option<&Path>,
     oauth_token: Option<&str>,
     mcp_env: &[(String, String)],
+    scoped_mcp: Option<&Path>,
 ) -> String {
     use crate::core::spawn_disclaim::pane::shell_single_quote;
 
@@ -377,6 +386,12 @@ pub fn build_claude_command_with(
     // can never drift.
     cmd.push(' ');
     cmd.push_str(setting_sources_flag(config_dir));
+    // #7422: default-deny MCP scoping. The caller composed the file (and
+    // aborts its own launch when it could not); this only renders the two
+    // flags that point the session at it. Empty when the caller passed `None`.
+    cmd.push_str(&crate::core::session_mcp_scope::strict_mcp_flag_string(
+        scoped_mcp,
+    ));
     cmd.push(' ');
     cmd.push_str(PERMISSION_MODE_FLAG);
     cmd
@@ -493,7 +508,9 @@ pub fn build_agent_command(
         agent.model.as_deref(),
         explicit,
     );
-    build_claude_command(Some(&model), prompt_file, None, &[])
+    // #7422: a delegation inherits the parent session's config posture and
+    // does not relocate `CLAUDE_CONFIG_DIR`, so it composes no scoped file.
+    build_claude_command(Some(&model), prompt_file, None, &[], None)
 }
 
 // ──────────────────────────────────────────────
@@ -528,14 +545,14 @@ mod tests {
     fn claude_command_bare() {
         // No model, no prompt file → the env-scrub head + the isolation flags.
         assert_eq!(
-            build_claude_command(None, None, None, &[]),
+            build_claude_command(None, None, None, &[], None),
             format!("{} {FLAGS}", head())
         );
     }
 
     #[test]
     fn claude_command_with_model() {
-        let cmd = build_claude_command(Some("claude-opus-4-5"), None, None, &[]);
+        let cmd = build_claude_command(Some("claude-opus-4-5"), None, None, &[], None);
         assert_eq!(cmd, format!("{} --model claude-opus-4-5 {FLAGS}", head()));
     }
 
@@ -545,7 +562,7 @@ mod tests {
     /// cannot go vacuous if the shared list is emptied.
     #[test]
     fn claude_command_scrubs_inherited_session_markers() {
-        let cmd = build_claude_command(None, None, None, &[]);
+        let cmd = build_claude_command(None, None, None, &[], None);
         assert!(
             cmd.starts_with("env -u "),
             "the launch line must carry an env scrub prefix: {cmd}"
@@ -587,7 +604,7 @@ mod tests {
     #[test]
     fn claude_command_relocated_never_scrubs_what_it_assigns() {
         let dir = Path::new("/tm/claude-config");
-        let cmd = build_claude_command_with(None, None, Some(dir), Some("tok"), &[]);
+        let cmd = build_claude_command_with(None, None, Some(dir), Some("tok"), &[], None);
         for name in crate::core::claude_env_scrub::DELIBERATE_SPAWN_ENV {
             assert!(
                 cmd.contains(&format!(" {name}=")),
@@ -606,7 +623,7 @@ mod tests {
     #[test]
     fn claude_command_relocates_the_config_dir() {
         let dir = Path::new("/tm/claude-config");
-        let cmd = build_claude_command_with(None, None, Some(dir), Some("tok-abc"), &[]);
+        let cmd = build_claude_command_with(None, None, Some(dir), Some("tok-abc"), &[], None);
         assert_eq!(
             cmd,
             format!(
@@ -633,7 +650,7 @@ mod tests {
     #[test]
     fn claude_command_omits_the_oauth_token_when_absent() {
         let dir = Path::new("/tm/claude-config");
-        let cmd = build_claude_command_with(None, None, Some(dir), None, &[]);
+        let cmd = build_claude_command_with(None, None, Some(dir), None, &[], None);
         assert!(
             cmd.contains("CLAUDE_CONFIG_DIR='/tm/claude-config'"),
             "the config dir must still be relocated: {cmd}"
@@ -656,7 +673,7 @@ mod tests {
     #[test]
     fn claude_command_quotes_a_config_dir_with_a_space() {
         let dir = Path::new("/Users/John Doe/.trusty-tools/claude-config");
-        let cmd = build_claude_command_with(None, None, Some(dir), None, &[]);
+        let cmd = build_claude_command_with(None, None, Some(dir), None, &[], None);
         assert!(
             cmd.contains("CLAUDE_CONFIG_DIR='/Users/John Doe/.trusty-tools/claude-config'"),
             "the config dir must be single-quoted: {cmd}"
@@ -687,6 +704,7 @@ mod tests {
             Some(Path::new("/tm/claude-config")),
             None,
             &mcp_env,
+            None,
         );
 
         assert!(
@@ -715,7 +733,7 @@ mod tests {
     #[test]
     fn claude_command_relocated_isolates_by_relocation_not_exclusion() {
         let dir = Path::new("/tm/claude-config");
-        let cmd = build_claude_command_with(None, None, Some(dir), None, &[]);
+        let cmd = build_claude_command_with(None, None, Some(dir), None, &[], None);
         assert!(
             cmd.contains("--setting-sources user,project,local"),
             "the relocated line must load the user tier: {cmd}"
@@ -831,14 +849,15 @@ mod tests {
     fn claude_command_defaults_the_alternate_screen_off() {
         let operand = crate::core::alt_screen::ALT_SCREEN_SHELL_ASSIGNMENT;
         for cmd in [
-            build_claude_command(None, None, None, &[]),
-            build_claude_command(Some("claude-opus-4-5"), None, None, &[]),
+            build_claude_command(None, None, None, &[], None),
+            build_claude_command(Some("claude-opus-4-5"), None, None, &[], None),
             build_claude_command_with(
                 None,
                 None,
                 Some(Path::new("/tm/claude-config")),
                 Some("tok"),
                 &[],
+                None,
             ),
         ] {
             assert!(
@@ -862,14 +881,15 @@ mod tests {
     fn claude_command_defaults_the_mouse_capture_off() {
         let operand = crate::core::alt_screen::MOUSE_SHELL_ASSIGNMENT;
         for cmd in [
-            build_claude_command(None, None, None, &[]),
-            build_claude_command(Some("claude-opus-4-5"), None, None, &[]),
+            build_claude_command(None, None, None, &[], None),
+            build_claude_command(Some("claude-opus-4-5"), None, None, &[], None),
             build_claude_command_with(
                 None,
                 None,
                 Some(Path::new("/tm/claude-config")),
                 Some("tok"),
                 &[],
+                None,
             ),
         ] {
             assert!(
@@ -932,7 +952,7 @@ mod tests {
     #[test]
     fn claude_command_with_prompt() {
         let path = Path::new("/tmp/prompt.txt");
-        let cmd = build_claude_command(None, Some(path), None, &[]);
+        let cmd = build_claude_command(None, Some(path), None, &[], None);
         assert_eq!(
             cmd,
             format!(
@@ -945,7 +965,7 @@ mod tests {
     #[test]
     fn claude_command_with_both() {
         let path = Path::new("/tmp/sys.txt");
-        let cmd = build_claude_command(Some("claude-haiku-4-5"), Some(path), None, &[]);
+        let cmd = build_claude_command(Some("claude-haiku-4-5"), Some(path), None, &[], None);
         assert_eq!(
             cmd,
             format!(
@@ -953,6 +973,38 @@ mod tests {
                 head()
             )
         );
+    }
+
+    /// #7422: the pane line carries the default-deny MCP flags when — and only
+    /// when — the caller composed a file for it.
+    #[test]
+    fn claude_command_carries_the_strict_mcp_flags() {
+        let scoped = Path::new("/ws/.trusty-mpm/session-mcp.json");
+        let cmd = build_claude_command_with(
+            None,
+            None,
+            Some(Path::new("/tm/claude-config")),
+            None,
+            &[],
+            Some(scoped),
+        );
+        assert!(
+            cmd.contains("--strict-mcp-config"),
+            "missing the default-deny scoping flag: {cmd}"
+        );
+        assert!(
+            cmd.contains("--mcp-config '/ws/.trusty-mpm/session-mcp.json'"),
+            "the pane shell re-splits this line, so the path must be quoted: {cmd}"
+        );
+    }
+
+    /// #7422: no composed file, no flags — a spawn that reads the operator's
+    /// own `~/.claude.json` is not tm's to scope.
+    #[test]
+    fn claude_command_omits_the_strict_mcp_flags_without_a_file() {
+        let cmd = build_claude_command(None, None, None, &[], None);
+        assert!(!cmd.contains("--strict-mcp-config"), "{cmd}");
+        assert!(!cmd.contains("--mcp-config"), "{cmd}");
     }
 
     #[test]
@@ -964,7 +1016,7 @@ mod tests {
         // isolation is proved by
         // `claude_command_relocated_isolates_by_relocation_not_exclusion`, which
         // is the same guarantee reached a different way, not a weaker one.
-        let cmd = build_claude_command(None, None, None, &[]);
+        let cmd = build_claude_command(None, None, None, &[], None);
         assert!(
             cmd.contains("--setting-sources project,local"),
             "missing setting-sources isolation flag: {cmd}"
@@ -980,7 +1032,7 @@ mod tests {
     fn claude_command_includes_permission_mode() {
         // Why: unattended orchestration sessions must not block on permission prompts;
         // bypass-permissions mode is required for fully automated multi-agent workflows.
-        let cmd = build_claude_command(Some("sonnet"), None, None, &[]);
+        let cmd = build_claude_command(Some("sonnet"), None, None, &[], None);
         assert!(
             cmd.contains("--dangerously-skip-permissions"),
             "missing bypass-permissions flag: {cmd}"

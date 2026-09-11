@@ -176,6 +176,67 @@ pub struct ProjectLevelConfig {
     /// Test: `project_default_model_tops_the_chain`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
+
+    /// What a session launched in this project is allowed to load beyond the
+    /// framework defaults.
+    ///
+    /// Why (#7422): MCP servers and Claude Code plugins are declared once per
+    /// HOST — the tm-managed `.claude.json` `mcpServers` map and the managed
+    /// `settings.json` `enabledPlugins` map — so one `tm mcp add` or one
+    /// `claude plugin install` loaded that server or plugin into every session
+    /// on the machine. The owner ruling (2026-09-11) is default-deny, and the
+    /// allowlist is a property of the repository rather than the operator's
+    /// laptop, so it belongs on this committed surface.
+    /// What: `None` (the default) → deny-all beyond the trusty-* builtins and
+    /// this project's own `.mcp.json`. See [`SessionScopeConfig`].
+    /// Test: `project_config_parses_session_scope`,
+    /// `project_config_rejects_unknown_session_key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionScopeConfig>,
+}
+
+/// The `[session]` table: this project's MCP-server and plugin allowlists.
+///
+/// Why: two independent allowlists that answer the same question ("what may a
+/// session in this repository load?") share one table so an operator reads them
+/// together. Both are ALLOWLISTS, never deny-lists: an absent key denies.
+/// What: `mcp_servers` names entries of the tm-managed `.claude.json`
+/// `mcpServers` map — the trusty-* builtins and this project's own `.mcp.json`
+/// load unconditionally and need no entry. `plugins` names Claude Code plugins,
+/// either as the full `<plugin>@<marketplace>` key or the bare `<plugin>` half.
+///
+/// ```toml
+/// [session]
+/// mcp_servers = ["slack-mcp", "gworkspace-mcp"]
+/// plugins = ["aws-core"]
+/// ```
+/// Test: `project_config_parses_session_scope`,
+/// `project_config_session_defaults_to_none`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+// #7422: a misspelled key here silently denies a server the operator meant to
+// allow, which reads as a tm bug rather than a typo. Fail loudly instead.
+#[serde(deny_unknown_fields)]
+pub struct SessionScopeConfig {
+    /// Shared-map MCP server names this project's sessions may load.
+    ///
+    /// Why: see [`ProjectLevelConfig::session`]. Naming a server that the
+    /// managed `.claude.json` does not declare is a no-op, not an error — the
+    /// allowlist grants access to a declaration, it does not create one.
+    /// What: `None` or an empty list → only the trusty-* builtins and this
+    /// project's own `.mcp.json` load.
+    /// Test: `project_config_parses_session_scope`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_servers: Option<Vec<String>>,
+
+    /// Claude Code plugin names this project's sessions may load.
+    ///
+    /// Why: see [`ProjectLevelConfig::session`].
+    /// What: `None` or an empty list → every plugin the managed config dir
+    /// knows about is written `false` into the project's
+    /// `.claude/settings.json`.
+    /// Test: `project_config_parses_session_scope`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugins: Option<Vec<String>>,
 }
 
 impl ProjectLevelConfig {

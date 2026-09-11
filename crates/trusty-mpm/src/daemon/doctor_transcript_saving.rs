@@ -120,6 +120,9 @@ fn launch_lines() -> Vec<(&'static str, Vec<String>)> {
         Some(&config_dir),
         Some(PROBE_TOKEN),
         &[],
+        // #7422: the probe reads the env prefix only; a scoped MCP file would
+        // add flags it does not inspect and a path that does not exist.
+        None,
     );
     let relaunch_line = crate::daemon::spawn_command::relaunch_command();
     // #4467 round 2: the two launch lines the anti-drift scan found uncovered.

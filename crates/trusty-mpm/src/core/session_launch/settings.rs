@@ -251,6 +251,84 @@ pub(super) fn write_output_style(
     Ok(())
 }
 
+/// Write the project-tier `enabledPlugins` allowlist into the project's
+/// `.claude/settings.json` (#7422).
+///
+/// Why: a Claude Code plugin installed into the tm-managed `CLAUDE_CONFIG_DIR`
+/// loads its whole skill catalog into every session on the host, and there is
+/// no per-invocation flag to scope it — `enabledPlugins` is settings-only. The
+/// project tier outranks the user tier, so writing the map here is the one
+/// lever that turns a host-wide install into a per-project decision. Sits
+/// beside [`write_output_style`] because it is the same kind of write to the
+/// same file, on the same launch path.
+/// What: enumerates every plugin the managed config dir knows about
+/// ([`crate::core::session_plugin_scope::known_plugins`]), maps each to `true`
+/// when the project's committed `[session] plugins` list names it and `false`
+/// otherwise, and merges that map into the existing `enabledPlugins` object.
+/// tm owns ONLY the keys it enumerated: a key for a plugin tm cannot see is the
+/// operator's and is carried through untouched, the same merge discipline
+/// [`write_output_style`]'s `attribution` seed and
+/// [`write_project_hooks`]'s entry-level strip already use. Returns without
+/// writing when the merged object equals what is on disk, so an unchanged
+/// project takes no write on every launch.
+///
+/// `config_dir` is the tm-managed `CLAUDE_CONFIG_DIR`. `None` — an
+/// unresolvable home — enumerates nothing and writes nothing, rather than
+/// writing an empty map that would disable plugins tm never saw.
+/// Test: `write_enabled_plugins_denies_a_non_opted_plugin`,
+/// `write_enabled_plugins_enables_an_opted_in_plugin`,
+/// `write_enabled_plugins_preserves_foreign_keys`,
+/// `write_enabled_plugins_skips_without_a_config_dir`.
+pub(super) fn write_enabled_plugins(
+    project_dir: &Path,
+    config_dir: Option<&Path>,
+) -> Result<(), PrepError> {
+    use crate::core::session_plugin_scope::{
+        ENABLED_PLUGINS_KEY, merge_enabled_plugins, plugin_scope,
+    };
+
+    let Some(config_dir) = config_dir else {
+        return Ok(());
+    };
+    let opt_in = crate::core::session_mcp_scope::opt_in_plugins(project_dir);
+    let scope = plugin_scope(config_dir, &opt_in);
+    if scope.is_empty() {
+        return Ok(());
+    }
+
+    let claude_dir = project_dir.join(".claude");
+    std::fs::create_dir_all(&claude_dir).map_err(|source| PrepError::Io {
+        path: claude_dir.clone(),
+        source,
+    })?;
+    let settings_path = claude_dir.join("settings.json");
+
+    let mut settings = match std::fs::read_to_string(&settings_path) {
+        Ok(text) => serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .filter(serde_json::Value::is_object)
+            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new())),
+        Err(_) => serde_json::Value::Object(serde_json::Map::new()),
+    };
+
+    let existing = settings
+        .get(ENABLED_PLUGINS_KEY)
+        .and_then(|v| v.as_object());
+    let (merged, changed) = merge_enabled_plugins(existing, &scope);
+    if !changed {
+        return Ok(());
+    }
+    settings[ENABLED_PLUGINS_KEY] = serde_json::Value::Object(merged);
+
+    let serialized = serde_json::to_string_pretty(&settings)
+        .map_err(|err| PrepError::Deploy(err.to_string()))?;
+    std::fs::write(&settings_path, serialized).map_err(|source| PrepError::Io {
+        path: settings_path.clone(),
+        source,
+    })?;
+    Ok(())
+}
+
 /// Write the project-tier trusty-mpm-owned hooks into the project's
 /// `.claude/settings.json`.
 ///
