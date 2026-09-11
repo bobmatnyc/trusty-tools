@@ -1,0 +1,2 @@
+Added
+- `config`, a default-off feature carrying the one MCP-server configuration authority the trusty-* crates share: `McpServerConfig` (name, `McpTransport::Stdio`/`Http`, an enable flag, and an uninterpreted `extensions` map for consumer-specific keys), `McpConfigFile::{load, load_or_default, save}` over `~/.trusty-tools/mcp/servers.toml` with an atomic write, `resolve` for layering per-consumer overrides on a global list, and `config::claude_code::{read_mcp_servers, write_mcp_servers}` as pure conversions to and from the `mcpServers` map Claude Code reads (#7452).
