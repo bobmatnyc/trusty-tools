@@ -306,12 +306,14 @@ fn rename_body(was: &str, typed: &str) -> Vec<Line<'static>> {
 /// readable branch, and makes the free-text entry look exactly like the rename
 /// overlay's — the operator has already learned that shape.
 /// What: the picker step lists the windowed targets from
-/// [`super::new_session::NewSessionFlow::rows`], each cut to `width` (#7406);
-/// the path step draws the typed buffer with the same cursor block. Both name
-/// Esc as the way out.
+/// [`super::new_session::NewSessionFlow::rows`], each cut to `width` (#7406),
+/// under a hint line carrying the window's position in the list and the typed
+/// filter (#7421); the path step draws the typed buffer with the same cursor
+/// block. Both name Esc as the way out.
 /// Test: `render_new_session_overlay_lists_the_registered_projects`,
 /// `render_new_session_overlay_shows_the_typed_path`,
-/// `render_new_session_overlay_truncates_a_long_row`.
+/// `render_new_session_overlay_truncates_a_long_row`,
+/// `render_new_session_overlay_shows_the_position_and_filter`.
 fn new_session_body(flow: &super::new_session::NewSessionFlow, width: usize) -> Vec<Line<'static>> {
     if let Some(typed) = flow.typed() {
         return vec![
@@ -326,9 +328,26 @@ fn new_session_body(flow: &super::new_session::NewSessionFlow, width: usize) -> 
         Line::from(String::new()),
     ];
     lines.extend(flow.rows().iter().map(|r| Line::from(fit(r, width))));
+    // #7421: without this the rows past the eighth simply looked absent.
+    let hint = new_session_hint(flow);
+    if !hint.is_empty() {
+        lines.push(Line::from(fit(&hint, width)));
+    }
     lines.push(Line::from(String::new()));
-    lines.push(Line::from("Enter confirms, Esc cancels."));
+    lines.push(Line::from("Type to filter. Enter confirms, Esc cancels."));
     lines
+}
+
+/// The picker's position-and-filter hint, empty when it would say nothing.
+///
+/// A short list that has not been filtered has neither a position worth stating
+/// nor a filter to echo, so it gets no line at all rather than a blank one.
+fn new_session_hint(flow: &super::new_session::NewSessionFlow) -> String {
+    let mut parts: Vec<String> = flow.position().into_iter().collect();
+    if !flow.filter().is_empty() {
+        parts.push(format!("filter: {}", flow.filter()));
+    }
+    parts.join("  ·  ")
 }
 
 /// The `?` key reference.
