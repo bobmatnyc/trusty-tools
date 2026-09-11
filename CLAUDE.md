@@ -405,13 +405,12 @@ UI to its tokens, components and screen reference before inventing layout. Spec:
 
 Most references are linked from the rule they serve, above. Not linked elsewhere:
 
-- [ci-scripts.md](docs/reference/ci-scripts.md) — the `scripts/` checks that run only in a workflow, and which of them block a merge
+- [ci-scripts.md](docs/reference/ci-scripts.md) — the `scripts/` checks that run only in a workflow, which of them block a merge, and which have a self-test
 - [ci-gates.md](docs/reference/ci-gates.md) — required contexts, merge states, and the jobs that gate nothing
 - [test-ladder-baseline.md](docs/reference/test-ladder-baseline.md) — the six rungs, their commands, and baseline-red triage
-- [crate-aliases.md](docs/reference/crate-aliases.md) — crate abbreviations; [crate-map.md](docs/reference/crate-map.md) — what each crate is for
 - [documentation-layout.md](docs/reference/documentation-layout.md) — docs layout conventions
 - [DOC-38](docs/specs/spec-linked-documentation.md) — SLD policy, enforced by `scripts/check_sld.sh`
 - [threat-model.md](docs/reference/threat-model.md) — per-daemon bind/guard/proxy inventory ([ADR-0018](docs/adr/0018-loopback-only-doctrine.md))
-- [generated-doc-regions.md](docs/reference/generated-doc-regions.md) — the `<!-- BEGIN GENERATED: … -->` contract and `UPDATE_DOCS=1 cargo test -p <crate> --test generated_docs`
-- [public-manifest.tsv](docs/public-manifest.tsv) — ALLOWLIST of publishable `docs/` pages, enforced by `scripts/check_public_docs.sh`
+- [generated-doc-regions.md](docs/reference/generated-doc-regions.md) — the `<!-- BEGIN GENERATED: … -->` contract and `UPDATE_DOCS=1 cargo test -p <crate> --test generated_docs`; a crate with no markers is not checked
+- [public-manifest.tsv](docs/public-manifest.tsv) — ALLOWLIST of publishable `docs/` pages, enforced by `scripts/check_public_docs.sh`; the internal mdBook is unaffected
 - `scripts/check_doc_paths.sh` (#5147) — resolves backtick-quoted path citations in this file, the crate `CLAUDE.md`/`README.md` set, `docs/reference/` and `docs/architecture/`. Write a non-literal path in one of the shapes its header's EXCLUDED TOKENS list covers rather than widening the gate

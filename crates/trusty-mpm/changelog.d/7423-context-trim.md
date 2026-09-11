@@ -7,4 +7,6 @@ Changed
   lists and the ASD-STE-100 note; the phase table moved to `tm-workflow`, the PM
   allowlist and model table to `tm-delegation-patterns`, the completion-report
   shape to `tm-verification-protocols`, and the clickable-reference link shapes
-  to `tm-ticketing`.
+  to `tm-ticketing`. All three output styles then dropped the worked example and
+  the inventories for the same pointer; `trusty-mpm.md` is 11,722 -> 7,947 bytes
+  and a test now holds it under an 8 KB resident budget.

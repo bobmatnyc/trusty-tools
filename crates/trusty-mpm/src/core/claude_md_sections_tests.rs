@@ -1718,17 +1718,17 @@ fn the_qa_evidence_contract_is_stated_once_in_the_skill() {
 
 #[test]
 fn the_prose_rules_ban_categories_not_phrase_lists() {
-    // Both new prose rules were added because a literal example list failed to
+    // Both prose rules were added because a literal example list failed to
     // generalize. Each must state the ban as a category or template AND mark
     // its examples non-exhaustive; asserting only the examples would rebuild
     // the exact failure they were written for.
     //
-    // #4574 moved the rules out of `core` and into the output style, which was
-    // already carrying a live mirror of the same text — both channels are
-    // session-resident, so the project was paying for them twice. The
-    // assertions follow the rules to their one home rather than being deleted;
-    // `the_prose_rules_live_in_the_output_style_not_core` below is what keeps
-    // the second copy from coming back.
+    // #4574 moved the rules out of `core` and into the output style. #7423 then
+    // split each rule from its evidence: the RULE stays resident in the style,
+    // and the category statement, the template and the observed-instance lists
+    // moved into `tm-prose-style`. The assertions follow each half to its new
+    // home rather than being deleted — the style must still STATE the rule, and
+    // the skill must still carry what stops it degenerating into a phrase list.
     for style in crate::core::bundle::OUTPUT_STYLES {
         let body = style.content;
         let id = style.id;
@@ -1741,35 +1741,46 @@ fn the_prose_rules_ban_categories_not_phrase_lists() {
             body.contains("bans the CATEGORY"),
             "{id}: the sycophancy rule must ban the category, not four strings"
         );
-        assert!(
-            body.contains("Non-exhaustive examples:"),
-            "{id}: the sycophancy examples must be marked non-exhaustive"
-        );
 
         assert!(
             body.contains("**If you are saying it, its worth is implied.**"),
             "{id}: must carry the significance-framing rule"
         );
-        assert!(
-            body.contains("`One <noun> that <its significance, or your relation to it>:`"),
-            "{id}: the significance-framing rule must keep the TEMPLATE as one shape"
-        );
-        assert!(
-            body.contains("the rule is the sentence\nabove, never this list"),
-            "{id}: the observed instances must be marked as illustration only"
-        );
 
         // The two rules the owner added on 2026-08-06 (#4574). Both are
         // shape-stated, not phrase-listed, for the same reason as above.
         assert!(
-            body.contains("Don't justify the restraint."),
+            body.contains("**Don't justify the restraint**"),
             "{id}: must carry the don't-justify-the-restraint rule"
         );
         assert!(
-            body.contains("No trailing emphatic negation."),
+            body.contains("trailing emphatic negation"),
             "{id}: must carry the trailing-emphatic-negation rule"
         );
+
+        // The evidence is one hop away, never gone (#7423).
+        assert!(
+            body.contains("Skill(skill=\"tm-prose-style\")"),
+            "{id}: must point at the skill that carries the worked examples"
+        );
     }
+
+    // What the skill now owns: the non-exhaustive marker on the sycophancy
+    // examples, the significance-framing TEMPLATE, and the illustration-only
+    // framing on the observed instances.
+    let skill = crate::core::bundle::TM_PROSE_STYLE;
+    assert!(
+        skill.contains("Non-exhaustive"),
+        "tm-prose-style: the sycophancy examples must be marked non-exhaustive"
+    );
+    assert!(
+        skill.contains("`One <noun> that <its significance, or your relation to it>:`"),
+        "tm-prose-style: the significance-framing rule must keep the TEMPLATE as one shape"
+    );
+    assert!(
+        skill.contains("never the rule itself"),
+        "tm-prose-style: the observed instances must be marked as illustration only"
+    );
 }
 
 #[test]

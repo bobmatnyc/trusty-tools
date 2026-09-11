@@ -20,10 +20,37 @@ worked example, the observed-instance lists, and the scope notes. Load it when a
 rule's boundary is unclear, when reviewing someone else's prose against the
 rules, or when editing the rules themselves.
 
+## The Base Bullets, With Their Examples
+
+The resident one-liners compress these. Each bullet is the rule; the quoted pair
+is the example the rule was written from.
+
+- **Lead with the point**: what happened, then why it matters.
+- **Lead with the concrete referent, not its category.** Name the file, the
+  function, the ruling — let the reader infer the category. "One line of code
+  the engineer chose not to change" beats "One judgment call is yours."
+- **State mechanism as cause then effect, in plain verbs.** "If writing the
+  config fails, the session starts anyway" beats "is still an early non-fatal
+  return."
+- **Show before-and-after when something changed.** "It used to say X. Now it
+  says X, except here."
+- **Cut evaluative hedges** — "that's defensible, but…", "worth noting", "that
+  said". They add no fact; they only manage the reader.
+- **Cut process narration** — "I've asked the critic to judge whether…" becomes
+  "The critic is checking now." State what is true, not what you asked an agent
+  to do.
+- **End options as a bare enumeration**: "Two options: A, or B."
+- **No closing aphorisms.** Never end a point or a message with a punchy line
+  that restates what was just said. Stop at the last useful sentence.
+- **Plain words over inflated ones**: "the merge didn't happen", not "the merge
+  was genuinely un-fired".
+- **Tables and short bullets for status**, not paragraphs.
+
 ## Do Not Embellish — the Worked Example
 
-No insight commentary, no delivery acknowledgement, no questions back. Include
-only the explanation the reader needs in order to decide.
+No insight commentary, no delivery acknowledgement, no questions back. Use the
+simplest phrasing that works. Include only the explanation the reader needs in
+order to decide.
 
 BEFORE (wrong):
 
@@ -40,9 +67,9 @@ AFTER (right):
 ## "If You Are Saying It, Its Worth Is Implied" — Observed Instances
 
 The rule is: any opener that announces a fact's significance instead of stating
-the fact is banned, however it is worded. `One <noun> that <its significance, or
-your relation to it>:` is one shape of it, not the whole ban. Delete the opener
-and lead with the fact.
+the fact is banned, however it is worded. One shape of it, not the whole ban:
+`One <noun> that <its significance, or your relation to it>:` — delete the
+opener and lead with the fact.
 
 These are illustrations of the shape, never the rule itself — a phrase absent
 from this list is not thereby allowed:
@@ -62,6 +89,7 @@ banned however it is worded. Non-exhaustive:
 
 - "Correct — and that's the cleaner framing than mine."
 - "Good question." / "Exactly right." / "You're absolutely right!"
+- "Excellent!" / "Perfect!" / "Amazing!"
 - "That's a better way to put it."
 
 Right: "OK." Or: "That's wrong, because X."
@@ -88,10 +116,9 @@ cause and effect the reader actually needs.
 - Wrong: "that section is load-bearing"
 - Right: "deleting that section breaks X"
 
-The ban is on the category — an engineering metaphor borrowed to signal
-precision — not on a list of words, which only invites the next synonym.
-Non-exhaustive: "surface area", "impedance mismatch", "first-class",
-"orthogonal".
+The ban is on the category, not on a list of words, which only invites the next
+synonym: an engineering metaphor borrowed to signal precision. Non-exhaustive:
+"surface area", "impedance mismatch", "first-class", "orthogonal".
 
 Scope: PM and agent prose. It does not reach code, an ADR quoting prior art, or a
 record of what someone else said.
@@ -145,7 +172,31 @@ other way around" or "…, never X" appended to a sentence that already said it.
 
 This does not touch the evidence rule. Raw output stays mandatory for failures,
 flakes, performance claims, and disputed results; sparse-on-success governs the
-prose around the evidence, never the evidence itself.
+prose around the evidence, never the evidence itself. A gate you were asked to
+run still reports its command and its counts — what you drop is the narration
+wrapped around them.
+
+## Ticket and PR Bodies, and the Prose-Only Scope
+
+**Ticket and PR bodies** are sparse: point at a spec or issue instead of
+restating it, and never paste a source-file table or a diff in. The binding form
+for an issue body — including whether to cite a line number — belongs to
+`tm-ticketing`, and the PR body's fields belong to `tm-workflow`. The rule
+governs the voice, not the schema. An agent hands its draft to the dispatching
+PM, which routes issues to `ticketing` and pull requests to `version-control`.
+
+**Prose only.** This governs how something is said, never whether it is said.
+Failures, corrections, and bad news are still reported directly and in full —
+the rule shortens the wording, never the disclosure.
+
+**Mode carve-outs.** The research style keeps confidence labels ("verified",
+"unverified", "inferred"): a label about the evidence is a fact, not an
+evaluative hedge, and the banned hedges are the ones that manage the reader
+without adding a fact. The teacher style keeps its routing explanations, which
+are not the process narration the rule bans — teach the mechanism ("engineer
+owns the implementation, qa owns the proof"), never the play-by-play of your own
+tool calls. Every other rule applies unchanged in both; teach with substance,
+not flattery.
 
 ## Related Skills
 
