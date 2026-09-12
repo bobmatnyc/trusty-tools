@@ -372,10 +372,75 @@ fn spawn_command_without_token_pins_the_exact_command() {
     let dispatch = super::claude_code_exit_hint::exit_dispatch_suffix();
     let expected = format!(
         "cd '/tmp/ws' && {{ export TM_MANAGED_SESSION_ID='{TEST_SESSION_ID}'; \
-             {clock}env -u ANTHROPIC_API_KEY{scrub} {managed} claude \
+             {clock}env -u ANTHROPIC_API_KEY{scrub} {managed} \
+             CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 claude \
              --setting-sources project,local --dangerously-skip-permissions{dispatch}; }}"
     );
     assert_eq!(cmd, expected, "no-token command shape must stay pinned");
+}
+
+#[test]
+fn spawn_command_disables_auto_memory() {
+    // #7685: the variable name is HARD-CODED here on purpose, for the same
+    // reason `spawn_command_scrubs_inherited_session_markers` hard-codes its
+    // marker — deriving it from production code would let the assertion pass
+    // against an emptied constant, which is exactly the silent failure the
+    // owner directive is about. trusty-memory is the memory in tm sessions.
+    let cmd = spawn_command(
+        Path::new(TEST_CWD),
+        "claude",
+        None,
+        TEST_SESSION_ID,
+        None,
+        None,
+        None,
+        &[],
+    );
+    assert!(
+        cmd.contains("CLAUDE_CODE_DISABLE_AUTO_MEMORY=1"),
+        "spawn must disable Claude Code auto-memory: {cmd}"
+    );
+}
+
+#[test]
+fn resume_command_disables_auto_memory() {
+    // A resumed session is the same session; it must carry the same directive.
+    let cmd = resume_command(
+        Path::new(TEST_CWD),
+        "claude",
+        None,
+        Some("abc-123"),
+        TEST_SESSION_ID,
+        None,
+        None,
+        None,
+        &[],
+    );
+    assert!(
+        cmd.contains("CLAUDE_CODE_DISABLE_AUTO_MEMORY=1"),
+        "resume must disable Claude Code auto-memory: {cmd}"
+    );
+}
+
+#[test]
+fn env_bin_prefix_orders_auto_memory_before_the_config_dir() {
+    // POSIX `env` stops parsing options at the first `NAME=VALUE`, so every
+    // assignment must sit after the `-u` scrub flags. This pins the new
+    // assignment's POSITION, not only its presence.
+    let prefix = env_bin_prefix("claude", Some(Path::new("/tmp/cfg")), None, &[]);
+    let auto = prefix
+        .find("CLAUDE_CODE_DISABLE_AUTO_MEMORY=1")
+        .expect("the auto-memory assignment must be present");
+    let scrub_end = prefix
+        .rfind("-u ")
+        .expect("the scrub flags must be present in the prefix");
+    let config = prefix
+        .find("CLAUDE_CONFIG_DIR=")
+        .expect("the config dir must be present");
+    assert!(
+        scrub_end < auto && auto < config,
+        "auto-memory must follow every -u flag and precede CLAUDE_CONFIG_DIR: {prefix}"
+    );
 }
 
 #[test]
@@ -636,7 +701,8 @@ fn resume_command_without_token_pins_the_exact_command() {
     let dispatch = super::claude_code_exit_hint::exit_dispatch_suffix();
     let expected = format!(
         "cd '/tmp/ws' && {{ export TM_MANAGED_SESSION_ID='{TEST_SESSION_ID}'; \
-             {clock}env -u ANTHROPIC_API_KEY{scrub} {managed} claude \
+             {clock}env -u ANTHROPIC_API_KEY{scrub} {managed} \
+             CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 claude \
              --setting-sources project,local --dangerously-skip-permissions --resume abc-123\
              {dispatch}; }}"
     );

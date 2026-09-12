@@ -123,7 +123,8 @@ const FIX_APPLY_HINT: &str = "tm doctor --fix --yes";
 /// the project hook cleanup (`hooks_contamination`), the lifecycle-group
 /// re-merge (`hooks_missing_tm_group`, #7490 — after that cleanup, so it
 /// restores what a managed launch would write), the push-guard retrofit
-/// (`push_guard`), the output-style redeploy at BOTH style tiers
+/// (`push_guard`), the auto-memory disable (`auto_memory`, #7685),
+/// the output-style redeploy at BOTH style tiers
 /// (`output_style_staleness`, #5866, #7423),
 /// the `legacy_sources` refusals, and the stray-`.mcp.json`
 /// sweep (`stray_mcp_json`) — printing each item's path, what would change,
@@ -170,6 +171,12 @@ pub(crate) fn run_repairs(apply: bool, include_frozen: bool) {
         // so running first would report a merge the strip then undid.
         steps.extend(repair_missing_hook_group(project, mode));
         steps.extend(repair_push_guard(project, mode));
+        // #7685: write `autoMemoryEnabled: false` into the project tier —
+        // trusty-memory is the memory here. Additive: one boolean key, every
+        // other key preserved, through the same merge the launch path uses.
+        steps.extend(trusty_mpm::daemon::doctor_auto_memory::repair_auto_memory(
+            project, mode,
+        ));
     } else {
         eprintln!("  could not resolve the current directory — skipped the project-scoped repairs");
     }

@@ -15,7 +15,9 @@
 //! test server.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+// #7685: `std::time::Duration` is spelled out at its two const sites rather than
+// imported — this file sits AT the 500-SLOC production cap, and a new check's
+// `use` line had to come from somewhere.
 
 use crate::core::doctor::{CheckStatus, DoctorCheck, DoctorReport};
 use crate::core::paths::FrameworkPaths;
@@ -87,10 +89,11 @@ use doctor_asset_duplicates::check_asset_duplicates;
 mod doctor_transcript_saving;
 use doctor_transcript_saving::check_transcript_saving;
 
-// #7424: the startup-context budget row. Its `mod` declaration is in
-// `daemon/mod.rs` rather than here — this file sits AT the 500-SLOC production
-// cap, so only the `use` fits.
-use super::doctor_startup_context::check_startup_context;
+// #7424 and #7685: the startup-context and auto-memory rows. Their `mod`
+// declarations are in `daemon/mod.rs` rather than here, and the two imports
+// share one statement — this file sits AT the 500-SLOC production cap, so a
+// `#[path] mod` pair per check does not fit.
+use super::{doctor_auto_memory::check_auto_memory, doctor_startup_context::check_startup_context};
 
 // Split out to keep this file under the 500-SLOC production cap (issue #2876 —
 // the skill-staleness and legacy-instruction-source probes).
@@ -297,7 +300,7 @@ use doctor_tmux_options::check_tmux_options;
 /// was measuring its own impatience. Note that the timeout is only half the
 /// fix — a timeout now resolves to [`CheckStatus::Unknown`] rather than a
 /// false `Fail` (see [`probe_health`]).
-pub const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+pub const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Number of attempts a health probe makes before giving up.
 ///
@@ -313,7 +316,7 @@ const PROBE_ATTEMPTS: usize = 3;
 ///
 /// Why: long enough to let a transient spike pass, short enough that three
 /// attempts stay well inside an interactive `tm doctor` run.
-const PROBE_RETRY_DELAY: Duration = Duration::from_millis(500);
+const PROBE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 
 // #4003: the search-index doctor probe used to hardcode a literal expected
 // index id ("trusty-mpm" — the crate name, not this repo's registered index
@@ -651,6 +654,9 @@ pub(crate) async fn run_doctor_with_claims(
     // by the session that owned it, so the row cannot reach another project's
     // session data. Declared in `daemon/mod.rs`; this file is AT the SLOC cap.
     checks.push(check_startup_context(project_dir));
+    // #7685: whether Claude Code's own auto memory is off for this project.
+    // trusty-memory is the memory here; read-only, `tm doctor --fix` writes.
+    checks.push(check_auto_memory(project_dir, &home));
 
     DoctorReport::from_checks(checks)
 }

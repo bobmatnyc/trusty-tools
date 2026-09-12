@@ -90,7 +90,7 @@ use crate::core::paths::FrameworkPaths;
 use crate::core::skill_deployer::DeployStats;
 use settings::{
     deploy_output_style, preseed_workspace_trust_home, remove_global_trusty_memory_hooks,
-    write_enabled_plugins, write_output_style, write_project_hooks,
+    write_auto_memory_off, write_enabled_plugins, write_output_style, write_project_hooks,
 };
 
 /// Re-export of the project-tier output-style/statusLine resolution primitives
@@ -111,6 +111,11 @@ use settings::{
 /// `core::standalone::settings_defaults` tests (this is a plain re-export, no
 /// logic of its own).
 pub(crate) use settings::{OUTPUT_STYLE, is_stale_statusline_command, resolve_statusline_command};
+
+/// Re-export of the auto-memory settings key and the one-key settings merge
+/// (#7685), so `tm doctor`'s `auto_memory` check and its `--fix` repair read and
+/// write exactly what this launch path writes.
+pub(crate) use settings::{AUTO_MEMORY_KEY, merge_settings_key};
 
 /// Re-export of the trusty-search project-index registration entry point and
 /// the trusty-memory palace-slug derivation.
@@ -1010,6 +1015,13 @@ fn prepare_session_inner(
     // still launches, it just shows the operator's default style.
     if let Err(err) = write_output_style(project_dir, Some(active_style_id)) {
         tracing::warn!("failed to set trusty-mpm output style: {err}");
+    }
+
+    // #7685: Claude Code auto-memory (`MEMORY.md`) is not used in tm sessions —
+    // trusty-memory is the memory. Non-fatal for the same reason the write above
+    // is: a failure costs the project the setting, not its session.
+    if let Err(err) = write_auto_memory_off(project_dir) {
+        tracing::warn!("failed to disable Claude Code auto-memory: {err}");
     }
 
     // #7422: write the project-tier `enabledPlugins` allowlist beside the output

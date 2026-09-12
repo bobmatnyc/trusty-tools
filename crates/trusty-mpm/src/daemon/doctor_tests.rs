@@ -542,6 +542,8 @@ async fn run_doctor_produces_fifty_checks() {
         "log_drain",
         // #7424: this project's turn-1 startup context against its ceiling.
         "startup_context",
+        // #7685: whether Claude Code's own auto memory is off for this project.
+        "auto_memory",
     ];
     assert_eq!(names, expected);
     // Count derived from the list above, never a standalone literal:
