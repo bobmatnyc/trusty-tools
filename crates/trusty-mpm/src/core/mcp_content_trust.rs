@@ -18,6 +18,17 @@
 //! `mcpServers` map of the tm-managed `.claude.json` that `tm mcp add` writes.
 //! A repository can name those, never define them.
 //!
+//! REGISTERING A SERVER IS NOT SHARING IT (PR #7692 review). A registry entry
+//! contributes to the known set only when the operator has marked it shareable
+//! with projects — [`crate::core::mcp_share`], set by
+//! `tm mcp add --share-with-projects` or `tm mcp share <name>`. Without that
+//! flag an exact spec match is still UNKNOWN, because this workspace's own
+//! convention ships credential-bearing servers with an EMPTY `env` (the secret
+//! arrives from the ambient environment or a `tm-secrets` exec wrapper), so a
+//! spec comparison cannot distinguish the operator's real server from a
+//! hostile repository's copy of its fully public shape. The builtins stay
+//! unconditionally matchable: their command is framework-controlled.
+//!
 //! A MATCHING NAME IS NEVER SUFFICIENT, and a reserved builtin name is
 //! stricter still: an entry called `trusty-memory` matches only evidence under
 //! THAT name — the canonical `trusty-memory` builtin, or the operator's own
@@ -31,12 +42,14 @@
 //! registry — each yields UNKNOWN, which is exactly today's behavior.
 //!
 //! What: [`KnownServers::from_registry`] normalizes the known set once per
-//! launch; [`KnownServers::accepts`] normalizes one candidate and reports
-//! whether it equals anything in that set.
+//! launch; [`KnownServers::classify`] normalizes one candidate and returns a
+//! [`Verdict`] — `Known`, `UnsharedMatch` (equal to a registry entry the
+//! operator has not shared, so the warning can name the `tm mcp share` that
+//! would load it), or `Unknown`.
 //! Test: `mcp_content_trust_tests.rs`, plus the end-to-end classification in
 //! `session_mcp_scope_tests.rs`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use serde_json::{Map, Value};
@@ -108,16 +121,40 @@ enum Spec {
 /// Why: normalizing the known set once per launch keeps the per-entry cost to
 /// one candidate normalization, instead of re-resolving every builtin and
 /// registry command for every entry in the file.
-/// What: `reserved` maps each framework builtin name to the specs an entry
-/// under THAT name may hold — the canonical builtin, plus the operator's own
-/// registry entry of the same name; `pool` holds every out-of-repo spec, for
-/// entries under any other name.
+/// What one project-declared entry was found to be.
+///
+/// Why: "not known" has two operator-actionable shapes, and collapsing them
+/// would lose the one hint that actually helps — an entry that already equals a
+/// registry server needs `tm mcp share`, not `tm project trust`.
+/// What: `Known` loads; `UnsharedMatch(name)` and `Unknown` do not.
+/// Test: `an_unshared_registry_match_is_reported_not_granted`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Verdict {
+    /// Content-equivalent to a builtin or a shared registry entry — it loads.
+    Known,
+    /// Equal to the named registry entry, which the operator has not shared.
+    UnsharedMatch(String),
+    /// Matches nothing the operator has.
+    Unknown,
+}
+
+/// What a project declaration may be measured against.
+///
+/// Why: normalizing the known set once per launch keeps the per-entry cost to
+/// one candidate normalization, instead of re-resolving every builtin and
+/// registry command for every entry in the file.
+/// What: `builtins` maps each framework builtin name to its canonical spec,
+/// always matchable; `shared` and `unshared` map each registry name to its
+/// spec, split by the operator's [`crate::core::mcp_share`] decision. Only
+/// `builtins` and `shared` can produce [`Verdict::Known`].
 /// Test: `mcp_content_trust_tests.rs`.
 pub struct KnownServers {
-    /// Reserved builtin name → the specs an entry under that name may hold.
-    reserved: BTreeMap<&'static str, Vec<Spec>>,
-    /// Every out-of-repo spec, for entries under a non-reserved name.
-    pool: Vec<Spec>,
+    /// Framework builtin name → its canonical, framework-controlled spec.
+    builtins: BTreeMap<&'static str, Spec>,
+    /// Registry name → spec, for entries the operator shared with projects.
+    shared: BTreeMap<String, Spec>,
+    /// Registry name → spec, for entries the operator has NOT shared.
+    unshared: BTreeMap<String, Spec>,
 }
 
 impl KnownServers {
@@ -127,50 +164,77 @@ impl KnownServers {
     /// evidence, and neither is written by the repository being classified.
     /// What: takes the registry as an already-read `mcpServers` map (the caller
     /// owns the non-quarantining read, so a launch never renames the file that
-    /// also holds OAuth state). An entry that will not normalize is skipped,
+    /// also holds OAuth state) and the `shared` names from
+    /// [`crate::core::mcp_share`]. An entry that will not normalize is skipped,
     /// which can only ever shrink the known set.
-    /// Test: `registry_entry_makes_an_identical_declaration_known`,
+    /// Test: `a_shared_registry_entry_makes_an_identical_declaration_known`,
     /// `an_empty_registry_knows_only_the_builtins`.
-    pub fn from_registry(registry: &Map<String, Value>) -> Self {
-        let mut reserved: BTreeMap<&'static str, Vec<Spec>> = BTreeMap::new();
-        let mut pool: Vec<Spec> = Vec::new();
-        for name in BUILTIN_MANAGED_MCP_SERVERS {
-            let mut specs: Vec<Spec> = Vec::new();
-            if let Some(spec) = builtin_server_entry(name).as_ref().and_then(normalize) {
-                pool.push(spec.clone());
-                specs.push(spec);
+    pub fn from_registry(registry: &Map<String, Value>, shared: &BTreeSet<String>) -> Self {
+        let builtins = BUILTIN_MANAGED_MCP_SERVERS
+            .iter()
+            .filter_map(|name| {
+                builtin_server_entry(name)
+                    .as_ref()
+                    .and_then(normalize)
+                    .map(|spec| (*name, spec))
+            })
+            .collect();
+        let mut shared_specs: BTreeMap<String, Spec> = BTreeMap::new();
+        let mut unshared_specs: BTreeMap<String, Spec> = BTreeMap::new();
+        for (name, entry) in registry {
+            let Some(spec) = normalize(entry) else {
+                continue;
+            };
+            if shared.contains(name) {
+                shared_specs.insert(name.clone(), spec);
+            } else {
+                unshared_specs.insert(name.clone(), spec);
             }
-            if let Some(spec) = registry.get(*name).and_then(normalize)
-                && !specs.contains(&spec)
-            {
-                specs.push(spec);
-            }
-            reserved.insert(name, specs);
         }
-        pool.extend(registry.values().filter_map(normalize));
-        Self { reserved, pool }
+        Self {
+            builtins,
+            shared: shared_specs,
+            unshared: unshared_specs,
+        }
     }
 
-    /// Is this project-declared entry content-equivalent to something known?
+    /// What is this project-declared entry, relative to what the operator has?
     ///
     /// Why: this is the KNOWN/UNKNOWN decision itself. It answers only about
     /// content — the name decides which evidence applies, never whether the
     /// entry is acceptable.
-    /// What: `false` for any entry that will not normalize. Under a reserved
-    /// builtin name, `true` only when the entry equals that builtin's canonical
-    /// spec or the operator's registry entry of the SAME name. Under any other
-    /// name, `true` when the entry equals any spec in the known pool.
+    /// What: [`Verdict::Unknown`] for any entry that will not normalize. Under a
+    /// framework builtin name, evidence must be under that SAME name — the
+    /// canonical builtin, or the operator's registry entry of that name — so no
+    /// unrelated server's spec can shadow a reserved name. Under any other
+    /// name, any builtin or shared registry spec may match. An entry equal to an
+    /// UNSHARED registry spec is [`Verdict::UnsharedMatch`], which does not
+    /// load.
     /// Test: `a_matching_name_alone_is_not_enough`,
     /// `a_builtin_name_matches_only_evidence_under_that_name`,
-    /// `registry_entry_makes_an_identical_declaration_known`.
-    pub fn accepts(&self, name: &str, entry: &Value) -> bool {
+    /// `an_unshared_registry_match_is_reported_not_granted`.
+    pub fn classify(&self, name: &str, entry: &Value) -> Verdict {
         let Some(candidate) = normalize(entry) else {
-            return false;
+            return Verdict::Unknown;
         };
-        if let Some(specs) = self.reserved.get(name) {
-            return specs.contains(&candidate);
+        if let Some(canonical) = self.builtins.get(name) {
+            if *canonical == candidate || self.shared.get(name) == Some(&candidate) {
+                return Verdict::Known;
+            }
+            if self.unshared.get(name) == Some(&candidate) {
+                return Verdict::UnsharedMatch(name.to_owned());
+            }
+            return Verdict::Unknown;
         }
-        self.pool.contains(&candidate)
+        if self.builtins.values().any(|spec| *spec == candidate)
+            || self.shared.values().any(|spec| *spec == candidate)
+        {
+            return Verdict::Known;
+        }
+        match self.unshared.iter().find(|(_, spec)| **spec == candidate) {
+            Some((matched, _)) => Verdict::UnsharedMatch(matched.clone()),
+            None => Verdict::Unknown,
+        }
     }
 }
 

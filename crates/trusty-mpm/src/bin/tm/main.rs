@@ -697,33 +697,7 @@ async fn main() -> anyhow::Result<()> {
         }
         // `tm mcp …` is a direct, daemon-less command family (like the standalone
         // driver): it edits the tm-owned config dir's `.claude.json` on disk.
-        Some(Command::Mcp { cmd }) => match cmd {
-            cli::McpCmd::Add {
-                name,
-                transport,
-                env,
-                header,
-                command_and_args,
-                root,
-                project,
-            } => commands::mcp::add_cmd(
-                root.as_deref(),
-                &name,
-                transport,
-                &env,
-                &header,
-                &command_and_args,
-                project,
-            ),
-            cli::McpCmd::Remove { name, root } => commands::mcp::remove_cmd(root.as_deref(), &name),
-            cli::McpCmd::List { json, root } => commands::mcp::list_cmd(root.as_deref(), json),
-            cli::McpCmd::Get { name, json, root } => {
-                commands::mcp::get_cmd(root.as_deref(), &name, json)
-            }
-            cli::McpCmd::Test { name, json, root } => {
-                commands::mcp::test_cmd(root.as_deref(), name.as_deref(), json).await
-            }
-        },
+        Some(Command::Mcp { cmd }) => commands::mcp::dispatch(cmd).await,
         // Unreachable at runtime: `Command::Config` is dispatched — and
         // `cli.command` returned early — before this match ever runs (see the
         // #2405 early short-circuit above, right after `Cli::try_parse`).

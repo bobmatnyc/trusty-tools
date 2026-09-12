@@ -65,6 +65,33 @@ pub(crate) enum McpCmd {
         /// `[session] mcp_servers`.
         #[arg(long)]
         project: bool,
+        /// Let an UNTRUSTED project's `.mcp.json` load this server when its
+        /// entry matches this one exactly (#7672).
+        ///
+        /// Off by default: registering a server is not lending it to
+        /// unreviewed repository content. Reversible with `tm mcp unshare`.
+        #[arg(long = "share-with-projects")]
+        share_with_projects: bool,
+    },
+    /// Let untrusted projects match this server by content (#7672).
+    ///
+    /// A project's `.mcp.json` entry that equals this server's spec exactly
+    /// then loads with no `tm project trust`. Share only servers whose tools
+    /// are safe to attach to a session reading unreviewed code.
+    Share {
+        /// Server name to share.
+        name: String,
+        /// Override the managed root (switches to the standalone config dir).
+        #[arg(long)]
+        root: Option<String>,
+    },
+    /// Stop untrusted projects matching this server by content (#7672).
+    Unshare {
+        /// Server name to stop sharing.
+        name: String,
+        /// Override the managed root (switches to the standalone config dir).
+        #[arg(long)]
+        root: Option<String>,
     },
     /// Remove a user-scope MCP server by name.
     Remove {

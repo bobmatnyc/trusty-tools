@@ -23,14 +23,22 @@
 //! itself (issue #3033, ADR-0042, owner ruling 2026-07-18).
 //!
 //! TRUST BY CONTENT (#7672, owner ruling 2026-09-12) narrows what that gate
-//! withholds. An untrusted project's entries are CLASSIFIED, not discarded:
-//! one whose executable spec already exists outside the repository — a trusty-*
-//! builtin, or an entry in the operator's own `tm mcp add` registry — is not a
-//! new grant and loads exactly as it would for a trusted project. Everything
-//! else is ignored as before, and the warning now names it. The classification
-//! rule and its fail-closed arms live in
-//! [`crate::core::mcp_content_trust`]; `tm project trust` keeps its meaning —
-//! a trusted project loads everything, matched or not.
+//! withholds, FOR `.mcp.json` ONLY. Those entries are CLASSIFIED, not
+//! discarded: one whose executable spec already exists outside the repository —
+//! a trusty-* framework builtin, or a registry entry the operator has marked
+//! shareable with projects ([`crate::core::mcp_share`]) — is not a new grant
+//! and loads exactly as it would for a trusted project. Everything else is
+//! ignored as before, and the warning now names it. The classification rule and
+//! its fail-closed arms live in [`crate::core::mcp_content_trust`].
+//!
+//! `[session] mcp_servers` IS NOT PART OF THAT, and the difference is the
+//! point (PR #7692 review). A `.mcp.json` entry carries CONTENT the repository
+//! can be judged on; an opt-in carries only a NAME, so honouring one without a
+//! trust grant would hand an untrusted clone the operator's credentialed
+//! server for a one-line `.trusty-mpm.toml` addition — trust by name, which
+//! this module refuses everywhere else. Opt-ins stay fully gated on
+//! `tm project trust`, which keeps its meaning: a trusted project loads
+//! everything, matched or not.
 //!
 //! THE `[session] plugins` HALF IS GATED THE SAME WAY, through
 //! [`granted_plugins`]. A plugin brings its own skills, commands and hooks into
@@ -65,6 +73,7 @@
 //!
 //! Test: `session_mcp_scope_tests.rs`.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
@@ -375,17 +384,19 @@ fn project_servers(cwd: &Path) -> Result<Map<String, Value>, String> {
 /// place, so the launch, `tm doctor`, and `tm session instructions` all read
 /// the same answer.
 /// What: resolves the project's trust bit from
-/// [`crate::core::project_trust::is_project_trusted`] and delegates to
-/// [`resolve_scope_with_trust`].
+/// [`crate::core::project_trust::is_project_trusted`] and the operator's shared
+/// registry set from [`crate::core::mcp_share::shared_servers`], then delegates
+/// to [`resolve_scope_with_grants`].
 /// Test: `resolve_scope_includes_builtins_and_project_servers`,
 /// `resolve_scope_excludes_a_shared_only_server`,
 /// `resolve_scope_includes_an_opted_in_shared_server`,
 /// `resolve_scope_degrades_on_a_malformed_project_mcp_json`.
 pub fn resolve_scope(cwd: &Path, config_dir: &Path) -> McpScope {
-    resolve_scope_with_trust(
+    resolve_scope_with_grants(
         cwd,
         config_dir,
         crate::core::project_trust::is_project_trusted(cwd),
+        &crate::core::mcp_share::shared_servers(),
     )
 }
 
@@ -398,26 +409,49 @@ pub fn resolve_scope(cwd: &Path, config_dir: &Path) -> McpScope {
 /// What: always unions the trusty-* framework builtins
 /// ([`BUILTIN_MANAGED_MCP_SERVERS`], defined by [`builtin_server_entry`] rather
 /// than copied from the shared map). When `trusted`, it adds the project's own
-/// `.mcp.json` verbatim; either way it adds every shared-map entry the
-/// project's `[session] mcp_servers` names, because that name points at a
-/// declaration the operator wrote out of repo (#7672). Every remaining
-/// shared-map name lands in `excluded`.
+/// `.mcp.json` verbatim plus every shared-map entry the project's
+/// `[session] mcp_servers` names; every remaining shared-map name lands in
+/// `excluded`.
 ///
 /// When NOT `trusted`, each `.mcp.json` entry is classified by
-/// [`crate::core::mcp_content_trust::KnownServers::accepts`]: a KNOWN entry
-/// loads and is named in `content_trusted`, an UNKNOWN one is ignored and named
+/// [`crate::core::mcp_content_trust::KnownServers::classify`]: a KNOWN entry
+/// loads and is named in `content_trusted`, anything else is ignored and named
 /// in `degraded` beside the `tm project trust` hint. An UNREADABLE `.mcp.json`
-/// declares nothing that can be matched, so none of it loads. A project whose
-/// every entry is KNOWN — or that declared nothing at all — gets no `degraded`
-/// reason and no warning.
+/// declares nothing that can be matched, so none of it loads. `[session]
+/// mcp_servers` opt-ins are NOT classified — an opt-in is a bare name the
+/// repository supplies with no content to judge, so it stays fully gated on
+/// `tm project trust` (#7422, restored by the PR #7692 review). A project whose
+/// every `.mcp.json` entry is KNOWN and which opts nothing in — or that
+/// declared nothing at all — gets no `degraded` reason and no warning.
 /// Test: `resolve_scope_rejects_a_builtin_name_pointing_at_another_command`,
 /// `resolve_scope_loads_this_repos_mcp_json_by_content_with_no_warning`,
 /// `resolve_scope_loads_the_known_entry_and_names_only_the_unknown_one`,
 /// `resolve_scope_classifies_unknown_when_the_registry_cannot_be_read`,
 /// `resolve_scope_drops_project_mcp_json_for_an_untrusted_project`,
-/// `resolve_scope_loads_an_opt_in_that_names_a_registered_server`,
+/// `resolve_scope_ignores_opt_ins_for_an_untrusted_project`,
+/// `resolve_scope_refuses_an_unshared_registry_match_and_says_how_to_share`,
 /// `resolve_scope_is_silent_for_an_untrusted_project_that_declares_nothing`.
 pub fn resolve_scope_with_trust(cwd: &Path, config_dir: &Path, trusted: bool) -> McpScope {
+    resolve_scope_with_grants(cwd, config_dir, trusted, &BTreeSet::new())
+}
+
+/// [`resolve_scope_with_trust`] against an explicit set of shared registry names.
+///
+/// Why: the full hermetic seam. Both user-scope decisions this function reads —
+/// the trust bit and the `tm mcp share` set — live under the operator's `$HOME`,
+/// so a test of the composition itself must be able to supply both.
+/// [`resolve_scope_with_trust`] passes an EMPTY share set, which is the
+/// fail-closed default and what every test of the trusted path wants.
+/// What: see [`resolve_scope_with_trust`]; `shared_registry` is the set from
+/// [`crate::core::mcp_share::shared_servers`].
+/// Test: `resolve_scope_loads_a_shared_registry_match_without_trust`,
+/// `resolve_scope_refuses_an_unshared_registry_match_and_says_how_to_share`.
+pub fn resolve_scope_with_grants(
+    cwd: &Path,
+    config_dir: &Path,
+    trusted: bool,
+    shared_registry: &BTreeSet<String>,
+) -> McpScope {
     let mut servers: Map<String, Value> = Map::new();
 
     // #7422: the framework builtins come from the canonical entry builder, not
@@ -451,20 +485,32 @@ pub fn resolve_scope_with_trust(cwd: &Path, config_dir: &Path, trusted: bool) ->
             }
         }
     } else {
-        // See #7672: an untrusted project's declarations are classified, not
-        // discarded — one whose executable spec the operator already has is not
-        // a new grant.
-        let known = crate::core::mcp_content_trust::KnownServers::from_registry(&shared);
+        // See #7672: an untrusted project's own `.mcp.json` entries are
+        // classified, not discarded — one whose executable spec the operator
+        // already has, and has shared, is not a new grant. The `[session]
+        // mcp_servers` opt-ins below are NOT part of this: an opt-in is a bare
+        // repo-supplied NAME with no content to judge, so it stays behind
+        // `tm project trust` exactly as #7422 left it (PR #7692 review).
+        let known =
+            crate::core::mcp_content_trust::KnownServers::from_registry(&shared, shared_registry);
         let mut unknown: Vec<String> = Vec::new();
+        let mut unshared: Vec<String> = Vec::new();
         let mut unreadable: Option<String> = None;
         match &project {
             Ok(entries) => {
                 for (name, entry) in entries {
-                    if known.accepts(name, entry) {
-                        servers.insert(name.clone(), entry.clone());
-                        content_trusted.push(name.clone());
-                    } else {
-                        unknown.push(name.clone());
+                    match known.classify(name, entry) {
+                        crate::core::mcp_content_trust::Verdict::Known => {
+                            servers.insert(name.clone(), entry.clone());
+                            content_trusted.push(name.clone());
+                        }
+                        crate::core::mcp_content_trust::Verdict::UnsharedMatch(matched) => {
+                            unknown.push(name.clone());
+                            unshared.push(matched);
+                        }
+                        crate::core::mcp_content_trust::Verdict::Unknown => {
+                            unknown.push(name.clone());
+                        }
                     }
                 }
             }
@@ -472,23 +518,28 @@ pub fn resolve_scope_with_trust(cwd: &Path, config_dir: &Path, trusted: bool) ->
             // matched, so none of it loads.
             Err(reason) => unreadable = Some(reason.clone()),
         }
-        for name in &opt_in {
-            // An opt-in naming neither a builtin nor a registry entry points at
-            // a declaration that does not exist, so it can match no content.
-            if !servers.contains_key(name) && !shared.contains_key(name) {
-                unknown.push(name.clone());
-            }
-        }
         unknown.sort();
         unknown.dedup();
-        if unreadable.is_some() || !unknown.is_empty() {
-            let reason = untrusted_reason(cwd, &unknown, unreadable.as_deref());
+        unshared.sort();
+        unshared.dedup();
+        // An opt-in in an untrusted project never loads, so say which ones.
+        let mut ignored_opt_ins: Vec<String> = opt_in.clone();
+        ignored_opt_ins.sort();
+        ignored_opt_ins.dedup();
+        if unreadable.is_some() || !unknown.is_empty() || !ignored_opt_ins.is_empty() {
+            let reason = untrusted_reason(
+                cwd,
+                &unknown,
+                &unshared,
+                &ignored_opt_ins,
+                unreadable.as_deref(),
+            );
             tracing::warn!("session-scoped MCP config degraded: {reason} (#7672)");
             degraded = Some(reason);
         } else if !content_trusted.is_empty() {
             tracing::debug!(
                 "session-scoped MCP config loaded {} entr{} from {} by content equivalence \
-                 with a server already registered (#7672)",
+                 with a server you have shared with projects (#7672)",
                 content_trusted.len(),
                 if content_trusted.len() == 1 {
                     "y"
@@ -505,13 +556,12 @@ pub fn resolve_scope_with_trust(cwd: &Path, config_dir: &Path, trusted: bool) ->
         if servers.contains_key(name) {
             continue;
         }
-        // #7672: an opt-in names an entry the OPERATOR wrote out of repo with
-        // `tm mcp add`, so the declaration behind the name is already theirs.
-        if opt_in.iter().any(|n| n == name) {
+        // #7422, restored by the PR #7692 review: `[session] mcp_servers` is a
+        // bare name in the repo's OWN committed config, so honouring it without
+        // a trust grant would be trust by name — the exact thing the content
+        // rule above refuses for `.mcp.json`.
+        if trusted && opt_in.iter().any(|n| n == name) {
             servers.insert(name.clone(), entry.clone());
-            if !trusted {
-                content_trusted.push(name.clone());
-            }
         } else {
             excluded.push(name.clone());
         }
@@ -537,12 +587,21 @@ pub fn resolve_scope_with_trust(cwd: &Path, config_dir: &Path, trusted: bool) ->
 /// you have" from "the file itself could not be read", and it has to name the
 /// entries — the #7422 wording said only that the file was ignored, which told
 /// an operator nothing about which server they had lost or why.
-/// What: names each UNKNOWN entry and where the evidence would have come from,
-/// prefixed by the unreadable-file reason when there is one, and always ends in
-/// the `tm project trust <cwd>` grant that loads the rest regardless.
+/// What: names each UNKNOWN `.mcp.json` entry, each ignored opt-in, and the
+/// unreadable-file reason when there is one. An entry that equalled a registry
+/// server the operator has NOT shared gets the second, narrower hint — that
+/// `tm mcp share <name>` alone would load it. Always ends in the
+/// `tm project trust <cwd>` grant that loads everything regardless.
 /// Test: `resolve_scope_rejects_a_builtin_name_pointing_at_another_command`,
-/// `resolve_scope_loads_the_known_entry_and_names_only_the_unknown_one`.
-fn untrusted_reason(cwd: &Path, unknown: &[String], unreadable: Option<&str>) -> String {
+/// `resolve_scope_loads_the_known_entry_and_names_only_the_unknown_one`,
+/// `resolve_scope_refuses_an_unshared_registry_match_and_says_how_to_share`.
+fn untrusted_reason(
+    cwd: &Path,
+    unknown: &[String],
+    unshared: &[String],
+    ignored_opt_ins: &[String],
+    unreadable: Option<&str>,
+) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(reason) = unreadable {
         parts.push(format!(
@@ -551,9 +610,22 @@ fn untrusted_reason(cwd: &Path, unknown: &[String], unreadable: Option<&str>) ->
     }
     if !unknown.is_empty() {
         parts.push(format!(
-            "these entries match no trusty-* builtin and no server in your own \
-             registry (`tm mcp add`), so they were ignored: {}",
+            "these {MCP_JSON} entries match no trusty-* builtin and no server you \
+             have shared with projects, so they were ignored: {}",
             unknown.join(", ")
+        ));
+    }
+    for name in unshared {
+        parts.push(format!(
+            "one of them matches your registered server {name}; run \
+             `tm mcp share {name}` to load it in projects without trust"
+        ));
+    }
+    if !ignored_opt_ins.is_empty() {
+        parts.push(format!(
+            "its [session] mcp_servers opt-ins name your own registered servers \
+             but cannot grant themselves, so they were ignored: {}",
+            ignored_opt_ins.join(", ")
         ));
     }
     format!(

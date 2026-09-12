@@ -84,6 +84,70 @@ fn parse_headers(items: &[String]) -> Result<Map<String, Value>> {
 /// clap: its first element is the command (stdio) or URL (http/sse); any
 /// remaining elements are stdio subprocess args (rejected for http/sse).
 /// Test: `cli_parses_mcp_add`, `cli_parses_mcp_add_http`; CRUD in `core::mcp_config`.
+///
+/// Dispatch one `tm mcp <verb>` invocation.
+///
+/// Why (#7672): the verb list grew past what `main`'s single match arm could
+/// hold without pushing that file over the 500-SLOC production cap, and the
+/// arm was pure routing with no `main`-level concern in it. Keeping the routing
+/// beside the handlers it routes to also means a new verb touches one file.
+/// What: maps each [`crate::cli::McpCmd`] variant onto its handler below.
+///
+/// # Errors
+///
+/// Propagates the selected handler's error unchanged.
+/// Test: `cli_parses_mcp_add`, `cli_parses_mcp_share`, `cli_parses_mcp_unshare`,
+/// `cli_parses_mcp_remove_list_get`.
+pub(crate) async fn dispatch(cmd: crate::cli::McpCmd) -> Result<()> {
+    use crate::cli::McpCmd;
+    match cmd {
+        McpCmd::Add {
+            name,
+            transport,
+            env,
+            header,
+            command_and_args,
+            root,
+            project,
+            share_with_projects,
+        } => add_cmd(
+            root.as_deref(),
+            &name,
+            transport,
+            &env,
+            &header,
+            &command_and_args,
+            AddPlacement {
+                project,
+                share_with_projects,
+            },
+        ),
+        McpCmd::Share { name, root } => share_cmd(root.as_deref(), &name, true),
+        McpCmd::Unshare { name, root } => share_cmd(root.as_deref(), &name, false),
+        McpCmd::Remove { name, root } => remove_cmd(root.as_deref(), &name),
+        McpCmd::List { json, root } => list_cmd(root.as_deref(), json),
+        McpCmd::Get { name, json, root } => get_cmd(root.as_deref(), &name, json),
+        McpCmd::Test { name, json, root } => test_cmd(root.as_deref(), name.as_deref(), json).await,
+    }
+}
+
+/// Where `tm mcp add` puts the server, and who may load it.
+///
+/// Why: clap hands these two independent booleans down together, and an
+/// argument list of eight trips `clippy::too_many_arguments`. Grouping them
+/// also keeps the two flags that decide WHO can load the server in one place.
+/// What: `project` writes the project's own `.mcp.json` instead of the shared
+/// user scope; `share_with_projects` records the #7672 content-match grant.
+/// Test: `cli_parses_mcp_share`, `cli_parses_mcp_unshare`.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct AddPlacement {
+    /// Write the server into THIS project's `.mcp.json` (`--project`, #7422).
+    pub project: bool,
+    /// Let an untrusted project match this user-scope entry by content
+    /// (`--share-with-projects`, #7672).
+    pub share_with_projects: bool,
+}
+
 pub(crate) fn add_cmd(
     root: Option<&str>,
     name: &str,
@@ -91,8 +155,12 @@ pub(crate) fn add_cmd(
     env: &[String],
     header: &[String],
     command_and_args: &[String],
-    project: bool,
+    placement: AddPlacement,
 ) -> Result<()> {
+    let AddPlacement {
+        project,
+        share_with_projects,
+    } = placement;
     let config_dir = resolve_config_dir(root)?;
     let command_or_url = command_and_args.first().map(String::as_str);
     // Drop a leading `--` separator (clap's `trailing_var_arg` keeps it in the
@@ -181,6 +249,65 @@ pub(crate) fn add_cmd(
         );
     } else {
         println!("MCP server '{name}' already present (no change)");
+    }
+    if share_with_projects {
+        // #7672: the same grant `tm mcp share` writes, taken at add time.
+        share_cmd(root, name, true)?;
+    }
+    Ok(())
+}
+
+/// Handle `tm mcp share <name>` and `tm mcp unshare <name>` (#7672).
+///
+/// Why: content equivalence lets an UNTRUSTED project's `.mcp.json` load a
+/// server whose spec it reproduces exactly. Registering a server is not that
+/// consent — this workspace ships credential-bearing servers with an empty
+/// `env`, so their spec is public and reproducible — so the operator names the
+/// servers projects may reach that way.
+/// What: reports whether `name` is a registered server (a share for a name that
+/// is not registered is almost always a typo, so it warns rather than silently
+/// recording a grant that matches nothing), then flips the bit in
+/// [`trusty_mpm::core::mcp_share::McpShareStore`] and saves only on a change.
+///
+/// # Errors
+///
+/// An unresolvable state root, or an unreadable, malformed or unwritable store.
+/// Test: `cli_parses_mcp_share`, `cli_parses_mcp_unshare`; the store itself in
+/// `core::mcp_share`.
+pub(crate) fn share_cmd(root: Option<&str>, name: &str, share: bool) -> Result<()> {
+    use trusty_mpm::core::mcp_share::{McpShareStore, share_store_root};
+
+    let config_dir = resolve_config_dir(root)?;
+    if mcp_config::get_server(&config_dir, name)?.is_none() {
+        println!(
+            "Warning: '{name}' is not a registered MCP server in {} — \
+             the grant is recorded but matches nothing until you `tm mcp add {name}`",
+            config_dir.display()
+        );
+    }
+    let store_root =
+        share_store_root().context("cannot resolve the home directory holding ~/.trusty-tools")?;
+    let mut store = McpShareStore::load(&store_root)?;
+    let changed = if share {
+        store.share(name)
+    } else {
+        store.unshare(name)
+    };
+    if !changed {
+        println!(
+            "MCP server '{name}' is already {} with projects (no change)",
+            if share { "shared" } else { "unshared" }
+        );
+        return Ok(());
+    }
+    store.save()?;
+    if share {
+        println!(
+            "Shared MCP server '{name}' with projects: an untrusted project whose \n  \
+             .mcp.json declares exactly this server's command, args and env now loads it."
+        );
+    } else {
+        println!("Unshared MCP server '{name}': only a TRUSTED project loads it from now on.");
     }
     Ok(())
 }
@@ -476,7 +603,7 @@ mod tests {
             &[],
             &[],
             &command_and_args,
-            false,
+            AddPlacement::default(),
         )
         .unwrap();
 
@@ -513,7 +640,7 @@ mod tests {
             &[],
             &[],
             &command_and_args,
-            false,
+            AddPlacement::default(),
         )
         .unwrap();
 

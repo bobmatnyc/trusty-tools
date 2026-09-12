@@ -227,57 +227,50 @@ fn resolve_scope_drops_project_mcp_json_for_an_untrusted_project() {
     );
 }
 
-/// #7672: an opt-in names an entry the OPERATOR wrote out of repo with
-/// `tm mcp add`, so the declaration behind the name is already theirs. Trust by
-/// content therefore loads it without a `tm project trust` grant — this
-/// REPLACES #7422's blanket denial of the same fixture.
+/// #7422, re-proved after the PR #7692 review: the committed
+/// `[session] mcp_servers` list decides which of the OPERATOR's credentialed
+/// servers load, and it is a bare repo-supplied NAME with no content to judge.
+/// Content equivalence cannot reach it, so it stays behind `tm project trust`.
+/// This test fails if the `trusted &&` guard is dropped again.
 #[test]
-fn resolve_scope_loads_an_opt_in_that_names_a_registered_server() {
+fn resolve_scope_ignores_opt_ins_for_an_untrusted_project() {
     let tmp = TempDir::new().unwrap();
     let (cwd, cfg, _) = fixture(&tmp);
-    shared_config(&cfg, &["slack-mcp"]);
+    // The registry entry carries a literal secret — exactly what an untrusted
+    // opt-in must not be able to reach.
+    shared_entries(
+        &cfg,
+        &[(
+            "slack-mcp",
+            json!({
+                "type": "stdio",
+                "command": "slack-mcp",
+                "args": [],
+                "env": {"SLACK_TOKEN": "xoxb-1"},
+            }),
+        )],
+    );
     std::fs::write(
         cwd.join(crate::core::project_config::PROJECT_CONFIG_FILE),
         "[session]\nmcp_servers = [\"slack-mcp\"]\n",
     )
     .unwrap();
 
-    let scope = resolve_scope_with_trust(&cwd, &cfg, false);
+    // Sharing the server does NOT open the opt-in path either: sharing governs
+    // content equivalence for `.mcp.json`, never a bare name.
+    let shared_everywhere = std::collections::BTreeSet::from(["slack-mcp".to_owned()]);
+    let scope = resolve_scope_with_grants(&cwd, &cfg, false, &shared_everywhere);
 
     assert!(
-        scope.servers.contains_key("slack-mcp"),
-        "the opt-in points at the operator's own registry entry: {:?}",
+        !scope.servers.contains_key("slack-mcp"),
+        "a committed opt-in cannot grant itself the operator's credentials: {:?}",
         scope.included
     );
-    assert!(scope.excluded.is_empty(), "{:?}", scope.excluded);
-    assert_eq!(
-        scope.degraded, None,
-        "every declared entry was known, so there is nothing to warn about"
-    );
-}
-
-/// #7672: an opt-in naming nothing the operator registered matches no content,
-/// so it is UNKNOWN and the warning says so.
-#[test]
-fn resolve_scope_reports_an_opt_in_that_names_no_registered_server() {
-    let tmp = TempDir::new().unwrap();
-    let (cwd, cfg, _) = fixture(&tmp);
-    shared_config(&cfg, &[]);
-    std::fs::write(
-        cwd.join(crate::core::project_config::PROJECT_CONFIG_FILE),
-        "[session]\nmcp_servers = [\"ghost\"]\n",
-    )
-    .unwrap();
-
-    let scope = resolve_scope_with_trust(&cwd, &cfg, false);
-
-    assert!(!scope.servers.contains_key("ghost"));
-    let degraded = scope
-        .degraded
-        .expect("an unmatched opt-in must be reported");
+    assert_eq!(scope.excluded, vec!["slack-mcp".to_owned()]);
+    let degraded = scope.degraded.expect("the drop must be reported");
     assert!(
-        degraded.contains("ghost"),
-        "the unknown entry must be named: {degraded}"
+        degraded.contains("slack-mcp") && degraded.contains("tm project trust"),
+        "the ignored opt-in and the grant must both be named: {degraded}"
     );
 }
 
@@ -377,18 +370,22 @@ fn resolve_scope_rejects_a_builtin_name_pointing_at_another_command() {
 }
 
 /// #7672 (b): this repository's own `.mcp.json`, against a registry that holds
-/// each of its entries, loads in full with no warning at all.
+/// each of its entries AND an operator who has shared the non-builtin ones,
+/// loads in full with no warning at all.
 #[test]
 fn resolve_scope_loads_this_repos_mcp_json_by_content_with_no_warning() {
     let tmp = TempDir::new().unwrap();
     let (cwd, cfg, _) = fixture(&tmp);
     let entries = this_repos_mcp_entries();
     // The operator's own user-scope registry: `tm mcp add` wrote every one of
-    // these, so each project declaration is content-equivalent to one they have.
+    // these, and `tm mcp share` lent the two that a canonical builtin does not
+    // already cover — `duetto-memory`, and `trusty-review` with its env block.
     shared_entries(&cfg, &entries);
     project_mcp_entries(&cwd, &entries);
+    let shared_registry =
+        std::collections::BTreeSet::from(["duetto-memory".to_owned(), "trusty-review".to_owned()]);
 
-    let scope = resolve_scope_with_trust(&cwd, &cfg, false);
+    let scope = resolve_scope_with_grants(&cwd, &cfg, false, &shared_registry);
 
     for (name, _) in &entries {
         assert!(
@@ -423,7 +420,8 @@ fn resolve_scope_loads_the_known_entry_and_names_only_the_unknown_one() {
         ],
     );
 
-    let scope = resolve_scope_with_trust(&cwd, &cfg, false);
+    let shared_registry = std::collections::BTreeSet::from(["duetto-memory".to_owned()]);
+    let scope = resolve_scope_with_grants(&cwd, &cfg, false, &shared_registry);
 
     assert!(
         scope.servers.contains_key("duetto-memory"),
@@ -444,6 +442,65 @@ fn resolve_scope_loads_the_known_entry_and_names_only_the_unknown_one() {
         !degraded.contains("duetto-memory"),
         "a loaded entry must not be reported as dropped: {degraded}"
     );
+}
+
+/// PR #7692 review, HIGH: registering a server is not sharing it. A server
+/// whose secret arrives out of band (empty `env`, credential from the ambient
+/// environment or a `tm-secrets` wrapper) has a fully public spec any repo can
+/// reproduce, so an exact match against an UNSHARED registry entry must not
+/// load — and the warning must name the `tm mcp share` that would change that.
+#[test]
+fn resolve_scope_refuses_an_unshared_registry_match_and_says_how_to_share() {
+    let tmp = TempDir::new().unwrap();
+    let (cwd, cfg, _) = fixture(&tmp);
+    // No literal secret anywhere in the spec — the whole point of the finding.
+    let public_shape = json!({"type": "stdio", "command": "slack-mcp", "args": ["serve"]});
+    shared_entries(&cfg, &[("slack-mcp", public_shape.clone())]);
+    project_mcp_entries(&cwd, &[("slack-mcp", public_shape)]);
+
+    let scope = resolve_scope_with_grants(&cwd, &cfg, false, &std::collections::BTreeSet::new());
+
+    assert!(
+        !scope.servers.contains_key("slack-mcp"),
+        "an unshared registry entry must not be reachable by spec alone: {:?}",
+        scope.included
+    );
+    assert!(
+        scope.content_trusted.is_empty(),
+        "{:?}",
+        scope.content_trusted
+    );
+    let degraded = scope.degraded.expect("the refusal must be reported");
+    assert!(
+        degraded.contains("tm mcp share slack-mcp"),
+        "the narrower grant must be offered: {degraded}"
+    );
+    assert!(
+        degraded.contains("tm project trust"),
+        "the broad grant hint must survive: {degraded}"
+    );
+}
+
+/// The same fixture with the operator's share in place loads with no warning —
+/// the positive half of the pair above.
+#[test]
+fn resolve_scope_loads_a_shared_registry_match_without_trust() {
+    let tmp = TempDir::new().unwrap();
+    let (cwd, cfg, _) = fixture(&tmp);
+    let public_shape = json!({"type": "stdio", "command": "slack-mcp", "args": ["serve"]});
+    shared_entries(&cfg, &[("slack-mcp", public_shape.clone())]);
+    project_mcp_entries(&cwd, &[("slack-mcp", public_shape)]);
+    let shared_registry = std::collections::BTreeSet::from(["slack-mcp".to_owned()]);
+
+    let scope = resolve_scope_with_grants(&cwd, &cfg, false, &shared_registry);
+
+    assert!(
+        scope.servers.contains_key("slack-mcp"),
+        "a shared registry entry matched by content loads: {:?}",
+        scope.included
+    );
+    assert_eq!(scope.content_trusted, vec!["slack-mcp".to_owned()]);
+    assert_eq!(scope.degraded, None);
 }
 
 /// #7672 (d): classification fails CLOSED. An unreadable registry yields no

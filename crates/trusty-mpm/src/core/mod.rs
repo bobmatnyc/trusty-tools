@@ -139,6 +139,9 @@ pub mod mcp_config;
 // out-of-repo is not a new grant — see `session_mcp_scope`.
 pub mod mcp_content_trust;
 pub mod mcp_provenance;
+// #7672: registering a server and lending it to unreviewed repository content
+// are two decisions; this is the second one.
+pub mod mcp_share;
 // #4181: per-project MCP pins now travel as spawn environment variables, not as
 // arguments injected into a workspace `.mcp.json` (ADR-0042).
 pub mod mcp_session_env;
