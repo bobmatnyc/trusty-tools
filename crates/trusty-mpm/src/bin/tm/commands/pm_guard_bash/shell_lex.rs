@@ -471,7 +471,7 @@ pub(crate) fn git_subcommand(segment: &str) -> Option<String> {
 /// alongside the index of the first non-option token.
 /// Test: every `git_subcommand_*` test, plus
 /// `git_output_file_finds_both_spellings`.
-fn git_argv_at_subcommand(segment: &str) -> Option<(Vec<String>, usize)> {
+pub(crate) fn git_argv_at_subcommand(segment: &str) -> Option<(Vec<String>, usize)> {
     let argv = shlex::split(segment)?;
     let mut i = strip_wrapper_prefix(&argv)?;
     let program = argv.get(i)?;

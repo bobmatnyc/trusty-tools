@@ -1,0 +1,2 @@
+Fixed
+- `tm hook --pm-guard` no longer refuses a `for`/`select` loop whose word list carries a git branch or ref name matching `credentials`/`secrets`/`token` (#7498). The words after `in` are a word list, not a path operand list, so the "a directory is written in front of it" proxy those three word families use is withdrawn there. A name with file shape of its own — a leading dot, an extension, or a filename-only family such as `id_rsa` — still denies inside a word list.
