@@ -123,4 +123,30 @@ pub(crate) enum RepairAction {
         #[arg(long)]
         markers: bool,
     },
+
+    /// End a delegation record stuck non-terminal (#7602).
+    ///
+    /// Why: a dispatched agent's record leaves `Running` only on a
+    /// `SubagentStop` the daemon receives. When the parent session dies without
+    /// one, the record stays live forever, and every worktree gate — the
+    /// merged-PR reclaim and `tm session adopt-worktree` both — refuses the
+    /// agent's tree with "a delegation naming it has not ended". No verb ended
+    /// such a record before this one.
+    /// What: asks the daemon to terminalize every non-terminal record naming
+    /// `<agent-id>`. The daemon REFUSES while the dispatching session is still
+    /// Active, whatever flags are passed; it also refuses when it holds no
+    /// record of that session, since the delegation map is rebuilt empty at
+    /// every daemon start and silence is undeterminable rather than absent —
+    /// `--force` is the operator asserting the owner is gone. The status
+    /// written is `cancelled`, never `completed`.
+    /// Test: `cli_parses_repair_delegation`, `cli_parses_repair_delegation_force`.
+    Delegation {
+        /// The agent id from the worktree's ownership sentinel, e.g.
+        /// `af20cc838b2b30a55`.
+        agent_id: String,
+        /// End the record even though the daemon cannot confirm the dispatching
+        /// session is gone.
+        #[arg(long)]
+        force: bool,
+    },
 }

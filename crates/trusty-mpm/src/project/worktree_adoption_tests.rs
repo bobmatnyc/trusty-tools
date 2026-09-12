@@ -157,6 +157,31 @@ fn anchors_are_the_distinct_checkouts() {
     );
 }
 
+/// #7588: the second registration surface must adopt under the name that
+/// already owns the checkout, or every worktree comes back `ClaimedByAnother`.
+#[test]
+fn owning_project_reports_the_name_that_already_claimed_the_checkout_7588() {
+    let fx = GitWorktreeFixture::new();
+    fx.add_worktree("pre-one");
+    let store_dir = tempfile::tempdir().expect("tempdir");
+    backfill_checkout(store_dir.path(), "gnomish", &fx.repo, at(0));
+
+    assert_eq!(
+        project_owning_checkout(store_dir.path(), &fx.repo),
+        Some("gnomish".to_string())
+    );
+}
+
+/// #7588: an unrecorded checkout has no owner, so the caller falls back to its
+/// own derived name rather than inventing an attribution.
+#[test]
+fn owning_project_is_none_for_an_unrecorded_checkout_7588() {
+    let fx = GitWorktreeFixture::new();
+    let store_dir = tempfile::tempdir().expect("tempdir");
+
+    assert_eq!(project_owning_checkout(store_dir.path(), &fx.repo), None);
+}
+
 /// THE #7357 acceptance case: a checkout whose worktrees existed BEFORE
 /// registration gets one record each, attributed to the project.
 #[test]

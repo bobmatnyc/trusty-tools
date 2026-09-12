@@ -73,14 +73,51 @@ pub struct PathParams {
 
 /// `POST /projects`, `mpm.projects.register` — announce a working directory.
 ///
+/// #7588: this is registry A — what `tm project init` calls. It used to register
+/// the path and nothing else, while registry B (`tm projects register`) and the
+/// `project_register` MCP tool both ran #7357's worktree backfill, so an
+/// operator who reached for the singular verb got exit 0, no `worktrees.json`,
+/// and every pre-existing worktree still invisible to `reconcile-worktrees`,
+/// `prune-worktrees --merged-prs`, `tm doctor` and the Disk survey. It now runs
+/// the SAME backfill, under the name that already owns the checkout when one
+/// does — so whichever surface registers first, both end up attributing the
+/// directory the same way rather than each claiming it under its own name.
+///
+/// NOT A GATE, exactly as #7357 established: the backfill reports failures and
+/// never raises them. Registration is bookkeeping and must succeed whatever the
+/// filesystem says. The report is dropped here rather than returned because
+/// registry A's response type is the wire-stable `ProjectInfo` that
+/// `tm project init` and the dashboard both read; the adoption counts reach the
+/// log, and the records — which is what the operator was actually missing —
+/// reach disk.
+///
 /// Test: `parity_projects_register_agrees_across_transports`,
-/// `register_project_op_disables_git_auto_maintenance`.
+/// `register_project_op_disables_git_auto_maintenance`,
+/// `register_project_op_backfills_pre_existing_worktrees_7588`,
+/// `register_project_op_adopts_under_the_owning_projects_name_7588`.
 pub fn register_project_op(state: &Arc<DaemonState>, path: PathBuf) -> ProjectInfo {
     // #7171: an explicit registration is the "operator points trusty-mpm at
     // an existing repo" case `ensure_base_clone`'s equivalent write does not
     // cover — best-effort and non-fatal; `path` need not even be a git repo.
     crate::core::git_maintenance::disable_and_log(&path);
-    state.register_project(path)
+    let info = state.register_project(path.clone());
+    // #7588: same store, same framework root, same function as registry B.
+    let store_dir = crate::project::registry_data_dir_under(state.framework_root());
+    let name = crate::project::project_owning_checkout(&store_dir, &path)
+        .unwrap_or_else(|| info.name.clone());
+    let report = crate::project::backfill_checkout(&store_dir, &name, &path, chrono::Utc::now());
+    if report != crate::project::BackfillReport::default() {
+        tracing::info!(
+            project = %name,
+            checkout = %path.display(),
+            recorded = report.recorded,
+            already_recorded = report.already_recorded,
+            claimed_by_another = report.claimed_by_another,
+            skipped = report.skipped,
+            "#7588: `tm project init` adopted pre-existing worktrees too"
+        );
+    }
+    info
 }
 
 /// `GET /projects`, `mpm.projects.list` — every announced directory.

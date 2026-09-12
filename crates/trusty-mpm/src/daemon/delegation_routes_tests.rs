@@ -1342,3 +1342,58 @@ async fn a_denied_dispatch_cancels_a_record_the_tracker_already_wrote() {
         next.agents
     );
 }
+
+// ── operator repair of a stuck record (#7602) ────────────────────────────
+
+/// The route is the only way `tm repair delegation` reaches the delegation map,
+/// so its path and its plumbing are pinned alongside the gate itself.
+#[tokio::test]
+async fn repair_route_ends_a_stuck_record_7602() {
+    use crate::core::session::{ControlModel, Session, SessionStatus};
+    use crate::daemon::services::delegation_repair::{RepairDelegationRequest, RepairOutcome};
+
+    let (state, _dir, session) = hermetic();
+    let mut record = Session::new(session, "/repo", ControlModel::Tmux, None);
+    record.status = SessionStatus::Stopped;
+    state.register_session(record);
+    let mut d = Delegation::observed(session, "rust-engineer", "task", Some("toolu_x".into()));
+    d.agent_id = Some("af20cc838b2b30a55".to_string());
+    d.status = DelegationStatus::Running;
+    state.upsert_delegation(d);
+
+    let Json(outcome) = super::repair_delegation_route(
+        axum::extract::State(Arc::clone(&state)),
+        Path("af20cc838b2b30a55".to_string()),
+        Some(Json(RepairDelegationRequest { force: false })),
+    )
+    .await;
+
+    assert_eq!(outcome, RepairOutcome::Ended { records: 1 });
+}
+
+/// A missing body must read as the SAFE default, not as `force: true` — an
+/// older client that sends none must not gain the override.
+#[tokio::test]
+async fn repair_route_refuses_a_live_owner_7602() {
+    use crate::core::session::{ControlModel, Session, SessionStatus};
+    use crate::daemon::services::delegation_repair::RepairOutcome;
+
+    let (state, _dir, session) = hermetic();
+    let mut record = Session::new(session, "/repo", ControlModel::Tmux, None);
+    record.status = SessionStatus::Active;
+    state.register_session(record);
+    let mut d = Delegation::observed(session, "rust-engineer", "task", Some("toolu_x".into()));
+    d.agent_id = Some("agent-live".to_string());
+    d.status = DelegationStatus::Running;
+    state.upsert_delegation(d);
+
+    let Json(outcome) = super::repair_delegation_route(
+        axum::extract::State(Arc::clone(&state)),
+        Path("agent-live".to_string()),
+        None,
+    )
+    .await;
+
+    assert!(matches!(outcome, RepairOutcome::Refused { .. }));
+    assert_eq!(state.all_delegations()[0].status, DelegationStatus::Running);
+}

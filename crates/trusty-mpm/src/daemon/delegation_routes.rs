@@ -146,6 +146,34 @@ pub fn router() -> Router<Arc<DaemonState>> {
             "/api/v1/sessions/{id}/delegations/granted-worktree",
             post(granted_worktree_route),
         )
+        // #7602: the operator repair verb. Keyed on the agent id, not a session
+        // — the whole case is a record whose session the daemon has lost.
+        .route(
+            "/api/v1/delegations/{agent_id}/repair",
+            post(repair_delegation_route),
+        )
+}
+
+/// `POST /api/v1/delegations/{agent_id}/repair` (#7602).
+///
+/// Why: a delegation stuck non-terminal has no other way out — `SubagentStop`
+/// is the only signal that ends one, and by construction it never arrived. The
+/// daemon is the only process holding the delegation map, so the decision and
+/// the write both have to happen here; `tm repair delegation <agent-id>` is the
+/// client.
+/// What: hands the agent id and the caller's `force` assertion to
+/// [`crate::daemon::services::delegation_repair::repair_delegation`], which owns
+/// every refusal arm, and returns its outcome as JSON. Always 200 — a refusal is
+/// an ANSWER, and a client that read it as a transport error would retry it.
+/// Test: `repair_route_ends_a_stuck_record_7602`,
+/// `repair_route_refuses_a_live_owner_7602`.
+pub async fn repair_delegation_route(
+    State(state): State<Arc<DaemonState>>,
+    Path(agent_id): Path<String>,
+    body: Option<Json<crate::daemon::services::delegation_repair::RepairDelegationRequest>>,
+) -> Json<crate::daemon::services::delegation_repair::RepairOutcome> {
+    let force = body.map(|Json(b)| b.force).unwrap_or(false);
+    Json(crate::daemon::services::delegation_repair::repair_delegation(&state, &agent_id, force))
 }
 
 /// `POST /api/v1/sessions/{id}/delegations/granted-worktree` (#5769).

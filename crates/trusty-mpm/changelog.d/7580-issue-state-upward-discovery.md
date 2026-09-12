@@ -1,0 +1,3 @@
+Fixed
+- `tm issue` now finds `issue-state.yaml` by walking upward from the current directory to the git toplevel instead of testing the current directory alone, so `tm issue transition N status:merged` run from a crate subdirectory uses the repository's committed model rather than silently falling back to the built-in one (#7580).
+- Every `tm issue` verb that loads a model now names the model in force: `tm issue states` prints its source, and a verb failure — `unknown target state`, above all — carries a line saying whether the built-in default answered, from which directory the search started, and how to override it (#7580).

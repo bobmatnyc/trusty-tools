@@ -245,6 +245,20 @@ pub(crate) struct OpenPlan {
     pub(crate) argv: Vec<String>,
     /// The `ws/<session>` label attached to the PR.
     pub(crate) workstream_label: String,
+    /// The `gh label create …` argv that makes that label exist first (#7513).
+    ///
+    /// Why: `gh pr create --label ws/<x>` fails outright on a label the
+    /// repository has never seen, and the caller most likely to hit that is the
+    /// one that cannot seed it — `session_context_pause` publishes from inside
+    /// the daemon, where `tm issue seed-labels`' tmux-session read finds
+    /// nothing. Carrying the seed in the PLAN rather than spelling it at the
+    /// call site is what keeps `--dry-run` a faithful rehearsal of the real run.
+    /// What: `create_label_argv` for the workstream label, with `--force`
+    /// (`ws/` is the framework's own namespace, so refreshing it is safe and
+    /// makes the seed idempotent). The convention label is deliberately NOT
+    /// seeded here: it is an ordinary repo label a project may have styled, and
+    /// `--force` would rewrite that on every PR.
+    pub(crate) label_seed_argv: Vec<String>,
     /// Contract fields present and non-empty, in contract order.
     pub(crate) supplied: Vec<&'static str>,
     /// The body as it will be sent, after the issue link was applied.
@@ -331,6 +345,12 @@ pub(crate) fn plan(
             "cannot derive the `ws/<session>` label from the resolved session name".to_string(),
         ]);
     };
+    // #7513: the label the PR is about to carry has to exist first.
+    let label_seed_argv = policy_labels::create_label_argv(
+        &workstream,
+        args.repo.as_deref().filter(|r| !r.trim().is_empty()),
+        policy_labels::is_owned_namespace(&workstream.name),
+    );
     let label = workstream.name;
     let mut gh_argv = argv(&["pr", "create"]);
     if let Some(repo) = args.repo.as_deref().filter(|r| !r.trim().is_empty()) {
@@ -359,6 +379,7 @@ pub(crate) fn plan(
     Ok(OpenPlan {
         argv: gh_argv,
         workstream_label: label,
+        label_seed_argv,
         supplied: report.supplied.iter().map(|f| f.heading()).collect(),
         body: linked,
     })
@@ -414,8 +435,28 @@ pub(crate) fn run<R: GhRunner, P: Preflight>(
     };
 
     if args.dry_run {
+        println!("gh {}", shell_render(&plan.label_seed_argv));
         println!("gh {}", shell_render(&plan.argv));
         return Ok(EXIT_OK);
+    }
+
+    // #7513: seed the `ws/<session>` label before the create that applies it.
+    // Best-effort by design: the seed is not the deliverable, and a repository
+    // where it fails but the label already exists must still open its PR. It
+    // does NOT fail open in the sense that matters — a label that genuinely
+    // cannot be created makes `gh pr create --label` fail loudly on the very
+    // next line, which is the error the operator needs to see.
+    match gh.run(&plan.label_seed_argv) {
+        Ok(seed) if !seed.success => eprintln!(
+            "  warning: could not seed the `{}` label: {}",
+            plan.workstream_label,
+            seed.stderr.trim()
+        ),
+        Err(e) => eprintln!(
+            "  warning: could not seed the `{}` label: {e:#}",
+            plan.workstream_label
+        ),
+        Ok(_) => {}
     }
 
     let out = gh.run(&plan.argv)?;

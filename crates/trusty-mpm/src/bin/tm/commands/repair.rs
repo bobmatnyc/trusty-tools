@@ -36,8 +36,17 @@ use crate::cli::RepairAction;
 /// Test: `cli_parses_repair_deploy`, `cli_parses_repair_push_guard`, and the
 /// `tests_behavior_repair_tests.rs` behaviour suite exercise the handlers this
 /// routes to.
-pub(crate) fn dispatch(action: RepairAction) -> anyhow::Result<()> {
+pub(crate) async fn dispatch(
+    client: &reqwest::Client,
+    url: &str,
+    action: RepairAction,
+) -> anyhow::Result<()> {
     match action {
+        // #7602: the only arm that needs the daemon — the delegation map lives
+        // there and nowhere else.
+        RepairAction::Delegation { agent_id, force } => {
+            repair_delegation(client, url, &agent_id, force).await
+        }
         RepairAction::Deploy { force } => repair_deploy(force),
         RepairAction::PushGuard { path, dry_run } => {
             super::push_guard::repair_push_guard(path, dry_run)
@@ -54,6 +63,58 @@ pub(crate) fn dispatch(action: RepairAction) -> anyhow::Result<()> {
             dry_run: _,
             markers,
         } => super::repair_savings_ledger::repair_savings_ledger(root, apply, markers),
+    }
+}
+
+/// `tm repair delegation <agent-id> [--force]` (#7602).
+///
+/// Why: the daemon owns the decision — it holds the delegation map and the
+/// session registry, and it is the only process that can write the record. This
+/// function's whole job is to carry the answer back without softening it: a
+/// refusal exits NONZERO so a script cannot read it as a repair.
+/// What: POSTs the agent id and the `force` assertion, then prints one line per
+/// outcome. `no_record` and `refused` both exit nonzero — the first because the
+/// operator named an agent nothing knows, which is a fact they must see rather
+/// than a success; the second because the gate declined.
+/// Test: `cli_parses_repair_delegation`, `cli_parses_repair_delegation_force`;
+/// the outcomes themselves in `delegation_repair_tests.rs`.
+async fn repair_delegation(
+    client: &reqwest::Client,
+    url: &str,
+    agent_id: &str,
+    force: bool,
+) -> anyhow::Result<()> {
+    let resp = client
+        .post(format!("{url}/api/v1/delegations/{agent_id}/repair"))
+        .json(&serde_json::json!({ "force": force }))
+        .send()
+        .await?;
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        anyhow::bail!("repair delegation failed ({status}): {body}");
+    }
+    let outcome: trusty_mpm::daemon::services::delegation_repair::RepairOutcome =
+        serde_json::from_str(&body)
+            .map_err(|e| anyhow::anyhow!("could not read the daemon's answer ({e}): {body}"))?;
+    use trusty_mpm::daemon::services::delegation_repair::RepairOutcome;
+    match outcome {
+        RepairOutcome::Ended { records } => {
+            println!("ended {records} stuck delegation record(s) for agent {agent_id} (cancelled)");
+            Ok(())
+        }
+        RepairOutcome::AlreadyEnded { records } => {
+            println!("nothing to repair: all {records} record(s) for agent {agent_id} have ended");
+            Ok(())
+        }
+        // The gate's own words — paraphrasing them would hide which arm fired,
+        // which is the only thing that says what to do next.
+        RepairOutcome::Refused { reason } => anyhow::bail!("repair refused: {reason}"),
+        RepairOutcome::NoRecord => anyhow::bail!(
+            "no delegation names agent {agent_id}. The daemon's delegation map is rebuilt empty \
+             at every start, so this is undeterminable rather than proof the agent is gone \
+             (ADR-0045)"
+        ),
     }
 }
 
