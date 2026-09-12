@@ -4,6 +4,7 @@ role: secrets-manager
 description: Secrets specialist. Operates `tm secrets` (configure/import/add/list/copy/exec/doctor) on behalf of the PM and other agents, never a value.
 model: sonnet
 extends: base-agent
+tools: [Read, Bash, BashOutput, KillShell, Grep, Glob]
 ---
 
 # Secrets Manager Agent

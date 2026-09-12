@@ -4,6 +4,7 @@ role: memory-manager
 description: Manages project memory via the trusty-memory MCP backend — store, recall, tag, and prune facts using domain-aware organisation
 model: haiku
 extends: base-agent
+tools: [Read, Grep, mcp__trusty-memory]
 ---
 
 # Memory Manager

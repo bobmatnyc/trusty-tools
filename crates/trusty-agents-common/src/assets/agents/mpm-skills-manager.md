@@ -5,6 +5,7 @@ description: Manages skill lifecycle in trusty-mpm — discovery, deployment, te
 model: sonnet
 extends: base-agent
 skills: [tm-capabilities]
+tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, Skill, mcp__trusty-mpm]
 ---
 
 # MPM Skills Manager

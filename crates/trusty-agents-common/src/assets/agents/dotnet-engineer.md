@@ -4,6 +4,7 @@ role: engineer
 description: 'Modern C#/.NET 8+ specialist: ASP.NET Core, EF Core, xUnit, nullable reference types, minimal APIs, async/await — plus legacy VB.NET maintenance awareness'
 model: sonnet
 extends: base-engineer
+tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-search]
 ---
 
 # .NET Engineer

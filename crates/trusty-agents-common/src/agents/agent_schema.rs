@@ -97,6 +97,7 @@ const TRUSTY_MPM_KEYS: &[&str] = &[
     "resource_tier",
     "skills",
     "tools",
+    "tcode_tools",
     "initialprompt",
 ];
 

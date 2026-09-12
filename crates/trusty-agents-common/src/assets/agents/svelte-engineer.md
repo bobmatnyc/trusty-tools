@@ -5,6 +5,7 @@ description: Specialized agent for modern Svelte 5 (Runes API) and SvelteKit dev
 model: sonnet
 extends: base-engineer
 skills: [systematic-debugging, test-driven-development]
+tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-search]
 ---
 
 # Svelte Engineer

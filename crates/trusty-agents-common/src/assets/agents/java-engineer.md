@@ -5,6 +5,7 @@ description: Java 21+ LTS specialist delivering production-ready Spring Boot app
 model: sonnet
 extends: base-engineer
 skills: [systematic-debugging, test-driven-development]
+tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-search]
 ---
 
 # Java Engineer

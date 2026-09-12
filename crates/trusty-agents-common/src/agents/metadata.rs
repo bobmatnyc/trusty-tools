@@ -93,7 +93,22 @@ pub struct AgentMetadata {
     /// `builder::Frontmatter::tools`). Unlike `skills`, this list is
     /// OVERRIDE-merged across an `extends` chain rather than unioned (see
     /// `builder::merge_frontmatter`).
+    ///
+    /// #7683: this key now carries CLAUDE CODE's tool vocabulary (`Read`,
+    /// `Bash`, `mcp__<server>`) for every roster agent, because the roster's
+    /// deploy target is `.claude/agents/`. `trusty-code`'s own vocabulary
+    /// moved to [`AgentMetadata::tcode_tools`].
     pub tools: Option<Vec<String>>,
+    /// Allowed tool names in `trusty-code`'s own vocabulary (#7683).
+    ///
+    /// Why: see [`crate::agents::builder::Frontmatter::tcode_tools`] — one
+    /// roster serves two runtimes whose tool names do not overlap, and a
+    /// Claude-vocabulary list read as a tcode allowlist gates that agent down
+    /// to zero callable tools.
+    /// What: `None` when the key is absent, `Some(vec![])` a deliberate
+    /// deny-all, both distinct exactly as on `tools`.
+    /// Test: `metadata_from_str_reads_tcode_tools`.
+    pub tcode_tools: Option<Vec<String>>,
     /// The `provenance:` field — who wrote this file (#4698).
     ///
     /// Why: the read-only surfaces that already report a file's recorded
@@ -126,6 +141,7 @@ impl From<Frontmatter> for AgentMetadata {
             skills: fm.skills,
             max_tokens: fm.max_tokens,
             tools: fm.tools,
+            tcode_tools: fm.tcode_tools,
             provenance: fm.provenance,
         }
     }
@@ -215,6 +231,29 @@ mod tests {
         let meta = agent_metadata_from_str("---\nname: plain\nrole: engineer\n---\n\nBody.\n");
         assert_eq!(meta.role.as_deref(), Some("engineer"));
         assert_eq!(meta.agent_type, None);
+    }
+
+    /// #7683: the two allowlists project to two fields, never one.
+    ///
+    /// Why: trusty-code reads `tcode_tools` and Claude Code reads `tools`. A
+    /// projection that folded either into the other would hand one runtime the
+    /// other's vocabulary, which `ToolRegistry::gated` resolves to zero tools.
+    #[test]
+    fn metadata_from_str_reads_tcode_tools() {
+        let doc = "---\nname: qa\nrole: qa\ntools: [Read, Grep]\ntcode_tools: [read_file]\n---\n\nBody.\n";
+        let meta = agent_metadata_from_str(doc);
+        assert_eq!(
+            meta.tools,
+            Some(vec!["Read".to_string(), "Grep".to_string()])
+        );
+        assert_eq!(meta.tcode_tools, Some(vec!["read_file".to_string()]));
+
+        let neither = agent_metadata_from_str("---\nname: plain\nrole: qa\n---\n\nBody.\n");
+        assert_eq!(neither.tools, None, "absent `tools:` must stay None");
+        assert_eq!(
+            neither.tcode_tools, None,
+            "absent `tcode_tools:` must stay None — all tools allowed"
+        );
     }
 
     /// #4698: the field a deployed framework agent now carries.

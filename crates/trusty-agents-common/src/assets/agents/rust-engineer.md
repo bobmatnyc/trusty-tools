@@ -5,6 +5,7 @@ description: 'Rust 2024 edition specialist: memory-safe systems, zero-cost abstr
 model: sonnet
 extends: base-engineer
 skills: [systematic-debugging, test-driven-development, rust-build-performance]
+tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, Skill, mcp__trusty-search]
 ---
 
 # Rust Engineer

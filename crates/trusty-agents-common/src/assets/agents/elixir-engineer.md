@@ -5,6 +5,7 @@ description: 'Elixir 1.17-1.18 + OTP specialist: supervision trees, GenServer/Ta
 model: sonnet
 extends: base-engineer
 skills: [systematic-debugging, test-driven-development]
+tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-search]
 ---
 
 # Elixir Engineer

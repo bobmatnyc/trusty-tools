@@ -30,7 +30,14 @@ name = "trusty-agents-common"
 # 0.7.2: patch bump for the trusty-code/trusty-agents reinstall carrying
 # #6537/#7158 for live verification (owner ruling 2026-09-08); src has moved
 # since 0.7.1 but no public item signature changed.
-version = "0.7.2"
+#
+# 0.8.0 (#7683): minor — the breaking position for a 0.y.z crate.
+# `AgentMetadata` gains a public `tcode_tools` field, which
+# `cargo-semver-checks` reports as `constructible_struct_adds_field` against
+# the 0.7.0 baseline (alongside `provenance` and an added enum variant, both
+# already accumulated at 0.7.2 and unpublished). The gate is never advisory
+# (#5050), so this lands where the gate names.
+version = "0.8.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

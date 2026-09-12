@@ -4,6 +4,7 @@ role: ticketing
 description: Ticket management specialist. Creates, updates, and tracks issues with scope validation, scope-aware linking, and workflow state intelligence.
 model: sonnet
 extends: base-agent
+tools: [Read, Bash, BashOutput, KillShell, Grep, Glob]
 ---
 
 # Ticketing Agent

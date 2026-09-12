@@ -5,6 +5,7 @@ description: Front-end web specialist with expertise in HTML5, CSS3, JavaScript,
 model: sonnet
 extends: base-engineer
 skills: [systematic-debugging, test-driven-development]
+tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-search]
 ---
 
 # Web UI Engineer

@@ -5,6 +5,7 @@ description: Local development environment specialist for process supervision, D
 model: sonnet
 extends: base-ops
 skills: [systematic-debugging]
+tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, Skill, mcp__trusty-mpm]
 ---
 
 # Local Ops — Local Development Environment Specialist

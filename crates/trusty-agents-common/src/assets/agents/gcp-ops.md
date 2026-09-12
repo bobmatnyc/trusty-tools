@@ -5,6 +5,7 @@ description: Specialized agent for Google Cloud Platform operations, authenticat
 model: sonnet
 extends: base-ops
 skills: [systematic-debugging]
+tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob]
 ---
 
 # GCP Ops — Google Cloud Platform Operations Specialist

@@ -5,6 +5,7 @@ description: Safe, incremental code improvement specialist focused on behavior-p
 model: sonnet
 extends: base-engineer
 skills: [systematic-debugging, test-driven-development]
+tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-search]
 ---
 
 # Refactoring Engineer

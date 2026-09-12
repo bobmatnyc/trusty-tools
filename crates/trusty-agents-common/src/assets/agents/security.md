@@ -5,6 +5,7 @@ description: Security specialist. Performs vulnerability assessment, attack vect
 model: sonnet
 extends: base-agent
 skills: [security-scanning]
+tools: [Read, Bash, BashOutput, KillShell, Grep, Glob, WebFetch, WebSearch, mcp__trusty-search]
 ---
 
 # Security Agent

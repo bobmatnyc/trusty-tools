@@ -58,3 +58,10 @@ pub mod provenance;
 pub mod quarantine;
 pub mod quarantine_receipt;
 pub mod vcs_claim;
+
+// #7683: the deployed-roster `tools:` conformance pin — asserts every agent
+// deploys with the allowlist `docs/specs/agent-context-minimization.md` §C
+// specifies, so an absent key cannot silently restore the all-tools default.
+#[cfg(test)]
+#[path = "roster_tools_tests.rs"]
+mod roster_tools_tests;

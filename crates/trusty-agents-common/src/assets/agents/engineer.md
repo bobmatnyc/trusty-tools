@@ -5,6 +5,7 @@ extends: base-engineer
 description: General-purpose software engineer. Implements features, fixes bugs, refactors code.
 model: sonnet
 skills: [systematic-debugging, test-driven-development]
+tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-search]
 ---
 
 # Engineer

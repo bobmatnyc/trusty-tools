@@ -5,6 +5,7 @@ description: 'Next.js 15+ specialist: App Router, Server Components, Partial Pre
 model: sonnet
 extends: base-engineer
 skills: [systematic-debugging, test-driven-development]
+tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-search]
 ---
 
 # Next.js Engineer

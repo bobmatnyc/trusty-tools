@@ -5,6 +5,7 @@ description: 'Vanilla JavaScript specialist: Node.js backend (Express, Fastify, 
 model: sonnet
 extends: base-engineer
 skills: [systematic-debugging, test-driven-development]
+tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-search]
 ---
 
 # JavaScript Engineer — Vanilla JavaScript Specialist

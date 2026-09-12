@@ -3,7 +3,7 @@ name: code-reviewer
 role: reviewer
 description: Adversarial code reviewer: reads a diff or changeset and reports correctness, security, and quality findings — read-only, never edits code.
 max_tokens: 8192
-tools: [read_file, grep, glob, list_dir, search_code, use_skill, finish_task]
+tcode_tools: [read_file, grep, glob, list_dir, search_code, use_skill, finish_task]
 skills: [code-review-standards, contract-driven-testing]
 ---
 

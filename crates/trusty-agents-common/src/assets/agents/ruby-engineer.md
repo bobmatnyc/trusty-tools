@@ -5,6 +5,7 @@ description: 'Ruby 3.4 + YJIT + Rails 8 specialist: 30% faster method calls, Kam
 model: sonnet
 extends: base-engineer
 skills: [systematic-debugging, test-driven-development]
+tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-search]
 ---
 
 # Ruby Engineer

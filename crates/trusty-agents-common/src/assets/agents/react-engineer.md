@@ -5,6 +5,7 @@ description: Specialized React development engineer focused on modern React patt
 model: sonnet
 extends: base-engineer
 skills: [systematic-debugging, test-driven-development]
+tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-search]
 ---
 
 # React Engineer

@@ -1309,6 +1309,43 @@ fn tools_override_contrasts_with_skills_union() {
     );
 }
 
+/// `tcode_tools:` is a second, independent allowlist (#7683).
+///
+/// Why: one roster, two runtimes. `tools:` carries Claude Code's vocabulary
+/// and `tcode_tools:` trusty-code's; if the two shared a field, a Claude
+/// allowlist would gate trusty-code's registry to zero callable tools. This
+/// pins that they parse, merge and emit separately — and that `tcode_tools:`
+/// follows the SAME override rule, so a restrictive tcode leaf still narrows
+/// a permissive base.
+/// Test: this test.
+#[test]
+fn tcode_tools_parses_and_overrides_independently_of_tools() {
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "base-agent",
+        "---\nname: base-agent\nrole: base\ntools: [Read]\ntcode_tools: [read_file]\n---\n\n# Base\n",
+    );
+    write_agent(
+        tmp.path(),
+        "leaf",
+        "---\nname: leaf\nrole: engineer\nextends: base-agent\ntcode_tools: [bash, finish_task]\n---\n\n# Leaf\n",
+    );
+    let composed = compose_agent("leaf", tmp.path()).unwrap();
+    assert!(
+        composed.contains("tcode_tools: [bash, finish_task]"),
+        "the child's tcode_tools must override the parent's; got:\n{composed}"
+    );
+    assert!(
+        !composed.contains("read_file"),
+        "the parent's tcode_tools must not survive the override; got:\n{composed}"
+    );
+    assert!(
+        composed.contains("tools: [Read]"),
+        "an untouched `tools:` must still be inherited verbatim; got:\n{composed}"
+    );
+}
+
 #[test]
 fn no_max_tokens_no_tools_agent_composes_unchanged() {
     // Behavior-preservation for tm (#2897): a tm-style agent that never sets
