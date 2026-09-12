@@ -27,6 +27,15 @@
 #   could never go green. Positive evidence has to come from the artifact, and
 #   this case proves the distinction is actually drawn.
 #
+#   `clean-fresh` runs TWICE, and the pair is the #7577 case. The stream is the
+#   same both times; only cargo's exit status differs. At 0 it is the clean pass
+#   above. At 101 it is a DEFAULT-lane cargo that died with nothing in the
+#   stream to explain it — a crate outside EXCLUDES that fails to build under
+#   default features — and that must fail LANE-ERROR. It exited 0 until #7577,
+#   because the gate's FAIL CLOSED 9 loop skipped any lane with no declared
+#   members and `default` never has any: it is the one lane run unconditionally
+#   rather than declared in the lane file.
+#
 # What: feeds synthetic cargo JSON streams to the gate's `--json` entry point
 #   (with `--cargo-rc` to set the exit status being scored) against an empty
 #   baseline, asserting both the exit status and the finding code on stdout.
@@ -87,7 +96,8 @@ partial-cache.json${TAB}0${TAB}3${TAB}NOT-EXAMINED
 clean-fresh.json${TAB}0${TAB}0${TAB}-
 broken-link.json${TAB}101${TAB}1${TAB}UNBASELINED
 build-error.json${TAB}101${TAB}3${TAB}BUILD-ERROR
-unattributable.json${TAB}101${TAB}3${TAB}UNATTRIBUTABLE"
+unattributable.json${TAB}101${TAB}3${TAB}UNATTRIBUTABLE
+clean-fresh.json${TAB}101${TAB}3${TAB}LANE-ERROR"
 
 fail=0
 run=0

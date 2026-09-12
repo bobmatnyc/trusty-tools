@@ -111,7 +111,10 @@
 #   lane cases: an unbuildable lane whose stream is empty must fail
 #   LANE-NOT-EXAMINED rather than skip, an uncovered feature must fail
 #   FEATURE-UNCOVERED, and a broken link found only in a feature lane must reach
-#   the verdict.
+#   the verdict. Its `clean-fresh` pair (#7577) pins the lane the others cannot
+#   reach: the same stream at cargo exit 0 is the clean pass, and at 101 it is a
+#   DEFAULT-lane cargo that died with no attributable diagnostic, which must
+#   fail LANE-ERROR rather than print a pass.
 
 set -euo pipefail
 
@@ -203,7 +206,8 @@ done
 # crates/trusty-audit/ui/src-tauri, so its diagnostics attribute to the
 # `trusty-audit` directory, which trusty-audit itself documents — the crate
 # failing to build on Linux was therefore invisible in the crate count and
-# surfaced only as `cargo exited 101` on a lane the scorer does not score.
+# surfaced only as `cargo exited 101` on the default lane, which the scorer did
+# not score until #7577.
 EXCLUDES=(--exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --exclude trusty-audit-ui)
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/rustdoc-links.XXXXXX")"
@@ -714,10 +718,18 @@ for pkg in sorted(no_cfg):
 # produce a lane whose crates were never re-documented — and a lane that did
 # not run rustdoc for a crate has said nothing about that crate's links. It
 # FAILS; it is never a skip.
+#
+# #7577: EVERY lane is scored here, the `default` lane included. This loop used
+# to `continue` on an empty member set, and `default` has one by construction —
+# it is run by `run_lane default ""` and is never declared in the lane file, so
+# `lane_members` has no row for it. That skipped the LANE-ERROR arm below for
+# the one lane that runs unconditionally: a default-feature `cargo doc` that
+# exited non-zero with no attributable diagnostic printed a pass. An empty
+# member set names no crate, so `absent` is empty and only the LANE-ERROR arm
+# has anything to say about such a lane — which is the arm that was being
+# skipped.
 for lane_id, _p, lane_rc, _f in lanes:
     members = lane_members.get(lane_id) or set()
-    if not members:
-        continue
     want_dirs = {pkg_dir.get(p, p) for p in members}
     absent = sorted(want_dirs - lane_documented.get(lane_id, set()))
     for crate in absent:
