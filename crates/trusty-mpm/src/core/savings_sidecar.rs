@@ -1,7 +1,7 @@
 //! The two side files the instruction-compression producer keeps beside the
 //! savings ledger (#7245).
 //!
-//! Why: [`crate::core::savings_instructions::record_instruction_compression`]
+//! Why: [`crate::core::savings_instructions::record_instruction_compression_in`]
 //! runs in the `tm` process that compiles the prompt, BEFORE `claude` is
 //! spawned. The id the `💸` statusline segment folds by does not exist yet —
 //! Claude Code exports `CLAUDE_CODE_SESSION_ID` into its own children only. So

@@ -1,0 +1,2 @@
+Fixed
+- Two broken intra-doc links left behind by the #7584 rename: `write_compiled_prompt_to`'s doc named a `write_compiled_prompt_and_record` that was never added, and `savings_sidecar`'s module doc named `record_instruction_compression` rather than the `record_instruction_compression_in` that replaced it. `#![deny(rustdoc::broken_intra_doc_links)]` makes both hard errors, so `cargo doc` exited 101, the crate's `features` lane went unexamined, and the `Rustdoc intra-doc links` job stayed red on main (#7351).
