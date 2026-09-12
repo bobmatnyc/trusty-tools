@@ -118,6 +118,39 @@ git checkout feature-branch
 git merge origin/main
 ```
 
+### Pulling After a Merge — Check Untracked Collisions First
+
+<!-- #7558: the post-merge pull aborted blind on an untracked research doc the
+     incoming branch also committed, and the recovery was improvised by hand. -->
+
+`git pull --ff-only` refuses to run when the incoming commits add a path that
+already exists in your checkout as an untracked file:
+
+```
+error: The following untracked working tree files would be overwritten by merge:
+        docs/research/some-plan.md
+```
+
+The abort names the path and nothing else. Check for the collision before you
+pull rather than improvising a recovery after it fails:
+
+```bash
+git fetch origin
+git status --porcelain                        # untracked paths are the `??` rows
+git show origin/<base>:<path> | diff - <path> # one per colliding path
+```
+
+There are exactly two outcomes:
+
+- **Identical content** — the untracked copy is byte-for-byte what the branch
+  commits, so nothing is lost. Delete the untracked copy and pull.
+- **Differing content** — stop and report the diff. That copy holds work the
+  branch does not have, and the pull is not the thing to force.
+
+Never delete an untracked path to clear the abort without diffing it first: a
+`--ff-only` abort says two writers produced the same path, not that one of them
+is disposable.
+
 ### Undoing Changes
 
 ```bash
