@@ -604,3 +604,90 @@ fn a_brace_pair_inside_a_string_is_not_a_row_boundary() {
     );
     assert!(planned.is_clean(), "such a ledger is already clean");
 }
+
+/// The same genuine fold as [`KEEP_REAL_FOLD`], re-recorded a second later —
+/// the exact shape the live producers appended 312 times (#7658). Only `ts`
+/// differs.
+const DUP_REAL_FOLD: &str = r#"{"ts":"2026-09-11T09:12:01Z","session_id":"33333333-3333-4333-8333-333333333333","technique":"instruction-compression","tokens_saved":611,"tokens_before":6702,"cost_saved_usd":0.0018,"basis":"sources 26810 B - compiled 24363 B, at 4 B/token, priced at claude-sonnet-4-5 input $3/Mtok","model_source":"statusline"}"#;
+
+/// The same SESSION with a genuinely different fold — its prompt changed, so
+/// this is real data and must survive the collapse (#7658).
+const KEEP_SECOND_FOLD: &str = r#"{"ts":"2026-09-11T09:30:00Z","session_id":"33333333-3333-4333-8333-333333333333","technique":"instruction-compression","tokens_saved":900,"tokens_before":6702,"cost_saved_usd":0.0027,"basis":"sources 26810 B - compiled 23163 B, at 4 B/token, priced at claude-sonnet-4-5 input $3/Mtok","model_source":"statusline"}"#;
+
+/// Write `lines` as a ledger under a fresh temp root and return both.
+fn ledger_of(lines: &[&str]) -> (tempfile::TempDir, std::path::PathBuf) {
+    let root = tempfile::tempdir().expect("temp root");
+    let ledger = savings_log_in(root.path());
+    std::fs::create_dir_all(ledger.parent().expect("parent")).expect("mkdir");
+    std::fs::write(&ledger, format!("{}\n", lines.join("\n"))).expect("write");
+    (root, ledger)
+}
+
+/// Why (#7658): the producer-side guard stops NEW duplicates; the operator's
+/// ledger already carries 312 copies of one measurement, and the repair is the
+/// only surface allowed to remove a row. Five copies collapse to the earliest.
+/// Test: itself.
+#[test]
+fn plan_collapses_duplicate_rows() {
+    let (_root, ledger) = ledger_of(&[
+        KEEP_REAL_FOLD,
+        DUP_REAL_FOLD,
+        DUP_REAL_FOLD,
+        DUP_REAL_FOLD,
+        DUP_REAL_FOLD,
+    ]);
+
+    let planned = plan(&ledger).expect("plan");
+    assert_eq!(
+        planned.count_of(Reason::Duplicate),
+        4,
+        "four of the five copies are repeats"
+    );
+    let kept: Vec<&str> = planned.kept().map(|f| f.text.as_str()).collect();
+    assert_eq!(
+        kept,
+        vec![KEEP_REAL_FOLD],
+        "the EARLIEST copy is the one kept"
+    );
+
+    let applied = apply(&ledger, &planned, chrono::Utc::now()).expect("apply");
+    assert_eq!(applied.kept, 1);
+    assert_eq!(applied.quarantined, 4);
+    assert_eq!(
+        std::fs::read_to_string(&ledger).expect("read").trim(),
+        KEEP_REAL_FOLD,
+        "the repaired ledger holds exactly one copy"
+    );
+    assert!(
+        plan(&ledger).expect("re-plan").is_clean(),
+        "a second run must find nothing"
+    );
+}
+
+/// Why (#7658): `basis` is what separates a repeat from a second genuine fold.
+/// A collapse keyed on the session alone would delete real measurements.
+/// Test: itself.
+#[test]
+fn plan_keeps_rows_whose_basis_differs() {
+    let (_root, ledger) = ledger_of(&[KEEP_REAL_FOLD, KEEP_SECOND_FOLD, KEEP_ODDITY]);
+
+    let planned = plan(&ledger).expect("plan");
+    assert_eq!(planned.count_of(Reason::Duplicate), 0);
+    assert!(
+        planned.is_clean(),
+        "a ledger of distinct measurements needs no repair"
+    );
+}
+
+/// Why (#7658): only `instruction-compression` has producers that re-run
+/// against an unchanged input. A repeated `divert` row is a second real
+/// diversion, so the collapse must not reach it.
+/// Test: itself.
+#[test]
+fn plan_keeps_a_repeated_divert_row() {
+    let (_root, ledger) = ledger_of(&[KEEP_DIVERT, KEEP_DIVERT]);
+
+    let planned = plan(&ledger).expect("plan");
+    assert_eq!(planned.count_of(Reason::Duplicate), 0);
+    assert_eq!(planned.kept().count(), 2, "both diversions are real");
+}

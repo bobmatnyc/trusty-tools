@@ -105,6 +105,66 @@ fn the_sweep_claims_a_row_staged_under_another_session_scope() {
     assert_eq!(rows_in(&ledger), 1, "the row must land exactly once");
 }
 
+/// Why (#7658): THE live regression — 312 byte-identical
+/// `instruction-compression` rows for one Claude session. The sweep runs before
+/// the re-derivation's `has_row` guard and consults nothing itself, so a
+/// producer that re-stages the same measurement got it appended on every hook.
+/// The row's identity, not the staging file's presence, is what must bound the
+/// ledger.
+/// Test: itself.
+#[test]
+fn n_hooks_sweeping_a_restaged_row_append_exactly_one() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let root = tmp.path().join("framework");
+    let compiled = project_with_compiled_prompt(tmp.path(), "project", "managed-7658");
+    let project = tmp.path().join("project");
+    let ledger = crate::core::savings::savings_log_in(&root);
+
+    // 26 hooks, each preceded by a re-stage — the shape the live ledger shows,
+    // whichever producer does the re-staging.
+    for _ in 0..26 {
+        stage_row(&root, &compiled, &a_row("managed-7658"));
+        emit_staged_row_for_session_in(&root, &project, "claude-7658");
+    }
+
+    assert_eq!(
+        rows_in(&ledger),
+        1,
+        "26 hooks over one re-staged measurement must leave one row, got:\n{}",
+        std::fs::read_to_string(&ledger).unwrap_or_default()
+    );
+    assert!(
+        !pending_row_path_in(&root, &compiled).exists(),
+        "a redundant staged row must be dropped, not left to be claimed again"
+    );
+}
+
+/// Why (#7658) — the Fail-Open Check at the sweep. A ledger that cannot be READ
+/// answers neither "present" nor "absent", so the claim must put the row back
+/// rather than append blind. The opposite reading is the fail-open that makes an
+/// IO fault an unbounded append loop.
+/// Test: itself.
+#[test]
+fn an_unreadable_ledger_leaves_the_staged_row_alone() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let root = tmp.path().join("framework");
+    let compiled = project_with_compiled_prompt(tmp.path(), "project", "managed-7658b");
+    let project = tmp.path().join("project");
+    let ledger = crate::core::savings::savings_log_in(&root);
+    // A directory at the ledger path: readable as a path, unreadable as a file.
+    std::fs::create_dir_all(&ledger).expect("occupy the ledger path");
+
+    stage_row(&root, &compiled, &a_row("managed-7658b"));
+    assert!(
+        !emit_staged_row_for_session_in(&root, &project, "claude-7658b"),
+        "no row can be reported against a ledger that cannot be read"
+    );
+    assert!(
+        pending_row_path_in(&root, &compiled).exists(),
+        "the measurement must stay staged for a hook that can read the ledger"
+    );
+}
+
 /// Why (#7411): staging is the only route this producer has to the ledger, so a
 /// staged file that was never written — an unwritable directory, a `tm`
 /// upgraded between the compile and the hook — left the session with a blank

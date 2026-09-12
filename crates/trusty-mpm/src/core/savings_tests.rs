@@ -500,3 +500,153 @@ fn a_row_and_its_newline_leave_in_one_write() {
         "exactly one terminator: {written:?}"
     );
 }
+
+/// Why (#7658): the live regression. The operator's ledger carried 312
+/// byte-identical `instruction-compression` rows for one session because both
+/// producers called [`append_row`] without ever reading the file. N attempts at
+/// one measurement must leave exactly one row.
+/// Test: itself.
+#[test]
+fn append_row_once_writes_one_row_for_n_attempts() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let ledger = savings_log_in(dir.path());
+    let measurement = row("sess-dup", 183, 0.000_549);
+
+    let mut appended = 0usize;
+    for _ in 0..26 {
+        match append_row_once(&ledger, &measurement).expect("append") {
+            AppendOnce::Appended => appended += 1,
+            AppendOnce::AlreadyPresent => {}
+            AppendOnce::LedgerUnreadable => panic!("the ledger is readable in this test"),
+        }
+    }
+
+    assert_eq!(appended, 1, "only the first attempt may write");
+    let text = std::fs::read_to_string(&ledger).expect("read");
+    assert_eq!(
+        text.lines().filter(|line| !line.trim().is_empty()).count(),
+        1,
+        "26 attempts at one measurement must leave one row, got:\n{text}"
+    );
+}
+
+/// Why (#7658): a session whose prompt genuinely changes mid-run folds a second,
+/// DIFFERENT measurement, and suppressing that would lose real data. The key is
+/// `(session_id, technique, basis)`, never the session alone.
+/// Test: itself.
+#[test]
+fn append_row_once_still_records_a_different_basis() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let ledger = savings_log_in(dir.path());
+    let first = row("sess-a", 183, 0.000_549);
+    let mut second = first.clone();
+    second.basis = "sources 30000 B - compiled 20000 B".to_string();
+
+    assert_eq!(
+        append_row_once(&ledger, &first).expect("append"),
+        AppendOnce::Appended
+    );
+    assert_eq!(
+        append_row_once(&ledger, &second).expect("append"),
+        AppendOnce::Appended,
+        "a different basis is a different measurement"
+    );
+    assert_eq!(fold_session(&ledger, "sess-a").rows, 2);
+}
+
+/// Why (#7658) — the Fail-Open Check. An unreadable ledger must NOT read as "no
+/// row exists": that is exactly the fail-open that turns a read fault into an
+/// unbounded append loop. The write is skipped and the caller is told.
+/// Test: itself.
+#[test]
+fn append_row_once_skips_an_unreadable_ledger() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let ledger = savings_log_in(dir.path());
+    // A DIRECTORY at the ledger path reads back as an error that is not
+    // `NotFound` — the same shape as every other unreadable ledger this guard
+    // has to survive, and the one a test can create portably.
+    std::fs::create_dir_all(&ledger).expect("occupy the ledger path");
+
+    assert_eq!(
+        row_presence(&ledger, "sess-a", TECHNIQUE_INSTRUCTION_COMPRESSION, "b"),
+        RowPresence::Unreadable,
+        "an unreadable ledger must never report Absent"
+    );
+    assert_eq!(
+        append_row_once(&ledger, &row("sess-a", 183, 0.000_549)).expect("no error"),
+        AppendOnce::LedgerUnreadable,
+        "the write is skipped when the ledger cannot be read"
+    );
+}
+
+/// Why (#7658): a ledger that does not exist yet is the ordinary state on a
+/// machine no producer has run on — absent, not unreadable, so the first row
+/// still lands.
+/// Test: itself.
+#[test]
+fn row_presence_of_a_missing_ledger_is_absent() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let ledger = savings_log_in(dir.path());
+    assert_eq!(
+        row_presence(&ledger, "sess-a", TECHNIQUE_INSTRUCTION_COMPRESSION, "b"),
+        RowPresence::Absent
+    );
+}
+
+/// Why (#7658): the presence check must see a row the FOLD rejects, or a
+/// producer whose row is unfoldable re-appends it on every invocation forever —
+/// the same unbounded growth by another route.
+/// Test: itself.
+#[test]
+fn row_presence_finds_a_row_the_fold_rejects() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut unfoldable = row("sess-a", 0, 0.0);
+    unfoldable.basis = "sources 10 B - compiled 10 B".to_string();
+    let line = serde_json::to_string(&unfoldable).expect("encode");
+    let ledger = ledger_with(&dir, &[&line]);
+
+    assert_eq!(
+        fold_session(&ledger, "sess-a").rows,
+        0,
+        "the fold rejects a row with non-positive tokens_saved"
+    );
+    assert_eq!(
+        row_presence(
+            &ledger,
+            "sess-a",
+            TECHNIQUE_INSTRUCTION_COMPRESSION,
+            "sources 10 B - compiled 10 B"
+        ),
+        RowPresence::Present,
+        "a rejected row is still on the file and must suppress a re-append"
+    );
+}
+
+/// Why (#7658): `basis` is what separates a repeat from a new measurement, so a
+/// presence check that ignored it would suppress real data.
+/// Test: itself.
+#[test]
+fn row_presence_distinguishes_a_different_basis() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let line = serde_json::to_string(&row("sess-a", 183, 0.000_549)).expect("encode");
+    let ledger = ledger_with(&dir, &[&line]);
+
+    assert_eq!(
+        row_presence(
+            &ledger,
+            "sess-a",
+            TECHNIQUE_INSTRUCTION_COMPRESSION,
+            "sources 1000 B - compiled 400 B"
+        ),
+        RowPresence::Present
+    );
+    assert_eq!(
+        row_presence(
+            &ledger,
+            "sess-a",
+            TECHNIQUE_INSTRUCTION_COMPRESSION,
+            "sources 9999 B - compiled 400 B"
+        ),
+        RowPresence::Absent
+    );
+}

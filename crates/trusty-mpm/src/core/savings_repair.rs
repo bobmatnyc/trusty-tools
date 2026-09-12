@@ -77,24 +77,30 @@ pub const MARKER_DIR: &str = crate::core::savings_sidecar::NO_FOLD_WARNED_DIR;
 /// Why: the sidecar records the rule that matched each row, because a repair
 /// that cannot say why it took a row is one an operator cannot audit.
 /// What: `TestFixture` for [`is_test_fixture_row`]; `Malformed` for a fragment
-/// that is not parseable JSON at all.
-/// Test: `plan_classifies_a_mixed_ledger`.
+/// that is not parseable JSON at all; `Duplicate` for a repeat of an
+/// `instruction-compression` measurement already seen earlier in the file
+/// (#7658).
+/// Test: `plan_classifies_a_mixed_ledger`, `plan_collapses_duplicate_rows`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {
     /// The row carries [`FIXTURE_COMPILED_BASIS`] — written by a unit test.
     TestFixture,
     /// The text does not parse as a [`SavingsRow`].
     Malformed,
+    /// A later copy of an `instruction-compression` measurement already on the
+    /// ledger, matched on `(session_id, technique, basis)` (#7658).
+    Duplicate,
 }
 
 impl Reason {
     /// The stable string written into the sidecar and printed by the command.
     ///
-    /// Test: `plan_classifies_a_mixed_ledger`.
+    /// Test: `plan_classifies_a_mixed_ledger`, `plan_collapses_duplicate_rows`.
     pub fn label(self) -> &'static str {
         match self {
             Self::TestFixture => "test-fixture",
             Self::Malformed => "malformed",
+            Self::Duplicate => "duplicate",
         }
     }
 }
@@ -238,6 +244,32 @@ pub fn is_test_fixture_row(row: &SavingsRow) -> bool {
     row.technique == TECHNIQUE_INSTRUCTION_COMPRESSION && row.basis.contains(FIXTURE_COMPILED_BASIS)
 }
 
+/// Has this `instruction-compression` measurement already been seen on this
+/// ledger (#7658)?
+///
+/// Why: the producer-side guard stops NEW duplicates; a ledger that already
+/// carries 312 copies of one measurement needs them collapsed, and the repair
+/// is the only surface that may remove a row. Keying on `basis` alongside
+/// `session_id` is what separates "the same fold recorded again" from "a second,
+/// genuinely different fold in the same session" — the latter is real data and
+/// must survive. Only `instruction-compression` is keyed this way because it is
+/// the only technique whose producers re-run against an unchanged input; a
+/// `divert` row repeating its basis is a second real diversion.
+/// What: records the key on first sight and reports `true` on every sight after
+/// that. A row of any other technique is never a duplicate here.
+/// Test: `plan_collapses_duplicate_rows`,
+/// `plan_keeps_rows_whose_basis_differs`,
+/// `plan_keeps_a_repeated_divert_row`.
+fn is_repeat_measurement(
+    row: &SavingsRow,
+    seen: &mut std::collections::HashSet<(String, String)>,
+) -> bool {
+    if row.technique != TECHNIQUE_INSTRUCTION_COMPRESSION {
+        return false;
+    }
+    !seen.insert((row.session_id.clone(), row.basis.clone()))
+}
+
 /// Split one physical ledger line into the row fragments it actually holds.
 ///
 /// Why (#7579): the ledger's writer issued a row and its newline as two
@@ -300,6 +332,10 @@ pub fn plan(ledger: &Path) -> std::io::Result<LedgerPlan> {
         bytes_read: text.len() as u64,
         ..LedgerPlan::default()
     };
+    // #7658: the measurements already seen, in ledger order. The FIRST copy of
+    // each is kept — it carries the earliest `ts`, which is when the fold that
+    // produced it actually happened.
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
     for (index, line) in text.lines().enumerate() {
         let number = index + 1;
         planned.lines_read += 1;
@@ -315,6 +351,8 @@ pub fn plan(ledger: &Path) -> std::io::Result<LedgerPlan> {
             let quarantine = match &row {
                 None => Some(Reason::Malformed),
                 Some(row) if is_test_fixture_row(row) => Some(Reason::TestFixture),
+                // #7658: a repeat of a measurement already on the file.
+                Some(row) if is_repeat_measurement(row, &mut seen) => Some(Reason::Duplicate),
                 Some(_) => None,
             };
             planned.fragments.push(Fragment {
