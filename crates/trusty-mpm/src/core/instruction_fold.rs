@@ -17,6 +17,16 @@
 //! tables. It never rewrites a rule, never drops a table ROW, and never touches
 //! anything inside a fenced code block.
 //!
+//! **Whole-line semantics.** It drops only lines whose comment runs to the end
+//! of the line; any line MIXING comment and content is delivered untouched —
+//! verbatim, with no strip, no compaction and no trailing-whitespace trim. That
+//! is the rule the bundled corpus and the three golden prompts actually need,
+//! and it is deliberately blunter than the partial-line handling it replaces:
+//! three review rounds showed that every attempt to strip a comment span and
+//! feed the remainder back through the pipeline created a new interaction with
+//! fence state, table-row indentation, or the continuation branch. A line the
+//! fold cannot classify with certainty is delivered, never edited.
+//!
 //! **What it deliberately does not do.** It does not reflow paragraphs, strip
 //! issue citations, drop headings, or summarise. Every one of those changes what
 //! the PM reads; this pass changes only what the PM's Markdown renderer would
@@ -48,13 +58,20 @@ const FENCE: &str = "```";
 /// fenced-code state second — an open comment swallows a fence-shaped line as
 /// comment content, and testing the fence first corrupted the parser both ways
 /// (leaked comment text, then deleted real lines). Outside a comment and a
-/// fence it consumes the HTML-comment spans that OPEN a line (through the line
-/// that closes them, keeping any content that FOLLOWS a same-line close — see
-/// [`strip_leading_comments`]), trims trailing whitespace, collapses a run of
-/// blank lines to one, and strips the alignment padding from an unindented
-/// Markdown table row.
+/// fence it classifies a comment-opening line with [`after_open_close`] — the
+/// comment runs to the end of the line, so the line is dropped; content follows
+/// the close, so the line is delivered VERBATIM; the comment is still open, so
+/// the following lines belong to it — then trims trailing whitespace, collapses
+/// a run of blank lines to one, and strips the alignment padding from an
+/// unindented Markdown table row.
 /// Inside a fence every byte is emitted verbatim. A trailing newline on the
 /// input is preserved on the output; trailing blank lines are not.
+///
+/// A delivered mixed line never reaches [`compact_row`] and never toggles fence
+/// state: it is pushed exactly as authored. `<!-- lang -->` followed by a fence
+/// marker is therefore NOT a fence open, because the delivered line does not
+/// satisfy `trim_start().starts_with("```")` — pinned by
+/// `a_mixed_comment_and_fence_line_does_not_open_a_fence`.
 ///
 /// Determinism: pure function of `text` — no clock, no environment, no I/O. It
 /// is also idempotent: `fold(fold(x)) == fold(x)`.
@@ -64,7 +81,10 @@ const FENCE: &str = "```";
 /// `blank_line_runs_collapse`, `the_fold_is_idempotent`,
 /// `no_table_row_is_lost`,
 /// `a_fence_inside_an_open_comment_does_not_desynchronise_the_parser`,
-/// `content_after_a_same_line_comment_close_survives`.
+/// `content_after_a_same_line_comment_close_survives`,
+/// `a_mixed_comment_and_fence_line_does_not_open_a_fence`,
+/// `a_closing_line_that_carries_content_is_delivered_verbatim`,
+/// `an_indented_table_row_after_a_comment_is_delivered_verbatim`.
 pub(crate) fn fold_delivered_prompt(text: &str) -> String {
     let ends_with_newline = text.ends_with('\n');
     let mut out: Vec<String> = Vec::new();
@@ -80,9 +100,16 @@ pub(crate) fn fold_delivered_prompt(text: &str) -> String {
         // fence toggled back off the parser was still inside the comment and
         // DELETED real instruction lines until the next `-->`.
         if in_comment {
-            // A block comment's continuation lines carry no instruction either,
-            // so the whole block goes, not just its opening line.
-            in_comment = !line.contains(COMMENT_CLOSE);
+            // #7616: the open block ends at the first `-->`. Nothing follows it
+            // on this line — drop the line; something does — the line MIXES
+            // comment and content, so it is delivered untouched.
+            let Some(tail) = after_open_close(line) else {
+                continue;
+            };
+            in_comment = false;
+            if !tail.trim().is_empty() {
+                out.push(line.to_string());
+            }
             continue;
         }
         if line.trim_start().starts_with(FENCE) {
@@ -99,11 +126,11 @@ pub(crate) fn fold_delivered_prompt(text: &str) -> String {
         let body = kept.trim_start();
 
         if body.starts_with(COMMENT_OPEN) {
-            // #7616: a comment that CLOSES on its own line can still be followed
-            // by real content, so the span goes and the remainder stays.
-            match strip_leading_comments(body, &mut in_comment) {
-                Some(rest) => out.push(compact_row(rest)),
-                None => continue,
+            // #7616: same three-way decision as the continuation above.
+            match after_open_close(body) {
+                None => in_comment = true,
+                Some(tail) if tail.trim().is_empty() => {}
+                Some(_) => out.push(line.to_string()),
             }
             continue;
         }
@@ -128,41 +155,38 @@ pub(crate) fn fold_delivered_prompt(text: &str) -> String {
     folded
 }
 
-/// Consume the HTML-comment spans that OPEN a line, returning what follows.
+/// What follows the FIRST `-->` on a line, or `None` when the line has none.
 ///
-/// Why (#7616): the fold used to drop the whole physical line whenever it began
-/// with `<!--`, which silently deleted real content on a line whose comment also
-/// closed on it — `<!-- note -->REAL CONTENT HERE` delivered nothing. No bundled
-/// section or `CLAUDE.md` hits that shape today, but the fold's whole claim is
-/// that it removes only bytes that carry no instruction, and a pass that can
-/// delete a rule under any input does not hold that claim.
+/// Why (#7616): this is the whole-line classifier, and it replaces a
+/// partial-line one that three review rounds could not make safe. Each attempt
+/// to strip a span and hand the remainder back to the rest of the pipeline
+/// created a new interaction — a stripped remainder that was fence-shaped never
+/// toggled fence state, a trimmed remainder lost the indentation
+/// [`compact_row`] keys its table-row exemption on, and the continuation branch
+/// still dropped a closing line that carried content. The classifier answers one
+/// question instead: does this line's comment run to the end of the line?
 ///
-/// What: repeatedly removes a leading `<!-- … -->` span and trims, then returns
-/// the remaining content — `None` when nothing but comment was on the line (the
-/// line then vanishes, leaving no blank behind, exactly as before) or when a
-/// span is left OPEN, which also sets `in_comment` so the following lines are
-/// consumed until its close.
+/// What: the substring after the first `-->`. An empty-or-whitespace answer
+/// means the line is comment through to its end and is dropped; a non-empty one
+/// means the line MIXES comment and content, and the caller delivers it
+/// verbatim — no strip, no compaction, no trailing-whitespace trim. `None` means
+/// the comment is still open and the following lines belong to it.
 ///
-/// **Leading spans only, deliberately.** A span that merely appears mid-line is
-/// left alone: a line can legitimately carry the marker grammar inside backticks
-/// while teaching a project how to override a section, and stripping every span
-/// anywhere would delete that documentation from an override body. Leaving a
-/// mid-line comment in the delivered prompt costs a few bytes; deleting a rule
-/// is the failure this function exists to prevent.
+/// **FIRST, not last, and that choice is content-preserving.** With the LAST
+/// `-->`, `<!-- a --> text <!-- b -->` classifies as comment-to-end-of-line and
+/// ` text ` is deleted — the exact defect class this issue is about. With the
+/// first, that line is mixed and survives untouched. The cost is the reverse
+/// case, `<!-- a --><!-- b -->`, which is pure comment yet is delivered: a few
+/// bytes kept, never a rule lost. That trade is deliberate and pinned by
+/// `a_line_of_two_comment_spans_is_delivered_rather_than_risk_deleting_content`.
 ///
 /// Test: `content_after_a_same_line_comment_close_survives`,
 /// `two_comments_on_one_line_keep_the_text_between_them`,
-/// `a_line_that_is_only_a_comment_leaves_no_blank_behind`.
-fn strip_leading_comments<'a>(body: &'a str, in_comment: &mut bool) -> Option<&'a str> {
-    let mut rest = body;
-    while rest.starts_with(COMMENT_OPEN) {
-        let Some(at) = rest.find(COMMENT_CLOSE) else {
-            *in_comment = true;
-            return None;
-        };
-        rest = rest[at + COMMENT_CLOSE.len()..].trim();
-    }
-    (!rest.is_empty()).then_some(rest)
+/// `a_line_that_is_only_a_comment_leaves_no_blank_behind`,
+/// `a_closing_line_that_carries_content_is_delivered_verbatim`.
+fn after_open_close(line: &str) -> Option<&str> {
+    line.find(COMMENT_CLOSE)
+        .map(|at| &line[at + COMMENT_CLOSE.len()..])
 }
 
 /// Strip the alignment padding from an unindented Markdown table row.

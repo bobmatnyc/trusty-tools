@@ -103,45 +103,58 @@ fn a_fence_inside_an_open_comment_does_not_desynchronise_the_parser() {
     );
 }
 
-/// #7616 REGRESSION: a comment that CLOSES on its own line must not take the
-/// real content that follows it with it.
+// ---------------------------------------------------------------------------
+// #7616 — whole-line semantics.
+//
+// A line whose comment runs to the end of the line is dropped. A line that
+// MIXES comment and content is delivered VERBATIM — no strip, no compaction, no
+// trailing-whitespace trim. Three review rounds of partial-line handling each
+// produced a new interaction (fence state, table-row indentation, the
+// continuation branch), so the fold now edits only lines it can classify with
+// certainty and delivers the rest untouched.
+// ---------------------------------------------------------------------------
+
+/// #7616: content after a same-line close survives, as the whole line.
 ///
-/// Why: the fold dropped the whole physical line whenever it began with `<!--`,
-/// so `<!-- note -->REAL CONTENT HERE` delivered nothing at all. The parser did
-/// not desynchronise — the damage is bounded to that one line — and no bundled
-/// section or `CLAUDE.md` carries the shape today. It still breaks the fold's
-/// only claim, that it removes nothing which carries instruction.
-/// FAILS BEFORE THIS CHANGE: the output is `after\n`.
+/// Why verbatim rather than the content alone: handing a stripped remainder back
+/// to the pipeline is what produced three rounds of findings. Delivering the
+/// physical line costs the comment's own bytes and cannot lose a rule.
 /// Test: itself.
 #[test]
 fn content_after_a_same_line_comment_close_survives() {
     let folded = fold_delivered_prompt("<!-- note -->REAL CONTENT HERE\nafter\n");
-    assert_eq!(folded, "REAL CONTENT HERE\nafter\n");
+    assert_eq!(folded, "<!-- note -->REAL CONTENT HERE\nafter\n");
 }
 
-/// #7616: two complete spans on one line — the text BETWEEN them survives, and
-/// the trailing span is left in place.
-///
-/// Why the trailing span stays: stripping every span anywhere in a line would
-/// delete the marker grammar from any override body that teaches it inside
-/// backticks, which is a rule loss. Leading spans are unambiguous; a mid-line
-/// one is not worth the risk for the bytes it saves. So the contract is
-/// asymmetric on purpose, and this test states the asymmetry rather than
-/// leaving it to be discovered.
+/// #7616: two complete spans on one line — the whole line is delivered, so the
+/// text between them cannot be lost.
 /// Test: itself.
 #[test]
 fn two_comments_on_one_line_keep_the_text_between_them() {
     let folded = fold_delivered_prompt("<!-- a --> text <!-- b -->\n");
-    assert_eq!(folded, "text <!-- b -->\n");
+    assert_eq!(folded, "<!-- a --> text <!-- b -->\n");
+}
+
+/// #7616: the accepted cost of classifying on the FIRST `-->`.
+///
+/// Why: a line of two adjacent spans carries no content, yet the first close is
+/// not the end of the line, so it is delivered. Classifying on the LAST `-->`
+/// would drop it — and would also drop `<!-- a --> text <!-- b -->`, deleting
+/// ` text `. Keeping a few comment bytes is the safe side of that trade, and
+/// this test exists so the cost is visible rather than discovered.
+/// Test: itself.
+#[test]
+fn a_line_of_two_comment_spans_is_delivered_rather_than_risk_deleting_content() {
+    let folded = fold_delivered_prompt("<!-- a --><!-- b -->\n");
+    assert_eq!(folded, "<!-- a --><!-- b -->\n");
 }
 
 /// #7616: the ordinary case must not regress — a line that is ONLY a comment
 /// still vanishes, and leaves no blank line behind where it stood.
 ///
-/// Why this is asserted separately: the same-line-close fix routes that line
-/// through a new path, and the obvious implementation of it emits an empty
-/// string, which would insert a blank into every delivered prompt at each
-/// authoring comment and change all three goldens.
+/// Why this is asserted separately: it is the branch the three bundled goldens
+/// depend on. An implementation that emitted an empty string here would insert a
+/// blank at every authoring comment and change all three.
 /// Test: itself.
 #[test]
 fn a_line_that_is_only_a_comment_leaves_no_blank_behind() {
@@ -149,14 +162,78 @@ fn a_line_that_is_only_a_comment_leaves_no_blank_behind() {
     assert_eq!(folded, "before\nafter\n");
 }
 
-/// #7616: an UNTERMINATED span on a line that also carries earlier complete
-/// spans still opens comment state, so the lines after it are consumed to the
-/// close rather than leaking.
+/// #7616 REGRESSION (critic input 1): a mixed comment/fence line is delivered
+/// verbatim and does NOT open a fence.
+///
+/// Why the fence state matters: the delivered text ends in a fence marker, but
+/// the LINE does not satisfy `trim_start().starts_with("```")`, so `in_fence`
+/// stays false. The row after it is therefore outside a fence and compacts; the
+/// next bare fence marker opens one, and the row inside it is verbatim. That is
+/// the contract, pinned here rather than left to be rediscovered.
+/// FAILS BEFORE THIS CHANGE: the stripped remainder was compacted through
+/// `compact_row` without toggling fence state, so the fenced row was compacted
+/// and the unfenced one was left padded.
 /// Test: itself.
 #[test]
-fn an_unterminated_span_after_a_closed_one_still_opens_comment_state() {
-    let folded = fold_delivered_prompt("<!-- a --><!-- open\nswallowed\n-->\nreal\n");
+fn a_mixed_comment_and_fence_line_does_not_open_a_fence() {
+    let src = "<!-- lang -->```\n\
+               |  a  |  b  |\n\
+               ```\n\
+               |  c  |  d  |\n";
+
+    let folded = fold_delivered_prompt(src);
+
+    assert_eq!(
+        folded,
+        "<!-- lang -->```\n\
+         |a|b|\n\
+         ```\n\
+         |  c  |  d  |\n"
+    );
+}
+
+/// #7616 REGRESSION (critic input 2): the line that CLOSES an open comment is
+/// delivered verbatim when content follows the close.
+///
+/// FAILS BEFORE THIS CHANGE: the continuation branch dropped the whole closing
+/// line, so the output was `\n`.
+/// Test: itself.
+#[test]
+fn a_closing_line_that_carries_content_is_delivered_verbatim() {
+    let folded = fold_delivered_prompt("<!-- open\nstuff\nclose --> REAL CONTENT\n");
+    assert_eq!(folded, "close --> REAL CONTENT\n");
+}
+
+/// #7616 REGRESSION (critic input 3): an indented table row on a mixed line
+/// keeps its indentation.
+///
+/// Why: `compact_row` exempts an INDENTED table-shaped line, because indentation
+/// inside a list item is structural. The partial-line path trimmed the remainder
+/// before handing it over, which silently removed that exemption.
+/// FAILS BEFORE THIS CHANGE: the row came back as `|a|b|`.
+/// Test: itself.
+#[test]
+fn an_indented_table_row_after_a_comment_is_delivered_verbatim() {
+    let folded = fold_delivered_prompt("<!-- c -->  | a | b |\n");
+    assert_eq!(folded, "<!-- c -->  | a | b |\n");
+}
+
+/// #7616: state pair — an open comment that never closes swallows the rest of
+/// the input, including fence-shaped lines, and delivers nothing.
+/// Test: itself.
+#[test]
+fn an_unclosed_comment_swallows_the_rest_of_the_input() {
+    let folded = fold_delivered_prompt("real\n<!-- open\n```\nnever closed\n");
     assert_eq!(folded, "real\n");
+}
+
+/// #7616: state pair — a comment-shaped line INSIDE a fence is content, so it is
+/// emitted verbatim and never opens comment state.
+/// Test: itself.
+#[test]
+fn a_comment_inside_a_fence_is_content_not_comment_state() {
+    let src = "```\n<!-- TRUSTY-MPM: WORKFLOW START v=1 -->\n```\nafter\n";
+    assert_eq!(fold_delivered_prompt(src), src);
 }
 
 #[test]
