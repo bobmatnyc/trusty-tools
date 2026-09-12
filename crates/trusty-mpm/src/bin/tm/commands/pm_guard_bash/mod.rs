@@ -74,7 +74,8 @@ pub(crate) use heredoc::split_heredoc_bodies;
 // same process-substitution stripper a COPY of one is.
 pub(crate) use secret_file_copy::{
     any_pattern_overlaps, evaluate_secret_file_copy_command, expand_brace_alternatives,
-    matches_only_name_substring_family, secret_pattern_overlaps, strip_process_substitution,
+    matches_only_name_substring_family, occurs_in_a_secret_literal_core, secret_pattern_overlaps,
+    strip_process_substitution,
 };
 // #7266 round 5: the read rule allowlists `git add`/`rm`/`mv`/`status`, and the
 // subcommand behind `git -C <path> …` is already parsed here. One parser, two

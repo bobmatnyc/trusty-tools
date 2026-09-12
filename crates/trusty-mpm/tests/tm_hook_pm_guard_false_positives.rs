@@ -273,6 +273,15 @@ fn pm_guard_still_denies_what_the_7533_withdrawals_protected() {
     assert_denied("cat ./.*rc");
     assert_denied("cat id_rs?");
     assert_denied("cat *nv");
+    // #7533 review round, CRITICAL: a ONE-literal glob whose literal completes
+    // a family core is not exempt. Each row denied at merge-base 53f952346,
+    // allowed at cc71b01b8, and denies again here.
+    assert_denied("cat *a");
+    assert_denied("cat *e");
+    assert_denied("cat *n");
+    assert_denied("cat ~/.ssh/*a");
+    assert_denied("cp ~/.ssh/*a /tmp/x");
+    assert_denied("grep -l pattern ~/.ssh/*a");
     assert_denied("cat secrets.txt");
     assert_denied("cat id_rsa.");
     assert_denied("git worktree add .worktrees/x .env");

@@ -336,8 +336,8 @@ use std::path::Path;
 use crate::commands::hook_rewrite::{first_command_token, strip_wrapper_prefix};
 use crate::commands::pm_guard_bash::{
     any_pattern_overlaps, expand_brace_alternatives, git_argv_at_subcommand, git_subcommand,
-    matches_only_name_substring_family, secret_pattern_overlaps, split_heredoc_bodies,
-    split_shell_segments, strip_process_substitution,
+    matches_only_name_substring_family, occurs_in_a_secret_literal_core, secret_pattern_overlaps,
+    split_heredoc_bodies, split_shell_segments, strip_process_substitution,
 };
 // #7414: the word-cutting layer moved out when the brace-literal fix pushed
 // this file over the 500-SLOC cap.
@@ -1414,10 +1414,10 @@ const GLOB_ONLY_TRANSPARENT_EXTENSIONS: &[&str] = &["json"];
 
 /// Whether one already-brace-expanded name or glob is a secret-bearing target.
 fn names_a_secret(candidate: &str) -> bool {
-    // #7533: a glob with at most one literal character selects no family in
-    // particular, exactly as an all-wildcard one does.
+    // #7533: a one-literal glob is exempt only when that literal cannot
+    // complete a family core — the overlap question is asked FIRST.
     if selects_every_name(candidate)
-        || carries_one_literal_character(candidate)
+        || cannot_select_a_secret_family(candidate)
         || has_transparent_source_extension(candidate)
     {
         return false;
@@ -1446,35 +1446,57 @@ fn selects_every_name(candidate: &str) -> bool {
     !candidate.is_empty() && candidate.bytes().all(|b| b == b'*' || b == b'?')
 }
 
-/// Whether `candidate` is a wildcard carrying exactly ONE literal character,
-/// and does not lead with a `.` (#7533).
+/// Whether `candidate` is a one-literal glob whose single literal PROVABLY
+/// cannot select a member of the secret-bearing file class (#7533).
 ///
-/// Why: [`selects_every_name`] already allows a glob with no literal at all,
-/// because it selects what a no-glob call selects. One literal character is
-/// the same answer one notch along: `*a` reaches a SUBSET of what the
-/// already-allowed `*` reaches, so refusing it protects nothing the guard is
-/// not already conceding. What it costs is Markdown — the word scan keeps `*`
-/// and `?` in a word, so the two asterisks opening a bold span glue onto the
-/// next letter and the fragment overlaps the `id_rsa`/`id_ecdsa` cores through
-/// two unbounded wildcards, case-folded. `**A pipe confirms nothing at all.**`
-/// in a here-document body was refused five times in one session, and twice
-/// more on the `gh` commands reporting it.
-/// What: exactly one byte outside `*`/`?`, at least one wildcard, and no
-/// leading `.`. The dot clause is what keeps the concession bounded: `*` does
-/// not match a dotfile, so `.*`, `.e*` and `./.*rc` are NOT a subset of it and
-/// stay screened — they are the one shape a single literal still aims at a
-/// family (`.env`, `.netrc`).
-/// Test: `allows_a_markdown_emphasis_fragment_7533`,
+/// Why: the word scan keeps `*` and `?` inside a word, so the two asterisks
+/// opening a Markdown bold span glue onto the next letter, and `**A` overlaps
+/// the `id_rsa`/`id_ecdsa` cores through two unbounded wildcards once both
+/// sides are case-folded. That refused ordinary prose five times in one
+/// session, and twice more on the `gh` commands reporting it.
+///
+/// The first cut exempted every one-literal glob with no leading `.`, arguing
+/// it reached a subset of the already-allowed bare `*`. The review round
+/// measured that argument and it does not hold: the subset claim came from
+/// [`selects_every_name`]'s Grep no-glob EQUIVALENCE, where the glob names
+/// nothing at all, and a one-literal glob does name something — the last
+/// character of a real file. `cat *a` (reaching `id_rsa`), `cat *e`
+/// (`*.tfstate`) and `cat *n` (`token*`, `*.ovpn`) each denied before that cut
+/// and allowed after it, through the argv path, the `cp` path and the `Grep`
+/// tool's `glob` field alike.
+///
+/// What: the overlap question is asked FIRST and the exemption is what
+/// survives it. Three clauses, all required — no leading `.`, at least one
+/// wildcard with exactly one literal byte beside it, and that byte absent from
+/// every denylist core ([`occurs_in_a_secret_literal_core`], case-sensitive).
+/// The case-sensitivity is the discriminator and the whole concession: every
+/// denylist entry is spelled in lower case and a shell's own glob matching is
+/// case-sensitive, so a lower-case literal can complete a core and is screened,
+/// while the upper-case letter a bold span opens a sentence with cannot. The
+/// leading-`.` clause stays because `*` matches no dotfile, so `.*`, `.e*` and
+/// `./.*rc` were never in the exempt shape to begin with.
+///
+/// The residual is named rather than hidden: `**a`, `**e` and any other
+/// lower-case single-letter emphasis still denies. That is the correct side to
+/// err on — the identical glob reaches a real key file — and it costs a bold
+/// span of one lower-case letter, not the reported prose.
+/// Test: `denies_a_one_literal_glob_that_completes_a_secret_core_7533`,
+/// `allows_a_markdown_emphasis_fragment_7533`,
 /// `denies_a_glob_that_expands_onto_a_secret_file`.
-fn carries_one_literal_character(candidate: &str) -> bool {
+fn cannot_select_a_secret_family(candidate: &str) -> bool {
     if candidate.starts_with('.') {
         return false;
     }
-    let is_wildcard = |b: &u8| matches!(b, b'*' | b'?');
-    let mut literals = candidate.bytes().filter(|b| !is_wildcard(b));
-    candidate.bytes().any(|b| is_wildcard(&b))
-        && literals.next().is_some()
-        && literals.next().is_none()
+    let is_wildcard = |b: u8| matches!(b, b'*' | b'?');
+    if !candidate.bytes().any(is_wildcard) {
+        return false;
+    }
+    let mut literals = candidate.bytes().filter(|b| !is_wildcard(*b));
+    // Zero literals is `selects_every_name`'s case, decided by its own rule.
+    let Some(only) = literals.next() else {
+        return false;
+    };
+    literals.next().is_none() && !occurs_in_a_secret_literal_core(only)
 }
 
 /// Whether `basename` carries an extension that NAMES something (#7533).
@@ -1828,6 +1850,53 @@ mod tests {
     }
 
     // --- #7533 -------------------------------------------------------------
+
+    /// A one-literal glob whose literal COMPLETES a family core still denies
+    /// (#7533 review round, CRITICAL).
+    ///
+    /// Why: the first cut exempted every one-literal glob with no leading `.`
+    /// on a "subset of the already-allowed bare `*`" argument. That argument
+    /// came from the Grep no-glob EQUIVALENCE, where the glob names nothing;
+    /// applied to a glob that does name something it hands over the last
+    /// character of every secret family. Each row here DENIED at merge-base
+    /// `53f952346`, ALLOWED at `cc71b01b8`, and denies again now.
+    /// What: the three reported letters through every surface the exemption
+    /// sits on — a Bash argv operand, a `cp` source, a search program's
+    /// operand, and the `Grep` tool's own `glob` field.
+    #[test]
+    fn denies_a_one_literal_glob_that_completes_a_secret_core_7533() {
+        // `*a` reaches `id_rsa`/`id_ecdsa`, `*e` reaches `*.tfstate`, `*n`
+        // reaches `token*` and `*.ovpn`.
+        for glob in ["*a", "*e", "*n", "**a", "*?a"] {
+            for command in [
+                format!("cat {glob}"),
+                format!("cat ~/.ssh/{glob}"),
+                format!("cp ~/.ssh/{glob} /tmp/x"),
+                format!("grep -l pattern ~/.ssh/{glob}"),
+            ] {
+                assert!(
+                    eval(&command).is_some(),
+                    "`{command}` reaches a secret family and must deny"
+                );
+            }
+            // The native `Grep` tool's own glob field takes the same answer.
+            let input = serde_json::json!({"pattern": "x", "path": "~/.ssh", "glob": glob});
+            assert!(
+                evaluate_secret_file_read_tool("Grep", Some(&input)).is_some(),
+                "Grep(glob = `{glob}`) reaches a secret family and must deny"
+            );
+        }
+        // The exemption is what survives that check, not what precedes it: an
+        // upper-case literal completes no core, because every denylist entry
+        // is lower case and shell globbing is case-sensitive.
+        for glob in ["**A", "*Q", "*Z", "**7"] {
+            assert_eq!(
+                eval(&format!("echo {glob}")),
+                None,
+                "`{glob}` completes no core and must allow"
+            );
+        }
+    }
 
     /// Markdown emphasis in prose is not a secret-file glob (#7533).
     ///

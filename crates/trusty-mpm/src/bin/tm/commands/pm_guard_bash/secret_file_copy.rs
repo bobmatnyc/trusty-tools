@@ -381,6 +381,29 @@ fn pattern_literal_core(pattern: &str) -> String {
     pattern.replace('*', "")
 }
 
+/// Whether `byte` occurs, CASE-SENSITIVELY, in any denylist entry's literal
+/// core (#7533).
+///
+/// Why: the read rule exempts a glob carrying a single literal character, and
+/// that exemption is only sound while the character cannot complete a core. It
+/// can: `*a` reaches `id_rsa`, `*e` reaches `*.tfstate`, `*n` reaches `token*`
+/// and `*.ovpn`, so exempting on shape alone hands over the last character of
+/// every secret family. This is the question the exemption must answer FIRST,
+/// asked of the denylist itself rather than of a copy.
+/// What: membership of the byte in the entries with their `*`s removed. The
+/// comparison is case-SENSITIVE, and that is the whole discriminator: every
+/// entry is spelled in lower case and a shell's own glob matching is
+/// case-sensitive, so a lower-case literal can complete a core and an
+/// upper-case one — which is what Markdown emphasis produces at the start of a
+/// sentence — cannot.
+/// Test: `every_denylist_entry_is_spelled_in_lower_case`, and
+/// `pm_guard_secret_read`'s `denies_a_one_literal_glob_that_completes_a_secret_core_7533`.
+pub(crate) fn occurs_in_a_secret_literal_core(byte: u8) -> bool {
+    SECRET_BEARING_FILE_PATTERNS
+        .iter()
+        .any(|pattern| pattern.bytes().any(|b| b != b'*' && b == byte))
+}
+
 /// Whether `candidate` — a caller-supplied GLOB, or a literal basename — names
 /// a file in [`SECRET_BEARING_FILE_PATTERNS`]'s classes.
 ///
@@ -1085,6 +1108,31 @@ mod tests {
             Path::new("/repo/.claude/worktrees/agent-x"),
             &env(),
         )
+    }
+
+    /// Every denylist entry is spelled in LOWER CASE (#7533 review round).
+    ///
+    /// Why: [`occurs_in_a_secret_literal_core`] compares case-sensitively, and
+    /// the read rule's one-literal-glob exemption rests entirely on that — an
+    /// upper-case literal is exempt only because no core carries one. An entry
+    /// added as `*.PEM` would silently widen the exemption to every lower-case
+    /// letter in it, so the invariant is asserted rather than assumed.
+    #[test]
+    fn every_denylist_entry_is_spelled_in_lower_case() {
+        for pattern in SECRET_BEARING_FILE_PATTERNS {
+            assert_eq!(
+                *pattern,
+                pattern.to_ascii_lowercase(),
+                "`{pattern}` must be lower case: the one-literal-glob exemption \
+                 in `pm_guard_secret_read` reads this list case-sensitively"
+            );
+        }
+        // The predicate that consumes the invariant, both directions.
+        assert!(occurs_in_a_secret_literal_core(b'a'));
+        assert!(occurs_in_a_secret_literal_core(b'e'));
+        assert!(occurs_in_a_secret_literal_core(b'n'));
+        assert!(!occurs_in_a_secret_literal_core(b'A'));
+        assert!(!occurs_in_a_secret_literal_core(b'*'));
     }
 
     /// A word family ending a sentence is prose, not a laundered file (#7533).
