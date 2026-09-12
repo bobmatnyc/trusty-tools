@@ -55,6 +55,10 @@ fn run_tm_compress_with(env: &[(&str, &str)], tool: &str, input: &str) -> (bool,
     let mut child = Command::new(bin)
         .args(["compress", "--tool", tool])
         .env_remove(ENV_COMPRESS_NO_RTK)
+        // #7514: the child would otherwise inherit the developer's live
+        // CLAUDE_CODE_SESSION_ID and append a real `compress` savings row to
+        // their own ledger. Cleared on the CHILD, never on this process.
+        .env_remove(trusty_mpm::core::savings::CLAUDE_CODE_SESSION_ID_ENV)
         .envs(env.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -125,6 +129,9 @@ fn run_wrapped_pipeline(inner: &str, tool: &str) -> (String, String) {
         .arg("-c")
         .arg(&script)
         .env(ENV_COMPRESS_NO_RTK, "1")
+        // #7514: see `run_tm_compress_with` — the `tm compress` at the tail of
+        // this pipeline must not key a savings row by the developer's session.
+        .env_remove(trusty_mpm::core::savings::CLAUDE_CODE_SESSION_ID_ENV)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

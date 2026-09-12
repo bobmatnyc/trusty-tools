@@ -1042,6 +1042,30 @@ fn a_bare_compiled_write_records_no_savings_row() {
     );
 }
 
+/// Why (#7514): the other half of the split — the recording write must land its
+/// measurement in the root the CALLER named, or threading the root through
+/// `prepare_session_inner` would be decoration. The fixture is LARGER than the
+/// source set on purpose: the producer then takes the "folded nothing" branch,
+/// which writes its marker before any model pricing, so the assertion does not
+/// depend on whether this host's configured PM model is in the price table.
+/// Test: itself.
+#[test]
+fn a_recording_compiled_write_reaches_the_named_framework_root() {
+    let root = TempDir::new().expect("framework root");
+    let project = TempDir::new().expect("project");
+    let dest = compiled_prompt_path(project.path(), "sess-7514");
+    let sources: usize = SECTION_SOURCES.iter().map(|(_, body)| body.len()).sum();
+    let bulky = "x".repeat(sources + 1);
+
+    write_compiled_prompt_recording_in(root.path(), &dest, &bulky).expect("write succeeds");
+
+    assert_eq!(fs::read_to_string(&dest).unwrap(), bulky);
+    assert!(
+        root.path().join("usage").join("no-fold-warned").exists(),
+        "the fold must be measured against the framework root the caller named"
+    );
+}
+
 #[test]
 fn compiled_prompt_write_is_the_full_assembled_prompt_never_a_stub() {
     // Why (#383 regression guard, retained through #4752's path move): the
@@ -1273,13 +1297,17 @@ fn refresh_compiled_prompt_writes_the_project_local_file() {
     //
     // FIXTURE: a stale sentinel is pre-seeded so "the file exists" cannot pass;
     // only a real refresh overwrites it.
+    //
+    // #7514: driven through the root-taking seam, so the fold this composes is
+    // recorded under `root` rather than the operator's own `~/.trusty-mpm`.
+    let root = TempDir::new().expect("framework root");
     let tmp = TempDir::new().expect("tempdir");
     let dest = compiled_prompt_path(tmp.path(), "sess-1");
     fs::create_dir_all(dest.parent().expect("has a parent")).expect("create parent");
     const STALE: &str = "STALE-FROM-A-PREVIOUS-LAUNCH";
     fs::write(&dest, STALE).expect("seed stale");
 
-    refresh_compiled_prompt(tmp.path(), "sess-1").expect("refresh must succeed");
+    refresh_compiled_prompt_in(root.path(), tmp.path(), "sess-1").expect("refresh must succeed");
 
     let on_disk = fs::read_to_string(&dest).expect("readable");
     assert_ne!(
@@ -1305,11 +1333,14 @@ fn refresh_compiled_prompt_reports_an_actionable_failure() {
     //
     // FIXTURE: a directory planted at the exact destination, so only this write
     // fails and nothing else in the compose path does.
+    // #7514: root-taking seam, so a failed refresh cannot touch the operator's
+    // ledger on its way to the error.
+    let root = TempDir::new().expect("framework root");
     let tmp = TempDir::new().expect("tempdir");
     let dest = compiled_prompt_path(tmp.path(), "sess-1");
     fs::create_dir_all(&dest).expect("plant a directory at the compiled path");
 
-    let msg = refresh_compiled_prompt(tmp.path(), "sess-1")
+    let msg = refresh_compiled_prompt_in(root.path(), tmp.path(), "sess-1")
         .expect_err("a failed compiled write must be reported as an error");
     assert!(
         msg.contains(&dest.display().to_string()),

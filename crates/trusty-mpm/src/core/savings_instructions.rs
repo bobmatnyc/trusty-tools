@@ -8,13 +8,12 @@
 //! by hand — means the figure re-derives itself when the instruction corpus
 //! changes, and it goes to zero honestly when nothing was folded.
 //!
-//! What: [`record_instruction_compression`] and its root-taking sibling
-//! [`record_instruction_compression_in`], called from the compiled-prompt
-//! writer's recording entry points
-//! ([`crate::core::instruction_pipeline::write_compiled_prompt_and_record`] and
-//! [`crate::core::instruction_pipeline::write_compiled_prompt_recording_in`]).
-//! #7514 split those off the bare write, which now records nothing. It compares
-//! the folded source set against the
+//! What: [`record_instruction_compression_in`], called from
+//! [`crate::core::instruction_pipeline::write_compiled_prompt_recording_in`].
+//! #7514 split that off the bare write, which now records nothing, and made the
+//! ledger's root a parameter rather than a read of the process home directory —
+//! each launch path resolves the ambient root once, in its own named wrapper.
+//! It compares the folded source set against the
 //! delivered prompt and appends one [`crate::core::savings::SavingsRow`] per
 //! session launch when, and only when, the delivered prompt is smaller.
 //!
@@ -92,31 +91,17 @@ use crate::core::savings_sidecar::{stage_row, warn_no_fold_once};
 /// Append one `instruction-compression` row for a session whose compiled prompt
 /// came out smaller than the sources that fed it.
 ///
-/// Why: called from the compiled-prompt writer so every launch path — fresh
-/// start, daemon resume, in-place relaunch — records the same way without each
-/// one growing its own call.
-/// What: reads the Claude Code session id the statusline folds by, then defers
-/// to [`record_instruction_compression_to`] against the default framework root.
-/// Test: `the_row_is_keyed_by_the_claude_session_id`,
-/// `no_claude_id_stages_the_row_instead_of_writing_an_unfoldable_one`.
-pub fn record_instruction_compression(dest: &Path, prompt: &str) {
-    record_instruction_compression_in(
-        &crate::core::paths::FrameworkPaths::default().root,
-        dest,
-        prompt,
-    );
-}
-
-/// [`record_instruction_compression`] against a caller-named framework root.
-///
-/// Why (#7514): the entry point above resolves its root from the operator's home
-/// directory, so every caller reachable from a test wrote into the operator's
-/// own ledger. A launch path that already holds a
-/// [`crate::core::paths::FrameworkPaths`] can name the root instead, and then a
-/// launch prepared under a temp root records under that temp root.
+/// Why: called from the compiled-prompt writer's recording entry points so every
+/// launch path — fresh start, daemon resume, in-place relaunch — records the same
+/// way without each one growing its own call. #7514 removed the ambient
+/// `record_instruction_compression` that resolved `framework_root` from the
+/// process home directory: every caller reachable from a test wrote into the
+/// operator's own ledger through it. Each launch path now resolves the ambient
+/// root once, in its own named wrapper, and passes it down.
 /// What: reads the Claude Code session id the statusline folds by, then defers to
 /// [`record_instruction_compression_to`] against `framework_root`.
-/// Test: `a_bare_compiled_write_records_no_savings_row`.
+/// Test: `a_bare_compiled_write_records_no_savings_row`,
+/// `a_recording_compiled_write_reaches_the_named_framework_root`.
 pub(crate) fn record_instruction_compression_in(framework_root: &Path, dest: &Path, prompt: &str) {
     // #7209: the row's key is the Claude Code session id, not the directory name.
     record_instruction_compression_to(

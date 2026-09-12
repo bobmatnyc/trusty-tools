@@ -266,25 +266,68 @@ async fn compress_with_raw_fallback(
 /// [`trusty_mpm::core::savings_compress::record_compress`], which declines a
 /// passthrough run rather than writing a zero-saving row. Declines quietly with
 /// no session id or no resolvable root; never fails the compression.
-/// Test: the producer's own suite in `savings_compress_tests.rs`.
+///
+/// #7514: the two ambient reads are ISOLATED here and nowhere else, so the only
+/// way a caller reaches the operator's ledger is by going through this function.
+/// `run_compress` is the one that does; every test drives
+/// [`record_compress_savings_with`] or the producer directly, and the
+/// `tests/tm_compress_pipe.rs` helpers — which spawn the real binary and so
+/// cannot be given a Rust parameter — clear `CLAUDE_CODE_SESSION_ID` from the
+/// CHILD's environment instead. A test that appends a row keyed by the
+/// developer's own live session id is the defect #7514 names.
+/// Test: `record_compress_savings_with_declines_without_a_session_id`.
 fn record_compress_savings(bytes_before: usize, bytes_after: usize, compression_path: &str) {
-    let Some(session_id) = trusty_mpm::core::savings::claude_code_session_id() else {
-        tracing::debug!("no claude session id: writing no compress savings row");
-        return;
-    };
     let root = match crate::commands::managed_root::resolve_managed_paths(None) {
-        Ok(paths) => paths.root,
+        Ok(paths) => Some(paths.root),
         Err(source) => {
             tracing::warn!(
                 %source,
                 "cannot resolve the framework root: writing no compress savings row"
             );
-            return;
+            None
         }
     };
+    record_compress_savings_with(
+        root.as_deref(),
+        trusty_mpm::core::savings::claude_code_session_id().as_deref(),
+        bytes_before,
+        bytes_after,
+        compression_path,
+    );
+}
+
+/// [`record_compress_savings`] with the framework root and session id supplied.
+///
+/// Why (#7514): `resolve_managed_paths` reads the operator's `--root` /
+/// `TRUSTY_MPM_ROOT` / config chain and `claude_code_session_id` reads the
+/// harness variable, so a test that reached this code wrote a real row into the
+/// operator's real ledger under the developer's own live session id. Injecting
+/// both — rather than setting them, which the `src/bin/tm/**` env ratchet
+/// (#5544) forbids — keeps the decision testable and leaves exactly one
+/// ambient call site.
+/// What: declines with no session id, a blank one, or no resolvable root;
+/// otherwise defers to
+/// [`trusty_mpm::core::savings_compress::record_compress`], which declines a
+/// passthrough run itself.
+/// Test: `record_compress_savings_with_declines_without_a_session_id`,
+/// `record_compress_savings_with_writes_under_the_named_root`.
+fn record_compress_savings_with(
+    root: Option<&std::path::Path>,
+    session_id: Option<&str>,
+    bytes_before: usize,
+    bytes_after: usize,
+    compression_path: &str,
+) {
+    let Some(session_id) = session_id.map(str::trim).filter(|id| !id.is_empty()) else {
+        tracing::debug!("no claude session id: writing no compress savings row");
+        return;
+    };
+    let Some(root) = root else {
+        return;
+    };
     trusty_mpm::core::savings_compress::record_compress(
-        &root,
-        &session_id,
+        root,
+        session_id,
         bytes_before,
         bytes_after,
         compression_path,
@@ -637,6 +680,42 @@ mod tests {
             "expected compression to shrink repetitive passing-test output"
         );
         assert!(compressed.contains("test result"));
+    }
+
+    /// Why (#7514): `tm compress`'s savings write read the operator's framework
+    /// root and the live `CLAUDE_CODE_SESSION_ID`, so a test that reached it
+    /// appended a real `compress` row to the operator's ledger keyed by the
+    /// developer's own session. The decline must be a property of the injected
+    /// inputs, not of the machine.
+    /// Test: itself.
+    #[test]
+    fn record_compress_savings_with_declines_without_a_session_id() {
+        let root = tempfile::tempdir().expect("temp root");
+        for id in [None, Some(""), Some("   ")] {
+            record_compress_savings_with(Some(root.path()), id, 10_000, 1_000, "native");
+        }
+        record_compress_savings_with(None, Some("c1"), 10_000, 1_000, "native");
+        assert!(
+            !root.path().join("usage").exists(),
+            "no session id, or no root, must write nothing at all"
+        );
+    }
+
+    /// Why (#7514): the other half — with both inputs supplied the row must land
+    /// under the root the CALLER named, or the injection would be decoration.
+    /// Test: itself.
+    #[test]
+    fn record_compress_savings_with_writes_under_the_named_root() {
+        let root = tempfile::tempdir().expect("temp root");
+
+        record_compress_savings_with(Some(root.path()), Some("c-7514"), 10_000, 1_000, "native");
+
+        let ledger = trusty_mpm::core::savings::savings_log_in(root.path());
+        let written = std::fs::read_to_string(&ledger).expect("the named root must hold the row");
+        assert!(
+            written.contains("c-7514") && written.contains("\"technique\":\"compress\""),
+            "the row must be keyed by the supplied session id: {written}"
+        );
     }
 
     #[tokio::test]

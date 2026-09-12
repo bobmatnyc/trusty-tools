@@ -114,12 +114,33 @@ pub(super) fn refresh_resume_compiled_prompt(
     workspace: &std::path::Path,
     session_id: &ManagedSessionId,
 ) -> Result<(), String> {
-    // #4752: delegates to the shared entry point so the daemon-resume,
-    // fresh-start, and bare-`tm` in-place relaunch paths cannot drift apart.
-    // #4832: the write is per-session, so the resumed session's own id selects
-    // the directory — a resume must refresh the file the spawn will read, not
-    // a sibling session's.
-    crate::core::instruction_pipeline::refresh_compiled_prompt(workspace, &session_id.to_string())
+    // #7514: a real resume, so the ambient framework root is the right ledger.
+    let root = crate::core::paths::FrameworkPaths::default().root;
+    refresh_resume_compiled_prompt_in(&root, workspace, session_id)
+}
+
+/// [`refresh_resume_compiled_prompt`] against a caller-named framework root.
+///
+/// Why (#7514): the entry point above resolves its savings ledger from the
+/// process home directory, so the two tests that drive it left a
+/// `no-fold-warned` marker in the operator's own `~/.trusty-mpm/usage/`.
+/// What: [`crate::core::instruction_pipeline::refresh_compiled_prompt_in`] with
+/// the resumed session's own id as the scope — #4752's shared entry point, so
+/// the daemon-resume, fresh-start and bare-`tm` in-place relaunch paths cannot
+/// drift apart, and #4832's per-session write, so a resume refreshes the file
+/// the spawn will read rather than a sibling session's.
+/// Test: `refresh_resume_compiled_prompt_writes_the_project_local_file`,
+/// `refresh_resume_compiled_prompt_reports_an_actionable_failure`.
+pub(super) fn refresh_resume_compiled_prompt_in(
+    framework_root: &std::path::Path,
+    workspace: &std::path::Path,
+    session_id: &ManagedSessionId,
+) -> Result<(), String> {
+    crate::core::instruction_pipeline::refresh_compiled_prompt_in(
+        framework_root,
+        workspace,
+        &session_id.to_string(),
+    )
 }
 
 #[cfg(test)]

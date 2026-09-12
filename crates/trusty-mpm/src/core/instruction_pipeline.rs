@@ -400,7 +400,7 @@ pub fn write_compiled_prompt_to(dest: &std::path::Path, prompt: &str) -> std::io
 /// [`crate::core::savings_instructions::record_instruction_compression_in`].
 /// Recording is best-effort by contract — a write failure returns before it, so
 /// no row can describe a prompt that never landed.
-/// Test: `prepare_session_writes_the_compiled_prompt_before_returning`.
+/// Test: `a_recording_compiled_write_reaches_the_named_framework_root`.
 pub(crate) fn write_compiled_prompt_recording_in(
     framework_root: &std::path::Path,
     dest: &std::path::Path,
@@ -413,25 +413,6 @@ pub(crate) fn write_compiled_prompt_recording_in(
         prompt,
     );
     Ok(())
-}
-
-/// [`write_compiled_prompt_to`], then record the fold against the operator's
-/// own framework root.
-///
-/// Why (#7514): the two launch paths that do not carry a
-/// [`crate::core::paths::FrameworkPaths`] — the spawn's `build_prompt_file` and
-/// [`refresh_compiled_prompt`] — still need the row, and the ambient root is
-/// correct for them because they only ever run inside a real launch. Naming that
-/// choice in the function name is what keeps it out of the pure writer.
-/// What: [`write_compiled_prompt_recording_in`] against
-/// [`crate::core::paths::FrameworkPaths::default`]'s root.
-/// Test: `refresh_compiled_prompt_writes_the_project_local_file`.
-pub fn write_compiled_prompt_and_record(
-    dest: &std::path::Path,
-    prompt: &str,
-) -> std::io::Result<()> {
-    let root = crate::core::paths::FrameworkPaths::default().root;
-    write_compiled_prompt_recording_in(&root, dest, prompt)
 }
 
 /// Compose a project's prompt and refresh its compiled prompt on disk — fatally.
@@ -453,15 +434,44 @@ pub fn write_compiled_prompt_and_record(
 /// the `effective_style` it just resolved (flag > config > manifest), which this
 /// helper hardcodes to `None`, and routing it through here would silently drop
 /// the operator's chosen output style from the compiled copy. All three still
-/// share the actual write via [`write_compiled_prompt_to`] and the same fatal
-/// policy; what differs is only which text they compose.
-/// What: composes the project-resolved prompt through the same seam the launcher
-/// uses, with no explicit output style, writes it to [`compiled_prompt_path`],
-/// and on failure returns the operator-facing string from
-/// [`instructions_failure_message`] — callers refuse the launch with it.
+/// share the actual write via [`write_compiled_prompt_recording_in`] and the
+/// same fatal policy; what differs is only which text they compose.
+/// What: [`refresh_compiled_prompt_in`] against
+/// [`crate::core::paths::FrameworkPaths::default`]'s root, which is correct for
+/// both callers because both are real launches on the operator's own machine.
+///
+/// PRECONDITION: `session_id` must be a session SCOPE — a managed session id or
+/// [`crate::core::harness_root::UNMANAGED_SESSION_SCOPE`] — because
+/// [`compiled_prompt_path`] uses it verbatim as a directory name and
+/// `savings_instructions::session_and_root` reads it back as the row's fallback
+/// key. Both production callers pass a `ManagedSessionId`'s string form.
 /// Test: `refresh_compiled_prompt_writes_the_project_local_file`,
 /// `refresh_compiled_prompt_reports_an_actionable_failure`.
 pub fn refresh_compiled_prompt(
+    project_dir: &std::path::Path,
+    session_id: &str,
+) -> Result<(), String> {
+    // #7514: a real launch, so the ambient framework root is the right ledger.
+    let root = crate::core::paths::FrameworkPaths::default().root;
+    refresh_compiled_prompt_in(&root, project_dir, session_id)
+}
+
+/// [`refresh_compiled_prompt`] against a caller-named framework root.
+///
+/// Why (#7514): the entry point above resolves its ledger from the process home
+/// directory, so the two unit tests that drive it wrote a savings row — or a
+/// `no-fold-warned` marker — into the operator's own `~/.trusty-mpm/usage/`.
+/// Naming the root is what lets those tests stay on a tempdir without mutating
+/// `$HOME`.
+/// What: composes the project-resolved prompt through the same seam the launcher
+/// uses, with no explicit output style, writes it to [`compiled_prompt_path`]
+/// and records the fold against `framework_root`; on failure returns the
+/// operator-facing string from [`instructions_failure_message`] — callers refuse
+/// the launch with it.
+/// Test: `refresh_compiled_prompt_writes_the_project_local_file`,
+/// `refresh_compiled_prompt_reports_an_actionable_failure`.
+pub fn refresh_compiled_prompt_in(
+    framework_root: &std::path::Path,
     project_dir: &std::path::Path,
     session_id: &str,
 ) -> Result<(), String> {
@@ -472,8 +482,7 @@ pub fn refresh_compiled_prompt(
         native,
     );
     let dest = compiled_prompt_path(project_dir, session_id);
-    // #7514: a real launch, so the ambient framework root is the right ledger.
-    write_compiled_prompt_and_record(&dest, &prompt)
+    write_compiled_prompt_recording_in(framework_root, &dest, &prompt)
         .map_err(|source| instructions_failure_message(&dest, &source))
 }
 
