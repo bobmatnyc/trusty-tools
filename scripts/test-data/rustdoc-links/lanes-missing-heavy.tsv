@@ -1,0 +1,3 @@
+# Fixture: INCOMPLETE — demo/heavy is placed nowhere (#7466).
+LANE	features	demo/config
+NO-CFG	demo	nogate

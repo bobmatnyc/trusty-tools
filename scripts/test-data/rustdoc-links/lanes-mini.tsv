@@ -1,0 +1,5 @@
+# Fixture lane declaration for check_rustdoc_links_selftest.sh (#7466).
+# Complete: every feature in metadata-mini.json is placed.
+LANE	features	demo/config
+NO-CFG	demo	nogate
+SKIP	demo	heavy	links a toolchain no runner has
