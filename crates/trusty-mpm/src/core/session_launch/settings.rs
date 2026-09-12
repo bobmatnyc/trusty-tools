@@ -909,71 +909,24 @@ pub(super) fn write_status_line(project_dir: &Path) -> Result<(), PrepError> {
         source,
     })?;
     let settings_path = claude_dir.join("settings.json");
-    let mut settings: serde_json::Value = std::fs::read_to_string(&settings_path)
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .filter(serde_json::Value::is_object)
-        .unwrap_or_else(|| serde_json::json!({}));
-    let obj = match settings.as_object_mut() {
-        Some(o) => o,
-        None => return Ok(()),
-    };
-
-    let changed = match obj.get("statusLine") {
-        None => {
-            obj.insert(
-                "statusLine".to_string(),
-                serde_json::json!({
-                    "type": "command",
-                    "command": resolve_statusline_command(),
-                    "padding": 0
-                }),
-            );
-            true
-        }
-        Some(existing) if is_stale_statusline_command(existing) => {
-            let resolved = resolve_statusline_command();
-            match obj
-                .get_mut("statusLine")
-                .and_then(serde_json::Value::as_object_mut)
-            {
-                Some(entry) => {
-                    entry.insert("command".to_string(), serde_json::json!(resolved));
-                }
-                // Defensive (#1914 review finding 2): `is_stale_bare_statusline_command`
-                // only returns `true` for a `serde_json::Value::Object` with matching
-                // `type`/`command` fields, so `as_object_mut` succeeding here is
-                // expected on every real call. If that invariant is ever violated
-                // (e.g. a future refactor of the match guard), replace the entry
-                // wholesale instead of silently leaving the stale/broken value in
-                // place — a silent no-op would defeat the whole point of the heal.
-                None => {
-                    obj.insert(
-                        "statusLine".to_string(),
-                        serde_json::json!({
-                            "type": "command",
-                            "command": resolved,
-                            "padding": 0
-                        }),
-                    );
-                }
-            }
-            true
-        }
-        // A genuinely user-customized statusLine — never clobber it.
-        Some(_) => false,
-    };
-
-    if !changed {
-        return Ok(());
+    // #7617: the seed-or-heal rule is now `core::statusline_settings`', shared
+    // with the tm-owned config dir, the user tier and `tm doctor --fix`. Two
+    // behaviours changed with it, both strictly safer: an unreadable or
+    // unparseable settings file is REFUSED rather than replaced with a fresh
+    // `{}` (the old path silently deleted every other key in it), and a repair
+    // replaces the whole entry rather than only its `command` field, which is
+    // what the tm-owned writer already did.
+    if let crate::core::statusline_settings::StatuslineWrite::Refused(reason) =
+        crate::core::statusline_settings::ensure_statusline_entry_in(&settings_path)
+    {
+        // Never fatal: this call is also the resume self-heal, and a corrupt
+        // project settings file must not cost the operator their session.
+        tracing::warn!(
+            path = %settings_path.display(),
+            %reason,
+            "could not seed or repair the statusLine entry; leaving the file untouched"
+        );
     }
-
-    let serialized = serde_json::to_string_pretty(&settings)
-        .map_err(|err| PrepError::Deploy(err.to_string()))?;
-    std::fs::write(&settings_path, serialized).map_err(|source| PrepError::Io {
-        path: settings_path,
-        source,
-    })?;
     Ok(())
 }
 

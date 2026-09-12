@@ -857,3 +857,133 @@ fn missing_group_repair_is_silent_for_a_complete_file() {
         "a complete file must not produce a repair line: {steps:?}"
     );
 }
+
+/// Why (#7617, #5866's lesson): the new `statusline` check's remediation line
+/// names `tm doctor --fix`, so the step it names has to exist and has to write.
+/// Test: itself.
+#[test]
+fn statusline_repair_seeds_a_missing_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(".claude").join("settings.json");
+
+    let steps = repair_statusline(std::slice::from_ref(&path), RepairMode::Apply);
+
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    assert_eq!(steps[0].check, "statusline");
+    assert!(steps[0].changed(), "{:?}", steps[0].status);
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(value["statusLine"]["type"], "command");
+}
+
+/// Why (critic MEDIUM 4): the module's rule is "back up before overwriting",
+/// and `repair_hooks_contamination` reports the path an operator undoes from.
+/// This step claimed `Applied { backup: None }` with no backup anywhere in the
+/// chain, so a repoint of the operator's own `~/.claude/settings.json` was
+/// unrecoverable.
+/// FAILS BEFORE THIS CHANGE: `f8a8a2fb8` reported `backup: None` and wrote no
+/// `.bak`.
+/// Test: itself.
+#[test]
+fn statusline_repair_backs_up_before_repointing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "statusLine": {
+                "type": "command",
+                "command": "/definitely/not/here/tm statusline",
+                "padding": 0
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let steps = repair_statusline(std::slice::from_ref(&path), RepairMode::Apply);
+
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    let StepStatus::Applied { backup: Some(bak) } = &steps[0].status else {
+        panic!("expected a backup path, got {:?}", steps[0].status);
+    };
+    assert!(
+        fs::read_to_string(bak)
+            .unwrap()
+            .contains("/definitely/not/here/tm statusline"),
+        "the backup must carry what was repointed"
+    );
+}
+
+/// Why: a SEEDED brand-new settings file had no prior bytes, so there is nothing
+/// to back up — and reporting a backup that does not exist would send an
+/// operator to a path that is not there.
+/// Test: itself.
+#[test]
+fn statusline_repair_reports_no_backup_when_it_created_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(".claude").join("settings.json");
+
+    let steps = repair_statusline(std::slice::from_ref(&path), RepairMode::Apply);
+
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    assert_eq!(steps[0].status, StepStatus::Applied { backup: None });
+}
+
+/// Why (the module's rule 1): a bare `--fix` describes and writes nothing.
+/// Test: itself.
+#[test]
+fn statusline_repair_dry_run_changes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(".claude").join("settings.json");
+
+    let steps = repair_statusline(std::slice::from_ref(&path), RepairMode::DryRun);
+
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0].status, StepStatus::Planned);
+    assert!(!path.exists(), "dry run must write nothing");
+}
+
+/// Why: a healthy machine must grow no output — a repair line per correct file
+/// is noise that trains an operator to skip the whole section.
+/// Test: itself.
+#[test]
+fn statusline_repair_is_silent_for_a_wired_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    // `/bin/sh` exists and is not an ephemeral build path; this test binary's
+    // own `current_exe()` is one, so it would read as stale (#2229).
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "statusLine": { "type": "command", "command": "/bin/sh statusline", "padding": 0 }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let steps = repair_statusline(std::slice::from_ref(&path), RepairMode::Apply);
+
+    assert!(steps.is_empty(), "{steps:?}");
+}
+
+/// Why (the module's rule 2, and the Fail-Open Check): a settings file that
+/// cannot be parsed is the operator's, and rewriting it from `{}` to fix a
+/// status bar would delete every other key in it.
+/// Test: itself.
+#[test]
+fn statusline_repair_refuses_unparseable_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    std::fs::write(&path, "{ not json").unwrap();
+
+    let steps = repair_statusline(std::slice::from_ref(&path), RepairMode::Apply);
+
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    assert!(
+        matches!(steps[0].status, StepStatus::Refused(_)),
+        "{:?}",
+        steps[0].status
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
+}

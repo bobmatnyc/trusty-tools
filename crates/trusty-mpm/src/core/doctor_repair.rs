@@ -307,6 +307,85 @@ pub(crate) fn repair_missing_hook_group_with(
     }]
 }
 
+/// The `tm doctor` check [`repair_statusline`] answers.
+const STATUSLINE_CHECK: &str = "statusline";
+
+/// Seed or repair the `statusLine` entry in every settings tier (#7617).
+///
+/// Why: the `💸` savings segment has gone dark three times, and the owner ruled
+/// it must be core setup guaranteed by the framework rather than something a
+/// project arranges. Provisioning now seeds both tiers on every launch, but an
+/// operator whose bar is already dark needs a repair they can run NOW without
+/// starting a session — and the new `statusline` doctor check's remediation
+/// line names this step, so the step has to exist or that line is a dead end
+/// (#5866's lesson).
+/// What: one step per file that needed the entry seeded or repointed — silent
+/// for a file that is already correct, so a healthy machine grows no output.
+/// A file that cannot be read as JSON is [`StepStatus::Refused`] with the
+/// reason and left byte-for-byte alone, never replaced: it is the operator's
+/// settings file, and every other key in it would go with the rewrite.
+///
+/// Scope is the caller's, as it is for [`repair_build_tree_binary`] — the
+/// driver passes every settings file on the machine plus the user tier, because
+/// which tier Claude Code resolves first is not this function's to decide.
+/// Test: `statusline_repair_seeds_a_missing_entry`,
+/// `statusline_repair_dry_run_changes_nothing`,
+/// `statusline_repair_is_silent_for_a_wired_file`,
+/// `statusline_repair_refuses_unparseable_json`.
+pub fn repair_statusline(settings_files: &[PathBuf], mode: RepairMode) -> Vec<RepairStep> {
+    settings_files
+        .iter()
+        .filter_map(|path| statusline_step(path, mode))
+        .collect()
+}
+
+/// One file's worth of [`repair_statusline`].
+///
+/// What: `None` when the file already carries a usable entry — the common case,
+/// which must stay silent. Otherwise a step, `Planned` in dry run and
+/// `Applied`/`Refused` when writing.
+/// Test: see [`repair_statusline`].
+fn statusline_step(path: &Path, mode: RepairMode) -> Option<RepairStep> {
+    use crate::core::statusline_settings::{StatuslineWrite, ensure_statusline_entry_in};
+    use crate::daemon::doctor::doctor_statusline::{TierState, tier_state};
+
+    if tier_state(path) == TierState::Wired {
+        return None;
+    }
+    let what = "seed or repoint the `statusLine` command at the installed tm binary".to_string();
+    if mode == RepairMode::DryRun {
+        return Some(RepairStep {
+            check: STATUSLINE_CHECK,
+            path: path.to_path_buf(),
+            what,
+            status: StepStatus::Planned,
+        });
+    }
+    // #7617 (critic MEDIUM 4): `ensure_statusline_entry_in` publishes through
+    // `write_json_atomic`, which takes `<path>.bak` first. Reporting it — and
+    // only when it is really there — is what makes this step honour the
+    // module's "back up before overwriting" rule the way
+    // `repair_hooks_contamination` does. A SEEDED brand-new file has no backup
+    // because there were no prior bytes to keep, which is not the same fact as
+    // "the backup failed" and must not be reported as one.
+    let status = match ensure_statusline_entry_in(path) {
+        StatuslineWrite::Seeded | StatuslineWrite::Repaired => {
+            let backup = crate::core::statusline_settings::backup_of(path);
+            StepStatus::Applied {
+                backup: backup.is_file().then_some(backup),
+            }
+        }
+        StatuslineWrite::Unchanged => return None,
+        StatuslineWrite::Refused(reason) => StepStatus::Refused(reason),
+    };
+    Some(RepairStep {
+        check: STATUSLINE_CHECK,
+        path: path.to_path_buf(),
+        what,
+        status,
+    })
+}
+
 /// The `tm doctor` check [`repair_build_tree_binary`] answers.
 ///
 /// Why: named once so the repair, its tests, and the driver's ordering comment

@@ -208,13 +208,53 @@ fn tm_compress_reports_a_signal_killed_wrapped_command() {
 fn tm_compress_reports_unknown_for_an_unwrapped_invocation() {
     // `tm compress < file`, and any rewrite older than #7384, carry no
     // sentinel. The field must still be present, and must not claim a status.
-    let (success, stdout, stderr) = run_tm_compress("cargo test", "ok\n");
+    //
+    // #7607: the payload is one that actually COMPRESSES. A three-byte `"ok\n"`
+    // passes through unchanged, and a run that changed nothing and reports no
+    // failure now emits no stats line at all — so the old fixture would have
+    // asserted `exit=unknown` against a deliberately empty stderr. The field
+    // under test is unchanged; only the payload that makes the line exist is.
+    let input = repetitive_cargo_test_payload();
+    let (success, stdout, stderr) = run_tm_compress("cargo test", &input);
     assert!(success, "tm compress exited non-zero: stderr={stderr}");
-    assert_eq!(stdout, "ok\n", "an unwrapped payload passes through");
+    assert!(
+        stdout.len() < input.len(),
+        "the fixture must compress, or there is no stats line to read"
+    );
     let stderr = strip_ansi(&stderr);
     assert!(
         stderr.contains("exit=unknown"),
         "a missing sentinel must read as unknown, not as success: {stderr}"
+    );
+}
+
+/// A run that changed nothing writes nothing into the caller's tool result.
+///
+/// Why (#7607): `tm compress` is the tail of the rewritten Bash pipeline, and
+/// Claude Code interleaves its stderr into the same tool result as its stdout.
+/// A 668-byte `grep` payload came back byte-for-byte with
+/// `bytes_before=668 bytes_after=668 pct_reduction=0.0` wedged into the middle
+/// of it. Asserted end to end through the real binary because the leak IS the
+/// process's stderr — a unit test on the predicate cannot see it.
+/// What: a payload below the 80-byte size gate, run unwrapped so no exit status
+/// is reported either, with `RUST_LOG=info` pinned so the filter is not what
+/// silences the line (#7641: this must be proven with the line ENABLED).
+/// Test: this function IS the test.
+#[test]
+fn a_passthrough_run_leaks_no_stats_line_into_the_tool_result() {
+    let input = "ok\n";
+    let (success, stdout, stderr) = run_tm_compress("cargo test", input);
+    assert!(success, "tm compress exited non-zero: stderr={stderr}");
+    assert_eq!(stdout, input, "a sub-gate payload passes through unchanged");
+    let stderr = strip_ansi(&stderr);
+    assert!(
+        !stderr.contains("pct_reduction"),
+        "a run that changed nothing must not narrate itself into the tool \
+         result (#7607): {stderr}"
+    );
+    assert!(
+        !stderr.contains("tool output compressed"),
+        "the stats line's message must be absent too, not merely its fields: {stderr}"
     );
 }
 
@@ -306,5 +346,155 @@ fn tm_compress_takes_the_rtk_path_when_rtk_is_installed() {
     assert!(
         !stdout.is_empty(),
         "the rtk path must still return content on stdout"
+    );
+}
+
+/// The operator's own savings ledger, when this process has a `$HOME` at all.
+///
+/// Why (#7618): the harm is rows in THAT file — not in whichever scratch root a
+/// helper points a child at. The assertion has to name the real one.
+/// What: `<HOME>/.trusty-mpm/usage/savings.jsonl`; `None` in a stripped
+/// environment, which is the CI case and asserts vacuously.
+/// Test: used by `a_fixture_payload_never_lands_as_a_session_savings_row`.
+fn operator_savings_ledger() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(|home| {
+        std::path::Path::new(&home)
+            .join(".trusty-mpm")
+            .join("usage")
+            .join("savings.jsonl")
+    })
+}
+
+/// Count `compress` rows in `ledger` whose `tokens_before` is `tokens`.
+///
+/// Why: a whole-file byte comparison would flake on a developer machine, where
+/// a live session appends real rows throughout the run. The fixture's own token
+/// count is a signature no genuine traffic reproduces — 32 of the 34 rows #7618
+/// reports are exactly this one number.
+/// What: parses each line and counts the matches; an absent or unreadable
+/// ledger counts zero, which is the correct reading for "no fixture row landed".
+/// Test: used by both tests below.
+fn fixture_rows_in(ledger: &std::path::Path, tokens: u64) -> usize {
+    std::fs::read_to_string(ledger)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|row| {
+            row["technique"] == "compress" && row["tokens_before"] == serde_json::json!(tokens)
+        })
+        .count()
+}
+
+/// The fixture payload's token count, as the producer derives it.
+///
+/// What: `bytes / 4`, the byte-proxy `core::savings_compress` uses. 1076 B of
+/// [`repetitive_cargo_test_payload`] is the 269 that #7618 counted.
+fn fixture_tokens() -> u64 {
+    (repetitive_cargo_test_payload().len() / 4) as u64
+}
+
+/// This target's fixture payload never reaches the operator's savings ledger.
+///
+/// Why (#7618): 32 of one session's 34 `compress` rows were ONE event — 269
+/// tokens in, 260 saved, `tool` "cargo test" — logged in `native_fallback` +
+/// `rtk_binary` PAIRS every few minutes, carrying 99% of that session's reported
+/// savings and inflating its `💸` segment ~9x. The pair is
+/// [`tm_compress_shrinks_piped_cargo_test_output`] (which forces the native
+/// chain) and [`tm_compress_takes_the_rtk_path_when_rtk_is_installed`] (which
+/// does not), both running [`repetitive_cargo_test_payload`] through
+/// `--tool "cargo test"`; "every few minutes" was an agent re-running
+/// `cargo test -p trusty-mpm`. #7514 stopped the bleeding by clearing
+/// `CLAUDE_CODE_SESSION_ID` from the child and #7568 gave it a scratch `$HOME`,
+/// but nothing PINNED either — a new spawn site that skips
+/// `common::tm_command` re-opens it silently, which is exactly how the first 270
+/// rows got written.
+/// What: drives both arms exactly as the tests above do, and asserts the
+/// operator's own ledger gained no row carrying the fixture's token count.
+/// Scoped to that signature rather than to the file's bytes, because a live
+/// session on the same host appends genuine rows throughout the run.
+/// Test: this function IS the test.
+#[test]
+fn a_fixture_payload_never_lands_as_a_session_savings_row() {
+    let tokens = fixture_tokens();
+    let ledger = operator_savings_ledger();
+    let before = ledger
+        .as_deref()
+        .map_or(0, |path| fixture_rows_in(path, tokens));
+
+    let input = repetitive_cargo_test_payload();
+    // The native arm, then the rtk arm — the exact pair that wrote the 270 rows.
+    let (native_ok, _, native_err) = run_tm_compress("cargo test", &input);
+    assert!(native_ok, "the native arm must still run: {native_err}");
+    if trusty_common::bin_resolve::resolve_binary("rtk").is_some() {
+        let (rtk_ok, _, rtk_err) = run_tm_compress_with(&[], "cargo test", &input);
+        assert!(rtk_ok, "the rtk arm must still run: {rtk_err}");
+    }
+
+    let after = ledger
+        .as_deref()
+        .map_or(0, |path| fixture_rows_in(path, tokens));
+    assert_eq!(
+        before, after,
+        "this target's fixture payload reached the operator's savings ledger \
+         ({:?}) — {tokens}-token `compress` rows went from {before} to {after}. \
+         A spawn site here is not going through `common::tm_command` (#7618).",
+        ledger
+    );
+}
+
+/// The hazard, pinned: an unisolated run DOES write the fixture row.
+///
+/// Why: without this, a `fixture_rows_in` that returned zero for an unrelated
+/// reason — a renamed technique, a changed token proxy, a producer that stopped
+/// writing — would make the guard above pass while proving nothing. This is the
+/// pre-#7514 shape, run against a decoy `$HOME` so the demonstration costs the
+/// operator's ledger nothing.
+/// What: the same payload and tool, through the sanctioned helper, with the two
+/// isolations deliberately overridden — a decoy `$HOME` standing in for the
+/// operator's, and a synthetic session id in place of the live one the helper
+/// clears. `isolate_spawned_tm` documents that a caller's later `.env` wins,
+/// which is what makes the override possible without a second spawn path.
+/// Test: this function IS the test.
+#[test]
+fn an_unisolated_compress_run_writes_the_fixture_row_into_the_home_it_inherits() {
+    let decoy = tempfile::tempdir().expect("decoy $HOME");
+    let input = repetitive_cargo_test_payload();
+
+    let mut child = common::tm_command()
+        .args(["compress", "--tool", "cargo test"])
+        .env(ENV_COMPRESS_NO_RTK, "1")
+        .env(STATS_LOG_LEVEL.0, STATS_LOG_LEVEL.1)
+        // #7618: deliberately NOT isolated — this test exists to show what
+        // `common::tm_command` prevents.
+        .env("HOME", decoy.path())
+        .env(
+            trusty_mpm::core::savings::CLAUDE_CODE_SESSION_ID_ENV,
+            "fixture-session-7618",
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn `tm compress`");
+    child
+        .stdin
+        .take()
+        .expect("child stdin")
+        .write_all(input.as_bytes())
+        .expect("write stdin");
+    let output = child.wait_with_output().expect("wait for tm compress");
+
+    let ledger = decoy
+        .path()
+        .join(".trusty-mpm")
+        .join("usage")
+        .join("savings.jsonl");
+    assert_eq!(
+        fixture_rows_in(&ledger, fixture_tokens()),
+        1,
+        "an unisolated `tm compress` must write the fixture row into the `$HOME` \
+         it was handed — if this stops holding, the guard above is asserting on \
+         something nothing produces any more and must be re-pointed. stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }

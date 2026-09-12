@@ -36,6 +36,9 @@ pub use resume_hooks::{ensure_project_hooks, missing_lifecycle_hook_events};
 mod search_index;
 mod settings;
 mod skills;
+// #7617: the launch-time `statusLine` guarantee, both tiers.
+mod statusline;
+pub use statusline::{ensure_status_line, ensure_status_line_in};
 mod sync_assets;
 #[cfg(test)]
 mod tests;
@@ -87,7 +90,7 @@ use crate::core::paths::FrameworkPaths;
 use crate::core::skill_deployer::DeployStats;
 use settings::{
     deploy_output_style, preseed_workspace_trust_home, remove_global_trusty_memory_hooks,
-    write_enabled_plugins, write_output_style, write_project_hooks, write_status_line,
+    write_enabled_plugins, write_output_style, write_project_hooks,
 };
 
 /// Re-export of the project-tier output-style/statusLine resolution primitives
@@ -578,38 +581,6 @@ pub fn prepare_isolated_session(
     prepare_session_with_repo_url(&fw, project_dir, repo_url)
 }
 
-/// Defensively (re)write the `tm statusline` config for an EXISTING session
-/// workspace, without re-running the full preparation pipeline.
-///
-/// Why (issue #1913): sessions spawned via the pre-fix in-project worktree path
-/// never ran [`prepare_session_with_repo_url`] at all, so their on-disk
-/// `.claude/settings.json` may be permanently missing the `statusLine` key, and
-/// nothing else in the launch path ever backfills it. Re-running the FULL prep
-/// pipeline (agent/skill redeploy, CLAUDE.md merge, MCP injection) on every
-/// resume is riskier than necessary here — those steps are not all confirmed
-/// idempotent under a resumed (not freshly-provisioned) workspace — so this
-/// exposes ONLY the one step `write_status_line` itself documents as safe to
-/// call unconditionally (it never clobbers a genuine user customization). The
-/// resume path calls this defensively so a session stuck in the pre-#1913
-/// broken state self-heals the next time it is resumed, without the broader
-/// blast radius of a full re-prep. As of #1914, the same call ALSO upgrades a
-/// stale bare `tm`/`trusty-mpm statusline` command (the pre-#1914 default,
-/// which silently fails to render under a minimal `PATH`) to the resolved
-/// absolute path — the two self-heal concerns share this one entry point
-/// rather than growing a second, duplicate resume hook.
-/// What: thin `pub` wrapper over `settings::write_status_line` (`pub(super)`,
-/// so not directly reachable from `crate::daemon::managed_routes`). Delegates
-/// verbatim — no additional logic.
-/// Test: the underlying idempotency and path-resolution guarantees are covered
-/// by `write_status_line_injects_when_absent` / `write_status_line_skips_when_already_set`
-/// / `write_status_line_preserves_user_config` / `write_status_line_heals_stale_tm_default`
-/// / `write_status_line_heals_stale_trusty_mpm_default` in this module's test
-/// file; `resume_managed_backfills_missing_status_line` in
-/// `tests/session_manager_mvp.rs` covers the `resume_managed` call site.
-pub fn ensure_status_line(project_dir: &Path) -> Result<(), PrepError> {
-    settings::write_status_line(project_dir)
-}
-
 /// Prepare a session, selecting an explicit output style (HR-4).
 ///
 /// Why: `tm launch --style <id>` lets the operator override the configured
@@ -1056,7 +1027,9 @@ fn prepare_session_inner(
     // Inject `tm statusline` into the project's `.claude/settings.json` so
     // Claude Code shows live context in its status bar. Only sets the key when
     // absent (never clobbers the user's existing statusLine). Non-fatal.
-    if let Err(err) = write_status_line(project_dir) {
+    // #7617: and into the user tier on the same call — provisioning owns both,
+    // so the `💸` segment is core setup rather than a project's to arrange.
+    if let Err(err) = ensure_status_line(project_dir) {
         tracing::warn!("failed to write statusLine config: {err}");
     }
 

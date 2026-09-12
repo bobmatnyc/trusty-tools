@@ -925,8 +925,14 @@ mod tests {
         let out = render_statusline(&input);
         assert!(out.contains("24%"), "5h usage % must appear: {out}");
         assert!(out.contains("41%"), "7d usage % must appear: {out}");
+        // #7617: the savings segment now always renders — a figure, or the
+        // explicit empty state — so the usage segment is no longer last. What
+        // this test is about is that usage comes after COST, which is still
+        // exactly what it asserts.
+        let cost_at = out.find("$1.23").expect("cost segment: {out}");
+        let usage_at = out.find("24%").expect("usage segment: {out}");
         assert!(
-            out.ends_with("41%") || out.contains("41%\u{1b}[0m"),
+            cost_at < usage_at,
             "usage segment must be appended after cost: {out}"
         );
     }

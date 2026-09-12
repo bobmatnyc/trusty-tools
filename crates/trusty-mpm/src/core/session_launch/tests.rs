@@ -2021,6 +2021,54 @@ fn assert_resolved_statusline_command(cmd: &str) {
     );
 }
 
+/// Provisioning seeds BOTH tiers, not just the project's.
+///
+/// Why (#7617): the `💸` segment has gone dark three times, and each
+/// investigation had to check three settings tiers by hand. The user tier
+/// (`~/.claude/settings.json`) had no writer at all, so a session launched
+/// outside the managed driver depended on a project having been prepared once.
+/// The owner's ruling is that the segment is core setup, guaranteed by the
+/// framework — which means provisioning owns every tier a launch reads.
+/// What: one call with the user tier NAMED (so the test needs no `$HOME`
+/// redirect, which would be a process-global write), asserting both files come
+/// away with a resolved absolute command.
+/// Test: itself.
+#[test]
+fn ensure_status_line_in_seeds_both_tiers() {
+    let project = tempdir().unwrap();
+    let user = tempdir().unwrap();
+    let user_settings = user.path().join(".claude").join("settings.json");
+
+    super::ensure_status_line_in(project.path(), Some(&user_settings)).expect("seeding succeeds");
+
+    for path in [
+        project.path().join(".claude").join("settings.json"),
+        user_settings,
+    ] {
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{} must exist: {e}", path.display()));
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["statusLine"]["type"], "command", "{}", path.display());
+        assert_resolved_statusline_command(v["statusLine"]["command"].as_str().unwrap());
+    }
+}
+
+/// Why (#7617): a stripped environment with no home resolves no user tier, and
+/// that must cost the project tier nothing — the launch still gets its status
+/// bar.
+/// Test: itself.
+#[test]
+fn ensure_status_line_in_without_a_user_tier_still_seeds_the_project() {
+    let project = tempdir().unwrap();
+
+    super::ensure_status_line_in(project.path(), None).expect("seeding succeeds");
+
+    let raw =
+        std::fs::read_to_string(project.path().join(".claude").join("settings.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(v["statusLine"]["type"], "command");
+}
+
 #[test]
 fn write_status_line_injects_when_absent() {
     // When no settings.json exists, write_status_line creates it with statusLine

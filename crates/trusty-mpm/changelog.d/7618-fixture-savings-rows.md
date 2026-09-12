@@ -1,0 +1,2 @@
+Fixed
+- The `tm_compress_pipe` integration target can no longer write its fixture payload into the operator's savings ledger. The 270 duplicate `269`-token `compress` rows #7618 reports came from that target's native-chain and rtk arms running the same `cargo test` fixture; a guard test now asserts the operator's ledger gains no row carrying that payload's signature, and a hazard-pin test proves the guard's signal is real (#7618).
