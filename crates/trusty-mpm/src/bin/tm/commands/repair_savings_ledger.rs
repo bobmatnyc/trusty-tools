@@ -42,8 +42,11 @@ pub(crate) fn resolve_root(explicit: Option<String>) -> PathBuf {
 /// matching rows, and the line numbers needing structural repair — then stops
 /// unless `apply` is set. With `apply` it moves the matched rows to a
 /// timestamped sidecar and rewrites the ledger atomically; with `markers` it
-/// also moves the `usage/no-fold-warned/` directory aside. A clean ledger is
-/// reported as such and left alone, which is a success rather than an error.
+/// also moves the `usage/no-fold-warned/` directory aside, and only then is the
+/// marker directory read at all. A clean ledger is reported as such and left
+/// alone, which is a success rather than an error. A row the live producer
+/// appended mid-repair is carried across and reported, since it was never
+/// classified — see [`trusty_mpm::core::savings_repair::apply`].
 /// Test: `repair_savings_ledger_dry_run_writes_nothing`,
 /// `repair_savings_ledger_applies_and_is_idempotent`.
 pub(crate) fn repair_savings_ledger(
@@ -57,9 +60,11 @@ pub(crate) fn repair_savings_ledger(
         plan(&ledger).with_context(|| format!("reading savings ledger {}", ledger.display()))?;
 
     report(&ledger, &planned);
-    let marker_count = count_markers(&root)
-        .with_context(|| format!("counting markers under {}", root.display()))?;
     if markers {
+        // #7569: counted only when asked for, so an unreadable marker directory
+        // cannot fail a plain dry run of the ledger.
+        let marker_count = count_markers(&root)
+            .with_context(|| format!("counting markers under {}", root.display()))?;
         println!("  markers:          {marker_count} file(s) under usage/no-fold-warned/");
     }
 
@@ -79,6 +84,13 @@ pub(crate) fn repair_savings_ledger(
             applied.quarantine.display()
         );
         println!("rewrote the ledger with {} row(s)", applied.kept);
+        if applied.carried > 0 {
+            // #7569: a live producer appended while the repair ran.
+            println!(
+                "carried {} row(s) appended during the repair — re-run to classify them",
+                applied.carried
+            );
+        }
     }
 
     if markers {
@@ -115,8 +127,11 @@ fn report(ledger: &std::path::Path, planned: &LedgerPlan) {
         planned.count_of(Reason::TestFixture),
         planned.count_of(Reason::Malformed)
     );
+    // #7569: these lines held more or less than one parseable row, which is a
+    // different finding from the `malformed` row count two lines above — most
+    // of them hold two VALID rows with no separator.
     println!(
-        "  malformed lines:  {}",
+        "  split/repaired:   {}",
         number_list(&planned.repaired_lines)
     );
     println!("  blank lines:      {}", number_list(&planned.blank_lines));

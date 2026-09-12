@@ -41,11 +41,18 @@ fn resolve_root_honours_the_override() {
 /// Why: the dry run is the DEFAULT, and an operator inspecting a live ledger
 /// must be certain nothing moved. A command that wrote on the default path
 /// would have destroyed rows before anyone authorised it.
+/// What (#7569): `--markers` is passed WITH a marker directory that actually
+/// exists. Without one the flag had nothing to leave alone, so the test proved
+/// nothing about the half of the dry run that touches markers.
 /// Test: itself.
 #[test]
 fn repair_savings_ledger_dry_run_writes_nothing() {
     let (root, ledger) = root_with_ledger();
     let before = std::fs::read_to_string(&ledger).expect("read");
+    let usage = ledger.parent().expect("parent").to_path_buf();
+    let markers = trusty_mpm::core::savings_repair::marker_dir(root.path());
+    std::fs::create_dir_all(&markers).expect("mkdir");
+    std::fs::write(markers.join("0002e2d5001ed230"), "22559 24667").expect("marker");
 
     repair_savings_ledger(Some(root.path().display().to_string()), false, true).expect("dry run");
 
@@ -54,14 +61,21 @@ fn repair_savings_ledger_dry_run_writes_nothing() {
         before,
         "the default run must leave the ledger byte-identical"
     );
-    let sidecars: Vec<_> = std::fs::read_dir(ledger.parent().expect("parent"))
+    assert!(
+        markers.join("0002e2d5001ed230").exists(),
+        "the default run must leave the marker directory in place"
+    );
+
+    let mut entries: Vec<String> = std::fs::read_dir(&usage)
         .expect("read usage dir")
         .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_name() != std::ffi::OsStr::new("savings.jsonl"))
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect();
-    assert!(
-        sidecars.is_empty(),
-        "the default run must create no sidecar, found {sidecars:?}"
+    entries.sort();
+    assert_eq!(
+        entries,
+        vec!["no-fold-warned".to_string(), "savings.jsonl".to_string()],
+        "the default run must create no sidecar of any kind"
     );
 }
 

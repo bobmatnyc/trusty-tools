@@ -38,6 +38,19 @@ const KEEP_DIVERT: &str = r#"{"ts":"2026-09-11T10:00:00Z","session_id":"55555555
 /// A row cut off mid-object — what a single interrupted write leaves.
 const TRUNCATED: &str = r#"{"ts":"2026-09-11T10:00:01Z","session_id":"6666"#;
 
+/// A genuine row whose `basis` carries a literal `}{` INSIDE a JSON string.
+///
+/// The #7579 split looks for exactly that byte pair between two rows, so a row
+/// carrying it in a string value is the case that tells a lexical splitter from
+/// a textual one.
+const KEEP_BRACE_IN_BASIS: &str = r#"{"ts":"2026-09-11T11:00:00Z","session_id":"77777777-7777-4777-8777-777777777777","technique":"compress","tokens_saved":40,"tokens_before":60,"cost_saved_usd":0.0004,"basis":"output 60 tok - compressed 20 tok }{ not a row boundary, at 4 B/token, via rtk_binary, priced at claude-fable-5-1 (statusline) input $10/Mtok","model_source":"statusline"}"#;
+
+/// The row a live producer appends while the repair is running.
+const LATE_ROW: &str = r#"{"ts":"2026-09-12T01:02:02Z","session_id":"99999999-9999-4999-8999-999999999999","technique":"compress","tokens_saved":10,"tokens_before":20,"cost_saved_usd":0.0001,"basis":"output 20 tok - compressed 10 tok, at 4 B/token, via rtk_binary, priced at claude-fable-5-1 (statusline) input $10/Mtok","model_source":"statusline"}"#;
+
+/// The session id [`LATE_ROW`] carries.
+const LATE_SESSION: &str = "99999999-9999-4999-8999-999999999999";
+
 /// The ledger the classification tests share, in physical-line order.
 ///
 /// Line 6 is the #7579 shape: two complete rows, no separator. Line 7 is the
@@ -400,6 +413,27 @@ fn quarantine_markers_moves_the_whole_directory() {
     assert_eq!(count_markers(root.path()).expect("count"), 0);
 }
 
+/// Why (#7569): [`MARKER_DIR`] used to be a second spelling of the producer's
+/// own constant. A rename on either side would then have left `--markers`
+/// moving nothing, counting nothing, and exiting 0 — a sweep that reports
+/// success having swept a directory that does not exist.
+/// What: pins the repair's directory to the parent of the path the producer
+/// actually writes a marker to.
+/// Test: itself.
+#[test]
+fn the_repair_sweeps_the_directory_the_producer_writes() {
+    let root = std::path::Path::new("/root");
+    let produced = crate::core::savings_sidecar::no_fold_marker_path(
+        root,
+        std::path::Path::new("/some/project"),
+    );
+    assert_eq!(
+        produced.parent().expect("a marker path has a parent"),
+        marker_dir(root),
+        "the repair must sweep the directory the producer writes into"
+    );
+}
+
 /// Why: a machine whose producer never declined has no marker directory, and
 /// `--markers` there must report nothing rather than fail.
 /// Test: itself.
@@ -412,4 +446,161 @@ fn quarantine_markers_of_a_missing_directory_is_none() {
             .expect("quarantine")
             .is_none()
     );
+}
+
+/// Why (#7569): the ledger has a LIVE producer — a Claude hook appends on
+/// session start — so a row can land between the plan's read and the apply's
+/// rename. Replacing the inode would strand that row while the command printed
+/// success, which is the one outcome this module exists to prevent.
+/// Test: itself.
+#[test]
+fn apply_carries_a_row_appended_after_the_plan() {
+    let (_root, ledger) = fixture_ledger();
+    let planned = plan(&ledger).expect("plan");
+
+    // The producer, running between the read and the rename.
+    crate::core::savings::append_row(&ledger, &parse(LATE_ROW)).expect("the producer appends");
+
+    let applied = apply(&ledger, &planned, at("2026-09-12T01:02:03Z")).expect("apply");
+    assert_eq!(applied.quarantined, 4, "the planned repair still happens");
+    assert_eq!(applied.carried, 1, "the late row is carried, not stranded");
+
+    let rewritten = std::fs::read_to_string(&ledger).expect("read");
+    let lines: Vec<&str> = rewritten.lines().collect();
+    assert_eq!(
+        lines[..5],
+        [
+            KEEP_COMPRESS,
+            KEEP_REAL_FOLD,
+            KEEP_ODDITY,
+            KEEP_DIVERT,
+            KEEP_COMPRESS
+        ],
+        "the kept rows are written back byte-identical"
+    );
+    assert_eq!(lines.len(), 6, "the late row is the only addition");
+    let carried: SavingsRow =
+        serde_json::from_str(lines[5]).expect("the carried row is still a parseable row");
+    assert_eq!(
+        carried.session_id, LATE_SESSION,
+        "the row the producer appended survives the rewrite"
+    );
+}
+
+/// Why (#7569): a ledger SHORTER than the one the plan read is not the file the
+/// plan describes — it was rotated, truncated, or replaced. Rewriting it from
+/// the stale plan would resurrect every row somebody had just removed, so the
+/// repair refuses instead.
+/// Test: itself.
+#[test]
+fn apply_refuses_a_ledger_that_shrank() {
+    let (_root, ledger) = fixture_ledger();
+    let planned = plan(&ledger).expect("plan");
+    let truncated = format!("{KEEP_COMPRESS}\n");
+    std::fs::write(&ledger, &truncated).expect("somebody truncates the ledger");
+
+    let failure = apply(&ledger, &planned, at("2026-09-12T01:02:03Z"))
+        .expect_err("a shrunken ledger must not be rewritten from a stale plan");
+    assert_eq!(failure.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(
+        std::fs::read_to_string(&ledger).expect("read"),
+        truncated,
+        "the ledger is left exactly as it was found"
+    );
+    assert!(
+        temp_files(ledger.parent().expect("parent")).is_empty(),
+        "the aborted rewrite leaves no temp file behind"
+    );
+}
+
+/// Why (#7569): every failure arm before the rename claims to leave the ledger
+/// untouched and to clean up after itself, and the create/write/sync arm had no
+/// test saying so. The reachable trigger is a `usage/` directory the process
+/// cannot write — a ledger on read-only media, or one whose permissions an
+/// operator tightened.
+/// What: a ledger holding one genuine row and a blank line. That plan is not
+/// clean, so the repair runs, yet it quarantines nothing, so no sidecar is
+/// written and the temp file is the FIRST thing `apply` tries to create.
+/// Test: itself.
+#[cfg(unix)]
+#[test]
+fn apply_leaves_no_temp_file_when_the_directory_is_read_only() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = tempfile::tempdir().expect("temp root");
+    let ledger = savings_log_in(root.path());
+    let usage = ledger.parent().expect("parent").to_path_buf();
+    std::fs::create_dir_all(&usage).expect("mkdir");
+    let original = format!("{KEEP_COMPRESS}\n\n");
+    std::fs::write(&ledger, &original).expect("write");
+
+    let planned = plan(&ledger).expect("plan");
+    assert!(
+        !planned.is_clean(),
+        "the blank line is what needs repairing"
+    );
+    assert_eq!(
+        planned.quarantined().count(),
+        0,
+        "nothing is quarantined, so no sidecar precedes the temp file"
+    );
+
+    std::fs::set_permissions(&usage, std::fs::Permissions::from_mode(0o555)).expect("chmod 555");
+    // Root — and a filesystem that ignores modes — can still write here, so
+    // there is no failure to assert. Restore and skip.
+    let probe = usage.join(".probe");
+    if std::fs::File::create(&probe).is_ok() {
+        let _ = std::fs::remove_file(&probe);
+        std::fs::set_permissions(&usage, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod 755");
+        return;
+    }
+
+    let failure = apply(&ledger, &planned, at("2026-09-12T01:02:03Z"));
+    std::fs::set_permissions(&usage, std::fs::Permissions::from_mode(0o755)).expect("chmod 755");
+
+    let failure = failure.expect_err("a read-only directory must fail the rewrite");
+    assert_eq!(failure.kind(), std::io::ErrorKind::PermissionDenied);
+    assert_eq!(
+        std::fs::read_to_string(&ledger).expect("read"),
+        original,
+        "the ledger must survive a failed repair byte-identical"
+    );
+    assert!(
+        temp_files(&usage).is_empty(),
+        "the aborted rewrite leaves no temp file behind"
+    );
+}
+
+/// Every `.repair-*.tmp` sibling in `dir`.
+fn temp_files(dir: &std::path::Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .expect("read usage dir")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".repair-"))
+        .collect()
+}
+
+/// Why (#7579): the split hunts for one row's end and the next row's start. A
+/// TEXTUAL splitter keyed on `}{` would cut a genuine row in half whenever its
+/// `basis` happened to carry that pair — quarantining both halves as malformed
+/// and losing a real fold. This pins the splitter as lexical.
+/// Test: itself.
+#[test]
+fn a_brace_pair_inside_a_string_is_not_a_row_boundary() {
+    let root = tempfile::tempdir().expect("temp root");
+    let ledger = savings_log_in(root.path());
+    std::fs::create_dir_all(ledger.parent().expect("parent")).expect("mkdir");
+    std::fs::write(&ledger, format!("{KEEP_BRACE_IN_BASIS}\n")).expect("write");
+
+    let planned = plan(&ledger).expect("plan");
+    assert_eq!(planned.fragments.len(), 1, "one row, not two halves");
+    assert_eq!(planned.fragments[0].text, KEEP_BRACE_IN_BASIS);
+    assert_eq!(planned.fragments[0].quarantine, None);
+    assert!(
+        planned.repaired_lines.is_empty(),
+        "a row carrying `}}{{` needs no structural repair"
+    );
+    assert!(planned.is_clean(), "such a ledger is already clean");
 }

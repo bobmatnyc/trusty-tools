@@ -26,10 +26,15 @@
 //! - **Every write lands after every read.** [`apply`] builds both output
 //!   buffers in memory before it opens anything for writing, so a parse or IO
 //!   failure aborts with the original ledger untouched.
+//! - **A live producer's append is not stranded.** The ledger's writer runs on
+//!   a Claude hook and can append at any moment, including between [`plan`]'s
+//!   read and [`apply`]'s rename. [`apply`] carries those bytes across rather
+//!   than replacing the inode they landed on.
 //!
 //! Test: `savings_repair_tests.rs` — `the_predicate_matches_only_fixture_rows`,
 //! `plan_classifies_a_mixed_ledger`, `apply_quarantines_and_rewrites`,
-//! `a_second_apply_finds_nothing`, `apply_keeps_the_original_bytes`.
+//! `a_second_apply_finds_nothing`, `apply_keeps_the_original_bytes`,
+//! `apply_carries_a_row_appended_after_the_plan`.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -57,8 +62,15 @@ pub const FIXTURE_COMPILED_BASIS: &str = "compiled 13 B";
 
 /// Directory under `usage/` holding the per-project "nothing folded" markers.
 ///
-/// Test: `marker_dir_nests_under_usage`.
-pub const MARKER_DIR: &str = "no-fold-warned";
+/// Why (#7569): a second copy of this name would let the producer's directory
+/// and the repair's sweep drift apart silently — `--markers` would move
+/// nothing, count nothing, and still exit 0. So this aliases the producer's own
+/// constant rather than re-spelling it.
+/// What: [`crate::core::savings_sidecar::NO_FOLD_WARNED_DIR`], re-exported under
+/// this module's public name.
+/// Test: `marker_dir_nests_under_usage`,
+/// `the_repair_sweeps_the_directory_the_producer_writes`.
+pub const MARKER_DIR: &str = crate::core::savings_sidecar::NO_FOLD_WARNED_DIR;
 
 /// Why a row is being moved off the ledger.
 ///
@@ -126,6 +138,15 @@ pub struct LedgerPlan {
     pub blank_lines: Vec<usize>,
     /// How many physical lines the ledger held.
     pub lines_read: usize,
+    /// How many bytes of ledger [`plan`] consumed.
+    ///
+    /// Why (#7569): the ledger has a LIVE producer. Everything after this
+    /// offset arrived between the read and [`apply`]'s rename, and would
+    /// otherwise be stranded on the old inode — see [`apply`].
+    /// What: the byte length of the text `plan` read; zero for a missing
+    /// ledger.
+    /// Test: `apply_carries_a_row_appended_after_the_plan`.
+    pub bytes_read: u64,
 }
 
 impl LedgerPlan {
@@ -178,6 +199,11 @@ pub struct Applied {
     pub kept: usize,
     /// How many rows moved to the sidecar.
     pub quarantined: usize,
+    /// How many rows a live producer appended during the repair and [`apply`]
+    /// carried across unclassified (#7569).
+    ///
+    /// Test: `apply_carries_a_row_appended_after_the_plan`.
+    pub carried: usize,
 }
 
 /// One quarantined fragment, as written to the sidecar.
@@ -269,7 +295,11 @@ pub fn plan(ledger: &Path) -> std::io::Result<LedgerPlan> {
         Err(source) => return Err(source),
     };
 
-    let mut planned = LedgerPlan::default();
+    let mut planned = LedgerPlan {
+        // #7569: the offset `apply` measures growth against.
+        bytes_read: text.len() as u64,
+        ..LedgerPlan::default()
+    };
     for (index, line) in text.lines().enumerate() {
         let number = index + 1;
         planned.lines_read += 1;
@@ -328,9 +358,22 @@ fn stamp(now: chrono::DateTime<chrono::Utc>) -> String {
 /// returns before that rename, leaving the ledger exactly as it was; the
 /// sidecar, if it was written, is a copy and costs nothing. A clean plan
 /// writes nothing at all and reports zero.
+///
+/// The ledger has a LIVE producer — a Claude hook appends to it at any moment —
+/// so the rename cannot simply replace what [`plan`] read: a row that arrived
+/// since then sits on the old inode and the rename would strand it. So the last
+/// thing written to the temp file is [`tail_since`]'s bytes, carried across
+/// verbatim and counted in [`Applied::carried`]. That narrows the loss window
+/// to the rename itself, which no lock the producers take could close; a row
+/// carried this way is unclassified, and the next run classifies it. A ledger
+/// that SHRANK since the plan is not the file the plan describes, so it is
+/// refused rather than rewritten.
 /// Test: `apply_quarantines_and_rewrites`, `a_second_apply_finds_nothing`,
 /// `apply_keeps_the_original_bytes`,
-/// `apply_leaves_the_ledger_untouched_when_the_sidecar_exists`.
+/// `apply_leaves_the_ledger_untouched_when_the_sidecar_exists`,
+/// `apply_carries_a_row_appended_after_the_plan`,
+/// `apply_refuses_a_ledger_that_shrank`,
+/// `apply_leaves_no_temp_file_when_the_directory_is_read_only`.
 pub fn apply(
     ledger: &Path,
     planned: &LedgerPlan,
@@ -342,6 +385,7 @@ pub fn apply(
             quarantine,
             kept: planned.kept().count(),
             quarantined: 0,
+            carried: 0,
         });
     }
 
@@ -381,15 +425,23 @@ pub fn apply(
     }
 
     let temp = sibling(ledger, &format!(".repair-{}.tmp", stamp(now)));
-    let written = (|| -> std::io::Result<()> {
+    let written = (|| -> std::io::Result<usize> {
         let mut file = std::fs::File::create(&temp)?;
         file.write_all(kept_bytes.as_bytes())?;
-        file.sync_all()
+        // #7569: read the producer's appends LAST, so the window between the
+        // read and the rename below is as small as this can make it.
+        let tail = tail_since(ledger, planned.bytes_read)?;
+        file.write_all(&tail)?;
+        file.sync_all()?;
+        Ok(rows_in(&tail))
     })();
-    if let Err(source) = written {
-        let _ = std::fs::remove_file(&temp);
-        return Err(source);
-    }
+    let carried = match written {
+        Ok(carried) => carried,
+        Err(source) => {
+            let _ = std::fs::remove_file(&temp);
+            return Err(source);
+        }
+    };
     if let Err(source) = std::fs::rename(&temp, ledger) {
         let _ = std::fs::remove_file(&temp);
         return Err(source);
@@ -399,7 +451,54 @@ pub fn apply(
         quarantine,
         kept,
         quarantined,
+        carried,
     })
+}
+
+/// The ledger's bytes past `offset`, which arrived after [`plan`] read it.
+///
+/// Why (#7569): see [`apply`] — these are a live producer's appends, and the
+/// rename would strand them on the old inode.
+/// What: the bytes from `offset` to end of file, verbatim. A ledger no longer
+/// than `offset` yields nothing; one SHORTER than `offset` is a different file
+/// from the one the plan describes, so it is an `InvalidData` error naming both
+/// lengths rather than a rewrite from a stale plan.
+/// Test: `apply_carries_a_row_appended_after_the_plan`,
+/// `apply_refuses_a_ledger_that_shrank`.
+fn tail_since(ledger: &Path, offset: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::{Read as _, Seek as _};
+
+    let mut file = std::fs::File::open(ledger)?;
+    let length = file.metadata()?.len();
+    if length < offset {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "savings ledger {} shrank from {offset} to {length} bytes during the repair",
+                ledger.display()
+            ),
+        ));
+    }
+    if length == offset {
+        return Ok(Vec::new());
+    }
+    file.seek(std::io::SeekFrom::Start(offset))?;
+    let mut tail = Vec::new();
+    file.read_to_end(&mut tail)?;
+    Ok(tail)
+}
+
+/// How many non-blank lines `bytes` holds.
+///
+/// What: counts what an operator would call rows, so a tail of `"\n"` reports
+/// zero rather than one. Invalid UTF-8 is counted lossily — this is a report,
+/// never the bytes written.
+/// Test: `apply_carries_a_row_appended_after_the_plan`.
+fn rows_in(bytes: &[u8]) -> usize {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count()
 }
 
 /// Where the "nothing folded" markers live under a framework root.
