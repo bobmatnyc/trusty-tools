@@ -109,6 +109,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `register` — Register a repo alias for the standalone managed driver (DOC-24)
 - `reinstall` — Redeploy the bundled agents and skills to EVERY deploy destination, and optionally reinstall the binary
 - `repair` — Recover from corrupt or inconsistent deploy state
+  - `delegation` — End a delegation record stuck non-terminal (#7602)
   - `deploy` — Repair the agent/skill deploy state in `~/.claude/`
   - `push-guard` — Retrofit the #2867 cross-branch `pre-push` guard onto an existing clone
   - `savings-ledger` — Quarantine the savings-ledger rows unit tests wrote (#7569)
