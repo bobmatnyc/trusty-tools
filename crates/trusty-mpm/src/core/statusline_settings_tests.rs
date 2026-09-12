@@ -194,6 +194,35 @@ fn a_repair_preserves_operator_fields() {
     );
 }
 
+/// Why (critic re-review): the repair's wholesale-insert branch was documented
+/// as "reachable only for a non-object `statusLine`", and it is not reachable at
+/// all — `is_stale_statusline_command` reads `entry.get("type")`, and
+/// `serde_json::Value::get` answers `None` for a non-object, so such a value is
+/// never claimed as stale. This pins where a non-object actually lands: the
+/// `Unchanged` arm, with the value left exactly as the operator wrote it. Were
+/// the predicate ever widened, this test is what would notice the destination
+/// changing.
+/// Test: itself.
+#[test]
+fn a_non_object_statusline_is_left_alone() {
+    let mut obj = serde_json::Map::new();
+    obj.insert(
+        "statusLine".to_string(),
+        serde_json::Value::String("garbage-string".to_string()),
+    );
+
+    assert_eq!(
+        apply_statusline_entry(&mut obj),
+        StatuslineWrite::Unchanged,
+        "a non-object statusLine is never claimed as stale, so nothing is written"
+    );
+    assert_eq!(
+        obj["statusLine"],
+        serde_json::Value::String("garbage-string".to_string()),
+        "the value must be left exactly as it was found"
+    );
+}
+
 /// Why: the seed writes the whole file back, so every other key has to survive
 /// the round trip — this is the assertion that a repair is not a reset.
 /// Test: itself.

@@ -176,13 +176,19 @@ pub fn backup_of(settings_path: &Path) -> std::path::PathBuf {
 /// The pre-#7617 project-tier writer patched only `command` for exactly this
 /// reason; consolidating the rule must not quietly drop that.
 ///
-/// The wholesale-insert arm is reachable only for a `statusLine` that is not a
-/// JSON object. `is_stale_statusline_command` requires `type == "command"` and a
-/// string `command`, so no real input takes it — it is the defensive branch
-/// #1914's review asked for, kept so a future loosening of that predicate cannot
-/// turn into a silent no-op.
+/// The wholesale-insert arm inside the repair is UNREACHABLE for every input,
+/// and is retained only as defence against a future loosening of the predicate.
+/// `is_stale_statusline_command` reads `entry.get("type")`, and
+/// `serde_json::Value::get` answers `None` for anything that is not an object —
+/// so a non-object `statusLine` is never claimed as stale, never reaches the
+/// repair, and `as_object_mut` there cannot fail. A non-object value therefore
+/// takes the `Unchanged` arm, the same as any operator customization. If that
+/// predicate is ever widened to claim a non-object, this branch is what stops
+/// the widening from turning into a silent no-op — which is the failure #1914's
+/// review flagged when the equivalent branch was first written.
 /// Test: `a_fresh_file_is_seeded`, `a_stale_entry_is_repaired`,
-/// `a_customized_entry_is_kept`, `a_repair_preserves_operator_fields`.
+/// `a_customized_entry_is_kept`, `a_repair_preserves_operator_fields`,
+/// `a_non_object_statusline_is_left_alone`.
 pub fn apply_statusline_entry(
     obj: &mut serde_json::Map<String, serde_json::Value>,
 ) -> StatuslineWrite {
