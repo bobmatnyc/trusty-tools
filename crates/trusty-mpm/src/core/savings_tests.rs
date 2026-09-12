@@ -441,3 +441,62 @@ fn now_ts_is_rfc3339() {
         "must parse as RFC 3339: {ts}"
     );
 }
+
+/// A `Write` that records the size of every call it receives.
+///
+/// Why: the #7579 defect is invisible in the resulting bytes — one write of
+/// `{…}\n` and two writes of `{…}` then `\n` produce an identical file. The
+/// only observable is the call boundary, which is what an `O_APPEND`
+/// descriptor interleaves on, so the test has to count calls rather than
+/// inspect content.
+struct CountingSink {
+    writes: Vec<usize>,
+    bytes: Vec<u8>,
+}
+
+impl std::io::Write for CountingSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.writes.push(buf.len());
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Why (#7579): the module header promises two racing producers "interleave
+/// rows, never bytes within a row", and `writeln!` broke that promise — it
+/// hands the formatter's pieces to the sink separately, so the row and its
+/// newline reached the `O_APPEND` descriptor as two writes and a producer
+/// racing between them landed its own row mid-line. The operator's ledger
+/// carries ten such lines.
+/// FAILS BEFORE THIS CHANGE: `writeln!(sink, "{line}")` records two writes —
+/// measured `[226, 1]` — where this asserts one.
+/// Test: itself.
+#[test]
+fn a_row_and_its_newline_leave_in_one_write() {
+    let mut sink = CountingSink {
+        writes: Vec::new(),
+        bytes: Vec::new(),
+    };
+    write_row_line(&mut sink, &row("sess-a", 4_000, 0.012)).expect("write");
+
+    assert_eq!(
+        sink.writes.len(),
+        1,
+        "the row and its newline must reach the descriptor together, got {:?}",
+        sink.writes
+    );
+    let written = String::from_utf8(sink.bytes).expect("utf-8");
+    assert!(
+        written.ends_with('\n'),
+        "the single write must carry the terminator: {written:?}"
+    );
+    assert_eq!(
+        written.matches('\n').count(),
+        1,
+        "exactly one terminator: {written:?}"
+    );
+}

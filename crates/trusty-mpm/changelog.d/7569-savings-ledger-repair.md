@@ -1,0 +1,2 @@
+Added
+- `tm repair savings-ledger` quarantines the savings-ledger rows unit tests wrote through the #7514 resolver bug. It reports and writes nothing by default; `--apply` moves the matched rows to `<ledger>.quarantine-<stamp>.jsonl`, rewrites the ledger atomically from the kept rows' original bytes, and splits the lines that hold two rows with no separator; `--markers` also moves the `usage/no-fold-warned/` directory aside. Re-running finds nothing. (#7569)

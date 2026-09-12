@@ -85,6 +85,89 @@ fn cli_parses_repair_session_store() {
     }
 }
 
+/// Why (#7569): the command REWRITES the operator's savings ledger, so the
+/// safe default is the contract — a bare invocation must report and write
+/// nothing. A flag that defaulted the other way would destroy rows before
+/// anyone authorised it.
+/// What: pins the verb name and the write-nothing default.
+/// Test: this test.
+#[test]
+fn cli_parses_repair_savings_ledger() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "repair", "savings-ledger"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Repair {
+            action:
+                RepairAction::SavingsLedger {
+                    root,
+                    apply,
+                    dry_run,
+                    markers,
+                },
+        } => {
+            assert_eq!(root, None, "the default target is the real framework root");
+            assert!(!apply, "a bare invocation writes nothing");
+            assert!(!dry_run, "dry-run is the default, not a flag it must carry");
+            assert!(!markers, "a bare invocation leaves the markers alone");
+        }
+        other => panic!("expected Command::Repair(SavingsLedger), got {other:?}"),
+    }
+}
+
+/// Why (#7569): `--apply` is the only way past the dry run, `--root` the only
+/// way to rehearse against a copy, and `--markers` the only way to sweep the
+/// stray marker directory; all three must be reachable.
+/// What: pins the three flags together.
+/// Test: this test.
+#[test]
+fn cli_parses_repair_savings_ledger_flags() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "repair",
+        "savings-ledger",
+        "--root",
+        "/tmp/rehearsal",
+        "--apply",
+        "--markers",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Repair {
+            action:
+                RepairAction::SavingsLedger {
+                    root,
+                    apply,
+                    dry_run,
+                    markers,
+                },
+        } => {
+            assert_eq!(root, Some("/tmp/rehearsal".to_string()));
+            assert!(apply);
+            assert!(!dry_run);
+            assert!(markers);
+        }
+        other => panic!("expected Command::Repair(SavingsLedger), got {other:?}"),
+    }
+}
+
+/// Why (#7569): `--apply` and `--dry-run` state opposite intentions, and a
+/// command that silently picked one would repair a ledger an operator meant
+/// only to inspect.
+/// Test: this test.
+#[test]
+fn cli_rejects_repair_savings_ledger_apply_with_dry_run() {
+    assert!(
+        Cli::try_parse_from([
+            "trusty-mpm",
+            "repair",
+            "savings-ledger",
+            "--apply",
+            "--dry-run",
+        ])
+        .is_err(),
+        "--apply and --dry-run must not be combinable"
+    );
+}
+
 /// Why: `--dry-run` is the only way to inspect the cut before authorising it
 /// and `--force` the only way past the orphan refusal; both must be reachable.
 /// What: pins all three flags.

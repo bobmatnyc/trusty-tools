@@ -47,6 +47,13 @@ pub(crate) fn dispatch(action: RepairAction) -> anyhow::Result<()> {
             dry_run,
             force,
         } => super::repair_session_store::repair_session_store(path, dry_run, force),
+        // #7569: quarantine the ledger rows #7514 let unit tests write.
+        RepairAction::SavingsLedger {
+            root,
+            apply,
+            dry_run: _,
+            markers,
+        } => super::repair_savings_ledger::repair_savings_ledger(root, apply, markers),
     }
 }
 

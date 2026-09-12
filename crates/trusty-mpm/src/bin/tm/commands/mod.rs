@@ -127,6 +127,9 @@ pub(crate) mod register_args;
 pub(crate) mod reinstall;
 pub(crate) mod rename;
 pub(crate) mod repair;
+// #7569: `tm repair savings-ledger` — quarantine the ledger rows #7514 let
+// unit tests append to the operator's own savings ledger.
+pub(crate) mod repair_savings_ledger;
 // #5007: `tm repair session-store` — back up and truncate a corrupt
 // `sessions.json` so a wedged store no longer needs a human editing JSON.
 pub(crate) mod repair_session_store;
