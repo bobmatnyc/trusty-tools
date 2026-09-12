@@ -47,10 +47,12 @@ fn an_unresolvable_agent_name_is_an_error() {
     );
 }
 
-/// #7443: a palace id that would escape the data root is refused.
+/// #7443: a palace id that does not name a fresh child of the data root is
+/// refused — `..` escapes the root, and a bare `.` IS the root, which puts
+/// every assistant back in one shared directory.
 #[test]
 fn a_traversing_palace_id_is_rejected() {
-    for bad in ["..", "../escape", "a/b", "a\\b", ""] {
+    for bad in [".", "..", " . ", "./here", "../escape", "a/b", "a\\b", ""] {
         let err = MemoryScope::new(bad)
             .expect_err("a path-bearing or blank palace id must not become a scope");
         assert!(
@@ -58,10 +60,12 @@ fn a_traversing_palace_id_is_rejected() {
             "expected Unusable for {bad:?}, got {err:?}"
         );
     }
-    assert!(
-        MemoryScope::new("owner-profile.v2_1").is_ok(),
-        "ordinary palace ids stay usable"
-    );
+    for ok in ["owner-profile.v2_1", "..foo", ".cache"] {
+        assert!(
+            MemoryScope::new(ok).is_ok(),
+            "{ok:?} is a literal name, not a dot-segment, and stays usable"
+        );
+    }
 }
 
 /// #7443: two assistants key two palaces for the same segment.

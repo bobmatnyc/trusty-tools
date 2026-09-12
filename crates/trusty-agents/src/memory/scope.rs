@@ -49,12 +49,15 @@ pub enum MemoryScopeError {
 /// One assistant's share of the memory-store keyspace.
 ///
 /// Why: a palace id is joined onto a data root as a directory name by
-/// [`crate::memory::trusty_backed`], so an unvalidated component would let a
-/// palace id containing `..` or a separator escape that root. Validating once,
+/// [`crate::memory::trusty_backed`], so an unvalidated component could name
+/// somewhere other than a fresh child of that root — `..` escapes it and `.` IS
+/// it, which puts every assistant back in one shared directory. Validating once,
 /// at construction, means every consumer of a `MemoryScope` holds a value that
 /// is already safe to interpolate.
-/// What: a non-blank string of ASCII alphanumerics, `-`, `_` and `.`, with `..`
-/// excluded outright.
+/// What: ONE path segment — a non-blank string of ASCII alphanumerics, `-`, `_`
+/// and `.`, which excludes every separator, with the two dot-segments `.` and
+/// `..` refused by exact match. A leading dot is only refused when the WHOLE
+/// name is a dot-segment, so `..foo` and `.cache` stay legal literal names.
 /// Test: `super::scope_tests::a_traversing_palace_id_is_rejected`,
 /// `super::scope_tests::two_assistants_key_two_palaces`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -65,13 +68,15 @@ impl MemoryScope {
     ///
     /// Why: the #7428 resolution and this crate's tests both arrive with a
     /// palace id in hand; validation is the only thing left to do.
-    /// What: trims, then rejects blank, `..`, and any character outside
-    /// `[A-Za-z0-9._-]`.
+    /// What: trims, then rejects blank, either dot-segment, and any character
+    /// outside `[A-Za-z0-9._-]` (which is what excludes every separator).
     /// Test: `super::scope_tests::a_traversing_palace_id_is_rejected`.
     pub fn new(palace: impl AsRef<str>) -> Result<Self, MemoryScopeError> {
         let trimmed = palace.as_ref().trim();
+        // #7443: `..` escapes the data root and `.` names the root itself, which
+        // puts every assistant back in one directory — refuse both.
         let usable = !trimmed.is_empty()
-            && trimmed != ".."
+            && !matches!(trimmed, "." | "..")
             && trimmed
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
