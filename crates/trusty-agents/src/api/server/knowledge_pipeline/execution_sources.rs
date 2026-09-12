@@ -148,7 +148,13 @@ pub(super) async fn withdraw_missing(
     scanned: &BTreeSet<String>,
 ) -> anyhow::Result<()> {
     let checkpoints = context.store().checkpoints()?;
-    let event_ids = checkpoints.values().map(|c| c.item_id.clone()).collect();
+    // #7653: the lookup below is capped at 10000 IDs and 16 MiB, so only
+    // checkpoints whose source can reach it are collected. Project checkpoints
+    // are authorized by the scan above and never consult the event log.
+    let candidates: Vec<(String, String)> = checkpoints
+        .values()
+        .map(|c| (c.source_id.clone(), c.item_id.clone()))
+        .collect();
     let mut event_records: Option<BTreeMap<String, crate::listeners::store::StoredEvent>> = None;
     for (key, mut checkpoint) in checkpoints {
         if checkpoint.status == "cancelled" || !checkpoint.needs_withdrawal() || seen.contains(&key)
@@ -175,6 +181,16 @@ pub(super) async fn withdraw_missing(
             } else {
                 // #4283: a bounded batch cannot authorize deletion of an older event.
                 if event_records.is_none() {
+                    let event_sources: BTreeSet<&str> = eligible
+                        .iter()
+                        .filter(|s| s.kind != SourceKind::Project)
+                        .map(|s| s.id.as_str())
+                        .collect();
+                    let event_ids: BTreeSet<String> = candidates
+                        .iter()
+                        .filter(|(source_id, _)| event_sources.contains(source_id.as_str()))
+                        .map(|(_, item_id)| item_id.clone())
+                        .collect();
                     event_records =
                         Some(crate::listeners::store::EventStore::read_exact(&event_ids).await?);
                 }

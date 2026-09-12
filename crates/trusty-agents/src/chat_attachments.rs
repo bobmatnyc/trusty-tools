@@ -123,6 +123,9 @@ pub(crate) async fn prepare(
     let session = crate::ctrl::pm_task::session_id_for(name);
     let args = json!({"palace":policy.namespace,"session_id":session});
     let previous = rpc(&socket, "chat_session_get", args.clone()).await;
+    // #7653: a failed probe leaves no baseline, so the re-read comparison below
+    // has nothing to compare against and must not run.
+    let mut history_probe_failed = false;
     let history: Vec<ChatMessage> = match previous {
         Ok(value) => serde_json::from_value(
             value
@@ -134,7 +137,11 @@ pub(crate) async fn prepare(
             history_unavailable.store(true, Ordering::Relaxed);
             return Ok(None);
         }
-        Err(_) => vec![],
+        Err(_) => {
+            history_unavailable.store(true, Ordering::Relaxed);
+            history_probe_failed = true;
+            vec![]
+        }
     };
     if attachments.is_empty() && !history.iter().any(|m| !m.attachments.is_empty()) {
         return Ok(None);
@@ -198,7 +205,7 @@ pub(crate) async fn prepare(
             .context("Invalid chat history")?,
     )?;
     anyhow::ensure!(
-        serde_json::to_value(&latest)? == serde_json::to_value(&history)?,
+        history_probe_failed || serde_json::to_value(&latest)? == serde_json::to_value(&history)?,
         "Conversation changed during attachment validation; retry the send"
     );
     if retry {
@@ -395,17 +402,27 @@ mod tests {
         let observed_writes = writes.clone();
         let fail_probe = Arc::new(AtomicBool::new(false));
         let probe_control = fail_probe.clone();
+        // #7653: a one-shot probe failure models a transient daemon blip, where
+        // the re-read below succeeds and returns the real prior history.
+        let probe_once = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let probe_once_control = probe_once.clone();
         const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGP4z8AARAwQCgAf7gP9i18U1AAAAABJRU5ErkJggg==";
         let asset_id = uuid::Uuid::new_v4().to_string();
         let daemon = crate::uds_mock::spawn(move |method, params| {
             let fail_probe = fail_probe.clone();
+            let probe_once = probe_once.clone();
             let history = history.clone(); let writes = writes.clone();
             let namespace = namespace.clone(); let asset_id = asset_id.clone();
             let wrapped = method == "tools/call";
             let method = if wrapped { params["name"].as_str().unwrap().to_owned() } else { method.to_owned() };
             let args = if wrapped { params["arguments"].clone() } else { params };
             Box::pin(async move {
-                if method == "chat_session_get" && fail_probe.load(Ordering::Relaxed) {
+                if method == "chat_session_get"
+                    && (fail_probe.load(Ordering::Relaxed)
+                        || probe_once
+                            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+                            .is_ok())
+                {
                     return Err(trusty_common::uds::server::RpcError::internal("synthetic history probe unavailable"));
                 }
                 let value = match method.as_str() {
@@ -499,12 +516,45 @@ mod tests {
             prepare(
                 "fixture",
                 "Explicit image",
-                &[attachment],
+                std::slice::from_ref(&attachment),
                 &AtomicBool::new(false),
                 |_| Ok(())
             )
             .await
             .is_err()
+        );
+
+        // #7653: a TRANSIENT probe failure on the attachment path — the first
+        // read fails, the re-read succeeds and returns the real prior history.
+        // Before the fix the empty substituted baseline made that re-read look
+        // like a concurrent write, so the turn failed with "Conversation
+        // changed during attachment validation" instead of degrading.
+        probe_control.store(false, Ordering::Relaxed);
+        probe_once_control.store(1, Ordering::Relaxed);
+        assert_eq!(observed.lock().unwrap().len(), 1);
+        let transient = AtomicBool::new(false);
+        let degraded = prepare(
+            "fixture",
+            "Follow-up with image",
+            std::slice::from_ref(&attachment),
+            &transient,
+            |_| Ok(()),
+        )
+        .await
+        .expect("a transient history probe failure must not report a changed conversation");
+        assert!(degraded.is_some());
+        assert!(transient.load(Ordering::Relaxed));
+        // The turn was persisted, so the user's explicit attachment is never
+        // silently dropped by the degradation.
+        assert_eq!(observed.lock().unwrap().len(), 2);
+        assert_eq!(
+            *observed_writes.lock().unwrap(),
+            [
+                "chat_asset_put",
+                "chat_session_add_turn",
+                "chat_asset_put",
+                "chat_session_add_turn"
+            ]
         );
     }
     #[tokio::test]
