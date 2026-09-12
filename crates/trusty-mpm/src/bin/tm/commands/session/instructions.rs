@@ -116,6 +116,9 @@ pub(crate) fn compose_session_instructions_with_roster(
         // made the printed count disagree with the delivered roster.
         project_dir: project_dir.to_path_buf(),
         claude_md_path: project_dir.join("CLAUDE.md"),
+        // #7673: the seed-site guard's home. This is the CLI boundary, so the
+        // ambient read belongs here rather than inside the guard.
+        home: dirs::home_dir(),
     };
     let output = build_instructions(&input)?;
 

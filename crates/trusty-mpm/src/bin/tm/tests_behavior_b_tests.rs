@@ -406,8 +406,6 @@ fn compose_session_instructions_display_matches_stash() {
     // on-disk stash to detect any future divergence.
     let tmp = tempfile::tempdir().unwrap();
     let project = tmp.path();
-    // #7673: the seed guard refuses a directory that is not a project root.
-    std::fs::create_dir_all(project.join(".trusty-mpm")).unwrap();
 
     let (display, _output, stash_path) =
         compose_session_instructions(project).expect("compose succeeds");
@@ -438,8 +436,6 @@ fn compose_session_instructions_display_matches_live_prompt() {
     let (_tiers, roster) = fixture_roster_section();
     let tmp = tempfile::tempdir().unwrap();
     let project = tmp.path();
-    // #7673: the seed guard refuses a directory that is not a project root.
-    std::fs::create_dir_all(project.join(".trusty-mpm")).unwrap();
 
     let (display, _output, _stash) =
         compose_session_instructions_with_roster(project, Some(roster.clone()))
@@ -476,8 +472,6 @@ fn compose_session_instructions_display_matches_live_prompt_with_override() {
     let (_tiers, roster) = fixture_roster_section();
     let tmp = tempfile::tempdir().unwrap();
     let project = tmp.path();
-    // #7673: the seed guard refuses a directory that is not a project root.
-    std::fs::create_dir_all(project.join(".trusty-mpm")).unwrap();
 
     std::fs::write(
         project.join("CLAUDE.md"),

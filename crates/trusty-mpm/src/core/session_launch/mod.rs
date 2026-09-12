@@ -924,6 +924,9 @@ fn prepare_session_inner(
         // the count printed at session start is the roster the PM receives.
         project_dir: project_dir.to_path_buf(),
         claude_md_path: project_dir.join("CLAUDE.md"),
+        // #7673 review: the injected home, not `dirs::home_dir()` inside the
+        // guard — the same seam every other host input rides on (#5544).
+        home: home.map(Path::to_path_buf),
     };
     // #4752 (owner ruling, round 4): a session DEPENDS on its instructions, so
     // failing to build them refuses the launch. This used to return the
@@ -942,12 +945,10 @@ fn prepare_session_inner(
     // Claude Code prepends each of them to every turn here, and the cost is
     // invisible from inside the session — this is the only moment it can be
     // surfaced. Silent when there is nothing above the project, or when the
-    // operator has already listed it in `claudeMdExcludes`.
-    crate::core::ancestor_claude_md::warn_ancestors(
-        project_dir,
-        dirs::home_dir().as_deref(),
-        crate::core::trusty_tools_config::managed_claude_config_dir().as_deref(),
-    );
+    // operator has already listed it in `claudeMdExcludes`. #7673 review: the
+    // INJECTED home, the same one the seed guard now rides on (#5544).
+    let managed_config = crate::core::trusty_tools_config::managed_claude_config_dir();
+    crate::core::ancestor_claude_md::warn_ancestors(project_dir, home, managed_config.as_deref());
 
     // Resolve the EFFECTIVE output style, folding the manifest's default in as
     // the lowest precedence below the existing HR-4 sources. Precedence:

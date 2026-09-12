@@ -701,6 +701,13 @@ pub struct PipelineInput {
     pub project_dir: PathBuf,
     /// Path to the project `CLAUDE.md`.
     pub claude_md_path: PathBuf,
+    /// The operator's home directory, for the #7673 seed-site guard.
+    ///
+    /// #7673 review: injected rather than read from `dirs::home_dir()` at the
+    /// guard, matching the `home` every other seam in this launch path already
+    /// threads (#5544). `prepare_session_inner` passes the `host.home` it was
+    /// given; `None` means "no home to compare against", which refuses nothing.
+    pub home: Option<PathBuf>,
 }
 
 /// Result of a successful instruction merge.
@@ -815,7 +822,8 @@ pub fn build_instructions(input: &PipelineInput) -> Result<PipelineOutput, Pipel
     // `CLAUDE.md` natively and the real launch prompt is built by
     // `resolve_pm_prompt`/`build_system_prompt_for`, so the content is read
     // back only to report whether this call created it.
-    let (_claude_md, claude_md_created) = load_or_create_claude_md(&input.claude_md_path)?;
+    let (_claude_md, claude_md_created) =
+        load_or_create_claude_md(&input.claude_md_path, input.home.as_deref())?;
 
     Ok(PipelineOutput {
         agent_count,
@@ -1022,33 +1030,44 @@ fn git_succeeds(dir: &std::path::Path, args: &[&str]) -> bool {
 /// on 2026-09-12; Claude Code loads every `CLAUDE.md` from the session cwd up to
 /// the filesystem root, so that one file rode into every turn of every agent in
 /// every project under the home directory. This now refuses to seed when the
-/// target directory is the home directory, or carries no project-root marker —
-/// see [`crate::core::claude_md_seed::refuse_seed_at`]. The refusal is an ERROR
+/// target directory is the home directory, or sits above it — see
+/// [`crate::core::claude_md_seed::refuse_seed_for`]. The refusal is an ERROR
 /// arm on the same fatal path as the #5228 refusal above, never a warning that
-/// writes anyway.
+/// writes anyway. `home` is INJECTED (it rides on [`PipelineInput::home`])
+/// rather than read from the ambient environment here, matching the rest of
+/// this seam (#5544).
 /// Test: `pipeline_creates_claude_md`, `pipeline_claude_md_left_byte_identical`,
 /// `load_or_create_claude_md_refuses_to_seed_at_the_home_directory`,
-/// `load_or_create_claude_md_refuses_to_seed_outside_a_project_root`,
+/// `load_or_create_claude_md_refuses_to_seed_above_the_home_directory`,
+/// `load_or_create_claude_md_fails_closed_on_a_path_with_no_directory`,
+/// `load_or_create_claude_md_seeds_in_a_subdirectory_of_a_git_repo`,
 /// `load_or_create_claude_md_refuses_to_stub_a_branch_predating_the_tracked_file`,
 /// `build_instructions_refuses_a_stale_worktree_rather_than_seeding_a_stub`,
 /// `load_or_create_claude_md_still_seeds_when_upstream_has_no_claude_md`,
 /// `load_or_create_claude_md_reads_a_present_file_in_a_git_worktree`.
-fn load_or_create_claude_md(path: &PathBuf) -> Result<(String, bool), PipelineError> {
+fn load_or_create_claude_md(
+    path: &PathBuf,
+    home: Option<&std::path::Path>,
+) -> Result<(String, bool), PipelineError> {
     match std::fs::read_to_string(path) {
         Ok(text) => Ok((text, false)),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             // #7673: and the seed must never land ABOVE a project. This is an
             // ERROR arm, never a warning that then writes anyway — the whole
             // finding is that a stray seed is invisible once written.
-            if let Some(dir) = path.parent().filter(|p| !p.as_os_str().is_empty())
-                && let Some(refusal) =
-                    crate::core::claude_md_seed::refuse_seed_at(dir, dirs::home_dir().as_deref())
-            {
+            // The decision is made on the FILE path, so an empty or absent
+            // parent — what `--dir ""` produces — fails closed inside
+            // `refuse_seed_for` rather than skipping the guard.
+            if let Some(refusal) = crate::core::claude_md_seed::refuse_seed_for(path, home) {
+                let named = path
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or(path);
                 return Err(PipelineError::Io {
                     path: path.clone(),
                     source: std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
-                        refusal.message(dir),
+                        refusal.message(named),
                     ),
                 });
             }

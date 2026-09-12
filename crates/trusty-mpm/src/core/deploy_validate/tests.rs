@@ -487,8 +487,6 @@ fn repair_closes_gaps_on_incomplete_workspace() {
     let tmp = TempDir::new().unwrap();
     let workspace = tmp.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
-    // #7673: the seed guard refuses a directory that is not a project root.
-    std::fs::create_dir_all(workspace.join(".trusty-mpm")).unwrap();
     let fw = FrameworkPaths::for_managed_project(tmp.path(), &workspace);
     let mut fw = fw;
     fw.trusty_mpm_root = None;

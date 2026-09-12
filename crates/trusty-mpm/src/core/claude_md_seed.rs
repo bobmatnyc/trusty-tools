@@ -20,60 +20,55 @@ use std::path::Path;
 
 use crate::core::instruction_pipeline::CLAUDE_MD_STUB;
 
-/// Directory entries that mark a directory as a project root (#7673).
+/// Why tm declined to seed a `CLAUDE.md`.
 ///
-/// Why: the daemon's project registry is keyed by repo URL, not by local path
-/// (`project::record::Project` has no path field), so it cannot answer "is this
-/// DIRECTORY a registered project". What can answer it is what is on disk: a
-/// git checkout, or tm's own per-project state — either of which tm itself
-/// created the first time the operator ran it there.
-/// What: `.git` (a repo or a worktree pointer file), `.trusty-mpm` (the harness
-/// root a registered project carries), and `.trusty-mpm.toml` (the per-project
-/// config). Any one of them is sufficient.
-/// Test: `a_git_checkout_is_a_project_root`,
-/// `a_harness_root_is_a_project_root`, `a_bare_directory_is_not_a_project_root`.
-const PROJECT_ROOT_MARKERS: [&str; 3] = [".git", ".trusty-mpm", ".trusty-mpm.toml"];
-
-/// Why tm declined to seed a `CLAUDE.md` at a directory.
-///
-/// Why: the two refusals need different words. `$HOME` is refused even when it
-/// looks like a project (an operator's dotfiles repo is a git checkout), because
-/// a file there is an ancestor of every project beneath it. A non-project
-/// directory is refused because nothing establishes that a session there is a
-/// project session at all.
-/// What: two variants, each rendering its own operator-facing message through
+/// Why: the refusals need different words. `$HOME` is refused even when it looks
+/// like a project (an operator's dotfiles repo is a git checkout), because a
+/// file there is an ancestor of every project beneath it. A directory ABOVE
+/// `$HOME` is refused for the same reason and more so. A target path with no
+/// directory component is refused because the site cannot be judged at all.
+/// What: three variants, each rendering its own operator-facing message through
 /// [`SeedRefusal::message`].
 /// Test: `seeding_into_home_is_refused`,
-/// `seeding_into_a_bare_directory_is_refused`.
+/// `seeding_above_the_home_directory_is_refused`,
+/// `a_path_with_no_directory_component_is_refused`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SeedRefusal {
     /// The target directory is the operator's home directory.
     Home,
-    /// The target directory carries no [`PROJECT_ROOT_MARKERS`] entry.
-    NotAProjectRoot,
+    /// The target directory is a strict ancestor of the home directory and
+    /// belongs to no git working tree — `/`, `/Users`, `/home`.
+    AboveHome,
+    /// The target path has no directory component to judge (#7673 review).
+    NoDirectory,
 }
 
 impl SeedRefusal {
     /// The operator-facing explanation, naming the path.
     ///
-    /// Why: a refusal the operator cannot act on is a wedge. Both messages name
-    /// the exact directory and what would make the seed legitimate.
-    /// What: one sentence per variant, with `dir` interpolated.
+    /// Why: a refusal the operator cannot act on is a wedge. Every message names
+    /// the exact path and what would make the seed legitimate.
     /// Test: `the_home_refusal_names_the_path`.
-    pub fn message(self, dir: &Path) -> String {
+    pub fn message(self, path: &Path) -> String {
         match self {
             Self::Home => format!(
                 "refusing to seed a CLAUDE.md at the home directory {} — Claude Code loads \
                  every CLAUDE.md from the session cwd up to the filesystem root, so a file \
                  here would be prepended to every session in every project beneath it. Start \
                  the session from the project directory instead.",
-                dir.display()
+                path.display()
             ),
-            Self::NotAProjectRoot => format!(
-                "refusing to seed a CLAUDE.md at {} — it is not a project root (no .git, \
-                 .trusty-mpm/ or .trusty-mpm.toml). Run tm from the project's own directory, \
-                 or register the project there first.",
-                dir.display()
+            Self::AboveHome => format!(
+                "refusing to seed a CLAUDE.md at {} — it sits above the home directory, so \
+                 Claude Code would prepend the file to every session in every project \
+                 beneath it. Start the session from the project directory instead.",
+                path.display()
+            ),
+            Self::NoDirectory => format!(
+                "refusing to seed a CLAUDE.md at {} — the path has no directory component, \
+                 so the seed site cannot be checked against the home directory. Pass the \
+                 project's own directory.",
+                path.display()
             ),
         }
     }
@@ -82,30 +77,63 @@ impl SeedRefusal {
 /// May tm write a seed `CLAUDE.md` into `dir`?
 ///
 /// Why: see the module header — this is the root-cause guard for the `$HOME`
-/// seed. It is deliberately a check on the DIRECTORY rather than on the caller,
-/// so every seeding path inherits it by calling the one seeder.
-/// What: `Some(SeedRefusal::Home)` when `dir` resolves to `home`;
-/// `Some(SeedRefusal::NotAProjectRoot)` when it carries no
-/// [`PROJECT_ROOT_MARKERS`] entry; `None` when seeding is allowed. `home` is
-/// INJECTED rather than read from the environment so a test can point it at a
-/// temp directory without a process-global `$HOME` write (#5544).
+/// seed, and the incident WAS `$HOME`. An earlier round of this guard also
+/// demanded a `.git`/`.trusty-mpm` marker in `dir` ITSELF, which refused two
+/// documented, previously-working surfaces: a session started from a
+/// SUBDIRECTORY of a git repo, which `tm session start`'s own
+/// `refuse_outside_a_git_project` gate already certifies, and
+/// `tm sessions instructions --dir <dir>` on a directory tm has never touched.
+/// So the marker test is gone and the rule is home-relative: a site is refused
+/// only when a file there would load into sessions that are not this project's.
+/// What: `Some(SeedRefusal::Home)` when `dir` resolves to `home`, checked FIRST
+/// and unconditionally, so a dotfiles repo at `$HOME` cannot talk its way past
+/// it; `Some(SeedRefusal::AboveHome)` when `dir` is a STRICT ancestor of `home`
+/// and [`crate::core::harness_root::harness_root_for`] — the codebase's one
+/// project-root definition, the same one `refuse_outside_a_git_project` uses —
+/// finds no git working tree owning it; `None` otherwise, which is every
+/// directory inside a git project at any depth and every first-touch directory.
+/// `home` is INJECTED rather than read from the environment so a test can point
+/// it at a temp directory without a process-global `$HOME` write (#5544); a
+/// `None` home disables both arms, because with no home there is no home to
+/// seed above.
 /// Test: `seeding_into_home_is_refused`,
-/// `seeding_into_a_bare_directory_is_refused`,
-/// `a_git_checkout_is_a_project_root`, `a_harness_root_is_a_project_root`.
+/// `seeding_above_the_home_directory_is_refused`,
+/// `a_bare_first_touch_directory_is_seeded`,
+/// `a_subdirectory_of_a_git_project_is_seeded`.
 pub fn refuse_seed_at(dir: &Path, home: Option<&Path>) -> Option<SeedRefusal> {
     let resolve = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    if let Some(home) = home
-        && resolve(dir) == resolve(home)
-    {
+    let home = resolve(home?);
+    let dir = resolve(dir);
+    if dir == home {
         return Some(SeedRefusal::Home);
     }
-    if PROJECT_ROOT_MARKERS
-        .iter()
-        .any(|marker| dir.join(marker).exists())
-    {
-        return None;
+    // A strict ancestor of `$HOME` is at least as bad as `$HOME` itself. The git
+    // probe runs ONLY on this arm — a handful of directories per machine — so
+    // the ordinary launch path never pays for it.
+    if home.starts_with(&dir) && crate::core::harness_root::harness_root_for(&dir).is_none() {
+        return Some(SeedRefusal::AboveHome);
     }
-    Some(SeedRefusal::NotAProjectRoot)
+    None
+}
+
+/// [`refuse_seed_at`] for a `CLAUDE.md` FILE path, failing closed (#7673 review).
+///
+/// Why: the call site used to derive the directory with
+/// `path.parent().filter(non-empty)` inside an `if let`, so a degenerate
+/// relative path — what `--dir ""` produces — made the binding fail and SKIPPED
+/// the guard entirely, falling through to the seeding write with no check at
+/// all. That is the same silent-seed shape this guard exists to close, reached
+/// through a different input. A path whose site cannot be determined is refused,
+/// never waved through.
+/// What: delegates to [`refuse_seed_at`] on `path`'s parent; an absent or empty
+/// parent is [`SeedRefusal::NoDirectory`].
+/// Test: `a_path_with_no_directory_component_is_refused`,
+/// `load_or_create_claude_md_fails_closed_on_a_path_with_no_directory`.
+pub fn refuse_seed_for(path: &Path, home: Option<&Path>) -> Option<SeedRefusal> {
+    match path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        Some(dir) => refuse_seed_at(dir, home),
+        None => Some(SeedRefusal::NoDirectory),
+    }
 }
 
 /// Is `content` tm's seed template with nothing of the operator's added?

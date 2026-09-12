@@ -370,8 +370,6 @@ mod tests {
         let project_root = crate::test_support::hermetic_temp_dir();
         let repo = project_root.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
-        // #7673: the seed guard refuses a directory that is not a project root.
-        std::fs::create_dir_all(repo.join(".trusty-mpm")).unwrap();
 
         run_prepare_session(&repo, None, &managed_root).expect("run_prepare_session succeeds");
 

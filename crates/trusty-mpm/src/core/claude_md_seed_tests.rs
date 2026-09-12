@@ -57,7 +57,8 @@ fn seeding_into_home_is_refused() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");
     // A dotfiles repo makes `$HOME` look exactly like a project root; the home
-    // refusal must outrank the marker test, not fall through it.
+    // refusal must be first and unconditional, not something a marker can
+    // out-argue.
     std::fs::create_dir_all(home.join(".git")).unwrap();
 
     assert_eq!(
@@ -67,54 +68,108 @@ fn seeding_into_home_is_refused() {
     );
 }
 
+/// A directory ABOVE `$HOME` — `/`, `/Users`, `/home` — loads into every
+/// session `$HOME` does and more, so it is refused on the same reasoning.
 #[test]
-fn seeding_into_a_bare_directory_is_refused() {
+fn seeding_above_the_home_directory_is_refused() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+
+    assert_eq!(
+        refuse_seed_at(tmp.path(), Some(&home)),
+        Some(SeedRefusal::AboveHome)
+    );
+}
+
+/// The CRITICAL regression this round fixes: the first round's marker test
+/// refused a bare temp directory, which is exactly the shape
+/// `tm sessions instructions --dir <dir>` is documented to accept on a
+/// directory tm has never touched.
+#[test]
+fn a_bare_first_touch_directory_is_seeded() {
     let tmp = TempDir::new().unwrap();
     let dir = tmp.path().join("scratch");
     std::fs::create_dir_all(&dir).unwrap();
     let home = tmp.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
 
-    assert_eq!(
-        refuse_seed_at(&dir, Some(&home)),
-        Some(SeedRefusal::NotAProjectRoot)
-    );
+    assert_eq!(refuse_seed_at(&dir, Some(&home)), None);
 }
 
+/// The other half of the same regression: `tm session start` already certifies
+/// any directory inside a git work tree, at any depth, through
+/// `harness_root_for`. The seed guard must not disagree with it.
 #[test]
-fn a_git_checkout_is_a_project_root() {
+fn a_subdirectory_of_a_git_project_is_seeded() {
     let tmp = TempDir::new().unwrap();
-    let dir = tmp.path().join("repo");
-    std::fs::create_dir_all(dir.join(".git")).unwrap();
+    let repo = tmp.path().join("repo");
+    let nested = repo.join("crates").join("thing");
+    std::fs::create_dir_all(&nested).unwrap();
+    if !git_init(&repo) {
+        eprintln!("#7673 tests: git unavailable, skipping");
+        return;
+    }
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
 
-    assert_eq!(refuse_seed_at(&dir, Some(tmp.path())), None);
+    assert_eq!(refuse_seed_at(&nested, Some(&home)), None);
 }
 
-/// A linked worktree carries `.git` as a FILE, not a directory.
+/// A registered project that is not a git checkout keeps working too.
 #[test]
-fn a_git_worktree_pointer_file_is_a_project_root() {
-    let tmp = TempDir::new().unwrap();
-    let dir = tmp.path().join("wt");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join(".git"), "gitdir: /elsewhere/.git/worktrees/wt\n").unwrap();
-
-    assert_eq!(refuse_seed_at(&dir, Some(tmp.path())), None);
-}
-
-#[test]
-fn a_harness_root_is_a_project_root() {
+fn a_harness_root_is_seeded() {
     let tmp = TempDir::new().unwrap();
     let dir = tmp.path().join("registered");
     std::fs::create_dir_all(dir.join(".trusty-mpm")).unwrap();
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
 
-    assert_eq!(refuse_seed_at(&dir, Some(tmp.path())), None);
+    assert_eq!(refuse_seed_at(&dir, Some(&home)), None);
 }
 
+/// With no home injected there is no home to seed above, so nothing is refused.
 #[test]
-fn a_bare_directory_is_not_a_project_root() {
+fn no_injected_home_refuses_nothing() {
     let tmp = TempDir::new().unwrap();
+    assert_eq!(refuse_seed_at(tmp.path(), None), None);
+}
+
+/// FAILS BEFORE THIS ROUND: `--dir ""` produced a bare `CLAUDE.md` whose parent
+/// is the empty path, and the call site's `if let` then skipped the guard
+/// entirely. The decision must fail CLOSED instead.
+#[test]
+fn a_path_with_no_directory_component_is_refused() {
     assert_eq!(
-        refuse_seed_at(tmp.path(), None),
-        Some(SeedRefusal::NotAProjectRoot),
-        "with no home to compare against, the marker test still decides"
+        refuse_seed_for(Path::new("CLAUDE.md"), Some(Path::new("/Users/ada"))),
+        Some(SeedRefusal::NoDirectory)
     );
+    assert_eq!(
+        refuse_seed_for(Path::new("CLAUDE.md"), None),
+        Some(SeedRefusal::NoDirectory),
+        "an absent home must not turn the degenerate path back into a pass"
+    );
+}
+
+/// `refuse_seed_for` must still be the ordinary guard for a real file path.
+#[test]
+fn a_file_path_inside_home_is_refused_through_refuse_seed_for() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+
+    assert_eq!(
+        refuse_seed_for(&home.join("CLAUDE.md"), Some(&home)),
+        Some(SeedRefusal::Home)
+    );
+}
+
+/// `git init` in `dir`, reporting whether git was available at all.
+fn git_init(dir: &Path) -> bool {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["init", "-q"])
+        .output()
+        .is_ok_and(|out| out.status.success())
 }

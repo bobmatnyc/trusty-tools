@@ -176,9 +176,6 @@ fn a_clean_project_produces_no_override_diagnostics() {
     // there and not on a developer machine. Testing "no unrelated warning was
     // emitted anywhere" was never the intent and is not this test's business.
     let tmp = tempfile::TempDir::new().expect("tempdir");
-    // #7673: composing instructions seeds the project CLAUDE.md, and that
-    // seed is now refused outside a project root.
-    std::fs::create_dir_all(tmp.path().join(".trusty-mpm")).unwrap();
     let dir = tmp.path().to_string_lossy().into_owned();
 
     let (stdout, stderr) = run_tm(&["sessions", "instructions", "--dir", &dir], None);

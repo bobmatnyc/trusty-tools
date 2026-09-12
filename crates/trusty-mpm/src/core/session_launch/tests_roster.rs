@@ -34,7 +34,7 @@ fn prepare_session_continues_after_agent_deploy_failure() {
     let tmp_home = tempdir().unwrap();
     let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
-    let project = super::tests::mark_project_root(tmp.path());
+    let project = tmp.path();
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
     // An existing (even empty) agent SOURCE directory is required for
@@ -102,7 +102,7 @@ fn prepare_session_continues_after_skill_deploy_failure() {
     let tmp_home = tempdir().unwrap();
     let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
-    let project = super::tests::mark_project_root(tmp.path());
+    let project = tmp.path();
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
     // Pre-create a REGULAR FILE where the bundled `tm-doctor` skill's target
