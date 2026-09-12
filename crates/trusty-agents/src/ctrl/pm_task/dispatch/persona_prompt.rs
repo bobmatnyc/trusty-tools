@@ -9,6 +9,44 @@ use async_openai::types::{
     ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
 };
 use std::path::Path;
+
+pub(super) struct PreparedProvider {
+    pub creds: crate::llm::credentials::LlmCredentials,
+    pub client: Option<async_openai::Client<async_openai::config::OpenAIConfig>>,
+    pub claude_cli_short_circuit: bool,
+    pub attachment_turn: Option<crate::chat_attachments::AttachmentTurn>,
+}
+/// Why: provider rejection must precede attachment persistence, while history outages stay visible.
+/// What: resolve the provider and client before preparing a validated turn and recording its health.
+/// Test: `attachment_rejection_is_read_only_and_pending_retries_are_idempotent`.
+pub(super) async fn prepare_provider(
+    config: &mut AgentConfig,
+    overrides: &crate::ctrl::SessionOverrides,
+    name: &str,
+    input: &str,
+) -> Result<PreparedProvider> {
+    let (creds, claude_cli_short_circuit) =
+        resolve_provider(config, overrides.provider.as_deref(), None, name)?;
+    let client = if claude_cli_short_circuit {
+        None
+    } else {
+        Some(crate::llm::create_client_for_model(&config.agent.model)?)
+    };
+    let attachment_turn = crate::chat_attachments::prepare(
+        name,
+        input,
+        &overrides.attachments,
+        &overrides.history_unavailable,
+        |turn| turn.validate_provider(config, creds.label(), claude_cli_short_circuit),
+    )
+    .await?;
+    Ok(PreparedProvider {
+        creds,
+        client,
+        claude_cli_short_circuit,
+        attachment_turn,
+    })
+}
 pub(super) fn system_prompt(
     persona_cfg: &AgentConfig,
     provider: &str,

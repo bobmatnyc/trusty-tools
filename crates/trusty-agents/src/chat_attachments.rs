@@ -2,9 +2,27 @@
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use trusty_common::chat_attachments::{Attachment, ImageContent, ImageRef, InputAttachment};
 use trusty_common::memory_core::store::chat_sessions::ChatMessage;
 use trusty_common::memory_rpc::call_memory_tool_at_with_timeout;
+
+pub(crate) const HISTORY_UNAVAILABLE_NOTICE: &str = "Saved image history and chat persistence are unavailable for this turn. The response may lack earlier image context.";
+
+/// Why: a provider prompt cannot guarantee that the API discloses missing image context.
+/// What: mark otherwise successful responses partial with a fixed host-generated notice.
+/// Test: `history_outage_notice_preserves_success_and_failure_contracts`.
+pub(crate) fn apply_history_notice(
+    response: &mut crate::api::types::PmResponse,
+    unavailable: &AtomicBool,
+) {
+    if unavailable.load(Ordering::Relaxed)
+        && response.status == crate::api::types::PmStatus::Success
+    {
+        response.status = crate::api::types::PmStatus::Partial;
+        response.errors.push(HISTORY_UNAVAILABLE_NOTICE.into());
+    }
+}
 
 pub(crate) async fn rpc(socket: &Path, method: &str, args: Value) -> Result<Value> {
     let value = call_memory_tool_at_with_timeout(
@@ -88,6 +106,7 @@ pub(crate) async fn prepare(
     name: &str,
     input: &str,
     attachments: &[InputAttachment],
+    history_unavailable: &AtomicBool,
     validate: impl FnOnce(&AttachmentTurn) -> Result<()>,
 ) -> Result<Option<AttachmentTurn>> {
     trusty_common::chat_attachments::validate_inputs(attachments)?;
@@ -111,7 +130,10 @@ pub(crate) async fn prepare(
                 .cloned()
                 .context("Invalid chat history")?,
         )?,
-        Err(_) if attachments.is_empty() => return Ok(None),
+        Err(_) if attachments.is_empty() => {
+            history_unavailable.store(true, Ordering::Relaxed);
+            return Ok(None);
+        }
         Err(_) => vec![],
     };
     if attachments.is_empty() && !history.iter().any(|m| !m.attachments.is_empty()) {
@@ -317,6 +339,22 @@ pub(crate) async fn get_asset(name: &str, id: &str) -> Result<(String, Vec<u8>)>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn history_outage_notice_preserves_success_and_failure_contracts() {
+        use crate::api::types::{PmResponse, PmStatus};
+        let mut response = PmResponse::running("fixture");
+        response.status = PmStatus::Success;
+        apply_history_notice(&mut response, &AtomicBool::new(false));
+        assert_eq!(response.status, PmStatus::Success);
+        assert!(response.errors.is_empty());
+        apply_history_notice(&mut response, &AtomicBool::new(true));
+        assert_eq!(response.status, PmStatus::Partial);
+        assert_eq!(response.errors, [HISTORY_UNAVAILABLE_NOTICE]);
+        let mut failed = PmResponse::error("fixture", "Explicit image failure");
+        apply_history_notice(&mut failed, &AtomicBool::new(true));
+        assert_eq!(failed.status, PmStatus::Failed);
+        assert_eq!(failed.errors, ["Explicit image failure"]);
+    }
     #[tokio::test]
     async fn attachment_rejection_is_read_only_and_pending_retries_are_idempotent() {
         if std::env::var_os("TRUSTY_ATTACHMENT_ACCEPT_CHILD").is_none() {
@@ -355,15 +393,21 @@ mod tests {
         let observed = history.clone();
         let writes = Arc::new(Mutex::new(Vec::<String>::new()));
         let observed_writes = writes.clone();
+        let fail_probe = Arc::new(AtomicBool::new(false));
+        let probe_control = fail_probe.clone();
         const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGP4z8AARAwQCgAf7gP9i18U1AAAAABJRU5ErkJggg==";
         let asset_id = uuid::Uuid::new_v4().to_string();
         let daemon = crate::uds_mock::spawn(move |method, params| {
+            let fail_probe = fail_probe.clone();
             let history = history.clone(); let writes = writes.clone();
             let namespace = namespace.clone(); let asset_id = asset_id.clone();
             let wrapped = method == "tools/call";
             let method = if wrapped { params["name"].as_str().unwrap().to_owned() } else { method.to_owned() };
             let args = if wrapped { params["arguments"].clone() } else { params };
             Box::pin(async move {
+                if method == "chat_session_get" && fail_probe.load(Ordering::Relaxed) {
+                    return Err(trusty_common::uds::server::RpcError::internal("synthetic history probe unavailable"));
+                }
                 let value = match method.as_str() {
                     "palace_list" => json!({"palaces":[namespace]}),
                     "chat_session_get" => json!({"history":history.lock().unwrap().clone()}),
@@ -386,10 +430,12 @@ mod tests {
         )
         .unwrap();
         let config = crate::agents::AgentConfig::by_name("fixture").unwrap();
+        let unavailable = AtomicBool::new(false);
         let rejected = prepare(
             "fixture",
             "Describe",
             std::slice::from_ref(&attachment),
+            &unavailable,
             |turn| turn.validate_provider(&config, "local", false),
         )
         .await;
@@ -403,28 +449,62 @@ mod tests {
         assert!(observed.lock().unwrap().is_empty());
         assert!(observed_writes.lock().unwrap().is_empty());
         assert!(
-            prepare("fixture", "Plain text still works", &[], |_| Ok(()))
-                .await
-                .unwrap()
-                .is_none()
+            prepare(
+                "fixture",
+                "Plain text still works",
+                &[],
+                &unavailable,
+                |_| Ok(())
+            )
+            .await
+            .unwrap()
+            .is_none()
         );
         prepare(
             "fixture",
             "Describe",
             std::slice::from_ref(&attachment),
+            &unavailable,
             |_| Ok(()),
         )
         .await
         .unwrap()
         .unwrap();
-        prepare("fixture", "Describe", &[attachment], |_| Ok(()))
-            .await
-            .unwrap()
-            .unwrap();
+        prepare(
+            "fixture",
+            "Describe",
+            std::slice::from_ref(&attachment),
+            &unavailable,
+            |_| Ok(()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(observed.lock().unwrap().len(), 1);
         assert_eq!(
             *observed_writes.lock().unwrap(),
             ["chat_asset_put", "chat_session_add_turn"]
+        );
+        assert!(!unavailable.load(Ordering::Relaxed));
+        probe_control.store(true, Ordering::Relaxed);
+        assert!(
+            prepare("fixture", "Plain follow-up", &[], &unavailable, |_| Ok(()))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(unavailable.load(Ordering::Relaxed));
+        assert_eq!(observed_writes.lock().unwrap().len(), 2);
+        assert!(
+            prepare(
+                "fixture",
+                "Explicit image",
+                &[attachment],
+                &AtomicBool::new(false),
+                |_| Ok(())
+            )
+            .await
+            .is_err()
         );
     }
     #[tokio::test]

@@ -176,6 +176,7 @@ impl TrustyAgentsRepl {
             // are threaded only through the Slack transport.
             user: None,
             focused_workstream: self.focused_workstream.clone(),
+            ..Default::default()
         };
         if let Some(persona_name) = self.active_persona.as_deref() {
             let response = crate::ctrl::run_pm_task_with_persona(

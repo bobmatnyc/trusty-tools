@@ -694,3 +694,6 @@ mod tests {
         );
     }
 }
+
+#[path = "store_lookup.rs"]
+mod lookup;

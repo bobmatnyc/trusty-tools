@@ -52,6 +52,7 @@
     id: string;
     narrative?: string;
     status?: string;
+    errors?: string[];
     /**
      * #3737: server-authoritative name of the specialist that actually
      * answered, present only when the turn delegated. When set, it overrides
@@ -123,7 +124,10 @@
         : /fail|error/i.test(p.status ?? '') ? 'The request failed without returning a response.' : '';
       const owner = conversationForTask(p.id);
       if (!owner) return;
-      updateMessageByTask(owner, p.id, text);
+      // #7370: keep partial-result notices outside the assistant's narrative.
+      const notices = p.status === 'partial' && Array.isArray(p.errors)
+        ? p.errors.filter((error): error is string => typeof error === 'string' && !!error.trim()) : [];
+      updateMessageByTask(owner, p.id, text, notices);
       // #3737: if the turn delegated, relabel the bubble to the agent that
       // actually answered (resolved to its display name via the roster).
       const responder = responderDisplayName(get(agentRoster), p.responder_agent);
@@ -365,6 +369,14 @@
       {:else}
         <div class="flex justify-center">
           <p class="max-w-[75%] text-center text-xs italic text-foundry-light-muted dark:text-foundry-text/50">{msg.content}</p>
+        </div>
+      {/if}
+      {#if msg.hostNotices?.length}
+        <div data-host-notice role="status" class="rounded-lg border border-foundry-amber/40 bg-foundry-amber/10 px-3 py-2 text-sm text-foundry-light-text dark:text-foundry-text">
+          <p class="mb-1 font-medium">Trusty Agents notice</p>
+          {#each msg.hostNotices as notice}
+            <p class="whitespace-pre-wrap break-words">{notice}</p>
+          {/each}
         </div>
       {/if}
     {/each}

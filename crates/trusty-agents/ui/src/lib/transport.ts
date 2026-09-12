@@ -224,6 +224,8 @@ async function fetchFallback(command: string, args?: Record<string, unknown>): P
             id,
             narrative,
             status: resp.status,
+            // #7370: preserve host notices just as native completion does.
+            errors: resp.errors,
             // #3737: forward the server's responder attribution so the browser
             // fallback relabels a delegated bubble the same way the Tauri path
             // does (that path emits the full PmResponse, which already carries

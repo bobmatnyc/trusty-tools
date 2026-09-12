@@ -159,6 +159,71 @@ mod tests {
         drop(first);
         assert!(reopened.worker_lock().unwrap().is_some());
     }
+    #[test]
+    fn checkpoint_overflow_preserves_readable_state_and_allows_recovery() {
+        use super::*;
+        use crate::assistants::{AssistantHome, AssistantInstanceId};
+        use crate::knowledge::extraction;
+        let root = tempfile::tempdir().unwrap();
+        let home = AssistantHome::under(
+            root.path().canonicalize().unwrap(),
+            AssistantInstanceId::new("bounded").unwrap(),
+        );
+        let store = KnowledgeStore::new(home.clone());
+        persistence::private_dir(&store.directory()).unwrap();
+        let mut checkpoint = Checkpoint {
+            source_id: "source".into(),
+            item_id: "item".into(),
+            fingerprint: "v1".into(),
+            model: "fixture".into(),
+            status: "retryable".into(),
+            attempts: 1,
+            next_attempt_at: 0,
+            lease_owner: String::new(),
+            lease_until: 0,
+            output: None,
+            materialized_fingerprint: Some("v1".into()),
+            last_error: None,
+        };
+        let quote = "x".repeat(4096);
+        let output = extraction::Extraction {
+            entities: vec![extraction::Entity {
+                id: "maya".into(),
+                kind: "person".into(),
+                name: "Maya".into(),
+                claims: vec![
+                    extraction::Claim {
+                        text: "x".repeat(2048),
+                        evidence_quote: quote.clone()
+                    };
+                    16
+                ],
+            }],
+            relationships: vec![],
+        };
+        let raw = serde_json::to_string(&output).unwrap();
+        checkpoint.output = Some(extraction::validate(&raw, &format!("Maya {quote}")).unwrap());
+        let entry_size = serde_json::to_vec(&checkpoint).unwrap().len() + 20;
+        let count = (16 * 1024 * 1024 - 1024) / entry_size;
+        let mut seed = BTreeMap::new();
+        for index in 0..count {
+            seed.insert(format!("item-{index}"), checkpoint.clone());
+        }
+        let path = store.directory().join("extraction.json");
+        persistence::write_bytes(&path, &serde_json::to_vec(&seed).unwrap()).unwrap();
+        let previous = std::fs::read(&path).unwrap();
+        // Each output is valid; only the aggregate exceeds the persistent reader limit.
+        let mut overflow = seed.clone();
+        overflow.insert("overflow".into(), checkpoint.clone());
+        assert!(serde_json::to_vec(&overflow).unwrap().len() > 16 * 1024 * 1024);
+        assert!(store.checkpoint("overflow", checkpoint.clone()).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), previous);
+        let reopened = KnowledgeStore::new(home);
+        assert_eq!(reopened.checkpoints().unwrap()["item-0"].fingerprint, "v1");
+        checkpoint.fingerprint = "v2".into();
+        reopened.checkpoint("item-0", checkpoint).unwrap();
+        assert_eq!(store.checkpoints().unwrap()["item-0"].fingerprint, "v2");
+    }
     #[tokio::test]
     async fn manifest_mutations_are_exclusive() {
         let tmp = tempfile::tempdir().unwrap();
