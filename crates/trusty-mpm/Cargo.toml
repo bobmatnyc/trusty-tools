@@ -64,7 +64,10 @@ name = "trusty-mpm"
 # edits `src/**`, so the `PR version bump vs crates.io` gate (#4421) requires
 # the bump here. Patch because the change is a bug fix inside the existing
 # savings producer and compiled-prompt writer.
-version = "1.5.35"
+# 1.5.36 (Refs #7616 #7617 #7658): patch, version-only — owner-authorized
+# reinstall so `tm --version` identifies the build carrying the fold/doctor,
+# statusline core-setup, and ledger dedupe fixes merged since 1.5.35.
+version = "1.5.36"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
