@@ -104,6 +104,10 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "The project carries none of the five RETIRED `.trusty-mpm/` instruction override files. They are no longer read, so a leftover one means the project's instructions are not reaching the PM — migrate the content to `CLAUDE.md` named sections (issue #4286).",
     ),
     (
+        "instruction_compression",
+        "How much the compose-time instruction fold saved this project, measured from its most recently compiled PM prompt: `Ok` with both byte counts and the percentage when the prompt came out smaller than the instruction bodies it was built from, `Warn` naming INACTIVE and both counts when it did not. Before this check the decline was a one-time daemon-log warning, so a missing `💸` statusline segment was the operator's only evidence that instruction compression was doing nothing (issue #7616).",
+    ),
+    (
         "agent_skills",
         "Every agent's declared `skills:` frontmatter resolves to a real skill — dangling references fail (DOC-42, issue #2889).",
     ),

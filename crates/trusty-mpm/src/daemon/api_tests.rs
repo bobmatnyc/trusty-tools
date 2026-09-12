@@ -1225,6 +1225,8 @@ async fn doctor_endpoint_returns_report() {
         "skill_project_tier",
         "legacy_sources",
         "legacy_overrides",
+        // #7616: the instruction fold's measured saving, or INACTIVE.
+        "instruction_compression",
         "agent_skills",
         "agent_skills_prose_hints",
         "memory",

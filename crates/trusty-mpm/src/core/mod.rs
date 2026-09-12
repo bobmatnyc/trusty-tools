@@ -108,6 +108,9 @@ pub mod hook;
 pub mod host_state_gate;
 pub mod idle_nudge;
 pub mod idle_parking;
+// Issue #7616: the compose-time fold — the one transformation between the
+// authored section corpus and the bytes delivered to the PM.
+pub mod instruction_fold;
 pub mod instruction_overrides;
 // Issue #4184 / epic #4183: the sectioned-JSON instruction package schema. Types
 // + validation only; `bundled_pm_package` is its first composing call site.

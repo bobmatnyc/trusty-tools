@@ -359,7 +359,11 @@ fn claim_staged_row(ledger: &Path, path: &Path, claude_session_id: &str) -> bool
 /// head. Empty when the directory is absent.
 /// Test: `the_sweep_claims_a_row_staged_under_another_session_scope`,
 /// `a_hook_with_nothing_staged_rederives_from_the_compiled_prompt`.
-fn compiled_prompts_in(project_dir: &Path) -> Vec<PathBuf> {
+///
+/// `pub(crate)` since #7616: the `instruction_compression` `tm doctor` check
+/// measures the same prompt this sweep does, and a second copy of the lookup
+/// would let the check and the producer disagree about which file is current.
+pub(crate) fn compiled_prompts_in(project_dir: &Path) -> Vec<PathBuf> {
     let sessions = crate::core::harness_root::harness_dir(project_dir)
         .join(crate::core::harness_root::SESSIONS_DIR);
     let Ok(entries) = std::fs::read_dir(&sessions) else {
