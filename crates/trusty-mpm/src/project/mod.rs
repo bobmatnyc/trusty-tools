@@ -48,6 +48,7 @@ pub use store::ProjectStoreError;
 pub use worktree_adoption::{
     AdoptedWorktree, AdoptionStore, BackfillReport, RecordOutcome, SkipReason, UnrecordedWorktree,
     adopted_anchors, adopted_anchors_under, backfill_checkout, default_adopted_anchors,
+    project_owning_checkout,
 };
 pub use worktree_policy::{
     dispatched_agent_worktree_enabled, registry_data_dir, registry_data_dir_under,

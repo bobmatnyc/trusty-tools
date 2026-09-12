@@ -133,3 +133,53 @@ async fn register_response_names_a_skipped_worktree() {
         "no_gitdir_pointer"
     );
 }
+
+/// Registry A — what `tm project init` calls — must adopt what registry B
+/// adopts (#7588).
+///
+/// Why: #7357 wired the backfill into `POST /api/v1/projects` and the MCP tool,
+/// leaving `POST /projects` registering a path and nothing else. The operator
+/// who reached for the singular verb got exit 0, no `worktrees.json`, and
+/// concluded the #7357 fix was broken. Red before this fix: the store is empty.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn register_project_op_backfills_pre_existing_worktrees_7588() {
+    let fx = GitWorktreeFixture::new();
+    fx.add_worktree("pre-one");
+    fx.add_worktree("pre-two");
+
+    let state = isolated_state().await;
+    crate::daemon::rpc::registry::projects::register_project_op(&state, fx.repo.clone());
+
+    let rows = adopted(&state);
+    let trees: Vec<&str> = rows.iter().map(|(_, t)| t.as_str()).collect();
+    assert_eq!(
+        trees,
+        vec!["pre-one", "pre-two"],
+        "tm project init must record the checkout's pre-existing worktrees"
+    );
+}
+
+/// The two registration surfaces must attribute one checkout to ONE project
+/// name (#7588).
+///
+/// Why: registry A derives a name from the directory and registry B takes the
+/// operator's. Recording under both would make every worktree `ClaimedByAnother`
+/// for whichever ran second — a correct registration reported as a wall of
+/// skips. The store's existing attribution wins.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn register_project_op_adopts_under_the_owning_projects_name_7588() {
+    let fx = GitWorktreeFixture::new();
+    fx.add_worktree("pre-one");
+    let checkout = fx.repo.to_str().expect("utf8 checkout");
+
+    let state = isolated_state().await;
+    register_project_registry_op(&state, register_body("gnomish", checkout))
+        .await
+        .expect("registry B registers");
+    crate::daemon::rpc::registry::projects::register_project_op(&state, fx.repo.clone());
+
+    let rows = adopted(&state);
+    assert_eq!(rows, vec![("gnomish".to_string(), "pre-one".to_string())]);
+}

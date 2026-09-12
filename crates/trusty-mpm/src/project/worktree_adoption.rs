@@ -434,6 +434,30 @@ pub fn backfill_checkout(
     report
 }
 
+/// The project already attributed to `checkout`, if any (#7588).
+///
+/// Why: registration exists on two independently-named surfaces —
+/// `tm project init` (path-keyed, name derived from the directory) and
+/// `tm projects register` (operator-named) — and both now adopt. Without this
+/// lookup the second one to run would record under a DIFFERENT name for the same
+/// directory, and [`AdoptionStore::record`] would answer `ClaimedByAnother` for
+/// every worktree, turning a correct second registration into a wall of
+/// skips. Asking the store which name already owns the checkout makes the two
+/// surfaces converge on one attribution instead of competing.
+/// What: the `project` of the first record whose `checkout` equals the canonical
+/// form of `checkout`, or `None` — including when git will not answer for the
+/// path, which is the same "nothing is attributed" outcome.
+/// Test: `owning_project_reports_the_name_that_already_claimed_the_checkout_7588`,
+/// `owning_project_is_none_for_an_unrecorded_checkout_7588`.
+pub fn project_owning_checkout(store_dir: &Path, checkout: &Path) -> Option<String> {
+    let canonical = canonical_repo_root(checkout)?;
+    AdoptionStore::load(store_dir)
+        .entries
+        .iter()
+        .find(|e| e.checkout == canonical)
+        .map(|e| e.project.clone())
+}
+
 /// The distinct project checkouts the adoption records name (#7357).
 ///
 /// Why: the scan needs ANCHORS, not worktrees — it re-derives every worktree
