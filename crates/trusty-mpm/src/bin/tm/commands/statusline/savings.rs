@@ -25,7 +25,16 @@
 //! |---|---|
 //! | `tokens_saved > 0`, a percent denominator, and other sessions on the ledger | `💸34%/29%` |
 //! | the same, but the ledger holds only this session | `💸34%/34%` |
-//! | zero fold, or no denominator at all (every row predates #7179 and no compaction tick has landed) | nothing at all |
+//! | zero fold for this session id, but a sibling id on the same managed session has rows (#7617) | that sibling's figure |
+//! | zero fold across every sibling, or no denominator at all (every row predates #7179 and no compaction tick has landed) | `💸—` |
+//!
+//! #7617 replaced "nothing at all" in that last row with an explicit empty
+//! state. The segment had gone dark twice, and the second time was not a defect
+//! in the fold: Claude Code minted a new `session_id` after a relaunch and a
+//! `/login` switch — three in one evening for one managed session — and the
+//! segment keyed the fold purely by the id on stdin. An absent segment and a
+//! genuinely-zero session were the same picture, so nothing anywhere said which
+//! had happened.
 //!
 //! The average is the arithmetic mean of each session's OWN percentage
 //! ([`average_percent_saved`]), which is the shape the owner ruled for on
@@ -69,13 +78,15 @@ use super::compaction;
 /// Test: `savings_segment_probe_is_absent_without_a_session_id`,
 /// `savings_segment_reads_the_ledger_under_an_explicit_root`.
 pub(crate) fn savings_segment_probe(session_id: &str) -> Option<String> {
-    if session_id.is_empty() {
-        return None;
-    }
     let root = savings_root()?;
-    savings_segment_at(&savings_log_in(&root), session_id, |id| {
-        compaction::session_actual_tokens_for(id)
-    })
+    // #7617: the siblings come from the framework root too, so a restart's new
+    // session id still folds the managed session's earlier rows.
+    savings_segment_at_in(
+        &root,
+        &savings_log_in(&root),
+        session_id,
+        compaction::session_actual_tokens_for,
+    )
 }
 
 /// [`savings_segment_probe`] against an explicit ledger path.
@@ -92,20 +103,83 @@ pub(crate) fn savings_segment_probe(session_id: &str) -> Option<String> {
 /// Test: `savings_segment_is_absent_when_the_ledger_is_missing`,
 /// `savings_segment_reads_the_ledger_under_an_explicit_root`,
 /// `savings_segment_renders_the_average_beside_the_session_figure`.
+// #7617: production now goes through `savings_segment_at_in`, which also needs
+// the framework root for the link store. This ledger-only form is kept for the
+// tests that predate the link store and assert on the fold alone.
+#[cfg(test)]
 pub(crate) fn savings_segment_at(
     ledger: &Path,
     session_id: &str,
     actual_tokens: impl Fn(&str) -> Option<u64>,
 ) -> Option<String> {
-    let total = fold_session(ledger, session_id);
+    // No root means no link store; the fold is this session's rows alone.
+    savings_segment_at_in(Path::new(""), ledger, session_id, actual_tokens)
+}
+
+/// [`savings_segment_at`] with the framework root supplied for the link store.
+///
+/// Why (#7617): the segment vanished twice, and the second disappearance was
+/// not a defect in the fold at all — Claude Code had minted a new `session_id`
+/// after a relaunch and a `/login` switch, three in one evening for one managed
+/// session, and the segment keyed the fold purely by the id on stdin. So a
+/// restart read exactly like "the harness saved nothing", and an operator had
+/// no way to tell a zero from a disappearance. Two changes close that: fold
+/// across every Claude session id linked to the same managed session before
+/// concluding zero, and then render an EXPLICIT empty state rather than
+/// nothing.
+/// What: folds `session_id`; on a zero, folds each sibling
+/// ([`trusty_mpm::core::session_links::linked_claude_ids`]) and takes the first
+/// that has rows; on a zero after that, returns [`EMPTY_STATE`]. The average is
+/// still computed across every session on the ledger, unchanged.
+///
+/// FAIL-OPEN: an absent or unreadable ledger, an absent link store, and an
+/// unlinked session all fold to zero and render [`EMPTY_STATE`] — a mark that
+/// claims no number. Nothing here writes, and no reading is ever substituted
+/// for a measurement that did not happen.
+/// Test: `savings_segment_folds_a_sibling_session_id`,
+/// `savings_segment_renders_the_empty_state_on_a_zero_fold`,
+/// `savings_segment_prefers_this_sessions_own_rows`.
+pub(crate) fn savings_segment_at_in(
+    framework_root: &Path,
+    ledger: &Path,
+    session_id: &str,
+    actual_tokens: impl Fn(&str) -> Option<u64>,
+) -> Option<String> {
+    let mut folded_id = session_id.to_string();
+    let mut total = fold_session(ledger, session_id);
     if total.is_zero() {
-        // Criterion 3 (#7074): a session with no savings rows shows neither
-        // figure, so the second fold is not even worth doing.
-        return None;
+        // #7617: a restart minted a new id; the managed session's earlier ids
+        // still carry its rows.
+        for sibling in
+            trusty_mpm::core::session_links::linked_claude_ids(framework_root, session_id)
+        {
+            if sibling == session_id {
+                continue;
+            }
+            let candidate = fold_session(ledger, &sibling);
+            if !candidate.is_zero() {
+                total = candidate;
+                folded_id = sibling;
+                break;
+            }
+        }
+    }
+    if total.is_zero() {
+        // #7617: an explicit empty state, so a disappearance reads differently
+        // from a zero. Never a `0%` — that would be a claim.
+        return Some(EMPTY_STATE.to_string());
     }
     let average = average_percent_saved(&fold_sessions(ledger), &actual_tokens);
-    render_savings_segment(&total, actual_tokens(session_id), average)
+    render_savings_segment(&total, actual_tokens(&folded_id), average)
+        .or_else(|| Some(EMPTY_STATE.to_string()))
 }
+
+/// What the segment shows when it has no figure to show (#7617).
+///
+/// Why: the owner's closure condition — "the segment never omits itself
+/// silently". An em dash claims nothing, takes one cell, and is visibly
+/// different from both a percentage and an absent segment.
+pub(crate) const EMPTY_STATE: &str = "\u{1f4b8}\u{2014}";
 
 /// Remember what only the `statusLine` payload knows: the session's model and
 /// the path to its own transcript.
@@ -419,19 +493,25 @@ mod tests {
         }
     }
 
-    /// Why (#6958): the ledger is normally absent — no producer has run — and
-    /// that must cost the status bar nothing and render nothing.
+    /// Why (#6958, empty state since #7617): the ledger is normally absent — no
+    /// producer has run — and that must cost the status bar nothing. It renders
+    /// the explicit empty state rather than vanishing, so "no rows yet" and
+    /// "the segment broke" are not the same picture.
     /// Test: itself.
     #[test]
     fn savings_segment_is_absent_when_the_ledger_is_missing() {
         let dir = tempfile::tempdir().expect("temp dir");
         let ledger = dir.path().join("usage").join("savings.jsonl");
-        assert_eq!(savings_segment_at(&ledger, "sess-1", |_| None), None);
+        assert_eq!(
+            savings_segment_at(&ledger, "sess-1", |_| None).as_deref(),
+            Some(EMPTY_STATE)
+        );
     }
 
     /// Why (#7074, acceptance criterion b): an EMPTY ledger must render neither
     /// the per-session figure nor the average — a file that exists but holds no
-    /// row is a different code path from a file that does not exist.
+    /// row is a different code path from a file that does not exist. Since
+    /// #7617 both render the empty state, and neither renders a figure.
     /// Test: itself.
     #[test]
     fn savings_segment_is_absent_on_an_empty_ledger() {
@@ -439,7 +519,10 @@ mod tests {
         let ledger = savings_log_in(dir.path());
         std::fs::create_dir_all(ledger.parent().expect("parent")).expect("mkdir");
         std::fs::write(&ledger, "").expect("write empty ledger");
-        assert_eq!(savings_segment_at(&ledger, "sess-1", |_| None), None);
+        assert_eq!(
+            savings_segment_at(&ledger, "sess-1", |_| None).as_deref(),
+            Some(EMPTY_STATE)
+        );
     }
 
     /// Why: proves the whole path — append a row, fold it back for that session
@@ -456,8 +539,79 @@ mod tests {
             savings_segment_at(&ledger, "sess-1", |_| None).as_deref(),
             Some("\u{1f4b8}20%/20%")
         );
-        // A different session's bar reads nothing from the same file.
-        assert_eq!(savings_segment_at(&ledger, "sess-2", |_| None), None);
+        // A different session's bar reads no FIGURE from the same file — and
+        // says so explicitly rather than vanishing (#7617).
+        assert_eq!(
+            savings_segment_at(&ledger, "sess-2", |_| None).as_deref(),
+            Some(EMPTY_STATE)
+        );
+    }
+
+    /// A restart's new session id folds the managed session's earlier rows.
+    ///
+    /// Why (#7617): this is the reported disappearance, reproduced. Managed
+    /// session 0b318c84 carried three Claude ids on 2026-09-12 (3544c9e5 →
+    /// 63589e53 → f3def033) and the segment went dark after each restart until
+    /// the new id had earned rows of its own. The rows were never lost; the
+    /// fold simply could not reach them.
+    /// Test: itself.
+    #[test]
+    fn savings_segment_folds_a_sibling_session_id() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let ledger = savings_log_in(dir.path());
+        write_row(&ledger, "claude-old", 12_000, 60_000);
+        trusty_mpm::core::session_links::record_link(dir.path(), "managed-1", "claude-old");
+        trusty_mpm::core::session_links::record_link(dir.path(), "managed-1", "claude-new");
+
+        assert_eq!(
+            savings_segment_at_in(dir.path(), &ledger, "claude-new", |_| None).as_deref(),
+            Some("\u{1f4b8}20%/20%"),
+            "a restart's new id must fold its managed session's earlier rows"
+        );
+    }
+
+    /// Why (#7617): the sibling fold is a FALLBACK, never a substitution. A
+    /// session with rows of its own must report those, so a long-running
+    /// session is never shown a superseded id's figure.
+    /// Test: itself.
+    #[test]
+    fn savings_segment_prefers_this_sessions_own_rows() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let ledger = savings_log_in(dir.path());
+        write_row(&ledger, "claude-old", 12_000, 60_000);
+        write_row(&ledger, "claude-new", 30_000, 60_000);
+        trusty_mpm::core::session_links::record_link(dir.path(), "managed-1", "claude-old");
+        trusty_mpm::core::session_links::record_link(dir.path(), "managed-1", "claude-new");
+
+        assert_eq!(
+            savings_segment_at_in(dir.path(), &ledger, "claude-new", |_| None).as_deref(),
+            Some("\u{1f4b8}50%/35%"),
+            "this session's own 50% must win over the sibling's 20%"
+        );
+    }
+
+    /// Why (#7617, closure condition 3): the segment never omits itself
+    /// silently. An unknown id, an empty id and an unreadable ledger all render
+    /// a mark that claims no number, so a disappearance reads differently from
+    /// a zero.
+    /// Test: itself.
+    #[test]
+    fn savings_segment_renders_the_empty_state_on_a_zero_fold() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let ledger = savings_log_in(dir.path());
+        write_row(&ledger, "claude-old", 12_000, 60_000);
+
+        for id in ["never-seen", ""] {
+            assert_eq!(
+                savings_segment_at_in(dir.path(), &ledger, id, |_| None).as_deref(),
+                Some(EMPTY_STATE),
+                "session id {id:?} must render the explicit empty state"
+            );
+        }
+        assert_ne!(
+            EMPTY_STATE, "\u{1f4b8}0%",
+            "the empty state must never be mistakable for a measured zero"
+        );
     }
 
     /// Why (#7074, acceptance criterion a): three sessions on one ledger, and
@@ -517,12 +671,15 @@ mod tests {
         );
     }
 
-    /// Why: before Claude Code assigns a session id there is nothing to fold,
-    /// and the probe must not read the disk to discover that.
+    /// Why: before Claude Code assigns a session id there is nothing to fold.
+    /// Since #7617 that renders the explicit empty state rather than omitting
+    /// the segment — an operator watching the bar go blank cannot otherwise
+    /// tell "no id yet" from "the segment broke", which is the whole reported
+    /// symptom. It still fabricates no figure.
     /// Test: itself.
     #[test]
     fn savings_segment_probe_is_absent_without_a_session_id() {
-        assert_eq!(savings_segment_probe(""), None);
+        assert_eq!(savings_segment_probe("").as_deref(), Some(EMPTY_STATE));
     }
 
     /// A Claude-config-shaped directory holding one real transcript file.

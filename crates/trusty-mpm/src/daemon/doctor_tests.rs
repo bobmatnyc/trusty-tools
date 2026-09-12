@@ -423,7 +423,7 @@ fn an_absent_path_still_matches_the_recorded_spelling_of_itself() {
 }
 
 #[tokio::test]
-async fn run_doctor_produces_forty_nine_checks() {
+async fn run_doctor_produces_fifty_checks() {
     // Issue #2158 added the `deployment` probe (nine → ten); issue #2246
     // adds `oauth_token` (ten → eleven); issue #2876 adds `skill_staleness`
     // and `legacy_sources` (eleven → thirteen); DOC-42 / issue #2889 adds
@@ -454,7 +454,9 @@ async fn run_doctor_produces_forty_nine_checks() {
     // (forty-four → forty-five); issue #7424 adds `startup_context`
     // (forty-five → forty-six); issue #7490 adds `hooks_missing_tm_group`
     // (forty-six → forty-seven); issue #7497 adds `disk_usage`
-    // (forty-seven → forty-eight).
+    // (forty-seven → forty-eight); issue #7616 adds
+    // `instruction_compression` (forty-eight → forty-nine); issue #7617 adds
+    // `statusline` (forty-nine → fifty).
     //
     // The test NAME had drifted four additions behind the tally above by the
     // time #6586 landed — it still read `thirty_two`. Renaming it is part of
@@ -489,6 +491,10 @@ async fn run_doctor_produces_forty_nine_checks() {
         // is inactive — the state a missing 💸 segment used to be the only
         // evidence of.
         "instruction_compression",
+        // #7617: whether the 💸 segment can render at all — the `statusLine`
+        // entry in each settings tier, its two inputs' readability, and the
+        // render rule itself.
+        "statusline",
         "agent_skills",
         "agent_skills_prose_hints",
         "memory",

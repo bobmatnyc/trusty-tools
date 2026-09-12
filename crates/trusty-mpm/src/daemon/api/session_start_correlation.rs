@@ -133,12 +133,25 @@ pub(crate) async fn correlate_session_start(
             }
 
             match mgr.set_claude_session_id(&id, claude_session_id).await {
-                Ok(()) => tracing::info!(
-                    managed_id = %id,
-                    claude_session_id = %claude_session_id,
-                    cwd = %cwd_str,
-                    "SessionStart: linked Claude session to managed session (#1744)"
-                ),
+                Ok(()) => {
+                    // #7617: the record holds only the CURRENT id, so every
+                    // restart orphans the previous one's savings rows and the
+                    // `💸` segment reads as a disappearance. The append-only
+                    // sidecar is what lets the statusline fold across all of
+                    // them. Best-effort — a link that cannot be written costs a
+                    // status-bar figure, never a session start.
+                    crate::core::session_links::record_link(
+                        &crate::core::paths::FrameworkPaths::default().root,
+                        &id.to_string(),
+                        claude_session_id,
+                    );
+                    tracing::info!(
+                        managed_id = %id,
+                        claude_session_id = %claude_session_id,
+                        cwd = %cwd_str,
+                        "SessionStart: linked Claude session to managed session (#1744)"
+                    );
+                }
                 Err(e) => tracing::warn!(
                     managed_id = %id,
                     "SessionStart: failed to persist claude_session_id: {e}"

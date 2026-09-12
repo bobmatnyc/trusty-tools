@@ -228,6 +228,9 @@ pub mod session_pause_pr;
 // #7422: the plugin half of the same default-deny decision — written into the
 // project's `.claude/settings.json`, because Claude Code has no plugin flag.
 pub mod session_plugin_scope;
+// #7617: which Claude session ids share a managed session, so a restart does not
+// read as a savings disappearance.
+pub mod session_links;
 pub mod session_record;
 pub mod session_store;
 pub mod skill_deploy_tiers;
@@ -250,6 +253,9 @@ pub mod staged_paths;
 pub mod stale_skills;
 pub mod standalone;
 pub mod startup_context;
+// #7617: the one seed-or-repair rule for the `statusLine` settings entry, which
+// every tier's writer and `tm doctor --fix` go through.
+pub mod statusline_settings;
 pub mod stray_mcp;
 pub mod tmux;
 pub mod transcript_usage;

@@ -20,6 +20,7 @@ use colored::Colorize;
 use trusty_mpm::core::doctor_repair::{
     RepairMode, RepairStep, StepStatus, refuse_legacy_sources, repair_build_tree_binary,
     repair_hooks_contamination, repair_missing_hook_group, repair_output_style, repair_push_guard,
+    repair_statusline,
 };
 use trusty_mpm::core::skill_repair::RepairAction;
 use trusty_mpm::core::stray_mcp::{quarantine_explicit, quarantine_strays};
@@ -152,6 +153,16 @@ pub(crate) fn run_repairs(apply: bool, include_frozen: bool) {
         &machine_wide_settings_files(project_dir.as_deref()),
         mode,
     ));
+    // #7617: AFTER the repoint, so a build-tree `statusLine` command is fixed by
+    // the pass that owns that damage class and this one only seeds what is
+    // missing. Scoped to the two tiers the `statusline` check reads — the cwd
+    // project and the user tier — NOT the machine-wide sweep above: seeding an
+    // entry into every project on the disk is a far larger change than
+    // repointing the ones already broken, and nobody asked for it.
+    steps.extend(repair_statusline(
+        &statusline_settings_files(project_dir.as_deref()),
+        mode,
+    ));
     if let Some(project) = &project_dir {
         steps.extend(repair_hooks_contamination(project, mode));
         // #7490: AFTER the strip above, never before. That pass removes every
@@ -229,6 +240,30 @@ fn machine_wide_settings_files(project_dir: Option<&std::path::Path>) -> Vec<std
         ));
     }
     set.into_iter().collect()
+}
+
+/// The two settings tiers the `statusline` check reads and its repair writes.
+///
+/// Why (#7617): the machine-wide sweep above exists because build-tree damage
+/// lands in whichever project ran last. Seeding a MISSING entry is the opposite
+/// case — a project with no `statusLine` key has simply never been prepared, and
+/// writing one into every such project on the disk is a change nobody asked
+/// for. The two tiers a session actually resolves are the cwd project's and the
+/// user's.
+/// What: `<cwd>/.claude/settings.json` and `~/.claude/settings.json`, whichever
+/// resolve. Existence is not checked — the repair creates an absent file, which
+/// is the seeding case.
+/// Test: `core::doctor_repair`'s `statusline_repair_*` tests cover the repair;
+/// this is path resolution.
+fn statusline_settings_files(project_dir: Option<&std::path::Path>) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    if let Some(dir) = project_dir {
+        files.push(dir.join(".claude").join("settings.json"));
+    }
+    if let Some(home) = dirs::home_dir() {
+        files.push(home.join(".claude").join("settings.json"));
+    }
+    files
 }
 
 /// Print one repair's worth of steps, with the per-outcome tallies.

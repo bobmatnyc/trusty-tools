@@ -95,20 +95,11 @@ pub(crate) fn ensure_settings_defaults(claude_config_dir: &Path) -> anyhow::Resu
     // disk (#2229). A genuinely user-customized command that still points at an
     // existing, non-ephemeral binary is left untouched by
     // `is_stale_statusline_command`.
-    let statusline_needs_write = match obj.get("statusLine") {
-        None => true,
-        Some(existing) => crate::core::session_launch::is_stale_statusline_command(existing),
-    };
-    if statusline_needs_write {
-        obj.insert(
-            "statusLine".to_string(),
-            serde_json::json!({
-                "type": "command",
-                "command": crate::core::session_launch::resolve_statusline_command(),
-                "padding": 0
-            }),
-        );
-    }
+    // #7617: the decision itself lives in `core::statusline_settings`, shared
+    // with the project-tier and user-tier writers. Only the I/O differs here —
+    // this function merges three keys into ONE atomic write, so it applies the
+    // rule in memory rather than calling a writer that owns the file.
+    let _ = crate::core::statusline_settings::apply_statusline_entry(obj);
 
     // #6807: the commit trailer and PR footer come from Claude Code's own
     // `attribution` setting, not from instruction prose. Seed only when absent

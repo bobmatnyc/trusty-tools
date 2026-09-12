@@ -108,6 +108,10 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "How much the compose-time instruction fold saved this project, measured from its most recently compiled PM prompt: `Ok` with both byte counts and the percentage when the prompt came out smaller than the instruction bodies it was built from, `Warn` naming INACTIVE and both counts when it did not. Before this check the decline was a one-time daemon-log warning, so a missing `💸` statusline segment was the operator's only evidence that instruction compression was doing nothing (issue #7616).",
     ),
     (
+        "statusline",
+        "Whether the `💸` savings segment can render at all: the `statusLine` command in each settings tier (present, and pointing at a binary that still exists), whether the savings ledger and the per-session statusline record store are readable, and whether the render rule produces a figure for a synthetic fold. `Fail` when no tier is wired, when an input cannot be read, or when the render rule declines; `Warn` when it can render but has no rows yet, or when a stale tier sits beside a wired one. Remediation: `tm doctor --fix --yes`, which seeds or repoints the entry in the project and user tiers (issue #7617).",
+    ),
+    (
         "agent_skills",
         "Every agent's declared `skills:` frontmatter resolves to a real skill — dangling references fail (DOC-42, issue #2889).",
     ),

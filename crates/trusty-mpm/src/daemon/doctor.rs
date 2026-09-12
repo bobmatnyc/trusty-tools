@@ -232,6 +232,13 @@ use doctor_legacy_overrides::check_legacy_overrides;
 mod doctor_instruction_compression;
 use doctor_instruction_compression::check_instruction_compression;
 
+// #7617: whether the 💸 segment is wired at all — the settings tiers, the
+// readability of its two inputs, and the render rule. Three disappearances had
+// no surface saying any of that.
+#[path = "doctor_statusline.rs"]
+pub(crate) mod doctor_statusline;
+use doctor_statusline::check_statusline;
+
 // #5045: the resolution half of `check_search` below. That probe asks the
 // daemon whether it is healthy and whether the DERIVED id appears in
 // `search.indexes.list`; this one resolves the id the session is actually
@@ -404,7 +411,7 @@ const PROBE_RETRY_DELAY: Duration = Duration::from_millis(500);
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_forty_nine_checks`,
+/// Test: `run_doctor_produces_fifty_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -530,6 +537,12 @@ pub(crate) async fn run_doctor_with_claims(
         // #7616: states whether the instruction fold is saving anything for this
         // project, so "no 💸 segment" stops being the only evidence.
         check_instruction_compression(project_dir),
+        // #7617: and this one reports whether the 💸 segment can render AT ALL —
+        // the `statusLine` entry in each tier, whether the ledger and the
+        // per-session record store are readable, and whether the render rule
+        // produces a figure. `instruction_compression` above answers whether
+        // there is anything to show; this answers whether it could be shown.
+        check_statusline(project_dir, &paths.root),
         agent_skills,
         agent_skills_prose_hints,
     ];
