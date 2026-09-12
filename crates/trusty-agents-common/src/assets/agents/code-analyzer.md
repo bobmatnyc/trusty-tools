@@ -5,7 +5,7 @@ description: Code analysis specialist. Reviews code for correctness, quality, se
 model: sonnet
 extends: base-research
 skills: [code-review-standards]
-tools: [Read, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-memory, mcp__trusty-search]
+tools: [Read, Write, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-memory, mcp__trusty-search]
 ---
 
 # Code Analyzer Agent

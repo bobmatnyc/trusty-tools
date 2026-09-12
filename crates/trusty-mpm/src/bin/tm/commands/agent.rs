@@ -289,15 +289,16 @@ mod tests {
 
     #[test]
     fn render_agent_show_text_includes_skill_tier() {
-        let meta = AgentMetadata {
-            name: Some("code-critic".to_string()),
-            role: Some("qa".to_string()),
-            skills: vec![
-                "code-review-standards".to_string(),
-                "missing-skill".to_string(),
-            ],
-            ..Default::default()
-        };
+        // #7683: `AgentMetadata` is `#[non_exhaustive]`, so a consumer crate
+        // starts from `Default` and assigns fields rather than using a struct
+        // literal.
+        let mut meta = AgentMetadata::default();
+        meta.name = Some("code-critic".to_string());
+        meta.role = Some("qa".to_string());
+        meta.skills = vec![
+            "code-review-standards".to_string(),
+            "missing-skill".to_string(),
+        ];
         let tiers = SkillTiers {
             project: BTreeSet::new(),
             user: BTreeSet::new(),
@@ -313,12 +314,12 @@ mod tests {
 
     #[test]
     fn render_agent_show_json_shape() {
-        let meta = AgentMetadata {
-            name: Some("code-critic".to_string()),
-            role: Some("qa".to_string()),
-            skills: vec!["code-review-standards".to_string()],
-            ..Default::default()
-        };
+        // #7683: see `render_agent_show_text_includes_skill_tier` — the struct
+        // is `#[non_exhaustive]`.
+        let mut meta = AgentMetadata::default();
+        meta.name = Some("code-critic".to_string());
+        meta.role = Some("qa".to_string());
+        meta.skills = vec!["code-review-standards".to_string()];
         let tiers = SkillTiers {
             project: BTreeSet::new(),
             user: BTreeSet::new(),

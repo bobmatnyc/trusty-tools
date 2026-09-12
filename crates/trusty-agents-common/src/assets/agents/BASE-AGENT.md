@@ -650,8 +650,10 @@ drives parks to zero. Metric: hand-backs with the goal unmet that needed a PM
 
 The PM's voice standard, restated for an agent that receives neither the PM's
 prompt nor its output style. It governs your report to the dispatcher, review
-verdicts, ticket and PR body text, and any generated documentation. Examples,
-inventories and the ASD-STE-100 note: `Skill(skill="tm-prose-style")`.
+verdicts, ticket and PR body text, and any generated documentation. The rules
+below are the whole standard — nothing here needs a skill load. Worked examples,
+banned-phrase inventories and the ASD-STE-100 note sit in the
+`tm-prose-style` skill, for the agents whose allowlist carries `Skill`.
 
 - Lead with the point and the concrete referent; mechanism as cause then effect.
 - Cut evaluative hedges, process narration, closing aphorisms, inflated words.

@@ -37,6 +37,12 @@ const READ_WRITE: &str = "Read, Write, Edit, Bash, BashOutput, KillShell, Grep, 
 /// What: `(agent file stem, expected `tools:` value)` for every dispatchable
 /// roster agent. The five `BASE-*` templates are deliberately absent — see
 /// `base_templates_declare_no_tools`.
+///
+/// An agent whose own body mandates authoring a file carries the write tool
+/// that step needs, even when the rest of its role is read-only: `research`
+/// takes `Write, Edit` for the "Capture Work" step that saves to
+/// `docs/research/`, and `code-analyzer` takes `Write` for the
+/// `scripts/code-review/` script its Large-Volume Analysis section generates.
 const EXPECTED_TOOLS: &[(&str, &str)] = &[
     (
         "api-qa",
@@ -44,7 +50,7 @@ const EXPECTED_TOOLS: &[(&str, &str)] = &[
     ),
     (
         "code-analyzer",
-        "Read, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-memory, mcp__trusty-search",
+        "Read, Write, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-memory, mcp__trusty-search",
     ),
     (
         "code-critic",
@@ -134,7 +140,7 @@ const EXPECTED_TOOLS: &[(&str, &str)] = &[
     ),
     (
         "research",
-        "Read, Bash, BashOutput, KillShell, Grep, Glob, WebFetch, WebSearch, mcp__trusty-memory, mcp__trusty-search",
+        "Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, WebFetch, WebSearch, mcp__trusty-memory, mcp__trusty-search",
     ),
     (
         "ruby-engineer",

@@ -302,10 +302,21 @@ tool today):
 | `code-critic`, `code-analyzer` | `trusty-search` (read-only) | adversarial review needs to locate code, not write memory or tickets |
 
 Concretely, per agent this means a `tools:` line naming Claude Code's built-in
-tools the role needs (`Read, Grep, Glob, Bash, Edit, Write` for an engineer;
-`Read, Grep, Glob, Bash` and no `Edit`/`Write` for `qa`/`code-critic`/
-`code-analyzer`, matching trusty-code's own read-only fork precedent) plus
-exactly the MCP server-level pattern(s) from the table, e.g.:
+tools the role needs (`Read, Grep, Glob, Bash, Edit, Write` for an engineer and
+for `qa`/`api-qa`, which author test code; `Read, Grep, Glob, Bash` and no
+`Edit`/`Write` for `code-critic`, matching trusty-code's own read-only fork
+precedent) plus exactly the MCP server-level pattern(s) from the table, e.g.:
+
+**A read-only role still gets the write tool its own body mandates.** The
+allowlist is derived from the agent's deployed text, so a step the body states
+as mandatory must be executable: `research` carries `Write, Edit` for
+methodology step 5, which saves dated captures under `docs/research/`, and
+`code-analyzer` carries `Write` for the script its Large-Volume Analysis
+section generates under `scripts/code-review/` above 10 files or 500 diff
+lines. Neither takes a write tool
+for the codebase itself. The agents that stay write-free — `code-critic`,
+`security`, `ticketing`, `secrets-manager`, `memory-manager` — deliver a report
+or an inline `gh --body`, and author no file anywhere in their bodies.
 
 ```yaml
 # engineer.md

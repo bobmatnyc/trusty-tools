@@ -44,8 +44,16 @@ use super::provenance::Provenance;
 /// What: a plain-old-data mirror of the frontmatter fields trusty-mpm
 /// recognizes. `skills` is always populated (empty `Vec` when absent), never
 /// `None`, since an agent with no declared dependencies is the common case.
+///
+/// `#[non_exhaustive]` (#7683): this projection has taken a breaking-change
+/// bump for a plain field addition three times now — `provenance`, then
+/// `tcode_tools` in this same change, which is what forces 0.7.2 → 0.8.0. A
+/// caller outside this crate builds one from [`Default::default`] and assigns
+/// the fields it cares about, so the next field costs no consumer a compile
+/// error and no crate a MINOR bump.
 /// Test: `metadata_from_str_reads_skills`, `metadata_from_str_all_fields`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct AgentMetadata {
     /// The `name:` field.
     pub name: Option<String>,
