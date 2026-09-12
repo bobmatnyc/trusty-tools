@@ -48,9 +48,11 @@ const FENCE: &str = "```";
 /// fenced-code state second — an open comment swallows a fence-shaped line as
 /// comment content, and testing the fence first corrupted the parser both ways
 /// (leaked comment text, then deleted real lines). Outside a comment and a
-/// fence it drops a line that opens an HTML comment (through the line that
-/// closes it), trims trailing whitespace, collapses a run of blank lines to one,
-/// and strips the alignment padding from an unindented Markdown table row.
+/// fence it consumes the HTML-comment spans that OPEN a line (through the line
+/// that closes them, keeping any content that FOLLOWS a same-line close — see
+/// [`strip_leading_comments`]), trims trailing whitespace, collapses a run of
+/// blank lines to one, and strips the alignment padding from an unindented
+/// Markdown table row.
 /// Inside a fence every byte is emitted verbatim. A trailing newline on the
 /// input is preserved on the output; trailing blank lines are not.
 ///
@@ -61,7 +63,8 @@ const FENCE: &str = "```";
 /// `a_fenced_block_is_emitted_verbatim`, `table_padding_is_stripped`,
 /// `blank_line_runs_collapse`, `the_fold_is_idempotent`,
 /// `no_table_row_is_lost`,
-/// `a_fence_inside_an_open_comment_does_not_desynchronise_the_parser`.
+/// `a_fence_inside_an_open_comment_does_not_desynchronise_the_parser`,
+/// `content_after_a_same_line_comment_close_survives`.
 pub(crate) fn fold_delivered_prompt(text: &str) -> String {
     let ends_with_newline = text.ends_with('\n');
     let mut out: Vec<String> = Vec::new();
@@ -96,7 +99,12 @@ pub(crate) fn fold_delivered_prompt(text: &str) -> String {
         let body = kept.trim_start();
 
         if body.starts_with(COMMENT_OPEN) {
-            in_comment = !body.contains(COMMENT_CLOSE);
+            // #7616: a comment that CLOSES on its own line can still be followed
+            // by real content, so the span goes and the remainder stays.
+            match strip_leading_comments(body, &mut in_comment) {
+                Some(rest) => out.push(compact_row(rest)),
+                None => continue,
+            }
             continue;
         }
         if body.is_empty() {
@@ -118,6 +126,43 @@ pub(crate) fn fold_delivered_prompt(text: &str) -> String {
         folded.push('\n');
     }
     folded
+}
+
+/// Consume the HTML-comment spans that OPEN a line, returning what follows.
+///
+/// Why (#7616): the fold used to drop the whole physical line whenever it began
+/// with `<!--`, which silently deleted real content on a line whose comment also
+/// closed on it — `<!-- note -->REAL CONTENT HERE` delivered nothing. No bundled
+/// section or `CLAUDE.md` hits that shape today, but the fold's whole claim is
+/// that it removes only bytes that carry no instruction, and a pass that can
+/// delete a rule under any input does not hold that claim.
+///
+/// What: repeatedly removes a leading `<!-- … -->` span and trims, then returns
+/// the remaining content — `None` when nothing but comment was on the line (the
+/// line then vanishes, leaving no blank behind, exactly as before) or when a
+/// span is left OPEN, which also sets `in_comment` so the following lines are
+/// consumed until its close.
+///
+/// **Leading spans only, deliberately.** A span that merely appears mid-line is
+/// left alone: a line can legitimately carry the marker grammar inside backticks
+/// while teaching a project how to override a section, and stripping every span
+/// anywhere would delete that documentation from an override body. Leaving a
+/// mid-line comment in the delivered prompt costs a few bytes; deleting a rule
+/// is the failure this function exists to prevent.
+///
+/// Test: `content_after_a_same_line_comment_close_survives`,
+/// `two_comments_on_one_line_keep_the_text_between_them`,
+/// `a_line_that_is_only_a_comment_leaves_no_blank_behind`.
+fn strip_leading_comments<'a>(body: &'a str, in_comment: &mut bool) -> Option<&'a str> {
+    let mut rest = body;
+    while rest.starts_with(COMMENT_OPEN) {
+        let Some(at) = rest.find(COMMENT_CLOSE) else {
+            *in_comment = true;
+            return None;
+        };
+        rest = rest[at + COMMENT_CLOSE.len()..].trim();
+    }
+    (!rest.is_empty()).then_some(rest)
 }
 
 /// Strip the alignment padding from an unindented Markdown table row.

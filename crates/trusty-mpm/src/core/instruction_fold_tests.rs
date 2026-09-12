@@ -103,6 +103,62 @@ fn a_fence_inside_an_open_comment_does_not_desynchronise_the_parser() {
     );
 }
 
+/// #7616 REGRESSION: a comment that CLOSES on its own line must not take the
+/// real content that follows it with it.
+///
+/// Why: the fold dropped the whole physical line whenever it began with `<!--`,
+/// so `<!-- note -->REAL CONTENT HERE` delivered nothing at all. The parser did
+/// not desynchronise — the damage is bounded to that one line — and no bundled
+/// section or `CLAUDE.md` carries the shape today. It still breaks the fold's
+/// only claim, that it removes nothing which carries instruction.
+/// FAILS BEFORE THIS CHANGE: the output is `after\n`.
+/// Test: itself.
+#[test]
+fn content_after_a_same_line_comment_close_survives() {
+    let folded = fold_delivered_prompt("<!-- note -->REAL CONTENT HERE\nafter\n");
+    assert_eq!(folded, "REAL CONTENT HERE\nafter\n");
+}
+
+/// #7616: two complete spans on one line — the text BETWEEN them survives, and
+/// the trailing span is left in place.
+///
+/// Why the trailing span stays: stripping every span anywhere in a line would
+/// delete the marker grammar from any override body that teaches it inside
+/// backticks, which is a rule loss. Leading spans are unambiguous; a mid-line
+/// one is not worth the risk for the bytes it saves. So the contract is
+/// asymmetric on purpose, and this test states the asymmetry rather than
+/// leaving it to be discovered.
+/// Test: itself.
+#[test]
+fn two_comments_on_one_line_keep_the_text_between_them() {
+    let folded = fold_delivered_prompt("<!-- a --> text <!-- b -->\n");
+    assert_eq!(folded, "text <!-- b -->\n");
+}
+
+/// #7616: the ordinary case must not regress — a line that is ONLY a comment
+/// still vanishes, and leaves no blank line behind where it stood.
+///
+/// Why this is asserted separately: the same-line-close fix routes that line
+/// through a new path, and the obvious implementation of it emits an empty
+/// string, which would insert a blank into every delivered prompt at each
+/// authoring comment and change all three goldens.
+/// Test: itself.
+#[test]
+fn a_line_that_is_only_a_comment_leaves_no_blank_behind() {
+    let folded = fold_delivered_prompt("before\n<!-- note -->\nafter\n");
+    assert_eq!(folded, "before\nafter\n");
+}
+
+/// #7616: an UNTERMINATED span on a line that also carries earlier complete
+/// spans still opens comment state, so the lines after it are consumed to the
+/// close rather than leaking.
+/// Test: itself.
+#[test]
+fn an_unterminated_span_after_a_closed_one_still_opens_comment_state() {
+    let folded = fold_delivered_prompt("<!-- a --><!-- open\nswallowed\n-->\nreal\n");
+    assert_eq!(folded, "real\n");
+}
+
 #[test]
 fn table_padding_is_stripped() {
     let src = "| # | Forbidden Action | CB# |\n\
