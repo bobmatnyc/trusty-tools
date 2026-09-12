@@ -193,11 +193,18 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-# The three Tauri GUI crates are excluded for the same reason every other
-# workspace-wide job in this repo excludes them: they need WebKit2GTK, which no
+# The four Tauri GUI crates are excluded for the same reason every other
+# workspace-wide job in this repo excludes them (ci.yml's clippy, test, doctest
+# and MSRV jobs all carry the same four flags): they need WebKit2GTK, which no
 # headless CI runner has. They are not published to crates.io, so they have no
 # docs.rs page for a broken link to land on.
-EXCLUDES=(--exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui)
+#
+# trusty-audit-ui was missing from this list until #7466. It lives at
+# crates/trusty-audit/ui/src-tauri, so its diagnostics attribute to the
+# `trusty-audit` directory, which trusty-audit itself documents — the crate
+# failing to build on Linux was therefore invisible in the crate count and
+# surfaced only as `cargo exited 101` on a lane the scorer does not score.
+EXCLUDES=(--exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --exclude trusty-audit-ui)
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/rustdoc-links.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
@@ -291,6 +298,18 @@ else
     fi
     printf '%s\t%s\t%s\t%s\n' "$lane" "$out" "$rc" "$feats" >> "$DESC"
     echo "check_rustdoc_links: lane ${lane}: cargo exited ${rc}" >&2
+    # A cargo that dies before invoking rustdoc says WHY on stderr, and the
+    # JSON stream the scorer reads carries none of it: a build-script panic is
+    # not a `compiler-message`. That stream was discarded with $WORK, so the
+    # #7466 cause — libdbus-sys's build.rs failing a `dbus-1` pkg-config probe
+    # on the runner — was unrecoverable from the CI log and had to be inferred
+    # from the dependency graph. Bounded, so a lane with 200 broken links does
+    # not paste 200 spans a second time.
+    if [ "$rc" -ne 0 ]; then
+      echo "check_rustdoc_links: lane ${lane}: last stderr lines from cargo:" >&2
+      grep -vE '^ *(Compiling|Checking|Documenting|Downloaded|Downloading|Updating|Locking|Blocking|Finished|Fresh|Generated) ' "$err" \
+        | tail -n 30 | sed 's/^/       /' >&2 || true
+    fi
   }
 
   run_lane default ""
@@ -456,7 +475,12 @@ for lane_id, json_path, lane_rc, _lane_feats in lanes:
 # ---- The lane declaration (#7466) --------------------------------------
 # Parsed AFTER the streams so a malformed row is reported beside whatever the
 # run found, not instead of it.
-EXCLUDED_CRATES = {"trusty-mpm-gui", "trusty-code-gui", "trusty-agents-ui"}
+EXCLUDED_CRATES = {
+    "trusty-mpm-gui",
+    "trusty-code-gui",
+    "trusty-agents-ui",
+    "trusty-audit-ui",
+}
 
 lane_members = collections.defaultdict(set)   # lane id -> {crate}
 declared = collections.defaultdict(set)       # crate -> {feature} placed by a row

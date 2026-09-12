@@ -305,11 +305,18 @@ jobs:
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # `libdbus-1-dev` for the same reason ci.yml's `rustdoc-links` job carries
+      # it (#7466): the script's `features` lane enables
+      # `trusty-common/keyring-store`, which on Linux resolves to
+      # `dbus-secret-service` -> `libdbus-sys`, whose build.rs pkg-config-probes
+      # `dbus-1 >= 1.6`. Without it trusty-common does not build, rustdoc
+      # documents almost nothing, and this gate fails at the release boundary —
+      # the exact timing #7466 exists to stop.
       - name: Install system dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config libssl-dev
+            build-essential pkg-config libssl-dev libdbus-1-dev
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
