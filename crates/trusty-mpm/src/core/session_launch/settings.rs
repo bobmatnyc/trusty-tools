@@ -281,27 +281,56 @@ pub(super) fn write_output_style(
 /// `config_dir` is the tm-managed `CLAUDE_CONFIG_DIR`. `None` — an
 /// unresolvable home — enumerates nothing and writes nothing, rather than
 /// writing an empty map that would disable plugins tm never saw.
+///
+/// #7678 moved the composition itself into
+/// [`crate::core::session_scope_drift::plan_enabled_plugins`] so that
+/// `tm doctor`'s `session_scope` check and `tm doctor --fix` read and repair
+/// through this same writer instead of a second implementation.
 /// Test: `write_enabled_plugins_denies_a_non_opted_plugin`,
 /// `write_enabled_plugins_denies_an_opt_in_from_an_untrusted_project`,
 /// `write_enabled_plugins_enables_an_opted_in_plugin`,
 /// `write_enabled_plugins_preserves_foreign_keys`,
 /// `write_enabled_plugins_skips_without_a_config_dir`.
-pub(super) fn write_enabled_plugins(
+pub(crate) fn write_enabled_plugins(
     project_dir: &Path,
     config_dir: Option<&Path>,
 ) -> Result<(), PrepError> {
-    use crate::core::session_plugin_scope::{
-        ENABLED_PLUGINS_KEY, merge_enabled_plugins, plugin_scope,
-    };
+    // #7678: the launch path resolves the real trust bit; the injected variant
+    // below is the seam the doctor repair's tests use.
+    let trusted = crate::core::project_trust::is_project_trusted(project_dir);
+    write_enabled_plugins_with_trust(project_dir, config_dir, trusted)
+}
 
+/// [`write_enabled_plugins`] against an explicit trust decision (#7678).
+///
+/// Why: the trust bit lives under the operator's `$HOME`, so `tm doctor --fix`
+/// could not be tested end-to-end against a TRUSTED project without redirecting
+/// it. Splitting the lookup from the write mirrors
+/// [`crate::core::session_mcp_scope::resolve_scope_with_trust`] and
+/// [`crate::core::session_mcp_scope::granted_plugins_with_trust`], which already
+/// do exactly this for the server half of the same `[session]` table.
+/// What: see [`write_enabled_plugins`]. Writes nothing when `config_dir` is
+/// `None`, when the managed config dir knows about no plugins, or when the
+/// merged object already equals what is on disk — so a `--fix` against an
+/// in-sync project leaves the file, and its mtime, untouched.
+/// Test: `write_enabled_plugins_enables_an_opted_in_plugin`,
+/// `session_scope_repair_writes_nothing_when_the_settings_already_match`.
+pub(crate) fn write_enabled_plugins_with_trust(
+    project_dir: &Path,
+    config_dir: Option<&Path>,
+    trusted: bool,
+) -> Result<(), PrepError> {
     let Some(config_dir) = config_dir else {
         return Ok(());
     };
-    // #7422: the opt-in list ships with the clone, so it only counts in a
-    // trusted project — an untrusted one grants nothing and every key goes false.
-    let opt_in = crate::core::session_mcp_scope::granted_plugins(project_dir);
-    let scope = plugin_scope(config_dir, &opt_in);
-    if scope.is_empty() {
+    let Some(plan) = crate::core::session_scope_drift::plan_enabled_plugins_with_trust(
+        project_dir,
+        config_dir,
+        trusted,
+    ) else {
+        return Ok(());
+    };
+    if plan.drift.is_empty() {
         return Ok(());
     }
 
@@ -310,29 +339,11 @@ pub(super) fn write_enabled_plugins(
         path: claude_dir.clone(),
         source,
     })?;
-    let settings_path = claude_dir.join("settings.json");
 
-    let mut settings = match std::fs::read_to_string(&settings_path) {
-        Ok(text) => serde_json::from_str::<serde_json::Value>(&text)
-            .ok()
-            .filter(serde_json::Value::is_object)
-            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new())),
-        Err(_) => serde_json::Value::Object(serde_json::Map::new()),
-    };
-
-    let existing = settings
-        .get(ENABLED_PLUGINS_KEY)
-        .and_then(|v| v.as_object());
-    let (merged, changed) = merge_enabled_plugins(existing, &scope);
-    if !changed {
-        return Ok(());
-    }
-    settings[ENABLED_PLUGINS_KEY] = serde_json::Value::Object(merged);
-
-    let serialized = serde_json::to_string_pretty(&settings)
+    let serialized = serde_json::to_string_pretty(&plan.merged)
         .map_err(|err| PrepError::Deploy(err.to_string()))?;
-    std::fs::write(&settings_path, serialized).map_err(|source| PrepError::Io {
-        path: settings_path.clone(),
+    std::fs::write(&plan.settings_path, serialized).map_err(|source| PrepError::Io {
+        path: plan.settings_path.clone(),
         source,
     })?;
     Ok(())

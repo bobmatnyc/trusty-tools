@@ -22,6 +22,7 @@ use trusty_mpm::core::doctor_repair::{
     repair_hooks_contamination, repair_missing_hook_group, repair_output_style, repair_push_guard,
     repair_statusline,
 };
+use trusty_mpm::core::doctor_repair_scope::repair_session_scope;
 use trusty_mpm::core::skill_repair::RepairAction;
 use trusty_mpm::core::stray_mcp::{quarantine_explicit, quarantine_strays};
 
@@ -123,7 +124,10 @@ const FIX_APPLY_HINT: &str = "tm doctor --fix --yes";
 /// the project hook cleanup (`hooks_contamination`), the lifecycle-group
 /// re-merge (`hooks_missing_tm_group`, #7490 — after that cleanup, so it
 /// restores what a managed launch would write), the push-guard retrofit
-/// (`push_guard`), the output-style redeploy at BOTH style tiers
+/// (`push_guard`), the session-scope re-apply (`session_scope`, #7678 — the
+/// project-tier `enabledPlugins` map and the composed session-MCP file, skipped
+/// entirely for a directory with no `.trusty-mpm/` marker),
+/// the output-style redeploy at BOTH style tiers
 /// (`output_style_staleness`, #5866, #7423),
 /// the `legacy_sources` refusals, and the stray-`.mcp.json`
 /// sweep (`stray_mcp_json`) — printing each item's path, what would change,
@@ -170,6 +174,16 @@ pub(crate) fn run_repairs(apply: bool, include_frozen: bool) {
         // so running first would report a merge the strip then undid.
         steps.extend(repair_missing_hook_group(project, mode));
         steps.extend(repair_push_guard(project, mode));
+        // #7678: re-apply the two session-scope writes `prepare_session` performs
+        // once at launch. A session paused before that write existed keeps
+        // loading every user-tier plugin, and nothing but this puts it back.
+        // Refuses silently for a directory with no `.trusty-mpm/` marker.
+        steps.extend(repair_session_scope(
+            project,
+            trusty_mpm::core::trusty_tools_config::managed_claude_config_dir().as_deref(),
+            trusty_mpm::core::session_mcp_scope::session_mcp_path(project).as_deref(),
+            mode,
+        ));
     } else {
         eprintln!("  could not resolve the current directory — skipped the project-scoped repairs");
     }

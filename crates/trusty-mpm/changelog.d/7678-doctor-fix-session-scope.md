@@ -1,0 +1,4 @@
+Fixed
+
+- `tm doctor`'s `session_scope` check now compares the project's `.claude/settings.json` against the `enabledPlugins` map `prepare_session` would write, and names every missing or divergent key. It reported the DECISION — "plugins NOT loaded: aws-agents, aws-core" — while a project that missed the launch write kept loading both at roughly 2,600 tokens per turn; `Ok` now means the file matches, not merely that nothing is scoped out (#7678).
+- `tm doctor --fix` re-applies both session-scope writes to a live project: the project-tier `enabledPlugins` map and the composed `session-mcp/<key>.json` file, each through the function the launch path itself calls, preserving every other key in the settings file. It refuses any directory with no `.trusty-mpm/` marker, writes nothing when both are already current, reports a failed write as FAILED rather than applied, and verifies the plugin write back off disk before reporting it (#7678).
