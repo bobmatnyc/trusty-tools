@@ -110,6 +110,25 @@ pub(super) struct IndexDetailEntry {
 pub struct CreateIndexRequest {
     pub id: String,
     pub root_path: std::path::PathBuf,
+    /// #7434: ADDITIONAL index roots this index also covers, beyond
+    /// `root_path`. `None`/missing ⇒ a single-root index, which is every
+    /// caller predating #7434.
+    ///
+    /// Why: an assistant index spanning an OKG tree plus one tree per project
+    /// (#7429) would otherwise have to be created single-root and then widened
+    /// by a second call, leaving a window in which the first reindex walks —
+    /// and the prune pass then prunes against — a table that is about to
+    /// change. Accepting the whole table at creation closes that window.
+    /// What: absolute directory paths, validated through the SAME gate
+    /// `POST /indexes/:id/roots` uses
+    /// ([`super::indexes_roots::resolve_added_roots`]): canonicalised,
+    /// denylist- and allowlist-checked, de-duplicated, with a tree already
+    /// covered by another index refused `409`. `root_path` itself is accepted
+    /// here as an idempotent no-op rather than duplicated into the table.
+    /// Test: `create_index_accepts_additional_roots`,
+    /// `create_index_refuses_a_root_another_index_owns` in `tests_7434_roots.rs`.
+    #[serde(default)]
+    pub roots: Option<Vec<String>>,
     /// Subtrees (relative to `root_path`) to restrict indexing to. Forwarded
     /// from `trusty-search.yaml`'s `paths:` field by `trusty-search index`.
     /// Empty / missing = walk the entire `root_path`.

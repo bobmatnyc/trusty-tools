@@ -60,6 +60,7 @@ async fn validate_root_path_denylist_rejects_ssh() {
             defer_embed: None,
             extra_skip_dirs: None,
             data_file_max_bytes: None,
+            roots: None,
             allow_sensitive_path: false,
         }),
     )
@@ -256,6 +257,7 @@ async fn create_index_still_rejects_sensitive_path_by_default() {
             defer_embed: None,
             extra_skip_dirs: None,
             data_file_max_bytes: None,
+            roots: None,
             allow_sensitive_path: false,
         }),
     )
@@ -324,6 +326,7 @@ async fn create_index_allows_sensitive_path_when_opted_in() {
             defer_embed: None,
             extra_skip_dirs: None,
             data_file_max_bytes: None,
+            roots: None,
             allow_sensitive_path: true,
         }),
     )
