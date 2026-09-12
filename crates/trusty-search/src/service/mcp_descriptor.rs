@@ -79,12 +79,13 @@ mod tests {
         // (`search_lexical`, `search_semantic`, `search_kg`) for an updated
         // total of 18. `search_all` was already counted in the pre-#138 15.
         // Issue #537 adds `upgrade` (→ 19). Issue #1104 adds `console_metrics`
-        // (→ 20). Issue #1557 adds `typeahead` (→ 21).
+        // (→ 20). Issue #1557 adds `typeahead` (→ 21). #7434 adds `add_root`
+        // (→ 22).
         let tools = SearchMcpService.tools();
         assert_eq!(
             tools.len(),
-            21,
-            "expected 21 MCP tools (including upgrade, console_metrics, and typeahead), got {}: {:?}",
+            22,
+            "expected 22 MCP tools (including upgrade, console_metrics, typeahead and add_root), got {}: {:?}",
             tools.len(),
             tools
                 .iter()
@@ -130,9 +131,10 @@ mod tests {
         // make sure SearchMcpService is object-safe and dispatches correctly.
         // Issue #138: total bumped from 15 → 18 with the per-lane search
         // tools. Issue #537: +1 for upgrade → 19. Issue #1104: +1 for
-        // console_metrics → 20. Issue #1557: +1 for typeahead → 21.
+        // console_metrics → 20. Issue #1557: +1 for typeahead → 21. #7434: +1
+        // for add_root → 22.
         let svc: Box<dyn ServiceDescriptor> = Box::new(SearchMcpService);
         assert_eq!(svc.name(), "trusty-search");
-        assert_eq!(svc.tools().len(), 21);
+        assert_eq!(svc.tools().len(), 22);
     }
 }
