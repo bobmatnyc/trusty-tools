@@ -1716,6 +1716,32 @@ fn git_workflow_skill_states_the_pre_pull_untracked_collision_check_7558() {
     }
 }
 
+/// 🔴 #7558 REGRESSION, second home: `tm-workflow` owns the main-checkout
+/// `pull --ff-only` refresh and already names ONE cause of its failure
+/// (another session's uncommitted work). The untracked-path collision is a
+/// second cause of the same command failing, so the refresh instructions must
+/// point at the check rather than leaving the reader to improvise — a
+/// cross-reference, not a second copy of the block.
+#[test]
+fn tm_workflow_points_at_the_pre_pull_untracked_collision_check_7558() {
+    for needle in [
+        "untracked path the incoming commits also add",
+        "Pulling After a Merge — Check Untracked Collisions First",
+        "#7558",
+    ] {
+        assert!(
+            TM_WORKFLOW.contains(needle),
+            "tm-workflow is missing the #7558 cross-reference to the pre-pull \
+             untracked-collision check: {needle:?}"
+        );
+    }
+    // A pointer, not a duplicate: the procedure itself stays in one place.
+    assert!(
+        !TM_WORKFLOW.contains("git show origin/<base>:<path> | diff - <path>"),
+        "tm-workflow must cross-reference the check, not restate its commands (#7558)"
+    );
+}
+
 /// 🔴 #7561 REGRESSION: a `kill <pid>` the agent issued itself surfaced four
 /// times as "failed with exit code 143", because a `128 + signal` exit shares
 /// the numeric range of a real failure. `verification-before-completion` owns
