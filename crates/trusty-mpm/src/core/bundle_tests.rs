@@ -1662,6 +1662,36 @@ fn base_agent_prose_rules_survive_composition() {
     );
 }
 
+/// 🔴 #7612 REGRESSION: `local-ops` parked on a narrated wait twice in one
+/// session — once on a reachability poll, once after starting a deploy script —
+/// despite BASE-AGENT's inherited rule, and a 600s bounded loop overran the
+/// Bash tool's 600000ms ceiling. #2501/#2610 closed the same class on
+/// version-control; the persona text must name the blocking verb for ITS task
+/// shapes and the margin a bounded loop owes.
+#[test]
+fn local_ops_names_tm_wait_for_deploys_and_a_loop_margin_7612() {
+    use crate::core::agent_builder::compose_agent;
+    use std::path::Path;
+
+    let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
+    let local_ops =
+        compose_agent("local-ops", assets_dir).expect("compose_agent(local-ops) must succeed");
+
+    for needle in [
+        "A deploy script and a reachability poll are your commands too",
+        "`tm wait --for run`",
+        "tm wait --for run --pid <pid> --timeout 480",
+        "tm wait --for file --path <sentinel>",
+        "10-15% under the harness's foreground ceiling",
+        "600000ms",
+    ] {
+        assert!(
+            local_ops.contains(needle),
+            "composed local-ops is missing the #7612 blocking-wait guidance: {needle:?}"
+        );
+    }
+}
+
 /// 🔴 #7558 REGRESSION: `git pull --ff-only` aborts naming only the colliding
 /// path, so the recovery gets improvised — once by hand-diffing two copies of
 /// an untracked research doc. The bundled `git-workflow` skill must state the

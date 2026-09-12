@@ -97,6 +97,28 @@ hangs until a human resumes you.
 cargo build --release -p <crate>         # long build: run it, wait for exit
 ```
 
+**A deploy script and a reachability poll are your commands too (#7612).** Run
+the script in the foreground and let it hold the turn. Wait on the thing itself
+with `tm wait --for run`, never on a notification you expect to wake you:
+
+```bash
+./scripts/<deploy-script>.sh                        # deploy: foreground, wait for exit
+tm wait --for run --pid <pid> --timeout 480         # a process you backgrounded
+tm wait --for file --path <sentinel> --timeout 480  # a probe that writes its result
+```
+
+A reachability poll is the same shape: have the probe write its verdict to a
+sentinel file and wait on that file, or run a bounded loop under the margin
+rule below. "I'll wait for the deploy monitor notification before proceeding"
+and "Standing by" both end the turn with the goal unmet and strand the deploy
+until a human resumes you.
+
+🔴 **Bound a polling loop ~10-15% under the harness's foreground ceiling, never
+at it.** The Bash tool caps at 600000ms, and a loop written to a nominal 600s
+overran that on per-iteration overhead and auto-backgrounded — the margin is
+what per-iteration cost is paid out of. Budget ~480s, and re-issue the wait in
+the SAME turn when the condition has not met yet (#7612).
+
 **CI is the opposite.** Never wait on it and never use `gh pr checks --watch` —
 `--watch` streams check output into your context for the whole run (546k tokens
 over 54 minutes on one PR). Push, take a ONE-SHOT `gh pr checks <pr>` /
