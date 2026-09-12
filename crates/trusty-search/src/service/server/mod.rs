@@ -125,6 +125,10 @@ mod tests_contrib_graph;
 mod tests_denylist;
 #[cfg(test)]
 mod tests_grep;
+// #7674: the grep `glob` parameter must select the same files for two
+// sibling directories, and a glob that selects none must say so.
+#[cfg(test)]
+mod tests_grep_glob_7674;
 #[cfg(test)]
 mod tests_health;
 #[cfg(test)]
