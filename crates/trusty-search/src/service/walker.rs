@@ -5,7 +5,9 @@
 //! What: `walk_source_files(root)` returns every source file (filtered by
 //! [`SOURCE_EXTS`]) below `root`, honouring `.gitignore` (via the `ignore`
 //! crate, same engine ripgrep uses) and skipping any directory whose name
-//! appears in [`SKIP_DIRS`], plus [`should_skip_path`] and [`should_skip_content`]
+//! appears in [`SKIP_DIRS`] — except a [`BUILD_OUTPUT_ONLY_DIRS`] name sitting
+//! directly under a [`SOURCE_ROOT_DIRS`] segment, which is source (#7694) —
+//! plus [`should_skip_path`] and [`should_skip_content`]
 //! for minification / size guards applied at read time.
 //! Test: see the unit tests at the bottom.
 
@@ -38,6 +40,10 @@ pub const SOURCE_EXTS: &[&str] = &[
 ];
 
 /// Directory names to skip when walking. Matched on basename only.
+///
+/// The names in [`BUILD_OUTPUT_ONLY_DIRS`] are the one exception: they prune
+/// only at a build-output location, never as a source directory under
+/// [`SOURCE_ROOT_DIRS`] (#7694). Everything else here prunes at any depth.
 ///
 /// Java/Gradle and JS/TS build outputs are aggressively pruned — these directories
 /// contain machine-generated code that bloats the index without adding signal.
@@ -119,6 +125,43 @@ pub const SKIP_DIRS: &[&str] = &[
     "testresources",
     "test_resources",
 ];
+
+/// Names in [`SKIP_DIRS`] that mean build output in one ecosystem and a
+/// hand-written SOURCE directory in another.
+///
+/// Why: [`SKIP_DIRS`] is matched on basename at ANY depth, so `bin` — added
+/// for Java/Gradle build output — also pruned Cargo's `src/bin/` convention.
+/// Every `src/bin/**` source file in the workspace (298 tracked `.rs` files,
+/// the whole `tm` CLI) was therefore absent from every index. See #7694.
+/// What: a name in this set prunes only when it is NOT an immediate child of a
+/// [`SOURCE_ROOT_DIRS`] segment. Every other [`SKIP_DIRS`] name (`target`,
+/// `node_modules`, `.git`, …) keeps its unconditional any-depth semantics.
+/// Test: `src_bin_tree_is_walked`, `root_build_output_dirs_are_still_pruned`
+/// in `tests/src_bin_coverage_7694.rs`.
+pub const BUILD_OUTPUT_ONLY_DIRS: &[&str] = &[
+    "bin",
+    "out",
+    "build",
+    "dist",
+    "classes",
+    "generated",
+    "generated-sources",
+    "generated-test-sources",
+    // `coverage` is a report directory at a repo root and a source module at
+    // `crates/trusty-review/src/coverage/`. The repo-parity pin found this
+    // second cohort; it is the same defect as `bin`.
+    "coverage",
+];
+
+/// Directory names that open a hand-written source tree.
+///
+/// Why: a build tool READS these and writes elsewhere, so a
+/// [`BUILD_OUTPUT_ONLY_DIRS`] name directly beneath one is source, not output.
+/// Cargo's `src/bin/<name>/main.rs` is the case that motivated this (#7694).
+/// What: matched on a whole path segment. Only the IMMEDIATE parent counts, so
+/// `app/build/` and `src/proj/dist/` still prune while `src/bin/` does not.
+/// Test: `src_bin_tree_is_walked` in `tests/src_bin_coverage_7694.rs`.
+pub const SOURCE_ROOT_DIRS: &[&str] = &["src", "tests", "benches", "examples"];
 
 /// File names (full basename) to skip unconditionally.
 ///
@@ -511,14 +554,46 @@ pub fn should_skip_path(path: &Path) -> bool {
 /// and never walks. Without this check a file modified inside `cdk.out/` (or
 /// any other build-artefact dir) would still be indexed incrementally,
 /// undoing the exclusion that the initial reindex honoured.
-/// What: scans every component of `path` against [`SKIP_DIRS`].
+/// What: delegates to [`rel_path_in_skipped_dir`] with no `extra_skip_dirs`.
 /// Test: see `test_path_in_skipped_dir` below.
 pub fn path_in_skipped_dir(path: &Path) -> bool {
-    path.components().any(|c| {
-        c.as_os_str()
-            .to_str()
-            .is_some_and(|name| SKIP_DIRS.contains(&name))
-    })
+    rel_path_in_skipped_dir(path, &[])
+}
+
+/// Return `true` when `rel` lies inside a directory the indexer excludes.
+///
+/// Why: the reindex walk, the watcher's per-event filter and the reconcile
+/// mtime walk each decided this for themselves, so they could disagree about
+/// one path — a file the walk admits but the watcher rejects silently stops
+/// updating. One predicate makes that unreachable, and it is where #7694's
+/// source-context carve-out lands so all three inherit it at once.
+/// What: scans `rel`'s segments left to right. A segment in `extra_skip_dirs`
+/// or in [`SKIP_DIRS`] prunes, with one exception — a
+/// [`BUILD_OUTPUT_ONLY_DIRS`] name whose immediate parent segment is in
+/// [`SOURCE_ROOT_DIRS`] is a source directory and is kept. `rel` should be
+/// relative to the walk root (#1554): segments of the root path itself are
+/// otherwise tested, and a repo living under `/data/` prunes itself.
+/// Test: `src_bin_tree_is_walked`, `root_build_output_dirs_are_still_pruned`,
+/// `gitignored_dir_is_still_pruned` in `tests/src_bin_coverage_7694.rs`, plus
+/// `test_path_in_skipped_dir` below.
+pub fn rel_path_in_skipped_dir(rel: &Path, extra_skip_dirs: &[String]) -> bool {
+    let mut parent: Option<&str> = None;
+    for seg in rel.components().filter_map(|c| c.as_os_str().to_str()) {
+        if extra_skip_dirs.iter().any(|d| d == seg) {
+            return true;
+        }
+        if SKIP_DIRS.contains(&seg) {
+            // #7694: `src/bin/` is source, `bin/` at a build-output location
+            // is not. Only the immediate parent decides.
+            let is_source_dir = BUILD_OUTPUT_ONLY_DIRS.contains(&seg)
+                && parent.is_some_and(|p| SOURCE_ROOT_DIRS.contains(&p));
+            if !is_source_dir {
+                return true;
+            }
+        }
+        parent = Some(seg);
+    }
+    false
 }
 
 /// Return `true` when the *contents* of a JS file look minified even though
@@ -711,12 +786,11 @@ pub(crate) fn path_admitted(root: &Path, path: &Path, opts: &WalkOptions) -> boo
     // fallback (e.g. a symlinked entry whose resolved path escapes the
     // root after `follow_links`) that preserves the pre-fix behaviour of
     // checking the full path.
+    //
+    // #7694: the segment scan itself lives in `rel_path_in_skipped_dir`, so
+    // the watcher and the reconcile walk apply exactly these rules too.
     let rel = path.strip_prefix(root).unwrap_or(path);
-    if rel
-        .components()
-        .filter_map(|c| c.as_os_str().to_str())
-        .any(|seg| SKIP_DIRS.contains(&seg) || opts.extra_skip_dirs.iter().any(|d| d == seg))
-    {
+    if rel_path_in_skipped_dir(rel, &opts.extra_skip_dirs) {
         return false;
     }
     // Extension allow-list: only known source extensions enter the indexer.
