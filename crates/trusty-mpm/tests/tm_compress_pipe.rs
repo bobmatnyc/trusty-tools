@@ -12,7 +12,8 @@
 //! native-chain tests force `TRUSTY_COMPRESS_NO_RTK=1` on the child so their
 //! assertions hold on any host (#7325);
 //! `tm_compress_takes_the_rtk_path_when_rtk_is_installed` covers the rtk arm
-//! where a host has one.
+//! where a host has one. Every spawn also pins the child's `RUST_LOG` — see
+//! [`STATS_LOG_LEVEL`].
 //! Test: `cargo test -p trusty-mpm --test tm_compress_pipe`.
 //!
 //! Note on `--tool` values: `commands::hook_rewrite::effective_tool_name`
@@ -30,6 +31,28 @@ mod common;
 use std::io::Write;
 use std::process::{Command, Stdio};
 use trusty_agents_common::compress::ENV_COMPRESS_NO_RTK;
+
+/// The log filter every spawned `tm compress` is pinned to (#7401, #7351).
+///
+/// Why: the stats line four tests below assert on is a `tracing::info!`, and
+/// `commands::compress::init_stats_log_subscriber` falls back to `info` only
+/// when `RUST_LOG` is ABSENT. CI exports `RUST_LOG: "warn"` workflow-wide
+/// (`.github/workflows/ci.yml`), the spawned child inherits it, the subscriber
+/// filters the line out, and each assertion fails against an empty stderr —
+/// red on every push-to-main nextest run since #7401 landed (tracker #7351).
+/// Whether the stats line should be emitted regardless of the ambient filter
+/// is a production question, and #7607 wants that line SUPPRESSED rather than
+/// forced, so the pin belongs here.
+/// What: applied to the spawned `Command`'s environment only — never to this
+/// process, which would trip the `src/bin/tm/**` env-isolation ratchet and
+/// leak into sibling tests — exactly as `TRUSTY_COMPRESS_NO_RTK` is. The
+/// caller's own `RUST_LOG` (unset, `warn`, `debug`) then cannot change what
+/// these tests observe.
+/// Test: `tm_compress_reports_unknown_for_an_unwrapped_invocation` is the
+/// failure CI reported; `tm_compress_reports_the_wrapped_commands_exit_status`,
+/// `tm_compress_reports_a_signal_killed_wrapped_command` and
+/// `tm_compress_takes_the_rtk_path_when_rtk_is_installed` fail the same way.
+const STATS_LOG_LEVEL: (&str, &str) = ("RUST_LOG", "info");
 
 /// Run `tm compress` with the native fallback chain forced.
 ///
@@ -54,11 +77,15 @@ fn run_tm_compress(tool: &str, input: &str) -> (bool, String, String) {
 /// silently force the native chain on the rtk-arm test below (#7325).
 /// `common::tm_command` clears `CLAUDE_CODE_SESSION_ID` (#7514) and points the
 /// child at a scratch `$HOME` (#7568) — the ledger it writes is the scratch
-/// home's, not the developer's.
+/// home's, not the developer's. [`STATS_LOG_LEVEL`] is applied before `env`,
+/// so a caller that needs a different filter can still name one (#7401).
 fn run_tm_compress_with(env: &[(&str, &str)], tool: &str, input: &str) -> (bool, String, String) {
     let mut child = common::tm_command()
         .args(["compress", "--tool", tool])
         .env_remove(ENV_COMPRESS_NO_RTK)
+        // See #7401: the ambient RUST_LOG must not decide whether the stats
+        // line the assertions read is emitted.
+        .env(STATS_LOG_LEVEL.0, STATS_LOG_LEVEL.1)
         .envs(env.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -135,6 +162,9 @@ fn run_wrapped_pipeline(inner: &str, tool: &str) -> (String, String) {
         .arg("-c")
         .arg(&script)
         .env(ENV_COMPRESS_NO_RTK, "1")
+        // See #7401: the `tm compress` at the tail of the pipeline inherits
+        // this `sh`'s environment, so the filter pin goes here.
+        .env(STATS_LOG_LEVEL.0, STATS_LOG_LEVEL.1)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
