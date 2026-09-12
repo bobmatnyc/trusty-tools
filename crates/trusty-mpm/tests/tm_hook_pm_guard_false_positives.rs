@@ -239,18 +239,16 @@ fn pm_guard_still_denies_a_real_secret_file_and_a_real_brace_alternation() {
     assert_denied("cat .{e:x,{y,env}}");
 }
 
-/// #7533: the three shapes the issue reports ALLOW through the real binary.
+/// #7533: the shapes the issue reports that ALLOW through the real binary.
 ///
-/// Why: every row here DENIED on 53f952346 — Markdown emphasis read as a glob
-/// onto the `id_rsa` family, a word family followed by a sentence's full stop
-/// read as an extension, and a `git worktree add` ref read as a path. The
-/// reporter hit the first twice while merely writing the issue comment, so the
-/// stdin -> classify -> stdout path is where the fix has to be visible.
+/// Why: every row here DENIED on 53f952346 — a word family followed by a
+/// sentence's full stop read as an extension, and a `git worktree add` ref
+/// read as a path. The Markdown-emphasis half of the report is NOT here: two
+/// attempts to exempt it were both fail-open, and the deliberate answer is
+/// that it stays denied — see
+/// `pm_guard_still_denies_the_markdown_emphasis_fragment_7533` below.
 #[test]
 fn pm_guard_allows_the_prose_and_ref_shapes_7533() {
-    // Markdown emphasis, in argv and in a here-document body.
-    assert_allowed("echo '**A pipe confirms nothing at all.**'");
-    assert_allowed("cat <<'EOF' > note.md\n**A short note.**\nEOF");
     // A word family ending a sentence.
     assert_allowed("echo 'the bearer token.'");
     assert_allowed("cat <<'EOF' > note.md\nA bearer token. And more prose.\nEOF");
@@ -282,6 +280,31 @@ fn pm_guard_still_denies_what_the_7533_withdrawals_protected() {
     assert_denied("cat ~/.ssh/*a");
     assert_denied("cp ~/.ssh/*a /tmp/x");
     assert_denied("grep -l pattern ~/.ssh/*a");
+}
+
+/// #7533 review round 2: the Markdown-emphasis fragment stays DENIED, through
+/// the real binary.
+///
+/// Why: the second cut exempted an UPPER-CASE one-literal glob, arguing it
+/// could not complete a lower-case denylist core. A glob does not expand onto
+/// a core, it expands onto a FILE, and `*M` reaches `server.PEM`
+/// byte-literally — so the exemption surrendered the whole upper-case half of
+/// every family. Every row here ALLOWED at c02a33fcf.
+/// What: the reported fragment plus the five letters the review round measured
+/// against real upper-case files, and the three that reach no family in either
+/// case and must still allow.
+#[test]
+fn pm_guard_still_denies_the_markdown_emphasis_fragment_7533() {
+    assert_denied("echo '**A pipe confirms nothing at all.**'");
+    assert_denied("cat <<'EOF' > note.md\n**A short note.**\nEOF");
+    for glob in ["*M", "*Y", "*S", "*N", "*C"] {
+        assert_denied(&format!("cat ~/.ssh/{glob}"));
+    }
+    // No core carries `q`, `z` or `7` in either case, so these still allow —
+    // and they do so through the ordinary overlap check, with no exemption.
+    for glob in ["*Q", "*Z", "*7"] {
+        assert_allowed(&format!("echo {glob}"));
+    }
     assert_denied("cat secrets.txt");
     assert_denied("cat id_rsa.");
     assert_denied("git worktree add .worktrees/x .env");

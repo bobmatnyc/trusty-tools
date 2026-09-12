@@ -336,8 +336,8 @@ use std::path::Path;
 use crate::commands::hook_rewrite::{first_command_token, strip_wrapper_prefix};
 use crate::commands::pm_guard_bash::{
     any_pattern_overlaps, expand_brace_alternatives, git_argv_at_subcommand, git_subcommand,
-    matches_only_name_substring_family, occurs_in_a_secret_literal_core, secret_pattern_overlaps,
-    split_heredoc_bodies, split_shell_segments, strip_process_substitution,
+    matches_only_name_substring_family, secret_pattern_overlaps, split_heredoc_bodies,
+    split_shell_segments, strip_process_substitution,
 };
 // #7414: the word-cutting layer moved out when the brace-literal fix pushed
 // this file over the 500-SLOC cap.
@@ -1414,12 +1414,7 @@ const GLOB_ONLY_TRANSPARENT_EXTENSIONS: &[&str] = &["json"];
 
 /// Whether one already-brace-expanded name or glob is a secret-bearing target.
 fn names_a_secret(candidate: &str) -> bool {
-    // #7533: a one-literal glob is exempt only when that literal cannot
-    // complete a family core — the overlap question is asked FIRST.
-    if selects_every_name(candidate)
-        || cannot_select_a_secret_family(candidate)
-        || has_transparent_source_extension(candidate)
-    {
+    if selects_every_name(candidate) || has_transparent_source_extension(candidate) {
         return false;
     }
     let is_glob = candidate.bytes().any(|b| b == b'*' || b == b'?');
@@ -1446,58 +1441,16 @@ fn selects_every_name(candidate: &str) -> bool {
     !candidate.is_empty() && candidate.bytes().all(|b| b == b'*' || b == b'?')
 }
 
-/// Whether `candidate` is a one-literal glob whose single literal PROVABLY
-/// cannot select a member of the secret-bearing file class (#7533).
-///
-/// Why: the word scan keeps `*` and `?` inside a word, so the two asterisks
-/// opening a Markdown bold span glue onto the next letter, and `**A` overlaps
-/// the `id_rsa`/`id_ecdsa` cores through two unbounded wildcards once both
-/// sides are case-folded. That refused ordinary prose five times in one
-/// session, and twice more on the `gh` commands reporting it.
-///
-/// The first cut exempted every one-literal glob with no leading `.`, arguing
-/// it reached a subset of the already-allowed bare `*`. The review round
-/// measured that argument and it does not hold: the subset claim came from
-/// [`selects_every_name`]'s Grep no-glob EQUIVALENCE, where the glob names
-/// nothing at all, and a one-literal glob does name something — the last
-/// character of a real file. `cat *a` (reaching `id_rsa`), `cat *e`
-/// (`*.tfstate`) and `cat *n` (`token*`, `*.ovpn`) each denied before that cut
-/// and allowed after it, through the argv path, the `cp` path and the `Grep`
-/// tool's `glob` field alike.
-///
-/// What: the overlap question is asked FIRST and the exemption is what
-/// survives it. Three clauses, all required — no leading `.`, at least one
-/// wildcard with exactly one literal byte beside it, and that byte absent from
-/// every denylist core ([`occurs_in_a_secret_literal_core`], case-sensitive).
-/// The case-sensitivity is the discriminator and the whole concession: every
-/// denylist entry is spelled in lower case and a shell's own glob matching is
-/// case-sensitive, so a lower-case literal can complete a core and is screened,
-/// while the upper-case letter a bold span opens a sentence with cannot. The
-/// leading-`.` clause stays because `*` matches no dotfile, so `.*`, `.e*` and
-/// `./.*rc` were never in the exempt shape to begin with.
-///
-/// The residual is named rather than hidden: `**a`, `**e` and any other
-/// lower-case single-letter emphasis still denies. That is the correct side to
-/// err on — the identical glob reaches a real key file — and it costs a bold
-/// span of one lower-case letter, not the reported prose.
-/// Test: `denies_a_one_literal_glob_that_completes_a_secret_core_7533`,
-/// `allows_a_markdown_emphasis_fragment_7533`,
-/// `denies_a_glob_that_expands_onto_a_secret_file`.
-fn cannot_select_a_secret_family(candidate: &str) -> bool {
-    if candidate.starts_with('.') {
-        return false;
-    }
-    let is_wildcard = |b: u8| matches!(b, b'*' | b'?');
-    if !candidate.bytes().any(is_wildcard) {
-        return false;
-    }
-    let mut literals = candidate.bytes().filter(|b| !is_wildcard(*b));
-    // Zero literals is `selects_every_name`'s case, decided by its own rule.
-    let Some(only) = literals.next() else {
-        return false;
-    };
-    literals.next().is_none() && !occurs_in_a_secret_literal_core(only)
-}
+// #7533 review round 2: there is NO one-literal-glob exemption. Two cuts tried
+// one, to stop the `**A` of a Markdown bold span reading as a glob onto
+// `id_rsa`, and both were fail-open: exempting on shape alone surrendered `*a`,
+// `*e` and `*n` (`id_rsa`, `*.tfstate`, `token*`), and exempting an upper-case
+// literal on the premise that it cannot complete a lower-case core ignored the
+// FILE — `*M` expands onto `server.PEM` byte-literally, and this guard folds
+// case everywhere else precisely because filename casing carries no security
+// meaning. A one-literal glob is now screened like any other, so the reported
+// emphasis fragment stays denied; `denies_a_markdown_emphasis_fragment_7533`
+// pins that as the deliberate answer and names what it costs.
 
 /// Whether `basename` carries an extension that NAMES something (#7533).
 ///
@@ -1860,9 +1813,9 @@ mod tests {
     /// applied to a glob that does name something it hands over the last
     /// character of every secret family. Each row here DENIED at merge-base
     /// `53f952346`, ALLOWED at `cc71b01b8`, and denies again now.
-    /// What: the three reported letters through every surface the exemption
-    /// sits on — a Bash argv operand, a `cp` source, a search program's
-    /// operand, and the `Grep` tool's own `glob` field.
+    /// What: the three reported letters through every surface the withdrawn
+    /// exemption sat on — a Bash argv operand, a `cp` source, a search
+    /// program's operand, and the `Grep` tool's own `glob` field.
     #[test]
     fn denies_a_one_literal_glob_that_completes_a_secret_core_7533() {
         // `*a` reaches `id_rsa`/`id_ecdsa`, `*e` reaches `*.tfstate`, `*n`
@@ -1886,44 +1839,17 @@ mod tests {
                 "Grep(glob = `{glob}`) reaches a secret family and must deny"
             );
         }
-        // The exemption is what survives that check, not what precedes it: an
-        // upper-case literal completes no core, because every denylist entry
-        // is lower case and shell globbing is case-sensitive.
-        for glob in ["**A", "*Q", "*Z", "**7"] {
+        // A literal that completes no core in EITHER case still allows, and
+        // does so through the ordinary overlap check — no exemption is
+        // involved. No core carries `q`, `z` or `7`.
+        for glob in ["*Q", "*Z", "*7", "**7", "*q", "*z"] {
             assert_eq!(
                 eval(&format!("echo {glob}")),
                 None,
                 "`{glob}` completes no core and must allow"
             );
         }
-    }
-
-    /// Markdown emphasis in prose is not a secret-file glob (#7533).
-    ///
-    /// Why: the word scan keeps `*` in a word, so the two asterisks opening a
-    /// bold span glue onto the next letter, and `**a` overlaps the `id_rsa`
-    /// and `id_ecdsa` cores through two unbounded wildcards, case-folded.
-    /// Every row DENIED on 53f952346, naming `**A` as the offending file. The
-    /// reporter hit it five times in one session — three on a here-document
-    /// body, twice more on the `gh` commands reporting those three.
-    #[test]
-    fn allows_a_markdown_emphasis_fragment_7533() {
-        for command in [
-            "echo '**A pipe confirms nothing at all.**'",
-            "echo **A",
-            "cat <<'EOF' > note.md\n**A pipe confirms nothing at all.**\nEOF",
-            "python3 - <<'PY'\nprint('**A short note.**')\nPY",
-        ] {
-            assert_eq!(
-                eval(command),
-                None,
-                "markdown emphasis must allow: `{command}`"
-            );
-        }
-        // The bound: one literal character allows only because the
-        // already-allowed bare `*` reaches a superset of it. A dot-leading
-        // glob is NOT in that superset — `*` matches no dotfile — so every
-        // round-6 row keeps its deny.
+        // And the round-6 corpus, which no cut here may relax.
         for command in [
             "cat .e*",
             "cat .en?",
@@ -1933,6 +1859,48 @@ mod tests {
             "cat *nv",
         ] {
             assert!(eval(command).is_some(), "`{command}` must deny");
+        }
+    }
+
+    /// The Markdown-emphasis fragment #7533 reported stays DENIED, and that is
+    /// the decision (#7533 review round 2).
+    ///
+    /// Why: two cuts tried to exempt it. The first exempted every one-literal
+    /// glob and surrendered `*a`/`*e`/`*n`. The second exempted an UPPER-CASE
+    /// literal, arguing it could not complete a lower-case core — but the core
+    /// is not what a glob expands onto, the FILE is, and `*M` expands onto
+    /// `server.PEM` byte-literally. This guard folds case everywhere else
+    /// because filename casing carries no security meaning, so the second cut
+    /// contradicted its own module.
+    /// What: the reported fragment, and the five upper-case letters the review
+    /// round measured against real files — `*M` (`server.PEM`), `*Y`
+    /// (`backup.KEY`), `*S` (`AWS_CREDENTIALS`), `*N` (`*.OVPN`, a `TOKEN*`
+    /// name), `*C` (`.NETRC`). Each ALLOWED at `c02a33fcf` and denies here.
+    ///
+    /// The cost is stated rather than hidden: a bold span whose first letter
+    /// reaches a family — `**A`, `**M`, `**S` — is still refused in a command
+    /// this guard reads, and the workaround is to write that prose with the
+    /// Edit tool, which this class does not inspect. The trailing-dot and
+    /// `worktree add` halves of #7533 are unaffected and stay fixed.
+    #[test]
+    fn denies_a_markdown_emphasis_fragment_7533() {
+        for command in [
+            "echo '**A pipe confirms nothing at all.**'",
+            "echo **A",
+            "cat <<'EOF' > note.md\n**A pipe confirms nothing at all.**\nEOF",
+        ] {
+            assert!(
+                eval(command).is_some(),
+                "the emphasis fragment reaches `id_rsa` and must deny: `{command}`"
+            );
+        }
+        // The review round's own corpus: an upper-case literal reaches a
+        // same-case file, so case cannot be the discriminator.
+        for glob in ["*M", "*Y", "*S", "*N", "*C"] {
+            assert!(
+                eval(&format!("cat ~/.ssh/{glob}")).is_some(),
+                "`{glob}` expands onto a same-case secret file and must deny"
+            );
         }
     }
 
