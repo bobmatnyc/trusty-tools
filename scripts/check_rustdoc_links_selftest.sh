@@ -36,6 +36,12 @@
 #   members and `default` never has any: it is the one lane run unconditionally
 #   rather than declared in the lane file.
 #
+#   #7598 is the same skip, one loop earlier: `--update-baseline` scores lanes
+#   with its own copy of that check, and #7577 did not touch it. The `update-*`
+#   cases below drive the WRITE path, because an arm proven on the verdict path
+#   says nothing about the path that rewrites the ratchet — and a baseline
+#   outlives the run that wrote it.
+#
 # What: feeds synthetic cargo JSON streams to the gate's `--json` entry point
 #   (with `--cargo-rc` to set the exit status being scored) against an empty
 #   baseline, asserting both the exit status and the finding code on stdout.
@@ -217,6 +223,91 @@ lane_case no-cfg-stale-fails lanes-nocfg-stale.tsv 3 NO-CFG-STALE \
 LANE_BASELINE="$DEMO_BASELINE" \
   lane_case dedup-across-lanes lanes-mini.tsv 0 'broken link(s), baseline 1' \
   --json "$FIXTURE_DIR/lane-feature-link.json" --lane default --cargo-rc 101 \
+  --json "$FIXTURE_DIR/lane-feature-link.json" --lane features --cargo-rc 101
+
+# ===========================================================================
+# --update-baseline (#7598). The write path scores lanes with its own loop, so
+# it needs its own cases: a fail-closed arm proven on the VERDICT path says
+# nothing about the path that REWRITES the ratchet, and a bad baseline outlives
+# the run that wrote it.
+#
+# Each case asserts the baseline FILE as well as the exit status. "Refused" is
+# only true if the sentinel survived — an exit 3 that had already rewritten the
+# file would still have burned the ratchet.
+#
+# update_case: name, lanes file, expected exit, expected code, "keep"|"written"
+# for what the baseline file must look like afterwards, then gate arguments.
+# ===========================================================================
+SENTINEL='# sentinel baseline — this run must not rewrite me'
+
+update_case() {
+  name="$1"; lanes="$2"; expected_exit="$3"; expected_code="$4"; baseline_want="$5"
+  shift 5
+  run=$((run + 1))
+  out="$WORK/out-$name.txt"
+  target="$WORK/baseline-$name.tsv"
+  printf '%s\n' "$SENTINEL" > "$target"
+  actual_exit=0
+  BASELINE_OVERRIDE="$target" \
+    LANES_OVERRIDE="$FIXTURE_DIR/$lanes" \
+    METADATA_OVERRIDE="$FIXTURE_DIR/metadata-mini.json" \
+    bash "$GATE" --update-baseline "$@" > "$out" 2>&1 || actual_exit=$?
+
+  if [ "$actual_exit" != "$expected_exit" ]; then
+    echo "FAIL  $name: expected exit $expected_exit, got $actual_exit"
+    sed 's/^/        /' "$out"
+    fail=1
+    return
+  fi
+  if [ "$expected_code" != "-" ] && ! grep -q "$expected_code" "$out"; then
+    echo "FAIL  $name: exit $actual_exit correct, but '$expected_code' not reported"
+    sed 's/^/        /' "$out"
+    fail=1
+    return
+  fi
+  if [ "$baseline_want" = "keep" ]; then
+    if ! grep -q "sentinel baseline" "$target"; then
+      echo "FAIL  $name: the run refused with exit $actual_exit but REWROTE the baseline anyway"
+      sed 's/^/        /' "$target"
+      fail=1
+      return
+    fi
+  else
+    if grep -q "sentinel baseline" "$target"; then
+      echo "FAIL  $name: expected the baseline to be rewritten, sentinel is still there"
+      fail=1
+      return
+    fi
+  fi
+  echo "ok    $name -> exit $actual_exit ${expected_code} (baseline ${baseline_want})"
+}
+
+# THE #7598 CASE. The same `clean-fresh` at cargo 101 that FAIL CLOSED 9 scores
+# as LANE-ERROR on the verdict path: a DEFAULT-lane cargo that died with nothing
+# in the stream to explain it. The update path's own loop `continue`d on an empty
+# member set, and `default` never has one, so this wrote a baseline from a run
+# whose failure was unaccounted for — and every later run then ratcheted against
+# that number.
+update_case update-default-lane-error lanes-mini.tsv 3 LANE-ERROR keep \
+  --json "$FIXTURE_DIR/clean-fresh.json" --cargo-rc 101
+
+# The counterweight: the identical stream at cargo exit 0 is a clean run and
+# must still write. A guard that refused this would make --update-baseline
+# unusable, which is how a fail-closed arm gets deleted rather than fixed.
+update_case update-clean-writes lanes-mini.tsv 0 BASELINE-UPDATED written \
+  --json "$FIXTURE_DIR/clean-fresh.json" --cargo-rc 0
+
+# A declared lane that examined nothing it named still refuses, and the removal
+# of the `continue` must not have cost that arm: `features` names demo/config
+# and its stream carries no artifact.
+update_case update-lane-unbuildable lanes-mini.tsv 3 LANE-NOT-EXAMINED keep \
+  --json "$FIXTURE_DIR/lane-documented.json" --lane default \
+  --json "$FIXTURE_DIR/lane-empty.json" --lane features --cargo-rc 101
+
+# A non-zero lane that DID emit an attributable diagnostic is the ordinary
+# "the lint denied a link" run, not an unexplained death — it writes.
+update_case update-lane-diag-writes lanes-mini.tsv 0 BASELINE-UPDATED written \
+  --json "$FIXTURE_DIR/lane-documented.json" --lane default \
   --json "$FIXTURE_DIR/lane-feature-link.json" --lane features --cargo-rc 101
 
 echo

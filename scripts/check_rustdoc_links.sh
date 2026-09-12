@@ -114,7 +114,10 @@
 #   the verdict. Its `clean-fresh` pair (#7577) pins the lane the others cannot
 #   reach: the same stream at cargo exit 0 is the clean pass, and at 101 it is a
 #   DEFAULT-lane cargo that died with no attributable diagnostic, which must
-#   fail LANE-ERROR rather than print a pass.
+#   fail LANE-ERROR rather than print a pass. Its `update-*` cases (#7598) run
+#   that same pair through `--update-baseline`, which scores lanes with its own
+#   loop, and assert the baseline FILE as well as the exit: a refusal that had
+#   already rewritten the ratchet would still have burned it.
 
 set -euo pipefail
 
@@ -591,16 +594,26 @@ if update:
     # baseline written from a run whose feature lane never built records the
     # DEFAULT-feature count as the whole truth, which is the state this issue
     # was filed about — and a bad baseline outlives the run that wrote it.
-    for lane_id, _p, _rc, _f in lanes:
+    #
+    # #7598: scored exactly as FAIL CLOSED 9 scores a verdict run, the `default`
+    # lane included. This loop used to `continue` on an empty member set, and
+    # `default` has one by construction — `run_lane default ""` runs it and no
+    # row in the lane file declares it — so a default-lane cargo that died with
+    # no attributable diagnostic wrote a baseline from a run that documented
+    # nothing it could account for.
+    for lane_id, _p, lane_rc, _f in lanes:
         members = lane_members.get(lane_id) or set()
-        if not members:
-            continue
         want_dirs = {pkg_dir.get(p, p) for p in members}
         absent = sorted(want_dirs - lane_documented.get(lane_id, set()))
         if absent:
             print(f"FAIL\tLANE-NOT-EXAMINED\tlane '{lane_id}' did not re-document "
                   f"{', '.join(absent)} — refusing to write a baseline that would "
                   "record the default-feature count as the whole truth")
+            sys.exit(3)
+        if lane_rc != 0 and lane_id not in lane_saw_diag:
+            print(f"FAIL\tLANE-ERROR\tlane '{lane_id}': cargo exited {lane_rc} "
+                  "with no attributable error — refusing to write a baseline "
+                  "from a run whose failure is unexplained")
             sys.exit(3)
     with open(baseline_path, "w") as fh:
         fh.write(HEADER)
