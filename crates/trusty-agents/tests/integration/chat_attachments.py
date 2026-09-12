@@ -232,14 +232,17 @@ def http(method, path, body=None, status=200, auth='valid', binary=False, origin
     assert code == status, (path, code, str(value)[:1000])
     return (raw, response_headers) if binary and code == 200 else value
 
-def task(text, attachments=None, provider='openrouter', model='openai/gpt-4o-mini', success=True):
+def task(text, attachments=None, provider='openrouter', model='openai/gpt-4o-mini', success=True, expected_status=None):
     submit = http('POST', '/api/task', {'task': text, 'agent': 'assistant', 'provider_id': provider, 'model_id': model, 'attachments': attachments or []}, 202)
 
     def terminal():
         result = http('GET', '/api/task/' + submit['id'])
         return result if result['status'] not in ['running', 'pending'] else None
     result = wait('task ' + submit['id'], terminal, 120 if args.real_vision else 45)
-    assert (result['status'] == 'success') == success, result
+    if expected_status is not None:
+        assert result['status'] == expected_status, result
+    else:
+        assert (result['status'] == 'success') == success, result
     return result
 
 def assert_payload(index, image_bytes, table=None):
@@ -382,7 +385,9 @@ try:
         control['fail_assets'] = False
         control['fail_history_probe'] = True
         before = len(calls)
-        degraded = task('Synthetic history outage plaintext follow-up.')
+        degraded = task('Synthetic history outage plaintext follow-up.', expected_status='partial')
+        assert degraded['errors'] == ['Saved image history and chat persistence are unavailable for this turn. The response may lack earlier image context.']
+        assert 'data:image/png;base64,' not in json.dumps(calls[before])
         assert len(calls) > before
         record('plaintext_history_probe_outage', {'status': degraded['status'], 'narrative': degraded.get('narrative'), 'previous_image_sent': 'data:image/png;base64,' in json.dumps(calls[before]), 'task_response': degraded})
     record('integrated_assertions_passed', {'real_vision': args.real_vision, 'provider_requests': len(calls), 'raw_preparation_to_task_to_provider': True, 'typed_memory_history_and_asset_restart': True})

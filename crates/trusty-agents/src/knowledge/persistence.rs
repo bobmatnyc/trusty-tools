@@ -110,7 +110,16 @@ pub(super) fn write(path: &Path, state: &mut KnowledgeState) -> Result<()> {
     }
     write_bytes(path, &data)
 }
+/// Why: every persisted state must remain readable under the same byte limit.
+/// What: reject oversized bytes before creating or replacing a file, preserving prior state.
+/// Test: `checkpoint_overflow_preserves_readable_state_and_allows_recovery`.
 pub(crate) fn write_bytes(path: &Path, data: &[u8]) -> Result<()> {
+    // #4283: the atomic writer and bounded reader share one size contract.
+    if data.len() as u64 > MAX_STATE_BYTES {
+        return Err(KnowledgeError::InvalidState(
+            "Knowledge state exceeds size limit".into(),
+        ));
+    }
     safe_path(path)?;
     let parent = path
         .parent()

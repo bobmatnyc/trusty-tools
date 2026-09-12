@@ -37,6 +37,8 @@ use crate::llm;
 /// sentinel and behave exactly as before. Wiring is verified by `cargo check`.
 #[derive(Debug, Clone, Default)]
 pub struct SessionOverrides {
+    /// Host-owned per-turn history health, shared with the response assembler.
+    pub history_unavailable: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub attachments: Vec<trusty_common::chat_attachments::InputAttachment>,
     pub model: Option<String>,
     pub provider: Option<String>,

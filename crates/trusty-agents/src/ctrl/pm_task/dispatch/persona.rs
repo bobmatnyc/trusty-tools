@@ -102,24 +102,12 @@ pub async fn run_pm_task_with_persona(
         persona_cfg.override_model(m)?;
     }
 
-    let (creds, claude_cli_short_circuit) = prompt::resolve_provider(
-        &mut persona_cfg,
-        overrides.provider.as_deref(),
-        None,
-        persona_name,
-    )?;
-    let client = if claude_cli_short_circuit {
-        None
-    } else {
-        Some(llm::create_client_for_model(&persona_cfg.agent.model)?)
-    };
-    let attachment_turn = crate::chat_attachments::prepare(
-        persona_name,
-        user_input,
-        &overrides.attachments,
-        |turn| turn.validate_provider(&persona_cfg, creds.label(), claude_cli_short_circuit),
-    )
-    .await?;
+    let prompt::PreparedProvider {
+        creds,
+        client,
+        claude_cli_short_circuit,
+        attachment_turn,
+    } = prompt::prepare_provider(&mut persona_cfg, &overrides, persona_name, user_input).await?;
     if claude_cli_short_circuit {
         prompt::append_cli_context(&mut persona_cfg, project_path);
         // DOC-54 §9.6 note: the claude-cli subprocess path runs an entirely

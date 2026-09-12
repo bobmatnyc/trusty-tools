@@ -19,11 +19,11 @@
 // `ChatPane.test.ts`'s mounting pattern.
 // Test: this file.
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mount, unmount } from 'svelte';
 import ChatView from './ChatView.svelte';
 import { bridgeEventToWebBus } from '../lib/eventBridge';
-import { emitWebEvent, type AppEvent } from '../lib/transport';
+import { emitWebEvent, invoke, type AppEvent } from '../lib/transport';
 import { streamAccumulator } from '../lib/chatStream';
 import { resetWorkflow } from '../stores/workflow';
 import { activeProjectId, activeTaskId, addMessage, isRunning, messages } from '../stores/app';
@@ -126,9 +126,47 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   if (instance) unmount(instance);
   instance = null;
   target.remove();
+});
+
+// #7370: the same completion listener consumes browser polls and native payloads.
+it.each(['browser poll', 'native payload'])('shows partial errors as a host notice via %s', async (transport) => {
+  const warning = 'Saved image history is unavailable. <img src=x onerror=alert(1)>';
+  const response = { id: TASK, narrative: REAL, status: 'partial', errors: [warning] };
+  if (transport === 'browser poll') {
+    vi.stubGlobal('fetch', vi.fn(async (_url: unknown, init?: RequestInit) =>
+      new Response(JSON.stringify(init?.method === 'POST' ? { id: TASK, status: 'running' } : response), { status: 200 })));
+    await invoke('send_message', { content: 'Continue with text' });
+  } else {
+    emitWebEvent('task-complete', response);
+  }
+  await rendered();
+
+  const notice = target.querySelector('[data-host-notice]');
+  expect(notice?.textContent).toContain('Trusty Agents notice');
+  expect(notice?.textContent).toContain(warning);
+  expect(notice?.getAttribute('role')).toBe('status');
+  expect(notice?.querySelector('img,script')).toBeNull();
+  expect(notice?.closest('[data-assistant-body]')).toBeNull();
+  expect(bubbleText()).toContain(REAL);
+  expect(bubbleText()).not.toContain(warning);
+  expect(spinnerVisible()).toBe(false);
+
+  // Re-delivery updates the same turn, without duplicating notices.
+  emitWebEvent('task-complete', response);
+  await rendered();
+  expect(target.querySelectorAll('[data-host-notice]')).toHaveLength(1);
+});
+
+it('keeps successful completion free of partial host notices', async () => {
+  emitWebEvent('task-complete', { id: TASK, narrative: REAL, status: 'success', errors: [] });
+  await rendered();
+  expect(bubbleText()).toContain(REAL);
+  expect(target.querySelector('[data-host-notice]')).toBeNull();
+  expect(spinnerVisible()).toBe(false);
 });
 
 describe('task-complete race (#3759)', () => {

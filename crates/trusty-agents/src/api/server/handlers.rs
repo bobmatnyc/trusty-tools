@@ -321,6 +321,7 @@ fn session_overrides_for(req: &TaskRequest) -> crate::ctrl::SessionOverrides {
         provider: req.provider_id.clone(),
         user: None,
         focused_workstream: req.focused_workstream.clone(),
+        ..Default::default()
     }
 }
 
@@ -545,6 +546,7 @@ pub(super) async fn submit_task(
                 // is captured for responder attribution — reflecting who
                 // actually ANSWERED, not who was asked.
                 let mut ev_rx = crate::events::subscribe();
+                let history_unavailable = overrides_bg.history_unavailable.clone();
                 let result = if let Some(agent_name) = agent_bg {
                     crate::ctrl::run_pm_task_with_persona(
                         &project_path,
@@ -587,6 +589,7 @@ pub(super) async fn submit_task(
                         r.status = PmStatus::Success;
                         r.narrative = content;
                         r.responder_agent = responder;
+                        crate::chat_attachments::apply_history_notice(&mut r, &history_unavailable);
                         r
                     }
                     Err(e) => {

@@ -50,6 +50,8 @@ export interface Project {
 import type { AttachmentRef } from '../lib/attachments';
 
 export interface Message {
+  /** #7370: server notices belong to the host, separately from model prose. */
+  hostNotices?: string[];
   /**
    * Prepared attachment bodies carried inline with the turn. Distinct from
    * `attachments` below, which holds #7370's id-addressed manifest rows.
@@ -536,18 +538,19 @@ export const canLoadOlderChat = derived(
  * placeholder for that task id and append/replace its content to grow the
  * bubble in place rather than spamming new messages.
  * What: Updates the first message matching `taskId` inside `projectId` with
- * the new content.
+ * the new content and optional host notices. Omitted notices clear old ones.
  * Test: Add a placeholder with `taskId='t1'`, call `updateMessageByTask` with
  * the same id and new content, assert the message content is replaced.
+ * `ChatView.test.ts` covers partial notices separately from model prose.
  */
-export function updateMessageByTask(projectId: string, taskId: string, content: string): void {
+export function updateMessageByTask(projectId: string, taskId: string, content: string, hostNotices?: string[]): void {
   messages.update((map) => {
     const list = map.get(projectId);
     if (!list) return map;
     const next = new Map(map);
     next.set(
       projectId,
-      list.map((m) => (m.taskId === taskId && (m.role === 'assistant' || m.role === 'pm') ? { ...m, content } : m)),
+      list.map((m) => (m.taskId === taskId && (m.role === 'assistant' || m.role === 'pm') ? { ...m, content, hostNotices } : m)),
     );
     return next;
   });

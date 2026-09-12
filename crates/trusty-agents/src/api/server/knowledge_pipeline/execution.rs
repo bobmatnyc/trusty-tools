@@ -282,3 +282,7 @@ async fn feed(
 #[cfg(test)]
 #[path = "execution_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "event_retention_tests.rs"]
+mod event_retention_tests;
