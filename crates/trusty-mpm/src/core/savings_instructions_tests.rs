@@ -17,6 +17,16 @@ fn sonnet_price() -> Option<(String, f64)> {
     Some(("claude-sonnet-4-6".to_string(), 3.0))
 }
 
+/// The roster-source stand-in for a fixture with no deployed agents (#7616).
+///
+/// Why: the real resolver reads this machine's global agent tiers, so calling it
+/// from the suite would make every assertion depend on what the operator has
+/// installed. Injecting the byte count keeps the suite hermetic, which is the
+/// same reason `price` is injected.
+fn no_roster(_project_dir: &std::path::Path) -> usize {
+    0
+}
+
 /// A compiled prompt that is a genuine fold: far smaller than the source set,
 /// but large enough to be a real assembly of the bundled sections.
 ///
@@ -198,6 +208,7 @@ fn a_malformed_compiled_prompt_path_records_no_row() {
         &dest,
         &plausible,
         Some("c-7514".to_string()),
+        no_roster,
         sonnet_price,
     );
 
@@ -240,7 +251,7 @@ fn folded_source_bytes_counts_the_bundled_sections() {
         .sum();
     assert!(bundled > 0, "the bundled corpus must not be empty");
     assert_eq!(
-        folded_source_bytes(dir.path()),
+        folded_source_bytes(dir.path(), 0),
         bundled,
         "a project with no CLAUDE.md contributes only the bundled sections"
     );
@@ -253,7 +264,7 @@ fn folded_source_bytes_counts_the_bundled_sections() {
 #[test]
 fn folded_source_bytes_adds_an_override_body() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let baseline = folded_source_bytes(dir.path());
+    let baseline = folded_source_bytes(dir.path(), 0);
     let body = "Ship it. Skip the ceremony.";
     std::fs::write(
         dir.path().join("CLAUDE.md"),
@@ -263,7 +274,7 @@ fn folded_source_bytes_adds_an_override_body() {
     )
     .expect("write CLAUDE.md");
 
-    let with_override = folded_source_bytes(dir.path());
+    let with_override = folded_source_bytes(dir.path(), 0);
     assert_eq!(
         with_override,
         baseline + body.len(),
@@ -319,6 +330,7 @@ fn the_row_is_keyed_by_the_claude_session_id() {
         &dest,
         &plausible_prompt(),
         Some("claude-abc-123".to_string()),
+        no_roster,
         sonnet_price,
     );
 
@@ -357,6 +369,7 @@ fn no_claude_id_stages_the_row_instead_of_writing_an_unfoldable_one() {
         &dest,
         &plausible_prompt(),
         None,
+        no_roster,
         sonnet_price,
     );
 
@@ -391,6 +404,7 @@ fn a_staged_row_becomes_foldable_at_the_first_hook_invocation() {
         &dest,
         &plausible_prompt(),
         None,
+        no_roster,
         sonnet_price,
     );
     assert!(
@@ -427,9 +441,16 @@ fn a_prompt_that_folds_nothing_warns_once_and_writes_no_row() {
     let project = tempfile::tempdir().expect("temp project");
     let framework_root = tempfile::tempdir().expect("temp framework root");
     let dest = compiled_prompt_dest(project.path(), "m1");
-    let bulky = "x".repeat(folded_source_bytes(project.path()) + 1);
+    let bulky = "x".repeat(folded_source_bytes(project.path(), 0) + 1);
 
-    record_instruction_compression_to(framework_root.path(), &dest, &bulky, None, sonnet_price);
+    record_instruction_compression_to(
+        framework_root.path(),
+        &dest,
+        &bulky,
+        None,
+        no_roster,
+        sonnet_price,
+    );
 
     assert!(
         !crate::core::savings::savings_log_in(framework_root.path()).exists(),
@@ -443,7 +464,7 @@ fn a_prompt_that_folds_nothing_warns_once_and_writes_no_row() {
         !crate::core::savings_sidecar::warn_no_fold_once(
             framework_root.path(),
             project.path(),
-            folded_source_bytes(project.path()),
+            folded_source_bytes(project.path(), 0),
             bulky.len(),
         ),
         "the producer must already have warned for this project and byte pair"
@@ -488,7 +509,10 @@ fn rederiving_a_prompt_that_folds_nothing_appends_nothing() {
     let project = tempfile::tempdir().expect("temp project");
     let framework_root = tempfile::tempdir().expect("temp framework root");
     let dest = compiled_prompt_dest(project.path(), "local");
-    let bulky = "x".repeat(folded_source_bytes(project.path()) + 1);
+    // #7616: the re-derivation resolves this machine's roster onto the source
+    // side, so a fixture sized against the bundled sections alone would now
+    // FOLD and take the other branch.
+    let bulky = "x".repeat(ambient_source_bytes(project.path()) + 1);
     std::fs::write(&dest, &bulky).expect("compiled prompt");
     let ledger = crate::core::savings::savings_log_in(framework_root.path());
 
@@ -589,5 +613,240 @@ fn claude_code_session_id_names_the_harness_variable() {
     assert_eq!(
         crate::core::savings::CLAUDE_CODE_SESSION_ID_ENV,
         "CLAUDE_CODE_SESSION_ID"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #7616 — the no-override fold, end to end.
+//
+// Why these live here rather than in `instruction_fold_tests.rs`: the defect was
+// never in one function. It was that the composer performed no transformation
+// AND the producer counted the roster only on the delivered side, so
+// `compiled >= sources` was structurally permanent for a project that overrides
+// nothing. Proving the fix means composing the real prompt and running the real
+// producer over it.
+// ---------------------------------------------------------------------------
+
+/// Write `count` agent files into `dir`, each with the frontmatter the roster
+/// scanner requires.
+///
+/// Why: the roster dedup is the larger half of the no-override fold, and it only
+/// exists when agents are deployed. A fixture tier is how the suite exercises it
+/// without reading this machine's global agent directories.
+fn deploy_agents(dir: &std::path::Path, count: usize) {
+    std::fs::create_dir_all(dir).expect("agent tier");
+    for index in 0..count {
+        std::fs::write(
+            dir.join(format!("fixture-agent-{index}.md")),
+            format!(
+                "---\nname: fixture-agent-{index}\nrole: engineer\nmodel: sonnet\n---\n\nBody.\n"
+            ),
+        )
+        .expect("agent file");
+    }
+}
+
+/// The no-override prompt and the roster bytes the composer read to produce it.
+///
+/// Why: every assertion below needs the same numbers, taken from the same
+/// composition, or they would be measuring different prompts.
+/// What: composes through `resolve_pm_prompt_with_roster` — the real entry point
+/// for a project with no `CLAUDE.md` — with a roster deduped against a harness
+/// tier holding every agent, which is the shape a real machine has (#4513).
+fn no_override_composition(project: &std::path::Path) -> (String, usize) {
+    let tier = project.join(".claude").join("agents");
+    deploy_agents(&tier, 40);
+    let dirs = vec![tier.clone()];
+
+    let delivered = crate::core::delegation_authority::roster_section_from_tiers(&dirs, &dirs)
+        .expect("a deployed tier renders a roster");
+    let read = crate::core::delegation_authority::roster_section_from_dirs(&dirs)
+        .expect("the undeduped roster renders too");
+
+    let (prompt, _) =
+        crate::core::instruction_overrides::resolve_pm_prompt_with_roster(project, || {
+            Some(delivered.clone())
+        });
+    (prompt, read.len())
+}
+
+/// #7616 REGRESSION: for a project that overrides no section, the compiled
+/// prompt must come out SMALLER than the instruction bodies the composer read.
+///
+/// FAILS BEFORE THIS CHANGE. On the pre-fix commit the composer applied no fold
+/// and the roster was counted only on the delivered side, so `compiled` was the
+/// sources PLUS the roster and the stack profile — the field measurement was
+/// 26,810 B of sources against a 26,695 B prompt, and the marker under
+/// `no-fold-warned/` recorded compiled 26,736 B against sources 22,559 B.
+/// Test: itself.
+#[test]
+fn a_no_override_project_folds_below_its_authored_sources() {
+    let project = tempfile::tempdir().expect("temp project");
+    let (prompt, roster_read) = no_override_composition(project.path());
+
+    let sources = folded_source_bytes(project.path(), roster_read);
+    let compiled = prompt.len();
+
+    assert!(
+        compiled < sources,
+        "the no-override fold must remove bytes: sources {sources} B, compiled \
+         {compiled} B"
+    );
+}
+
+/// #7616 REGRESSION: the reduction must be at least what the prose fold alone
+/// recovers from the bundled corpus.
+///
+/// Why a corpus-derived floor rather than a round percentage: the roster half of
+/// the fold scales with how many agents a machine deploys, so a fixed percentage
+/// would pin the fixture rather than the mechanism. The prose half does not — it
+/// is a property of the shipped sections — so it is the honest floor to assert.
+/// FAILS BEFORE THIS CHANGE: the reduction was negative.
+/// Test: itself.
+#[test]
+fn the_no_override_fold_clears_the_prose_floor() {
+    let project = tempfile::tempdir().expect("temp project");
+    let (prompt, roster_read) = no_override_composition(project.path());
+
+    let sources = folded_source_bytes(project.path(), roster_read);
+    let saved = sources.saturating_sub(prompt.len());
+
+    let prose_floor: usize = crate::core::instruction_pipeline::SECTION_SOURCES
+        .iter()
+        .map(|(_, body)| {
+            body.len() - crate::core::instruction_fold::fold_delivered_prompt(body).len()
+        })
+        .sum();
+
+    assert!(prose_floor > 0, "the prose fold must recover something");
+    assert!(
+        saved >= prose_floor,
+        "the fold saved {saved} B, below the {prose_floor} B the prose fold alone \
+         recovers from the bundled sections"
+    );
+}
+
+/// #7616 REGRESSION: a real ledger row lands for the no-override case, and its
+/// `basis` carries the MEASURED byte counts.
+///
+/// Why the basis matters (#7514, #7584): the ledger has twice carried rows whose
+/// numbers came from a fixture rather than a real composition. A row is only
+/// evidence if the counts in it are the counts that were measured.
+/// FAILS BEFORE THIS CHANGE: no row was written at all — the producer took the
+/// `warn_no_fold_once` decline branch every time.
+/// Test: itself.
+#[test]
+fn the_no_override_row_basis_carries_the_measured_bytes() {
+    let project = tempfile::tempdir().expect("temp project");
+    let framework_root = tempfile::tempdir().expect("temp framework root");
+    let (prompt, roster_read) = no_override_composition(project.path());
+    let dest = compiled_prompt_dest(project.path(), "local");
+    let ledger = crate::core::savings::savings_log_in(framework_root.path());
+
+    record_instruction_compression_to(
+        framework_root.path(),
+        &dest,
+        &prompt,
+        Some("claude-7616".to_string()),
+        move |_| roster_read,
+        sonnet_price,
+    );
+
+    let written = std::fs::read_to_string(&ledger).expect("a row must be written");
+    let sources = folded_source_bytes(project.path(), roster_read);
+    assert!(
+        written.contains(&format!(
+            "sources {sources} B - compiled {} B",
+            prompt.len()
+        )),
+        "the basis must carry the measured counts, not a placeholder: {written}"
+    );
+    assert!(
+        written.contains("claude-7616"),
+        "the row must be keyed by the Claude session id: {written}"
+    );
+    assert!(
+        !written.contains("\"session_id\":\"local\""),
+        "a row keyed by the compiled-prompt directory is the #7209 defect: {written}"
+    );
+}
+
+/// Why (#7616): "0 when no agent is deployed anywhere" is the branch that keeps
+/// the savings figure able to come out honestly zero — a machine with no roster
+/// folds no roster, and claiming otherwise would inflate every row. The ambient
+/// entry point cannot assert it (it reads this machine's global tiers), so the
+/// claim is asserted against the tier seam.
+/// Test: itself.
+#[test]
+fn roster_source_bytes_are_zero_without_a_roster() {
+    assert_eq!(
+        roster_source_bytes_from(&[]),
+        0,
+        "no tier at all folds no roster"
+    );
+
+    let empty_tier = tempfile::tempdir().expect("temp tier");
+    assert_eq!(
+        roster_source_bytes_from(&[empty_tier.path().to_path_buf()]),
+        0,
+        "a tier that exists but deploys no agent folds no roster"
+    );
+
+    let absent = empty_tier.path().join("never-created");
+    assert_eq!(
+        roster_source_bytes_from(&[absent]),
+        0,
+        "an absent tier is normal, not a fold"
+    );
+
+    // The positive control: the same seam DOES count a tier that holds agents,
+    // so the zeros above are the branch and not a broken call.
+    let deployed = tempfile::tempdir().expect("temp tier");
+    deploy_agents(deployed.path(), 3);
+    assert!(
+        roster_source_bytes_from(&[deployed.path().to_path_buf()]) > 0,
+        "a tier holding agents must contribute source bytes"
+    );
+}
+
+/// Why (#7616): the roster dedup is read-and-discarded source in exactly the
+/// sense an overridden section body is. Counting it only on the delivered side
+/// is what made the no-override case permanently zero.
+/// Test: itself.
+#[test]
+fn the_roster_dedup_counts_as_folded_source() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let baseline = folded_source_bytes(dir.path(), 0);
+    assert_eq!(
+        folded_source_bytes(dir.path(), 1_234),
+        baseline + 1_234,
+        "the roster the composer read must land on the source side"
+    );
+}
+
+/// Why (#7616): the `tm doctor` check reads this, and a project that has never
+/// launched a session has no prompt to measure. Reporting a number there would
+/// be inventing one.
+/// Test: itself.
+#[test]
+fn the_fold_measurement_is_none_before_any_session_compiles() {
+    let project = tempfile::tempdir().expect("temp project");
+    assert!(measure_project_fold(project.path()).is_none());
+}
+
+/// Why (#7616): the check must measure THIS launch's prompt, so it reads the
+/// newest compiled prompt rather than whichever directory enumerates first.
+/// Test: itself.
+#[test]
+fn the_fold_measurement_reads_the_newest_compiled_prompt() {
+    let project = tempfile::tempdir().expect("temp project");
+    let dest = compiled_prompt_dest(project.path(), "local");
+    std::fs::write(&dest, "x".repeat(4_096)).expect("compiled prompt");
+
+    let (sources, compiled) = measure_project_fold(project.path()).expect("a measurement");
+    assert_eq!(compiled, 4_096);
+    assert!(
+        sources >= min_plausible_compiled_bytes(),
+        "the source side must carry the bundled corpus"
     );
 }

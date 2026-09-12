@@ -834,20 +834,32 @@ fn claude_md_is_the_only_marker_host() {
 /// summary, a row does not. `P1`..`P11` and the CB rows are the enforcement
 /// content itself, so a prompt containing all of them cannot be one where the
 /// tables were dropped, truncated or replaced with a pointer.
+/// #7616: spelled in the DELIVERED form, not the authored one — the compose-time
+/// fold strips Markdown table padding, so `| P1 | …` reaches the PM as `|P1|…`.
+/// Asserting the authored spelling would stop checking anything the moment the
+/// fold ran, which is exactly the kind of silent lapse these markers exist to
+/// catch.
 const AUTHORITY_MARKERS: &[&str] = &[
     "## Prohibitions (CANONICAL -- single source of truth)",
-    "| P1 | Edit/Write of SOURCE-CODE files",
-    "| P2 | Read >3 files or deep code analysis",
-    "| P5 | `sed`,`awk`,`patch`,`git apply`, pipe to file",
-    "| P11 | Instruct user to run commands",
+    "|P1|Edit/Write of SOURCE-CODE files",
+    "|P2|Read >3 files or deep code analysis",
+    "|P5|`sed`,`awk`,`patch`,`git apply`, pipe to file",
+    "|P11|Instruct user to run commands",
     "## Circuit Breakers",
-    "| 1 | Source Impl | PM Edit/Write of a source-code file",
-    "| 10 | Delegation Failure Limit",
-    "| 14 | Code Mod via Bash",
+    "|1|Source Impl|PM Edit/Write of a source-code file",
+    "|10|Delegation Failure Limit",
+    "|14|Code Mod via Bash",
 ];
 
 /// Assert every authority marker is present in `prompt`.
+///
+/// #7616: callers pass two different kinds of string — a DELIVERED prompt, which
+/// the compose-time fold has already compacted, and a raw section projection,
+/// which it has not. Normalising through the fold here (it is idempotent) lets
+/// one spelling of the markers cover both, rather than carrying a padded and an
+/// unpadded copy of every row.
 fn assert_authority_intact(prompt: &str, configuration: &str) {
+    let prompt = crate::core::instruction_fold::fold_delivered_prompt(prompt);
     for marker in AUTHORITY_MARKERS {
         assert!(
             prompt.contains(marker),

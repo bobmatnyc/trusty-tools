@@ -18,15 +18,25 @@
 //! session launch when, and only when, the delivered prompt is smaller.
 //!
 //! **What counts as "folded".** The source set is every instruction body the
-//! composer READ for this session: the nine bundled section sources, plus each
-//! named-section override body it read from the project's `CLAUDE.md`. Both are
-//! candidates; only one of each overridden pair reaches the output, so the
-//! delta is what the override mechanism folded away. Generated context the
-//! composer ADDS — the live agent roster, the detected stack profile — has no
-//! source file behind it and appears only on the delivered side, which is why a
-//! project that overrides nothing produces a delivered prompt LARGER than its
-//! sources and correctly writes no row. A savings figure has to be able to come
-//! out zero, or it is not a measurement.
+//! composer READ for this session: the nine bundled section sources, each
+//! named-section override body it read from the project's `CLAUDE.md`, and the
+//! UNDEDUPED agent roster. Each is a candidate; only part of each reaches the
+//! output, so the delta is what the composer folded away.
+//!
+//! **The roster is source, not just output (#7616).** Until #7616 the roster was
+//! counted only on the delivered side, on the reasoning that generated context
+//! "has no source file behind it" — which made `compiled >= sources` permanent
+//! for a project that overrides nothing, and the field measurement was 26,810 B
+//! of sources against a 26,695 B prompt (0.4%). That reasoning was wrong twice
+//! over. The roster generator resolves the FULL deployed inventory and delivers
+//! only the entries the harness's own `Available agent types` listing omits
+//! (#4513), so the dropped entries are read-and-discarded exactly as an
+//! overridden section body is. And the composer now performs a real fold on the
+//! authored prose as well ([`crate::core::instruction_fold`]), which it did not
+//! before. The detected stack profile still has no larger source behind it and
+//! is still counted only where it lands. A savings figure has to be able to come
+//! out zero, or it is not a measurement — and it still does, on a machine with
+//! no roster and a corpus with nothing to fold.
 //!
 //! Everything here is best-effort: an unresolvable session id, an unpriceable
 //! model, or an unwritable ledger each skip the row. A missing savings row must
@@ -109,8 +119,48 @@ pub(crate) fn record_instruction_compression_in(framework_root: &Path, dest: &Pa
         dest,
         prompt,
         claude_code_session_id(),
+        // #7616: the roster the composer READ, resolved from this machine's
+        // agent tiers. Injected rather than read inside the measurement so the
+        // suite stays hermetic — the tiers are machine-global.
+        ambient_roster_source_bytes,
         resolve_pm_price,
     );
+}
+
+/// Bytes of the roster the composer read, before the #4513 dedup dropped every
+/// agent the harness publishes itself.
+///
+/// Why (#7616): this is the half of the fold that was attributed to neither
+/// side. The composer resolves the full deployed-agent inventory and delivers
+/// only the entries the harness's own `Available agent types` listing omits, so
+/// the dropped entries are read-and-discarded source in exactly the sense an
+/// overridden section body is — and counting them only on the delivered side is
+/// what made `compiled >= sources` permanent for a project with no override.
+/// What: renders the UNDEDUPED roster for `project_dir`'s tiers and returns its
+/// length; `0` when no agent is deployed anywhere, which is honest — a machine
+/// with no roster folds no roster.
+/// Test: `the_roster_dedup_counts_as_folded_source` (the arithmetic),
+/// `roster_source_bytes_are_zero_without_a_roster` (the tier seam).
+fn ambient_roster_source_bytes(project_dir: &Path) -> usize {
+    let dirs = crate::core::delegation_authority::deployed_agent_dirs(project_dir);
+    roster_source_bytes_from(&dirs)
+}
+
+/// [`ambient_roster_source_bytes`] against an explicit tier list.
+///
+/// Why (#7616): the ambient entry point resolves `$CLAUDE_CONFIG_DIR` and the
+/// caller's home directory, so on a provisioned machine it can never return `0`
+/// and the "no roster folds no roster" branch is untestable through it. Taking
+/// the tiers is the seam that makes that branch assertable without mutating
+/// process-global state, the same shape `delegation_authority` already uses for
+/// `roster_section_from_dirs`.
+/// What: the length of the UNDEDUPED roster render for `dirs`, or `0` when no
+/// agent is deployed in any of them.
+/// Test: `roster_source_bytes_are_zero_without_a_roster`.
+fn roster_source_bytes_from(dirs: &[std::path::PathBuf]) -> usize {
+    crate::core::delegation_authority::roster_section_from_dirs(dirs)
+        .map(|section| section.len())
+        .unwrap_or(0)
 }
 
 /// [`record_instruction_compression_in`] against an explicit framework root,
@@ -140,6 +190,7 @@ fn record_instruction_compression_to(
     dest: &Path,
     prompt: &str,
     claude_session_id: Option<String>,
+    roster_source: impl FnOnce(&Path) -> usize,
     price: impl FnOnce() -> Option<(String, f64)>,
 ) {
     let Some((compiled_prompt_id, harness_root)) = session_and_root(dest) else {
@@ -153,7 +204,7 @@ fn record_instruction_compression_to(
         );
         return;
     };
-    let source_bytes = folded_source_bytes(&harness_root);
+    let source_bytes = folded_source_bytes(&harness_root, roster_source(&harness_root));
     let compiled_bytes = prompt.len();
     // #7491: a compiled prompt this small is not a fold, it is a stub,
     // a truncated write, or a stale file at the compiled-prompt path.
@@ -235,6 +286,7 @@ pub(crate) fn rederive_from_compiled_prompt(
         compiled_prompt,
         &prompt,
         Some(claude_session_id.to_string()),
+        ambient_roster_source_bytes,
         resolve_pm_price,
     );
     crate::core::savings::has_row(
@@ -291,12 +343,14 @@ fn session_and_root(dest: &Path) -> Option<(String, std::path::PathBuf)> {
 /// Why: see the module header — this is the "before" half of the fold, and it
 /// has to include the override bodies as well as the bundled sections, because
 /// an override is a source the composer read and (partly) discarded.
-/// What: the nine bundled section sources plus every accepted named-section
-/// override body found in the project's `CLAUDE.md`. Rejected override blocks
-/// are excluded: the composer did not fold them, it declined them.
+/// What: the nine bundled section sources, every accepted named-section
+/// override body found in the project's `CLAUDE.md`, and `roster_source_bytes`
+/// — the UNDEDUPED roster render (#7616). Rejected override blocks are excluded:
+/// the composer did not fold them, it declined them.
 /// Test: `folded_source_bytes_counts_the_bundled_sections`,
-/// `folded_source_bytes_adds_an_override_body`.
-fn folded_source_bytes(project_dir: &Path) -> usize {
+/// `folded_source_bytes_adds_an_override_body`,
+/// `the_roster_dedup_counts_as_folded_source`.
+fn folded_source_bytes(project_dir: &Path, roster_source_bytes: usize) -> usize {
     let bundled: usize = crate::core::instruction_pipeline::SECTION_SOURCES
         .iter()
         .map(|(_, body)| body.len())
@@ -306,7 +360,44 @@ fn folded_source_bytes(project_dir: &Path) -> usize {
         .iter()
         .map(|applied| applied.body.len())
         .sum();
-    bundled + overrides
+    // #7616: the undeduped roster is read-and-partly-discarded source too.
+    bundled + overrides + roster_source_bytes
+}
+
+/// What the fold actually achieved for `project_dir`, last time it ran.
+///
+/// Why (#7616): the decline branch is silent by design — it warns once per
+/// project into the daemon log and writes no ledger row — so an operator seeing
+/// no `💸` segment had nowhere to look for the reason. `tm doctor` is the
+/// surface that answers "is this working", and it had no compression check at
+/// all. This is the measurement behind that check, taken from the same inputs
+/// the producer uses so the two can never report different numbers.
+/// What: `(source_bytes, compiled_bytes)` for the most recently written compiled
+/// prompt under `<project>/.trusty-mpm/sessions/`, or `None` when no session has
+/// compiled one yet. The source side is [`folded_source_bytes`] with this
+/// machine's roster, exactly as at launch.
+/// Test: `the_fold_measurement_is_none_before_any_session_compiles`,
+/// `the_fold_measurement_reads_the_newest_compiled_prompt`.
+pub(crate) fn measure_project_fold(project_dir: &Path) -> Option<(usize, usize)> {
+    let prompt = crate::core::savings_sidecar::compiled_prompts_in(project_dir)
+        .into_iter()
+        .next()?;
+    let compiled_bytes = std::fs::metadata(&prompt).ok()?.len() as usize;
+    Some((ambient_source_bytes(project_dir), compiled_bytes))
+}
+
+/// [`folded_source_bytes`] with this machine's roster resolved.
+///
+/// Why (#7616): three callers need the same number — the doctor check, and two
+/// tests that must build a fixture prompt provably ABOVE the source set to
+/// exercise the decline branch. Before the roster joined the source side they
+/// could sum [`crate::core::instruction_pipeline::SECTION_SOURCES`] themselves;
+/// now that would undercount and the fixture would land on the wrong branch.
+/// What: the bundled sections, the project's override bodies, and the undeduped
+/// roster for `project_dir`'s tiers.
+/// Test: `the_fold_measurement_reads_the_newest_compiled_prompt`.
+pub(crate) fn ambient_source_bytes(project_dir: &Path) -> usize {
+    folded_source_bytes(project_dir, ambient_roster_source_bytes(project_dir))
 }
 
 /// The smallest byte count a real compiled PM prompt can have.

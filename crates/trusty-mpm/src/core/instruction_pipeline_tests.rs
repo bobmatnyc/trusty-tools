@@ -1054,7 +1054,10 @@ fn a_recording_compiled_write_reaches_the_named_framework_root() {
     let root = TempDir::new().expect("framework root");
     let project = TempDir::new().expect("project");
     let dest = compiled_prompt_path(project.path(), "sess-7514");
-    let sources: usize = SECTION_SOURCES.iter().map(|(_, body)| body.len()).sum();
+    // #7616: the source set is no longer the bundled sections alone — it also
+    // carries this machine's undeduped roster, so summing `SECTION_SOURCES` here
+    // would undercount and the fixture would land on the folded branch instead.
+    let sources = crate::core::savings_instructions::ambient_source_bytes(project.path());
     let bulky = "x".repeat(sources + 1);
 
     write_compiled_prompt_recording_in(root.path(), &dest, &bulky).expect("write succeeds");

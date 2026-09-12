@@ -917,7 +917,10 @@ impl InstructionPackage {
         if self.trailing_newline && !out.is_empty() {
             out.push('\n');
         }
-        Ok(out)
+        // #7616: the one transformation between the authored corpus and the
+        // delivered bytes. Before it existed the "instruction-compression"
+        // technique folded nothing for a project that overrides no section.
+        Ok(crate::core::instruction_fold::fold_delivered_prompt(&out))
     }
 
     /// Concatenate the AUTHORED blocks of `sections`, in block order.

@@ -226,6 +226,12 @@ use doctor_log_drain::check_log_drain;
 mod doctor_legacy_overrides;
 use doctor_legacy_overrides::check_legacy_overrides;
 
+// #7616: the fold's decline was reported only as a one-time daemon-log warning,
+// so a missing 💸 segment had no explanation on any surface an operator reads.
+#[path = "doctor_instruction_compression.rs"]
+mod doctor_instruction_compression;
+use doctor_instruction_compression::check_instruction_compression;
+
 // #5045: the resolution half of `check_search` below. That probe asks the
 // daemon whether it is healthy and whether the DERIVED id appears in
 // `search.indexes.list`; this one resolves the id the session is actually
@@ -398,7 +404,7 @@ const PROBE_RETRY_DELAY: Duration = Duration::from_millis(500);
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_forty_eight_checks`,
+/// Test: `run_doctor_produces_forty_nine_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -521,6 +527,9 @@ pub(crate) async fn run_doctor_with_claims(
         // leftover file means the project's instructions stopped reaching the
         // PM, so this Fails loudly and names the CLAUDE.md migration.
         check_legacy_overrides(project_dir),
+        // #7616: states whether the instruction fold is saving anything for this
+        // project, so "no 💸 segment" stops being the only evidence.
+        check_instruction_compression(project_dir),
         agent_skills,
         agent_skills_prose_hints,
     ];

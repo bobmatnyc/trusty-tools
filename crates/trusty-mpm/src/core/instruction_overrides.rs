@@ -494,7 +494,11 @@ pub(crate) fn assemble_sections(
     // Non-overridable floor, always last.
     sections.push(base_pm().trim().to_string());
 
-    join_sections(sections)
+    // #7616: the legacy assembly is a DELIVERED prompt too, so it folds through
+    // the same pass the packaged composer uses. Folding in one place only would
+    // break `composed_package_is_byte_identical_to_the_legacy_bundled_fallback`
+    // and would hand a roster-absent project an unfolded prompt.
+    crate::core::instruction_fold::fold_delivered_prompt(&join_sections(sections))
 }
 
 /// The DEFAULT delegation section: bundled routing doctrine + the live roster.
