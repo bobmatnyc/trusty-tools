@@ -5,6 +5,7 @@ description: Manages agent lifecycle in trusty-mpm — discovery, validation, bu
 model: sonnet
 extends: base-agent
 skills: [tm-capabilities]
+tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-mpm]
 ---
 
 # MPM Agent Manager

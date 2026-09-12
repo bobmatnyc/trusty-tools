@@ -95,7 +95,7 @@ fn load_plugin_agent_projects_fields() {
     let path = tmp.path().join("solo.md");
     std::fs::write(
         &path,
-        "---\nname: solo\nrole: engineer\ndescription: A lone agent\nmodel: sonnet\nmax_tokens: 4096\ntools: [read_file]\n---\n\nBody text.\n",
+        "---\nname: solo\nrole: engineer\ndescription: A lone agent\nmodel: sonnet\nmax_tokens: 4096\ntcode_tools: [read_file]\n---\n\nBody text.\n",
     )
     .expect("write");
 

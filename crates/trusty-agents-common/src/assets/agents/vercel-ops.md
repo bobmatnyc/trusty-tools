@@ -5,6 +5,7 @@ description: Vercel platform operations specialist for deployment, edge function
 model: sonnet
 extends: base-ops
 skills: [systematic-debugging]
+tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob]
 ---
 
 # Vercel Ops — Vercel Platform Operations Specialist

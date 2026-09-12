@@ -1615,9 +1615,14 @@ fn base_agent_prose_rules_survive_composition() {
 
     // The agent-facing variant is kept in step with the output style, so it
     // states the same rules under a heading naming the same standard.
+    // #7683: the pointer is PROSE, not a modelled `Skill(...)` call — most
+    // agents' `tools:` allowlist no longer carries `Skill`, so an instruction
+    // to invoke it would name a tool the agent does not have. The PM's own
+    // output style still models the call (it keeps the tool); that pin lives in
+    // `claude_md_sections_tests.rs`.
     for needle in [
         "Write Plainly",
-        "Skill(skill=\"tm-prose-style\")",
+        "`tm-prose-style` skill",
         "concrete referent",
         "closing aphorisms",
         "**Do not embellish.**",
@@ -1636,6 +1641,17 @@ fn base_agent_prose_rules_survive_composition() {
             "composed agent is missing prose rule anchor {needle:?} (#7423)"
         );
     }
+
+    // #7683: BASE-AGENT is the `extends` root of every roster agent, and most
+    // of their `tools:` allowlists omit `Skill`. Compose one of those and
+    // assert the base template models no `Skill(...)` call at all — an agent
+    // must never be told to invoke a tool it does not carry.
+    let no_skill_tool =
+        compose_agent("code-critic", assets_dir).expect("compose_agent must succeed");
+    assert!(
+        !no_skill_tool.contains("Skill(skill="),
+        "an agent whose tools: omits Skill must inherit no modelled Skill(...) call (#7683)"
+    );
 
     assert!(
         composed.contains("Verbosity scales with what went wrong"),

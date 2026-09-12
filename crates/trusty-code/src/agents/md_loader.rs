@@ -210,7 +210,8 @@ pub(crate) fn extract_body(composed: &str) -> String {
 ///   the `.md` frontmatter has exactly one model concept, matching how the
 ///   TOML fixtures set `[agent].model` and leave `[llm].model_override` unset).
 /// - `max_tokens` -> `llm.max_tokens` (direct map).
-/// - `tools: Option<Vec<String>>` -> `ToolsConfig.allowed` (DIRECT map — both
+/// - `tcode_tools: Option<Vec<String>>` -> `ToolsConfig.allowed` (DIRECT map,
+///   #7683 — `tools:` is Claude Code's vocabulary and is IGNORED here; both
 ///   sides share identical `None`=all-allowed / `Some([])`=deny-all /
 ///   `Some(list)`=allowlist semantics, per `Frontmatter::tools`'s doc comment
 ///   and `runner::in_process`'s `agent.tools.as_ref().and_then(|t|
@@ -256,8 +257,14 @@ pub(crate) fn project_to_agent_config(
             // prompt yet — see the doc comment above.
             append_skills: meta.skills,
         },
+        // #7683: `tcode_tools`, never `tools`. The shared roster's `tools:`
+        // now carries CLAUDE CODE's vocabulary (`Read`, `Bash`,
+        // `mcp__trusty-search`), which intersects this runtime's registry at
+        // zero tools — `ToolRegistry::gated` matches by exact name, so
+        // honouring it here would leave every embedded roster agent unable to
+        // call anything, `finish_task` included.
         tools: Some(ToolsConfig {
-            allowed: meta.tools,
+            allowed: meta.tcode_tools,
         }),
         runner: None,
     }
@@ -278,7 +285,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             tmp.path().join("solo.md"),
-            "---\nname: solo\nrole: engineer\ndescription: A lone agent\nmodel: sonnet\nmax_tokens: 4096\ntools: [read_file, grep]\n---\n\nYou are a solo agent.\n",
+            "---\nname: solo\nrole: engineer\ndescription: A lone agent\nmodel: sonnet\nmax_tokens: 4096\ntcode_tools: [read_file, grep]\n---\n\nYou are a solo agent.\n",
         )
         .expect("write");
 
@@ -295,9 +302,9 @@ mod tests {
         );
     }
 
-    /// `tools:` projects with identical `Option<Vec<String>>` semantics on
-    /// both sides: absent key -> `None` (all allowed), `tools: []` ->
-    /// `Some([])` (deny-all), `tools: [a, b]` -> `Some([a, b])` (allowlist).
+    /// `tcode_tools:` projects with identical `Option<Vec<String>>` semantics
+    /// on both sides: absent key -> `None` (all allowed), `tcode_tools: []` ->
+    /// `Some([])` (deny-all), `tcode_tools: [a, b]` -> `Some([a, b])`.
     ///
     /// Why: this is the load-bearing contract from Slice A (#2952) — a naive
     /// `is_empty()` check would collapse deny-all into "inherit"/"allow-all".
@@ -320,7 +327,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             tmp.path().join("a.md"),
-            "---\nname: a\nrole: engineer\ntools: []\n---\n\nBody.\n",
+            "---\nname: a\nrole: engineer\ntcode_tools: []\n---\n\nBody.\n",
         )
         .expect("write");
         let cfg = load_md_agent(&tmp.path().join("a.md")).expect("load");
@@ -332,7 +339,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             tmp.path().join("a.md"),
-            "---\nname: a\nrole: engineer\ntools: [read_file, grep]\n---\n\nBody.\n",
+            "---\nname: a\nrole: engineer\ntcode_tools: [read_file, grep]\n---\n\nBody.\n",
         )
         .expect("write");
         let cfg = load_md_agent(&tmp.path().join("a.md")).expect("load");
@@ -441,7 +448,7 @@ mod tests {
 
         std::fs::write(
             tmp.path().join("twin.md"),
-            "---\nname: twin\nrole: engineer\nmodel: sonnet\nmax_tokens: 8192\ntools: [read_file, grep]\n---\n\nYou are a twin agent.\n",
+            "---\nname: twin\nrole: engineer\nmodel: sonnet\nmax_tokens: 8192\ntcode_tools: [read_file, grep]\n---\n\nYou are a twin agent.\n",
         )
         .expect("write md");
 

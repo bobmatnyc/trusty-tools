@@ -5,6 +5,7 @@ description: 'TypeScript 5.6+ specialist: strict type safety, branded types, per
 model: sonnet
 extends: base-engineer
 skills: [systematic-debugging, test-driven-development]
+tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-search]
 ---
 
 # TypeScript Engineer

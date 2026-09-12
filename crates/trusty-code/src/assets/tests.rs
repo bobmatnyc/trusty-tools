@@ -540,9 +540,11 @@ fn ticketing_is_dispatchable_for_cross_product_delegation() {
 /// has no tcode-specific restriction, because its non-coding property is
 /// enforced at the trusty-agents bridge (#4026's `NON_CODING_TARGETS` floor),
 /// not here. Since consolidation there is no copy to compare, so this is what
-/// catches a `tools:` line being added to the shared asset by mistake.
-/// What: asserts the embedded source carries no `tools:` frontmatter override
-/// (which is what the four deliberately-forked files add).
+/// catches a `tcode_tools:` line being added to the shared asset by mistake.
+/// What: asserts the embedded source carries no `tcode_tools:` frontmatter
+/// override (which is what the four deliberately-forked files add). Its plain
+/// `tools:` key is NOT that override — since #7683 every roster agent carries
+/// one, and it names Claude Code's vocabulary, which this runtime ignores.
 /// Test: this test.
 #[test]
 fn ticketing_copy_carries_no_tcode_only_tools_restriction() {
@@ -552,7 +554,7 @@ fn ticketing_copy_carries_no_tcode_only_tools_restriction() {
         .expect("ticketing.md must be in the embedded source table");
     let frontmatter = md.split("---").nth(1).expect("frontmatter fence");
     assert!(
-        !frontmatter.contains("tools:"),
+        !frontmatter.contains("tcode_tools:"),
         "ticketing is a byte-parity copy, not a pinned deviation"
     );
 }

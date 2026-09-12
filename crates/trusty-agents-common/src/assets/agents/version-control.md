@@ -5,6 +5,7 @@ description: Git operations specialist. Manages branches, versioning, releases, 
 model: sonnet
 extends: base-ops
 skills: [git-workflow]
+tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, Skill, mcp__trusty-review]
 ---
 
 # Version Control Agent

@@ -5,6 +5,7 @@ description: 'PHP 8.4-8.5 + Laravel 11-12 specialist: strict types, modern secur
 model: sonnet
 extends: base-engineer
 skills: [systematic-debugging, test-driven-development]
+tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-search]
 ---
 
 # PHP Engineer

@@ -5,6 +5,7 @@ description: Specialized Dart/Flutter engineer for cross-platform mobile, web, a
 model: sonnet
 extends: base-engineer
 skills: [systematic-debugging, test-driven-development]
+tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-search]
 ---
 
 # Dart Engineer

@@ -312,6 +312,22 @@ pub(crate) struct Frontmatter {
     /// (populated via [`parse_list_value`], same grammar as `skills:`) when
     /// the key is present, including `Some(vec![])` for `tools: []`.
     pub(crate) tools: Option<Vec<String>>,
+    /// Allowed tool names in `trusty-code`'s OWN tool vocabulary (#7683).
+    ///
+    /// Why: one roster, two runtimes, two disjoint tool vocabularies. The
+    /// shared roster under `assets/agents/` deploys to Claude Code, whose
+    /// tool names are `Read`/`Bash`/`mcp__<server>`; `trusty-code` gates its
+    /// own registry on `read_file`/`bash`/`search_code`. A single `tools:`
+    /// key cannot mean both: a Claude-vocabulary list read as a tcode
+    /// allowlist intersects tcode's registry at zero tools, leaving the agent
+    /// unable to call anything — `ToolRegistry::gated` filters by exact name.
+    /// So `tools:` means Claude Code (the roster's deploy target) and
+    /// `tcode_tools:` means trusty-code, which reads only this key.
+    /// What: parsed and merged exactly like [`Frontmatter::tools`] — override,
+    /// not union; `Some(vec![])` a deny-all distinct from an absent `None`.
+    /// Test: `tcode_tools_parses_and_overrides_independently_of_tools` in
+    /// builder_tests.rs.
+    pub(crate) tcode_tools: Option<Vec<String>>,
 }
 
 /// Resolve the default `model` for a `resource_tier` (HR-1 deploy enrichment).
@@ -371,6 +387,36 @@ fn default_initial_prompt(role: Option<&str>) -> Option<&'static str> {
         // memory-manager, agent/skill managers) and unknown roles get none.
         _ => None,
     }
+}
+
+/// Take one optional inline-list frontmatter key out of the parsed field map.
+///
+/// Why: `tools:` and `tcode_tools:` (#7683) share one grammar, one
+/// warn-and-degrade rule, and one load-bearing outer `Option` — the `Option`
+/// is what lets [`merge_frontmatter`] tell "inherit the parent" (key absent)
+/// from "explicit deny-all" (`tools: []`, which parses to `Some(vec![])`).
+/// Writing that twice invites the two copies to drift apart.
+/// What: removes `key` from `fields`; `None` when the key was absent,
+/// otherwise `Some` of [`parse_list_value`]'s result. A present-but-garbled
+/// value warns and degrades to `Some(vec![])` rather than erroring, so a
+/// typo locks the agent down instead of silently widening it.
+/// Test: `tools_malformed_inline_value_never_errors`,
+/// `tcode_tools_parses_and_overrides_independently_of_tools` in
+/// builder_tests.rs.
+fn take_optional_list(fields: &mut HashMap<String, String>, key: &str) -> Option<Vec<String>> {
+    fields.remove(key).map(|raw_value| {
+        let parsed = parse_list_value(&raw_value);
+        let trimmed_raw = raw_value.trim();
+        if parsed.is_empty() && !trimmed_raw.is_empty() && trimmed_raw != "[]" {
+            tracing::warn!(
+                key = %key,
+                value = %raw_value,
+                "agent frontmatter list value could not be parsed as a list — \
+                 treating as empty"
+            );
+        }
+        parsed
+    })
 }
 
 /// Split a source document into its frontmatter map and body.
@@ -519,18 +565,10 @@ pub(crate) fn split_frontmatter(raw: &str) -> Result<(Frontmatter, String), Agen
     // key is entirely absent, which is what lets `merge_frontmatter`
     // distinguish "inherit the parent" (key absent) from "explicit deny-all"
     // (`tools: []`, which still parses to `Some(vec![])`).
-    let tools = fields.remove("tools").map(|raw_value| {
-        let parsed = parse_list_value(&raw_value);
-        let trimmed_raw = raw_value.trim();
-        if parsed.is_empty() && !trimmed_raw.is_empty() && trimmed_raw != "[]" {
-            tracing::warn!(
-                value = %raw_value,
-                "agent frontmatter `tools:` value could not be parsed as a list — \
-                 treating as empty"
-            );
-        }
-        parsed
-    });
+    // #7683: `tcode_tools:` is the same grammar and the same merge policy for
+    // trusty-code's own vocabulary — see `Frontmatter::tcode_tools`.
+    let tools = take_optional_list(&mut fields, "tools");
+    let tcode_tools = take_optional_list(&mut fields, "tcode_tools");
 
     // #2897: `max_tokens:` is a scalar integer, merged child-wins like
     // `model:`. A malformed value (non-integer) is warned and dropped rather
@@ -609,6 +647,7 @@ pub(crate) fn split_frontmatter(raw: &str) -> Result<(Frontmatter, String), Agen
         skills: skills_block.or(inline_skills).unwrap_or_default(),
         max_tokens,
         tools,
+        tcode_tools,
         provenance,
     };
     Ok((fm, body))
@@ -711,6 +750,11 @@ fn merge_frontmatter(chain: &[Frontmatter]) -> String {
         if let Some(t) = &fm.tools {
             merged.tools = Some(t.clone());
         }
+        // #7683: same override rule, independent key — see
+        // `Frontmatter::tcode_tools`.
+        if let Some(t) = &fm.tcode_tools {
+            merged.tcode_tools = Some(t.clone());
+        }
     }
 
     // HR-1 Part C: derive `model` from `resource_tier` only when no explicit
@@ -771,6 +815,12 @@ fn merge_frontmatter(chain: &[Frontmatter]) -> String {
         // emits no `tools:` line at all, mirroring the `skills:` emission
         // above but keyed on presence rather than non-emptiness.
         out.push_str(&format!("tools: [{}]\n", v.join(", ")));
+    }
+    // #7683: emitted verbatim under its own key so `trusty-code`'s loader
+    // reads its own vocabulary and Claude Code reads `tools:` above. Same
+    // `Some`-keyed emission, so `tcode_tools: []` round-trips as deny-all.
+    if let Some(v) = &merged.tcode_tools {
+        out.push_str(&format!("tcode_tools: [{}]\n", v.join(", ")));
     }
     if let Some(v) = &merged.initial_prompt {
         // Emit a YAML double-quoted scalar. The value is escaped so a `"` or

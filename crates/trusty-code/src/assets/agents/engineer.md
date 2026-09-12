@@ -3,7 +3,7 @@ name: engineer
 role: engineer
 description: General-purpose software engineer: implements features, fixes bugs, and writes tests.
 max_tokens: 8192
-tools: [read_file, write_file, write_files, edit, grep, glob, list_dir, bash, search_code, use_skill, finish_task]
+tcode_tools: [read_file, write_file, write_files, edit, grep, glob, list_dir, bash, search_code, use_skill, finish_task]
 skills: [test-driven-development, systematic-debugging, root-cause-tracing]
 ---
 

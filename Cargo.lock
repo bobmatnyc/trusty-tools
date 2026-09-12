@@ -11395,7 +11395,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-agents-common"
-version = "0.7.2"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11563,7 +11563,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-code"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "async-trait",

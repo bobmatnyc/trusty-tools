@@ -616,7 +616,7 @@ async fn unknown_agent_errors() {
 #[tokio::test]
 async fn tools_allowed_is_enforced() {
     let body = "---\nname: python-engineer\nmodel: openai/gpt-4o-mini\n\
-                tools: [allowed_tool]\n---\n";
+                tcode_tools: [allowed_tool]\n---\n";
     let tmp = agents_dir_with(body, "python-engineer");
 
     // Model tries to call the DENIED tool, then concludes.

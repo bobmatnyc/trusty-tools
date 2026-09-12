@@ -5,6 +5,7 @@ description: 'Python 3.12+ development specialist: type-safe, async-first, produ
 model: sonnet
 extends: base-engineer
 skills: [systematic-debugging, test-driven-development]
+tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-search]
 ---
 
 # Python Engineer

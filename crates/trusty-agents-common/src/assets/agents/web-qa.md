@@ -5,6 +5,7 @@ description: Progressive 6-phase web testing with UAT mode for business intent v
 model: sonnet
 extends: base-qa
 skills: [systematic-debugging, test-driven-development, testing-anti-patterns]
+tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__claude-in-chrome, mcp__trusty-search]
 ---
 
 # Web QA Agent

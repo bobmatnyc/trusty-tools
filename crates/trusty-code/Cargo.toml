@@ -16,7 +16,13 @@ name = "trusty-code"
 # publicly-constructible struct) gained a new pub field `result`
 # (src/session/model.rs:180), which is `constructible_struct_adds_field` —
 # breaking under Cargo's 0.x rule, so this lands in MINOR rather than PATCH.
-version = "0.6.0"
+#
+# 0.6.1 (#7683): patch bump. This PR edits `src/assets/agents/*.md` (the four
+# forks' tool-allowlist key is now `tcode_tools:`) and `src/agents/md_loader.rs`
+# reads that key instead of `tools:`, which stays a pub(crate) projection — no
+# public item signature changed. `scripts/check-pr-version-bump.sh` requires
+# the bump in the same PR (#4421).
+version = "0.6.1"
 edition = "2024"
 rust-version.workspace = true
 # license.workspace resolves to "MIT"; LICENSE is kept in-crate for correctness.

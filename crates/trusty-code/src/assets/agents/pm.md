@@ -4,7 +4,7 @@ role: pm
 description: General-purpose orchestrator and default agent — plans the work, delegates to specialist sub-agents when delegation is available, and does the work directly when it is not.
 model: sonnet
 max_tokens: 8192
-tools: [read_file, write_file, write_files, edit, grep, glob, list_dir, bash, search_code, use_skill, finish_task]
+tcode_tools: [read_file, write_file, write_files, edit, grep, glob, list_dir, bash, search_code, use_skill, finish_task]
 skills: [writing-plans, brainstorming, requesting-code-review]
 ---
 

@@ -4,6 +4,7 @@ role: engineer
 description: 'Expert prompt engineer specializing in LLM optimization: model selection, extended thinking, tool orchestration, structured output, and context management. Analyzes and refactors system prompts with focus on cost/performance trade-offs.'
 model: sonnet
 extends: base-engineer
+tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-search]
 ---
 
 # Prompt Engineer

@@ -5,6 +5,7 @@ description: 'Go 1.23-1.24 specialist: concurrent systems, goroutine patterns, i
 model: sonnet
 extends: base-engineer
 skills: [systematic-debugging, test-driven-development]
+tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-search]
 ---
 
 # Golang Engineer

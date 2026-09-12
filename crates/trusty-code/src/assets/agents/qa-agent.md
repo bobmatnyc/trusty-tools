@@ -3,7 +3,7 @@ name: qa-agent
 role: qa
 description: Quality assurance engineer: designs test strategy, writes and runs tests, validates behavior against requirements.
 max_tokens: 8192
-tools: [read_file, grep, glob, list_dir, bash, search_code, use_skill, finish_task]
+tcode_tools: [read_file, grep, glob, list_dir, bash, search_code, use_skill, finish_task]
 skills: [test-quality-inspector, testing-anti-patterns, verification-before-completion]
 ---
 

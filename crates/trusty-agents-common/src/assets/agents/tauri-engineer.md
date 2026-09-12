@@ -5,6 +5,7 @@ description: 'Tauri desktop application specialist: hybrid web UI + Rust backend
 model: sonnet
 extends: base-engineer
 skills: [systematic-debugging, test-driven-development, rust-build-performance]
+tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-search]
 ---
 
 # Tauri Engineer

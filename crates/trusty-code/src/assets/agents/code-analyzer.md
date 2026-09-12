@@ -4,7 +4,7 @@ role: code-analyzer
 description: Code analysis specialist. Reviews code for correctness, quality, security, and architectural health using static analysis.
 model: sonnet
 extends: base-research
-tools: [read_file, grep, glob, list_dir, search_code, use_skill, finish_task]
+tcode_tools: [read_file, grep, glob, list_dir, search_code, use_skill, finish_task]
 skills: [code-review-standards]
 ---
 

@@ -4,7 +4,7 @@ role: qa
 description: Expert quality assurance engineer. Designs test strategies, implements automation, and validates software quality.
 model: sonnet
 extends: base-qa
-tools: [read_file, grep, glob, list_dir, search_code, use_skill, finish_task]
+tcode_tools: [read_file, grep, glob, list_dir, search_code, use_skill, finish_task]
 skills: [systematic-debugging, test-driven-development, testing-anti-patterns]
 ---
 

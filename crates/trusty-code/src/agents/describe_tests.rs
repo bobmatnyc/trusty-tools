@@ -202,7 +202,7 @@ fn describe_reports_the_tools_allowlist_and_declared_skills() {
     let tmp = tempfile::tempdir().expect("tempdir");
     std::fs::write(
         tmp.path().join("locked-down.md"),
-        "---\nname: locked-down\ntools: [read_file, grep]\nskills: [systematic-debugging]\n---\n\nBody.\n",
+        "---\nname: locked-down\ntcode_tools: [read_file, grep]\nskills: [systematic-debugging]\n---\n\nBody.\n",
     )
     .expect("write");
 
