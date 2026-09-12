@@ -40,7 +40,16 @@ pub const FEEDBACK_HEADING: &str = "## Prompt feedback";
 ///
 /// Why: held as an asset file so the delivered wording is reviewed as prose in
 /// a PR diff, the same rule the instruction sections follow.
-/// Test: `the_addendum_names_the_extraction_heading`.
+///
+/// ONE SHORT PARAGRAPH, deliberately. The delivered text says what to emit and
+/// to pass the request down, and nothing else: it is resident in every composed
+/// prompt on every turn, so a sentence that only justifies the feature is paid
+/// for forever. The justification is the module header above — the addendum is
+/// about the PROMPT, not the work, and it complements rather than replaces the
+/// `Improvement recommendations` block (#6935), which reports on the framework.
+/// A reader of the prompt never needed that distinction; a reader of this file
+/// does.
+/// Test: `the_addendum_names_the_extraction_heading`, `the_addendum_is_short`.
 const PM_ADDENDUM: &str =
     include_str!("../assets/instructions/sections/prompt-self-improvement.md");
 

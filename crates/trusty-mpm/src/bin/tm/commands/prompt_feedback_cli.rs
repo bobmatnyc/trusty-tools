@@ -24,7 +24,8 @@ use trusty_mpm::core::prompt_feedback::{FeedbackRow, ReadFilter, read_rows, summ
 /// Test: `cli_parses_prompt_feedback`, `cli_parses_prompt_feedback_summary`.
 #[derive(Debug, Clone, clap::Args)]
 pub struct PromptFeedbackArgs {
-    /// Show only feedback captured in this Claude Code session.
+    /// Show only feedback from this Claude Code session, or one linked to it
+    /// by a restart (#7702).
     #[arg(long)]
     pub session: Option<String>,
     /// Show only feedback from this agent type (`pm` for the session itself).

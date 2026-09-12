@@ -117,12 +117,27 @@ fn pm_prompt_carries_the_addendum_when_the_flag_is_on() {
 }
 
 /// The addendum stays short. The feature costs every response five lines of
-/// output; it must not also cost the prompt a page of input.
+/// output; it must not also cost the prompt a page of input. The cap tightened
+/// from 12 to 6 with the #7702 review trim: the delivered text is the heading
+/// and one paragraph, and the rationale that used to follow it now lives in
+/// `PM_ADDENDUM`'s own doc comment, where it is not resident in every prompt.
 #[test]
 fn the_addendum_is_short() {
     assert!(
-        PM_ADDENDUM.lines().count() <= 12,
-        "the PM addendum is {} lines; keep it under 12",
+        PM_ADDENDUM.lines().count() <= 6,
+        "the PM addendum is {} lines; keep it under 6",
         PM_ADDENDUM.lines().count()
+    );
+}
+
+/// 🔴 The trim is the point, not an accident of wording. A justification
+/// paragraph reads as author-facing prose and costs tokens on every turn; the
+/// delivered text carries the instruction alone.
+#[test]
+fn the_addendum_carries_no_justification_paragraph() {
+    assert!(
+        !PM_ADDENDUM.contains("#6935"),
+        "the framework-reporting distinction belongs in the module doc, not in \
+         the prompt every turn pays for"
     );
 }

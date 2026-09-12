@@ -164,6 +164,64 @@ fn read_rows_filters_by_session() {
     assert_eq!(back[0].feedback, "keep");
 }
 
+/// 🔴 #7702: Claude Code mints a new `session_id` on every restart, so
+/// `--session <today's id>` must still find the rows the same managed session
+/// captured under its earlier id. Folds through
+/// `session_links::linked_claude_ids` — the statusline's own #7617 call, not a
+/// second sibling lookup. Fails on 96efd6138, which matched by equality alone
+/// and returned one row.
+#[test]
+fn read_rows_folds_a_linked_sibling_session() {
+    let tmp = TempDir::new().expect("tempdir");
+    // Two ids of one managed session, and a third that belongs to another.
+    crate::core::session_links::record_link(tmp.path(), "managed-1", "sess-1");
+    crate::core::session_links::record_link(tmp.path(), "managed-1", "sess-2");
+
+    append_row(tmp.path(), &row("pm", "before the restart"));
+    let mut after = row("pm", "after the restart");
+    after.session_id = Some("sess-2".to_string());
+    append_row(tmp.path(), &after);
+    let mut stranger = row("pm", "a different session");
+    stranger.session_id = Some("sess-9".to_string());
+    append_row(tmp.path(), &stranger);
+
+    let back = read_rows(
+        tmp.path(),
+        &ReadFilter {
+            session: Some("sess-2".to_string()),
+            ..ReadFilter::default()
+        },
+    );
+    assert_eq!(back.len(), 2, "both ids of the managed session must fold");
+    assert_eq!(back[0].feedback, "after the restart");
+    assert_eq!(back[1].feedback, "before the restart");
+    assert!(
+        !back.iter().any(|r| r.feedback == "a different session"),
+        "an unlinked session's rows must never fold in"
+    );
+}
+
+/// The fold never widens an UNLINKED id: with no link store at all, the filter
+/// is still exact equality.
+#[test]
+fn read_rows_without_a_link_store_matches_the_id_alone() {
+    let tmp = TempDir::new().expect("tempdir");
+    append_row(tmp.path(), &row("pm", "keep"));
+    let mut other = row("pm", "drop");
+    other.session_id = Some("sess-2".to_string());
+    append_row(tmp.path(), &other);
+
+    let back = read_rows(
+        tmp.path(),
+        &ReadFilter {
+            session: Some("sess-1".to_string()),
+            ..ReadFilter::default()
+        },
+    );
+    assert_eq!(back.len(), 1);
+    assert_eq!(back[0].feedback, "keep");
+}
+
 #[test]
 fn read_rows_filters_by_agent() {
     let tmp = TempDir::new().expect("tempdir");

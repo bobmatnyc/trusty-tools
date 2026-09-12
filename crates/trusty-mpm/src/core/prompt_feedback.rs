@@ -43,9 +43,26 @@ pub const LEDGER_FILE: &str = "prompt-feedback.jsonl";
 /// the column would be null for exactly the rows an operator most wants to
 /// group. A fixed sentinel keeps [`summarize`] a single grouping over one
 /// non-null column.
+///
+/// 🔴 A `Stop`, and ONLY a `Stop`. An absent `agent_type` on a `SubagentStop`
+/// is not evidence that the PM spoke — see [`UNKNOWN_SUBAGENT_TYPE`].
 /// What: `"pm"`.
 /// Test: `a_stop_payload_writes_a_pm_row`.
 pub const PM_AGENT_TYPE: &str = "pm";
+
+/// The `agent_type` recorded for a subagent stop that named no type (#7702).
+///
+/// Why: `SubagentStop` normally carries `agent_type`, but the daemon's own
+/// delegation tracker already treats a stop without one as evidence about
+/// nothing rather than as the PM's
+/// (`a_stop_without_an_agent_type_reconciles_nothing`). Folding such a row into
+/// [`PM_AGENT_TYPE`] would book a subagent's critique against the PM and
+/// corrupt [`summarize`], whose entire job is naming which agent type
+/// complains most. A distinct sentinel keeps the count honest and stays
+/// visible in the output as a thing to investigate.
+/// What: `"unknown-subagent"`.
+/// Test: `a_subagent_stop_without_an_agent_type_is_not_the_pm`.
+pub const UNKNOWN_SUBAGENT_TYPE: &str = "unknown-subagent";
 
 /// How many bytes of one feedback section are stored.
 ///
@@ -74,7 +91,8 @@ pub struct FeedbackRow {
     /// Claude Code's session id, or `null` when the payload carried none.
     #[serde(default)]
     pub session_id: Option<String>,
-    /// The subagent's type, or [`PM_AGENT_TYPE`] for the session itself.
+    /// The subagent's type, [`PM_AGENT_TYPE`] for the session itself, or
+    /// [`UNKNOWN_SUBAGENT_TYPE`] for a subagent stop that named none.
     pub agent_type: String,
     /// sha256 of the composed prompt this feedback is about, when known.
     #[serde(default)]
@@ -233,7 +251,8 @@ pub fn append_row(framework_root: &Path, row: &FeedbackRow) -> bool {
 /// `read_rows_applies_the_limit_after_filtering`.
 #[derive(Debug, Clone, Default)]
 pub struct ReadFilter {
-    /// Keep only rows from this session id.
+    /// Keep only rows from this session id, or from one linked to it — see
+    /// `session_and_siblings` (private, so a plain span rather than a link).
     pub session: Option<String>,
     /// Keep only rows from this agent type.
     pub agent: Option<String>,
@@ -249,8 +268,11 @@ pub struct ReadFilter {
 /// `warn` — a partial line from a crashed writer must not hide the rest of the
 /// file. An absent ledger reads as an empty list, not an error: nothing has
 /// been captured yet is a normal state.
+///
+/// `--session` folds linked ids (#7702): see `session_and_siblings` below.
 /// Test: `append_then_read_round_trips_a_row`, `read_rows_is_newest_first`,
-/// `read_rows_skips_a_malformed_line`, `read_of_an_absent_ledger_is_empty`.
+/// `read_rows_skips_a_malformed_line`, `read_of_an_absent_ledger_is_empty`,
+/// `read_rows_folds_a_linked_sibling_session`.
 pub fn read_rows(framework_root: &Path, filter: &ReadFilter) -> Vec<FeedbackRow> {
     let path = ledger_path(framework_root);
     let raw = match std::fs::read_to_string(&path) {
@@ -265,6 +287,13 @@ pub fn read_rows(framework_root: &Path, filter: &ReadFilter) -> Vec<FeedbackRow>
         }
     };
 
+    // Resolved once, before the scan: the link store is a directory read, and
+    // doing it per row would turn one small scan into one per line.
+    let sessions = filter
+        .session
+        .as_deref()
+        .map(|want| session_and_siblings(framework_root, want));
+
     let mut rows: Vec<FeedbackRow> = raw
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -276,10 +305,11 @@ pub fn read_rows(framework_root: &Path, filter: &ReadFilter) -> Vec<FeedbackRow>
             }
         })
         .filter(|row| {
-            filter
-                .session
-                .as_ref()
-                .is_none_or(|want| row.session_id.as_deref() == Some(want.as_str()))
+            sessions.as_ref().is_none_or(|want| {
+                row.session_id
+                    .as_deref()
+                    .is_some_and(|id| want.iter().any(|w| w == id))
+            })
         })
         .filter(|row| {
             filter
@@ -294,6 +324,34 @@ pub fn read_rows(framework_root: &Path, filter: &ReadFilter) -> Vec<FeedbackRow>
         rows.truncate(limit);
     }
     rows
+}
+
+/// Every session id `--session <id>` accepts: `session` and its linked siblings.
+///
+/// Why (#7702, the #7617 lesson): Claude Code mints a NEW `session_id` on every
+/// restart — a relaunch, a `/login` switch, a crash — so an operator who reads
+/// back the id their session is running under today gets an EMPTY result for
+/// feedback the same managed session captured an hour ago, with nothing saying
+/// rows were excluded. That is exactly how the `💸` segment disappeared in
+/// #7617, and the fix is the same fix: fold across the managed session's ids.
+///
+/// ONE IMPLEMENTATION. The sibling lookup is
+/// [`linked_claude_ids`](crate::core::session_links::linked_claude_ids), the
+/// same call the statusline fold makes; nothing here re-derives a link. Where
+/// the statusline takes the FIRST sibling with rows — it renders one number —
+/// this returns the union, because a listing shows every matching row.
+/// What: the ids linked to `session`, which already include `session` itself;
+/// `[session]` alone when nothing links it, which is every unmanaged session
+/// and every read failure. Never empty, so an unlinked id still matches its own
+/// rows.
+/// Test: `read_rows_folds_a_linked_sibling_session`,
+/// `read_rows_filters_by_session`.
+fn session_and_siblings(framework_root: &Path, session: &str) -> Vec<String> {
+    let mut ids = crate::core::session_links::linked_claude_ids(framework_root, session);
+    if !ids.iter().any(|id| id == session) {
+        ids.push(session.to_string());
+    }
+    ids
 }
 
 /// Row counts per agent type, most frequent first.

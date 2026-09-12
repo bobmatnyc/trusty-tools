@@ -71,6 +71,60 @@ fn a_subagent_stop_payload_records_its_type() {
     assert_eq!(rows[0].agent_type, "rust-engineer");
 }
 
+/// 🔴 #7702: a `SubagentStop` that names no `agent_type` must NOT be booked as
+/// the PM. `tm prompt-feedback --summary` answers "which agent type complains
+/// most", so folding an untyped subagent into `pm` is a wrong answer to the
+/// only question it asks. Payload shape per `hook_payload.rs`'s live-captured
+/// `SubagentStop` fixture, with `agent_type` dropped. Fails on 96efd6138,
+/// which recorded `pm`.
+#[test]
+fn a_subagent_stop_without_an_agent_type_is_not_the_pm() {
+    let tmp = TempDir::new().expect("tempdir");
+    let transcript = transcript_with(tmp.path(), "## Prompt feedback\n\nuntyped subagent\n");
+    let root = tmp.path().join("root");
+    let payload = serde_json::json!({
+        "hook_event_name": "SubagentStop",
+        "session_id": "sess-1",
+        "agent_id": "a403cdbc078b5c474",
+        "agent_transcript_path": transcript.to_string_lossy(),
+    });
+
+    assert!(capture_into(&root, Some(&payload)));
+
+    let rows = trusty_mpm::core::prompt_feedback::read_rows(
+        &root,
+        &trusty_mpm::core::prompt_feedback::ReadFilter::default(),
+    );
+    // The LITERAL, not the constant: this string is the ledger's stored
+    // vocabulary, and `--agent unknown-subagent` is what an operator types.
+    assert_eq!(rows[0].agent_type, "unknown-subagent");
+    assert_ne!(
+        rows[0].agent_type, PM_AGENT_TYPE,
+        "an untyped subagent stop must never be counted as the PM"
+    );
+}
+
+/// An unrecognised or absent `hook_event_name` is not a `Stop` either, so it
+/// takes the sentinel rather than the PM's own bucket.
+#[test]
+fn an_event_with_no_name_is_not_the_pm() {
+    let tmp = TempDir::new().expect("tempdir");
+    let transcript = transcript_with(tmp.path(), "## Prompt feedback\n\nno event name\n");
+    let root = tmp.path().join("root");
+    let payload = serde_json::json!({
+        "session_id": "sess-1",
+        "transcript_path": transcript.to_string_lossy(),
+    });
+
+    assert!(capture_into(&root, Some(&payload)));
+
+    let rows = trusty_mpm::core::prompt_feedback::read_rows(
+        &root,
+        &trusty_mpm::core::prompt_feedback::ReadFilter::default(),
+    );
+    assert_eq!(rows[0].agent_type, "unknown-subagent");
+}
+
 /// `SubagentStop` carries BOTH transcripts. Reading the parent's would
 /// attribute the parent's last message to the subagent's type.
 #[test]

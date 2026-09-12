@@ -28,7 +28,7 @@
 use std::path::Path;
 
 use serde_json::Value;
-use trusty_mpm::core::prompt_feedback::{FeedbackRow, PM_AGENT_TYPE};
+use trusty_mpm::core::prompt_feedback::{FeedbackRow, PM_AGENT_TYPE, UNKNOWN_SUBAGENT_TYPE};
 
 /// How much of a transcript's tail is scanned for the final assistant message.
 ///
@@ -47,7 +47,8 @@ const TRANSCRIPT_TAIL_BYTES: u64 = 2 * 1024 * 1024;
 /// the section, and appends a row. Returns `Ok(())` unconditionally so the
 /// binary's exit status is 0 whatever happened; every failure is a `warn`.
 /// Test: `an_unreadable_transcript_writes_nothing`,
-/// `a_stop_payload_writes_a_pm_row`, `a_subagent_stop_payload_records_its_type`.
+/// `a_stop_payload_writes_a_pm_row`, `a_subagent_stop_payload_records_its_type`,
+/// `a_subagent_stop_without_an_agent_type_is_not_the_pm`.
 pub(crate) async fn prompt_feedback_hook() -> anyhow::Result<()> {
     let root = trusty_mpm::core::paths::FrameworkPaths::default().root;
     let payload = read_stdin_payload();
@@ -111,15 +112,46 @@ pub(crate) fn capture_into(framework_root: &Path, payload: Option<&Value>) -> bo
             .get("session_id")
             .and_then(Value::as_str)
             .map(str::to_owned),
-        agent_type: payload
-            .get("agent_type")
-            .and_then(Value::as_str)
-            .unwrap_or(PM_AGENT_TYPE)
-            .to_string(),
+        agent_type: agent_type_for(payload).to_string(),
         prompt_digest: prompt_digest(payload),
         feedback,
     };
     trusty_mpm::core::prompt_feedback::append_row(framework_root, &row)
+}
+
+/// Which agent type this event's row is booked under (#7702).
+///
+/// Why: the row's `agent_type` was the payload's when present and
+/// [`PM_AGENT_TYPE`] otherwise, regardless of which event fired. A
+/// `SubagentStop` that names no type then lands in the PM's own count — and
+/// `tm prompt-feedback --summary` exists to answer "which agent type produces
+/// the most complaints", so one mislabelled row is a wrong answer to the only
+/// question the command asks. The daemon's delegation tracker already rules
+/// that an absent `agent_type` on a stop is evidence about nothing
+/// (`a_stop_without_an_agent_type_reconciles_nothing`); this applies the same
+/// ruling to the ledger.
+/// What: the payload's non-empty `agent_type` when it has one; else
+/// [`PM_AGENT_TYPE`] for `hook_event_name == "Stop"` and
+/// [`UNKNOWN_SUBAGENT_TYPE`] for every other event name, absent names
+/// included — anything that is not a plain `Stop` is not the main session, so
+/// guessing the PM there is the one outcome that must never happen.
+/// Test: `a_stop_payload_writes_a_pm_row`,
+/// `a_subagent_stop_payload_records_its_type`,
+/// `a_subagent_stop_without_an_agent_type_is_not_the_pm`,
+/// `an_event_with_no_name_is_not_the_pm`.
+fn agent_type_for(payload: &Value) -> &str {
+    let named = payload
+        .get("agent_type")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|agent| !agent.is_empty());
+    if let Some(agent) = named {
+        return agent;
+    }
+    match payload.get("hook_event_name").and_then(Value::as_str) {
+        Some("Stop") => PM_AGENT_TYPE,
+        _ => UNKNOWN_SUBAGENT_TYPE,
+    }
 }
 
 /// Which transcript this event's final message lives in.
