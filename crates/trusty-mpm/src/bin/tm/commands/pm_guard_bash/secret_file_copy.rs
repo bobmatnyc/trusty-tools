@@ -852,10 +852,18 @@ fn is_ssh_private_key_name(basename: &str) -> bool {
 /// matches the denylist by shape — `npm install token-bucket express` and
 /// `grep -rn credentials src/ > out.md` both name a secret-shaped bare WORD
 /// that is a package name and a search pattern, not a file.
-/// What: a leading `/`, `./`, `../` or `~`, a `.` anywhere in the basename, or
+/// What: a leading `/`, `./`, `../` or `~`, a NON-FINAL `.` in the basename, or
 /// an SSH private-key name. A bare word carries none of those.
+///
+/// The dot must have something after it (#7533). A trailing run of dots is a
+/// sentence's full stop or an ellipsis, not an extension, so `token.` read as a
+/// path and a here-document body of ordinary prose was refused as laundering
+/// that "file" into its `.md` destination — while the identical sentence
+/// without the stop allowed. `.env`, `note.md` and `secrets.rs` all keep a dot
+/// with a name after it and are untouched.
 /// Test: `allows_a_grep_pattern_word_redirected_into_a_markup_name`,
-/// `allows_an_npm_install_whose_package_name_is_secret_shaped`.
+/// `allows_an_npm_install_whose_package_name_is_secret_shaped`,
+/// `allows_a_word_family_ending_a_sentence_7533`.
 fn is_written_as_a_path(token: &str) -> bool {
     let stripped = strip_process_substitution(token);
     let basename = token_basename(stripped);
@@ -863,7 +871,7 @@ fn is_written_as_a_path(token: &str) -> bool {
         || stripped.starts_with("./")
         || stripped.starts_with("../")
         || stripped.starts_with('~')
-        || basename.contains('.')
+        || basename.trim_end_matches('.').contains('.')
         || is_ssh_private_key_name(basename)
 }
 
@@ -1077,6 +1085,24 @@ mod tests {
             Path::new("/repo/.claude/worktrees/agent-x"),
             &env(),
         )
+    }
+
+    /// A word family ending a sentence is prose, not a laundered file (#7533).
+    ///
+    /// Why: `is_written_as_a_path` read the full stop in `token.` as an
+    /// extension, so a here-document of ordinary prose was refused as
+    /// reproducing that "file" into its `.md` destination. Both allow rows
+    /// DENIED on 53f952346; the identical sentence without the stop allowed,
+    /// which is the signature of a rule reading punctuation as a path.
+    #[test]
+    fn allows_a_word_family_ending_a_sentence_7533() {
+        assert_eq!(eval("cat <<'EOF' > note.md\nA bearer token.\nEOF"), None);
+        assert_eq!(eval("grep -rn credentials... src/ > out.md"), None);
+        // A dot with a name after it is still an extension, so every real
+        // laundering row keeps its deny.
+        assert!(eval("cp /repo/.env notes.md").is_some());
+        assert!(eval("cp /repo/credentials.json notes.md").is_some());
+        assert!(eval("cat /repo/terraform.tfvars > notes.md").is_some());
     }
 
     #[test]

@@ -238,3 +238,43 @@ fn pm_guard_still_denies_a_real_secret_file_and_a_real_brace_alternation() {
     assert_denied("cat {.env,.env.prod}");
     assert_denied("cat .{e:x,{y,env}}");
 }
+
+/// #7533: the three shapes the issue reports ALLOW through the real binary.
+///
+/// Why: every row here DENIED on 53f952346 — Markdown emphasis read as a glob
+/// onto the `id_rsa` family, a word family followed by a sentence's full stop
+/// read as an extension, and a `git worktree add` ref read as a path. The
+/// reporter hit the first twice while merely writing the issue comment, so the
+/// stdin -> classify -> stdout path is where the fix has to be visible.
+#[test]
+fn pm_guard_allows_the_prose_and_ref_shapes_7533() {
+    // Markdown emphasis, in argv and in a here-document body.
+    assert_allowed("echo '**A pipe confirms nothing at all.**'");
+    assert_allowed("cat <<'EOF' > note.md\n**A short note.**\nEOF");
+    // A word family ending a sentence.
+    assert_allowed("echo 'the bearer token.'");
+    assert_allowed("cat <<'EOF' > note.md\nA bearer token. And more prose.\nEOF");
+    // A ref-naming git call, including the shape the issue's closure names.
+    assert_allowed("git worktree add .worktrees/x docs/secrets-integration-spec");
+    assert_allowed("git checkout -b docs/secrets-integration-spec");
+    assert_allowed("git branch --list 'docs/secrets*'");
+}
+
+/// #7533's bound: what each withdrawal was protecting still denies.
+///
+/// Why: a one-literal glob allows only because the already-allowed bare `*`
+/// reaches a superset of it, and `*` reaches no dotfile — so the dot-leading
+/// globs are outside the concession and keep their deny. The extension
+/// narrowing touches only the three families whose core is an English word.
+#[test]
+fn pm_guard_still_denies_what_the_7533_withdrawals_protected() {
+    assert_denied("cat .e*");
+    assert_denied("cat .en?");
+    assert_denied("cat ./.*rc");
+    assert_denied("cat id_rs?");
+    assert_denied("cat *nv");
+    assert_denied("cat secrets.txt");
+    assert_denied("cat id_rsa.");
+    assert_denied("git worktree add .worktrees/x .env");
+    assert_denied("git worktree add .worktrees/x config/credentials");
+}
