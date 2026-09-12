@@ -80,12 +80,15 @@ This rules out every post-hoc interception point:
   forward stdin JSON would enrich the *observability* copy (see
   [§ Not Recommended](#not-recommended)) but cannot touch the live copy, for the
   reason above.
-- **RTK is shipped but scoped to the wrong harness.** `compress_tool_output_async`
-  (`crates/trusty-agents/src/compress/tool_output/rtk.rs:84`) genuinely reduces live
-  tokens — but only inside `tagent`'s own LLM tool loop
-  (`llm/tool_loop/mod.rs:424`), which mediates its own tool calls and can rewrite a
-  result before it goes back to the model. Native `tm` sessions don't run that loop;
-  they run Claude Code's.
+- **RTK is now available to native `tm` sessions.** As of #1959/#1968, the
+  `compress_tool_output_async` function lives in
+  `crates/trusty-agents-common/src/compress/tool_output/rtk.rs` (shared across both
+  `tagent` and `tm`). The `tm compress` command
+  (`crates/trusty-mpm/src/bin/tm/commands/compress.rs`) routes every native Bash
+  PreToolUse rewrite through it, reducing live tool-output tokens in native Claude
+  Code sessions. Additionally, `tm compress` emits a `compress` savings row
+  (`crates/trusty-mpm/src/core/savings_compress.rs`) that the 💸 statusline folds
+  to show total context saved.
 - **ZTK doesn't exist in this workspace** — but a working equivalent exists in a
   sibling project, and it proves the seam is real. No `ztk` symbol appears anywhere
   under `crates/`; the `codejunkie99/ztk` Zig binary itself is not vendored, shelled

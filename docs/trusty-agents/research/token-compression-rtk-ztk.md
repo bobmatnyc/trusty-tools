@@ -8,6 +8,8 @@ Rust-applicable, rule-based approaches. Includes analysis of rtk-ai/rtk and code
 
 ## Implementation status (updated 2026-07-03, issue #1944)
 
+**Status update (2026-09-12, #1959/#1968):** The RTK pattern description below (lines starting with "RTK-*pattern* — shipped, but only in the `tagent` runtime") is now outdated. As of #1959/#1968, the compressor was hoisted to `crates/trusty-agents-common/src/compress/tool_output/rtk.rs` and is now available to both tagent and native `tm` sessions. The `tm compress` command routes every native Bash PreToolUse rewrite through it. This research document remains a valuable survey of the underlying techniques but does not reflect current shipping scope.
+
 This document is a **survey of external techniques**, not a description of shipped behavior. The
 current implementation status in `trusty-tools` is:
 
