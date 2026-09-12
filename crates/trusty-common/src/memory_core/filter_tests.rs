@@ -3146,12 +3146,19 @@ fn prefixed_provider_keys_are_blocked_after_7549() {
 /// distinct prose tokens, 32 of them ordinary English; requiring the delimiter
 /// takes it to 14, and every token below is one the delimiter rule removes.
 ///
-/// The last two entries are real corpus tokens of a different shape: they clear
-/// the boundary rule (the prefix does follow a `=`) and are rejected by the
-/// second gate instead, the `SECRET_MIN_LEN` floor on the run behind the prefix.
-/// Both gates therefore have a reason to exist in this test, not just in the doc.
-/// What: asserts the token predicate declines each shape and that the end-to-end
-/// gate accepts prose carrying them.
+/// The trailing entries are a different shape: they clear the boundary rule (the
+/// prefix does follow a `=`) and the SECOND gate rejects them — the
+/// `SECRET_MIN_LEN` floor on the suffix the prefix opens, itself included. Both
+/// gates therefore have a reason to exist in this test, not only in the doc. Each
+/// such entry names the suffix length it actually presents, because a label that
+/// only said "short" carried a wrong number through review once.
+///
+/// The floor itself is then bracketed by a PAIR of assertions one filler byte
+/// apart, with the lengths asserted rather than eyeballed. A single
+/// under-the-floor case pins nothing: it passes just as well if the floor is 18,
+/// 19 or 25. The 19/20 pair is what fails the moment the floor moves.
+/// What: asserts the token predicate declines each shape, brackets the floor,
+/// and asserts the end-to-end gate accepts prose carrying these tokens.
 /// Test: itself.
 #[test]
 fn prose_prefix_substrings_are_not_flagged_after_7549() {
@@ -3176,12 +3183,23 @@ fn prose_prefix_substrings_are_not_flagged_after_7549() {
             "trusty-mpm/INSTRUCTIONS.md#macOS-Full-Disk-Access",
         ),
         ("compound with `risk-`", "2026-Q3-risk-register-rollup"),
-        // Prefix at a real boundary, but the run behind it is shorter than
-        // SECRET_MIN_LEN — a documentation placeholder, not a key.
-        ("docs placeholder, short body", "GITHUB_TOKEN=ghp_xxx"),
+        // Prefix at a real boundary, but the suffix it opens (prefix counted in,
+        // as `carries_secret_prefix` measures it) is under SECRET_MIN_LEN — a
+        // documentation placeholder, not a key. The length each one actually
+        // presents is named, because "short" alone let a wrong number sit here.
+        ("docs placeholder, suffix 7", "GITHUB_TOKEN=ghp_xxx"),
         (
-            "docs placeholder, body one short of the floor",
+            "docs placeholder, suffix 17",
             "SLACK_BOT_TOKEN=xoxb-xxxxxxxxxxxx",
+        ),
+        // THE FLOOR'S LOWER EDGE, load-bearing: `xoxb-` plus 14 filler is a
+        // 19-byte suffix, one under SECRET_MIN_LEN. Paired with the 20-byte case
+        // in the positive direction below — neither assertion pins the boundary
+        // alone, and without the pair the floor could drift to 18 or 19 with the
+        // whole corpus still green.
+        (
+            "suffix one byte under the floor",
+            "SLACK_BOT_TOKEN=xoxb-xxxxxxxxxxxxxx",
         ),
     ] {
         assert!(
@@ -3191,6 +3209,26 @@ fn prose_prefix_substrings_are_not_flagged_after_7549() {
              SECRET_MIN_LEN floor on the interior run was dropped: {tok}"
         );
     }
+
+    // The floor's two sides, measured rather than eyeballed. `at` differs from
+    // `under` by ONE filler byte, so the pair brackets SECRET_MIN_LEN exactly:
+    // move the floor either way and one of the two assertions fails.
+    let boundary_at = "SLACK_BOT_TOKEN=".len();
+    let under = "SLACK_BOT_TOKEN=xoxb-xxxxxxxxxxxxxx";
+    let at = "SLACK_BOT_TOKEN=xoxb-xxxxxxxxxxxxxxx";
+    assert_eq!(under.len() - boundary_at, SECRET_MIN_LEN - 1);
+    assert_eq!(at.len() - boundary_at, SECRET_MIN_LEN);
+    assert!(
+        find_secret_token(under).is_none(),
+        "#7549: a {}-byte suffix is one under SECRET_MIN_LEN and must not flag",
+        SECRET_MIN_LEN - 1
+    );
+    assert!(
+        find_secret_token(at).is_some(),
+        "#7549: a suffix of exactly SECRET_MIN_LEN bytes at a delimiter boundary \
+         must flag. With the assertion above, this pins the floor at \
+         {SECRET_MIN_LEN} — if only this one fails, the floor rose."
+    );
 
     let cfg = FilterConfig::default();
     for content in [

@@ -102,10 +102,17 @@ pub fn check_secret(content: &str) -> Result<(), FilterReject> {
 /// regardless of their entropy profile. Matching the prefix is cheaper and more
 /// precise than entropy alone.
 ///
-/// Every entry here carries punctuation an English word never does, which is why
-/// [`SECRET_MIN_LEN`] is sufficient protection for this list. AWS `AKIA`/`ASIA`
-/// used to live here and is not (issue #4898) — it is four bare letters, so it
-/// needs a shape check; see [`AWS_KEY_ID_PREFIXES`].
+/// What a candidate entry must satisfy, restated since #7549 widened the match:
+/// an entry now fires at offset 0 OR at an interior delimiter boundary, so
+/// "carries punctuation an English word never does" is no longer the whole
+/// answer — `sk-` is the tail of `disk-`, `risk-` and `task-`, three of the most
+/// ordinary words in this project's prose. Vet a new entry against being a
+/// WORD-INTERNAL substring, not merely against containing punctuation. The two
+/// guards that make the list safe are the delimiter rule (a match beginning
+/// mid-word is declined) and the [`SECRET_MIN_LEN`] floor on the run the match
+/// opens; both live in [`carries_secret_prefix`] and are measured there. AWS
+/// `AKIA`/`ASIA` used to live here and is not (issue #4898) — it is four bare
+/// letters, so it needs a shape check; see [`AWS_KEY_ID_PREFIXES`].
 /// What: lowercased prefix list matched case-insensitively by
 /// [`carries_secret_prefix`] (the caller lowercases the token), after the
 /// [`SECRET_MIN_LEN`] floor.
@@ -122,7 +129,8 @@ pub(crate) const SECRET_PREFIXES: &[&str] = &[
 ];
 
 /// True when `lower` carries a [`SECRET_PREFIXES`] entry at its start, or at an
-/// interior delimiter boundary with a credential-length run behind it.
+/// interior delimiter boundary that opens a suffix of at least
+/// [`SECRET_MIN_LEN`] bytes (the prefix counted in).
 ///
 /// Why (issue #7549): the test this replaced was `lower.starts_with(p)`, so one
 /// lowercase segment typed ahead of a real provider key defeated the entire
@@ -145,10 +153,13 @@ pub(crate) const SECRET_PREFIXES: &[&str] = &[
 /// removes every one of those shapes at no cost in detection: no issuer mints a
 /// key whose prefix begins mid-word.
 ///
-/// Why the run behind an interior prefix must still reach [`SECRET_MIN_LEN`]:
-/// that is the floor offset 0 already answers to, applied by
-/// [`looks_like_secret`] to the whole token, so asking it of the interior suffix
-/// keeps one rule instead of two. Measured, it takes the 14 prose tokens to 1,
+/// Why the suffix an interior prefix OPENS — the prefix itself included, exactly
+/// as the code measures it at the `lower.len() - at` below — must still reach
+/// [`SECRET_MIN_LEN`]: that is the floor offset 0 already answers to, applied by
+/// [`looks_like_secret`] to the whole token, and at offset 0 the whole token IS
+/// that suffix. Measuring the same span keeps one rule instead of two: a match
+/// at a boundary is judged by what a match at offset 0 would have been judged by
+/// had the token started there. Measured, it takes the 14 prose tokens to 1,
 /// and the 13 it drops are documentation placeholders too short to be keys
 /// (`GITHUB_TOKEN=ghp_xxx`, `SLACK_BOT_TOKEN=xoxb-`, `ANTHROPIC_API_KEY=sk-ant-`).
 /// The survivor is `OPENROUTER_API_KEY=sk-or-v1-xxxxxxxxxxxx`, which is the shape
@@ -172,8 +183,8 @@ pub(crate) const SECRET_PREFIXES: &[&str] = &[
 pub(crate) fn carries_secret_prefix(lower: &str) -> bool {
     SECRET_PREFIXES.iter().any(|p| {
         lower.match_indices(p).any(|(at, _)| {
-            // #7549: an interior prefix counts only at a delimiter boundary and
-            // with a credential-length run behind it.
+            // #7549: an interior prefix counts only at a delimiter boundary, and
+            // only when the suffix it opens (prefix included) is credential-length.
             at == 0
                 || (lower.len() - at >= SECRET_MIN_LEN
                     && !lower.as_bytes()[at - 1].is_ascii_alphanumeric())
@@ -1174,7 +1185,11 @@ pub(crate) fn looks_like_secret(token: &str) -> bool {
     // #7482: a vendor-issued PUBLIC resource id (a Vercel `dpl_` deployment id)
     // has a credential's character-class profile but is not a credential. Placed
     // BELOW the known-credential prefixes so a public-id prefix can never
-    // pre-empt one; both anchor at offset 0, so this is order-independent today.
+    // pre-empt one. #7549 note: the two anchor differently now (the prefix test
+    // also matches at an interior boundary), but the order still cannot matter —
+    // `is_public_resource_id` requires an all-ALPHANUMERIC tail of one exact
+    // length after `dpl_`, and every SECRET_PREFIXES entry carries a `-` or a
+    // second `_`, so no single token can satisfy both predicates.
     if is_public_resource_id(token) {
         return false;
     }
