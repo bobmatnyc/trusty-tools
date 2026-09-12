@@ -48,9 +48,11 @@ impl CodeIndexer {
         self.ensure_chunks_loaded().await;
         let chunks = self.chunks.read().await;
         let root = self.root_path.clone();
+        // #7434: decode `@root<n>/…` chunk paths back to their own root.
+        let extra_roots = self.additional_roots.clone();
         chunks
             .values()
-            .map(|raw| raw_to_code_chunk(raw, 0.0, "all", None, &root))
+            .map(|raw| raw_to_code_chunk(raw, 0.0, "all", None, &root, &extra_roots))
             .collect()
     }
 
@@ -176,9 +178,11 @@ impl CodeIndexer {
         });
         let end = (offset + limit).min(total);
         let root = self.root_path.clone();
+        // #7434: decode `@root<n>/…` chunk paths back to their own root.
+        let extra_roots = self.additional_roots.clone();
         let page: Vec<CodeChunk> = ordered[offset..end]
             .iter()
-            .map(|raw| raw_to_code_chunk(raw, 0.0, "enumerate", None, &root))
+            .map(|raw| raw_to_code_chunk(raw, 0.0, "enumerate", None, &root, &extra_roots))
             .collect();
         Ok((total, page))
     }
@@ -223,6 +227,8 @@ impl CodeIndexer {
         limit: usize,
     ) -> Result<(usize, Vec<CodeChunk>, Option<String>)> {
         let root = self.root_path.clone();
+        // #7434: decode `@root<n>/…` chunk paths back to their own root.
+        let extra_roots = self.additional_roots.clone();
         // Durable path: indexed seek over redb, no full-corpus materialization.
         if let Some(corpus) = self.corpus.clone() {
             // #6043: the count and the rows must fail together. Reading the
@@ -269,7 +275,7 @@ impl CodeIndexer {
             };
             let page: Vec<CodeChunk> = raws
                 .iter()
-                .map(|raw| raw_to_code_chunk(raw, 0.0, "enumerate", None, &root))
+                .map(|raw| raw_to_code_chunk(raw, 0.0, "enumerate", None, &root, &extra_roots))
                 .collect();
             return Ok((total, page, next_cursor));
         }
@@ -301,7 +307,7 @@ impl CodeIndexer {
         };
         let page: Vec<CodeChunk> = slice
             .iter()
-            .map(|raw| raw_to_code_chunk(raw, 0.0, "enumerate", None, &root))
+            .map(|raw| raw_to_code_chunk(raw, 0.0, "enumerate", None, &root, &extra_roots))
             .collect();
         Ok((total, page, next_cursor))
     }
@@ -332,6 +338,7 @@ impl CodeIndexer {
                 "vector",
                 snippet,
                 &self.root_path,
+                &self.additional_roots,
             ));
             if out.len() >= top_k {
                 break;

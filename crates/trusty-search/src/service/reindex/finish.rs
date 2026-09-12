@@ -80,6 +80,11 @@ pub(super) struct FinishCtx {
     pub(super) progress: Arc<ReindexProgress>,
     pub(super) index_id: IndexId,
     pub(super) canonical_root: PathBuf,
+    /// #7434: the same root table `BatchCtx` carried, so the prune pass
+    /// relativises exactly as the batch loop did. `canonical_root` stays
+    /// beside it because `write_indexed_root` and the corpus swap are defined
+    /// against the PRIMARY root alone and must not see an additional one.
+    pub(super) roots: crate::core::index_roots::IndexRoots,
     pub(super) walked_files: Vec<PathBuf>,
     pub(super) hashes: FileHashes,
     pub(super) total: usize,
@@ -146,6 +151,7 @@ pub(super) async fn finish_reindex(
         progress,
         index_id,
         canonical_root,
+        roots,
         walked_files,
         hashes,
         total,
@@ -192,7 +198,7 @@ pub(super) async fn finish_reindex(
         super::prune::prune_deleted_files_from_staging(
             &handle,
             &walked_files,
-            &canonical_root,
+            &roots,
             &hashes,
             &index_id,
         )

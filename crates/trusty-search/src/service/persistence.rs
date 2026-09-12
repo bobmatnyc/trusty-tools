@@ -35,6 +35,23 @@ use std::path::{Path, PathBuf};
 pub struct PersistedIndex {
     pub id: String,
     pub root_path: PathBuf,
+    /// #7434: additional INDEX ROOTS this index also covers, beyond
+    /// `root_path`.
+    ///
+    /// Why: an index that spans an OKG tree plus one tree per project (#7429)
+    /// must come back spanning them after a daemon restart; without this field
+    /// warm boot would silently narrow it to the primary root and the next
+    /// reindex would prune every additional-root file out of the corpus.
+    /// What: absolute, canonicalised directory paths, in the order the
+    /// corpus-path encoding numbers them (see
+    /// [`crate::core::index_roots`]) — reordering them invalidates every
+    /// stored `@root<n>/…` path, so the add path only ever APPENDS.
+    /// `#[serde(default)]` so every existing `indexes.toml` deserialises with
+    /// an empty list and needs no migration; `skip_serializing_if` keeps the
+    /// TOML compact for the single-root majority.
+    /// Test: `additional_roots_round_trip` in `persistence_tests.rs`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_roots: Vec<PathBuf>,
     /// Subtrees (relative to `root_path`) to restrict indexing to. Sourced
     /// from `trusty-search.yaml`'s `paths:` field. `#[serde(default)]` so
     /// older `indexes.toml` files without these fields keep loading.
@@ -401,6 +418,8 @@ impl Default for PersistedIndex {
         Self {
             id: String::new(),
             root_path: PathBuf::new(),
+            // #7434: single-root by default; multi-root is opt-in.
+            additional_roots: Vec::new(),
             include_paths: Vec::new(),
             exclude_globs: Vec::new(),
             extensions: Vec::new(),

@@ -472,7 +472,7 @@ async fn test_kg_refine_threshold_boundary() {
 #[test]
 fn resolve_chunk_file_relative_becomes_absolute() {
     let root = std::path::Path::new("/tmp/test");
-    let result = resolve_chunk_file("src/lib.rs", root);
+    let result = resolve_chunk_file("src/lib.rs", root, &[]);
     assert_eq!(result, "/tmp/test/src/lib.rs");
 }
 
@@ -485,7 +485,7 @@ fn resolve_chunk_file_relative_becomes_absolute() {
 fn resolve_chunk_file_absolute_passthrough() {
     let root = std::path::Path::new("/tmp/test");
     let abs_path = "/Users/alice/proj/src/lib.rs";
-    let result = resolve_chunk_file(abs_path, root);
+    let result = resolve_chunk_file(abs_path, root, &[]);
     assert_eq!(result, abs_path);
 }
 
@@ -642,7 +642,7 @@ fn raw_to_code_chunk_populates_path_for_relative_file() {
 
     let raw = make_raw_chunk("src/lib.rs", "pub fn hello() {}\n");
     let root = std::path::Path::new("/home/alice/proj");
-    let chunk = raw_to_code_chunk(&raw, 0.9, "bm25", None, root);
+    let chunk = raw_to_code_chunk(&raw, 0.9, "bm25", None, root, &[]);
 
     // `file` must be absolute.
     assert!(
@@ -672,7 +672,7 @@ fn raw_to_code_chunk_path_is_none_for_absolute_file() {
 
     let raw = make_raw_chunk("/mnt/efs/data/repos/proj/src/lib.rs", "pub fn hello() {}\n");
     let root = std::path::Path::new("/mnt/efs/data/repos/proj");
-    let chunk = raw_to_code_chunk(&raw, 0.9, "bm25", None, root);
+    let chunk = raw_to_code_chunk(&raw, 0.9, "bm25", None, root, &[]);
 
     // `file` must pass through unchanged (absolute input → absolute output).
     assert_eq!(chunk.file, "/mnt/efs/data/repos/proj/src/lib.rs");

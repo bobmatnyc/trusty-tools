@@ -138,6 +138,23 @@ pub struct CodeIndexer {
     pub index_id: String,
     pub root_path: std::path::PathBuf,
 
+    /// #7434: the index's additional roots, mirrored from
+    /// [`crate::core::registry::IndexHandle::additional_roots`].
+    ///
+    /// Why: the indexer is the only thing that sees a stored chunk path at
+    /// materialisation time, and turning `@root<n>/…` back into a real file
+    /// needs the table those ordinals index into. Without it every
+    /// additional-root hit resolves to a path under the PRIMARY root that does
+    /// not exist, and the caller cannot open its own search result.
+    /// What: kept in sync by the same paths that keep `root_path` in sync —
+    /// `set_root_path`'s sibling [`CodeIndexer::set_additional_roots`], called
+    /// wherever a handle is built or rebuilt. Empty for single-root indexes,
+    /// which is every index predating #7434.
+    /// Test: `round_trips_every_root` in `core::index_roots::tests` pins the
+    /// decode this field feeds; `additional_root_file_is_stored_root_relative`
+    /// pins the encode side it must invert.
+    pub additional_roots: Vec<std::path::PathBuf>,
+
     pub(super) embedder: Option<Arc<dyn Embedder>>,
     pub(super) store: Option<Arc<dyn VectorStore>>,
 
@@ -621,6 +638,21 @@ impl CodeIndexer {
         self.root_path = root_path.into();
     }
 
+    /// #7434: replace the additional-root table this indexer resolves stored
+    /// `@root<n>/…` chunk paths against.
+    ///
+    /// Why: the ordinals in stored paths are positions in this exact list, so
+    /// an indexer holding a stale or empty list resolves an additional-root hit
+    /// to a nonexistent path under the primary root — the multi-root mirror of
+    /// the stale-`root_path` bug #4951 covers.
+    /// What: overwrites the field; the `&mut self` receiver means the caller
+    /// already holds the indexer write lock. Order matters and is
+    /// append-only — see `IndexHandle::additional_roots`.
+    /// Test: `round_trips_every_root` in `core::index_roots::tests`.
+    pub fn set_additional_roots(&mut self, roots: Vec<std::path::PathBuf>) {
+        self.additional_roots = roots;
+    }
+
     pub fn new(index_id: impl Into<String>, root_path: impl Into<std::path::PathBuf>) -> Self {
         let cap =
             NonZeroUsize::new(QUERY_CACHE_CAPACITY).expect("QUERY_CACHE_CAPACITY must be non-zero");
@@ -629,6 +661,8 @@ impl CodeIndexer {
         Self {
             index_id: index_id.into(),
             root_path: root_path.into(),
+            // #7434: single-root until a caller adds roots.
+            additional_roots: Vec::new(),
             embedder: None,
             store: None,
             embed_pool: arc_swap::ArcSwapOption::empty(),

@@ -31,22 +31,31 @@ use std::sync::Arc;
 /// live files as "deleted" and wipe the staging corpus.  Having one
 /// canonical function called from both sites closes that risk permanently.
 ///
-/// What: strips `root` from `path` via `strip_prefix` and calls
-/// `display().to_string()`, normalising separators to the platform default
-/// (forward-slash on Unix, back-slash on Windows — consistent within the
-/// same daemon process, which is all that matters for a set-compare that
-/// never crosses machine boundaries).  The `unwrap_or` branch that returns
-/// the ABSOLUTE path is intentionally preserved for the edge case where
-/// `strip_prefix` fails (e.g. a symlink whose target escapes the root);
-/// the batch loop has the same fallback, so the strings still match.
+/// What: #7434 moved the rule itself into
+/// [`crate::core::index_roots::relative_path`] so a multi-root index stores
+/// every file relative to ITS OWN root — a file under an additional root would
+/// otherwise fall through `strip_prefix`'s fallback and be stored ABSOLUTE,
+/// silently giving up the #402 relocation resilience for exactly the files the
+/// feature added. The primary root's stored form is byte-identical to the
+/// pre-#7434 one, so no corpus needs rewriting. Separators normalise to the
+/// platform default, which is all a set-compare inside one daemon process
+/// needs. The absolute fallback for a path under NO root is preserved, and
+/// both sides share it.
+///
+/// The per-file root is recovered by longest-prefix match against the root
+/// table rather than being tagged onto each walked file: one table travels
+/// with `BatchCtx` and `FinishCtx`, so the batch loop and the prune pass
+/// cannot disagree about which root a file belongs to — which is the exact
+/// property this function exists to guarantee.
 ///
 /// Test: `to_corpus_relative_path_agrees_with_batch_loop` and
-/// `disk_existence_guard_skips_live_file` in `prune_tests.rs`.
-pub(super) fn to_corpus_relative_path(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .display()
-        .to_string()
+/// `disk_existence_guard_skips_live_file` in `prune_tests.rs`;
+/// `additional_root_file_is_stored_root_relative` in `multi_root_tests.rs`.
+pub(super) fn to_corpus_relative_path(
+    roots: &crate::core::index_roots::IndexRoots,
+    path: &Path,
+) -> String {
+    roots.relative_path(path)
 }
 
 /// Prune stale data from the staging corpus for files deleted from disk (issue #848).
@@ -85,7 +94,7 @@ pub(super) fn to_corpus_relative_path(root: &Path, path: &Path) -> String {
 pub(super) async fn prune_deleted_files_from_staging(
     handle: &IndexHandle,
     walked_files: &[PathBuf],
-    canonical_root: &Path,
+    roots: &crate::core::index_roots::IndexRoots,
     hashes: &Arc<DashMap<PathBuf, String>>,
     index_id: &IndexId,
 ) {
@@ -93,7 +102,7 @@ pub(super) async fn prune_deleted_files_from_staging(
     // are guaranteed identical to those stored by the batch loop.
     let walked_set: std::collections::HashSet<String> = walked_files
         .iter()
-        .map(|p| to_corpus_relative_path(canonical_root, p))
+        .map(|p| to_corpus_relative_path(roots, p))
         .collect();
 
     // Query the staging corpus for all file paths currently stored.
@@ -170,7 +179,10 @@ pub(super) async fn prune_deleted_files_from_staging(
         // it — log a warn and skip.  This guard can never fire on a truly
         // deleted file because `PathBuf::exists` returns false for any path
         // that has no corresponding directory entry (including ENOENT).
-        let absolute = canonical_root.join(file_path);
+        // #7434: decode through the root table, so an `@root<n>/…` key from an
+        // additional root is stat'd at ITS root rather than under the primary
+        // (where it would never exist, and the guard would pass vacuously).
+        let absolute = roots.resolve_absolute(file_path);
         if absolute.exists() {
             tracing::warn!(
                 "reindex[{}]: prune: skipping {} — still exists on disk, \

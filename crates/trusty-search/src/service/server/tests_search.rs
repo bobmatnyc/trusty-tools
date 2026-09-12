@@ -453,7 +453,7 @@ fn stale_indexer_root_makes_every_chunk_fail_the_search_post_filter() {
 
     // The defect, stated as an assertion: materializing against the stale root
     // yields an absolute path the post-filter rejects.
-    let stale_file = resolve_chunk_file(stored_relative, old_root);
+    let stale_file = resolve_chunk_file(stored_relative, old_root, &[]);
     assert_eq!(stale_file, "/knowledge/ACP/ACP-1.md");
     assert!(
         !file_is_within_root(&stale_file, new_root),
@@ -463,7 +463,7 @@ fn stale_indexer_root_makes_every_chunk_fail_the_search_post_filter() {
 
     // The fix: once the indexer's root moves with the handle's, the same stored
     // chunk resolves inside the new root and survives the filter.
-    let fixed_file = resolve_chunk_file(stored_relative, new_root);
+    let fixed_file = resolve_chunk_file(stored_relative, new_root, &[]);
     assert_eq!(fixed_file, "/knowledge/Jira/ACP/ACP-1.md");
     assert!(
         file_is_within_root(&fixed_file, new_root),
@@ -500,7 +500,11 @@ fn reindex_root_override_syncs_indexer_root_path() {
     );
     assert!(
         file_is_within_root(
-            &crate::core::indexer::helpers::resolve_chunk_file("ACP/ACP-1.md", &indexer.root_path),
+            &crate::core::indexer::helpers::resolve_chunk_file(
+                "ACP/ACP-1.md",
+                &indexer.root_path,
+                &[]
+            ),
             std::path::Path::new("/knowledge/Jira"),
         ),
         "#4951: chunks must resolve inside the new root after the sync"

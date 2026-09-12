@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use crate::core::registry::{IndexHandle, IndexId};
 
-use super::helpers::file_is_within_root;
+use super::helpers::file_is_within_any_root;
 use super::router::{IndexFileRequest, RemoveFileRequest};
 use super::state::SearchAppState;
 
@@ -404,14 +404,16 @@ async fn grep_one_index(
         if !compiled.path_matches(&rel) {
             continue;
         }
-        if !file_is_within_root(&rel, &handle.root_path) {
+        // #7434: any-of-N containment, and the absolute form is decoded through
+        // the root table so an `@root<n>/…` key opens the file at its own root.
+        if !file_is_within_any_root(&rel, &handle.root_path, &handle.additional_roots) {
             continue;
         }
-        let abs = if std::path::Path::new(&rel).is_absolute() {
-            std::path::PathBuf::from(&rel)
-        } else {
-            handle.root_path.join(&rel)
-        };
+        let abs = crate::core::index_roots::resolve_absolute(
+            &handle.root_path,
+            &handle.additional_roots,
+            &rel,
+        );
         match tokio::fs::read_to_string(&abs).await {
             Ok(content) => {
                 crate::service::grep::grep_file_content(&rel, &content, compiled, out, max_results);

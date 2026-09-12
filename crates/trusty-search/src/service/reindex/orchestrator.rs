@@ -66,22 +66,69 @@ pub(crate) fn spawn_reindex_awaitable(
     ))
 }
 
-/// Walk every configured subtree under `handle.root_path`, apply repo-config
-/// filters (`exclude_globs`, `extensions`), and de-duplicate.
+/// The outcome of one multi-root walk (#7434).
+///
+/// Why: `collect_files_to_index` used to return a bare `WalkResult` because
+/// there was exactly one root and "does it exist" was a question `runner.rs`
+/// could ask afterwards. With N roots the walk is the only place that knows
+/// WHICH root was missing, and a missing additional root must degrade that
+/// root's coverage loudly rather than silently contributing zero files.
+/// What: the merged walk plus the roots that were absent or not directories.
+/// Only a missing PRIMARY root keeps the existing hard-failure path in
+/// `runner.rs` — this list carries the additional ones.
+/// Test: `walk_records_a_missing_additional_root` in `multi_root_tests.rs`.
+pub(super) struct CollectedFiles {
+    pub walk: crate::service::walker::WalkResult,
+    /// Absolute paths of index roots that did not exist (or were not
+    /// directories) at walk time, in table order.
+    pub missing_roots: Vec<PathBuf>,
+}
+
+/// Walk every index root of `handle`, apply repo-config filters
+/// (`exclude_globs`, `extensions`, `path_filter`), and de-duplicate.
 ///
 /// Why: extracted from `spawn_reindex_with_cleanup` (issue #98) so the
 /// orchestrator body is dominated by control flow rather than walker plumbing.
-/// `include_paths` empty → walk the whole `root_path`; otherwise walk each
-/// configured subtree and concatenate (this is how `trusty-search.yaml` slices
-/// a polyrepo into independent indexes).
-/// What: returns the merged `WalkResult` whose `files` are sorted and unique.
-/// Test: covered by `reindex_honours_include_paths_filter` below.
-pub(super) fn collect_files_to_index(handle: &IndexHandle) -> crate::service::walker::WalkResult {
-    let include_paths: Vec<PathBuf> = if handle.include_paths.is_empty() {
+/// #7434 widened it from one root to the index's whole root table so an index
+/// can span an OKG tree plus one tree per project (#7429).
+/// What: the walk set is `include_paths` (when configured — those narrow
+/// WITHIN the primary root and are deliberately NOT generalised to additional
+/// roots) or the primary root, PLUS every additional root, concatenated. Each
+/// root is existence-checked first: a missing additional root is recorded in
+/// [`CollectedFiles::missing_roots`] and contributes nothing, while a missing
+/// primary root produces the empty walk that `runner.rs` already turns into a
+/// failure. `path_filter` is evaluated against the root that OWNS each file
+/// (via [`crate::core::index_roots::IndexRoots::owning_root`]) rather than
+/// against the primary root, or it would drop every additional-root file.
+/// Returns files sorted and unique.
+/// Test: `reindex_honours_include_paths_filter` below;
+/// `walk_covers_every_index_root` and `walk_records_a_missing_additional_root`
+/// in `multi_root_tests.rs`.
+pub(super) fn collect_files_to_index(handle: &IndexHandle) -> CollectedFiles {
+    let roots = handle.roots();
+    // #7434: `include_paths` narrows within the PRIMARY root only; additional
+    // roots are always walked whole.
+    let mut subtrees: Vec<PathBuf> = if handle.include_paths.is_empty() {
         vec![handle.root_path.clone()]
     } else {
         handle.include_paths.clone()
     };
+    subtrees.extend(handle.additional_roots.iter().cloned());
+
+    // #7434: a root that is gone contributes nothing; recording WHICH one is
+    // what makes a half-covered index diagnosable from
+    // `GET /indexes/:id/status` instead of looking like an empty tree.
+    let mut missing_roots: Vec<PathBuf> = Vec::new();
+    for root in std::iter::once(&handle.root_path).chain(handle.additional_roots.iter()) {
+        if !root.is_dir() {
+            missing_roots.push(root.clone());
+        }
+    }
+    let include_paths: Vec<PathBuf> = subtrees
+        .into_iter()
+        .filter(|p| !missing_roots.iter().any(|m| p.starts_with(m)))
+        .collect();
+
     let mut walked_files: Vec<PathBuf> = Vec::new();
     let mut total_skipped_dirs: usize = 0;
     // Issue #1372: resolve the per-index hygiene knobs onto the walk options.
@@ -117,22 +164,69 @@ pub(super) fn collect_files_to_index(handle: &IndexHandle) -> crate::service::wa
     }
 
     // Issue #111: `path_filter` restricts indexing to files under immediate
-    // subdirectories of `root_path` matching one of the configured glob patterns.
+    // subdirectories of a root matching one of the configured glob patterns.
+    // #7434: evaluated against the root that owns each file, so the filter
+    // applies per-root instead of dropping every additional-root file.
     if !handle.path_filter.is_empty() {
         let patterns = handle.path_filter.clone();
-        let root =
-            std::fs::canonicalize(&handle.root_path).unwrap_or_else(|_| handle.root_path.clone());
-        walked_files.retain(|p| crate::core::registry::path_matches_filter(p, &root, &patterns));
+        let canonical: Vec<PathBuf> = roots
+            .all()
+            .into_iter()
+            .map(|r| std::fs::canonicalize(&r).unwrap_or(r))
+            .collect();
+        let canonical_roots = crate::core::index_roots::IndexRoots::new(
+            canonical[0].clone(),
+            canonical[1..].to_vec(),
+        );
+        walked_files.retain(|p| match canonical_roots.owning_root(p) {
+            Some(root) => crate::core::registry::path_matches_filter(p, root, &patterns),
+            None => false,
+        });
     }
 
-    // De-duplicate when multiple `include_paths` overlap.
+    // De-duplicate when multiple `include_paths` or roots overlap.
     walked_files.sort();
     walked_files.dedup();
 
-    crate::service::walker::WalkResult {
-        files: walked_files,
-        skipped_dirs: total_skipped_dirs,
+    CollectedFiles {
+        walk: crate::service::walker::WalkResult {
+            files: walked_files,
+            skipped_dirs: total_skipped_dirs,
+        },
+        missing_roots,
     }
+}
+
+/// Record this walk's per-root coverage gaps on the handle's diagnostics (#7434).
+///
+/// Why: `runner.rs` sits at 491 of its 500-SLOC cap, and the per-root
+/// bookkeeping belongs beside the walk that produced it. Keeping the write here
+/// costs `runner.rs` one call instead of a block.
+/// What: stores the missing roots as display strings and, when any are missing,
+/// logs one `warn!` naming them — a reindex that quietly covers fewer trees
+/// than the operator configured is the failure this makes visible. A missing
+/// PRIMARY root is deliberately NOT special-cased here: it produces a zero-file
+/// walk, and `runner.rs`'s existing `last_walk_error` path already reports it.
+/// Test: `walk_records_a_missing_additional_root` in `multi_root_tests.rs`.
+pub(super) async fn record_root_diagnostics(
+    handle: &IndexHandle,
+    index_id: &IndexId,
+    missing_roots: &[PathBuf],
+) {
+    let missing: Vec<String> = missing_roots
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect();
+    if !missing.is_empty() {
+        tracing::warn!(
+            "reindex[{}]: {} index root(s) absent at walk time — coverage is \
+             degraded for: {}",
+            index_id.0,
+            missing.len(),
+            missing.join(", "),
+        );
+    }
+    handle.walk_diagnostics.write().await.missing_index_roots = missing;
 }
 
 /// Variant of `spawn_reindex` that GC's the progress map after completion

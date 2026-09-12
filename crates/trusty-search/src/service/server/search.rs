@@ -18,7 +18,7 @@ use std::sync::Arc;
 use crate::core::{classifier::QueryClassifier, indexer::SearchQuery, registry::IndexId};
 use crate::service::lazy_loader::LAST_QUERIED_WRITE_INTERVAL_SECS;
 
-use super::helpers::file_is_within_root;
+use super::helpers::file_is_within_any_root;
 use super::state::{DaemonEvent, SearchAppState};
 use super::status::index_last_indexed;
 
@@ -828,9 +828,12 @@ pub(crate) async fn search_report(
     // results to the caller. `file_is_within_root` uses a cheap lexical
     // check first; only absolute-path results that fail the fast path pay the
     // `canonicalize` syscall cost (issue #541 approach b).
+    // #7434: any-of-N — a hit from an additional root is inside the index and
+    // must survive this filter.
     let root = handle.root_path.clone();
+    let extra_roots = handle.additional_roots.clone();
     let before = results.len();
-    results.retain(|r| file_is_within_root(&r.file, &root));
+    results.retain(|r| file_is_within_any_root(&r.file, &root, &extra_roots));
     let filtered_out = before.saturating_sub(results.len());
     // #2203: the fifth drop site. `stale_index_root` already flagged it as a
     // boolean; the count joins the other four so `meta.dropped` accounts for

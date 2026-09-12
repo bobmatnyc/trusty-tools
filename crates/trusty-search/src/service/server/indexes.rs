@@ -663,6 +663,10 @@ pub(crate) async fn create_index_report(
         trusty_common::repo_identity::RepoIdentity::derive(&req.root_path).map(|r| r.canonical());
     if let Err(e) = crate::service::persistence::upsert_index_registry_entry(
         crate::service::persistence::PersistedIndex {
+            // #7434: `POST /indexes` does not yet accept a `roots` list, so a
+            // freshly created index is always single-root. The field is
+            // persisted from here the moment that request field lands.
+            additional_roots: Vec::new(),
             id: req.id.clone(),
             root_path: req.root_path.clone(),
             include_paths: req.include_paths.clone().unwrap_or_default(),
@@ -786,6 +790,8 @@ pub(crate) async fn create_index_report(
         stages.graph.status,
     );
     let handle = IndexHandle {
+        // #7434: see the persisted entry above — create is single-root today.
+        additional_roots: Vec::new(),
         id: id.clone(),
         indexer: Arc::new(tokio::sync::RwLock::new(indexer)),
         root_path: req.root_path,
