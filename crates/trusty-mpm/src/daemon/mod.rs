@@ -24,6 +24,10 @@ pub mod coordinator;
 pub mod delegation_routes;
 pub mod discovery;
 pub mod doctor;
+// #7685: declared here for the same reason #7424's row below is — `doctor.rs`
+// sits AT the 500-SLOC production cap. `pub` because `tm doctor --fix` calls
+// `repair_auto_memory` from the `tm` binary.
+pub mod doctor_auto_memory;
 // #7424: declared here rather than inside `doctor.rs` — that file sits AT the
 // 500-SLOC production cap, so its `mod` + `use` pair would not fit. The check
 // is reached as `super::doctor_startup_context::…` from `doctor::run_doctor`.

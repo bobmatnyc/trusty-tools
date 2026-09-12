@@ -166,6 +166,103 @@ pub(super) fn deploy_output_style(root: &Path) -> Result<PathBuf, PrepError> {
     Ok(default_path.unwrap_or_else(|| style_dir.join("trusty-mpm.md")))
 }
 
+/// The Claude Code settings key that turns auto memory off (#7685).
+///
+/// Why: the owner directive is that Claude Code's own auto memory (`MEMORY.md`)
+/// is not used in tm sessions — `trusty-memory` is the memory. The key name is
+/// Claude Code's, documented at
+/// <https://code.claude.com/docs/en/memory#enable-or-disable-auto-memory>:
+/// "To turn it off for a single project, set `autoMemoryEnabled` in that
+/// project's settings". One constant, because `tm doctor`'s `auto_memory` check
+/// and its `--fix` repair must read and write exactly what this launch path
+/// writes.
+/// What: the literal key name.
+/// Test: `write_auto_memory_off_disables_auto_memory`.
+pub(crate) const AUTO_MEMORY_KEY: &str = "autoMemoryEnabled";
+
+/// Read-merge-write the project's `.claude/settings.json` under one mutation.
+///
+/// Why (#7685): [`write_output_style`] was the only project-settings writer and
+/// carried the read/merge/write body inline, so every new key would have copied
+/// it. The merge discipline it encodes is the part worth sharing: an existing
+/// file is parsed and every key it already carries is preserved, a missing or
+/// malformed file starts from an empty object rather than aborting the launch,
+/// and the result is written back pretty-printed. Taking a closure rather than a
+/// single key keeps a multi-key writer at one read and one write.
+/// What: creates `<project_dir>/.claude/`, loads the settings object (empty on a
+/// missing or non-object file), hands it to `mutate`, and writes it back
+/// pretty-printed.
+/// Test: `write_output_style_preserves_existing_keys`,
+/// `write_auto_memory_off_preserves_existing_keys`.
+pub(crate) fn merge_settings<F>(project_dir: &Path, mutate: F) -> Result<(), PrepError>
+where
+    F: FnOnce(&mut serde_json::Value),
+{
+    let claude_dir = project_dir.join(".claude");
+    std::fs::create_dir_all(&claude_dir).map_err(|source| PrepError::Io {
+        path: claude_dir.clone(),
+        source,
+    })?;
+    let settings_path = claude_dir.join("settings.json");
+
+    // Load existing settings to preserve unrelated keys; tolerate a missing or
+    // malformed file by starting from an empty object.
+    let mut settings = match std::fs::read_to_string(&settings_path) {
+        Ok(text) => serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .filter(serde_json::Value::is_object)
+            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new())),
+        Err(_) => serde_json::Value::Object(serde_json::Map::new()),
+    };
+
+    mutate(&mut settings);
+
+    let serialized = serde_json::to_string_pretty(&settings)
+        .map_err(|err| PrepError::Deploy(err.to_string()))?;
+    std::fs::write(&settings_path, serialized).map_err(|source| PrepError::Io {
+        path: settings_path.clone(),
+        source,
+    })
+}
+
+/// Set one key in the project's `.claude/settings.json`, preserving the rest.
+///
+/// Why (#7685): the common case of [`merge_settings`] — one scalar key, every
+/// other key carried through untouched. `tm doctor --fix`'s `auto_memory` repair
+/// writes through this same function rather than re-implementing the merge, so
+/// the repair and the launch path cannot drift.
+/// What: [`merge_settings`] with a closure that assigns `value` to `key`.
+/// Test: `write_auto_memory_off_disables_auto_memory`,
+/// `auto_memory_repair_applies_when_absent`.
+pub(crate) fn merge_settings_key(
+    project_dir: &Path,
+    key: &str,
+    value: serde_json::Value,
+) -> Result<(), PrepError> {
+    merge_settings(project_dir, |settings| settings[key] = value)
+}
+
+/// Write `autoMemoryEnabled: false` into the project's `.claude/settings.json`
+/// (#7685).
+///
+/// Why: the owner directive — Claude Code auto-memory is not used in tm
+/// sessions, `trusty-memory` is the memory. This is the project-tier half; the
+/// managed-spawn half is the `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` assignment in
+/// [`crate::runtime::claude_code::env_bin_prefix`]. Both, for the reason
+/// [`write_output_style`]'s `attribution` seed gives: the env var reaches only
+/// the `claude` child tm spawns, whereas a bare `claude` launched in this
+/// project reads the project tier regardless.
+/// What: [`merge_settings_key`] with [`AUTO_MEMORY_KEY`] and `false`. Written
+/// unconditionally rather than absent-only — the directive is that auto memory
+/// is off here, not that it defaults off.
+/// Test: `write_auto_memory_off_disables_auto_memory`,
+/// `write_auto_memory_off_preserves_existing_keys`,
+/// `write_auto_memory_off_overrides_an_enabled_value`,
+/// `prepare_session_disables_auto_memory`.
+pub(super) fn write_auto_memory_off(project_dir: &Path) -> Result<(), PrepError> {
+    merge_settings_key(project_dir, AUTO_MEMORY_KEY, serde_json::Value::Bool(false))
+}
+
 /// Merge trusty-mpm output-style and spinner-tip settings into the project's
 /// `.claude/settings.json`.
 ///
@@ -203,52 +300,33 @@ pub(super) fn write_output_style(
     project_dir: &Path,
     active_style: Option<&str>,
 ) -> Result<(), PrepError> {
-    let claude_dir = project_dir.join(".claude");
-    std::fs::create_dir_all(&claude_dir).map_err(|source| PrepError::Io {
-        path: claude_dir.clone(),
-        source,
-    })?;
-    let settings_path = claude_dir.join("settings.json");
-
-    // Load existing settings to preserve unrelated keys; tolerate a missing or
-    // malformed file by starting from an empty object.
-    let mut settings = match std::fs::read_to_string(&settings_path) {
-        Ok(text) => serde_json::from_str::<serde_json::Value>(&text)
-            .ok()
-            .filter(serde_json::Value::is_object)
-            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new())),
-        Err(_) => serde_json::Value::Object(serde_json::Map::new()),
-    };
-
     let style = active_style
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or(OUTPUT_STYLE);
-    settings["outputStyle"] = serde_json::Value::String(style.to_string());
-    settings["spinnerTipsEnabled"] = serde_json::Value::Bool(true);
-    settings["spinnerTipsOverride"] = serde_json::json!({ "tips": SPINNER_TIPS });
 
-    // #6807: the tm-owned CLAUDE_CONFIG_DIR copy of this key reaches only the
-    // `claude` child tm spawns, because `CLAUDE_CONFIG_DIR` is set per-command
-    // (`standalone::run`) and never exported. A bare `claude` launched in this
-    // project reads the project tier regardless, so seed it here too — absent
-    // only, so an operator-set `attribution` survives.
-    if let Some(obj) = settings.as_object_mut() {
-        obj.entry("attribution").or_insert_with(|| {
-            serde_json::json!({
-                "commit": crate::core::attribution::ATTRIBUTION_FOOTER,
-                "pr": crate::core::attribution::ATTRIBUTION_FOOTER,
-            })
-        });
-    }
+    // #7685: the read/merge/write body this function used to carry inline now
+    // lives in `merge_settings`, so the auto-memory key and every later key
+    // share one tested code path.
+    merge_settings(project_dir, |settings| {
+        settings["outputStyle"] = serde_json::Value::String(style.to_string());
+        settings["spinnerTipsEnabled"] = serde_json::Value::Bool(true);
+        settings["spinnerTipsOverride"] = serde_json::json!({ "tips": SPINNER_TIPS });
 
-    let serialized = serde_json::to_string_pretty(&settings)
-        .map_err(|err| PrepError::Deploy(err.to_string()))?;
-    std::fs::write(&settings_path, serialized).map_err(|source| PrepError::Io {
-        path: settings_path.clone(),
-        source,
-    })?;
-    Ok(())
+        // #6807: the tm-owned CLAUDE_CONFIG_DIR copy of this key reaches only the
+        // `claude` child tm spawns, because `CLAUDE_CONFIG_DIR` is set per-command
+        // (`standalone::run`) and never exported. A bare `claude` launched in this
+        // project reads the project tier regardless, so seed it here too — absent
+        // only, so an operator-set `attribution` survives.
+        if let Some(obj) = settings.as_object_mut() {
+            obj.entry("attribution").or_insert_with(|| {
+                serde_json::json!({
+                    "commit": crate::core::attribution::ATTRIBUTION_FOOTER,
+                    "pr": crate::core::attribution::ATTRIBUTION_FOOTER,
+                })
+            });
+        }
+    })
 }
 
 /// Write the project-tier `enabledPlugins` allowlist into the project's

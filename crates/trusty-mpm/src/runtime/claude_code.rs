@@ -166,7 +166,13 @@ fn cd_and_group(cwd: &Path, body: &str) -> String {
 /// renderer, so either half alone still costs a managed pane native and tmux
 /// scrollback. Each operand's `${NAME-1}` expansion means a value the pane
 /// already exports wins, decided independently per variable.
-/// What: `env -u ANTHROPIC_API_KEY <-u marker…> CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN="${…-1}" CLAUDE_CODE_DISABLE_MOUSE="${…-1}" [CLAUDE_CONFIG_DIR='<dir>'] [CLAUDE_CODE_OAUTH_TOKEN='<token>'] <claude_bin>`
+/// (6) Issue #7685: the line always assigns `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`,
+/// the documented env-var half of turning Claude Code's own auto memory off. The
+/// project-tier `autoMemoryEnabled: false` key
+/// ([`crate::core::session_launch`]) is the other half, and each covers what the
+/// other cannot — the env var reaches only this spawned child, the settings key
+/// reaches a bare `claude` launched in the same project.
+/// What: `env -u ANTHROPIC_API_KEY <-u marker…> CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN="${…-1}" CLAUDE_CODE_DISABLE_MOUSE="${…-1}" CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 [CLAUDE_CONFIG_DIR='<dir>'] [CLAUDE_CODE_OAUTH_TOKEN='<token>'] <claude_bin>`
 /// — each bracketed assignment appears only when its value is `Some`; the two
 /// managed-default operands are unconditional. The
 /// `-u NAME` option MUST precede any
@@ -189,7 +195,9 @@ fn cd_and_group(cwd: &Path, body: &str) -> String {
 /// `spawn_command_defaults_the_alternate_screen_off`,
 /// `resume_command_defaults_the_alternate_screen_off`,
 /// `spawn_command_defaults_the_mouse_capture_off`,
-/// `resume_command_defaults_the_mouse_capture_off`.
+/// `resume_command_defaults_the_mouse_capture_off`,
+/// `spawn_command_disables_auto_memory`, `resume_command_disables_auto_memory`,
+/// `env_bin_prefix_orders_auto_memory_before_the_config_dir`.
 ///
 /// `GH_TOKEN`/`GH_USER` (issue #3025) are deliberately NOT assignments on
 /// this prefix — see [`claude_code_gh_env::gh_env_source_prefix`], applied
@@ -210,6 +218,12 @@ pub(crate) fn env_bin_prefix(
     // exports.
     assignments.push(' ');
     assignments.push_str(&crate::core::alt_screen::managed_shell_assignments());
+    // #7685: Claude Code auto-memory (`MEMORY.md`) is not used in tm sessions —
+    // trusty-memory is the memory. Unconditional, unlike the `${NAME-1}` operands
+    // above: the directive is that it is off here, not that it defaults off. Per
+    // Claude Code's docs the env var also wins over a subagent's own `memory:`
+    // frontmatter field, so it forecloses a future agent asset opting back in.
+    assignments.push_str(" CLAUDE_CODE_DISABLE_AUTO_MEMORY=1");
     if let Some(dir) = config_dir {
         let quoted = shell_single_quote(&dir.display().to_string());
         assignments.push_str(&format!(" CLAUDE_CONFIG_DIR={quoted}"));
