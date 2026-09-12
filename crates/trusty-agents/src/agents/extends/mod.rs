@@ -367,8 +367,14 @@ pub fn merge_extends(base: AgentConfig, child: AgentConfig) -> AgentConfig {
         merged.tools.enforce_search_indexes = child.tools.enforce_search_indexes;
     }
     // `[skills].allow` (#3933): same base-first union as `[tools].allow`, for
-    // the same reason — an overlay ADDS capability to its base and must never
-    // silently remove what the base granted.
+    // the same reason — an AUTHORED overlay ADDS capability to its base and
+    // must never silently remove what the base granted. #7360's
+    // `replace_skills` is the one exception, and it is not an authored overlay:
+    // it is set only by a Settings write, where the operator's selection is
+    // exact and a union would silently re-add what they just removed. Narrowing
+    // is the only direction that flag reaches — a turn-originated patch cannot
+    // widen past the manifest's own grants (#7396,
+    // `api::server::grant_ceiling`).
     merged.skills.allow = if child.permissions.replace_skills {
         Some(child.skills.allow.unwrap_or_default())
     } else {

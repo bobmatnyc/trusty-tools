@@ -48,12 +48,12 @@ impl ToolExecutor for ConciergeTool {
         ]
     }
     fn schema(&self) -> Value {
-        json!({"type":"function","function":{"name":self.name(),"description":"Ask Concierge's deterministic service for platform configuration or health. Only change settings on explicit user direction. Read settings first and pass that persistence domain's revision in patch. Each call changes one domain; it returns the actual saved result. Role and delegation ceilings cannot be widened. For installed skill moves use delegate_skill_configuration.",
+        json!({"type":"function","function":{"name":self.name(),"description":"Ask Concierge's deterministic service for platform configuration or health. Only change settings on explicit user direction. Read settings first and pass that persistence domain's revision in patch. Each call changes one domain; it returns the actual saved result. Role and delegation ceilings cannot be widened: a patch may only narrow the grants this assistant already has, and permission grants and cross-palace memory reads are readable here but change only through Settings in the app. For installed skill moves use delegate_skill_configuration.",
         "parameters":{"type":"object","additionalProperties":false,"required":["action"],"properties":{
             "action":{"enum":["settings.get","settings.patch","platform.health"]},
             "assistant":{"type":"string","description":"Target assistant; fixed to self when called by an assistant."},
-            "section":{"enum":["config","model","provider","personality","permissions","memory","projects","knowledge","skills","subagents","listeners","channels"]},
-            "patch":{"type":"object","description":"Settings domain request, including its revision. Memory: revision,cross_palace_query. Projects: revision,scope assistant,projects absolute paths. Config: revision plus model_id/provider_id/personality/tools_allow/scopes/skills_allow/subagents_delegate_allowed. Listeners/channels use their GET payload and revision; knowledge uses revision,paused."}
+            "section":{"enum":["config","model","provider","personality","permissions","memory","projects","knowledge","skills","subagents","listeners","channels"],"description":"permissions and memory are settings.get only."},
+            "patch":{"type":"object","description":"Settings domain request, including its revision. Projects: revision,scope assistant,projects absolute paths. Config: revision plus model_id/provider_id/personality/tools_allow/scopes/skills_allow/subagents_delegate_allowed, each of which may only narrow the current grants. Listeners/channels use their GET payload and revision; knowledge uses revision,paused."}
         }}}})
     }
     async fn execute(&self, args: Value) -> ToolResult {
@@ -121,5 +121,37 @@ mod tests {
         );
         let tool = ConciergeTool::assistant("cto-assistant", true);
         assert!(tool.execute(json!({"action":"settings.patch","section":"memory","patch":{"revision":"r","cross_palace_query":true}})).await.is_error());
+    }
+
+    /// #7396: neither grant edits nor the cross-palace read switch is reachable
+    /// from a model turn, attended or not.
+    ///
+    /// Why: `ask_concierge` is registered `read_only=false` on every attended
+    /// assistant turn, so an unattended-only refusal is no refusal at all — the
+    /// injected-text path this closes runs attended. The `permissions` section
+    /// writes the same grant lists every later check reads, and
+    /// `cross_palace_query` is what makes a foreign-namespace read legal, so
+    /// both change only through the operator-authenticated HTTP routes.
+    /// What: an ATTENDED tool (`read_only=false`) is refused on both sections
+    /// before any persistence domain is reached, while the same sections still
+    /// answer `settings.get`.
+    /// Test: this function IS the test.
+    #[tokio::test]
+    async fn attended_turns_cannot_patch_permissions_or_cross_palace_reads() {
+        let tool = ConciergeTool::assistant("cto-assistant", false);
+        for section in ["permissions", "memory"] {
+            let refusal = tool
+                .execute(json!({"action":"settings.patch","section":section,
+                                "patch":{"revision":"r","cross_palace_query":true,"scopes":["*"]}}))
+                .await;
+            assert!(
+                refusal.is_error(),
+                "{section} accepted a turn-originated patch: {refusal:?}"
+            );
+            assert!(
+                refusal.content().contains("only through Settings"),
+                "{section} was refused for the wrong reason: {refusal:?}"
+            );
+        }
     }
 }

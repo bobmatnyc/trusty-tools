@@ -59,6 +59,8 @@ pub(crate) mod assistant_settings;
 mod attachments;
 mod auth;
 mod cancel;
+// #7396: the grant ceiling a turn-originated settings patch may never widen.
+mod grant_ceiling;
 pub(crate) mod knowledge_pipeline;
 // #4278: read back the durable `persona-{agent}` chat log so the GUI can
 // rehydrate its chat view on reload.

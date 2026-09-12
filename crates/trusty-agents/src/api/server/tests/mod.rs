@@ -32,6 +32,8 @@ mod ctrl_sessions;
 mod event_tickets;
 mod events_sse;
 mod guard;
+// #7396: the ceiling a turn-originated settings patch may never widen.
+mod grant_ceiling;
 mod listener_events;
 mod listing;
 mod models;

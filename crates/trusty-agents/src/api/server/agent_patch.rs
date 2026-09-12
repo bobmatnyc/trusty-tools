@@ -196,6 +196,21 @@ pub(super) struct PatchAgentRequest {
     /// `patch_agent_subagent_whitelist_accepts_an_empty_list`.
     #[serde(default)]
     pub(super) subagents_delegate_allowed: Option<Vec<String>>,
+    /// #7396: the grant ceiling this request may not exceed, or `None` for the
+    /// operator-authenticated HTTP route, which carries no ceiling.
+    ///
+    /// Why: `ask_concierge` puts `settings.patch` inside a model turn, so the
+    /// four grant fields above are reachable from text the assistant merely
+    /// READ. The field is `#[serde(skip)]` — it can never arrive on the wire,
+    /// and the only way it is ever `Some` is
+    /// [`super::assistant_settings::operate_at`] setting it after deserializing
+    /// a turn-originated request. `None` therefore means "no caller could have
+    /// asked for this", which is exactly the HTTP route's posture.
+    /// What: enforced by [`super::assistant_settings::patch_grants`] before any
+    /// field is written, so a widening request is refused whole.
+    /// Test: `super::tests::grant_ceiling::turn_patch_cannot_widen_its_own_scopes`.
+    #[serde(skip)]
+    pub(super) ceiling: Option<super::grant_ceiling::GrantCeiling>,
 }
 
 /// Build a `400 Bad Request` JSON error response.
@@ -365,8 +380,25 @@ pub(super) async fn patch_agent_at(
         }
     };
 
-    if let Err(message) = super::assistant_settings::patch_grants(&mut doc, &req) {
-        return bad_request(message);
+    // #7396: the grant ceiling, refused whole and structured so the caller
+    // learns WHICH entries were rejected rather than reading back a quietly
+    // narrowed list. Nothing has been written at this point.
+    if let Err(refusal) = super::assistant_settings::patch_grants(&mut doc, &req) {
+        tracing::warn!(
+            agent = name,
+            field = %refusal.field,
+            refused = ?refusal.refused,
+            "patch_agent: refused a grant edit"
+        );
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": refusal.message,
+                "field": refusal.field,
+                "refused": refusal.refused,
+            })),
+        )
+            .into_response();
     }
     // #3819: the model/provider resolution + claude-code runner-constraint
     // check below only makes sense when the caller is actually touching
