@@ -160,17 +160,16 @@ pub(crate) fn spawn_watch_loop_with_registry(
                     file_events
                         .record(FileEventKind::Rescan, RESCAN_FEED_PATH)
                         .await;
-                    let policy = registry.as_ref().and_then(|r| r.get(&index_id));
-                    if registry.is_some() && policy.is_none() {
-                        continue;
-                    }
-                    let outcome = crate::service::watch_rescan::reconcile_with_policy(
+                    // #7396: the registry lookup lives inside the pass. An
+                    // absent handle is a FAILED pass, not a reason to discard
+                    // the batch — see `watch_rescan::reconcile_registered`.
+                    let outcome = crate::service::watch_rescan::reconcile_registered(
                         &index_id,
                         &canonical_root,
                         &raw_root,
                         &indexer,
                         &indexed_files,
-                        policy.as_deref(),
+                        registry.as_ref(),
                     )
                     .await;
                     // One decision for every way a pass can fall short. The

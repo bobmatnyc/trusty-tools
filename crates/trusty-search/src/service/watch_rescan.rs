@@ -132,6 +132,21 @@ pub enum RescanError {
         #[source]
         source: anyhow::Error,
     },
+    /// The registry no longer holds a handle for this index, so the pass could
+    /// not learn which paths the index admits (#7396).
+    ///
+    /// Why: this used to be a bare `continue` in the watch loop, which
+    /// discarded the dropped-event batch outright — no log, no failure count,
+    /// no retry. The dropped paths are already unrecoverable at that point, so
+    /// an absent handle must re-arm exactly like any other incomplete pass.
+    #[error(
+        "index '{index_id}': the registry holds no handle for this index, so the admission policy \
+         for a dropped-event rescan is unknown"
+    )]
+    UnregisteredIndex {
+        /// Index whose handle could not be resolved.
+        index_id: String,
+    },
     /// Chunks for a file that no longer exists could not be dropped.
     #[error("index '{index_id}': could not drop chunks for deleted file '{path}' after a dropped-event rescan: {source}")]
     Remove {
@@ -181,6 +196,50 @@ pub async fn reconcile_after_rescan(
         indexer,
         indexed_files,
         None,
+    )
+    .await
+}
+
+/// Reconcile against the policy the registry currently holds for this index.
+///
+/// Why (#7396): the registry lookup belongs INSIDE the pass, not in front of
+/// it. When it lived in the watch loop's match arm, a momentarily-absent handle
+/// took a bare `continue` and the dropped-event batch was lost with nothing
+/// scheduled to recover it — the exact silent data loss the `Flag::Rescan`
+/// handling exists to prevent. Returning [`RescanError::UnregisteredIndex`]
+/// instead routes the case through the recovery every other incomplete pass
+/// already uses: [`rescan_follow_up`] counts it and [`schedule_rescan_retry`]
+/// re-arms, so a handle that comes back reconciles the tree.
+/// What: `registry` absent means this loop was started without one, which is
+/// the pre-#7379 unfiltered behaviour and still reconciles the full root.
+/// `registry` present but holding no handle is the failure above.
+/// Test: `rescan_without_a_registered_handle_schedules_a_retry`.
+pub(crate) async fn reconcile_registered(
+    index_id: &IndexId,
+    canonical_root: &Path,
+    raw_root: &Path,
+    indexer: &Arc<RwLock<CodeIndexer>>,
+    indexed_files: &IndexedFiles,
+    registry: Option<&crate::core::registry::IndexRegistry>,
+) -> Result<RescanStats, RescanError> {
+    let policy = match registry {
+        Some(registry) => match registry.get(index_id) {
+            Some(handle) => Some(handle),
+            None => {
+                return Err(RescanError::UnregisteredIndex {
+                    index_id: index_id.to_string(),
+                });
+            }
+        },
+        None => None,
+    };
+    reconcile_with_policy(
+        index_id,
+        canonical_root,
+        raw_root,
+        indexer,
+        indexed_files,
+        policy.as_deref(),
     )
     .await
 }
