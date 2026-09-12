@@ -1,0 +1,3 @@
+Fixed
+
+- `grep`'s `glob` parameter no longer returns a silent zero for real indexed paths (#7674). A glob with no `/` now matches by basename at any depth (`rg -g` parity, so `savings.rs` reaches `a/b/savings.rs`), and an absolute glob is resolved against the index root so a `file` value copied out of a `search` result can be pasted verbatim. A request that supplies a `glob` now carries a `meta` object reporting the normalized glob, how many indexed files it selected, and the corpus size — `glob_matched_files: 0` states in words that the filter, not the pattern, produced the empty `matches` array. An unparseable glob remains a `400`, never an empty result.

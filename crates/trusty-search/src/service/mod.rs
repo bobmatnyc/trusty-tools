@@ -14,6 +14,8 @@ pub mod embed_pool;
 pub mod embedder_supervisor;
 pub mod fs_discovery;
 pub mod grep;
+// #7674: glob normalization, matching and the zero-match diagnostic for `/grep`.
+pub mod grep_glob;
 pub(crate) mod index_admission;
 pub mod index_budget;
 pub mod indexed_files;

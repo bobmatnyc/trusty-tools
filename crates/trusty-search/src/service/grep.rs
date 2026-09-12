@@ -15,13 +15,20 @@
 //! index has chunked, (2) reading each file fresh from disk under the index
 //! `root_path`, and (3) running the matcher. Keeping the matcher pure makes the
 //! line/column/context logic trivially unit-testable with in-memory strings.
+//! Glob normalization, matching and the zero-match diagnostic live one module
+//! over in [`crate::service::grep_glob`] (#7674).
 //! Test: the `tests` module covers literal + regex matching, case folding,
 //! `before`/`after`/`combined` context windows, multiline (dot-matches-newline)
 //! matching, glob filtering, the `max_results` truncation flag, and invalid
 //! regex/glob rejection. The HTTP wiring is exercised by the server-level
-//! integration tests (`grep_*`).
+//! integration tests (`grep_*`), and the glob shapes of #7674 by
+//! `crate::service::server::tests_grep_glob_7674`.
 
 use serde::{Deserialize, Serialize};
+
+// #7674: glob normalization, matching and the zero-match diagnostic live in
+// their own module so this one stays the matcher.
+pub use crate::service::grep_glob::{GlobFilter, GrepMeta, GrepScanCounts};
 
 /// Request body for `POST /grep` and `POST /indexes/:id/grep`.
 ///
@@ -66,6 +73,13 @@ pub struct GrepRequest {
     /// `--include=<glob>` parity: only files whose path matches this glob are
     /// searched. The glob is matched against the index-relative file path
     /// (e.g. `crates/foo/src/bar.rs`). `None` = no filter.
+    ///
+    /// See #7674 for the normalization rules
+    /// ([`crate::service::grep_glob::normalize_glob`]): a glob with no `/`
+    /// matches by basename at any depth, and an absolute glob is additionally
+    /// compared against the file's absolute path so a `file` value copied out
+    /// of a `search` result works verbatim. When a glob is supplied the
+    /// response carries a [`GrepMeta`] saying how many files it selected.
     #[serde(default)]
     pub glob: Option<String>,
 
@@ -156,14 +170,19 @@ pub struct GrepMatch {
 /// (`total`).
 /// What: `serde`-serialized. `total` equals `matches.len()` today but is kept
 /// distinct so a future "count only" mode can report a total larger than the
-/// returned slice.
+/// returned slice. `meta` is present only when the request carried a `glob`,
+/// and is what lets a caller tell "the pattern is absent" from "the glob
+/// excluded every file" (#7674) — without it both render as `total: 0`.
 /// Test: `truncates_at_max_results` asserts `truncated` flips and the slice is
-/// clamped.
+/// clamped; `grep_reports_a_glob_that_selected_no_files` covers `meta`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct GrepResponse {
     pub matches: Vec<GrepMatch>,
     pub total: usize,
     pub truncated: bool,
+    /// Glob diagnostic; `None` when the request supplied no `glob` (#7674).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta: Option<GrepMeta>,
 }
 
 /// Errors that can occur while preparing a grep query.
@@ -198,7 +217,9 @@ pub enum GrepError {
 #[derive(Debug)]
 pub struct CompiledGrep {
     regex: regex::Regex,
-    glob: Option<glob::Pattern>,
+    // #7674: the filter remembers the raw and normalized spellings so the
+    // response `meta` can report what was actually compiled.
+    glob: Option<GlobFilter>,
     context_before: usize,
     context_after: usize,
     multiline: bool,
@@ -245,10 +266,11 @@ impl CompiledGrep {
             .build()
             .map_err(|e| GrepError::InvalidRegex(e.to_string()))?;
 
+        // #7674: normalize before compiling (a separator-free glob matches by
+        // basename, `rg -g` parity). An unparseable glob is still an error —
+        // never a silently empty result set.
         let glob = match req.glob.as_deref() {
-            Some(pat) => {
-                Some(glob::Pattern::new(pat).map_err(|e| GrepError::InvalidGlob(e.to_string()))?)
-            }
+            Some(pat) => Some(GlobFilter::compile(pat).map_err(GrepError::InvalidGlob)?),
             None => None,
         };
 
@@ -275,24 +297,49 @@ impl CompiledGrep {
     /// Why: lets the handler skip reading files that can't match before paying
     /// the I/O cost.
     /// What: returns `true` when no glob was supplied, otherwise delegates to
-    /// `glob::Pattern::matches_with` using `require_literal_separator = false`
-    /// so `*.rs` matches at any depth (ripgrep `--include` semantics) while
-    /// `**/` still works as written.
+    /// [`GlobFilter::matches_rel`]. Prefer [`Self::path_matches_in_root`] on a
+    /// path the index root is known for — it additionally honours an absolute
+    /// glob (#7674).
     /// Test: `glob_filters_by_path`.
     pub fn path_matches(&self, rel_path: &str) -> bool {
         match &self.glob {
             None => true,
-            Some(pat) => {
-                // require_literal_separator=false ⇒ `*.rs` matches
-                // `a/b/c.rs`, matching `grep --include`/`rg -g` behaviour.
-                let opts = glob::MatchOptions {
-                    case_sensitive: true,
-                    require_literal_separator: false,
-                    require_literal_leading_dot: false,
-                };
-                pat.matches_with(rel_path, opts)
-            }
+            Some(filter) => filter.matches_rel(rel_path),
         }
+    }
+
+    /// Test a file against the glob, resolving it under the index root first.
+    ///
+    /// Why: an absolute glob — the spelling `search`/`search_lexical` hand back
+    /// in their own `file` field — can never match the index-relative path the
+    /// corpus stores, so pasting one into `glob` returned zero matches with no
+    /// explanation (#7674). The root is what turns one form into the other.
+    /// What: delegates to [`GlobFilter::matches_in_root`], which tries the
+    /// index-relative path first and only resolves against `root` for a glob
+    /// the caller wrote absolutely.
+    /// Test: `absolute_glob_matches_via_the_root` (in `grep_glob`);
+    /// `grep_honours_an_absolute_glob_as_search_reports_it`.
+    pub fn path_matches_in_root(&self, rel_path: &str, root: &std::path::Path) -> bool {
+        match &self.glob {
+            None => true,
+            Some(filter) => filter.matches_in_root(rel_path, root),
+        }
+    }
+
+    /// The compiled glob filter, when the request supplied one (#7674).
+    pub fn glob_filter(&self) -> Option<&GlobFilter> {
+        self.glob.as_ref()
+    }
+
+    /// Build the response `meta` for a completed scan, if a glob was in play.
+    ///
+    /// Why: the handlers must not each decide when a diagnostic is owed —
+    /// "a glob was supplied" is the single rule, and it lives here.
+    /// What: returns `None` when no glob was supplied, otherwise
+    /// [`GrepMeta::new`] over the accumulated scan counters.
+    /// Test: `grep_reports_a_glob_that_selected_no_files`.
+    pub fn glob_meta(&self, counts: GrepScanCounts) -> Option<GrepMeta> {
+        self.glob.as_ref().map(|f| GrepMeta::new(f, counts))
     }
 }
 

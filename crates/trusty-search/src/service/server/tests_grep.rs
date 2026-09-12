@@ -5,8 +5,8 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use tokio::sync::RwLock;
-/// Test: consumed by the `grep_*` tests below.
-async fn stage_grep_index(
+/// Test: consumed by the `grep_*` tests below and by `tests_grep_glob_7674`.
+pub(super) async fn stage_grep_index(
     files: &[(&str, &str)],
 ) -> (Arc<SearchAppState>, IndexId, tempfile::TempDir) {
     use crate::core::chunker::{ChunkType, RawChunk};

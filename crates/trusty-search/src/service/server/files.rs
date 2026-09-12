@@ -382,9 +382,10 @@ async fn grep_one_index(
     compiled: &crate::service::grep::CompiledGrep,
     out: &mut Vec<crate::service::grep::GrepMatch>,
     max_results: usize,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<crate::service::grep::GrepScanCounts> {
+    let mut counts = crate::service::grep::GrepScanCounts::default();
     if out.len() >= max_results {
-        return Ok(());
+        return Ok(counts);
     }
     let chunks = {
         let indexer = handle.indexer.read().await;
@@ -395,15 +396,19 @@ async fn grep_one_index(
     let mut files: Vec<String> = chunks.into_iter().map(|c| c.file).collect();
     files.sort();
     files.dedup();
+    counts.corpus_files = files.len();
 
     for rel in files {
         if out.len() >= max_results {
-            return Ok(());
+            return Ok(counts);
         }
         // Glob filter (cheap) before defense-in-depth root confinement.
-        if !compiled.path_matches(&rel) {
+        // #7674: `_in_root` so an absolute glob — the spelling `search` reports
+        // in its own `file` field — resolves against this index's root.
+        if !compiled.path_matches_in_root(&rel, &handle.root_path) {
             continue;
         }
+        counts.glob_matched_files += 1;
         if !file_is_within_root(&rel, &handle.root_path) {
             continue;
         }
@@ -425,7 +430,7 @@ async fn grep_one_index(
             }
         }
     }
-    Ok(())
+    Ok(counts)
 }
 
 /// Render a grep or call-chain corpus-read failure as the shared 503 (#5917).
@@ -529,7 +534,7 @@ pub(crate) async fn grep_report(
     let mut matches = Vec::new();
     // #5917: an unreadable corpus greps no files at all. Reporting that as
     // zero matches tells the caller its literal is nowhere in the code.
-    grep_one_index(&handle, &compiled, &mut matches, req.max_results)
+    let counts = grep_one_index(&handle, &compiled, &mut matches, req.max_results)
         .await
         .map_err(|e| {
             let (status, body) = corpus_backed_read_error(&index_id.0, &e);
@@ -540,6 +545,9 @@ pub(crate) async fn grep_report(
         index_id = %index_id,
         matches = matches.len(),
         truncated = truncated,
+        // #7674: a glob that selected nothing is the difference between "absent"
+        // and "excluded"; log it so the server side can see it too.
+        glob_matched_files = counts.glob_matched_files,
         latency_ms = started.elapsed().as_millis() as u64,
         "grep"
     );
@@ -548,6 +556,9 @@ pub(crate) async fn grep_report(
         matches,
         total,
         truncated,
+        // #7674: present whenever a glob was supplied, so `total: 0` is never
+        // ambiguous between "no hits" and "the glob excluded every file".
+        meta: compiled.glob_meta(counts),
     })
 }
 
@@ -609,6 +620,8 @@ pub(crate) async fn global_grep_report(
 
     let started = std::time::Instant::now();
     let mut matches = Vec::new();
+    // #7674: the fan-out's glob diagnostic sums every index it swept.
+    let mut counts = crate::service::grep::GrepScanCounts::default();
     for id in ids {
         if matches.len() >= req.max_results {
             break;
@@ -622,18 +635,21 @@ pub(crate) async fn global_grep_report(
             // #5917: one unreadable corpus makes the whole fan-out incomplete,
             // and a global grep has no per-index field to say so. Refuse rather
             // than return the other indexes' matches as the complete answer.
-            grep_one_index(&handle, &compiled, &mut matches, req.max_results)
-                .await
-                .map_err(|e| {
-                    let (status, body) = corpus_backed_read_error(&id.0, &e);
-                    (status, body.0)
-                })?;
+            counts.add(
+                grep_one_index(&handle, &compiled, &mut matches, req.max_results)
+                    .await
+                    .map_err(|e| {
+                        let (status, body) = corpus_backed_read_error(&id.0, &e);
+                        (status, body.0)
+                    })?,
+            );
         }
     }
     let truncated = matches.len() >= req.max_results;
     tracing::info!(
         matches = matches.len(),
         truncated = truncated,
+        glob_matched_files = counts.glob_matched_files,
         latency_ms = started.elapsed().as_millis() as u64,
         "grep_global"
     );
@@ -642,6 +658,9 @@ pub(crate) async fn global_grep_report(
         matches,
         total,
         truncated,
+        // #7674: same diagnostic on the fan-out — a glob that selected no file
+        // in ANY index reads identically to a pattern that is simply absent.
+        meta: compiled.glob_meta(counts),
     })
 }
 

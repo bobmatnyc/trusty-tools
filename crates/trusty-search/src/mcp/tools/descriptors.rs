@@ -356,7 +356,7 @@ pub fn tool_descriptors() -> Value {
                     "context":            { "type": "integer", "description": "-C: equal before/after context, overrides context_before/context_after" },
                     "context_before":     { "type": "integer", "description": "-B: lines of context before each match" },
                     "context_after":      { "type": "integer", "description": "-A: lines of context after each match" },
-                    "glob":                { "type": "string", "description": "--include glob (e.g. '**/*.rs')" },
+                    "glob":                { "type": "string", "description": "--include glob, matched against the index-relative path (e.g. '**/*.rs'). A glob with no '/' matches by basename at any depth ('grep.rs' finds 'a/b/grep.rs'); a glob WITH a '/' is anchored at the index root, so 'src/**/*.rs' will not reach 'crates/x/src/y.rs' — use '**/src/**/*.rs'. An absolute path works too, so a `file` value copied from a search result can be pasted verbatim. When you pass a glob the response carries a `meta` object: `glob_matched_files: 0` means the glob excluded every file, NOT that the pattern is absent (#7674)." },
                     "multiline":          { "type": "boolean", "default": false, "description": "Let `.` span newlines" },
                     "fixed_strings":      { "type": "boolean", "default": false, "description": "-F: treat pattern as literal" },
                     "files_with_matches": { "type": "boolean", "default": false, "description": "-l: return one path per matching file" },
