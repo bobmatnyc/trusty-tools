@@ -23,44 +23,58 @@
 //! [`crate::core::project_trust`] records its decision under — out of reach of
 //! both Claude Code and any repository.
 //!
+//! THE GRANT IS BOUND TO THE SERVER'S CONTENT, NOT TO ITS NAME (PR #7692
+//! re-review). The store records, per name, the
+//! [`crate::core::mcp_content_trust::spec_digest`] of the registry entry as it
+//! stood when the operator shared it, and a grant applies only while the entry
+//! still hashes to that digest. A name-only grant outlives its subject: share
+//! `foo`, `tm mcp remove foo`, then `tm mcp add foo` an unrelated server, and
+//! that unrelated server would inherit the grant. The CLI closes the same gap
+//! from the other side — `tm mcp share` refuses a name with no registered
+//! server, `tm mcp remove` drops the grant, and a `tm mcp add` that replaces an
+//! entry drops it unless `--share-with-projects` renews it. // See #7672
+//!
 //! RESIDUAL RISK, ACCEPTED. Sharing a server is a standing grant for EVERY
 //! untrusted project on this host, not a per-project one. Share only servers
 //! whose tools are safe to attach to a session reading code the operator has
 //! not reviewed; keep a credentialed actor (a ticketing system, a database, a
 //! chat workspace) unshared and reach it through `tm project trust` instead.
 //!
-//! What: [`McpShareStore`] persists a sorted set of shared server names, with
-//! the same load / mutate / save / owner-only-`0600` shape as
+//! What: [`McpShareStore`] persists a sorted name → digest map, with the same
+//! load / mutate / save / owner-only-`0600` shape as
 //! [`crate::core::project_trust::ProjectTrustStore`]. [`shared_servers`] is the
 //! non-fatal production accessor that fails closed to an empty set.
 //! Test: `mcp_share_tests.rs`.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::core::mcp_content_trust::is_spec_digest;
+
 /// On-disk filename, beside `project-trust.json` under the tm state root.
 const SHARE_STORE_FILE: &str = "mcp-shared.json";
 
-/// On-disk shape: a sorted array of server names, and nothing else.
+/// On-disk shape: server name → the shared spec digest, and nothing else.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct ShareStoreData {
-    /// Registry server names the operator has shared with untrusted projects.
+    /// Shared registry server names, each mapped to the
+    /// [`crate::core::mcp_content_trust::spec_digest`] it was shared at.
     #[serde(default)]
-    shared_servers: Vec<String>,
+    shared_servers: BTreeMap<String, String>,
 }
 
 /// The set of registry servers an untrusted project may match by content.
 ///
 /// Why: see the module doc — registering a server and lending it to unreviewed
 /// repository content are two different decisions, so they get two records.
-/// What: a `BTreeSet<String>` of server names plus the resolved file path;
-/// mutations are committed by an explicit [`McpShareStore::save`].
+/// What: a `BTreeMap` of server name → shared spec digest, plus the resolved
+/// file path; mutations are committed by an explicit [`McpShareStore::save`].
 /// Test: `share_store_new_is_empty`, `save_and_reload_round_trip`.
 #[derive(Debug, Default)]
 pub struct McpShareStore {
-    shared: BTreeSet<String>,
+    grants: BTreeMap<String, String>,
     file_path: PathBuf,
 }
 
@@ -69,18 +83,23 @@ impl McpShareStore {
     ///
     /// Why: a missing file means nothing has been shared — the fail-closed
     /// default — so it is an empty store, never an error.
-    /// What: reads and deserializes when present; an empty store otherwise.
+    /// What: reads and deserializes when present; an empty store otherwise. A
+    /// record whose digest is not the shape
+    /// [`crate::core::mcp_content_trust::spec_digest`] produces is DROPPED
+    /// rather than trusted: a hand-edited or truncated value must read as "not
+    /// shared", never as a value that might compare equal to something.
     ///
     /// # Errors
     ///
     /// An unreadable or malformed file. A caller that must not fail the launch
     /// uses [`shared_servers`] instead.
-    /// Test: `share_store_new_is_empty`, `save_and_reload_round_trip`.
+    /// Test: `share_store_new_is_empty`, `save_and_reload_round_trip`,
+    /// `a_malformed_digest_is_dropped_at_load`.
     pub fn load(root: &Path) -> anyhow::Result<Self> {
         let file_path = root.join(SHARE_STORE_FILE);
         if !file_path.exists() {
             return Ok(Self {
-                shared: BTreeSet::new(),
+                grants: BTreeMap::new(),
                 file_path,
             });
         }
@@ -89,7 +108,11 @@ impl McpShareStore {
         let data: ShareStoreData = serde_json::from_str(&raw)
             .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", file_path.display()))?;
         Ok(Self {
-            shared: data.shared_servers.into_iter().collect(),
+            grants: data
+                .shared_servers
+                .into_iter()
+                .filter(|(_, digest)| is_spec_digest(digest))
+                .collect(),
             file_path,
         })
     }
@@ -112,7 +135,7 @@ impl McpShareStore {
                 .map_err(|e| anyhow::anyhow!("failed to create {}: {e}", parent.display()))?;
         }
         let data = ShareStoreData {
-            shared_servers: self.shared.iter().cloned().collect(),
+            shared_servers: self.grants.clone(),
         };
         let json = serde_json::to_string_pretty(&data)
             .map_err(|e| anyhow::anyhow!("failed to serialize mcp-shared: {e}"))?;
@@ -141,28 +164,34 @@ impl McpShareStore {
         Ok(())
     }
 
-    /// Share `name` with untrusted projects; `true` when this changed the store.
-    /// Test: `share_inserts_and_is_idempotent`.
-    pub fn share(&mut self, name: &str) -> bool {
-        self.shared.insert(name.to_owned())
+    /// Share `name`'s CURRENT content, identified by `spec_digest`.
+    ///
+    /// Why: re-sharing a server whose spec has changed is a new decision about
+    /// new content, so it overwrites the recorded digest rather than being a
+    /// no-op. Only an identical re-share changes nothing.
+    /// What: inserts or replaces the grant; `true` when the store changed.
+    /// Test: `share_records_the_digest_and_is_idempotent`.
+    pub fn share(&mut self, name: &str, spec_digest: &str) -> bool {
+        let previous = self.grants.insert(name.to_owned(), spec_digest.to_owned());
+        previous.as_deref() != Some(spec_digest)
     }
 
-    /// Stop sharing `name`; `true` when it was present.
+    /// Stop sharing `name`; `true` when a grant was present.
     /// Test: `unshare_removes_and_is_idempotent`.
     pub fn unshare(&mut self, name: &str) -> bool {
-        self.shared.remove(name)
+        self.grants.remove(name).is_some()
     }
 
-    /// Is `name` shared with untrusted projects?
-    /// Test: `share_inserts_and_is_idempotent`.
-    pub fn is_shared(&self, name: &str) -> bool {
-        self.shared.contains(name)
+    /// The digest `name` was shared at, if it is shared at all.
+    /// Test: `share_records_the_digest_and_is_idempotent`.
+    pub fn digest_for(&self, name: &str) -> Option<&str> {
+        self.grants.get(name).map(String::as_str)
     }
 
-    /// The shared names, sorted.
+    /// Every grant, name → shared digest.
     /// Test: `save_and_reload_round_trip`.
-    pub fn names(&self) -> BTreeSet<String> {
-        self.shared.clone()
+    pub fn grants(&self) -> BTreeMap<String, String> {
+        self.grants.clone()
     }
 }
 
@@ -183,13 +212,13 @@ pub fn share_store_root() -> Option<PathBuf> {
 /// Why: the launch path reads this on every spawn, so an unresolvable home, an
 /// unreadable file, or malformed JSON must degrade to "nothing is shared"
 /// rather than abort — fail closed, matching the store's whole purpose.
-/// What: [`McpShareStore::names`] from the production root, or an empty set.
+/// What: [`McpShareStore::grants`] from the production root, or an empty map.
 /// Test: `shared_servers_fails_closed_on_a_missing_root`,
 /// `shared_servers_reads_a_real_store`.
-pub fn shared_servers() -> BTreeSet<String> {
+pub fn shared_servers() -> BTreeMap<String, String> {
     share_store_root()
         .and_then(|root| McpShareStore::load(&root).ok())
-        .map(|store| store.names())
+        .map(|store| store.grants())
         .unwrap_or_default()
 }
 

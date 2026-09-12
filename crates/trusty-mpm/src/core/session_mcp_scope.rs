@@ -73,7 +73,7 @@
 //!
 //! Test: `session_mcp_scope_tests.rs`.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
@@ -432,7 +432,7 @@ pub fn resolve_scope(cwd: &Path, config_dir: &Path) -> McpScope {
 /// `resolve_scope_refuses_an_unshared_registry_match_and_says_how_to_share`,
 /// `resolve_scope_is_silent_for_an_untrusted_project_that_declares_nothing`.
 pub fn resolve_scope_with_trust(cwd: &Path, config_dir: &Path, trusted: bool) -> McpScope {
-    resolve_scope_with_grants(cwd, config_dir, trusted, &BTreeSet::new())
+    resolve_scope_with_grants(cwd, config_dir, trusted, &BTreeMap::new())
 }
 
 /// [`resolve_scope_with_trust`] against an explicit set of shared registry names.
@@ -442,15 +442,18 @@ pub fn resolve_scope_with_trust(cwd: &Path, config_dir: &Path, trusted: bool) ->
 /// so a test of the composition itself must be able to supply both.
 /// [`resolve_scope_with_trust`] passes an EMPTY share set, which is the
 /// fail-closed default and what every test of the trusted path wants.
-/// What: see [`resolve_scope_with_trust`]; `shared_registry` is the set from
-/// [`crate::core::mcp_share::shared_servers`].
+/// What: see [`resolve_scope_with_trust`]; `shared_registry` is the name →
+/// shared-spec-digest map from [`crate::core::mcp_share::shared_servers`], and
+/// a grant applies only while the registry entry still hashes to its digest
+/// (#7672).
 /// Test: `resolve_scope_loads_a_shared_registry_match_without_trust`,
-/// `resolve_scope_refuses_an_unshared_registry_match_and_says_how_to_share`.
+/// `resolve_scope_refuses_an_unshared_registry_match_and_says_how_to_share`,
+/// `resolve_scope_reports_a_stale_share_as_stale`.
 pub fn resolve_scope_with_grants(
     cwd: &Path,
     config_dir: &Path,
     trusted: bool,
-    shared_registry: &BTreeSet<String>,
+    shared_registry: &BTreeMap<String, String>,
 ) -> McpScope {
     let mut servers: Map<String, Value> = Map::new();
 
@@ -495,6 +498,7 @@ pub fn resolve_scope_with_grants(
             crate::core::mcp_content_trust::KnownServers::from_registry(&shared, shared_registry);
         let mut unknown: Vec<String> = Vec::new();
         let mut unshared: Vec<String> = Vec::new();
+        let mut stale_shares: Vec<String> = Vec::new();
         let mut unreadable: Option<String> = None;
         match &project {
             Ok(entries) => {
@@ -504,9 +508,19 @@ pub fn resolve_scope_with_grants(
                             servers.insert(name.clone(), entry.clone());
                             content_trusted.push(name.clone());
                         }
-                        crate::core::mcp_content_trust::Verdict::UnsharedMatch(matched) => {
+                        // A grant recorded against different content is not a
+                        // grant, but it is a different thing to tell the
+                        // operator than "you never shared this". // See #7672
+                        crate::core::mcp_content_trust::Verdict::UnsharedMatch {
+                            name: matched,
+                            stale,
+                        } => {
                             unknown.push(name.clone());
-                            unshared.push(matched);
+                            if stale {
+                                stale_shares.push(matched);
+                            } else {
+                                unshared.push(matched);
+                            }
                         }
                         crate::core::mcp_content_trust::Verdict::Unknown => {
                             unknown.push(name.clone());
@@ -522,6 +536,8 @@ pub fn resolve_scope_with_grants(
         unknown.dedup();
         unshared.sort();
         unshared.dedup();
+        stale_shares.sort();
+        stale_shares.dedup();
         // An opt-in in an untrusted project never loads, so say which ones.
         let mut ignored_opt_ins: Vec<String> = opt_in.clone();
         ignored_opt_ins.sort();
@@ -531,6 +547,7 @@ pub fn resolve_scope_with_grants(
                 cwd,
                 &unknown,
                 &unshared,
+                &stale_shares,
                 &ignored_opt_ins,
                 unreadable.as_deref(),
             );
@@ -590,15 +607,19 @@ pub fn resolve_scope_with_grants(
 /// What: names each UNKNOWN `.mcp.json` entry, each ignored opt-in, and the
 /// unreadable-file reason when there is one. An entry that equalled a registry
 /// server the operator has NOT shared gets the second, narrower hint — that
-/// `tm mcp share <name>` alone would load it. Always ends in the
-/// `tm project trust <cwd>` grant that loads everything regardless.
+/// `tm mcp share <name>` alone would load it — and one whose share went STALE
+/// says so instead, because telling an operator to share a server they already
+/// shared reads as a bug rather than as an instruction (#7672). Always ends in
+/// the `tm project trust <cwd>` grant that loads everything regardless.
 /// Test: `resolve_scope_rejects_a_builtin_name_pointing_at_another_command`,
 /// `resolve_scope_loads_the_known_entry_and_names_only_the_unknown_one`,
-/// `resolve_scope_refuses_an_unshared_registry_match_and_says_how_to_share`.
+/// `resolve_scope_refuses_an_unshared_registry_match_and_says_how_to_share`,
+/// `resolve_scope_reports_a_stale_share_as_stale`.
 fn untrusted_reason(
     cwd: &Path,
     unknown: &[String],
     unshared: &[String],
+    stale_shares: &[String],
     ignored_opt_ins: &[String],
     unreadable: Option<&str>,
 ) -> String {
@@ -619,6 +640,13 @@ fn untrusted_reason(
         parts.push(format!(
             "one of them matches your registered server {name}; run \
              `tm mcp share {name}` to load it in projects without trust"
+        ));
+    }
+    for name in stale_shares {
+        parts.push(format!(
+            "one of them matches your registered server {name}, but the share \
+             you recorded for it was taken against different content, so it is \
+             stale; run `tm mcp share {name}` again to renew it"
         ));
     }
     if !ignored_opt_ins.is_empty() {

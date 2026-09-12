@@ -36,6 +36,23 @@ fn shared_config(dir: &Path, names: &[&str]) {
     .unwrap();
 }
 
+/// The grants `tm mcp share` would record for `names`, read back from the
+/// registry the fixture wrote: a grant is bound to that entry's content, not to
+/// its name (#7672).
+fn grants_for(cfg: &Path, names: &[&str]) -> BTreeMap<String, String> {
+    let raw = std::fs::read_to_string(cfg.join(".claude.json")).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let servers = parsed["mcpServers"].as_object().unwrap().clone();
+    names
+        .iter()
+        .map(|name| {
+            let digest = crate::core::mcp_content_trust::spec_digest(&servers[*name])
+                .expect("the fixture's registry entry normalizes");
+            ((*name).to_string(), digest)
+        })
+        .collect()
+}
+
 /// Write a project `.mcp.json` holding `names` as stdio servers.
 fn project_mcp_json(dir: &Path, names: &[&str]) {
     let mut servers = serde_json::Map::new();
@@ -258,7 +275,7 @@ fn resolve_scope_ignores_opt_ins_for_an_untrusted_project() {
 
     // Sharing the server does NOT open the opt-in path either: sharing governs
     // content equivalence for `.mcp.json`, never a bare name.
-    let shared_everywhere = std::collections::BTreeSet::from(["slack-mcp".to_owned()]);
+    let shared_everywhere = grants_for(&cfg, &["slack-mcp"]);
     let scope = resolve_scope_with_grants(&cwd, &cfg, false, &shared_everywhere);
 
     assert!(
@@ -382,8 +399,7 @@ fn resolve_scope_loads_this_repos_mcp_json_by_content_with_no_warning() {
     // already cover — `duetto-memory`, and `trusty-review` with its env block.
     shared_entries(&cfg, &entries);
     project_mcp_entries(&cwd, &entries);
-    let shared_registry =
-        std::collections::BTreeSet::from(["duetto-memory".to_owned(), "trusty-review".to_owned()]);
+    let shared_registry = grants_for(&cfg, &["duetto-memory", "trusty-review"]);
 
     let scope = resolve_scope_with_grants(&cwd, &cfg, false, &shared_registry);
 
@@ -420,7 +436,7 @@ fn resolve_scope_loads_the_known_entry_and_names_only_the_unknown_one() {
         ],
     );
 
-    let shared_registry = std::collections::BTreeSet::from(["duetto-memory".to_owned()]);
+    let shared_registry = grants_for(&cfg, &["duetto-memory"]);
     let scope = resolve_scope_with_grants(&cwd, &cfg, false, &shared_registry);
 
     assert!(
@@ -458,7 +474,7 @@ fn resolve_scope_refuses_an_unshared_registry_match_and_says_how_to_share() {
     shared_entries(&cfg, &[("slack-mcp", public_shape.clone())]);
     project_mcp_entries(&cwd, &[("slack-mcp", public_shape)]);
 
-    let scope = resolve_scope_with_grants(&cwd, &cfg, false, &std::collections::BTreeSet::new());
+    let scope = resolve_scope_with_grants(&cwd, &cfg, false, &BTreeMap::new());
 
     assert!(
         !scope.servers.contains_key("slack-mcp"),
@@ -490,7 +506,7 @@ fn resolve_scope_loads_a_shared_registry_match_without_trust() {
     let public_shape = json!({"type": "stdio", "command": "slack-mcp", "args": ["serve"]});
     shared_entries(&cfg, &[("slack-mcp", public_shape.clone())]);
     project_mcp_entries(&cwd, &[("slack-mcp", public_shape)]);
-    let shared_registry = std::collections::BTreeSet::from(["slack-mcp".to_owned()]);
+    let shared_registry = grants_for(&cfg, &["slack-mcp"]);
 
     let scope = resolve_scope_with_grants(&cwd, &cfg, false, &shared_registry);
 
@@ -501,6 +517,38 @@ fn resolve_scope_loads_a_shared_registry_match_without_trust() {
     );
     assert_eq!(scope.content_trusted, vec!["slack-mcp".to_owned()]);
     assert_eq!(scope.degraded, None);
+}
+
+/// PR #7692 re-review, HIGH: the grant is bound to the content it was given
+/// for. Once the registry entry changes — or once the name is reused by a
+/// different server entirely — the old grant stops applying, and the warning
+/// says the share went stale instead of pretending it was never made.
+#[test]
+fn resolve_scope_reports_a_stale_share_as_stale() {
+    let tmp = TempDir::new().unwrap();
+    let (cwd, cfg, _) = fixture(&tmp);
+    let shared_at = json!({"type": "stdio", "command": "slack-mcp", "args": ["serve"]});
+    shared_entries(&cfg, &[("slack-mcp", shared_at)]);
+    // The operator's grant, taken while the entry above was registered.
+    let grant = grants_for(&cfg, &["slack-mcp"]);
+    // Then the name was reused for something else entirely.
+    let reused = json!({"type": "stdio", "command": "slack-mcp", "args": ["--dump-token"]});
+    shared_entries(&cfg, &[("slack-mcp", reused.clone())]);
+    project_mcp_entries(&cwd, &[("slack-mcp", reused)]);
+
+    let scope = resolve_scope_with_grants(&cwd, &cfg, false, &grant);
+
+    assert!(
+        !scope.servers.contains_key("slack-mcp"),
+        "a grant for the previous content must not lend the new content: {:?}",
+        scope.included
+    );
+    let degraded = scope.degraded.expect("the refusal must be reported");
+    assert!(
+        degraded.contains("stale") && degraded.contains("tm mcp share slack-mcp"),
+        "the operator has already shared this name, so the hint must say the \
+         grant is stale and offer to renew it: {degraded}"
+    );
 }
 
 /// #7672 (d): classification fails CLOSED. An unreadable registry yields no

@@ -29,6 +29,17 @@
 //! hostile repository's copy of its fully public shape. The builtins stay
 //! unconditionally matchable: their command is framework-controlled.
 //!
+//! A SHARE IS GRANTED TO CONTENT, NOT TO A NAME (PR #7692 re-review). The
+//! operator shares the server they are looking at, so the grant records
+//! [`spec_digest`] — the sha256 of that entry's normalized spec — and a
+//! registry entry counts as shared only while its CURRENT digest still equals
+//! the recorded one. Otherwise the grant would outlive its subject: share
+//! `foo`, `tm mcp remove foo`, then register an unrelated server under the
+//! reused name, and a bare-name grant would make that unrelated server
+//! matchable by content. A digest mismatch is [`Verdict::UnsharedMatch`] with
+//! `stale` set, so the warning can say the grant no longer describes the
+//! server rather than claim it was never given. // See #7672
+//!
 //! A MATCHING NAME IS NEVER SUFFICIENT, and a reserved builtin name is
 //! stricter still: an entry called `trusty-memory` matches only evidence under
 //! THAT name — the canonical `trusty-memory` builtin, or the operator's own
@@ -44,8 +55,9 @@
 //! What: [`KnownServers::from_registry`] normalizes the known set once per
 //! launch; [`KnownServers::classify`] normalizes one candidate and returns a
 //! [`Verdict`] — `Known`, `UnsharedMatch` (equal to a registry entry the
-//! operator has not shared, so the warning can name the `tm mcp share` that
-//! would load it), or `Unknown`.
+//! operator has not shared as it now stands, so the warning can name the
+//! `tm mcp share` that would load it), or `Unknown`. [`spec_digest`] is the
+//! grant identity the share store records.
 //! Test: `mcp_content_trust_tests.rs`, plus the end-to-end classification in
 //! `session_mcp_scope_tests.rs`.
 
@@ -53,8 +65,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use serde_json::{Map, Value};
+use sha2::{Digest as _, Sha256};
 
 use crate::core::mcp_config::{BUILTIN_MANAGED_MCP_SERVERS, builtin_server_entry};
+
+/// Hex characters in a [`spec_digest`] — sha256, so 32 bytes.
+const DIGEST_HEX_LEN: usize = 64;
 
 /// The `mcpServers` entry keys that describe a stdio server's execution.
 ///
@@ -120,15 +136,25 @@ enum Spec {
 ///
 /// Why: "not known" has two operator-actionable shapes, and collapsing them
 /// would lose the one hint that actually helps — an entry that already equals a
-/// registry server needs `tm mcp share`, not `tm project trust`.
-/// What: `Known` loads; `UnsharedMatch(name)` and `Unknown` do not.
-/// Test: `an_unshared_registry_match_is_reported_not_granted`.
+/// registry server needs `tm mcp share`, not `tm project trust`. A grant that
+/// exists but no longer describes that server is a third thing again: the
+/// operator already decided to share it, so the hint has to say the decision
+/// went stale rather than send them to make it a second time. // See #7672
+/// What: `Known` loads; `UnsharedMatch { .. }` and `Unknown` do not.
+/// Test: `an_unshared_registry_match_is_reported_not_granted`,
+/// `a_changed_registry_entry_makes_its_share_stale`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
     /// Content-equivalent to a builtin or a shared registry entry — it loads.
     Known,
-    /// Equal to the named registry entry, which the operator has not shared.
-    UnsharedMatch(String),
+    /// Equal to a registry entry the operator has not shared as it stands now.
+    UnsharedMatch {
+        /// The REGISTRY entry's name, which is what `tm mcp share` takes.
+        name: String,
+        /// A grant for that name exists but was recorded against different
+        /// content, so it no longer applies — re-sharing renews it.
+        stale: bool,
+    },
     /// Matches nothing the operator has.
     Unknown,
 }
@@ -141,7 +167,9 @@ pub enum Verdict {
 /// What: `builtins` maps each framework builtin name to its canonical spec,
 /// always matchable; `shared` and `unshared` map each registry name to its
 /// spec, split by the operator's [`crate::core::mcp_share`] decision. Only
-/// `builtins` and `shared` can produce [`Verdict::Known`].
+/// `builtins` and `shared` can produce [`Verdict::Known`]. `stale` names the
+/// `unshared` entries that landed there because their grant's digest no longer
+/// matches, which is the one case the warning words differently.
 /// Test: `mcp_content_trust_tests.rs`.
 pub struct KnownServers {
     /// Framework builtin name → its canonical, framework-controlled spec.
@@ -150,6 +178,8 @@ pub struct KnownServers {
     shared: BTreeMap<String, Spec>,
     /// Registry name → spec, for entries the operator has NOT shared.
     unshared: BTreeMap<String, Spec>,
+    /// `unshared` names carrying a grant recorded against different content.
+    stale: BTreeSet<String>,
 }
 
 impl KnownServers {
@@ -159,12 +189,16 @@ impl KnownServers {
     /// evidence, and neither is written by the repository being classified.
     /// What: takes the registry as an already-read `mcpServers` map (the caller
     /// owns the non-quarantining read, so a launch never renames the file that
-    /// also holds OAuth state) and the `shared` names from
-    /// [`crate::core::mcp_share`]. An entry that will not normalize is skipped,
-    /// which can only ever shrink the known set.
+    /// also holds OAuth state) and the `shared` grants from
+    /// [`crate::core::mcp_share`] — name → the [`spec_digest`] the operator
+    /// shared. A grant counts only while the registry entry still hashes to the
+    /// digest it was recorded against; any other entry is unshared, and one
+    /// whose grant went stale is remembered as such. An entry that will not
+    /// normalize is skipped, which can only ever shrink the known set.
     /// Test: `a_shared_registry_entry_makes_an_identical_declaration_known`,
+    /// `a_changed_registry_entry_makes_its_share_stale`,
     /// `an_empty_registry_knows_only_the_builtins`.
-    pub fn from_registry(registry: &Map<String, Value>, shared: &BTreeSet<String>) -> Self {
+    pub fn from_registry(registry: &Map<String, Value>, shared: &BTreeMap<String, String>) -> Self {
         let builtins = BUILTIN_MANAGED_MCP_SERVERS
             .iter()
             .filter_map(|name| {
@@ -176,20 +210,31 @@ impl KnownServers {
             .collect();
         let mut shared_specs: BTreeMap<String, Spec> = BTreeMap::new();
         let mut unshared_specs: BTreeMap<String, Spec> = BTreeMap::new();
+        let mut stale: BTreeSet<String> = BTreeSet::new();
         for (name, entry) in registry {
             let Some(spec) = normalize(entry) else {
                 continue;
             };
-            if shared.contains(name) {
-                shared_specs.insert(name.clone(), spec);
-            } else {
-                unshared_specs.insert(name.clone(), spec);
+            match shared.get(name) {
+                Some(granted) if *granted == digest_of(&spec) => {
+                    shared_specs.insert(name.clone(), spec);
+                }
+                // A grant against different content is no grant at all — see
+                // the module doc's third rule. // See #7672
+                Some(_) => {
+                    stale.insert(name.clone());
+                    unshared_specs.insert(name.clone(), spec);
+                }
+                None => {
+                    unshared_specs.insert(name.clone(), spec);
+                }
             }
         }
         Self {
             builtins,
             shared: shared_specs,
             unshared: unshared_specs,
+            stale,
         }
     }
 
@@ -217,7 +262,7 @@ impl KnownServers {
                 return Verdict::Known;
             }
             if self.unshared.get(name) == Some(&candidate) {
-                return Verdict::UnsharedMatch(name.to_owned());
+                return self.unshared_match(name);
             }
             return Verdict::Unknown;
         }
@@ -227,10 +272,103 @@ impl KnownServers {
             return Verdict::Known;
         }
         match self.unshared.iter().find(|(_, spec)| **spec == candidate) {
-            Some((matched, _)) => Verdict::UnsharedMatch(matched.clone()),
+            Some((matched, _)) => self.unshared_match(matched),
             None => Verdict::Unknown,
         }
     }
+
+    /// The refusal for a match against an unshared registry entry.
+    ///
+    /// Why: one place decides whether the operator is told to share the server
+    /// or told their existing share went stale, so the two hints can never
+    /// disagree about the same name.
+    /// Test: `a_changed_registry_entry_makes_its_share_stale`.
+    fn unshared_match(&self, name: &str) -> Verdict {
+        Verdict::UnsharedMatch {
+            name: name.to_owned(),
+            stale: self.stale.contains(name),
+        }
+    }
+}
+
+/// The digest a share grant is recorded against (#7672).
+///
+/// Why: a grant naming only a server outlives the server — remove it, register
+/// something unrelated under the same name, and the old grant would lend the
+/// new server's content to every untrusted project. Binding the grant to this
+/// digest makes the grant expire exactly when the thing it described changes.
+/// One function, used by both `tm mcp share` (which records it) and
+/// [`KnownServers::from_registry`] (which checks it), so the writer and the
+/// reader can never disagree about what was shared.
+/// What: `None` for an entry [`normalize`] rejects — a share of it could never
+/// match anything, so there is nothing to record. Otherwise the lowercase hex
+/// sha256 of the normalized spec.
+/// Test: `spec_digest_tracks_every_compared_field`,
+/// `spec_digest_is_none_for_an_entry_that_will_not_normalize`.
+pub fn spec_digest(entry: &Value) -> Option<String> {
+    normalize(entry).as_ref().map(digest_of)
+}
+
+/// Is this the shape [`spec_digest`] produces?
+///
+/// Why: the grant record is a file under `$HOME`, so a hand-edited or truncated
+/// digest must read as "no grant" rather than as a value that might collide.
+/// What: exactly [`DIGEST_HEX_LEN`] lowercase hex characters.
+/// Test: `a_malformed_digest_is_dropped_at_load`.
+pub fn is_spec_digest(candidate: &str) -> bool {
+    candidate.len() == DIGEST_HEX_LEN
+        && candidate
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Hash one normalized spec.
+///
+/// Why: every field is length-prefixed and tagged, so no two different specs
+/// can produce one byte stream by moving a delimiter into a value.
+/// What: sha256 over that encoding, lowercase hex.
+/// Test: `spec_digest_tracks_every_compared_field`.
+fn digest_of(spec: &Spec) -> String {
+    let mut hasher = Sha256::new();
+    match spec {
+        Spec::Stdio { command, args, env } => {
+            feed(&mut hasher, "kind", "stdio");
+            match command {
+                Command::Resolved(path) => feed(&mut hasher, "resolved", &path.to_string_lossy()),
+                Command::Unresolved(raw) => feed(&mut hasher, "unresolved", raw),
+            }
+            for arg in args {
+                feed(&mut hasher, "arg", arg);
+            }
+            for (key, value) in env {
+                feed(&mut hasher, "env-key", key);
+                feed(&mut hasher, "env-value", value);
+            }
+        }
+        Spec::Remote {
+            transport,
+            url,
+            headers,
+        } => {
+            feed(&mut hasher, "kind", "remote");
+            feed(&mut hasher, "transport", transport);
+            feed(&mut hasher, "url", url);
+            for (key, value) in headers {
+                feed(&mut hasher, "header-key", key);
+                feed(&mut hasher, "header-value", value);
+            }
+        }
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+/// Absorb one tagged field, length-prefixed so it cannot be confused with the
+/// next one. See [`digest_of`].
+fn feed(hasher: &mut Sha256, tag: &str, value: &str) {
+    hasher.update((tag.len() as u64).to_le_bytes());
+    hasher.update(tag.as_bytes());
+    hasher.update((value.len() as u64).to_le_bytes());
+    hasher.update(value.as_bytes());
 }
 
 /// Reduce one `mcpServers` entry to its executable spec.

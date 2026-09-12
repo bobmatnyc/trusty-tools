@@ -4,9 +4,9 @@
 //! every test here is a negative one unless it is proving the ordinary case.
 //! A test suite that only asserted matches would still pass against a
 //! classifier that accepted everything.
-//! What: the match itself, the name rules, the operator's share flag, each
-//! field that must differ to make an entry UNKNOWN, and each malformed shape
-//! that fails closed.
+//! What: the match itself, the name rules, the operator's share flag and the
+//! content digest it is bound to, each field that must differ to make an entry
+//! UNKNOWN, and each malformed shape that fails closed.
 //! Test: this file.
 
 use serde_json::json;
@@ -14,14 +14,23 @@ use serde_json::json;
 use super::*;
 
 /// A known set from `(name, entry)` registry pairs; `shared` names are the ones
-/// the operator has lent to projects.
+/// the operator has lent to projects, each grant bound to that entry's digest
+/// exactly as `tm mcp share` records it (#7672).
 fn known_from(entries: &[(&str, Value)], shared: &[&str]) -> KnownServers {
     let registry: Map<String, Value> = entries
         .iter()
         .map(|(name, entry)| ((*name).to_string(), entry.clone()))
         .collect();
-    let shared: BTreeSet<String> = shared.iter().map(|s| (*s).to_string()).collect();
-    KnownServers::from_registry(&registry, &shared)
+    let grants: BTreeMap<String, String> = shared
+        .iter()
+        .filter_map(|name| {
+            registry
+                .get(*name)
+                .and_then(spec_digest)
+                .map(|digest| ((*name).to_string(), digest))
+        })
+        .collect();
+    KnownServers::from_registry(&registry, &grants)
 }
 
 /// Does this entry load? The three-way [`Verdict`] collapsed for readability;
@@ -82,17 +91,110 @@ fn an_unshared_registry_match_is_reported_not_granted() {
     let unshared = known_from(&[("slack-mcp", entry.clone())], &[]);
     assert_eq!(
         unshared.classify("slack-mcp", &entry),
-        Verdict::UnsharedMatch("slack-mcp".to_owned()),
+        Verdict::UnsharedMatch {
+            name: "slack-mcp".to_owned(),
+            stale: false,
+        },
         "registering is not sharing"
     );
     assert_eq!(
         unshared.classify("renamed-in-the-repo", &entry),
-        Verdict::UnsharedMatch("slack-mcp".to_owned()),
+        Verdict::UnsharedMatch {
+            name: "slack-mcp".to_owned(),
+            stale: false,
+        },
         "the hint names the REGISTRY server, not the repo's spelling"
     );
 
     let shared = known_from(&[("slack-mcp", entry.clone())], &["slack-mcp"]);
     assert_eq!(shared.classify("slack-mcp", &entry), Verdict::Known);
+}
+
+/// PR #7692 re-review, HIGH: a grant is given to CONTENT. Share a server, then
+/// change what that server runs, and the old grant must not carry over — the
+/// operator shared the thing they were looking at, not the name. The refusal
+/// says the share is stale, because telling someone to share a server they
+/// already shared reads as a bug rather than as an instruction.
+#[test]
+fn a_changed_registry_entry_makes_its_share_stale() {
+    let shared_at = json!({"type": "stdio", "command": "slack-mcp", "args": ["serve"]});
+    let changed_to = json!({"type": "stdio", "command": "slack-mcp", "args": ["--dump-token"]});
+    let grants = BTreeMap::from([(
+        "slack-mcp".to_owned(),
+        spec_digest(&shared_at).expect("the shared entry normalizes"),
+    )]);
+    let registry: Map<String, Value> =
+        Map::from_iter([("slack-mcp".to_owned(), changed_to.clone())]);
+
+    let known = KnownServers::from_registry(&registry, &grants);
+
+    assert_eq!(
+        known.classify("slack-mcp", &changed_to),
+        Verdict::UnsharedMatch {
+            name: "slack-mcp".to_owned(),
+            stale: true,
+        },
+        "the grant described the old args, so it does not cover the new ones"
+    );
+    assert_eq!(
+        known.classify("slack-mcp", &shared_at),
+        Verdict::Unknown,
+        "and the content the grant DID describe is no longer registered at all"
+    );
+
+    // Re-sharing the server as it now stands renews the grant.
+    let renewed = known_from(&[("slack-mcp", changed_to.clone())], &["slack-mcp"]);
+    assert_eq!(renewed.classify("slack-mcp", &changed_to), Verdict::Known);
+}
+
+/// The digest is the grant's identity, so every field the comparison uses has
+/// to change it — otherwise a share would cover content it never saw.
+#[test]
+fn spec_digest_tracks_every_compared_field() {
+    let base =
+        json!({"type": "stdio", "command": "slack-mcp", "args": ["serve"], "env": {"A": "1"}});
+    let baseline = spec_digest(&base).expect("normalizes");
+
+    for (label, other) in [
+        (
+            "args",
+            json!({"type": "stdio", "command": "slack-mcp", "args": ["other"], "env": {"A": "1"}}),
+        ),
+        (
+            "env value",
+            json!({"type": "stdio", "command": "slack-mcp", "args": ["serve"], "env": {"A": "2"}}),
+        ),
+        (
+            "env key",
+            json!({"type": "stdio", "command": "slack-mcp", "args": ["serve"], "env": {"B": "1"}}),
+        ),
+        (
+            "command",
+            json!({"type": "stdio", "command": "other-mcp", "args": ["serve"], "env": {"A": "1"}}),
+        ),
+        ("transport", json!({"type": "http", "url": "serve"})),
+    ] {
+        assert_ne!(
+            spec_digest(&other).expect("normalizes"),
+            baseline,
+            "a differing {label} must change the digest"
+        );
+    }
+    assert_eq!(
+        spec_digest(&json!({"command": "slack-mcp", "args": ["serve"], "env": {"A": "1"}}))
+            .expect("normalizes"),
+        baseline,
+        "an absent `type` is the same stdio spec, so it is the same grant"
+    );
+    assert!(is_spec_digest(&baseline), "{baseline}");
+}
+
+/// Nothing to record for an entry no declaration could ever match — the CLI
+/// turns this `None` into a refusal rather than a grant that matches nothing.
+#[test]
+fn spec_digest_is_none_for_an_entry_that_will_not_normalize() {
+    assert!(spec_digest(&json!({"command": "sh", "unmodelled": true})).is_none());
+    assert!(spec_digest(&json!("not even an object")).is_none());
 }
 
 /// A reserved framework name may match only evidence under THAT name, so a

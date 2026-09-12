@@ -10,7 +10,14 @@ Changed
   `tm mcp add` does NOT share it: sharing is off by default, and an unshared
   registry entry never matches even on an exact spec match, because a
   credential-bearing server whose secret arrives from the ambient environment
-  has a fully public spec any repository could reproduce. Equivalence covers the
+  has a fully public spec any repository could reproduce. A share is granted to
+  the server's CONTENT, not to its name: the grant records the digest of the
+  registry entry as it stood, `tm mcp share` refuses a name with no registered
+  server, `tm mcp remove` drops the grant with the server, and a `tm mcp add`
+  that replaces an entry drops the grant unless `--share-with-projects` renews
+  it — so a reused name can never inherit an unrelated server's grant. A grant
+  whose digest no longer matches is reported as stale, with the
+  `tm mcp share <name>` that renews it. Equivalence covers the
   resolved command path, args, and env keys and values for stdio; transport, URL
   and headers for remote. A matching name is never sufficient, a framework
   builtin name matches only evidence under that same name, and every error or
