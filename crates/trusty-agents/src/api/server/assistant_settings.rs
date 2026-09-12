@@ -196,10 +196,17 @@ pub(crate) async fn operate_at(
         ("settings.get", "config" | "permissions" | "model" | "provider") => {
             let mut value =
                 response_value(super::agent_patch::get_agent_at(dirs, name).await).await?;
-            value["permissions_editable"] = json!(true);
-            value["permissions_reason"] = json!(
-                "Authenticated operator configuration; RBAC and platform delegation ceilings still apply at execution."
-            );
+            // #7396: the `settings.patch` vocabulary below has no `permissions`
+            // arm, so reporting that section as editable told the turn it could
+            // do something the very next match refuses. The flag answers for
+            // the section that was asked for, not for the read as a whole.
+            let editable = section != "permissions";
+            value["permissions_editable"] = json!(editable);
+            value["permissions_reason"] = json!(if editable {
+                "Authenticated operator configuration; grants may only be narrowed from a turn, and RBAC and platform delegation ceilings still apply at execution."
+            } else {
+                "Read-only from a turn: permissions change through the operator's PATCH /api/agents/{name} route only."
+            });
             Ok(value)
         }
         ("settings.get", "personality") => {

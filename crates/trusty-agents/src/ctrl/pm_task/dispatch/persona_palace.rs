@@ -199,8 +199,8 @@ pub(super) async fn recall_across(
 /// What: ASK FIRST, create only on a not-found. `palace_create` does not refuse
 /// an existing name — `trusty-memory`'s `handle_palace_create` builds a fresh
 /// `Palace` with `created_at: Utc::now()` and hands it to `create_palace`, which
-/// rewrites `palace.json` (the same metadata-destroying create that #4911
-/// guards against in `crate::memory::trusty_backed`). So a create issued blindly
+/// rewrites `palace.json` (the same metadata-destroying create #4911 names). So
+/// a create issued blindly
 /// on every turn would overwrite the metadata of whatever palace the resolved id
 /// happens to name, including another assistant's. The `memory.palace_get` probe
 /// is the same check-then-create the installer performs

@@ -189,3 +189,50 @@ async fn the_operator_route_still_widens() {
     let raw = std::fs::read_to_string(&manifest).unwrap();
     assert!(raw.contains("google.*"), "{raw}");
 }
+
+/// A read tells the turn the truth about which sections it may write.
+///
+/// Why: `settings.get` hands the model a `permissions_editable` flag it has no
+/// other way to check, and the `settings.patch` vocabulary has no `permissions`
+/// arm — so a flat `true` promised an edit the very next match refuses. The
+/// round-1 CRITICAL was a schema string claiming a ceiling the code did not
+/// enforce; this is the same class of false statement, one section down.
+/// What: `settings.get permissions` reports `permissions_editable: false` and a
+/// reason naming the operator route, while `settings.get config` — which the
+/// patch vocabulary does accept, ceiling-bound — still reports `true`.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn a_read_reports_only_the_sections_a_turn_can_patch() {
+    let (_tmp, dirs, _manifest) = fixture();
+
+    let locked = operate_at(&dirs, "fixture", "settings.get", "permissions", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(locked["permissions_editable"], json!(false));
+    assert!(
+        locked["permissions_reason"]
+            .as_str()
+            .unwrap()
+            .contains("operator"),
+        "{locked}"
+    );
+
+    let editable = operate_at(&dirs, "fixture", "settings.get", "config", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(editable["permissions_editable"], json!(true));
+
+    // The flag is not decoration: patching the section it calls read-only is
+    // refused by the vocabulary itself, with no revision to get past first.
+    assert!(
+        operate_at(
+            &dirs,
+            "fixture",
+            "settings.patch",
+            "permissions",
+            json!({"scopes": ["*"]}),
+        )
+        .await
+        .is_err()
+    );
+}
