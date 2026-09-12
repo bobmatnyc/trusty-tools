@@ -7,7 +7,7 @@
 //   "whatever the view paints when there is no live page", and all three were
 //   reported as a black screen. Nothing measured them, because measuring them
 //   means reading pixels, not navigation callbacks.
-// What: seven modes, each instantiating the bundle's principal class offscreen
+// What: nine modes, each instantiating the bundle's principal class offscreen
 //   and reading its rendered bitmap through
 //   `bitmapImageRepForCachingDisplay` / `cacheDisplay`:
 //     offline — points the view at a closed port; asserts the frame is not black
@@ -37,6 +37,15 @@
 //               never reloaded — which is what fails a view that reloads on
 //               every probe tick. `suspend-cold` serves one hidden from its
 //               first answer, and measures the bounded forced-recovery deadline.
+//     recreate  #7606: the never-answering listener again, so every load fails
+//               the same way and the failure COUNT is the variable. Asserts the
+//               view stops reloading into the same WebContent process and
+//               replaces the `WKWebView` instance after three consecutive
+//               failures, and that the replacement loads.
+//     one-      the same endpoint, watched only as far as the first failure and
+//     failure   its retry. Asserts the instance is NOT replaced there — the
+//               assertion that fails a view which spends a process on every
+//               brief console restart.
 //   Every mode takes the frame it runs at — `--frame WxH`, default 1280x800 —
 //   so the ultrawide geometry #6871 was reported on is reachable.
 // Test: it IS the test. README.md, "Paint harness", has the invocations;
@@ -98,10 +107,15 @@ let minInkRatio = 0.02
 /// and the `slow` mode's retry count are the real gates.
 let firstPaintDeadline: TimeInterval = 1.0
 /// How long the `slow` mode watches its listener for retry attempts. The fixed
-/// view attempts at roughly 0 s, 11 s, 22 s and 33 s (a 5 s request timeout with
-/// a 1 s watchdog grace, plus a 5 s retry delay), so this window holds four
-/// attempts and demands three.
-let retryObservationSeconds: TimeInterval = 34
+/// view attempts at roughly 0 s, 14 s, 28 s and 42 s — a 5 s request timeout
+/// with a 1 s watchdog grace, plus an 8 s retry delay — so this window holds
+/// four attempts and demands three.
+///
+/// #7606 moved the retry delay from 5 s to 8 s and this window from 34 s with
+/// it. The cadence is no longer a free number: a retry that lands before the 6 s
+/// deadline supersedes the attempt in flight, and WebKit reports that
+/// supersession as -999. The view now derives the delay from the deadline.
+let retryObservationSeconds: TimeInterval = 45
 /// Connection attempts the `slow` mode expects inside that window: the initial
 /// load plus at least two retries. Without a request timeout the view issues
 /// one connection and waits out `URLRequest`'s 60 s default, so this is the
@@ -120,7 +134,7 @@ let minSlowModeAttempts = 3
 /// wait, a synchronous XPC round trip, or a run-loop spin into the stop path.
 let stopReturnBudget: TimeInterval = 0.5
 /// How long after the stop the listener is watched for traffic that must not
-/// come. The unfixed view's re-armed retry lands about 5 s after the stop
+/// come. The unfixed view's re-armed retry lands about 8 s after the stop
 /// (`about:blank` supersedes the in-flight load, WebKit reports the
 /// cancellation, `enterOffline` re-arms `scheduleRetryTimer`'s 5 s delay), and
 /// each subsequent attempt about 11 s after that, so 20 s holds two or three of
@@ -186,6 +200,32 @@ let suspendColdObservationSeconds: TimeInterval = 90
 /// about that long and every sample in the window must carry drawn content.
 let suspendSampleSeconds: TimeInterval = 3
 
+// MARK: - Web-view rebuild thresholds (#7606)
+
+/// Consecutive failed loads the view is expected to absorb before it rebuilds
+/// its `WKWebView`. Mirrors `recreateAfterFailures` in `TrustyConsoleSaver.swift`
+/// — the two must move together, and `one-failure` mode below is what catches a
+/// view that rebuilds sooner.
+let recreateAfterFailures = 3
+/// How long `recreate` mode watches for that rebuild. Against a listener that
+/// never answers, the view fails on its own 6 s watchdog and waits 8 s before
+/// the next attempt, so the three failures land at roughly 6 s, 20 s and 34 s.
+/// Sixty seconds holds the third with slack and is far short of the hourly
+/// reload, which could produce a fresh load for a reason that is not this one.
+let recreateObservationSeconds: TimeInterval = 60
+/// How long `recreate` mode then watches for the load the rebuilt web view must
+/// issue. A rebuild that replaces the instance and loads nothing is the same
+/// black screen with an extra process behind it.
+let recreateFreshLoadWait: TimeInterval = 10
+/// How long `one-failure` mode waits for the retry that proves the FIRST failure
+/// was counted and answered. Without it the mode would pass on a view that never
+/// failed at all.
+let oneFailureRetryWait: TimeInterval = 20
+/// How much longer it then watches the instance. The second failure lands at
+/// about 20 s and the rebuild at about 34 s, so this stays inside the window
+/// where exactly one failure has been counted.
+let oneFailureSettleSeconds: TimeInterval = 3
+
 // MARK: - Arguments
 
 func note(_ message: String) {
@@ -246,9 +286,10 @@ let bundlePath = positional.count > 1
     ? positional[1]
     : NSHomeDirectory() + "/Library/Screen Savers/TrustyConsole.saver"
 
-guard ["offline", "slow", "preview", "resize", "stop", "suspend", "suspend-cold"].contains(mode) else {
-    note("usage: paintharness <offline|slow|preview|resize|stop|suspend|suspend-cold> [bundlePath]"
-        + " [--frame WxH] [--start WxH]")
+guard ["offline", "slow", "preview", "resize", "stop", "suspend", "suspend-cold",
+       "recreate", "one-failure"].contains(mode) else {
+    note("usage: paintharness <offline|slow|preview|resize|stop|suspend|suspend-cold"
+        + "|recreate|one-failure> [bundlePath] [--frame WxH] [--start WxH]")
     note("  --frame  the frame to run at (default 1280x800; env SAVER_HARNESS_FRAME)")
     note("  --start  resize mode only: the frame to construct at (default 320x200)")
     exit(64)
@@ -608,10 +649,12 @@ case "suspend", "suspend-cold":
     }
     page = listener
     pointView(atPort: listener.port)
-case "slow", "stop":
+case "slow", "stop", "recreate", "one-failure":
     // #6900 wants the same endpoint `slow` uses: a load that is in flight and
     // stays there is the state the stop has to interrupt, and every connection
-    // the view opens is counted.
+    // the view opens is counted. #7606's two modes want it for a third reason —
+    // it is the only endpoint that makes every load fail the same way, so the
+    // failure COUNT is the variable under test.
     guard let listener = SilentListener() else {
         note("could not start the silent listener")
         finish(6)
@@ -808,6 +851,112 @@ case "slow":
         }
     } else {
         failures.append("could not read the view's bitmap after the stall")
+    }
+
+case "recreate", "one-failure":
+    guard let listener = silent else { break }
+    let expectsRebuild = mode == "recreate"
+
+    /// The view's timers and WebKit's callbacks all land on the main run loop,
+    /// so a plain sleep would stop the machinery under test.
+    func pump(_ seconds: TimeInterval, until condition: () -> Bool = { false }) {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline && !condition() {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+    }
+
+    func currentWebView() -> WKWebView? {
+        view.subviews.compactMap { $0 as? WKWebView }.first
+    }
+
+    // The ORIGINAL instance, held strongly for the length of the run. Identity
+    // is the assertion, and a released object's address can be handed to its
+    // replacement — holding it makes `!==` mean what it reads as.
+    guard let original = currentWebView() else {
+        failures.append("the view built no web view to replace")
+        break
+    }
+    note("original web view: \(ObjectIdentifier(original))")
+
+    if expectsRebuild {
+        // --- N consecutive failures must replace the instance ---------------
+        // Every load against this listener times out, so the only variable is
+        // how many the view takes before it stops reloading into the same
+        // WebContent process and builds a new one. #7606's owner report is
+        // three days of a view that never did.
+        note("watching for the rebuild for \(Int(recreateObservationSeconds))s"
+            + " (\(recreateAfterFailures) failures expected first)")
+        var acceptedBeforeRebuild = listener.accepted
+        var lowestInk = Double.greatestFiniteMagnitude
+        let deadline = Date().addingTimeInterval(recreateObservationSeconds)
+        while Date() < deadline && currentWebView() === original {
+            // Sampled BEFORE the identity check, so this holds the connection
+            // count from the last poll at which the instance was still the old
+            // one — the count the rebuild's own load has to exceed.
+            acceptedBeforeRebuild = listener.accepted
+            if let rep = capture(view), let frame = stats(of: rep) {
+                lowestInk = min(lowestInk, frame.inkRatio)
+                if frame.nonBlackRatio < minNonBlackRatio {
+                    failures.append(String(format: "frame went black while failing: nonBlack=%.4f",
+                                           frame.nonBlackRatio))
+                    break
+                }
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        }
+
+        guard let rebuilt = currentWebView(), rebuilt !== original else {
+            failures.append("the web view was never replaced:"
+                + " \(listener.accepted) failed load(s) in \(Int(recreateObservationSeconds))s,"
+                + " expected a rebuild after \(recreateAfterFailures)")
+            break
+        }
+        note("web view replaced: \(ObjectIdentifier(original)) → \(ObjectIdentifier(rebuilt))"
+            + " after \(acceptedBeforeRebuild) connection attempt(s)")
+        if acceptedBeforeRebuild < recreateAfterFailures {
+            failures.append("rebuilt too early: \(acceptedBeforeRebuild) attempt(s) before the"
+                + " swap, expected at least \(recreateAfterFailures)")
+        }
+
+        // --- and the replacement must actually load -------------------------
+        note("watching for the rebuilt view's own load for \(Int(recreateFreshLoadWait))s")
+        pump(recreateFreshLoadWait, until: { listener.accepted > acceptedBeforeRebuild })
+        note("connection attempts after the swap: \(listener.accepted) (was \(acceptedBeforeRebuild))")
+        if listener.accepted <= acceptedBeforeRebuild {
+            failures.append("the rebuilt web view never loaded:"
+                + " no connection in \(Int(recreateFreshLoadWait))s after the swap")
+        }
+
+        // #6838 must not regress across the swap: the fallback keeps drawing
+        // while the web view underneath it is replaced.
+        note(String(format: "lowest ink while failing: %.4f", lowestInk))
+        if lowestInk < minInkRatio, lowestInk != Double.greatestFiniteMagnitude {
+            failures.append(String(format: "fallback stopped drawing while failing: ink=%.4f < %.4f",
+                                   lowestInk, minInkRatio))
+        }
+    } else {
+        // --- ONE failure must replace nothing --------------------------------
+        // The counterpart assertion, and the one that fails a view that rebuilds
+        // on every failure: a single timed-out load is an outage the retry
+        // backoff already answers, and spending a WebContent process on it would
+        // turn a brief console restart into process churn.
+        note("waiting up to \(Int(oneFailureRetryWait))s for the retry that follows the first failure")
+        pump(oneFailureRetryWait, until: { listener.accepted >= 2 })
+        note("connection attempts: \(listener.accepted)")
+        if listener.accepted < 2 {
+            failures.append("the first load never failed and retried:"
+                + " \(listener.accepted) connection attempt(s) in \(Int(oneFailureRetryWait))s,"
+                + " so this run proves nothing about the rebuild threshold")
+            break
+        }
+        pump(oneFailureSettleSeconds)
+        if let now = currentWebView(), now !== original {
+            failures.append("rebuilt the web view after a single failure —"
+                + " \(listener.accepted) connection attempt(s), threshold is \(recreateAfterFailures)")
+        } else {
+            note("web view unchanged after one failure: \(ObjectIdentifier(original))")
+        }
     }
 
 case "stop":
