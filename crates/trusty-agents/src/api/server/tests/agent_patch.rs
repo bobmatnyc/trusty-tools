@@ -822,6 +822,50 @@ async fn get_agent_searches_second_tier_when_first_misses() {
     assert_eq!(body["name"], "izzie");
 }
 
+/// Why (#7396): `GET /api/agents/{name}` called `memory_grants::migrate`,
+/// which takes the cross-process manifest lock and REWRITES the file. A read
+/// endpoint that mutates configuration serializes every read behind a file
+/// lock and turns a lock or I/O failure into a 500 on a plain read. The repair
+/// now applies to the served view only; the dispatch, pipeline and subagent
+/// entry points still persist it.
+///
+/// The fixture is exactly the legacy shape the repair targets: assistant role,
+/// `memory_recall` allowed, the write scope granted, no `settings_revision`.
+/// The response must still carry the repaired grant, and the manifest's bytes
+/// and mtime must be untouched.
+#[tokio::test]
+async fn a_get_serves_the_migrated_view_without_writing_the_manifest() {
+    let tmp = tempfile::tempdir().unwrap();
+    let legacy = "[agent]\nname = \"izzie\"\nrole = \"assistant\"\nmodel = \"fixture\"\ndescription = \"test\"\n\n[llm]\nmax_tokens = 100\ntemperature = 0.0\n\n[tools]\nallow = [\"memory_recall\"]\nscopes = [\"memory.*\"]\n";
+    write_package(tmp.path(), "izzie", legacy, "Hi.\n");
+    let manifest = tmp.path().join("izzie/agent.toml");
+    let before = std::fs::read_to_string(&manifest).unwrap();
+    let before_mtime = std::fs::metadata(&manifest).unwrap().modified().unwrap();
+
+    let resp = get_agent_at(&[tmp.path().to_path_buf()], "izzie").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 16 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        body["tools_allow"],
+        serde_json::json!(["memory_recall", "memory_remember", "memory_write"]),
+        "the read still serves the repaired grant"
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(&manifest).unwrap(),
+        before,
+        "a GET must not rewrite the manifest"
+    );
+    assert_eq!(
+        std::fs::metadata(&manifest).unwrap().modified().unwrap(),
+        before_mtime,
+        "a GET must not touch the manifest's mtime"
+    );
+}
+
 /// Project-local tier wins over `$HOME` when both define the same name —
 /// same precedence `crate::agents::agents_dir_candidates()` documents.
 #[tokio::test]

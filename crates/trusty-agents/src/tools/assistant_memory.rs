@@ -305,14 +305,27 @@ impl ToolExecutor for BoundMemory {
         } else {
             None
         };
-        match crate::agents::AgentConfig::by_name(&self.assistant) {
-            Ok(config) if operation_granted(&config, &self.name) => {}
-            Ok(_) => {
+        // #7396: `operation_granted` reads the manifest and walks the skill
+        // sources synchronously, so it runs off the runtime worker exactly as
+        // the policy resolve below does.
+        let assistant = self.assistant.clone();
+        let tool_name = self.name.clone();
+        let granted = tokio::task::spawn_blocking(move || {
+            crate::agents::AgentConfig::by_name(&assistant)
+                .map(|config| operation_granted(&config, &tool_name))
+        })
+        .await;
+        match granted {
+            Ok(Ok(true)) => {}
+            Ok(Ok(false)) => {
                 return ToolResult::err(
                     "This assistant does not have the required memory permission scope",
                 );
             }
-            Err(e) => return ToolResult::err(format!("Cannot resolve memory permissions: {e}")),
+            Ok(Err(e)) => {
+                return ToolResult::err(format!("Cannot resolve memory permissions: {e}"));
+            }
+            Err(e) => return ToolResult::err(e.to_string()),
         }
         let assistant = self.assistant.clone();
         let policy =

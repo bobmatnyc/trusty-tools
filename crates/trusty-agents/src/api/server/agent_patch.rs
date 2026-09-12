@@ -665,8 +665,10 @@ pub(super) async fn patch_agent_at(
 /// sibling of [`patch_agent_route`] — same [`resolve_agent_paths`] +
 /// [`parse_agent_toml`] machinery, no mutation.
 /// What: `404` for an unknown name; `200` with the same JSON shape
-/// `GET /api/agents`'s entries and `PATCH`'s response share.
-/// Test: `super::tests::agent_patch::get_agent_route_*`.
+/// `GET /api/agents`'s entries and `PATCH`'s response share. The legacy
+/// memory-grant repair is applied to the served view only (#7396).
+/// Test: `super::tests::agent_patch::get_agent_route_*`,
+/// `super::tests::agent_patch::a_get_serves_the_migrated_view_without_writing_the_manifest`.
 pub(super) async fn get_agent_route(
     State(_state): State<AppState>,
     AxumPath(name): AxumPath<String>,
@@ -685,13 +687,6 @@ pub(super) async fn get_agent_at(dirs: &[PathBuf], name: &str) -> Response {
         )
             .into_response();
     };
-    if let Err(error) = crate::assistants::memory_grants::migrate(dirs, name).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error":error.to_string()})),
-        )
-            .into_response();
-    }
     let raw = match tokio::fs::read_to_string(&path).await {
         Ok(s) => s,
         Err(e) => {
@@ -701,6 +696,24 @@ pub(super) async fn get_agent_at(dirs: &[PathBuf], name: &str) -> Response {
                 Json(serde_json::json!({ "error": "failed to read agent config" })),
             )
                 .into_response();
+        }
+    };
+    // #7396: a GET must not write. This used to call `memory_grants::migrate`,
+    // which takes the cross-process manifest lock and rewrites the file, so
+    // every read serialized behind that lock and a lock or I/O failure became a
+    // 500 on a plain read. The repair is applied to the SERVED view only; the
+    // write paths (`migrate_chat` from dispatch, the knowledge pipeline, and
+    // subagent startup) are what persist it.
+    let raw = match crate::assistants::memory_grants::repaired(dirs, name, &raw) {
+        Ok(Some(doc)) => doc.to_string(),
+        Ok(None) => raw,
+        Err(error) => {
+            tracing::warn!(
+                ?error,
+                agent = name,
+                "get_agent_at: memory-grant view unavailable"
+            );
+            raw
         }
     };
     match parse_agent_toml(&raw, name) {

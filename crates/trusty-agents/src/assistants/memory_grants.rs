@@ -14,6 +14,62 @@ pub async fn migrate_chat(name: &str, input: &str) -> Result<()> {
     migrate(&crate::agents::agents_dir_candidates(), name).await
 }
 
+/// The repair itself, decided and applied in memory against one manifest text.
+///
+/// Why (#7396): the repaired view is what both a read and a write want, but
+/// only a write may persist it. Keeping the decision here — pure, no lock, no
+/// I/O beyond the config load the caller already pays for — lets
+/// `GET /api/agents/{name}` serve the migrated config without rewriting the
+/// manifest, which used to take a cross-process lock and turn a lock or I/O
+/// failure into a 500 on a plain read.
+/// What: returns the repaired document, or `None` when the repair does not
+/// apply — any Settings revision or skill restriction prevents expansion. The
+/// `settings_revision` stamp is NOT set here: it marks the repair as persisted,
+/// so only [`migrate`] writes it, and a read stays byte-deterministic.
+/// Test: `migration_preserves_later_tool_revocation`,
+/// `a_get_serves_the_migrated_view_without_writing_the_manifest`.
+pub(crate) fn repaired(
+    dirs: &[PathBuf],
+    name: &str,
+    raw: &str,
+) -> Result<Option<toml_edit::DocumentMut>> {
+    let mut doc = raw.parse::<toml_edit::DocumentMut>()?;
+    if doc.get("settings_revision").is_some() {
+        return Ok(None);
+    }
+    if !doc
+        .get("tools")
+        .and_then(|t| t.get("allow"))
+        .and_then(toml_edit::Item::as_array)
+        .is_some_and(|a| a.iter().any(|p| p.as_str() == Some("memory_recall")))
+    {
+        return Ok(None);
+    }
+    let config = crate::agents::AgentConfig::by_name_in(dirs, name)?;
+    if !super::is_assistant_role(&config.agent.role)
+        || config.skills.allow.is_some()
+        || !crate::tools::assistant_memory::scope_granted(&config, "memory.write")
+    {
+        return Ok(None);
+    }
+    let Some(allow) = doc
+        .get_mut("tools")
+        .and_then(|t| t.get_mut("allow"))
+        .and_then(toml_edit::Item::as_array_mut)
+    else {
+        return Ok(None);
+    };
+    if !allow.iter().any(|p| p.as_str() == Some("memory_recall")) {
+        return Ok(None);
+    }
+    for name in ["memory_remember", "memory_write"] {
+        if !allow.iter().any(|p| p.as_str() == Some(name)) {
+            allow.push(name);
+        }
+    }
+    Ok(Some(doc))
+}
+
 /// Why: legacy configs grant the write scope but omit the durable tool names.
 /// What: persist the repair once; any Settings revision or skill restriction prevents expansion.
 /// Test: `migration_preserves_later_tool_revocation`.
@@ -24,40 +80,9 @@ pub async fn migrate(dirs: &[PathBuf], name: &str) -> Result<()> {
     };
     let _guard = crate::knowledge::execution::mutation_guard(&manifest).await?;
     let raw = tokio::fs::read_to_string(&manifest).await?;
-    let mut doc = raw.parse::<toml_edit::DocumentMut>()?;
-    if doc.get("settings_revision").is_some() {
-        return Ok(());
-    }
-    if !doc
-        .get("tools")
-        .and_then(|t| t.get("allow"))
-        .and_then(toml_edit::Item::as_array)
-        .is_some_and(|a| a.iter().any(|p| p.as_str() == Some("memory_recall")))
-    {
-        return Ok(());
-    }
-    let config = crate::agents::AgentConfig::by_name_in(dirs, name)?;
-    if !super::is_assistant_role(&config.agent.role)
-        || config.skills.allow.is_some()
-        || !crate::tools::assistant_memory::scope_granted(&config, "memory.write")
-    {
-        return Ok(());
-    }
-    let Some(allow) = doc
-        .get_mut("tools")
-        .and_then(|t| t.get_mut("allow"))
-        .and_then(toml_edit::Item::as_array_mut)
-    else {
+    let Some(mut doc) = repaired(dirs, name, &raw)? else {
         return Ok(());
     };
-    if !allow.iter().any(|p| p.as_str() == Some("memory_recall")) {
-        return Ok(());
-    }
-    for name in ["memory_remember", "memory_write"] {
-        if !allow.iter().any(|p| p.as_str() == Some(name)) {
-            allow.push(name);
-        }
-    }
     doc["settings_revision"] = toml_edit::value(uuid::Uuid::new_v4().to_string());
     let path = manifest.canonicalize()?;
     crate::knowledge::persistence::write_bytes(&path, doc.to_string().as_bytes())?;
