@@ -116,11 +116,6 @@ enum Spec {
     },
 }
 
-/// The out-of-repo server specs a project declaration may match.
-///
-/// Why: normalizing the known set once per launch keeps the per-entry cost to
-/// one candidate normalization, instead of re-resolving every builtin and
-/// registry command for every entry in the file.
 /// What one project-declared entry was found to be.
 ///
 /// Why: "not known" has two operator-actionable shapes, and collapsing them
