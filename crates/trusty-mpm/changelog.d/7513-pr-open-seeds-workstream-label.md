@@ -1,0 +1,2 @@
+Fixed
+- `tm pr open` now creates the `ws/<session>` label it is about to apply, with `gh label create --force`, before calling `gh pr create` — so the pause publisher's PR-open path no longer fails on a repository that has never seen that label, which it could not seed itself because `tm issue seed-labels` reads a tmux session name the daemon does not have. The seed is best-effort and warns rather than failing the open; `--dry-run` prints it alongside the create (#7513).

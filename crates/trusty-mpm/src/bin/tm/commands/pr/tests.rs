@@ -939,12 +939,82 @@ fn open_failure_exits_two_without_calling_gh() {
 fn open_creates_and_reports() {
     let (_d, path) = scratch_body(&full_body());
     let args = open_args(&path.to_string_lossy());
-    let gh = FakeGh::new().on("pr create", "https://github.com/o/r/pull/4242\n");
+    let gh = FakeGh::new()
+        .on("label create", "")
+        .on("pr create", "https://github.com/o/r/pull/4242\n");
     let code = open::run(&gh, &args, &FakePreflight::ok()).expect("create succeeds");
     assert_eq!(code, super::EXIT_OK);
     let calls = gh.calls();
-    assert_eq!(calls.len(), 1);
-    assert!(calls[0].join(" ").contains("--label ws/tm-test-01"));
+    // #7513: the label seed, then the create that applies it.
+    assert_eq!(calls.len(), 2);
+    assert!(calls[1].join(" ").contains("--label ws/tm-test-01"));
+}
+
+/// REGRESSION (#7513): `gh pr create --label ws/<x>` fails outright on a label
+/// the repository has never seen, and the caller that hits that hardest —
+/// `session_context_pause`, publishing from inside the daemon — has no tmux
+/// session for `tm issue seed-labels` to read. So the open seeds the label
+/// itself, BEFORE the create, and with `--force` so re-running is a no-op.
+/// Red before the fix: the only `gh` call is `pr create`.
+#[test]
+fn open_seeds_the_workstream_label_before_creating_7513() {
+    let (_d, path) = scratch_body(&full_body());
+    let args = open_args(&path.to_string_lossy());
+    let gh = FakeGh::new()
+        .on("label create", "")
+        .on("pr create", "https://github.com/o/r/pull/4242\n");
+
+    assert_eq!(
+        open::run(&gh, &args, &FakePreflight::ok()).expect("create succeeds"),
+        super::EXIT_OK
+    );
+
+    let calls = gh.calls();
+    let seed = calls[0].join(" ");
+    assert!(seed.starts_with("label create ws/tm-test-01"), "{seed}");
+    assert!(seed.contains("--force"), "{seed}");
+    assert!(
+        calls[1].join(" ").starts_with("pr create"),
+        "the seed must come first: {:?}",
+        calls[1]
+    );
+}
+
+/// #7513: the seed is not the deliverable. A repository where `gh label create`
+/// fails but the label already exists must still open its PR — and the warning
+/// says which label could not be seeded, so a create that then fails on the
+/// label is not a mystery.
+#[test]
+fn open_still_creates_when_the_label_seed_fails_7513() {
+    let (_d, path) = scratch_body(&full_body());
+    let args = open_args(&path.to_string_lossy());
+    // No `label create` route: FakeGh answers it as a failure.
+    let gh = FakeGh::new().on("pr create", "https://github.com/o/r/pull/4242\n");
+
+    assert_eq!(
+        open::run(&gh, &args, &FakePreflight::ok()).expect("create succeeds"),
+        super::EXIT_OK
+    );
+    assert_eq!(gh.calls().len(), 2, "the create still ran");
+}
+
+/// #7513: `--dry-run` prints the seed alongside the create and still spawns
+/// nothing — adding a second command must not give the rehearsal a side effect.
+#[test]
+fn open_dry_run_spawns_no_gh_for_the_label_seed_7513() {
+    let (_d, path) = scratch_body(&full_body());
+    let mut args = open_args(&path.to_string_lossy());
+    args.dry_run = true;
+    let gh = FakeGh::new();
+
+    assert_eq!(
+        open::run(&gh, &args, &FakePreflight::ok()).expect("dry run"),
+        super::EXIT_OK
+    );
+    assert!(
+        gh.calls().is_empty(),
+        "a dry run must not spawn gh, seed included"
+    );
 }
 
 // ── PR labels / project / milestone standard (#7274) ─────────────────────
@@ -1299,17 +1369,18 @@ fn open_notes_an_unreadable_refs_issue() {
 fn open_records_the_new_pr_for_cleanup() {
     let (_d, path) = scratch_body(&full_body());
     let args = open_args(&path.to_string_lossy());
-    let gh = FakeGh::new().on(
+    let gh = FakeGh::new().on("label create", "").on(
         "pr create",
         "https://github.com/bobmatnyc/trusty-tools/pull/7275\n",
     );
     let pre = FakePreflight::ok();
     let code = open::run(&gh, &args, &pre).expect("create succeeds");
     assert_eq!(code, super::EXIT_OK);
+    // #7513 added the label seed; recording still costs no call of its own.
     assert_eq!(
         gh.calls().len(),
-        1,
-        "recording must not cost a second gh call"
+        2,
+        "recording must not cost a gh call beyond the seed and the create"
     );
 
     let entries = pre.cleanup_registry().entries();
