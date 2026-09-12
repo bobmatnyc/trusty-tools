@@ -253,3 +253,48 @@ fn an_absent_section_reads_as_no_configured_value() {
     let missing = tempfile::tempdir().expect("tempdir");
     assert_eq!(read_configured(missing.path()), None);
 }
+
+/// Why (#7603): [`DiskGate::Pinned`] is the seam that lets a test decide its
+/// own verdict instead of the runner's real disk — if it silently fell back to
+/// measuring the path it would defeat the whole injection.
+/// What: a pinned value comes back unchanged for a path whose real mount usage
+/// (if any) is certainly not the synthetic 99% pinned here.
+/// Test: this test.
+#[test]
+fn a_pinned_gate_measures_nothing() {
+    let pinned = measured(99.0);
+    let gate = DiskGate::Pinned(Some(pinned.clone()));
+    assert_eq!(
+        gate.measurement_for(Path::new("/nonexistent/path")),
+        Some(pinned)
+    );
+
+    let empty_gate = DiskGate::Pinned(None);
+    assert_eq!(empty_gate.measurement_for(Path::new("/")), None);
+}
+
+/// Why (#7603): [`DiskGate::MeasureTarget`] is production behaviour — it must
+/// still delegate to [`measure`] rather than silently going inert.
+/// What: `MeasureTarget` reports the same mount as a direct `measure()` call on
+/// the same path. `usage_pct` is read live twice, so it is compared with slack
+/// rather than for exact equality — the point is delegation, not a frozen
+/// percentage.
+/// Test: this test.
+#[test]
+fn the_default_gate_measures_the_real_mount() {
+    let path = Path::new(".");
+    assert_eq!(DiskGate::default(), DiskGate::MeasureTarget);
+    let via_gate = DiskGate::MeasureTarget.measurement_for(path);
+    let direct = measure(path);
+    match (via_gate, direct) {
+        (Some(a), Some(b)) => {
+            assert_eq!(a.mount_point, b.mount_point);
+            assert!(
+                (a.usage_pct - b.usage_pct).abs() < 1.0,
+                "usage_pct drifted more than expected between two live reads: {a:?} vs {b:?}"
+            );
+        }
+        (None, None) => {}
+        (a, b) => panic!("MeasureTarget and a direct measure() disagree: {a:?} vs {b:?}"),
+    }
+}

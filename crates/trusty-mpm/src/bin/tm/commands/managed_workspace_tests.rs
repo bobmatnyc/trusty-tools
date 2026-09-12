@@ -39,11 +39,50 @@
 use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
+use trusty_mpm::core::disk_usage_guard::{DiskGate, MeasuredMount};
 use trusty_mpm::daemon::managed_routes::inproject;
 use trusty_mpm::project::{Project, ProjectRegistry};
 use trusty_mpm::session_manager::ManagedSessionId;
 
-use super::{LaunchDir, ManagedWorkspace, provision_for_fallback, provision_for_launch};
+use super::{
+    LaunchDir, ManagedWorkspace, provision_for_fallback, provision_for_launch,
+    provision_for_launch_gated,
+};
+
+/// A disk gate pinned to an empty mount, for the tests that create a worktree.
+///
+/// Why (#7603): `provision_*` measures the REAL mount its worktree would land on
+/// and reads `disk.max_usage_pct` from the operator's REAL
+/// `~/.trusty-tools/trusty-mpm/config.yaml`, so the three worktree-creating
+/// tests below decided their verdict from how full this machine happens to be —
+/// they passed 12764/0 and went red forty minutes later on identical code. None
+/// of them asserts anything about disk. `$HOME` cannot be redirected out of that
+/// read from a `tm`-bin test, because `env_isolation_tests.rs` bans writing it,
+/// so the measurement is injected instead.
+/// What: a synthetic mount at 0.0%, which is below every threshold
+/// `resolve_max_usage_pct` will accept (`1..=100`) — so no operator config, and
+/// no host, can make these tests refuse.
+/// Test: used by every worktree-creating test below.
+fn empty_disk() -> DiskGate {
+    DiskGate::Pinned(Some(MeasuredMount {
+        mount_point: "/fixture-mount".to_string(),
+        usage_pct: 0.0,
+    }))
+}
+
+/// A disk gate pinned ABOVE any threshold `resolve_max_usage_pct` accepts.
+///
+/// Why: the counterpart to [`empty_disk`] — the injection would be an off switch
+/// if a pinned value could only ever allow. Pinning 100.0 has to refuse.
+/// What: a synthetic mount at 100.0%, at or above every accepted threshold.
+/// Test: `a_pinned_over_threshold_gate_refuses_a_launch_worktree`,
+/// `a_pinned_over_threshold_gate_refuses_a_fallback_worktree`.
+fn full_disk() -> DiskGate {
+    DiskGate::Pinned(Some(MeasuredMount {
+        mount_point: "/fixture-mount".to_string(),
+        usage_pct: 100.0,
+    }))
+}
 
 /// RAII override of `TRUSTY_MPM_REPOS_ROOT`, restored on drop (incl. unwind).
 ///
@@ -390,13 +429,16 @@ async fn provision_for_launch_explicit_request_creates_worktree() {
     let live = tempfile::tempdir().unwrap();
     let session_id = ManagedSessionId::new();
 
-    let workspace = provision_for_launch(
+    // #7603: pin the measurement — this test asserts the `--worktree` request
+    // reaches the filesystem, never anything about the host's volume.
+    let workspace = provision_for_launch_gated(
         origin,
         &base,
         live.path(),
         true,
         LaunchDir::OperatorCwd,
         &session_id,
+        &empty_disk(),
     )
     .await
     .unwrap();
@@ -560,12 +602,21 @@ async fn provision_for_fallback_opted_out_creates_no_clone_and_no_worktree() {
     let git_root = tempfile::tempdir().unwrap();
     let session_id = ManagedSessionId::new();
 
-    let workspace = provision_for_fallback(registry.path(), origin, git_root.path(), &session_id)
-        .await
-        .expect(
-            "#4300: an opted-out project must not attempt a clone at all — a clone \
+    // #7603: the opted-out branch returns before the gate is consulted at all,
+    // so the pin here is belt-and-braces — it keeps the test's verdict
+    // independent of the host even if that ordering ever changes.
+    let workspace = provision_for_fallback(
+        registry.path(),
+        origin,
+        git_root.path(),
+        &session_id,
+        &empty_disk(),
+    )
+    .await
+    .expect(
+        "#4300: an opted-out project must not attempt a clone at all — a clone \
              error here means the opt-out was never consulted",
-        );
+    );
 
     assert_eq!(
         workspace,
@@ -611,9 +662,17 @@ async fn provision_for_fallback_unset_creates_worktree_not_live_checkout() {
     let git_root = tempfile::tempdir().unwrap();
     let session_id = ManagedSessionId::new();
 
-    let workspace = provision_for_fallback(registry.path(), origin, git_root.path(), &session_id)
-        .await
-        .unwrap();
+    // #7603: pin the measurement — the subject is the unset-`worktree` default,
+    // not the host's disk.
+    let workspace = provision_for_fallback(
+        registry.path(),
+        origin,
+        git_root.path(),
+        &session_id,
+        &empty_disk(),
+    )
+    .await
+    .unwrap();
 
     let expected = expected_worktree(&base, &session_id);
     assert_eq!(
@@ -660,11 +719,13 @@ async fn provision_for_fallback_other_projects_optout_does_not_leak() {
     let git_root = tempfile::tempdir().unwrap();
     let session_id = ManagedSessionId::new();
 
+    // #7603: pin the measurement — the subject is registry keying, not disk.
     let workspace = provision_for_fallback(
         registry.path(),
         "https://github.invalid/fixture-owner/fallback-repo.git",
         git_root.path(),
         &session_id,
+        &empty_disk(),
     )
     .await
     .unwrap();
@@ -679,5 +740,160 @@ async fn provision_for_fallback_other_projects_optout_does_not_leak() {
         expected.is_dir(),
         "worktree must exist at {}",
         expected.display()
+    );
+}
+
+// ── The #7603 injection itself ───────────────────────────────────────────────
+//
+// The three tests above now pin their measurement, which is only trustworthy if
+// pinning still gates. These two prove it does in the refusing direction, and
+// the third proves the gated path stops consulting the host at all.
+
+/// A pinned OVER-threshold measurement still refuses a `tm launch --worktree`
+/// (#7603).
+///
+/// Why: `DiskGate::Pinned` would be an off switch rather than an injection if a
+/// pinned value could only ever allow. The gate has deliberately none (#7497),
+/// and this change must not introduce one — the threshold still comes from the
+/// operator's config and a pinned 100% is at or above every value it accepts.
+/// What: the same fixture as
+/// `provision_for_launch_explicit_request_creates_worktree`, with [`full_disk`]
+/// instead of [`empty_disk`]. Asserts the call fails, that the refusal names the
+/// gate, and that NO worktree directory was created.
+/// Test: this is the test. RED if `Pinned` were ever taken as "skip the gate".
+#[tokio::test]
+async fn a_pinned_over_threshold_gate_refuses_a_launch_worktree() {
+    let origin = "https://github.invalid/fixture-owner/isolated-repo";
+
+    let repos_root = tempfile::tempdir().unwrap();
+    let base = repos_root
+        .path()
+        .join("fixture-owner")
+        .join("isolated-repo");
+    init_git_repo(&base);
+    let live = tempfile::tempdir().unwrap();
+    let session_id = ManagedSessionId::new();
+
+    let err = provision_for_launch_gated(
+        origin,
+        &base,
+        live.path(),
+        true,
+        LaunchDir::OperatorCwd,
+        &session_id,
+        &full_disk(),
+    )
+    .await
+    .expect_err("a pinned 100% mount is at or above every accepted threshold");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("refusing to create a worktree")
+            && message.contains("/fixture-mount")
+            && message.contains("disk.max_usage_pct"),
+        "#7603: the refusal must be the disk gate's own, naming the PINNED \
+         mount — got: {message}"
+    );
+    assert!(
+        !expected_worktree(&base, &session_id).exists(),
+        "#7497: a refused gate must create nothing"
+    );
+}
+
+/// A pinned OVER-threshold measurement still refuses on the fallback path
+/// (#7603).
+///
+/// Why: the two entry points must not drift into disagreeing about the gate —
+/// the same reason `check_measured` and `bash_refusal` share one threshold.
+/// What: the `provision_for_fallback_unset_creates_worktree_not_live_checkout`
+/// fixture with [`full_disk`]; asserts the refusal and that neither the base
+/// clone's `.worktrees` nor the live checkout gained anything.
+/// Test: this is the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_pinned_over_threshold_gate_refuses_a_fallback_worktree() {
+    let origin = "https://github.invalid/fixture-owner/fallback-repo.git";
+    let registry = registry_with("https://github.invalid/fixture-owner/fallback-repo", None).await;
+
+    let repos_root = tempfile::tempdir().unwrap();
+    let _guard = ReposRootGuard::set(repos_root.path());
+    let base = repos_root
+        .path()
+        .join("fixture-owner")
+        .join("fallback-repo");
+    init_git_repo(&base);
+    let git_root = tempfile::tempdir().unwrap();
+    let session_id = ManagedSessionId::new();
+
+    let err = provision_for_fallback(
+        registry.path(),
+        origin,
+        git_root.path(),
+        &session_id,
+        &full_disk(),
+    )
+    .await
+    .expect_err("a pinned 100% mount must refuse on the fallback path too");
+
+    assert!(
+        err.to_string().contains("refusing to create a worktree"),
+        "#7603: expected the disk gate's refusal, got: {err}"
+    );
+    assert!(
+        !expected_worktree(&base, &session_id).exists(),
+        "#7497: a refused gate must create nothing"
+    );
+    assert!(
+        !git_root.path().join(".worktrees").exists(),
+        "#1724: the live checkout must stay untouched on a refusal too"
+    );
+}
+
+/// A pinned gate reads neither the host's mount nor the operator's config
+/// (#7603).
+///
+/// Why: this is the property the whole change exists for, and it is not implied
+/// by the two refusal tests above — those would also pass if `Pinned` merely
+/// *added* a second measurement beside the real one. The verdict must come from
+/// the pinned value ALONE, so that a host at 99% and a host at 1% agree.
+/// What: pins 0.0% for a worktree whose path is a real directory on this
+/// machine's volume, and asserts it is created. On a host at or above the
+/// operator's `disk.max_usage_pct` the unpinned path refuses this exact call —
+/// which is the six-test red the issue reports.
+/// Test: this is the test. RED at 53f95234: `provision_for_launch` measured the
+/// real mount and refused with "/simulated-full-volume is at 99.0% disk usage,
+/// at or above the disk.max_usage_pct threshold of 90%".
+#[tokio::test]
+async fn a_pinned_gate_keeps_a_launch_worktree_off_the_hosts_disk() {
+    let origin = "https://github.invalid/fixture-owner/isolated-repo";
+
+    let repos_root = tempfile::tempdir().unwrap();
+    let base = repos_root
+        .path()
+        .join("fixture-owner")
+        .join("isolated-repo");
+    init_git_repo(&base);
+    let live = tempfile::tempdir().unwrap();
+    let session_id = ManagedSessionId::new();
+
+    let workspace = provision_for_launch_gated(
+        origin,
+        &base,
+        live.path(),
+        true,
+        LaunchDir::OperatorCwd,
+        &session_id,
+        &empty_disk(),
+    )
+    .await
+    .expect(
+        "#7603: a pinned 0% measurement must decide this call, whatever the \
+         host's volume and the operator's disk.max_usage_pct say",
+    );
+
+    assert_eq!(
+        workspace,
+        ManagedWorkspace::Worktree(expected_worktree(&base, &session_id)),
+        "the pinned measurement must be the one the gate applied"
     );
 }
