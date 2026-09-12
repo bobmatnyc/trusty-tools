@@ -666,13 +666,21 @@ pub(crate) async fn search_report(
     // lazily restored from the cold store (which never spawns a watcher). Resume
     // watching so future saves index incrementally, and — only when we actually
     // (re)establish a watcher — kick a background reconcile to catch edits made
-    // while it was unwatched. The `is_watching` re-check keeps this a no-op when
+    // while it was unwatched. The post-spawn re-check keeps this a no-op when
     // `TRUSTY_DISABLE_WATCHER=1` (spawn is a no-op), so we never spin a reconcile
     // on every query in that mode. The query itself served current in-memory
     // state; the reconcile converges any missed edits for subsequent queries.
-    if !state.watcher_manager.is_watching(&index_id).await {
+    //
+    // #7434: gated on `needs_root_resync` (does EVERY root have a live watch?)
+    // rather than `is_watching` (does ANY?). A multi-root index whose second
+    // root failed to spawn answers `is_watching` true, so the old gate never
+    // retried it — that tree stopped updating until the next registration
+    // event or a daemon restart. The reconcile is gated on the same predicate
+    // going false, i.e. on the retry actually succeeding: a root that keeps
+    // failing must not spawn a reconcile on every query.
+    if state.watcher_manager.needs_root_resync(&handle).await {
         state.watcher_manager.spawn_for_index(&handle).await;
-        if state.watcher_manager.is_watching(&index_id).await {
+        if !state.watcher_manager.needs_root_resync(&handle).await {
             let woken = Arc::clone(&handle);
             let summary = Arc::clone(&state.reconcile_summary);
             tokio::spawn(crate::service::reconcile::reconcile_one_index(

@@ -27,6 +27,16 @@ Added
   `watcher.roots`, one row per root reporting `watching` / `degraded` /
   `failed` with its reason; the existing `watcher` fields are unchanged
   (#7434).
+- A query now retries a root whose watch failed. The watcher wake-up on the
+  query path asked whether ANY root was watched, which a multi-root index
+  answers `true` to while one of its trees is dead — so a root that failed to
+  spawn stayed dead until a registration event or a daemon restart. It asks
+  whether EVERY root is watched instead, and kicks the catch-up reconcile only
+  when the retry actually succeeds, so a permanently failing root costs one
+  spawn attempt per query and no reconcile storm. The network-mount refusal is
+  not retried here — it is a settled verdict, and re-asking it per query would
+  buy a `statfs` on the hot path. `watcher.active`, `/health` and the
+  idle-suspend ticker keep the any-of-N reading they want (#7434).
 - MCP tool `add_root` (`index_id`, `roots`) adds directory trees to an existing
   index, and `create_index` accepts the same `roots` list at registration — the
   multi-root surface is reachable from an MCP client rather than only over

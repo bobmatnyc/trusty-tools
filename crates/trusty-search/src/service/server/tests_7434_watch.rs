@@ -108,6 +108,115 @@ async fn add_root_spawns_a_watch_for_the_new_root() {
     state.watcher_manager.stop_all().await;
 }
 
+/// Run one search against `id`, ignoring the body.
+///
+/// Why: the watcher wake-up this file's last test is about runs inside
+/// `search_report`, before the ranking it is not testing. The body can be an
+/// error (an empty index has nothing to return) without invalidating the
+/// claim — what matters is that the wake-up ran, which it does after the
+/// corpus check and before any lane.
+/// What: a minimal lexical query through the real query entry point.
+/// Test: used by `query_retries_a_root_whose_watch_failed`.
+async fn query_once(state: &Arc<SearchAppState>, id: &str) {
+    let _ = super::search::search_report(
+        state,
+        id,
+        crate::core::indexer::SearchQuery {
+            text: "anything".to_string(),
+            top_k: 1,
+            expand_graph: false,
+            compact: false,
+            branch_files: None,
+            branch_boost: 1.5,
+            branch: None,
+            stage: Some(crate::core::indexer::SearchStage::Lexical),
+            mode: crate::core::indexer::SearchMode::Code,
+            exclude_archived: false,
+            refine_query: None,
+            path_prefix: None,
+            repos: Vec::new(),
+        },
+    )
+    .await;
+}
+
+/// A root whose watch failed is retried by the next query.
+///
+/// Why (#7434): the query path's watcher wake-up was gated on `is_watching`,
+/// which answers `true` for a PARTIALLY watched index. An index whose second
+/// root failed to spawn — the tree unreadable at boot, an inotify limit — was
+/// therefore never retried: the gate saw a live watcher and skipped the
+/// resync, so that tree stopped updating until a registration event or a
+/// daemon restart. Gating on `needs_root_resync` instead is what makes the
+/// next query retry it.
+/// What: builds a two-root index, drops both watches and removes the second
+/// tree, then queries — establishing the pre-fix state exactly (one root
+/// watched, one failed, `is_watching` true). Restores the tree and queries
+/// again: the retry must install the missing watch. Against the `is_watching`
+/// gate the second query is a no-op and the final assertion fails at 1 watched
+/// root.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn query_retries_a_root_whose_watch_failed() {
+    let (_dp, primary) = super::test_support::allowlisted_index_root("ts-7434-rq-p-");
+    let (_dx, extra) = super::test_support::allowlisted_index_root("ts-7434-rq-x-");
+    let state = mock_state_async().await;
+    let id = "retry-root-watch";
+
+    create_index(&state, id, &primary).await;
+    add_roots(&state, id, vec![extra.clone()]).await;
+
+    // The boot state this test is about: nothing watched yet, and the second
+    // tree unreadable, so its spawn will fail while the primary's succeeds.
+    state
+        .watcher_manager
+        .stop_for_index(&IndexId::new(id))
+        .await;
+    std::fs::remove_dir_all(&extra).expect("remove the second tree");
+
+    query_once(&state, id).await;
+    assert_eq!(
+        state.watcher_manager.watched_root_count().await,
+        1,
+        "only the readable root can be watched"
+    );
+    assert!(
+        state.watcher_manager.is_watching(&IndexId::new(id)).await,
+        "precondition: the old gate saw a live watcher and stopped here"
+    );
+    let rows = state
+        .watcher_manager
+        .root_watch_states(&IndexId::new(id))
+        .await;
+    assert!(
+        rows.iter()
+            .any(|r| r.slot == Some(0) && r.state == "failed"),
+        "the second root must be recorded as failed: {rows:?}"
+    );
+
+    // The tree comes back. Nothing re-registers the index, so the next query
+    // is the only thing that can notice.
+    std::fs::create_dir_all(&extra).expect("restore the second tree");
+    query_once(&state, id).await;
+
+    let rows = state
+        .watcher_manager
+        .root_watch_states(&IndexId::new(id))
+        .await;
+    assert_eq!(
+        state.watcher_manager.watched_root_count().await,
+        2,
+        "the next query must retry the failed root: {rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|r| r.slot == Some(0) && r.state == "watching"),
+        "and it must be live again: {rows:?}"
+    );
+
+    state.watcher_manager.stop_all().await;
+}
+
 /// Why: `GET /indexes/:id/status` answered `watcher.active` plus one reason
 /// string, which cannot express "two of three trees are watched" — an index
 /// with a dead root looks identical to a healthy one. The pre-existing fields

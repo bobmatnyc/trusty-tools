@@ -580,11 +580,13 @@ impl WatcherManager {
     /// watcher — either idle-suspended (`server::tickers`) or lazily restored
     /// from the cold store — so it can resume watching and reconcile on wake.
     /// What: `true` when at least one root has a live watch (#7434). A
-    /// PARTIALLY watched index answers `true` here on purpose: the wake-up
-    /// path's job is to restart a suspended index, and `spawn_for_index` is
-    /// idempotent per root, so the unwatched roots are picked up by the next
-    /// registration event rather than by a full teardown. Which roots are
-    /// unwatched is what [`Self::root_watch_states`] answers.
+    /// PARTIALLY watched index answers `true` here on purpose — this is the
+    /// any-of-N reading the idle-suspend ticker, `watcher.active` and
+    /// `/health` all want. The query path asks
+    /// [`Self::needs_root_resync`] instead, which is the all-of-N one, so a
+    /// root that failed to spawn is retried on the next query rather than
+    /// waiting for a registration event. Which roots are unwatched is what
+    /// [`Self::root_watch_states`] answers.
     /// Test: `is_watching_reflects_spawn_and_stop`.
     pub async fn is_watching(&self, id: &IndexId) -> bool {
         self.inner
@@ -592,6 +594,40 @@ impl WatcherManager {
             .await
             .get(id)
             .is_some_and(|entries| entries.iter().any(|e| e.state.is_watching()))
+    }
+
+    /// Does this index have a root whose watch is worth retrying right now?
+    ///
+    /// Why (#7434): [`Self::is_watching`] answers `true` for a PARTIALLY
+    /// watched index, and the query path's wake-up is gated on it. An index
+    /// whose second root failed to spawn at boot therefore never retried:
+    /// nothing re-asked until a registration event arrived, so that tree
+    /// stopped updating until the daemon restarted. Asking "is every root
+    /// watched" instead of "is any root watched" is what makes the next query
+    /// retry it. Kept as a separate predicate rather than changing
+    /// `is_watching`'s meaning, because three other callers depend on the
+    /// any-of-N reading — the idle-suspend ticker (which would stop suspending
+    /// a partially watched index), `/indexes/:id/status`'s `watcher.active`,
+    /// and `/health` — and none of them is asking about a retry.
+    /// What: `true` when a root in `handle`'s CURRENT table has no entry at
+    /// all, or an entry in [`RootWatchState::Failed`]. A
+    /// [`RootWatchState::Degraded`] root is NOT retried here: it is #3408's
+    /// deliberate network-mount refusal, and re-asking it per query would buy
+    /// a `statfs` and a warning log on the hot path for a verdict that cannot
+    /// change without the mount changing. Registration events still retry it,
+    /// exactly as before.
+    /// Test: `failed_root_needs_resync_and_degraded_root_does_not`,
+    /// `server::tests_7434_watch::query_retries_a_root_whose_watch_failed`.
+    pub async fn needs_root_resync(&self, handle: &Arc<IndexHandle>) -> bool {
+        let table = WatchedRoot::table(&handle.root_path, &handle.additional_roots);
+        let guard = self.inner.lock().await;
+        let entries = guard.get(&handle.id);
+        table.iter().any(|root| {
+            match entries.and_then(|e| e.iter().find(|w| w.root == root.raw())) {
+                None => true,
+                Some(entry) => matches!(entry.state, RootWatchState::Failed { .. }),
+            }
+        })
     }
 
     /// Number of indexes whose watcher was refused because their root was
@@ -1092,6 +1128,59 @@ mod tests {
             "a spawn failure is not the #3408 network-mount refusal"
         );
 
+        mgr.stop_all().await;
+    }
+
+    /// Why: `is_watching` answers `true` for the partially-watched index the
+    /// test above builds, and the query path's watcher wake-up was gated on
+    /// it — so the failed root was never retried until a registration event
+    /// arrived. `needs_root_resync` is the all-of-N reading that makes the
+    /// retry possible, and it must NOT also re-ask the #3408 network-mount
+    /// refusal, which is a settled verdict rather than a transient failure.
+    /// Test: this test.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_root_needs_resync_and_degraded_root_does_not() {
+        let primary = tempfile::tempdir().expect("tempdir primary");
+        let missing = primary.path().join("gone");
+        let handle = multi_root_handle("resync-retry", primary.path(), vec![missing.clone()]);
+        let mgr = WatcherManager::new();
+
+        mgr.spawn_for_index(&handle).await;
+        assert!(
+            mgr.is_watching(&handle.id).await,
+            "precondition: the any-of-N answer hides the dead root"
+        );
+        assert!(
+            mgr.needs_root_resync(&handle).await,
+            "a root recorded as failed is worth retrying"
+        );
+
+        // The tree comes back; the next resync must pick it up.
+        std::fs::create_dir_all(&missing).expect("recreate the missing root");
+        mgr.spawn_for_index(&handle).await;
+        assert!(
+            !mgr.needs_root_resync(&handle).await,
+            "a fully watched index needs nothing: {:?}",
+            mgr.root_watch_states(&handle.id).await
+        );
+        assert_eq!(mgr.watched_root_count().await, 2);
+        mgr.stop_all().await;
+
+        // #3408's refusal is deliberate, and re-asking it per query would buy a
+        // `statfs` and a warning for a verdict that cannot change here.
+        let network = tempfile::tempdir().expect("tempdir network");
+        let degraded = multi_root_handle("resync-degraded", network.path(), vec![]);
+        let mgr = WatcherManager::new();
+        mgr.spawn_for_index_with_mount_kind(&degraded, MountKind::Network)
+            .await;
+        assert!(
+            !mgr.is_watching(&degraded.id).await,
+            "precondition: a network-degraded root has no live watch"
+        );
+        assert!(
+            !mgr.needs_root_resync(&degraded).await,
+            "a degraded root is not retried on every query"
+        );
         mgr.stop_all().await;
     }
 
