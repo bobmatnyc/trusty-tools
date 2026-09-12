@@ -60,6 +60,7 @@ use trusty_common::memory_rpc::{MemoryRpcError, call_memory_tool_at_with_timeout
 use uuid::Uuid;
 
 use crate::memory::redb_usearch::RedbUsearchStore;
+use crate::memory::scope::{self, MemoryScope};
 use crate::memory::store::{MemoryResult, MemoryStore, Segment};
 
 /// The socket the trusty-memory daemon serves on.
@@ -103,6 +104,9 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(5);
 /// `auto_detect_falls_back_to_local`, and the live-socket round-trip tests.
 pub struct TrustyMemoryClient {
     socket: PathBuf,
+    /// The assistant this client speaks for, when it speaks for one (#7443).
+    /// `None` keeps the pre-#7443 single-tenant palace ids.
+    scope: Option<MemoryScope>,
     /// Palace ids this client has already created/confirmed. Avoids a
     /// `palace_create` round-trip on every `insert`.
     ensured_palaces: RwLock<HashSet<String>>,
@@ -117,6 +121,24 @@ impl TrustyMemoryClient {
     pub fn new(socket: impl Into<PathBuf>) -> Self {
         Self {
             socket: socket.into(),
+            scope: None,
+            ensured_palaces: RwLock::new(HashSet::new()),
+        }
+    }
+
+    /// A client whose palaces belong to ONE assistant (#7443).
+    ///
+    /// Why: the daemon's palace namespace is shared by every process that
+    /// dials it, so an unscoped client is a cross-assistant leak the moment two
+    /// assistants use the native memory tools. `scope` is #7428's resolved
+    /// palace for the calling assistant.
+    /// What: [`Self::new`] plus the scope that [`scope::palace_id`] folds into
+    /// every palace id this client addresses.
+    /// Test: `scoped_clients_address_scoped_palaces`.
+    pub fn new_for_assistant(socket: impl Into<PathBuf>, scope: MemoryScope) -> Self {
+        Self {
+            socket: socket.into(),
+            scope: Some(scope),
             ensured_palaces: RwLock::new(HashSet::new()),
         }
     }
@@ -145,15 +167,15 @@ impl TrustyMemoryClient {
         format!("mem:{}:{}", segment.prefix(), id)
     }
 
-    /// Deterministic palace id for `segment` — one palace per segment.
+    /// Deterministic palace id for `segment` under this client's scope.
     ///
-    /// Why: mirrors the `trusty-agents-{prefix}` naming convention already
-    /// established by `TrustyBackedMemoryStore::palace_id_for` for the
-    /// in-process Palace adapter, so an operator browsing the daemon's admin
-    /// UI sees a consistent naming scheme regardless of which trusty-agents
-    /// adapter wrote the data.
-    fn palace_id_for(segment: Segment) -> String {
-        format!("trusty-agents-{}", segment.prefix())
+    /// Why (#7443): this used to be a second copy of the format string
+    /// `TrustyBackedMemoryStore` also carried, kept in step by a doc comment
+    /// pointing at the other. [`scope::palace_id`] is now the one
+    /// implementation both adapters call, so the naming an operator sees in the
+    /// daemon's admin UI cannot drift between them.
+    fn palace_id_for(&self, segment: Segment) -> String {
+        scope::palace_id(self.scope.as_ref(), segment)
     }
 
     /// Ensure `segment`'s palace exists on the daemon, creating it on first
@@ -172,7 +194,7 @@ impl TrustyMemoryClient {
     /// test — `insert` calls this on every write, so the round trip exercises
     /// palace auto-creation as a side effect).
     async fn ensure_palace(&self, segment: Segment) -> Result<()> {
-        let palace_id = Self::palace_id_for(segment);
+        let palace_id = self.palace_id_for(segment);
         {
             let cache = self
                 .ensured_palaces
@@ -316,7 +338,7 @@ impl MemoryStore for TrustyMemoryClient {
         let _ = vector;
 
         self.ensure_palace(segment).await?;
-        let palace_id = Self::palace_id_for(segment);
+        let palace_id = self.palace_id_for(segment);
         let ns_id = Self::ns_id(segment, id);
 
         let existing = self
@@ -399,7 +421,7 @@ impl MemoryStore for TrustyMemoryClient {
     }
 
     async fn get(&self, segment: Segment, id: &str) -> Result<Option<Value>> {
-        let palace_id = Self::palace_id_for(segment);
+        let palace_id = self.palace_id_for(segment);
         let ns_id = Self::ns_id(segment, id);
         let Some(row) = self
             .find_by_tag(&palace_id, &ns_id)
@@ -420,7 +442,7 @@ impl MemoryStore for TrustyMemoryClient {
     }
 
     async fn delete(&self, segment: Segment, id: &str) -> Result<()> {
-        let palace_id = Self::palace_id_for(segment);
+        let palace_id = self.palace_id_for(segment);
         let ns_id = Self::ns_id(segment, id);
         let Some(row) = self
             .find_by_tag(&palace_id, &ns_id)

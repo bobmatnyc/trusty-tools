@@ -32,6 +32,7 @@ use trusty_common::memory_core::store::PalaceStore;
 use trusty_common::memory_core::store::payload_store::PayloadStore;
 use trusty_common::memory_core::store::vector::VectorStore;
 
+use crate::memory::scope::{self, MemoryScope};
 use crate::memory::store::{MemoryResult, MemoryStore, Segment};
 
 /// Deterministic UUIDv5 namespace used to map trusty-agents string ids onto the
@@ -76,6 +77,10 @@ struct PayloadEntry {
 pub struct TrustyBackedMemoryStore {
     registry: PalaceRegistry,
     data_root: PathBuf,
+    /// The assistant this store belongs to, when it belongs to one (#7443).
+    /// `None` is the single-tenant seeder/CLI store, whose palace ids keep
+    /// their pre-#7443 spelling.
+    scope: Option<MemoryScope>,
     /// `Segment → (string id → (uuid, payload))` plus reverse `uuid → string id`
     /// so search hits can be translated back to the caller's id. Hydrated from
     /// `payloads` on construction; written through on every mutating call.
@@ -107,7 +112,29 @@ impl TrustyBackedMemoryStore {
     /// in a tempdir); `tests::payloads_persist_across_reopen` exercises the
     /// hydrate-on-construct path.
     pub fn new(data_root: impl Into<PathBuf>) -> Result<Self> {
-        let data_root = data_root.into();
+        Self::open(data_root.into(), None)
+    }
+
+    /// An adapter under `data_root` that belongs to ONE assistant (#7443).
+    ///
+    /// Why: [`Self::new`] keys both the palace id and the payload sidecar by
+    /// content-type `Segment` alone, so two assistants sharing a process and a
+    /// data root land in one `trusty-agents-mem` drawer — the leak #7443
+    /// exists to close. `scope` carries #7428's resolved palace for the calling
+    /// assistant, and it separates BOTH the palace id and the durable
+    /// `payloads.db`, because the sidecar is what `get` actually reads.
+    /// What: roots the store at `<data_root>/<scope>` and keys every palace
+    /// `trusty-agents-{scope}-{prefix}`. Nothing else differs from
+    /// [`Self::new`].
+    /// Test: `two_assistants_never_cross_read`,
+    /// `a_scoped_store_is_rooted_under_the_assistant`.
+    pub fn new_for_assistant(data_root: impl Into<PathBuf>, scope: MemoryScope) -> Result<Self> {
+        let root = data_root.into().join(scope.as_str());
+        Self::open(root, Some(scope))
+    }
+
+    /// Shared constructor body for [`Self::new`] and [`Self::new_for_assistant`].
+    fn open(data_root: PathBuf, scope: Option<MemoryScope>) -> Result<Self> {
         std::fs::create_dir_all(&data_root)
             .with_context(|| format!("create trusty-backed data root {}", data_root.display()))?;
 
@@ -138,17 +165,18 @@ impl TrustyBackedMemoryStore {
         Ok(Self {
             registry: PalaceRegistry::new(),
             data_root,
+            scope,
             sidecar: Arc::new(RwLock::new(sidecar)),
             payloads,
         })
     }
 
     /// Stable string identifier for the palace backing `segment`.
-    // #7428: process-global AgentMemory palace is a cross-assistant leak vector;
-    // fenced by `native_memory_tools_are_registered_without_a_backend`, re-key
-    // per assistant in a follow-up.
-    fn palace_id_for(segment: Segment) -> PalaceId {
-        PalaceId::new(format!("trusty-agents-{}", segment.prefix()))
+    // #7443: an unscoped store is single-tenant by construction (seeders, CLI);
+    // a scoped one carries the calling assistant into the key so two assistants
+    // in one process can never address one palace.
+    fn palace_id_for(&self, segment: Segment) -> PalaceId {
+        PalaceId::new(scope::palace_id(self.scope.as_ref(), segment))
     }
 
     /// Map an trusty-agents `Segment` onto the trusty `RoomType` taxonomy.
@@ -176,7 +204,7 @@ impl TrustyBackedMemoryStore {
 
     /// Open or fetch the `PalaceHandle` for `segment`.
     fn handle_for(&self, segment: Segment) -> Result<Arc<PalaceHandle>> {
-        let palace_id = Self::palace_id_for(segment);
+        let palace_id = self.palace_id_for(segment);
         if let Some(h) = self.registry.get(&palace_id) {
             return Ok(h);
         }

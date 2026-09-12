@@ -20,7 +20,7 @@ mod list_keys;
 mod retrieve_memory;
 mod store_memory;
 
-pub use backend::MemoryBackend;
+pub use backend::{MemoryBackend, open_assistant_memory_backend};
 pub use list_keys::ListMemoryKeysTool;
 pub use retrieve_memory::RetrieveMemoryTool;
 pub use store_memory::StoreMemoryTool;

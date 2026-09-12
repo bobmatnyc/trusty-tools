@@ -21,6 +21,7 @@ pub mod embed;
 pub mod graph;
 pub mod redb_recovery;
 pub mod redb_usearch;
+pub mod scope;
 pub mod session_store;
 pub mod store;
 pub mod trusty_backed;
@@ -35,6 +36,8 @@ pub use embed::{Embedder, FastEmbedder};
 pub use graph::{AgentSession, MemoryGraph};
 #[allow(unused_imports)]
 pub use redb_usearch::RedbUsearchStore;
+#[allow(unused_imports)]
+pub use scope::{MemoryScope, MemoryScopeError};
 #[allow(unused_imports)]
 pub use session_store::{SessionMeta, SessionRegistry, SessionStore};
 #[allow(unused_imports)]
@@ -82,12 +85,63 @@ pub const MEMORY_BACKEND_ENV_DEPRECATED: &str = "OPEN_MPM_MEMORY_BACKEND";
 /// Test: `open_memory_store_defaults_to_redb`,
 /// `open_memory_store_selects_trusty_via_env`.
 pub fn open_memory_store(data_dir: &Path) -> Result<Arc<dyn store::MemoryStore>> {
+    open_memory_store_scoped(data_dir, None)
+}
+
+/// The configured `MemoryStore` for ONE assistant under `data_dir` (#7443).
+///
+/// Why: the native memory tools address `Segment::AgentMemory`, which an
+/// unscoped store maps onto one process-global drawer — two assistants served
+/// by one process would read and write each other's memories. This is the ONE
+/// entry point that opens a store an assistant may be handed, and it takes no
+/// argument that turns the scope back off.
+/// What: [`open_memory_store`] with `scope` threaded through — a per-assistant
+/// palace id AND a per-assistant data root, because the two backends isolate on
+/// different things.
+/// Test: `two_assistants_never_cross_read`,
+/// `a_scoped_store_is_rooted_under_the_assistant`.
+pub fn open_memory_store_for_assistant(
+    data_dir: &Path,
+    scope: &MemoryScope,
+) -> Result<Arc<dyn store::MemoryStore>> {
+    open_memory_store_scoped(data_dir, Some(scope))
+}
+
+/// Shared body of [`open_memory_store`] and [`open_memory_store_for_assistant`].
+///
+/// Why: one backend-selection match, so a backend added to one entry point
+/// cannot be forgotten in the other.
+/// Test: `open_memory_store_defaults_to_redb`,
+/// `open_memory_store_selects_trusty_via_env`.
+fn open_memory_store_scoped(
+    data_dir: &Path,
+    scope: Option<&MemoryScope>,
+) -> Result<Arc<dyn store::MemoryStore>> {
     let backend = crate::env_compat::env_var(MEMORY_BACKEND_ENV, MEMORY_BACKEND_ENV_DEPRECATED)
         .unwrap_or_default();
+    // #7443: redb isolates on its data dir, trusty on its palace id; scoping
+    // both is what makes the guarantee independent of the selected backend.
+    let redb_dir = match scope {
+        Some(scope) => data_dir.join("assistants").join(scope.as_str()),
+        None => data_dir.to_path_buf(),
+    };
+    let open_redb = |label: &str| -> Result<Arc<dyn store::MemoryStore>> {
+        let s =
+            RedbUsearchStore::open(&redb_dir, embed::ALL_MINI_LM_L6_V2_DIM).with_context(|| {
+                format!("open RedbUsearchStore at {} ({label})", redb_dir.display())
+            })?;
+        Ok(Arc::new(s))
+    };
     match backend.to_ascii_lowercase().as_str() {
         "trusty" => {
             let trusty_dir = data_dir.join("trusty");
-            let s = TrustyBackedMemoryStore::new(&trusty_dir).with_context(|| {
+            let s = match scope {
+                Some(scope) => {
+                    TrustyBackedMemoryStore::new_for_assistant(&trusty_dir, scope.clone())
+                }
+                None => TrustyBackedMemoryStore::new(&trusty_dir),
+            }
+            .with_context(|| {
                 format!(
                     "open TrustyBackedMemoryStore at {} (backend=trusty)",
                     trusty_dir.display()
@@ -96,26 +150,13 @@ pub fn open_memory_store(data_dir: &Path) -> Result<Arc<dyn store::MemoryStore>>
             tracing::info!(path = %trusty_dir.display(), "memory backend: trusty");
             Ok(Arc::new(s))
         }
-        "" | "redb" => {
-            let s = RedbUsearchStore::open(data_dir, embed::ALL_MINI_LM_L6_V2_DIM).with_context(
-                || {
-                    format!(
-                        "open RedbUsearchStore at {} (backend=redb)",
-                        data_dir.display()
-                    )
-                },
-            )?;
-            Ok(Arc::new(s))
-        }
+        "" | "redb" => open_redb("backend=redb"),
         other => {
             tracing::warn!(
                 requested = other,
                 "unknown {MEMORY_BACKEND_ENV} value; falling back to redb"
             );
-            let s = RedbUsearchStore::open(data_dir, embed::ALL_MINI_LM_L6_V2_DIM).with_context(
-                || format!("open RedbUsearchStore at {} (fallback)", data_dir.display()),
-            )?;
-            Ok(Arc::new(s))
+            open_redb("fallback")
         }
     }
 }
@@ -288,6 +329,53 @@ mod tests {
         assert!(
             dir.path().join("trusty").join("payloads.redb").exists(),
             "trusty backend should create payloads.redb under <data_dir>/trusty/"
+        );
+    }
+
+    /// #7443: two assistants sharing a data dir never read each other's rows,
+    /// whichever backend is configured.
+    ///
+    /// Why: redb isolates on its data dir and the trusty adapter on its palace
+    /// id, so a fix that only scoped one of them would hold under one backend
+    /// and leak under the other. This test reads no env var and sets none, so
+    /// it exercises whichever backend the runner has configured.
+    /// What: two scoped stores under one data dir, the same key written through
+    /// each, read back through each.
+    /// Test: this test itself; the tool-level proof is
+    /// `crate::tools::native_memory::tests::two_assistants_never_cross_read`.
+    #[tokio::test]
+    async fn a_scoped_store_is_rooted_under_the_assistant() {
+        let dir = tempdir().unwrap();
+        let alpha = MemoryScope::new("alpha").expect("alpha");
+        let beta = MemoryScope::new("beta").expect("beta");
+        let a = open_memory_store_for_assistant(dir.path(), &alpha).expect("alpha store");
+        let b = open_memory_store_for_assistant(dir.path(), &beta).expect("beta store");
+        let vec = vec![0.0_f32; embed::ALL_MINI_LM_L6_V2_DIM];
+        a.insert(
+            store::Segment::AgentMemory,
+            "k",
+            &vec,
+            json!({"who": "alpha"}),
+        )
+        .await
+        .expect("alpha insert");
+        b.insert(
+            store::Segment::AgentMemory,
+            "k",
+            &vec,
+            json!({"who": "beta"}),
+        )
+        .await
+        .expect("beta insert");
+        assert_eq!(
+            a.get(store::Segment::AgentMemory, "k").await.unwrap(),
+            Some(json!({"who": "alpha"})),
+            "alpha read beta's row"
+        );
+        assert_eq!(
+            b.get(store::Segment::AgentMemory, "k").await.unwrap(),
+            Some(json!({"who": "beta"})),
+            "beta read alpha's row"
         );
     }
 }

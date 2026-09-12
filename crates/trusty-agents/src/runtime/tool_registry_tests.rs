@@ -2037,23 +2037,22 @@ fn gh_surface_registers_no_mutating_tool_even_for_l0() {
     }
 }
 
-/// #7428 FENCE: the native memory tools reach no palace by default.
+/// #7443: the native memory tools reach no palace from a default registry.
 ///
-/// Why: `crate::memory::trusty_backed`'s `palace_id_for` keys palaces by
-/// content-type `Segment`, so under `TAGENT_MEMORY_BACKEND=trusty` every
-/// assistant's `memory_recall` / `store_memory` / `retrieve_memory` /
-/// `list_memory_keys` would share ONE process-global
-/// `trusty-agents-agent-memory` palace — a cross-assistant leak, and the exact
-/// thing one-palace-per-assistant exists to prevent. Re-keying that store per
-/// assistant is deliberately out of scope for #7428; this test is the fence
-/// that keeps the gap from widening meanwhile. It pins the CURRENT truth:
-/// `build_registry_for_agent` and `native_tool_registry` both register these
-/// tools with NO backend, so a default agent reaches no palace at all, shared
-/// or otherwise. Wiring a backend in without re-keying the palace per assistant
-/// turns this test red.
+/// Why: this began as #7428's fence over the process-global palace those tools
+/// addressed. #7443 closed that gap — `crate::memory::scope::palace_id` folds
+/// the calling assistant into the key, and
+/// `crate::tools::native_memory::open_assistant_memory_backend` is the only way
+/// production code gets a backend, refusing outright when the assistant
+/// resolves to no palace. Cross-assistant isolation is now asserted directly by
+/// `crate::tools::native_memory::tests::two_assistants_never_cross_read`. What
+/// remains here is the narrower statement that still needs pinning: neither
+/// `build_registry_for_agent` nor `native_tool_registry` injects a backend of
+/// its own, so any wiring that appears later has to come through the scoped
+/// entry point rather than a default constructor.
 /// What: dispatches each tool and requires the graceful "memory store not
 /// available" degradation, which is reachable only when `backend` is `None`.
-/// Test: this test IS the fence.
+/// Test: this test IS the assertion.
 #[tokio::test]
 async fn native_memory_tools_are_registered_without_a_backend() {
     fn rendered(result: &crate::tools::traits::ToolResult) -> String {

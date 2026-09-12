@@ -84,6 +84,43 @@ fn ns_id_namespaces_by_segment() {
     assert!(b.contains(Segment::History.prefix()));
 }
 
+/// #7443: the daemon's palace namespace is shared by every process that dials
+/// it, so two assistants using the native memory tools would address one
+/// `trusty-agents-mem` palace unless the client carries a scope.
+///
+/// Why: `ns_id` above namespaces by SEGMENT, which is a content-type, not a
+/// tenant — it cannot separate two assistants writing the same segment.
+/// What: two scoped clients and one unscoped one; asserts all three address
+/// different palaces for the same segment, and that the unscoped id keeps its
+/// pre-#7443 spelling.
+/// Test: This test.
+#[test]
+fn scoped_clients_address_scoped_palaces() {
+    let alpha = TrustyMemoryClient::new_for_assistant(
+        unreachable_socket(),
+        crate::memory::MemoryScope::new("alpha").expect("alpha"),
+    );
+    let beta = TrustyMemoryClient::new_for_assistant(
+        unreachable_socket(),
+        crate::memory::MemoryScope::new("beta").expect("beta"),
+    );
+    let unscoped = TrustyMemoryClient::new(unreachable_socket());
+    assert_eq!(
+        alpha.palace_id_for(Segment::AgentMemory),
+        "trusty-agents-alpha-mem"
+    );
+    assert_ne!(
+        alpha.palace_id_for(Segment::AgentMemory),
+        beta.palace_id_for(Segment::AgentMemory),
+        "two assistants must not address one AgentMemory palace"
+    );
+    assert_eq!(
+        unscoped.palace_id_for(Segment::AgentMemory),
+        "trusty-agents-mem",
+        "an unscoped client must keep addressing its existing palace"
+    );
+}
+
 /// Why: `search` must fail loudly and descriptively rather than
 /// silently return an empty/wrong result — see the method's doc comment
 /// for the architectural reason a vector query can't reach

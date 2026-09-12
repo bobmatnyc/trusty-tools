@@ -5,9 +5,14 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use super::{ListMemoryKeysTool, MemoryBackend, RetrieveMemoryTool, StoreMemoryTool};
+use super::{
+    ListMemoryKeysTool, MemoryBackend, RetrieveMemoryTool, StoreMemoryTool,
+    open_assistant_memory_backend,
+};
 use crate::memory::Embedder;
+use crate::memory::scope::MemoryScope;
 use crate::memory::store::{MemoryResult, MemoryStore, Segment};
+use crate::memory::trusty_backed::TrustyBackedMemoryStore;
 use crate::tools::traits::ToolExecutor;
 
 // Mock store that behaves as a simple key-value map (vector ignored).
@@ -504,4 +509,154 @@ fn list_memory_keys_schema_names_tool() {
     let t = ListMemoryKeysTool::new();
     assert_eq!(t.name(), "list_memory_keys");
     assert_eq!(t.schema()["function"]["name"], "list_memory_keys");
+}
+
+// ------- #7443: per-assistant palace isolation -------
+
+/// Embedder producing the 384-d vectors `TrustyBackedMemoryStore` requires.
+struct Dim384Embedder;
+impl Embedder for Dim384Embedder {
+    fn embed(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+        Ok(texts.iter().map(|_| vec![0.1_f32; 384]).collect())
+    }
+    fn embed_single(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+        Ok(vec![0.1_f32; 384])
+    }
+    fn dimension(&self) -> usize {
+        384
+    }
+}
+
+/// A native-memory backend for `assistant`, rooted at `root`, on the real
+/// palace-backed store — the store whose palace id #7443 re-keys.
+fn scoped_backend(root: &std::path::Path, assistant: &str) -> MemoryBackend {
+    let scope = MemoryScope::new(assistant).expect("a usable scope");
+    let store: Arc<dyn MemoryStore> = Arc::new(
+        TrustyBackedMemoryStore::new_for_assistant(root, scope.clone())
+            .expect("a scoped store opens"),
+    );
+    MemoryBackend::for_scope(store, Arc::new(Dim384Embedder), scope)
+}
+
+async fn store_via_tool(backend: &MemoryBackend, key: &str, content: &str) {
+    let out = StoreMemoryTool::with_backend(backend.clone())
+        .execute(json!({"key": key, "content": content}))
+        .await;
+    let v: Value = serde_json::from_str(out.content()).expect("store_memory returns JSON");
+    assert_eq!(v["stored"], true, "store_memory failed: {v}");
+}
+
+async fn retrieve_via_tool(backend: &MemoryBackend, key: &str) -> Value {
+    let out = RetrieveMemoryTool::with_backend(backend.clone())
+        .execute(json!({"key": key}))
+        .await;
+    let v: Value = serde_json::from_str(out.content()).expect("retrieve_memory returns JSON");
+    v["content"].clone()
+}
+
+/// #7443: two assistants, ONE process, two palaces — neither tool call ever
+/// returns the other assistant's memory.
+///
+/// Why: before this change the `TrustyBackedMemoryStore` palace id AND the
+/// durable payload sidecar were both keyed by content-type `Segment` alone, so
+/// every assistant's `store_memory` / `retrieve_memory` / `list_memory_keys`
+/// addressed ONE `trusty-agents-mem` drawer under a shared data root. Two
+/// assistants writing the same key overwrote each other, and a reopen handed
+/// either of them the other's value.
+/// What: opens two scoped stores under ONE root — the scope is the only thing
+/// separating them — writes the same key through each assistant's own
+/// `store_memory`, reads both back through `retrieve_memory`, checks
+/// `list_memory_keys` does not leak across, and repeats every read after
+/// reopening both stores so the durable sidecar is covered too.
+/// Test: this test IS the regression test for #7443.
+#[tokio::test]
+async fn two_assistants_never_cross_read() {
+    let root = tempfile::tempdir().expect("tempdir");
+
+    let alpha = scoped_backend(root.path(), "alpha");
+    let beta = scoped_backend(root.path(), "beta");
+
+    store_via_tool(&alpha, "launch-plan", "alpha-only").await;
+    store_via_tool(&beta, "launch-plan", "beta-only").await;
+    store_via_tool(&alpha, "alpha-private", "for alpha alone").await;
+
+    assert_eq!(
+        retrieve_via_tool(&alpha, "launch-plan").await,
+        json!("alpha-only"),
+        "alpha's retrieve_memory returned another assistant's value"
+    );
+    assert_eq!(
+        retrieve_via_tool(&beta, "launch-plan").await,
+        json!("beta-only"),
+        "beta's retrieve_memory returned another assistant's value"
+    );
+    assert_eq!(
+        retrieve_via_tool(&beta, "alpha-private").await,
+        Value::Null,
+        "beta read a key only alpha ever wrote"
+    );
+
+    let listed = ListMemoryKeysTool::with_backend(beta.clone())
+        .execute(json!({}))
+        .await;
+    let listed: Value = serde_json::from_str(listed.content()).expect("list returns JSON");
+    assert_eq!(
+        listed["keys"],
+        json!(["launch-plan"]),
+        "beta's list_memory_keys leaked alpha's keys: {listed}"
+    );
+
+    // Reopening proves the DURABLE sidecar is scoped too, not just the
+    // in-process map: an unscoped store hydrates both assistants' rows from one
+    // payloads.db.
+    drop(alpha);
+    drop(beta);
+    let alpha = scoped_backend(root.path(), "alpha");
+    let beta = scoped_backend(root.path(), "beta");
+    assert_eq!(
+        retrieve_via_tool(&alpha, "launch-plan").await,
+        json!("alpha-only"),
+        "after reopen, alpha read another assistant's value"
+    );
+    assert_eq!(
+        retrieve_via_tool(&beta, "launch-plan").await,
+        json!("beta-only"),
+        "after reopen, beta read another assistant's value"
+    );
+}
+
+/// #7443 fail-closed: an assistant that resolves to no palace gets NO backend.
+///
+/// Why: the tempting degradation is to hand back the unscoped store and carry
+/// on, which writes another assistant's drawer silently. The refusal has to be
+/// the outcome, so the caller's choice is "no memory tools", never "someone
+/// else's memory tools".
+/// What: an agent name that is not a usable assistant instance id and pins no
+/// binding palace; asserts the error names the cause and that nothing was
+/// opened under the data dir.
+/// Test: this test IS the fail-closed check.
+#[tokio::test]
+async fn an_unresolvable_assistant_gets_no_backend() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let outcome = open_assistant_memory_backend(
+        root.path(),
+        "Not A Valid Instance Id!",
+        None,
+        Arc::new(Dim384Embedder),
+    );
+    let Err(err) = outcome else {
+        panic!("an unresolvable assistant must not receive a memory backend");
+    };
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("resolves to no memory palace"),
+        "the refusal must name the cause; got {rendered}"
+    );
+    assert_eq!(
+        std::fs::read_dir(root.path())
+            .expect("data dir readable")
+            .count(),
+        0,
+        "a refused assistant must not have opened any store"
+    );
 }
