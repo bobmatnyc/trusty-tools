@@ -4,8 +4,7 @@
 //! #7617), and each investigation had to establish from scratch which of three
 //! settings tiers carried the entry and whether the command in it still
 //! resolved. Two separate implementations of the same seed-or-heal rule existed
-//! —
-//! [`crate::core::session_launch::settings::write_status_line`] for the project
+//! — `session_launch::settings::write_status_line` for the project
 //! tier and `standalone::settings_defaults::ensure_settings_defaults` for the
 //! tm-owned `CLAUDE_CONFIG_DIR` — and NEITHER covered the user tier
 //! (`~/.claude/settings.json`), so a session launched outside the managed driver

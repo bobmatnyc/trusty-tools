@@ -116,7 +116,10 @@ pub(crate) fn savings_segment_at(
     savings_segment_at_in(Path::new(""), ledger, session_id, actual_tokens)
 }
 
-/// [`savings_segment_at`] with the framework root supplied for the link store.
+/// `savings_segment_at` with the framework root supplied for the link store.
+///
+/// (Plain span, not an intra-doc link: that ledger-only form is `#[cfg(test)]`
+/// since #7617, so it does not exist in a `cargo doc` build.)
 ///
 /// Why (#7617): the segment vanished twice, and the second disappearance was
 /// not a defect in the fold at all — Claude Code had minted a new `session_id`

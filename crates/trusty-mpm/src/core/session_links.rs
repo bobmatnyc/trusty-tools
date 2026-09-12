@@ -36,9 +36,9 @@ use std::path::{Path, PathBuf};
 
 /// The sidecar directory, under the framework root's `usage/`.
 ///
-/// Why: it sits beside `savings.jsonl` and `no-fold-warned/` because
-/// `tm repair savings-ledger` sweeps that directory as a unit, and a link store
-/// that survived a ledger reset would point at rows that no longer exist.
+/// Why: it sits beside `savings.jsonl` and `no-fold-warned/` because everything
+/// here exists to serve that ledger — see the module header's GROWTH AND
+/// PRUNING note for what the savings repair does and does not sweep today.
 const SESSION_LINKS_DIR: &str = "session-links";
 
 /// Where `managed_id`'s link list lives.
