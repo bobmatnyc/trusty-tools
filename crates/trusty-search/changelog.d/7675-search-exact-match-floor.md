@@ -1,0 +1,3 @@
+Fixed
+
+- Hybrid `search` no longer ranks a semantic guess above a literal occurrence. A query naming an identifier (one carrying an underscore, `::` or a camelCase boundary, optionally behind `fn`/`struct`/`const`), an explicitly quoted string, or a distinctive multi-word phrase now gets an exact-match floor: every chunk containing that literal verbatim ranks above every chunk that does not, declaration first, with the vector lanes ordering only the remainder. `meta.exact_match_floor` and `meta.exact_match_literal` report which literal decided the top hit. A query naming no literal, or one that occurs nowhere in the corpus, ranks exactly as before (#7675).

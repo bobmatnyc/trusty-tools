@@ -15,7 +15,11 @@ use super::*;
 use axum::Json;
 
 /// `RawChunk` builder for the drop-reporting tests below.
-fn drop_test_chunk(
+///
+/// `pub(super)` since #7675: `tests_exact_match_7675` builds the same
+/// handler-level fixture and a second copy would be two fixtures to keep in
+/// step with `RawChunk`'s field list.
+pub(super) fn drop_test_chunk(
     id: &str,
     file: &str,
     content: &str,
@@ -42,7 +46,7 @@ fn drop_test_chunk(
 }
 
 /// Query shape shared by the two drop-reporting tests.
-fn drop_test_query(
+pub(super) fn drop_test_query(
     text: &str,
     mode: crate::core::indexer::SearchMode,
     stage: Option<crate::core::indexer::SearchStage>,

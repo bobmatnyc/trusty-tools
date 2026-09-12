@@ -102,6 +102,7 @@ mod chunk_cap;
 mod corpus_fault;
 mod embed_pool_routing;
 mod eviction_kg_paths;
+mod exact_match_floor;
 mod path_filter_search;
 mod persistence_and_search;
 mod ranking_and_modes;

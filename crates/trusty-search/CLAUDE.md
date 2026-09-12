@@ -439,6 +439,18 @@ Hybrid search (BM25 + vector + KG expansion + RRF fusion).
     lexical however conceptual the query was. The second field separates "off
     for this index" from "not built yet". Counterparts to the existing
     `meta.bm25_lane_degraded`.
+  - `meta.exact_match_floor` / `meta.exact_match_literal` (#7675): `true` when
+    the query named a literal — a single identifier carrying an underscore,
+    `::` or a camelCase boundary (optionally behind `fn`/`struct`/`const`), an
+    explicitly quoted string, or a distinctive multi-word phrase — that occurs
+    verbatim in the corpus, and every chunk carrying it was ranked above every
+    chunk that does not, declaration first. The semantic lanes then order only
+    the remainder. `exact_match_literal` is the text that was matched and is
+    present whenever a literal was RECOGNISED, so a caller can tell "read as a
+    literal query, found nowhere" from "read as a conceptual query" (where it
+    is `null`). Ordering inside the floored group is lane-independent
+    (declaration, then occurrence count, then chunk id), which is what makes
+    `search` and `search_lexical` agree on top-1 for an identifier.
   - `meta.dropped` / `meta.dropped_total` (#2203): how many candidates this
     query retrieved and then discarded, per site. Without it a short `results`
     array was indistinguishable from a small match set. Sites:

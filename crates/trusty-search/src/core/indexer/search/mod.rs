@@ -12,6 +12,7 @@
 //! test in `indexer::tests`.
 
 pub(crate) mod drops;
+pub(crate) mod exact;
 pub(crate) mod kg;
 pub(crate) mod lanes;
 pub(crate) mod materialize;
@@ -37,6 +38,28 @@ use super::{
     STRUCT_DEFINITION_BOOST,
 };
 use drops::SearchDrops;
+use exact::ExactMatchReport;
+
+/// Everything one search produced: the page, the drop tally, and the
+/// exact-match verdict.
+///
+/// Why: `search_with_drops` returned a 2-tuple, and #7675 adds a third piece of
+/// per-query accounting the response `meta` block has to carry. A named struct
+/// keeps the next addition from widening the tuple again.
+/// What: the materialised results, the [`SearchDrops`] tally, and the
+/// [`ExactMatchReport`] saying whether a literal floor decided the top hit.
+/// Test: `search_meta_reports_the_exact_match_floor` in
+/// `service::server::tests_search`.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct SearchOutcome {
+    /// The ranked page, already filtered and truncated to `top_k`.
+    pub results: Vec<CodeChunk>,
+    /// How many candidates were retrieved and then discarded, per site.
+    pub dropped: SearchDrops,
+    /// Whether an exact-match floor applied, and to which literal (#7675).
+    pub exact_match: ExactMatchReport,
+}
 
 /// Score assigned to grep-fallback hits (issue #75). Intentionally tiny so
 /// fallback rows never out-rank a real BM25/vector hit — they only surface
@@ -169,6 +192,19 @@ impl CodeIndexer {
         &self,
         query: &SearchQuery,
     ) -> Result<(Vec<CodeChunk>, SearchDrops)> {
+        let outcome = self.search_with_outcome(query).await?;
+        Ok((outcome.results, outcome.dropped))
+    }
+
+    /// [`Self::search_with_drops`], plus the #7675 exact-match verdict.
+    ///
+    /// Why: the HTTP layer publishes `meta.exact_match_floor` so a caller can
+    /// see WHY the top hit ranks first — a literal occurrence that was floored,
+    /// or a semantic ranking. Only this entry point carries that verdict.
+    /// What: the full pipeline; `search` and `search_with_drops` are the
+    /// discarding wrappers.
+    /// Test: `search_meta_reports_the_exact_match_floor`.
+    pub async fn search_with_outcome(&self, query: &SearchQuery) -> Result<SearchOutcome> {
         self.touch_activity();
         // #6581: M005 clears the corpus and re-chunks it in batches, so a query
         // landing in that window would read a cleanly-readable but empty corpus
@@ -266,6 +302,20 @@ impl CodeIndexer {
         } else {
             None
         };
+        // #7675: an identifier- or literal-shaped query earns an exact-match
+        // lane whose hits the floor below ranks above every semantic guess. A
+        // conceptual query extracts no literal and pays nothing.
+        let exact_literal = exact::extract_exact_literal(&query.text);
+        let exact_re = exact_literal.as_ref().and_then(exact::literal_regex);
+        let exact_ids: Vec<String> = match (&exact_literal, &exact_re) {
+            (Some(lit), Some(re)) => self
+                .exact_match_lane(lit, re, want, effective_mode, filter)
+                .await
+                .into_iter()
+                .map(|h| h.id)
+                .collect(),
+            _ => Vec::new(),
+        };
         let bm25_fut = self.bm25_search(&query.text, want, filter);
         let hnsw_results = match &embedding {
             Some(v) => self.vector_search_scoped(v, want, query).await?,
@@ -340,6 +390,9 @@ impl CodeIndexer {
                 effective_mode,
             )
             .await?;
+        // #7675: the floor is a ranking rule, so the chunks it ranks must first
+        // survive `materialize_search_results`' `take(top_k)`.
+        let all = exact::promote_candidates(all, &exact_ids);
 
         // 5) Materialise the top-k IDs into `CodeChunk`s.
         let mut dropped = SearchDrops::default();
@@ -375,7 +428,22 @@ impl CodeIndexer {
         if let Some(err) = self.corpus_read_fault.error(&self.index_id) {
             return Err(anyhow::Error::new(err));
         }
-        Ok((result, dropped))
+        // #7675: the LAST ranking step, after the archive/mode pass has done its
+        // own score sort — otherwise that sort would undo the floor.
+        let mut exact_match = ExactMatchReport {
+            applied: false,
+            literal: exact_literal.as_ref().map(|l| l.text.clone()),
+        };
+        if let (Some(lit), Some(re)) = (&exact_literal, &exact_re) {
+            if !exact_ids.is_empty() {
+                exact_match.applied = exact::apply_floor(&mut result, lit, re);
+            }
+        }
+        Ok(SearchOutcome {
+            results: result,
+            dropped,
+            exact_match,
+        })
     }
 
     /// Apply the mode-based file-type filter and the archive score penalty.
