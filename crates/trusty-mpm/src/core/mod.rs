@@ -95,6 +95,9 @@ pub mod disk_usage_guard;
 pub mod dispatch_isolation;
 pub mod doctor;
 pub mod doctor_repair;
+// #7678: `tm doctor --fix`'s session-scope arm — re-applies the plugin and MCP
+// scope writes to a live project through the launch path's own writers.
+pub mod doctor_repair_scope;
 pub mod error;
 pub mod exit_codes;
 pub mod external_session;
@@ -228,6 +231,9 @@ pub mod session_pause_pr;
 // #7422: the plugin half of the same default-deny decision — written into the
 // project's `.claude/settings.json`, because Claude Code has no plugin flag.
 pub mod session_plugin_scope;
+// #7678: what a project's `.claude/settings.json` still owes that plugin write —
+// the one comparison the doctor check, the preview and the writer all read.
+pub mod session_scope_drift;
 // #7617: which Claude session ids share a managed session, so a restart does not
 // read as a savings disappearance.
 pub mod session_links;

@@ -147,6 +147,23 @@ MCP server and installed plugin that project's sessions have stopped loading,
 and the exact keys that put one back. It is informational and never fails
 doctor — an excluded server is the designed outcome, not a fault.
 
+The check also compares the project's `.claude/settings.json` against the
+`enabledPlugins` map `prepare_session` would write, and names every missing or
+divergent key (issue #7678). That comparison is what makes the line above
+trustworthy: the plugin write happens ONCE, at launch, so a project whose
+session was paused before that write existed — or resumed across the upgrade
+that added it — kept loading every user-tier plugin while the check reported
+them as "NOT loaded". The check stays read-only; `tm doctor --fix` previews and
+`tm doctor --fix --yes` re-applies BOTH writes — the project-tier
+`enabledPlugins` map and the composed `session-mcp/<key>.json` file — through
+the same functions the launch path calls, preserving every other key in the
+settings file. It skips any directory with no `.trusty-mpm/` marker, and writes
+nothing when both are already current.
+
+A rewritten `settings.json` does not reach a session that is already running:
+Claude Code reads plugin enablement at startup. The repair makes the NEXT
+session correct; an operator who needs the tokens back now relaunches.
+
 `tm session instructions` prints the same excluded set on stderr, beside the
 composed prompt it writes to stdout.
 

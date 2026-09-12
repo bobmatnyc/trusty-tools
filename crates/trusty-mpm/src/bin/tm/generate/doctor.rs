@@ -218,7 +218,7 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
     ),
     (
         "session_scope",
-        "Names the shared MCP servers and installed Claude Code plugins a project's sessions will NOT load under default-deny scoping, and the `.trusty-mpm.toml` `[session]` keys that opt each one back in (issue #7422). Informational: `Warn` when something is excluded, `Ok` when nothing is, never `Fail` — an excluded server is the designed outcome, not a fault. Read-only; it composes the same decision the launch path does and writes nothing.",
+        "Names the shared MCP servers and installed Claude Code plugins a project's sessions will NOT load under default-deny scoping, and the `.trusty-mpm.toml` `[session]` keys that opt each one back in (issue #7422). Also compares the project's `.claude/settings.json` against the `enabledPlugins` map `prepare_session` would write and names every missing or divergent key: until issue #7678 the check reported the DECISION while a project that missed the write — a session paused before it existed, or resumed across the upgrade that added it — kept loading every user-tier plugin, with nothing on screen saying so. `Warn` when something is excluded OR the settings file does not carry the decision, `Ok` only when nothing is excluded and the file already matches, never `Fail`. Read-only; `tm doctor --fix --yes` owns the write, re-applying both the project-tier `enabledPlugins` map and the composed session-MCP file through the launch path's own writers, and only for a project carrying a `.trusty-mpm/` marker.",
     ),
     (
         "tmux_options",

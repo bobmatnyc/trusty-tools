@@ -499,6 +499,27 @@ pub fn provision(cwd: &Path, config_dir: &Path) -> Result<PathBuf, ScopeError> {
     provision_at(&path, cwd, config_dir)
 }
 
+/// The exact bytes a launch writes into the composed session-MCP file (#7678).
+///
+/// Why: `tm doctor --fix` has to answer "is the file on disk already what a
+/// launch would write?" before deciding to rewrite it, and the only honest way
+/// to answer that is to compose the same bytes the writer composes. Extracting
+/// the body from [`provision_at`] rather than re-deriving it is what keeps the
+/// comparison and the write from drifting apart.
+/// What: pretty-printed `{"mcpServers": …}` for [`resolve_scope`]'s decision.
+///
+/// # Errors
+///
+/// [`ScopeError::Encode`] when the composed map will not serialise.
+/// Test: `composed_body_matches_the_provisioned_file`.
+pub fn composed_body(cwd: &Path, config_dir: &Path) -> Result<String, ScopeError> {
+    let scope = resolve_scope(cwd, config_dir);
+    serde_json::to_string_pretty(&serde_json::json!({
+        "mcpServers": Value::Object(scope.servers),
+    }))
+    .map_err(|err| ScopeError::Encode(err.to_string()))
+}
+
 /// [`provision`] against an already-resolved output path.
 ///
 /// Why: the hermetic core, so tests write into a temp dir without redirecting
@@ -511,7 +532,10 @@ pub fn provision(cwd: &Path, config_dir: &Path) -> Result<PathBuf, ScopeError> {
 /// Test: `provision_writes_the_composed_map`,
 /// `provision_writes_an_owner_only_file`.
 pub fn provision_at(path: &Path, cwd: &Path, config_dir: &Path) -> Result<PathBuf, ScopeError> {
-    let scope = resolve_scope(cwd, config_dir);
+    // #7678: composed first, and by the one function `tm doctor --fix` compares
+    // the on-disk file against — so "already current" and "what gets written"
+    // are the same bytes by construction.
+    let body = composed_body(cwd, config_dir)?;
     let dir = path.parent().unwrap_or(path).to_path_buf();
     std::fs::create_dir_all(&dir).map_err(|source| ScopeError::Write {
         path: dir.clone(),
@@ -527,10 +551,6 @@ pub fn provision_at(path: &Path, cwd: &Path, config_dir: &Path) -> Result<PathBu
             },
         )?;
     }
-    let body = serde_json::to_string_pretty(&serde_json::json!({
-        "mcpServers": Value::Object(scope.servers),
-    }))
-    .map_err(|err| ScopeError::Encode(err.to_string()))?;
     // #7422: create the file owner-only BEFORE any credential-bearing byte
     // reaches it — a write-then-chmod leaves a readable window.
     let mut options = std::fs::OpenOptions::new();

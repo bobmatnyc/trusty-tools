@@ -90,8 +90,21 @@ use crate::core::paths::FrameworkPaths;
 use crate::core::skill_deployer::DeployStats;
 use settings::{
     deploy_output_style, preseed_workspace_trust_home, remove_global_trusty_memory_hooks,
-    write_enabled_plugins, write_output_style, write_project_hooks,
+    write_output_style, write_project_hooks,
 };
+
+/// Re-export of the project-tier `enabledPlugins` writer (#7678).
+///
+/// Why: `mod settings` above is private, so `tm doctor --fix`'s repair
+/// ([`crate::core::doctor_repair_scope`]) could not reach the writer
+/// `prepare_session` uses without this re-export — and a second implementation
+/// of the same write is exactly what the repair must not be.
+/// What: re-exports [`settings::write_enabled_plugins`] and its trust-injected
+/// seam [`settings::write_enabled_plugins_with_trust`] — plain re-exports, no
+/// logic of their own.
+/// Test: `write_enabled_plugins_denies_a_non_opted_plugin`,
+/// `session_scope_repair_applies_the_default_deny_map`.
+pub(crate) use settings::{write_enabled_plugins, write_enabled_plugins_with_trust};
 
 /// Re-export of the project-tier output-style/statusLine resolution primitives
 /// for reuse by `core::standalone::settings_defaults` (issue #2214).
