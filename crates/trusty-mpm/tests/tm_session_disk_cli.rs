@@ -16,8 +16,9 @@
 //! Test: this file; run with
 //! `cargo test -p trusty-mpm --test tm_session_disk_cli`.
 
+mod common;
+
 use std::future::IntoFuture;
-use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use axum::routing::{get, post};
@@ -170,9 +171,11 @@ async fn serve_stub() -> (String, Arc<Mutex<Vec<Value>>>) {
 ///
 /// The cwd is outside any managed workspace root, so the project filter
 /// declines and the survey covers everything — which is what makes the
-/// assertions independent of the developer's own machine.
+/// assertions independent of the developer's own machine. `common::tm_command`
+/// does the same for the child's `$HOME` (#7568); the `TRUSTY_MPM_URL` below is
+/// set after it, so it survives the helper's scrub.
 fn run_tm(url: &str, cwd: &std::path::Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_tm"))
+    common::tm_command()
         .env("TRUSTY_MPM_URL", url)
         .args(args)
         .current_dir(cwd)

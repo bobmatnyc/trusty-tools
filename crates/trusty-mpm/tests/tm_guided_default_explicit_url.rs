@@ -16,21 +16,20 @@
 //! that fallback-prone logic runs) and errors with exit code 75 instead.
 //! What: spawns `tm --url http://127.0.0.1:1` (bare, no subcommand) with
 //! stdin closed and asserts exit 75 plus a stderr message naming the failed
-//! URL and stating no fallback occurred. Uses `CARGO_BIN_EXE_tm` (set by
-//! Cargo for integration tests) so no extra dev-dependency is needed. Runs
-//! from a hermetic, non-git temp directory so the test never depends on this
-//! repo's own git/GitHub-remote structure (`derive_project` never needs to
+//! URL and stating no fallback occurred. The command comes from
+//! `common::tm_command`, so the child also gets a scratch `$HOME` (#7568).
+//! Runs from a hermetic, non-git temp directory so the test never depends on
+//! this repo's own git/GitHub-remote structure (`derive_project` never needs to
 //! run — the explicit-URL guard fires before it).
 //! Test: this test.
 
-use std::process::Command;
+mod common;
 
 #[test]
 fn bare_tm_explicit_unreachable_url_errors_not_silent_fallback() {
     let tmp = tempfile::tempdir().expect("create temp cwd");
 
-    let bin = env!("CARGO_BIN_EXE_tm");
-    let output = Command::new(bin)
+    let output = common::tm_command()
         .args(["--url", "http://127.0.0.1:1"])
         .current_dir(tmp.path())
         .stdin(std::process::Stdio::null())

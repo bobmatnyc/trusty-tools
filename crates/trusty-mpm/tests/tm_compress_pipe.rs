@@ -7,7 +7,7 @@
 //! compressed result to stdout, exit 0. Unit tests inside `commands::compress`
 //! cover the compression logic directly; this file proves the actual binary
 //! honors that stdin/stdout contract end to end.
-//! What: Runs the built `tm` binary (`CARGO_BIN_EXE_tm`) as
+//! What: Runs the built `tm` binary (via `common::tm_command`) as
 //! `tm compress --tool <name>` with piped stdin. The three
 //! native-chain tests force `TRUSTY_COMPRESS_NO_RTK=1` on the child so their
 //! assertions hold on any host (#7325);
@@ -24,6 +24,8 @@
 //! that a tool name outside the dispatch table's coverage (whether that's
 //! literally `"bash"` or any other unmatched name) is always a safe,
 //! byte-for-byte passthrough — never a corruption or crash.
+
+mod common;
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -50,15 +52,13 @@ fn run_tm_compress(tool: &str, input: &str) -> (bool, String, String) {
 /// process's environment, so `TRUSTY_COMPRESS_NO_RTK` is cleared first and
 /// then re-set only from `env` — otherwise an operator who exported it would
 /// silently force the native chain on the rtk-arm test below (#7325).
+/// `common::tm_command` clears `CLAUDE_CODE_SESSION_ID` (#7514) and points the
+/// child at a scratch `$HOME` (#7568) — the ledger it writes is the scratch
+/// home's, not the developer's.
 fn run_tm_compress_with(env: &[(&str, &str)], tool: &str, input: &str) -> (bool, String, String) {
-    let bin = env!("CARGO_BIN_EXE_tm");
-    let mut child = Command::new(bin)
+    let mut child = common::tm_command()
         .args(["compress", "--tool", tool])
         .env_remove(ENV_COMPRESS_NO_RTK)
-        // #7514: the child would otherwise inherit the developer's live
-        // CLAUDE_CODE_SESSION_ID and append a real `compress` savings row to
-        // their own ledger. Cleared on the CHILD, never on this process.
-        .env_remove(trusty_mpm::core::savings::CLAUDE_CODE_SESSION_ID_ENV)
         .envs(env.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -120,18 +120,21 @@ fn strip_ansi(text: &str) -> String {
 /// filter's stdout plus its ANSI-stripped stderr. `inner` must not contain a
 /// single quote.
 fn run_wrapped_pipeline(inner: &str, tool: &str) -> (String, String) {
-    let bin = env!("CARGO_BIN_EXE_tm");
+    // #7568: a shell pipeline needs the PATH, not a `Command`, so the isolation
+    // goes on the `sh` that runs it — the `tm compress` at the tail inherits it.
+    // That also covers #7514: the scrubbed environment carries no live
+    // CLAUDE_CODE_SESSION_ID to key a savings row by.
+    let bin = common::tm_bin();
     let script = format!(
         "{{ sh -c '{inner}'; printf '\\n__tm_compress_exit=%s__\\n' \"$?\"; }} \
          | '{bin}' compress --tool '{tool}'"
     );
-    let output = Command::new("sh")
+    let mut command = Command::new("sh");
+    common::isolate_spawned_tm(&mut command, common::tm_spawn_home());
+    let output = command
         .arg("-c")
         .arg(&script)
         .env(ENV_COMPRESS_NO_RTK, "1")
-        // #7514: see `run_tm_compress_with` — the `tm compress` at the tail of
-        // this pipeline must not key a savings row by the developer's session.
-        .env_remove(trusty_mpm::core::savings::CLAUDE_CODE_SESSION_ID_ENV)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

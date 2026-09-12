@@ -15,6 +15,8 @@
 //! (<https://code.claude.com/docs/en/hooks>).
 //! Test: `cargo test -p trusty-mpm --test tm_hook_idle_parking`.
 
+mod common;
+
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -23,10 +25,10 @@ use std::process::{Command, Stdio};
 /// #7278: `config_dir` becomes the child's `CLAUDE_CONFIG_DIR`, which is the
 /// boundary the parking detector screens `transcript_path` against. Set on the
 /// spawned process, never on this one — a `std::env::set_var` here would leak
-/// into every other test in the binary.
+/// into every other test in the binary. It is chained AFTER
+/// `common::tm_command`, whose scrub would otherwise clear it (#7568).
 fn run_hook_in(stdin_json: &str, config_dir: &std::path::Path) -> (bool, String) {
-    let bin = env!("CARGO_BIN_EXE_tm");
-    let mut child = Command::new(bin)
+    let mut child = common::tm_command()
         .args(["--url", "http://127.0.0.1:1", "hook"])
         .env_remove("TRUSTY_MPM_DISABLE_HOOKS")
         .env_remove("CLAUDE_MPM_SUB_AGENT")
@@ -241,8 +243,7 @@ fn rejects_fifo_without_blocking() {
         .expect("failed to spawn mkfifo");
     assert!(mkfifo_status.success(), "mkfifo must succeed");
 
-    let bin = env!("CARGO_BIN_EXE_tm");
-    let mut child = Command::new(bin)
+    let mut child = common::tm_command()
         .args(["--url", "http://127.0.0.1:1", "hook"])
         .env_remove("TRUSTY_MPM_DISABLE_HOOKS")
         .env_remove("CLAUDE_MPM_SUB_AGENT")

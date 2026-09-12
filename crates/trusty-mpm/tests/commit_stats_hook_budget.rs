@@ -16,6 +16,8 @@
 //! answer: `merge`, `squash`, and `commit` with and without a session.
 //! Test: this file IS the test module.
 
+mod common;
+
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -77,9 +79,12 @@ impl Fixture {
     /// Put the real `tm` binary on the hook's `PATH`, as a shim rather than a
     /// copy: it keeps the test off any code-signing question and costs nothing.
     fn real_tm(&self) {
+        // #7568: the hook finds `tm` by name on `PATH`, so this needs the path
+        // rather than a `Command`. The isolation goes on the `/bin/sh` that
+        // runs the hook, in `run_sourced` below, and the shim inherits it.
         write_executable(
             &self.bin.join("tm"),
-            &format!("#!/bin/sh\nexec {:?} \"$@\"\n", env!("CARGO_BIN_EXE_tm")),
+            &format!("#!/bin/sh\nexec {:?} \"$@\"\n", common::tm_bin()),
         );
     }
 
@@ -107,12 +112,14 @@ impl Fixture {
             std::env::var("PATH").unwrap_or_default()
         );
         let mut cmd = Command::new("/bin/sh");
+        // #7568: applied first, so the caller's `TRUSTY_MPM_ROOT` and session
+        // id below survive it and only the inherited ones are scrubbed.
+        common::isolate_spawned_tm(&mut cmd, common::tm_spawn_home());
         cmd.arg(&self.hook)
             .arg(&self.message)
             .env("PATH", path)
             .env("TM_COMMIT_STATS_TIMEOUT", budget)
-            .env_remove("TM_SKIP_COMMIT_STATS")
-            .env_remove("CLAUDE_CODE_SESSION_ID");
+            .env_remove("TM_SKIP_COMMIT_STATS");
         if let Some(source) = source {
             cmd.arg(source);
         }
