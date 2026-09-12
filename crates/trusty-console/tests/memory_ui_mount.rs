@@ -101,12 +101,18 @@ async fn memory_ui_serves_every_asset_the_shell_references() {
         let (status, headers, body) = get(&format!("/tools/memory/{r}")).await;
         assert_eq!(status, StatusCode::OK, "asset {r} must be served");
         assert!(!body.is_empty(), "asset {r} came back empty");
-        assert!(
-            headers
-                .iter()
-                .any(|(k, v)| k == header::CACHE_CONTROL.as_str() && v.contains("immutable")),
-            "content-hashed asset {r} should be cacheable; got {headers:?}"
-        );
+        // #7590: only `assets/` carries a content hash in its filename, so only
+        // it may be cached forever. The shell also references `favicon.svg`,
+        // whose name never changes when its bytes do — an immutable header
+        // there would pin a stale icon in every browser that saw the old one.
+        if r.starts_with("assets/") {
+            assert!(
+                headers
+                    .iter()
+                    .any(|(k, v)| k == header::CACHE_CONTROL.as_str() && v.contains("immutable")),
+                "content-hashed asset {r} should be cacheable; got {headers:?}"
+            );
+        }
     }
 }
 

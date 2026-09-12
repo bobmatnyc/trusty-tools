@@ -3,11 +3,23 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>trusty-analyzer</title>
+    <title>Trusty Analyzer</title>
+    <!-- #7590: the one canonical trusty favicon. `public/favicon.svg` is a
+         byte-for-byte copy of docs/design/UI/design-system/icons/favicon.svg;
+         Vite rewrites this root-absolute href to the bundle's relative base, so
+         it resolves both on the dev server and under the console's
+         /tools/analyze/ mount. -->
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <!-- #7589: the Foundry three-face set, matching ui-search and ui-memory and
+         the design system's own install step. This page requested Inter and
+         JetBrains Mono while `styles/tokens.css` has always asked for IBM Plex
+         Sans / IBM Plex Mono, so neither requested face was ever used and the
+         dashboard rendered in the system stack. Chakra Petch is what the brand
+         lockup's wordmark needs. -->
     <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
       rel="stylesheet"
     />
     <!-- #6155: the daemon-injected `__DAEMON_PORT__` / `__SEARCH_URL__`
@@ -28,8 +40,8 @@
         }
       })();
     </script>
-    <script type="module" crossorigin src="./assets/index-BN5QBwuF.js"></script>
-    <link rel="stylesheet" crossorigin href="./assets/index-nOt6ghg2.css">
+    <script type="module" crossorigin src="./assets/index-BCa4gHP-.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-HhkUNLLD.css">
   </head>
   <body>
     <div id="app"></div>

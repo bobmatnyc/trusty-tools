@@ -4,6 +4,12 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Trusty Memory</title>
+    <!-- #7590: the one canonical trusty favicon. `public/favicon.svg` is a
+         byte-for-byte copy of docs/design/UI/design-system/icons/favicon.svg;
+         Vite rewrites this root-absolute href to the bundle's relative base, so
+         it resolves both on the dev server and under the console's
+         /tools/memory/ mount. -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
