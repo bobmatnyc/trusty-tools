@@ -16,3 +16,14 @@ Added
   cold-parked — is refused `409`. The add holds the per-index reindex lock for
   the whole read-append-persist-swap, so concurrent adds both land, and it
   queues a background reindex so the new tree is walked (#7434).
+- The file watcher covers every root of a multi-root index, not just
+  `root_path`. Each root gets its own watch and its own state, so a save under
+  an additional root updates that root's own chunks, one root that cannot be
+  watched leaves the others running and is recorded rather than only logged,
+  and a dropped-event rescan reconciles every root instead of sweeping the
+  other roots' files out of the corpus. `POST /indexes/{id}/roots` starts the
+  new root's watch in the same request, and a relocate restarts the primary's
+  watch while keeping the additional ones. `GET /indexes/{id}/status` gains
+  `watcher.roots`, one row per root reporting `watching` / `degraded` /
+  `failed` with its reason; the existing `watcher` fields are unchanged
+  (#7434).

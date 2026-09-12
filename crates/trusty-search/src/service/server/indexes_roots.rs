@@ -287,6 +287,17 @@ pub(crate) async fn add_index_roots_report(
         roots.len() + 1,
     );
 
+    // #7434: start watching the added root in this request, not at the next
+    // registration event. The walk below closes the coverage gap once; without
+    // a watch, every edit made in the new tree afterwards is invisible until
+    // someone reindexes, which is the same silent staleness this slice exists
+    // to remove. The resync is per root and idempotent, so the existing roots'
+    // watches are untouched. A failure to spawn is RECORDED against that root
+    // (`GET /indexes/:id/status` → `watcher.roots`) and does not fail the add:
+    // the root is in the table, the walk is queued, and the index is strictly
+    // better covered than before — refusing here would undo a persisted append.
+    state.watcher_manager.spawn_for_index(&registered).await;
+
     let progress = Arc::new(ReindexProgress::new());
     state
         .reindex_progress

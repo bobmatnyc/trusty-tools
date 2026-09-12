@@ -427,6 +427,15 @@ pub(crate) async fn relocate_index_report(
                  (next reindex may re-detect root move): {e}"
             );
         }
+        // #7434: the primary root moved, so its watch is now installed on a
+        // tree this index no longer covers — it would feed edits from the OLD
+        // location into the corpus and see nothing from the new one. The resync
+        // stops exactly that watch and starts one on the new primary. The
+        // ADDITIONAL roots did not move, so their watches are left running:
+        // tearing the index's watches down and rebuilding them all would drop
+        // every additional root's OS watch for no reason, and re-installing a
+        // recursive watch is the expensive half of this call.
+        state.watcher_manager.spawn_for_index(&h).await;
     }
 
     state.emit(DaemonEvent::IndexRegistered { id: id.to_string() });

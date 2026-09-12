@@ -527,6 +527,108 @@ async fn rescan_reconcile_warms_the_hash_cache_from_the_corpus() {
     );
 }
 
+// ── #7434: the reconcile covers every root of a multi-root index ───────────
+
+/// Build the root table for a primary plus one additional root.
+fn two_root_table(primary: &std::path::Path, extra: &std::path::Path) -> Vec<WatchedRoot> {
+    WatchedRoot::table(primary, &[extra.to_path_buf()])
+}
+
+/// Why: an overflow's reconcile is the only thing that re-derives a watched
+/// tree's state from disk. Walking the primary root alone would leave every
+/// additional root's writes and deletions unreconciled — the same silent loss
+/// the whole rescan mechanism exists to prevent, reintroduced for exactly the
+/// trees #7434 added.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rescan_covers_every_root() {
+    let primary_dir = tempfile::tempdir().expect("tempdir primary");
+    let extra_dir = tempfile::tempdir().expect("tempdir extra");
+    let primary = std::fs::canonicalize(primary_dir.path()).expect("canonicalize primary");
+    let extra = std::fs::canonicalize(extra_dir.path()).expect("canonicalize extra");
+    let (index_id, indexer, tracker) = fixture(&primary);
+
+    std::fs::write(primary.join("in_primary.rs"), "fn p() {}\n").expect("write primary");
+    std::fs::write(extra.join("in_extra.rs"), "fn e() {}\n").expect("write extra");
+
+    let table = two_root_table(&primary, &extra);
+    let stats = reconcile_after_rescan_roots(&index_id, &table, &indexer, &tracker)
+        .await
+        .expect("reconcile succeeds");
+
+    assert_eq!(
+        stats.files_reindexed, 2,
+        "the pass must reindex one file from EACH root, not just the primary's"
+    );
+    let tracked: Vec<String> = tracker
+        .paths()
+        .await
+        .into_iter()
+        .map(|p| p.display().to_string())
+        .collect();
+    assert!(
+        tracked.contains(&"in_primary.rs".to_string()),
+        "the primary root's file keeps its bare key: {tracked:?}"
+    );
+    assert!(
+        tracked.contains(&"@root1/in_extra.rs".to_string()),
+        "the additional root's file must be keyed to its own root: {tracked:?}"
+    );
+}
+
+/// Why: the reconcile's deletion sweep walks the whole shared `IndexedFiles`
+/// tracker, re-checking each tracked file's existence before removing it. That
+/// check resolves the key against a root — and resolving an additional root's
+/// key against the PRIMARY root answers "absent" for every one of its files.
+/// A pass that got this wrong would evict a healthy root's entire corpus.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rescan_does_not_sweep_another_root_s_files() {
+    let primary_dir = tempfile::tempdir().expect("tempdir primary");
+    let extra_dir = tempfile::tempdir().expect("tempdir extra");
+    let primary = std::fs::canonicalize(primary_dir.path()).expect("canonicalize primary");
+    let extra = std::fs::canonicalize(extra_dir.path()).expect("canonicalize extra");
+    let (index_id, indexer, tracker) = fixture(&primary);
+
+    std::fs::write(primary.join("keep.rs"), "fn k() {}\n").expect("write primary");
+    std::fs::write(extra.join("also_keep.rs"), "fn a() {}\n").expect("write extra");
+    let doomed = extra.join("doomed.rs");
+    std::fs::write(&doomed, "fn gone() {}\n").expect("write doomed");
+
+    let table = two_root_table(&primary, &extra);
+    reconcile_after_rescan_roots(&index_id, &table, &indexer, &tracker)
+        .await
+        .expect("seed reconcile succeeds");
+    assert_eq!(tracker.len().await, 3, "all three files are tracked");
+
+    // The delete the daemon never saw an event for — under the ADDITIONAL root.
+    std::fs::remove_file(&doomed).expect("remove");
+
+    let stats = reconcile_after_rescan_roots(&index_id, &table, &indexer, &tracker)
+        .await
+        .expect("reconcile succeeds");
+
+    assert_eq!(
+        stats.files_removed, 1,
+        "exactly the deleted file is swept — not every additional-root file"
+    );
+    let tracked: Vec<String> = tracker
+        .paths()
+        .await
+        .into_iter()
+        .map(|p| p.display().to_string())
+        .collect();
+    assert!(
+        tracked.contains(&"keep.rs".to_string())
+            && tracked.contains(&"@root1/also_keep.rs".to_string()),
+        "both surviving files must still be tracked: {tracked:?}"
+    );
+    assert!(
+        !tracked.contains(&"@root1/doomed.rs".to_string()),
+        "and the deleted one must be gone: {tracked:?}"
+    );
+}
+
 /// Why: a reconcile that fails leaves the index out of sync, so the retry must
 /// keep coming back rather than backing off to never.
 #[test]

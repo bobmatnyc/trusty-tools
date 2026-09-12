@@ -58,7 +58,9 @@ use crate::core::registry::IndexId;
 use crate::core::CodeIndexer;
 use crate::service::indexed_files::IndexedFiles;
 use crate::service::walker::walk_source_files;
-use crate::service::watch_loop::watcher_relative_path;
+// #7434: the reconcile keys every walked file through the root that produced
+// it, so it carries the root table rather than a single root path.
+use crate::service::watch_roots::WatchedRoot;
 use crate::service::watcher::WatchEvent;
 
 /// Files read and committed per batch.
@@ -174,7 +176,49 @@ pub async fn reconcile_after_rescan(
     indexer: &Arc<RwLock<CodeIndexer>>,
     indexed_files: &IndexedFiles,
 ) -> Result<RescanStats, RescanError> {
-    let walked = walk_source_files(canonical_root).files;
+    // #7434: a single-root index is the one-entry case of the multi-root form.
+    reconcile_after_rescan_roots(
+        index_id,
+        &[WatchedRoot::from_pair(canonical_root, raw_root)],
+        indexer,
+        indexed_files,
+    )
+    .await
+}
+
+/// [`reconcile_after_rescan`] over EVERY root of a multi-root index (#7434).
+///
+/// Why: an overflow is per-OS-watch, but the reconcile's deletion sweep is not
+/// — it walks the whole shared [`IndexedFiles`] tracker, which after #7434
+/// holds every root's files under one index. A pass that walked only the
+/// overflowing root would find every OTHER root's tracked files absent from
+/// its `live` set, fail the existence re-check (their keys do not resolve under
+/// this root), and evict them. Covering every root is what makes the sweep's
+/// "absent from the walk AND absent from disk" test mean what it says.
+/// What: walks each root in `roots` in turn, keying each file through that
+/// root's own slot, accumulating one `live` set and one [`RescanStats`] across
+/// all of them; then sweeps once. The per-index content-hash cache spares every
+/// file whose content has not changed, so the extra roots cost a walk and a
+/// read, not a re-parse.
+/// Test: `rescan_covers_every_root`,
+/// `rescan_does_not_sweep_another_root_s_files`.
+pub async fn reconcile_after_rescan_roots(
+    index_id: &IndexId,
+    roots: &[WatchedRoot],
+    indexer: &Arc<RwLock<CodeIndexer>>,
+    indexed_files: &IndexedFiles,
+) -> Result<RescanStats, RescanError> {
+    // Each walked file is paired with the INDEX of the root that produced it,
+    // so the key below is computed through that root rather than the primary.
+    let mut walked: Vec<(PathBuf, usize)> = Vec::new();
+    for (n, root) in roots.iter().enumerate() {
+        walked.extend(
+            walk_source_files(root.canonical())
+                .files
+                .into_iter()
+                .map(|abs| (abs, n)),
+        );
+    }
     let mut stats = RescanStats::default();
     let mut live: HashSet<PathBuf> = HashSet::with_capacity(walked.len());
 
@@ -194,7 +238,7 @@ pub async fn reconcile_after_rescan(
         let mut recorded: Vec<(PathBuf, Vec<String>)> = Vec::with_capacity(batch.len());
         let mut fingerprints: Vec<(PathBuf, String)> = Vec::with_capacity(batch.len());
 
-        for abs in batch {
+        for (abs, root_n) in batch {
             let content = match crate::core::extract::read_content(abs).await {
                 Ok(content) => content,
                 Err(err) => {
@@ -207,7 +251,10 @@ pub async fn reconcile_after_rescan(
             };
             // Same relative key `handle_modified` records, so the two paths
             // never disagree about what a file is called in the corpus.
-            let rel = watcher_relative_path(canonical_root, raw_root, abs);
+            // #7434: computed through the root that produced this file, so an
+            // additional root's file is keyed `@root<n>/…` here exactly as the
+            // watcher and the reindex walk key it.
+            let rel = roots[*root_n].corpus_path(abs);
             let key = PathBuf::from(&rel);
             // #6570: the file was still read and hashed, so this is a decision
             // about its CONTENT, not about its mtime. `live` is populated either
@@ -254,8 +301,7 @@ pub async fn reconcile_after_rescan(
         }
     }
 
-    stats.files_removed =
-        sweep_deleted(index_id, canonical_root, indexer, indexed_files, &live).await?;
+    stats.files_removed = sweep_deleted(index_id, roots, indexer, indexed_files, &live).await?;
 
     if stats.files_reindexed > 0 || stats.files_removed > 0 {
         // One rebuild for the whole pass — `index_files_batch_no_rebuild` and
@@ -329,14 +375,19 @@ async fn warm_hashes_from_corpus(
 /// `scripts/teardown-guard-manifest.tsv`.
 async fn sweep_deleted(
     index_id: &IndexId,
-    canonical_root: &Path,
+    // #7434: the whole root table, not one root. A tracked key names the root
+    // it belongs to (`@root<n>/…`), and joining it against the primary root
+    // instead would report every additional root's file as deleted.
+    roots: &[WatchedRoot],
     indexer: &Arc<RwLock<CodeIndexer>>,
     indexed_files: &IndexedFiles,
     live: &HashSet<PathBuf>,
 ) -> Result<usize, RescanError> {
     let mut removed = 0usize;
     for tracked in indexed_files.paths().await {
-        if live.contains(&tracked) || canonical_root.join(&tracked).exists() {
+        if live.contains(&tracked)
+            || crate::service::watch_roots::absolute_for_key(roots, &tracked).exists()
+        {
             continue;
         }
         let path = tracked.display().to_string();

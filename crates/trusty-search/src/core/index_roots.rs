@@ -85,10 +85,29 @@ pub fn relative_path(primary: &Path, additional: &[PathBuf], path: &Path) -> Str
 
     match best {
         None => path.display().to_string(),
-        Some((_, None, rel)) => rel.display().to_string(),
-        Some((_, Some(i), rel)) => {
-            format!("{ADDITIONAL_ROOT_PREFIX}{}/{}", i + 1, rel.display())
-        }
+        Some((_, slot, rel)) => stored_path_for_slot(slot, &rel.display().to_string()),
+    }
+}
+
+/// Apply the `@root<n>/` sentinel to a root-relative path for `slot`.
+///
+/// Why: the reindex walk is no longer the only producer of corpus paths — the
+/// file watcher writes them too, once per watched root (#7434). Two encoders
+/// would be two places for the sentinel's spelling to drift, and the #848
+/// prune property depends on every producer agreeing byte-for-byte. This is
+/// the one place the sentinel is written.
+/// What: `None` (the primary root) returns `rel` unchanged, which is what keeps
+/// a single-root corpus byte-identical to its pre-#7434 form. `Some(n)` returns
+/// `@root<n+1>/<rel>`. An ALREADY-ABSOLUTE `rel` is returned unchanged for
+/// every slot: that string is the out-of-root fallback both producers share,
+/// and prefixing it would make it undecodable.
+/// Test: `stored_path_for_slot_matches_relative_path`,
+/// `stored_path_for_slot_leaves_an_absolute_fallback_alone`.
+pub fn stored_path_for_slot(slot: Option<usize>, rel: &str) -> String {
+    match slot {
+        None => rel.to_string(),
+        Some(_) if Path::new(rel).is_absolute() => rel.to_string(),
+        Some(n) => format!("{ADDITIONAL_ROOT_PREFIX}{}/{rel}", n + 1),
     }
 }
 
@@ -382,6 +401,44 @@ mod tests {
                 PathBuf::from("/b/extra"),
                 PathBuf::from("/c/third"),
             ]
+        );
+    }
+
+    /// Why: the file watcher encodes its corpus keys through
+    /// [`stored_path_for_slot`] while the reindex walk reaches it through
+    /// [`relative_path`]. The #848 prune property needs the two to produce the
+    /// same string for the same file, byte for byte.
+    /// Test: this test (#7434).
+    #[test]
+    fn stored_path_for_slot_matches_relative_path() {
+        let table = roots();
+        assert_eq!(
+            stored_path_for_slot(None, "src/lib.rs"),
+            table.relative_path(Path::new("/a/primary/src/lib.rs"))
+        );
+        assert_eq!(
+            stored_path_for_slot(Some(0), "src/lib.rs"),
+            table.relative_path(Path::new("/b/extra/src/lib.rs"))
+        );
+        assert_eq!(
+            stored_path_for_slot(Some(1), "x.rs"),
+            table.relative_path(Path::new("/c/third/x.rs"))
+        );
+    }
+
+    /// Why: a path under no root falls back to its absolute form on both the
+    /// walk and the watcher side. Prefixing that with a slot would produce a
+    /// string neither [`resolve_absolute`] nor any consumer can decode.
+    /// Test: this test (#7434).
+    #[test]
+    fn stored_path_for_slot_leaves_an_absolute_fallback_alone() {
+        assert_eq!(
+            stored_path_for_slot(Some(0), "/elsewhere/stray.rs"),
+            "/elsewhere/stray.rs"
+        );
+        assert_eq!(
+            stored_path_for_slot(None, "/elsewhere/stray.rs"),
+            "/elsewhere/stray.rs"
         );
     }
 }

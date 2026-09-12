@@ -55,6 +55,8 @@ pub mod warm_boot;
 pub(crate) mod test_isolation;
 pub mod watch_loop;
 pub mod watch_rescan;
+// #7434: per-root watch identity and state for a multi-root index.
+pub mod watch_roots;
 #[cfg(test)]
 pub(crate) mod watch_test_support;
 pub mod watcher;
@@ -73,5 +75,8 @@ pub use daemon::{
 pub use indexed_files::IndexedFiles;
 pub use server::SearchAppState;
 pub use watch_loop::{spawn_watch_loop, WatcherTask};
+// #7434: one watch per index root, so a consumer can name which root a state
+// belongs to.
+pub use watch_roots::{RootWatchReport, RootWatchState, WatchedRoot};
 pub use watcher::{FileWatcher, WatchEvent};
 pub use watcher_manager::WatcherManager;

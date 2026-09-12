@@ -86,6 +86,9 @@ mod tests_same_id_root_mismatch;
 // #7434: the add-roots endpoint and create-time `roots`.
 #[cfg(test)]
 mod tests_7434_roots;
+// #7434: one file watcher per index root, and its per-root status surface.
+#[cfg(test)]
+mod tests_7434_watch;
 // #3049: DELETE must quiesce in-flight writers and report what it actually did.
 #[cfg(test)]
 mod tests_3049;
