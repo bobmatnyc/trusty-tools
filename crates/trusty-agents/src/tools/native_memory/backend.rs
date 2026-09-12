@@ -7,10 +7,13 @@
 //! `save_keys`, `zero_vec`) shared across the three tools.
 //! Test: Exercised via the store/retrieve/list tests in `super::tests`.
 
+use std::path::Path;
 use std::sync::Arc;
 
-use crate::memory::Embedder;
+use crate::memory::scope::MemoryScope;
 use crate::memory::store::{MemoryStore, Segment};
+use crate::memory::{Embedder, open_memory_store_for_assistant};
+use crate::stores::AgentStoreBinding;
 
 /// Prefix applied to user-visible keys so kv entries don't collide with the
 /// session / edge rows written by `MemoryGraph`.
@@ -31,6 +34,44 @@ pub struct MemoryBackend {
     pub store: Arc<dyn MemoryStore>,
     pub embedder: Arc<dyn Embedder>,
     pub session_id: Option<String>,
+    /// The assistant whose palace `store` addresses, when one was resolved
+    /// (#7443). `None` is the pre-#7443 single-tenant backend that tests and
+    /// the seeders build directly; production wiring goes through
+    /// [`open_assistant_memory_backend`], which never produces `None`.
+    pub scope: Option<MemoryScope>,
+}
+
+/// Build the native memory tools' backend for ONE assistant (#7443).
+///
+/// Why: `memory_recall`, `store_memory`, `retrieve_memory` and
+/// `list_memory_keys` all address `Segment::AgentMemory`, which an unscoped
+/// store maps onto one process-global palace. This is the only constructor
+/// production code may use, and it FAILS when #7428's resolution produces no
+/// palace for `agent` — a missing scope must never degrade into the shared
+/// palace, because that degradation is silent and writes another assistant's
+/// drawer. The caller's choice is then to run without the memory tools, not to
+/// run them against someone else's memory.
+/// What: resolves [`MemoryScope::for_assistant`] from the agent name and its
+/// `[[stores]]` binding, opens the scoped store under `data_dir`, and bundles
+/// it with `embedder`.
+/// Test: `two_assistants_never_cross_read`,
+/// `an_unresolvable_assistant_gets_no_backend`.
+pub fn open_assistant_memory_backend(
+    data_dir: &Path,
+    agent: &str,
+    binding: Option<&AgentStoreBinding>,
+    embedder: Arc<dyn Embedder>,
+) -> anyhow::Result<MemoryBackend> {
+    // #7443: resolution failure is terminal — never a fall-through to the
+    // process-global palace.
+    let scope = MemoryScope::for_assistant(agent, binding)?;
+    let store = open_memory_store_for_assistant(data_dir, &scope)?;
+    Ok(MemoryBackend {
+        store,
+        embedder,
+        session_id: None,
+        scope: Some(scope),
+    })
 }
 
 impl MemoryBackend {
@@ -45,6 +86,26 @@ impl MemoryBackend {
             store,
             embedder,
             session_id: None,
+            scope: None,
+        }
+    }
+
+    /// [`Self::new`] with an explicit assistant scope (#7443).
+    ///
+    /// Why: a caller that already holds a scoped store — the tests that drive
+    /// two assistants through one process — still has to record WHICH assistant
+    /// the backend speaks for, so the tools can name it in an error.
+    /// Test: `two_assistants_never_cross_read`.
+    pub fn for_scope(
+        store: Arc<dyn MemoryStore>,
+        embedder: Arc<dyn Embedder>,
+        scope: MemoryScope,
+    ) -> Self {
+        Self {
+            store,
+            embedder,
+            session_id: None,
+            scope: Some(scope),
         }
     }
 
