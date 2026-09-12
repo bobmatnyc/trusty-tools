@@ -576,11 +576,14 @@ async fn rescan_covers_every_root() {
     );
 }
 
-/// Why: the reconcile's deletion sweep walks the whole shared `IndexedFiles`
-/// tracker, re-checking each tracked file's existence before removing it. That
-/// check resolves the key against a root — and resolving an additional root's
-/// key against the PRIMARY root answers "absent" for every one of its files.
-/// A pass that got this wrong would evict a healthy root's entire corpus.
+/// Why: the deletion sweep's second guard re-checks the filesystem for a
+/// tracked file the walk did NOT return, because the walk and the watcher do
+/// not apply identical filters (`rescan_reconcile_keeps_a_tracked_file_the_walk_skipped`).
+/// That check resolves the tracked key against a root — and resolving an
+/// additional root's `@root<n>/…` key against the PRIMARY root answers "absent"
+/// for every one of them, turning every walk-skipped file under an additional
+/// root into a phantom deletion. The file under test exists on disk throughout;
+/// only a wrong resolution can remove it.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rescan_does_not_sweep_another_root_s_files() {
@@ -591,27 +594,32 @@ async fn rescan_does_not_sweep_another_root_s_files() {
     let (index_id, indexer, tracker) = fixture(&primary);
 
     std::fs::write(primary.join("keep.rs"), "fn k() {}\n").expect("write primary");
-    std::fs::write(extra.join("also_keep.rs"), "fn a() {}\n").expect("write extra");
-    let doomed = extra.join("doomed.rs");
-    std::fs::write(&doomed, "fn gone() {}\n").expect("write doomed");
+
+    // Exists on disk under the ADDITIONAL root, but the walker prunes
+    // `node_modules`, so the sweep reaches its existence re-check.
+    let skipped_dir = extra.join("node_modules");
+    std::fs::create_dir_all(&skipped_dir).expect("mkdir");
+    std::fs::write(skipped_dir.join("vendored.js"), "function v() {}\n").expect("write");
+    let survivor = std::path::PathBuf::from("@root1/node_modules/vendored.js");
+    tracker
+        .record(
+            survivor.clone(),
+            vec!["@root1/node_modules/vendored.js:1:1".to_string()],
+        )
+        .await;
+
+    // And one file under the additional root that really IS gone, so the sweep
+    // is shown still doing its job rather than merely never firing.
+    let doomed = std::path::PathBuf::from("@root1/doomed.rs");
+    tracker
+        .record(doomed.clone(), vec!["@root1/doomed.rs:1:1".to_string()])
+        .await;
 
     let table = two_root_table(&primary, &extra);
-    reconcile_after_rescan_roots(&index_id, &table, &indexer, &tracker)
-        .await
-        .expect("seed reconcile succeeds");
-    assert_eq!(tracker.len().await, 3, "all three files are tracked");
-
-    // The delete the daemon never saw an event for — under the ADDITIONAL root.
-    std::fs::remove_file(&doomed).expect("remove");
-
     let stats = reconcile_after_rescan_roots(&index_id, &table, &indexer, &tracker)
         .await
         .expect("reconcile succeeds");
 
-    assert_eq!(
-        stats.files_removed, 1,
-        "exactly the deleted file is swept — not every additional-root file"
-    );
     let tracked: Vec<String> = tracker
         .paths()
         .await
@@ -619,13 +627,17 @@ async fn rescan_does_not_sweep_another_root_s_files() {
         .map(|p| p.display().to_string())
         .collect();
     assert!(
-        tracked.contains(&"keep.rs".to_string())
-            && tracked.contains(&"@root1/also_keep.rs".to_string()),
-        "both surviving files must still be tracked: {tracked:?}"
+        tracked.contains(&survivor.display().to_string()),
+        "a walk-skipped file that still EXISTS under an additional root must \
+         survive the sweep — its key has to resolve against its own root: {tracked:?}"
     );
     assert!(
-        !tracked.contains(&"@root1/doomed.rs".to_string()),
-        "and the deleted one must be gone: {tracked:?}"
+        !tracked.contains(&doomed.display().to_string()),
+        "the genuinely absent file must still be swept: {tracked:?}"
+    );
+    assert_eq!(
+        stats.files_removed, 1,
+        "exactly one deletion — not every additional-root file"
     );
 }
 
