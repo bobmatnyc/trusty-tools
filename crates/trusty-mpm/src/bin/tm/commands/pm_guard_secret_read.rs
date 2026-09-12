@@ -180,8 +180,11 @@
 //! the word sits, never about what the word may be, so the two positions
 //! cannot drift apart on which names a word list may launder.
 //! `git checkout`/`git switch` do take paths, so their tokens are refs only
-//! behind a [`NEW_REF_FLAGS`] spelling, and a `--` withdraws the position
-//! entirely.
+//! behind a [`NEW_REF_FLAGS`] spelling written BEFORE the `--` separator —
+//! after it every token is a pathspec, `-b` included, so the flag search and
+//! the window it opens are both bounded there (round 3's critic measured
+//! `git checkout main -- -b docs/api-secrets` allowing while
+//! `git checkout main -- docs/api-secrets` denied).
 //!
 //! A TEXT PAYLOAD is the second: `gh issue comment 7517 --body …` naming a
 //! `.env` file in its prose was refused, and rewording that one word to
@@ -332,7 +335,7 @@ use std::path::Path;
 
 use crate::commands::hook_rewrite::{first_command_token, strip_wrapper_prefix};
 use crate::commands::pm_guard_bash::{
-    any_pattern_overlaps, expand_brace_alternatives, git_subcommand,
+    any_pattern_overlaps, expand_brace_alternatives, git_argv_at_subcommand, git_subcommand,
     matches_only_name_substring_family, secret_pattern_overlaps, split_heredoc_bodies,
     split_shell_segments, strip_process_substitution,
 };
@@ -665,8 +668,7 @@ fn secret_words_in_segment(segment: &str) -> Vec<String> {
     // #7498: the words after `in` are a loop's word LIST, and the words in a
     // ref-creating position are REF names — neither is a path operand list, and
     // both withdraw the same one arm.
-    let word_list_from =
-        for_word_list_start(segment, &argv).or_else(|| ref_name_start(segment, &argv));
+    let word_list_from = for_word_list_start(segment, &argv).or_else(|| ref_name_start(segment));
     let mut out: Vec<String> = Vec::new();
     for (index, token) in argv.iter().enumerate() {
         if Some(index) == pattern_at || text_payloads.contains(&index) {
@@ -868,39 +870,61 @@ const NEW_REF_FLAGS: &[&str] = &["-b", "-B", "-c", "-C"];
 /// [`REF_NAMING_GIT_SUBCOMMANDS`] call, or for a `checkout`/`switch` call at
 /// the token after its [`NEW_REF_FLAGS`] spelling. A nested command withdraws
 /// it, exactly as it withdraws [`for_word_list_start`], because the words are
-/// then whatever that command prints. A `--` at or after that index withdraws
-/// it too: `--` ends the ref list and begins a PATH list. `None` for every
-/// other segment, so no ordinary argv reaches the narrowed shape test. The
-/// position is what is identified, never the verb — this adds nothing to
-/// [`SAFE_HANDLING_VERBS`] or [`SAFE_GIT_SUBCOMMANDS`], and the narrowing it
-/// enables is the single predicate the word-list rule already uses
-/// ([`reads_as_a_branch_name`], [`BRANCH_NAME_PREFIXES`] allowlist included),
-/// so `git checkout -b .env`, `git push origin id_rsa` and
-/// `git checkout -b config/credentials` still deny.
+/// then whatever that command prints. `None` for every other segment, so no
+/// ordinary argv reaches the narrowed shape test. The position is what is
+/// identified, never the verb — this adds nothing to [`SAFE_HANDLING_VERBS`] or
+/// [`SAFE_GIT_SUBCOMMANDS`], and the narrowing it enables is the single
+/// predicate the word-list rule already uses ([`reads_as_a_branch_name`],
+/// [`BRANCH_NAME_PREFIXES`] allowlist included), so `git checkout -b .env`,
+/// `git push origin id_rsa` and `git checkout -b config/credentials` still
+/// deny.
+///
+/// The `--` separator bounds BOTH halves of that answer, which the first cut
+/// got only half right (#7498 round 3 critic MEDIUM). git reads every token
+/// after `--` as a PATHSPEC, one spelled `-b` included, so scanning for the
+/// new-branch flag across the whole tail let a flag BEHIND the separator open a
+/// ref window over the real pathspec: `git checkout main -- -b docs/api-secrets`
+/// ALLOWED while `git checkout main -- docs/api-secrets` denied. The search and
+/// the result are now both confined to the tokens BEFORE the first `--`, so no
+/// token at or after it can open a window — which also subsumes the earlier
+/// separate `--` test.
+///
+/// The subcommand's index comes from `pm_guard_bash::git_argv_at_subcommand`,
+/// which returns the argv and the index together. Re-deriving that index by
+/// string equality is a second argv parse — the defect that helper's own doc
+/// says it exists to prevent — and it mis-indexes a segment whose global option
+/// value repeats the subcommand name (`git -C branch branch x`).
 /// Test: `allows_a_git_ref_name_carrying_a_word_family`,
 /// `denies_a_secret_file_in_a_git_ref_position`.
-fn ref_name_start(segment: &str, argv: &[String]) -> Option<usize> {
+fn ref_name_start(segment: &str) -> Option<usize> {
     if NESTED_COMMAND_MARKERS.iter().any(|m| segment.contains(m)) {
         return None;
     }
-    let sub = git_subcommand(segment)?;
-    let at = argv.iter().position(|t| *t == sub)?;
-    let from = if REF_NAMING_GIT_SUBCOMMANDS.contains(&sub.as_str()) {
+    // #7498 critic: one parser answers both "which subcommand" and "at which
+    // index", so the two can never disagree.
+    let (argv, at) = git_argv_at_subcommand(segment)?;
+    let sub = argv.get(at)?.as_str();
+    // #7498 critic: `--` ends the options; everything after it is a pathspec.
+    let end_of_options = argv
+        .iter()
+        .enumerate()
+        .skip(at + 1)
+        .find(|(_, token)| *token == "--")
+        .map_or(argv.len(), |(index, _)| index);
+    let from = if REF_NAMING_GIT_SUBCOMMANDS.contains(&sub) {
         at + 1
-    } else if matches!(sub.as_str(), "checkout" | "switch") {
-        // #7498: the new-branch flag is what makes the next token a ref.
+    } else if matches!(sub, "checkout" | "switch") {
+        // #7498: the new-branch flag is what makes the next token a ref, and
+        // only a flag before the separator is a flag at all.
         at + 2
             + argv
-                .get(at + 1..)?
+                .get(at + 1..end_of_options)?
                 .iter()
                 .position(|t| NEW_REF_FLAGS.contains(&t.as_str()))?
     } else {
         return None;
     };
-    if argv.get(from..)?.iter().any(|t| t == "--") {
-        return None;
-    }
-    (from < argv.len()).then_some(from)
+    (from < end_of_options).then_some(from)
 }
 
 /// Flags whose next token is a human-readable TEXT PAYLOAD, never a path
@@ -920,6 +944,28 @@ fn ref_name_start(segment: &str, argv: &[String]) -> Option<usize> {
 /// `sort -m .env` MERGES and prints the files after it, so exempting the token
 /// after every `-m` would be a bypass rather than a false-positive fix. That
 /// keeps round 5's deliberate cost for `git commit -m "add .env"` in place.
+///
+/// The skip is VERB-AGNOSTIC by design, so `somecmd --body .env` allows for any
+/// program. Two assumptions carry that, stated here so the next round need not
+/// re-derive them (#7498 round 3 critic LOW):
+///
+/// 1. No program takes a FILE to read behind one of these four exact
+///    spellings. A file variant is spelled differently — `--body-file`,
+///    `--file`, `-F`, `--notes-file` — and exact equality keeps every one of
+///    them screened. Keying on the verb instead would be the rounds-1-to-4
+///    failure mode, so the flag list, not a program list, is what must stay
+///    short.
+/// 2. GNU `getopt_long` accepts any UNAMBIGUOUS abbreviation of a long option,
+///    and this rule does not. That asymmetry is safe in one direction and not
+///    the other. An abbreviation an agent writes (`--bod .env`) is not one of
+///    these spellings, so it is still screened — over-refusal, the correct
+///    side. The uncovered case is a program that defines ONLY a longer
+///    file-reading option of which one of these four is a prefix (a
+///    `--message-file` with no `--message`), where the program would read the
+///    file while this rule reads the token as prose. No such spelling is known
+///    in the tools an agent here drives; a reported one is a flag to REMOVE
+///    from this list, never a program to exempt.
+///
 /// Test: `allows_a_filename_named_in_a_text_payload`,
 /// `denies_a_file_flag_beside_a_text_payload`.
 const TEXT_PAYLOAD_FLAGS: &[&str] = &["--body", "--title", "--message", "--note"];
@@ -1692,6 +1738,13 @@ mod tests {
             // `--` ends the ref list and begins one.
             "git checkout main -- config/credentials",
             "git checkout config/credentials",
+            // #7498 round 3 critic MEDIUM: git reads every token after `--` as
+            // a PATHSPEC, one spelled `-b` included, so a new-branch flag
+            // BEHIND the separator must not open a ref window over the real
+            // pathspec. All three ALLOWED before the bound was added.
+            "git checkout main -- -b docs/api-secrets",
+            "git checkout -- -c docs/api-secrets",
+            "git checkout HEAD~1 -- -b refs/my-secrets-notes",
             // A nested command withdraws the position entirely.
             "git branch $(basename config/credentials)",
             // Every other subcommand keeps the pre-fix answer, reading verbs
@@ -1904,6 +1957,15 @@ mod tests {
         // prefix, so `BRANCH_NAME_PREFIXES` is a trade rather than a fact.
         "for f in docs/api-secrets; do cat $f; done",
         "for f in release/gpg-secrets; do cat $f; done",
+        // Round 3's own two widths, asserted rather than described (#7498
+        // round 3 critic MEDIUM). A TEXT PAYLOAD is skipped whole, so a payload
+        // that IS the filename allows — the price of reading prose as prose,
+        // bounded by the four-flag list and withdrawn by any nested command.
+        "gh issue comment 1 --title .env",
+        // A git REF position inherits `BRANCH_NAME_PREFIXES`, so it inherits
+        // that allowlist's trade too: a credential file under a listed prefix
+        // reads as a branch there, exactly as it does in a word list.
+        "git push origin x docs/api-secrets",
     ];
 
     /// Ordinary daily commands that must ALLOW.

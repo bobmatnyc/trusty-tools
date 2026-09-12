@@ -80,6 +80,10 @@ pub(crate) use secret_file_copy::{
 // subcommand behind `git -C <path> …` is already parsed here. One parser, two
 // callers, rather than a second global-option table.
 pub(crate) use shell_lex::git_subcommand;
+// #7498 round 3 critic MEDIUM: a caller that needs the subcommand's INDEX as
+// well as its name must not re-derive it by string equality — that is a second
+// argv parse, the defect `git_argv_at_subcommand`'s own doc says it prevents.
+pub(crate) use shell_lex::git_argv_at_subcommand;
 // #5791: worktree removal is PM-executed, so an agent's `git worktree remove`
 // denies. The sibling `worktree add` guard above is a different rule with a
 // different scope — that one is about WHERE a tree is provisioned, this one is

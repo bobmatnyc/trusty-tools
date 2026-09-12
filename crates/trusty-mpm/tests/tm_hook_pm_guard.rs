@@ -3343,6 +3343,12 @@ fn pm_guard_allows_a_git_ref_name_and_a_text_payload() {
         // A `.`/`..` traversal out of the prefix (b60f93cb5's clause).
         "git checkout -b feat/../secrets/prod-credentials",
         "git branch docs/../.aws/credentials",
+        // #7498 round 3 critic MEDIUM: git reads every token after `--` as a
+        // pathspec, one spelled `-b` included, so a new-branch flag behind the
+        // separator must not open a ref window over the real pathspec.
+        "git checkout main -- -b docs/api-secrets",
+        "git checkout -- -c docs/api-secrets",
+        "git checkout HEAD~1 -- -b refs/my-secrets-notes",
         "gh issue comment 1 --body-file .env",
         "git commit -F .env",
         "git show HEAD:.env",
