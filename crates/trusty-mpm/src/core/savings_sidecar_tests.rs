@@ -361,3 +361,47 @@ fn the_no_fold_warning_is_emitted_at_warn_level() {
         "the warning must name both byte counts: {logged}"
     );
 }
+
+/// Why (#7617): the warning's first wording told an operator the `💸` segment
+/// "stays absent" for this project. Since #7617 the statusline folds `divert`
+/// and `compress` rows beside instruction-compression, falls back to a linked
+/// sibling session, and renders `💸—` as an explicit empty state — so the
+/// segment renders and the claim is false. A decline here zeroes ONE technique's
+/// contribution, never the segment, and an operator who reads the wider claim
+/// stops looking for the savings they do have.
+/// What: captures the warning and rejects any word that asserts the segment is
+/// gone, then pins the two facts that replaced it — the scope (this project) and
+/// the remedy (a CLAUDE.md section override).
+/// Test: itself.
+#[test]
+fn the_no_fold_warning_claims_no_segment_wide_absence() {
+    let root = tempfile::tempdir().expect("temp root");
+    let project = root.path().join("project");
+    let capture = CaptureWriter::default();
+
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(capture.clone())
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        warn_no_fold_once(root.path(), &project, 26_741, 29_074);
+    });
+
+    let logged = String::from_utf8(capture.0.lock().expect("capture lock").clone())
+        .expect("the captured log must be utf-8");
+    for banned in ["stays absent", "absent", "hidden", "no 💸", "never renders"] {
+        assert!(
+            !logged.contains(banned),
+            "the warning must not claim the segment is gone, but says {banned:?}: {logged}"
+        );
+    }
+    assert!(
+        logged.contains("this project"),
+        "the warning must scope the decline to this project: {logged}"
+    );
+    assert!(
+        logged.contains("CLAUDE.md section override"),
+        "the warning must name the override that would fold a section away: {logged}"
+    );
+}

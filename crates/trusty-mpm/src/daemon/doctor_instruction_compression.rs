@@ -1,7 +1,9 @@
 //! `tm doctor` instruction-compression probe (issue #7616).
 //!
-//! Why: when the fold produces no reduction the producer writes no ledger row
-//! and the `💸` statusline segment simply stays absent. #7245 gave that decline
+//! Why: when the fold produces no reduction the producer writes no ledger row,
+//! so this project adds nothing to the `💸` statusline segment under that
+//! technique — the segment itself still renders, folding `divert` and `compress`
+//! rows and a linked sibling session's (#7617). #7245 gave that decline
 //! a one-time `warn!` in the daemon log, which is the wrong surface — an
 //! operator asking "is instruction compression working on this project?" reads
 //! `tm doctor`, and `tm doctor` had no compression check at all. Silence and
@@ -94,11 +96,14 @@ fn describe(source_bytes: usize, compiled_bytes: usize) -> String {
              {compiled_bytes} B = {saved} B ({percent:.1}% smaller)"
         );
     }
+    // #7671: scoped to this technique — #7617 made the segment render regardless.
     format!(
         "instruction compression INACTIVE for this project: sources {source_bytes} B, \
          compiled {compiled_bytes} B — the compiled prompt is not smaller than the \
          instruction bodies it was built from, so no instruction-compression savings \
-         row is written and the 💸 statusline segment stays absent. See issue #7616."
+         row is written and this project contributes nothing to the 💸 statusline \
+         segment under that technique; divert and compress savings still count. \
+         See issue #7616."
     )
 }
 
