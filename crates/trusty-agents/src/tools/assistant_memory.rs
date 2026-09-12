@@ -680,6 +680,103 @@ mod tests {
             .is_err()
         );
     }
+    /// #7443's invariant, restated against the daemon-bound path (#7396).
+    ///
+    /// Why: the local palace store this guarantee used to be proved against is
+    /// gone, and its proof (`native_memory::tests::two_assistants_never_cross_read`)
+    /// went with it. What replaced the store is a policy whose namespace is
+    /// derived per assistant — but `namespace_arguments_reject_foreign_writes_\
+    /// and_default_broad_reads` exercises ONE policy's argument rewriting, so
+    /// nothing asserted that two assistants with two distinct namespaces cannot
+    /// read each other THROUGH the daemon. That is the statement the guarantee
+    /// actually makes, so it gets asserted end to end over the wire.
+    /// What: two policies, a fact written under each through `BoundMemory`'s own
+    /// argument rewriting, then every read shape each one can issue with
+    /// `cross_palace_query=false` — including the ones that name the other
+    /// palace outright. Each assistant sees only its own fact, and the flag that
+    /// would change that is not reachable from a turn
+    /// (`tools::concierge::tests::attended_turns_cannot_patch_permissions_or_\
+    /// cross_palace_reads`).
+    /// Test: this function IS the test.
+    #[tokio::test]
+    async fn two_assistants_never_cross_read() {
+        use crate::uds_mock::{self, RpcError};
+        let facts = Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::<
+            String,
+            String,
+        >::new()));
+        let store = facts.clone();
+        let daemon = uds_mock::spawn(move |method: &str, params: Value| {
+            let facts = store.clone();
+            let method = method.to_string();
+            Box::pin(async move {
+                match method.as_str() {
+                    "palace_list" => Ok(json!({"palaces":["alpha","beta"]})),
+                    "memory_remember" => {
+                        let palace = params["palace"].as_str().unwrap().to_owned();
+                        let text = params["text"].as_str().unwrap().to_owned();
+                        facts.lock().unwrap().insert(palace, text);
+                        Ok(json!({"status":"stored"}))
+                    }
+                    // The daemon answers exactly what it was asked for. Any
+                    // cross-read therefore has to come from the arguments this
+                    // crate built, which is the layer under test.
+                    "memory_recall" => {
+                        let palace = params["palace"].as_str().unwrap();
+                        Ok(json!({"results":facts.lock().unwrap().get(palace)
+                            .map(|t| vec![json!({"palace_id":palace,"content":t})])
+                            .unwrap_or_default()}))
+                    }
+                    _ => Err(RpcError::method_not_found(&method, &[])),
+                }
+            })
+        })
+        .await;
+
+        let policy = |assistant: &str, namespace: &str| MemoryPolicy {
+            assistant_id: assistant.into(),
+            namespace: namespace.into(),
+            revision: "r".into(),
+            cross_palace_query: false,
+        };
+        let one = policy("one", "alpha");
+        let two = policy("two", "beta");
+        for (policy, secret) in [(&one, "Alpha's secret"), (&two, "Beta's secret")] {
+            let (method, args) =
+                arguments(policy, "memory_write", json!({ "text": secret })).unwrap();
+            call(daemon.socket(), policy, &method, args).await.unwrap();
+        }
+
+        for (mine, theirs, own_secret) in [
+            (&one, "beta", "Alpha's secret"),
+            (&two, "alpha", "Beta's secret"),
+        ] {
+            for request in [
+                json!({"query":"secret"}),
+                json!({"query":"secret","palace":theirs}),
+                json!({"query":"secret","palace":"*"}),
+            ] {
+                let Ok((method, args)) = arguments(mine, "memory_recall", request.clone()) else {
+                    // Refusing the request outright is the stronger answer.
+                    continue;
+                };
+                let result = call(daemon.socket(), mine, &method, args).await.unwrap();
+                let hits = result["result"]["results"].as_array().unwrap();
+                assert_eq!(
+                    hits.len(),
+                    1,
+                    "{} saw {hits:?} for {request}",
+                    mine.namespace
+                );
+                assert_eq!(
+                    hits[0]["content"], own_secret,
+                    "{} read another assistant's namespace: {hits:?}",
+                    mine.namespace
+                );
+            }
+        }
+    }
+
     #[test]
     fn namespace_arguments_reject_foreign_writes_and_default_broad_reads() {
         for cross in [false, true] {

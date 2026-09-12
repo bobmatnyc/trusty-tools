@@ -2037,21 +2037,25 @@ fn gh_surface_registers_no_mutating_tool_even_for_l0() {
     }
 }
 
-/// #7443: the native memory tools reach no palace from a default registry.
+/// #7443, restated against the daemon-bound replacement (#7396): a default
+/// registry's memory tools reach no namespace at all.
 ///
-/// Why: this began as #7428's fence over the process-global palace those tools
-/// addressed. #7443 closed that gap — `crate::memory::scope::palace_id` folds
-/// the calling assistant into the key, and
-/// `crate::tools::native_memory::open_assistant_memory_backend` is the only way
-/// production code gets a backend, refusing outright when the assistant
-/// resolves to no palace. Cross-assistant isolation is now asserted directly by
-/// `crate::tools::native_memory::tests::two_assistants_never_cross_read`. What
-/// remains here is the narrower statement that still needs pinning: neither
-/// `build_registry_for_agent` nor `native_tool_registry` injects a backend of
-/// its own, so any wiring that appears later has to come through the scoped
-/// entry point rather than a default constructor.
-/// What: dispatches each tool and requires the graceful "memory store not
-/// available" degradation, which is reachable only when `backend` is `None`.
+/// Why: this began as #7428's fence over the process-global palace the native
+/// memory tools addressed. That local store is gone — durable memory now goes
+/// through trusty-memory under a per-assistant namespace, `memory_recall`
+/// refuses with "Memory requires a configured assistant namespace" until a host
+/// binds one (`tools::memory::recall`), and `store_memory`/`retrieve_memory`/
+/// `list_memory_keys` are no longer registered at all. The statement that still
+/// needs pinning is the same one, one layer over: `build_registry_for_agent`
+/// injects no binding of its own, so any memory access that appears later has to
+/// come through `tools::assistant_memory::bind` rather than a default
+/// constructor. Cross-assistant isolation itself is asserted by
+/// `crate::tools::assistant_memory::tests::two_assistants_never_cross_read`,
+/// which replaces the deleted `native_memory::tests::two_assistants_never_cross_read`.
+/// What: dispatches `memory_recall` from a default registry and requires the
+/// unbound refusal, then requires that the three retired tools are absent rather
+/// than degrading — an absent tool cannot reach a backend, and a re-registration
+/// would be exactly the silent rewiring this test exists to catch.
 /// Test: this test IS the assertion.
 #[tokio::test]
 async fn native_memory_tools_are_registered_without_a_backend() {
@@ -2079,8 +2083,8 @@ async fn native_memory_tools_are_registered_without_a_backend() {
             .await,
     );
     assert!(
-        recall.contains("memory store not available"),
-        "memory_recall reached a backend from a default registry: {recall}"
+        recall.contains("Memory requires a configured assistant namespace"),
+        "memory_recall reached a namespace from a default registry: {recall}"
     );
 
     let mut native = crate::tools::ToolRegistry::new();
@@ -2090,14 +2094,9 @@ async fn native_memory_tools_are_registered_without_a_backend() {
         native.register(tool);
     }
     for name in ["store_memory", "retrieve_memory", "list_memory_keys"] {
-        let out = rendered(
-            &native
-                .dispatch(name, serde_json::json!({"key": "k", "content": "v"}))
-                .await,
-        );
         assert!(
-            out.contains("memory store not available"),
-            "{name} reached a backend without one being injected: {out}"
+            !native.contains(name),
+            "{name} addressed a process-global store and must stay retired"
         );
     }
 }
