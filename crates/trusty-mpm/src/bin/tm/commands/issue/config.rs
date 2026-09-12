@@ -3,14 +3,16 @@
 //! Why: the issue state machine (label set, allowed transitions, assignee model)
 //! is *configuration*, not harness code. This module defines the serde shape of
 //! that YAML contract, embeds the Unicorn Factory default via `include_str!`, and
-//! resolves which model to load (flag > CWD file > `agents.ticketing.
-//! lifecycle_model` (#6918) > user config > embedded default, RFC §6).
-//! Validation lives in the sibling `validate` module to keep
+//! resolves which model to load (flag > the repo's own model, found by
+//! [`discover_upward`] walking the cwd up to the git toplevel (#7580) >
+//! `agents.ticketing.lifecycle_model` (#6918) > user config > embedded default,
+//! RFC §6). Validation lives in the sibling `validate` module to keep
 //! both files under the 500-SLOC production cap.
 //! What: the [`StateModel`] root and its nested types ([`LabelConfig`],
 //! [`StateDef`], [`StateLabel`], [`ExtraLabel`], [`Transition`], [`Trigger`],
 //! [`AssigneeModel`]), the embedded [`DEFAULT_MODEL_YAML`], and the loader
-//! ([`load_model`] / [`resolve_config_path`] / [`user_config_path`]).
+//! ([`load_model_with_source`] / [`load_model_in`] / [`discover_upward`] /
+//! [`resolve_config_path`] / [`user_config_path`]).
 //! Test: round-trip + discovery tests in this file; validation tests in
 //! `validate.rs`.
 

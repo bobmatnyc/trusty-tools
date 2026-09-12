@@ -15,7 +15,8 @@
 //!
 //! # Why the status written is terminal, and why `Stale` would not do
 //!
-//! [`DelegationStatus::Stale`] is deliberately neither live nor terminal, and
+//! [`Stale`](crate::core::agent::DelegationStatus::Stale) is deliberately
+//! neither live nor terminal, and
 //! the two consumers read that differently: the idle nudge treats it as not
 //! live, but
 //! [`crate::daemon::services::agent_worktree_reap::delegation_state_for_agent`]
@@ -23,7 +24,8 @@
 //! answers [`crate::session_manager::worktree_ownership::AgentDelegationState::Live`].
 //! Staling therefore does not release the worktree, which is exactly why the
 //! specimen survived #6497's session-end sweep. The repair writes
-//! [`DelegationStatus::Cancelled`]: an explicit terminal state meaning "this
+//! [`Cancelled`](crate::core::agent::DelegationStatus::Cancelled): an explicit
+//! terminal state meaning "this
 //! delegation was ended by an operator because nothing else could end it",
 //! never `Completed`, which would claim the agent finished its work.
 //!
@@ -37,6 +39,17 @@
 //! a restart looks identical to "the session is gone". That arm refuses too, and
 //! names `--force` as the operator's explicit assertion — which is the whole
 //! point of a sanctioned verb rather than a timer that guesses.
+//!
+//! One residual remains, and it is bounded rather than closed. [`owner_liveness`]
+//! keys on the exact [`SessionId`] recorded at dispatch, so a session whose
+//! record was REMOVED (rather than marked `Stopped`) while its pane runs on
+//! under a reissued id reads as `Unknown`, and `--force` would then cancel a
+//! delegation whose agent may still be writing: `--force` trusts the daemon's
+//! own session bookkeeping, not the OS and not git. Nothing is deleted on that
+//! evidence, though — every destructive path downstream re-checks a live OS
+//! process before removing anything (`agent_worktree_reap`'s gate 6,
+//! `worktree_reclaim_sweep`, #7504) — so the worst outcome is a status flipped
+//! early, not a live agent's tree removed.
 //! Test: `delegation_repair_tests`.
 
 use std::sync::Arc;
@@ -181,7 +194,8 @@ pub(crate) fn owner_liveness(state: &Arc<DaemonState>, session: SessionId) -> Ow
 /// `is_terminal()`, stops refusing the agent's worktree.
 /// What: tallies the records naming the agent, resolves the strictest owner
 /// liveness across their sessions (any live owner wins), runs [`decide`], and on
-/// `Ended` writes [`DelegationStatus::Cancelled`] to each non-terminal record.
+/// `Ended` writes [`Cancelled`](crate::core::agent::DelegationStatus::Cancelled)
+/// to each non-terminal record.
 /// Nothing is written on any other outcome.
 /// Test: `repair_ends_a_stuck_record_of_a_dead_owner_7602`,
 /// `repair_refuses_while_the_owner_is_live_7602`,

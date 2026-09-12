@@ -7,8 +7,11 @@
 //! mutation, so issue state stays reconstructable from GitHub artifacts alone.
 //! What: the [`issue`] dispatcher that selects the `gh` backend, resolves the
 //! `agents.ticketing` standard (#6918), loads + validates the model (config
-//! discovery: flag > CWD > `agents.ticketing.lifecycle_model` > user > embedded
-//! default), and runs the requested verb (`seed-labels`, `transition`,
+//! discovery: flag > the repo's own model, found by walking the cwd up to the
+//! git toplevel (#7580) > `agents.ticketing.lifecycle_model` > user > embedded
+//! default — and since #7580 the model's SOURCE rides with it, so a verb's
+//! output and its failures name which of those answered), and runs the
+//! requested verb (`seed-labels`, `transition`,
 //! `current`, `states`, `standard`, `seed-config`, `repair`, `audit`). Schema
 //! types live in `config.rs`, validation in `validate.rs`, the state machine in
 //! `state.rs`, the operations in `ops.rs`, the `standard` printer in
