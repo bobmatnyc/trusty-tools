@@ -8,8 +8,6 @@ effort: high
 ---
 # Test-Driven Development (TDD)
 
-Comprehensive TDD patterns and practices for all programming languages. This skill eliminates ~500-800 lines of redundant testing guidance per agent.
-
 ## When to Use
 
 Apply TDD for:
@@ -29,14 +27,12 @@ Write a test that:
 - Is focused on a single behavior
 ```
 
-🔴 **A concurrency regression test's RED run against the pre-fix commit is
-not optional — it is the test's own correctness check.** A test written as a
-plain `Promise.all` (or equivalent) over two racing calls can pass against the
-exact racy commit it was meant to catch, when connection setup happens to
-serialize the pair and mask the race. Run it RED before trusting it green.
-Evidence: adaptive-crm issue #222 — first run against the racy store showed
-10 pass, 0 fail; only after warming the connection pool and looping eight
-attempts did attempt 0 fail with two creates.
+🔴 **Run a concurrency regression test RED against the pre-fix commit — that
+run is the test's own correctness check.** A plain `Promise.all` (or
+equivalent) over two racing calls can pass against the exact racy commit it
+was meant to catch, when connection setup serializes the pair and masks the
+race. Evidence: adaptive-crm #222 — 10 pass, 0 fail at first; only a warmed
+connection pool and eight looped attempts made attempt 0 fail with two creates.
 
 ### 2. Green Phase: Make It Pass
 ```
@@ -103,38 +99,13 @@ def test_should_calculate_total_when_items_added():
     assert total == 11.50
 ```
 
-**JavaScript (Jest):**
-```javascript
-describe('ShoppingCart', () => {
-  test('should calculate total when items added', () => {
-    const cart = new ShoppingCart();
-    cart.addItem({ name: 'Book', price: 10.00 });
-    cart.addItem({ name: 'Pen', price: 1.50 });
+Same AAA body, one naming shape per language:
 
-    const total = cart.calculateTotal();
+**JavaScript (Jest):** `test('should calculate total when items added', …)`
+inside `describe('ShoppingCart', …)`.
 
-    expect(total).toBe(11.50);
-  });
-});
-```
-
-**Go:**
-```go
-func TestShouldCalculateTotalWhenItemsAdded(t *testing.T) {
-    // Arrange
-    cart := NewShoppingCart()
-    cart.AddItem(Item{Name: "Book", Price: 10.00})
-    cart.AddItem(Item{Name: "Pen", Price: 1.50})
-
-    // Act
-    total := cart.CalculateTotal()
-
-    // Assert
-    if total != 11.50 {
-        t.Errorf("Expected 11.50, got %f", total)
-    }
-}
-```
+**Go:** `func TestShouldCalculateTotalWhenItemsAdded(t *testing.T)`, asserting
+with `t.Errorf` on mismatch.
 
 ## Test Types and Scope
 
