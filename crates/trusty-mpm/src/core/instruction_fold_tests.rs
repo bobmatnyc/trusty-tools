@@ -50,6 +50,59 @@ fn a_fenced_block_is_emitted_verbatim() {
     );
 }
 
+/// #7616 REGRESSION: a fence-shaped line inside an OPEN HTML comment must not
+/// desynchronise the parser.
+///
+/// Why this is the worst shape the fold can get wrong: it fails in both
+/// directions at once. Testing the fence before the comment flipped `in_fence`
+/// on a line that was really comment content, so the comment's own text and its
+/// `-->` leaked into the delivered prompt — and when that phantom fence toggled
+/// back off, the parser was still `in_comment` and silently DELETED real
+/// instruction lines until the next `-->`. `assemble_sections` folds the joined
+/// output including a project's `CLAUDE.md` override bodies, so a project author
+/// documenting fence syntax inside a multi-line comment would lose real rules
+/// from every PM prompt, with nothing anywhere saying so.
+/// FAILS BEFORE THIS CHANGE: `hidden` and `-->` appear in the output and
+/// `CODE INSIDE A REAL FENCE` is gone.
+/// Test: itself.
+#[test]
+fn a_fence_inside_an_open_comment_does_not_desynchronise_the_parser() {
+    let src = "<!-- example:\n\
+               ```\n\
+               hidden\n\
+               -->\n\
+               REAL RULE: never do X.\n\
+               ```\n\
+               CODE INSIDE A REAL FENCE\n\
+               ```\n\
+               AFTER\n";
+
+    let folded = fold_delivered_prompt(src);
+
+    assert!(
+        !folded.contains("hidden"),
+        "comment content leaked into the delivered prompt: {folded}"
+    );
+    assert!(
+        !folded.contains(COMMENT_CLOSE),
+        "the comment's closing delimiter leaked: {folded}"
+    );
+    for survivor in [
+        "REAL RULE: never do X.",
+        "CODE INSIDE A REAL FENCE",
+        "AFTER",
+    ] {
+        assert!(
+            folded.contains(survivor),
+            "the fold deleted the real line {survivor:?}: {folded}"
+        );
+    }
+    assert_eq!(
+        folded,
+        "REAL RULE: never do X.\n```\nCODE INSIDE A REAL FENCE\n```\nAFTER\n"
+    );
+}
+
 #[test]
 fn table_padding_is_stripped() {
     let src = "| # | Forbidden Action | CB# |\n\

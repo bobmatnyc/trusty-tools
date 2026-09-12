@@ -44,10 +44,13 @@ const FENCE: &str = "```";
 /// cannot deliver differently folded prompts, which is what
 /// `composed_package_is_byte_identical_to_the_legacy_bundled_fallback` pins.
 ///
-/// What: walks `text` line by line, tracking fenced-code and HTML-comment state.
-/// Outside a fence it drops a line that opens an HTML comment (through the line
-/// that closes it), trims trailing whitespace, collapses a run of blank lines to
-/// one, and strips the alignment padding from an unindented Markdown table row.
+/// What: walks `text` line by line, tracking HTML-comment state FIRST and
+/// fenced-code state second — an open comment swallows a fence-shaped line as
+/// comment content, and testing the fence first corrupted the parser both ways
+/// (leaked comment text, then deleted real lines). Outside a comment and a
+/// fence it drops a line that opens an HTML comment (through the line that
+/// closes it), trims trailing whitespace, collapses a run of blank lines to one,
+/// and strips the alignment padding from an unindented Markdown table row.
 /// Inside a fence every byte is emitted verbatim. A trailing newline on the
 /// input is preserved on the output; trailing blank lines are not.
 ///
@@ -57,7 +60,8 @@ const FENCE: &str = "```";
 /// Test: `authoring_comments_are_not_delivered`,
 /// `a_fenced_block_is_emitted_verbatim`, `table_padding_is_stripped`,
 /// `blank_line_runs_collapse`, `the_fold_is_idempotent`,
-/// `no_table_row_is_lost`.
+/// `no_table_row_is_lost`,
+/// `a_fence_inside_an_open_comment_does_not_desynchronise_the_parser`.
 pub(crate) fn fold_delivered_prompt(text: &str) -> String {
     let ends_with_newline = text.ends_with('\n');
     let mut out: Vec<String> = Vec::new();
@@ -65,6 +69,19 @@ pub(crate) fn fold_delivered_prompt(text: &str) -> String {
     let mut in_comment = false;
 
     for line in text.lines() {
+        // #7616: comment state is checked BEFORE fence state, and the order is
+        // load-bearing. An open HTML comment swallows a fence-shaped line as
+        // comment content; testing the fence first let that line flip `in_fence`
+        // while `in_comment` stayed true, so the comment's own `-->` and the
+        // real lines after it leaked into the prompt verbatim, and when the
+        // fence toggled back off the parser was still inside the comment and
+        // DELETED real instruction lines until the next `-->`.
+        if in_comment {
+            // A block comment's continuation lines carry no instruction either,
+            // so the whole block goes, not just its opening line.
+            in_comment = !line.contains(COMMENT_CLOSE);
+            continue;
+        }
         if line.trim_start().starts_with(FENCE) {
             in_fence = !in_fence;
             out.push(line.trim_end().to_string());
@@ -72,12 +89,6 @@ pub(crate) fn fold_delivered_prompt(text: &str) -> String {
         }
         if in_fence {
             out.push(line.to_string());
-            continue;
-        }
-        if in_comment {
-            // #7616: a block comment's continuation lines carry no instruction
-            // either, so the whole block goes, not just its opening line.
-            in_comment = !line.contains(COMMENT_CLOSE);
             continue;
         }
 

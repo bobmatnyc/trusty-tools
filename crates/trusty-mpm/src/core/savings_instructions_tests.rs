@@ -771,6 +771,44 @@ fn the_no_override_row_basis_carries_the_measured_bytes() {
     );
 }
 
+/// Why (#7616): "0 when no agent is deployed anywhere" is the branch that keeps
+/// the savings figure able to come out honestly zero — a machine with no roster
+/// folds no roster, and claiming otherwise would inflate every row. The ambient
+/// entry point cannot assert it (it reads this machine's global tiers), so the
+/// claim is asserted against the tier seam.
+/// Test: itself.
+#[test]
+fn roster_source_bytes_are_zero_without_a_roster() {
+    assert_eq!(
+        roster_source_bytes_from(&[]),
+        0,
+        "no tier at all folds no roster"
+    );
+
+    let empty_tier = tempfile::tempdir().expect("temp tier");
+    assert_eq!(
+        roster_source_bytes_from(&[empty_tier.path().to_path_buf()]),
+        0,
+        "a tier that exists but deploys no agent folds no roster"
+    );
+
+    let absent = empty_tier.path().join("never-created");
+    assert_eq!(
+        roster_source_bytes_from(&[absent]),
+        0,
+        "an absent tier is normal, not a fold"
+    );
+
+    // The positive control: the same seam DOES count a tier that holds agents,
+    // so the zeros above are the branch and not a broken call.
+    let deployed = tempfile::tempdir().expect("temp tier");
+    deploy_agents(deployed.path(), 3);
+    assert!(
+        roster_source_bytes_from(&[deployed.path().to_path_buf()]) > 0,
+        "a tier holding agents must contribute source bytes"
+    );
+}
+
 /// Why (#7616): the roster dedup is read-and-discarded source in exactly the
 /// sense an overridden section body is. Counting it only on the delivered side
 /// is what made the no-override case permanently zero.

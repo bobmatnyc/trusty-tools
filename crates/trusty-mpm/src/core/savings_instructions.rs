@@ -139,11 +139,26 @@ pub(crate) fn record_instruction_compression_in(framework_root: &Path, dest: &Pa
 /// What: renders the UNDEDUPED roster for `project_dir`'s tiers and returns its
 /// length; `0` when no agent is deployed anywhere, which is honest — a machine
 /// with no roster folds no roster.
-/// Test: `roster_source_bytes_are_zero_without_a_roster`,
-/// `the_roster_dedup_counts_as_folded_source`.
+/// Test: `the_roster_dedup_counts_as_folded_source` (the arithmetic),
+/// `roster_source_bytes_are_zero_without_a_roster` (the tier seam).
 fn ambient_roster_source_bytes(project_dir: &Path) -> usize {
     let dirs = crate::core::delegation_authority::deployed_agent_dirs(project_dir);
-    crate::core::delegation_authority::roster_section_from_dirs(&dirs)
+    roster_source_bytes_from(&dirs)
+}
+
+/// [`ambient_roster_source_bytes`] against an explicit tier list.
+///
+/// Why (#7616): the ambient entry point resolves `$CLAUDE_CONFIG_DIR` and the
+/// caller's home directory, so on a provisioned machine it can never return `0`
+/// and the "no roster folds no roster" branch is untestable through it. Taking
+/// the tiers is the seam that makes that branch assertable without mutating
+/// process-global state, the same shape `delegation_authority` already uses for
+/// `roster_section_from_dirs`.
+/// What: the length of the UNDEDUPED roster render for `dirs`, or `0` when no
+/// agent is deployed in any of them.
+/// Test: `roster_source_bytes_are_zero_without_a_roster`.
+fn roster_source_bytes_from(dirs: &[std::path::PathBuf]) -> usize {
+    crate::core::delegation_authority::roster_section_from_dirs(dirs)
         .map(|section| section.len())
         .unwrap_or(0)
 }
