@@ -244,3 +244,12 @@ describe('event-stream ticket auth (#5052)', () => {
     expect(sseReconnectDelayMs(-1)).toBe(SSE_RECONNECT_MIN_MS);
   });
 });
+
+it('forwards typed clipboard image bytes in browser task submission', async () => {
+  const attachments = [{ kind: 'image', name: 'chart.png', mime_type: 'image/png', data_base64: 'iVBORw0KGgo=' }];
+  const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: 'fixture rejection before execution' }), { status: 422 }));
+  vi.stubGlobal('fetch', fetcher);
+  await expect(invoke('send_message', { content: '', agent: 'alice', attachments })).rejects.toThrow('fixture rejection');
+  expect(JSON.parse(fetcher.mock.calls[0][1].body)).toMatchObject({ task: '', agent: 'alice', attachments });
+  vi.unstubAllGlobals();
+});

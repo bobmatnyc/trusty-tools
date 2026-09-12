@@ -1,20 +1,5 @@
-//! Implementation of `memory search`, `memory run`, and `code search` CLI subcommands.
-//!
-//! Why: Local store inspection needs a no-API-key, fast entry point. Humans
-//! debug workflows with `memory run <run_id>`; agents recall prior sessions
-//! with `memory search <query>`; code navigation uses `code search <query>`.
-//! What: Parses argv into a `Command` enum (pure, testable), then executes
-//! against a `RedbUsearchStore`+`FastEmbedder`+`MemoryGraph`/`CodeIndexer` stack.
-//!
-//! Module layout (see #366 split):
-//! - `mod.rs` — CLI parsing (`Command`, clap front-end) + dispatch
-//! - `handlers.rs` — store-backed run_* handlers + store openers
-//! - `format.rs` — human/JSON result formatters
-//! - `tests.rs` — unit tests
-//!
-//! Test: Unit tests cover `parse_args` for each form plus the human/JSON
-//! formatters for memory and code results.
-
+//! Code search CLI and explicit retirement of local memory commands (#7360).
+//! Test: parser cases and `legacy_memory_commands_fail_before_store_access`.
 mod format;
 mod handlers;
 
@@ -74,7 +59,7 @@ struct SearchCli {
 
 #[derive(Debug, Subcommand)]
 enum SearchGroup {
-    /// Agent-memory queries (search, run, sessions, search-all).
+    /// Retired local memory commands; use trusty-memory or assistant memory tools.
     Memory {
         #[command(subcommand)]
         action: MemoryAction,
@@ -88,7 +73,7 @@ enum SearchGroup {
 
 #[derive(Debug, Subcommand)]
 enum MemoryAction {
-    /// Semantic search over memories in the current session.
+    /// Retired local memory search; use assistant memory_recall.
     Search {
         query: String,
         #[arg(long = "top-k", default_value_t = DEFAULT_TOP_K)]
@@ -96,18 +81,18 @@ enum MemoryAction {
         #[arg(long)]
         json: bool,
     },
-    /// Inspect a workflow run by id.
+    /// Retired local run inspection; use the current task API.
     Run {
         run_id: String,
         #[arg(long)]
         json: bool,
     },
-    /// List all known sessions.
+    /// Retired local session listing; use trusty-memory chat-session APIs.
     Sessions {
         #[arg(long)]
         json: bool,
     },
-    /// Cross-session semantic search.
+    /// Retired cross-session local search; use trusty-memory recall.
     #[command(name = "search-all")]
     SearchAll {
         query: String,
@@ -184,41 +169,14 @@ pub fn parse_args(args: &[&str]) -> Result<Command> {
 pub async fn run_search_command(args: &[String]) -> Result<()> {
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let cmd = parse_args(&arg_refs)?;
-    let agent_dir = default_agent_dir()?;
-
-    // Migrate legacy `.trusty-agents/store/` if present.
-    if agent_dir.exists() {
-        crate::memory::migrate_if_needed(&agent_dir)?;
+    // #7360: legacy commands must not open or migrate another memory backend.
+    if !matches!(cmd, Command::CodeSearch { .. }) {
+        bail!(
+            "Local memory commands are retired. Use trusty-memory or an assistant's memory_remember/memory_recall tools. Existing local files are preserved; migrate their contents explicitly if needed."
+        );
     }
-
-    let code_dir = agent_dir.join("code");
-    let sessions_dir = agent_dir.join("sessions");
-
+    let code_dir = default_agent_dir()?.join("code");
     match cmd {
-        Command::MemorySearch { query, top_k, json } => {
-            if !sessions_dir.exists() {
-                println!("No sessions found at {}.", sessions_dir.display());
-                return Ok(());
-            }
-            handlers::run_memory_search(&query, top_k, json, &sessions_dir).await
-        }
-        Command::MemoryRun { run_id, json } => {
-            if !sessions_dir.exists() {
-                println!("No sessions found at {}.", sessions_dir.display());
-                return Ok(());
-            }
-            handlers::run_memory_run(&run_id, json, &sessions_dir).await
-        }
-        Command::MemorySessions { json } => {
-            handlers::run_memory_sessions(json, &sessions_dir).await
-        }
-        Command::MemorySearchAll { query, top_k, json } => {
-            if !sessions_dir.exists() {
-                println!("No sessions found at {}.", sessions_dir.display());
-                return Ok(());
-            }
-            handlers::run_memory_search_all(&query, top_k, json, &sessions_dir).await
-        }
         Command::CodeSearch {
             query,
             top_k,
@@ -234,6 +192,7 @@ pub async fn run_search_command(args: &[String]) -> Result<()> {
             }
             handlers::run_code_search(&query, top_k, lang.as_deref(), json, &code_dir).await
         }
+        _ => unreachable!("legacy memory commands returned before filesystem access"),
     }
 }
 

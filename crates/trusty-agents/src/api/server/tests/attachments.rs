@@ -385,6 +385,66 @@ async fn send_refuses_too_many_attachments() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
+/// #7396: the two attachment pathways share ONE per-turn count budget.
+///
+/// Why: `attachments` (manifest ids, capped at `MAX_ATTACHMENTS_PER_TURN`) and
+/// `inline_attachments` (prepared bodies, capped at `MAX_ATTACHMENTS`) were
+/// budgeted independently, so a request setting both collected the sum of two
+/// caps. Every attachment on either list is rendered into the turn and replayed
+/// as history on every later turn in the session, which is the cost the cap was
+/// chosen against — the caller's route to the model does not change it.
+/// What: a request sitting at BOTH caps at once (8 ids + 4 inline tables) is
+/// refused `400`. Each list alone is within budget, so the refusal can only come
+/// from the combined count.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn send_refuses_a_request_sitting_at_both_attachment_caps() {
+    let dir = tempfile::TempDir::new().expect("temp");
+    let ids: Vec<String> = (0..crate::attachments::MAX_ATTACHMENTS_PER_TURN)
+        .map(|_| "0".repeat(32))
+        .collect();
+    let inline: Vec<serde_json::Value> = (0..trusty_common::chat_attachments::MAX_ATTACHMENTS)
+        .map(|n| {
+            serde_json::json!({
+                "kind": "table",
+                "name": format!("sheet{n}.csv"),
+                "source_format": "csv",
+                "sheets": [{"name": "Sheet1", "rows": [["Name", "Role"]]}],
+            })
+        })
+        .collect();
+
+    let response = build_router(state_at(dir.path()))
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/task")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "task": "hi",
+                        "agent": AGENT,
+                        "attachments": ids,
+                        "inline_attachments": inline,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("submit");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .expect("body");
+    let body: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert!(
+        body["error"].as_str().unwrap().contains("at most"),
+        "the refusal must name the combined cap: {body}"
+    );
+}
+
 /// A server-side failure must not hand the caller an absolute path.
 ///
 /// Why this is a regression: `refuse` used to return `error.to_string()` for

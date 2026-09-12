@@ -22,6 +22,8 @@
 //! `roundtrip_persists_across_reopen`. The one-shot SQLite → redb migration
 //! was removed in issue #989 (all palaces confirmed migrated).
 
+mod assets;
+pub use assets::ChatImageAsset;
 mod store;
 mod types;
 
@@ -106,6 +108,7 @@ mod tests {
             .upsert_session(
                 &good,
                 &[ChatMessage {
+                    attachments: vec![],
                     role: "user".into(),
                     content: "hi".into(),
                 }],
@@ -143,6 +146,7 @@ mod tests {
         let result = store.append_message(
             id,
             ChatMessage {
+                attachments: vec![],
                 role: "user".into(),
                 content: "new".into(),
             },
@@ -180,6 +184,7 @@ mod tests {
             .upsert_session(
                 &b,
                 &[ChatMessage {
+                    attachments: vec![],
                     role: "user".into(),
                     content: "hi".into(),
                 }],
@@ -200,6 +205,7 @@ mod tests {
             .upsert_session(
                 &id,
                 &[ChatMessage {
+                    attachments: vec![],
                     role: "user".into(),
                     content: "first".into(),
                 }],
@@ -210,10 +216,12 @@ mod tests {
                 &id,
                 &[
                     ChatMessage {
+                        attachments: vec![],
                         role: "user".into(),
                         content: "first".into(),
                     },
                     ChatMessage {
+                        attachments: vec![],
                         role: "assistant".into(),
                         content: "second".into(),
                     },
@@ -242,6 +250,7 @@ mod tests {
             .upsert_session(
                 &id,
                 &[ChatMessage {
+                    attachments: vec![],
                     role: "user".into(),
                     content: "hi".into(),
                 }],
@@ -260,6 +269,7 @@ mod tests {
             .upsert_session(
                 id,
                 &[ChatMessage {
+                    attachments: vec![],
                     role: "user".into(),
                     content: "hello".into(),
                 }],
@@ -283,6 +293,7 @@ mod tests {
                 .upsert_session(
                     &id,
                     &[ChatMessage {
+                        attachments: vec![],
                         role: "user".into(),
                         content: "remember me".into(),
                     }],
@@ -339,6 +350,7 @@ mod tests {
                         .append_message(
                             &id,
                             ChatMessage {
+                                attachments: vec![],
                                 role: "user".into(),
                                 content: format!("turn-{i}"),
                             },
@@ -380,6 +392,7 @@ mod tests {
             .append_message(
                 id,
                 ChatMessage {
+                    attachments: vec![],
                     role: "user".into(),
                     content: "first".into(),
                 },
@@ -404,10 +417,12 @@ mod tests {
                 &id,
                 vec![
                     ChatMessage {
+                        attachments: vec![],
                         role: "user".into(),
                         content: "prompt".into(),
                     },
                     ChatMessage {
+                        attachments: vec![],
                         role: "assistant".into(),
                         content: "response".into(),
                     },

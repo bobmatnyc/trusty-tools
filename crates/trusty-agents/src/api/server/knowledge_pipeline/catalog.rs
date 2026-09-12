@@ -59,13 +59,9 @@ fn descriptor(
     kind: SourceKind,
     display_name: String,
 ) -> SourceDescriptor {
-    let mut dependency_reasons = vec![
-        "Business-entity NLP extraction and inexpensive inference cleanup require the upstream OKG pipeline (#4283)".into(),
-        "Durable extraction execution and searchable publication are pending (#4538)".into(),
-    ];
+    let mut dependency_reasons = vec![];
     match kind {
-        SourceKind::Project => dependency_reasons
-            .push("Current-file modification-time extraction manifests are pending (#4540)".into()),
+        SourceKind::Project => {}
         SourceKind::Gmail | SourceKind::Gdrive => dependency_reasons
             .push("Complete, resumable monthly source pagination is pending (#4534)".into()),
         SourceKind::Slack => dependency_reasons

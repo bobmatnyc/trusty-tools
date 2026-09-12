@@ -60,10 +60,10 @@
 # ---------------------------------------------------------------------------
 LANE	features	tga/bedrock
 LANE	features	trusty-analyze/http-server,trusty-analyze/ner,trusty-analyze/review
-LANE	features	trusty-common/axum-server,trusty-common/bedrock,trusty-common/bedrock-client,trusty-common/blocking-http,trusty-common/bm25,trusty-common/bug-capture,trusty-common/catchup
+LANE	features	trusty-common/axum-server,trusty-common/bedrock,trusty-common/bedrock-client,trusty-common/blocking-http,trusty-common/bm25,trusty-common/bug-capture,trusty-common/catchup,trusty-common/chat-attachments
 LANE	features	trusty-common/cli-help,trusty-common/codex-config,trusty-common/config-cli,trusty-common/console-metrics,trusty-common/crate-config,trusty-common/credentials,trusty-common/daemon-token
 LANE	features	trusty-common/docgen,trusty-common/embedder,trusty-common/embedder-candle,trusty-common/embedder-client,trusty-common/embedder-test-support,trusty-common/gh-cli,trusty-common/host-metrics
-LANE	features	trusty-common/inference-client,trusty-common/intent-source,trusty-common/keyring-store,trusty-common/log-drain,trusty-common/machine-tier,trusty-common/memory-core,trusty-common/memory-rpc
+LANE	features	trusty-common/inference-client,trusty-common/intent-source,trusty-common/keyring-store,trusty-common/knowledge-document,trusty-common/log-drain,trusty-common/machine-tier,trusty-common/memory-core,trusty-common/memory-rpc
 LANE	features	trusty-common/migrations,trusty-common/monitor-tui,trusty-common/palace-resolve,trusty-common/redb-open,trusty-common/rpc,trusty-common/search-index,trusty-common/session-naming
 LANE	features	trusty-common/sld,trusty-common/stdio-mcp-client,trusty-common/symgraph,trusty-common/symgraph-parser,trusty-common/symgraph-server,trusty-common/tickets,trusty-common/uds
 LANE	features	trusty-common/uds-supervisor,trusty-common/update-check,trusty-common/webhook-hmac,trusty-common/webhook-relay

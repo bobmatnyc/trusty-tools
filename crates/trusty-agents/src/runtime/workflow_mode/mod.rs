@@ -115,7 +115,7 @@ mod resume;
 
 use helpers::{
     build_init_context, build_runner_for_workflow, check_workflow_project_dirs,
-    collect_modified_files, load_skill_registry, load_tag_skill_registry, load_user_memory_suffix,
+    collect_modified_files, load_skill_registry, load_tag_skill_registry,
     read_current_build_number, refresh_global_skills_cache, resolve_out_dir, resolve_workflows_dir,
 };
 
@@ -315,7 +315,6 @@ pub(super) async fn run_workflow(
     // Backed by an embedded redb + usearch store at ~/.trusty-agents/memory/.
     // Injected at lower priority than project context so project-specific
     // knowledge always wins. Non-fatal on failure.
-    let user_memory_suffix = load_user_memory_suffix().await;
 
     // #173: Tag-indexed skill registry for pre-plan automatic skill discovery.
     // This is independent of the legacy `skill_registry` (which is the older
@@ -336,7 +335,6 @@ pub(super) async fn run_workflow(
         .with_skill_registry(Some(skill_registry))
         .with_skills_loader(Some(skills_loader))
         .with_init_context(init_ctx)
-        .with_user_memory(user_memory_suffix)
         .with_tag_skill_registry(Some(tag_skill_registry))
         .with_progress(Some(Arc::new(progress::ProgressReporter::new())));
 

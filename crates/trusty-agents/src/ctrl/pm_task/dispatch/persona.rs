@@ -20,9 +20,7 @@ use crate::tools::registry::scope::ScopePattern;
 use crate::tools::{AgentRunner, ToolRegistry};
 
 use super::super::super::claude_cli::run_pm_task_via_claude_cli;
-use super::super::super::config::{
-    SessionOverrides, apply_credential_routing, resolve_overridden_credentials,
-};
+use super::super::super::config::SessionOverrides;
 use super::super::super::handlers::{
     AddProjectTool, CreateDirTool, ListProjectsTool, MoveFileTool, RemoveProjectTool,
     SetActiveProjectTool, StopTaskTool, register_ticketing_tools,
@@ -93,6 +91,7 @@ pub async fn run_pm_task_with_persona(
     // (written by the personalization editor) now dispatches correctly
     // through this persona-chat path, not just the subprocess `--direct`
     // path that already used `by_name_async` internally.
+    crate::assistants::memory_grants::migrate_chat(persona_name, user_input).await?;
     let mut persona_cfg = AgentConfig::by_name_async(persona_name)
         .await
         .with_context(|| format!("persona agent '{persona_name}' not found"))?;
@@ -103,18 +102,24 @@ pub async fn run_pm_task_with_persona(
         persona_cfg.override_model(m)?;
     }
 
-    let creds = resolve_overridden_credentials(&mut persona_cfg, overrides.provider.as_deref())?;
-    let claude_cli_short_circuit = apply_credential_routing(&mut persona_cfg, &creds);
-    tracing::info!(
-        persona = %persona_name,
-        agent = %persona_cfg.agent.name,
-        runner = ?persona_cfg.agent.runner,
-        model = %persona_cfg.agent.model,
-        creds = creds.label(),
-        claude_cli_short_circuit,
-        use_anthropic_direct = persona_cfg.llm.use_anthropic_direct,
-        "run_pm_task_with_persona: credentials resolved"
-    );
+    let (creds, claude_cli_short_circuit) = prompt::resolve_provider(
+        &mut persona_cfg,
+        overrides.provider.as_deref(),
+        None,
+        persona_name,
+    )?;
+    let client = if claude_cli_short_circuit {
+        None
+    } else {
+        Some(llm::create_client_for_model(&persona_cfg.agent.model)?)
+    };
+    let attachment_turn = crate::chat_attachments::prepare(
+        persona_name,
+        user_input,
+        &overrides.attachments,
+        |turn| turn.validate_provider(&persona_cfg, creds.label(), claude_cli_short_circuit),
+    )
+    .await?;
     if claude_cli_short_circuit {
         prompt::append_cli_context(&mut persona_cfg, project_path);
         // DOC-54 §9.6 note: the claude-cli subprocess path runs an entirely
@@ -140,7 +145,7 @@ pub async fn run_pm_task_with_persona(
     }
     let persona_llm_t0 = std::time::Instant::now();
 
-    let client = llm::create_client()?;
+    let client = client.context("API provider client unavailable")?;
 
     // DOC-54 §9.6.1/§9.6.3 (filterable context, demo-day 2026-07-24):
     // fetch the closed label vocabulary + (when focused) assemble the
@@ -169,8 +174,9 @@ pub async fn run_pm_task_with_persona(
     // prompt is assembled.
     // #7428: `persona_name` is the assistant INSTANCE id, which is now what the
     // palace defaults to when no `[[stores]] palace` pins one.
+    crate::tools::assistant_memory::bind_automatic(&mut persona_cfg, persona_name).await;
     let persona_memory = persona_memory::build_persona_memory(
-        &persona_cfg.stores,
+        &crate::tools::assistant_memory::recall_stores(&persona_cfg),
         persona_name,
         Some(&workstreams_socket),
         trusty_common::resolve_daemon_base_url("trusty-search").as_deref(),
@@ -206,20 +212,11 @@ pub async fn run_pm_task_with_persona(
         &persona_cfg.agent.kind,
         listener_event_turn,
     );
-    let effective_patterns = if persona_cfg.agent.kind == "assistant" {
-        let mut patterns = effective_patterns.unwrap_or_default();
-        patterns.push("project_skill".to_owned());
-        if !listener_event_turn {
-            patterns.push("channel".to_owned());
-            patterns.push("delegate_skill_configuration".to_owned());
-            if crate::assistants::is_assistant_role(&persona_cfg.agent.role) {
-                patterns.push("knowledge_history".to_owned());
-            }
-        }
-        Some(patterns)
-    } else {
-        effective_patterns
-    };
+    let effective_patterns = crate::tools::concierge::assistant_patterns(
+        &persona_cfg,
+        effective_patterns,
+        listener_event_turn,
+    );
     if !unresolved_skills.is_empty() {
         tracing::warn!(
             persona = %persona_name,
@@ -232,6 +229,12 @@ pub async fn run_pm_task_with_persona(
     let (persona_registry, persona_tool_names): (ToolRegistry, Vec<String>) =
         if let Some(patterns) = effective_patterns {
             let mut registry = ToolRegistry::new();
+            if persona_cfg.agent.kind == "assistant" {
+                registry.register(Arc::new(crate::tools::concierge::ConciergeTool::assistant(
+                    persona_name,
+                    listener_event_turn,
+                )));
+            }
             if persona_cfg.agent.kind == "assistant" && !listener_event_turn {
                 if crate::assistants::is_assistant_role(&persona_cfg.agent.role) {
                     registry.register(Arc::new(
@@ -430,18 +433,12 @@ pub async fn run_pm_task_with_persona(
             // `effective_search_indexes` returns `resolved_search_indexes()`
             // verbatim. `[[stores]]` — the ONE curated OKG store, DOC-54
             // §5.1 — is neither read nor widened by that call.
-            let bound_index = persona_cfg
-                .stores
-                .default_search_index()
-                .map(str::to_string);
-            let attached = cross_project_scope
-                .effective_search_indexes(persona_cfg.tools.resolved_search_indexes());
-            registry.register(Arc::new(
-                crate::tools::memory::VectorSearchTool::new()
-                    .with_default_index(bound_index)
-                    .with_attached_indexes(attached)
-                    .with_index_enforcement(persona_cfg.tools.search_indexes_enforced()),
-            ));
+            registry.register(Arc::new(crate::knowledge::search_binding::tool(
+                persona_name,
+                &persona_cfg,
+                cross_project_scope
+                    .effective_search_indexes(persona_cfg.tools.resolved_search_indexes()),
+            )));
 
             // system_status epic (#3052): lets a persona report on-demand
             // trusty-* subsystem health (daemons, MCP servers, credential
@@ -563,6 +560,11 @@ pub async fn run_pm_task_with_persona(
                 }
             }
 
+            if crate::assistants::is_assistant_role(&persona_cfg.agent.role) {
+                crate::tools::assistant_memory::bind(&mut registry, persona_name);
+            } else {
+                crate::tools::assistant_memory::bind(&mut registry, "delegated-memory-unavailable");
+            }
             let all_names: Vec<String> = registry
                 .schemas()
                 .into_iter()
@@ -690,7 +692,8 @@ pub async fn run_pm_task_with_persona(
     // `PmResponse` / attribution downstream are unaffected. A tool-armed persona
     // (`!persona_tool_names.is_empty()`) keeps the multi-turn tool loop below,
     // and any streaming failure falls through to that same blocking path.
-    if persona_tool_names.is_empty()
+    if attachment_turn.is_none()
+        && persona_tool_names.is_empty()
         && llm::stream::streaming_supported(
             &persona_cfg.agent.model,
             persona_cfg.llm.use_anthropic_direct,
@@ -754,7 +757,11 @@ pub async fn run_pm_task_with_persona(
         }
     }
 
-    let initial_messages = prompt::messages(system_prompt, history, user_input)?;
+    let initial_messages = if let Some(turn) = &attachment_turn {
+        turn.initial_messages(system_prompt)?
+    } else {
+        prompt::messages(system_prompt, history, user_input)?
+    };
 
     let adapter = llm::adapter::adapter_for_model(&persona_cfg.agent.model);
     // #3208: NEVER collapse an empty tool list to `None` here — see
@@ -779,6 +786,10 @@ pub async fn run_pm_task_with_persona(
         persona_cfg.llm.strict_tool_discipline(),
         persona_cfg.llm.use_anthropic_direct,
         &persona_cfg.llm.stop_sequences,
+        Some((
+            persona_cfg.llm.aws_profile.as_deref(),
+            persona_cfg.llm.aws_region.as_deref(),
+        )),
     )
     .await
     .context("persona LLM call failed")?;
@@ -789,26 +800,21 @@ pub async fn run_pm_task_with_persona(
         "run_pm_task_with_persona: LLM call complete"
     );
 
-    let display = classification::finish_turn(
-        project_path,
-        persona_name,
-        &client,
-        &persona_cfg,
-        user_input,
+    prompt::finish_turn(
+        prompt::TurnCompletion {
+            project_path,
+            persona_name,
+            client: &client,
+            persona_cfg: &persona_cfg,
+            user_input,
+            turn_ctx: &turn_ctx,
+            workstreams_socket: &workstreams_socket,
+        },
         content,
-        &turn_ctx,
-        &workstreams_socket,
-    )
-    .await?;
-    persona_memory::spawn_persist_turn_with_activity(
-        &persona_cfg.stores,
-        Some(&workstreams_socket),
-        persona_name,
-        user_input,
-        &display,
+        attachment_turn.as_ref(),
         persona_registry.activity_history(),
-    );
-    Ok(display)
+    )
+    .await
 }
 
 #[cfg(test)]

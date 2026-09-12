@@ -14,8 +14,10 @@ pub(crate) mod activity;
 pub mod agent_plugin;
 pub mod always_on;
 pub mod analysis;
+pub mod assistant_memory;
 pub mod ast_tools;
 pub mod channel;
+pub mod concierge;
 // #4026/#4028: cross-product subagent allow-set + propose-only envelope.
 pub mod cross_product;
 pub mod delegate;
@@ -37,7 +39,6 @@ pub mod mcp_service_tools;
 pub mod mcp_tools;
 pub mod memory;
 pub mod memory_search;
-pub mod native_memory;
 pub mod native_search;
 pub mod native_ticketing;
 pub mod okg;
@@ -349,24 +350,12 @@ impl ToolRegistry {
     }
 }
 
-/// Optional backends for the native search + memory tools (#137).
-///
-/// Why: `native_tool_registry` needs to know which of search_code /
-/// search_memory / store_memory / retrieve_memory / list_memory_keys /
-/// search_skills should be given a real backend vs. left in graceful-
-/// degradation mode. Passing them in a single struct keeps the call site
-/// readable as the backend list grows.
-/// What: Each field is an `Option<Arc<_>>`; `None` leaves the corresponding
-/// tool in "unavailable" mode so callers that don't wire it don't crash.
-/// Test: `native_tool_registry_*` cases exercise both wired and default
-/// paths.
+/// Optional code index and skill backends. Fact memory always uses the bound daemon.
 #[derive(Default, Clone)]
 #[allow(dead_code)]
 pub struct NativeToolBackends {
     pub code_indexer: Option<Arc<crate::search::indexer::CodeIndexer>>,
-    pub memory_graph: Option<Arc<crate::memory::graph::MemoryGraph>>,
     pub skill_resolver: Option<Arc<dyn SkillResolver>>,
-    pub memory_backend: Option<crate::tools::native_memory::MemoryBackend>,
 }
 
 /// Build a list of native (non-shell) tools (#133, #137).
@@ -385,7 +374,6 @@ pub fn native_tool_registry(
     ticketing: Option<Arc<dyn crate::ticketing::TicketingClient>>,
     backends: NativeToolBackends,
 ) -> Vec<Arc<dyn ToolExecutor>> {
-    use crate::tools::native_memory::{ListMemoryKeysTool, RetrieveMemoryTool, StoreMemoryTool};
     use crate::tools::native_search::{SearchCodeTool, SearchMemoryTool, SearchSkillsTool};
     use crate::tools::native_ticketing::{
         AddCommentTool, CloseTicketTool, CreateTicketTool, GetTicketTool, ListTicketsTool,
@@ -395,39 +383,12 @@ pub fn native_tool_registry(
         Some(idx) => Arc::new(SearchCodeTool::with_indexer(idx)),
         None => Arc::new(SearchCodeTool::new()),
     };
-    let search_memory: Arc<dyn ToolExecutor> = match backends.memory_graph {
-        Some(g) => Arc::new(SearchMemoryTool::with_graph(g)),
-        None => Arc::new(SearchMemoryTool::new()),
-    };
+    let search_memory: Arc<dyn ToolExecutor> = Arc::new(SearchMemoryTool::new());
     let search_skills: Arc<dyn ToolExecutor> = match backends.skill_resolver {
         Some(r) => Arc::new(SearchSkillsTool::with_resolver(r)),
         None => Arc::new(SearchSkillsTool::new()),
     };
-    let (store_mem, retrieve_mem, list_mem): (
-        Arc<dyn ToolExecutor>,
-        Arc<dyn ToolExecutor>,
-        Arc<dyn ToolExecutor>,
-    ) = match backends.memory_backend {
-        Some(backend) => (
-            Arc::new(StoreMemoryTool::with_backend(backend.clone())),
-            Arc::new(RetrieveMemoryTool::with_backend(backend.clone())),
-            Arc::new(ListMemoryKeysTool::with_backend(backend)),
-        ),
-        None => (
-            Arc::new(StoreMemoryTool::new()),
-            Arc::new(RetrieveMemoryTool::new()),
-            Arc::new(ListMemoryKeysTool::new()),
-        ),
-    };
-
-    let mut out: Vec<Arc<dyn ToolExecutor>> = vec![
-        search_code,
-        search_memory,
-        search_skills,
-        store_mem,
-        retrieve_mem,
-        list_mem,
-    ];
+    let mut out: Vec<Arc<dyn ToolExecutor>> = vec![search_code, search_memory, search_skills];
     if let Some(client) = ticketing {
         out.push(Arc::new(CreateTicketTool(client.clone())));
         out.push(Arc::new(GetTicketTool(client.clone())));

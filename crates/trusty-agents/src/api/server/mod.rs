@@ -44,7 +44,7 @@ pub(crate) mod agent_channels;
 mod agent_kg;
 mod agent_knowledge;
 pub(crate) mod agent_listeners;
-mod agent_patch;
+pub(crate) mod agent_patch;
 mod agent_permissions;
 mod agent_skills;
 mod agent_stores;
@@ -53,14 +53,19 @@ mod agent_subagents;
 mod assistant_mcp;
 // #7428: one memory palace per assistant, with the opt-in fan-out setting.
 mod assistant_memory;
+pub(crate) mod assistant_settings;
 // #7370: chat-thread attachments — upload, manifest listing, and
 // id-addressed retrieval under `<assistant home>/attachments/<session>/`.
 mod attachments;
 mod auth;
 mod cancel;
+// #7396: the grant ceiling a turn-originated settings patch may never widen.
+mod grant_ceiling;
 pub(crate) mod knowledge_pipeline;
 // #4278: read back the durable `persona-{agent}` chat log so the GUI can
 // rehydrate its chat view on reload.
+mod assistant_operations;
+mod attachment_prepare;
 mod chat_history;
 mod costs;
 mod ctrl_sessions;

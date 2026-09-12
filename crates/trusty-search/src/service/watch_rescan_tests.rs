@@ -540,3 +540,67 @@ fn rescan_retry_backoff_grows_and_saturates() {
         "no failure count may produce an unbounded delay"
     );
 }
+
+/// #7396: a dropped-event rescan whose index has no registry handle must still
+/// re-arm, not vanish.
+///
+/// Why: the pre-fix watch loop answered an absent handle with a bare `continue`
+/// — no log line, no failure count, no retry — while the paths the OS dropped
+/// were already unrecoverable. A handle missing for one moment (a
+/// re-registration, a teardown that is undone) therefore cost the index an
+/// unknown set of file changes permanently, and the alarm that would have
+/// caught it was the thing being discarded.
+/// What: drives the real production sequence a `Flag::Rescan` takes —
+/// `reconcile_registered` against an EMPTY registry, the real follow-up
+/// decision, the real scheduler, the real channel the loop reads. The registry
+/// is present and simply holds no handle for this id, which is exactly the
+/// state the removed `continue` keyed on. "No handle" must not be confused with
+/// "no registry at all", so the `None` case is asserted beside it: that one
+/// still reconciles the whole root.
+/// Test: this function IS the test.
+#[tokio::test(start_paused = true)]
+async fn rescan_without_a_registered_handle_schedules_a_retry() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = std::fs::canonicalize(dir.path()).expect("canonicalize");
+    let (index_id, indexer, tracker) = fixture(&root);
+    std::fs::write(root.join("present.rs"), "fn present() {}\n").expect("write");
+
+    let registry = crate::core::registry::IndexRegistry::new();
+    let failure = crate::service::watch_rescan::reconcile_registered(
+        &index_id,
+        &root,
+        &root,
+        &indexer,
+        &tracker,
+        Some(&registry),
+    )
+    .await
+    .expect_err("an unregistered index cannot be reconciled");
+    assert!(
+        matches!(failure, RescanError::UnregisteredIndex { .. }),
+        "the absent handle must be reported as its own failure: {failure:?}"
+    );
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WatchEvent>();
+    let RescanFollowUp::Retry { attempt } = rescan_follow_up(Err(&failure), 0) else {
+        panic!("an unreconciled tree must ask for a retry");
+    };
+    schedule_rescan_retry(tx, attempt);
+    assert!(
+        rx.try_recv().is_err(),
+        "the retry must not fire immediately"
+    );
+    assert_eq!(
+        rx.recv().await,
+        Some(WatchEvent::Rescan),
+        "an absent registry handle must re-arm the rescan, never discard it"
+    );
+
+    // No registry at all is the pre-#7379 unfiltered mode and still reconciles.
+    let stats = crate::service::watch_rescan::reconcile_registered(
+        &index_id, &root, &root, &indexer, &tracker, None,
+    )
+    .await
+    .expect("a loop started without a registry reconciles the whole root");
+    assert_eq!(stats.files_reindexed, 1, "{stats:?}");
+}

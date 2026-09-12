@@ -72,7 +72,6 @@ pub(crate) async fn prepare_ctrl_turn_state(ctrl: &Ctrl) -> Result<CtrlTurnState
         .collect();
 
     let registry = build_ctrl_registry(
-        ctrl.memory.clone(),
         pending_connect.clone(),
         ctrl.self_project.clone(),
         pending_self_task.clone(),
@@ -177,9 +176,9 @@ pub(crate) async fn build_ctrl_turn_system_prompt(
 
     let is_ctrl_persona = agent_cfg.agent.name == "ctrl";
 
-    if !is_ctrl_persona && let Some(proj) = &ctrl.self_project {
+    if !is_ctrl_persona {
         let q = &user_input[..200.min(user_input.len())];
-        let memories = recall_project_memories(proj, q, 5).await;
+        let memories = recall_project_memories(&agent_cfg.agent.name, q, 5).await;
         if !memories.is_empty() {
             builder = builder.add_memory_layer(memories);
         }

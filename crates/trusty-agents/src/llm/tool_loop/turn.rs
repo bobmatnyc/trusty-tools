@@ -246,7 +246,7 @@ async fn dispatch_turn_shared(
 
     let mut req = trusty_common::inference::ChatRequest::new(
         wire_model,
-        inference_bridge::to_shared_messages(messages),
+        inference_bridge::to_shared_messages(messages)?,
     );
     req.temperature = Some(temperature);
     req.max_tokens = Some(max_tokens);

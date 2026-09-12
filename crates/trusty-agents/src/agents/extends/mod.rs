@@ -345,7 +345,12 @@ pub fn merge_extends(base: AgentConfig, child: AgentConfig) -> AgentConfig {
 
     // --- List fields: union (dedup, base-first order) ---
     merged.tools.allowed = union_opt_vec(merged.tools.allowed, child.tools.allowed);
-    merged.tools.allow = union_opt_vec(merged.tools.allow, child.tools.allow);
+    // #7360: an operator's Settings selection is exact, including an empty list.
+    merged.tools.allow = if child.permissions.replace_tools {
+        Some(child.tools.allow.unwrap_or_default())
+    } else {
+        union_opt_vec(merged.tools.allow, child.tools.allow)
+    };
     merged.tools.scopes = union_opt_vec(merged.tools.scopes, child.tools.scopes);
     // #3232: `[tools].search_indexes` — attached trusty-search indexes, the
     // tier-2 knowledge mechanism (epic #4007). Same base-first union as
@@ -362,9 +367,19 @@ pub fn merge_extends(base: AgentConfig, child: AgentConfig) -> AgentConfig {
         merged.tools.enforce_search_indexes = child.tools.enforce_search_indexes;
     }
     // `[skills].allow` (#3933): same base-first union as `[tools].allow`, for
-    // the same reason — an overlay ADDS capability to its base and must never
-    // silently remove what the base granted.
-    merged.skills.allow = union_opt_vec(merged.skills.allow, child.skills.allow);
+    // the same reason — an AUTHORED overlay ADDS capability to its base and
+    // must never silently remove what the base granted. #7360's
+    // `replace_skills` is the one exception, and it is not an authored overlay:
+    // it is set only by a Settings write, where the operator's selection is
+    // exact and a union would silently re-add what they just removed. Narrowing
+    // is the only direction that flag reaches — a turn-originated patch cannot
+    // widen past the manifest's own grants (#7396,
+    // `api::server::grant_ceiling`).
+    merged.skills.allow = if child.permissions.replace_skills {
+        Some(child.skills.allow.unwrap_or_default())
+    } else {
+        union_opt_vec(merged.skills.allow, child.skills.allow)
+    };
 
     // `[subagents]` (#4026 `allowed`, ADR-0024 decision 4 `delegate_allowed`):
     // base-first UNION, the §2.5 list rule, for the same reason as
@@ -377,10 +392,14 @@ pub fn merge_extends(base: AgentConfig, child: AgentConfig) -> AgentConfig {
     // cannot widen past the server-owned floor: `SubagentAllowSet::resolve`
     // intersects the merged list with the floor at every dispatch.
     merged.subagents.allowed = union_opt_vec(merged.subagents.allowed, child.subagents.allowed);
-    merged.subagents.delegate_allowed = union_opt_vec(
-        merged.subagents.delegate_allowed,
-        child.subagents.delegate_allowed,
-    );
+    merged.subagents.delegate_allowed = if child.permissions.replace_subagents {
+        Some(child.subagents.delegate_allowed.unwrap_or_default())
+    } else {
+        union_opt_vec(
+            merged.subagents.delegate_allowed,
+            child.subagents.delegate_allowed,
+        )
+    };
 
     // `[permissions]` (#3936, DOC-57 §2.3 + §7.2):
     //
@@ -392,7 +411,15 @@ pub fn merge_extends(base: AgentConfig, child: AgentConfig) -> AgentConfig {
     // `merged`) already holds the accumulated union of every ancestor level;
     // this only has to fold in the CHILD's own contribution (also computed
     // above, before the partial moves).
-    merged.permissions.scopes = union_opt_vec(base_scopes_seed, child_effective_scopes);
+    merged.permissions.scopes = if child.permissions.replace_scopes {
+        Some(child_effective_scopes.unwrap_or_default())
+    } else {
+        union_opt_vec(base_scopes_seed, child_effective_scopes)
+    };
+    merged.permissions.replace_scopes = child.permissions.replace_scopes;
+    merged.permissions.replace_tools = child.permissions.replace_tools;
+    merged.permissions.replace_skills = child.permissions.replace_skills;
+    merged.permissions.replace_subagents = child.permissions.replace_subagents;
     // `grants[]` — union keyed by `skill`, same shape as the listener-binding
     // union: a child re-declaring a grant for a skill OVERRIDES the base's
     // mode for it rather than appending a second, shadowing entry.

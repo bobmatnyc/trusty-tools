@@ -14,7 +14,7 @@
 //! `plain_content_when_no_cache_control`.
 
 use serde::ser::SerializeStruct;
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Serialize, Serializer};
 
 use super::tool::{CacheControl, ToolCall};
 
@@ -28,25 +28,21 @@ use super::tool::{CacheControl, ToolCall};
 /// turns; `tool_call_id`/`name` are populated for `tool` messages;
 /// `cache_control` is a prompt-cache breakpoint applied at serialisation time.
 /// Test: `serialises_all_roles`, `cache_control_serialises_as_block`.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ChatMessage {
     /// Conversation role.
     pub role: String,
     /// Text content; `None` on assistant turns that only emit tool calls.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    pub images: Vec<crate::chat_attachments::ImageContent>,
     /// Tool calls emitted by the assistant.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
     /// For `tool` messages: the id of the tool call this responds to.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     /// For `tool` messages: the name of the function that was called.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Prompt-cache breakpoint. Request-only, so dropped on deserialise via
     /// `#[serde(skip)]`; see [`Self::serialize`] for its wire effect.
-    #[serde(skip)]
     pub cache_control: Option<CacheControl>,
 }
 
@@ -71,17 +67,32 @@ impl Serialize for ChatMessage {
         let mut state = serializer.serialize_struct("ChatMessage", 5)?;
         state.serialize_field("role", &self.role)?;
 
-        match (&self.content, &self.cache_control) {
-            (Some(text), Some(cache_control)) => {
-                let block = [CachedTextBlock {
-                    kind: "text",
-                    text: text.as_str(),
-                    cache_control,
-                }];
-                state.serialize_field("content", &block)?;
+        if self.images.is_empty() {
+            match (&self.content, &self.cache_control) {
+                (Some(text), Some(cache_control)) => {
+                    let block = [CachedTextBlock {
+                        kind: "text",
+                        text: text.as_str(),
+                        cache_control,
+                    }];
+                    state.serialize_field("content", &block)?;
+                }
+                (Some(text), None) => state.serialize_field("content", text)?,
+                (None, _) => state.skip_field("content")?,
             }
-            (Some(text), None) => state.serialize_field("content", text)?,
-            (None, _) => state.skip_field("content")?,
+        } else {
+            let mut blocks = Vec::new();
+            if let Some(text) = &self.content {
+                blocks.push(serde_json::json!({"type":"text","text":text}));
+            }
+            for image in &self.images {
+                blocks.push(serde_json::json!({"type":"image_url","image_url":{"url":format!("data:{};base64,{}",image.mime_type,image.data_base64)}}));
+            }
+            if let (Some(cache), Some(last)) = (&self.cache_control, blocks.last_mut()) {
+                last["cache_control"] =
+                    serde_json::to_value(cache).map_err(serde::ser::Error::custom)?;
+            }
+            state.serialize_field("content", &blocks)?;
         }
 
         match &self.tool_calls {
@@ -157,6 +168,7 @@ impl ChatMessage {
         content: impl Into<String>,
     ) -> Self {
         Self {
+            images: vec![],
             role: "tool".into(),
             content: Some(content.into()),
             tool_calls: None,
@@ -173,6 +185,7 @@ impl ChatMessage {
     /// What: builds a text-only message with all optional fields `None`.
     fn text(role: &str, content: impl Into<String>) -> Self {
         Self {
+            images: vec![],
             role: role.into(),
             content: Some(content.into()),
             tool_calls: None,

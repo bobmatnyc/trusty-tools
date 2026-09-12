@@ -28,11 +28,10 @@ use crate::session::HistoryMessage;
 /// by round-tripping through `serde_json::Value` so we don't need a custom
 /// size accounting for every message variant.
 /// What: Serializes each message to a Value, calls
-/// `ContextManager::trim_to_budget` with `protected_count = 1` (the system
-/// message), and deserializes survivors back. On any serde failure the
+/// `ContextManager::trim_to_budget`, protecting the system message and retained image
+/// history, then deserializes survivors back. On any serde failure the
 /// original vector is returned unchanged (fail-open).
-/// Test: Exercised via the manager's own unit tests; integration covered by
-/// the workflow smoke tests.
+/// Test: `image_attachment_history_survives_text_budget_trimming` and ContextManager trim tests.
 pub fn trim_messages_with_manager(
     messages: Vec<ChatCompletionRequestMessage>,
     manager: &ContextManager,
@@ -47,7 +46,18 @@ pub fn trim_messages_with_manager(
         Err(_) => return messages,
     };
     let original_len = json_msgs.len();
-    let (trimmed, outcome) = manager.trim_to_budget(json_msgs, model, 1);
+    // #7370: opaque image bytes are not text tokens; never evict a remembered image silently.
+    // Bound attachment history is admitted before this point; provider context errors remain visible.
+    let protected = json_msgs
+        .iter()
+        .rposition(|message| {
+            message
+                .get("content")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|parts| parts.iter().any(|part| part["type"] == "image_url"))
+        })
+        .map_or(1, |index| index + 1);
+    let (trimmed, outcome) = manager.trim_to_budget(json_msgs, model, protected);
     if !outcome.changed() {
         return messages;
     }
@@ -201,6 +211,30 @@ fn compress_history_messages(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_attachment_history_survives_text_budget_trimming() {
+        let image = format!("data:image/png;base64,{}", "YWJj".repeat(50_000));
+        let wire = serde_json::json!([
+            {"role":"system","content":"system"},
+            {"role":"user","content":[{"type":"image_url","image_url":{"url":image}}]},
+            {"role":"assistant","content":"Seen"},
+            {"role":"user","content":"Describe it again"}
+        ]);
+        let messages: Vec<ChatCompletionRequestMessage> =
+            serde_json::from_value(wire.clone()).unwrap();
+        let expected = serde_json::to_value(&messages).unwrap();
+        let result = trim_messages_with_manager(messages, &ContextManager::new(0.1), "unknown");
+        let actual = serde_json::to_value(result).unwrap();
+        assert!(
+            actual[1] == expected[1],
+            "image history must remain byte-identical"
+        );
+        assert_eq!(
+            actual.as_array().unwrap().last(),
+            expected.as_array().unwrap().last()
+        );
+    }
 
     fn hm(role: &str, content: &str) -> HistoryMessage {
         HistoryMessage {

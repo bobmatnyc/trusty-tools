@@ -151,6 +151,11 @@ pub(super) async fn run_subagent(name: &str) -> Result<()> {
             std::env::var("TAGENT_DELEGATION_TAINT_ALLOW").ok(),
         );
     let is_tainted_delegation = delegation_taint_allow.is_some();
+    if !is_tainted_delegation {
+        crate::assistants::memory_grants::migrate(&agents::agents_dir_candidates(), name).await?;
+        cfg = AgentConfig::by_name(name)?;
+    }
+
     if is_tainted_delegation {
         tracing::info!(
             agent = %name,
@@ -265,6 +270,9 @@ pub(super) async fn run_subagent(name: &str) -> Result<()> {
     //   3. Any resolved skills declared by the agent.
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut builder = SystemPromptBuilder::new(cfg.system_prompt.content.clone());
+    if is_assistant_tier && !is_tainted_delegation {
+        builder = builder.add_harness_layer(tools::concierge::context(true));
+    }
 
     // Assistant-tier personas are black-boxed (persona.md/#3550): the user
     // must never see internal system/architecture names. `CLAUDE.md`/
@@ -397,6 +405,16 @@ pub(super) async fn run_subagent(name: &str) -> Result<()> {
         cfg.subagents.delegate_allowed.as_deref(),
     );
 
+    if is_assistant_tier && !is_tainted_delegation {
+        registry
+            .get_or_insert_with(ToolRegistry::new)
+            .register(Arc::new(crate::knowledge::search_binding::tool(
+                name,
+                &cfg,
+                cfg.tools.resolved_search_indexes(),
+            )));
+    }
+
     // #57: If the agent opts into `use_finish_task`, auto-register the
     // terminal tool. Create a fresh registry when the agent didn't have one
     // (a pure `finish_task`-only agent is still valid).
@@ -437,6 +455,24 @@ pub(super) async fn run_subagent(name: &str) -> Result<()> {
         }
     }
 
+    {
+        // Delegated workers cannot inherit a different assistant's memory identity.
+        tools::assistant_memory::bind(
+            registry.get_or_insert_with(ToolRegistry::new),
+            if is_tainted_delegation || !is_assistant_tier {
+                "delegated-memory-unavailable"
+            } else {
+                name
+            },
+        );
+    }
+    if is_assistant_tier && !is_tainted_delegation {
+        registry
+            .get_or_insert_with(ToolRegistry::new)
+            .register(Arc::new(tools::concierge::ConciergeTool::assistant(
+                name, false,
+            )));
+    }
     // Assistant-tier tool scoping (#3550 follow-up): mirrors
     // `filter_persona_tool_names` in the persona-chat dispatch path
     // (`ctrl::pm_task::dispatch::persona`) so a persona's `[tools].allow`
@@ -458,6 +494,12 @@ pub(super) async fn run_subagent(name: &str) -> Result<()> {
             ),
         ),
     );
+    let mut skill_scoped_allow = skill_scoped_allow;
+    if is_assistant_tier && !is_tainted_delegation {
+        skill_scoped_allow
+            .get_or_insert_with(Vec::new)
+            .push("ask_concierge".into());
+    }
     if !unresolved_skills.is_empty() {
         tracing::warn!(
             agent = %name,

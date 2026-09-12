@@ -1,16 +1,25 @@
+import { tmApi } from '../stores/app';
 import { invoke, isDesktop } from './transport';
 
-export interface WorkspaceRoot { id: string; name: string; path: string; available?: boolean; aliases?: string[] }
+export interface WorkspaceRoot { id: string; name: string; path: string; available?: boolean; availability_reason?: string; aliases?: string[] }
 export interface WorkspaceEntry { name: string; path: string; is_dir: boolean; size: number | null }
 export interface WorkspaceFile { path: string; kind: 'markdown' | 'code' | 'image' | 'unsupported'; content: string; mime?: string; size: number }
 export interface WorkspaceDiff { available: boolean; diff: string; reason?: string }
-export const DESKTOP_FILES_MESSAGE = 'Open the desktop app to browse local files and attach project folders.';
+export const DESKTOP_FILES_MESSAGE = 'Open the desktop app to browse local files. You can attach folders on the server by their absolute path here.';
 function desktop() { if (!isDesktop()) throw new Error(DESKTOP_FILES_MESSAGE); }
 export async function listWorkspaceRoots(paths: string[] = []): Promise<WorkspaceRoot[]> {
-  desktop(); return invoke('workspace_list_roots', { paths });
+  if (isDesktop()) return invoke('workspace_list_roots', { paths });
+  const projects = await tmApi<WorkspaceRoot[]>('/api/projects?all=true');
+  return projects.filter(root => paths.includes(root.path)).map(root => ({ ...root, available: root.available === true }));
 }
 export async function registerWorkspaceRoot(path: string): Promise<WorkspaceRoot> {
   desktop(); return invoke('workspace_register_root', { path });
+}
+// #4358: server validation also allows ordinary folders in a browser.
+export async function registerProjectFolder(path: string): Promise<WorkspaceRoot> {
+  const registered = await tmApi<WorkspaceRoot>('/api/projects', { method: 'POST', body: JSON.stringify({ path: path.trim() }) });
+  if (!registered || typeof registered.path !== 'string') throw new Error('Project registration returned no folder.');
+  return isDesktop() ? registerWorkspaceRoot(registered.path) : { ...registered, available: true };
 }
 export async function chooseWorkspaceRoot(): Promise<WorkspaceRoot | null> {
   desktop();

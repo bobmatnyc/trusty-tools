@@ -269,6 +269,7 @@ impl ChatSessionStore {
     /// the legacy SQLite `INSERT … ON CONFLICT` behaviour.
     /// Test: `upsert_session_overwrites_history`.
     pub fn upsert_session(&self, id: &str, history: &[ChatMessage]) -> anyhow::Result<()> {
+        self.validate_chat_attachments(id, history)?;
         self.upsert_session_inner(id, history)?;
         Ok(())
     }
@@ -365,6 +366,7 @@ impl ChatSessionStore {
         id: &str,
         messages: Vec<ChatMessage>,
     ) -> anyhow::Result<ChatSession> {
+        self.validate_chat_attachments(id, &messages)?;
         Ok(self.append_messages_inner(id, messages)?)
     }
 

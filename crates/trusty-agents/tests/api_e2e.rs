@@ -8,9 +8,9 @@
 //! What: Spawns the compiled binary via the `ApiServer` test helper, sends
 //! HTTP requests, and asserts the responses. Tests that require an LLM API
 //! key are marked `#[ignore]` so a no-credentials `cargo test` still passes;
-//! they can be opted into with `cargo test --test api_e2e -- --ignored`.
-//! Test: `cargo test --test api_e2e` (non-ignored) and
-//! `cargo test --test api_e2e -- --ignored` (full suite, requires API key).
+//! they can be opted into with `cargo test -p trusty-agents --test api_e2e --no-fail-fast -- --include-ignored`.
+//! Test: `cargo test -p trusty-agents --test api_e2e --no-fail-fast` (non-ignored) and
+//! `cargo test -p trusty-agents --test api_e2e --no-fail-fast -- --include-ignored` (full suite, requires API key).
 
 mod support;
 
@@ -18,6 +18,58 @@ use std::time::Duration;
 
 use serde_json::Value;
 use support::api_server::ApiServer;
+
+#[tokio::test]
+async fn manually_registered_non_git_temp_directory_survives_inventory() {
+    let server = ApiServer::spawn().await.expect("isolated API server");
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().canonicalize().unwrap();
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/projects", server.base_url());
+    let response = client
+        .post(&url)
+        .json(&serde_json::json!({"path":path}))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        response.status().is_success(),
+        "{}",
+        response.text().await.unwrap()
+    );
+    let rows: Value = client.get(&url).send().await.unwrap().json().await.unwrap();
+    assert!(
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["path"] == path.to_string_lossy().as_ref() && row["available"] == true)
+    );
+    let file = path.join("regular-file.txt");
+    std::fs::write(&file, "fixture").unwrap();
+    for invalid in [
+        file.to_string_lossy().to_string(),
+        path.join("absent").to_string_lossy().to_string(),
+        "relative/path".into(),
+    ] {
+        let response = client
+            .post(&url)
+            .json(&serde_json::json!({"path":invalid}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+        assert!(response.json::<Value>().await.unwrap()["error"].is_string());
+    }
+    std::fs::remove_file(file).unwrap();
+    drop(folder);
+    let rows: Value = client.get(&url).send().await.unwrap().json().await.unwrap();
+    assert!(
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["path"] == path.to_string_lossy().as_ref() && row["available"] == false)
+    );
+}
 
 /// Helper: pull an `OPENROUTER_API_KEY` (or equivalent) into env from
 /// `.env.local` so locally-run `--ignored` tests pick up credentials the

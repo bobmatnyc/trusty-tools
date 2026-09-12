@@ -52,13 +52,18 @@ Used with `--api` / `--serve`.
 
 ```
 tagent code search "<query>"     # Search the local code index
-tagent memory search "<query>"   # Search the history/turn-log index
 tagent agents list               # List available agents
 tagent skills list               # List discoverable skills
 tagent skills sources            # Show skill discovery directories
 tagent postmortem [--last N | --session <id>]
 tagent postmortem --tag <tag>
 ```
+
+The former `tagent memory search`, `run`, `sessions`, and `search-all`
+subcommands, and `tagent memories export`, `import`, and `list`, return a
+retirement error. Use `trusty-memory` or the assistant's
+`memory_remember` and `memory_recall` tools. Existing local memory files remain
+on disk; they are not automatically migrated or used as a fallback.
 
 ## Environment variables
 

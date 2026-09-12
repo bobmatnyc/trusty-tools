@@ -470,8 +470,7 @@ pub struct NativeToolsConfig {
     #[serde(default = "default_true")]
     pub native_search: bool,
 
-    /// Register `store_memory`, `retrieve_memory`, `list_memory_keys`
-    /// (default on).
+    /// Legacy compatibility flag. Keyed local memory tools are retired (#7360).
     #[serde(default = "default_true")]
     pub native_memory: bool,
 

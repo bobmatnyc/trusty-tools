@@ -83,15 +83,6 @@ pub(crate) struct Ctrl {
     /// `ctrl.pms`; sharing only the mpsc senders keeps coupling minimal
     /// while letting CTRL keep authoritative ownership of `PmHandle`.
     pub(crate) connected_pms: Arc<tokio::sync::Mutex<HashMap<String, mpsc::Sender<PmMsg>>>>,
-    /// Shared in-memory fallback for memory_store / memory_recall when the
-    /// embedded memory store is not reachable from the CTRL subprocess.
-    ///
-    /// Why: CTRL is a top-level REPL — we don't want memory ops to hard-fail
-    /// when the user hasn't set up MCP. An in-memory Vec is good enough for
-    /// the current session and stays small.
-    /// What: `Arc<Mutex<Vec<String>>>` so the `MemoryTools` closure clones
-    /// can mutate it safely.
-    pub(crate) memory: Arc<Mutex<Vec<String>>>,
     /// Detected trusty-agents self-project root, when running from its own
     /// checkout. (#182)
     pub(crate) self_project: Option<PathBuf>,
@@ -125,7 +116,6 @@ impl Ctrl {
             active: None,
             bus: None,
             connected_pms: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            memory: Arc::new(Mutex::new(Vec::new())),
             self_project: None,
             docs_index: Arc::new(Mutex::new(None)),
             user_profile: None,

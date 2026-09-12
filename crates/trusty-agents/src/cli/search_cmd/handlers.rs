@@ -1,47 +1,10 @@
-//! Store-backed handlers for the `memory`/`code` search subcommands.
-//!
-//! Why: Opening the redb/usearch stack and running the search/run/sessions
-//! queries is the I/O-heavy half of the command; isolating it keeps the CLI
-//! parsing module pure and both files under the 500-line cap.
-//! What: `open_graph`/`open_code_indexer` store openers plus the
-//! `run_memory_*` and `run_code_search` handlers.
-//! Test: Covered indirectly; the formatters they call are unit-tested.
-
-use std::path::Path;
-use std::sync::Arc;
-
-use anyhow::{Context, Result};
-
-use super::format::{
-    format_code_results, format_memory_results, format_session_list, format_sessions,
-};
-use crate::memory::{
-    CodeStore, Embedder, FastEmbedder, MemoryGraph, MemoryStore, SessionRegistry, SessionStore,
-};
+//! Code index query handlers. Memory commands use trusty-memory (#7360).
+use super::format::format_code_results;
+use crate::memory::{CodeStore, Embedder, FastEmbedder, MemoryStore};
 use crate::search::CodeIndexer;
-
-/// Embedding dimension used throughout the project (all-MiniLM-L6-v2).
+use anyhow::{Context, Result};
+use std::{path::Path, sync::Arc};
 const EMBED_DIM: usize = 384;
-
-/// Resolve the current run_id for memory reads. Defaults to `default` if
-/// the env var isn't set (matches the migration-path `sessions/default/`).
-fn current_run_id() -> String {
-    crate::env_compat::env_var("TAGENT_RUN_ID", "OPEN_MPM_RUN_ID")
-        .unwrap_or_else(|_| "default".to_string())
-}
-
-async fn open_graph(sessions_dir: &Path) -> Result<MemoryGraph> {
-    std::fs::create_dir_all(sessions_dir)
-        .with_context(|| format!("failed to create sessions dir: {}", sessions_dir.display()))?;
-    let run_id = current_run_id();
-    let store = SessionStore::open(sessions_dir, &run_id, EMBED_DIM)
-        .context("failed to open session store")?;
-    let embedder = FastEmbedder::new().context("failed to construct FastEmbedder")?;
-    let store_arc: Arc<dyn MemoryStore> = Arc::new(store);
-    let embedder_arc: Arc<dyn Embedder> = Arc::new(embedder);
-    Ok(MemoryGraph::new(store_arc, embedder_arc))
-}
-
 async fn open_code_indexer(code_dir: &Path) -> Result<CodeIndexer> {
     std::fs::create_dir_all(code_dir)
         .with_context(|| format!("failed to create code dir: {}", code_dir.display()))?;
@@ -50,77 +13,6 @@ async fn open_code_indexer(code_dir: &Path) -> Result<CodeIndexer> {
     let store_arc: Arc<dyn MemoryStore> = Arc::new(store);
     let embedder_arc: Arc<dyn Embedder> = Arc::new(embedder);
     Ok(CodeIndexer::new(store_arc, embedder_arc))
-}
-
-/// Semantic search over agent memory (current session only).
-pub(super) async fn run_memory_search(
-    query: &str,
-    top_k: usize,
-    json: bool,
-    sessions_dir: &Path,
-) -> Result<()> {
-    let graph = open_graph(sessions_dir).await?;
-    let hits = graph.search(query, top_k).await?;
-    if hits.is_empty() {
-        println!("No results found.");
-        return Ok(());
-    }
-    println!("{}", format_memory_results(&hits, json)?);
-    Ok(())
-}
-
-/// Retrieve all sessions in a workflow run, ordered by timestamp.
-pub(super) async fn run_memory_run(run_id: &str, json: bool, sessions_dir: &Path) -> Result<()> {
-    // Open the specific run_id rather than current_run_id so users can inspect
-    // any prior session without needing to set TAGENT_RUN_ID.
-    let store = SessionStore::open(sessions_dir, run_id, EMBED_DIM)
-        .context("failed to open session store")?;
-    let embedder = FastEmbedder::new().context("failed to construct FastEmbedder")?;
-    let store_arc: Arc<dyn MemoryStore> = Arc::new(store);
-    let embedder_arc: Arc<dyn Embedder> = Arc::new(embedder);
-    let graph = MemoryGraph::new(store_arc, embedder_arc);
-
-    let sessions = graph.get_run(run_id).await?;
-    if sessions.is_empty() {
-        println!("No results found.");
-        return Ok(());
-    }
-    println!("{}", format_sessions(&sessions, json)?);
-    Ok(())
-}
-
-/// List all known agent-memory sessions from the registry.
-pub(super) async fn run_memory_sessions(json: bool, sessions_dir: &Path) -> Result<()> {
-    if !sessions_dir.exists() {
-        println!("No sessions found at {}.", sessions_dir.display());
-        return Ok(());
-    }
-    let reg = SessionRegistry::open(sessions_dir)?;
-    let sessions = reg.list()?;
-    if sessions.is_empty() {
-        println!("No sessions found.");
-        return Ok(());
-    }
-    println!("{}", format_session_list(&sessions, json)?);
-    Ok(())
-}
-
-/// Cross-session semantic search: merges results from every session in the
-/// `sessions/` dir.
-pub(super) async fn run_memory_search_all(
-    query: &str,
-    top_k: usize,
-    json: bool,
-    sessions_dir: &Path,
-) -> Result<()> {
-    let embedder = FastEmbedder::new().context("failed to construct FastEmbedder")?;
-    let hits = MemoryGraph::search_all_sessions(sessions_dir, &embedder, query, top_k).await?;
-    if hits.is_empty() {
-        println!("No results found.");
-        return Ok(());
-    }
-    println!("{}", format_memory_results(&hits, json)?);
-    Ok(())
 }
 
 /// Semantic search over the code index with optional language filter.

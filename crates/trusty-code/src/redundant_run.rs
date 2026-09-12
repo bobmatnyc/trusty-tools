@@ -273,6 +273,7 @@ mod tests {
         ChatMessage {
             role: "assistant".into(),
             content: None,
+            images: vec![],
             tool_calls: Some(calls),
             tool_call_id: None,
             name: None,

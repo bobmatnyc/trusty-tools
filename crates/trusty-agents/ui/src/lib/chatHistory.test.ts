@@ -568,3 +568,11 @@ test('history still loads when a resumed task banner arrives during overlapping 
   await selection;
   expect(get(activeMessages).map(m => m.content)).toEqual(['what did we decide?', 'we shipped the fragment gate', 'Resumed task']);
 });
+
+test('keeps memory-owned image descriptors and their assistant when reloading history', () => {
+  const attachment = {kind:'image' as const,name:'Chart',mime_type:'image/png' as const,asset_id:'opaque-asset'};
+  const page = {available:true,messages:[{role:'user',content:'Read this',attachments:[attachment]}],start:0,total:1,has_more:false,updated_at:null};
+  const result = historyToMessages(page, 'Alice', 0, undefined, 'alice');
+  expect(result[0].inlineAttachments).toEqual([attachment]);
+  expect(result[0].attachmentAssistant).toBe('alice');
+});

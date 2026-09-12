@@ -330,13 +330,10 @@ fn native_tool_registry_returns_six_tools_without_ticketing() {
     // graceful-degradation mode.
     let tools = native_tool_registry(None, NativeToolBackends::default());
     let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
-    assert_eq!(tools.len(), 6);
+    assert_eq!(tools.len(), 3);
     assert!(names.contains(&"search_code"));
     assert!(names.contains(&"search_memory"));
     assert!(names.contains(&"search_skills"));
-    assert!(names.contains(&"store_memory"));
-    assert!(names.contains(&"retrieve_memory"));
-    assert!(names.contains(&"list_memory_keys"));
 }
 
 #[tokio::test]

@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use tokio::process::Child;
 use tokio::sync::Mutex;
 
@@ -123,25 +123,15 @@ pub async fn ensure_api_server(
 
     let binary = resolve_tagent_binary();
 
-    // #api-sidecar-cwd: When launched from the macOS .app bundle, the Tauri
-    // process's cwd is `/` (sealed read-only APFS volume). The sidecar's
-    // self-project detection falls back to cwd when no marker is found, which
-    // would result in attempts to create `/.trusty-agents/state` (EROFS). Pass the
-    // compile-time-known trusty-agents project root via TAGENT_PROJECT_DIR so the
-    // sidecar resolves state dirs and `.env.local` against the correct path.
-    //
-    // Why: Fix for "API server did not become healthy within 20s" — the
-    // sidecar was crashing on `create_dir_all("/.trusty-agents/state")` before
-    // binding the HTTP listener.
-    // What: Set TAGENT_PROJECT_DIR to the trusty-agents repo root derived from
-    // CARGO_MANIFEST_DIR (ui/src-tauri → ../.. → repo root).
-    // Test: Launch the bundled .app, observe sidecar reaches /api/health
-    // within the 20s polling window.
-    let project_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    // #4358: runtime state is independent of the checkout used to build the app.
+    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let project_root = crate::sidecar_project::resolve_project_root(
+        std::env::var_os("TAGENT_PROJECT_DIR").map(std::path::PathBuf::from),
+        std::env::var_os("OPEN_MPM_PROJECT_DIR").map(std::path::PathBuf::from),
+        &config_dir.join("project-root.json"),
+        &data_dir.join("project"),
+    )?;
 
     tracing::info!(
         ?binary,

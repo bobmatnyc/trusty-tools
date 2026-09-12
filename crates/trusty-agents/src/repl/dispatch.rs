@@ -168,6 +168,7 @@ impl TrustyAgentsRepl {
         // #284: Build the session overrides snapshot once so every dispatch
         // arm in this function uses the same `/model` and `/provider` state.
         let overrides = crate::ctrl::SessionOverrides {
+            attachments: vec![],
             model: self.model_override.clone(),
             provider: self.provider_override.clone(),
             // #481: REPL dispatch runs as the trusted local CLI operator

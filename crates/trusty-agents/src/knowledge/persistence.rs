@@ -24,7 +24,7 @@ pub(super) fn safe_path(path: &Path) -> Result<()> {
     }
     Ok(())
 }
-pub(super) fn private_dir(path: &Path) -> Result<()> {
+pub(crate) fn private_dir(path: &Path) -> Result<()> {
     safe_path(path)?;
     if !path.exists() {
         if let Some(parent) = path.parent() {
@@ -49,7 +49,7 @@ pub(super) fn private_dir(path: &Path) -> Result<()> {
     }
     Ok(())
 }
-pub(super) fn lock(path: &Path) -> Result<File> {
+pub(crate) fn lock(path: &Path) -> Result<File> {
     safe_path(path)?;
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false);
@@ -66,7 +66,7 @@ pub(super) fn lock(path: &Path) -> Result<File> {
     fs4::FileExt::lock(&file)?;
     Ok(file)
 }
-pub(super) fn read<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>> {
+pub(crate) fn read<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>> {
     safe_path(path)?;
     let mut options = OpenOptions::new();
     options.read(true);
@@ -110,7 +110,7 @@ pub(super) fn write(path: &Path, state: &mut KnowledgeState) -> Result<()> {
     }
     write_bytes(path, &data)
 }
-pub(super) fn write_bytes(path: &Path, data: &[u8]) -> Result<()> {
+pub(crate) fn write_bytes(path: &Path, data: &[u8]) -> Result<()> {
     safe_path(path)?;
     let parent = path
         .parent()

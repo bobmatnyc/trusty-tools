@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ChatAttachments from './ChatAttachments.svelte';
   import { onMount, onDestroy, afterUpdate } from 'svelte';
   import { Loader2 } from 'lucide-svelte';
   import { get } from 'svelte/store';
@@ -253,6 +254,7 @@
                 {/each}
               </div>
             {/if}
+            <ChatAttachments attachments={msg.inlineAttachments ?? []} assistant={msg.attachmentAssistant} />
             <p class="mt-1 text-right text-[10px] text-foundry-light-muted dark:text-foundry-text/50">{fmtTime(msg.timestamp)}</p>
           </div>
         </div>

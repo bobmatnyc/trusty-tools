@@ -275,6 +275,7 @@ mod tests {
         let messages = vec![ChatMessage {
             role: "assistant".into(),
             content: None,
+            images: vec![],
             tool_calls: Some(vec![ToolCall {
                 id: "call_1".into(),
                 kind: "function".into(),
@@ -317,6 +318,7 @@ mod tests {
             messages.push(ChatMessage {
                 role: "assistant".into(),
                 content: None,
+                images: vec![],
                 tool_calls: Some(vec![ToolCall {
                     id: format!("call_{i}"),
                     kind: "function".into(),
@@ -448,6 +450,7 @@ mod tests {
         let tool_call_only = vec![ChatMessage {
             role: "assistant".into(),
             content: None,
+            images: vec![],
             tool_calls: Some(vec![ToolCall {
                 id: "call_1".into(),
                 kind: "function".into(),

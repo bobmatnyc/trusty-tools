@@ -81,6 +81,8 @@ pub mod home;
 pub mod instance;
 pub mod mcp;
 pub mod memory;
+pub mod memory_grants;
+pub mod memory_policy;
 pub mod provision;
 pub mod roster;
 

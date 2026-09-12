@@ -97,6 +97,9 @@ pub(super) struct LiveMcpTool {
 
 #[async_trait]
 impl ToolExecutor for LiveMcpTool {
+    fn scope(&self) -> Option<&str> {
+        self.client.memory_scope(&self.name)
+    }
     fn name(&self) -> &str {
         &self.name
     }

@@ -32,9 +32,25 @@ User-global state lives under `~/.trusty-agents/`:
 ├── projects.json         # Global project registry
 ├── sockets/<name>.sock   # MessageBus UNIX sockets for cross-project relay
 ├── skills/                # Globally-shared skills (see discovery order below)
-├── memory/                # Shared memory stores
+├── memory/                # Legacy local memory files, preserved but no longer used
 └── sessions/               # Cross-session audit logs (pm-messages.jsonl)
 ```
+
+## Assistant settings
+
+Use the assistant's Settings or ask it to call Concierge for configuration and
+health. Saved project defaults and the cross-palace query option persist per
+assistant. The memory namespace is assigned by the service and is not editable.
+See [desktop workspace](desktop-workspace.md#memory-and-settings) for memory,
+project selection, and automatic extraction behavior.
+
+Fact memory is handled by `trusty-memory`. Legacy local memory files are preserved;
+this change does not migrate their contents or automatically import legacy
+`shared-memories.jsonl` files. `TAGENT_MEMORY_BACKEND` does not select an alternate
+agent memory backend. Code indexes remain separate from fact memory. Chat history
+and attachment ownership use the memory service; see the
+[attachment contract](desktop-workspace.md#pasted-images-and-tables) for pending
+implementation details and limits.
 
 ## Agent TOML
 

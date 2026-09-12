@@ -37,6 +37,7 @@ use crate::llm;
 /// sentinel and behave exactly as before. Wiring is verified by `cargo check`.
 #[derive(Debug, Clone, Default)]
 pub struct SessionOverrides {
+    pub attachments: Vec<trusty_common::chat_attachments::InputAttachment>,
     pub model: Option<String>,
     pub provider: Option<String>,
     /// Resolved principal for this dispatch (#481).
@@ -119,6 +120,15 @@ pub(crate) fn resolve_overridden_credentials(
             pinned,
             requested
         );
+    }
+    // #7370: configured AWS/local providers do not require unrelated ambient API credentials.
+    if provider_override.is_none() {
+        if cfg.agent.model.starts_with("bedrock/") {
+            return Ok(LlmCredentials::Bedrock);
+        }
+        if cfg.agent.model.starts_with("ollama/") {
+            return Ok(LlmCredentials::Ollama);
+        }
     }
     match provider_override {
         Some("claude-code") => Ok(LlmCredentials::ClaudeCode),
@@ -310,96 +320,52 @@ pub(crate) fn build_user_context_prefix(
     format!("{}\n{}", render_user_context_block(identity), base_content)
 }
 
-/// Best-effort semantic recall over the project's embedded memory store (#275).
-///
-/// Why: The PM and ctrl prompts get a project-memory layer so the LLM is
-/// grounded in prior decisions/conventions without the user re-stating them.
-/// Previously this shelled out to the `kuzu-memory` MCP binary; that path was
-/// fire-and-forget (no Rust write site, silent empty on missing binary) and
-/// shared no schema with the in-process redb+usearch store where every other
-/// memory tool actually writes. This helper routes recall through the same
-/// store + embedder used by `memory_recall`, eliminating split-brain memory.
-/// What: Opens `<project>/.trusty-agents/sessions/default` as a `RedbUsearchStore`,
-/// embeds the query via `FastEmbedder`, searches `Segment::AgentMemory`, and
-/// returns up to `top_k` `payload.content` strings (falling back to the raw
-/// JSON payload when no `content` field is present). Any error — store
-/// missing, embedder init failure, search error — collapses to an empty Vec
-/// so prompt building never blocks on memory recall.
-///
-/// Log level is NOT uniform across those error arms (audit 2026-08-19,
-/// finding 19). A broken store and a cold project both return an empty Vec,
-/// so the log record is the only thing that tells them apart: store-open and
-/// embedder-init failures — the two an operator can actually fix — emit
-/// `warn!` carrying the anyhow error chain. Embed and search failures stay at
-/// `debug!`; they are per-query and do not indicate misconfiguration.
-/// Test: `recall_project_memories_warns_when_store_open_fails` asserts the
-/// WARN event fires AND that the empty-Vec fallback is unchanged. Both call
-/// sites (PM `run_pm_task_with_history` and ctrl `run_ctrl`) exercise the
-/// empty-Vec path on any cold project; populated recall is covered by
-/// `memory_recall` integration tests in `tools/memory.rs`.
+/// Best-effort automatic recall through the assistant-bound trusty-memory namespace.
+/// Failures remain visible in operator logs; no alternate memory store is opened.
 pub(crate) async fn recall_project_memories(
-    project_dir: &Path,
+    assistant: &str,
     query: &str,
     top_k: usize,
 ) -> Vec<String> {
-    let session_dir = project_dir
-        .join(".trusty-agents")
-        .join("sessions")
-        .join("default");
-    if !session_dir.exists() {
-        return Vec::new();
+    let name = assistant.to_string();
+    let result = async {
+        let config = AgentConfig::by_name(assistant)?;
+        anyhow::ensure!(
+            crate::tools::assistant_memory::scope_granted(&config, "memory.read"),
+            "Automatic recall requires memory.read permission"
+        );
+        let policy =
+            tokio::task::spawn_blocking(move || crate::assistants::memory_policy::resolve(&name))
+                .await??;
+        let socket = trusty_common::memory_rpc::resolve_memory_socket()?;
+        let value = trusty_common::memory_rpc::call_memory_tool_at(
+            &socket,
+            "memory_recall",
+            serde_json::json!({"palace":policy.namespace,"query":query,"top_k":top_k}),
+        )
+        .await?;
+        let rows = value
+            .get("results")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| anyhow::anyhow!("Malformed memory recall response"))?;
+        Ok::<Vec<String>, anyhow::Error>(
+            rows.iter()
+                .filter_map(|v| {
+                    v.get("content")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
+                .collect(),
+        )
     }
-    let store = match crate::memory::open_memory_store(&session_dir) {
-        Ok(s) => s,
-        Err(e) => {
-            // audit 2026-08-19: `debug!` hid a broken store behind the same
-            // empty Vec a cold project returns. `?e` prints anyhow's cause chain.
-            tracing::warn!(
-                error = ?e,
-                session_dir = %session_dir.display(),
-                "recall_project_memories: store open failed; continuing without project memory"
-            );
-            return Vec::new();
+    .await;
+    match result {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(%assistant,%error,"Assistant memory unavailable; continuing without recall");
+            Vec::new()
         }
-    };
-    let embedder = match crate::memory::FastEmbedder::new() {
-        Ok(e) => e,
-        Err(e) => {
-            // audit 2026-08-19: same reasoning as the store-open arm above.
-            tracing::warn!(
-                error = ?e,
-                "recall_project_memories: embedder unavailable; continuing without project memory"
-            );
-            return Vec::new();
-        }
-    };
-    let qvec = match crate::memory::Embedder::embed_single(&embedder, query) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::debug!(error = %e, "recall_project_memories: embed failed");
-            return Vec::new();
-        }
-    };
-    let hits = match store
-        .search(crate::memory::Segment::AgentMemory, &qvec, top_k)
-        .await
-    {
-        Ok(h) => h,
-        Err(e) => {
-            tracing::debug!(error = %e, "recall_project_memories: search failed");
-            return Vec::new();
-        }
-    };
-    hits.into_iter()
-        .map(|h| {
-            h.payload
-                .get("content")
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-                .unwrap_or_else(|| h.payload.to_string())
-        })
-        .filter(|s| !s.trim().is_empty())
-        .collect()
+    }
 }
 
 /// Resolve the agent config that drives `run_pm_task_with_history` (#240).
@@ -639,7 +605,7 @@ You are proactive, direct, and results-driven. You don't just route tasks — yo
 - self_project_status() → your own project's version and git state
 - initiate_self_task(task) → run a task on your own project (self-improvement)
 - task_status() → list active and recently completed PM tasks
-- memory_store/memory_recall → cross-project context
+- platform_settings → assistant configuration and health
 - search_docs(query) → search project documentation semantically. Use this to answer questions about how trusty-agents works, its configuration, agents, skills, and workflows.
 
 ## Rules
@@ -648,3 +614,30 @@ You are proactive, direct, and results-driven. You don't just route tasks — yo
 - When a task runs >30 min without output, proactively check status
 - Prefer action over asking for permission on routine decisions
 ";
+
+#[cfg(test)]
+mod configured_provider_tests {
+    #[test]
+    fn configured_keyless_provider_resolution_preserves_routing() {
+        for (model, expected) in [
+            (
+                "bedrock/fixture",
+                crate::llm::credentials::LlmCredentials::Bedrock,
+            ),
+            (
+                "ollama/fixture",
+                crate::llm::credentials::LlmCredentials::Ollama,
+            ),
+        ] {
+            let mut cfg = crate::agents::AgentConfig::ctrl_default();
+            cfg.agent.model = model.into();
+            cfg.llm.aws_profile = Some("synthetic-profile".into());
+            assert_eq!(
+                super::resolve_overridden_credentials(&mut cfg, None).unwrap(),
+                expected
+            );
+            assert_eq!(cfg.agent.model, model);
+            assert_eq!(cfg.llm.aws_profile.as_deref(), Some("synthetic-profile"));
+        }
+    }
+}

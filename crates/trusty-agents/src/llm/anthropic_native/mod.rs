@@ -109,7 +109,8 @@ pub fn build_anthropic_request(
                 // User messages are already in a compatible shape: a string
                 // content field is valid on Anthropic too. Pass through as-is
                 // with only the fields Anthropic accepts.
-                let content = v.get("content").cloned().unwrap_or(Value::Null);
+                let content =
+                    super::anthropic_native::convert::convert_user_content(v.get("content"))?;
                 out_messages.push(json!({
                     "role": "user",
                     "content": content,

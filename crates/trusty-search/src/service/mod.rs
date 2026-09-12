@@ -14,6 +14,7 @@ pub mod embed_pool;
 pub mod embedder_supervisor;
 pub mod fs_discovery;
 pub mod grep;
+pub(crate) mod index_admission;
 pub mod index_budget;
 pub mod indexed_files;
 pub mod lazy_loader;

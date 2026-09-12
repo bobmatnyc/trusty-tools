@@ -82,8 +82,8 @@ pub(super) fn add_job(
         status: JobStatus::BlockedOnDependency,
         reason: reason.into(),
     };
-    let mut reasons = source.dependency_reasons.clone();
-    reasons.push("upstream_business_extraction_required".into());
+    let reasons = source.dependency_reasons.clone();
+
     state.jobs.push(KnowledgeJob {
         id,
         record: None,

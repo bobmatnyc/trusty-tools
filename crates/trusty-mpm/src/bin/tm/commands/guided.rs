@@ -1189,7 +1189,8 @@ pub(crate) fn managed_pane_settle_pending_message(id: &str) -> String {
 /// if cwd is inside a git working tree (at ANY depth), it is never written to.
 /// What: three-way dispatch on cwd:
 ///   (1) Inside a GitHub-backed git working tree → delegate to
-///       [`launch_protected_workspace`] which provisions (or reuses) the protected
+///       [`super::guided_protected::launch_protected_workspace`] which
+///       provisions (or reuses) the protected
 ///       base clone and per-session worktree, then calls `launch()` against THAT
 ///       workspace, never the live checkout. Uses the repo ROOT (not cwd) to
 ///       read the origin remote — correct even from subdirectories. #4300: a
@@ -1239,7 +1240,8 @@ pub(crate) async fn fallback_protected(
 /// volume and the operator's real config — three of them went red when the host
 /// crossed 90%, having asserted nothing about disk.
 /// What: the entire fallback, with `gate` handed down to
-/// [`super::managed_workspace::provision_for_fallback_gated`].
+/// [`super::managed_workspace::provision_for_fallback`], through
+/// [`super::guided_protected::launch_protected_workspace`].
 /// Test: `guided_fallback_redirect_success_worktree_not_live_checkout`,
 /// `guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone`,
 /// `guided_fallback_leaves_no_tmux_session_behind`.

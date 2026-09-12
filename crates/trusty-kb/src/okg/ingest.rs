@@ -338,7 +338,10 @@ impl KbStore {
         }
 
         let mut fm = serde_yaml::Mapping::new();
-        fm.insert(yaml("source_status"), yaml("deleted"));
+        fm.insert(
+            yaml(trusty_common::knowledge_document::SOURCE_STATUS),
+            yaml(trusty_common::knowledge_document::DELETED),
+        );
         fm.insert(yaml("tombstoned"), yaml(now));
         // Merge, not overwrite: the body and every distilled fact survive. A
         // tombstone is a flag, never a deletion.

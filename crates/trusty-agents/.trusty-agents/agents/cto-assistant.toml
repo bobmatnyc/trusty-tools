@@ -83,6 +83,8 @@ allow = [
     # vector_search (semantic code/doc search) — both already exist as
     # registered tools in trusty-agents but were missing from this allow list.
     "memory_recall",
+    "memory_remember",
+    "memory_write",
     "vector_search",
     # #472: CTO ops DB query tools — read-only SQLite over ~/Duetto/cto/data/cto.db.
     # Registered in-process via `src/tools/cto_db.rs` and gated to this persona

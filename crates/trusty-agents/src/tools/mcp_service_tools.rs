@@ -68,6 +68,22 @@ pub(crate) struct ServiceClient {
 }
 
 impl ServiceClient {
+    /// The memory scope a trusty-memory tool call runs under, if any.
+    ///
+    /// Why: an assistant's memory tools must address that assistant's own
+    /// palace; a non-memory service has no scope at all.
+    /// What: `Some` only when this client is the trusty-memory server, matched
+    /// on the configured name or the spawned binary's file name.
+    /// Test: `crate::tools::assistant_memory` scope tests.
+    pub(crate) fn memory_scope(&self, tool: &str) -> Option<&'static str> {
+        let binary = std::path::Path::new(&self.command)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        (self.name.contains("trusty-memory") || binary == "trusty-memory")
+            .then(|| crate::tools::assistant_memory::scope_for(tool))
+    }
+
     /// Construct from a resolved server, when its transport is stdio.
     ///
     /// Why: `#[non_exhaustive]` `McpTransport` means the caller cannot match
@@ -162,6 +178,10 @@ struct StaticMcpTool {
 
 #[async_trait]
 impl ToolExecutor for StaticMcpTool {
+    fn scope(&self) -> Option<&str> {
+        self.client.memory_scope(&self.name)
+    }
+
     fn name(&self) -> &str {
         &self.name
     }

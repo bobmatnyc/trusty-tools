@@ -30,6 +30,8 @@ function authHeaders(): Record<string, string> {
 
 /** `GET/PATCH /api/agents/:name`'s wire shape (parse_agent_toml's JSON). */
 export interface AgentDetail {
+  revision?: string;
+  skills_allow?: string[];
   name: string;
   role: string;
   model: string;
@@ -78,6 +80,9 @@ export async function fetchAgentPersona(name: string): Promise<AgentPersona | nu
 }
 
 export interface PatchAgentBody {
+  revision?: string;
+  skills_allow?: string[];
+  scopes?: string[];
   model_id?: string;
   provider_id?: string;
   personality?: string;

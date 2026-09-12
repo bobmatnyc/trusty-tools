@@ -402,6 +402,10 @@ impl InProcessAgentRunner {
             cfg.llm.strict_tool_discipline(),
             cfg.llm.use_anthropic_direct,
             &cfg.llm.stop_sequences,
+            Some((
+                cfg.llm.aws_profile.as_deref(),
+                cfg.llm.aws_region.as_deref(),
+            )),
         )
         .await
         .with_context(|| format!("in-process agent '{agent_name}' LLM loop failed"))?;

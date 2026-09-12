@@ -130,6 +130,10 @@ pub(super) async fn run_subagent_single_shot(
             cfg.llm.strict_tool_discipline(),
             cfg.llm.use_anthropic_direct,
             &cfg.llm.stop_sequences,
+            Some((
+                cfg.llm.aws_profile.as_deref(),
+                cfg.llm.aws_region.as_deref(),
+            )),
         )
         .await?;
         return Ok((content, usage));
@@ -224,6 +228,10 @@ pub(super) async fn run_subagent_with_tools(
         cfg.llm.strict_tool_discipline(),
         cfg.llm.use_anthropic_direct,
         &cfg.llm.stop_sequences,
+        Some((
+            cfg.llm.aws_profile.as_deref(),
+            cfg.llm.aws_region.as_deref(),
+        )),
     )
     .await?;
     Ok((content, usage))

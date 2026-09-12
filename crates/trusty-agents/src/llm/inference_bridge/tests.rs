@@ -57,7 +57,7 @@ fn make_tool(name: &str, params: serde_json::Value) -> ChatCompletionTool {
 /// Test: itself.
 #[test]
 fn system_message_maps_role_and_text() {
-    let shared = to_shared_message(&sys("you are helpful"));
+    let shared = to_shared_message(&sys("you are helpful")).unwrap();
     assert_eq!(shared.role, "system");
     assert_eq!(shared.content.as_deref(), Some("you are helpful"));
     assert!(shared.cache_control.is_none());
@@ -68,7 +68,7 @@ fn system_message_maps_role_and_text() {
 /// Test: itself.
 #[test]
 fn user_message_maps_role_and_text() {
-    let shared = to_shared_message(&user("hello there"));
+    let shared = to_shared_message(&user("hello there")).unwrap();
     assert_eq!(shared.role, "user");
     assert_eq!(shared.content.as_deref(), Some("hello there"));
 }
@@ -91,7 +91,7 @@ fn assistant_message_with_tool_calls_maps_fields() {
         .build()
         .unwrap()
         .into();
-    let shared = to_shared_message(&msg);
+    let shared = to_shared_message(&msg).unwrap();
     assert_eq!(shared.role, "assistant");
     assert!(shared.content.is_none());
     let calls = shared.tool_calls.expect("tool_calls present");
@@ -107,7 +107,7 @@ fn assistant_message_with_tool_calls_maps_fields() {
 /// Test: itself.
 #[test]
 fn tool_message_maps_fields() {
-    let shared = to_shared_message(&tool_msg("call_abc", r#"{"t":72}"#));
+    let shared = to_shared_message(&tool_msg("call_abc", r#"{"t":72}"#)).unwrap();
     assert_eq!(shared.role, "tool");
     assert_eq!(shared.tool_call_id.as_deref(), Some("call_abc"));
     assert_eq!(shared.content.as_deref(), Some(r#"{"t":72}"#));
@@ -122,7 +122,7 @@ fn tool_message_maps_fields() {
 /// bridge must degrade predictably rather than panic if it ever does.
 /// Test: itself.
 #[test]
-fn multi_part_user_content_collapses_to_concatenated_text() {
+fn multi_part_user_content_retains_typed_images() {
     use async_openai::types::{
         ChatCompletionRequestMessageContentPartImage, ChatCompletionRequestMessageContentPartText,
         ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
@@ -137,7 +137,7 @@ fn multi_part_user_content_collapses_to_concatenated_text() {
             ChatCompletionRequestUserMessageContentPart::ImageUrl(
                 ChatCompletionRequestMessageContentPartImage {
                     image_url: ImageUrl {
-                        url: "https://example.test/x.png".into(),
+                        url: "data:image/png;base64,YWJj".into(),
                         detail: None,
                     },
                 },
@@ -150,12 +150,13 @@ fn multi_part_user_content_collapses_to_concatenated_text() {
         ]),
         name: None,
     };
-    let shared = to_shared_message(&ChatCompletionRequestMessage::User(msg));
+    let shared = to_shared_message(&ChatCompletionRequestMessage::User(msg)).unwrap();
     assert_eq!(
         shared.content.as_deref(),
         Some("look at this: what is it?"),
-        "text parts concatenate; the image part is dropped, not errored"
+        "text parts concatenate and image content stays typed"
     );
+    assert_eq!(shared.images[0].data_base64, "YWJj");
 }
 
 /// The shared wire type's own cache_control→content-block serialisation is

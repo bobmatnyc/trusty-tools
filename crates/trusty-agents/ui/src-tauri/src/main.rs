@@ -35,6 +35,7 @@
 
 mod overlay;
 mod sidecar;
+mod sidecar_project;
 mod sse_bridge;
 mod task_commands;
 mod workspace_files;

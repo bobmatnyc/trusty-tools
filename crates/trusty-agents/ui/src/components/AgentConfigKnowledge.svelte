@@ -1,4 +1,6 @@
 <script lang="ts">
+  import AssistantMemorySettings from './AssistantMemorySettings.svelte';
+  import AssistantProjectSettings from './AssistantProjectSettings.svelte';
   /**
    * Why (#3932, DOC-57 §4 / §8.2): section 2 of the five-section agent config
    * — "what the agent knows". This replaces the OKG Stores tab, and §8.2's G-2
@@ -72,7 +74,7 @@
 </script>
 
 <div class="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto">
-  {#if agentName}<AssistantKnowledgePipeline {agentName} />{/if}
+  {#if agentName}<AssistantMemorySettings {agentName} /><AssistantProjectSettings {agentName} /><AssistantKnowledgePipeline {agentName} />{/if}
   {#if agentName}<AssistantMemoryFanOut {agentName} />{/if}
   {#if agentName}<AssistantMcpConnections {agentName} />{/if}
   <section class="flex flex-col gap-2">

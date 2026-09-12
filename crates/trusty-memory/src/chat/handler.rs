@@ -437,6 +437,7 @@ pub async fn chat_stream(state: &AppState, body: ChatBody) -> Result<RpcStreamIt
                     .iter()
                     .map(
                         |m| trusty_common::memory_core::store::chat_sessions::ChatMessage {
+                            attachments: vec![],
                             role: m.role.clone(),
                             content: m.content.clone(),
                         },

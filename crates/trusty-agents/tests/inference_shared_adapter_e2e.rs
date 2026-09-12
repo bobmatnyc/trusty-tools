@@ -137,6 +137,7 @@ async fn bare_claude_model_routes_through_shared_adapter_when_flag_enabled() {
         // production call site's derivation for this same param combo.
         false, // use_anthropic_direct
         &[],   // stop_sequences
+        None,  // no configured AWS route
     )
     .await
     .expect("chat_with_tools_gated via shared adapter");
@@ -267,6 +268,7 @@ async fn caching_active_keeps_raw_path_even_with_flag_enabled() {
         // production call site's derivation for this same param combo.
         false, // use_anthropic_direct — keeps route_native_anthropic false
         &[],   // stop_sequences
+        None,  // no configured AWS route
     )
     .await
     .expect("chat_with_tools_gated via raw path");

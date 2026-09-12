@@ -50,6 +50,17 @@ impl ProjectRegistry {
     /// Every read/write method behaves identically.
     /// Test: `from_registry_loads_active_entries_for_l0`,
     /// `from_registry_fails_closed_when_registry_is_unreadable`.
+    /// Record explicit selection without weakening automatic discovery filtering.
+    pub async fn mark_manual(&self, path: &Path) -> Result<()> {
+        let mut entries = self.load().await?;
+        let key = path.to_string_lossy();
+        let entry = entries
+            .get_mut(key.as_ref())
+            .ok_or_else(|| anyhow::anyhow!("Project not registered"))?;
+        entry.manually_registered = true;
+        self.save(&entries).await
+    }
+
     pub fn with_registry_path(registry_path: PathBuf) -> Self {
         Self { registry_path }
     }
@@ -117,6 +128,7 @@ impl ProjectRegistry {
             key,
             ProjectEntry {
                 path: project_dir.to_path_buf(),
+                manually_registered: existing.as_ref().is_some_and(|e| e.manually_registered),
                 name,
                 last_run,
                 status: ProjectStatus::Active,
@@ -157,6 +169,7 @@ impl ProjectRegistry {
             key,
             ProjectEntry {
                 path: project_dir.to_path_buf(),
+                manually_registered: existing.as_ref().is_some_and(|e| e.manually_registered),
                 name: existing.map(|e| e.name).unwrap_or(name),
                 last_run,
                 status: ProjectStatus::Active,
@@ -189,6 +202,7 @@ impl ProjectRegistry {
         let last_run = existing.as_ref().and_then(|e| e.last_run);
         let prev_count = existing.as_ref().map(|e| e.pm_count).unwrap_or(0);
         let prev_is_self = existing.as_ref().map(|e| e.is_self).unwrap_or(false);
+        let prev_manual = existing.as_ref().is_some_and(|e| e.manually_registered);
         let mut git_origin = existing.as_ref().and_then(|e| e.git_origin.clone());
         let mut open_issues_count = existing.as_ref().and_then(|e| e.open_issues_count);
         let mut open_prs_count = existing.as_ref().and_then(|e| e.open_prs_count);
@@ -251,6 +265,7 @@ impl ProjectRegistry {
                 last_connected: Some(Utc::now()),
                 pm_count: prev_count + 1,
                 is_self: prev_is_self,
+                manually_registered: prev_manual,
                 git_origin,
                 open_issues_count,
                 open_prs_count,

@@ -1,19 +1,18 @@
 //! Per-assistant keying for the `MemoryStore` palaces (#7443, epic #7425).
 //!
-//! Why: both palace-backed stores — [`crate::memory::trusty_backed`] and
-//! [`crate::memory::trusty_client`] — used to derive a palace id from the
-//! content-type [`Segment`] alone, so `Segment::AgentMemory` resolved to ONE
-//! process-global `trusty-agents-mem` palace. The native memory tools
-//! (`memory_recall`, `store_memory`, `retrieve_memory`, `list_memory_keys`)
-//! address exactly that segment, so the moment a backend is wired in, two
-//! assistants served by one process share one drawer. [`MemoryScope`] is the
-//! assistant identity that goes into the key, and it is resolved by #7428's
-//! [`resolve_palace_plan`] rather than by a second rule of this module's own.
+//! Why: the palace-backed store [`crate::memory::trusty_client`] used to derive
+//! a palace id from the content-type [`Segment`] alone, so `Segment::AgentMemory`
+//! resolved to ONE process-global `trusty-agents-mem` palace. The native memory
+//! tool `memory_recall` addresses exactly that segment, so the moment a backend
+//! is wired in, two assistants served by one process share one drawer.
+//! [`MemoryScope`] is the assistant identity that goes into the key, and it is
+//! resolved by #7428's [`resolve_palace_plan`] rather than by a second rule of
+//! this module's own.
 //! What: [`MemoryScope`] is a validated palace-key component;
 //! [`MemoryScope::for_assistant`] resolves one from an agent name plus its
 //! `[[stores]]` binding, and FAILS when that resolution produces no palace —
 //! never a fall-through to the unscoped id. [`palace_id`] is the ONE place
-//! either store formats a palace id, scoped or not.
+//! the store formats a palace id, scoped or not.
 //! Test: `super::scope_tests` — the whole module.
 
 use std::path::{Path, PathBuf};
@@ -25,8 +24,9 @@ use crate::stores::AgentStoreBinding;
 /// Why a [`MemoryScope`] could not be produced.
 ///
 /// Why: the native memory tools must refuse to run rather than write into the
-/// shared palace, so every failure here is terminal for that tool call — see
-/// [`crate::tools::native_memory::open_assistant_memory_backend`].
+/// shared palace, so every failure here is terminal for that tool call — the
+/// daemon-bound replacement refuses in the same direction, see
+/// [`crate::tools::assistant_memory::bind`].
 /// Test: `super::scope_tests::an_unresolvable_agent_name_is_an_error`,
 /// `super::scope_tests::a_traversing_palace_id_is_rejected`.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -48,8 +48,9 @@ pub enum MemoryScopeError {
 
 /// One assistant's share of the memory-store keyspace.
 ///
-/// Why: a palace id is joined onto a data root as a directory name by
-/// [`crate::memory::trusty_backed`], so an unvalidated component could name
+/// Why: a palace id is joined onto a data root as a directory name by the
+/// daemon [`crate::memory::trusty_client`] addresses, so an unvalidated
+/// component could name
 /// somewhere other than a fresh child of that root — `..` escapes it and `.` IS
 /// it, which puts every assistant back in one shared directory. Validating once,
 /// at construction, means every consumer of a `MemoryScope` holds a value that

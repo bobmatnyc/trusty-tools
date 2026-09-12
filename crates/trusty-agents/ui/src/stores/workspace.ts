@@ -7,17 +7,23 @@ export const sidebarMode = writable<'history' | 'projects'>('history');
 export const openedFile = writable<{ root: WorkspaceRoot; path: string } | null>(null);
 export const activeRoot = writable<WorkspaceRoot | null>(null);
 export const workspaceRoots = writable<WorkspaceRoot[]>([]);
+// #3931: server-persisted defaults remain separate from explicit chat attachments.
+export const assistantDefaultProjects = writable<Record<string, WorkspaceRoot[]>>({});
+export function setAssistantDefaultProjects(assistant: string, roots: WorkspaceRoot[]): void {
+  assistantDefaultProjects.update(value => ({ ...value, [assistant]: roots }));
+}
 export const registeredWorkspaceRoots = writable<WorkspaceRoot[]>([]);
 export const workspaceError = writable<string | null>(null);
 const STORAGE_KEY = 'trusty-agents.workspace.v1';
 interface ChatFolders { ids: string[]; primary: string | null }
-interface SavedWorkspace { locations?: Record<string, string>; projects: WorkspaceRoot[]; chats: Record<string, ChatFolders> }
+interface SavedWorkspace { workingFolders?: Record<string, string>; locations?: Record<string, string>; projects: WorkspaceRoot[]; chats: Record<string, ChatFolders> }
 function readSaved(): SavedWorkspace {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return { projects: [], chats: {} };
     const value = JSON.parse(raw);
     if (!Array.isArray(value.projects) || !value.chats || typeof value.chats !== 'object') throw new Error('Invalid saved folders');
+    if (value.workingFolders && (typeof value.workingFolders !== 'object' || Object.values(value.workingFolders).some(path => typeof path !== 'string'))) throw new Error('Invalid working folders');
     if (value.locations && (typeof value.locations !== 'object' || Object.values(value.locations).some(path => typeof path !== 'string'))) throw new Error('Invalid saved locations');
     for (const root of value.projects) {
       if (!root || typeof root.id !== 'string' || typeof root.path !== 'string' || typeof root.name !== 'string') throw new Error('Invalid saved folder');
@@ -35,16 +41,17 @@ const saved = writable<SavedWorkspace>(readSaved());
 export const assistantKnowledgeAttachments = derived([saved, activeAgentId], ([$saved, assistant]) => assistantProjectChats($saved, assistant));
 export const chatWorkspaceKey = derived([activeProjectId, activeAgentId], ([$project, $agent]) => JSON.stringify([$project, $agent]));
 export const projectRoots = derived(saved, value => value.projects.filter(root => root.available !== false));
-export const currentChatRoots = derived([saved, chatWorkspaceKey], ([$saved, key]) => $saved.projects.filter(root => $saved.chats[key]?.ids.includes(root.id)));
-export const chatProjectPath = derived([saved, chatWorkspaceKey], ([$saved, key]) => {
-  const primary = $saved.chats[key]?.primary;
-  const root = $saved.projects.find(root => root.id === primary);
+export const currentChatRoots = derived([saved, chatWorkspaceKey, assistantDefaultProjects, activeAgentId], ([$saved, key, defaults, assistant]) => {
+  const explicit = $saved.projects.filter(root => $saved.chats[key]?.ids.includes(root.id));
+  return [...new Map([...(defaults[assistant ?? ''] ?? []), ...explicit].map(root => [root.path, root])).values()];
+});
+export const chatProjectPath = derived([saved, chatWorkspaceKey, currentChatRoots], ([$saved, key, roots]) => {
+  const root = roots.find(root => root.path === $saved.workingFolders?.[key]) ?? roots.find(root => root.id === $saved.chats[key]?.primary) ?? roots[0];
   return root?.available === false ? null : root?.path ?? null;
 });
-export const chatFolderError = derived([saved, chatWorkspaceKey], ([$saved, key]) => {
-  const primary = $saved.chats[key]?.primary;
-  const root = $saved.projects.find(root => root.id === primary);
-  return root?.available === false ? `The working folder “${root.name}” is unavailable. Remove its attachment before sending, or restore the folder.` : null;
+export const chatFolderError = derived([saved, chatWorkspaceKey, currentChatRoots], ([$saved, key, roots]) => {
+  const root = roots.find(root => root.path === $saved.workingFolders?.[key]) ?? roots.find(root => root.id === $saved.chats[key]?.primary) ?? roots[0];
+  return root?.available === false ? `The working folder “${root.name}” is unavailable. Remove it in Settings or restore the folder.` : null;
 });
 function save(value: SavedWorkspace): void {
   // Keep the usable in-session state even if disk persistence is unavailable, and surface that distinction.
@@ -60,7 +67,9 @@ export function rememberWorkspaceRoot(root: WorkspaceRoot): void {
 }
 export function attachRootToChat(root: WorkspaceRoot): void {
   const value = get(saved), key = get(chatWorkspaceKey), chat = value.chats[key] ?? { ids: [], primary: null };
-  save({ ...value, projects: [...value.projects.filter(item => item.id !== root.id && item.path !== root.path), root], chats: { ...value.chats, [key]: { ids: [...new Set([...chat.ids, root.id])], primary: root.id } } });
+  // #3931: preserve shared attachment identity when the same path has a new native ID.
+  const stable = { ...root, id: value.projects.find(item => item.path === root.path)?.id ?? root.id };
+  save({ ...value, workingFolders: { ...value.workingFolders, [key]: stable.path }, projects: [...value.projects.filter(item => item.id !== stable.id && item.path !== stable.path), stable], chats: { ...value.chats, [key]: { ids: [...new Set([...chat.ids, stable.id])], primary: stable.id } } });
   rememberWorkspaceRoot(root);
 }
 export function detachRootFromChat(rootId: string): void {
@@ -70,9 +79,9 @@ export function detachRootFromChat(rootId: string): void {
   save({ ...value, chats: { ...value.chats, [key]: { ids, primary: chat.primary === rootId ? ids[0] ?? null : chat.primary } } });
 }
 export function selectChatRoot(root: WorkspaceRoot): void {
-  const value = get(saved), key = get(chatWorkspaceKey), chat = value.chats[key];
-  if (!chat?.ids.includes(root.id)) return;
-  save({ ...value, chats: { ...value.chats, [key]: { ...chat, primary: root.id } } });
+  const value = get(saved), key = get(chatWorkspaceKey);
+  if (!get(currentChatRoots).some(item => item.path === root.path)) return;
+  save({ ...value, workingFolders: { ...value.workingFolders, [key]: root.path } });
   activeRoot.set(root);
 }
 let rootsRequest = 0;
@@ -104,9 +113,9 @@ export async function loadWorkspaceRoots(paths?: string[]): Promise<void> {
     activeRoot.set(availableRoots.find(root => root.id === current?.id) ?? availableRoots.find(root => root.path === get(chatProjectPath)) ?? availableRoots[0] ?? null);
   } catch (error) { if (request === rootsRequest) workspaceError.set(folderError(error)); }
 }
-chatWorkspaceKey.subscribe(key => {
-  const value = get(saved), primary = value.chats[key]?.primary;
-  activeRoot.set(value.projects.find(root => root.id === primary && root.available !== false) ?? null);
+chatWorkspaceKey.subscribe(() => {
+  const path = get(chatProjectPath);
+  activeRoot.set(get(currentChatRoots).find(root => root.path === path && root.available !== false) ?? null);
   openedFile.set(null);
 });
 
@@ -125,9 +134,11 @@ export function relocateWorkspaceRoot(previous: WorkspaceRoot, root: WorkspaceRo
   rememberWorkspaceRoot(root);
 }
 
-export function detachUnavailableChatFolders(): void {
-  const value = get(saved);
-  const primary = value.chats[get(chatWorkspaceKey)]?.primary;
-  const root = value.projects.find(item => item.id === primary);
-  if (root?.available === false) detachRootFromChat(root.id);
+export function detachUnavailableChatFolders(): boolean {
+  const value = get(saved), key = get(chatWorkspaceKey), roots = get(currentChatRoots);
+  const root = roots.find(item => item.path === value.workingFolders?.[key]) ?? roots.find(item => item.id === value.chats[key]?.primary) ?? roots[0];
+  // #3931: assistant defaults can only be removed through their revisioned settings.
+  if (!root || root.available !== false || (get(assistantDefaultProjects)[get(activeAgentId) ?? ''] ?? []).some(item => item.path === root.path)) return false;
+  detachRootFromChat(root.id);
+  return true;
 }

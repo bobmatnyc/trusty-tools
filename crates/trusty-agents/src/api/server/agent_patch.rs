@@ -109,7 +109,7 @@ use super::state::AppState;
 /// pre-#3819 behavior) would never resolve ANY bundled agent there, since
 /// every bundled agent lives in the `$HOME/.trusty-agents/agents` tier, not
 /// a nonexistent `/.trusty-agents/agents`.
-pub(super) fn resolve_agent_paths(
+pub(crate) fn resolve_agent_paths(
     dirs: &[PathBuf],
     name: &str,
 ) -> Option<(PathBuf, Option<PathBuf>)> {
@@ -143,7 +143,14 @@ pub(super) fn resolve_agent_paths(
 /// Test: `patch_agent_persists_model_and_round_trips`,
 /// `patch_agent_provider_only_uses_default_model`.
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub(super) struct PatchAgentRequest {
+    #[serde(default)]
+    pub(super) revision: Option<String>,
+    #[serde(default)]
+    pub(super) scopes: Option<Vec<String>>,
+    #[serde(default)]
+    pub(super) skills_allow: Option<Vec<String>>,
     #[serde(default)]
     pub(super) model_id: Option<String>,
     #[serde(default)]
@@ -189,6 +196,21 @@ pub(super) struct PatchAgentRequest {
     /// `patch_agent_subagent_whitelist_accepts_an_empty_list`.
     #[serde(default)]
     pub(super) subagents_delegate_allowed: Option<Vec<String>>,
+    /// #7396: the grant ceiling this request may not exceed, or `None` for the
+    /// operator-authenticated HTTP route, which carries no ceiling.
+    ///
+    /// Why: `ask_concierge` puts `settings.patch` inside a model turn, so the
+    /// four grant fields above are reachable from text the assistant merely
+    /// READ. The field is `#[serde(skip)]` — it can never arrive on the wire,
+    /// and the only way it is ever `Some` is
+    /// [`super::assistant_settings::operate_at`] setting it after deserializing
+    /// a turn-originated request. `None` therefore means "no caller could have
+    /// asked for this", which is exactly the HTTP route's posture.
+    /// What: enforced by [`super::assistant_settings::patch_grants`] before any
+    /// field is written, so a widening request is refused whole.
+    /// Test: `super::tests::grant_ceiling::turn_patch_cannot_widen_its_own_scopes`.
+    #[serde(skip)]
+    pub(super) ceiling: Option<super::grant_ceiling::GrantCeiling>,
 }
 
 /// Build a `400 Bad Request` JSON error response.
@@ -245,6 +267,8 @@ pub(super) async fn patch_agent_at(
         && req.personality.is_none()
         && req.tools_allow.is_none()
         && req.subagents_delegate_allowed.is_none()
+        && req.scopes.is_none()
+        && req.skills_allow.is_none()
     {
         return bad_request(
             "request body must set at least one of model_id/provider_id/personality/\
@@ -300,6 +324,16 @@ pub(super) async fn patch_agent_at(
     }
 
     let _manifest_lock = super::AGENT_CONFIG_WRITE_LOCK.lock().await;
+    let _process_lock = match crate::knowledge::execution::mutation_guard(&path).await {
+        Ok(lock) => lock,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error":error.to_string()})),
+            )
+                .into_response();
+        }
+    };
     let raw = match tokio::fs::read_to_string(&path).await {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -319,6 +353,17 @@ pub(super) async fn patch_agent_at(
         }
     };
 
+    if req
+        .revision
+        .as_ref()
+        .is_some_and(|revision| revision != &super::assistant_settings::config_revision(&raw))
+    {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error":"Agent settings changed; read config and retry"})),
+        )
+            .into_response();
+    }
     let mut doc: DocumentMut = match raw.parse() {
         Ok(d) => d,
         Err(e) => {
@@ -335,6 +380,26 @@ pub(super) async fn patch_agent_at(
         }
     };
 
+    // #7396: the grant ceiling, refused whole and structured so the caller
+    // learns WHICH entries were rejected rather than reading back a quietly
+    // narrowed list. Nothing has been written at this point.
+    if let Err(refusal) = super::assistant_settings::patch_grants(&mut doc, &req) {
+        tracing::warn!(
+            agent = name,
+            field = %refusal.field,
+            refused = ?refusal.refused,
+            "patch_agent: refused a grant edit"
+        );
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": refusal.message,
+                "field": refusal.field,
+                "refused": refusal.refused,
+            })),
+        )
+            .into_response();
+    }
     // #3819: the model/provider resolution + claude-code runner-constraint
     // check below only makes sense when the caller is actually touching
     // model/provider — skip it entirely for a request that only sets
@@ -554,7 +619,8 @@ pub(super) async fn patch_agent_at(
         }
     }
 
-    if let Err(e) = tokio::fs::write(&path, doc.to_string()).await {
+    doc["settings_revision"] = value(uuid::Uuid::new_v4().to_string());
+    if let Err(e) = super::agent_listeners::atomic_write(&path, doc.to_string().as_bytes()).await {
         tracing::warn!(?e, agent = name, path = %path.display(), "patch_agent: write failed");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -565,7 +631,11 @@ pub(super) async fn patch_agent_at(
 
     let fallback_name = name.to_string();
     match parse_agent_toml(&doc.to_string(), &fallback_name) {
-        Some(v) => (StatusCode::OK, Json(v)).into_response(),
+        Some(mut v) => {
+            v["revision"] =
+                serde_json::json!(super::assistant_settings::config_revision(&doc.to_string()));
+            (StatusCode::OK, Json(v)).into_response()
+        }
         None => {
             // Unreachable in practice — we just wrote `doc` ourselves — but
             // handled explicitly rather than unwrapped per the no-`unwrap()`
@@ -595,8 +665,10 @@ pub(super) async fn patch_agent_at(
 /// sibling of [`patch_agent_route`] — same [`resolve_agent_paths`] +
 /// [`parse_agent_toml`] machinery, no mutation.
 /// What: `404` for an unknown name; `200` with the same JSON shape
-/// `GET /api/agents`'s entries and `PATCH`'s response share.
-/// Test: `super::tests::agent_patch::get_agent_route_*`.
+/// `GET /api/agents`'s entries and `PATCH`'s response share. The legacy
+/// memory-grant repair is applied to the served view only (#7396).
+/// Test: `super::tests::agent_patch::get_agent_route_*`,
+/// `super::tests::agent_patch::a_get_serves_the_migrated_view_without_writing_the_manifest`.
 pub(super) async fn get_agent_route(
     State(_state): State<AppState>,
     AxumPath(name): AxumPath<String>,
@@ -626,8 +698,29 @@ pub(super) async fn get_agent_at(dirs: &[PathBuf], name: &str) -> Response {
                 .into_response();
         }
     };
+    // #7396: a GET must not write. This used to call `memory_grants::migrate`,
+    // which takes the cross-process manifest lock and rewrites the file, so
+    // every read serialized behind that lock and a lock or I/O failure became a
+    // 500 on a plain read. The repair is applied to the SERVED view only; the
+    // write paths (`migrate_chat` from dispatch, the knowledge pipeline, and
+    // subagent startup) are what persist it.
+    let raw = match crate::assistants::memory_grants::repaired(dirs, name, &raw) {
+        Ok(Some(doc)) => doc.to_string(),
+        Ok(None) => raw,
+        Err(error) => {
+            tracing::warn!(
+                ?error,
+                agent = name,
+                "get_agent_at: memory-grant view unavailable"
+            );
+            raw
+        }
+    };
     match parse_agent_toml(&raw, name) {
-        Some(v) => (StatusCode::OK, Json(v)).into_response(),
+        Some(mut v) => {
+            v["revision"] = serde_json::json!(super::assistant_settings::config_revision(&raw));
+            (StatusCode::OK, Json(v)).into_response()
+        }
         None => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": "existing agent config is not valid TOML" })),

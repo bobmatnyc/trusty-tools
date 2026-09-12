@@ -401,3 +401,14 @@ fn build_anthropic_request_skips_history_cache_when_caching_disabled() {
         }
     }
 }
+
+#[test]
+fn image_attachment_becomes_anthropic_base64_content() {
+    let message: ChatCompletionRequestMessage = serde_json::from_value(json!({"role":"user","content":[{"type":"text","text":"Describe"},{"type":"image_url","image_url":{"url":"data:image/png;base64,YWJj"}}]})).unwrap();
+    let body =
+        build_anthropic_request("claude-test", &[message], &[], 0.0, 100, None, false).unwrap();
+    assert_eq!(
+        body["messages"][0]["content"][1],
+        json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":"YWJj"}})
+    );
+}

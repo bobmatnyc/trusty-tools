@@ -114,11 +114,15 @@ pub(crate) async fn handle_chat_session_add_turn(state: &AppState, args: Value) 
         ChatMessage {
             role: role.to_string(),
             content: content.to_string(),
+            attachments: serde_json::from_value(
+                args.get("attachments").cloned().unwrap_or(json!([])),
+            )?,
         },
     )?;
     Ok(json!({
         "message_count": session.history.len(),
         "updated_at": session.updated_at,
+        "attachments_version": 1,
     }))
 }
 
@@ -255,15 +259,20 @@ pub(crate) async fn handle_chat_turn_append(state: &AppState, args: Value) -> Re
             ChatMessage {
                 role: "user".to_string(),
                 content: prompt.to_string(),
+                attachments: serde_json::from_value(
+                    args.get("attachments").cloned().unwrap_or(json!([])),
+                )?,
             },
             ChatMessage {
                 role: "assistant".to_string(),
                 content: response.to_string(),
+                attachments: vec![],
             },
         ],
     )?;
     Ok(json!({
         "message_count": session.history.len(),
         "updated_at": session.updated_at,
+        "attachments_version": 1,
     }))
 }

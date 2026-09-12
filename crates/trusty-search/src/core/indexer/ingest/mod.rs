@@ -329,6 +329,10 @@ impl CodeIndexer {
                 self.index_id
             );
         }
+        if trusty_common::knowledge_document::is_tombstone(content) {
+            self.remove_file(file_path).await?;
+            return Ok(());
+        }
         let (mut chunks, entities) = chunk_ast(file_path, content);
 
         populate_virtual_terms(&mut chunks, &entities);
@@ -612,7 +616,12 @@ impl CodeIndexer {
             files
                 .par_iter()
                 .map(|(path, content)| {
-                    let (mut chunks, entities) = chunk_ast(path, content);
+                    let (mut chunks, entities) =
+                        if trusty_common::knowledge_document::is_tombstone(content) {
+                            (vec![], vec![])
+                        } else {
+                            chunk_ast(path, content)
+                        };
                     populate_virtual_terms(&mut chunks, &entities);
                     (path.clone(), chunks, entities)
                 })

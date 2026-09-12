@@ -105,6 +105,9 @@ pub(crate) async fn write_at(
 ) -> Result<Value, ConfigError> {
     let _lock = super::AGENT_CONFIG_WRITE_LOCK.lock().await;
     let path = manifest(dirs, name)?;
+    let _process_lock = crate::knowledge::execution::mutation_guard(&path)
+        .await
+        .map_err(internal)?;
     let raw = tokio::fs::read_to_string(&path).await.map_err(internal)?;
     let existing = effective(dirs, &raw)?;
     if config_revision(&raw, &existing) != update.revision {

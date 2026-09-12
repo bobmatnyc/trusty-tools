@@ -57,12 +57,28 @@ pub(super) struct ConnectProjectRequest {
 pub(super) async fn connect_project(
     State(_state): State<AppState>,
     Json(req): Json<ConnectProjectRequest>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let path = std::path::PathBuf::from(&req.path);
-    if !path.exists() {
-        return Err(StatusCode::BAD_REQUEST);
+    // #4358: registration requires a real server-host directory, including non-Git folders.
+    let invalid = |message: String| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error":message})),
+        )
+    };
+    if !path.is_absolute() {
+        return Err(invalid(
+            "Choose an absolute folder path on the server host".into(),
+        ));
     }
-    let abs = path.canonicalize().unwrap_or(path);
+    let abs = path
+        .canonicalize()
+        .map_err(|e| invalid(format!("Cannot access folder {}: {e}", path.display())))?;
+    if !abs.is_dir() {
+        return Err(invalid(format!("{} is not a directory", abs.display())));
+    }
+    std::fs::read_dir(&abs)
+        .map_err(|e| invalid(format!("Cannot read folder {}: {e}", abs.display())))?;
 
     // Persist to the same registry GET reads from. Failures here surface
     // as 500 — the client expects success to mean "the project is now
@@ -70,11 +86,25 @@ pub(super) async fn connect_project(
     // reproduce the original bug.
     let registry = ProjectRegistry::new().map_err(|e| {
         tracing::warn!(error = %e, "connect_project: ProjectRegistry::new failed");
-        StatusCode::INTERNAL_SERVER_ERROR
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error":"Project registration could not be persisted"})),
+        )
     })?;
     registry.register_pm_start(&abs).await.map_err(|e| {
         tracing::warn!(error = %e, "connect_project: register_pm_start failed");
-        StatusCode::INTERNAL_SERVER_ERROR
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error":"Project registration could not be persisted"})),
+        )
+    })?;
+
+    registry.mark_manual(&abs).await.map_err(|e| {
+        tracing::warn!(error=%e,"Explicit project selection could not be persisted");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error":"Project registration could not be persisted"})),
+        )
     })?;
 
     // #451: New WebUI form supplies `adapter`; materialize the per-project
@@ -83,20 +113,31 @@ pub(super) async fn connect_project(
         let projects_dir = abs.join(".trusty-agents").join("projects");
         let store = crate::tm::ProjectConfigStore::open(&projects_dir).map_err(|e| {
             tracing::warn!(error = %e, "connect_project: ProjectConfigStore::open failed");
-            StatusCode::INTERNAL_SERVER_ERROR
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error":"Project registration could not be persisted"})),
+            )
         })?;
         // Detect create-vs-reuse: a pre-existing entry at this path means we
         // are reusing, not creating. The find_by_path probe is cheap and
         // avoids a save when the config already exists.
         let pre_existing = store.find_by_path(&abs).map_err(|e| {
             tracing::warn!(error = %e, "connect_project: find_by_path failed");
-            StatusCode::INTERNAL_SERVER_ERROR
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error":"Project registration could not be persisted"})),
+            )
         })?;
         let cfg = store
             .find_or_create(&abs, adapter, req.name.as_deref())
             .map_err(|e| {
                 tracing::warn!(error = %e, "connect_project: find_or_create failed");
-                StatusCode::INTERNAL_SERVER_ERROR
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(
+                        serde_json::json!({"error":"Project registration could not be persisted"}),
+                    ),
+                )
             })?;
         return Ok(Json(serde_json::json!({
             "name": cfg.project.name,

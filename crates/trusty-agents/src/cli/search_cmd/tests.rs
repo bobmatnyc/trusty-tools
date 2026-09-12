@@ -7,14 +7,8 @@
 
 use std::path::PathBuf;
 
-use chrono::{TimeZone, Utc};
-use serde_json::json;
-
-use super::format::{
-    format_code_results, format_memory_results, format_session_list, format_sessions, preview_text,
-};
+use super::format::{format_code_results, preview_text};
 use super::{Command, parse_args};
-use crate::memory::{AgentSession, MemoryResult, SessionMeta};
 use crate::search::CodeChunk;
 
 #[test]
@@ -57,27 +51,6 @@ fn parse_memory_run() {
 }
 
 #[test]
-fn format_memory_results_human() {
-    let results = vec![MemoryResult {
-        id: "sess-1".to_string(),
-        score: 0.87,
-        segment: "mem".to_string(),
-        payload: json!({
-            "agent_name": "python-engineer",
-            "phase": "code",
-            "timestamp": "2026-04-22T10:30:00Z",
-            "prompt": "write a hello world",
-            "response": "print('hello')"
-        }),
-    }];
-    let out = format_memory_results(&results, false).unwrap();
-    assert!(out.contains("Agent"));
-    assert!(out.contains("Phase"));
-    assert!(out.contains("Score"));
-    assert!(out.contains("python-engineer"));
-}
-
-#[test]
 fn format_code_results_json() {
     let chunks = vec![CodeChunk {
         file: PathBuf::from("/tmp/foo.rs"),
@@ -93,25 +66,6 @@ fn format_code_results_json() {
     let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert!(parsed.is_array());
     assert_eq!(parsed[0]["function_name"], "main");
-}
-
-#[test]
-fn format_sessions_human_includes_timestamp_and_preview() {
-    let sessions = vec![AgentSession {
-        id: "s1".to_string(),
-        agent_name: "pm".to_string(),
-        workflow_run_id: "run-1".to_string(),
-        phase: "plan".to_string(),
-        prompt: "plan the work".to_string(),
-        response: "ok".to_string(),
-        timestamp: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
-        parent_id: None,
-        segment: None,
-    }];
-    let out = format_sessions(&sessions, false).unwrap();
-    assert!(out.contains("pm"));
-    assert!(out.contains("(plan)"));
-    assert!(out.contains("plan the work"));
 }
 
 #[test]
@@ -153,19 +107,6 @@ fn parse_memory_search_all() {
 }
 
 #[test]
-fn format_session_list_human_lists_runs() {
-    let s = vec![SessionMeta {
-        run_id: "abcdef1234567890".to_string(),
-        started_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
-        task_preview: "hello world task".to_string(),
-    }];
-    let out = format_session_list(&s, false).unwrap();
-    assert!(out.contains("Run"));
-    assert!(out.contains("abcdef12"));
-    assert!(out.contains("hello world task"));
-}
-
-#[test]
 fn parse_handles_json_flag_before_query() {
     let cmd = parse_args(&["memory", "search", "--json", "hello"]).unwrap();
     assert_eq!(
@@ -176,4 +117,29 @@ fn parse_handles_json_flag_before_query() {
             json: true,
         }
     );
+}
+
+#[tokio::test]
+async fn legacy_memory_commands_fail_before_store_access() {
+    for args in [
+        vec!["memory", "search", "synthetic"],
+        vec!["memory", "run", "missing"],
+        vec!["memory", "sessions"],
+        vec!["memory", "search-all", "synthetic"],
+    ] {
+        let error =
+            super::run_search_command(&args.into_iter().map(String::from).collect::<Vec<_>>())
+                .await
+                .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Local memory commands are retired")
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("Existing local files are preserved")
+        );
+    }
 }

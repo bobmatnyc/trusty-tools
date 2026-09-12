@@ -12,6 +12,22 @@ use super::super::{SkillDef, SkillKind::Action, SkillKind::System, tool_skill};
 
 pub(super) static TABLE: &[SkillDef] = &[
     tool_skill(
+        "ask-concierge",
+        "Ask Concierge",
+        "Configure assistant settings and check platform health.",
+        "ask_concierge",
+        System,
+        None,
+    ),
+    tool_skill(
+        "platform-settings",
+        "Platform Settings",
+        "Concierge's validated settings and health service.",
+        "platform_settings",
+        System,
+        None,
+    ),
+    tool_skill(
         "listener-config",
         "Configure My Listeners",
         "Configure this assistant's event filters and instructions.",

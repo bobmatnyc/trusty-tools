@@ -213,7 +213,7 @@ pub(crate) async fn read_task_text_with_inline(
 /// auto-imports shared memories, seeds the agent store, and returns the ctx.
 /// Test: Exercised end-to-end via the workflow integration tests.
 pub(super) async fn build_init_context() -> Option<crate::init::InitContext> {
-    use crate::{cli, init, memory};
+    use crate::init;
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let omd = cwd.join(".trusty-agents").join("state");
     let initializer = init::ProjectInitializer::new(cwd, omd);
@@ -230,57 +230,6 @@ pub(super) async fn build_init_context() -> Option<crate::init::InitContext> {
                 summary_chars = ctx.project_summary.len(),
                 "project self-initialization complete"
             );
-            // Cross-machine memory share: if `.trusty-agents/shared-memories.jsonl`
-            // exists and its hash differs from the last-imported tracker,
-            // import it now so teammate sessions become recallable via
-            // `memory_recall scope=imported`. Best-effort.
-            {
-                let cwd_share = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                match cli::memories_cmd::auto_import_if_changed(&cwd_share).await {
-                    Ok(n) if n > 0 => {
-                        eprintln!(
-                            "[trusty-agents] Imported {n} shared memories from .trusty-agents/shared-memories.jsonl"
-                        );
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::warn!(error = %e, "auto-import shared memories failed (continuing)");
-                    }
-                }
-            }
-
-            // #190: Seed agent memory with project docs so workflow agents
-            // can recall user/developer documentation via memory_recall.
-            // Best-effort: failures (e.g., model download issues) are
-            // logged but do not block workflow execution.
-            let cwd_inner = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            let omd_inner = cwd_inner.join(".trusty-agents").join("state");
-            let session_dir = cwd_inner
-                .join(".trusty-agents")
-                .join("sessions")
-                .join("default");
-            if let Err(e) = std::fs::create_dir_all(&session_dir) {
-                tracing::warn!(error = %e, "doc seed: create session dir failed");
-            } else {
-                match memory::open_memory_store(&session_dir) {
-                    Ok(store) => match memory::FastEmbedder::new() {
-                        Ok(embedder) => {
-                            let initializer = init::ProjectInitializer::new(cwd_inner, omd_inner);
-                            // #190+: seed docs + skills + MCP connections in one call.
-                            // seed_all() emits its own combined log line and
-                            // never fails — individual stages log warnings on
-                            // failure but don't abort.
-                            let _ = initializer.seed_all(store.as_ref(), &embedder).await;
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "doc seed: embedder unavailable");
-                        }
-                    },
-                    Err(e) => {
-                        tracing::warn!(error = %e, "doc seed: store open failed");
-                    }
-                }
-            }
             Some(ctx)
         }
         Err(e) => {
@@ -493,32 +442,6 @@ pub(super) fn load_tag_skill_registry() -> Arc<crate::skills::registry::SkillReg
     Arc::new(skills::registry::SkillRegistry::load_with_index(
         &default_bundled_config_dir(),
     ))
-}
-
-/// Open the user-scoped memory store and return its prompt suffix (#118).
-///
-/// Why: Extracted from `run_workflow`; the suffix is injected at lower
-/// priority than project context so project-specific knowledge always wins.
-/// What: Returns `Some(suffix)` when the store opens and has content, else
-/// `None` (store-open failure is non-fatal and logged).
-/// Test: Exercised via the workflow integration tests.
-pub(super) async fn load_user_memory_suffix() -> Option<String> {
-    use crate::memory;
-    match memory::user_store::UserMemoryStore::open().await {
-        Ok(store) => {
-            let suffix = store.to_prompt_suffix();
-            tracing::debug!(suffix_chars = suffix.len(), "user memory store opened");
-            if suffix.is_empty() {
-                None
-            } else {
-                Some(suffix)
-            }
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "user memory store unavailable (continuing)");
-            None
-        }
-    }
 }
 
 /// Refresh the global skills cache so newly-added skills are indexed (#115).

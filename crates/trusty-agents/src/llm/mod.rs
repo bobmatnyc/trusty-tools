@@ -38,7 +38,9 @@ pub use thinking_classifier::{ThinkingMode, classify_thinking_mode};
 // Public API surface preserved across the #360 split: these were all
 // top-level `llm::` items before the module was decomposed.
 pub use compress::{apply_compression, trim_messages_with_manager};
-pub use helpers::{ChatResponse, ToolCall, create_client, should_retry_plain_text_turn};
+pub use helpers::{
+    ChatResponse, ToolCall, create_client, create_client_for_model, should_retry_plain_text_turn,
+};
 pub use single_turn::{chat, chat_adapter_aware};
 pub use tool_loop::{chat_with_tools, chat_with_tools_gated};
 

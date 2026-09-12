@@ -562,7 +562,7 @@ context rather than always-on, to preserve BOTH pre-PR behaviors exactly:
 | `trusty-search` / `trusty-embedderd` | **off** (pre-PR hook behavior) | **on** (pre-PR script behavior) |
 | `trusty-mpm` | **on** | **on** |
 | `trusty-agents` (`tagent`) | N/A — not a `tctl install` member (#4277) | **on** |
-| `trusty-memory` + `trusty-bm25-daemon` + `trusty-memory-mcp-bridge` | **off** (same ONNX exposure as trusty-search) | **on** |
+| `trusty-memory` + `trusty-memory-mcp-bridge` | **off** (same ONNX exposure as trusty-search) | **on** |
 | `trusty-analyze` | **off** (same ONNX exposure as trusty-search) | **on** |
 
 trusty-search/embedderd load an ONNX runtime dylib, and Hardened Runtime's
@@ -786,18 +786,18 @@ run. Two specifics:
 The rest of this section describes what the tooling *does*. Treat the TCC
 outcome as expected, not established.
 
-`cargo install --path crates/trusty-memory` produces THREE binaries and all
-three are signed — #2721 is the recorded lesson that signing part of an
-install set leaves the rest ad-hoc while the prompt keeps recurring:
+`cargo install --path crates/trusty-memory` produces two binaries, and both
+must be signed. The former `trusty-bm25-daemon` binary was removed in #5329;
+BM25 now runs in-process. The crate manifest and signed-install script define
+the current install set:
 
 | Binary | Identifier |
 |---|---|
 | `trusty-memory` | `com.trusty.trusty-memory` |
-| `trusty-bm25-daemon` | `com.trusty.trusty-bm25-daemon` |
 | `trusty-memory-mcp-bridge` | `com.trusty.trusty-memory-mcp-bridge` |
 
 ```bash
-# From the repo root (or any worktree) — installs all three and signs them
+# From the repo root (or a clean deployment worktree) — installs both and signs them
 scripts/install-trusty-memory-signed.sh
 # or
 make install-memory-signed
@@ -924,8 +924,14 @@ launchctl print gui/$(id -u)/<label> | grep -E 'state|pid'   # does launchd own 
 lsof -nP -iTCP:<port> -sTCP:LISTEN                           # who actually holds the port?
 ```
 
-If the listener's PID is not the one `launchctl print` reports, `kill -TERM` it
-before restarting, then use `launchctl kickstart -k gui/$(id -u)/<label>`.
+If the listener's PID differs from launchd's PID, establish its ownership and
+active-request state before stopping anything. An unknown listener is not
+permission to terminate another session's service. Once the owned orphan is
+confirmed and a quiet restart is coordinated, stop that PID with `kill -TERM`
+and verify it releases the listener. Restart the owned launchd service with
+`bootout` and `bootstrap` as described in
+[Connection-Safe Daemon Restart](#connection-safe-daemon-restart-issue-534).
+Do not use `kickstart -k`; it prevents graceful request draining.
 
 🔴 **A 200 `GET /health` right after `bootstrap` is NOT sufficient evidence the
 restart succeeded** (issue #2486) — a client racing the restart window (e.g. an

@@ -1,7 +1,52 @@
 use super::*;
 use crate::registry::{ProjectEntry, ProjectStatus};
+#[tokio::test]
+async fn assistant_projects_work_with_legacy_store_and_keep_missing_selection() {
+    let (tmp, dirs, root) = fixture();
+    let manifest = dirs[0].join("twin.toml");
+    let original = std::fs::read_to_string(&manifest).unwrap();
+    let original = format!("{original}\n[[stores]]\nname='legacy-index'\npalace='cto'\n");
+    std::fs::write(&manifest, &original).unwrap();
+    let project = tmp.path().join("plain-folder");
+    std::fs::create_dir(&project).unwrap();
+    let path = project
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let ctx = context(&dirs, &root, vec![entry(project.clone())]).await;
+    let Json(value) = update_projects(
+        ctx,
+        Projects {
+            revision: String::new(),
+            scope: Some("assistant".into()),
+            chat_id: String::new(),
+            projects: vec![path.clone()],
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(value["pipeline"]["assistant_projects"], json!([path]));
+    assert!(value["store_issue"].is_null());
+    assert_eq!(std::fs::read_to_string(&manifest).unwrap(), original);
+    std::fs::remove_dir(project).unwrap();
+    let ctx = context(&dirs, &root, vec![]).await;
+    let Json(value) = update_projects(
+        ctx,
+        Projects {
+            revision: value["pipeline"]["revision"].as_str().unwrap().into(),
+            scope: Some("assistant".into()),
+            chat_id: String::new(),
+            projects: vec![path.clone()],
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(value["assistant_projects_status"][0]["available"], false);
+    assert_eq!(value["pipeline"]["assistant_projects"], json!([path]));
+}
 
-fn fixture() -> (tempfile::TempDir, Vec<PathBuf>, PathBuf) {
+pub(super) fn fixture() -> (tempfile::TempDir, Vec<PathBuf>, PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
     let agents = tmp.path().join("agents");
     std::fs::create_dir(&agents).unwrap();
@@ -10,7 +55,7 @@ fn fixture() -> (tempfile::TempDir, Vec<PathBuf>, PathBuf) {
     let homes = tmp.path().canonicalize().unwrap().join("homes");
     (tmp, vec![agents], homes)
 }
-fn entry(path: PathBuf) -> ProjectEntry {
+pub(super) fn entry(path: PathBuf) -> ProjectEntry {
     ProjectEntry {
         path,
         name: "Fixture project".into(),
@@ -19,12 +64,17 @@ fn entry(path: PathBuf) -> ProjectEntry {
         last_connected: None,
         pm_count: 0,
         is_self: false,
+        manually_registered: false,
         git_origin: None,
         open_issues_count: None,
         open_prs_count: None,
     }
 }
-async fn context(dirs: &[PathBuf], root: &std::path::Path, projects: Vec<ProjectEntry>) -> Context {
+pub(super) async fn context(
+    dirs: &[PathBuf],
+    root: &std::path::Path,
+    projects: Vec<ProjectEntry>,
+) -> Context {
     Context::at(dirs, root.to_path_buf(), "twin", projects, vec![])
         .await
         .unwrap()
@@ -107,6 +157,7 @@ async fn pipeline_projects_are_revisioned_and_registered() {
     let invalid = update_projects(
         ctx,
         Projects {
+            scope: None,
             revision: state.revision.clone(),
             chat_id: "chat-a".into(),
             projects: vec![unregistered.to_string_lossy().into_owned()],
@@ -118,6 +169,7 @@ async fn pipeline_projects_are_revisioned_and_registered() {
     let Json(result) = update_projects(
         ctx,
         Projects {
+            scope: None,
             revision: state.revision.clone(),
             chat_id: "chat-a".into(),
             projects: vec![project.to_string_lossy().into_owned()],
@@ -136,6 +188,7 @@ async fn pipeline_projects_are_revisioned_and_registered() {
         update_projects(
             ctx,
             Projects {
+                scope: None,
                 revision: state.revision,
                 chat_id: "chat-a".into(),
                 projects: vec![]

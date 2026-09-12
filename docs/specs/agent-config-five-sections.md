@@ -180,6 +180,31 @@ nothing about its substance.
 
 ### 4.1 Composition (NORMATIVE)
 
+**Owner revision, 2026-09-10 (#7360, #3931, #7361):** All explicit and automatic
+fact memory uses `trusty-memory`. There is no separate session-only memory tool
+or embedded agent-memory fallback. Transient conversation context and document
+indexes are separate concerns. Legacy local memory files remain preserved;
+retiring their commands does not migrate their contents.
+
+Fact memory belongs to the immutable Assistant namespace. The service preserves
+an exclusive legacy palace binding where valid. Reads and writes stay within
+that namespace by default. Settings exposes **Allow queries across memory
+palaces**, disabled by default; enabling it permits explicit cross-palace reads
+only. It does not permit foreign writes, share a protected OKG, or change its
+owner. Effective scopes and tool/skill grants still apply. Ambiguous ownership
+must be reported rather than silently rebound.
+
+Settings also persists Assistant project defaults independently from chat
+attachments. Their canonical union supplies eligible project sources. Readable
+non-Git directories are supported; unavailable saved choices remain visible and
+removable. Registration alone does not select a source. Native assistants use
+Concierge's typed Settings and health operations for platform configuration;
+mutations require an explicit user request and the applicable authority.
+
+These are the current accepted requirements, not an installed-build verification
+claim. The earlier tool lists and connection-status snapshot in §4.3–4.4 are
+historical context where they conflict with this revision.
+
 **Owner revision, 2026-09-09:** §4.7 governs the managed knowledge pipeline.
 Its owner is an **Assistant**: a privileged virtual twin that interacts directly
 with the user. Specialist and delegated agents do not acquire independent OKGs.
@@ -369,6 +394,9 @@ for search in #7429).** The Assistant has **one** trusty-search index, not two:
 the OKG tree is one root of that index, and each attached project is an
 additional root. A copied source document alone does not count as entity
 extraction.
+
+The 2026-09-10 revision additionally includes the Assistant's saved project
+defaults among those sources, persisted separately from chat attachments.
 
 The pipeline is source collection → NLP entity candidates → bounded batches of
 inexpensive inference for normalization/deduplication → validated OKG entities

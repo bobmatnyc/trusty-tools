@@ -16,11 +16,15 @@ Nothing in the palace made that possible. `Drawer.id` is a v4 UUID minted at
 write time, so no part of a drawer's identity derives from what it says, and the
 palace had no export or import at all — the two copies could not meet.
 
-The closest working precedent is `trusty-agents memories export/import`
-(`crates/trusty-agents/src/cli/memories_cmd/ops.rs`), JSONL over its own redb
-store with whole-file sha256 idempotency. Its per-record upsert key is
-`imported:{machine_id}:{id}`, which is exactly the defect: machine plus local id
-can never recognise two machines' copies of one fact as the same fact.
+The earlier `trusty-agents memories export/import` implementation used JSONL
+over its own redb store with whole-file sha256 idempotency. Its per-record upsert
+key was `imported:{machine_id}:{id}`: machine plus local id could never recognise
+two machines' copies of one fact as the same fact.
+
+Those local commands are retired; their dispatcher now reports that boundary in
+`crates/trusty-agents/src/cli/memories_cmd/mod.rs`. Automatic import of
+`shared-memories.jsonl` is also retired. Existing files remain preserved, without
+automatic migration; agent fact memory uses `trusty-memory` (#7360).
 
 Sharing scope is per-project only.
 

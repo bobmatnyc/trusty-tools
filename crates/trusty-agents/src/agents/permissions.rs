@@ -43,6 +43,16 @@ use crate::rbac::ServiceTier;
 /// `permissions_config_defaults_when_absent`.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 pub struct PermissionsConfig {
+    /// Settings list replacements supersede inherited grants; authored overlays default to union.
+    /// Test: `settings_grant_replacements_survive_extends`.
+    #[serde(default)]
+    pub replace_scopes: bool,
+    #[serde(default)]
+    pub replace_tools: bool,
+    #[serde(default)]
+    pub replace_skills: bool,
+    #[serde(default)]
+    pub replace_subagents: bool,
     #[serde(default)]
     pub scopes: Option<Vec<String>>,
     /// DOC-41 §5.5's `user_authority` singleton. Reserved: parsed and

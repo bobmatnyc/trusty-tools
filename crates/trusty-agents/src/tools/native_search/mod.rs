@@ -32,9 +32,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::helpers::{chunk_to_hit_json, grep_fallback_search};
-    use super::{SearchCodeTool, SearchMemoryTool, SearchSkillsTool};
+    use super::{SearchCodeTool, SearchSkillsTool};
+    use crate::memory::Embedder;
     use crate::memory::store::{MemoryResult, MemoryStore, Segment};
-    use crate::memory::{AgentSession, Embedder, MemoryGraph};
     use crate::search::indexer::{CodeChunk, CodeIndexer};
     use crate::tools::traits::{SkillResolver, ToolExecutor};
 
@@ -297,51 +297,6 @@ mod tests {
             assert!(obj.contains_key("score"), "score must survive; got {hit}");
             assert_eq!(hit["match_reason"], c.match_reason);
         }
-    }
-
-    // ------- search_memory tests -------
-
-    #[tokio::test]
-    async fn search_memory_degrades_gracefully() {
-        let t = SearchMemoryTool::new();
-        let out = t.execute(json!({"query": "decisions"})).await;
-        assert!(!out.is_error());
-        let v: Value = serde_json::from_str(out.content()).unwrap();
-        assert!(v["hits"].is_array());
-        assert_eq!(v["hits"].as_array().unwrap().len(), 0);
-        assert!(v["error"].is_string());
-    }
-
-    #[tokio::test]
-    async fn search_memory_errors_on_missing_query() {
-        let t = SearchMemoryTool::new();
-        assert!(t.execute(json!({})).await.is_error());
-    }
-
-    #[tokio::test]
-    async fn search_memory_executes_with_graph() {
-        let store: Arc<dyn MemoryStore> = Arc::new(MockStore::new());
-        let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder { dim: 8 });
-        let graph = Arc::new(MemoryGraph::new(store, embedder));
-        let session = AgentSession {
-            id: "s1".to_string(),
-            agent_name: "engineer".to_string(),
-            workflow_run_id: "r1".to_string(),
-            phase: "build".to_string(),
-            prompt: "write me a function".to_string(),
-            response: "here is hello_world".to_string(),
-            timestamp: chrono::Utc::now(),
-            parent_id: None,
-            segment: None,
-        };
-        graph.record(session).await.unwrap();
-
-        let tool = SearchMemoryTool::with_graph(graph);
-        let out = tool.execute(json!({"query": "hello"})).await;
-        assert!(!out.is_error());
-        let v: Value = serde_json::from_str(out.content()).unwrap();
-        let hits = v["hits"].as_array().unwrap();
-        assert!(!hits.is_empty(), "expected at least one hit; got {v:?}");
     }
 
     // ------- search_skills tests -------

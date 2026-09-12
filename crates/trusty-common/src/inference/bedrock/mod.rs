@@ -133,6 +133,15 @@ pub struct BedrockAdapter {
     capabilities: ProviderCapabilities,
 }
 
+/// Why: legacy Converse callers must preserve typed image/history content.
+/// What: reuse the same validated role, image and tool conversion as the shared adapter.
+/// Test: shared Bedrock conversion tests.
+pub fn conversation_messages(
+    messages: Vec<crate::inference::ChatMessage>,
+) -> Result<(Vec<SystemContentBlock>, Vec<Message>), InferenceError> {
+    convert::build_converse_messages(&ChatRequest::new("", messages))
+}
+
 impl BedrockAdapter {
     /// Construct a `BedrockAdapter` for the resolved (or defaulted) region.
     ///

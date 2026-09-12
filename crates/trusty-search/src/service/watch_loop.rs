@@ -105,10 +105,31 @@ pub fn spawn_watch_loop(
     // only producer — it is the one place that sees a change at all.
     file_events: crate::core::file_events::SharedFileEventFeed,
 ) -> Result<WatcherTask> {
+    spawn_watch_loop_with_registry(
+        root_path,
+        index_id,
+        indexer,
+        indexed_files,
+        file_events,
+        None,
+    )
+}
+
+/// Live registry lookup keeps watcher policy current after Settings updates (#7379).
+pub(crate) fn spawn_watch_loop_with_registry(
+    root_path: &Path,
+    index_id: crate::core::registry::IndexId,
+    indexer: Arc<RwLock<CodeIndexer>>,
+    indexed_files: IndexedFiles,
+    file_events: crate::core::file_events::SharedFileEventFeed,
+    registry: Option<crate::core::registry::IndexRegistry>,
+) -> Result<WatcherTask> {
     let (tx, mut rx) = mpsc::unbounded_channel::<WatchEvent>();
-    // Retained so a failed dropped-event reconcile can re-arm itself. See
-    // `watch_rescan::schedule_rescan_retry`.
-    let retry_tx = tx.clone();
+    // Retained so a failed dropped-event reconcile — and an undecidable live
+    // admission — can re-arm on this loop's own channel. The gate is what keeps
+    // the two callers to one outstanding timer (#7396). See
+    // `watch_rescan::RescanGate`.
+    let rescan_gate = crate::service::watch_rescan::RescanGate::new(tx.clone());
     let watcher = FileWatcher::start(root_path.to_path_buf(), tx)?;
 
     // Canonicalize the root exactly as the reindex walker does (issue #402).
@@ -136,17 +157,26 @@ pub fn spawn_watch_loop(
                 // nothing will redeliver them, so the changed paths can only be
                 // re-derived from disk. Discarding this is a silent data loss.
                 WatchEvent::Rescan => {
+                    // #7396: this pass discharges whatever armed it, so the next
+                    // undecidable admission may arm again. Disarming here rather
+                    // than after the pass keeps a defer raised DURING the pass —
+                    // which the walk may already have gone past — able to do so.
+                    rescan_gate.disarm();
                     // #6524: no single path is implicated, so the feed row says
                     // "the whole tree" rather than naming a file it cannot know.
                     file_events
                         .record(FileEventKind::Rescan, RESCAN_FEED_PATH)
                         .await;
-                    let outcome = crate::service::watch_rescan::reconcile_after_rescan(
+                    // #7396: the registry lookup lives inside the pass. An
+                    // absent handle is a FAILED pass, not a reason to discard
+                    // the batch — see `watch_rescan::reconcile_registered`.
+                    let outcome = crate::service::watch_rescan::reconcile_registered(
                         &index_id,
                         &canonical_root,
                         &raw_root,
                         &indexer,
                         &indexed_files,
+                        registry.as_ref(),
                     )
                     .await;
                     // One decision for every way a pass can fall short. The
@@ -164,10 +194,7 @@ pub fn spawn_watch_loop(
                         }
                         RescanFollowUp::Retry { attempt } => {
                             rescan_failures = attempt;
-                            crate::service::watch_rescan::schedule_rescan_retry(
-                                retry_tx.clone(),
-                                attempt,
-                            );
+                            rescan_gate.arm_retry(attempt);
                             Some(attempt)
                         }
                     };
@@ -220,15 +247,35 @@ pub fn spawn_watch_loop(
                         &path,
                     )
                     .await;
-                    handle_modified(
-                        &path,
-                        &index_id,
-                        &canonical_root,
-                        &raw_root,
-                        &indexer,
-                        &indexed_files,
-                    )
-                    .await;
+                    if let Some(registry) = &registry {
+                        crate::service::index_admission::apply_modified(
+                            registry,
+                            &index_id,
+                            &path,
+                            crate::service::index_admission::WatchRoots {
+                                canonical: &canonical_root,
+                                raw: &raw_root,
+                            },
+                            &indexer,
+                            &indexed_files,
+                            // #7396: an admission the filesystem could not
+                            // answer defers to a rescan rather than deleting
+                            // the file's chunks. The gate coalesces a batch of
+                            // them into one pass.
+                            Some(&rescan_gate),
+                        )
+                        .await;
+                    } else {
+                        handle_modified(
+                            &path,
+                            &index_id,
+                            &canonical_root,
+                            &raw_root,
+                            &indexer,
+                            &indexed_files,
+                        )
+                        .await;
+                    }
                 }
                 WatchEvent::Removed(path) => {
                     // #6524: same key `handle_removed` looks the file up by.

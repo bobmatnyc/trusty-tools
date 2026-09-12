@@ -31,6 +31,15 @@ use crate::recap;
 /// Test: `submit_task_returns_running` (integration) + serde round-trip.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TaskRequest {
+    /// Attachment bodies prepared by `POST /api/chat-attachments/prepare` and
+    /// carried inline with this turn.
+    ///
+    /// Why: the wire name is `inline_attachments`, NOT `attachments`, because
+    /// #7370's id-addressed pathway landed on `attachments` first and the two
+    /// carry different shapes — a list of ids there, prepared bodies here.
+    /// Test: `prepare_route_accepts_csv_and_rejects_invalid_images`.
+    #[serde(default)]
+    pub inline_attachments: Vec<trusty_common::chat_attachments::InputAttachment>,
     pub task: String,
     #[serde(default)]
     pub workflow: Option<String>,
@@ -307,6 +316,7 @@ fn resolve_agent_for_chat(req: &TaskRequest, is_ctrl_command: bool) -> Option<St
 /// `session_overrides_for_passes_through_model_and_provider`.
 fn session_overrides_for(req: &TaskRequest) -> crate::ctrl::SessionOverrides {
     crate::ctrl::SessionOverrides {
+        attachments: req.inline_attachments.clone(),
         model: req.model_id.clone(),
         provider: req.provider_id.clone(),
         user: None,
@@ -367,8 +377,28 @@ fn drain_last_responder(
 /// by `crate::intent` unit tests.
 pub(super) async fn submit_task(
     State(state): State<AppState>,
-    Json(mut req): Json<TaskRequest>,
+    req: Result<Json<TaskRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
+    let Json(mut req) = match req {
+        Ok(req) => req,
+        Err(e) => return super::attachment_prepare::json_error(e).into_response(),
+    };
+    // The inline (`inline_attachments`) pathway validates its own bodies; the
+    // id-addressed (`attachments`) pathway is resolved against the manifest
+    // below. A turn may carry either or both, but they share ONE per-turn count
+    // budget — see `resolve_attachments` (#7396).
+    if let Err(error) = trusty_common::chat_attachments::validate_inputs(&req.inline_attachments) {
+        return super::attachment_prepare::error(error).into_response();
+    }
+    if !req.inline_attachments.is_empty()
+        && (req.agent.is_none() || req.task.trim_start().starts_with('/') || req.workflow.is_some())
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error":"Attachments require an assistant chat turn"})),
+        )
+            .into_response();
+    }
     // #7370: VALIDATE BEFORE ANYTHING IS PERSISTED. Every write this handler
     // performs - the `running` placeholder, the attendance turn, the session
     // announcement, and downstream `spawn_persist_turn`'s chat-history append
@@ -442,14 +472,17 @@ pub(super) async fn submit_task(
     // `run_pm_task_with_session`. Routing these to the prescriptive
     // subprocess pipeline would lose access to those tools.
     let normalized = req.task.trim().to_lowercase();
-    let is_ctrl_command = normalized.starts_with("add project ")
-        || normalized.starts_with("remove project ")
-        || normalized.starts_with("stop task ")
-        || normalized.starts_with("set active ")
-        || normalized == "list projects"
-        || normalized == "list tasks";
+    let is_ctrl_command = req.inline_attachments.is_empty()
+        && (normalized.starts_with("add project ")
+            || normalized.starts_with("remove project ")
+            || normalized.starts_with("stop task ")
+            || normalized.starts_with("set active ")
+            || normalized == "list projects"
+            || normalized == "list tasks");
 
-    let intent = if is_ctrl_command {
+    let intent = if !req.inline_attachments.is_empty() {
+        IntentClass::Research
+    } else if is_ctrl_command {
         // Force the in-process Research path so CTRL tools are available.
         IntentClass::Research
     } else {
@@ -639,21 +672,28 @@ pub(super) async fn submit_task(
 /// `super::tests::attachments::send_with_a_known_attachment_is_accepted`.
 async fn resolve_attachments(state: &AppState, req: &TaskRequest) -> Result<Vec<String>, Response> {
     let ids = req.attachments.clone().unwrap_or_default();
-    if ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    if ids.len() > crate::attachments::MAX_ATTACHMENTS_PER_TURN {
+    // #7396: ONE budget across both pathways. `attachments` carries manifest
+    // ids and `inline_attachments` carries prepared bodies, but a turn pays for
+    // every one of them — each is rendered into the turn and replayed as
+    // history on every later turn in the session. Budgeting them separately
+    // handed a caller that sets both the sum of two caps, which is a cost
+    // neither cap was chosen for. Counted before the empty-`ids` return so a
+    // request that sets only `inline_attachments` is measured too.
+    let carried = ids.len() + req.inline_attachments.len();
+    if carried > crate::attachments::MAX_ATTACHMENTS_PER_TURN {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
                 "error": format!(
-                    "a turn may carry at most {} attachments, not {}",
+                    "a turn may carry at most {} attachments, not {carried}",
                     crate::attachments::MAX_ATTACHMENTS_PER_TURN,
-                    ids.len()
                 ),
             })),
         )
             .into_response());
+    }
+    if ids.is_empty() {
+        return Ok(Vec::new());
     }
     let agent = addressed_agent_for(req);
     // The session is DERIVED from the addressed assistant, never taken from
@@ -895,6 +935,7 @@ mod tests {
 
     fn base_request(agent: Option<&str>) -> TaskRequest {
         TaskRequest {
+            inline_attachments: vec![],
             task: "hi".to_string(),
             workflow: None,
             out_dir: None,

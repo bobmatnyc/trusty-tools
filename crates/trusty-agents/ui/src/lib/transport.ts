@@ -126,6 +126,8 @@ async function fetchFallback(command: string, args?: Record<string, unknown>): P
         workflow: args?.workflow ?? 'prescriptive',
         project_path: args?.projectPath ?? args?.project_path ?? null,
       };
+      if (Array.isArray(args?.inlineAttachments) && args.inlineAttachments.length)
+        body.inline_attachments = args.inlineAttachments;
       const agent = args?.agent;
       if (typeof agent === 'string' && agent.trim()) {
         body.agent = agent;
@@ -156,7 +158,8 @@ async function fetchFallback(command: string, args?: Record<string, unknown>): P
         body: JSON.stringify(body),
       });
       if (!submit.ok) {
-        const err = `send_message submit failed: ${submit.status}`;
+        const detail = await submit.json().catch(() => ({}));
+        const err = typeof detail.error === 'string' ? detail.error : `send_message submit failed: ${submit.status}`;
         emitWeb('task-error', { task_id: '', error: err });
         throw new Error(err);
       }

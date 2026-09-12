@@ -32,7 +32,7 @@ use crate::{api, subprocess, tools};
 
 use super::helpers::{
     build_runner_for_workflow, load_skill_registry, load_tag_skill_registry,
-    load_user_memory_suffix, read_current_build_number,
+    read_current_build_number,
 };
 
 /// Handle `tagent resume [--list] [--json] <run-id>`.
@@ -94,7 +94,6 @@ pub(crate) async fn run_resume_subcommand(args: &[String]) -> Result<()> {
     let perf_dir: PathBuf = project_root.join("docs").join("performance");
     let skill_registry = load_skill_registry(&project_root).await;
     let tag_skill_registry = load_tag_skill_registry();
-    let user_memory_suffix = load_user_memory_suffix().await;
 
     // #5227: resume must resolve the workflows dir the same hierarchical way
     // the original run did, or a resume from a different CWD reads no
@@ -107,7 +106,6 @@ pub(crate) async fn run_resume_subcommand(args: &[String]) -> Result<()> {
     .with_perf_dir(Some(perf_dir))
     .with_skill_registry(Some(skill_registry))
     .with_tag_skill_registry(Some(tag_skill_registry))
-    .with_user_memory(user_memory_suffix)
     .with_progress(Some(Arc::new(crate::progress::ProgressReporter::new())));
 
     match engine.resume_with_perf_and_dirs(&run_id).await? {

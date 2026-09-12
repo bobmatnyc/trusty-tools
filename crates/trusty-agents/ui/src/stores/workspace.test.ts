@@ -121,9 +121,24 @@ it('removes a missing chat attachment only when requested', async () => {
   const state = await import('./workspace');
   state.attachRootToChat({ ...alpha, available: false });
   expect(get(state.chatFolderError)).toContain('unavailable');
-  state.detachUnavailableChatFolders();
+  expect(state.detachUnavailableChatFolders()).toBe(true);
   expect(get(state.currentChatRoots)).toEqual([]);
   expect(get(state.chatFolderError)).toBeNull();
+});
+
+it('resolves the selected missing folder while retaining defaults for Settings', async () => {
+  const state = await import('./workspace');
+  const app = await import('./app');
+  app.activeAgentId.set('alice');
+  state.attachRootToChat({ ...alpha, available: false });
+  state.attachRootToChat(beta);
+  state.selectChatRoot(alpha);
+  expect(state.detachUnavailableChatFolders()).toBe(true);
+  expect(get(state.currentChatRoots)).toEqual([beta]);
+  state.setAssistantDefaultProjects('alice', [{ ...alpha, available: false }]);
+  state.selectChatRoot(alpha);
+  expect(state.detachUnavailableChatFolders()).toBe(false);
+  expect(get(state.chatFolderError)).toContain('unavailable');
 });
 
 
@@ -146,4 +161,42 @@ it('preserves registered candidates during a generic app refresh', async () => {
   await state.loadWorkspaceRoots();
   expect(get(state.registeredWorkspaceRoots)).toEqual([alpha]);
   expect(vi.mocked(client.listWorkspaceRoots)).toHaveBeenLastCalledWith(['/alpha']);
+});
+
+it('keeps assistant defaults separate from attachments across assistants and new chats', async () => {
+  const state = await import('./workspace');
+  const app = await import('./app');
+  app.activeAgentId.set('alice');
+  state.setAssistantDefaultProjects('alice', [alpha]);
+  state.setAssistantDefaultProjects('bob', [beta]);
+  expect(get(state.currentChatRoots)).toEqual([alpha]);
+  expect(get(state.assistantKnowledgeAttachments)).toEqual([]);
+  app.activeProjectId.set('new-chat');
+  expect(get(state.currentChatRoots)).toEqual([alpha]);
+  app.activeAgentId.set('bob');
+  expect(get(state.currentChatRoots)).toEqual([beta]);
+  expect(get(state.chatProjectPath)).toBe('/beta');
+  state.setAssistantDefaultProjects('bob', [{ ...beta, available: false }]);
+  expect(get(state.chatProjectPath)).toBeNull();
+  expect(get(state.chatFolderError)).toContain('unavailable');
+});
+
+it('selecting a default changes only the working folder and revokes it when settings removes it', async () => {
+  const state = await import('./workspace'); const app = await import('./app');
+  app.activeAgentId.set('alice');
+  state.setAssistantDefaultProjects('alice', [alpha, beta]);
+  state.selectChatRoot(beta);
+  expect(get(state.chatProjectPath)).toBe('/beta');
+  expect(get(state.assistantKnowledgeAttachments)).toEqual([]);
+  state.setAssistantDefaultProjects('alice', [alpha]);
+  expect(get(state.currentChatRoots)).toEqual([alpha]);
+  expect(get(state.chatProjectPath)).toBe('/alpha');
+});
+it('registering a same-path root with a new native ID preserves other chat memberships', async () => {
+  const state = await import('./workspace'); const app = await import('./app');
+  app.activeAgentId.set('alice'); state.attachRootToChat(alpha);
+  app.activeAgentId.set('bob'); state.attachRootToChat({ ...alpha, id: 'different-native-id' });
+  app.activeAgentId.set('alice');
+  expect(get(state.currentChatRoots).map(root => root.path)).toEqual(['/alpha']);
+  expect(get(state.assistantKnowledgeAttachments)[0].projects).toEqual(['/alpha']);
 });

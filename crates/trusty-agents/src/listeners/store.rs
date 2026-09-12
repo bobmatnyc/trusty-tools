@@ -243,7 +243,14 @@ impl EventStore {
                 return Err(e).with_context(|| format!("failed to read {}", path.display()));
             }
         };
-        let filters = Self::load_filters_at(dir).await.unwrap_or_default();
+        // #7396: the events themselves are readable; only a preference file is
+        // not. Failing the whole history endpoint over that hides rows that
+        // exist, so the rows render with the documented default label — the
+        // same answer `is_event_type_included_at` gives.
+        let filters = Self::load_filters_at(dir).await.unwrap_or_else(|error| {
+            tracing::warn!(%error, "Event filters unavailable; listing every event as included");
+            Default::default()
+        });
         let mut events: Vec<StoredEvent> = raw
             .lines()
             .filter(|l| !l.trim().is_empty())
@@ -359,8 +366,27 @@ impl EventStore {
     /// directly (issue #3922) — see [`Self::append_at`]'s docs for why this
     /// seam exists.
     pub(crate) async fn is_event_type_included_at(dir: &std::path::Path, event_type: &str) -> bool {
-        let filters = Self::load_filters_at(dir).await.unwrap_or_default();
-        is_included(&filters, event_type)
+        // #7396: include on error, and say so. `included` is not a display
+        // label — `listeners/poll.rs` skips knowledge intake AND the agent wake
+        // when it is false, while the dedup set already holds the event id and
+        // `save_cursor` has advanced the provider cursor in the same pass. An
+        // unreadable `filters.json` is a preference-file problem; excluding on
+        // it drops the inbound message permanently, with only a warn to show
+        // for it, and no later pass redelivers it. The documented default is
+        // "included until a user explicitly excludes them", so an unknown
+        // preference resolves to the default rather than to its opposite.
+        match Self::load_filters_at(dir).await {
+            Ok(filters) => is_included(&filters, event_type),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    event_type,
+                    "Event filters unavailable; applying the documented default and including \
+                     this event"
+                );
+                true
+            }
+        }
     }
 }
 
@@ -465,6 +491,49 @@ mod tests {
             .unwrap();
         let events = EventStore::read_events_at(dir, None).await.unwrap();
         assert!(!events[0].included);
+    }
+
+    /// #7396: an unreadable `filters.json` includes the event; it never drops it.
+    ///
+    /// Why: `included == false` is not a display label. `listeners/poll.rs`
+    /// skips knowledge intake AND the agent wake on it, in the same pass that
+    /// has already inserted the event id into the dedup set and advanced the
+    /// provider cursor — so an excluded event is gone for good, and a transient
+    /// filter-file failure would silently drop real inbound mail. The direction
+    /// is the whole finding, so it gets a test of its own rather than resting on
+    /// the happy-path toggle above.
+    /// What: a `filters.json` that is not valid JSON, and a second one that is a
+    /// DIRECTORY (an I/O failure rather than a parse failure) — both must leave
+    /// the event included, and the history endpoint must still render rows.
+    /// Test: this function IS the test.
+    #[tokio::test]
+    async fn broken_filters_include_the_event_and_still_list_history() {
+        for (label, broken) in [("unparseable", true), ("unreadable", false)] {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path();
+            let path = filters_path_at(dir);
+            if broken {
+                std::fs::write(&path, "{ not json").unwrap();
+            } else {
+                std::fs::create_dir_all(&path).unwrap();
+            }
+            assert!(
+                EventStore::load_filters_at(dir).await.is_err(),
+                "{label}: the fixture must actually fail to load"
+            );
+            assert!(
+                EventStore::is_event_type_included_at(dir, "message.received").await,
+                "{label}: a filter-file failure must not exclude an inbound event"
+            );
+
+            EventStore::append_at(dir, &sample_event("id1", "message.received"))
+                .await
+                .unwrap();
+            let events = EventStore::read_events_at(dir, None)
+                .await
+                .unwrap_or_else(|e| panic!("{label}: history must still render: {e}"));
+            assert!(events[0].included, "{label}");
+        }
     }
 
     /// (#3925) Standing regression guard for the #3922 race CLASS, not just

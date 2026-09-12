@@ -655,17 +655,7 @@ pub fn walk_source_files_with_options(root: &Path, opts: &WalkOptions) -> WalkRe
     // hidden entries; the only hidden-directory exclusions came from
     // SKIP_DIRS (`.git`, `.cargo`, ...). Honouring `.gitignore` is what
     // prunes `.venv` / `.cache` / `.aws-sam` on projects that gitignore them.
-    let mut builder = ignore::WalkBuilder::new(&canonical_root);
-    builder
-        .follow_links(opts.follow_links)
-        .hidden(false)
-        .standard_filters(opts.respect_gitignore)
-        .git_ignore(opts.respect_gitignore)
-        .git_exclude(opts.respect_gitignore)
-        .git_global(opts.respect_gitignore)
-        .ignore(opts.respect_gitignore)
-        .parents(opts.respect_gitignore)
-        .require_git(false);
+    let builder = configured_builder(&canonical_root, opts);
 
     for entry in builder.build() {
         let entry = match entry {
@@ -685,58 +675,7 @@ pub fn walk_source_files_with_options(root: &Path, opts: &WalkOptions) -> WalkRe
             continue;
         }
         let path = entry.path();
-        // Belt-and-suspenders: a project without a `.gitignore` (rare but
-        // real, e.g. a `target/` left over from someone else's build) still
-        // needs the hardcoded skip list to keep `node_modules` etc. out of
-        // the index. Match on any component's basename so a nested
-        // `vendor/foo/node_modules/bar.js` is still pruned.
-        //
-        // Issue #1372: also prune any component whose basename is in the
-        // per-index `extra_skip_dirs` set (default: data/exports/output/
-        // reports/snapshots/results) so data-export trees never reach the
-        // indexer. Matched on basename only, identical to SKIP_DIRS semantics.
-        //
-        // Fix #1554: strip the canonical root prefix BEFORE checking
-        // components so that directory names in the ROOT PATH ITSELF (e.g. a
-        // repo stored at `/data/repos/myproject`) never match the skip lists.
-        // Only path segments that are RELATIVE to the walk root should be
-        // tested — callers have no control over what parent directories their
-        // root lives under. `strip_prefix` always succeeds here because
-        // `WalkBuilder::new(&canonical_root)` only yields entries that begin
-        // with `canonical_root`; the `unwrap_or` is a belt-and-suspenders
-        // fallback (e.g. a symlinked entry whose resolved path escapes the
-        // root after `follow_links`) that preserves the pre-fix behaviour of
-        // checking the full path.
-        let rel = path.strip_prefix(&canonical_root).unwrap_or(path);
-        if rel
-            .components()
-            .filter_map(|c| c.as_os_str().to_str())
-            .any(|seg| SKIP_DIRS.contains(&seg) || opts.extra_skip_dirs.iter().any(|d| d == seg))
-        {
-            continue;
-        }
-        // Extension allow-list: only known source extensions enter the indexer.
-        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
-            continue;
-        };
-        if !SOURCE_EXTS.iter().any(|e| e.eq_ignore_ascii_case(ext)) {
-            continue;
-        }
-        // Path-level skip: minified filenames, binaries, large files (global
-        // 1 MiB cap).
-        if should_skip_path(path) {
-            continue;
-        }
-        // Issue #1372: tighter per-extension cap for data-ish files
-        // (JSON/XML/TXT/log). Layered on top of the global cap above so a
-        // 200 KiB data export is pruned while a small `package.json` of the
-        // same extension stays indexable.
-        if exceeds_data_cap(path, opts.data_file_max_bytes) {
-            continue;
-        }
-        // Issue #77: default doc/changelog/license exclusion. Skipped before
-        // the file is read so prose never enters BM25 / vector lanes.
-        if !opts.include_docs && is_default_doc_excluded(path) {
+        if !path_admitted(&canonical_root, path, opts) {
             continue;
         }
         files.push(path.to_path_buf());
@@ -746,6 +685,82 @@ pub fn walk_source_files_with_options(root: &Path, opts: &WalkOptions) -> WalkRe
         files,
         skipped_dirs,
     }
+}
+
+/// Shared path checks for walker and live events (#7379).
+pub(crate) fn path_admitted(root: &Path, path: &Path, opts: &WalkOptions) -> bool {
+    // Belt-and-suspenders: a project without a `.gitignore` (rare but
+    // real, e.g. a `target/` left over from someone else's build) still
+    // needs the hardcoded skip list to keep `node_modules` etc. out of
+    // the index. Match on any component's basename so a nested
+    // `vendor/foo/node_modules/bar.js` is still pruned.
+    //
+    // Issue #1372: also prune any component whose basename is in the
+    // per-index `extra_skip_dirs` set (default: data/exports/output/
+    // reports/snapshots/results) so data-export trees never reach the
+    // indexer. Matched on basename only, identical to SKIP_DIRS semantics.
+    //
+    // Fix #1554: strip the canonical root prefix BEFORE checking
+    // components so that directory names in the ROOT PATH ITSELF (e.g. a
+    // repo stored at `/data/repos/myproject`) never match the skip lists.
+    // Only path segments that are RELATIVE to the walk root should be
+    // tested — callers have no control over what parent directories their
+    // root lives under. `strip_prefix` always succeeds here because
+    // `WalkBuilder::new(root)` only yields entries that begin
+    // with `canonical_root`; the `unwrap_or` is a belt-and-suspenders
+    // fallback (e.g. a symlinked entry whose resolved path escapes the
+    // root after `follow_links`) that preserves the pre-fix behaviour of
+    // checking the full path.
+    let rel = path.strip_prefix(root).unwrap_or(path);
+    if rel
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .any(|seg| SKIP_DIRS.contains(&seg) || opts.extra_skip_dirs.iter().any(|d| d == seg))
+    {
+        return false;
+    }
+    // Extension allow-list: only known source extensions enter the indexer.
+    let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+        return false;
+    };
+    if !SOURCE_EXTS.iter().any(|e| e.eq_ignore_ascii_case(ext)) {
+        return false;
+    }
+    // Path-level skip: minified filenames, binaries, large files (global
+    // 1 MiB cap).
+    if should_skip_path(path) {
+        return false;
+    }
+    // Issue #1372: tighter per-extension cap for data-ish files
+    // (JSON/XML/TXT/log). Layered on top of the global cap above so a
+    // 200 KiB data export is pruned while a small `package.json` of the
+    // same extension stays indexable.
+    if exceeds_data_cap(path, opts.data_file_max_bytes) {
+        return false;
+    }
+    // Issue #77: default doc/changelog/license exclusion. Skipped before
+    // the file is read so prose never enters BM25 / vector lanes.
+    if !opts.include_docs && is_default_doc_excluded(path) {
+        return false;
+    }
+    true
+}
+
+/// Use the same ignore sources for walking and single-file admission.
+pub(crate) fn configured_builder(root: &Path, opts: &WalkOptions) -> ignore::WalkBuilder {
+    let mut builder = ignore::WalkBuilder::new(root);
+    builder
+        .follow_links(opts.follow_links)
+        .hidden(false)
+        .standard_filters(opts.respect_gitignore)
+        .git_ignore(opts.respect_gitignore)
+        .git_exclude(opts.respect_gitignore)
+        .git_global(opts.respect_gitignore)
+        .ignore(opts.respect_gitignore)
+        .parents(opts.respect_gitignore)
+        .require_git(false);
+
+    builder
 }
 
 #[cfg(test)]
