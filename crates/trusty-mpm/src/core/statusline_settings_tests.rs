@@ -111,6 +111,11 @@ fn an_unparseable_file_is_refused() {
 /// Why: this runs on every launch and every resume. A second call must not
 /// rewrite the file, or every session bumps the mtime of the operator's
 /// settings for nothing.
+///
+/// #7689: the enum alone let the real contract drift — assert the BYTES and the
+/// mtime too, plus the absence of the `<path>.bak` that `write_json_atomic`
+/// takes before every publish. Those three are what "wrote nothing" actually
+/// means; `StatuslineWrite::Unchanged` is only the report of it.
 /// Test: itself.
 #[test]
 fn seeding_is_idempotent() {
@@ -118,10 +123,83 @@ fn seeding_is_idempotent() {
     let path = dir.path().join("settings.json");
 
     assert_eq!(ensure_statusline_entry_in(&path), StatuslineWrite::Seeded);
+    let seeded_bytes = std::fs::read(&path).expect("read after seed");
+    let seeded_mtime = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .expect("mtime after seed");
+
     assert_eq!(
         ensure_statusline_entry_in(&path),
         StatuslineWrite::Unchanged
     );
+    assert_eq!(
+        std::fs::read(&path).expect("read after second call"),
+        seeded_bytes,
+        "a second call must leave the file byte-for-byte as the seed wrote it"
+    );
+    assert_eq!(
+        std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .expect("mtime after second call"),
+        seeded_mtime,
+        "a second call must not bump the mtime of the operator's settings"
+    );
+    assert!(
+        !backup_of(&path).is_file(),
+        "a second call must not publish, so it must take no backup either"
+    );
+}
+
+/// Why (#7689): `resolve_statusline_command` degrades to the bare
+/// literal `tm statusline` when `current_exe()` is an ephemeral build path and
+/// no `tm`/`trusty-mpm` is installed — and that literal is one of
+/// `KNOWN_BARE_STATUSLINE_COMMANDS`, so `is_stale_statusline_command` claims the
+/// seeder's own output and the next call reports `Repaired` forever. That holds
+/// on a CI runner and not on a developer machine, which is why
+/// `seeding_is_idempotent` was green locally and red in CI for every run of
+/// shard 5. Injecting the resolver pins the degraded case on any host.
+/// FAILS BEFORE THIS CHANGE: the second call returned `Repaired`.
+/// Test: itself.
+#[test]
+fn an_unresolvable_seed_is_not_repaired_on_the_next_call() {
+    let degraded = || "tm statusline".to_string();
+    let mut obj = serde_json::Map::new();
+
+    assert_eq!(
+        apply_statusline_entry_with(&mut obj, degraded),
+        StatuslineWrite::Seeded
+    );
+    let seeded = obj.clone();
+
+    assert_eq!(
+        apply_statusline_entry_with(&mut obj, degraded),
+        StatuslineWrite::Unchanged,
+        "the resolution has not changed, so there is nothing to repoint to"
+    );
+    assert_eq!(obj, seeded, "nothing may be mutated on the second pass");
+}
+
+/// Why (#7689): the equality check must not cost the `--fix` repair its job. An
+/// entry that names a DIFFERENT binary from the one resolution offers is still
+/// stale, and still gets repointed.
+/// Test: itself.
+#[test]
+fn a_divergent_entry_is_still_repaired_against_the_resolution() {
+    let mut obj = serde_json::Map::new();
+    obj.insert(
+        "statusLine".to_string(),
+        serde_json::json!({
+            "type": "command",
+            "command": "/definitely/not/here/tm statusline",
+            "padding": 0
+        }),
+    );
+
+    assert_eq!(
+        apply_statusline_entry_with(&mut obj, || "/opt/tm statusline".to_string()),
+        StatuslineWrite::Repaired
+    );
+    assert_eq!(obj["statusLine"]["command"], "/opt/tm statusline");
 }
 
 /// Why (critic CRITICAL): this writes `~/.claude/settings.json`, the file class

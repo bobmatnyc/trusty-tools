@@ -97,7 +97,8 @@ impl StatuslineWrite {
 /// `a_customized_entry_is_kept`, `an_unparseable_file_is_refused`,
 /// `seeding_is_idempotent`, `other_keys_survive_the_seed`,
 /// `a_repair_backs_up_the_prior_bytes`,
-/// `a_repair_preserves_operator_fields`.
+/// `a_repair_preserves_operator_fields`,
+/// `a_divergent_entry_is_still_repaired_against_the_resolution`.
 pub fn ensure_statusline_entry_in(settings_path: &Path) -> StatuslineWrite {
     // #7617: held across the read AND the write below — see "Write safety".
     let _guard = crate::core::claude_json_guard::lock();
@@ -186,30 +187,67 @@ pub fn backup_of(settings_path: &Path) -> std::path::PathBuf {
 /// predicate is ever widened to claim a non-object, this branch is what stops
 /// the widening from turning into a silent no-op — which is the failure #1914's
 /// review flagged when the equivalent branch was first written.
+/// A REPAIR THAT WOULD WRITE THE IDENTICAL COMMAND IS NOT A REPAIR (#7689):
+/// [`resolve_statusline_command`] degrades to the bare literal `tm statusline`
+/// when `current_exe()` is an ephemeral build path AND no `tm`/`trusty-mpm` is
+/// resolvable — and that literal is itself in `KNOWN_BARE_STATUSLINE_COMMANDS`,
+/// so the predicate claims the seeder's own output. Without the equality check
+/// the second call on an untouched file reports `Repaired` and rewrites the
+/// file with byte-identical content, which is what this runs on every launch
+/// and every resume. The repair path survives intact: a command that differs
+/// from the resolution — a missing binary, a cleaned build tree — still differs
+/// from it, and still reports [`StatuslineWrite::Repaired`].
 /// Test: `a_fresh_file_is_seeded`, `a_stale_entry_is_repaired`,
 /// `a_customized_entry_is_kept`, `a_repair_preserves_operator_fields`,
-/// `a_non_object_statusline_is_left_alone`.
+/// `a_non_object_statusline_is_left_alone`,
+/// `an_unresolvable_seed_is_not_repaired_on_the_next_call`.
 pub fn apply_statusline_entry(
     obj: &mut serde_json::Map<String, serde_json::Value>,
 ) -> StatuslineWrite {
+    apply_statusline_entry_with(obj, resolve_statusline_command)
+}
+
+/// Testable core of [`apply_statusline_entry`] with the command resolution
+/// injected.
+///
+/// Why (#7689): the non-idempotent case only arises when
+/// [`resolve_statusline_command`] degrades to its bare last resort, which
+/// depends on the host having no installed `tm` — true on a CI runner, false on
+/// every developer machine, so the defect was invisible locally and red in CI.
+/// Injecting the resolver makes that branch deterministic here, the same
+/// `resolve_statusline_binary_with` pattern the resolution priority itself uses.
+/// What: [`apply_statusline_entry`]'s rule, with `resolve` supplying the command
+/// string. Called at most once, and never on the `Unchanged` path, so a steady
+/// install still costs no resolution.
+/// Test: `an_unresolvable_seed_is_not_repaired_on_the_next_call`.
+fn apply_statusline_entry_with(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    resolve: impl Fn() -> String,
+) -> StatuslineWrite {
     match obj.get("statusLine") {
         None => {
-            obj.insert("statusLine".to_string(), statusline_entry());
+            obj.insert("statusLine".to_string(), statusline_entry(&resolve()));
             StatuslineWrite::Seeded
         }
         Some(existing) if is_stale_statusline_command(existing) => {
+            let current = existing
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            let resolved = resolve();
+            // See #7689
+            if current.as_deref() == Some(resolved.as_str()) {
+                return StatuslineWrite::Unchanged;
+            }
             match obj
                 .get_mut("statusLine")
                 .and_then(serde_json::Value::as_object_mut)
             {
                 Some(entry) => {
-                    entry.insert(
-                        "command".to_string(),
-                        serde_json::Value::String(resolve_statusline_command()),
-                    );
+                    entry.insert("command".to_string(), serde_json::Value::String(resolved));
                 }
                 None => {
-                    obj.insert("statusLine".to_string(), statusline_entry());
+                    obj.insert("statusLine".to_string(), statusline_entry(&resolved));
                 }
             }
             StatuslineWrite::Repaired
@@ -221,14 +259,14 @@ pub fn apply_statusline_entry(
 
 /// The entry every tier gets.
 ///
-/// What: `{"type":"command","command":"<abs tm> statusline","padding":0}`, with
-/// the command resolved absolutely by
-/// [`resolve_statusline_command`] — a bare `tm statusline` silently renders
-/// nothing under Claude Code's minimal `PATH` (#1914).
-fn statusline_entry() -> serde_json::Value {
+/// What: `{"type":"command","command":"<command>","padding":0}`, where
+/// `command` is normally [`resolve_statusline_command`]'s absolute
+/// `<abs tm> statusline` — a bare `tm statusline` silently renders nothing
+/// under Claude Code's minimal `PATH` (#1914).
+fn statusline_entry(command: &str) -> serde_json::Value {
     serde_json::json!({
         "type": "command",
-        "command": resolve_statusline_command(),
+        "command": command,
         "padding": 0
     })
 }
