@@ -660,13 +660,16 @@ pub(crate) fn no_fold_marker_path(root: &Path, project_dir: &Path) -> PathBuf {
 /// Warn — once per project — that the compiled prompt was not smaller than the
 /// sources that fed it, so no savings row can be written.
 ///
-/// Why (#7245): this decline is the reason the `💸` segment is structurally
-/// absent for a project that overrides no instruction section, and at `debug!`
-/// it was invisible: an operator saw a missing segment with nothing anywhere
-/// saying why. It cannot log on every launch either — the condition is
-/// permanent for such a project, and a warning that repeats every session is
-/// one an operator learns to skip. So it names both byte counts and the reason
-/// once, and repeats only when the numbers move.
+/// Why (#7245, narrowed by #7617): this decline is why a project that overrides
+/// no instruction section contributes zero instruction-compression savings, and
+/// at `debug!` it was invisible — an operator read a flat `💸` figure with
+/// nothing anywhere saying why. It cannot log on every launch either: the
+/// condition is permanent for such a project, and a warning that repeats every
+/// session is one an operator learns to skip. So it names both byte counts and
+/// the reason once, and repeats only when the numbers move. The message scopes
+/// its claim to this technique — since #7617 the statusline also folds `divert`
+/// and `compress` rows, falls back to a linked sibling session, and renders
+/// `💸—` as an explicit empty state, so the segment renders either way.
 /// What: compares the `<source> <compiled>` pair against the marker file for
 /// `project_dir`; when it differs (or no marker exists) emits one `warn!` and
 /// records the pair. Returns whether it warned. A marker that cannot be written
@@ -674,7 +677,8 @@ pub(crate) fn no_fold_marker_path(root: &Path, project_dir: &Path) -> PathBuf {
 /// never seeing it.
 /// Test: `the_no_fold_warning_fires_once_per_project`,
 /// `the_no_fold_warning_fires_again_when_the_byte_pair_moves`,
-/// `the_no_fold_warning_is_emitted_at_warn_level`.
+/// `the_no_fold_warning_is_emitted_at_warn_level`,
+/// `the_no_fold_warning_claims_no_segment_wide_absence`.
 pub fn warn_no_fold_once(
     root: &Path,
     project_dir: &Path,
@@ -686,15 +690,17 @@ pub fn warn_no_fold_once(
     if std::fs::read_to_string(&path).is_ok_and(|seen| seen.trim() == stamp) {
         return false;
     }
+    // #7671: scoped to this technique — #7617 made the segment render regardless.
     tracing::warn!(
         project = %project_dir.display(),
         source_bytes,
         compiled_bytes,
         "the compiled prompt is not smaller than the instruction sources it was \
          built from, so no instruction-compression savings row is written and \
-         the 💸 statusline segment stays absent for this project; this project \
-         configures no CLAUDE.md section overrides, and only an override folds \
-         a bundled section away"
+         this project contributes nothing to the 💸 statusline segment under \
+         that technique; add a CLAUDE.md section override to fold a bundled \
+         section away, because only an override folds one; divert and compress \
+         savings still count, and the segment still renders"
     );
     let _ = (|| -> Option<()> {
         std::fs::create_dir_all(path.parent()?).ok()?;
