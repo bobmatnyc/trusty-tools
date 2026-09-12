@@ -23,6 +23,8 @@
 //! [`InPlaceResumeCommand`]: crate::runtime::InPlaceResumeCommand
 
 mod claude_code;
+// #7568: the PM system-prompt file and its named-root compiled-prompt refresh.
+mod prompt_file;
 mod tcode;
 
 #[cfg(test)]

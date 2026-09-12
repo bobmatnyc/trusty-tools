@@ -33,7 +33,7 @@ const TEST_CWD: &str = "/tmp/ws";
 /// `#[serial_test::serial]` since it mutates process-global env.
 struct HomeGuard {
     prev: Option<String>,
-    _tmp: tempfile::TempDir,
+    tmp: tempfile::TempDir,
 }
 impl HomeGuard {
     fn set() -> Self {
@@ -42,7 +42,15 @@ impl HomeGuard {
         // SAFETY: callers are #[serial], so no other test thread reads HOME
         // concurrently; Drop restores the prior value even on panic.
         unsafe { std::env::set_var("HOME", tmp.path()) };
-        Self { prev, _tmp: tmp }
+        Self { prev, tmp }
+    }
+
+    /// The decoy home this guard installed.
+    ///
+    /// Why (#7568): a test that asserts a producer wrote under the root it was
+    /// GIVEN has to be able to name the root it must NOT have written under.
+    fn home(&self) -> &std::path::Path {
+        self.tmp.path()
     }
 }
 impl Drop for HomeGuard {
@@ -1176,6 +1184,87 @@ fn build_prompt_file_compiled_write_failure_does_not_block_the_spawn() {
         "the session must still receive the real PM prompt: {content}"
     );
     std::fs::remove_file(&path).ok();
+}
+
+/// Everything a fold records lives under `<root>/usage/`.
+///
+/// What: the savings ledger, the staged rows and the `no-fold-warned` markers
+/// all sit there, so its existence is the single "this root was written to"
+/// probe both tests below need — whichever branch the fold took.
+fn usage_dir_of(framework_root: &std::path::Path) -> std::path::PathBuf {
+    framework_root.join("usage")
+}
+
+// #7568: the named-root seam has no production caller yet — `build_prompt_file`
+// is what every spawn path uses — so it is imported here rather than into
+// `claude_code`, where it would read as an unused import.
+use crate::runtime::prompt_file::build_prompt_file_in;
+
+/// The savings producer writes under the root it was GIVEN.
+///
+/// Why (#7568): `build_prompt_file` was the last producer resolving its ledger
+/// from the process home, so `cargo test -p trusty-mpm` kept adding files to the
+/// operator's own `~/.trusty-mpm/usage/` — 64 `no-fold-warned` markers in the
+/// run that failed this issue's live verification. #7514 gave
+/// `refresh_compiled_prompt` and `record_compress_savings` a named-root seam;
+/// this is the third. The assertion that matters is the NEGATIVE one: the
+/// process's home must come away untouched.
+/// What: a decoy `$HOME` standing in for the operator's, a separate named root,
+/// and one call through the seam. Asserts the fold landed under the named root
+/// and that the decoy grew no framework root at all.
+/// Test: this function IS the test.
+#[test]
+#[serial_test::serial]
+fn build_prompt_file_records_under_the_named_framework_root() {
+    let home = HomeGuard::set();
+    let root = tempfile::tempdir().expect("named framework root");
+    let project = tempfile::tempdir().expect("project");
+
+    let path = build_prompt_file_in(root.path(), project.path(), Some("sess-1"))
+        .expect("prompt file written");
+    std::fs::remove_file(&path).ok();
+
+    assert!(
+        usage_dir_of(root.path()).exists(),
+        "the fold must be recorded under the named root: {}",
+        root.path().display()
+    );
+    assert!(
+        !home.home().join(".trusty-mpm").join("usage").exists(),
+        "the producer wrote under the PROCESS home ({}) instead of the root it \
+         was given — this is #7568's defect, and on a real machine that home is \
+         the operator's own",
+        home.home().display()
+    );
+}
+
+/// The hazard, pinned: the ambient form follows the process's `$HOME`.
+///
+/// Why: without this, a `usage/` directory that stopped appearing for an
+/// unrelated reason — a producer that declines, a pricing lookup that fails —
+/// would make the negative assertion above pass while proving nothing. This is
+/// the pre-fix shape, and it is also the PRODUCTION contract: a real spawn's
+/// ledger is the operator's, which is the whole reason the seam had to be
+/// added rather than the resolution changed.
+/// What: the ambient entry point under a decoy `$HOME`, asserting the decoy
+/// gained the framework root the named-root test above forbids.
+/// Test: this function IS the test.
+#[test]
+#[serial_test::serial]
+fn an_ambient_build_prompt_file_records_under_whatever_home_it_inherits() {
+    let home = HomeGuard::set();
+    let project = tempfile::tempdir().expect("project");
+
+    let path = build_prompt_file(project.path(), Some("sess-1")).expect("prompt file written");
+    std::fs::remove_file(&path).ok();
+
+    assert!(
+        usage_dir_of(&home.home().join(".trusty-mpm")).exists(),
+        "the ambient form must record under the process's home — if this stops \
+         holding, the guard above is asserting on something nothing produces \
+         any more and must be re-pointed (decoy home {})",
+        home.home().display()
+    );
 }
 
 #[test]
