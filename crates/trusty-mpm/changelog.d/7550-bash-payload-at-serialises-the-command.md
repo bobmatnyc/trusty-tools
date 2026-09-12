@@ -1,0 +1,2 @@
+Fixed
+- The `bash_payload_at` helper in the `tm_hook_pm_guard` integration suite now builds its `PreToolUse` payload with `serde_json::json!` instead of interpolating the command and cwd into a raw JSON string literal. A command carrying a `"` or a `\` produced malformed JSON, which `tm hook --pm-guard` answers with empty stdout — indistinguishable from an ALLOW — so a test written to assert a DENY could have passed while proving nothing. A caller's `extra_fields` splice is now re-parsed and panics loudly if it is not valid JSON (#7550).
