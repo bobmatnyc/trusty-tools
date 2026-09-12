@@ -25,7 +25,7 @@ name        = "trusty-console"
 # (src/connector.rs:100) and `enum_variant_added` for
 # `machine_history::events::HistoryEvent::Services`. Both are the shape the
 # console's per-service graphs are read from, so neither is avoidable.
-version     = "0.11.1"
+version     = "0.11.2"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true
