@@ -102,14 +102,22 @@ pub fn check_secret(content: &str) -> Result<(), FilterReject> {
 /// regardless of their entropy profile. Matching the prefix is cheaper and more
 /// precise than entropy alone.
 ///
-/// Every entry here carries punctuation an English word never does, which is why
-/// [`SECRET_MIN_LEN`] is sufficient protection for this list. AWS `AKIA`/`ASIA`
-/// used to live here and is not (issue #4898) — it is four bare letters, so it
-/// needs a shape check; see [`AWS_KEY_ID_PREFIXES`].
-/// What: lowercased prefix list checked case-insensitively in
-/// [`looks_like_secret`] (which lowercases the token before comparing), after
-/// the [`SECRET_MIN_LEN`] floor.
-/// Test: `known_key_prefixes_are_blocked`, `aws_access_key_ids_are_blocked`.
+/// What a candidate entry must satisfy, restated since #7549 widened the match:
+/// an entry now fires at offset 0 OR at an interior delimiter boundary, so
+/// "carries punctuation an English word never does" is no longer the whole
+/// answer — `sk-` is the tail of `disk-`, `risk-` and `task-`, three of the most
+/// ordinary words in this project's prose. Vet a new entry against being a
+/// WORD-INTERNAL substring, not merely against containing punctuation. The two
+/// guards that make the list safe are the delimiter rule (a match beginning
+/// mid-word is declined) and the [`SECRET_MIN_LEN`] floor on the run the match
+/// opens; both live in [`carries_secret_prefix`] and are measured there. AWS
+/// `AKIA`/`ASIA` used to live here and is not (issue #4898) — it is four bare
+/// letters, so it needs a shape check; see [`AWS_KEY_ID_PREFIXES`].
+/// What: lowercased prefix list matched case-insensitively by
+/// [`carries_secret_prefix`] (the caller lowercases the token), after the
+/// [`SECRET_MIN_LEN`] floor.
+/// Test: `known_key_prefixes_are_blocked`, `aws_access_key_ids_are_blocked`,
+/// `prefixed_provider_keys_are_blocked_after_7549`.
 pub(crate) const SECRET_PREFIXES: &[&str] = &[
     "sk-",
     "ghp_",
@@ -119,6 +127,70 @@ pub(crate) const SECRET_PREFIXES: &[&str] = &[
     "xoxb-",
     "xoxp-",
 ];
+
+/// True when `lower` carries a [`SECRET_PREFIXES`] entry at its start, or at an
+/// interior delimiter boundary that opens a suffix of at least
+/// [`SECRET_MIN_LEN`] bytes (the prefix counted in).
+///
+/// Why (issue #7549): the test this replaced was `lower.starts_with(p)`, so one
+/// lowercase segment typed ahead of a real provider key defeated the entire
+/// prefix layer — `dpl_ghp_abcdefghijklmnopqrstuvwxyz0123456789` is a GitHub PAT
+/// wearing four characters of disguise and was not flagged. The miss compounds:
+/// the prefix layer is the FIRST thing [`looks_like_secret`] consults, so a
+/// no-answer there hands the token to [`is_structural_token`], whose
+/// segmented-identifier branch then rescues it outright because every segment of
+/// that token is lowercase-alphanumeric. A key written after `=`, after a quote,
+/// or inside a JSON pair lands in the same hole, since [`find_secret_token`]
+/// trims punctuation from a token's OUTER boundary only.
+///
+/// Why the preceding byte must be non-alphanumeric rather than anything at all,
+/// measured over this checkout (7,378 files, tokenised exactly as
+/// [`find_secret_token`] does): a bare substring match flags 46 distinct prose
+/// tokens, 32 of them ordinary English, because `sk-` is a substring of `disk-`,
+/// `risk-` and `task-` — `--disk-size`, `#6-risk-registers`,
+/// `feat/7313-disk-survey-by-session` and `single-primary-task-plus-secondaries`
+/// all become credentials. Requiring a delimiter in front takes that to 14 and
+/// removes every one of those shapes at no cost in detection: no issuer mints a
+/// key whose prefix begins mid-word.
+///
+/// Why the suffix an interior prefix OPENS — the prefix itself included, exactly
+/// as the code measures it at the `lower.len() - at` below — must still reach
+/// [`SECRET_MIN_LEN`]: that is the floor offset 0 already answers to, applied by
+/// [`looks_like_secret`] to the whole token, and at offset 0 the whole token IS
+/// that suffix. Measuring the same span keeps one rule instead of two: a match
+/// at a boundary is judged by what a match at offset 0 would have been judged by
+/// had the token started there. Measured, it takes the 14 prose tokens to 1,
+/// and the 13 it drops are documentation placeholders too short to be keys
+/// (`GITHUB_TOKEN=ghp_xxx`, `SLACK_BOT_TOKEN=xoxb-`, `ANTHROPIC_API_KEY=sk-ant-`).
+/// The survivor is `OPENROUTER_API_KEY=sk-or-v1-xxxxxxxxxxxx`, which is the shape
+/// this issue exists to catch.
+///
+/// Known accepted bound, unchanged in kind from offset 0 and now reachable at a
+/// boundary too: nothing is asked of the characters behind the prefix beyond
+/// their count, so a 20-character run opening with `sk-` is a credential here
+/// whether it is a key or a hyphenated phrase. `sk-eleton-key-for-the-front-door`
+/// was already flagged as a bare token before this change; the same run inside
+/// `notes/sk-eleton-key-for-the-front-door` is flagged after it. Pinned in
+/// `prose_prefix_substrings_are_not_flagged_after_7549`.
+/// What: byte-offset scan over the caller-lowercased token. Offset 0 matches
+/// exactly as before; an interior offset additionally requires the preceding
+/// byte to be non-ASCII-alphanumeric and the remaining suffix to be at least
+/// [`SECRET_MIN_LEN`] bytes.
+/// Test: `known_key_prefixes_are_blocked`,
+/// `prefixed_provider_keys_are_blocked_after_7549`,
+/// `prose_prefix_substrings_are_not_flagged_after_7549`,
+/// `known_accepted_bounds_after_7549`.
+pub(crate) fn carries_secret_prefix(lower: &str) -> bool {
+    SECRET_PREFIXES.iter().any(|p| {
+        lower.match_indices(p).any(|(at, _)| {
+            // #7549: an interior prefix counts only at a delimiter boundary, and
+            // only when the suffix it opens (prefix included) is credential-length.
+            at == 0
+                || (lower.len() - at >= SECRET_MIN_LEN
+                    && !lower.as_bytes()[at - 1].is_ascii_alphanumeric())
+        })
+    })
+}
 
 /// AWS access key ID prefixes — long-term (`AKIA…`) and STS temporary
 /// credentials (`ASIA…`).
@@ -1065,7 +1137,9 @@ pub(crate) fn is_structural_token(token: &str) -> bool {
 /// What: returns `false` immediately for [`is_git_sha_like`] tokens (the
 /// allowlist) and for anything below [`SECRET_MIN_LEN`], then returns `true`
 /// when the token (a) carries a known [`SECRET_PREFIXES`] credential prefix
-/// (e.g. `sk-`, `ghp_`) or has the AWS key-id shape ([`is_aws_access_key_id`]),
+/// (e.g. `sk-`, `ghp_`) at its start or at an interior delimiter boundary
+/// ([`carries_secret_prefix`], issue #7549), or has the AWS key-id shape
+/// ([`is_aws_access_key_id`]),
 /// or (b) is not a structural token (see
 /// [`is_structural_token`]) AND mixes character classes in a way SHAs cannot
 /// — i.e. contains BOTH a lowercase and an uppercase letter plus a digit, or
@@ -1085,7 +1159,8 @@ pub(crate) fn is_structural_token(token: &str) -> bool {
 /// `git_sha_like_is_not_secret`, `ordinary_words_are_not_secret`,
 /// `aws_access_key_ids_are_blocked`, `mixed_case_no_digit_limitation`,
 /// `structural_tokens_are_not_flagged`,
-/// `vercel_deployment_ids_are_not_flagged`.
+/// `vercel_deployment_ids_are_not_flagged`,
+/// `prefixed_provider_keys_are_blocked_after_7549`.
 pub(crate) fn looks_like_secret(token: &str) -> bool {
     // Allowlist git SHAs first — the whole point of issue #1481.
     if is_git_sha_like(token) {
@@ -1102,13 +1177,19 @@ pub(crate) fn looks_like_secret(token: &str) -> bool {
         return false;
     }
     let lower = token.to_ascii_lowercase();
-    if SECRET_PREFIXES.iter().any(|p| lower.starts_with(p)) || is_aws_access_key_id(token) {
+    // #7549: a provider prefix counts at a delimiter boundary, not only at
+    // offset 0 — a lowercase segment typed in front used to hide the whole key.
+    if carries_secret_prefix(&lower) || is_aws_access_key_id(token) {
         return true;
     }
     // #7482: a vendor-issued PUBLIC resource id (a Vercel `dpl_` deployment id)
     // has a credential's character-class profile but is not a credential. Placed
     // BELOW the known-credential prefixes so a public-id prefix can never
-    // pre-empt one; both anchor at offset 0, so this is order-independent today.
+    // pre-empt one. #7549 note: the two anchor differently now (the prefix test
+    // also matches at an interior boundary), but the order still cannot matter —
+    // `is_public_resource_id` requires an all-ALPHANUMERIC tail of one exact
+    // length after `dpl_`, and every SECRET_PREFIXES entry carries a `-` or a
+    // second `_`, so no single token can satisfy both predicates.
     if is_public_resource_id(token) {
         return false;
     }
