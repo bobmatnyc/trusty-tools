@@ -810,8 +810,10 @@ const BRANCH_NAME_PREFIXES: &[&str] =
 /// `denies_a_secret_file_in_a_for_loop_word_list`.
 fn reads_as_a_branch_name(word: &str) -> bool {
     let base = normalize_bracket_classes(&command_basename(word));
+    // #7533: the same three tests `names_a_secret_file` takes, inverted — so
+    // the empty-extension reading of a trailing `.` is set aside here too.
     if base.starts_with('.')
-        || Path::new(&base).extension().is_some()
+        || has_a_named_extension(&base)
         || !matches_only_name_substring_family(&base)
     {
         return false;
@@ -867,8 +869,9 @@ const NEW_REF_FLAGS: &[&str] = &["-b", "-B", "-c", "-C"];
 /// never a file's bytes, and every child of an epic whose subject is secrets
 /// wants that word in its branch name.
 /// What: `Some(index)` — the first token that names a ref — for a
-/// [`REF_NAMING_GIT_SUBCOMMANDS`] call, or for a `checkout`/`switch` call at
-/// the token after its [`NEW_REF_FLAGS`] spelling. A nested command withdraws
+/// [`REF_NAMING_GIT_SUBCOMMANDS`] call, for a `checkout`/`switch` call at
+/// the token after its [`NEW_REF_FLAGS`] spelling, and for `worktree add` at
+/// its first operand (#7533). A nested command withdraws
 /// it, exactly as it withdraws [`for_word_list_start`], because the words are
 /// then whatever that command prints. `None` for every other segment, so no
 /// ordinary argv reaches the narrowed shape test. The position is what is
@@ -913,6 +916,11 @@ fn ref_name_start(segment: &str) -> Option<usize> {
         .map_or(argv.len(), |(index, _)| index);
     let from = if REF_NAMING_GIT_SUBCOMMANDS.contains(&sub) {
         at + 1
+    } else if sub == "worktree" && argv.get(at + 1).is_some_and(|t| t == "add") {
+        // #7533: every operand of `git worktree add` is a new tree's PATH or a
+        // commit-ish, and neither prints a file's bytes. `list`, `remove` and
+        // `prune` are absent, so they keep the pre-fix answer.
+        at + 2
     } else if matches!(sub, "checkout" | "switch") {
         // #7498: the new-branch flag is what makes the next token a ref, and
         // only a flag before the separator is a flag at all.
@@ -1196,7 +1204,8 @@ fn names_a_secret_file(word: &str, scan: Scan) -> bool {
     if base.is_empty() || !denies_as_a_read_target(&base, scan) {
         return false;
     }
-    if base.starts_with('.') || Path::new(&base).extension().is_some() {
+    // #7533: a trailing `.` is a sentence's full stop, not an extension.
+    if base.starts_with('.') || has_a_named_extension(&base) {
         return true;
     }
     if !matches_only_name_substring_family(&base) {
@@ -1430,6 +1439,38 @@ fn names_a_secret(candidate: &str) -> bool {
 /// Test: `allows_a_grep_tool_call_over_a_directory_with_no_glob`.
 fn selects_every_name(candidate: &str) -> bool {
     !candidate.is_empty() && candidate.bytes().all(|b| b == b'*' || b == b'?')
+}
+
+// #7533 review round 2: there is NO one-literal-glob exemption. Two cuts tried
+// one, to stop the `**A` of a Markdown bold span reading as a glob onto
+// `id_rsa`, and both were fail-open: exempting on shape alone surrendered `*a`,
+// `*e` and `*n` (`id_rsa`, `*.tfstate`, `token*`), and exempting an upper-case
+// literal on the premise that it cannot complete a lower-case core ignored the
+// FILE — `*M` expands onto `server.PEM` byte-literally, and this guard folds
+// case everywhere else precisely because filename casing carries no security
+// meaning. A one-literal glob is now screened like any other, so the reported
+// emphasis fragment stays denied; `denies_a_markdown_emphasis_fragment_7533`
+// pins that as the deliberate answer and names what it costs.
+
+/// Whether `basename` carries an extension that NAMES something (#7533).
+///
+/// Why: `Path::extension` answers `Some("")` for a trailing `.`, so
+/// `token.` — the word family's core followed by a sentence's full stop —
+/// read as file shape and denied, while the identical `token` allowed. That is
+/// the shape prose takes: a bearer credential named at the end of a sentence
+/// was refused in an `echo`, and again in a here-document body whose
+/// destination was an unrelated `.md` file.
+/// What: `true` only for a non-empty extension, so `note.md` is file shape and
+/// `token.`, `secrets.` and `credentials.` are words with punctuation after
+/// them. It narrows nothing else: those three families are the only ones whose
+/// core is an English word, and every other family already denies on its own
+/// literal (`id_rsa.` still matches `id_rsa*`).
+/// Test: `allows_a_word_family_followed_by_a_full_stop_7533`,
+/// `a_word_family_counts_only_when_it_is_written_as_a_path`.
+fn has_a_named_extension(basename: &str) -> bool {
+    Path::new(basename)
+        .extension()
+        .is_some_and(|e| !e.is_empty())
 }
 
 /// Whether `basename` ends in one of [`TRANSPARENT_SOURCE_EXTENSIONS`].
@@ -1756,6 +1797,166 @@ mod tests {
             // And the rule is unchanged outside git.
             "cat config/credentials",
             "sed -n '1,5p' id_rsa",
+        ] {
+            assert!(eval(command).is_some(), "`{command}` must deny");
+        }
+    }
+
+    // --- #7533 -------------------------------------------------------------
+
+    /// A one-literal glob whose literal COMPLETES a family core still denies
+    /// (#7533 review round, CRITICAL).
+    ///
+    /// Why: the first cut exempted every one-literal glob with no leading `.`
+    /// on a "subset of the already-allowed bare `*`" argument. That argument
+    /// came from the Grep no-glob EQUIVALENCE, where the glob names nothing;
+    /// applied to a glob that does name something it hands over the last
+    /// character of every secret family. Each row here DENIED at merge-base
+    /// `53f952346`, ALLOWED at `cc71b01b8`, and denies again now.
+    /// What: the three reported letters through every surface the withdrawn
+    /// exemption sat on — a Bash argv operand, a `cp` source, a search
+    /// program's operand, and the `Grep` tool's own `glob` field.
+    #[test]
+    fn denies_a_one_literal_glob_that_completes_a_secret_core_7533() {
+        // `*a` reaches `id_rsa`/`id_ecdsa`, `*e` reaches `*.tfstate`, `*n`
+        // reaches `token*` and `*.ovpn`.
+        for glob in ["*a", "*e", "*n", "**a", "*?a"] {
+            for command in [
+                format!("cat {glob}"),
+                format!("cat ~/.ssh/{glob}"),
+                format!("cp ~/.ssh/{glob} /tmp/x"),
+                format!("grep -l pattern ~/.ssh/{glob}"),
+            ] {
+                assert!(
+                    eval(&command).is_some(),
+                    "`{command}` reaches a secret family and must deny"
+                );
+            }
+            // The native `Grep` tool's own glob field takes the same answer.
+            let input = serde_json::json!({"pattern": "x", "path": "~/.ssh", "glob": glob});
+            assert!(
+                evaluate_secret_file_read_tool("Grep", Some(&input)).is_some(),
+                "Grep(glob = `{glob}`) reaches a secret family and must deny"
+            );
+        }
+        // A literal that completes no core in EITHER case still allows, and
+        // does so through the ordinary overlap check — no exemption is
+        // involved. No core carries `q`, `z` or `7`.
+        for glob in ["*Q", "*Z", "*7", "**7", "*q", "*z"] {
+            assert_eq!(
+                eval(&format!("echo {glob}")),
+                None,
+                "`{glob}` completes no core and must allow"
+            );
+        }
+        // And the round-6 corpus, which no cut here may relax.
+        for command in [
+            "cat .e*",
+            "cat .en?",
+            "cat ./.*",
+            "cat ./.*rc",
+            "cat id_rs?",
+            "cat *nv",
+        ] {
+            assert!(eval(command).is_some(), "`{command}` must deny");
+        }
+    }
+
+    /// The Markdown-emphasis fragment #7533 reported stays DENIED, and that is
+    /// the decision (#7533 review round 2).
+    ///
+    /// Why: two cuts tried to exempt it. The first exempted every one-literal
+    /// glob and surrendered `*a`/`*e`/`*n`. The second exempted an UPPER-CASE
+    /// literal, arguing it could not complete a lower-case core — but the core
+    /// is not what a glob expands onto, the FILE is, and `*M` expands onto
+    /// `server.PEM` byte-literally. This guard folds case everywhere else
+    /// because filename casing carries no security meaning, so the second cut
+    /// contradicted its own module.
+    /// What: the reported fragment, and the five upper-case letters the review
+    /// round measured against real files — `*M` (`server.PEM`), `*Y`
+    /// (`backup.KEY`), `*S` (`AWS_CREDENTIALS`), `*N` (`*.OVPN`, a `TOKEN*`
+    /// name), `*C` (`.NETRC`). Each ALLOWED at `c02a33fcf` and denies here.
+    ///
+    /// The cost is stated rather than hidden: a bold span whose first letter
+    /// reaches a family — `**A`, `**M`, `**S` — is still refused in a command
+    /// this guard reads, and the workaround is to write that prose with the
+    /// Edit tool, which this class does not inspect. The trailing-dot and
+    /// `worktree add` halves of #7533 are unaffected and stay fixed.
+    #[test]
+    fn denies_a_markdown_emphasis_fragment_7533() {
+        for command in [
+            "echo '**A pipe confirms nothing at all.**'",
+            "echo **A",
+            "cat <<'EOF' > note.md\n**A pipe confirms nothing at all.**\nEOF",
+        ] {
+            assert!(
+                eval(command).is_some(),
+                "the emphasis fragment reaches `id_rsa` and must deny: `{command}`"
+            );
+        }
+        // The review round's own corpus: an upper-case literal reaches a
+        // same-case file, so case cannot be the discriminator.
+        for glob in ["*M", "*Y", "*S", "*N", "*C"] {
+            assert!(
+                eval(&format!("cat ~/.ssh/{glob}")).is_some(),
+                "`{glob}` expands onto a same-case secret file and must deny"
+            );
+        }
+    }
+
+    /// A word family followed by a sentence's full stop is prose (#7533).
+    ///
+    /// Why: `Path::extension` answers `Some("")` for a trailing `.`, so
+    /// `token.` read as file shape while the identical `token` allowed. Both
+    /// rows DENIED on 53f952346 — the first naming `token.` in an `echo`, the
+    /// second refusing the redirect as reproducing `token.` into `note.md`.
+    #[test]
+    fn allows_a_word_family_followed_by_a_full_stop_7533() {
+        for command in [
+            "echo 'the bearer token.'",
+            "echo 'rotated the secrets. then redeployed'",
+            "cat <<'EOF' > note.md\nA bearer token. And more prose.\nEOF",
+        ] {
+            assert_eq!(eval(command), None, "prose must allow: `{command}`");
+        }
+        // A named extension is still file shape, and every family whose core
+        // is a filename rather than a word denies with or without the stop.
+        for command in [
+            "cat secrets.txt",
+            "cat credentials.json",
+            "cat ./secrets",
+            "cat id_rsa.",
+            "cat .env.",
+        ] {
+            assert!(eval(command).is_some(), "`{command}` must deny");
+        }
+    }
+
+    /// `git worktree add`'s operands are a PATH and a commit-ish (#7533).
+    ///
+    /// Why: the issue's own closure list names it beside `checkout -b` and
+    /// `branch`. Both rows DENIED on 53f952346, naming the branch as a
+    /// secret-bearing file.
+    #[test]
+    fn allows_a_worktree_add_ref_name_7533() {
+        for command in [
+            "git worktree add .worktrees/x docs/secrets-integration-spec",
+            "git worktree add -b docs/secrets-integration-spec .worktrees/x",
+            "git worktree add .worktrees/y feat/7526-secrets-manager-agent",
+        ] {
+            assert_eq!(
+                eval(command),
+                None,
+                "a worktree ref must allow: `{command}`"
+            );
+        }
+        // The narrowing is the shared branch predicate, so file shape and an
+        // unlisted first component both keep the deny, and every other
+        // `worktree` subcommand keeps the pre-fix answer.
+        for command in [
+            "git worktree add .worktrees/x .env",
+            "git worktree add .worktrees/x config/credentials",
+            "git worktree remove config/credentials",
         ] {
             assert!(eval(command).is_some(), "`{command}` must deny");
         }

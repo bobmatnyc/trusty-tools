@@ -400,7 +400,7 @@ fn pm_guard_allows_a_heredoc_whose_body_mentions_git_commit() {
     // shared per-turn file-change budget.
     let (_dir, repo) = main_checkout_fixture();
     let heredoc = run_pm_guard(
-        &bash_payload_at("cat <<'EOF'\\ngit commit -m 'wip'\\nEOF", &repo, ""),
+        &bash_payload_at("cat <<'EOF'\ngit commit -m 'wip'\nEOF", &repo, ""),
         &[],
     );
     assert_eq!(
@@ -418,7 +418,7 @@ fn pm_guard_allows_a_heredoc_whose_body_mentions_git_commit() {
     );
     assert_denied(&chained);
     let unterminated = run_pm_guard(
-        &bash_payload_at("cat <<'EOF'\\ngit add x && git commit -m 'y'", &repo, ""),
+        &bash_payload_at("cat <<'EOF'\ngit add x && git commit -m 'y'", &repo, ""),
         &[],
     );
     assert_denied(&unterminated);
@@ -2287,11 +2287,76 @@ fn main_checkout_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
 
 /// A `PreToolUse` Bash payload running `command` in `cwd`, with any extra
 /// top-level JSON fields (e.g. an `agent_id`) spliced in.
+///
+/// Why: #7550. `command` and `cwd` used to be interpolated straight into a raw
+/// JSON string literal, so a command carrying a `"` or a `\` produced broken
+/// JSON — and `run_pm_guard` answers a malformed payload with empty stdout,
+/// which reads exactly like an ALLOW. A test written to assert a DENY would
+/// have PASSED its `assert_eq!(stdout, "")` twin and silently proved nothing.
+/// Serialising the two fields is what makes an unparseable payload
+/// unreachable.
+/// What: `serde_json::json!` builds the object, then `extra_fields` — a
+/// caller-supplied JSON fragment, always a literal in this file — is spliced
+/// in after the opening brace, and the result is re-parsed so a malformed
+/// splice fails the test loudly instead of reaching the guard.
+/// Test: `bash_payload_at_escapes_a_quote_in_the_command_7550`.
 fn bash_payload_at(command: &str, cwd: &std::path::Path, extra_fields: &str) -> String {
-    format!(
-        r#"{{"hook_event_name":"PreToolUse",{extra_fields}"cwd":"{}","tool_name":"Bash","tool_input":{{"command":"{command}"}}}}"#,
-        cwd.display()
-    )
+    let payload = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "cwd": cwd.display().to_string(),
+        "tool_name": "Bash",
+        "tool_input": {"command": command},
+    })
+    .to_string();
+    if extra_fields.is_empty() {
+        return payload;
+    }
+    let spliced = format!("{{{extra_fields}{}", &payload[1..]);
+    // #7550: a caller's fragment must not be able to reintroduce the broken
+    // JSON this helper exists to prevent.
+    serde_json::from_str::<serde_json::Value>(&spliced)
+        .unwrap_or_else(|e| panic!("extra_fields produced invalid JSON ({e}): {spliced}"));
+    spliced
+}
+
+/// #7550: a command carrying a literal `"` reaches the guard intact.
+///
+/// Why: the pre-fix helper produced unparseable JSON for this command, and the
+/// guard answers unparseable input with empty stdout — indistinguishable from
+/// an allow. The assertion is therefore on the PAYLOAD as well as the verdict:
+/// a payload that does not round-trip is the defect, whatever the guard then
+/// says about it.
+#[test]
+fn bash_payload_at_escapes_a_quote_in_the_command_7550() {
+    let (_dir, repo) = main_checkout_fixture();
+    let command = r#"git reset --hard "$(echo origin/main)""#;
+    let payload = bash_payload_at(command, &repo, "");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&payload).expect("#7550: the payload must be valid JSON");
+    assert_eq!(
+        parsed["tool_input"]["command"], command,
+        "the command must survive serialisation verbatim"
+    );
+    // A quote-carrying destructive command is still classified, which the
+    // broken payload could never prove: empty stdout read as an allow.
+    let stdout = run_pm_guard(&payload, &[]);
+    assert_denied(&stdout);
+    assert!(
+        stdout.contains("ADR-0037"),
+        "expected the destructive-git deny, got: {stdout}"
+    );
+    // A backslash is the other byte raw interpolation could not carry.
+    let wrapped = bash_payload_at(r"\git reset --hard", &repo, "");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&wrapped).expect("#7550: a backslash must serialise");
+    assert_eq!(parsed["tool_input"]["command"], r"\git reset --hard");
+    assert_denied(&run_pm_guard(&wrapped, &[]));
+    // The `extra_fields` splice still produces one parseable object.
+    let with_agent = bash_payload_at("ls", &repo, r#""agent_id":"a1","#);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&with_agent).expect("#7550: a spliced payload must parse");
+    assert_eq!(parsed["agent_id"], "a1");
+    assert_eq!(parsed["tool_input"]["command"], "ls");
 }
 
 #[test]
@@ -3138,8 +3203,8 @@ fn pm_guard_allows_code_braces_in_a_heredoc_body_and_an_inline_program() {
     let home_s = home.path().to_string_lossy().to_string();
     let env = [("HOME", home_s.as_str())];
     for command in [
-        "cat <<'RSEOF'\\nstruct VerbStub {\\n    cmd: String,\\n}\\nRSEOF",
-        "python3 <<'PY'\\nd = {'a': 1}\\nprint(f'{d!r}')\\nPY",
+        "cat <<'RSEOF'\nstruct VerbStub {\n    cmd: String,\n}\nRSEOF",
+        "python3 <<'PY'\nd = {'a': 1}\nprint(f'{d!r}')\nPY",
         "awk -F'[ ;]' '{p+=$4} END {print p}' /tmp/x.txt",
         "node -e 'console.log({a: 1})'",
     ] {
@@ -3159,13 +3224,13 @@ fn pm_guard_allows_code_braces_in_a_heredoc_body_and_an_inline_program() {
     // critic's quote-join cases: a shell rejoins `.en"v"` into `.env`, and
     // with an unquoted delimiter it runs the substitution and prints the file.
     for command in [
-        "python3 <<'PY'\\nprint(open('.env').read())\\nPY",
-        "python3 -c 'print(open(\\\".env\\\").read())'",
+        "python3 <<'PY'\nprint(open('.env').read())\nPY",
+        "python3 -c 'print(open(\".env\").read())'",
         "awk '{print}' .env.local",
-        "cat <<'EOF' > .env\\nAPI_KEY=1\\nEOF",
+        "cat <<'EOF' > .env\nAPI_KEY=1\nEOF",
         "cat {.env,.env.prod}",
-        "cat <<EOF\\n$(cat .en\\\"v\\\")\\nEOF",
-        "sh -c 'cat .en\\\"v\\\"'",
+        "cat <<EOF\n$(cat .en\"v\")\nEOF",
+        "sh -c 'cat .en\"v\"'",
     ] {
         let stdout = run_pm_guard_at_with_env(
             &bash_payload_at(command, &repo, ""),
@@ -3190,8 +3255,8 @@ fn pm_guard_allows_a_brace_literal_passed_as_an_argument_value() {
     // the unit corpus keeps the reported spelling.
     let (_dir, repo) = main_checkout_fixture();
     for command in [
-        "printf '%s' '{\\\"position\\\":\\\"above\\\"}'",
-        "jq -n '{\\\"outer\\\":{\\\"inner\\\":1}}'",
+        "printf '%s' '{\"position\":\"above\"}'",
+        "jq -n '{\"outer\":{\"inner\":1}}'",
         "gh issue view 7414 --json title,labels -q '{title,labels:[.labels[].name]}'",
         "gh issue create --title t --body 'the awk program {p+=$4} END {print p} counts'",
     ] {
@@ -3210,7 +3275,7 @@ fn pm_guard_allows_a_brace_literal_passed_as_an_argument_value() {
     // secret.
     for command in [
         "cp secret.{tfvars,bak} dst",
-        "jq -n '{\\\"file\\\":\\\".env\\\"}'",
+        "jq -n '{\"file\":\".env\"}'",
         "cat ${VAR",
         // #7414 round 2: a NESTED group the cut splits. bash reads this as
         // `.e:x`, `.y` and `.env`, so the middle alternative names a secret.

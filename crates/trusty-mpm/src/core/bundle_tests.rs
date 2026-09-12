@@ -1661,3 +1661,107 @@ fn base_agent_prose_rules_survive_composition() {
         "graduated-verbosity rule must not reuse the optimizer's `Caveman` term"
     );
 }
+
+/// 🔴 #7612 REGRESSION: `local-ops` parked on a narrated wait twice in one
+/// session — once on a reachability poll, once after starting a deploy script —
+/// despite BASE-AGENT's inherited rule, and a 600s bounded loop overran the
+/// Bash tool's 600000ms ceiling. #2501/#2610 closed the same class on
+/// version-control; the persona text must name the blocking verb for ITS task
+/// shapes and the margin a bounded loop owes.
+#[test]
+fn local_ops_names_tm_wait_for_deploys_and_a_loop_margin_7612() {
+    use crate::core::agent_builder::compose_agent;
+    use std::path::Path;
+
+    let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
+    let local_ops =
+        compose_agent("local-ops", assets_dir).expect("compose_agent(local-ops) must succeed");
+
+    for needle in [
+        "A deploy script and a reachability poll are your commands too",
+        "`tm wait --for run`",
+        "tm wait --for run --pid <pid> --timeout 480",
+        "tm wait --for file --path <sentinel>",
+        "10-15% under the harness's foreground ceiling",
+        "600000ms",
+    ] {
+        assert!(
+            local_ops.contains(needle),
+            "composed local-ops is missing the #7612 blocking-wait guidance: {needle:?}"
+        );
+    }
+}
+
+/// 🔴 #7558 REGRESSION: `git pull --ff-only` aborts naming only the colliding
+/// path, so the recovery gets improvised — once by hand-diffing two copies of
+/// an untracked research doc. The bundled `git-workflow` skill must state the
+/// pre-pull check and BOTH of its outcomes, so the identical-content case
+/// resolves itself and the differing-content case is reported rather than
+/// deleted.
+#[test]
+fn git_workflow_skill_states_the_pre_pull_untracked_collision_check_7558() {
+    for needle in [
+        "### Pulling After a Merge — Check Untracked Collisions First",
+        "git status --porcelain",
+        "git show origin/<base>:<path>",
+        "**Identical content**",
+        "**Differing content**",
+        "Never delete an untracked path to clear the abort without diffing it",
+    ] {
+        assert!(
+            GIT_WORKFLOW.contains(needle),
+            "git-workflow skill is missing the #7558 pre-pull untracked-collision \
+             guidance: {needle:?}"
+        );
+    }
+}
+
+/// 🔴 #7558 REGRESSION, second home: `tm-workflow` owns the main-checkout
+/// `pull --ff-only` refresh and already names ONE cause of its failure
+/// (another session's uncommitted work). The untracked-path collision is a
+/// second cause of the same command failing, so the refresh instructions must
+/// point at the check rather than leaving the reader to improvise — a
+/// cross-reference, not a second copy of the block.
+#[test]
+fn tm_workflow_points_at_the_pre_pull_untracked_collision_check_7558() {
+    for needle in [
+        "untracked path the incoming commits also add",
+        "Pulling After a Merge — Check Untracked Collisions First",
+        "#7558",
+    ] {
+        assert!(
+            TM_WORKFLOW.contains(needle),
+            "tm-workflow is missing the #7558 cross-reference to the pre-pull \
+             untracked-collision check: {needle:?}"
+        );
+    }
+    // A pointer, not a duplicate: the procedure itself stays in one place.
+    assert!(
+        !TM_WORKFLOW.contains("git show origin/<base>:<path> | diff - <path>"),
+        "tm-workflow must cross-reference the check, not restate its commands (#7558)"
+    );
+}
+
+/// 🔴 #7561 REGRESSION: a `kill <pid>` the agent issued itself surfaced four
+/// times as "failed with exit code 143", because a `128 + signal` exit shares
+/// the numeric range of a real failure. `verification-before-completion` owns
+/// the "check exit code" step, so the signal reading must live beside it —
+/// including the one `128 + N` value that IS a failure (137 nobody killed).
+#[test]
+fn verification_skill_reads_128_plus_signal_as_terminated_not_failed_7561() {
+    for needle in [
+        "## Reading an Exit Code",
+        "`128 + N`",
+        "`143` (128+15)",
+        "`SIGTERM` — the ordinary `kill <pid>`",
+        "**terminated by signal N**",
+        "never as \"failed with exit code 143\"",
+        "The one exception is `137`",
+    ] {
+        assert!(
+            VERIFICATION_BEFORE_COMPLETION.contains(needle),
+            "verification-before-completion skill is missing the #7561 \
+             signal-exit reading: {needle:?}"
+        );
+    }
+}

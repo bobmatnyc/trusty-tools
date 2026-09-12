@@ -302,8 +302,17 @@ auto-merging docs-only PR. So run the fetch and `pull --ff-only` above after a
 pause PR lands, the same as after any other merge, and the snapshot is visible
 locally again.
 
-🔴 **If `--ff-only` fails, never clear the way by discarding.** The usual cause
-is another session's uncommitted work. Do not `git stash` — repo-level and
+🟡 **One cause is an untracked path the incoming commits also add.** `--ff-only`
+then aborts with "The following untracked working tree files would be
+overwritten by merge", naming the path and nothing else. Diff that untracked
+copy against the incoming one BEFORE pulling rather than improvising a recovery
+after the abort: identical content resolves itself, differing content is
+reported with the diff. The check and both outcomes are in
+`Skill(skill="git-workflow")`, under the heading
+"Pulling After a Merge — Check Untracked Collisions First" (#7558).
+
+🔴 **If `--ff-only` fails, never clear the way by discarding.** The other usual
+cause is another session's uncommitted work. Do not `git stash` — repo-level and
 shared across every worktree, so it yanks state out from under sessions running
 right now. Do not `git checkout --`, `restore`, `reset --hard`, or `clean`: the
 main-checkout guard blocks these, correctly, and hunting for an unblocked

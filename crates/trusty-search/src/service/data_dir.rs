@@ -17,7 +17,7 @@
 //! `data_dir_home_fallback_path_is_absolute` in this module's `tests` block.
 
 use anyhow::{Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Issue #718: HOME-based fallback for when both `TRUSTY_DATA_DIR` and
 /// `dirs::data_local_dir()` are unavailable (launchd posix_spawn context on
@@ -169,6 +169,56 @@ fn passwd_home_dir() -> Option<PathBuf> {
     }
 }
 
+/// Does `dir` name the operator's real, production data directory?
+///
+/// Why: `persistence::data_dir` reads `TRUSTY_DATA_DIR` BEFORE it reaches the
+/// #4255 test-harness branch, so an operator who exports that variable — the
+/// documented isolated-instance workflow (#281) — skipped the guard entirely
+/// and `cargo test -p trusty-search` registered its fixture indexes in whatever
+/// registry the variable named (#7599). This predicate is what lets the
+/// override be refused for the production location alone, leaving every test
+/// that points `TRUSTY_DATA_DIR` at a tempdir working exactly as before.
+/// What: compares `dir` against both production candidates, using each path's
+/// canonical form when it resolves so `/var` vs `/private/var`, a trailing
+/// slash, or a symlinked `$HOME` do not read as different locations. Creates
+/// nothing, so asking the question never has the side effect it is guarding.
+/// Test: `production_location_is_recognised_as_production`,
+/// `a_tempdir_override_is_not_production`.
+pub(super) fn names_production_data_dir(dir: &Path) -> bool {
+    let want = normalized(dir);
+    production_data_dir_candidates()
+        .iter()
+        .any(|candidate| normalized(candidate) == want)
+}
+
+/// Both well-known production locations, as PATHS — nothing is created.
+///
+/// Mirrors `persistence::production_data_dir` and
+/// [`data_dir_home_fallback`], which do create; the two must stay in step, and
+/// `production_location_is_recognised_as_production` is what pins that.
+fn production_data_dir_candidates() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(base) = dirs::data_local_dir() {
+        out.push(base.join("trusty-search"));
+    }
+    if let Some(home) = resolve_home_dir() {
+        #[cfg(target_os = "macos")]
+        out.push(
+            home.join("Library")
+                .join("Application Support")
+                .join("trusty-search"),
+        );
+        #[cfg(not(target_os = "macos"))]
+        out.push(home.join(".local").join("share").join("trusty-search"));
+    }
+    out
+}
+
+/// The canonical form of `p` when it exists, `p` itself otherwise.
+fn normalized(p: &Path) -> PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
 /// The data directory a TEST PROCESS resolves to when it has not set
 /// `TRUSTY_DATA_DIR` — never the operator's live data dir (issues #4094, #4255).
 ///
@@ -284,6 +334,125 @@ mod tests {
                 "#4094: unit tests must never resolve to the developer's real \
                  trusty-search data dir ({})",
                 real.display()
+            );
+        }
+    }
+
+    /// #7599: a `TRUSTY_DATA_DIR` that names the operator's PRODUCTION data dir
+    /// must not reach `data_dir()` from a test process.
+    ///
+    /// Why: THE REGRESSION CASE. `data_dir()` reads the override before the
+    /// #4255 test-harness branch, so an operator who exports `TRUSTY_DATA_DIR`
+    /// — the documented isolated-instance workflow (#281) — had no guard at
+    /// all, and `cargo test -p trusty-search` registered fixture indexes in the
+    /// live registry. Measured on `origin/main` at fa31252b5: `cargo test -p
+    /// trusty-search --lib tests_2336` under such an override wrote five
+    /// `ts-2336-*` rows into that directory's `indexes.toml`, plus a
+    /// `roots.toml` and per-index data dirs.
+    /// What: points the override at each production candidate in turn and
+    /// asserts both `data_dir()` and `indexes_toml_path()` resolve into the
+    /// isolated per-process directory instead. It performs NO registry write:
+    /// the assertion is what must run before any write, so a failing run on the
+    /// pre-fix commit cannot itself pollute the location it is defending.
+    /// Test: this test.
+    #[test]
+    #[serial]
+    fn a_production_trusty_data_dir_is_refused_in_a_test_process() {
+        let candidates = production_data_dir_candidates();
+        assert!(
+            !candidates.is_empty(),
+            "no production data-dir candidate resolved on this host, so this \
+             test would assert nothing — neither dirs::data_local_dir() nor \
+             $HOME/passwd produced a path"
+        );
+        let isolated_base = std::env::temp_dir().join("trusty-search-unit-test-data");
+        for production in candidates {
+            unsafe { std::env::set_var("TRUSTY_DATA_DIR", &production) };
+            let resolved = crate::service::persistence::data_dir();
+            let registry = crate::service::persistence::indexes_toml_path();
+            unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
+
+            let resolved = resolved.expect("data_dir must still resolve");
+            assert_ne!(
+                normalized(&resolved),
+                normalized(&production),
+                "#7599: TRUSTY_DATA_DIR named the production data dir {} and a \
+                 test process resolved straight to it — every persisting \
+                 handler under test then writes the operator's live registry",
+                production.display()
+            );
+            assert!(
+                resolved.starts_with(&isolated_base),
+                "#7599: the refused override must fall through to the isolated \
+                 per-process dir under {} (got {})",
+                isolated_base.display(),
+                resolved.display()
+            );
+            let registry = registry.expect("indexes_toml_path must still resolve");
+            assert!(
+                registry.starts_with(&isolated_base),
+                "#7599: indexes.toml resolved to {} — the file this issue is \
+                 about must follow the refused override, not the production \
+                 location",
+                registry.display()
+            );
+        }
+    }
+
+    /// A `TRUSTY_DATA_DIR` pointing anywhere else is honoured unchanged.
+    ///
+    /// Why: the counterweight to the case above. Pointing the override at a
+    /// tempdir is how a test isolates DELIBERATELY, and most of this crate's
+    /// suite does exactly that — a guard that refused every override would
+    /// break them, so the refusal has to be production-specific.
+    /// What: asserts `names_production_data_dir` is false for a tempdir and
+    /// that `data_dir()` returns that tempdir verbatim.
+    /// Test: this test.
+    #[test]
+    #[serial]
+    fn a_tempdir_override_is_not_production() {
+        let tmp = tempfile::tempdir().unwrap();
+        let abs = tmp.path().join("ts-7599-isolated");
+        std::fs::create_dir_all(&abs).unwrap();
+        assert!(
+            !names_production_data_dir(&abs),
+            "a tempdir must not read as the production data dir: {}",
+            abs.display()
+        );
+        unsafe { std::env::set_var("TRUSTY_DATA_DIR", &abs) };
+        let resolved = crate::service::persistence::data_dir();
+        unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
+        assert_eq!(
+            normalized(&resolved.expect("data_dir must resolve")),
+            normalized(&abs),
+            "a non-production TRUSTY_DATA_DIR must be honoured verbatim"
+        );
+    }
+
+    /// Every production candidate is recognised as production.
+    ///
+    /// Why: `production_data_dir_candidates` duplicates the path formulas that
+    /// `persistence::production_data_dir` and [`data_dir_home_fallback`] use to
+    /// CREATE those directories. A formula that drifts apart from theirs makes
+    /// the #7599 guard silently stop matching, which fails open.
+    /// What: asserts the predicate answers true for each candidate and that the
+    /// macOS/Linux formula still anchors under the resolved home.
+    /// Test: this test.
+    #[test]
+    fn production_location_is_recognised_as_production() {
+        let candidates = production_data_dir_candidates();
+        assert!(!candidates.is_empty(), "no production candidate resolved");
+        for candidate in &candidates {
+            assert!(
+                candidate.is_absolute(),
+                "production candidate must be absolute: {}",
+                candidate.display()
+            );
+            assert!(
+                names_production_data_dir(candidate),
+                "#7599: {} is a production candidate the predicate does not \
+                 recognise — the guard would fail open",
+                candidate.display()
             );
         }
     }

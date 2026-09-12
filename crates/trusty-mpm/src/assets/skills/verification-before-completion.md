@@ -61,6 +61,33 @@ The five-step gate function:
 
 Skip any step = lying, not verifying.
 
+## Reading an Exit Code
+
+<!-- #7561: a `kill <pid>` stop of a dev server was reported four times as
+     "failed with exit code 143". -->
+
+Step 3 says "check exit code". A non-zero exit is not automatically a failure.
+A process stopped by a signal reaches the shell as `128 + N`, so a kill you
+issued yourself lands in the same numeric range as a real crash:
+
+| Exit | Meaning |
+|---|---|
+| `0` | Success |
+| `1`–`125` | The command's own failure status |
+| `130` (128+2) | `SIGINT` — Ctrl-C |
+| `137` (128+9) | `SIGKILL` — `kill -9`, or the OOM killer |
+| `143` (128+15) | `SIGTERM` — the ordinary `kill <pid>` |
+
+When you or the harness stopped the process on purpose — `kill <pid>` on a dev
+server you started, a monitor tearing down a background task — a `128 + N` exit
+is **terminated by signal N**, which is the outcome you asked for. Report it
+that way and never as "failed with exit code 143". Do not file a bug or start
+debugging a failure that did not happen.
+
+The one exception is `137` on a build or test run nobody killed: that is the
+OOM killer, a real failure, and it is diagnosed rather than read as a clean
+stop.
+
 ## Key Patterns
 
 **Correct Pattern:**

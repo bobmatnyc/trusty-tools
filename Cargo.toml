@@ -398,7 +398,12 @@ tempfile = "3"
 criterion = { version = "0.5", features = ["html_reports"] }
 # serial_test: run env-mutating tests serially to prevent env-var races across
 # parallel test threads. Used by bug-report token tests.
-serial_test = "3"
+# #7542: `file_locks` is what provides `#[serial_test::file_serial]`, the
+# cross-PROCESS lock CLAUDE.md prescribes for a resource shared between test
+# processes — an in-process `#[serial]` serializes nothing under `cargo nextest`,
+# which gives every test its own process (#4162). Without the feature here the
+# attribute does not resolve for any crate taking this row.
+serial_test = { version = "3", features = ["file_locks"] }
 # wiremock: async HTTP mock server for hermetic reqwest-based client tests
 # (e.g. trusty-channels' 200/401/429 Slack Web API paths). Also pinned locally by
 # trusty-git-analytics; this shared entry is the canonical version.
