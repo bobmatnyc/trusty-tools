@@ -73,7 +73,10 @@ restore is where the work gets lost.
    reads back; with no commit there is nothing to restore from.
 2. Revert only the files under test — `git checkout origin/main -- <paths>` —
    run the test, and confirm it fails for the reason you expect.
-3. Restore with `git checkout HEAD -- <paths>`, naming `HEAD`.
+3. Restore with `git checkout HEAD -- <paths>`, naming `HEAD`. Inside a
+   Claude Code isolation worktree this form is refused as unverifiable; use
+   `git restore --source=HEAD --staged --worktree <paths>` there instead
+   (#7508).
 4. **Never restore with `git checkout <branch> -- <paths>` on a branch with no
    commit yet.** Its tip IS the base branch, so that checkout discards every
    uncommitted edit and prints nothing — an engineer lost a finished fix this

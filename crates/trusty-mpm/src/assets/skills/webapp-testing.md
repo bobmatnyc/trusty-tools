@@ -423,6 +423,29 @@ page.set_viewport_size({'width': 1920, 'height': 1080})
 page.screenshot(path='/tmp/desktop.png')
 ```
 
+### Headless CLI Screenshots (`chrome --headless --screenshot`)
+
+A raw `chrome --headless --screenshot` run can exit 0 or 1 and write NO file,
+with no error naming the missing output — Chrome 153 has been observed doing
+this silently (adaptive-crm, issue #210, ~20 minutes lost diagnosing it).
+**Verify the output file exists after every headless-screenshot command**;
+treat a missing file as a failure even when the exit code looks clean.
+
+`--screenshot` alone cannot set a cookie first, so it cannot shoot a
+session-gated app. The supported fallback is CDP: launch with
+`--remote-debugging-port`, list targets at `/json/list`, then drive
+`Page.captureScreenshot` over the CDP websocket — the same connection can set
+the cookie before capturing.
+
+Run the dev server, a health check, the browser launch, and the capture
+inside ONE foreground script, rather than backgrounding the server and
+capturing in a later, separate tool call — a backgrounded server is not
+guaranteed to survive between tool calls, and a capture against a dead server
+photographs Chrome's own `ERR_CONNECTION_REFUSED` page instead of failing
+loudly (adaptive-crm PM session 2026-09-10: three of four captures showed the
+error page). Assert the server answers 200 immediately before AND after each
+shot, inside that same script.
+
 ### Video Recording
 ```python
 browser = p.chromium.launch(headless=True)

@@ -127,6 +127,16 @@ impl Drop for Detached {
 /// `SIGINT` stops killing the process on its own from the first poll onwards;
 /// the re-raise is what puts that back. Never returns.
 ///
+/// This function is what installs the `SIGINT` handler, via
+/// `tokio::signal::ctrl_c()` — the crate does not register one at load time,
+/// only when this is awaited, and only for as long as it stays pending.
+/// `tokio::signal::ctrl_c()` fans one OS signal out to every concurrent
+/// listener rather than claiming it exclusively, so a host binary that also
+/// awaits its own `tokio::signal::ctrl_c()` gets notified alongside this one,
+/// not instead of it — both run. A host binary that installs a signal handler
+/// by any OTHER means (a raw `sigaction`, the `signal-hook` crate) is
+/// untested against this function and may race it for the disposition.
+///
 /// This belongs to the BINARY, not to [`super::clone_all`]: it ends the process,
 /// and a front end embedding this crate owns that decision itself.
 /// Test: `super::watchdog::watchdog_tests::an_interrupt_kills_a_detached_clone_group`.

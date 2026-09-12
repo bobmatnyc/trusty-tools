@@ -470,11 +470,16 @@ pub struct IndexRegistryFile {
 /// resolves to an isolated per-process directory instead of the operator's
 /// live data dir, so a test that never sets `TRUSTY_DATA_DIR` cannot register
 /// indexes in the real `indexes.toml` (see [`default_data_dir`]).
+/// Issue #7599: and a test process that DOES set it to the production location
+/// is refused too — that read happens first, so exporting the variable used to
+/// skip the #4255 guard outright. Any other override is honoured unchanged.
 /// What: returns an absolute path, creating the directory if missing.
 /// Test: `data_dir_respects_trusty_data_dir_env_var`, `data_dir_override_yields_absolute_path`,
 /// `data_dir_home_fallback_path_is_absolute`,
 /// `test_harness_data_dir_is_isolated_from_real_user_data_dir`,
-/// `production_data_dir_is_the_real_user_location`.
+/// `production_data_dir_is_the_real_user_location`,
+/// `a_production_trusty_data_dir_is_refused_in_a_test_process`,
+/// `a_tempdir_override_is_not_production`.
 pub fn data_dir() -> Result<PathBuf> {
     if let Ok(override_dir) = std::env::var("TRUSTY_DATA_DIR") {
         let dir = PathBuf::from(&override_dir);
@@ -483,6 +488,24 @@ pub fn data_dir() -> Result<PathBuf> {
             "TRUSTY_DATA_DIR must be an absolute path (got: {})",
             override_dir
         );
+        // #7599: an override naming the PRODUCTION location does not get to
+        // bypass the #4255 test-harness guard. This read happens before that
+        // guard, so an operator who exports TRUSTY_DATA_DIR had no guard at
+        // all and every persisting handler under test wrote the live registry.
+        // Only the production location is refused — a tempdir override, which
+        // is how tests isolate deliberately, is honoured unchanged.
+        if trusty_common::running_under_test_harness()
+            && super::data_dir::names_production_data_dir(&dir)
+        {
+            tracing::warn!(
+                "data_dir: TRUSTY_DATA_DIR names the production data dir ({}) in a \
+                 test process — using the isolated test data dir instead (#7599); \
+                 set {}=1 to opt into real production state",
+                dir.display(),
+                trusty_common::test_harness::ALLOW_PRODUCTION_ENV
+            );
+            return super::data_dir::test_harness_data_dir();
+        }
         std::fs::create_dir_all(&dir).context("create TRUSTY_DATA_DIR data dir")?;
         tracing::debug!("data_dir: TRUSTY_DATA_DIR override: {}", dir.display());
         return Ok(dir);

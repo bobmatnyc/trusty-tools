@@ -27,7 +27,7 @@ what it stops; the header says why it exists.
 |---|---|---|
 | `check_deny_duplicates.sh` | `pre-publish.yml` | Counts `cargo deny check bans` duplicate-version warnings against a frozen budget. `multiple-versions = "warn"` exits 0 while reporting them, so without this the warnings are never read; the count may only ratchet down. |
 | `check_test_count.sh` | `test-count.yml` | Wraps a `cargo test` invocation and refuses an aggregate of zero. A filter matching no tests exits 0 printing `0 passed; 775 filtered out` — a green run that proved nothing (#4307). |
-| `check_rustdoc_links.sh` | `ci.yml` (`rustdoc-links`), `pre-publish.yml` (Gate 1) | Broken intra-doc links, against a frozen baseline of pre-existing ones. docs.rs builds a release's documentation once and never rebuilds it, so a broken link is permanent for that version. Both jobs call the one script, so the flags cannot drift apart. The per-PR job was added by #5973 after eight links reached main through green PRs: the tag-triggered gate found them only at the release boundary. It is NOT a required context — promoting it wedges every open PR that predates it — so it currently reports without blocking. Since #7466 it also runs one `cargo doc` pass per feature lane declared in `scripts/rustdoc-doc-lanes.tsv`, because `cargo doc` resolves default features only and a link inside a default-off feature was invisible here until release; that file must account for every declared feature of every documented crate, so a crate that gains a feature fails the gate until the feature is placed. The per-lane examination check scores the DEFAULT lane too since #7577: that lane is run unconditionally rather than declared, so it has no members in the lane file, and the check used to skip any lane with none — a default-feature `cargo doc` that exited non-zero with no attributable diagnostic was a silent pass. |
+| `check_rustdoc_links.sh` | `ci.yml` (`rustdoc-links`), `pre-publish.yml` (Gate 1) | Broken intra-doc links, against a frozen baseline of pre-existing ones. docs.rs builds a release's documentation once and never rebuilds it, so a broken link is permanent for that version. Both jobs call the one script, so the flags cannot drift apart. The per-PR job was added by #5973 after eight links reached main through green PRs: the tag-triggered gate found them only at the release boundary. It is NOT a required context — promoting it wedges every open PR that predates it — so it currently reports without blocking. Since #7466 it also runs one `cargo doc` pass per feature lane declared in `scripts/rustdoc-doc-lanes.tsv`, because `cargo doc` resolves default features only and a link inside a default-off feature was invisible here until release; that file must account for every declared feature of every documented crate, so a crate that gains a feature fails the gate until the feature is placed. The per-lane examination check scores the DEFAULT lane too since #7577: that lane is run unconditionally rather than declared, so it has no members in the lane file, and the check used to skip any lane with none — a default-feature `cargo doc` that exited non-zero with no attributable diagnostic was a silent pass. #7598 applied the same scoring to the `--update-baseline` write path, which carries its own copy of that loop: the skip there let a baseline be written from a run whose default lane died unexplained, and a bad baseline outlives the run that wrote it. |
 | `generate-homebrew-formula.sh` | `homebrew-formula.yml`, `release.yml` | Renders `tap/Formula/<crate>.rb` for the `bobmatnyc/homebrew-trusty` tap. It is the single implementation (#5635); `release.yml` calls it instead of carrying an inline heredoc and a second copy of the crate→binary map. |
 | `classify-ci-results.sh` | `ci.yml`, `red-main-notify.yml` | Turns a set of job conclusions into the red-main verdict. `cancelled` is not `failure`, so the previous `contains(needs.*.result, 'failure')` test let an all-cancelled run report main verified (#4179). |
 | `ci-create-local-main.sh` | `ci.yml`, `pre-publish.yml` | Creates the local `main` branch the `trusty-agents` git tests need, and fails the step when creation genuinely fails. The `git fetch origin main:main \|\| true` it replaced swallowed a GitHub 500 and produced an unrelated test failure eleven minutes later (#5693). |
@@ -59,6 +59,49 @@ gate that cannot fail makes its own green meaningless:
 `check_deny_duplicates.sh` and `ci-create-local-main.sh` have no test of their
 own. Both carry a frozen baseline or a fetch that can fail open, which is the
 shape a self-test exists to pin, so both are candidates if either is edited.
+
+**The `--gate <path>` self-test convention.** Some `scripts/*_selftest.sh`
+scripts — `check_rustdoc_links_selftest.sh`,
+`check_changelog_attribution_selftest.sh`,
+`check_changelog_staged_selftest.sh` — accept `--gate <path>` to run their
+fixture cases against an alternate copy of the gate script instead of the real
+one. This is the mutation-demonstration convention: pointing `--gate` at a
+deliberately broken copy proves the fixtures can still fail, the same property
+"Self-tests" above states for the gate/self-test pairing itself. Not every
+self-test in this file supports the flag; check the individual script's own
+`--gate` handling before assuming it does.
+
+**Reading a GitHub Actions job log from this harness.** `gh api
+repos/OWNER/REPO/actions/jobs/<id>/logs` and a raw log piped through BSD `sed`
+both fail here — the Bash tool refuses terminal escape sequences, and BSD
+`sed`'s regex engine chokes on the raw ESC byte. Working form:
+
+```
+gh run view <run> --job <id> --log 2>&1 | LC_ALL=C tr -d '\033' | LC_ALL=C sed 's/\[[0-9;]*m//g' > <file>
+```
+
+then Read the file. `LC_ALL=C` keeps both `tr` and `sed` in byte mode so
+neither trips on the ESC byte or non-UTF-8 log content.
+
+**Bin-target doc links need the explicit-target form.** A `` [`Name`] `` doc
+link under a `src/bin/**` target that points at a library item resolves
+against the bin crate's own scope, not the library's, and silently ships as
+dead link text — a crate-scoped build does not catch it, only
+`check_rustdoc_links.sh`'s workspace-wide run does. Spell the target
+explicitly instead: `` [`Name`](trusty_mpm::path::Name) ``. Worked example:
+`crates/trusty-mpm/src/bin/tm/commands/hook_payload.rs:84-85`, both forms
+spelled out explicitly. (Adding a `-p <crate>` passthrough to the script so a
+crate-scoped run can serve as a pre-commit gate is a separate, code-level
+change, out of scope here.)
+
+A source-scanning guard that strips comments before matching must consume
+`//` and `/* */` in appearance order — stripping block comments first lets a
+`src/bin/tm/**` glob inside a `//` doc line open an unterminated block
+comment and silently discard the rest of the file, a false-clean ratchet.
+`env_isolation_tests.rs::strip_comments` in
+`crates/trusty-mpm/src/bin/tm/env_isolation_tests.rs` already does this
+correctly; point any new comment-stripping guard at that precedent rather
+than re-deriving the order (Refs #7568).
 
 ## Gated in a workflow, but not CI-only
 

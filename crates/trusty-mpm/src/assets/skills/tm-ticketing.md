@@ -83,6 +83,15 @@ root cause; file a new regression when the recurrence has a different cause, a
 different symptom class, or arrives after a verified fix that a reader would need
 to see as separate work.
 
+**A reopen comment on a previously-verified issue must carry the observed
+command and its actual stderr/output, never a restated prior cause.** #7185's
+reopen comment repeated the original causal claim ("tm's guard counts the
+marker") instead of the real failure: git's own `fatal: 'wt' contains
+modified or untracked files, use --force` in a project that does not
+gitignore the marker. One quoted stderr line would have named the real gate
+immediately. Quote what actually ran and what it printed; do not assume the
+old diagnosis still applies.
+
 ### 2. Promote only an independently prioritizable outcome
 
 File a standalone issue only when at least one of these holds:
@@ -464,6 +473,15 @@ live verification stays open — at `status:merged` while nobody is working it, 
 back at `status:coded` once a follow-up fix PR is open (owner ruling 2026-09-07;
 the model declares `status:merged -> status:coded`). A fix PR carries `Refs #N`,
 never `Closes #N`, so a merge cannot auto-close something nobody has verified.
+
+**Docs-only exception (owner ruling 2026-09-09).** A docs-only issue may close
+directly from `status:merged` on merged-text evidence — a squash-merge SHA
+plus confirmation the merged text is present on `origin/main` at the cited
+file/symbol — since there is no installed binary or run to point at. First
+application: #7190, closed on squash SHA `0024aa7af6a0cbab6fbe12b35ef5c6e26e312c46`
+with the text verified present at `destructive_delete.rs` lines 73-74 on
+`origin/main`. Every other issue class keeps the `status:tested` +
+live-verification bar unchanged.
 
 **Comments along the way.** A progress comment at each meaningful transition —
 diagnosis confirmed, fix pushed, review verdict received, blocked — carrying

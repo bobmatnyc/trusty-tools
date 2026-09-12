@@ -101,6 +101,14 @@ and issue #2222. On a mismatched host, `trusty-embedderd`'s startup now fails
 fast with an explicit glibc-version error instead of hanging for up to
 `TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS` (default 180 s).
 
+🟡 **An unexplained exit 137 from any gate command is usually a SIGKILL under
+memory pressure, not a real failure** — several agent worktrees building or
+testing concurrently exhaust host memory. First response is a single retry
+before investigating further. Moved here from CLAUDE.md and generalized
+(#7465): the original guidance named only `cargo test -p <crate>`, but the
+same kill hits `./scripts/check_line_cap.sh` and any other gate command; when
+retrying `cargo test -p <crate>` specifically, add `-- --test-threads=4`.
+
 🟢 **MSRV drift** — the workspace pins `rust-version = "1.94"`. Running
 `rustup update` and picking up a new nightly may introduce syntax that
 compiles locally but fails on CI. Prefer stable channel toolchains.

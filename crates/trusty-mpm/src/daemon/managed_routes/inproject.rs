@@ -524,8 +524,35 @@ pub fn create_session_worktree(
     worktree_name: &str,
     owner_session_id: &crate::session_manager::ManagedSessionId,
 ) -> Result<PathBuf, String> {
-    let measured =
-        crate::core::disk_usage_guard::measure(&worktree_path_for(base_path, worktree_name));
+    create_session_worktree_gated(
+        base_path,
+        worktree_name,
+        owner_session_id,
+        &crate::core::disk_usage_guard::DiskGate::MeasureTarget,
+    )
+}
+
+/// [`create_session_worktree`] with the measurement source named explicitly.
+///
+/// Why (#7603): the gate's target path is built HERE, from `base_path` and
+/// `worktree_name`, so a caller that wants to pin the measurement cannot take it
+/// itself — it has to hand down a [`DiskGate`] and let this function apply it.
+/// That is what keeps the tm-bin provisioning tests off the developer's real
+/// volume and real `~/.trusty-tools/trusty-mpm/config.yaml`.
+/// What: resolves the measurement through `gate` and delegates to
+/// [`create_session_worktree_measured`] — same threshold, same decision, only
+/// the measurement's source differs.
+/// Test: `provision_for_launch_explicit_request_creates_worktree`,
+/// `a_pinned_over_threshold_gate_refuses_a_launch_worktree`.
+///
+/// [`DiskGate`]: crate::core::disk_usage_guard::DiskGate
+pub fn create_session_worktree_gated(
+    base_path: &Path,
+    worktree_name: &str,
+    owner_session_id: &crate::session_manager::ManagedSessionId,
+    gate: &crate::core::disk_usage_guard::DiskGate,
+) -> Result<PathBuf, String> {
+    let measured = gate.measurement_for(&worktree_path_for(base_path, worktree_name));
     create_session_worktree_measured(
         base_path,
         worktree_name,
