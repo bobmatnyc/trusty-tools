@@ -11,6 +11,15 @@
 
 use super::*;
 
+// #7685: the sidecar probes these tests drive now live beside `doctor.rs`
+// rather than inside it. Same functions, same assertions — only the module
+// boundary moved, so the import is what changed and nothing else.
+use super::doctor_sidecars::{
+    check_memory, check_search, expected_search_index_id, index_present, probe_health,
+};
+use crate::core::doctor::{CheckStatus, DoctorCheck};
+use crate::daemon::search_rpc;
+
 #[test]
 fn index_present_matches_each_shape() {
     // Bare string array.

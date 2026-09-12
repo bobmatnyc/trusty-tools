@@ -1,3 +1,7 @@
+// #7685: the public entry points moved to `entry.rs`; the ones re-exported at
+// the module boundary still arrive via `use super::*` below, and this one —
+// which has no production caller outside `entry` — is imported directly.
+use super::entry::isolated_framework_paths;
 use super::search_index::register_project_index;
 use super::settings::{
     clean_global_trusty_memory_hooks, deploy_output_style, is_stale_bare_statusline_command,
@@ -899,7 +903,7 @@ fn prepare_session_sets_output_style() {
 
 #[test]
 #[serial_test::serial]
-fn prepare_session_disables_auto_memory() {
+fn prepare_session_disables_auto_memory_when_trusty_memory_is_reachable() {
     // #7685: the launch path must write the project-tier auto-memory kill
     // switch, not only offer the helper. Same `$HOME` discipline as
     // `prepare_session_sets_output_style` above, and for the same reason.
@@ -909,7 +913,13 @@ fn prepare_session_disables_auto_memory() {
     let project = tmp.path();
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
-    prepare_session(&fw, project).expect("prep succeeds");
+    crate::core::session_launch::prepare_session_with_memory_reachable(
+        &fw,
+        project,
+        Some(tmp_home.path()),
+        true,
+    )
+    .expect("prep succeeds");
 
     let value: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
@@ -918,12 +928,47 @@ fn prepare_session_disables_auto_memory() {
     assert_eq!(
         value["autoMemoryEnabled"],
         serde_json::json!(false),
-        "trusty-memory is the memory — Claude Code auto-memory must be off"
+        "trusty-memory is up and is the memory — Claude Code auto-memory must be off"
     );
     assert_eq!(
         value["outputStyle"],
         serde_json::json!("trusty-mpm"),
         "the auto-memory write must not clobber the style the same launch wrote"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn prepare_session_leaves_auto_memory_alone_when_trusty_memory_is_down() {
+    // #7685 (owner ruling 2026-09-12): auto memory is a FALLBACK. With
+    // trusty-memory unreachable the launch must NOT write the key, or the
+    // session loses both memories at once.
+    let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+
+    crate::core::session_launch::prepare_session_with_memory_reachable(
+        &fw,
+        project,
+        Some(tmp_home.path()),
+        false,
+    )
+    .expect("prep succeeds");
+
+    let value: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        value.get("autoMemoryEnabled").is_none(),
+        "with trusty-memory down the fallback must stay available: {value}"
+    );
+    assert_eq!(
+        value["outputStyle"],
+        serde_json::json!("trusty-mpm"),
+        "declining the auto-memory write must not skip the rest of the launch"
     );
 }
 

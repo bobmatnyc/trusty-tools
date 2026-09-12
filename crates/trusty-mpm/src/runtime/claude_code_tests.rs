@@ -14,6 +14,70 @@
 use super::super::test_helpers::FakeTmux;
 use super::*;
 
+/// [`super::spawn_command`] with the reachable-trusty-memory posture (#7685).
+///
+/// Why: every test in this file predates the `memory_reachable` parameter and
+/// was written against the command line tm emits when trusty-memory is up —
+/// which is still the posture each of them pins. Supplying that value once here
+/// keeps those assertions about what they were written to assert instead of
+/// restating one constant ~40 times. The other branch is covered explicitly, via
+/// `super::spawn_command`, by
+/// `spawn_command_keeps_auto_memory_when_trusty_memory_is_unreachable`.
+/// What: delegates with `memory_reachable: true`.
+#[allow(clippy::too_many_arguments)]
+fn spawn_command(
+    cwd: &Path,
+    claude_bin: &str,
+    config_dir: Option<&Path>,
+    session_id: &str,
+    prompt_file: Option<&Path>,
+    oauth_token: Option<&str>,
+    gh_env_file: Option<&Path>,
+    mcp_env: &[(String, String)],
+) -> String {
+    super::spawn_command(
+        cwd,
+        claude_bin,
+        config_dir,
+        session_id,
+        prompt_file,
+        oauth_token,
+        gh_env_file,
+        mcp_env,
+        true,
+    )
+}
+
+/// [`super::resume_command`] with the reachable-trusty-memory posture (#7685).
+///
+/// Why and what: see [`spawn_command`] above. The other branch is covered by
+/// `resume_command_keeps_auto_memory_when_trusty_memory_is_unreachable`.
+#[allow(clippy::too_many_arguments)]
+fn resume_command(
+    cwd: &Path,
+    claude_bin: &str,
+    config_dir: Option<&Path>,
+    claude_session_id: Option<&str>,
+    session_id: &str,
+    prompt_file: Option<&Path>,
+    oauth_token: Option<&str>,
+    gh_env_file: Option<&Path>,
+    mcp_env: &[(String, String)],
+) -> String {
+    super::resume_command(
+        cwd,
+        claude_bin,
+        config_dir,
+        claude_session_id,
+        session_id,
+        prompt_file,
+        oauth_token,
+        gh_env_file,
+        mcp_env,
+        true,
+    )
+}
+
 /// Fixed managed-session UUID string reused across command-builder tests
 /// (#2023 component B) — a representative id, not a real session.
 const TEST_SESSION_ID: &str = "11111111-2222-3333-4444-555555555555";
@@ -423,11 +487,77 @@ fn resume_command_disables_auto_memory() {
 }
 
 #[test]
+fn spawn_command_keeps_auto_memory_when_trusty_memory_is_unreachable() {
+    // #7685 (owner ruling 2026-09-12): auto memory is the FALLBACK. Emitting
+    // the kill switch beside a dead trusty-memory would leave the session with
+    // no memory at all, so the assignment must be ABSENT — not merely different.
+    let cmd = super::spawn_command(
+        Path::new(TEST_CWD),
+        "claude",
+        None,
+        TEST_SESSION_ID,
+        None,
+        None,
+        None,
+        &[],
+        false,
+    );
+    assert!(
+        !cmd.contains("CLAUDE_CODE_DISABLE_AUTO_MEMORY"),
+        "with trusty-memory down the fallback must stay available: {cmd}"
+    );
+    assert!(
+        cmd.contains("--dangerously-skip-permissions"),
+        "omitting one assignment must not drop the rest of the command: {cmd}"
+    );
+}
+
+#[test]
+fn resume_command_keeps_auto_memory_when_trusty_memory_is_unreachable() {
+    // A resumed session is the same session; it gets the same fallback rule.
+    let cmd = super::resume_command(
+        Path::new(TEST_CWD),
+        "claude",
+        None,
+        Some("abc-123"),
+        TEST_SESSION_ID,
+        None,
+        None,
+        None,
+        &[],
+        false,
+    );
+    assert!(
+        !cmd.contains("CLAUDE_CODE_DISABLE_AUTO_MEMORY"),
+        "with trusty-memory down the fallback must stay available: {cmd}"
+    );
+    assert!(
+        cmd.contains("--resume abc-123"),
+        "omitting one assignment must not drop the resume target: {cmd}"
+    );
+}
+
+#[test]
+fn env_bin_prefix_keeps_auto_memory_when_trusty_memory_is_unreachable() {
+    // The lowest layer, pinned directly: nothing above it can put the
+    // assignment back if this one refuses to emit it.
+    let prefix = env_bin_prefix("claude", Some(Path::new("/tmp/cfg")), None, &[], false);
+    assert!(
+        !prefix.contains("CLAUDE_CODE_DISABLE_AUTO_MEMORY"),
+        "the unreachable branch must emit no auto-memory assignment: {prefix}"
+    );
+    assert!(
+        prefix.contains("CLAUDE_CONFIG_DIR="),
+        "every other assignment must survive: {prefix}"
+    );
+}
+
+#[test]
 fn env_bin_prefix_orders_auto_memory_before_the_config_dir() {
     // POSIX `env` stops parsing options at the first `NAME=VALUE`, so every
     // assignment must sit after the `-u` scrub flags. This pins the new
     // assignment's POSITION, not only its presence.
-    let prefix = env_bin_prefix("claude", Some(Path::new("/tmp/cfg")), None, &[]);
+    let prefix = env_bin_prefix("claude", Some(Path::new("/tmp/cfg")), None, &[], true);
     let auto = prefix
         .find("CLAUDE_CODE_DISABLE_AUTO_MEMORY=1")
         .expect("the auto-memory assignment must be present");
@@ -532,7 +662,7 @@ fn env_bin_prefix_orders_scrub_flags_before_assignments() {
     // appearing after an assignment is exec'd as a command
     // (`env: -u: No such file or directory`) and kills every managed spawn.
     let dir = Path::new("/tm/config");
-    let prefix = env_bin_prefix("/abs/claude", Some(dir), Some("tok"), &[]);
+    let prefix = env_bin_prefix("/abs/claude", Some(dir), Some("tok"), &[], true);
     let last_unset = prefix
         .rfind("-u ")
         .expect("prefix must contain at least one -u flag");
@@ -584,7 +714,13 @@ fn env_bin_prefix_carries_a_non_empty_mcp_env() {
         ),
         ("TRUSTY_INDEX".to_owned(), "idx-42".to_owned()),
     ];
-    let prefix = env_bin_prefix("/abs/claude", Some(Path::new("/tm/config")), None, &mcp_env);
+    let prefix = env_bin_prefix(
+        "/abs/claude",
+        Some(Path::new("/tm/config")),
+        None,
+        &mcp_env,
+        true,
+    );
 
     assert!(
         prefix.contains(" TRUSTY_MEMORY_PALACE='owner repo slug'"),

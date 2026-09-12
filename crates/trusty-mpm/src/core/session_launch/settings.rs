@@ -245,20 +245,24 @@ pub(crate) fn merge_settings_key(
 /// Write `autoMemoryEnabled: false` into the project's `.claude/settings.json`
 /// (#7685).
 ///
-/// Why: the owner directive — Claude Code auto-memory is not used in tm
-/// sessions, `trusty-memory` is the memory. This is the project-tier half; the
+/// Why: the owner directive — `trusty-memory` is the memory, and Claude Code's
+/// own auto memory is a FALLBACK that stays on only while trusty-memory is
+/// unavailable (ruling 2026-09-12). This is the project-tier half; the
 /// managed-spawn half is the `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` assignment in
 /// [`crate::runtime::claude_code::env_bin_prefix`]. Both, for the reason
 /// [`write_output_style`]'s `attribution` seed gives: the env var reaches only
 /// the `claude` child tm spawns, whereas a bare `claude` launched in this
 /// project reads the project tier regardless.
-/// What: [`merge_settings_key`] with [`AUTO_MEMORY_KEY`] and `false`. Written
-/// unconditionally rather than absent-only — the directive is that auto memory
-/// is off here, not that it defaults off.
+/// What: [`merge_settings_key`] with [`AUTO_MEMORY_KEY`] and `false`, written
+/// unconditionally — deciding WHETHER to call it is
+/// [`super::prepare_session_inner`]'s job, which calls it only when
+/// [`crate::core::memory_reachable`] says trusty-memory answered. Keeping the
+/// gate at the one call site is what stops a second caller re-deciding it.
 /// Test: `write_auto_memory_off_disables_auto_memory`,
 /// `write_auto_memory_off_preserves_existing_keys`,
 /// `write_auto_memory_off_overrides_an_enabled_value`,
-/// `prepare_session_disables_auto_memory`.
+/// `prepare_session_disables_auto_memory_when_trusty_memory_is_reachable`,
+/// `prepare_session_leaves_auto_memory_alone_when_trusty_memory_is_down`.
 pub(super) fn write_auto_memory_off(project_dir: &Path) -> Result<(), PrepError> {
     merge_settings_key(project_dir, AUTO_MEMORY_KEY, serde_json::Value::Bool(false))
 }

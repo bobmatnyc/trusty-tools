@@ -70,6 +70,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `test` — Verify MCP servers by running a real handshake against each
 - `memory` — Deterministic trusty-memory palace maintenance (issue #4837)
   - `import` — Bulk-import a directory of memory `.md` files into a palace
+  - `import-auto-memory` — Migrate Claude Code's own auto-memory store into the project's palace
 - `meta` — Standalone metaharness — PM + sub-agent delegation without the daemon (#1045)
   - `run` — Boot the metaharness for a single run
 - `optimizer` — Inspect or configure the token-use optimizer

@@ -33,7 +33,8 @@ pub(crate) mod test_helpers;
 pub(crate) use claude_code::session_id_exists;
 // #6777: the ONE project-dir encoder. Re-exported so nothing outside
 // `claude_code` re-derives Claude Code's `[^A-Za-z0-9]` → `-` fold by hand.
-#[cfg(test)]
+// #7685 made it unconditional: `core::auto_memory_import` resolves a project's
+// auto-memory directory with it in production, not only in tests.
 pub(crate) use claude_code::encode_project_dir;
 // #4467: re-exported so the `transcript_saving` doctor check can read the scrub
 // set out of the REAL managed-spawn env prefix rather than restating the marker

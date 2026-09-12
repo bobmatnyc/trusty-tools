@@ -60,6 +60,8 @@ fn spawn_command_carries_the_strict_mcp_flags() {
         None,
         None,
         &[],
+        // #7685: the reachable posture — MCP scoping is orthogonal to it.
+        true,
     );
     assert!(
         cmd.contains("--strict-mcp-config"),
@@ -83,6 +85,7 @@ fn spawn_command_omits_the_strict_mcp_flags_without_a_config_dir() {
         None,
         None,
         &[],
+        true,
     );
     assert!(
         !cmd.contains("--strict-mcp-config"),
@@ -103,6 +106,7 @@ fn resume_command_carries_the_strict_mcp_flags() {
         None,
         None,
         &[],
+        true,
     );
     assert!(
         cmd.contains("--strict-mcp-config"),
@@ -127,6 +131,7 @@ fn resume_command_omits_the_strict_mcp_flags_without_a_config_dir() {
         None,
         None,
         &[],
+        true,
     );
     assert!(!cmd.contains("--strict-mcp-config"), "{cmd}");
 }

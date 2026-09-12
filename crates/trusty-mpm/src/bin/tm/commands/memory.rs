@@ -3,8 +3,10 @@
 //! Why (issue #4837): a thin translation layer — clap args in, library call
 //! out, report rendered. All import logic lives in
 //! [`trusty_mpm::core::memory_import`] so it is testable without a CLI.
-//! What: [`memory`] routes [`MemoryAction`] and renders the result either as
-//! the machine-readable JSON report (`--json`) or a per-file human summary.
+//! What: [`memory`] routes [`MemoryAction`] — `import` here, and
+//! `import-auto-memory` (#7685) in [`super::memory_auto_import`] — and renders
+//! the result either as the machine-readable JSON report (`--json`) or a
+//! per-file human summary.
 //! Exits non-zero when any file failed, so a script can gate on it.
 //! Test: `cli_parses_memory_import*` in `tests.rs`; the import behaviour is
 //! covered by `core::memory_import::tests`.
@@ -53,6 +55,16 @@ pub(crate) async fn memory(action: MemoryAction) -> anyhow::Result<()> {
                 anyhow::bail!("{} file(s) failed to import", report.failed);
             }
             Ok(())
+        }
+        // #7685: its own file — see `memory_auto_import`.
+        MemoryAction::ImportAutoMemory {
+            project,
+            palace,
+            json,
+            memory_socket,
+        } => {
+            super::memory_auto_import::import_auto_memory(project, palace, json, memory_socket)
+                .await
         }
     }
 }

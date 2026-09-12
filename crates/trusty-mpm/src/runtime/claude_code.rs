@@ -166,13 +166,17 @@ fn cd_and_group(cwd: &Path, body: &str) -> String {
 /// renderer, so either half alone still costs a managed pane native and tmux
 /// scrollback. Each operand's `${NAME-1}` expansion means a value the pane
 /// already exports wins, decided independently per variable.
-/// (6) Issue #7685: the line always assigns `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`,
-/// the documented env-var half of turning Claude Code's own auto memory off. The
-/// project-tier `autoMemoryEnabled: false` key
-/// ([`crate::core::session_launch`]) is the other half, and each covers what the
-/// other cannot — the env var reaches only this spawned child, the settings key
-/// reaches a bare `claude` launched in the same project.
-/// What: `env -u ANTHROPIC_API_KEY <-u marker…> CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN="${…-1}" CLAUDE_CODE_DISABLE_MOUSE="${…-1}" CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 [CLAUDE_CONFIG_DIR='<dir>'] [CLAUDE_CODE_OAUTH_TOKEN='<token>'] <claude_bin>`
+/// (6) Issue #7685: the line assigns `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` when
+/// and only when `memory_reachable` — the documented env-var half of turning
+/// Claude Code's own auto memory off. The project-tier `autoMemoryEnabled:
+/// false` key ([`crate::core::session_launch`]) is the other half, and each
+/// covers what the other cannot — the env var reaches only this spawned child,
+/// the settings key reaches a bare `claude` launched in the same project. Both
+/// are conditional for one reason (owner ruling 2026-09-12): auto memory is the
+/// FALLBACK, so with trusty-memory down a session that also lost auto memory
+/// would have no memory at all. The caller resolves the flag, exactly as it
+/// resolves `gh_env` — this builder stays a pure function of its arguments.
+/// What: `env -u ANTHROPIC_API_KEY <-u marker…> CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN="${…-1}" CLAUDE_CODE_DISABLE_MOUSE="${…-1}" [CLAUDE_CODE_DISABLE_AUTO_MEMORY=1] [CLAUDE_CONFIG_DIR='<dir>'] [CLAUDE_CODE_OAUTH_TOKEN='<token>'] <claude_bin>`
 /// — each bracketed assignment appears only when its value is `Some`; the two
 /// managed-default operands are unconditional. The
 /// `-u NAME` option MUST precede any
@@ -197,7 +201,10 @@ fn cd_and_group(cwd: &Path, body: &str) -> String {
 /// `spawn_command_defaults_the_mouse_capture_off`,
 /// `resume_command_defaults_the_mouse_capture_off`,
 /// `spawn_command_disables_auto_memory`, `resume_command_disables_auto_memory`,
-/// `env_bin_prefix_orders_auto_memory_before_the_config_dir`.
+/// `env_bin_prefix_orders_auto_memory_before_the_config_dir`,
+/// `env_bin_prefix_keeps_auto_memory_when_trusty_memory_is_unreachable`,
+/// `spawn_command_keeps_auto_memory_when_trusty_memory_is_unreachable`,
+/// `resume_command_keeps_auto_memory_when_trusty_memory_is_unreachable`.
 ///
 /// `GH_TOKEN`/`GH_USER` (issue #3025) are deliberately NOT assignments on
 /// this prefix — see [`claude_code_gh_env::gh_env_source_prefix`], applied
@@ -210,6 +217,7 @@ pub(crate) fn env_bin_prefix(
     config_dir: Option<&Path>,
     oauth_token: Option<&str>,
     mcp_env: &[(String, String)],
+    memory_reachable: bool,
 ) -> String {
     let mut assignments = String::new();
     // #6495/#7160: default the pane to Claude Code's classic renderer with
@@ -218,12 +226,14 @@ pub(crate) fn env_bin_prefix(
     // exports.
     assignments.push(' ');
     assignments.push_str(&crate::core::alt_screen::managed_shell_assignments());
-    // #7685: Claude Code auto-memory (`MEMORY.md`) is not used in tm sessions —
-    // trusty-memory is the memory. Unconditional, unlike the `${NAME-1}` operands
-    // above: the directive is that it is off here, not that it defaults off. Per
-    // Claude Code's docs the env var also wins over a subagent's own `memory:`
-    // frontmatter field, so it forecloses a future agent asset opting back in.
-    assignments.push_str(" CLAUDE_CODE_DISABLE_AUTO_MEMORY=1");
+    // #7685: Claude Code auto-memory (`MEMORY.md`) is a FALLBACK — trusty-memory
+    // is the memory, so the switch goes in only when trusty-memory answered
+    // (owner ruling 2026-09-12). Per Claude Code's docs the env var also wins
+    // over a subagent's own `memory:` frontmatter field, so when it IS present it
+    // forecloses a future agent asset opting back in.
+    if memory_reachable {
+        assignments.push_str(" CLAUDE_CODE_DISABLE_AUTO_MEMORY=1");
+    }
     if let Some(dir) = config_dir {
         let quoted = shell_single_quote(&dir.display().to_string());
         assignments.push_str(&format!(" CLAUDE_CONFIG_DIR={quoted}"));
@@ -342,6 +352,7 @@ fn spawn_command(
     oauth_token: Option<&str>,
     gh_env_file: Option<&Path>,
     mcp_env: &[(String, String)],
+    memory_reachable: bool,
 ) -> String {
     let body = format!(
         "{}{}{}{}{} {}{} {}{}",
@@ -352,7 +363,13 @@ fn spawn_command(
         // immediately before `env` (#3025).
         launch_clock_prefix(),
         claude_code_gh_env::gh_env_source_prefix(gh_env_file),
-        env_bin_prefix(claude_bin, config_dir, oauth_token, mcp_env),
+        env_bin_prefix(
+            claude_bin,
+            config_dir,
+            oauth_token,
+            mcp_env,
+            memory_reachable
+        ),
         prompt_file_flag(prompt_file),
         // #4451: the relocated spawn must load the `user` tier — that is where
         // `CLAUDE_CONFIG_DIR/agents` (the bundled roster) lives.
@@ -430,6 +447,7 @@ fn resume_command(
     oauth_token: Option<&str>,
     gh_env_file: Option<&Path>,
     mcp_env: &[(String, String)],
+    memory_reachable: bool,
 ) -> String {
     let base = format!(
         "{}{}{}{}{} {}{} {}",
@@ -438,7 +456,13 @@ fn resume_command(
         // resume path is the one the refused relaunch was observed on.
         launch_clock_prefix(),
         claude_code_gh_env::gh_env_source_prefix(gh_env_file),
-        env_bin_prefix(claude_bin, config_dir, oauth_token, mcp_env),
+        env_bin_prefix(
+            claude_bin,
+            config_dir,
+            oauth_token,
+            mcp_env,
+            memory_reachable
+        ),
         prompt_file_flag(prompt_file),
         // #4451: same relocated-tier contract as `spawn_command`.
         crate::core::model_inject::setting_sources_flag(config_dir),
@@ -1102,6 +1126,11 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // trusty-search daemon), never inside the command-string builder.
         let mcp_env = crate::core::mcp_session_env::session_mcp_env(cwd, None);
         let gh_env_file = claude_code_gh_env::write_gh_env_file(gh_env);
+        // #7685: auto memory is the FALLBACK, so the kill switch goes on the
+        // command line only when trusty-memory answered. Resolved here, beside
+        // `session_mcp_env` (which likewise touches a sidecar), so the string
+        // builders below stay pure functions of their arguments.
+        let memory_reachable = crate::core::memory_reachable::probe_memory_reachable_blocking();
         self.tmux
             .send_line(
                 tmux_name,
@@ -1120,6 +1149,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
                     oauth_token.as_deref(),
                     gh_env_file.as_deref(),
                     &mcp_env,
+                    memory_reachable,
                 ),
             )
             .map_err(|e| RuntimeError::TmuxUnavailable(e.to_string()))?;
@@ -1263,6 +1293,9 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             oauth_token: oauth_token.as_deref(),
             gh_env_file: gh_env_file.as_deref(),
             mcp_env: &mcp_env,
+            // #7685: same fallback rule as `spawn` — a resumed session must not
+            // lose auto memory while trusty-memory is down either.
+            memory_reachable: crate::core::memory_reachable::probe_memory_reachable_blocking(),
         };
         // #6863: a session Claude Code is still running in the background
         // refuses `--resume` and exits 0, leaving the pane a bare shell; ask its

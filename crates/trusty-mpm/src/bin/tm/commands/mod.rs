@@ -81,6 +81,8 @@ pub(crate) mod managed_workspace;
 pub(crate) mod manager;
 pub(crate) mod mcp;
 pub(crate) mod memory;
+// #7685: `tm memory import-auto-memory`, in its own file beside the dispatcher.
+pub(crate) mod memory_auto_import;
 pub(crate) mod meta;
 pub(crate) mod misc;
 // #6276: the one decision about a repository's origin remote — a local-only

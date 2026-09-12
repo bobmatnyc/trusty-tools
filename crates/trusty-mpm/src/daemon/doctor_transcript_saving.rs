@@ -108,8 +108,11 @@ fn launch_lines() -> Vec<(&'static str, Vec<String>)> {
     let config_dir = std::path::PathBuf::from(PROBE_CONFIG_DIR);
 
     // Shell-string builders: parse the `-u` operands out of the `env` prefix.
+    // #7685: `memory_reachable: true` — this probe is about the `-u` scrub list,
+    // and the reachable branch is the one that carries every assignment, so it is
+    // the strictly wider line to check.
     let prefix =
-        crate::runtime::env_bin_prefix("claude", Some(&config_dir), Some(PROBE_TOKEN), &[]);
+        crate::runtime::env_bin_prefix("claude", Some(&config_dir), Some(PROBE_TOKEN), &[], true);
     // #4181: probe the RELOCATED shape — `tm launch` / `tm connect` now emit
     // `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_OAUTH_TOKEN` assignments, so this
     // must read a line that carries both or it stops covering the real spawn.
