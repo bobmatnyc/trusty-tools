@@ -598,4 +598,37 @@ mod tests {
             );
         }
     }
+
+    /// The regression-proof recipe must revert to the branch's own PRE-FIX
+    /// commit, and must spell a gate script as an executable path.
+    ///
+    /// Why (#7705): `origin/main` moves while an engineer works, so a revert to
+    /// it can swap in someone else's change and make the "fails before" run
+    /// prove the wrong thing — or nothing. And an engineer who writes
+    /// `bash scripts/<name>.sh` inside a Claude Code isolation worktree can have
+    /// the command refused as unverifiable, which reads as a broken gate rather
+    /// than a wrong spelling. Both rules are one sentence each in a long file,
+    /// exactly the shape a later rewrite drops without noticing.
+    /// What: pins the two load-bearing phrases and rejects the bare
+    /// `git checkout origin/main --` recipe they replaced.
+    /// Test: this IS the assertion.
+    #[test]
+    fn regression_proof_reverts_against_the_pre_fix_commit() {
+        assert!(
+            BASE_ENGINEER.contains("git merge-base origin/main HEAD"),
+            "BASE-ENGINEER must name the pre-fix commit the revert targets (#7705)"
+        );
+        assert!(
+            BASE_ENGINEER.contains("never to a bare"),
+            "BASE-ENGINEER must forbid reverting to a bare `origin/main` (#7705)"
+        );
+        assert!(
+            !BASE_ENGINEER.contains("`git checkout origin/main -- <paths>`"),
+            "the moving-ref revert recipe must be gone, not merely warned about (#7705)"
+        );
+        assert!(
+            BASE_ENGINEER.contains("`./scripts/<name>.sh`"),
+            "BASE-ENGINEER must state the executable gate-script spelling (#7705)"
+        );
+    }
 }

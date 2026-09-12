@@ -1,5 +1,5 @@
 #!/bin/sh
-# trusty-mpm-push-guard: v3 (#2867)
+# trusty-mpm-push-guard: v4 (#2867, #7704)
 #
 # Why: issue #2867 — an agent worktree whose local branch was configured with
 #   `branch.<local>.merge = refs/heads/<someone-else's-PR-branch>` ran a bare
@@ -8,17 +8,18 @@
 #   `git push origin HEAD:other-branch` does it too), and the offending push
 #   may come from a process trusty-mpm never created. A pre-push hook is the
 #   only guard that fires regardless of WHO runs the push.
-# What: refuses a push that would OVERWRITE AN EXISTING remote branch with the
-#   history of a branch of a DIFFERENT name. One rule, applied identically
-#   whether HEAD is attached or detached:
+# What: refuses a push that would DESTROY lineage on an existing remote branch
+#   from a branch of a DIFFERENT name. One rule, applied identically whether
+#   HEAD is attached or detached:
 #
-#     updating an existing branch requires source name == destination name
+#     updating an existing branch requires either source name == destination
+#     name, or a FAST-FORWARD of that destination
 #
 #   where the source name is the pushed `refs/heads/<name>`, or — when the
 #   source is anonymous (`HEAD`, a raw sha) — the checked-out branch name.
-#   An anonymous source from a DETACHED HEAD has no name, so it can only
-#   CREATE, never update.
-#   Three shapes are deliberately OUT OF SCOPE and pass through untouched:
+#   An anonymous source from a DETACHED HEAD has no name, so only the
+#   fast-forward test can permit it onto an existing branch.
+#   Four shapes are deliberately OUT OF SCOPE and pass through untouched:
 #     * non-branch destinations (tags, notes, refs/pull) — cannot clobber a
 #       PR's branch lineage;
 #     * CREATING a branch that does not exist on the remote yet — git reports
@@ -26,6 +27,14 @@
 #       destroy, so a create can never be the #2867 damage, and `git push
 #       origin <sha>:refs/heads/<new-name>` is the standard way to rescue work
 #       out of a detached worktree;
+#     * FAST-FORWARDING an existing branch (#7704) — the destination's current
+#       tip is an ancestor of what is being pushed, so every commit the branch
+#       already has is still reachable afterwards. The push only ADDS, which
+#       is the routine "land another commit on the PR branch I am working"
+#       case and is not the #2867 damage. Proven from the <remote sha> git
+#       states on stdin, never from how the push was spelled: `--force` and
+#       `--force-with-lease` on a genuine fast-forward are still permitted,
+#       and a plain `git push` that is NOT one is still refused;
 #     * branch DELETES (`git push origin --delete X`, `git push origin :X`).
 #       NOT because they cannot happen by accident — they can, see the
 #       warning below — but because a deleted GitHub branch is RECOVERABLE
@@ -34,6 +43,9 @@
 #       not. Post-merge remote cleanup is routine, and the right layer to
 #       police deletion is branch protection on the server, not a hook the
 #       pusher can remove.
+#   The fast-forward test FAILS CLOSED: when the destination's tip cannot be
+#   resolved locally — even after fetching that one ref — the guard cannot
+#   prove the push is additive, so it refuses.
 #   Set TM_ALLOW_CROSS_BRANCH_PUSH=1 to perform a deliberate cross-branch push.
 #
 # WARNING — do NOT reason from "git refuses a bare push while detached". That
@@ -44,13 +56,14 @@
 #   a BARE `git push` from a detached HEAD, clobbered `victim` with no refspec
 #   typed by anyone. The same mechanism makes a bare `git push` perform a
 #   DELETE (`remote.origin.push = ':refs/heads/victim'`). This is exactly why
-#   the exemption above is keyed on CREATE-vs-UPDATE, which git states in the
-#   <remote sha> field, and never on HEAD state or on how the push was spelled.
+#   the exemptions above are keyed on facts git states in the <remote sha>
+#   field, and never on HEAD state or on how the push was spelled.
 # Test: crates/trusty-mpm/tests/push_guard_hook.rs (real temp repos and a real
-#   bare remote: refuses the cross-branch push attached AND detached, refuses
-#   the `remote.<name>.push` detached-bare-push exploit above, permits the
-#   same-name push and the create in both states, permits deletes and tags,
-#   permits with the override).
+#   bare remote: refuses the divergent cross-branch push attached AND detached,
+#   refuses the `remote.<name>.push` detached-bare-push exploit above, permits
+#   the same-name push, the create and the fast-forward in both states, refuses
+#   a rebased `--force-with-lease`, fails closed on an unresolvable destination
+#   tip, permits deletes and tags, permits with the override).
 #
 # Note: git aborts the ENTIRE push when a pre-push hook exits non-zero, so a
 # multi-refspec push containing one refused ref sends none of them. That is
@@ -63,12 +76,55 @@ if [ "${TM_ALLOW_CROSS_BRANCH_PUSH:-}" = "1" ]; then
 	exit 0
 fi
 
+remote_name=${1:-}
+
+# Classify an update of an existing branch: `fast-forward`, `diverged`, or
+# `unverifiable`. $1 = <remote sha> (the destination's current tip, as the
+# remote reports it), $2 = <local sha> (what is being pushed — HEAD's sha for a
+# `HEAD:<branch>` refspec), $3 = the destination ref, used only to fetch the
+# tip when this clone has never seen it.
+#
+# Every git call redirects stdin from /dev/null: this runs inside the `while
+# read` loop below, and a child that consumes the hook's stdin would silently
+# swallow the remaining refspecs.
+fast_forward_verdict() {
+	_dest_sha=$1
+	_src_sha=$2
+	_dest_ref=$3
+
+	if [ -z "$_dest_sha" ] || [ -z "$_src_sha" ]; then
+		echo unverifiable
+		return
+	fi
+
+	if ! git cat-file -e "$_dest_sha^{commit}" </dev/null 2>/dev/null; then
+		# The remote is ahead of anything this clone has fetched. Pull
+		# down that ONE ref (no ref updates, no tags, never a prompt)
+		# and retry; a still-missing object leaves the verdict closed.
+		if [ -n "$remote_name" ]; then
+			GIT_TERMINAL_PROMPT=0 git fetch --quiet --no-tags \
+				"$remote_name" "$_dest_ref" </dev/null >/dev/null 2>&1 || true
+		fi
+		if ! git cat-file -e "$_dest_sha^{commit}" </dev/null 2>/dev/null; then
+			echo unverifiable
+			return
+		fi
+	fi
+
+	if git merge-base --is-ancestor "$_dest_sha" "$_src_sha" </dev/null 2>/dev/null; then
+		echo fast-forward
+	else
+		echo diverged
+	fi
+}
+
 # Empty when HEAD is detached.
 head_branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null) || head_branch=""
 
 refused=0
 refused_branch=""
 rescue_sha=""
+saw_unverifiable=0
 # `|| [ -n "$local_ref" ]` keeps a final line with no trailing newline from
 # being silently dropped: POSIX `read` returns non-zero at EOF even when it
 # read a partial line, and dropping it here would fail OPEN.
@@ -93,7 +149,8 @@ while read -r local_ref local_sha remote_ref remote_sha || [ -n "$local_ref" ]; 
 	*)
 		# Anonymous source (`HEAD`, a raw sha). Attached, it IS the
 		# checked-out branch; detached, it has no name at all — which
-		# is why the create check below, NOT the HEAD state, decides.
+		# is why the create and fast-forward checks, NOT the HEAD
+		# state, decide.
 		src_branch=$head_branch
 		;;
 	esac
@@ -111,6 +168,19 @@ while read -r local_ref local_sha remote_ref remote_sha || [ -n "$local_ref" ]; 
 		continue
 	fi
 
+	# #7704: a fast-forward ADDS to the destination without discarding any
+	# commit it already has, so it cannot be the #2867 damage even across
+	# names. Anything else — a rebase pushed with `--force-with-lease`
+	# included — rewrites commits the destination already has, which is the
+	# exact lineage this guard exists to protect.
+	verdict=$(fast_forward_verdict "$remote_sha" "$local_sha" "$remote_ref")
+	if [ "$verdict" = "fast-forward" ]; then
+		continue
+	fi
+	if [ "$verdict" = "unverifiable" ]; then
+		saw_unverifiable=1
+	fi
+
 	refused=1
 	if [ -n "$src_branch" ]; then
 		refused_branch=$src_branch
@@ -122,12 +192,26 @@ while read -r local_ref local_sha remote_ref remote_sha || [ -n "$local_ref" ]; 
 	echo "  pushing            : $local_ref" >&2
 	echo "  which is branch    : ${src_branch:-<none — detached HEAD>}" >&2
 	echo "  onto EXISTING      : $remote_ref" >&2
+	echo "  destination tip    : ${remote_sha:-<unknown>}" >&2
+	echo "  fast-forward       : no ($verdict)" >&2
 done
 
 if [ "$refused" -ne 0 ]; then
 	echo "" >&2
 	echo "Overwriting an EXISTING branch from a branch of a different name is" >&2
 	echo "how PR #2863's reviewed lineage was clobbered (#2867)." >&2
+	echo "" >&2
+	echo "A FAST-FORWARD onto a differently-named branch needs no override and" >&2
+	echo "is allowed (#7704) — it only adds commits. This push is not one." >&2
+	echo "A rebase pushed with --force-with-lease is never a fast-forward: the" >&2
+	echo "rebase rewrites the commits the destination already has, which is the" >&2
+	echo "lineage this guard protects. It stays refused without the env var." >&2
+	if [ "$saw_unverifiable" -ne 0 ]; then
+		echo "Here the destination's current tip could not be resolved locally" >&2
+		echo "even after fetching that ref, so the guard cannot prove the push" >&2
+		echo "is additive and fails closed." >&2
+	fi
+	echo "" >&2
 	if [ -n "$refused_branch" ]; then
 		echo "Push onto the matching branch instead:" >&2
 		echo "  git push origin refs/heads/$refused_branch:refs/heads/$refused_branch" >&2

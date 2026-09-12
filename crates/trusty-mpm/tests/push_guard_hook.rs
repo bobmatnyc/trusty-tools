@@ -10,17 +10,25 @@
 //! the way the #2867 agent created its own (which no trusty-mpm code path ever
 //! configures — the hook is its only protection).
 //! What: builds a bare `origin` + a clone, installs the guard via the
-//! production `install_pre_push_guard`, then asserts (1) a cross-branch push is
-//! refused and leaves the destination ref untouched, (2) the printed remedy
-//! actually SUCCEEDS rather than being the refused command, (3) the same-name
-//! push succeeds, (4) a detached HEAD permits the explicit rescue refspec but
-//! still refuses a named-branch cross-branch push, (5) the name-preserving
-//! push of another branch gets the same verdict attached and detached, (6)
-//! deletes and tags pass through, (7) `TM_ALLOW_CROSS_BRANCH_PUSH=1` permits
-//! the deliberate cross-branch push, (8) an ad-hoc worktree inherits the guard,
-//! (9) a configured `remote.<name>.push` refspec cannot smuggle the clobber
-//! past the guard via a BARE push from a detached HEAD, and (10) CREATING a
-//! branch is permitted attached and detached while UPDATING one is not.
+//! production `install_pre_push_guard`, then asserts (1) a divergent
+//! cross-branch push is refused and leaves the destination ref untouched, (2)
+//! the printed remedy actually SUCCEEDS rather than being the refused command,
+//! (3) the same-name push succeeds, (4) a detached HEAD permits the explicit
+//! rescue refspec but still refuses a named-branch cross-branch push, (5) the
+//! name-preserving push of another branch gets the same verdict attached and
+//! detached, (6) deletes and tags pass through, (7)
+//! `TM_ALLOW_CROSS_BRANCH_PUSH=1` permits the deliberate cross-branch push,
+//! (8) an ad-hoc worktree inherits the guard, (9) a configured
+//! `remote.<name>.push` refspec cannot smuggle the clobber past the guard via a
+//! BARE push from a detached HEAD, (10) CREATING a branch is permitted attached
+//! and detached while a DIVERGENT update is not, and — #7704 — (11) a
+//! FAST-FORWARD onto a differently-named existing branch is permitted attached
+//! and detached, (12) a rebased `--force-with-lease` is still refused with a
+//! refusal that says why, and (13) a destination tip that cannot be resolved
+//! even after fetching it fails CLOSED.
+//!
+//! The fixture's `victim` branch carries a commit of its own so that every
+//! cross-branch case here genuinely diverges — see `fixture`.
 //! Test: this file IS the test module.
 
 use std::path::{Path, PathBuf};
@@ -86,8 +94,24 @@ fn fixture() -> Option<Fixture> {
     assert!(git(&clone, &["add", "."]).0);
     assert!(git(&clone, &["commit", "-qm", "seed"]).0);
     assert!(git(&clone, &["push", "-q", "origin", "main"]).0);
-    // A second branch on the remote, standing in for the foreign PR branch.
-    assert!(git(&clone, &["push", "-q", "origin", "main:refs/heads/victim"]).0);
+    // A second branch on the remote, standing in for the foreign PR branch —
+    // carrying a commit of its OWN so it genuinely DIVERGES from `main`.
+    // See #7704: a victim sitting AT `main` is fast-forwardable from any branch
+    // built on `main`, and the guard now permits a fast-forward, so a victim
+    // seeded that way would make every cross-branch assertion below vacuous.
+    assert!(git(&clone, &["checkout", "-q", "-b", "victim-seed"]).0);
+    std::fs::write(clone.join("REVIEWED"), b"reviewed lineage").expect("write REVIEWED");
+    assert!(git(&clone, &["add", "."]).0);
+    assert!(git(&clone, &["commit", "-qm", "reviewed lineage"]).0);
+    assert!(
+        git(
+            &clone,
+            &["push", "-q", "origin", "victim-seed:refs/heads/victim"]
+        )
+        .0
+    );
+    assert!(git(&clone, &["checkout", "-q", "main"]).0);
+    assert!(git(&clone, &["branch", "-qD", "victim-seed"]).0);
 
     Some(Fixture {
         _root: root,
@@ -111,6 +135,60 @@ fn commit(repo: &Path, name: &str) {
     std::fs::write(repo.join(name), name.as_bytes()).expect("write file");
     assert!(git(repo, &["add", "."]).0);
     assert!(git(repo, &["commit", "-qm", name]).0);
+}
+
+/// Drop the tip commit and put a different one in its place — what a rebase
+/// does to the commits a remote branch already holds.
+///
+/// Why (#7704): the guard now permits a fast-forward onto a differently-named
+/// branch, so a test that merely ADDS a commit no longer exercises the refusal
+/// path at all. Every "must still be refused" case has to diverge first.
+fn rewrite_tip(repo: &Path, name: &str) {
+    assert!(git(repo, &["reset", "--hard", "-q", "HEAD~1"]).0);
+    commit(repo, name);
+}
+
+/// Run the installed hook directly, honouring git's documented hook contract:
+/// argv is `<remote name> <remote URL>` and stdin carries
+/// `<local ref> <local sha> <remote ref> <remote sha>` lines.
+///
+/// Why (#7704): the fail-closed path needs a `<remote sha>` that no object
+/// store anywhere holds, and a real `git push` can never produce one — git
+/// reports only a sha the remote actually has. Driving the hook through its own
+/// contract is the only way to reach that branch, and the fast-forward control
+/// in `unresolvable_destination_tip_fails_closed` proves this harness can still
+/// produce a PASS rather than refusing everything it is handed.
+fn run_hook(hook: &Path, cwd: &Path, remote: &str, stdin: &str) -> (bool, String) {
+    use std::io::Write;
+
+    let mut child = Command::new("sh")
+        .arg(hook)
+        .arg(remote)
+        .arg(cwd)
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("sh must be spawnable");
+    child
+        .stdin
+        .as_mut()
+        .expect("piped stdin")
+        .write_all(stdin.as_bytes())
+        .expect("write the hook's stdin");
+    let out = child.wait_with_output().expect("the hook must terminate");
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+    )
+}
+
+/// Resolve a ref in the clone.
+fn local_sha(repo: &Path, refname: &str) -> String {
+    let (ok, out, err) = git(repo, &["rev-parse", refname]);
+    assert!(ok, "rev-parse {refname} must resolve; stderr: {err}");
+    out.trim().to_string()
 }
 
 /// The guard must refuse a cross-branch push and leave the victim ref intact,
@@ -342,7 +420,9 @@ fn creating_a_new_branch_is_allowed_attached_and_detached() {
     // But UPDATING either of them from a differently-named source is refused
     // in both states — the create exemption must not leak into updates.
     let before = remote_sha(&fx.origin, "refs/heads/backup-1").expect("exists");
-    commit(&fx.clone, "more.txt");
+    // The update has to DIVERGE from `backup-1` to prove anything: see #7704 —
+    // simply adding a commit would be a fast-forward, which the guard permits.
+    rewrite_tip(&fx.clone, "rewritten.txt");
     let (upd_ok, _, _) = git(
         &fx.clone,
         &["push", "origin", "--force", "HEAD:refs/heads/backup-1"],
@@ -434,7 +514,14 @@ fn deletes_and_tags_pass_through() {
     );
 }
 
-/// The documented override must permit a deliberate cross-branch push.
+/// The documented override must permit a deliberate cross-branch push that the
+/// fast-forward exemption does NOT reach (#7704).
+///
+/// Why: the override is the escape hatch for exactly the shape the guard
+/// refuses, and `victim` now diverges from `main`, so this push is a genuine
+/// lineage clobber rather than an additive one. The control below pins that:
+/// without the env var the identical command is refused, and the refusal
+/// explains which exemption it failed to qualify for.
 #[test]
 fn override_env_var_permits_cross_branch_push() {
     let Some(fx) = fixture() else {
@@ -444,6 +531,21 @@ fn override_env_var_permits_cross_branch_push() {
     assert!(git(&fx.clone, &["checkout", "-q", "-b", "mine"]).0);
     commit(&fx.clone, "work.txt");
     let victim_before = remote_sha(&fx.origin, "refs/heads/victim").expect("victim exists");
+
+    // Control: the identical command without the override is refused, and says
+    // why a fast-forward would have been allowed where this is not.
+    let (plain_ok, _, plain_err) = git(
+        &fx.clone,
+        &["push", "origin", "HEAD:refs/heads/victim", "--force"],
+    );
+    assert!(
+        !plain_ok,
+        "the unoverridden divergent push must be refused; stderr: {plain_err}"
+    );
+    assert!(
+        plain_err.contains("A FAST-FORWARD onto a differently-named branch"),
+        "the refusal must name the exemption this push failed; stderr: {plain_err}"
+    );
 
     let out = Command::new("git")
         .arg("-C")
@@ -524,5 +626,172 @@ fn adhoc_agent_created_worktree_inherits_the_guard() {
         remote_sha(&fx.origin, "refs/heads/victim").as_deref(),
         Some(victim_before.as_str()),
         "PR-branch lineage must be intact — this is the #2867 regression"
+    );
+}
+
+/// A FAST-FORWARD onto a differently-named existing branch must be permitted
+/// with no override at all (#7704).
+///
+/// Why: the guard exists to protect lineage that ALREADY sits on the
+/// destination. A fast-forward discards none of it — every commit the branch
+/// holds stays reachable — so refusing one bought no safety and blocked the
+/// routine case: a worktree on `agent-<id>` landing another commit on the PR
+/// branch it was dispatched to work. The cost was not just friction: the only
+/// way past that refusal was `TM_ALLOW_CROSS_BRANCH_PUSH=1`, and normalising
+/// that env var is the one thing that genuinely disarms the #2867 protection.
+/// What: `mine` descends from `origin/main`, so pushing it onto `main` under a
+/// different name only adds. Pinned attached AND detached, and asserted to have
+/// actually MOVED the ref rather than being a silent no-op.
+#[test]
+fn fast_forward_onto_an_existing_branch_is_allowed() {
+    let Some(fx) = fixture() else {
+        return;
+    };
+    install_pre_push_guard(&fx.clone).expect("install");
+    assert!(git(&fx.clone, &["checkout", "-q", "-b", "mine"]).0);
+    commit(&fx.clone, "work.txt");
+    let main_before = remote_sha(&fx.origin, "refs/heads/main").expect("main exists");
+
+    // Attached on `mine`, fast-forwarding the existing, differently-named
+    // `main` — the #2867 refspec shape with none of the #2867 damage.
+    let (ok, _, err) = git(&fx.clone, &["push", "origin", "HEAD:refs/heads/main"]);
+    assert!(
+        ok,
+        "a fast-forward onto an existing branch of another name must be permitted \
+         without the override; stderr: {err}"
+    );
+    let main_after = remote_sha(&fx.origin, "refs/heads/main").expect("main exists");
+    assert_ne!(
+        main_after, main_before,
+        "the permitted push must actually have moved the ref, not silently no-op'd"
+    );
+
+    // Detached, the identical shape must get the identical verdict — the rule
+    // is keyed on ancestry, never on HEAD state.
+    assert!(git(&fx.clone, &["checkout", "-q", "--detach", "HEAD"]).0);
+    commit(&fx.clone, "more.txt");
+    let (det_ok, _, det_err) = git(&fx.clone, &["push", "origin", "HEAD:refs/heads/main"]);
+    assert!(det_ok, "…and while detached; stderr: {det_err}");
+    assert_ne!(
+        remote_sha(&fx.origin, "refs/heads/main").as_deref(),
+        Some(main_after.as_str()),
+        "the detached fast-forward must also have moved the ref"
+    );
+}
+
+/// A rebase pushed with `--force-with-lease` is the non-descendant case and
+/// stays refused without the override (#7704).
+///
+/// Why: `--force-with-lease` only proves you have SEEN the tip you are
+/// replacing; it says nothing about whether the commits being replaced were
+/// reviewed. A rebase rewrites exactly the commits the destination already
+/// holds, which is the #2867 damage. The refusal has to SAY that, because an
+/// agent reading a bare "cross-branch push refused" beside a new fast-forward
+/// exemption will conclude the guard is broken rather than that its push is.
+#[test]
+fn rebased_force_with_lease_onto_an_existing_branch_is_still_refused() {
+    let Some(fx) = fixture() else {
+        return;
+    };
+    install_pre_push_guard(&fx.clone).expect("install");
+    assert!(git(&fx.clone, &["checkout", "-q", "-b", "mine"]).0);
+    commit(&fx.clone, "work.txt");
+
+    // Create the destination, then rebase away the commit it now holds.
+    assert!(
+        git(
+            &fx.clone,
+            &["push", "-q", "origin", "HEAD:refs/heads/target"]
+        )
+        .0
+    );
+    let target_before = remote_sha(&fx.origin, "refs/heads/target").expect("target exists");
+    rewrite_tip(&fx.clone, "rebased.txt");
+
+    let (ok, _, err) = git(
+        &fx.clone,
+        &[
+            "push",
+            "--force-with-lease",
+            "origin",
+            "HEAD:refs/heads/target",
+        ],
+    );
+    assert!(
+        !ok,
+        "a rebased --force-with-lease onto another branch must stay refused; stderr: {err}"
+    );
+    assert!(
+        err.contains("REFUSED cross-branch push"),
+        "the refusal must come from the guard; stderr: {err}"
+    );
+    assert!(
+        err.contains("--force-with-lease is never a fast-forward"),
+        "the refusal must explain why --force-with-lease does not qualify; stderr: {err}"
+    );
+    assert!(
+        err.contains("TM_ALLOW_CROSS_BRANCH_PUSH=1"),
+        "the refusal must still name the override; stderr: {err}"
+    );
+    assert!(
+        err.contains("#7704"),
+        "the refusal must cite the fast-forward exemption's issue; stderr: {err}"
+    );
+    assert_eq!(
+        remote_sha(&fx.origin, "refs/heads/target").as_deref(),
+        Some(target_before.as_str()),
+        "the rewritten lineage must be byte-identical on the remote"
+    );
+}
+
+/// A destination tip this clone cannot resolve — even after fetching that one
+/// ref — must FAIL CLOSED (#7704).
+///
+/// Why: the fast-forward exemption is an ancestry claim, and an ancestry
+/// question with no answer is not a licence to push. Fetching first is what
+/// keeps the common "the remote moved on" case from being a false refusal; a
+/// sha still missing afterwards means the guard has nothing to reason from.
+/// The fast-forward control in the same test proves this harness can produce a
+/// PASS, so the refusal below is a verdict rather than an artefact of driving
+/// the hook directly.
+#[test]
+fn unresolvable_destination_tip_fails_closed() {
+    let Some(fx) = fixture() else {
+        return;
+    };
+    let HookInstall::Installed(hook) = install_pre_push_guard(&fx.clone).expect("install") else {
+        panic!("the guard must install into a fresh clone");
+    };
+    assert!(git(&fx.clone, &["checkout", "-q", "-b", "mine"]).0);
+    commit(&fx.clone, "work.txt");
+    let head = local_sha(&fx.clone, "HEAD");
+
+    // Control: the same harness, a tip that IS an ancestor of HEAD, passes.
+    let ff = format!(
+        "refs/heads/mine {head} refs/heads/main {}\n",
+        local_sha(&fx.clone, "refs/remotes/origin/main")
+    );
+    let (ff_ok, ff_err) = run_hook(&hook, &fx.clone, "origin", &ff);
+    assert!(
+        ff_ok,
+        "the direct-invocation control must PASS a fast-forward; stderr: {ff_err}"
+    );
+
+    // A well-formed sha no object store anywhere holds: the fetch cannot supply
+    // it, so the ancestry question has no answer.
+    let phantom = "0123456789abcdef0123456789abcdef01234567";
+    let unknown = format!("refs/heads/mine {head} refs/heads/victim {phantom}\n");
+    let (ok, err) = run_hook(&hook, &fx.clone, "origin", &unknown);
+    assert!(
+        !ok,
+        "an unresolvable destination tip must be refused, not waved through; stderr: {err}"
+    );
+    assert!(
+        err.contains("unverifiable"),
+        "the per-ref line must name the unverifiable verdict; stderr: {err}"
+    );
+    assert!(
+        err.contains("could not be resolved locally") && err.contains("fails closed"),
+        "the refusal must say the guard failed closed rather than diverged; stderr: {err}"
     );
 }
