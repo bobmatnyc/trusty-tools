@@ -21,6 +21,28 @@ use crate::commands::session::{
 // `fallback_protected` to launch.
 use crate::test_support::tmux_session::{FixtureTmuxSessions, ScratchTmuxSession};
 
+/// A disk gate pinned to an empty mount, for the fallback tests that provision
+/// a worktree (#7603).
+///
+/// Why: `fallback_protected` gates the worktree it provisions against the REAL
+/// mount and the operator's REAL `disk.max_usage_pct`, so the three tests below
+/// went red — asserting nothing about disk — once this host crossed 90%.
+/// `$HOME` cannot be redirected from a `tm`-bin test (`env_isolation_tests.rs`
+/// bans writing it), so the measurement is injected instead. The refusing
+/// direction is pinned in `managed_workspace_tests.rs`, so this file only needs
+/// the allowing one.
+/// What: a synthetic mount at 0.0%, below every threshold
+/// `resolve_max_usage_pct` accepts (`1..=100`).
+/// Test: used by the three `guided_fallback_*` tests that expect a worktree.
+fn empty_disk() -> trusty_mpm::core::disk_usage_guard::DiskGate {
+    trusty_mpm::core::disk_usage_guard::DiskGate::Pinned(Some(
+        trusty_mpm::core::disk_usage_guard::MeasuredMount {
+            mount_point: "/fixture-mount".to_string(),
+            usage_pct: 0.0,
+        },
+    ))
+}
+
 #[test]
 fn cli_parses_attach() {
     let cli = Cli::try_parse_from(["trusty-mpm", "attach", "frontend"]).unwrap();
@@ -1777,9 +1799,15 @@ async fn guided_fallback_redirect_success_worktree_not_live_checkout() {
     let _tmux = fallback_tmux_guard(repos_root.path());
 
     let client = reqwest::Client::new();
-    let _result =
-        crate::commands::guided::fallback_protected(&client, "http://127.0.0.1:1", live_dir.path())
-            .await;
+    // #7603: pin the measurement — this test asserts where the fallback deploys,
+    // never anything about the host's volume.
+    let _result = crate::commands::guided::fallback_protected_gated(
+        &client,
+        "http://127.0.0.1:1",
+        live_dir.path(),
+        &empty_disk(),
+    )
+    .await;
 
     // ── Acceptance criteria (#1724 success path) ─────────────────────────────
     // Live checkout must be untouched.
@@ -1861,9 +1889,15 @@ async fn guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone
     let _tmux = fallback_tmux_guard(&repos_root_path);
 
     let client = reqwest::Client::new();
-    let _result =
-        crate::commands::guided::fallback_protected(&client, "http://127.0.0.1:1", live_dir.path())
-            .await;
+    // #7603: pin the measurement — this test asserts where the fallback deploys,
+    // never anything about the host's volume.
+    let _result = crate::commands::guided::fallback_protected_gated(
+        &client,
+        "http://127.0.0.1:1",
+        live_dir.path(),
+        &empty_disk(),
+    )
+    .await;
 
     // Exactly one worktree, and it is the directory the session must run in.
     let worktrees_dir = base.join(".worktrees");
@@ -1967,9 +2001,15 @@ async fn guided_fallback_leaves_no_tmux_session_behind() {
     let guard = fallback_tmux_guard(&repos_root_path);
 
     let client = reqwest::Client::new();
-    let _result =
-        crate::commands::guided::fallback_protected(&client, "http://127.0.0.1:1", live_dir.path())
-            .await;
+    // #7603: pin the measurement — this test asserts where the fallback deploys,
+    // never anything about the host's volume.
+    let _result = crate::commands::guided::fallback_protected_gated(
+        &client,
+        "http://127.0.0.1:1",
+        live_dir.path(),
+        &empty_disk(),
+    )
+    .await;
 
     let spawned = guard.spawned();
     assert!(

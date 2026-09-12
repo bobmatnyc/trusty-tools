@@ -42,6 +42,7 @@
 
 use std::path::{Path, PathBuf};
 
+use trusty_mpm::core::disk_usage_guard::DiskGate;
 use trusty_mpm::daemon::managed_routes::inproject;
 use trusty_mpm::session_manager::ManagedSessionId;
 
@@ -137,6 +138,7 @@ async fn provision(
     base_path: &Path,
     main_checkout: &Path,
     session_id: &ManagedSessionId,
+    gate: &DiskGate,
 ) -> Result<ManagedWorkspace, String> {
     if !isolate {
         // `main_checkout` is already resolved — this function never re-resolves
@@ -158,8 +160,14 @@ async fn provision(
     // semantic tmux name from, so they keep the pre-#2032 UUID-named
     // worktree; only the daemon's `spawn_managed_inproject` uses the
     // semantic-name layout.
-    let worktree =
-        inproject::create_session_worktree(base_path, &session_id.to_string(), session_id)?;
+    // #7603: the gate's measurement source is an argument, so an in-process test
+    // of either entry point above pins it instead of reading the host's volume.
+    let worktree = inproject::create_session_worktree_gated(
+        base_path,
+        &session_id.to_string(),
+        session_id,
+        gate,
+    )?;
     Ok(ManagedWorkspace::Worktree(worktree))
 }
 
@@ -209,6 +217,40 @@ pub(crate) async fn provision_for_launch(
     worktree_requested: bool,
     launch_dir: LaunchDir,
     session_id: &ManagedSessionId,
+) -> anyhow::Result<ManagedWorkspace> {
+    provision_for_launch_gated(
+        origin_url,
+        base_path,
+        cwd,
+        worktree_requested,
+        launch_dir,
+        session_id,
+        &DiskGate::MeasureTarget,
+    )
+    .await
+}
+
+/// [`provision_for_launch`] with the disk gate's measurement source named
+/// explicitly (#7603).
+///
+/// Why: an in-process test of this function otherwise decides its verdict from
+/// how full the developer's volume is, against the threshold in the operator's
+/// own `~/.trusty-tools/trusty-mpm/config.yaml` — the six-test red the issue
+/// reports. `$HOME` cannot be redirected from a `tm`-bin test, so the
+/// measurement arrives as an argument instead.
+/// What: identical to [`provision_for_launch`] except that `gate` decides where
+/// the measurement comes from; the threshold and the decision are unchanged.
+/// Test: `provision_for_launch_explicit_request_creates_worktree`,
+/// `a_pinned_over_threshold_gate_refuses_a_launch_worktree`,
+/// `a_pinned_gate_keeps_a_launch_worktree_off_the_hosts_disk`.
+pub(crate) async fn provision_for_launch_gated(
+    origin_url: &str,
+    base_path: &Path,
+    cwd: &Path,
+    worktree_requested: bool,
+    launch_dir: LaunchDir,
+    session_id: &ManagedSessionId,
+    gate: &DiskGate,
 ) -> anyhow::Result<ManagedWorkspace> {
     let launch_root = super::guided::find_git_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
     // ADR-0037 (2026-08-17 clarification): "the project's main checkout" is the
@@ -262,6 +304,7 @@ pub(crate) async fn provision_for_launch(
         base_path,
         &main_checkout,
         session_id,
+        gate,
     )
     .await
     .map_err(|e| anyhow::anyhow!("failed to provision managed workspace: {e}"))
@@ -289,11 +332,18 @@ pub(crate) async fn provision_for_launch(
 /// `provision_for_fallback_other_projects_optout_does_not_leak`,
 /// `provision_for_launch_keeps_a_caller_resolved_placement`,
 /// `guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone`.
+///
+/// `gate` is the disk gate's measurement source (#7603). This path takes no
+/// ungated wrapper, because its only production caller —
+/// `guided_protected::launch_protected_workspace` — already receives the gate
+/// from `guided::fallback_protected`, which is where the `MeasureTarget` default
+/// is applied once for the whole fallback.
 pub(crate) async fn provision_for_fallback(
     registry_dir: &Path,
     origin_url: &str,
     git_root: &Path,
     session_id: &ManagedSessionId,
+    gate: &DiskGate,
 ) -> anyhow::Result<ManagedWorkspace> {
     let Some(gh) = trusty_common::github_path::parse_github_path(origin_url) else {
         eprintln!(
@@ -328,7 +378,7 @@ pub(crate) async fn provision_for_fallback(
         );
     }
 
-    let workspace = match provision(isolate, origin_url, &base, git_root, session_id).await {
+    let workspace = match provision(isolate, origin_url, &base, git_root, session_id, gate).await {
         Ok(w) => w,
         Err(e) => {
             eprintln!(

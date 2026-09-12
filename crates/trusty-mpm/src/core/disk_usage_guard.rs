@@ -278,6 +278,51 @@ pub fn measure(path: &Path) -> Option<MeasuredMount> {
     })
 }
 
+/// How a provisioning path obtains the measurement its disk gate applies.
+///
+/// Why (#7603): [`measure`] reads the REAL mount, and [`active_threshold`] reads
+/// the operator's REAL config under ambient `$HOME` — so an in-process test of
+/// any entry point above the gate decides its verdict from the developer's own
+/// machine. The managed-workspace suite passed 12764/0 and went red forty
+/// minutes later on identical code, once the host crossed the 90% the operator's
+/// `~/.trusty-tools/trusty-mpm/config.yaml` names. `$HOME` cannot be redirected
+/// out of that read from a `tm`-bin test — `env_isolation_tests.rs` bans writing
+/// it — so determinism has to arrive as an argument. This is the same seam
+/// [`check_measured`] and `create_session_worktree_measured` give the layer
+/// below (#7497), lifted to the entry points a test actually calls.
+/// What: [`Self::MeasureTarget`] is production — measure the mount the worktree
+/// would land on. [`Self::Pinned`] applies an already-taken measurement instead.
+/// It is NOT an off switch: the threshold still comes from the operator's
+/// config, a pinned over-threshold value refuses exactly as a real one does, and
+/// `Pinned(None)` is still the fail-closed unmeasurable case.
+/// Test: `a_pinned_gate_measures_nothing`,
+/// `the_default_gate_measures_the_real_mount`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum DiskGate {
+    /// Measure the mount the worktree would land on (production).
+    #[default]
+    MeasureTarget,
+    /// Apply this already-taken measurement instead of measuring.
+    Pinned(Option<MeasuredMount>),
+}
+
+impl DiskGate {
+    /// The measurement this gate applies to a worktree landing at `path`.
+    ///
+    /// Why: one place decides "measure or take what I was given", so no caller
+    /// can half-apply the injection.
+    /// What: [`measure`] for [`Self::MeasureTarget`]; the pinned value otherwise.
+    /// Test: `a_pinned_gate_measures_nothing`,
+    /// `the_default_gate_measures_the_real_mount`.
+    #[must_use]
+    pub fn measurement_for(&self, path: &Path) -> Option<MeasuredMount> {
+        match self {
+            Self::MeasureTarget => measure(path),
+            Self::Pinned(measured) => measured.clone(),
+        }
+    }
+}
+
 /// Gate the creation of a new worktree at `path` against an ALREADY-TAKEN
 /// measurement (fail closed).
 ///
