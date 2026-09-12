@@ -548,13 +548,23 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
         uses: dtolnay/rust-toolchain@stable
 
+      # `libdbus-1-dev` is this job's alone (#7466). The `features` lane enables
+      # `trusty-common/keyring-store`, and `keyring`'s Linux target section
+      # resolves that to `dbus-secret-service` -> `libdbus-sys`, whose build.rs
+      # pkg-config-probes `dbus-1 >= 1.6` and panics without the headers. macOS
+      # resolves `keyring/apple-native` instead and never compiles that chain, so
+      # the lane exits 0 locally and 101 on the runner: trusty-common failed to
+      # build, so rustdoc documented 2 crates and the gate failed closed with
+      # nine LANE-NOT-EXAMINED rows. No other job enables `keyring-store` — no
+      # crate depends on it — so no other apt list needs this.
       - name: Install system dependencies
         if: needs.changes.outputs.docs_only != 'true'
         run: |
           bash scripts/ci-apt-install.sh \
             build-essential \
             pkg-config \
-            libssl-dev
+            libssl-dev \
+            libdbus-1-dev
 
       # Its own cache key, for the same reason every other job has one: a doc
       # build's target dir is not interchangeable with clippy's or test's.

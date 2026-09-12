@@ -40,8 +40,11 @@
 #       Same bar as scripts/semver-checks-feature-exclusions.tsv, which carries
 #       the matching rows for the same features.
 #
-# The three Tauri GUI crates the gate excludes outright (trusty-mpm-gui,
-# trusty-code-gui, trusty-agents-ui) need no rows: they are never documented.
+# The four Tauri GUI crates the gate excludes outright (trusty-mpm-gui,
+# trusty-code-gui, trusty-agents-ui, trusty-audit-ui) need no rows: they are
+# never documented. trusty-audit-ui joined that list in #7466 — it needs
+# WebKit2GTK exactly as its three siblings do, and carrying a row for a crate
+# the run excludes is a claim about documentation that never happens.
 #
 # Regenerate the inventory this file must cover:
 #   cargo metadata --no-deps --format-version 1
@@ -78,7 +81,6 @@ LANE	features	trusty-search/candle,trusty-search/clustering,trusty-search/ner,tr
 # feature it enables is itself a declared feature and carries its own row, so
 # the coverage check reaches it either way.
 # ---------------------------------------------------------------------------
-NO-CFG	trusty-audit-ui	custom-protocol
 NO-CFG	trusty-common	embedder-bundled-ort
 NO-CFG	trusty-common	embedder-coreml
 NO-CFG	trusty-common	embedder-load-dynamic
