@@ -30,7 +30,10 @@ fn refresh_resume_compiled_prompt_writes_the_project_local_file() {
     const STALE: &str = "STALE-FROM-A-PREVIOUS-START";
     std::fs::write(&dest, STALE).expect("seed stale");
 
-    refresh_resume_compiled_prompt(tmp.path(), &id).expect("refresh succeeds");
+    // #7514: root-taking seam, so the fold lands under `root` and not in the
+    // operator's own `~/.trusty-mpm/usage/`.
+    let root = tempfile::tempdir().expect("framework root");
+    refresh_resume_compiled_prompt_in(root.path(), tmp.path(), &id).expect("refresh succeeds");
 
     let on_disk = std::fs::read_to_string(&dest).expect("readable");
     assert_ne!(
@@ -56,7 +59,9 @@ fn refresh_resume_compiled_prompt_reports_an_actionable_failure() {
     let dest = crate::core::instruction_pipeline::compiled_prompt_path(tmp.path(), &id.to_string());
     std::fs::create_dir_all(&dest).expect("plant a directory at the compiled path");
 
-    let msg = refresh_resume_compiled_prompt(tmp.path(), &id)
+    // #7514: root-taking seam — see the sibling test above.
+    let root = tempfile::tempdir().expect("framework root");
+    let msg = refresh_resume_compiled_prompt_in(root.path(), tmp.path(), &id)
         .expect_err("a failed compiled write must refuse the resume");
     assert!(
         msg.contains(&dest.display().to_string()),

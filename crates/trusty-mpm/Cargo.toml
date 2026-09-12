@@ -60,7 +60,11 @@ name = "trusty-mpm"
 # #7479 #7499 #7185 #7487 #7518 #7504): patch, version-only — 1.5.32 is
 # already published and this bump exists solely so `tm --version` identifies
 # the reinstalled build.
-version = "1.5.33"
+# 1.5.34 (#7514): patch — 1.5.33 is already published on crates.io and this PR
+# edits `src/**`, so the `PR version bump vs crates.io` gate (#4421) requires
+# the bump here. Patch because the change is a bug fix inside the existing
+# savings producer and compiled-prompt writer.
+version = "1.5.34"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

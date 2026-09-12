@@ -368,16 +368,50 @@ pub fn instructions_failure_message(path: &std::path::Path, source: &std::io::Er
 /// What: creates `dest`'s parent directory if absent, then writes `prompt`
 /// verbatim. Returns the underlying IO error unchanged; pair it with
 /// [`instructions_failure_message`] when surfacing to an operator.
-/// Test: `write_compiled_prompt_to_creates_parent_dirs`.
+///
+/// #7514: this write is PURE — it touches `dest` and nothing else. The
+/// instruction-compression savings row used to be recorded here, against
+/// [`crate::core::paths::FrameworkPaths::default`], which resolves under the
+/// operator's real home. That made the operator's ledger reachable from any
+/// unit test that wrote a compiled prompt into a tempdir: 228 of the 229
+/// `instruction-compression` rows on the owner's host were this function's own
+/// 13-byte fixture. Recording is now an explicit choice of the caller —
+/// [`write_compiled_prompt_and_record`] for a launch, or
+/// [`write_compiled_prompt_recording_in`] where the caller already holds the
+/// framework root.
+/// Test: `write_compiled_prompt_to_creates_parent_dirs`,
+/// `a_bare_compiled_write_records_no_savings_row`.
 pub fn write_compiled_prompt_to(dest: &std::path::Path, prompt: &str) -> std::io::Result<()> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(dest, prompt)?;
-    // #6958: this is the one choke point that knows both halves of the
-    // instruction fold, so the savings row is recorded here rather than at each
-    // of the three launch paths. Best-effort by contract — see the producer.
-    crate::core::savings_instructions::record_instruction_compression(dest, prompt);
+    std::fs::write(dest, prompt)
+}
+
+/// [`write_compiled_prompt_to`], then record the fold against `framework_root`.
+///
+/// Why (#6958, re-seamed by #7514): one choke point still knows both halves of
+/// the instruction fold, so the savings row is recorded here rather than at each
+/// launch path — but the LEDGER it lands in is now named by the caller instead
+/// of resolved from the process's home directory. `prepare_session_inner`
+/// already holds a [`crate::core::paths::FrameworkPaths`], so threading its root
+/// keeps a launch prepared under a temp root recording under that same root.
+/// What: the pure write, then
+/// [`crate::core::savings_instructions::record_instruction_compression_in`].
+/// Recording is best-effort by contract — a write failure returns before it, so
+/// no row can describe a prompt that never landed.
+/// Test: `a_recording_compiled_write_reaches_the_named_framework_root`.
+pub(crate) fn write_compiled_prompt_recording_in(
+    framework_root: &std::path::Path,
+    dest: &std::path::Path,
+    prompt: &str,
+) -> std::io::Result<()> {
+    write_compiled_prompt_to(dest, prompt)?;
+    crate::core::savings_instructions::record_instruction_compression_in(
+        framework_root,
+        dest,
+        prompt,
+    );
     Ok(())
 }
 
@@ -400,15 +434,44 @@ pub fn write_compiled_prompt_to(dest: &std::path::Path, prompt: &str) -> std::io
 /// the `effective_style` it just resolved (flag > config > manifest), which this
 /// helper hardcodes to `None`, and routing it through here would silently drop
 /// the operator's chosen output style from the compiled copy. All three still
-/// share the actual write via [`write_compiled_prompt_to`] and the same fatal
-/// policy; what differs is only which text they compose.
-/// What: composes the project-resolved prompt through the same seam the launcher
-/// uses, with no explicit output style, writes it to [`compiled_prompt_path`],
-/// and on failure returns the operator-facing string from
-/// [`instructions_failure_message`] — callers refuse the launch with it.
+/// share the actual write via [`write_compiled_prompt_recording_in`] and the
+/// same fatal policy; what differs is only which text they compose.
+/// What: [`refresh_compiled_prompt_in`] against
+/// [`crate::core::paths::FrameworkPaths::default`]'s root, which is correct for
+/// both callers because both are real launches on the operator's own machine.
+///
+/// PRECONDITION: `session_id` must be a session SCOPE — a managed session id or
+/// [`crate::core::harness_root::UNMANAGED_SESSION_SCOPE`] — because
+/// [`compiled_prompt_path`] uses it verbatim as a directory name and
+/// `savings_instructions::session_and_root` reads it back as the row's fallback
+/// key. Both production callers pass a `ManagedSessionId`'s string form.
 /// Test: `refresh_compiled_prompt_writes_the_project_local_file`,
 /// `refresh_compiled_prompt_reports_an_actionable_failure`.
 pub fn refresh_compiled_prompt(
+    project_dir: &std::path::Path,
+    session_id: &str,
+) -> Result<(), String> {
+    // #7514: a real launch, so the ambient framework root is the right ledger.
+    let root = crate::core::paths::FrameworkPaths::default().root;
+    refresh_compiled_prompt_in(&root, project_dir, session_id)
+}
+
+/// [`refresh_compiled_prompt`] against a caller-named framework root.
+///
+/// Why (#7514): the entry point above resolves its ledger from the process home
+/// directory, so the two unit tests that drive it wrote a savings row — or a
+/// `no-fold-warned` marker — into the operator's own `~/.trusty-mpm/usage/`.
+/// Naming the root is what lets those tests stay on a tempdir without mutating
+/// `$HOME`.
+/// What: composes the project-resolved prompt through the same seam the launcher
+/// uses, with no explicit output style, writes it to [`compiled_prompt_path`]
+/// and records the fold against `framework_root`; on failure returns the
+/// operator-facing string from [`instructions_failure_message`] — callers refuse
+/// the launch with it.
+/// Test: `refresh_compiled_prompt_writes_the_project_local_file`,
+/// `refresh_compiled_prompt_reports_an_actionable_failure`.
+pub fn refresh_compiled_prompt_in(
+    framework_root: &std::path::Path,
     project_dir: &std::path::Path,
     session_id: &str,
 ) -> Result<(), String> {
@@ -419,7 +482,7 @@ pub fn refresh_compiled_prompt(
         native,
     );
     let dest = compiled_prompt_path(project_dir, session_id);
-    write_compiled_prompt_to(&dest, &prompt)
+    write_compiled_prompt_recording_in(framework_root, &dest, &prompt)
         .map_err(|source| instructions_failure_message(&dest, &source))
 }
 
