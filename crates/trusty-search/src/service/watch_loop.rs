@@ -125,9 +125,11 @@ pub(crate) fn spawn_watch_loop_with_registry(
     registry: Option<crate::core::registry::IndexRegistry>,
 ) -> Result<WatcherTask> {
     let (tx, mut rx) = mpsc::unbounded_channel::<WatchEvent>();
-    // Retained so a failed dropped-event reconcile can re-arm itself. See
-    // `watch_rescan::schedule_rescan_retry`.
-    let retry_tx = tx.clone();
+    // Retained so a failed dropped-event reconcile — and an undecidable live
+    // admission — can re-arm on this loop's own channel. The gate is what keeps
+    // the two callers to one outstanding timer (#7396). See
+    // `watch_rescan::RescanGate`.
+    let rescan_gate = crate::service::watch_rescan::RescanGate::new(tx.clone());
     let watcher = FileWatcher::start(root_path.to_path_buf(), tx)?;
 
     // Canonicalize the root exactly as the reindex walker does (issue #402).
@@ -155,6 +157,11 @@ pub(crate) fn spawn_watch_loop_with_registry(
                 // nothing will redeliver them, so the changed paths can only be
                 // re-derived from disk. Discarding this is a silent data loss.
                 WatchEvent::Rescan => {
+                    // #7396: this pass discharges whatever armed it, so the next
+                    // undecidable admission may arm again. Disarming here rather
+                    // than after the pass keeps a defer raised DURING the pass —
+                    // which the walk may already have gone past — able to do so.
+                    rescan_gate.disarm();
                     // #6524: no single path is implicated, so the feed row says
                     // "the whole tree" rather than naming a file it cannot know.
                     file_events
@@ -187,10 +194,7 @@ pub(crate) fn spawn_watch_loop_with_registry(
                         }
                         RescanFollowUp::Retry { attempt } => {
                             rescan_failures = attempt;
-                            crate::service::watch_rescan::schedule_rescan_retry(
-                                retry_tx.clone(),
-                                attempt,
-                            );
+                            rescan_gate.arm_retry(attempt);
                             Some(attempt)
                         }
                     };
@@ -256,8 +260,9 @@ pub(crate) fn spawn_watch_loop_with_registry(
                             &indexed_files,
                             // #7396: an admission the filesystem could not
                             // answer defers to a rescan rather than deleting
-                            // the file's chunks.
-                            Some(&retry_tx),
+                            // the file's chunks. The gate coalesces a batch of
+                            // them into one pass.
+                            Some(&rescan_gate),
                         )
                         .await;
                     } else {

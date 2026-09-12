@@ -1,9 +1,8 @@
 //! Shared initial-walk and live-event admission (#7379).
 use crate::core::registry::IndexHandle;
 use crate::service::walker::{self, walk_source_files_with_options, WalkOptions};
-use crate::service::watcher::WatchEvent;
+use crate::service::watch_rescan::RescanGate;
 use std::path::{Path, PathBuf};
-use tokio::sync::mpsc::UnboundedSender;
 
 pub(crate) fn walk(handle: &IndexHandle) -> walker::WalkResult {
     let include_paths: Vec<PathBuf> = if handle.include_paths.is_empty() {
@@ -176,26 +175,29 @@ pub(crate) fn admits(handle: &IndexHandle, path: &Path) -> Admission {
 /// Why (#7396): the alternative at an undecidable admission is to guess, and
 /// the wrong guess deletes data. A rescan re-derives the path's state from
 /// disk, which is the recovery the dropped-event path already uses.
-/// What: warns with the reason, then re-arms through
-/// [`crate::service::watch_rescan::schedule_rescan_retry`] at the base backoff.
-/// Consecutive-failure backoff belongs to the rescan arm, which owns that
-/// counter; a deferred save is a fresh request.
-/// Test: `a_transient_canonicalize_failure_keeps_chunks_and_schedules_a_rescan`.
+/// What: warns with the reason, then asks [`RescanGate::request`] for a pass.
+/// The gate, not this function, decides whether a timer is armed: one cause —
+/// a mount that went away, a directory the daemon lost access to — answers
+/// every event in a batch undecidably, and one full-tree reconcile settles all
+/// of them, so a request made while one is already outstanding is dropped
+/// (#7396). Consecutive-failure backoff belongs to the rescan arm, which owns
+/// that counter; a deferred save is a fresh request.
+/// Test: `a_transient_canonicalize_failure_keeps_chunks_and_schedules_a_rescan`,
+/// `three_undecidable_events_schedule_exactly_one_rescan`.
 fn defer_to_rescan(
     index_id: &crate::core::registry::IndexId,
     path: &Path,
     reason: &str,
-    retry_tx: Option<&UnboundedSender<WatchEvent>>,
+    rescan: Option<&RescanGate>,
 ) {
+    let armed = rescan.is_some_and(RescanGate::request);
     tracing::warn!(
         index_id = %index_id,
         path = %path.display(),
         reason,
-        "live admission could not be decided — index left untouched, scheduling a rescan",
+        armed,
+        "live admission could not be decided — index left untouched, deferring to a rescan",
     );
-    if let Some(tx) = retry_tx {
-        crate::service::watch_rescan::schedule_rescan_retry(tx.clone(), 1);
-    }
 }
 
 /// The watched root in the two forms the relative-path fallback needs.
@@ -216,7 +218,8 @@ pub(crate) struct WatchRoots<'a> {
 /// What: the three [`Admission`] states map to index, remove, and defer; only
 /// the third leaves the index untouched and re-arms a rescan.
 /// Test: `a_transient_canonicalize_failure_keeps_chunks_and_schedules_a_rescan`,
-/// `live_admission_observes_registry_replacement`.
+/// `live_admission_observes_registry_replacement`,
+/// `three_undecidable_events_schedule_exactly_one_rescan`.
 pub(crate) async fn apply_modified(
     registry: &crate::core::registry::IndexRegistry,
     index_id: &crate::core::registry::IndexId,
@@ -224,12 +227,12 @@ pub(crate) async fn apply_modified(
     roots: WatchRoots<'_>,
     indexer: &std::sync::Arc<tokio::sync::RwLock<crate::core::CodeIndexer>>,
     indexed_files: &crate::service::IndexedFiles,
-    retry_tx: Option<&UnboundedSender<WatchEvent>>,
+    rescan: Option<&RescanGate>,
 ) {
     let Some(handle) = registry.get(index_id) else {
         // #7396: an absent handle is a failed pass, not a reason to drop the
         // event — the ruling `watch_rescan::reconcile_registered` already makes.
-        defer_to_rescan(index_id, path, "index is not registered", retry_tx);
+        defer_to_rescan(index_id, path, "index is not registered", rescan);
         return;
     };
     match admits(&handle, path) {
@@ -256,7 +259,7 @@ pub(crate) async fn apply_modified(
             .await;
         }
         Admission::Undetermined => {
-            defer_to_rescan(index_id, path, "path could not be resolved", retry_tx);
+            defer_to_rescan(index_id, path, "path could not be resolved", rescan);
         }
     }
 }
@@ -267,7 +270,9 @@ mod tests {
         registry::{IndexId, IndexRegistry},
         CodeIndexer,
     };
+    use crate::service::watcher::WatchEvent;
     use std::sync::Arc;
+    use std::time::Duration;
     use tokio::sync::RwLock;
     #[tokio::test]
     async fn live_admission_observes_registry_replacement() {
@@ -493,7 +498,17 @@ mod tests {
         );
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WatchEvent>();
-        apply_modified(&registry, &id, &target, roots, &indexer, &files, Some(&tx)).await;
+        let gate = RescanGate::new(tx);
+        apply_modified(
+            &registry,
+            &id,
+            &target,
+            roots,
+            &indexer,
+            &files,
+            Some(&gate),
+        )
+        .await;
         assert!(
             !indexer
                 .read()
@@ -528,6 +543,96 @@ mod tests {
             ),
             Admission::Excluded,
             "a path that is definitively absent still takes the removal branch"
+        );
+    }
+
+    /// Why (#7396): `defer_to_rescan` armed a timer once per undecidable event,
+    /// outside the `RescanFollowUp` decision that owns scheduling. The causes
+    /// are not per-file — a mount that answered with an error, a directory the
+    /// daemon lost access to — so one batch answers undecidably for every file
+    /// under it, and the watch task paid N detached timers and N full-tree
+    /// reconciles for one cause that a single pass settles.
+    ///
+    /// The fixture is three self-referential symlinks, the same deterministic
+    /// `ELOOP` shape `a_transient_canonicalize_failure_keeps_chunks_and_
+    /// schedules_a_rescan` uses, standing in for three files under one broken
+    /// subtree.
+    ///
+    /// Against `3c7dbeaec` this fails at the count: three `Rescan` events are
+    /// waiting instead of one.
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn three_undecidable_events_schedule_exactly_one_rescan() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("notes")).unwrap();
+
+        let id = IndexId::new("synthetic");
+        let indexer = Arc::new(RwLock::new(CodeIndexer::new("synthetic", &root)));
+        let registry = IndexRegistry::new();
+        let mut handle = IndexHandle::bare(id.clone(), indexer.clone(), root.clone());
+        handle.include_paths = vec![root.join("notes")];
+        handle.extensions = vec!["md".into()];
+        registry.register(handle);
+        let files = crate::service::IndexedFiles::new();
+        let roots = WatchRoots {
+            canonical: &root,
+            raw: &root,
+        };
+
+        let targets: Vec<PathBuf> = ["maya.md", "atlas.md", "orion.md"]
+            .iter()
+            .map(|name| {
+                let target = root.join("notes").join(name);
+                std::os::unix::fs::symlink(name, &target).unwrap();
+                assert_eq!(
+                    admits(&registry.get(&id).unwrap(), &target),
+                    Admission::Undetermined,
+                    "the fixture must actually produce an undecidable admission"
+                );
+                target
+            })
+            .collect();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WatchEvent>();
+        let gate = RescanGate::new(tx);
+        for target in &targets {
+            apply_modified(&registry, &id, target, roots, &indexer, &files, Some(&gate)).await;
+        }
+
+        // Sleeping past the base backoff on a paused clock auto-advances to each
+        // armed timer in turn and lets its detached task send, so draining after
+        // it sees every `Rescan` that was armed — not just the first, which is
+        // what makes the count able to fail.
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        let mut rescans = 0usize;
+        while let Ok(event) = rx.try_recv() {
+            assert_eq!(event, WatchEvent::Rescan, "the gate arms nothing else");
+            rescans += 1;
+        }
+        assert_eq!(
+            rescans, 1,
+            "three undecidable events must coalesce into one full-tree reconcile"
+        );
+
+        // The pass that discharges the request re-opens the gate: a later
+        // undecidable event is a new cause, not a duplicate of the settled one.
+        gate.disarm();
+        apply_modified(
+            &registry,
+            &id,
+            &targets[0],
+            roots,
+            &indexer,
+            &files,
+            Some(&gate),
+        )
+        .await;
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some(WatchEvent::Rescan),
+            "a defer after the pass must arm again"
         );
     }
 }

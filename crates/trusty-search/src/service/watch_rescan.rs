@@ -47,6 +47,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -494,19 +495,86 @@ pub(crate) fn rescan_follow_up(
 /// layer up. Re-queueing keeps the loop in the "not yet reconciled" state until
 /// a pass actually succeeds.
 ///
-/// What: spawns a detached timer that sends one `Rescan`. Called once per
-/// [`RescanFollowUp::Retry`] and never otherwise, so retries cannot stack. If
-/// the watch loop has been torn down the send fails against a closed channel
-/// and the timer simply expires.
+/// What: spawns a detached timer that sends one `Rescan`. If the watch loop has
+/// been torn down the send fails against a closed channel and the timer simply
+/// expires.
+///
+/// Every watch-task caller goes through [`RescanGate`], which is what keeps
+/// retries from stacking (#7396). The gate admits two callers and treats them
+/// differently: a [`RescanFollowUp::Retry`] arms unconditionally, because its
+/// `attempt` carries the backoff and supersedes any coarser timer; a deferred
+/// live admission arms only when nothing is already armed. A batch of N
+/// undecidable events therefore costs one timer and one full-tree reconcile,
+/// not N of each.
 ///
 /// Test: `rescan_partial_pass_schedules_a_retry_that_fires`,
-/// `rescan_retry_backoff_grows_and_saturates`.
+/// `rescan_retry_backoff_grows_and_saturates`,
+/// `crate::service::index_admission::tests::three_undecidable_events_schedule_exactly_one_rescan`.
 pub fn schedule_rescan_retry(tx: UnboundedSender<WatchEvent>, consecutive_failures: u32) {
     let delay = retry_backoff(consecutive_failures);
     tokio::spawn(async move {
         tokio::time::sleep(delay).await;
         let _ = tx.send(WatchEvent::Rescan);
     });
+}
+
+/// The one rescan a watch task may have outstanding, and the channel to arm it.
+///
+/// Why (#7396): the undecidable-admission path in
+/// [`crate::service::index_admission::apply_modified`] asks for a rescan once
+/// per delivered event, and a broken mount or a directory the daemon lost
+/// access to answers every event in a batch that way. Arming a timer per event
+/// would put N detached timers and N full-tree reconciles on one watch task for
+/// one cause — and a full-tree reconcile is the most expensive thing this
+/// module does.
+/// What: one flag per watch task, owned by the watch loop. The loop clears it as
+/// it takes a [`WatchEvent::Rescan`] off its channel, so a defer raised while a
+/// pass is running can still arm the next one.
+/// Test: `crate::service::index_admission::tests::three_undecidable_events_schedule_exactly_one_rescan`.
+pub(crate) struct RescanGate {
+    tx: UnboundedSender<WatchEvent>,
+    armed: AtomicBool,
+}
+
+impl RescanGate {
+    /// Why: the gate arms on the watch loop's own channel, so it holds a clone.
+    pub(crate) fn new(tx: UnboundedSender<WatchEvent>) -> Self {
+        Self {
+            tx,
+            armed: AtomicBool::new(false),
+        }
+    }
+
+    /// Arm the retry a [`RescanFollowUp::Retry`] decision ordered.
+    ///
+    /// Why: `attempt` is the consecutive-failure count that drives
+    /// [`retry_backoff`], and a failed pass must always be re-armed, so this
+    /// caller is never suppressed.
+    /// What: schedules, then marks the gate armed so defers raised before it
+    /// fires fold into it rather than adding a second timer.
+    pub(crate) fn arm_retry(&self, attempt: u32) {
+        self.armed.store(true, Ordering::SeqCst);
+        schedule_rescan_retry(self.tx.clone(), attempt);
+    }
+
+    /// Ask for a rescan on behalf of an admission the filesystem could not decide.
+    ///
+    /// What: arms at the base delay only when nothing is armed, and reports
+    /// whether this call was the one that armed it. A deferred save is a fresh
+    /// request rather than a consecutive failure, so the attempt number stays 1;
+    /// the backoff counter belongs to the reconcile arm that owns it.
+    pub(crate) fn request(&self) -> bool {
+        if self.armed.swap(true, Ordering::SeqCst) {
+            return false;
+        }
+        schedule_rescan_retry(self.tx.clone(), 1);
+        true
+    }
+
+    /// Let the next request arm again. Called as a `Rescan` leaves the channel.
+    pub(crate) fn disarm(&self) {
+        self.armed.store(false, Ordering::SeqCst);
+    }
 }
 
 /// Exponential backoff for reconcile retries, saturating at [`RETRY_MAX`].
