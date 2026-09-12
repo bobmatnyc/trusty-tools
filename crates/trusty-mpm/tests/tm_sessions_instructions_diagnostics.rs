@@ -18,17 +18,16 @@
 //!
 //! Test: `cargo test -p trusty-mpm --test tm_sessions_instructions_diagnostics`.
 
-use std::process::Command;
+mod common;
 
 /// Run `tm` with `args` and `RUST_LOG`, returning `(stdout, stderr)` separately.
 ///
 /// Capturing the two streams independently is the whole point: this binary's
 /// daemon and MCP modes need stdout free for JSON-RPC framing, and this command
 /// prints the resolved prompt to stdout. A diagnostic that reached stdout would
-/// corrupt both.
+/// corrupt both. `common::tm_command` confines the child's `$HOME` (#7568).
 fn run_tm(args: &[&str], rust_log: Option<&str>) -> (String, String) {
-    let bin = env!("CARGO_BIN_EXE_tm");
-    let mut cmd = Command::new(bin);
+    let mut cmd = common::tm_command();
     cmd.args(args);
     match rust_log {
         Some(value) => cmd.env("RUST_LOG", value),

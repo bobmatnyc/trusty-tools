@@ -7,7 +7,7 @@
 //! stdin-read → rewrite → stdout-print path end to end through the real
 //! binary, which is the behavior Claude Code will actually depend on. This
 //! file closes that gap.
-//! What: Runs the built `tm` binary (`CARGO_BIN_EXE_tm`) as
+//! What: Runs the built `tm` binary (via `common::tm_command`) as
 //! `tm --url http://127.0.0.1:1 hook` with `CLAUDE_HOOK_EVENT=PreToolUse` and
 //! a `{"tool_name":"Bash","tool_input":{"command":"..."}}` stdin payload,
 //! then asserts the printed `hookSpecificOutput.updatedInput.command` matches
@@ -27,6 +27,8 @@
 //! consistent with the documented protocol, not a substitute for testing
 //! against a real running Claude Code session.
 
+mod common;
+
 use std::io::Write;
 
 /// What `tm hook` rewrites `cargo test` into.
@@ -38,13 +40,15 @@ use std::io::Write;
 /// spelling is repeated here — the unit tests build theirs from the producer,
 /// which is what keeps the two from drifting apart unnoticed.
 const EXPECTED_CARGO_TEST_REWRITE: &str = "{ cargo test; printf '\\n__tm_compress_exit=%s__\\n' \"$?\"; } | tm compress --tool \"cargo test\"";
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// Spawn `tm hook` with the given `CLAUDE_HOOK_EVENT` and stdin JSON,
 /// returning stdout as a string.
+///
+/// The command comes from `common::tm_command`, so the child runs against a
+/// scratch `$HOME` (#7568).
 fn run_hook_with_stdin(event: &str, stdin_json: &str) -> String {
-    let bin = env!("CARGO_BIN_EXE_tm");
-    let mut child = Command::new(bin)
+    let mut child = common::tm_command()
         .args(["--url", "http://127.0.0.1:1", "hook"])
         .env("CLAUDE_HOOK_EVENT", event)
         .env("CLAUDE_SESSION_ID", "test-session")
@@ -144,8 +148,7 @@ fn hook_rewrite_stdout_contains_only_the_json_object() {
 /// live hooks reference (confirmed 2026-07-03): Claude Code does not set
 /// those as environment variables for hook subprocesses.
 fn run_hook_with_stdin_only(stdin_json: &str) -> String {
-    let bin = env!("CARGO_BIN_EXE_tm");
-    let mut child = Command::new(bin)
+    let mut child = common::tm_command()
         .args(["--url", "http://127.0.0.1:1", "hook"])
         .env_remove("CLAUDE_HOOK_EVENT")
         .env_remove("CLAUDE_SESSION_ID")

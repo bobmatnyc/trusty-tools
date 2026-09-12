@@ -5,20 +5,16 @@
 //! on every primary binary; this asserts the mount actually wired up HERE by
 //! driving the real built binary — `config --help` parses and `config keys
 //! list` runs fully offline (no key required, no value is ever printed).
-//! What: spawns the binary via the Cargo-provided `CARGO_BIN_EXE_*` path and
-//! checks the two offline invocations exit success with the expected surface
-//! text.
+//! What: spawns the real built binary through `common::tm_command` — which
+//! confines the child to a scratch `$HOME` (#7568) — and checks the two offline
+//! invocations exit success with the expected surface text.
 //! Test: this file IS the test.
 
-use std::process::Command;
-
-/// Absolute path to the freshly built binary (Cargo sets this for integration
-/// tests). Using it guarantees we exercise the real mounted CLI, not a stub.
-const BIN: &str = env!("CARGO_BIN_EXE_tm");
+mod common;
 
 #[test]
 fn config_help_advertises_keys_feature() {
-    let out = Command::new(BIN)
+    let out = common::tm_command()
         .args(["config", "--help"])
         .output()
         .expect("spawn `config --help`");
@@ -36,7 +32,7 @@ fn config_help_advertises_keys_feature() {
 
 #[test]
 fn config_keys_list_runs_offline() {
-    let out = Command::new(BIN)
+    let out = common::tm_command()
         .args(["config", "keys", "list"])
         .output()
         .expect("spawn `config keys list`");

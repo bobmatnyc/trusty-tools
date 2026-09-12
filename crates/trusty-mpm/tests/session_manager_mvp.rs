@@ -10,6 +10,8 @@
 //! cache-hit test proving the LLM is skipped on repeated identical content.
 //! Test: this file IS the test; run with `cargo test -p trusty-mpm`.
 
+mod common;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -1176,8 +1178,8 @@ async fn front_gate_answer_unblocks_spawn() {
 /// to exit 75. Pointing the command at a dead loopback port forces the transport
 /// (unreachable) branch deterministically without standing up a daemon.
 /// What: spawns `tm --url http://127.0.0.1:<dead> sessions prune-idle --json` and
-/// asserts the process exits with status code 75. Uses `CARGO_BIN_EXE_tm`
-/// (set by Cargo for integration tests) so no extra dev-dependency is needed.
+/// asserts the process exits with status code 75. The command comes from
+/// `common::tm_command_in`, so no extra dev-dependency is needed.
 /// A hermetic HOME is planted with a lock file that anchors the lock-file
 /// fallback in `resolve_daemon_url_probing` (#1731) to the same dead port,
 /// preventing a live daemon on the default port from intercepting resolution.
@@ -1199,8 +1201,6 @@ async fn front_gate_answer_unblocks_spawn() {
 /// Test: this test.
 #[test]
 fn cli_prune_idle_unreachable_exit_code() {
-    use std::process::Command;
-
     // Plant a hermetic HOME so `resolve_daemon_url_probing` (#1731) cannot fall
     // back to a real daemon's `~/.trusty-mpm/daemon.lock`. The fake lock file
     // points at the same dead port with our PID (alive) so the staleness check
@@ -1218,8 +1218,9 @@ fn cli_prune_idle_unreachable_exit_code() {
 
     // 127.0.0.1:1 is a reserved/dead port: connecting there fails fast with a
     // transport error, which is exactly the SM-unavailable (exit 75) path.
-    let bin = env!("CARGO_BIN_EXE_tm");
-    let output = Command::new(bin)
+    // #7568: `tm_command_in` pins that same hermetic HOME on the child and
+    // strips the rest of the operator's state pointers with it.
+    let output = common::tm_command_in(fake_home.path())
         .args([
             "--url",
             "http://127.0.0.1:1",
@@ -1227,7 +1228,6 @@ fn cli_prune_idle_unreachable_exit_code() {
             "prune-idle",
             "--json",
         ])
-        .env("HOME", fake_home.path())
         .output()
         .expect("spawn tm binary");
 
