@@ -166,6 +166,9 @@ substitutes as the reliable spelling rather than as a workaround for one shape.
 | `cd <worktree> && git diff …` | `git -C <absolute worktree path> diff …` |
 | a git command wrapped in the redirect-then-`echo` gate idiom | run the git command bare, one per Bash call |
 | a pathspec whose basename starts `tm-`, or a `$(git …)` substitution as a pathspec | quote a glob: `git --no-pager diff -- 'crates/*/src/assets/skills/tm-capa*'` |
+| `git checkout HEAD -- <paths>` | `git restore --source=HEAD --staged --worktree <paths>` |
+| a `grep` pattern with no `git` in it at all — `grep -n caller_session <file>` refused, `grep -n 'caller' <same file>` allowed, same file both times | re-spell the pattern shorter, or read the file with the Read tool instead |
+| `gh pr create` / `tm pr open` refused because the PR body text carries an env-sample filename substring (a dotenv-style `.example` suffix) | reword the body text to avoid that literal substring, or pass the body via `--body-file <path>` |
 
 ### Running a script or an interpreter
 
@@ -176,6 +179,8 @@ substitutes as the reliable spelling rather than as a workaround for one shape.
 | `python3 - <<'PY'`, `cat >> <file> <<'EOF'`, a heredoc piped into a runner | the Write tool, or Edit for a multi-hunk change |
 | `node -e` whose script path is built from a variable | a literal path |
 | an `awk` program over a log file | `grep` |
+| `grep -n <pattern> <file>` | multi-file/line-number `grep` results are unreliable here — read the file with the Read tool and search visually, or narrow to the one line with `sed -n '<N>p' <file>` on a literal address |
+| a helper script written with the Write tool to the scratchpad directory, then run from there (`python3 <scratchpad>/name.py`) — refused even quoted, because the scratchpad sits outside the worktree | write the script INSIDE the worktree with the Write tool and invoke it as `./name.py`, not from the scratchpad path |
 
 This repo's docs spell every gate `bash scripts/<name>.sh`, so the first row
 above applies to the whole test ladder, not only to the line-cap check.
@@ -191,6 +196,9 @@ above applies to the whole test ladder, not only to the line-cap check.
 | `export VAR=$PWD/… && cargo …`, `CARGO_TARGET_DIR=$PWD/… cargo …` | spell the absolute path literally in the assignment |
 | `$(pgrep …)` or any command substitution supplying an argument | a literal value, captured in a previous call |
 | an argument whose TEXT contains `git` — a grep pattern, a `perl -pi` regex, a filename | none; re-spell the pattern, or use the Write-a-script route |
+| a directory argument with a trailing `/` (`find crates/<crate>/ -name …`) | drop the trailing slash: `find crates/<crate> -name …` |
+| a pattern or path containing the literal token `worktree` (`grep -n worktree <file>`) | re-spell around the literal token, or read the file with the Read tool |
+| `grep` over more than one file (`grep -rn <pattern> <dir1> <dir2>`, or a glob matching several files) | one `grep` call per file, or `git grep -l <pattern>` to list matches first |
 
 One reported shape is refused HERE too, for a reason of our own: `$'…'` quoting
 (`grep -n $'\tfixture' README.md`). The guard's lexer cannot decode it, so it

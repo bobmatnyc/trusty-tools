@@ -137,6 +137,12 @@ Use: think/deepthink for analysis
 Return: Approval status with specific recommendations
 ```
 
+Both `code-analyzer` and `code-critic` run the Fail-Open Check
+(`code-review-standards`) against every failure branch touched, and name
+which of its three outcomes each branch lands in: fail-open (defect),
+fail-closed (correct), or reported degradation — the failure carried to the
+caller in a tested response field (also correct, distinct from fail-open).
+
 Decision: APPROVED → Implementation. NEEDS_IMPROVEMENT → back to Research.
 BLOCKED → escalate to the user.
 
@@ -148,7 +154,11 @@ described below. Skip only for docs-only/CI-only changes.
 The gate itself is `tm-verification-protocols`.
 
 **Phase 5 — Documentation** (`documentation`). Skipped for an internal refactor
-with no public API change.
+with no public API change. A spec edit driven by an owner ruling carries a
+dated cross-reference at the change site — `// <date>: <owner ruling
+summary>, see #<DOC-or-issue>` — mirroring the `// #NNNN:` ticket-attribution
+convention for code. A spec change from an owner ruling with no dated
+cross-reference fails review.
 
 ### Running the Phases
 

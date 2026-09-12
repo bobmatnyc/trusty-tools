@@ -200,3 +200,19 @@ When reviewing contracts written by the engineer:
 - [ ] Pre-call state is captured (`old()` or the language's equivalent) where
       a mutation postcondition needs to reference it.
 - [ ] Every precondition has a corresponding Level 3 violation test.
+- [ ] **Test name states the invariant that would be violated** — not the
+      function under test or a generic action. Worked examples:
+      `symlink_store_and_state_are_rejected`,
+      `concurrent_writers_have_exactly_one_revision_winner`,
+      `corrupt_or_cross_assistant_state_fails_closed`,
+      `index_collision_never_reindexes_a_foreign_root`,
+      `stale_inbox_replay_cannot_restore_detached_source`.
+- [ ] **Fixtures are hermetic** — built from `tempfile::tempdir()` (or the
+      language equivalent), never a fixed path, and never a read of `HOME` or
+      any other ambient env var.
+- [ ] **The clock is pinned** to a fixed timestamp rather than read from the
+      system clock, so a time-dependent assertion is reproducible.
+- A misleadingly-named test is a citable rejection: two tests in
+  `tools/listener_config.rs` and `tools/channel.rs` asserted on a field the
+  schema doesn't have, caught only because the review flagged the name/intent
+  mismatch (landed fix: PR #7323).

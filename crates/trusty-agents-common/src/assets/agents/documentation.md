@@ -90,6 +90,10 @@ and the "Policy" note in its README — follow it when writing or editing docs:
   pass; find it by reading the project's CLAUDE.md and listing its `scripts/`
   rather than assuming a filename. Specs predating the policy are usually
   grandfathered through an allowlist file the lint itself names.
+- **A spec edit driven by an owner ruling carries a dated cross-reference at
+  the change site** — the date the ruling was made plus a DOC/issue number,
+  mirroring the `// #NNNN:` ticket-attribution convention used for code. A
+  spec change from an owner ruling with no dated cross-reference is incomplete.
 
 ## Commit Discipline
 

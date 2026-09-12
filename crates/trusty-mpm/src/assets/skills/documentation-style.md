@@ -66,6 +66,21 @@ pub fn my_function() { … }
 pub fn cwd(&self) -> &Path { … }
 ```
 
+**Two `///` continuation pitfalls compile clean but fail a separate gate:**
+
+- A blank `///` line followed by an indented continuation line compiles as a
+  rustdoc doctest — rustdoc reads the indented block as a code fence, not
+  prose, and the crate's test suite then fails with `` unknown start of token:
+  ` `` instead of a doc build. Never follow a blank `///` line with an
+  indented continuation. Fixed worked example:
+  `crates/trusty-common/src/host_metrics.rs::mount_for_path` — its `Why:`/
+  `What:` continuation lines run on with no blank line inserted.
+- `Test:` placed directly after a numbered or bulleted list in `What:` fails
+  `clippy::doc_lazy_continuation` under `-D warnings` ("doc list item without
+  indentation"). Insert a blank `///` line between the list and `Test:`.
+  Fixed worked example:
+  `crates/trusty-mpm/src/bin/tm/commands/pm_guard_secret_read.rs:967-969`.
+
 **Never fabricate a spec link.** Add `# Spec References` (inline) or
 `spec_refs:` (Markdown frontmatter) only when a spec genuinely governs the
 item. An item with no governing spec simply omits the block — that is the
