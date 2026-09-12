@@ -63,28 +63,22 @@ fn a_malformed_project_config_falls_through_to_the_host() {
 }
 
 #[test]
-fn both_addenda_name_the_extraction_heading() {
+fn the_addendum_names_the_extraction_heading() {
     assert!(
         PM_ADDENDUM.contains(FEEDBACK_HEADING),
         "the PM addendum must name the heading the hook extracts"
     );
-    assert!(
-        AGENT_ADDENDUM.contains(FEEDBACK_HEADING),
-        "the agent addendum must name the heading the hook extracts"
-    );
 }
 
-/// An agent never dispatches ("No Subagent Fan-Out"), so its addendum must not
-/// tell it to pass the request down.
+/// 🔴 A dispatched agent is asked through the PM's own brief, never through a
+/// second injection at agent deploy. The pass-it-down clause is therefore the
+/// only thing that carries the request past the PM, and dropping it would
+/// silently reduce the feature to PM-only.
 #[test]
-fn agent_addendum_does_not_ask_an_agent_to_dispatch() {
-    assert!(
-        !AGENT_ADDENDUM.contains("dispatch brief you send"),
-        "the agent addendum must not carry the PM's pass-it-down clause"
-    );
+fn the_addendum_asks_the_pm_to_pass_the_request_down() {
     assert!(
         PM_ADDENDUM.contains("dispatch brief you send"),
-        "the PM addendum must carry it"
+        "the PM addendum must tell the PM to append the request to every brief"
     );
 }
 
@@ -96,16 +90,6 @@ fn pm_addendum_is_separated_from_the_prompt_it_follows() {
         "the addendum must open with the section separator, got {addendum:?}"
     );
     assert!(addendum.contains(FEEDBACK_HEADING));
-}
-
-#[test]
-fn agent_addendum_is_separated_from_the_body_it_follows() {
-    let addendum = agent_addendum();
-    assert!(addendum.starts_with(crate::core::instruction_pipeline::SECTION_SEPARATOR));
-    assert!(
-        addendum.ends_with('\n'),
-        "a composed agent file must end with a newline"
-    );
 }
 
 /// 🔴 THE OFF CASE for the PM prompt. Fails on any implementation that appends
@@ -132,31 +116,13 @@ fn pm_prompt_carries_the_addendum_when_the_flag_is_on() {
     assert!(got.contains(FEEDBACK_HEADING), "the addendum is appended");
 }
 
-/// 🔴 THE OFF CASE for the agent deploy. `None` is the byte-identical
-/// pre-#7688 path through `deploy_agents_filtered_with_suffix`.
-#[test]
-fn agent_suffix_is_none_when_the_flag_is_off() {
-    let tmp = project_with("prompt_self_improvement = false\n");
-    assert_eq!(agent_deploy_suffix(tmp.path()), None);
-}
-
-#[test]
-fn agent_suffix_is_the_addendum_when_the_flag_is_on() {
-    let tmp = project_with("prompt_self_improvement = true\n");
-    let suffix = agent_deploy_suffix(tmp.path()).expect("a suffix");
-    assert!(suffix.contains(FEEDBACK_HEADING));
-    assert_eq!(suffix, agent_addendum());
-}
-
-/// Both addenda stay short. The feature costs every response five lines of
+/// The addendum stays short. The feature costs every response five lines of
 /// output; it must not also cost the prompt a page of input.
 #[test]
-fn both_addenda_are_short() {
-    for (name, text) in [("pm", PM_ADDENDUM), ("agent", AGENT_ADDENDUM)] {
-        assert!(
-            text.lines().count() <= 12,
-            "the {name} addendum is {} lines; keep it under 12",
-            text.lines().count()
-        );
-    }
+fn the_addendum_is_short() {
+    assert!(
+        PM_ADDENDUM.lines().count() <= 12,
+        "the PM addendum is {} lines; keep it under 12",
+        PM_ADDENDUM.lines().count()
+    );
 }

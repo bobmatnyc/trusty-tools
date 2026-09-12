@@ -80,3 +80,69 @@ fn indents_a_multi_line_body() {
     assert!(out.contains("    line one\n"), "got {out}");
     assert!(out.contains("    line two\n"), "got {out}");
 }
+
+// ── The clap surface ────────────────────────────────────────────────────────
+
+/// Why: the three filters and `--summary` are the whole operator surface, and a
+/// clap-level regression (a renamed flag, a lost `Option`) is invisible to the
+/// rendering tests above — they construct `FeedbackRow`s directly and never go
+/// through the parser.
+/// What: the defaults with no flags, then every filter supplied at once.
+#[test]
+fn cli_parses_prompt_feedback() {
+    use clap::Parser;
+
+    let cli = crate::cli::Cli::try_parse_from(["trusty-mpm", "prompt-feedback"]).unwrap();
+    match cli.command.unwrap() {
+        crate::cli::Command::PromptFeedback(args) => {
+            assert_eq!(args.session, None);
+            assert_eq!(args.agent, None);
+            assert_eq!(args.limit, 20, "the documented default");
+            assert!(!args.summary);
+        }
+        other => panic!("expected PromptFeedback, got {other:?}"),
+    }
+
+    let cli = crate::cli::Cli::try_parse_from([
+        "trusty-mpm",
+        "prompt-feedback",
+        "--session",
+        "sess-1",
+        "--agent",
+        "rust-engineer",
+        "--limit",
+        "3",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        crate::cli::Command::PromptFeedback(args) => {
+            assert_eq!(args.session.as_deref(), Some("sess-1"));
+            assert_eq!(args.agent.as_deref(), Some("rust-engineer"));
+            assert_eq!(args.limit, 3);
+        }
+        other => panic!("expected PromptFeedback, got {other:?}"),
+    }
+}
+
+/// `--summary` changes the RENDERING, not the selection, so it must compose
+/// with a filter rather than conflict with one.
+#[test]
+fn cli_parses_prompt_feedback_summary() {
+    use clap::Parser;
+
+    let cli = crate::cli::Cli::try_parse_from([
+        "trusty-mpm",
+        "prompt-feedback",
+        "--summary",
+        "--agent",
+        "qa",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        crate::cli::Command::PromptFeedback(args) => {
+            assert!(args.summary);
+            assert_eq!(args.agent.as_deref(), Some("qa"));
+        }
+        other => panic!("expected PromptFeedback, got {other:?}"),
+    }
+}

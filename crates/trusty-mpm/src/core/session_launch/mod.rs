@@ -110,10 +110,7 @@ mod tests_quarantine_4448;
 
 use std::path::{Path, PathBuf};
 
-// #7688: `_with_suffix` is the flag-gated form; the plain one stays for tests.
-use crate::core::agent_deployer::{
-    DeployResult, deploy_agents_filtered_with_suffix, retract_framework_agents,
-};
+use crate::core::agent_deployer::{DeployResult, deploy_agents_filtered, retract_framework_agents};
 use crate::core::instruction_pipeline::{PipelineInput, PipelineOutput, build_instructions};
 use crate::core::paths::FrameworkPaths;
 use crate::core::skill_deployer::DeployStats;
@@ -566,15 +563,9 @@ pub(super) fn prepare_session_inner(
     crate::core::provisioning_stage::emit(
         crate::core::provisioning_stage::ProvisioningStage::DeployingAgents,
     );
-    // #7688: every deployed agent carries the prompt-feedback request when the
-    // flag is on, and byte-identical content to before when it is off.
-    let agent_addendum = crate::core::prompt_self_improvement::agent_deploy_suffix(project_dir);
-    let deploy = match deploy_agents_filtered_with_suffix(
-        &plan.agent_source,
-        &fw.agent_deploy_dir(),
-        |name| plan.agent_selected(name),
-        agent_addendum.as_deref(),
-    ) {
+    let deploy = match deploy_agents_filtered(&plan.agent_source, &fw.agent_deploy_dir(), |name| {
+        plan.agent_selected(name)
+    }) {
         Ok(result) => result,
         Err(err) => {
             // LOUD: an empty agent roster means the launched session has

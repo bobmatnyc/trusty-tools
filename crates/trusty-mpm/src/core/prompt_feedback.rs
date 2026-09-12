@@ -44,7 +44,7 @@ pub const LEDGER_FILE: &str = "prompt-feedback.jsonl";
 /// group. A fixed sentinel keeps [`summarize`] a single grouping over one
 /// non-null column.
 /// What: `"pm"`.
-/// Test: `a_stop_event_is_recorded_as_the_pm`.
+/// Test: `a_stop_payload_writes_a_pm_row`.
 pub const PM_AGENT_TYPE: &str = "pm";
 
 /// How many bytes of one feedback section are stored.
@@ -302,7 +302,7 @@ pub fn read_rows(framework_root: &Path, filter: &ReadFilter) -> Vec<FeedbackRow>
 /// complaints" is the one question that points at which prompt to fix next.
 /// What: `(agent_type, count)` descending by count, then by name so the output
 /// is stable for equal counts.
-/// Test: `summarize_counts_by_agent_type`, `summarize_orders_by_count`.
+/// Test: `summarize_counts_by_agent_type`, `summarize_orders_by_count_then_name`.
 pub fn summarize(rows: &[FeedbackRow]) -> Vec<(String, usize)> {
     let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     for row in rows {

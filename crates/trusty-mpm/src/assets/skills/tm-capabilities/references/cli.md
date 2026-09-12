@@ -2,7 +2,7 @@
 
 Generated from `Cli::command()` (clap's command-tree introspection) — every `tm <command>` and its nested subcommands, verbatim. Source: `crates/trusty-mpm/src/bin/tm/cli/mod.rs` (top-level `Command` enum) plus one action enum per group under `cli/actions/*.rs`. Regenerate with `tm generate capabilities`.
 
-62 top-level commands.
+63 top-level commands.
 
 - `agent` — Inspect the deployed agent roster's declared skills (DOC-42, issue #2889)
   - `list` — List every deployed agent with its declared skills
@@ -107,6 +107,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `register` — Register (idempotent upsert) a project in registry B
   - `show` — Show a project's config PLUS a read-only nested sessions listing
   - `status` — Show a project's deterministic status rollup (session histogram + flags)
+- `prompt-feedback` — Read back the prompt critiques `tm hook --prompt-feedback` captured (#7688)
 - `register` — Register a repo alias for the standalone managed driver (DOC-24)
 - `reinstall` — Redeploy the bundled agents and skills to EVERY deploy destination, and optionally reinstall the binary
 - `repair` — Recover from corrupt or inconsistent deploy state

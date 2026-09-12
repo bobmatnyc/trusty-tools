@@ -857,6 +857,105 @@ fn write_project_hooks_strips_stale_divert_when_disabled() {
     );
 }
 
+// ── #7688: the prompt-feedback capture, end to end through the writer ───────
+
+/// The enabled write must land one capture group on each of the two events, and
+/// a relaunch must replace rather than append.
+///
+/// Why: `prompt_feedback_hooks_tests` asserts the ADDITIONS map; this asserts
+/// what reaches `settings.json`, which is the artifact Claude Code reads. The
+/// idempotence half is the #2948 failure mode — a strip that stops recognising
+/// what the writer wrote grows a duplicate group per launch, and nothing in the
+/// additions map can see that.
+/// What: three identical enabled writes, then one `Stop` and one `SubagentStop`
+/// capture group asserted on disk.
+/// Test: this function IS the test.
+#[test]
+fn write_project_hooks_writes_prompt_feedback_when_enabled() {
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path();
+    let settings_path = project.join(".claude").join("settings.json");
+
+    for pass in 1..=3 {
+        super::super::settings::write_project_hooks_with_prompt_feedback(
+            project,
+            Some(std::path::Path::new(TEST_EXE)),
+            true,
+            false,
+            true,
+        )
+        .unwrap_or_else(|e| panic!("write {pass}: {e}"));
+    }
+    let written = std::fs::read_to_string(&settings_path).unwrap();
+
+    let value: serde_json::Value = serde_json::from_str(&written).unwrap();
+    for event in ["Stop", "SubagentStop"] {
+        let groups = value["hooks"][event].as_array().expect("array");
+        let captures: Vec<&serde_json::Value> = groups
+            .iter()
+            .filter(|g| {
+                g["hooks"][0]["command"]
+                    .as_str()
+                    .is_some_and(|c| c.ends_with(" hook --prompt-feedback"))
+            })
+            .collect();
+        assert_eq!(
+            captures.len(),
+            1,
+            "exactly one {event} capture group after three launches: {groups:?}"
+        );
+    }
+}
+
+/// Turning the flag back off must REMOVE what a prior launch wrote.
+///
+/// Why (#5034, restated for this toggle): a strip domain derived from the
+/// toggled-down additions leaves the groups firing forever, so a project that
+/// disabled the feature keeps spawning a `tm` process at the end of every turn.
+/// What: writes enabled, asserts the groups landed, writes disabled, and asserts
+/// no capture command survives while the lifecycle triad's own `Stop` entry does.
+/// Test: this function IS the test.
+#[test]
+fn write_project_hooks_strips_stale_prompt_feedback_when_disabled() {
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path();
+    let settings_path = project.join(".claude").join("settings.json");
+
+    super::super::settings::write_project_hooks_with_prompt_feedback(
+        project,
+        Some(std::path::Path::new(TEST_EXE)),
+        true,
+        false,
+        true,
+    )
+    .expect("enabled write");
+    assert!(
+        std::fs::read_to_string(&settings_path)
+            .unwrap()
+            .contains("--prompt-feedback"),
+        "precondition: the enabled write must land the groups"
+    );
+
+    super::super::settings::write_project_hooks_with_prompt_feedback(
+        project,
+        Some(std::path::Path::new(TEST_EXE)),
+        true,
+        false,
+        false,
+    )
+    .expect("disabled write");
+    let after = std::fs::read_to_string(&settings_path).unwrap();
+    assert!(
+        !after.contains("--prompt-feedback"),
+        "the disabled write must strip the stale capture groups: {after}"
+    );
+
+    // And it must strip ONLY those: the lifecycle triad's `Stop` entry survives.
+    let value: serde_json::Value = serde_json::from_str(&after).unwrap();
+    let stop = value["hooks"]["Stop"].as_array().expect("array");
+    assert_eq!(stop.len(), 1, "the lifecycle triad must remain: {stop:?}");
+}
+
 /// The pinned installed-looking binary every test in this module writes with.
 const TEST_EXE: &str = "/usr/local/bin/tm";
 

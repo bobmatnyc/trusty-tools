@@ -32,10 +32,7 @@
 use std::path::Path;
 
 use super::settings::deploy_output_style;
-// #7688: `_with_suffix` is the flag-gated form; the plain one stays for tests.
-use crate::core::agent_deployer::{
-    DeployResult, deploy_agents_filtered_with_suffix, retract_framework_agents,
-};
+use crate::core::agent_deployer::{DeployResult, deploy_agents_filtered, retract_framework_agents};
 use crate::core::paths::FrameworkPaths;
 use crate::core::skill_deployer::DeployStats;
 use crate::core::skill_tiers::deploy_all_skill_tiers;
@@ -151,17 +148,11 @@ pub fn sync_session_assets(
     // workspace's `.claude/agents/` is retracted so it stops shadowing the
     // canonical roster. Retraction is non-fatal: a workspace that cannot be
     // cleaned must not block the asset refresh itself.
-    // #7688: the resync composes the same agents the launch does, so it applies
-    // the same flag-gated addendum — otherwise `tm sessions sync-assets` would
-    // silently strip it back off every agent it refreshed.
-    let agent_addendum = crate::core::prompt_self_improvement::agent_deploy_suffix(project_dir);
-    let deploy: DeployResult = deploy_agents_filtered_with_suffix(
-        &plan.agent_source,
-        &fw.agent_deploy_dir(),
-        |name| plan.agent_selected(name),
-        agent_addendum.as_deref(),
-    )
-    .map_err(|e| SyncAssetsError::AgentDeploy(e.to_string()))?;
+    let deploy: DeployResult =
+        deploy_agents_filtered(&plan.agent_source, &fw.agent_deploy_dir(), |name| {
+            plan.agent_selected(name)
+        })
+        .map_err(|e| SyncAssetsError::AgentDeploy(e.to_string()))?;
 
     // Targets `project_dir`'s own `.claude/agents`, not `fw.claude_agents_dir()`
     // — see the identical note in `prepare_session_inner`. Retraction is a
@@ -458,7 +449,7 @@ mod tests {
 
         // Simulate the legacy per-workspace deploy an older binary performed.
         let legacy = ws_fw.claude_agents_dir();
-        crate::core::agent_deployer::deploy_agents_filtered(&bundled, &legacy, |_| true).unwrap();
+        deploy_agents_filtered(&bundled, &legacy, |_| true).unwrap();
         assert!(legacy.join("rust-engineer.md").exists());
 
         // …plus an agent the operator dropped in by hand, which trusty-mpm

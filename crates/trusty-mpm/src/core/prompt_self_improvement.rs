@@ -1,4 +1,4 @@
-//! The `prompt-self-improvement` flag and the two addenda it injects (#7688).
+//! The `prompt-self-improvement` flag and the PM addendum it injects (#7688).
 //!
 //! Why: nothing in the harness asks the model what was wrong with the prompt it
 //! received. Every improvement signal tm collects today is about the WORK — the
@@ -9,16 +9,19 @@
 //! (2026-09-12) adds a flag that makes every composed prompt ask for that
 //! feedback on two axes: what was unclear, and what was unnecessary.
 //!
-//! What: [`enabled_for`] resolves the flag for one project; [`pm_addendum`] and
-//! [`agent_addendum`] are the two texts, held as reviewable markdown beside the
-//! instruction sections rather than as string literals. The PM text asks the PM
-//! to pass the same request down its dispatch briefs; the agent text does not,
-//! because an agent never dispatches ("No Subagent Fan-Out").
+//! What: [`enabled_for`] resolves the flag for one project and [`pm_addendum`]
+//! is the text, held as reviewable markdown beside the instruction sections
+//! rather than as a string literal. The PM text asks the PM to append the same
+//! request to every dispatch brief it sends, which is how a dispatched agent
+//! receives it — there is deliberately no second injection at agent deploy. The
+//! deployed agent files are one machine-global set shared by every project on
+//! the host (#4409), so a per-project flag written into them has two projects
+//! rewriting each other's copies on alternate launches; the brief is per
+//! dispatch and carries the flag correctly.
 //!
-//! DEFAULT OFF. Both addenda are appended, never substituted, so with the flag
+//! DEFAULT OFF. The addendum is appended, never substituted, so with the flag
 //! off every byte tm composes is what it was before this module existed — the
-//! property `pm_prompt_is_unchanged_when_the_flag_is_off` and
-//! `agent_bytes_are_unchanged_when_the_flag_is_off` pin.
+//! property `pm_prompt_is_unchanged_when_the_flag_is_off` pins.
 //!
 //! Test: `prompt_self_improvement_tests.rs`.
 
@@ -30,24 +33,16 @@ use std::path::Path;
 /// agree on one spelling, or the hook silently harvests nothing from a session
 /// that was correctly asked. One constant, three readers.
 /// What: the Markdown heading, without a trailing newline.
-/// Test: `both_addenda_name_the_extraction_heading`.
+/// Test: `the_addendum_names_the_extraction_heading`.
 pub const FEEDBACK_HEADING: &str = "## Prompt feedback";
 
 /// The PM-side addendum, appended to the composed launch prompt.
 ///
 /// Why: held as an asset file so the delivered wording is reviewed as prose in
 /// a PR diff, the same rule the instruction sections follow.
-/// Test: `both_addenda_name_the_extraction_heading`.
+/// Test: `the_addendum_names_the_extraction_heading`.
 const PM_ADDENDUM: &str =
     include_str!("../assets/instructions/sections/prompt-self-improvement.md");
-
-/// The agent-side addendum, appended to every composed agent at deploy.
-///
-/// Why: see [`PM_ADDENDUM`]. Distinct text because an agent must not be told to
-/// "append this to every dispatch brief you send" — it sends none.
-/// Test: `agent_addendum_does_not_ask_an_agent_to_dispatch`.
-const AGENT_ADDENDUM: &str =
-    include_str!("../assets/instructions/sections/prompt-self-improvement-agent.md");
 
 /// The PM addendum, separator included, ready to concatenate onto a prompt.
 ///
@@ -60,20 +55,6 @@ pub fn pm_addendum() -> String {
         "{}{}",
         crate::core::instruction_pipeline::SECTION_SEPARATOR,
         PM_ADDENDUM.trim_end()
-    )
-}
-
-/// The agent addendum, separator included, ready to concatenate onto an agent.
-///
-/// What: a Markdown rule then the asset. A composed agent file ends with its
-/// body, so the same separator the PM prompt uses keeps the two injections
-/// visually identical for anyone reading either artifact.
-/// Test: `agent_addendum_is_separated_from_the_body_it_follows`.
-pub fn agent_addendum() -> String {
-    format!(
-        "{}{}\n",
-        crate::core::instruction_pipeline::SECTION_SEPARATOR,
-        AGENT_ADDENDUM.trim_end()
     )
 }
 
@@ -104,28 +85,12 @@ pub fn append_to_pm_prompt(project_dir: &Path, prompt: String) -> String {
     }
 }
 
-/// The agent-deploy suffix for `project_dir`, or `None` when the flag is off.
-///
-/// Why: the deploy call sites pass `Option<&str>` to
-/// [`deploy_agents_filtered_with_suffix`](crate::core::agent_deployer::deploy_agents_filtered_with_suffix),
-/// and `None` is the byte-identical pre-#7688 path. One resolver keeps the
-/// launch and the `sync-assets` redeploy from disagreeing — a disagreement
-/// would show up as `tm sessions sync-assets` silently stripping the addendum
-/// back off every agent it refreshed.
-/// What: `Some(`[`agent_addendum`]`)` when on, `None` when off.
-/// Test: `agent_suffix_is_none_when_the_flag_is_off`,
-/// `agent_suffix_is_the_addendum_when_the_flag_is_on`.
-pub fn agent_deploy_suffix(project_dir: &Path) -> Option<String> {
-    enabled_for(project_dir).then(agent_addendum)
-}
-
 /// Is prompt self-improvement on for `project_dir`?
 ///
-/// Why: one resolver, so the PM prompt, the deployed agents, and the hook
-/// matcher can never disagree about whether the feature is on — a session told
-/// to emit the addendum but whose hook was not registered would produce
-/// feedback nobody collects, and the reverse would register a hook that never
-/// fires.
+/// Why: one resolver, so the PM prompt and the hook matcher can never disagree
+/// about whether the feature is on — a session told to emit the addendum but
+/// whose hook was not registered would produce feedback nobody collects, and
+/// the reverse would register a hook that never fires.
 ///
 /// What: the same two-layer precedence every other project-overridable key
 /// uses, top down —
