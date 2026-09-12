@@ -28,6 +28,8 @@
 
 use std::path::Path;
 
+use trusty_common::claude_config::write_json_atomic;
+
 use crate::core::session_launch::{is_stale_statusline_command, resolve_statusline_command};
 
 /// What one file's worth of [`ensure_statusline_entry_in`] did.
@@ -70,13 +72,36 @@ impl StatuslineWrite {
 /// inserts `statusLine` when the key is absent, or rewrites only its `command`
 /// when [`is_stale_statusline_command`] claims the existing value. Any other
 /// existing value is an operator customization and is returned
-/// [`StatuslineWrite::Unchanged`] untouched. The file is written back — creating
-/// its parent directory if needed — ONLY when something changed, so a steady
-/// install costs one read.
+/// [`StatuslineWrite::Unchanged`] untouched. The file is written back ONLY when
+/// something changed, so a steady install costs one read.
+///
+/// # Write safety
+///
+/// This writes `~/.claude/settings.json` and a project's `.claude/settings.json`
+/// — the file class `write_json_atomic` exists for, because a half-written one
+/// bricks Claude Code. Two guarantees, and neither is optional here since
+/// `session_launch::ensure_status_line` runs this on every launch AND every
+/// resume, so two sessions on one machine race:
+///
+/// 1. **The publish is atomic, and the prior bytes are backed up** —
+///    [`write_json_atomic`] stages under a per-call name and renames, so a
+///    reader sees one writer's complete payload or the other's, never a splice
+///    (#4077), and leaves `<path>.bak` behind.
+/// 2. **The read-modify-write cycle is serialised** — the whole load → mutate →
+///    store runs under [`crate::core::claude_json_guard::lock`], the same
+///    in-process mutex the `.claude.json` seeders take (#4072). Atomicity alone
+///    stops corruption but not a LOST UPDATE: two writers that both read the
+///    pre-seed file would each publish their own complete copy, and the second
+///    would drop whatever the first added.
+///
 /// Test: `a_fresh_file_is_seeded`, `a_stale_entry_is_repaired`,
 /// `a_customized_entry_is_kept`, `an_unparseable_file_is_refused`,
-/// `seeding_is_idempotent`, `other_keys_survive_the_seed`.
+/// `seeding_is_idempotent`, `other_keys_survive_the_seed`,
+/// `a_repair_backs_up_the_prior_bytes`,
+/// `a_repair_preserves_operator_fields`.
 pub fn ensure_statusline_entry_in(settings_path: &Path) -> StatuslineWrite {
+    // #7617: held across the read AND the write below — see "Write safety".
+    let _guard = crate::core::claude_json_guard::lock();
     let raw = match std::fs::read_to_string(settings_path) {
         Ok(text) => Some(text),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
@@ -103,19 +128,31 @@ pub fn ensure_statusline_entry_in(settings_path: &Path) -> StatuslineWrite {
         return outcome;
     }
 
-    if let Some(parent) = settings_path.parent()
-        && let Err(err) = std::fs::create_dir_all(parent)
-    {
-        return StatuslineWrite::Refused(err.to_string());
+    // #7617: staged-then-renamed, with `<path>.bak` taken first. Creates the
+    // parent directory itself, so no separate `create_dir_all` is needed — and
+    // on failure it leaves `settings_path` byte-for-byte as it was.
+    match write_json_atomic(settings_path, &settings) {
+        Ok(()) => outcome,
+        Err(err) => StatuslineWrite::Refused(err.to_string()),
     }
-    let serialized = match serde_json::to_string_pretty(&settings) {
-        Ok(text) => text,
-        Err(err) => return StatuslineWrite::Refused(err.to_string()),
-    };
-    if let Err(err) = std::fs::write(settings_path, serialized) {
-        return StatuslineWrite::Refused(err.to_string());
-    }
-    outcome
+}
+
+/// The backup [`ensure_statusline_entry_in`] leaves behind, when it wrote one.
+///
+/// Why (#7617, critic MEDIUM 4): `tm doctor --fix` must report the backup an
+/// operator can undo from, and the module's own rule is "back up before
+/// overwriting". [`write_json_atomic`] takes it and does not return its path,
+/// and `trusty_common`'s own `backup_path` is private, so the one place that
+/// spelling is re-derived is here rather than at the repair site.
+/// What: `<path>.bak`, the name `write_json_atomic` publishes onto. Note it
+/// exists only when `path` existed BEFORE the write — seeding a brand-new
+/// settings file backs up nothing, because there was nothing to lose.
+/// Test: `a_repair_backs_up_the_prior_bytes`,
+/// `statusline_repair_backs_up_before_repointing`.
+pub fn backup_of(settings_path: &Path) -> std::path::PathBuf {
+    let mut name = settings_path.file_name().unwrap_or_default().to_os_string();
+    name.push(".bak");
+    settings_path.with_file_name(name)
 }
 
 /// The seed-or-repair DECISION, applied to an already-parsed settings object.
@@ -127,12 +164,26 @@ pub fn ensure_statusline_entry_in(settings_path: &Path) -> StatuslineWrite {
 /// rather than the I/O is what keeps one rule across all three without forcing
 /// that writer into two writes.
 /// What: inserts the entry when `statusLine` is absent ([`StatuslineWrite::Seeded`]),
-/// replaces it when [`is_stale_statusline_command`] claims the existing value
+/// repoints it when [`is_stale_statusline_command`] claims the existing value
 /// ([`StatuslineWrite::Repaired`]), and otherwise leaves an operator
 /// customization exactly as it is ([`StatuslineWrite::Unchanged`]). Never
 /// returns `Refused` — there is no I/O here to fail.
+///
+/// A REPAIR IS A REPOINT, NOT A RESET (#7617, critic MEDIUM 3): only `command`
+/// is rewritten, in place, so an operator's `padding` — and any key Claude Code
+/// adds to this entry that this code has never heard of — survives. Replacing
+/// the whole object would silently reset both, and a status bar that loses its
+/// padding on every stale-binary heal is a worse trade than the one it fixes.
+/// The pre-#7617 project-tier writer patched only `command` for exactly this
+/// reason; consolidating the rule must not quietly drop that.
+///
+/// The wholesale-insert arm is reachable only for a `statusLine` that is not a
+/// JSON object. `is_stale_statusline_command` requires `type == "command"` and a
+/// string `command`, so no real input takes it — it is the defensive branch
+/// #1914's review asked for, kept so a future loosening of that predicate cannot
+/// turn into a silent no-op.
 /// Test: `a_fresh_file_is_seeded`, `a_stale_entry_is_repaired`,
-/// `a_customized_entry_is_kept`.
+/// `a_customized_entry_is_kept`, `a_repair_preserves_operator_fields`.
 pub fn apply_statusline_entry(
     obj: &mut serde_json::Map<String, serde_json::Value>,
 ) -> StatuslineWrite {
@@ -142,7 +193,20 @@ pub fn apply_statusline_entry(
             StatuslineWrite::Seeded
         }
         Some(existing) if is_stale_statusline_command(existing) => {
-            obj.insert("statusLine".to_string(), statusline_entry());
+            match obj
+                .get_mut("statusLine")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                Some(entry) => {
+                    entry.insert(
+                        "command".to_string(),
+                        serde_json::Value::String(resolve_statusline_command()),
+                    );
+                }
+                None => {
+                    obj.insert("statusLine".to_string(), statusline_entry());
+                }
+            }
             StatuslineWrite::Repaired
         }
         // A genuine operator customization pointing at a live binary.

@@ -16,6 +16,16 @@
 //! [`linked_claude_ids`] is read by the statusline, which needs no daemon to be
 //! running and no session store to parse.
 //!
+//! GROWTH AND PRUNING: the store is append-only and unbounded — one file per
+//! managed session, one short line per Claude restart, so a machine accumulates
+//! roughly one line per session start forever. It sits under `usage/` beside the
+//! ledger it serves deliberately: the only thing a stale link can cost is a fold
+//! across ids whose rows are gone, which folds to zero and renders the empty
+//! state. `tm repair savings-ledger` does NOT sweep this directory today — it
+//! quarantines `savings.jsonl` and `no-fold-warned/` by name (see
+//! `crate::core::savings_repair`). Adding it there is the pruning path when the
+//! size is ever worth reclaiming; nothing here depends on that having happened.
+//!
 //! FAIL-OPEN BY CONSTRUCTION: every read failure — an absent directory, an
 //! unreadable file, a partial write — yields NO siblings. The caller then shows
 //! its explicit empty state. Nothing here ever invents a link, so a fold can
@@ -82,7 +92,6 @@ pub fn record_link(root: &Path, managed_id: &str, claude_id: &str) -> bool {
     if std::fs::create_dir_all(parent).is_err() {
         return false;
     }
-    use std::io::Write;
     let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -90,7 +99,27 @@ pub fn record_link(root: &Path, managed_id: &str, claude_id: &str) -> bool {
     else {
         return false;
     };
-    writeln!(file, "{claude_id}").is_ok()
+    write_link_line(&mut file, claude_id).is_ok()
+}
+
+/// Write one id and its newline to `sink` as a SINGLE write.
+///
+/// Why (#7617, critic HIGH 2; the #7579 shape): `writeln!` expands to
+/// `write_fmt`, which hands the formatter's pieces to the sink separately — the
+/// id and its `\n` reach the `O_APPEND` descriptor as two writes, and a second
+/// writer racing between them lands its own id mid-line. That is not
+/// theoretical here: the daemon's `SessionStart` correlation is the caller, and
+/// a splice would fabricate a session id that never existed, which
+/// [`linked_claude_ids`] would then hand the statusline as a sibling to fold.
+/// #7579 put ten such lines in the operator's savings ledger by the same
+/// mistake; `savings::write_row_line` is the fix this mirrors.
+/// What: builds `<id>\n` in one buffer and hands it over in one `write_all`.
+/// Test: `an_id_and_its_newline_leave_in_one_write`.
+fn write_link_line(sink: &mut impl std::io::Write, claude_id: &str) -> std::io::Result<()> {
+    let mut line = String::with_capacity(claude_id.len() + 1);
+    line.push_str(claude_id);
+    line.push('\n');
+    sink.write_all(line.as_bytes())
 }
 
 /// Every Claude session id that shares a managed session with `claude_id`.

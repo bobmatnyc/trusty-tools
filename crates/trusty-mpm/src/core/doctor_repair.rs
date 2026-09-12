@@ -361,8 +361,20 @@ fn statusline_step(path: &Path, mode: RepairMode) -> Option<RepairStep> {
             status: StepStatus::Planned,
         });
     }
+    // #7617 (critic MEDIUM 4): `ensure_statusline_entry_in` publishes through
+    // `write_json_atomic`, which takes `<path>.bak` first. Reporting it — and
+    // only when it is really there — is what makes this step honour the
+    // module's "back up before overwriting" rule the way
+    // `repair_hooks_contamination` does. A SEEDED brand-new file has no backup
+    // because there were no prior bytes to keep, which is not the same fact as
+    // "the backup failed" and must not be reported as one.
     let status = match ensure_statusline_entry_in(path) {
-        StatuslineWrite::Seeded | StatuslineWrite::Repaired => StepStatus::Applied { backup: None },
+        StatuslineWrite::Seeded | StatuslineWrite::Repaired => {
+            let backup = crate::core::statusline_settings::backup_of(path);
+            StepStatus::Applied {
+                backup: backup.is_file().then_some(backup),
+            }
+        }
         StatuslineWrite::Unchanged => return None,
         StatuslineWrite::Refused(reason) => StepStatus::Refused(reason),
     };

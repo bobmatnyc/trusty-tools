@@ -876,6 +876,60 @@ fn statusline_repair_seeds_a_missing_entry() {
     assert_eq!(value["statusLine"]["type"], "command");
 }
 
+/// Why (critic MEDIUM 4): the module's rule is "back up before overwriting",
+/// and `repair_hooks_contamination` reports the path an operator undoes from.
+/// This step claimed `Applied { backup: None }` with no backup anywhere in the
+/// chain, so a repoint of the operator's own `~/.claude/settings.json` was
+/// unrecoverable.
+/// FAILS BEFORE THIS CHANGE: `f8a8a2fb8` reported `backup: None` and wrote no
+/// `.bak`.
+/// Test: itself.
+#[test]
+fn statusline_repair_backs_up_before_repointing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "statusLine": {
+                "type": "command",
+                "command": "/definitely/not/here/tm statusline",
+                "padding": 0
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let steps = repair_statusline(std::slice::from_ref(&path), RepairMode::Apply);
+
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    let StepStatus::Applied { backup: Some(bak) } = &steps[0].status else {
+        panic!("expected a backup path, got {:?}", steps[0].status);
+    };
+    assert!(
+        fs::read_to_string(bak)
+            .unwrap()
+            .contains("/definitely/not/here/tm statusline"),
+        "the backup must carry what was repointed"
+    );
+}
+
+/// Why: a SEEDED brand-new settings file had no prior bytes, so there is nothing
+/// to back up — and reporting a backup that does not exist would send an
+/// operator to a path that is not there.
+/// Test: itself.
+#[test]
+fn statusline_repair_reports_no_backup_when_it_created_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(".claude").join("settings.json");
+
+    let steps = repair_statusline(std::slice::from_ref(&path), RepairMode::Apply);
+
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    assert_eq!(steps[0].status, StepStatus::Applied { backup: None });
+}
+
 /// Why (the module's rule 1): a bare `--fix` describes and writes nothing.
 /// Test: itself.
 #[test]

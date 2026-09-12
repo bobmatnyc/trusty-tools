@@ -124,6 +124,76 @@ fn seeding_is_idempotent() {
     );
 }
 
+/// Why (critic CRITICAL): this writes `~/.claude/settings.json`, the file class
+/// `write_json_atomic` exists for — a half-written one bricks Claude Code, and
+/// `ensure_status_line` runs on every launch AND every resume, so two sessions
+/// race. A bare `std::fs::write` leaves no recovery artifact when the publish
+/// goes wrong; the backup is the observable half of routing through the atomic
+/// writer.
+/// FAILS BEFORE THIS CHANGE: `f8a8a2fb8` wrote with `std::fs::write`, so
+/// `<path>.bak` never existed.
+/// Test: itself.
+#[test]
+fn a_repair_backs_up_the_prior_bytes() {
+    let (_dir, path) = settings_with(serde_json::json!({
+        "type": "command",
+        "command": "/definitely/not/here/tm statusline",
+        "padding": 0
+    }));
+
+    assert_eq!(ensure_statusline_entry_in(&path), StatuslineWrite::Repaired);
+
+    let backup = backup_of(&path);
+    assert!(
+        backup.is_file(),
+        "the prior bytes must be recoverable from {}",
+        backup.display()
+    );
+    assert!(
+        std::fs::read_to_string(&backup)
+            .unwrap()
+            .contains("/definitely/not/here/tm statusline"),
+        "the backup must carry what was replaced"
+    );
+}
+
+/// Why (critic MEDIUM 3): a repair is a REPOINT. An operator who set
+/// `padding: 2` — or any key Claude Code adds to this entry that this code has
+/// never heard of — must not lose it because the binary the command named moved.
+/// The pre-#7617 project-tier writer patched only `command` for this reason.
+/// FAILS BEFORE THIS CHANGE: `f8a8a2fb8` replaced the whole `statusLine` object,
+/// resetting `padding` to 0 and dropping unknown keys entirely.
+/// Test: itself.
+#[test]
+fn a_repair_preserves_operator_fields() {
+    let (_dir, path) = settings_with(serde_json::json!({
+        "type": "command",
+        "command": "/definitely/not/here/tm statusline",
+        "padding": 2,
+        "someFutureClaudeCodeKey": "keep me"
+    }));
+
+    assert_eq!(ensure_statusline_entry_in(&path), StatuslineWrite::Repaired);
+
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(
+        value["statusLine"]["padding"], 2,
+        "an operator's padding must survive a repoint"
+    );
+    assert_eq!(
+        value["statusLine"]["someFutureClaudeCodeKey"], "keep me",
+        "a key this code does not know must survive a repoint"
+    );
+    assert!(
+        value["statusLine"]["command"].as_str().is_some_and(
+            |cmd| cmd.ends_with(" statusline") && cmd != "/definitely/not/here/tm statusline"
+        ),
+        "the command itself must still be repointed: {}",
+        value["statusLine"]["command"]
+    );
+}
+
 /// Why: the seed writes the whole file back, so every other key has to survive
 /// the round trip — this is the assertion that a repair is not a reset.
 /// Test: itself.
