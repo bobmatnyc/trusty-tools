@@ -60,6 +60,49 @@ gate that cannot fail makes its own green meaningless:
 own. Both carry a frozen baseline or a fetch that can fail open, which is the
 shape a self-test exists to pin, so both are candidates if either is edited.
 
+**The `--gate <path>` self-test convention.** Some `scripts/*_selftest.sh`
+scripts — `check_rustdoc_links_selftest.sh`,
+`check_changelog_attribution_selftest.sh`,
+`check_changelog_staged_selftest.sh` — accept `--gate <path>` to run their
+fixture cases against an alternate copy of the gate script instead of the real
+one. This is the mutation-demonstration convention: pointing `--gate` at a
+deliberately broken copy proves the fixtures can still fail, the same property
+"Self-tests" above states for the gate/self-test pairing itself. Not every
+self-test in this file supports the flag; check the individual script's own
+`--gate` handling before assuming it does.
+
+**Reading a GitHub Actions job log from this harness.** `gh api
+repos/OWNER/REPO/actions/jobs/<id>/logs` and a raw log piped through BSD `sed`
+both fail here — the Bash tool refuses terminal escape sequences, and BSD
+`sed`'s regex engine chokes on the raw ESC byte. Working form:
+
+```
+gh run view <run> --job <id> --log 2>&1 | LC_ALL=C tr -d '\033' | LC_ALL=C sed 's/\[[0-9;]*m//g' > <file>
+```
+
+then Read the file. `LC_ALL=C` keeps both `tr` and `sed` in byte mode so
+neither trips on the ESC byte or non-UTF-8 log content.
+
+**Bin-target doc links need the explicit-target form.** A `` [`Name`] `` doc
+link under a `src/bin/**` target that points at a library item resolves
+against the bin crate's own scope, not the library's, and silently ships as
+dead link text — a crate-scoped build does not catch it, only
+`check_rustdoc_links.sh`'s workspace-wide run does. Spell the target
+explicitly instead: `` [`Name`](trusty_mpm::path::Name) ``. Worked example:
+`crates/trusty-mpm/src/bin/tm/commands/hook_payload.rs:84-85`, both forms
+spelled out explicitly. (Adding a `-p <crate>` passthrough to the script so a
+crate-scoped run can serve as a pre-commit gate is a separate, code-level
+change, out of scope here.)
+
+A source-scanning guard that strips comments before matching must consume
+`//` and `/* */` in appearance order — stripping block comments first lets a
+`src/bin/tm/**` glob inside a `//` doc line open an unterminated block
+comment and silently discard the rest of the file, a false-clean ratchet.
+`env_isolation_tests.rs::strip_comments` in
+`crates/trusty-mpm/src/bin/tm/env_isolation_tests.rs` already does this
+correctly; point any new comment-stripping guard at that precedent rather
+than re-deriving the order (Refs #7568).
+
 ## Gated in a workflow, but not CI-only
 
 `scripts/check_doc_paths.sh` (issue #5147) is deliberately NOT in the table

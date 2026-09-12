@@ -50,6 +50,13 @@ was exercised.
 `cargo test --workspace` is absent from rungs 1–3 on purpose; "scope down, never
 scope away" above is what constrains picking a lower rung.
 
+🔴 **Editing `crates/trusty-console/ui*/index.html` owes the crate's
+`*_ui_mount` tests, in addition to rung 6's other gates** —
+`cargo test -p trusty-console --test '*_ui_mount'` (`analyze_ui_mount.rs`,
+`memory_ui_mount.rs`, `search_ui_mount.rs`). These pin the served shell's
+`<title>` and asset references; an `index.html` edit that misses them can pass
+every other UI gate green and still fail here (#7593).
+
 ### Every rung carries `--no-fail-fast`, and the reason is not politeness
 
 Cargo runs each test target as its own binary and, by default, stops issuing

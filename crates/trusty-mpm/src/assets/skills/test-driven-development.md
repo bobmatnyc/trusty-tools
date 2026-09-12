@@ -29,6 +29,15 @@ Write a test that:
 - Is focused on a single behavior
 ```
 
+🔴 **A concurrency regression test's RED run against the pre-fix commit is
+not optional — it is the test's own correctness check.** A test written as a
+plain `Promise.all` (or equivalent) over two racing calls can pass against the
+exact racy commit it was meant to catch, when connection setup happens to
+serialize the pair and mask the race. Run it RED before trusting it green.
+Evidence: adaptive-crm issue #222 — first run against the racy store showed
+10 pass, 0 fail; only after warming the connection pool and looping eight
+attempts did attempt 0 fail with two creates.
+
 ### 2. Green Phase: Make It Pass
 ```
 Write the minimum code to:

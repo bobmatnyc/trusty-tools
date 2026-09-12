@@ -53,9 +53,9 @@ what a pasted count then proves:
   runs otherwise. Run `UPDATE_GOLDEN=1 cargo test -p trusty-mpm golden`, then
   read the diff of the three `crates/trusty-mpm/src/core/testdata/pm-prompt-*.md`
   goldens and confirm it carries only your edit.
-- 🟡 An exit 137 with no output from `cargo test -p <crate>` is a SIGKILL under
-  memory pressure (several agent worktrees building at once), not a test
-  failure; re-run with `-- --test-threads=4`.
+- 🟡 An exit 137 with no output from any gate command is usually a SIGKILL
+  under memory pressure, not a real failure — retry once before digging
+  further: [common-pitfalls.md](docs/reference/common-pitfalls.md).
 
 🔴 **`trusty-common` takes `--features` on every test run (#4901)** — its
 `default` set is empty, so a bare `cargo test -p trusty-common` is a

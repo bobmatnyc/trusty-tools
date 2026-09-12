@@ -323,6 +323,25 @@ regardless of wording.
 time, each waited for before the next. Serializing always works. Hand-rolling to
 parallelize anyway is what this forbids.
 
+## Salvaging a Dead Agent's Worktree
+
+A dispatch that names an existing worktree left behind by a stopped or dead
+agent cannot be followed directly — `tm hook --pm-guard` refuses cross-tree
+git from a differently-pinned worktree. Reach for `tm session
+adopt-worktree <tree> --as <session>` FIRST, before hand-porting files or
+rebuilding the branch from scratch: it is the documented verb for exactly
+this case (#6497, live-verified 2026-09-02). The refusal text to search on:
+`already used by worktree at .../<agent-dir>`, or a guard denial naming a
+tree pinned to a different, gone session. `tm session adopt-worktree` is
+distinct from `git worktree remove` (#5791, cleanup of an already-merged
+tree) — adoption is for a tree still holding unmerged work.
+
+Declaring `isolation: "worktree"` on a dispatch always mints a FRESH tree;
+there is no parameter that says "adopt this existing one instead." A PM that
+knows the target tree is a live, un-reclaimed worktree from an earlier round
+still has to let the dispatched agent land in the guard refusal and run
+`adopt-worktree` itself — there is no way to wire adoption in up front.
+
 ## Cross-Workstream Coordination (memory claim drawers, DOC-53)
 
 Memory is awareness only — never a lock, never a message channel. git/GitHub

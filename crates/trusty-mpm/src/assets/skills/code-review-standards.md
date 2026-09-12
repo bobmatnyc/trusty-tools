@@ -96,6 +96,15 @@ CRITICAL or HIGH by construction: silent data loss, or a broken contract.
    "done" marker, or success return that moves forward when the operation
    failed puts the lost item outside every future window. **Fail closed** —
    hold the state, propagate the error.
+   - A third outcome is also acceptable: **reported degradation** — the
+     failure is carried to the caller in the response body (e.g. a
+     `{"connected": false, "reason": ...}` field), and that field is under
+     test. This is distinct from silently failing open; the caller can see
+     and act on the degraded state. Contrast within one branch:
+     `knowledge_pipeline.rs::search_socket` discards its error via `.ok()`
+     (undocumented fail-open) while `knowledge_pipeline/indexing.rs` turns
+     the same missing-socket case into an explicit, tested response field
+     (reported degradation).
 2. **Name the alarm, then break it.** Identify which check is supposed to catch
    this loss, then ask whether it can report healthy while the loss occurs.
    Aggregates, tallies and summaries hide single-item failures by construction.
