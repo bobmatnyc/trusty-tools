@@ -20,8 +20,17 @@
 //! are therefore gated on [`crate::core::project_trust::is_project_trusted`] —
 //! the durable USER-scope decision `tm project trust` records under
 //! `~/.trusty-tools/trusty-mpm/`, which a repository cannot flip from inside
-//! itself (issue #3033, ADR-0042, owner ruling 2026-07-18). An untrusted
-//! project loads the builtins only.
+//! itself (issue #3033, ADR-0042, owner ruling 2026-07-18).
+//!
+//! TRUST BY CONTENT (#7672, owner ruling 2026-09-12) narrows what that gate
+//! withholds. An untrusted project's entries are CLASSIFIED, not discarded:
+//! one whose executable spec already exists outside the repository — a trusty-*
+//! builtin, or an entry in the operator's own `tm mcp add` registry — is not a
+//! new grant and loads exactly as it would for a trusted project. Everything
+//! else is ignored as before, and the warning now names it. The classification
+//! rule and its fail-closed arms live in
+//! [`crate::core::mcp_content_trust`]; `tm project trust` keeps its meaning —
+//! a trusted project loads everything, matched or not.
 //!
 //! THE `[session] plugins` HALF IS GATED THE SAME WAY, through
 //! [`granted_plugins`]. A plugin brings its own skills, commands and hooks into
@@ -45,10 +54,11 @@
 //! files, and the file is rewritten on every launch.
 //!
 //! FAIL-CLOSED, in two arms that are deliberately different:
-//! - an unreadable or malformed `<cwd>/.mcp.json`, and an untrusted project,
-//!   both DEGRADE — the affected servers are dropped, [`McpScope::degraded`]
-//!   says which and why, and the launch proceeds with the builtins. The session
-//!   loses servers; it never gains one it did not ask for.
+//! - an unreadable or malformed `<cwd>/.mcp.json`, and an UNKNOWN entry in an
+//!   untrusted project, both DEGRADE — the affected servers are dropped,
+//!   [`McpScope::degraded`] names them and why, and the launch proceeds with
+//!   the builtins. The session loses servers; it never gains one it did not ask
+//!   for.
 //! - an unwritable state directory FAILS the launch ([`ScopeError`]). The only
 //!   alternative is spawning with no `--mcp-config`, which is exactly the
 //!   unscoped shared map this module exists to stop.
@@ -119,9 +129,9 @@ pub enum ScopeError {
 /// which servers this project's sessions stopped loading and where to opt them
 /// back in. Composing that answer in the same pass that composes the file is
 /// what stops the diagnostic and the launch disagreeing.
-/// What: `servers` is the `mcpServers` map to write; `included` and `excluded`
-/// are sorted name lists; `degraded` carries the one-line reason when the
-/// project's own `.mcp.json` could not be read.
+/// What: `servers` is the `mcpServers` map to write; `included`, `excluded` and
+/// `content_trusted` are sorted name lists; `degraded` carries the one-line
+/// reason when something the project declared did not load.
 /// Test: `resolve_scope_includes_builtins_and_project_servers`,
 /// `resolve_scope_excludes_a_shared_only_server`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -132,7 +142,13 @@ pub struct McpScope {
     pub included: Vec<String>,
     /// Shared-map names the session will NOT load, sorted.
     pub excluded: Vec<String>,
-    /// Set when the project's own `.mcp.json` was unreadable and skipped.
+    /// Names an UNTRUSTED project loaded by content equivalence (#7672), sorted.
+    ///
+    /// Why: `tm doctor` reports the KNOWN/UNKNOWN split, not a flat "untrusted"
+    /// verdict, so it needs the known half by name. Always empty for a trusted
+    /// project, where the trust grant — not the content — is what loaded them.
+    pub content_trusted: Vec<String>,
+    /// Set when something the project declared did not load, with the reason.
     pub degraded: Option<String>,
 }
 
@@ -382,18 +398,24 @@ pub fn resolve_scope(cwd: &Path, config_dir: &Path) -> McpScope {
 /// What: always unions the trusty-* framework builtins
 /// ([`BUILTIN_MANAGED_MCP_SERVERS`], defined by [`builtin_server_entry`] rather
 /// than copied from the shared map). When `trusted`, it adds the project's own
-/// `.mcp.json` and every shared-map entry the project's `[session] mcp_servers`
-/// names; every remaining shared-map name lands in `excluded`. A
-/// `[session] mcp_servers` entry naming a server the shared map does not hold
-/// is ignored — the allowlist grants access to a declaration, it does not
-/// create one — and stays out of both lists.
+/// `.mcp.json` verbatim; either way it adds every shared-map entry the
+/// project's `[session] mcp_servers` names, because that name points at a
+/// declaration the operator wrote out of repo (#7672). Every remaining
+/// shared-map name lands in `excluded`.
 ///
-/// When NOT `trusted`, both in-repo surfaces are dropped: every shared-map name
-/// is `excluded`, and `degraded` names `tm project trust` — but only when the
-/// project actually declared something, since a project that declared nothing
-/// lost nothing.
-/// Test: `resolve_scope_drops_project_mcp_json_for_an_untrusted_project`,
-/// `resolve_scope_ignores_opt_ins_for_an_untrusted_project`,
+/// When NOT `trusted`, each `.mcp.json` entry is classified by
+/// [`crate::core::mcp_content_trust::KnownServers::accepts`]: a KNOWN entry
+/// loads and is named in `content_trusted`, an UNKNOWN one is ignored and named
+/// in `degraded` beside the `tm project trust` hint. An UNREADABLE `.mcp.json`
+/// declares nothing that can be matched, so none of it loads. A project whose
+/// every entry is KNOWN — or that declared nothing at all — gets no `degraded`
+/// reason and no warning.
+/// Test: `resolve_scope_rejects_a_builtin_name_pointing_at_another_command`,
+/// `resolve_scope_loads_this_repos_mcp_json_by_content_with_no_warning`,
+/// `resolve_scope_loads_the_known_entry_and_names_only_the_unknown_one`,
+/// `resolve_scope_classifies_unknown_when_the_registry_cannot_be_read`,
+/// `resolve_scope_drops_project_mcp_json_for_an_untrusted_project`,
+/// `resolve_scope_loads_an_opt_in_that_names_a_registered_server`,
 /// `resolve_scope_is_silent_for_an_untrusted_project_that_declares_nothing`.
 pub fn resolve_scope_with_trust(cwd: &Path, config_dir: &Path, trusted: bool) -> McpScope {
     let mut servers: Map<String, Value> = Map::new();
@@ -409,7 +431,9 @@ pub fn resolve_scope_with_trust(cwd: &Path, config_dir: &Path, trusted: bool) ->
 
     let project = project_servers(cwd);
     let opt_in = opt_in_servers(cwd);
+    let shared = shared_servers(config_dir);
     let mut degraded = None;
+    let mut content_trusted: Vec<String> = Vec::new();
 
     if trusted {
         match project {
@@ -426,31 +450,68 @@ pub fn resolve_scope_with_trust(cwd: &Path, config_dir: &Path, trusted: bool) ->
                 degraded = Some(reason);
             }
         }
-    } else if project.as_ref().is_ok_and(|e| !e.is_empty())
-        || project.is_err()
-        || !opt_in.is_empty()
-    {
-        // #7422: an in-repo declaration is not its own permission — say what was
-        // dropped and how to grant it, once, rather than per server.
-        let reason = format!(
-            "{} is not a trusted project, so its {} and its [session] mcp_servers \
-             opt-ins were ignored; run `tm project trust {}` to load them",
-            cwd.display(),
-            MCP_JSON,
-            cwd.display()
-        );
-        tracing::warn!("session-scoped MCP config degraded: {reason} (#7422)");
-        degraded = Some(reason);
+    } else {
+        // See #7672: an untrusted project's declarations are classified, not
+        // discarded — one whose executable spec the operator already has is not
+        // a new grant.
+        let known = crate::core::mcp_content_trust::KnownServers::from_registry(&shared);
+        let mut unknown: Vec<String> = Vec::new();
+        let mut unreadable: Option<String> = None;
+        match &project {
+            Ok(entries) => {
+                for (name, entry) in entries {
+                    if known.accepts(name, entry) {
+                        servers.insert(name.clone(), entry.clone());
+                        content_trusted.push(name.clone());
+                    } else {
+                        unknown.push(name.clone());
+                    }
+                }
+            }
+            // Fail closed: an unreadable file declares nothing that can be
+            // matched, so none of it loads.
+            Err(reason) => unreadable = Some(reason.clone()),
+        }
+        for name in &opt_in {
+            // An opt-in naming neither a builtin nor a registry entry points at
+            // a declaration that does not exist, so it can match no content.
+            if !servers.contains_key(name) && !shared.contains_key(name) {
+                unknown.push(name.clone());
+            }
+        }
+        unknown.sort();
+        unknown.dedup();
+        if unreadable.is_some() || !unknown.is_empty() {
+            let reason = untrusted_reason(cwd, &unknown, unreadable.as_deref());
+            tracing::warn!("session-scoped MCP config degraded: {reason} (#7672)");
+            degraded = Some(reason);
+        } else if !content_trusted.is_empty() {
+            tracing::debug!(
+                "session-scoped MCP config loaded {} entr{} from {} by content equivalence \
+                 with a server already registered (#7672)",
+                content_trusted.len(),
+                if content_trusted.len() == 1 {
+                    "y"
+                } else {
+                    "ies"
+                },
+                MCP_JSON,
+            );
+        }
     }
 
-    let shared = shared_servers(config_dir);
     let mut excluded: Vec<String> = Vec::new();
     for (name, entry) in &shared {
         if servers.contains_key(name) {
             continue;
         }
-        if trusted && opt_in.iter().any(|n| n == name) {
+        // #7672: an opt-in names an entry the OPERATOR wrote out of repo with
+        // `tm mcp add`, so the declaration behind the name is already theirs.
+        if opt_in.iter().any(|n| n == name) {
             servers.insert(name.clone(), entry.clone());
+            if !trusted {
+                content_trusted.push(name.clone());
+            }
         } else {
             excluded.push(name.clone());
         }
@@ -459,12 +520,48 @@ pub fn resolve_scope_with_trust(cwd: &Path, config_dir: &Path, trusted: bool) ->
     let mut included: Vec<String> = servers.keys().cloned().collect();
     included.sort();
     excluded.sort();
+    content_trusted.sort();
+    content_trusted.dedup();
     McpScope {
         servers,
         included,
         excluded,
+        content_trusted,
         degraded,
     }
+}
+
+/// The one-line reason an untrusted project's declarations did not all load.
+///
+/// Why (#7672): the warning has to distinguish "nothing here matched anything
+/// you have" from "the file itself could not be read", and it has to name the
+/// entries — the #7422 wording said only that the file was ignored, which told
+/// an operator nothing about which server they had lost or why.
+/// What: names each UNKNOWN entry and where the evidence would have come from,
+/// prefixed by the unreadable-file reason when there is one, and always ends in
+/// the `tm project trust <cwd>` grant that loads the rest regardless.
+/// Test: `resolve_scope_rejects_a_builtin_name_pointing_at_another_command`,
+/// `resolve_scope_loads_the_known_entry_and_names_only_the_unknown_one`.
+fn untrusted_reason(cwd: &Path, unknown: &[String], unreadable: Option<&str>) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(reason) = unreadable {
+        parts.push(format!(
+            "{reason}, so nothing it declares could be matched by content"
+        ));
+    }
+    if !unknown.is_empty() {
+        parts.push(format!(
+            "these entries match no trusty-* builtin and no server in your own \
+             registry (`tm mcp add`), so they were ignored: {}",
+            unknown.join(", ")
+        ));
+    }
+    format!(
+        "{} is not a trusted project: {}; run `tm project trust {}` to load them",
+        cwd.display(),
+        parts.join("; "),
+        cwd.display()
+    )
 }
 
 /// Compose and write a session's MCP config, returning the file to point at.

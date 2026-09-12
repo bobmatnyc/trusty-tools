@@ -132,6 +132,9 @@ pub mod local_repo_url;
 pub mod managed_config;
 pub mod manifest;
 pub mod mcp_config;
+// #7672: an in-repo MCP declaration whose executable spec already exists
+// out-of-repo is not a new grant — see `session_mcp_scope`.
+pub mod mcp_content_trust;
 pub mod mcp_provenance;
 // #4181: per-project MCP pins now travel as spawn environment variables, not as
 // arguments injected into a workspace `.mcp.json` (ADR-0042).
