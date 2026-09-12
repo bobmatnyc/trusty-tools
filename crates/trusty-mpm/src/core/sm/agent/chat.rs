@@ -201,7 +201,9 @@ impl SessionManagerAgent {
             Ok(hits) if !hits.is_empty() => {
                 let joined = hits
                     .iter()
-                    .map(|h| h.drawer.content.trim())
+                    // #7466: `Drawer::content` is a private field behind the
+                    // `content()` accessor (#5902 keeps the digest in agreement).
+                    .map(|h| h.drawer.content().trim())
                     .filter(|c| !c.is_empty())
                     .collect::<Vec<_>>()
                     .join("\n");
