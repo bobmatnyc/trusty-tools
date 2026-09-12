@@ -37,7 +37,7 @@ use crate::commands::ticket::system::{
     GhTicketSystem, TicketSystem, TicketSystemKind, not_yet_supported,
 };
 
-use config::{StateModel, load_model};
+use config::{ModelSource, StateModel, describe_source, load_model_with_source};
 use seed_ticketing::{
     TicketingSeedOutcome, seed_outcome_result, seed_ticketing_block, ticketing_config_path,
 };
@@ -93,7 +93,7 @@ fn dispatch<S: TicketSystem>(
     let lifecycle = ticketing.lifecycle_model.as_deref();
     match cmd {
         IssueCmd::SeedLabels { config, dry_run } => {
-            let model = load_model(config.as_deref(), lifecycle)?;
+            let (model, _source) = load_model_with_source(config.as_deref(), lifecycle)?;
             // #6914: the `ws/<session>` policy label needs the same session
             // name session launch labels with — the tmux session name.
             let session = crate::commands::tmux_attach::current_tmux_session_name();
@@ -102,7 +102,7 @@ fn dispatch<S: TicketSystem>(
             print_seed_report(&report);
         }
         IssueCmd::Standard { config } => {
-            let model = load_model(config.as_deref(), lifecycle)?;
+            let (model, _source) = load_model_with_source(config.as_deref(), lifecycle)?;
             standard::print_standard(&ticketing, &model, runner);
         }
         IssueCmd::Transition {
@@ -111,8 +111,11 @@ fn dispatch<S: TicketSystem>(
             config,
             note,
         } => {
-            let model = load_model(config.as_deref(), lifecycle)?;
-            let report = ops::transition(backend, &model, issue, &to_state, note.as_deref())?;
+            // #7580: a rejected state name is the error this bug reads as, so
+            // the model in force is named beside it.
+            let (model, source) = load_model_with_source(config.as_deref(), lifecycle)?;
+            let report = ops::transition(backend, &model, issue, &to_state, note.as_deref())
+                .map_err(|e| with_source(e, &source))?;
             let from = report.from.as_deref().unwrap_or("(none)");
             println!("transitioned #{issue}: {from} → {}", report.to);
             if report.assignee_changed {
@@ -120,13 +123,16 @@ fn dispatch<S: TicketSystem>(
             }
         }
         IssueCmd::Current { issue, config } => {
-            let model = load_model(config.as_deref(), lifecycle)?;
-            let state = ops::current(backend, &model, issue)?;
+            let (model, source) = load_model_with_source(config.as_deref(), lifecycle)?;
+            let state =
+                ops::current(backend, &model, issue).map_err(|e| with_source(e, &source))?;
             println!("{state}");
         }
         IssueCmd::States { config } => {
-            let model = load_model(config.as_deref(), lifecycle)?;
-            print_states(&model);
+            // #7580: `tm issue states` is what an operator reads to learn the
+            // valid names, so it says which model produced them.
+            let (model, source) = load_model_with_source(config.as_deref(), lifecycle)?;
+            print_states(&model, &source);
         }
         IssueCmd::SeedConfig { force } => {
             seed_config(force)?;
@@ -140,8 +146,8 @@ fn dispatch<S: TicketSystem>(
             audit::run(&ticketing, gh_env, runner, issue, recent, since)?;
         }
         IssueCmd::Repair { issue, config } => {
-            let model = load_model(config.as_deref(), lifecycle)?;
-            let kept = ops::repair(backend, &model, issue)?;
+            let (model, source) = load_model_with_source(config.as_deref(), lifecycle)?;
+            let kept = ops::repair(backend, &model, issue).map_err(|e| with_source(e, &source))?;
             println!("repaired #{issue}: resolved to `{kept}`");
         }
     }
@@ -169,14 +175,30 @@ fn print_seed_report(report: &ops::SeedReport) {
     }
 }
 
+/// Append the model's source to a verb's failure (#7580).
+///
+/// Why: "unknown target state `status:merged`; valid states: [queued, …]" reads
+/// as a mistyped state name. The one fact that turns it into the actual
+/// diagnosis — which model produced that list — is the source, so it rides on
+/// every verb failure rather than being something the operator has to go and ask
+/// for.
+/// What: reformats the error with [`describe_source`] on its own line. The
+/// original message is kept verbatim and first.
+/// Test: `verb_failure_names_the_embedded_default_source_7580`.
+fn with_source(err: anyhow::Error, source: &ModelSource) -> anyhow::Error {
+    anyhow::anyhow!("{err:#}\n  {}", describe_source(source))
+}
+
 /// Print the configured states and transitions.
 ///
 /// Why: operator introspection of the active model (reads YAML only, no `gh`).
 /// What: lists each state (its label, or `(no label)` for a label-less state,
 /// plus the terminal flag) then each transition edge, marking the edges that
-/// require a `--note`.
+/// require a `--note`. Since #7580 the model's own source is printed first, so a
+/// list of built-in states is never mistaken for the project's.
 /// Test: side-effect-only (stdout); the model is unit-tested in `config`.
-fn print_states(model: &StateModel) {
+fn print_states(model: &StateModel, source: &ModelSource) {
+    println!("{}", describe_source(source));
     println!("states ({}):", model.states.len());
     for s in &model.states {
         let term = if s.terminal { " [terminal]" } else { "" };
@@ -260,4 +282,35 @@ fn seed_config(force: bool) -> anyhow::Result<()> {
     // #7067: the refusal arm exits nonzero — the standard is half-applied and a
     // script must not read that as a completed seed.
     seed_outcome_result(outcome, &config_yaml)
+}
+
+#[cfg(test)]
+mod source_annotation_tests {
+    use super::*;
+
+    // #7580: a verb failure carries the model's source, so an unknown-state
+    // error cannot be read as a typo when the built-in model is in force.
+    #[test]
+    fn verb_failure_names_the_embedded_default_source_7580() {
+        let source = ModelSource::EmbeddedDefault {
+            searched_from: PathBuf::from("/repo/crates/trusty-mpm"),
+        };
+        let err = with_source(
+            anyhow::anyhow!("unknown target state `status:merged`; valid states: [queued]"),
+            &source,
+        );
+        let text = format!("{err}");
+        assert!(text.contains("unknown target state"), "{text}");
+        assert!(text.contains("BUILT-IN default"), "{text}");
+    }
+
+    #[test]
+    fn verb_failure_names_a_file_source() {
+        let source = ModelSource::File(PathBuf::from("/repo/issue-state.yaml"));
+        let text = format!("{}", with_source(anyhow::anyhow!("boom"), &source));
+        assert!(
+            text.contains("state model: /repo/issue-state.yaml"),
+            "{text}"
+        );
+    }
 }
