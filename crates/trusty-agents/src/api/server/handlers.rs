@@ -385,7 +385,8 @@ pub(super) async fn submit_task(
     };
     // The inline (`inline_attachments`) pathway validates its own bodies; the
     // id-addressed (`attachments`) pathway is resolved against the manifest
-    // below. The two are independent and a turn may carry either.
+    // below. A turn may carry either or both, but they share ONE per-turn count
+    // budget — see `resolve_attachments` (#7396).
     if let Err(error) = trusty_common::chat_attachments::validate_inputs(&req.inline_attachments) {
         return super::attachment_prepare::error(error).into_response();
     }
@@ -671,21 +672,28 @@ pub(super) async fn submit_task(
 /// `super::tests::attachments::send_with_a_known_attachment_is_accepted`.
 async fn resolve_attachments(state: &AppState, req: &TaskRequest) -> Result<Vec<String>, Response> {
     let ids = req.attachments.clone().unwrap_or_default();
-    if ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    if ids.len() > crate::attachments::MAX_ATTACHMENTS_PER_TURN {
+    // #7396: ONE budget across both pathways. `attachments` carries manifest
+    // ids and `inline_attachments` carries prepared bodies, but a turn pays for
+    // every one of them — each is rendered into the turn and replayed as
+    // history on every later turn in the session. Budgeting them separately
+    // handed a caller that sets both the sum of two caps, which is a cost
+    // neither cap was chosen for. Counted before the empty-`ids` return so a
+    // request that sets only `inline_attachments` is measured too.
+    let carried = ids.len() + req.inline_attachments.len();
+    if carried > crate::attachments::MAX_ATTACHMENTS_PER_TURN {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
                 "error": format!(
-                    "a turn may carry at most {} attachments, not {}",
+                    "a turn may carry at most {} attachments, not {carried}",
                     crate::attachments::MAX_ATTACHMENTS_PER_TURN,
-                    ids.len()
                 ),
             })),
         )
             .into_response());
+    }
+    if ids.is_empty() {
+        return Ok(Vec::new());
     }
     let agent = addressed_agent_for(req);
     // The session is DERIVED from the addressed assistant, never taken from
