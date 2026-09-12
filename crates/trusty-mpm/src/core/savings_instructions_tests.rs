@@ -149,6 +149,85 @@ fn session_and_root_rejects_a_short_path() {
     assert!(session_and_root(std::path::Path::new("/a/b/INSTRUCTIONS-COMPILED.md")).is_none());
 }
 
+/// Why (#7514): the resolver counted directories instead of checking their
+/// names, so any path four segments deep resolved to a session. The owner's
+/// ledger carried 228 rows reading `"session_id":"b" … compiled 13 B` — `b` is
+/// the second directory of `<tmp>/a/b/INSTRUCTIONS-COMPILED.md`, this crate's
+/// own `write_compiled_prompt_to_creates_parent_dirs` fixture, and 13 B is that
+/// fixture's `COMPILED-BODY` body.
+/// FAILS BEFORE THIS CHANGE: every path below resolved to a session id.
+/// Test: itself.
+#[test]
+fn session_and_root_rejects_a_path_that_is_not_under_sessions() {
+    for not_a_compiled_prompt in [
+        "/tmp/x/a/b/INSTRUCTIONS-COMPILED.md",
+        "/repos/t/.trusty-mpm/framework/sess-1/INSTRUCTIONS-COMPILED.md",
+        "/repos/t/other/sessions/sess-1/INSTRUCTIONS-COMPILED.md",
+        "/repos/t/.trusty-mpm/sessions/sess-1/last-instructions.md",
+    ] {
+        assert!(
+            session_and_root(std::path::Path::new(not_a_compiled_prompt)).is_none(),
+            "{not_a_compiled_prompt} is not a compiled-prompt path"
+        );
+    }
+}
+
+/// Why (#7514): the producer's whole input is a destination path, so a
+/// destination that is not a compiled prompt must produce nothing at all —
+/// neither a ledger row nor a staged one. The body here is deliberately ABOVE
+/// the #7491 floor, so what the assertion pins is the PATH check and not the
+/// floor; the floor's own guards are unchanged and still cover a short file.
+/// FAILS BEFORE THIS CHANGE: the ledger gained a row keyed `b`.
+/// Test: itself.
+#[test]
+fn a_malformed_compiled_prompt_path_records_no_row() {
+    let framework_root = tempfile::tempdir().expect("temp framework root");
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let dest = tmp
+        .path()
+        .join("a")
+        .join("b")
+        .join("INSTRUCTIONS-COMPILED.md");
+    std::fs::create_dir_all(dest.parent().expect("parent")).expect("fixture dirs");
+    let plausible = plausible_prompt_above_the_floor();
+    std::fs::write(&dest, &plausible).expect("fixture");
+    let ledger = crate::core::savings::savings_log_in(framework_root.path());
+
+    record_instruction_compression_to(
+        framework_root.path(),
+        &dest,
+        &plausible,
+        Some("c-7514".to_string()),
+        sonnet_price,
+    );
+
+    assert!(
+        !ledger.exists(),
+        "a destination that is not a compiled prompt must append no row: {}",
+        std::fs::read_to_string(&ledger).unwrap_or_default()
+    );
+    assert!(
+        !crate::core::savings_sidecar::pending_row_path_in(framework_root.path(), &dest).exists(),
+        "nor stage one"
+    );
+    assert!(
+        !framework_root
+            .path()
+            .join("usage")
+            .join("no-fold-warned")
+            .exists(),
+        "nor leave a no-fold marker behind"
+    );
+}
+
+/// A compiled-prompt body that clears the #7491 floor and still folds.
+///
+/// Why: a fixture below the floor would make every assertion about the floor
+/// rather than about the property under test.
+fn plausible_prompt_above_the_floor() -> String {
+    "x".repeat(min_plausible_compiled_bytes() + 137)
+}
+
 /// Why: the bundled sections are the floor of the source set, and a count that
 /// silently dropped them would make every fold look like a saving.
 /// Test: itself.

@@ -1258,11 +1258,16 @@ fn prepare_session_inner(
 
     let scope = crate::core::harness_root::session_scope(session_id);
     let compiled = crate::core::instruction_pipeline::compiled_prompt_path(project_dir, &scope);
-    crate::core::instruction_pipeline::write_compiled_prompt_to(&compiled, &resolved_prompt)
-        .map_err(|source| PrepError::Instructions {
-            path: compiled.clone(),
-            source,
-        })?;
+    // #7514: record the fold against THIS preparation's framework root.
+    crate::core::instruction_pipeline::write_compiled_prompt_recording_in(
+        &fw.root,
+        &compiled,
+        &resolved_prompt,
+    )
+    .map_err(|source| PrepError::Instructions {
+        path: compiled.clone(),
+        source,
+    })?;
 
     // #6649: computed LAST so the skill tier it reads is the one this launch
     // leaves behind, not the one it inherited.

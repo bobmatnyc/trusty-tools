@@ -429,8 +429,9 @@ fn build_prompt_file(project_dir: &Path, session_id: Option<&str>) -> Option<std
     // two provisioning steps and not here.
     let scope = crate::core::harness_root::session_scope(session_id);
     let compiled = crate::core::instruction_pipeline::compiled_prompt_path(project_dir, &scope);
+    // #7514: a real spawn, so the ambient framework root is the right ledger.
     if let Err(err) =
-        crate::core::instruction_pipeline::write_compiled_prompt_to(&compiled, &prompt)
+        crate::core::instruction_pipeline::write_compiled_prompt_and_record(&compiled, &prompt)
     {
         tracing::warn!(
             project = %project_dir.display(),

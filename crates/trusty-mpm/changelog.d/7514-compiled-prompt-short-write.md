@@ -1,0 +1,3 @@
+Fixed
+
+- the instruction-compression savings row no longer describes a test fixture as an operator's session: writing a compiled prompt is now a pure write, the ledger the fold is recorded in is named by the launch path instead of resolved from the process home directory, and a destination that is not a `<root>/.trusty-mpm/sessions/<id>/INSTRUCTIONS-COMPILED.md` path declines with a warning rather than attributing a row to a directory that is not a session (refs [#7514](https://github.com/bobmatnyc/trusty-tools/issues/7514))

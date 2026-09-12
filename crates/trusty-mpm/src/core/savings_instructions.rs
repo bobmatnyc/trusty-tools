@@ -8,9 +8,13 @@
 //! by hand — means the figure re-derives itself when the instruction corpus
 //! changes, and it goes to zero honestly when nothing was folded.
 //!
-//! What: [`record_instruction_compression`], called from
-//! [`crate::core::instruction_pipeline::write_compiled_prompt_to`] — the single
-//! writer of the compiled prompt. It compares the folded source set against the
+//! What: [`record_instruction_compression`] and its root-taking sibling
+//! [`record_instruction_compression_in`], called from the compiled-prompt
+//! writer's recording entry points
+//! ([`crate::core::instruction_pipeline::write_compiled_prompt_and_record`] and
+//! [`crate::core::instruction_pipeline::write_compiled_prompt_recording_in`]).
+//! #7514 split those off the bare write, which now records nothing. It compares
+//! the folded source set against the
 //! delivered prompt and appends one [`crate::core::savings::SavingsRow`] per
 //! session launch when, and only when, the delivered prompt is smaller.
 //!
@@ -77,6 +81,8 @@
 
 use std::path::Path;
 
+use crate::core::harness_root::{HARNESS_DIR, SESSIONS_DIR};
+use crate::core::instruction_pipeline::COMPILED_PROMPT_FILE;
 use crate::core::savings::{
     BYTES_PER_TOKEN, SavingsRow, TECHNIQUE_INSTRUCTION_COMPRESSION, append_row,
     claude_code_session_id, now_ts, savings_log_in,
@@ -94,9 +100,27 @@ use crate::core::savings_sidecar::{stage_row, warn_no_fold_once};
 /// Test: `the_row_is_keyed_by_the_claude_session_id`,
 /// `no_claude_id_stages_the_row_instead_of_writing_an_unfoldable_one`.
 pub fn record_instruction_compression(dest: &Path, prompt: &str) {
+    record_instruction_compression_in(
+        &crate::core::paths::FrameworkPaths::default().root,
+        dest,
+        prompt,
+    );
+}
+
+/// [`record_instruction_compression`] against a caller-named framework root.
+///
+/// Why (#7514): the entry point above resolves its root from the operator's home
+/// directory, so every caller reachable from a test wrote into the operator's
+/// own ledger. A launch path that already holds a
+/// [`crate::core::paths::FrameworkPaths`] can name the root instead, and then a
+/// launch prepared under a temp root records under that temp root.
+/// What: reads the Claude Code session id the statusline folds by, then defers to
+/// [`record_instruction_compression_to`] against `framework_root`.
+/// Test: `a_bare_compiled_write_records_no_savings_row`.
+pub(crate) fn record_instruction_compression_in(framework_root: &Path, dest: &Path, prompt: &str) {
     // #7209: the row's key is the Claude Code session id, not the directory name.
     record_instruction_compression_to(
-        &crate::core::paths::FrameworkPaths::default().root,
+        framework_root,
         dest,
         prompt,
         claude_code_session_id(),
@@ -134,6 +158,14 @@ fn record_instruction_compression_to(
     price: impl FnOnce() -> Option<(String, f64)>,
 ) {
     let Some((compiled_prompt_id, harness_root)) = session_and_root(dest) else {
+        // #7514: a destination that is not a compiled-prompt path has no session
+        // and no harness root to measure against, so there is nothing to record.
+        tracing::warn!(
+            compiled_prompt = %dest.display(),
+            "not a <root>/.trusty-mpm/sessions/<id>/INSTRUCTIONS-COMPILED.md path, so \
+             neither the session nor the source set it would be measured against is \
+             known; writing no instruction-compression savings row"
+        );
         return;
     };
     let source_bytes = folded_source_bytes(&harness_root);
@@ -239,16 +271,34 @@ pub(crate) fn rederive_from_compiled_prompt(
 /// harness root is three directories above that (`sessions/`, `.trusty-mpm/`,
 /// the root).
 /// Returns `None` for any path not of that shape.
+///
+/// #7514: it now CHECKS that shape. It used to take the parent as a session id
+/// and count three directories up for the root without looking at what those
+/// directories were called, so `<tmp>/a/b/INSTRUCTIONS-COMPILED.md` resolved to
+/// session `b` under root `<tmp>` — which is exactly the
+/// `session_id":"b" … compiled 13 B` row the owner's ledger carried, produced by
+/// this crate's own `write_compiled_prompt_to_creates_parent_dirs` fixture. A
+/// path that is not a compiled prompt now declines, so no row can be attributed
+/// to a directory that is not a session.
 /// Test: `session_and_root_reads_the_compiled_prompt_path`,
-/// `session_and_root_rejects_a_short_path`.
+/// `session_and_root_rejects_a_short_path`,
+/// `session_and_root_rejects_a_path_that_is_not_under_sessions`,
+/// `a_malformed_compiled_prompt_path_records_no_row`.
 fn session_and_root(dest: &Path) -> Option<(String, std::path::PathBuf)> {
-    let session_dir = dest.parent()?;
-    let session_id = session_dir.file_name()?.to_str()?.to_string();
-    if session_id.is_empty() {
+    if dest.file_name()? != std::ffi::OsStr::new(COMPILED_PROMPT_FILE) {
         return None;
     }
-    let harness_root = session_dir.parent()?.parent()?.parent()?.to_path_buf();
-    Some((session_id, harness_root))
+    let session_dir = dest.parent()?;
+    let session_id = session_dir.file_name()?.to_str()?.to_string();
+    let sessions_dir = session_dir.parent()?;
+    if sessions_dir.file_name()? != std::ffi::OsStr::new(SESSIONS_DIR) {
+        return None;
+    }
+    let harness_dir = sessions_dir.parent()?;
+    if harness_dir.file_name()? != std::ffi::OsStr::new(HARNESS_DIR) {
+        return None;
+    }
+    Some((session_id, harness_dir.parent()?.to_path_buf()))
 }
 
 /// Total bytes of every instruction body the composer read for this project.

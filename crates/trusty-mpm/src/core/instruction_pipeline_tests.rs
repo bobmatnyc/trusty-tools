@@ -65,6 +65,12 @@ impl RosterTiers {
         self.tmp.path().join("project")
     }
 
+    /// The temp `$HOME` this guard installed — where an ambient
+    /// [`crate::core::paths::FrameworkPaths::default`] resolves while it is held.
+    fn home(&self) -> PathBuf {
+        self.tmp.path().join("home")
+    }
+
     /// Tier 1 — `<project>/.claude/agents`, the operator's hand-placed agents.
     fn project_tier(&self) -> PathBuf {
         self.project().join(".claude").join("agents")
@@ -1006,6 +1012,34 @@ fn write_compiled_prompt_to_creates_parent_dirs() {
     let dest = tmp.path().join("a").join("b").join(COMPILED_PROMPT_FILE);
     write_compiled_prompt_to(&dest, "COMPILED-BODY").expect("write succeeds");
     assert_eq!(fs::read_to_string(&dest).unwrap(), "COMPILED-BODY");
+}
+
+/// Why (#7514): this write used to append an instruction-compression savings row
+/// against `FrameworkPaths::default()` — which resolves under the operator's own
+/// home — so every unit test that wrote a compiled prompt into a tempdir put a
+/// synthetic row in the operator's real ledger and a marker in its
+/// `usage/no-fold-warned/`. The `💸` statusline segment then reported a figure no
+/// launch produced. A bare write must touch its destination and nothing else.
+/// FAILS BEFORE THIS CHANGE: `<home>/.trusty-mpm/usage/` existed afterwards.
+/// Test: itself.
+#[test]
+#[serial_test::serial]
+fn a_bare_compiled_write_records_no_savings_row() {
+    let tiers = RosterTiers::new();
+    let project = tiers.project();
+    let dest = compiled_prompt_path(&project, "sess-7514");
+    // Above the #7491 floor and below the source set, so the producer WOULD
+    // have recorded a row: what is asserted is that it is never asked to.
+    let plausible =
+        "x".repeat(crate::core::savings_instructions::min_plausible_compiled_bytes() + 137);
+
+    write_compiled_prompt_to(&dest, &plausible).expect("write succeeds");
+
+    assert_eq!(fs::read_to_string(&dest).unwrap(), plausible);
+    assert!(
+        !tiers.home().join(".trusty-mpm").join("usage").exists(),
+        "a bare compiled write must not reach the operator's savings ledger"
+    );
 }
 
 #[test]
