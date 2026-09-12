@@ -32,7 +32,7 @@ name = "trusty-memory"
 # 0.26.0 (#6820): minor — `AppState` gained the public `machine` field. The struct
 # has public fields and is not `#[non_exhaustive]`, so a downstream struct literal
 # stops compiling; Cargo's 0.x rule puts that break in MINOR.
-version = "0.26.0"
+version = "0.26.1"
 edition = "2021"
 description = "MCP server (stdio + Unix socket) for trusty-memory"
 license.workspace = true
