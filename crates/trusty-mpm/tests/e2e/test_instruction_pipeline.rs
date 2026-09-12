@@ -23,6 +23,9 @@ use trusty_mpm::core::instruction_pipeline::{PipelineInput, build_instructions};
 /// directory. Agents for these tests go into that project's own
 /// `.claude/agents` tier — see [`agents_tier`].
 fn input_in(tmp: &TempDir) -> PipelineInput {
+    // #7673: seeding a CLAUDE.md into a directory that is not a project root
+    // is refused — the harness root is the marker that says this one is.
+    std::fs::create_dir_all(tmp.path().join("project").join(".trusty-mpm")).unwrap();
     PipelineInput {
         project_dir: tmp.path().join("project"),
         claude_md_path: tmp.path().join("project").join("CLAUDE.md"),

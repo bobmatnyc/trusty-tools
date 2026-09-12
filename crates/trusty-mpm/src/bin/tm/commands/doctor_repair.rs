@@ -17,6 +17,7 @@
 //! this file is path resolution and printing.
 
 use colored::Colorize;
+use trusty_mpm::core::ancestor_claude_md_repair::repair_ancestor_claude_md;
 use trusty_mpm::core::doctor_repair::{
     RepairMode, RepairStep, StepStatus, refuse_legacy_sources, repair_build_tree_binary,
     repair_hooks_contamination, repair_missing_hook_group, repair_output_style, repair_push_guard,
@@ -182,6 +183,18 @@ pub(crate) fn run_repairs(apply: bool, include_frozen: bool) {
             project,
             trusty_mpm::core::trusty_tools_config::managed_claude_config_dir().as_deref(),
             trusty_mpm::core::session_mcp_scope::session_mcp_path(project).as_deref(),
+            mode,
+        ));
+        // #7673: the two ancestor-`CLAUDE.md` remedies — rename a pure tm seed
+        // template aside, and add a content-carrying ancestor to this project's
+        // `claudeMdExcludes` rather than touching someone's notes. Project-
+        // scoped because the exclude is written into THIS project's
+        // `.claude/settings.local.json`.
+        steps.extend(repair_ancestor_claude_md(
+            project,
+            dirs::home_dir().as_deref(),
+            trusty_mpm::core::trusty_tools_config::managed_claude_config_dir().as_deref(),
+            &chrono::Utc::now().format("%Y%m%d").to_string(),
             mode,
         ));
     } else {

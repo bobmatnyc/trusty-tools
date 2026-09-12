@@ -1273,6 +1273,8 @@ async fn doctor_endpoint_returns_report() {
         "log_drain",
         // #7424: this project's turn-1 startup context against its ceiling.
         "startup_context",
+        // #7673: every CLAUDE.md ABOVE the project root.
+        "ancestor_claude_md",
     ];
     assert_eq!(names, expected);
     // Count derived from the list above, never a standalone literal:

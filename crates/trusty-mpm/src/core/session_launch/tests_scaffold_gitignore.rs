@@ -59,6 +59,10 @@ fn prepare_session_skips_gitignore_when_project_is_not_git_repo() {
     let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = crate::test_support::hermetic_temp_dir();
     let project = tmp.path();
+    // #7673: a non-git project still has to be a project root for the CLAUDE.md
+    // seed to be allowed. The harness root is the marker that says so without
+    // making this a git working tree, which is the whole point here.
+    std::fs::create_dir_all(project.join(".trusty-mpm")).unwrap();
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
     prepare_session(&fw, project).expect("prep succeeds");

@@ -938,6 +938,17 @@ fn prepare_session_inner(
         }
     })?;
 
+    // #7673: one WARN per launch naming every `CLAUDE.md` ABOVE this project.
+    // Claude Code prepends each of them to every turn here, and the cost is
+    // invisible from inside the session — this is the only moment it can be
+    // surfaced. Silent when there is nothing above the project, or when the
+    // operator has already listed it in `claudeMdExcludes`.
+    crate::core::ancestor_claude_md::warn_ancestors(
+        project_dir,
+        dirs::home_dir().as_deref(),
+        crate::core::trusty_tools_config::managed_claude_config_dir().as_deref(),
+    );
+
     // Resolve the EFFECTIVE output style, folding the manifest's default in as
     // the lowest precedence below the existing HR-4 sources. Precedence:
     // explicit `--style` flag > `[style] active` config key > manifest `[style]

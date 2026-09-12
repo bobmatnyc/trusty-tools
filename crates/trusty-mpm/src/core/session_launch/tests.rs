@@ -8,6 +8,21 @@ use super::settings::{
 use super::*;
 use tempfile::tempdir;
 
+/// Mark `dir` a project root so the #7673 seed guard permits the CLAUDE.md stub.
+///
+/// Why: `load_or_create_claude_md` now refuses to seed into a directory with no
+/// `.git`, `.trusty-mpm/` or `.trusty-mpm.toml` — a bare temp directory is
+/// exactly the shape that guard exists to stop, and every `prepare_session`
+/// fixture here was one. The marker is the HARNESS ROOT, not a `.git`
+/// directory: a fake `.git` makes the #4448 quarantine gate read the fixture as
+/// a git checkout and skip the sweep those tests are asserting on.
+/// What: creates `<dir>/.trusty-mpm/` and returns `dir` unchanged.
+/// Test: used by every `prepare_session_*` test in this module and its siblings.
+pub(super) fn mark_project_root(dir: &std::path::Path) -> &std::path::Path {
+    std::fs::create_dir_all(dir.join(".trusty-mpm")).expect("mark the fixture a project root");
+    dir
+}
+
 /// Why: env-mutating tests previously restored the var by hand at the end of the
 /// test body, so a panic between set and restore leaked process-global state
 /// into sibling `#[serial]` tests. This guard restores the prior value (or
@@ -109,7 +124,7 @@ fn build_system_prompt_for_applies_project_override() {
     // `.trusty-mpm/INSTRUCTIONS.md` file this used to write is retired, and the
     // second half of this test now asserts it has no effect.
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = mark_project_root(tmp.path());
     std::fs::write(
         project.join("CLAUDE.md"),
         "<!-- TRUSTY-MPM: WORKFLOW START v=1 -->\n\
@@ -166,6 +181,7 @@ fn prepare_session_does_not_seed_the_workspace_on_the_managed_path() {
     let workspace = tempdir().unwrap();
     let home = tempdir().unwrap();
 
+    mark_project_root(workspace.path());
     let fw = crate::core::paths::FrameworkPaths::for_managed_project(
         managed_root.path(),
         workspace.path(),
@@ -226,6 +242,7 @@ fn global_hook_cleanup_reaches_the_real_home_under_an_overridden_root() {
     )
     .unwrap();
 
+    mark_project_root(workspace.path());
     let fw = crate::core::paths::FrameworkPaths::for_managed_project(
         std::path::Path::new("/opt/tm-roots/team-a/.trusty-mpm"),
         workspace.path(),
@@ -306,7 +323,7 @@ fn prepare_session_stash_reflects_override() {
         let tmp_home = tempdir().unwrap();
         let _home = EnvVarGuard::set("HOME", tmp_home.path());
         let tmp = tempdir().unwrap();
-        let project = tmp.path();
+        let project = mark_project_root(tmp.path());
         let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
         // #4286: the override arrives as a CLAUDE.md named section. The
@@ -374,7 +391,7 @@ fn prepare_session_writes_claude_md_and_stash() {
     let tmp_home = tempdir().unwrap();
     let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = mark_project_root(tmp.path());
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
     let report = prepare_session(&fw, project).expect("prep succeeds");
@@ -448,7 +465,7 @@ fn prepare_session_writes_the_compiled_prompt_before_returning() {
     let tmp_home = tempdir().unwrap();
     let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = mark_project_root(tmp.path());
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
     const STALE: &str = "STALE-FROM-A-PREVIOUS-INSTALL";
@@ -495,7 +512,7 @@ fn prepare_session_fails_when_the_compiled_prompt_cannot_be_written() {
     let tmp_home = tempdir().unwrap();
     let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = mark_project_root(tmp.path());
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
     std::fs::create_dir_all(compiled_for(project)).unwrap();
@@ -541,7 +558,7 @@ fn prepare_session_for_managed_writes_the_per_session_compiled_prompt() {
     let tmp_home = tempdir().unwrap();
     let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = mark_project_root(tmp.path());
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
     let report =
@@ -579,7 +596,7 @@ fn prepare_session_migrates_off_the_legacy_compiled_prompt() {
     let tmp_home = tempdir().unwrap();
     let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = mark_project_root(tmp.path());
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
     let legacy = project
@@ -633,7 +650,7 @@ fn prepare_session_refuses_when_the_instructions_cannot_be_built() {
     let tmp_home = tempdir().unwrap();
     let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = mark_project_root(tmp.path());
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
     std::fs::create_dir_all(project.join("CLAUDE.md"))
@@ -685,7 +702,7 @@ fn stash_write_failure_does_not_skip_the_fatal_instruction_write() {
     let tmp_home = tempdir().unwrap();
     let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = mark_project_root(tmp.path());
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
     std::fs::create_dir_all(project.join(".trusty-mpm/last-instructions.md"))
@@ -713,7 +730,7 @@ fn prepare_session_deploys_project_tier_output_style() {
     let tmp_home = tempdir().unwrap();
     let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = mark_project_root(tmp.path());
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
     prepare_session(&fw, project).expect("prep succeeds");
@@ -740,7 +757,7 @@ fn prepare_session_self_heals_missing_skill_source() {
     let tmp_home = tempdir().unwrap();
     let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = mark_project_root(tmp.path());
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
     assert!(!fw.skills.exists(), "precondition: no prior tm install ran");
 
@@ -782,7 +799,7 @@ fn prepare_session_self_heals_renamed_skill_source() {
     let tmp_home = tempdir().unwrap();
     let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = mark_project_root(tmp.path());
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
     std::fs::create_dir_all(&fw.skills).unwrap();
     std::fs::write(fw.skills.join("mpm-old-skill.md"), "stale\n").unwrap();
@@ -843,7 +860,7 @@ async fn prepare_session_emits_stage_events_in_order() {
     let tmp_home = tempdir().unwrap();
     let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = mark_project_root(tmp.path());
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
     let (tx, mut rx) = tokio::sync::broadcast::channel(32);
@@ -885,7 +902,7 @@ fn prepare_session_sets_output_style() {
     let tmp_home = tempdir().unwrap();
     let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = mark_project_root(tmp.path());
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
     prepare_session(&fw, project).expect("prep succeeds");
@@ -907,7 +924,7 @@ fn prepare_session_writes_configured_style() {
     let tmp_home = tempdir().unwrap();
     let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = mark_project_root(tmp.path());
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
     // Seed `<root>/config.toml` with a teaching-mode selection.
@@ -940,7 +957,7 @@ fn prepare_session_explicit_style_overrides_config() {
     let tmp_home = tempdir().unwrap();
     let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = mark_project_root(tmp.path());
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
     std::fs::create_dir_all(&fw.root).unwrap();
@@ -977,7 +994,7 @@ fn prepare_session_unknown_style_falls_back_to_default() {
     let tmp_home = tempdir().unwrap();
     let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = mark_project_root(tmp.path());
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
     std::fs::create_dir_all(&fw.root).unwrap();
@@ -996,7 +1013,7 @@ fn prepare_session_unknown_style_falls_back_to_default() {
 fn write_output_style_preserves_existing_keys() {
     // Why: merging the style must not clobber an operator's other settings.
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = mark_project_root(tmp.path());
     let claude_dir = project.join(".claude");
     std::fs::create_dir_all(&claude_dir).unwrap();
     std::fs::write(
@@ -1020,7 +1037,7 @@ fn write_output_style_preserves_existing_keys() {
 #[test]
 fn write_output_style_seeds_attribution() {
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = mark_project_root(tmp.path());
 
     write_output_style(project, None).expect("write succeeds");
 
@@ -1045,7 +1062,7 @@ fn write_output_style_seeds_attribution() {
 #[test]
 fn write_output_style_preserves_operator_attribution() {
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = mark_project_root(tmp.path());
     let claude_dir = project.join(".claude");
     std::fs::create_dir_all(&claude_dir).unwrap();
     std::fs::write(
@@ -1076,7 +1093,7 @@ fn write_output_style_sets_active_style() {
     // Why: HR-4 — an explicitly resolved active style id must be written into
     // settings.json so a native-capable Claude Code applies it.
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = mark_project_root(tmp.path());
 
     write_output_style(project, Some("trusty-mpm-research")).expect("write succeeds");
 
@@ -1095,7 +1112,7 @@ fn write_output_style_empty_falls_back_to_default() {
     // Why: a blank/whitespace id must not blank the outputStyle key; it falls
     // back to the professional default.
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = mark_project_root(tmp.path());
 
     write_output_style(project, Some("   ")).expect("write succeeds");
 
@@ -1112,7 +1129,7 @@ fn write_output_style_sets_spinner_tips() {
     // claude-mpm spinner tips with project-specific ones; the settings.json
     // merge must enable tips and write a non-empty tips array.
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = mark_project_root(tmp.path());
 
     write_output_style(project, None).expect("write succeeds");
 
@@ -1135,7 +1152,7 @@ fn write_project_hooks_writes_all_event_types() {
     // `SessionStart` → inbox-check. The old `PostToolUse`/`Stop` events invoked
     // the nonexistent `hooks fire` subcommand and are gone.
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = mark_project_root(tmp.path());
 
     write_project_hooks(
         project,
@@ -1171,7 +1188,7 @@ fn write_project_hooks_uses_canonical_commands() {
     // (`prompt-context`, `inbox-check`) — never the bogus `hooks fire` form that
     // hard-blocked prompts with "unrecognized subcommand 'hooks'".
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = mark_project_root(tmp.path());
 
     write_project_hooks(
         project,
@@ -1211,7 +1228,7 @@ fn write_project_hooks_omits_post_tool_use_and_stop() {
     // `project_hooks_tests::write_project_hooks_writes_lifecycle_triad` for
     // the full six-event triad assertion.
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = mark_project_root(tmp.path());
 
     write_project_hooks(
         project,
@@ -1247,7 +1264,7 @@ fn write_project_hooks_registers_pm_guard() {
     // NOTE (#2003): PreToolUse now also carries the lifecycle-triad group
     // alongside the guard — two groups, not one.
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = mark_project_root(tmp.path());
 
     write_project_hooks(
         project,
@@ -1294,7 +1311,7 @@ fn write_project_hooks_replaces_existing() {
     // lifecycle-triad) rather than 1 — the assertion is "stays at 2 across
     // repeats", not "stays at 1".
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = mark_project_root(tmp.path());
 
     write_project_hooks(
         project,
@@ -1671,7 +1688,7 @@ fn prepare_session_reports_output_style() {
     let tmp_home = tempdir().unwrap();
     let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = mark_project_root(tmp.path());
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
     let report = prepare_session(&fw, project).expect("prep succeeds");
@@ -1702,7 +1719,7 @@ fn prepare_session_reports_skill_deploy() {
     let tmp_home = tempdir().unwrap();
     let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = mark_project_root(tmp.path());
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
     let report = prepare_session(&fw, project).expect("prep succeeds");
@@ -1725,7 +1742,7 @@ fn prepare_session_is_idempotent() {
     let tmp_home = tempdir().unwrap();
     let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = mark_project_root(tmp.path());
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
     let first = prepare_session(&fw, project).expect("first prep succeeds");
@@ -1776,7 +1793,7 @@ fn prepare_session_default_deploys_all_seeded_agents() {
     let tmp_home = tempdir().unwrap();
     let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = mark_project_root(tmp.path());
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
     // Force the bundled source so the test does not depend on an `agents/`
     // submodule resolved from the running binary's location.
@@ -1821,7 +1838,7 @@ fn prepare_session_never_retracts_the_operator_home_agents_tier() {
     let tmp_home = tempdir().unwrap();
     let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = mark_project_root(tmp.path());
     let mut fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
     fw.trusty_mpm_root = None;
     seed_bundled_agents(&fw);
@@ -1880,7 +1897,7 @@ fn prepare_session_manifest_filters_agent_set() {
     let tmp_home = tempdir().unwrap();
     let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = mark_project_root(tmp.path());
     let mut fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
     fw.trusty_mpm_root = None;
     seed_bundled_agents(&fw);
@@ -1924,7 +1941,7 @@ fn prepare_session_manifest_sets_default_style() {
     let tmp_home = tempdir().unwrap();
     let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = mark_project_root(tmp.path());
     let mut fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
     fw.trusty_mpm_root = None;
 
@@ -1959,7 +1976,7 @@ fn prepare_session_config_style_overrides_manifest() {
     let tmp_home = tempdir().unwrap();
     let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = mark_project_root(tmp.path());
     let mut fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
     fw.trusty_mpm_root = None;
 

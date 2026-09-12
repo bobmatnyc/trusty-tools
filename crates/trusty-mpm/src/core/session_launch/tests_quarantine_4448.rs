@@ -90,7 +90,7 @@ fn prepare_session_quarantines_a_shadowing_workspace_agent() {
     let tmp_home = tempdir().unwrap();
     let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = super::tests::mark_project_root(tmp.path());
     let fw = managed_fixture(tmp_home.path(), project);
 
     let content = tm_shadow("rust-engineer");
@@ -148,7 +148,7 @@ fn prepare_session_never_quarantines_the_operator_home_agents_tier() {
     let tmp_home = tempdir().unwrap();
     let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = super::tests::mark_project_root(tmp.path());
     let fw = managed_fixture(tmp_home.path(), project);
 
     // An untracked, trusty-mpm-schema copy on a bundled name, sitting in the
@@ -188,7 +188,7 @@ fn prepare_session_never_quarantines_a_git_tracked_workspace_agent() {
     let tmp_home = tempdir().unwrap();
     let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = super::tests::mark_project_root(tmp.path());
     let fw = managed_fixture(tmp_home.path(), project);
 
     git(project, &["init", "-q"]);
@@ -219,7 +219,7 @@ fn prepare_session_never_quarantines_a_claude_mpm_workspace_agent() {
     let tmp_home = tempdir().unwrap();
     let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = super::tests::mark_project_root(tmp.path());
     let fw = managed_fixture(tmp_home.path(), project);
 
     let content = "---\nname: rust-engineer\ndescription: \"Use this agent when…\"\n\
@@ -241,7 +241,7 @@ fn prepare_session_leaves_a_clean_project_clean() {
     let tmp_home = tempdir().unwrap();
     let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = super::tests::mark_project_root(tmp.path());
     let fw = managed_fixture(tmp_home.path(), project);
 
     let custom = stage_project_agent(project, "acme.md", &tm_shadow("acme-house-agent"));
@@ -264,7 +264,7 @@ fn prepare_session_reports_a_quarantined_agent_as_a_launch_notice() {
     let tmp_home = tempdir().unwrap();
     let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = super::tests::mark_project_root(tmp.path());
     let fw = managed_fixture(tmp_home.path(), project);
 
     stage_project_agent(project, "rust-engineer.md", &tm_shadow("rust-engineer"));
@@ -297,7 +297,7 @@ fn prepare_session_on_a_clean_project_reports_no_asset_notice() {
     let tmp_home = tempdir().unwrap();
     let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = super::tests::mark_project_root(tmp.path());
     let fw = managed_fixture(tmp_home.path(), project);
 
     stage_project_agent(project, "acme.md", &tm_shadow("acme-house-agent"));
@@ -318,7 +318,7 @@ fn prepare_session_reports_a_same_stem_duplicate() {
     let tmp_home = tempdir().unwrap();
     let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
-    let project = tmp.path();
+    let project = super::tests::mark_project_root(tmp.path());
     let fw = managed_fixture(tmp_home.path(), project);
 
     // An operator-authored directory beside a file of the same stem. Neither is

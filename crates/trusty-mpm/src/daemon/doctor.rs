@@ -21,7 +21,7 @@ use crate::core::doctor::{CheckStatus, DoctorCheck, DoctorReport};
 use crate::core::paths::FrameworkPaths;
 // #7259: doctor's claim set now carries liveness, produced in one place by
 // `SessionManager::workspace_claims`.
-use crate::session_manager::worktree_reclaim::{ClaimLiveness, LiveClaims, WorkspaceClaim};
+use crate::session_manager::worktree_reclaim::{LiveClaims, WorkspaceClaim};
 
 // Split out to keep this file under the 500-SLOC production cap (#5947 — the
 // worktrees probe now reads the reconciled inventory, and its counts type and
@@ -90,7 +90,16 @@ use doctor_transcript_saving::check_transcript_saving;
 // #7424: the startup-context budget row. Its `mod` declaration is in
 // `daemon/mod.rs` rather than here — this file sits AT the 500-SLOC production
 // cap, so only the `use` fits.
+// #7673: the ancestor-`CLAUDE.md` row, and the fleet helpers this file gave up
+// to make room for it — `doctor.rs` sits AT the 500-SLOC production cap, so the
+// split ships inside the change that next adds to it.
+#[path = "doctor_ancestor_claude_md.rs"]
+mod doctor_ancestor_claude_md;
+#[path = "doctor_workspace_claims.rs"]
+mod doctor_workspace_claims;
 use super::doctor_startup_context::check_startup_context;
+use doctor_ancestor_claude_md::check_ancestor_claude_md;
+use doctor_workspace_claims::{is_managed_workspace, live_workspace_paths};
 
 // Split out to keep this file under the 500-SLOC production cap (issue #2876 —
 // the skill-staleness and legacy-instruction-source probes).
@@ -411,7 +420,7 @@ const PROBE_RETRY_DELAY: Duration = Duration::from_millis(500);
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_fifty_checks`,
+/// Test: `run_doctor_produces_fifty_one_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -651,6 +660,16 @@ pub(crate) async fn run_doctor_with_claims(
     // by the session that owned it, so the row cannot reach another project's
     // session data. Declared in `daemon/mod.rs`; this file is AT the SLOC cap.
     checks.push(check_startup_context(project_dir));
+    // #7673: every `CLAUDE.md` ABOVE the project root, which Claude Code
+    // prepends to every session started beneath it. No other row looks above
+    // the project at all, which is how a tm seed template sat at `$HOME`
+    // costing every turn of every agent in every project under it. Read-only;
+    // `tm doctor --fix --yes` renames a pure seed aside and excludes the rest.
+    checks.push(check_ancestor_claude_md(
+        project_dir,
+        Some(&home),
+        crate::core::trusty_tools_config::managed_claude_config_dir().as_deref(),
+    ));
 
     DoctorReport::from_checks(checks)
 }
@@ -701,61 +720,6 @@ pub async fn run_doctor_for_manager(
     let worktree_counts =
         gather_worktree_counts(mgr, &repos_root, &crate::project::default_adopted_anchors()).await;
     run_doctor_with_claims(project_dir, Some(&repos_root), &active, worktree_counts).await
-}
-
-/// The claimed workspace paths whose session is still live (#7259).
-///
-/// Why: four probes — the managed-workspace tier decision, the base-clone
-/// identity check, and the two hooks-hygiene checks — ask only "which
-/// workspaces belong to a running session". A tombstoned record answers that
-/// question with a directory nobody occupies, which is how a `deleted` adopted
-/// pane's org-level path kept counting as active.
-/// What: every claim except the ones a liveness probe answered for and found
-/// gone. `Live` covers both "the session is running" and "nothing could
-/// establish that it is not", so an unobservable tmux yields the full set —
-/// the same fail-closed direction gate 2 takes.
-/// Test: `live_workspace_paths_drops_only_claims_a_probe_found_gone`.
-fn live_workspace_paths(active: &LiveClaims) -> Vec<PathBuf> {
-    active
-        .claims
-        .iter()
-        .filter(|c| c.liveness != ClaimLiveness::SessionGone)
-        .map(|c| c.path.clone())
-        .collect()
-}
-
-/// Is `project_dir` a workspace some live session was provisioned into?
-///
-/// Why (#5867): [`FrameworkPaths::for_managed_workspace`] rewrites the SKILL
-/// deploy destination to `<dir>/.claude/skills`, which is true only of a
-/// managed session's own workspace. Every other production call site already
-/// passes one; `run_doctor` is the only one handed an arbitrary process cwd,
-/// and applying the workspace layout there collapsed the operator-home tier
-/// onto the project tier. `active_workspace_paths` is exactly the set of
-/// provisioned workspaces — `daemon::api::doctor` builds it from every session
-/// record's `workspace_path` — so it is the only input that can answer this
-/// without inventing a heuristic.
-/// What: canonicalizes both sides (a workspace under `/tmp` resolves through a
-/// symlink on macOS, so a raw `==` would miss the match) and reports whether
-/// `project_dir` appears in the set. A path that cannot be canonicalized —
-/// absent, dangling symlink, unreadable parent alike — falls back to its own
-/// raw spelling, so it is then compared verbatim. That is the safe answer in
-/// the sense that matters: it can still match a recorded workspace under the
-/// exact name the session recorded, but it can never match an unregistered
-/// directory, which is the promotion #5867 is about.
-/// Test: `unmanaged_cwd_audits_the_operator_home_tier`,
-/// `a_registered_workspace_still_gets_the_workspace_layout`,
-/// `an_uncanonicalizable_path_is_not_a_managed_workspace`,
-/// `an_unreadable_directory_is_not_a_managed_workspace`,
-/// `an_absent_path_still_matches_the_recorded_spelling_of_itself`.
-fn is_managed_workspace(project_dir: &Path, active_workspace_paths: &[PathBuf]) -> bool {
-    fn resolve(path: &Path) -> PathBuf {
-        std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-    }
-    let target = resolve(project_dir);
-    active_workspace_paths
-        .iter()
-        .any(|candidate| resolve(candidate) == target)
 }
 
 /// Probe trusty-memory's health (#6286).

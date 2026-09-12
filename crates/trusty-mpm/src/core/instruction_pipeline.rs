@@ -1018,7 +1018,17 @@ fn git_succeeds(dir: &std::path::Path, args: &[&str]) -> bool {
 /// the ordinary stub, so a genuinely new project is unaffected. Note a missing
 /// `@{upstream}` alone does NOT fall open — `origin/HEAD` is still consulted,
 /// and a repo with no remote at all is what actually reaches the stub.
+/// #7673 — and never ABOVE a project. A tm seed template was found at `$HOME`
+/// on 2026-09-12; Claude Code loads every `CLAUDE.md` from the session cwd up to
+/// the filesystem root, so that one file rode into every turn of every agent in
+/// every project under the home directory. This now refuses to seed when the
+/// target directory is the home directory, or carries no project-root marker —
+/// see [`crate::core::claude_md_seed::refuse_seed_at`]. The refusal is an ERROR
+/// arm on the same fatal path as the #5228 refusal above, never a warning that
+/// writes anyway.
 /// Test: `pipeline_creates_claude_md`, `pipeline_claude_md_left_byte_identical`,
+/// `load_or_create_claude_md_refuses_to_seed_at_the_home_directory`,
+/// `load_or_create_claude_md_refuses_to_seed_outside_a_project_root`,
 /// `load_or_create_claude_md_refuses_to_stub_a_branch_predating_the_tracked_file`,
 /// `build_instructions_refuses_a_stale_worktree_rather_than_seeding_a_stub`,
 /// `load_or_create_claude_md_still_seeds_when_upstream_has_no_claude_md`,
@@ -1027,6 +1037,21 @@ fn load_or_create_claude_md(path: &PathBuf) -> Result<(String, bool), PipelineEr
     match std::fs::read_to_string(path) {
         Ok(text) => Ok((text, false)),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            // #7673: and the seed must never land ABOVE a project. This is an
+            // ERROR arm, never a warning that then writes anyway — the whole
+            // finding is that a stray seed is invisible once written.
+            if let Some(dir) = path.parent().filter(|p| !p.as_os_str().is_empty())
+                && let Some(refusal) =
+                    crate::core::claude_md_seed::refuse_seed_at(dir, dirs::home_dir().as_deref())
+            {
+                return Err(PipelineError::Io {
+                    path: path.clone(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        refusal.message(dir),
+                    ),
+                });
+            }
             // #5228: a stale branch's missing CLAUDE.md must never be stubbed over.
             if let Some(upstream) = upstream_tracking(path) {
                 return Err(PipelineError::Io {

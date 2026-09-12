@@ -264,6 +264,8 @@ fn prepare_inproject_session_writes_statusline() {
     // #3965: `#[serial]` + `$HOME` override — see `HomeGuard` above.
     let _home = set_home(tmp_home.path());
     let worktree = tempfile::TempDir::new().expect("tmp worktree");
+    // #7673: the seed guard refuses a directory that is not a project root.
+    std::fs::create_dir_all(worktree.path().join(".trusty-mpm")).unwrap();
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
     let session_id = ManagedSessionId::new();
 
@@ -325,6 +327,8 @@ async fn prepare_inproject_session_emits_stage_events_in_order() {
     // #3965: `#[serial]` + `$HOME` override — see `HomeGuard` above.
     let _home = set_home(tmp_home.path());
     let worktree = tempfile::TempDir::new().expect("tmp worktree");
+    // #7673: the seed guard refuses a directory that is not a project root.
+    std::fs::create_dir_all(worktree.path().join(".trusty-mpm")).unwrap();
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
     let session_id = ManagedSessionId::new();
 

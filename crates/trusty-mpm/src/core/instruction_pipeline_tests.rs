@@ -61,8 +61,14 @@ impl RosterTiers {
     }
 
     /// The project whose roster is under test.
+    ///
+    /// #7673: marked as a git checkout, because seeding a `CLAUDE.md` into a
+    /// directory that is not a project root is now refused. A bare temp
+    /// directory is exactly the shape the guard exists to stop.
     fn project(&self) -> PathBuf {
-        self.tmp.path().join("project")
+        let dir = self.tmp.path().join("project");
+        fs::create_dir_all(dir.join(".git")).expect("mark the fixture a project root");
+        dir
     }
 
     /// The temp `$HOME` this guard installed — where an ambient
@@ -436,6 +442,53 @@ fn load_or_create_claude_md_reads_a_present_file_in_a_git_worktree() {
     assert!(!created, "an existing CLAUDE.md is never recreated");
     assert_eq!(content, fx.upstream_content);
     assert_eq!(fs::read_to_string(&path).unwrap(), fx.upstream_content);
+}
+
+/// #7673, the 2026-09-12 finding: a tm seed template was sitting at `$HOME`,
+/// so Claude Code prepended it to every turn of every agent in every project
+/// under the home directory.
+///
+/// FAILS BEFORE THIS CHANGE: nothing consulted the home directory, so this
+/// wrote `$HOME/CLAUDE.md` and returned `Ok((stub, true))`.
+#[serial_test::serial]
+#[test]
+fn load_or_create_claude_md_refuses_to_seed_at_the_home_directory() {
+    // `RosterTiers` points the process `$HOME` at its own temp tree, which is
+    // what lets this assert against a home directory that is not the operator's.
+    let tiers = RosterTiers::new();
+    let home = tiers.home();
+    // A dotfiles repo makes `$HOME` look exactly like a project root; the home
+    // refusal has to outrank the marker test rather than fall through it.
+    fs::create_dir_all(home.join(".git")).unwrap();
+    let path = home.join("CLAUDE.md");
+
+    let err = load_or_create_claude_md(&path).expect_err("seeding at $HOME must be refused");
+
+    let PipelineError::Io { source, .. } = &err;
+    assert!(
+        source.to_string().contains("home directory"),
+        "the refusal must name the reason: {source}"
+    );
+    assert!(!path.exists(), "nothing is written: {err:?}");
+}
+
+/// FAILS BEFORE THIS CHANGE: any directory at all was seeded, which is how a
+/// stray `CLAUDE.md` could land above a project and load into everything below.
+#[test]
+fn load_or_create_claude_md_refuses_to_seed_outside_a_project_root() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().join("scratch");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("CLAUDE.md");
+
+    let err = load_or_create_claude_md(&path).expect_err("a bare directory must be refused");
+
+    let PipelineError::Io { source, .. } = &err;
+    assert!(
+        source.to_string().contains("not a project root"),
+        "the refusal must name the reason: {source}"
+    );
+    assert!(!path.exists(), "nothing is written: {err:?}");
 }
 
 #[test]
@@ -1380,6 +1433,8 @@ fn build_instructions_reports_an_unreadable_agent_file() {
     // be read lowered the number with nothing carried out of the pipeline to
     // say so — the count read as a total when it was a floor.
     let project = TempDir::new().unwrap();
+    // #7673: the seed guard refuses a directory that is not a project root.
+    fs::create_dir_all(project.path().join(".trusty-mpm")).unwrap();
     let tier = project.path().join(".claude").join("agents");
     fs::create_dir_all(&tier).unwrap();
     let locked = tier.join("qa.md");
@@ -1416,6 +1471,8 @@ fn build_instructions_reports_an_unreadable_agent_file() {
 fn build_instructions_reports_a_complete_roster_when_nothing_failed() {
     // The healthy path must keep saying so, or the flag above is not a signal.
     let project = TempDir::new().unwrap();
+    // #7673: the seed guard refuses a directory that is not a project root.
+    fs::create_dir_all(project.path().join(".trusty-mpm")).unwrap();
     let out = build_instructions(&PipelineInput {
         project_dir: project.path().to_path_buf(),
         claude_md_path: project.path().join("CLAUDE.md"),

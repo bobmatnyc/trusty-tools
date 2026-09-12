@@ -165,6 +165,8 @@ async fn session_start_dispatches_managed_new_for_github_repo() {
 async fn session_start_in_place_writes_stash_and_hard_fails_on_daemon_unreachable() {
     let tmp_home = tempfile::TempDir::new().expect("tmp home");
     let target = tempfile::TempDir::new().expect("tmp target dir");
+    // #7673: the seed guard refuses a directory that is not a project root.
+    std::fs::create_dir_all(target.path().join(".trusty-mpm")).unwrap();
     let fw = trusty_mpm::core::paths::FrameworkPaths::under(tmp_home.path());
 
     let client = reqwest::Client::new();

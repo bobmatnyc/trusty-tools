@@ -10,6 +10,10 @@
 //! Test: this module IS the test suite for `super`.
 
 use super::*;
+// #7673: `doctor.rs` no longer imports this — `live_workspace_paths`, its only
+// production consumer, moved to `doctor_workspace_claims.rs` to make room under
+// the 500-SLOC cap. The claim fixtures below still need it.
+use crate::session_manager::worktree_reclaim::ClaimLiveness;
 
 #[test]
 fn index_present_matches_each_shape() {
@@ -423,7 +427,7 @@ fn an_absent_path_still_matches_the_recorded_spelling_of_itself() {
 }
 
 #[tokio::test]
-async fn run_doctor_produces_fifty_checks() {
+async fn run_doctor_produces_fifty_one_checks() {
     // Issue #2158 added the `deployment` probe (nine → ten); issue #2246
     // adds `oauth_token` (ten → eleven); issue #2876 adds `skill_staleness`
     // and `legacy_sources` (eleven → thirteen); DOC-42 / issue #2889 adds
@@ -456,7 +460,8 @@ async fn run_doctor_produces_fifty_checks() {
     // (forty-six → forty-seven); issue #7497 adds `disk_usage`
     // (forty-seven → forty-eight); issue #7616 adds
     // `instruction_compression` (forty-eight → forty-nine); issue #7617 adds
-    // `statusline` (forty-nine → fifty).
+    // `statusline` (forty-nine → fifty); issue #7673 adds
+    // `ancestor_claude_md` (fifty → fifty-one).
     //
     // The test NAME had drifted four additions behind the tally above by the
     // time #6586 landed — it still read `thirty_two`. Renaming it is part of
@@ -542,6 +547,9 @@ async fn run_doctor_produces_fifty_checks() {
         "log_drain",
         // #7424: this project's turn-1 startup context against its ceiling.
         "startup_context",
+        // #7673: every CLAUDE.md ABOVE the project root, which Claude Code
+        // prepends to every session started beneath it.
+        "ancestor_claude_md",
     ];
     assert_eq!(names, expected);
     // Count derived from the list above, never a standalone literal:
