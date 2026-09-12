@@ -113,7 +113,7 @@ pub(crate) fn record_instruction_compression_in(framework_root: &Path, dest: &Pa
     );
 }
 
-/// [`record_instruction_compression`] against an explicit framework root,
+/// [`record_instruction_compression_in`] against an explicit framework root,
 /// session id and price.
 ///
 /// Why: the three ambient reads the entry point makes — the framework root under
