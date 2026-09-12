@@ -48,6 +48,42 @@ fn config_hooks_defaults_to_enabled() {
     assert!(HooksConfig::default().prompt_context);
 }
 
+/// #7688: the host default is OFF, and "off" is spelled `None` — the key
+/// declines to decide so a project's own `.trusty-mpm.toml` can.
+#[test]
+fn config_prompt_self_improvement_defaults_to_none() {
+    let dir = tempfile::TempDir::new().unwrap();
+    assert!(
+        load_from_str(dir.path(), "[pm]\ncircuit_breaker = true\n")
+            .pm
+            .prompt_self_improvement
+            .is_none()
+    );
+    assert!(
+        load_from_str(dir.path(), "")
+            .pm
+            .prompt_self_improvement
+            .is_none()
+    );
+}
+
+#[test]
+fn config_prompt_self_improvement_parses() {
+    let dir = tempfile::TempDir::new().unwrap();
+    assert_eq!(
+        load_from_str(dir.path(), "[pm]\nprompt_self_improvement = true\n")
+            .pm
+            .prompt_self_improvement,
+        Some(true)
+    );
+    assert_eq!(
+        load_from_str(dir.path(), "[pm]\nprompt_self_improvement = false\n")
+            .pm
+            .prompt_self_improvement,
+        Some(false)
+    );
+}
+
 /// Why (#5034): the key is the only supported way to suppress the
 /// per-prompt `trusty-memory prompt-context` injection — there is
 /// deliberately no CLI flag and no env var — so its parsing is load-bearing.

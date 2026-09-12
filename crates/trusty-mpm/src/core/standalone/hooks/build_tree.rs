@@ -57,16 +57,25 @@ use std::path::Path;
 /// Why (#7262): the second half of the two-part test above. Each entry is a
 /// shape one of tm's writers produces: `" hook"` is the six-event lifecycle
 /// triad ([`super::mpm_hook_additions_with_exe`]), [`PM_GUARD_SUFFIX`] the PM
-/// enforcement guard, and [`DIVERT_CHECK_SUFFIX`] the #6887 bulk-read diversion
-/// groups. Anything else is not tm's to classify.
-/// What: the three tails, matched as exact string suffixes so the whole prefix
+/// enforcement guard, [`DIVERT_CHECK_SUFFIX`] the #6887 bulk-read diversion
+/// groups, and [`PROMPT_FEEDBACK_SUFFIX`] the #7688 prompt-feedback capture.
+/// Anything else is not tm's to classify.
+/// What: the four tails, matched as exact string suffixes so the whole prefix
 /// is the executable path — spaces in that path included. They are mutually
 /// exclusive: a command ending in [`PM_GUARD_SUFFIX`] cannot also end in
 /// `" hook"`.
 /// Test: `build_tree_hook_command_matches_every_tm_argv_shape`,
 /// `pm_guard_and_divert_commands_end_in_a_known_argv_tail` (the drift guard, in
 /// `session_launch::project_hooks_tests`).
-const TM_HOOK_ARGV_TAILS: &[&str] = &[" hook", PM_GUARD_SUFFIX, DIVERT_CHECK_SUFFIX];
+const TM_HOOK_ARGV_TAILS: &[&str] = &[
+    " hook",
+    PM_GUARD_SUFFIX,
+    DIVERT_CHECK_SUFFIX,
+    // #7688: without this tail the build-tree classifier stops recognising a
+    // capture hook as tm's own, so a stale one pointing at a Cargo build tree
+    // would survive the repair every sibling shape gets.
+    PROMPT_FEEDBACK_SUFFIX,
+];
 
 /// The `statusLine.command` argv tail (`#4492`, `#7262`).
 ///
@@ -106,6 +115,19 @@ pub(crate) const DIVERT_CHECK_SUFFIX: &str = " hook --divert-check";
 /// guard, in `session_launch::project_hooks_tests`),
 /// `build_tree_hook_command_matches_every_tm_argv_shape`.
 pub(crate) const PM_GUARD_SUFFIX: &str = " hook --pm-guard";
+
+/// The `hook --prompt-feedback` argv tail (#7688).
+///
+/// Why: the same one-definition rule [`DIVERT_CHECK_SUFFIX`] and
+/// [`PM_GUARD_SUFFIX`] already follow — the writer
+/// (`session_launch::prompt_feedback_hooks::prompt_feedback_hook_groups`), the
+/// strip's identity predicate, and [`TM_HOOK_ARGV_TAILS`] here all read this
+/// exact string, and a copied literal would let them drift into the #2948
+/// duplicate-group failure.
+/// What: the literal suffix, including its leading space.
+/// Test: `is_project_managed_hook_command_recognises_prompt_feedback`,
+/// `pm_guard_and_divert_commands_end_in_a_known_argv_tail`.
+pub(crate) const PROMPT_FEEDBACK_SUFFIX: &str = " hook --prompt-feedback";
 
 /// Does `cmd` invoke a hook from a binary inside a Cargo build tree?
 ///

@@ -192,6 +192,45 @@ pub fn deploy_agents_filtered(
     target_dir: &Path,
     select: impl Fn(&str) -> bool,
 ) -> Result<DeployResult, AgentBuildError> {
+    // #7688: `None` is the pre-existing behaviour, byte for byte.
+    deploy_agents_filtered_with_suffix(source_dir, target_dir, select, None)
+}
+
+/// [`deploy_agents_filtered`], appending `suffix` to every composed agent.
+///
+/// Why (#7688): the `prompt-self-improvement` flag has to reach every agent a
+/// session can dispatch, and the one thing every agent already shares is this
+/// composer — `BASE-AGENT.md` is the first link of every `extends:` chain, so
+/// text appended to the composed OUTPUT lands in exactly the same set of files
+/// that inheritance would have reached. Doing it here rather than by editing
+/// the bundled `BASE-AGENT.md` asset keeps that asset a constant: the flag is
+/// per-project runtime state, and an asset is compiled in.
+///
+/// The suffix is appended AFTER composition and BEFORE validation, checksum,
+/// and write, so the manifest records the checksum of the exact bytes on disk —
+/// the invariant #4698 established for the `provenance:` stamp, for the same
+/// reason. Flipping the flag therefore refreshes each managed file on the next
+/// deploy rather than leaving the ledger describing bytes that are no longer
+/// there.
+///
+/// What: identical to [`deploy_agents_filtered`] when `suffix` is `None` — the
+/// same code path, not a parallel one. `Some(text)` appends `text` verbatim to
+/// each composed agent's body; frontmatter is untouched, because the suffix
+/// lands after the body the composer rendered.
+///
+/// CAVEAT, deliberate and documented rather than worked around: `target_dir` is
+/// one machine-global directory shared by every project on the host (#4409), so
+/// two projects disagreeing about the flag rewrite each other's copies on
+/// alternate launches. The write is idempotent and the content additive, so the
+/// cost is a redundant refresh, never a lost or corrupted agent.
+/// Test: `deploy_appends_the_suffix_to_every_agent`,
+/// `deploy_without_a_suffix_is_byte_identical`.
+pub fn deploy_agents_filtered_with_suffix(
+    source_dir: &Path,
+    target_dir: &Path,
+    select: impl Fn(&str) -> bool,
+    suffix: Option<&str>,
+) -> Result<DeployResult, AgentBuildError> {
     // No source directory means nothing to deploy — an empty result, not an
     // error, so a fresh install with no agents still succeeds. Checked BEFORE
     // taking the ledger lock so a no-op deploy neither blocks on a concurrent
@@ -208,7 +247,7 @@ pub fn deploy_agents_filtered(
     // entries describe are then treated as untracked and frozen (the #4408
     // shape, via a race). See `manifest::with_agent_manifest_lock`.
     with_agent_manifest_lock(target_dir, || {
-        deploy_agents_locked(source_dir, target_dir, select)
+        deploy_agents_locked(source_dir, target_dir, select, suffix)
     })
 }
 
@@ -243,6 +282,7 @@ fn deploy_agents_locked(
     source_dir: &Path,
     target_dir: &Path,
     select: impl Fn(&str) -> bool,
+    suffix: Option<&str>,
 ) -> Result<DeployResult, AgentBuildError> {
     let mut result = DeployResult::default();
 
@@ -303,6 +343,13 @@ fn deploy_agents_locked(
                     continue;
                 }
             };
+        // #7688: appended before validation, checksum, and write, so the ledger
+        // records the bytes that actually land. `None` leaves `composed`
+        // untouched — the pre-#7688 path, not a copy of it.
+        let composed = match suffix {
+            Some(text) => format!("{composed}{text}"),
+            None => composed,
+        };
 
         // Issue #3556: `compose_agent`'s success only means trusty-mpm's own
         // LENIENT frontmatter reader could parse the result — it tolerates a

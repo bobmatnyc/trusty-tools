@@ -1,0 +1,11 @@
+# trusty-tools project-level trusty-mpm config (#5207).
+#
+# Tracked in git: it travels with clones and shows up in PR diffs, and it sits
+# at the TOP of every precedence chain it participates in. A key absent here
+# declines to decide, and the host layer answers.
+
+# #7688: this repository is where prompt wording is authored and revised, so it
+# is where asking every composed prompt what was unclear and what was
+# unnecessary pays for the five lines it costs. Owner ruling 2026-09-12;
+# default is false everywhere else.
+prompt_self_improvement = true

@@ -549,7 +549,22 @@ pub(crate) enum Command {
         /// `Read`/`cat` and steer the agent to `tm divert bulk-read`.
         #[arg(long)]
         divert_check: bool,
+        /// Run in prompt-feedback capture mode (#7688): on `Stop` /
+        /// `SubagentStop`, extract the final message's `## Prompt feedback`
+        /// section into the ledger. Registered only where the
+        /// `prompt-self-improvement` flag is on. Always exits 0.
+        #[arg(long)]
+        prompt_feedback: bool,
     },
+    /// Read back the prompt critiques `tm hook --prompt-feedback` captured
+    /// (#7688).
+    ///
+    /// Why: the ledger is JSON Lines — the right storage, the wrong reading
+    /// experience. This is the minimum surface that makes the capture usable.
+    /// What: newest-first rows with `--session` / `--agent` / `--limit`, or
+    /// per-agent-type counts with `--summary`.
+    /// Test: `cli_parses_prompt_feedback`, `cli_parses_prompt_feedback_summary`.
+    PromptFeedback(crate::commands::prompt_feedback_cli::PromptFeedbackArgs),
     /// Bulk-read diversion worker (issue #6887).
     ///
     /// Why: a session that reads a 2000-line file pays for every line on its

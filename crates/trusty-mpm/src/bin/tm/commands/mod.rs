@@ -92,6 +92,10 @@ pub(crate) mod pane_identity;
 pub(crate) mod picker_delete;
 pub(crate) mod picker_delete_glob;
 pub(crate) mod picker_launch_new;
+// #7688: the `tm prompt-feedback` read-back and the capture hook behind it.
+pub(crate) mod prompt_feedback_cli;
+pub(crate) mod prompt_feedback_hook;
+
 pub(crate) mod pm_guard;
 pub(crate) mod pm_guard_bash;
 pub(crate) mod pm_guard_budget;

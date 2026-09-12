@@ -190,6 +190,10 @@ pub mod project_tier_agent_strays;
 // tier by a pre-#6602 deploy.
 pub mod project_tier_strays;
 pub mod project_trust;
+// #7688: the captured `## Prompt feedback` ledger — extract, append, read back.
+pub mod prompt_feedback;
+// #7688: the `prompt-self-improvement` flag and the two addenda it injects.
+pub mod prompt_self_improvement;
 pub mod protected_dirs;
 pub mod provisioning_stage;
 pub mod push_guard;
