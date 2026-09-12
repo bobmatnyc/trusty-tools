@@ -538,7 +538,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Some(Command::Services { action }) => services(action),
-        Some(Command::Repair { action }) => commands::repair::dispatch(action),
+        Some(Command::Repair { action }) => commands::repair::dispatch(&client, &url, action).await,
         Some(Command::Auth { action }) => {
             use cli::AuthAction;
             match action {

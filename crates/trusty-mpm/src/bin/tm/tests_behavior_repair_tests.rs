@@ -85,6 +85,51 @@ fn cli_parses_repair_session_store() {
     }
 }
 
+/// Why (#7602): `--force` is the operator asserting an owner the daemon cannot
+/// confirm is gone, so it must be opt-in — a default-on flag would let the verb
+/// end a record for a session that is merely unregistered.
+/// What: pins the verb name, its positional agent id, and the refusing default.
+/// Test: this test.
+#[test]
+fn cli_parses_repair_delegation() {
+    let cli =
+        Cli::try_parse_from(["trusty-mpm", "repair", "delegation", "af20cc838b2b30a55"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Repair {
+            action: RepairAction::Delegation { agent_id, force },
+        } => {
+            assert_eq!(agent_id, "af20cc838b2b30a55");
+            assert!(
+                !force,
+                "a bare invocation must not assert the owner is gone"
+            );
+        }
+        other => panic!("expected Command::Repair(Delegation), got {other:?}"),
+    }
+}
+
+/// Why (#7602): the undeterminable-owner arm is the one an operator actually
+/// hits after a daemon restart, so its escape has to be reachable.
+/// What: pins `--force`.
+/// Test: this test.
+#[test]
+fn cli_parses_repair_delegation_force() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "repair",
+        "delegation",
+        "af20cc838b2b30a55",
+        "--force",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Repair {
+            action: RepairAction::Delegation { force, .. },
+        } => assert!(force),
+        other => panic!("expected Command::Repair(Delegation), got {other:?}"),
+    }
+}
+
 /// Why (#7569): the command REWRITES the operator's savings ledger, so the
 /// safe default is the contract — a bare invocation must report and write
 /// nothing. A flag that defaulted the other way would destroy rows before

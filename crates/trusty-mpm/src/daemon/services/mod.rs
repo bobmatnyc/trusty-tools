@@ -12,6 +12,7 @@
 //! `cargo test -p trusty-mpm-daemon services`.
 
 pub mod agent_worktree_reap;
+pub mod delegation_repair;
 pub mod delegation_tracker;
 pub mod hook_service;
 // #7504: the ONE place the merged-PR reclaim's production probes are assembled,
