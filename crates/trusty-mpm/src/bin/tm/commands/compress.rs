@@ -29,8 +29,15 @@
 //! command's exit status, which the rewritten pipeline appends as a sentinel
 //! line and [`split_exit_sentinel`] strips back off (#7384), and a compression
 //! that emptied a non-empty input hands the raw text back with a warning
-//! instead of returning nothing ([`compress_with_raw_fallback`], #7377).
+//! instead of returning nothing ([`compress_with_raw_fallback`], #7377). The
+//! stats line is emitted only when it carries something — a run that returned
+//! its input byte-for-byte with nothing to report stays silent rather than
+//! narrating `pct_reduction=0.0` into the caller's own tool result
+//! ([`stats_line_is_informative`], #7607).
 //! Test: `run_compress_shrinks_repetitive_cargo_test_output`,
+//! `a_passthrough_run_emits_no_stats_line`,
+//! `a_failing_wrapped_command_still_emits_the_stats_line`,
+//! `an_expanding_run_still_emits_the_stats_line`,
 //! `log_compression_stats_pct_reduction_is_zero_for_empty_input`,
 //! `log_compression_stats_pct_reduction_can_be_negative_when_output_expands`,
 //! `native_fallback_elision_reports_a_matching_non_zero_reduction`,
@@ -388,9 +395,15 @@ fn init_stats_log_subscriber() {
 /// dropped; a zsh `no matches found:` error was invisible on one such call.
 /// `exit=unknown` when stdin carried no sentinel, which is what an unwrapped
 /// `tm compress < file` produces.
+///
+/// #7607: the line is emitted only when it carries something, per
+/// [`stats_line_is_informative`]. A passthrough run — output returned
+/// byte-for-byte, `pct_reduction=0.0` — used to narrate itself into the middle
+/// of the caller's own tool result.
 /// Test: `log_compression_stats_pct_reduction_is_zero_for_empty_input`,
 /// `log_compression_stats_pct_reduction_can_be_negative_when_output_expands`,
 /// `native_fallback_elision_reports_a_matching_non_zero_reduction`,
+/// `a_passthrough_run_emits_no_stats_line`,
 /// exercised end-to-end via `run_compress_*` tests below and, for the exit
 /// field, by `tm_compress_reports_the_wrapped_commands_exit_status`.
 fn log_compression_stats(
@@ -407,6 +420,10 @@ fn log_compression_stats(
     } else {
         0.0
     };
+    // #7607: a no-op run says nothing, so it says nothing.
+    if !stats_line_is_informative(bytes_before, bytes_after, exit) {
+        return pct_reduction;
+    }
     // #7384: `%` so the field renders as `exit=3`, not a quoted `exit="3"`.
     let exit_status = exit.map_or_else(|| "unknown".to_string(), |code| code.to_string());
     tracing::info!(
@@ -419,6 +436,33 @@ fn log_compression_stats(
         "tool output compressed"
     );
     pct_reduction
+}
+
+/// Whether this run's stats line carries anything the reader did not already have.
+///
+/// Why (#7607): `tm compress` is the tail of a pipeline whose stdout IS the
+/// agent's tool result, and its stats line goes to stderr — which Claude Code
+/// interleaves into that same result. On a passthrough (input below the size
+/// gate, or a tool name with no dispatch branch) the filter returns the bytes
+/// unchanged and the line reports `pct_reduction=0.0`: pure narration wedged
+/// into the middle of a `grep` result, the symptom #7607 reports. Suppressing it
+/// under a MINIMUM PAYLOAD SIZE — the issue's other suggestion — would be the
+/// wrong test: an 80 KB output that compresses to exactly 80 KB is equally
+/// uninformative, and a 3-byte output from a command that exited 3 is not.
+/// What: `true` when the byte counts moved AT ALL — a reduction, and equally an
+/// expansion, which [`log_compression_stats`] documents as the one signal a
+/// reader most wants — or when the wrapped command reported a failing status
+/// (#7384's `exit` field, the other reason the line exists). `false` only for
+/// the exact no-op: same bytes out as in, and no failure to report. An
+/// `exit=unknown` run is an unwrapped invocation, which reports no failure.
+///
+/// FAIL-OPEN BY CONSTRUCTION: every input this cannot read as a proven no-op
+/// keeps the line. Nothing is suppressed on a measurement that did not happen.
+/// Test: `a_passthrough_run_emits_no_stats_line`,
+/// `a_failing_wrapped_command_still_emits_the_stats_line`,
+/// `an_expanding_run_still_emits_the_stats_line`.
+fn stats_line_is_informative(bytes_before: usize, bytes_after: usize, exit: Option<i32>) -> bool {
+    bytes_after != bytes_before || exit.is_some_and(|code| code != 0)
 }
 
 /// One row of `tm compress`'s durable compression-effectiveness log.
@@ -658,6 +702,49 @@ mod tests {
             log_compression_stats("bash", 10, 20, "native_fallback", None),
             -100.0
         );
+    }
+
+    /// Why (#7607): a 668-byte `grep` result came back unchanged and the stats
+    /// line reporting `pct_reduction=0.0` landed in the middle of it, in the
+    /// agent's own tool result. The predicate is what decides that, so it is
+    /// what this pins.
+    /// Test: itself.
+    #[test]
+    fn a_passthrough_run_emits_no_stats_line() {
+        assert!(
+            !stats_line_is_informative(668, 668, Some(0)),
+            "an unchanged payload from a command that succeeded says nothing"
+        );
+        assert!(
+            !stats_line_is_informative(668, 668, None),
+            "an unwrapped invocation reports no failure, so it is no different"
+        );
+        assert!(
+            !stats_line_is_informative(0, 0, Some(0)),
+            "an empty payload is the same no-op"
+        );
+    }
+
+    /// Why (#7607, guarding #7384): the exit status is the OTHER reason this
+    /// line exists. Suppressing a no-op must not suppress a failure report —
+    /// a zsh `no matches found:` error arrives as exactly this shape, zero
+    /// bytes moved and a non-zero status.
+    /// Test: itself.
+    #[test]
+    fn a_failing_wrapped_command_still_emits_the_stats_line() {
+        assert!(stats_line_is_informative(0, 0, Some(1)));
+        assert!(stats_line_is_informative(668, 668, Some(3)));
+        assert!(stats_line_is_informative(0, 0, Some(137)));
+    }
+
+    /// Why (#7607, guarding PR #1968's ruling): an expansion is the one signal
+    /// the line's own doc comment says must never be hidden, so the
+    /// no-op suppression must not reach it.
+    /// Test: itself.
+    #[test]
+    fn an_expanding_run_still_emits_the_stats_line() {
+        assert!(stats_line_is_informative(10, 20, None));
+        assert!(stats_line_is_informative(1076, 36, Some(0)));
     }
 
     #[tokio::test]
