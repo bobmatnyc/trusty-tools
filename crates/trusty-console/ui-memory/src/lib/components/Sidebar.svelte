@@ -93,10 +93,15 @@
     font-weight: 700;
     font-size: 18px;
   }
+  /* #7589: the sidebar's own text token, not `--trusty-text-inverse`. That
+     token is the contrast colour for a rust fill, and it flips to #201612 in
+     the dark palette — near-black on the #171009 sidebar, about 1.1:1, so the
+     product name was unreadable in dark. `--trusty-sidebar-text` is #e6d8c8 in
+     both palettes, which is what every other label on this surface uses. */
   .brand-title {
     font-weight: 600;
     font-size: 15px;
-    color: var(--trusty-text-inverse);
+    color: var(--trusty-sidebar-text);
   }
   .brand-sub {
     font-size: 11px;

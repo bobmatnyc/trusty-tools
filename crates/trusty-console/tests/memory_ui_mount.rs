@@ -112,6 +112,13 @@ async fn memory_ui_serves_every_asset_the_shell_references() {
                     .any(|(k, v)| k == header::CACHE_CONTROL.as_str() && v.contains("immutable")),
                 "content-hashed asset {r} should be cacheable; got {headers:?}"
             );
+        } else {
+            assert!(
+                headers
+                    .iter()
+                    .any(|(k, v)| k == header::CACHE_CONTROL.as_str() && v.contains("no-cache")),
+                "un-hashed asset {r} must revalidate; got {headers:?}"
+            );
         }
     }
 }
