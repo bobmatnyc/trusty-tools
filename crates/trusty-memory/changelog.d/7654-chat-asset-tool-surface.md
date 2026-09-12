@@ -1,0 +1,5 @@
+Fixed
+
+- **The three `chat_asset_*` tools now appear in the scope map, the tool count and the generated README table.** #7370 registered `chat_asset_capabilities`, `chat_asset_put` and `chat_asset_get` in `tools::definitions` but changed nothing that enumerates the tool surface, so `rpc.discover` emitted them with an empty `x-scopes` array — an orchestrator enforcing least privilege had no rule to apply — and seven tests failed on `main` from the day it merged. `scopes_for_tool` now classifies capability discovery and an owned asset read as `memory.read` and the asset store as `memory.write`; the count assertions read 52; the roster contract in `tools::tests` lists all three ([#7654](https://github.com/bobmatnyc/trusty-tools/issues/7654))
+  - The README's generated `mcp-tools` region was refreshed from the code, which also picks up the `attachments?` argument #7370 added to `chat_session_add_turn` and `chat_turn_append`
+  - `read_write_classification` pins the split so a later change cannot quietly make the asset write a read

@@ -72,6 +72,10 @@ pub fn scopes_for_tool(name: &str) -> Vec<String> {
         | "console_metrics"
         | "chat_session_get"
         | "chat_session_list"
+        // #7654: #7370 shipped the chat-asset tools with no scope entry at all.
+        // Capability discovery and an owned asset read mutate nothing.
+        | "chat_asset_capabilities"
+        | "chat_asset_get"
         | "chat_session_recall" => &[MEMORY_READ],
 
         // Mutating
@@ -98,6 +102,8 @@ pub fn scopes_for_tool(name: &str) -> Vec<String> {
         | "chat_session_add_turn"
         | "chat_session_delete"
         | "chat_turn_append"
+        // #7654: storing an asset writes bytes into the session store.
+        | "chat_asset_put"
         | "dream_consolidate_room"
         | "palace_dream" => &[MEMORY_WRITE],
 
@@ -179,6 +185,13 @@ mod tests {
         assert_eq!(scopes_for_tool("kg_assert"), vec!["memory.write"]);
         assert_eq!(scopes_for_tool("palace_compact"), vec!["memory.write"]);
         assert_eq!(scopes_for_tool("palace_info"), vec!["memory.read"]);
+        // #7654: pin the chat-asset split — only the put is a write.
+        assert_eq!(
+            scopes_for_tool("chat_asset_capabilities"),
+            vec!["memory.read"]
+        );
+        assert_eq!(scopes_for_tool("chat_asset_get"), vec!["memory.read"]);
+        assert_eq!(scopes_for_tool("chat_asset_put"), vec!["memory.write"]);
     }
 
     #[test]

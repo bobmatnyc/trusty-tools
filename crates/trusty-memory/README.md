@@ -255,19 +255,22 @@ per-palace conversation store: turns are stored verbatim and bypass the
 `memory_remember` signal/noise and dedup gates.
 
 <!-- BEGIN GENERATED: mcp-tools -->
-The MCP server registers **49 tools**. Authoritative source: `trusty_memory::tools::tool_definitions` —
+The MCP server registers **52 tools**. Authoritative source: `trusty_memory::tools::tool_definitions` —
 this table is generated from it, not maintained by hand.
 
 | Tool | Arguments | Summary |
 |---|---|---|
 | `add_alias` | `palace`, `short`, `full`, `extra?` | Add a short→full alias (e.g. tga → trusty-git-analytics) to the prompt-facts surface. |
-| `chat_session_add_turn` | `palace`, `session_id`, `role`, `content` | Append a message (prompt or response) to a chat session's history. |
+| `chat_asset_capabilities` | — | Read supported durable chat attachment contract. |
+| `chat_asset_get` | `palace`, `session_id`, `asset_id` | Read an image owned by the supplied palace and session. |
+| `chat_asset_put` | `palace`, `session_id`, `name`, `mime_type`, `data_base64` | Store a bounded image in an existing palace chat session; returns generated asset_id. |
+| `chat_session_add_turn` | `palace`, `session_id`, `role`, `content`, `attachments?` | Append a message (prompt or response) to a chat session's history. |
 | `chat_session_create` | `palace`, `session_id?`, `title?` | Create a new chat session in a palace (spec-001 chat-session manager). |
 | `chat_session_delete` | `palace`, `session_id` | Delete a chat session (and its full history) from a palace. |
 | `chat_session_get` | `session_id`, `palace?` | Retrieve a full chat session: metadata plus every turn in chronological order. |
 | `chat_session_list` | `limit?`, `offset?`, `palace?` | List chat sessions in a palace as paginated metadata (id, title, timestamps, message_count) ordered most-recently-updated first. |
 | `chat_session_recall` | `session_id`, `palace?` | Retrieve a full chat session with all turns in order (alias for chat_session_get, preferred name for agent-facing recall). |
-| `chat_turn_append` | `palace`, `session_id`, `prompt`, `response` | Append a prompt/response PAIR to a chat session as two consecutive messages (user role then assistant role). |
+| `chat_turn_append` | `palace`, `session_id`, `prompt`, `response`, `attachments?` | Append a prompt/response PAIR to a chat session as two consecutive messages (user role then assistant role). |
 | `console_metrics` | — | Return a ConsoleMetricsReport with palace aggregate statistics (palace_count, counted_palace_count, cached_palace_count, total_drawers,… |
 | `discover_aliases` | `palace`, `project_root?` | Auto-discover project aliases by scanning Cargo workspace members, binary names, first-letter abbreviations, and the git remote. |
 | `dream_consolidate_room` | `palace`, `max_age_days?`, `room?` | Trigger LLM-driven semantic consolidation for one room (or all rooms) of a palace, on demand and synchronously (spec-001). |
