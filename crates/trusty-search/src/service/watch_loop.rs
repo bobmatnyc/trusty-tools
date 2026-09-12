@@ -248,10 +248,16 @@ pub(crate) fn spawn_watch_loop_with_registry(
                             registry,
                             &index_id,
                             &path,
-                            &canonical_root,
-                            &raw_root,
+                            crate::service::index_admission::WatchRoots {
+                                canonical: &canonical_root,
+                                raw: &raw_root,
+                            },
                             &indexer,
                             &indexed_files,
+                            // #7396: an admission the filesystem could not
+                            // answer defers to a rescan rather than deleting
+                            // the file's chunks.
+                            Some(&retry_tx),
                         )
                         .await;
                     } else {

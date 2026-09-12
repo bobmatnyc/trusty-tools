@@ -1,7 +1,9 @@
 //! Shared initial-walk and live-event admission (#7379).
 use crate::core::registry::IndexHandle;
 use crate::service::walker::{self, walk_source_files_with_options, WalkOptions};
+use crate::service::watcher::WatchEvent;
 use std::path::{Path, PathBuf};
+use tokio::sync::mpsc::UnboundedSender;
 
 pub(crate) fn walk(handle: &IndexHandle) -> walker::WalkResult {
     let include_paths: Vec<PathBuf> = if handle.include_paths.is_empty() {
@@ -74,15 +76,56 @@ fn tombstone_file(path: &Path) -> bool {
     file.take(65 * 1024).read_to_end(&mut prefix).is_ok()
         && trusty_common::knowledge_document::is_tombstone(&String::from_utf8_lossy(&prefix))
 }
+/// Whether the live policy indexes a path — or whether that could not be decided.
+///
+/// Why (#7396): [`apply_modified`] routes a negative answer into the REMOVAL
+/// path, so "the policy excludes this path" and "the filesystem could not
+/// answer right now" must not share one answer. A transient `EACCES`, a
+/// network-mount hiccup, or the window inside an atomic rename would otherwise
+/// delete every chunk the file owns.
+/// What: three states. Only [`Admission::Excluded`] may reach a removal.
+/// Test: `a_transient_canonicalize_failure_keeps_chunks_and_schedules_a_rescan`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Admission {
+    /// The current policy indexes this path.
+    Included,
+    /// The current policy excludes this path, or the path is definitively gone.
+    Excluded,
+    /// The filesystem could not answer. Nothing may be removed on this.
+    Undetermined,
+}
+
+/// Classify a `canonicalize` failure as definitive absence or a transient miss.
+///
+/// Why (#7396): the removal branch is destructive, so it may only be taken on
+/// an error that actually means "this path is gone".
+/// What: a `NotFound` is re-checked with `symlink_metadata`, which neither
+/// follows links nor needs the whole prefix resolved; a second `NotFound` is
+/// the definitive answer. Every other error kind is undetermined.
+/// Test: `a_transient_canonicalize_failure_keeps_chunks_and_schedules_a_rescan`.
+fn resolve_failure(path: &Path, err: &std::io::Error) -> Admission {
+    let gone = err.kind() == std::io::ErrorKind::NotFound
+        && path
+            .symlink_metadata()
+            .err()
+            .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+    if gone {
+        Admission::Excluded
+    } else {
+        Admission::Undetermined
+    }
+}
+
 /// Why: watcher saves must honor the same current policy as reindex.
 /// What: check configured subtrees and filters, then the walker's ignore engine along only this path.
 /// Test: `live_admission_observes_registry_replacement`.
-pub(crate) fn admits(handle: &IndexHandle, path: &Path) -> bool {
-    let Ok(path) = path.canonicalize() else {
-        return false;
+pub(crate) fn admits(handle: &IndexHandle, path: &Path) -> Admission {
+    let path = match path.canonicalize() {
+        Ok(path) => path,
+        Err(err) => return resolve_failure(path, &err),
     };
     if !configured_file(handle, &path) {
-        return false;
+        return Admission::Excluded;
     }
     let roots = if handle.include_paths.is_empty() {
         vec![handle.root_path.clone()]
@@ -96,9 +139,16 @@ pub(crate) fn admits(handle: &IndexHandle, path: &Path) -> bool {
         extra_skip_dirs: handle.extra_skip_dirs.clone(),
         data_file_max_bytes: handle.data_file_max_bytes,
     };
+    // #7396: a root we could not resolve is not evidence that the file left the
+    // index, so it downgrades the fall-through answer rather than being skipped.
+    let mut unresolved_root = false;
     for root in roots {
-        let Ok(root) = root.canonicalize() else {
-            continue;
+        let root = match root.canonicalize() {
+            Ok(root) => root,
+            Err(err) => {
+                unresolved_root |= resolve_failure(&root, &err) == Admission::Undetermined;
+                continue;
+            }
         };
         if !path.starts_with(&root) || !walker::path_admitted(&root, &path, &opts) {
             continue;
@@ -111,45 +161,103 @@ pub(crate) fn admits(handle: &IndexHandle, path: &Path) -> bool {
             .filter_map(Result::ok)
             .any(|entry| entry.path() == path && entry.file_type().is_some_and(|t| t.is_file()))
         {
-            return true;
+            return Admission::Included;
         }
     }
-    false
+    if unresolved_root {
+        Admission::Undetermined
+    } else {
+        Admission::Excluded
+    }
+}
+
+/// Leave the index untouched and ask a rescan to settle this path.
+///
+/// Why (#7396): the alternative at an undecidable admission is to guess, and
+/// the wrong guess deletes data. A rescan re-derives the path's state from
+/// disk, which is the recovery the dropped-event path already uses.
+/// What: warns with the reason, then re-arms through
+/// [`crate::service::watch_rescan::schedule_rescan_retry`] at the base backoff.
+/// Consecutive-failure backoff belongs to the rescan arm, which owns that
+/// counter; a deferred save is a fresh request.
+/// Test: `a_transient_canonicalize_failure_keeps_chunks_and_schedules_a_rescan`.
+fn defer_to_rescan(
+    index_id: &crate::core::registry::IndexId,
+    path: &Path,
+    reason: &str,
+    retry_tx: Option<&UnboundedSender<WatchEvent>>,
+) {
+    tracing::warn!(
+        index_id = %index_id,
+        path = %path.display(),
+        reason,
+        "live admission could not be decided — index left untouched, scheduling a rescan",
+    );
+    if let Some(tx) = retry_tx {
+        crate::service::watch_rescan::schedule_rescan_retry(tx.clone(), 1);
+    }
+}
+
+/// The watched root in the two forms the relative-path fallback needs.
+///
+/// Why: `canonical` is what the reindex walker keys on; `raw` is the root as
+/// configured, which a deleted file's path must also be stripped against
+/// because canonicalizing a gone path fails (see `watch_loop`). They always
+/// travel together, so they travel as one argument.
+#[derive(Clone, Copy)]
+pub(crate) struct WatchRoots<'a> {
+    pub(crate) canonical: &'a Path,
+    pub(crate) raw: &'a Path,
 }
 
 /// Read live policy for each delivered modification, including updates after watcher startup.
+///
+/// Why (#7396): an undecidable admission must not reach `handle_removed`.
+/// What: the three [`Admission`] states map to index, remove, and defer; only
+/// the third leaves the index untouched and re-arms a rescan.
+/// Test: `a_transient_canonicalize_failure_keeps_chunks_and_schedules_a_rescan`,
+/// `live_admission_observes_registry_replacement`.
 pub(crate) async fn apply_modified(
     registry: &crate::core::registry::IndexRegistry,
     index_id: &crate::core::registry::IndexId,
     path: &Path,
-    canonical_root: &Path,
-    raw_root: &Path,
+    roots: WatchRoots<'_>,
     indexer: &std::sync::Arc<tokio::sync::RwLock<crate::core::CodeIndexer>>,
     indexed_files: &crate::service::IndexedFiles,
+    retry_tx: Option<&UnboundedSender<WatchEvent>>,
 ) {
     let Some(handle) = registry.get(index_id) else {
+        // #7396: an absent handle is a failed pass, not a reason to drop the
+        // event — the ruling `watch_rescan::reconcile_registered` already makes.
+        defer_to_rescan(index_id, path, "index is not registered", retry_tx);
         return;
     };
-    if admits(&handle, path) {
-        crate::service::watch_loop::handle_modified(
-            path,
-            index_id,
-            canonical_root,
-            raw_root,
-            indexer,
-            indexed_files,
-        )
-        .await;
-    } else {
-        crate::service::watch_loop::handle_removed(
-            path,
-            index_id,
-            canonical_root,
-            raw_root,
-            indexer,
-            indexed_files,
-        )
-        .await;
+    match admits(&handle, path) {
+        Admission::Included => {
+            crate::service::watch_loop::handle_modified(
+                path,
+                index_id,
+                roots.canonical,
+                roots.raw,
+                indexer,
+                indexed_files,
+            )
+            .await;
+        }
+        Admission::Excluded => {
+            crate::service::watch_loop::handle_removed(
+                path,
+                index_id,
+                roots.canonical,
+                roots.raw,
+                indexer,
+                indexed_files,
+            )
+            .await;
+        }
+        Admission::Undetermined => {
+            defer_to_rescan(index_id, path, "path could not be resolved", retry_tx);
+        }
     }
 }
 #[cfg(test)]
@@ -188,6 +296,10 @@ mod tests {
         let expected = vec![root.join("notes/maya.md")];
         assert_eq!(walk(&handle).files, expected);
         let files = crate::service::IndexedFiles::new();
+        let roots = WatchRoots {
+            canonical: &root,
+            raw: &root,
+        };
         for path in [
             "notes/maya.md",
             "notes/private.md",
@@ -198,10 +310,10 @@ mod tests {
                 &registry,
                 &id,
                 &root.join(path),
-                &root,
-                &root,
+                roots,
                 &indexer,
                 &files,
+                None,
             )
             .await;
         }
@@ -224,10 +336,10 @@ mod tests {
             &registry,
             &id,
             &root.join("notes/maya.md"),
-            &root,
-            &root,
+            roots,
             &indexer,
             &files,
+            None,
         )
         .await;
         assert!(indexer
@@ -271,10 +383,10 @@ mod tests {
             &registry,
             &id,
             &root.join("notes/maya.md"),
-            &root,
-            &root,
+            roots,
             &indexer,
             &files,
+            None,
         )
         .await;
         assert!(indexer
@@ -312,5 +424,110 @@ mod tests {
             .chunk_ids_for_file("notes/maya.md")
             .await
             .is_empty());
+    }
+
+    /// Why (#7396): `apply_modified` used to route EVERY negative answer from
+    /// `admits` into `handle_removed`, and `admits` answered negative when
+    /// `canonicalize` merely failed. One `EACCES`, one network-mount hiccup, or
+    /// one save landing inside an atomic-rename window therefore purged the
+    /// file from the index — a destructive fail-open on an uncertain answer.
+    ///
+    /// The fixture is a self-referential symlink at the indexed path: the path
+    /// still exists (`symlink_metadata` succeeds) but `canonicalize` fails with
+    /// `ELOOP`. That is deterministic on every platform and, unlike a
+    /// `chmod 000` fixture, does not depend on the test user not being root —
+    /// the same reasoning as `watch_rescan_tests::write_unreadable_source`.
+    /// The permission and rename-window error kinds are then classified
+    /// directly, since they cannot be provoked portably.
+    ///
+    /// Against `557ab9c5c` the chunk assertion below fails: the chunks are gone.
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn a_transient_canonicalize_failure_keeps_chunks_and_schedules_a_rescan() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("notes")).unwrap();
+        let target = root.join("notes/maya.md");
+        std::fs::write(&target, "# Maya\nMaya leads Atlas.").unwrap();
+
+        let id = IndexId::new("synthetic");
+        let indexer = Arc::new(RwLock::new(CodeIndexer::new("synthetic", &root)));
+        let registry = IndexRegistry::new();
+        let mut handle = IndexHandle::bare(id.clone(), indexer.clone(), root.clone());
+        handle.include_paths = vec![root.join("notes")];
+        handle.extensions = vec!["md".into()];
+        registry.register(handle);
+        let files = crate::service::IndexedFiles::new();
+        let roots = WatchRoots {
+            canonical: &root,
+            raw: &root,
+        };
+
+        apply_modified(&registry, &id, &target, roots, &indexer, &files, None).await;
+        assert!(
+            !indexer
+                .read()
+                .await
+                .chunk_ids_for_file("notes/maya.md")
+                .await
+                .is_empty(),
+            "the file must be indexed before the failure is introduced"
+        );
+
+        // The path exists, but resolving it fails — the shape of a save caught
+        // mid-rename, or of a mount that answered with an error this instant.
+        std::fs::remove_file(&target).unwrap();
+        std::os::unix::fs::symlink("maya.md", &target).unwrap();
+        assert!(
+            target.canonicalize().is_err(),
+            "the fixture must actually break canonicalize"
+        );
+        assert!(
+            target.symlink_metadata().is_ok(),
+            "the path itself is still there — this is not a deletion"
+        );
+        assert_eq!(
+            admits(&registry.get(&id).unwrap(), &target),
+            Admission::Undetermined,
+            "an unresolvable path is not an exclusion"
+        );
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WatchEvent>();
+        apply_modified(&registry, &id, &target, roots, &indexer, &files, Some(&tx)).await;
+        assert!(
+            !indexer
+                .read()
+                .await
+                .chunk_ids_for_file("notes/maya.md")
+                .await
+                .is_empty(),
+            "a canonicalize failure must never delete the file's chunks"
+        );
+        assert_eq!(
+            rx.recv().await,
+            Some(WatchEvent::Rescan),
+            "the undecided path must be re-armed for a rescan, not dropped"
+        );
+
+        // Error kinds that cannot be provoked portably, classified directly.
+        use std::io::{Error, ErrorKind};
+        assert_eq!(
+            resolve_failure(&target, &Error::from(ErrorKind::PermissionDenied)),
+            Admission::Undetermined,
+            "a permission error is not evidence the file left the index"
+        );
+        assert_eq!(
+            resolve_failure(&target, &Error::from(ErrorKind::NotFound)),
+            Admission::Undetermined,
+            "a NotFound whose path is still on disk is the rename window"
+        );
+        assert_eq!(
+            resolve_failure(
+                &root.join("notes/gone.md"),
+                &Error::from(ErrorKind::NotFound)
+            ),
+            Admission::Excluded,
+            "a path that is definitively absent still takes the removal branch"
+        );
     }
 }
