@@ -231,6 +231,11 @@ fn tool_definitions_lists_all_tools() {
         "chat_session_list",
         "chat_session_delete",
         "chat_turn_append",
+        // #7654: the durable chat-asset surface (#7370) shipped without a
+        // roster entry, so the contract test failed on every run.
+        "chat_asset_capabilities",
+        "chat_asset_put",
+        "chat_asset_get",
         "dream_consolidate_room",
         "palace_dream",
         // spec-001 Phase 4 (issue #1722):
