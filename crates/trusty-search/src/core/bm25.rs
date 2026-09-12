@@ -124,6 +124,20 @@ impl CodeBm25Index {
     ) -> Vec<(String, f32)> {
         self.inner.score_query_all_with_filter(query, top_k, filter)
     }
+
+    /// Chunk ids whose postings carry every term in `terms`.
+    ///
+    /// Why: the #7675 exact-match floor verifies a literal against candidates
+    /// rather than scanning every chunk's content. Forwarding keeps the
+    /// intersection in the shared scorer that owns the inverted index.
+    /// What: forwards to `BM25Index::docs_containing_all`; `None` means no
+    /// candidate set is derivable (no terms), an empty `Vec` means no chunk
+    /// carries all of them.
+    /// Test: `core::indexer::tests::exact_match_floor::
+    /// the_postings_candidate_path_and_the_full_scan_agree`.
+    pub fn docs_containing_all(&self, terms: &[String]) -> Option<Vec<&str>> {
+        self.inner.docs_containing_all(terms)
+    }
 }
 
 impl Default for CodeBm25Index {

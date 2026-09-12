@@ -440,17 +440,36 @@ Hybrid search (BM25 + vector + KG expansion + RRF fusion).
     for this index" from "not built yet". Counterparts to the existing
     `meta.bm25_lane_degraded`.
   - `meta.exact_match_floor` / `meta.exact_match_literal` (#7675): `true` when
-    the query named a literal — a single identifier carrying an underscore,
-    `::` or a camelCase boundary (optionally behind `fn`/`struct`/`const`), an
-    explicitly quoted string, or a distinctive multi-word phrase — that occurs
-    verbatim in the corpus, and every chunk carrying it was ranked above every
-    chunk that does not, declaration first. The semantic lanes then order only
-    the remainder. `exact_match_literal` is the text that was matched and is
-    present whenever a literal was RECOGNISED, so a caller can tell "read as a
-    literal query, found nowhere" from "read as a conceptual query" (where it
-    is `null`). Ordering inside the floored group is lane-independent
-    (declaration, then occurrence count, then chunk id), which is what makes
+    the query named a literal that occurs verbatim in the corpus, and every
+    chunk carrying it was ranked above every chunk that does not, declaration
+    first. The semantic lanes then order only the remainder. Four shapes earn
+    the floor, each one a caller could have typed into ripgrep: an explicitly
+    quoted string; a single identifier carrying an underscore, `::` or a
+    camelCase boundary (optionally behind `fn`/`struct`/`const`); a bare
+    filename token (`session_mcp_scope.rs`), matched against each chunk's path
+    basename rather than its content; and an issue reference (`#7675`), matched
+    verbatim. An UNQUOTED multi-word phrase earns nothing — it is a conceptual
+    query, and flooring one let a prose sentence occurring verbatim in a single
+    doc line take the top slot from every semantically-relevant chunk. A bare
+    word and a single unsignalled type name (`Palace`) stay out for the same
+    reason. `exact_match_literal` is the text that was matched and is present
+    whenever a literal was RECOGNISED, so a caller can tell "read as a literal
+    query, found nowhere" from "read as a conceptual query" (where it is
+    `null`). Ordering inside the floored group is lane-independent
+    (declaration, then live-before-archived, then the caller's `on_branch`
+    preference, then occurrence count, then chunk id), which is what makes
     `search` and `search_lexical` agree on top-1 for an identifier.
+  - `meta.exact_match_degraded` / `meta.exact_match_full_scan` (#7675): the
+    lane's own honesty bits. `exact_match_degraded` is `true` when the lane
+    could not read the corpus at all (the same bounded-rehydrate exhaustion
+    `meta.bm25_lane_degraded` reports for its lane, #3683), so an absent floor
+    means "the lane did not run", never "the literal is not there".
+    `exact_match_full_scan` is `true` when the BM25 postings prefilter was
+    unavailable — an evicted or corpus-capped lexical index, where
+    `bm25.len() < chunks.len()` means the postings can miss a chunk — and the
+    lane matched the literal against every chunk's content instead. A filename
+    query compares path basenames and never scans content, so it reports
+    `false`.
   - `meta.dropped` / `meta.dropped_total` (#2203): how many candidates this
     query retrieved and then discarded, per site. Without it a short `results`
     array was indistinguishable from a small match set. Sites:

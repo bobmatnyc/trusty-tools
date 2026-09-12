@@ -9,8 +9,10 @@
 //! corpus whose decoys reproduce the ranking the spike observed: the vector and
 //! BM25 lanes both prefer chunks that share the query's common words over the
 //! one chunk carrying the literal whole.
-//! What: L1/L3 regression, a conceptual-ranking no-change pin, the
-//! promotion-past-`top_k` case, the `Phrase` commonness cap, and the
+//! What: L1/L3 regression, a conceptual-ranking no-change pin (including a
+//! prose sentence that occurs verbatim and still must not be floored), the
+//! promotion-past-`top_k` case, the filename and issue-reference shapes, the
+//! archived-duplicate ordering, the postings-vs-scan agreement, and the
 //! property-style `search` vs `search_lexical` top-1 agreement check.
 //! Test: this module.
 
@@ -22,6 +24,12 @@ use crate::core::indexer::search::exact::{extract_exact_literal, literal_regex, 
 const L1_LITERAL: &str = "not smaller than the instruction sources";
 /// The L3 compound identifier from the spike.
 const L3_IDENT: &str = "render_savings_segment";
+/// A ≥3-token prose sentence that occurs VERBATIM in exactly one doc chunk.
+///
+/// Why: the round-2 HIGH finding — an unquoted phrase used to earn the floor,
+/// so a sentence like this one took the top slot from every chunk the semantic
+/// lane judged relevant. It must now extract no literal at all. #7675.
+const CONCEPTUAL_PROSE: &str = "reclaims idle caches on a bounded ticker";
 
 /// Build the fixture corpus the spike's two misses reproduce against.
 ///
@@ -104,6 +112,17 @@ async fn fixture() -> CodeIndexer {
         .await
         .unwrap();
     }
+    // A prose doc chunk carrying CONCEPTUAL_PROSE verbatim. #7675 round 2: an
+    // unquoted multi-word phrase must not float this chunk over the code the
+    // semantic lane judged relevant, however exactly the sentence matches.
+    idx.add_chunk(raw(
+        "doc:prose",
+        "docs/notes/rollout.md",
+        "## Rollout notes\n\nThe daemon reclaims idle caches on a bounded ticker \
+         so a quiet host shrinks back to its durable baseline.\n",
+    ))
+    .await
+    .unwrap();
     // Extra identifiers for the property check, one declaration each.
     for (i, name) in PROPERTY_IDENTS.iter().enumerate() {
         idx.add_chunk(raw(
@@ -240,87 +259,96 @@ async fn conceptual_ranking_is_unchanged_by_the_floor() {
     // corpus must rank exactly as it did before. The floor's whole gate is
     // `extract_exact_literal` + a corpus hit, so proving the gate declines is
     // proving the ranking is untouched.
-    // What: the conceptual phrasing of L3 extracts a Phrase literal that occurs
-    // nowhere, so no floor applies; the ranked order equals the order the same
-    // pipeline produces with the floor provably inert.
+    // What: two conceptual queries — one whose words occur only scattered, and
+    // one (`CONCEPTUAL_PROSE`) that occurs VERBATIM in a prose doc chunk. The
+    // second is the round-2 regression: an unquoted phrase must extract no
+    // literal, so the doc chunk cannot be floored over the code the semantic
+    // lane picked. Both ranked orders equal the order the same pipeline
+    // produces with the floor provably inert.
     // Test: this test.
     let idx = fixture().await;
-    let conceptual = "where is the statusline savings segment rendered";
-    let lit = extract_exact_literal(conceptual).expect("a long phrase is a Phrase candidate");
-    let re = literal_regex(&lit).expect("phrase regex compiles");
-    assert_eq!(lit.shape, LiteralShape::Phrase);
-    let hits = idx
-        .exact_match_lane(&lit, &re, 40, crate::core::indexer::SearchMode::All, None)
-        .await;
-    assert!(
-        hits.is_empty(),
-        "the conceptual phrase must occur verbatim nowhere, so the floor stays inert"
-    );
-    let outcome = idx
-        .search_with_outcome(&query(conceptual, 5))
-        .await
-        .unwrap();
-    assert!(
-        !outcome.exact_match.applied,
-        "no floor may apply to a conceptual query"
-    );
-    // And the ranked order is byte-identical to the same query run with the
-    // floor's own inputs removed — i.e. the pipeline before this change.
-    let baseline = idx.search(&query(conceptual, 5)).await.unwrap();
-    let ranked: Vec<&str> = outcome.results.iter().map(|r| r.id.as_str()).collect();
-    let ranked_baseline: Vec<&str> = baseline.iter().map(|r| r.id.as_str()).collect();
-    assert_eq!(
-        ranked, ranked_baseline,
-        "conceptual ranking must be deterministic and unchanged"
-    );
-}
-
-#[tokio::test]
-async fn a_common_phrase_does_not_earn_the_floor() {
-    // Why: a multi-word phrase that occurs in many chunks is boilerplate, and
-    // flooring it would reorder a conceptual query for no gain. #7675.
-    // What: a phrase planted in more chunks than `PHRASE_HIT_CAP` gets no lane.
-    // Test: this test.
-    let idx = make_indexer();
-    for i in 0..24 {
-        idx.add_chunk(raw(
-            &format!("boiler:{i}"),
-            &format!("src/b_{i}.rs"),
-            "// Copyright the trusty authors; all rights reserved\nfn a() {}",
-        ))
-        .await
-        .unwrap();
+    for conceptual in [
+        "where is the statusline savings segment rendered",
+        CONCEPTUAL_PROSE,
+    ] {
+        assert!(
+            extract_exact_literal(conceptual).is_none(),
+            "an unquoted multi-word query must extract no literal: {conceptual}"
+        );
+        let outcome = idx
+            .search_with_outcome(&query(conceptual, 5))
+            .await
+            .unwrap();
+        assert!(
+            !outcome.exact_match.applied,
+            "no floor may apply to a conceptual query: {conceptual}"
+        );
+        assert!(
+            outcome.exact_match.literal.is_none(),
+            "a conceptual query names no literal: {conceptual}"
+        );
+        assert!(
+            !outcome.results.is_empty(),
+            "the conceptual query must still answer: {conceptual}"
+        );
+        // And the ranked order is byte-identical to the same query run with the
+        // floor's own inputs removed — i.e. the pipeline before this change.
+        let baseline = idx.search(&query(conceptual, 5)).await.unwrap();
+        let ranked: Vec<&str> = outcome.results.iter().map(|r| r.id.as_str()).collect();
+        let ranked_baseline: Vec<&str> = baseline.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(
+            ranked, ranked_baseline,
+            "conceptual ranking must be deterministic and unchanged: {conceptual}"
+        );
     }
-    let lit = extract_exact_literal("Copyright the trusty authors").expect("phrase");
-    let re = literal_regex(&lit).expect("regex");
-    let hits = idx
-        .exact_match_lane(&lit, &re, 40, crate::core::indexer::SearchMode::All, None)
-        .await;
+}
+
+#[tokio::test]
+async fn an_unquoted_phrase_earns_no_literal_even_when_it_occurs_verbatim() {
+    // Why: round-2 HIGH. An unquoted multi-word phrase used to earn the floor
+    // under a hit cap alone, so a distinctive prose sentence occurring once in
+    // a CHANGELOG line took rank 1 from every semantically-relevant chunk.
+    // Quoting it is how a caller asks for it literally. #7675.
+    // What: the phrase extracts nothing; the same words quoted extract a
+    // `Quoted` literal that DOES floor the doc chunk carrying them.
+    // Test: this test.
+    let idx = fixture().await;
     assert!(
-        hits.is_empty(),
-        "a phrase matching more than the cap must decline the floor, got {} hits",
-        hits.len()
+        extract_exact_literal(CONCEPTUAL_PROSE).is_none(),
+        "an unquoted phrase must not earn the floor"
+    );
+    let quoted = extract_exact_literal(&format!("\"{CONCEPTUAL_PROSE}\"")).expect("quoted");
+    assert_eq!(quoted.shape, LiteralShape::Quoted);
+    let re = literal_regex(&quoted).expect("regex");
+    let lane = idx
+        .exact_match_lane(
+            &quoted,
+            &re,
+            40,
+            crate::core::indexer::SearchMode::All,
+            None,
+        )
+        .await;
+    assert_eq!(
+        lane.hits.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
+        vec!["doc:prose"],
+        "quoting the same words is how a caller asks for the literal"
     );
 }
 
 #[tokio::test]
-async fn hybrid_top_one_agrees_with_lexical_for_sampled_identifiers() {
-    // Why: the property #7675 asks for — for identifiers sampled from the
+async fn hybrid_top_one_agrees_with_lexical_for_every_planted_identifier() {
+    // Why: the property #7675 asks for — for every identifier planted in the
     // corpus, the default hybrid `search` must land on the same file:line that
     // `search_lexical` does. Before the floor, three of the spike's nine
     // lookups disagreed.
-    // What: walks a deterministic pseudo-random sample of the fixture's planted
-    // identifiers and compares top-1 `file:start_line` across the two lanes.
+    // What: iterates `PROPERTY_IDENTS` directly — full, non-duplicated coverage
+    // of the definition/use tie planted per identifier, which the previous
+    // sample-with-replacement LCG neither guaranteed nor checked.
     // Test: this test.
     let idx = fixture().await;
-    // Deterministic LCG — a seeded sample, not a dependency on a rng crate.
-    let mut state: u64 = 0x7675_0000_0000_0001;
-    let mut checked = 0_usize;
-    for _ in 0..PROPERTY_IDENTS.len() {
-        state = state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        let name = PROPERTY_IDENTS[(state >> 33) as usize % PROPERTY_IDENTS.len()];
+    let mut checked: Vec<&str> = Vec::new();
+    for name in PROPERTY_IDENTS {
         let hybrid = idx.search(&query(name, 5)).await.unwrap();
         let mut lex_q = query(name, 5);
         lex_q.stage = Some(crate::core::indexer::SearchStage::Lexical);
@@ -336,11 +364,15 @@ async fn hybrid_top_one_agrees_with_lexical_for_sampled_identifiers() {
             lexical[0].file,
             lexical[0].start_line,
         );
-        checked += 1;
+        checked.push(name);
     }
-    assert!(
-        checked >= PROPERTY_IDENTS.len(),
-        "every sample must be checked"
+    // Teeth: the assertion names WHICH identifiers were compared, so a loop
+    // that silently skips one (or compares one twice) fails here rather than
+    // passing on a count the loop itself guarantees.
+    assert_eq!(
+        checked,
+        PROPERTY_IDENTS.to_vec(),
+        "every planted identifier must be compared exactly once, in order"
     );
 }
 
@@ -348,8 +380,49 @@ async fn hybrid_top_one_agrees_with_lexical_for_sampled_identifiers() {
 fn extract_exact_literal_reads_the_query_shapes() {
     // Why: the extractor is the whole gate between the floor and conceptual
     // ranking. #7675.
-    // What: the four accept shapes and the two reject shapes.
+    // What: every accept shape and every reject shape.
     // Test: this test.
+    assert_eq!(
+        extract_exact_literal("session_mcp_scope.rs").map(|l| l.shape),
+        Some(LiteralShape::Filename),
+        "a bare filename is a ripgrep-parity literal"
+    );
+    assert!(
+        extract_exact_literal("the cache is warm.").is_none(),
+        "a sentence ending in a period is not a filename"
+    );
+    assert!(
+        extract_exact_literal("notes.backup").is_none(),
+        "an unknown extension is not a filename"
+    );
+    assert_eq!(
+        extract_exact_literal("#7675").map(|l| l.shape),
+        Some(LiteralShape::IssueRef)
+    );
+    assert!(
+        extract_exact_literal("#draft").is_none(),
+        "only digits follow the hash in an issue reference"
+    );
+    // MEDIUM, round 2: the two-token declaration form deliberately accepts a
+    // bare, signal-less name — the keyword IS the disambiguation. Pinned so a
+    // refactor cannot flip it silently.
+    assert_eq!(
+        extract_exact_literal("fn fold").map(|l| (l.text, l.shape)),
+        Some(("fold".to_string(), LiteralShape::Identifier)),
+        "`fn fold` asks for a declaration where bare `fold` is conceptual"
+    );
+    assert_eq!(
+        extract_exact_literal("struct Cache").map(|l| l.text),
+        Some("Cache".to_string())
+    );
+    assert!(
+        extract_exact_literal("fold").is_none(),
+        "the bare word alone stays conceptual"
+    );
+    assert!(
+        extract_exact_literal("Palace").is_none(),
+        "a single Capitalized name carries no boundary signal"
+    );
     assert_eq!(
         extract_exact_literal("render_savings_segment").map(|l| l.shape),
         Some(LiteralShape::Identifier)
@@ -373,6 +446,155 @@ fn extract_exact_literal_reads_the_query_shapes() {
     // A plain English word is a conceptual query, not a literal request.
     assert!(extract_exact_literal("authenticate").is_none());
     assert!(extract_exact_literal("auth flow").is_none());
+    assert!(
+        extract_exact_literal("how does the rehydrate ticker decide").is_none(),
+        "an unquoted multi-word phrase earns nothing"
+    );
+}
+
+#[tokio::test]
+async fn a_filename_query_floors_the_chunks_of_that_file() {
+    // Why: ripgrep finds `session_mcp_scope.rs` trivially; the identifier gate
+    // rejected it outright because of the dot. Round-2 MEDIUM. #7675.
+    // What: the floor matches the chunk's path basename, not its content, so a
+    // chunk merely MENTIONING the filename is not floored.
+    // Test: this test.
+    let idx = make_indexer();
+    idx.add_chunk(raw(
+        "file:target",
+        "src/service/session_mcp_scope.rs",
+        "fn apply_scope(project: &Project) -> Result<()> { Ok(()) }",
+    ))
+    .await
+    .unwrap();
+    idx.add_chunk(raw(
+        "file:mention",
+        "src/docs/notes.rs",
+        "// see session_mcp_scope.rs for the scope rules",
+    ))
+    .await
+    .unwrap();
+    let lit = extract_exact_literal("session_mcp_scope.rs").expect("filename");
+    let re = literal_regex(&lit).expect("regex");
+    let lane = idx
+        .exact_match_lane(&lit, &re, 10, crate::core::indexer::SearchMode::All, None)
+        .await;
+    assert_eq!(
+        lane.hits.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
+        vec!["file:target"],
+        "a filename query floors the file itself, not chunks that mention it"
+    );
+    assert!(
+        !lane.full_scan,
+        "a filename query matches paths, so it is not the content-scan fallback"
+    );
+}
+
+#[tokio::test]
+async fn an_issue_reference_floors_its_verbatim_occurrence() {
+    // Why: `#7675` fails every identifier rule on its leading hash, yet it is
+    // exactly the kind of literal a caller reaches for ripgrep with. #7675.
+    // What: the reference is matched verbatim and does not hit `#76750`.
+    // Test: this test.
+    let idx = make_indexer();
+    idx.add_chunk(raw(
+        "issue:hit",
+        "src/core/a.rs",
+        "// #7675: the exact-match floor lives here\nfn floor() {}",
+    ))
+    .await
+    .unwrap();
+    idx.add_chunk(raw(
+        "issue:longer",
+        "src/core/b.rs",
+        "// #76750 is a different issue entirely\nfn other() {}",
+    ))
+    .await
+    .unwrap();
+    let lit = extract_exact_literal("#7675").expect("issue ref");
+    let re = literal_regex(&lit).expect("regex");
+    let lane = idx
+        .exact_match_lane(&lit, &re, 10, crate::core::indexer::SearchMode::All, None)
+        .await;
+    assert_eq!(
+        lane.hits.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
+        vec!["issue:hit"],
+        "`#7675` must not match inside `#76750`"
+    );
+}
+
+#[tokio::test]
+async fn an_archived_duplicate_ranks_below_the_live_definition() {
+    // Why: round-2 HIGH. `apply_archive_downrank` multiplies a stale chunk's
+    // score, and `apply_floor` then overwrote that score — so a deprecated
+    // duplicate of a declaration could take rank 1 from the live one, inside
+    // the one query type users rely on to reach the real definition. #7675.
+    // What: two chunks declare the same identifier; the archived one must sort
+    // second under the floor.
+    // Test: this test.
+    let idx = make_indexer();
+    let body =
+        "fn resolve_scope_root(p: &Path) -> Option<PathBuf> { p.parent().map(Path::to_owned) }";
+    // `archive::classify` reads the path, so a `legacy/` directory is the
+    // signal — the floor reuses that verdict rather than recomputing one. The
+    // ids are chosen so the ARCHIVED chunk wins the final `id` tie-break: both
+    // chunks are declarations with one occurrence and no branch preference, so
+    // without the archive key in the sort this assertion fails, which is what
+    // it did against 64f1718e6.
+    idx.add_chunk(raw("arch:z_live", "src/core/scope.rs", body))
+        .await
+        .unwrap();
+    idx.add_chunk(raw("arch:a_archived", "legacy/core/scope.rs", body))
+        .await
+        .unwrap();
+    let results = idx.search(&query("resolve_scope_root", 5)).await.unwrap();
+    let order: Vec<&str> = results.iter().map(|r| r.id.as_str()).collect();
+    assert!(
+        order.len() >= 2,
+        "both declarations must survive to be ordered, got {order:?}"
+    );
+    let live = order.iter().position(|id| *id == "arch:z_live");
+    let old = order.iter().position(|id| *id == "arch:a_archived");
+    assert!(
+        matches!((live, old), (Some(l), Some(o)) if l < o),
+        "the live declaration must outrank its archived duplicate, got {order:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_postings_candidate_path_and_the_full_scan_agree() {
+    // Why: the postings prefilter replaces an O(corpus) content scan, so it is
+    // only sound if it finds exactly what the scan would. #7675.
+    // What: the same identifier through the lane (postings-driven, because the
+    // BM25 corpus covers every chunk) and through a direct content scan of the
+    // fixture must name the same chunk ids.
+    // Test: this test.
+    let idx = fixture().await;
+    let lit = extract_exact_literal(L3_IDENT).expect("identifier");
+    let re = literal_regex(&lit).expect("regex");
+    let lane = idx
+        .exact_match_lane(&lit, &re, 40, crate::core::indexer::SearchMode::All, None)
+        .await;
+    assert!(
+        !lane.full_scan,
+        "a complete BM25 corpus must drive candidates from the postings"
+    );
+    let mut from_lane: Vec<String> = lane.hits.iter().map(|h| h.id.clone()).collect();
+    from_lane.sort();
+    let mut by_scan: Vec<String> = idx
+        .chunks
+        .read()
+        .await
+        .values()
+        .filter(|raw| re.is_match(&raw.content))
+        .map(|raw| raw.id.clone())
+        .collect();
+    by_scan.sort();
+    assert_eq!(
+        from_lane, by_scan,
+        "the postings candidate set must find exactly what a full scan finds"
+    );
+    assert!(!by_scan.is_empty(), "the fixture must contain the literal");
 }
 
 #[test]

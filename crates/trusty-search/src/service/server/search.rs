@@ -966,6 +966,14 @@ pub(crate) async fn search_report(
             // "read as a conceptual query" (where it is `null`).
             "exact_match_floor": exact_match.applied,
             "exact_match_literal": exact_match.literal,
+            // #7675: the fail-open guard. `exact_match_degraded` is `true` when
+            // the lane could not read the corpus at all, so an absent floor
+            // means "the lane did not run", not "the literal is not there" —
+            // the same distinction `bm25_lane_degraded` draws for its lane.
+            // `exact_match_full_scan` says the BM25 postings prefilter was
+            // unavailable and every chunk's content was matched instead.
+            "exact_match_degraded": exact_match.degraded,
+            "exact_match_full_scan": exact_match.full_scan,
         },
     });
     // #5069: a routed query's results belong to the SERVING facet's tree, which

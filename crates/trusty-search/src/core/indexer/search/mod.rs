@@ -307,15 +307,14 @@ impl CodeIndexer {
         // conceptual query extracts no literal and pays nothing.
         let exact_literal = exact::extract_exact_literal(&query.text);
         let exact_re = exact_literal.as_ref().and_then(exact::literal_regex);
-        let exact_ids: Vec<String> = match (&exact_literal, &exact_re) {
-            (Some(lit), Some(re)) => self
-                .exact_match_lane(lit, re, want, effective_mode, filter)
-                .await
-                .into_iter()
-                .map(|h| h.id)
-                .collect(),
-            _ => Vec::new(),
+        let exact_lane = match (&exact_literal, &exact_re) {
+            (Some(lit), Some(re)) => {
+                self.exact_match_lane(lit, re, want, effective_mode, filter)
+                    .await
+            }
+            _ => exact::ExactLaneOutcome::default(),
         };
+        let exact_ids: Vec<String> = exact_lane.hits.iter().map(|h| h.id.clone()).collect();
         let bm25_fut = self.bm25_search(&query.text, want, filter);
         let hnsw_results = match &embedding {
             Some(v) => self.vector_search_scoped(v, want, query).await?,
@@ -433,6 +432,8 @@ impl CodeIndexer {
         let mut exact_match = ExactMatchReport {
             applied: false,
             literal: exact_literal.as_ref().map(|l| l.text.clone()),
+            degraded: exact_lane.degraded,
+            full_scan: exact_lane.full_scan,
         };
         if let (Some(lit), Some(re)) = (&exact_literal, &exact_re) {
             if !exact_ids.is_empty() {
