@@ -303,24 +303,43 @@ pub fn default_savings_log() -> PathBuf {
 /// Why: one writer means the on-disk shape cannot drift between producers, and
 /// an `O_APPEND` write of a single line is atomic enough for this file's size
 /// that no cross-process lock is needed — two producers racing interleave rows,
-/// never bytes within a row.
+/// never bytes within a row. That second half only holds because the row and
+/// its newline leave here as ONE write (#7579); see [`write_row_line`].
 /// What: serialises `row` to one line of JSON and appends it with a trailing
 /// newline. Returns the IO error unchanged; every producer treats a failure as
 /// non-fatal, since a missing savings row must never cost a session its launch.
 /// Test: `append_then_fold_round_trips`, `append_creates_the_usage_directory`.
 pub fn append_row(ledger: &Path, row: &SavingsRow) -> std::io::Result<()> {
-    use std::io::Write as _;
-
     if let Some(parent) = ledger.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let line = serde_json::to_string(row)
-        .map_err(|source| std::io::Error::new(std::io::ErrorKind::InvalidData, source))?;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(ledger)?;
-    writeln!(file, "{line}")
+    write_row_line(&mut file, row)
+}
+
+/// Write one row and its terminator to `sink` in a single `write_all`.
+///
+/// Why (#7579): `writeln!` expands to `write_fmt`, which hands the formatter's
+/// pieces to the sink one at a time — the row's bytes, then the newline, as two
+/// separate `O_APPEND` writes. Two producers racing between those two writes
+/// interleave BYTES, not rows: the operator's ledger carries ten physical lines
+/// holding two complete rows with no separator, each followed by the blank line
+/// the two stranded newlines left. Building the whole line in memory first is
+/// what makes the module header's "never bytes within a row" claim true, since
+/// a single `write_all` to an `O_APPEND` descriptor is not split.
+/// What: serialises `row`, appends `\n` to the same buffer, and issues one
+/// `write_all`. A serialisation failure becomes an `InvalidData` IO error so
+/// callers keep one error type.
+/// Test: `a_row_and_its_newline_leave_in_one_write`,
+/// `append_then_fold_round_trips`.
+pub fn write_row_line(sink: &mut impl std::io::Write, row: &SavingsRow) -> std::io::Result<()> {
+    let mut line = serde_json::to_string(row)
+        .map_err(|source| std::io::Error::new(std::io::ErrorKind::InvalidData, source))?;
+    line.push('\n');
+    sink.write_all(line.as_bytes())
 }
 
 /// Fold every accepted row belonging to `session_id`.

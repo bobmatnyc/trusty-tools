@@ -113,7 +113,11 @@ const PENDING_DIR: &str = "pending-savings";
 const STRANDED_AFTER: Duration = Duration::from_secs(12 * 60 * 60);
 
 /// Directory holding the per-project "nothing folded" warning markers.
-const NO_FOLD_WARNED_DIR: &str = "no-fold-warned";
+///
+/// #7569: `crate::core::savings_repair::MARKER_DIR` aliases this rather than
+/// re-spelling it, so a rename here cannot leave the repair sweeping a
+/// directory nothing writes.
+pub(crate) const NO_FOLD_WARNED_DIR: &str = "no-fold-warned";
 
 /// FNV-1a (64-bit) over `bytes`.
 ///
@@ -581,8 +585,9 @@ pub fn emit_staged_row_for_session_in(root: &Path, cwd: &Path, claude_session_id
 /// Where the "nothing folded" warning marker for `project_dir` lives.
 ///
 /// What: `<root>/usage/no-fold-warned/<digest>`.
-/// Test: `the_no_fold_warning_fires_once_per_project`.
-fn no_fold_marker_path(root: &Path, project_dir: &Path) -> PathBuf {
+/// Test: `the_no_fold_warning_fires_once_per_project`,
+/// `the_repair_sweeps_the_directory_the_producer_writes`.
+pub(crate) fn no_fold_marker_path(root: &Path, project_dir: &Path) -> PathBuf {
     keyed_path(root, NO_FOLD_WARNED_DIR, project_dir, "")
 }
 
