@@ -1661,3 +1661,51 @@ fn base_agent_prose_rules_survive_composition() {
         "graduated-verbosity rule must not reuse the optimizer's `Caveman` term"
     );
 }
+
+/// 🔴 #7558 REGRESSION: `git pull --ff-only` aborts naming only the colliding
+/// path, so the recovery gets improvised — once by hand-diffing two copies of
+/// an untracked research doc. The bundled `git-workflow` skill must state the
+/// pre-pull check and BOTH of its outcomes, so the identical-content case
+/// resolves itself and the differing-content case is reported rather than
+/// deleted.
+#[test]
+fn git_workflow_skill_states_the_pre_pull_untracked_collision_check_7558() {
+    for needle in [
+        "### Pulling After a Merge — Check Untracked Collisions First",
+        "git status --porcelain",
+        "git show origin/<base>:<path>",
+        "**Identical content**",
+        "**Differing content**",
+        "Never delete an untracked path to clear the abort without diffing it",
+    ] {
+        assert!(
+            GIT_WORKFLOW.contains(needle),
+            "git-workflow skill is missing the #7558 pre-pull untracked-collision \
+             guidance: {needle:?}"
+        );
+    }
+}
+
+/// 🔴 #7561 REGRESSION: a `kill <pid>` the agent issued itself surfaced four
+/// times as "failed with exit code 143", because a `128 + signal` exit shares
+/// the numeric range of a real failure. `verification-before-completion` owns
+/// the "check exit code" step, so the signal reading must live beside it —
+/// including the one `128 + N` value that IS a failure (137 nobody killed).
+#[test]
+fn verification_skill_reads_128_plus_signal_as_terminated_not_failed_7561() {
+    for needle in [
+        "## Reading an Exit Code",
+        "`128 + N`",
+        "`143` (128+15)",
+        "`SIGTERM` — the ordinary `kill <pid>`",
+        "**terminated by signal N**",
+        "never as \"failed with exit code 143\"",
+        "The one exception is `137`",
+    ] {
+        assert!(
+            VERIFICATION_BEFORE_COMPLETION.contains(needle),
+            "verification-before-completion skill is missing the #7561 \
+             signal-exit reading: {needle:?}"
+        );
+    }
+}
