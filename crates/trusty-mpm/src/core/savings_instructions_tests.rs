@@ -850,3 +850,40 @@ fn the_fold_measurement_reads_the_newest_compiled_prompt() {
         "the source side must carry the bundled corpus"
     );
 }
+
+/// Why (#7658): the live regression's own producer. A `tm` subprocess of a live
+/// Claude session inherits `CLAUDE_CODE_SESSION_ID`, so every compose takes the
+/// append branch below — with no read of the ledger, 26 composes of one unchanged
+/// prompt wrote 26 identical rows. The measurement, not the number of composes,
+/// bounds the ledger.
+/// Test: itself.
+#[test]
+fn n_composes_under_one_session_id_append_exactly_one_row() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let root = tmp.path().join("framework");
+    let project = tmp.path().join("project");
+    let dest = crate::core::instruction_pipeline::compiled_prompt_path(&project, "local");
+    std::fs::create_dir_all(dest.parent().expect("session dir")).expect("session dir");
+    let ledger = savings_log_in(&root);
+    // Far below the source set so the fold is genuinely positive, and at or above
+    // the #7491 plausibility floor so the producer does not refuse it.
+    let prompt = "x".repeat(min_plausible_compiled_bytes().max(1));
+
+    for _ in 0..26 {
+        record_instruction_compression_to(
+            &root,
+            &dest,
+            &prompt,
+            Some("claude-7658".to_string()),
+            no_roster,
+            sonnet_price,
+        );
+    }
+
+    let text = std::fs::read_to_string(&ledger).expect("the first compose must write a ledger");
+    assert_eq!(
+        text.lines().filter(|line| !line.trim().is_empty()).count(),
+        1,
+        "26 composes of one unchanged prompt must leave one row, got:\n{text}"
+    );
+}

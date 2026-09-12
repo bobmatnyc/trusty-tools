@@ -93,8 +93,8 @@ use std::path::Path;
 use crate::core::harness_root::{HARNESS_DIR, SESSIONS_DIR};
 use crate::core::instruction_pipeline::COMPILED_PROMPT_FILE;
 use crate::core::savings::{
-    BYTES_PER_TOKEN, SavingsRow, TECHNIQUE_INSTRUCTION_COMPRESSION, append_row,
-    claude_code_session_id, now_ts, savings_log_in,
+    BYTES_PER_TOKEN, SavingsRow, TECHNIQUE_INSTRUCTION_COMPRESSION, claude_code_session_id, now_ts,
+    savings_log_in,
 };
 use crate::core::savings_sidecar::{stage_row, warn_no_fold_once};
 
@@ -244,7 +244,12 @@ fn record_instruction_compression_to(
         return;
     }
     let ledger = savings_log_in(framework_root);
-    if let Err(source) = append_row(&ledger, &row) {
+    // #7658: this append fires on every compose that runs with the harness's
+    // session id exported, which a `tm` subprocess of a live Claude session
+    // inherits — 312 byte-identical rows for one session. `append_row_once`
+    // consults the ledger first; see `savings::append_row_once` for why the
+    // guard lives there rather than here.
+    if let Err(source) = crate::core::savings::append_row_once(&ledger, &row) {
         tracing::warn!(
             ledger = %ledger.display(),
             %source,

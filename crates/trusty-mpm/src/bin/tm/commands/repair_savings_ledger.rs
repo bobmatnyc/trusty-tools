@@ -9,8 +9,12 @@
 //! for a one-shot, back-up-then-rewrite recovery of a persisted file.
 //! What: [`repair_savings_ledger`] resolves the framework root, plans the
 //! repair, prints the verdict, and — only with `--apply` — performs it.
+//! Since #7658 the same plan/apply pair also collapses exact-duplicate
+//! `instruction-compression` rows — one live session accumulated 312 copies of
+//! one measurement — keeping the earliest copy of each `(session_id, basis)`.
 //! Test: `repair_savings_ledger_dry_run_writes_nothing`,
-//! `repair_savings_ledger_applies_and_is_idempotent`.
+//! `repair_savings_ledger_applies_and_is_idempotent`; the collapse rule itself
+//! is `plan_collapses_duplicate_rows`.
 
 use std::path::PathBuf;
 
@@ -122,10 +126,13 @@ fn report(ledger: &std::path::Path, planned: &LedgerPlan) {
         kept + quarantined
     );
     println!("  would keep:       {kept} row(s)");
+    // #7658: `duplicate` is the third class — repeats of one
+    // instruction-compression measurement, collapsed to the earliest copy.
     println!(
-        "  would quarantine: {quarantined} row(s) — {} test-fixture, {} malformed",
+        "  would quarantine: {quarantined} row(s) — {} test-fixture, {} malformed, {} duplicate",
         planned.count_of(Reason::TestFixture),
-        planned.count_of(Reason::Malformed)
+        planned.count_of(Reason::Malformed),
+        planned.count_of(Reason::Duplicate)
     );
     // #7569: these lines held more or less than one parseable row, which is a
     // different finding from the `malformed` row count two lines above — most

@@ -320,6 +320,164 @@ pub fn append_row(ledger: &Path, row: &SavingsRow) -> std::io::Result<()> {
     write_row_line(&mut file, row)
 }
 
+/// Whether the ledger already carries a given measurement — or could not be
+/// asked (#7658).
+///
+/// Why: a two-valued answer forces an unreadable ledger to be reported as one
+/// of "present" or "absent", and both are wrong in a way that costs something.
+/// Reporting it absent is the FAIL-OPEN: every producer then appends, and an
+/// unreadable ledger becomes an unbounded one — which is the failure this whole
+/// change exists to stop. Reporting it present would silently discard a genuine
+/// measurement. The third value lets the caller do neither: skip the write and
+/// say so in the log.
+/// What: `Unreadable` covers every read error EXCEPT `NotFound`, because a
+/// ledger that does not exist yet is the ordinary state on a machine no
+/// producer has run on, not a fault.
+/// Test: `row_presence_distinguishes_a_different_basis`,
+/// `append_row_once_skips_an_unreadable_ledger`,
+/// `row_presence_of_a_missing_ledger_is_absent`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowPresence {
+    /// The ledger holds a row with this `(session_id, technique, basis)`.
+    Present,
+    /// The ledger was read and holds no such row.
+    Absent,
+    /// The ledger could not be read, so the question was not answered.
+    Unreadable,
+}
+
+/// Does the ledger already carry this exact measurement?
+///
+/// Why (#7658): [`has_row`] answers "does this session have a row of this
+/// technique", which is the right question for the re-derivation guard and the
+/// wrong one for an append — a session whose prompt genuinely changed mid-run
+/// owes a second, DIFFERENT row. Keying on `basis` as well is what separates
+/// "the same measurement again" from "a new measurement", so the guard
+/// suppresses only the former.
+/// What: scans every parseable row, whatever its values. Deliberately NOT
+/// [`for_each_accepted_row`]: a row the fold rejects is still on the file, and
+/// treating it as absent would let a producer re-append it on every invocation
+/// forever.
+/// Test: `row_presence_distinguishes_a_different_basis`,
+/// `row_presence_finds_a_row_the_fold_rejects`,
+/// `append_row_once_skips_an_unreadable_ledger`.
+pub fn row_presence(ledger: &Path, session_id: &str, technique: &str, basis: &str) -> RowPresence {
+    let text = match std::fs::read_to_string(ledger) {
+        Ok(text) => text,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return RowPresence::Absent,
+        Err(source) => {
+            tracing::warn!(
+                ledger = %ledger.display(),
+                %source,
+                "could not read the savings ledger to check for an existing row"
+            );
+            return RowPresence::Unreadable;
+        }
+    };
+    let found = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str::<SavingsRow>(line).ok())
+        .any(|row| {
+            row.session_id == session_id && row.technique == technique && row.basis == basis
+        });
+    if found {
+        RowPresence::Present
+    } else {
+        RowPresence::Absent
+    }
+}
+
+/// What [`append_row_once`] did.
+///
+/// Test: `append_row_once_writes_one_row_for_n_attempts`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppendOnce {
+    /// The row was not on the ledger and is now.
+    Appended,
+    /// An identical measurement was already recorded; nothing was written.
+    AlreadyPresent,
+    /// The ledger could not be read, so nothing was written (#7658).
+    LedgerUnreadable,
+}
+
+/// Append `row` unless the ledger already carries the same measurement.
+///
+/// Why (#7658): THE choke point. The ledger grew 312 byte-identical
+/// `instruction-compression` rows for one live session because both producers
+/// that write this technique — the compose-time append in
+/// [`crate::core::savings_instructions`] and the sweep's append in
+/// [`crate::core::savings_sidecar`] — called [`append_row`] without ever
+/// consulting the file. Guarding each producer separately would leave the next
+/// producer free to re-open the hole, so the check lives HERE, below every one
+/// of them: a caller that reaches the ledger at all reaches it through this.
+/// What: [`row_presence`] on `(session_id, technique, basis)`, then
+/// [`append_row`] only for [`RowPresence::Absent`] — the pair held under
+/// `trusty_common::file_lock::with_exclusive_lock` on the ledger, because a
+/// read-then-append that is not atomic is the SAME duplicate class bounded by
+/// the number of racers: two hooks in separate processes both observe `Absent`
+/// and both append. That lock is the workspace's one advisory-locking primitive
+/// (#5344) and it serialises threads and processes alike, so no second
+/// implementation is introduced here. An unreadable ledger skips the write and
+/// reports it — never treated as "no row exists", which would make an
+/// unreadable ledger append on every invocation.
+///
+/// Only the instruction-compression producers route through this. `divert` and
+/// `compress` keep [`append_row`]: a second diversion of the same file is a
+/// second real saving, so suppressing it would delete data, and neither pays the
+/// lock.
+///
+/// NOT reentrant, inheriting `with_exclusive_lock`'s contract — never call this
+/// from inside another lock on the same ledger.
+/// Test: `append_row_once_writes_one_row_for_n_attempts`,
+/// `racing_threads_append_exactly_one_row`,
+/// `append_row_once_skips_an_unreadable_ledger`,
+/// `append_row_once_still_records_a_different_basis`.
+pub fn append_row_once(ledger: &Path, row: &SavingsRow) -> std::io::Result<AppendOnce> {
+    // #7658: the ledger's parent must exist before the lock sidecar can be
+    // created beside it. `append_row` creates it too, but that is inside the
+    // critical section and too late for the lock file itself.
+    if let Some(parent) = ledger.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    trusty_common::file_lock::with_exclusive_lock(ledger, || append_row_once_locked(ledger, row))?
+}
+
+/// [`append_row_once`]'s critical section, with the lock already held.
+///
+/// Why: separating it keeps the lock acquisition one line and makes the
+/// read-then-append pair readable as the single indivisible step it has to be.
+/// What: see [`append_row_once`].
+/// Test: `append_row_once_writes_one_row_for_n_attempts`,
+/// `racing_threads_append_exactly_one_row`.
+fn append_row_once_locked(ledger: &Path, row: &SavingsRow) -> std::io::Result<AppendOnce> {
+    match row_presence(ledger, &row.session_id, &row.technique, &row.basis) {
+        RowPresence::Present => {
+            tracing::debug!(
+                ledger = %ledger.display(),
+                session_id = %row.session_id,
+                technique = %row.technique,
+                "the ledger already carries this measurement; appending nothing"
+            );
+            Ok(AppendOnce::AlreadyPresent)
+        }
+        RowPresence::Unreadable => {
+            tracing::warn!(
+                ledger = %ledger.display(),
+                session_id = %row.session_id,
+                technique = %row.technique,
+                "the savings ledger could not be read, so whether this row is already \
+                 recorded is unknown; skipping the append rather than risking a duplicate"
+            );
+            Ok(AppendOnce::LedgerUnreadable)
+        }
+        RowPresence::Absent => {
+            append_row(ledger, row)?;
+            Ok(AppendOnce::Appended)
+        }
+    }
+}
+
 /// Write one row and its terminator to `sink` in a single `write_all`.
 ///
 /// Why (#7579): `writeln!` expands to `write_fmt`, which hands the formatter's

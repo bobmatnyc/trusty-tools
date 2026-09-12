@@ -18,7 +18,9 @@
 //!   [`crate::core::savings::SavingsRow`], written by the compiling process
 //!   because it cannot key it. [`emit_staged_row`] claims it and appends it
 //!   under the Claude session id through
-//!   [`crate::core::savings::append_row`], which stays the ledger's one writer.
+//!   [`crate::core::savings::append_row_once`], which stays the ledger's one
+//!   writer for this technique and, since #7658, appends only a measurement the
+//!   ledger does not already carry.
 //!   The claim is an atomic rename onto a per-attempt path, so of two racing
 //!   hook processes only the one whose rename succeeds appends. The claim file
 //!   is deleted once the append has landed, and renamed back to the staging
@@ -87,7 +89,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use crate::core::savings::{SavingsRow, append_row};
+use crate::core::savings::{AppendOnce, SavingsRow};
 
 /// Directory holding staged rows, under the framework root's `usage/`.
 const PENDING_DIR: &str = "pending-savings";
@@ -252,7 +254,9 @@ fn claim_path_for(staged: &Path) -> PathBuf {
 /// What: renames the staged file onto a per-attempt claim path — the rename is
 /// the claim, and the racer whose rename fails reads nothing and appends
 /// nothing — then replaces the row's `session_id` and appends through
-/// [`append_row`]. The claim file is removed only once the append has landed;
+/// [`crate::core::savings::append_row_once`], which since #7658 appends only a
+/// measurement the ledger does not already carry. The claim file is removed once
+/// the append has landed — or once the ledger is found to hold the row already;
 /// an append that fails goes back to the staging path for the next hook, and
 /// the warning carries the row's JSON so the measurement survives in the log
 /// even if the rename back also fails. Returns whether a row was appended:
@@ -286,9 +290,21 @@ pub fn emit_staged_row(
 /// the directory, so the atomic rename lives here — one claim primitive, still
 /// the only writer, so two hooks racing on one staged file still produce one
 /// ledger row.
-/// What: see [`emit_staged_row`], which is this against a digested path.
+/// What: see [`emit_staged_row`], which is this against a digested path. The
+/// append goes through [`crate::core::savings::append_row_once`] since #7658, so
+/// a claim of a measurement the ledger already carries deletes the staged file
+/// and reports `false` — the row is accounted for, and leaving the file would
+/// only have it claimed again on the next hook. A ledger that cannot be READ
+/// leaves the row staged, exactly as a failed append does — but only until the
+/// staged file passes [`STRANDED_AFTER`], after which the retry stops: the file
+/// stays under its claim name, which the sweep skips, and one `error!` names it
+/// for `tm repair` or the operator. Without that bound a persistently unreadable
+/// ledger warns and re-stages on every sweep forever.
 /// Test: `two_racing_claims_append_exactly_one_row`,
-/// `a_failed_append_leaves_the_row_staged_for_the_next_hook`.
+/// `a_failed_append_leaves_the_row_staged_for_the_next_hook`,
+/// `n_hooks_sweeping_a_restaged_row_append_exactly_one`,
+/// `an_unreadable_ledger_leaves_the_staged_row_alone`,
+/// `a_stranded_row_stops_being_restaged_against_an_unreadable_ledger`.
 fn claim_staged_row(ledger: &Path, path: &Path, claude_session_id: &str) -> bool {
     let session_id = claude_session_id.trim();
     if session_id.is_empty() {
@@ -328,20 +344,66 @@ fn claim_staged_row(ledger: &Path, path: &Path, claude_session_id: &str) -> bool
         }
     };
     row.session_id = session_id.to_string();
-    if let Err(source) = append_row(ledger, &row) {
-        let restored = std::fs::rename(&claim, &path).is_ok();
-        let row_json = serde_json::to_string(&row).unwrap_or(text);
-        tracing::warn!(
-            ledger = %ledger.display(),
-            %source,
-            restored,
-            row = %row_json,
-            "could not append the staged instruction-compression savings row"
-        );
-        return false;
+    // #7658: the sweep re-runs on every hook, and a producer that re-stages
+    // hands it the same measurement again. `append_row_once` is what makes a
+    // second claim of an identical row a no-op instead of a second ledger line.
+    match crate::core::savings::append_row_once(ledger, &row) {
+        Ok(AppendOnce::Appended) => {
+            let _ = std::fs::remove_file(&claim);
+            true
+        }
+        // The measurement is already on the ledger, so this staged copy is
+        // redundant: drop it rather than leave it to be claimed again forever.
+        Ok(AppendOnce::AlreadyPresent) => {
+            let _ = std::fs::remove_file(&claim);
+            false
+        }
+        // #7658: nothing was written and nothing is known, so the staged row
+        // goes back for a hook that can read the ledger — the same treatment a
+        // failed append gets, for the same reason. Bounded by
+        // [`STRANDED_AFTER`], because a ledger that is PERSISTENTLY unreadable
+        // would otherwise warn and re-stage on every sweep for the life of the
+        // machine.
+        Ok(AppendOnce::LedgerUnreadable) => {
+            // The rename preserves the staged file's mtime, so the claim path
+            // still carries the age the bound is measured against.
+            if age_of(&claim).is_some_and(|age| age >= STRANDED_AFTER) {
+                // Not renamed back: the sweep only picks up `*.json`, so leaving
+                // the file under its claim name is what stops the retry. The row
+                // is still on disk for `tm repair` or the operator.
+                tracing::error!(
+                    ledger = %ledger.display(),
+                    path = %claim.display(),
+                    stranded_hours = STRANDED_AFTER.as_secs() / 3600,
+                    "the savings ledger has been unreadable since this instruction-compression \
+                     row was staged, for longer than the stranded threshold; giving up on it \
+                     rather than re-staging it on every sweep. The measurement is still at the \
+                     path named here"
+                );
+                return false;
+            }
+            let restored = std::fs::rename(&claim, &path).is_ok();
+            tracing::warn!(
+                ledger = %ledger.display(),
+                restored,
+                "left the staged instruction-compression savings row unwritten because \
+                 the ledger could not be read"
+            );
+            false
+        }
+        Err(source) => {
+            let restored = std::fs::rename(&claim, &path).is_ok();
+            let row_json = serde_json::to_string(&row).unwrap_or(text);
+            tracing::warn!(
+                ledger = %ledger.display(),
+                %source,
+                restored,
+                row = %row_json,
+                "could not append the staged instruction-compression savings row"
+            );
+            false
+        }
     }
-    let _ = std::fs::remove_file(&claim);
-    true
 }
 
 /// Every compiled prompt that exists under `project_dir`, newest first.
