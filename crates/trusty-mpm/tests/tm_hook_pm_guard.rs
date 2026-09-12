@@ -3278,6 +3278,14 @@ fn pm_guard_allows_a_for_loop_word_list_of_branch_names() {
         "for f in feat/x ~/.aws/credentials; do cat $f; done",
         "for f in docs/secrets; do cat $f; done",
         "for f in feat/credentials; do cat $f; done",
+        // Round 13 critic round 2, CRITICAL: a `..` after a listed prefix
+        // escapes it. Each ALLOWED on `acfb7c70a`; the argv form always denied.
+        "for f in feat/../secrets/prod-credentials; do cat $f; done",
+        "for f in docs/../secrets/prod-credentials; do cat $f; done",
+        "for f in feat/../../../../etc/db-credentials; do cat $f; done",
+        "for f in refs/../../../var/run/my-secrets; do cat $f; done",
+        "for f in feat/../../.aws/aws-credentials; do cat $f; done",
+        "{ for f in feat/../secrets/prod-credentials; do cat $f; done; }",
     ] {
         let stdout = run_pm_guard_at(
             &bash_payload_at(command, &repo, ""),
