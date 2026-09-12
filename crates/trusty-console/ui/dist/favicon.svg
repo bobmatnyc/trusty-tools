@@ -1,14 +1,32 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
-  <title id="title">Trusty Console operator mark</title>
-  <rect width="64" height="64" rx="13" fill="#201612"/>
-  <path d="M32 15v-5" stroke="#E9B98A" stroke-width="2"/>
-  <rect x="29.5" y="5" width="5" height="5" rx="1" fill="#D97742"/>
-  <rect x="16" y="15" width="32" height="24" rx="5" fill="#D97742"/>
-  <rect x="22" y="22" width="5" height="5" rx="1" fill="#201612"/>
-  <rect x="37" y="22" width="5" height="5" rx="1" fill="#201612"/>
-  <path d="M26 32h12" stroke="#201612" stroke-width="2.5"/>
-  <rect x="8" y="45" width="48" height="13" rx="4" fill="#B7410E"/>
-  <rect x="13" y="49" width="10" height="5" rx="1" fill="#201612"/>
-  <rect x="27" y="49" width="10" height="5" rx="1" fill="#201612"/>
-  <rect x="41" y="49" width="10" height="5" rx="1" fill="#201612"/>
+<!--
+  Canonical trusty favicon (#7590). One mark, used by every trusty-* web page.
+
+  Derived from the Foundry robot mark (RobotIcon.svelte, `full` hero variant):
+  every coordinate here is that component's 32x32 geometry doubled onto a 64x64
+  canvas, so the head, antenna, eyes and `>_` mouth sit where the component puts
+  them. The 1.5px strokes are redrawn as solid plates, because a 1.5px stroke on
+  a 32-unit canvas is 0.75 device pixels at a 16px browser tab and vanishes.
+
+  The three hex values are canonical Foundry literals, not new colours: #2B1C12
+  is RobotIcon's own `full`-variant chassis fill, #D97742 is the trusty-accent
+  token on dark, and #E9B98A is the trusty-sidebar-accent token. The favicon's
+  own field is a dark oxide plate, so the accent takes its dark-palette value
+  per the Foundry "accent brightens one step on dark" rule. A favicon cannot
+  read CSS custom properties, which is why the values are written out here
+  rather than referenced. (XML comments forbid a double hyphen, so the token
+  names above are spelled without their CSS prefix.)
+
+  This file is the SOURCE. Every other favicon.svg in the repo is a byte-for-byte
+  copy of it — see README.md's vendored-copy list.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="trusty-favicon-title">
+  <title id="trusty-favicon-title">Trusty</title>
+  <rect width="64" height="64" rx="12" fill="#2B1C12"/>
+  <path d="M32 21V13" stroke="#E9B98A" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="32" cy="10" r="3.5" fill="#E9B98A"/>
+  <rect x="12" y="21" width="40" height="36" rx="8" fill="#D97742"/>
+  <rect x="21" y="32" width="6" height="6" rx="1.5" fill="#2B1C12"/>
+  <rect x="37" y="32" width="6" height="6" rx="1.5" fill="#2B1C12"/>
+  <path d="M23 45L27 48L23 51" fill="none" stroke="#2B1C12" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M30 51H41" stroke="#2B1C12" stroke-width="3" stroke-linecap="round"/>
 </svg>

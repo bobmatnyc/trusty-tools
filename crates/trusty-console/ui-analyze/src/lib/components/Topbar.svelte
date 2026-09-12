@@ -10,12 +10,19 @@
    * shared Foundry `Badge` (`dot` prop) instead of hand-rolled spans, so
    * their status glyphs match the console's own (`crates/trusty-console/ui/
    * src/Badge.svelte`) rather than being a third divergent copy.
-   * What: Renders crumbs derived from the current route on the left; on the
-   * right, the console link-back, a <select> for choosing the active index
-   * (persisted via state), the search-reachable pill, and the daemon health
-   * badge.
+   * #7589: the header now opens with the Foundry brand lockup — the canonical
+   * robot mark beside this tool's name (`ToolLockup`, vendored from
+   * docs/design/UI/design-system/icons/). Before it, a dashboard served at
+   * `/tools/analyze/` showed a bare breadcrumb and nothing identifying the
+   * product family. The lockup reads its colour and type from Foundry tokens
+   * only, so it inverts with `data-theme` and adds no hue.
+   * What: Renders the brand lockup and the crumbs derived from the current
+   * route on the left; on the right, the console link-back, a <select> for
+   * choosing the active index (persisted via state), the search-reachable
+   * pill, and the daemon health badge.
    * Test: Stop trusty-search, refresh /health, confirm pill turns red.
-   * `consoleLink.test.js` covers the link address.
+   * `consoleLink.test.js` covers the link address; `Topbar.test.js` mounts
+   * this header and asserts the lockup's mark and wordmark are both in it.
    */
   import {
     getHealth,
@@ -33,6 +40,7 @@
   import { resolveConsoleUrl } from '../consoleLink.js';
   import ActionIcon from './ActionIcon.svelte';
   import Badge from './Badge.svelte';
+  import ToolLockup from './ToolLockup.svelte';
 
   const consoleHref = resolveConsoleUrl();
 
@@ -80,11 +88,15 @@
 </script>
 
 <header class="topbar">
-  <div class="crumbs">
-    {#each crumbs as crumb, i}
-      {#if i > 0}<span class="sep">/</span>{/if}
-      <span class="crumb">{crumb}</span>
-    {/each}
+  <div class="lead">
+    <ToolLockup name="Trusty Analyzer" />
+    <span class="lead-divider" aria-hidden="true"></span>
+    <div class="crumbs">
+      {#each crumbs as crumb, i}
+        {#if i > 0}<span class="sep">/</span>{/if}
+        <span class="crumb">{crumb}</span>
+      {/each}
+    </div>
   </div>
   <div class="actions">
     <a class="console-link" href={consoleHref} title="Back to the Trusty Console">
@@ -151,6 +163,21 @@
     position: sticky;
     top: 0;
     z-index: 10;
+  }
+  /* #7589: the lockup and the crumbs are one left-hand cluster, separated by a
+     hairline rather than by spacing alone, so "which product" and "where in it"
+     read as two fields of the same header. */
+  .lead {
+    display: flex;
+    align-items: center;
+    gap: var(--trusty-space-3);
+    min-width: 0;
+  }
+  .lead-divider {
+    width: 1px;
+    height: 20px;
+    flex: none;
+    background: var(--trusty-border);
   }
   .crumbs {
     display: flex;

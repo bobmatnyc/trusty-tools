@@ -100,10 +100,14 @@
     font-weight: 700;
     font-size: 18px;
   }
+  /* #7589: the sidebar's own text token. `--text` is the page body colour, so
+     on the light palette it resolves to #2b1c12 against this always-dark
+     sidebar — the mirror of the dark-palette failure its ui-search and
+     ui-memory siblings had. `--trusty-sidebar-text` is #e6d8c8 in both. */
   .brand-title {
     font-weight: 600;
     font-size: 15px;
-    color: var(--text);
+    color: var(--trusty-sidebar-text);
   }
   .brand-sub {
     font-size: 11px;

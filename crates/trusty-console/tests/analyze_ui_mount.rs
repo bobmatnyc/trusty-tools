@@ -66,7 +66,8 @@ async fn analyze_ui_index_serves_the_spa_with_the_bridge_base_injected() {
             .any(|(k, v)| k == header::CONTENT_TYPE.as_str() && v.starts_with("text/html")),
         "expected an HTML content type, got {headers:?}"
     );
-    assert!(body.contains("<title>trusty-analyzer</title>"), "{body}");
+    // #7589 branded this title; it stays the mount's identity check.
+    assert!(body.contains("<title>Trusty Analyzer</title>"), "{body}");
     assert!(
         body.contains(r#"window.__ANALYZE_BASE__ = new URL("/api/analyze/", document.baseURI)"#),
         "the API base must be repointed at the console bridge; got:\n{body}"
@@ -101,12 +102,25 @@ async fn analyze_ui_serves_every_asset_the_shell_references() {
         let (status, headers, body) = get(&format!("/tools/analyze/{r}")).await;
         assert_eq!(status, StatusCode::OK, "asset {r} must be served");
         assert!(!body.is_empty(), "asset {r} came back empty");
-        assert!(
-            headers
-                .iter()
-                .any(|(k, v)| k == header::CACHE_CONTROL.as_str() && v.contains("immutable")),
-            "content-hashed asset {r} should be cacheable; got {headers:?}"
-        );
+        // #7590: only `assets/` carries a content hash in its filename, so only
+        // it may be cached forever. The shell also references `favicon.svg`,
+        // whose name never changes when its bytes do — an immutable header
+        // there would pin a stale icon in every browser that saw the old one.
+        if r.starts_with("assets/") {
+            assert!(
+                headers
+                    .iter()
+                    .any(|(k, v)| k == header::CACHE_CONTROL.as_str() && v.contains("immutable")),
+                "content-hashed asset {r} should be cacheable; got {headers:?}"
+            );
+        } else {
+            assert!(
+                headers
+                    .iter()
+                    .any(|(k, v)| k == header::CACHE_CONTROL.as_str() && v.contains("no-cache")),
+                "un-hashed asset {r} must revalidate; got {headers:?}"
+            );
+        }
     }
 }
 
@@ -116,7 +130,7 @@ async fn analyze_ui_serves_every_asset_the_shell_references() {
 async fn analyze_ui_unknown_path_falls_back_to_the_shell() {
     let (status, _, body) = get("/tools/analyze/no/such/file").await;
     assert_eq!(status, StatusCode::OK);
-    assert!(body.contains("<title>trusty-analyzer</title>"));
+    assert!(body.contains("<title>Trusty Analyzer</title>"));
 }
 
 /// Why: three mounts serving from one binary is the whole risk this file exists

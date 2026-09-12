@@ -40,8 +40,14 @@ model of machine doing different jobs.
 - `trusty-console-logo.svg` — primary horizontal lockup for paper/light fields.
 - `trusty-console-logo-reversed.svg` — Night Shift lockup for dark oxide fields.
 - `trusty-console-mark.svg` — standalone operator mark for constrained spaces.
-- `trusty-console-favicon.svg` — optically simplified browser mark; drops the
-  arms, which muddy at 16px.
+
+The console has no favicon of its own. #7590 gave every trusty-* web page one
+shared browser mark — `docs/design/UI/design-system/icons/favicon.svg`, derived
+from the Foundry robot — and the console's own optically simplified
+`trusty-console-favicon.svg` was deleted with it, because two marks in one tab
+strip is the divergence that issue closed. Only `trusty-agents` keeps a separate
+favicon, under the standing exemption recorded in
+[`design-system/icons/README.md`](../design-system/icons/README.md).
 
 The prohibitions above apply unchanged: no recoloring the robot, no shadows, no
 circular clip, and the `UNIT-05` descriptor stays on the primary lockup.

@@ -19,7 +19,10 @@
 		class="mx-auto flex max-w-content flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 sm:flex-nowrap sm:px-6"
 	>
 		<a href="/" class="flex shrink-0 items-center gap-2 rounded-sm">
-			<!-- Same four-plate mark as static/favicon.svg, recoloured from tokens. -->
+			<!-- Four-plate Foundry mark, recoloured from tokens. #7590 moved
+			     static/favicon.svg to the shared robot mark every trusty-* page now
+			     carries, so the two are deliberately no longer the same drawing:
+			     the tab identifies the suite, this identifies the site. -->
 			<svg viewBox="0 0 32 32" aria-hidden="true" class="h-6 w-6 shrink-0">
 				<rect x="0" y="0" width="14" height="14" class="fill-foundry-primary" />
 				<rect x="18" y="0" width="14" height="14" class="fill-foundry-primary/35" />

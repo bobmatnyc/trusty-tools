@@ -134,6 +134,10 @@
   /* Typography */
   --trusty-font: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
   --trusty-mono: 'IBM Plex Mono', ui-monospace, Menlo, monospace;
+  /* #7589: Foundry's display face, the third of the set index.html loads. The
+     brand lockup is its only caller here; ui-search and ui-memory already
+     carried this token. */
+  --trusty-display: 'Chakra Petch', 'IBM Plex Sans', sans-serif;
   --trusty-fs-xs: 0.75rem;
   --trusty-fs-sm: 0.875rem;
   --trusty-fs-md: 1rem;
