@@ -148,7 +148,7 @@ daemon**: each mode builds its own endpoint.
 swiftc -O -swift-version 5 -o target/console-saver/harness/paintharness \
   crates/trusty-console/macos/saver/PaintHarness.swift
 
-for mode in offline slow preview resize stop suspend suspend-cold; do
+for mode in offline slow preview resize stop suspend suspend-cold recreate one-failure; do
   ./target/console-saver/harness/paintharness "$mode" \
     target/console-saver/TrustyConsole.saver || echo "FAILED: $mode"
 done
@@ -160,12 +160,14 @@ unoptimised build spends over a second in it.
 | Mode | Endpoint | Asserts |
 |---|---|---|
 | `offline` | a closed port | ≥98% of pixels non-black and ≥2% carrying drawn content, both before `startAnimation()` and after |
-| `slow` | a listener that accepts and never answers | the same, plus ≥3 connection attempts in 34 s — i.e. the load timed out and retried instead of hanging on `URLRequest`'s 60 s default |
+| `slow` | a listener that accepts and never answers | the same, plus ≥3 connection attempts in 45 s — i.e. the load timed out and retried instead of hanging on `URLRequest`'s 60 s default |
 | `preview` | none (`isPreview: true`) | the bundled asset draws, and no `WKWebView` is built for a tile |
 | `resize` | the real console (7788, or `SAVER_HARNESS_PORT`) | after a late growth: `webView.frame == view.bounds`, the page's own `innerWidth`×`innerHeight` equals those bounds, and none of five edge samples is black (#6871) |
 | `stop` | the same never-answering listener | `stopAnimation()` returns inside 500 ms and the listener sees **zero** further connections for 20 s — twice, once with a load in flight and once from inside a render tick (#6900) |
 | `suspend` | a listener that **answers**, serving a page that reports `document.visibilityState` as `visible` for three reads then `hidden` | three re-entrant `startAnimation()` calls over the live page produce **zero** further requests; the page then goes 35 s reporting itself visible with **zero** requests, so a view that reloaded on every probe tick fails here; then the flip to `hidden` produces exactly one reload, and every frame captured while the web view is off screen carries ≥2% ink (#7112) |
 | `suspend-cold` | the same listener, serving a page that is `hidden` from its **first** read | the same re-entrant assertion, then the view recovers inside 90 s with no visible-then-hidden history to reason from — the bounded forced-recovery deadline, measured at 69 s (#7112) |
+| `recreate` | the never-answering listener again | after three consecutive failed loads the `WKWebView` **instance** is replaced and the replacement opens its own connection; the fallback keeps drawing across the swap (#7606) |
+| `one-failure` | the same listener, watched only as far as the first failure and its retry | the instance is **not** replaced — the assertion that fails a view which spends a WebContent process on every brief console restart (#7606) |
 
 ### Stop path (#6900)
 
@@ -246,6 +248,27 @@ the exact symptom this issue is about.
 `recoveryCooldown` caps the reload rate at one a minute, so none of the four
 grounds can turn into a treadmill.
 
+**And when reloading is not enough, the web view itself goes (#7606).** A reload
+lands in the same WebContent process, so a page macOS has parked at
+`running-suspended-NotVisible` comes back hidden and the recovery above reloads
+it again. The owner's saver ran that loop for three days while the console
+answered `/ui/screensaver` in under a millisecond throughout. After three
+consecutive failures to get a live page on screen — a failed or timed-out load,
+or a visibility recovery — the view tears down its `WKWebView` and builds a
+fresh one, which is a fresh WebContent and network process, and loads into that.
+The decision is made on the COUNT alone and never on what the page says about
+its own visibility: a page reporting itself hidden inside a saver the host is
+animating is not evidence of occlusion, and treating it as such is what let this
+run for days. Only a probe answering `visible` clears the count —
+`didFinish` does not, because every reload in that three-day loop finished. The
+rebuild is capped at one a minute, widening to one per ten minutes once the
+console has been down longer than `fastRetryWindow`, so a dead daemon overnight
+does not become process churn. The same issue derived the retry delay from the
+6 s load deadline rather than leaving it a flat 5 s underneath it: every retry
+used to `load` over an attempt WebKit had not finished with, WebKit reported the
+supersession as `NSURLErrorCancelled` (-999), and the view counted its own
+cancellation as a fresh failure — 139 of them in two hours of the same log.
+
 Every decision names its trigger and its ground at `.default`, so `log show`
 separates them:
 
@@ -256,6 +279,8 @@ visibility lost, recovering — document.visibilityState=hidden (was visible)
 visibility lost, recovering — document.visibilityState=hidden (unhealthy for 69s)
 visibility lost, waiting — occluded window, page never reported visible (…)
 window occlusion changed — visible=false
+rebuilding the web view — 3 consecutive failed load(s): visibility recovery: …
+rebuild held off — 3 consecutive failure(s), inside the 60s cooldown (…)
 ```
 
 Against a bundle built from the pre-fix `main` (951d46b6b) both modes report
@@ -408,8 +433,10 @@ configuration sheet this phase (`hasConfigureSheet` is `false`).
   view paints `Resources/ConsolePreview.png` scaled to fit at 35% over the
   Foundry dark background (`#201612`), with a `TRUSTY CONSOLE · OFFLINE` banner
   over a scrim so a photograph of old numbers cannot read as live ones. Retries
-  every 5 s for the first 3 minutes of an outage, then every 30 s, and switches
-  to the live page the moment one succeeds — no saver restart.
+  every 8 s for the first 3 minutes of an outage, then every 30 s, and switches
+  to the live page the moment one succeeds — no saver restart. The 8 s is
+  derived from the 6 s deadline, not chosen: a retry that lands inside it
+  supersedes the attempt in flight and WebKit reports that as -999 (#7606).
 - **Preview** — the System Settings thumbnail (`isPreview == true`) never
   constructs a web view; it paints the same asset at full opacity, with no
   banner.
@@ -432,6 +459,13 @@ configuration sheet this phase (`hasConfigureSheet` is `false`).
   is reachable) and reloaded, on any of four grounds and after at most 60 s. This
   is the only exit from `.live` when the OS discards the page's layers without
   terminating its process (#7112).
+- **Rebuilt** — after three consecutive failures to get a live page on screen
+  (a failed or timed-out load, or a visibility recovery), the `WKWebView` is torn
+  down and replaced, which is the only way to leave a frozen WebContent process
+  behind. Decided on the count, never on what the page reports about its own
+  visibility; cleared only by a probe answering `visible`; capped at one a
+  minute, or one per ten minutes once the console has been down past the
+  fast-retry window (#7606).
 - **Multi-display** — the framework instantiates one view per screen, so each
   display gets its own web view and timers. No coordination is attempted.
 - **Tracks the frame** — the web view is sized from `bounds` in
