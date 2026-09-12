@@ -295,11 +295,16 @@ pub fn emit_staged_row(
 /// a claim of a measurement the ledger already carries deletes the staged file
 /// and reports `false` — the row is accounted for, and leaving the file would
 /// only have it claimed again on the next hook. A ledger that cannot be READ
-/// leaves the row staged, exactly as a failed append does.
+/// leaves the row staged, exactly as a failed append does — but only until the
+/// staged file passes [`STRANDED_AFTER`], after which the retry stops: the file
+/// stays under its claim name, which the sweep skips, and one `error!` names it
+/// for `tm repair` or the operator. Without that bound a persistently unreadable
+/// ledger warns and re-stages on every sweep forever.
 /// Test: `two_racing_claims_append_exactly_one_row`,
 /// `a_failed_append_leaves_the_row_staged_for_the_next_hook`,
 /// `n_hooks_sweeping_a_restaged_row_append_exactly_one`,
-/// `an_unreadable_ledger_leaves_the_staged_row_alone`.
+/// `an_unreadable_ledger_leaves_the_staged_row_alone`,
+/// `a_stranded_row_stops_being_restaged_against_an_unreadable_ledger`.
 fn claim_staged_row(ledger: &Path, path: &Path, claude_session_id: &str) -> bool {
     let session_id = claude_session_id.trim();
     if session_id.is_empty() {
@@ -355,8 +360,28 @@ fn claim_staged_row(ledger: &Path, path: &Path, claude_session_id: &str) -> bool
         }
         // #7658: nothing was written and nothing is known, so the staged row
         // goes back for a hook that can read the ledger — the same treatment a
-        // failed append gets, for the same reason.
+        // failed append gets, for the same reason. Bounded by
+        // [`STRANDED_AFTER`], because a ledger that is PERSISTENTLY unreadable
+        // would otherwise warn and re-stage on every sweep for the life of the
+        // machine.
         Ok(AppendOnce::LedgerUnreadable) => {
+            // The rename preserves the staged file's mtime, so the claim path
+            // still carries the age the bound is measured against.
+            if age_of(&claim).is_some_and(|age| age >= STRANDED_AFTER) {
+                // Not renamed back: the sweep only picks up `*.json`, so leaving
+                // the file under its claim name is what stops the retry. The row
+                // is still on disk for `tm repair` or the operator.
+                tracing::error!(
+                    ledger = %ledger.display(),
+                    path = %claim.display(),
+                    stranded_hours = STRANDED_AFTER.as_secs() / 3600,
+                    "the savings ledger has been unreadable since this instruction-compression \
+                     row was staged, for longer than the stranded threshold; giving up on it \
+                     rather than re-staging it on every sweep. The measurement is still at the \
+                     path named here"
+                );
+                return false;
+            }
             let restored = std::fs::rename(&claim, &path).is_ok();
             tracing::warn!(
                 ledger = %ledger.display(),

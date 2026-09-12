@@ -530,6 +530,54 @@ fn append_row_once_writes_one_row_for_n_attempts() {
     );
 }
 
+/// Why (#7658, code-critic round 1): the single-threaded loop above does not
+/// exercise the interval between the presence read and the append. Two callers
+/// racing on one key both observe `Absent` and both append unless that pair is
+/// indivisible — the same duplicate class, bounded only by the number of racers.
+/// `with_exclusive_lock` serialises separate descriptors, so the threads here
+/// exercise the same lock two processes would contend on.
+/// What: 16 threads released together on one measurement, repeated 10 times
+/// because a race that survives once may not survive again.
+/// Test: itself.
+#[test]
+fn racing_threads_append_exactly_one_row() {
+    for attempt in 0..10 {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let ledger = savings_log_in(dir.path());
+        std::fs::create_dir_all(ledger.parent().expect("parent")).expect("mkdir");
+        let measurement = row("sess-race", 183, 0.000_549);
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(16));
+        let handles: Vec<_> = (0..16)
+            .map(|_| {
+                let ledger = ledger.clone();
+                let measurement = measurement.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    append_row_once(&ledger, &measurement).expect("append")
+                })
+            })
+            .collect();
+        let appended = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("thread"))
+            .filter(|outcome| *outcome == AppendOnce::Appended)
+            .count();
+
+        assert_eq!(
+            appended, 1,
+            "attempt {attempt}: exactly one racer may write"
+        );
+        let text = std::fs::read_to_string(&ledger).expect("read");
+        assert_eq!(
+            text.lines().filter(|line| !line.trim().is_empty()).count(),
+            1,
+            "attempt {attempt}: 16 racers must leave one row, got:\n{text}"
+        );
+    }
+}
+
 /// Why (#7658): a session whose prompt genuinely changes mid-run folds a second,
 /// DIFFERENT measurement, and suppressing that would lose real data. The key is
 /// `(session_id, technique, basis)`, never the session alone.

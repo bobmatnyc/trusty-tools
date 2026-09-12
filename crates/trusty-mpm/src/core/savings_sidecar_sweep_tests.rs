@@ -165,6 +165,66 @@ fn an_unreadable_ledger_leaves_the_staged_row_alone() {
     );
 }
 
+/// Why (#7658, code-critic round 1): the re-stage above is correct for a
+/// transient read fault and unbounded for a permanent one — a ledger that is
+/// never readable warns and re-stages on every sweep for the life of the
+/// machine. Past [`STRANDED_AFTER`] the retry stops: the file keeps its claim
+/// name, which the sweep skips, so the measurement is preserved without being
+/// reattempted.
+/// Test: itself.
+#[test]
+fn a_stranded_row_stops_being_restaged_against_an_unreadable_ledger() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let root = tmp.path().join("framework");
+    let compiled = project_with_compiled_prompt(tmp.path(), "project", "managed-7658c");
+    let project = tmp.path().join("project");
+    let ledger = crate::core::savings::savings_log_in(&root);
+    std::fs::create_dir_all(&ledger).expect("occupy the ledger path");
+
+    let staged = pending_row_path_in(&root, &compiled);
+    stage_row(&root, &compiled, &a_row("managed-7658c"));
+    backdate(&staged, STRANDED_AFTER.as_secs() / 3600 + 1);
+
+    assert!(!emit_staged_row_for_session_in(
+        &root,
+        &project,
+        "claude-7658c"
+    ));
+    assert!(
+        !staged.exists(),
+        "a stranded row against an unreadable ledger must not be re-staged"
+    );
+
+    // The measurement is still on disk under the claim name, and a second sweep
+    // does not pick it back up.
+    let leftovers: Vec<PathBuf> = std::fs::read_dir(root.join("usage").join(PENDING_DIR))
+        .expect("pending dir")
+        .flatten()
+        .map(|entry| entry.path())
+        .collect();
+    assert_eq!(leftovers.len(), 1, "the row's bytes must survive");
+    assert!(
+        leftovers[0]
+            .extension()
+            .is_none_or(|extension| extension != "json"),
+        "the leftover must not be swept again: {}",
+        leftovers[0].display()
+    );
+
+    assert!(!emit_staged_row_for_session_in(
+        &root,
+        &project,
+        "claude-7658c"
+    ));
+    assert_eq!(
+        std::fs::read_dir(root.join("usage").join(PENDING_DIR))
+            .expect("pending dir")
+            .count(),
+        1,
+        "a second sweep must neither claim nor duplicate it"
+    );
+}
+
 /// Why (#7411): staging is the only route this producer has to the ledger, so a
 /// staged file that was never written — an unwritable directory, a `tm`
 /// upgraded between the compile and the hook — left the session with a blank

@@ -412,13 +412,45 @@ pub enum AppendOnce {
 /// producer free to re-open the hole, so the check lives HERE, below every one
 /// of them: a caller that reaches the ledger at all reaches it through this.
 /// What: [`row_presence`] on `(session_id, technique, basis)`, then
-/// [`append_row`] only for [`RowPresence::Absent`]. An unreadable ledger skips
-/// the write and reports it — never treated as "no row exists", which would
-/// make an unreadable ledger append on every invocation.
+/// [`append_row`] only for [`RowPresence::Absent`] — the pair held under
+/// `trusty_common::file_lock::with_exclusive_lock` on the ledger, because a
+/// read-then-append that is not atomic is the SAME duplicate class bounded by
+/// the number of racers: two hooks in separate processes both observe `Absent`
+/// and both append. That lock is the workspace's one advisory-locking primitive
+/// (#5344) and it serialises threads and processes alike, so no second
+/// implementation is introduced here. An unreadable ledger skips the write and
+/// reports it — never treated as "no row exists", which would make an
+/// unreadable ledger append on every invocation.
+///
+/// Only the instruction-compression producers route through this. `divert` and
+/// `compress` keep [`append_row`]: a second diversion of the same file is a
+/// second real saving, so suppressing it would delete data, and neither pays the
+/// lock.
+///
+/// NOT reentrant, inheriting `with_exclusive_lock`'s contract — never call this
+/// from inside another lock on the same ledger.
 /// Test: `append_row_once_writes_one_row_for_n_attempts`,
+/// `racing_threads_append_exactly_one_row`,
 /// `append_row_once_skips_an_unreadable_ledger`,
 /// `append_row_once_still_records_a_different_basis`.
 pub fn append_row_once(ledger: &Path, row: &SavingsRow) -> std::io::Result<AppendOnce> {
+    // #7658: the ledger's parent must exist before the lock sidecar can be
+    // created beside it. `append_row` creates it too, but that is inside the
+    // critical section and too late for the lock file itself.
+    if let Some(parent) = ledger.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    trusty_common::file_lock::with_exclusive_lock(ledger, || append_row_once_locked(ledger, row))?
+}
+
+/// [`append_row_once`]'s critical section, with the lock already held.
+///
+/// Why: separating it keeps the lock acquisition one line and makes the
+/// read-then-append pair readable as the single indivisible step it has to be.
+/// What: see [`append_row_once`].
+/// Test: `append_row_once_writes_one_row_for_n_attempts`,
+/// `racing_threads_append_exactly_one_row`.
+fn append_row_once_locked(ledger: &Path, row: &SavingsRow) -> std::io::Result<AppendOnce> {
     match row_presence(ledger, &row.session_id, &row.technique, &row.basis) {
         RowPresence::Present => {
             tracing::debug!(
