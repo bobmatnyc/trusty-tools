@@ -14,7 +14,10 @@
 //   the way into `startAnimation()`, so a preview-sized or 0x0 init frame never
 //   survives to the first paint (#6871). While the page is live the view asks it
 //   every 10 s whether WebKit still considers it visible, because the OS can
-//   discard the page's layers without terminating its process (#7112).
+//   discard the page's layers without terminating its process (#7112). After
+//   three consecutive attempts fail to put a live page on screen, the web view
+//   itself is torn down and rebuilt, because a reload cannot leave the frozen
+//   WebContent process a fresh one replaces (#7606).
 // Test: `LoadHarness.swift` in this directory resolves the principal class,
 //   instantiates the view outside the screen-saver host and asserts `didFinish`
 //   fires; `PaintHarness.swift` reads the rendered bitmap in the offline,
@@ -24,7 +27,9 @@
 //   `suspend-cold` states asserts a re-entrant `startAnimation()` reloads
 //   nothing, a page that goes from visible to hidden is reloaded, and a page
 //   hidden from its first answer under an unoccluded window is reloaded too —
-//   without either reloading a healthy page (#7112). The in-host run is manual — see
+//   without either reloading a healthy page (#7112), and in the `recreate` and
+//   `one-failure` states asserts three consecutive failed loads replace the web
+//   view instance while one does not (#7606). The in-host run is manual — see
 //   README.md, "Manual verification".
 //
 // Two constraints below are load-tested spike findings, not preference:
@@ -139,8 +144,23 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
     /// lets WebKit's error callback win the ordinary race, so the log carries
     /// the real `NSError` rather than the watchdog's generic reason.
     private static let loadWatchdogGrace: TimeInterval = 1
+    /// #7606: how long one load attempt may stay outstanding before this view
+    /// gives up on it. Named once so the retry cadence below cannot drift back
+    /// under it — see [`retryGap`].
+    private static let loadDeadline: TimeInterval = loadTimeout + loadWatchdogGrace
+    /// #7606: how long after that deadline the next attempt starts. Any positive
+    /// value satisfies the invariant this constant exists for; two seconds keeps
+    /// a console that comes back mid-cycle picked up quickly.
+    private static let retryGap: TimeInterval = 2
     /// Retry cadence for the first [`fastRetryWindow`] of an outage.
-    private static let fastRetryInterval: TimeInterval = 5
+    ///
+    /// #7606: DERIVED from [`loadDeadline`], not chosen. At a flat 5 s it sat
+    /// UNDER the 6 s deadline, so every retry issued a `load` over an attempt
+    /// WebKit had not finished with; WebKit reported that supersession as
+    /// `NSURLErrorCancelled` (-999), [`enterOffline`] read its own cancellation
+    /// as a fresh failure and armed another 5 s retry, and the loop fed itself.
+    /// The owner's log carried 139 of those in two hours.
+    private static let fastRetryInterval: TimeInterval = loadDeadline + retryGap
     /// Retry cadence once the console has been down longer than that.
     private static let slowRetryInterval: TimeInterval = 30
     /// How long retries stay fast. A daemon reinstall is back inside a minute,
@@ -168,6 +188,22 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
     /// never reported visible" branch is unbounded and [`reloadInterval`] is the
     /// only exit — an hour of the black screen this issue is about.
     private static let forcedRecoveryDeadline: TimeInterval = 60
+    /// #7606: consecutive failed attempts to get a live page on screen after
+    /// which the `WKWebView` itself is torn down and rebuilt. Three, because a
+    /// single failure is an outage the retry backoff already answers and this
+    /// costs a WebContent and a network XPC child; three consecutive ones say
+    /// the processes behind THIS web view are the thing that is wrong.
+    private static let recreateAfterFailures = 3
+    /// #7606: minimum gap between two rebuilds while the console has been
+    /// reachable recently. Matched to [`recoveryCooldown`] deliberately: a
+    /// rebuild is the heavier form of the same remedy and must not run at a
+    /// tighter rate than the reload it escalates from.
+    private static let recreateCooldown: TimeInterval = 60
+    /// #7606: the same gap once the console has been down longer than
+    /// [`fastRetryWindow`]. A dead daemon can fail every attempt all night, and
+    /// nothing about spawning WebContent processes at the 60 s floor would make
+    /// it answer.
+    private static let slowRecreateCooldown: TimeInterval = 600
 
     private var webView: WKWebView?
     private var retryTimer: Timer?
@@ -208,6 +244,20 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
     /// jobs are to log the transition an operator needs to correlate against
     /// RunningBoard's own rows, and to re-probe the instant the window comes back.
     private var occlusionObserver: NSObjectProtocol?
+    /// #7606: when the load in flight started; `nil` when none is. What lets
+    /// [`abandonInFlightLoad`] tell a load it must cancel from one that already
+    /// ended, so `expectingCancellation` is never set speculatively.
+    private var loadStartedAt: Date?
+    /// #7606: whether the next `NSURLErrorCancelled` belongs to a load THIS view
+    /// abandoned. Without it a cancellation the view asked for arrives at
+    /// [`webView(_:didFailProvisionalNavigation:withError:)`] indistinguishable
+    /// from a real network failure and is counted as one.
+    private var expectingCancellation = false
+    /// #7606: failed attempts to get a live page on screen since the last one
+    /// that provably worked. Drives [`recreateAfterFailures`].
+    private var consecutiveLoadFailures = 0
+    /// #7606: when the web view was last rebuilt, for the recreate cooldown.
+    private var lastRecreateAt: Date?
     private var state: DisplayState
     private let config = SaverConfig.current()
     /// #6839: the bundled render of the dashboard, drawn whenever the live page
@@ -240,14 +290,24 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
         // cost. #6839: preview draws the bundled render of that dashboard
         // instead, which is what the tile was missing.
         guard !isPreview else { return }
+        webView = makeWebView()
+    }
 
+    /// Why: #7606 rebuilds the web view at runtime, and two copies of this
+    ///   configuration would drift — a rebuilt view that drew its own background
+    ///   or arrived unhidden would look like a different bug entirely.
+    /// What: one hidden, full-bounds, delegate-attached `WKWebView`, added as a
+    ///   subview. The caller owns the [`webView`] reference.
+    /// Test: `PaintHarness.swift`'s `recreate` mode asserts the rebuilt instance
+    ///   loads and paints the same way the original did.
+    private func makeWebView() -> WKWebView {
         let web = WKWebView(frame: bounds, configuration: WKWebViewConfiguration())
         web.autoresizingMask = [.width, .height]
         web.navigationDelegate = self
         web.setValue(false, forKey: "drawsBackground")
         web.isHidden = true
         addSubview(web)
-        webView = web
+        return web
     }
 
     @available(*, unavailable)
@@ -327,6 +387,13 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
         sawVisiblePage = false
         lastRecoveryAt = nil
         unhealthySince = nil
+        // #7606: the failure count and the rebuild cooldown are deliberately NOT
+        // reset here. `WallpaperAgent` re-arms a running view every 20 s to
+        // 3.5 min, and an offline view falls through to the load below on every
+        // one of those calls — clearing the count there would stop it ever
+        // reaching the threshold, and clearing the cooldown would let the host's
+        // cadence drive the rebuild rate. `stopAnimation()` owns both resets,
+        // and a view that has never run holds their initial values anyway.
         webView?.navigationDelegate = self
         loadConsole()
         scheduleReloadTimer()
@@ -404,6 +471,13 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
         sawVisiblePage = false
         lastRecoveryAt = nil
         unhealthySince = nil
+        // #7606: nothing may rebuild the web view after the host's stop, and the
+        // cancellation the `about:blank` navigation below produces belongs to no
+        // attempt this view is still counting.
+        loadStartedAt = nil
+        expectingCancellation = false
+        consecutiveLoadFailures = 0
+        lastRecreateAt = nil
         if let occlusionObserver {
             NotificationCenter.default.removeObserver(occlusionObserver)
             self.occlusionObserver = nil
@@ -467,11 +541,18 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
         // `evaluateJavaScript` fails on the navigation, and that failure reads as
         // a suspension and issues a second, redundant reload. `didFinish` re-arms.
         cancelVisibilityProbe()
+        // #7606: a `load` over an attempt WebKit has not finished with is a
+        // supersession, and WebKit reports it as -999. Cancelling here rather
+        // than letting the new request do it implicitly is what makes that -999
+        // attributable: every one this view can provoke passes through
+        // [`abandonInFlightLoad`] first and is recognised on the way back.
+        abandonInFlightLoad()
         os_log("loading %{public}@", log: saverLog, type: .info, config.url.absoluteString)
         var request = URLRequest(url: config.url)
         request.cachePolicy = .reloadIgnoringLocalCacheData
         // #6838: without this the request inherits URLRequest's 60 s default.
         request.timeoutInterval = Self.loadTimeout
+        loadStartedAt = Date()
         webView.load(request)
         // Only while the fallback is what the operator can see. An hourly reload
         // of a page already on screen has its own failure callbacks, and pulling
@@ -489,13 +570,39 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
     ///   against a listener that accepts and never answers.
     private func startLoadWatchdog() {
         loadTimer?.invalidate()
-        let deadline = Self.loadTimeout + Self.loadWatchdogGrace
+        let deadline = Self.loadDeadline
         loadTimer = Timer.scheduledTimer(withTimeInterval: deadline, repeats: false) { [weak self] _ in
             guard let self else { return }
             self.loadTimer = nil
             guard self.state != .live else { return }
+            // #7606: giving up on an attempt means cancelling it. Left running,
+            // it stays outstanding until the next `load` supersedes it, and the
+            // -999 that comes back then is indistinguishable from a real one.
+            self.abandonInFlightLoad()
             self.enterOffline("load did not finish within \(Int(deadline))s")
         }
+    }
+
+    /// Why: the view abandons a load in two places — the watchdog above and the
+    ///   #7606 rebuild — and WebKit answers both by delivering
+    ///   `NSURLErrorCancelled` to the navigation delegate. Read as a network
+    ///   failure that error arms another retry, and the retry abandons another
+    ///   load: the -999 treadmill the owner's log carried 139 times in two hours.
+    /// What: cancels the attempt in flight, if there is one, and records that the
+    ///   cancellation coming back is this view's own doing. A no-op when nothing
+    ///   is outstanding, so the flag is never set speculatively — a -999 with no
+    ///   abandonment behind it came from outside and is still counted.
+    /// Test: `PaintHarness.swift`'s `recreate` mode counts the failures the view
+    ///   reaches before it rebuilds; a self-inflicted -999 doubles that count and
+    ///   trips the rebuild early.
+    private func abandonInFlightLoad() {
+        guard let startedAt = loadStartedAt else { return }
+        loadStartedAt = nil
+        expectingCancellation = true
+        webView?.stopLoading()
+        os_log("abandoned the load in flight after %{public}@s",
+               log: saverLog, type: .info,
+               String(format: "%.1f", Date().timeIntervalSince(startedAt)))
     }
 
     private func scheduleReloadTimer() {
@@ -512,7 +619,9 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
     ///   dead daemon overnight must not retry at 5 s forever.
     /// What: one-shot rather than repeating, rescheduled per attempt, so the
     ///   cadence can widen: [`fastRetryInterval`] for the first
-    ///   [`fastRetryWindow`] of an outage, then [`slowRetryInterval`].
+    ///   [`fastRetryWindow`] of an outage, then [`slowRetryInterval`]. Both
+    ///   exceed [`loadDeadline`], so the attempt this fires is never the thing
+    ///   that cancels the attempt before it (#7606).
     ///   Invalidating first makes two stacked timers unreachable. The fired
     ///   closure reloads only in `.offline`, which is what keeps `.stopped`
     ///   terminal (#6900) — a timer already in flight when the host stops runs
@@ -544,6 +653,7 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
         webView?.isHidden = true
         loadTimer?.invalidate()
         loadTimer = nil
+        loadStartedAt = nil
         // #7112: there is no live page left to probe.
         cancelVisibilityProbe()
         // Only the FIRST failure of a run sets the clock, so the backoff widens
@@ -552,6 +662,102 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
         needsDisplay = true
         os_log("offline — %{public}@", log: saverLog, type: .error, reason)
         scheduleRetryTimer()
+        // #7606: last, so the retry above is armed as a backstop whether or not
+        // the rebuild runs. A rebuild that does run loads immediately and that
+        // load re-arms the timer from its own outcome.
+        noteLoadFailure(reason)
+    }
+
+    // MARK: - Web-view rebuild (#7606)
+
+    /// Why: reloading inside a `WKWebView` whose WebContent process the OS has
+    ///   parked cannot undo the parking — the reload lands in the same process,
+    ///   the page comes back `hidden`, and #7112's recovery reloads it again. The
+    ///   owner's saver ran that loop for three days: the console answered
+    ///   `/ui/screensaver` in under a millisecond throughout while the screen
+    ///   showed the bundled offline preview.
+    /// What: counts consecutive failed attempts to get a live page on screen and,
+    ///   at [`recreateAfterFailures`], schedules the rebuild. Judged on the
+    ///   COUNT, never on what the page said about its own visibility: a page
+    ///   reporting itself hidden inside a saver the host is animating is not
+    ///   evidence of occlusion, which is the inference that let this run for
+    ///   days. Returns whether a rebuild is now on its way, so a caller that
+    ///   would otherwise reload can stand down.
+    /// Test: `PaintHarness.swift`'s `recreate` mode asserts the instance is
+    ///   replaced after three failures and a fresh load follows; its `one-failure`
+    ///   mode asserts a single failure replaces nothing.
+    @discardableResult
+    private func noteLoadFailure(_ reason: String) -> Bool {
+        guard state != .stopped, state != .preview else { return false }
+        consecutiveLoadFailures += 1
+        guard consecutiveLoadFailures >= Self.recreateAfterFailures else { return false }
+
+        let cooldown = currentRecreateCooldown()
+        if let lastRecreateAt, Date().timeIntervalSince(lastRecreateAt) < cooldown {
+            os_log("rebuild held off — %{public}@ consecutive failure(s), inside the %{public}@s cooldown (%{public}@)",
+                   log: saverLog, type: .info,
+                   String(consecutiveLoadFailures), String(Int(cooldown)), reason)
+            return false
+        }
+
+        let failures = consecutiveLoadFailures
+        // Claimed BEFORE the rebuild runs, so a second failure landing in the
+        // same turn of the run loop cannot queue a second one behind it.
+        lastRecreateAt = Date()
+        consecutiveLoadFailures = 0
+        // Every caller reaches this from a navigation-delegate callback or from a
+        // timer that ran one, so WebKit is on the stack. Releasing a `WKWebView`
+        // under its own callback is not a supported teardown; the next turn is.
+        DispatchQueue.main.async { [weak self] in
+            self?.recreateWebView(reason, afterFailures: failures)
+        }
+        return true
+    }
+
+    /// The cooldown in force right now. A console that has been down longer than
+    /// [`fastRetryWindow`] fails every attempt by definition, and spawning
+    /// WebContent children at the 60 s floor all night would not make it answer.
+    private func currentRecreateCooldown() -> TimeInterval {
+        let downFor = offlineSince.map { Date().timeIntervalSince($0) } ?? 0
+        return downFor < Self.fastRetryWindow ? Self.recreateCooldown : Self.slowRecreateCooldown
+    }
+
+    /// Why: a fresh `WKWebView` is a fresh WebContent and network process, which
+    ///   is the only thing that clears a page the OS has frozen in place. This is
+    ///   the escalation #7112's reload could not reach.
+    /// What: detaches the old web view's delegate BEFORE tearing it down — the
+    ///   #6900 ordering, for the same reason, so a callback from the process
+    ///   being discarded reaches nothing — swaps in a replacement from
+    ///   [`makeWebView`], and loads. The state is left as the caller set it, so a
+    ///   rebuild reached from `.suspended` keeps the dimmed no-banner frame and
+    ///   one reached from `.offline` keeps the OFFLINE banner.
+    /// Test: `PaintHarness.swift`'s `recreate` mode.
+    private func recreateWebView(_ reason: String, afterFailures failures: Int) {
+        // Re-checked rather than assumed: this runs a turn of the run loop after
+        // the decision, and the host may have stopped the saver in between.
+        guard state != .stopped, state != .preview else {
+            os_log("rebuild abandoned — the host stopped the saver first", log: saverLog, type: .info)
+            return
+        }
+        os_log("rebuilding the web view — %{public}@ consecutive failed load(s): %{public}@",
+               log: saverLog, type: .default, String(failures), reason)
+
+        cancelVisibilityProbe()
+        loadTimer?.invalidate()
+        loadTimer = nil
+        loadStartedAt = nil
+        expectingCancellation = false
+        sawVisiblePage = false
+        unhealthySince = nil
+
+        if let old = webView {
+            old.navigationDelegate = nil
+            old.stopLoading()
+            old.removeFromSuperview()
+        }
+        webView = makeWebView()
+        needsDisplay = true
+        loadConsole()
     }
 
     // MARK: - Visibility recovery (#7112)
@@ -609,6 +815,11 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
             if let answer = value as? String, answer == "visible" {
                 self.sawVisiblePage = true
                 self.unhealthySince = nil
+                // #7606: the ONE signal that a load actually worked. `didFinish`
+                // is not it — every reload in the owner's three-day loop finished,
+                // and the page it produced was hidden each time. A page that
+                // answers `visible` is on screen, and only that clears the count.
+                self.consecutiveLoadFailures = 0
                 return
             }
             let answer = (value as? String)
@@ -670,6 +881,10 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
         needsDisplay = true
         os_log("visibility lost, recovering — %{public}@ (%{public}@)",
                log: saverLog, type: .default, reason, ground)
+        // #7606: a recovery is a failed attempt to keep a live page on screen,
+        // and counts as one. Three in a row mean the reload is not working and
+        // the process behind the page goes instead — the rebuild loads for us.
+        if noteLoadFailure("visibility recovery: \(reason)") { return }
         loadConsole()
     }
 
@@ -831,6 +1046,8 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
         // successful console load would put a blank page on screen.
         guard webView.url?.absoluteString != "about:blank" else { return }
         state = .live
+        loadStartedAt = nil
+        expectingCancellation = false
         retryTimer?.invalidate()
         retryTimer = nil
         loadTimer?.invalidate()
@@ -853,7 +1070,19 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
     public func webView(_ webView: WKWebView,
                         didFailProvisionalNavigation navigation: WKNavigation!,
                         withError error: Error) {
-        enterOffline("didFailProvisionalNavigation " + Self.describe(error as NSError))
+        let nsError = error as NSError
+        // #7606: a cancellation this view asked for in [`abandonInFlightLoad`] is
+        // not a failure to count and not a reason to retry — the attempt that
+        // replaces it is already accounted for. Counting it is what turned one
+        // failure into two and halved the effective retry interval.
+        if expectingCancellation, nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorCancelled {
+            expectingCancellation = false
+            os_log("ignored own cancellation — %{public}@", log: saverLog, type: .info,
+                   Self.describe(nsError))
+            return
+        }
+        expectingCancellation = false
+        enterOffline("didFailProvisionalNavigation " + Self.describe(nsError))
     }
 
     public func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {

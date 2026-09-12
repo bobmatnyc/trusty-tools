@@ -16,15 +16,15 @@
 //! is unaffected by the subsequent failure.
 //! Test: `cargo test -p trusty-mpm --test tm_sessions_alias_notice`.
 
-use std::process::Command;
+mod common;
 
 /// Deterministic never-listening address (reserved port), so the daemon round
 /// trip fails immediately instead of hanging or requiring a live daemon.
 const DEAD_URL: &str = "http://127.0.0.1:1";
 
+/// Run `tm`, with the child confined to a scratch `$HOME` (#7568).
 fn run_tm(args: &[&str]) -> (String, String) {
-    let bin = env!("CARGO_BIN_EXE_tm");
-    let output = Command::new(bin)
+    let output = common::tm_command()
         .args(args)
         .output()
         .expect("failed to spawn `tm`");

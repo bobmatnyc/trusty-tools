@@ -20,6 +20,8 @@ directory becomes the package source.
 | `ActionIcon.svelte` | 24×24 stroke icon, selected by `name` from a fixed vocabulary (below) |
 | `RobotIcon.svelte` | 32×32 robot-face brand mark, three variants (`full` / `mono` / `badge`) |
 | `LogoMark.svelte` | `RobotIcon` + "Trusty Assistant" wordmark lockup, self-contained (no Tailwind dependency) |
+| `ToolLockup.svelte` | `RobotIcon` + a caller-supplied tool wordmark — the same lockup for a tool that carries its own name (#7589) |
+| `favicon.svg` | The one canonical trusty favicon: the robot mark at 64×64, redrawn as solid plates so it survives a 16px browser tab (#7590) |
 
 ## `ActionIcon` name → glyph vocabulary
 
@@ -91,10 +93,52 @@ This directory is the only place icon markup should be **authored**. Do not
 hand-edit a vendored crate copy and let it diverge — fix the bug or add the
 glyph here first, then propagate:
 
+`ActionIcon.svelte`:
+
 - `crates/trusty-agents/ui/src/lib/icons/ActionIcon.svelte`
 - `crates/trusty-console/ui-search/src/lib/components/ActionIcon.svelte` (#6439)
 - `crates/trusty-console/ui-memory/src/lib/components/ActionIcon.svelte` (#6439)
 - `crates/trusty-console/ui-analyze/src/lib/components/ActionIcon.svelte` (#6439)
+
+`RobotIcon.svelte` and `ToolLockup.svelte` (#7589) — the three console service
+dashboards render the brand lockup in their Topbar, and `ToolLockup` imports
+`RobotIcon`, so each dashboard vendors both:
+
+- `crates/trusty-console/ui-search/src/lib/components/RobotIcon.svelte`
+- `crates/trusty-console/ui-memory/src/lib/components/RobotIcon.svelte`
+- `crates/trusty-console/ui-analyze/src/lib/components/RobotIcon.svelte`
+- `crates/trusty-console/ui-search/src/lib/components/ToolLockup.svelte`
+- `crates/trusty-console/ui-memory/src/lib/components/ToolLockup.svelte`
+- `crates/trusty-console/ui-analyze/src/lib/components/ToolLockup.svelte`
+
+`favicon.svg` (#7590) — every copy is **byte-for-byte identical** to the source,
+because a favicon is shipped as a file rather than imported as a component;
+`cmp` is the whole sync check. Each Vite package keeps its copy in `public/`
+(SvelteKit's in `static/`) so the bundler emits it beside `index.html`:
+
+- `crates/trusty-console/ui/public/favicon.svg`
+- `crates/trusty-console/ui-search/public/favicon.svg`
+- `crates/trusty-console/ui-memory/public/favicon.svg`
+- `crates/trusty-console/ui-analyze/public/favicon.svg`
+- `crates/trusty-audit/ui/public/favicon.svg`
+- `crates/trusty-code-gui/ui/public/favicon.svg`
+- `crates/trusty-mpm-gui/ui/public/favicon.svg`
+- `website/static/favicon.svg`
+
+Five committed bundles carry a fifth kind of copy, which nobody edits by hand:
+`crates/trusty-console/ui/dist/`, `ui-search-dist/`, `ui-memory-dist/`,
+`ui-analyze-dist/` and `crates/trusty-search/ui-dist/` are bundler output that a
+Rust binary embeds, so each one holds a mirror of its package's `favicon.svg`
+emitted by `pnpm build` (the trusty-search one mirrored by
+`make -C crates/trusty-search release-prep`). Refresh them with that build rather
+than by copying, and `scripts/check-ui-bundle-freshness.sh` proves each mirror
+still matches the source it was built from.
+
+The Tauri shells' `icons/` directories (`crates/trusty-code-gui/icons/`,
+`crates/trusty-mpm-gui/icons/`) are **not** on that list. Those are app/dock
+bundle icons wired through `tauri.conf.json`'s `bundle.icon`, not page favicons,
+and `trusty-code-gui`'s set is already generated from its own Foundry-derived
+`icons/icon-master.svg`.
 
 `crates/trusty-agents/ui/src/lib/icons/LogoMark.svelte` still uses that
 crate's own Tailwind token layer (`text-foundry-text`, `font-display`)

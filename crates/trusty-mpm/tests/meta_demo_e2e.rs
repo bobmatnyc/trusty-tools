@@ -7,11 +7,13 @@
 //! `#[ignore]`-gated; the CI-runnable coverage is the pure poll/verify unit tests
 //! in the `tm` binary's `commands::meta::{launch,verify}` modules. This file is
 //! the documented local-validation entry point for the POC success criterion.
-//! What: runs the built `tm` binary (`CARGO_BIN_EXE_tm`) as
+//! What: runs the built `tm` binary (via `common::tm_bin`) as
 //! `meta run --demo --project <tmp> --timeout-secs <n>` against a throwaway dir
 //! and asserts the process exits 0 (the #1051 acceptance criterion) and the
 //! artifact exists with the expected marker.
 //! Test: this file (run with `cargo test -p trusty-mpm --test meta_demo_e2e -- --include-ignored`).
+
+mod common;
 
 use std::process::Command;
 
@@ -32,7 +34,10 @@ fn meta_run_demo_writes_and_verifies_artifact() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let project = tmp.path();
 
-    let bin = env!("CARGO_BIN_EXE_tm");
+    // #7568: deliberately NOT confined to a scratch `$HOME`. This is a live,
+    // `#[ignore]`d run against the framework the operator actually installed —
+    // a scratch home would make it untestable rather than hermetic.
+    let bin = common::tm_bin();
     let output = Command::new(bin)
         .args([
             "meta",

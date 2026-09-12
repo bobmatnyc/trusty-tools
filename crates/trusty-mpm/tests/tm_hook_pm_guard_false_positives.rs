@@ -16,8 +16,10 @@
 //! reported command verbatim plus the deny that bounds the fix.
 //! Test: `cargo test -p trusty-mpm --test tm_hook_pm_guard_false_positives`.
 
+mod common;
+
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// The daemon URL every spawn here pins: nothing listens on port 1, so the
 /// best-effort audit POST on a deny path fails fast on a refused connection
@@ -38,11 +40,9 @@ const UNREACHABLE_DAEMON: &str = "http://127.0.0.1:1";
 /// counter can never touch the developer's real `$HOME`.
 /// Test: every assertion below routes through it.
 fn run_pm_guard(stdin_json: &str, home: &std::path::Path) -> String {
-    let bin = env!("CARGO_BIN_EXE_tm");
-    let mut command = Command::new(bin);
+    let mut command = common::tm_command_in(home);
     command
         .args(["--url", UNREACHABLE_DAEMON, "hook", "--pm-guard"])
-        .env("HOME", home)
         .env_remove("TRUSTY_MPM_DISABLE_HOOKS")
         .env_remove("CLAUDE_MPM_SUB_AGENT")
         .env_remove("TRUSTY_MPM_PM_UNRESTRICTED")

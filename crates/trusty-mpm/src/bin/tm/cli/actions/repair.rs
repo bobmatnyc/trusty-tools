@@ -89,4 +89,38 @@ pub(crate) enum RepairAction {
         #[arg(long)]
         force: bool,
     },
+
+    /// Quarantine the savings-ledger rows unit tests wrote (#7569).
+    ///
+    /// Why: #7514 let the instruction-compression producer resolve a fixture
+    /// path to a session id, so every test run appended a row to the
+    /// OPERATOR's real ledger. Its fix stops new rows arriving; it cannot
+    /// retract the 228 already there, and they claim 1,498,419 of the
+    /// ledger's 1,501,558 instruction-compression tokens — which is what the
+    /// `💸` statusline average is computed over.
+    /// What: reports what it would move and writes NOTHING unless `--apply`.
+    /// With `--apply` it moves the matched rows to
+    /// `<ledger>.quarantine-<stamp>.jsonl` (never deleting one), rewrites the
+    /// ledger atomically from the kept rows' original bytes, and repairs the
+    /// #7579 lines that hold two rows with no separator by splitting them and
+    /// judging each half. `--markers` additionally moves the
+    /// `usage/no-fold-warned/` directory aside. Re-running finds nothing.
+    /// Test: `cli_parses_repair_savings_ledger`,
+    /// `cli_parses_repair_savings_ledger_flags`.
+    SavingsLedger {
+        /// Framework root holding `usage/savings.jsonl`. Defaults to
+        /// `~/.trusty-mpm`.
+        #[arg(long)]
+        root: Option<String>,
+        /// Move the matched rows. Without it the command only reports.
+        #[arg(long)]
+        apply: bool,
+        /// Report without writing anything — the default, and the way to say
+        /// so explicitly.
+        #[arg(long, conflicts_with = "apply")]
+        dry_run: bool,
+        /// Also move the `usage/no-fold-warned/` marker directory aside.
+        #[arg(long)]
+        markers: bool,
+    },
 }

@@ -34,6 +34,8 @@
 //! share (and race on) the same counter file, and would also pollute the
 //! real developer `$HOME`.
 
+mod common;
+
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -128,24 +130,22 @@ fn spawn_pm_guard(
     extra_env: &[(&str, &str)],
     unset: &[&str],
 ) -> std::process::Child {
-    let bin = env!("CARGO_BIN_EXE_tm");
-    let mut command = Command::new(bin);
+    // #7497: point the child at a config home whose `disk.max_usage_pct` is
+    // 100, so the disk gate can never deny an ordinary `git worktree add`
+    // payload below on a runner whose volume happens to be full. An EXPLICIT
+    // threshold is the only thing that moves this gate — there is deliberately
+    // no env var that disables it — and a caller passing its own `HOME` in
+    // `extra_env` (the two disk cases, and every budget-eligible case)
+    // overrides it, since a later `.env` for the same key wins.
+    // #7568: `tm_command_in` is also what keeps the child off the operator's
+    // own `~/.trusty-mpm`.
+    let mut command = common::tm_command_in(default_hook_home());
     command
         .args(["--url", url, "hook", "--pm-guard"])
         .env_remove("TRUSTY_MPM_DISABLE_HOOKS")
         .env_remove("CLAUDE_MPM_SUB_AGENT")
         .env_remove("TRUSTY_MPM_PM_UNRESTRICTED")
         .env_remove("TRUSTY_MPM_PM_DENY_BY_DEFAULT")
-        .env_remove("TM_MANAGED_SESSION_ID")
-        // #7497: point the child at a config home whose `disk.max_usage_pct` is
-        // 100, so the disk gate can never deny an ordinary `git worktree add`
-        // payload below on a runner whose volume happens to be full. An
-        // EXPLICIT threshold is the only thing that moves this gate — there is
-        // deliberately no env var that disables it — and a caller passing its
-        // own `HOME` in `extra_env` (the two disk cases, and every
-        // budget-eligible case) overrides this line, since a later `.env` for
-        // the same key wins.
-        .env("HOME", default_hook_home())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

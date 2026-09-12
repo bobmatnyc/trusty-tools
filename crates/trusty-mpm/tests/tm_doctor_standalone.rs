@@ -12,21 +12,20 @@
 //! ONE row saying "not running", and that no output names a port.
 //! Test: `cargo test -p trusty-mpm --test tm_doctor_standalone`.
 
-use std::process::Command;
+mod common;
 
 /// Run `tm doctor` against an address nothing listens on.
 ///
-/// The scratch HOME keeps the run off the operator's real framework root, and
-/// port 1 on loopback is the same never-listening address the `tm hook`
-/// fail-open suite uses — the connect is refused rather than timing out.
+/// The scratch HOME keeps the run off the operator's real framework root —
+/// `common::tm_command_in` applies it along with the rest of the #7568 scrub —
+/// and port 1 on loopback is the same never-listening address the `tm hook`
+/// fail-open suite uses, so the connect is refused rather than timing out.
 fn run_doctor_with_no_daemon() -> (bool, String, String) {
     let home = tempfile::tempdir().expect("scratch home");
     let cwd = tempfile::tempdir().expect("scratch cwd");
-    let output = Command::new(env!("CARGO_BIN_EXE_tm"))
+    let output = common::tm_command_in(home.path())
         .args(["--url", "http://127.0.0.1:1", "doctor"])
         .current_dir(cwd.path())
-        .env("HOME", home.path())
-        .env_remove("TRUSTY_MPM_URL")
         .output()
         .expect("failed to spawn `tm doctor`");
     (

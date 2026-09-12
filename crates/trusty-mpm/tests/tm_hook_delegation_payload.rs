@@ -13,9 +13,11 @@
 //! live Claude Code 2.1.220 captures (the #2864 Step-0 probe).
 //! Test: `cargo test -p trusty-mpm --test tm_hook_delegation_payload`.
 
+mod common;
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// Read one HTTP request off `stream` and return its body.
 ///
@@ -73,8 +75,9 @@ fn capture_hook_post(stdin_json: &str) -> (serde_json::Value, bool, String) {
         body
     });
 
-    let bin = env!("CARGO_BIN_EXE_tm");
-    let mut child = Command::new(bin)
+    // #7568: the child gets a scratch `$HOME`, so the hook's own state writes
+    // land there rather than in the operator's `~/.trusty-mpm`.
+    let mut child = common::tm_command()
         .args(["--url", &format!("http://127.0.0.1:{port}"), "hook"])
         .env_remove("TRUSTY_MPM_DISABLE_HOOKS")
         .env_remove("CLAUDE_MPM_SUB_AGENT")

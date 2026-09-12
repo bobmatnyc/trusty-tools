@@ -2980,18 +2980,19 @@ fn real_secrets_still_blocked_after_7482_public_id_exemption() {
          FLAGS, something separated them; delete this assertion and say how."
     );
 
-    // KNOWN MISS 2, pre-existing and unrelated to #7482: an all-lowercase
-    // `_`-segmented token is a segmented identifier, so a provider key with ANY
-    // lowercase prefix typed in front of it is rescued by `is_structural_token`
-    // branch (c) before the prefix test can see it. The exemption is not
-    // involved — that tail carries a second `_` and is 40 characters, so
-    // `is_public_resource_id` declines it twice over.
+    // WAS KNOWN MISS 2, CLOSED by #7549. #7482 recorded it as accepted: an
+    // all-lowercase `_`-segmented token is a segmented identifier, so a provider
+    // key with any lowercase segment typed in front of it was rescued by
+    // `is_structural_token` branch (c) before the prefix test could see it. The
+    // prefix test now matches at a delimiter boundary as well as at offset 0, so
+    // the rescue never runs. Kept here, with the assertion inverted, because the
+    // shape belongs to this corpus: the exemption must not re-open it.
     assert!(
-        find_secret_token("dpl_ghp_abcdefghijklmnopqrstuvwxyz0123456789").is_none(), // pragma: allowlist secret
-        "KNOWN MISS (pre-existing, re-pinned by #7482): the structural rescue \
-         for `_`-segmented lowercase tokens hides a prefixed provider key. If \
-         this now FLAGS, that bypass was closed elsewhere — delete this \
-         assertion rather than widening anything."
+        find_secret_token("dpl_ghp_abcdefghijklmnopqrstuvwxyz0123456789").is_some(), // pragma: allowlist secret
+        "#7549: a provider key behind a prepended lowercase segment must be \
+         flagged. This was #7482's KNOWN MISS 2; if it is missed again, the \
+         boundary arm of `carries_secret_prefix` regressed or the public-id \
+         exemption grew in front of it."
     );
 
     // KNOWN REJECTION, and the bound on what #7482 fixed: a deployment id inside
@@ -3052,5 +3053,243 @@ fn known_accepted_bounds_after_7482() {
         "KNOWN ACCEPTED BOUND (#7482): a Vercel PROJECT id (`prj_`) is not on \
          the exemption list and still flags. If it now passes, the list grew — \
          add it to the assertion above."
+    );
+}
+
+// ---- Issue #7549: SECRET_PREFIXES match at a delimiter boundary, not only at
+// ---- the start of the token.
+
+/// Why (issue #7549): the prefix layer tested `lower.starts_with(p)`, so one
+/// lowercase segment typed ahead of a real provider key defeated it entirely —
+/// and because the prefix layer runs FIRST, its miss then handed the token to
+/// `is_structural_token`, whose segmented-identifier branch rescued it outright.
+/// Every entry below was MISSED before this change, each for a different reason
+/// in the same family, so the set pins the fix by placement rather than by one
+/// representative shape:
+///
+/// - prepended segment: rescued by `is_segmented_identifier` (the `dpl_ghp_…`
+///   reproduction the issue reports).
+/// - after `=`: rescued by branch (a), a word-shaped LHS plus a word-shaped RHS.
+/// - behind a quote: not rescued at all — the `"` fails
+///   `is_plausible_b64_charset`, and an all-lowercase body fails the mixed-case
+///   branch, so nothing was left to flag it.
+/// - inside a JSON pair: rescued by `is_segmented_identifier` again, because the
+///   quote and colon sit INSIDE a segment, where `is_human_word_segment` ignores
+///   them.
+/// - after a hyphen: rescued by `is_segmented_identifier`.
+///
+/// What: asserts each placement is flagged by `find_secret_token`, then that the
+/// end-to-end gate rejects the same key written into ordinary prose.
+/// Test: itself.
+#[test]
+fn prefixed_provider_keys_are_blocked_after_7549() {
+    let mut missed: Vec<String> = Vec::new();
+    for (label, tok) in [
+        (
+            "prepended lowercase segment",
+            "dpl_ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+        ), // pragma: allowlist secret
+        (
+            "after an `=` in an env-var assignment",
+            "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+        ), // pragma: allowlist secret
+        (
+            "behind a quote",
+            "token=\"ghp_abcdefghijklmnopqrstuvwxyz0123456789\"",
+        ), // pragma: allowlist secret
+        (
+            "inside a JSON pair",
+            "{\"token\":\"ghp_abcdefghijklmnopqrstuvwxyz0123456789\"}",
+        ), // pragma: allowlist secret
+        (
+            "after a hyphen, mid-token",
+            "backup-sk-abcdefghijklmnopqrstuvwxyz01234567890123",
+        ), // pragma: allowlist secret
+    ] {
+        // Collected, not asserted per iteration: each entry is a DIFFERENT
+        // rescue path, so a report naming only the first missed placement hides
+        // how many of them a regression reopened.
+        if find_secret_token(tok).is_none() {
+            missed.push(format!("{label} ({tok})"));
+        }
+    }
+    assert!(
+        missed.is_empty(),
+        "#7549: a provider key carrying a {SECRET_MIN_LEN}+ character run \
+         behind its prefix must be flagged wherever the prefix sits in the \
+         token. Missed placements: {missed:#?}"
+    );
+
+    // End-to-end, not just the token predicate: the gate is what a write hits.
+    let cfg = FilterConfig::default();
+    for content in [
+        "Rotate GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789 before the release", // pragma: allowlist secret
+        "The deploy log printed dpl_ghp_abcdefghijklmnopqrstuvwxyz0123456789 in plain text", // pragma: allowlist secret
+    ] {
+        assert!(
+            matches!(
+                cfg.apply(content, false),
+                Err(FilterReject::PotentialSecret { .. })
+            ),
+            "#7549: the gate must REJECT prose carrying a boundary-prefixed key; \
+             got {:?}",
+            cfg.apply(content, false)
+        );
+    }
+}
+
+/// Why (issue #7549): widening the prefix test to interior matches is only safe
+/// because the match must sit at a delimiter boundary. `sk-` is a substring of
+/// `disk-`, `risk-` and `task-`, three of the most ordinary words in this
+/// project's own prose. Measured over this checkout — 7,378 files, tokenised
+/// exactly as `find_secret_token` does — a boundary-free interior match flags 46
+/// distinct prose tokens, 32 of them ordinary English; requiring the delimiter
+/// takes it to 14, and every token below is one the delimiter rule removes.
+///
+/// The trailing entries are a different shape: they clear the boundary rule (the
+/// prefix does follow a `=`) and the SECOND gate rejects them — the
+/// `SECRET_MIN_LEN` floor on the suffix the prefix opens, itself included. Both
+/// gates therefore have a reason to exist in this test, not only in the doc. Each
+/// such entry names the suffix length it actually presents, because a label that
+/// only said "short" carried a wrong number through review once.
+///
+/// The floor itself is then bracketed by a PAIR of assertions one filler byte
+/// apart, with the lengths asserted rather than eyeballed. A single
+/// under-the-floor case pins nothing: it passes just as well if the floor is 18,
+/// 19 or 25. The 19/20 pair is what fails the moment the floor moves.
+/// What: asserts the token predicate declines each shape, brackets the floor,
+/// and asserts the end-to-end gate accepts prose carrying these tokens.
+/// Test: itself.
+#[test]
+fn prose_prefix_substrings_are_not_flagged_after_7549() {
+    for (label, tok) in [
+        // `sk-` inside `disk-`, `risk-`, `task-` — rejected by the boundary rule,
+        // because the character before the prefix is a letter.
+        (
+            "branch name with `disk-`",
+            "feat/7313-disk-survey-by-session",
+        ),
+        (
+            "hyphenated phrase with `task-`",
+            "single-primary-task-plus-secondaries",
+        ),
+        (
+            "slash-joined flags with `disk-`",
+            "--cpu/--memory/--disk-size",
+        ),
+        ("path with `task-`", "autonomous/task-dispatch-for-autonomy"),
+        (
+            "anchor link with `Disk-`",
+            "trusty-mpm/INSTRUCTIONS.md#macOS-Full-Disk-Access",
+        ),
+        ("compound with `risk-`", "2026-Q3-risk-register-rollup"),
+        // Prefix at a real boundary, but the suffix it opens (prefix counted in,
+        // as `carries_secret_prefix` measures it) is under SECRET_MIN_LEN — a
+        // documentation placeholder, not a key. The length each one actually
+        // presents is named, because "short" alone let a wrong number sit here.
+        ("docs placeholder, suffix 7", "GITHUB_TOKEN=ghp_xxx"),
+        (
+            "docs placeholder, suffix 17",
+            "SLACK_BOT_TOKEN=xoxb-xxxxxxxxxxxx",
+        ),
+        // THE FLOOR'S LOWER EDGE, load-bearing: `xoxb-` plus 14 filler is a
+        // 19-byte suffix, one under SECRET_MIN_LEN. Paired with the 20-byte case
+        // in the positive direction below — neither assertion pins the boundary
+        // alone, and without the pair the floor could drift to 18 or 19 with the
+        // whole corpus still green.
+        (
+            "suffix one byte under the floor",
+            "SLACK_BOT_TOKEN=xoxb-xxxxxxxxxxxxxx",
+        ),
+    ] {
+        assert!(
+            find_secret_token(tok).is_none(),
+            "#7549 ({label}): an ordinary token carrying a prefix SUBSTRING must \
+             NOT be flagged. If it now flags, the boundary rule or the \
+             SECRET_MIN_LEN floor on the interior run was dropped: {tok}"
+        );
+    }
+
+    // The floor's two sides, measured rather than eyeballed. `at` differs from
+    // `under` by ONE filler byte, so the pair brackets SECRET_MIN_LEN exactly:
+    // move the floor either way and one of the two assertions fails.
+    let boundary_at = "SLACK_BOT_TOKEN=".len();
+    let under = "SLACK_BOT_TOKEN=xoxb-xxxxxxxxxxxxxx";
+    let at = "SLACK_BOT_TOKEN=xoxb-xxxxxxxxxxxxxxx";
+    assert_eq!(under.len() - boundary_at, SECRET_MIN_LEN - 1);
+    assert_eq!(at.len() - boundary_at, SECRET_MIN_LEN);
+    assert!(
+        find_secret_token(under).is_none(),
+        "#7549: a {}-byte suffix is one under SECRET_MIN_LEN and must not flag",
+        SECRET_MIN_LEN - 1
+    );
+    assert!(
+        find_secret_token(at).is_some(),
+        "#7549: a suffix of exactly SECRET_MIN_LEN bytes at a delimiter boundary \
+         must flag. With the assertion above, this pins the floor at \
+         {SECRET_MIN_LEN} — if only this one fails, the floor rose."
+    );
+
+    let cfg = FilterConfig::default();
+    for content in [
+        "The disk-survey work landed on feat/7313-disk-survey-by-session this week",
+        "Set GITHUB_TOKEN=ghp_xxx in the example env file and move on",
+    ] {
+        assert!(
+            cfg.apply(content, false).is_ok(),
+            "#7549: the gate must ACCEPT prose carrying a prefix substring; got \
+             {:?}",
+            cfg.apply(content, false)
+        );
+    }
+}
+
+/// Why (issue #7549): the widened prefix test asks nothing of the characters
+/// BEHIND the prefix beyond how many there are. That was already true at offset
+/// 0 — `known_accepted_bounds_after_4898` pins `sk-eleton-key-for-the-front-door`
+/// as flagged — and making an interior boundary count carries the same bound to
+/// every delimiter in the token. Pinning both halves is what makes a later
+/// tightening or loosening visible instead of silent.
+/// What: pins the predicate's two arms directly (offset 0, and a boundary with
+/// the length floor), then the accepted cost of the length-only rule.
+/// Test: itself.
+#[test]
+fn known_accepted_bounds_after_7549() {
+    // The predicate's own contract, asserted on the lowercased form the caller
+    // passes it, so a change to either arm shows up here and not only through
+    // `looks_like_secret`'s later branches.
+    assert!(
+        carries_secret_prefix("ghp_abcdefghijklmnopqrstuvwxyz0123456789"), // pragma: allowlist secret
+        "#7549: offset 0 must match exactly as it did before the change"
+    );
+    assert!(
+        carries_secret_prefix("dpl_ghp_abcdefghijklmnopqrstuvwxyz0123456789"), // pragma: allowlist secret
+        "#7549: a prefix after a delimiter, with a long run behind it, matches"
+    );
+    assert!(
+        !carries_secret_prefix("feat/7313-disk-survey-by-session"),
+        "#7549: a prefix substring beginning mid-word does not match"
+    );
+    assert!(
+        !carries_secret_prefix("github_token=ghp_xxx"),
+        "#7549: a prefix at a boundary with a sub-SECRET_MIN_LEN run does not match"
+    );
+
+    // KNOWN ACCEPTED BOUND: the interior arm inherits the length-only rule from
+    // offset 0, so a hyphenated English phrase behind `sk-` is a credential here
+    // too. The two assertions are a PAIR: the first shows the bare token was
+    // ALREADY flagged before this change (#4898 pins it), the second shows the
+    // boundary arm carries that verdict to the same run inside a path. Widening
+    // this is not a #7549 regression; narrowing it means narrowing offset 0 too.
+    assert!(
+        find_secret_token("sk-eleton-key-for-the-front-door").is_some(),
+        "the bare form must be flagged, or the bound below proves nothing"
+    );
+    assert!(
+        find_secret_token("notes/sk-eleton-key-for-the-front-door").is_some(),
+        "KNOWN ACCEPTED BOUND (#7549): the prefix test is length-gated, not \
+         shape-gated, at an interior boundary exactly as it is at offset 0. If \
+         this stops flagging, the interior arm grew a shape check that offset 0 \
+         does not have — make both arms agree."
     );
 }

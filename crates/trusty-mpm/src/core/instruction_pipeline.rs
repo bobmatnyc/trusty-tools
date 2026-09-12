@@ -376,9 +376,9 @@ pub fn instructions_failure_message(path: &std::path::Path, source: &std::io::Er
 /// unit test that wrote a compiled prompt into a tempdir: 228 of the 229
 /// `instruction-compression` rows on the owner's host were this function's own
 /// 13-byte fixture. Recording is now an explicit choice of the caller —
-/// [`write_compiled_prompt_and_record`] for a launch, or
-/// [`write_compiled_prompt_recording_in`] where the caller already holds the
-/// framework root.
+/// [`write_compiled_prompt_recording_in`], which records against the framework
+/// root the caller already holds rather than one resolved from the process's
+/// home.
 /// Test: `write_compiled_prompt_to_creates_parent_dirs`,
 /// `a_bare_compiled_write_records_no_savings_row`.
 pub fn write_compiled_prompt_to(dest: &std::path::Path, prompt: &str) -> std::io::Result<()> {
