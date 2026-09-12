@@ -175,9 +175,16 @@ pub(crate) fn collect_stale_files_by_mtime(root_path: &Path, since_unix: u64) ->
             // etc.). Without pruning, walkdir stats every file inside before the
             // per-file predicate rejects them — causing the boot-thrash described
             // in #1672 reviewer finding 1.
+            //
+            // #7694: prune on the ROOT-RELATIVE path, not the basename alone.
+            // A basename test cannot tell `src/bin/` (source) from `bin/`
+            // (build output), so it pruned the former and the mtime walk
+            // never saw a `src/bin/**` edit.
             if e.file_type().is_dir() {
-                let name = e.file_name().to_str().unwrap_or("");
-                return !crate::service::walker::SKIP_DIRS.contains(&name);
+                let Ok(rel) = e.path().strip_prefix(root_path) else {
+                    return false;
+                };
+                return !crate::service::walker::rel_path_in_skipped_dir(rel, &[]);
             }
             // For files: apply the same exclusion rules as the live watcher.
             // path_in_skipped_dir handles nested excluded dirs that share a name

@@ -226,6 +226,15 @@ fn fix_log_rotation() {
 /// warnings/errors plus the hint to re-run with `--fix`.
 fn print_summary(errors: usize, warnings: usize, fix: bool) {
     println!();
+    // #7694: an index built before this version pruned every `src/bin/**`
+    // source tree. Nothing re-adds those files on its own — the watcher only
+    // reacts to edits — so the operator has to ask for the reindex.
+    println!(
+        "{}",
+        "note: indexes built before #7694 are missing src/bin/** sources — \
+         run `trusty-search index <path> --force` once to pick them up."
+            .dimmed()
+    );
     if errors == 0 && warnings == 0 {
         println!("{}", "Everything looks good!".green().bold());
         return;

@@ -1,0 +1,3 @@
+Fixed
+
+- Index `src/bin/**` and `src/coverage/**` sources again. `bin`, `coverage` — and the other names that mean build output in one ecosystem and source in another (`out`, `build`, `dist`, `classes`, `generated*`) — now prune only at a build-output location, never directly under `src/`, `tests/`, `benches/` or `examples/`. Matching on basename at any depth had hidden 301 tracked `.rs` files in this workspace, the whole `tm` CLI among them. The walk, the file watcher and the reconcile mtime walk share one predicate, so they cannot disagree about a path. An index built before this change is missing those files and needs one `trusty-search index <path> --force` to pick them up; `trusty-search doctor` says so (#7694).
