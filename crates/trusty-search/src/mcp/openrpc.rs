@@ -58,8 +58,10 @@ pub fn scopes_for_tool(name: &str) -> Vec<String> {
         | "search_similar" | "search_health" | "list_indexes" | "index_status" | "list_chunks"
         | "chat" | "get_call_chain" | "grep" | "console_metrics" | "typeahead" => &[SEARCH_READ],
 
-        // Mutating
-        "index_file" | "remove_file" | "create_index" | "delete_index" | "reindex" => {
+        // Mutating. #7434 added `add_root`: it appends to an index's root
+        // table and queues a walk, so it is a write in exactly the sense
+        // `create_index` is.
+        "index_file" | "remove_file" | "create_index" | "add_root" | "delete_index" | "reindex" => {
             &[SEARCH_WRITE]
         }
 
@@ -115,6 +117,8 @@ mod tests {
         assert_eq!(scopes_for_tool("search_all"), vec!["search.read"]);
         assert_eq!(scopes_for_tool("index_file"), vec!["search.write"]);
         assert_eq!(scopes_for_tool("delete_index"), vec!["search.write"]);
+        // #7434: adding a root mutates the index's root table.
+        assert_eq!(scopes_for_tool("add_root"), vec!["search.write"]);
         assert_eq!(scopes_for_tool("list_indexes"), vec!["search.read"]);
         assert_eq!(scopes_for_tool("chat"), vec!["search.read"]);
     }

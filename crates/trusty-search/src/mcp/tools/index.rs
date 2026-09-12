@@ -1,14 +1,17 @@
 //! Index management tool arms: `index_file`, `remove_file`, `list_indexes`,
-//! `create_index`, `delete_index`, `reindex`, `index_status`, `list_chunks`.
+//! `create_index`, `add_root`, `delete_index`, `reindex`, `index_status`,
+//! `list_chunks`.
 //!
 //! Why: index lifecycle operations (register, populate, inspect, delete) form
 //! a cohesive group that changes together when the daemon's index API evolves.
 //! Keeping them separate from search and admin tools makes code review and
 //! feature additions easier.
 //! What: exports `dispatch_index_tool`, called from `call_tool` in `mod.rs`,
-//! which routes the eight index-management tool names to their daemon endpoints.
+//! which routes the nine index-management tool names to their daemon endpoints.
 //! Test: `tests.rs` — `missing_params_returns_invalid_params` and the
-//! `tools/list` completeness tests cover all eight names.
+//! `tools/list` completeness tests cover all nine names;
+//! `add_root_posts_the_roots_array` and
+//! `add_root_rejects_a_missing_or_malformed_roots_array` cover the #7434 arm.
 
 use serde_json::Value;
 
@@ -46,14 +49,18 @@ fn required_index_id(server: &McpServer, args: &Value) -> Result<String, Dispatc
 /// Why: `create_index` forwards `exclude_globs` verbatim into the HTTP body,
 /// and the daemon deserialises it as `Option<Vec<String>>` — a caller that
 /// passed `[1, 2]` would get a 422 from the daemon instead of an MCP-level
-/// answer. Validating here keeps the wire body well-typed.
+/// answer. Validating here keeps the wire body well-typed. #7434 gave the same
+/// treatment to `roots`, on both `create_index` and `add_root`.
 /// What: all-or-nothing. Returns `None` when the key is absent, is not an
 /// array, is empty, or holds ANY non-string entry. The last case used to drop
 /// just the offending entries, so `["a", 1, "b"]` registered an index filtered
 /// by two globs when the caller wrote three — a quieter outcome for the same
 /// typo that `[1, 2]` already rejected whole.
 /// Test: `create_index_forwards_exclude_globs`,
-/// `create_index_omits_malformed_exclude_globs` in `tests.rs`.
+/// `create_index_omits_malformed_exclude_globs` in `tests.rs`;
+/// `create_index_forwards_roots`, `create_index_omits_malformed_roots` and
+/// `add_root_rejects_a_missing_or_malformed_roots_array` in
+/// `tests_7434_add_root.rs`.
 fn string_array(args: &Value, key: &str) -> Option<Vec<Value>> {
     let items = args.get(key)?.as_array()?;
     (!items.is_empty() && items.iter().all(Value::is_string)).then(|| items.clone())
@@ -86,7 +93,7 @@ fn delete_data_arg(args: &Value) -> Result<bool, DispatchError> {
     }
 }
 
-/// Route one of the eight index-management tool names to the correct daemon
+/// Route one of the nine index-management tool names to the correct daemon
 /// call.
 ///
 /// Why: grouping index management separately from search and admin lets each
@@ -169,7 +176,40 @@ pub(super) async fn dispatch_index_tool(
             if let Some(globs) = string_array(args, "exclude_globs") {
                 body["exclude_globs"] = Value::Array(globs);
             }
+            // #7434: create-time additional roots. Forwarded only when the
+            // array is well-formed, for the same reason `exclude_globs` is —
+            // the daemon deserialises it as `Vec<PathBuf>`, so a caller that
+            // sent `[1, 2]` would get a 422 instead of an MCP-level answer.
+            if let Some(roots) = string_array(args, "roots") {
+                body["roots"] = Value::Array(roots);
+            }
             Some(server.post("/indexes", &body).await)
+        }
+        // #7434: the MCP door onto `POST /indexes/:id/roots`.
+        "add_root" => {
+            let index_id = match required_index_id(server, args) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            // Unlike `create_index`'s optional `roots`, this one IS the call:
+            // a malformed or empty array has to be an error, because silently
+            // dropping it would POST an empty list and report the index's
+            // unchanged root table as a success.
+            let Some(roots) = string_array(args, "roots") else {
+                return Some(Err(DispatchError::InvalidParams(
+                    "add_root requires 'roots': a non-empty array of absolute \
+                     directory paths (strings)"
+                        .into(),
+                )));
+            };
+            Some(
+                server
+                    .post(
+                        &format!("/indexes/{index_id}/roots"),
+                        &serde_json::json!({ "roots": roots }),
+                    )
+                    .await,
+            )
         }
         "delete_index" => {
             let index_id = match required_index_id(server, args) {

@@ -11,7 +11,8 @@
 //! - [`search`]      — `search`, `search_lexical`, `search_semantic`, `search_kg`,
 //!   `search_all`, `search_similar`
 //! - [`index`]       — `index_file`, `remove_file`, `list_indexes`,
-//!   `create_index`, `delete_index`, `reindex`, `index_status`, `list_chunks`
+//!   `create_index`, `add_root`, `delete_index`, `reindex`, `index_status`,
+//!   `list_chunks`
 //! - [`misc`]        — `search_health`, `chat`, `get_call_chain`, `grep`,
 //!   `upgrade`
 //! - [`health`]      — the `search_health` report (#5264): which daemon
@@ -41,6 +42,9 @@ use serde_json::Value;
 pub use trusty_mcp::{error_codes, initialize_response, JsonRpcError, Request, Response};
 
 pub(crate) mod descriptors;
+// #7434: the index-lifecycle descriptors, split out of `descriptors` at its
+// 500-SLOC cap.
+pub(crate) mod descriptors_lifecycle;
 pub(crate) mod health;
 pub(crate) mod http;
 pub(crate) mod index;
@@ -397,3 +401,6 @@ mod tests_health;
 // #6317: the NO_INDEX_RESOLVED directory answer, and the write tools it spares.
 #[cfg(test)]
 mod tests_index_directory;
+// #7434: the `add_root` tool, `create_index`'s `roots`, and the descriptor split.
+#[cfg(test)]
+mod tests_7434_add_root;

@@ -27,3 +27,12 @@ Added
   `watcher.roots`, one row per root reporting `watching` / `degraded` /
   `failed` with its reason; the existing `watcher` fields are unchanged
   (#7434).
+- MCP tool `add_root` (`index_id`, `roots`) adds directory trees to an existing
+  index, and `create_index` accepts the same `roots` list at registration — the
+  multi-root surface is reachable from an MCP client rather than only over
+  HTTP. Both run the daemon's existing gate, so a tree another index owns is
+  still refused. `add_root` requires `roots`: unlike `create_index`'s optional
+  filters, a malformed array is an error rather than a dropped field, because
+  posting an empty list would report the unchanged root table as a success. The
+  index-lifecycle descriptors moved to `mcp/tools/descriptors_lifecycle.rs`,
+  which changes no schema (#7434).

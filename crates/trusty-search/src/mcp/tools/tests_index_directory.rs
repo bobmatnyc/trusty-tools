@@ -175,7 +175,15 @@ async fn empty_daemon_directory_points_at_create_index() {
 async fn mutating_tools_still_error_when_no_index_resolves() {
     let base = spawn_listing_daemon(two_indexes()).await;
     let server = McpServer::new(base);
-    for tool in ["index_file", "remove_file", "delete_index", "reindex"] {
+    // #7434: `add_root` is a write too — adding a tree to an index the caller
+    // never named is exactly as unrecoverable as reindexing one.
+    for tool in [
+        "index_file",
+        "remove_file",
+        "delete_index",
+        "reindex",
+        "add_root",
+    ] {
         let (payload, is_error) = tool_result(&server.dispatch(call(tool)).await);
         assert!(
             is_error,
@@ -285,12 +293,20 @@ fn directory_tools_drop_required_index_id() {
 /// it to every tool would advertise `reindex` as callable with no index — the
 /// exact call the dispatcher rejects. Schema and dispatcher must agree on the
 /// write side too.
-/// What: asserts `index_id` is still `required` on the four mutating arms.
+/// What: asserts `index_id` is still `required` on the five mutating arms.
 /// Test: this test.
 #[test]
 fn mutating_tools_keep_required_index_id() {
     let defs = super::tool_descriptors();
-    for tool in ["index_file", "remove_file", "delete_index", "reindex"] {
+    // #7434: `add_root` joins the list — it mutates an index's root table, so
+    // its schema must keep `index_id` required exactly as `reindex` does.
+    for tool in [
+        "index_file",
+        "remove_file",
+        "delete_index",
+        "reindex",
+        "add_root",
+    ] {
         let def = defs
             .as_array()
             .expect("descriptors are an array")
