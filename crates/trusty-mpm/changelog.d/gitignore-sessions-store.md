@@ -1,2 +1,0 @@
-Changed
-- `tm-session-pause` and `tm-workflow` now state that a project which gitignores `.trusty-mpm/sessions/` publishes no snapshot PR and owes no main fast-forward, and that no snapshot is committed by hand to make up for it. `core::session_pause_pr`'s module doc no longer claims this repository tracks its own session store — it does not, as of the owner ruling of 2026-09-13. Behavior is unchanged: an ignored store already took the `not_tracked` skip.
