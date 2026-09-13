@@ -209,7 +209,7 @@ pub fn resolve_memory_reachable(resolved: Option<bool>) -> bool {
 /// A separate entry point makes that re-probe countable by a test without
 /// counting preparation's own probes.
 /// What: [`resolve_memory_reachable`]; under `cfg(test)` a `None` also bumps
-/// [`ADAPTER_REPROBES_ON_THIS_THREAD`].
+/// `ADAPTER_REPROBES_ON_THIS_THREAD`.
 /// Test: `spawn_managed_on_main_hands_the_adapter_the_prepared_reachability`.
 pub fn resolve_spawn_memory_reachable(resolved: Option<bool>) -> bool {
     #[cfg(test)]

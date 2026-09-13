@@ -365,7 +365,8 @@ use doctor_sidecars::{check_memory, check_search};
 /// PINS against `GET /indexes/{id}/status` and `Fail`s on a 404; index
 /// registration is fail-open at every step, so the pin advances even when
 /// creation failed and the `search` probe above stays green) — folding the
-/// resulting [`DoctorCheck`]s into a [`DoctorReport`] whose `overall` status
+/// resulting [`DoctorCheck`](crate::core::doctor::DoctorCheck)s into a
+/// [`DoctorReport`] whose `overall` status
 /// is the worst of them.
 ///
 /// Note (#1905): the mpm-*→tm-* stale-skill cleanup is intentionally NOT a

@@ -25,10 +25,12 @@ use crate::core::paths::FrameworkPaths;
 /// `claude` process behave as a trusty-mpm session; both the CLI and the client
 /// call this before sending `claude` into the tmux pane.
 /// What: deploys composed agents from the framework agent source to
-/// `~/.claude/agents/`, runs [`build_instructions`] for `project_dir` (which
+/// `~/.claude/agents/`, runs
+/// [`build_instructions`](crate::core::instruction_pipeline::build_instructions) for
+/// `project_dir` (which
 /// loads or creates the project `CLAUDE.md`), writes the launch prompt — the
 /// exact override-resolved AND output-style-injected text produced by
-/// [`build_system_prompt_for_with_style`] — to
+/// [`build_system_prompt_for_with_style`](crate::core::session_launch::build_system_prompt_for_with_style) — to
 /// `<project_dir>/.trusty-mpm/last-instructions.md` so the inspectable stash
 /// matches the live launch prompt byte-for-byte (issue #1409), and returns a
 /// [`PrepReport`].
@@ -41,7 +43,8 @@ use crate::core::paths::FrameworkPaths;
 /// Two steps establish them, and BOTH are fatal — the same condition reaching
 /// two sites, reported as [`PrepError::Instructions`], which every spawning
 /// caller refuses to launch on:
-///   * [`build_instructions`] composes the merged instructions; and
+///   * [`build_instructions`](crate::core::instruction_pipeline::build_instructions)
+///     composes the merged instructions; and
 ///   * the same resolved prompt is written to
 ///     `<project_dir>/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md`
 ///     ([`crate::core::instruction_pipeline::compiled_prompt_path`]) as this
@@ -84,7 +87,7 @@ pub fn prepare_session(fw: &FrameworkPaths, project_dir: &Path) -> Result<PrepRe
 /// session-id, so palace derivation from that basename picks the WRONG name. The
 /// provisioner knows the `repo_url` it cloned, so threading it here supplies the
 /// canonical remote. Since ADR-0042 deleted the MCP injectors, what consumes it
-/// is [`maybe_register_palace_alias`] — the #1939 healing that decides whether
+/// is `maybe_register_palace_alias` — the #1939 healing that decides whether
 /// the derived `owner-repo` palace should resolve to a pre-existing bare-repo
 /// one. The flag-less [`prepare_session`] delegates with `None`, which falls
 /// back to the workspace's own `git remote get-url origin`.
@@ -92,7 +95,7 @@ pub fn prepare_session(fw: &FrameworkPaths, project_dir: &Path) -> Result<PrepRe
 /// `LaunchParams`/`SessionRecord`) is threaded down as the authoritative remote.
 /// Real native-style detection is applied.
 /// Test: `creates_alias_for_split_brain` and the sibling guards in
-/// [`palace_alias`], which cover what the threaded remote decides.
+/// `palace_alias`, which cover what the threaded remote decides.
 pub fn prepare_session_with_repo_url(
     fw: &FrameworkPaths,
     project_dir: &Path,
@@ -255,7 +258,9 @@ pub fn prepare_session_with_style(
 /// invariant deterministically under BOTH `native_supported = true` and `false`;
 /// [`prepare_session_with_style`] supplies real detection in production.
 /// What: identical to [`prepare_session_with_style`] except the stash is written
-/// from [`build_system_prompt_for_with_style_and_native`] using the supplied flag,
+/// from
+/// [`build_system_prompt_for_with_style_and_native`](crate::core::session_launch::build_system_prompt_for_with_style_and_native)
+/// using the supplied flag,
 /// so the stash always reflects the exact injected (or non-injected) launch prompt.
 /// Test: `prepare_session_stash_reflects_override`.
 pub fn prepare_session_with_style_and_native(
