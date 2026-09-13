@@ -26,6 +26,9 @@ fn input_in(tmp: &TempDir) -> PipelineInput {
     PipelineInput {
         project_dir: tmp.path().join("project"),
         claude_md_path: tmp.path().join("project").join("CLAUDE.md"),
+        // #7673: a temp directory is neither the home directory nor above it,
+        // so the seed-site guard permits it. Injected, never read ambiently.
+        home: None,
     }
 }
 

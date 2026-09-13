@@ -701,6 +701,13 @@ pub struct PipelineInput {
     pub project_dir: PathBuf,
     /// Path to the project `CLAUDE.md`.
     pub claude_md_path: PathBuf,
+    /// The operator's home directory, for the #7673 seed-site guard.
+    ///
+    /// #7673 review: injected rather than read from `dirs::home_dir()` at the
+    /// guard, matching the `home` every other seam in this launch path already
+    /// threads (#5544). `prepare_session_inner` passes the `host.home` it was
+    /// given; `None` means "no home to compare against", which refuses nothing.
+    pub home: Option<PathBuf>,
 }
 
 /// Result of a successful instruction merge.
@@ -801,6 +808,29 @@ impl std::error::Error for PipelineError {
 /// `build_instructions_refuses_a_stale_worktree_rather_than_seeding_a_stub`,
 /// `session_start_count_matches_the_delivered_delegation_roster`
 pub fn build_instructions(input: &PipelineInput) -> Result<PipelineOutput, PipelineError> {
+    build_instructions_with_init(input, None)
+}
+
+/// [`build_instructions`] with the git-init-offer prompt seam threaded through
+/// (#7673 round 3 follow-up).
+///
+/// Why: the owner's ruling is that tm OFFERS a real yes/no before creating a
+/// git repository, never a silent decision either way. `should_init` is the
+/// seam that offer lives behind — see
+/// [`crate::core::claude_md_seed_git::offer_git_init`]. `None` (every caller
+/// except the one CLI entry point that established a TTY) keeps this
+/// byte-for-byte identical to [`build_instructions`] before this follow-up.
+/// What: identical to [`build_instructions`] except
+/// [`load_or_create_claude_md_with_init`] receives `should_init` instead of a
+/// hard-coded `None`.
+/// Test: every `pipeline_*`/`build_instructions_*` test covers the `None`
+/// path (unchanged) by calling [`build_instructions`]; the `Some` path is
+/// covered at the one CLI entry point that can establish a TTY, in
+/// `bin/tm/commands/session/instructions_tests.rs`.
+pub fn build_instructions_with_init(
+    input: &PipelineInput,
+    should_init: Option<&mut dyn FnMut() -> bool>,
+) -> Result<PipelineOutput, PipelineError> {
     // #4588: resolved by `resolve_roster` — the SAME function that renders the
     // delegation section delivered to the PM — so `agent_count`, which
     // `tm session start` prints verbatim, cannot describe a different set of
@@ -815,7 +845,18 @@ pub fn build_instructions(input: &PipelineInput) -> Result<PipelineOutput, Pipel
     // `CLAUDE.md` natively and the real launch prompt is built by
     // `resolve_pm_prompt`/`build_system_prompt_for`, so the content is read
     // back only to report whether this call created it.
-    let (_claude_md, claude_md_created) = load_or_create_claude_md(&input.claude_md_path)?;
+    // #7673 round 3 follow-up: `None` routes through the plain
+    // `load_or_create_claude_md` — the same call every test in this module
+    // and every pre-follow-up caller already exercises — so adding the prompt
+    // seam changes nothing observable for a caller that does not supply one.
+    let (_claude_md, claude_md_created) = match should_init {
+        Some(f) => load_or_create_claude_md_with_init(
+            &input.claude_md_path,
+            input.home.as_deref(),
+            Some(f),
+        )?,
+        None => load_or_create_claude_md(&input.claude_md_path, input.home.as_deref())?,
+    };
 
     Ok(PipelineOutput {
         agent_count,
@@ -1018,15 +1059,96 @@ fn git_succeeds(dir: &std::path::Path, args: &[&str]) -> bool {
 /// the ordinary stub, so a genuinely new project is unaffected. Note a missing
 /// `@{upstream}` alone does NOT fall open — `origin/HEAD` is still consulted,
 /// and a repo with no remote at all is what actually reaches the stub.
+/// #7673 — and never ABOVE a project. A tm seed template was found at `$HOME`
+/// on 2026-09-12; Claude Code loads every `CLAUDE.md` from the session cwd up to
+/// the filesystem root, so that one file rode into every turn of every agent in
+/// every project under the home directory. This now refuses to seed when the
+/// target directory is the home directory, or sits above it — see
+/// [`crate::core::claude_md_seed::refuse_seed_for`]. The refusal is an ERROR
+/// arm on the same fatal path as the #5228 refusal above, never a warning that
+/// writes anyway. `home` is INJECTED (it rides on [`PipelineInput::home`])
+/// rather than read from the ambient environment here, matching the rest of
+/// this seam (#5544).
 /// Test: `pipeline_creates_claude_md`, `pipeline_claude_md_left_byte_identical`,
+/// `load_or_create_claude_md_refuses_to_seed_at_the_home_directory`,
+/// `load_or_create_claude_md_refuses_to_seed_above_the_home_directory`,
+/// `load_or_create_claude_md_fails_closed_on_a_path_with_no_directory`,
+/// `load_or_create_claude_md_seeds_in_a_subdirectory_of_a_git_repo`,
 /// `load_or_create_claude_md_refuses_to_stub_a_branch_predating_the_tracked_file`,
 /// `build_instructions_refuses_a_stale_worktree_rather_than_seeding_a_stub`,
 /// `load_or_create_claude_md_still_seeds_when_upstream_has_no_claude_md`,
 /// `load_or_create_claude_md_reads_a_present_file_in_a_git_worktree`.
-fn load_or_create_claude_md(path: &PathBuf) -> Result<(String, bool), PipelineError> {
+fn load_or_create_claude_md(
+    path: &PathBuf,
+    home: Option<&std::path::Path>,
+) -> Result<(String, bool), PipelineError> {
+    load_or_create_claude_md_with_init(path, home, None)
+}
+
+/// [`load_or_create_claude_md`] with the git-init-offer prompt seam threaded
+/// through (#7673 round 3 follow-up).
+///
+/// Why: the owner's ruling is that tm OFFERS to create a git repository before
+/// seeding into one that has none — a real yes/no, not a silent decision. A
+/// `should_init` of `None` keeps every existing caller's behavior byte-for-byte
+/// unchanged (the non-interactive default this module already applied);
+/// `Some` is for a CLI entry point that has established it is running on a TTY
+/// and built a real confirm closure (see `bin/tm/commands/session/instructions.rs`).
+/// What: identical to [`load_or_create_claude_md`] except the seed site's
+/// `crate::core::claude_md_seed_git::offer_git_init` call receives `should_init`
+/// instead of a hard-coded `None`.
+/// Test: `load_or_create_claude_md_seeds_in_a_subdirectory_of_a_git_repo` and
+/// the rest of [`load_or_create_claude_md`]'s pointer list cover the `None`
+/// path (unchanged); the `Some` path is covered at the CLI entry point in
+/// `instructions_tests.rs`, which is the only caller that can establish a TTY.
+fn load_or_create_claude_md_with_init(
+    path: &PathBuf,
+    home: Option<&std::path::Path>,
+    should_init: Option<&mut dyn FnMut() -> bool>,
+) -> Result<(String, bool), PipelineError> {
     match std::fs::read_to_string(path) {
         Ok(text) => Ok((text, false)),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            // #7673: and the seed must never land ABOVE a project. This is an
+            // ERROR arm, never a warning that then writes anyway — the whole
+            // finding is that a stray seed is invisible once written.
+            // The decision is made on the FILE path, so an empty or absent
+            // parent — what `--dir ""` produces — fails closed inside
+            // `refuse_seed_for` rather than skipping the guard.
+            if let Some(refusal) = crate::core::claude_md_seed::refuse_seed_for(path, home) {
+                let named = path
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or(path);
+                return Err(PipelineError::Io {
+                    path: path.clone(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        refusal.message(named),
+                    ),
+                });
+            }
+            // #7673 round 3 (owner ruling 2026-09-13): a marker-less, non-git
+            // directory below home is still seedable, but not when it is a
+            // WORKSPACE PARENT — a git repository lives beneath it, so the seed
+            // would become an ancestor `CLAUDE.md` for every project under it.
+            // `should_init` is threaded from the caller: `None` for every
+            // call site with no prompt capability (the non-interactive
+            // default — seed with no git, exactly as before this follow-up),
+            // `Some` only for a CLI entry point that already established it
+            // is running on a TTY.
+            if let Some(dir) = path.parent().filter(|p| !p.as_os_str().is_empty())
+                && let Err(refusal) =
+                    crate::core::claude_md_seed_git::offer_git_init(dir, home, should_init)
+            {
+                return Err(PipelineError::Io {
+                    path: path.clone(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        refusal.message(dir),
+                    ),
+                });
+            }
             // #5228: a stale branch's missing CLAUDE.md must never be stubbed over.
             if let Some(upstream) = upstream_tracking(path) {
                 return Err(PipelineError::Io {
