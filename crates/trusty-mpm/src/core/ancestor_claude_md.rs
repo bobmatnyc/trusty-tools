@@ -30,8 +30,8 @@ use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::core::claude_md_seed::is_seed_template;
 use crate::core::harness_root::{HARNESS_DIR, linked_worktree_owner};
-use crate::core::instruction_pipeline::CLAUDE_MD_STUB;
 
 /// Bytes per token in the estimate this module reports.
 ///
@@ -307,9 +307,10 @@ const MAX_SEED_BYTES: u64 = 16 * 1024;
 /// Is the file at `path` tm's seed template?
 ///
 /// What: `false` without reading for anything over [`MAX_SEED_BYTES`] or any
-/// file that cannot be read; otherwise [`is_seed_template`] decides. An
-/// unreadable file is still REPORTED — only the destructive seed verdict is
-/// withheld.
+/// file that cannot be read; otherwise
+/// [`is_seed_template`][crate::core::claude_md_seed::is_seed_template] — the
+/// one seed-shape test in the crate (#7673) — decides. An unreadable file is
+/// still REPORTED — only the destructive seed verdict is withheld.
 /// Test: see [`scan_with_excludes`].
 fn looks_like_seed(path: &Path, bytes: u64) -> bool {
     if bytes > MAX_SEED_BYTES {
@@ -318,36 +319,6 @@ fn looks_like_seed(path: &Path, bytes: u64) -> bool {
     std::fs::read_to_string(path)
         .map(|text| is_seed_template(&text))
         .unwrap_or(false)
-}
-
-/// Is `content` tm's seed template with nothing of the operator's added?
-///
-/// Why: the doctor check's `Fail` verdict and `--fix`'s rename both hinge on
-/// "this file is pure cost". Only a file whose prose is the stub's can carry
-/// that verdict — anything else is content someone may want.
-/// What: compares both sides with HTML comments removed (Claude Code strips
-/// them on load), each line trimmed and blank lines dropped.
-/// Test: `a_seed_ancestor_is_reported_as_a_seed`,
-/// `a_content_ancestor_is_not_a_seed`.
-fn is_seed_template(content: &str) -> bool {
-    fn normalized(content: &str) -> String {
-        let mut stripped = String::with_capacity(content.len());
-        let mut rest = content;
-        while let Some(start) = rest.find("<!--") {
-            stripped.push_str(&rest[..start]);
-            rest = rest[start..]
-                .find("-->")
-                .map_or("", |end| &rest[start + end + 3..]);
-        }
-        stripped.push_str(rest);
-        let lines: Vec<&str> = stripped
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .collect();
-        lines.join("\n")
-    }
-    normalized(content) == normalized(CLAUDE_MD_STUB)
 }
 
 /// The text a user-facing caller prints for one scan, or `None` for silence.
