@@ -190,6 +190,16 @@ pub(crate) async fn session(
             // this project's sessions will NOT load goes to stderr beside it,
             // the same channel the override applied/declined markers use.
             print_excluded_scope(&path);
+            // #7673: the memory files ABOVE the project this prompt rides with,
+            // or why they could not be checked. stderr, beside the scope notice.
+            let scanned = trusty_mpm::core::ancestor_claude_md::scan(
+                &path,
+                dirs::home_dir().as_deref(),
+                trusty_mpm::core::trusty_tools_config::managed_claude_config_dir().as_deref(),
+            );
+            if let Some(text) = trusty_mpm::core::ancestor_claude_md::scan_notice(&path, &scanned) {
+                eprintln!("\n{text}");
+            }
         }
         SessionAction::Events { id_or_name } => {
             let id = match crate::commands::managed_route::resolve_project_session_id(

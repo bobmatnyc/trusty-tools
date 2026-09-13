@@ -185,6 +185,19 @@ pub(crate) fn run_repairs(apply: bool, include_frozen: bool) {
             trusty_mpm::core::session_mcp_scope::session_mcp_path(project).as_deref(),
             mode,
         ));
+        // #7673: rename a pure tm seed template above the project aside, and
+        // exclude a content-carrying one. `project` is the process cwd; the
+        // repair resolves it to the nearest project boundary before scanning
+        // and before choosing which `.claude/settings.local.json` to write.
+        steps.extend(
+            trusty_mpm::core::ancestor_claude_md_repair::repair_ancestor_claude_md(
+                project,
+                dirs::home_dir().as_deref(),
+                trusty_mpm::core::trusty_tools_config::managed_claude_config_dir().as_deref(),
+                &chrono::Utc::now().format("%Y%m%d").to_string(),
+                mode,
+            ),
+        );
         // #7685: write `autoMemoryEnabled` into the project tier, in the
         // direction reachability dictates — `false` when trusty-memory is the
         // memory, `true` to restore the fallback when it is not answering.
