@@ -47,6 +47,25 @@ const DEF_KEYWORDS: &[&str] = &[
     "mod",
 ];
 
+/// Upper bound on how many chunks a single `Filename` match may float to the
+/// floor (#7675 round 3).
+///
+/// Why: a basename as common as `mod.rs` (510 occurrences in this repo alone)
+/// would otherwise flood the whole top-k page with an effectively arbitrary
+/// subset of unrelated files — the identical flood shape the now-deleted
+/// `PHRASE_HIT_CAP` existed to prevent for the old `Phrase` shape. Reusing a
+/// small constant cap here, rather than relying solely on the broader `want`
+/// oversample budget `exact_match_lane` already truncates every shape to, is
+/// what keeps one ambiguous basename from dominating the page the way `want`
+/// (≈4x `top_k`) alone does not.
+/// What: applied in [`CodeIndexer::exact_match_lane`] on top of (never instead
+/// of) the existing `want` truncation — `hits.truncate(want.min(FILENAME_HIT_CAP))`
+/// — after [`rank_hits`] has already ordered an exact path-suffix match ahead
+/// of a bare-basename-only one, so truncation keeps the most meaningful
+/// matches rather than an arbitrary id-ordered subset.
+/// Test: `a_common_basename_is_capped_and_does_not_bury_the_relevant_file`.
+pub(crate) const FILENAME_HIT_CAP: usize = 8;
+
 /// Extensions a bare token must carry to read as a filename rather than prose.
 ///
 /// Why: `session_mcp_scope.rs` typed as a query means "show me that file", and
@@ -74,8 +93,12 @@ pub(crate) enum LiteralShape {
     Identifier,
     /// Text the caller quoted explicitly.
     Quoted,
-    /// A bare filename token (`session_mcp_scope.rs`). Matched against each
-    /// chunk's path basename, never its content.
+    /// A bare filename (`session_mcp_scope.rs`) or a path-shaped suffix
+    /// (`indexer/search/exact.rs`). Matched against each chunk's path, never
+    /// its content — a path-shaped literal requires the chunk's whole path to
+    /// end with that multi-segment suffix; a bare one matches the basename.
+    /// See [`filename_match_tier`] for the two-tier rule #7675 round 3 added
+    /// so a precise path-suffix match outranks a same-basename-only one.
     Filename,
     /// An issue reference (`#7675`), matched verbatim in content.
     IssueRef,
@@ -191,7 +214,16 @@ fn is_issue_ref(tok: &str) -> bool {
     !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
 }
 
-/// A bare filename: `[A-Za-z0-9_.-]+` ending in a known source/doc extension.
+/// A bare filename (`[A-Za-z0-9_.-]+`) or a path-shaped suffix
+/// (`[A-Za-z0-9_./-]+`, e.g. `indexer/search/exact.rs`), either way ending in
+/// a known source/doc extension.
+///
+/// Why: `indexer/search/exact.rs` typed as a query means "show me that exact
+/// file, unambiguously" — the same ripgrep-parity intent `session_mcp_scope.rs`
+/// already earns, just spelled with enough path to disambiguate a common
+/// basename. #7675 round 3.
+/// Test: `extract_exact_literal_reads_the_query_shapes`,
+/// `a_path_shaped_query_returns_its_file_first`.
 fn is_filename_token(tok: &str) -> bool {
     let Some((stem, ext)) = tok.rsplit_once('.') else {
         return false;
@@ -200,7 +232,7 @@ fn is_filename_token(tok: &str) -> bool {
         return false;
     }
     stem.chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '/')
 }
 
 /// A bare identifier token: `[A-Za-z_][A-Za-z0-9_:]*`, no other punctuation.
@@ -367,16 +399,45 @@ fn as_hit_input(raw: &RawChunk) -> HitInput<'_> {
     }
 }
 
-/// The final path segment of `path`, which is what a filename query matches.
+/// The final path segment of `path`, which is what a bare filename query
+/// matches.
 fn basename(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
+/// Whether `file` carries a [`LiteralShape::Filename`] literal, and at which
+/// of two tiers — `Some(true)` for an exact path-suffix (or whole-path) match,
+/// `Some(false)` for a same-basename-only match, `None` for no match at all.
+///
+/// Why: #7675 round 2 matched a `Filename` literal against the basename
+/// alone, so `mod.rs` (510 files sharing that basename in this repo) floored
+/// every one of them with no way to tell a precise match from an incidental
+/// one. A caller who types a multi-segment query
+/// (`indexer/search/exact.rs`) is disambiguating on purpose; a chunk whose
+/// whole path ends with that suffix is the higher-confidence match and must
+/// rank ahead of a chunk that merely shares the literal's final segment.
+/// What: the higher tier requires `file` to equal `lit_text` or end with
+/// `/{lit_text}`; the lower tier falls back to comparing only each side's
+/// final path segment. A bare (single-segment) literal's two tiers coincide,
+/// so it is unaffected — every match it has is already the higher tier.
+/// Test: `a_path_shaped_query_returns_its_file_first`,
+/// `a_common_basename_is_capped_and_does_not_bury_the_relevant_file`.
+fn filename_match_tier(file: &str, lit_text: &str) -> Option<bool> {
+    if file == lit_text || file.ends_with(&format!("/{lit_text}")) {
+        Some(true)
+    } else if basename(file) == basename(lit_text) {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 /// How many times `lit` occurs in one chunk — content for every shape except
-/// [`LiteralShape::Filename`], which matches the chunk's path basename.
+/// [`LiteralShape::Filename`], which matches the chunk's path via
+/// [`filename_match_tier`] rather than its content.
 fn occurrences_of(lit: &ExactLiteral, re: &Regex, input: &HitInput<'_>) -> usize {
     match lit.shape {
-        LiteralShape::Filename => usize::from(basename(input.file) == lit.text),
+        LiteralShape::Filename => usize::from(filename_match_tier(input.file, &lit.text).is_some()),
         _ => re.find_iter(input.content).count(),
     }
 }
@@ -399,9 +460,18 @@ fn occurrences_of(lit: &ExactLiteral, re: &Regex, input: &HitInput<'_>) -> usize
 /// `on_branch` is in the key because the caller's `branch_files` boost is a
 /// declared preference the floor must not swallow; it reaches this function as
 /// a flag rather than as the score multiplier the pipeline applied.
+///
+/// For [`LiteralShape::Filename`], `is_definition` is repurposed (not a second
+/// field — #7675 round 3) to carry [`filename_match_tier`]'s verdict: `true`
+/// for an exact path-suffix match, `false` for a same-basename-only one. This
+/// is the same "precise match floats to the top of its group" mechanism the
+/// `Identifier` shape already uses for a real declaration, so a path-shaped
+/// query (`indexer/search/exact.rs`) outranks every chunk that only shares its
+/// final segment, using the existing sort key rather than a new one.
 /// Test: `hybrid_top_one_agrees_with_lexical_for_every_planted_identifier`,
 /// `an_archived_duplicate_ranks_below_the_live_definition`,
-/// `test_branch_boost_applied_to_matching_chunks`.
+/// `test_branch_boost_applied_to_matching_chunks`,
+/// `a_path_shaped_query_returns_its_file_first`.
 fn rank_hits<'a, I>(items: I, lit: &ExactLiteral, re: &Regex) -> Vec<ExactHit>
 where
     I: Iterator<Item = HitInput<'a>>,
@@ -414,11 +484,17 @@ where
             if occurrences == 0 {
                 return None;
             }
-            Some(ExactHit {
-                id: input.id.to_string(),
-                is_definition: definition
+            let is_definition = match lit.shape {
+                LiteralShape::Filename => {
+                    filename_match_tier(input.file, &lit.text).unwrap_or(false)
+                }
+                _ => definition
                     .as_ref()
                     .is_some_and(|d| d.matches(input.content, input.function_name)),
+            };
+            Some(ExactHit {
+                id: input.id.to_string(),
+                is_definition,
                 occurrences,
                 on_branch: input.on_branch,
                 downranked: input.downranked,
@@ -660,7 +736,16 @@ impl CodeIndexer {
                     re,
                 ),
             };
-            hits.truncate(want);
+            // #7675 round 3: a `Filename` match gets the small, dedicated
+            // `FILENAME_HIT_CAP` on top of (never instead of) `want` — see
+            // that constant's doc comment for why `want` alone does not
+            // bound an ambiguous basename's flood.
+            let cap = if matches!(lit.shape, LiteralShape::Filename) {
+                want.min(FILENAME_HIT_CAP)
+            } else {
+                want
+            };
+            hits.truncate(cap);
             return ExactLaneOutcome {
                 hits,
                 degraded: false,

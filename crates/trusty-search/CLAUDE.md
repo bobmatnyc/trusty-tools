@@ -446,19 +446,26 @@ Hybrid search (BM25 + vector + KG expansion + RRF fusion).
     the floor, each one a caller could have typed into ripgrep: an explicitly
     quoted string; a single identifier carrying an underscore, `::` or a
     camelCase boundary (optionally behind `fn`/`struct`/`const`); a bare
-    filename token (`session_mcp_scope.rs`), matched against each chunk's path
-    basename rather than its content; and an issue reference (`#7675`), matched
-    verbatim. An UNQUOTED multi-word phrase earns nothing — it is a conceptual
-    query, and flooring one let a prose sentence occurring verbatim in a single
-    doc line take the top slot from every semantically-relevant chunk. A bare
-    word and a single unsignalled type name (`Palace`) stay out for the same
-    reason. `exact_match_literal` is the text that was matched and is present
-    whenever a literal was RECOGNISED, so a caller can tell "read as a literal
-    query, found nowhere" from "read as a conceptual query" (where it is
-    `null`). Ordering inside the floored group is lane-independent
-    (declaration, then live-before-archived, then the caller's `on_branch`
-    preference, then occurrence count, then chunk id), which is what makes
-    `search` and `search_lexical` agree on top-1 for an identifier.
+    filename or path-shaped suffix (`session_mcp_scope.rs`,
+    `indexer/search/exact.rs`), matched against each chunk's path rather than
+    its content; and an issue reference (`#7675`), matched verbatim. An
+    UNQUOTED multi-word phrase earns nothing — it is a conceptual query, and
+    flooring one let a prose sentence occurring verbatim in a single doc line
+    take the top slot from every semantically-relevant chunk. A bare word and
+    a single unsignalled type name (`Palace`) stay out for the same reason.
+    `exact_match_literal` is the text that was matched and is present whenever
+    a literal was RECOGNISED, so a caller can tell "read as a literal query,
+    found nowhere" from "read as a conceptual query" (where it is `null`).
+    Ordering inside the floored group is lane-independent (declaration, then
+    live-before-archived, then the caller's `on_branch` preference, then
+    occurrence count, then chunk id), which is what makes `search` and
+    `search_lexical` agree on top-1 for an identifier. For the filename shape,
+    "declaration" is repurposed as "exact path-suffix match" (a chunk whose
+    whole path ends with the query) outranking a same-basename-only match
+    (#7675 round 3), and a single query's floor contribution from this shape
+    is capped at a small constant (`FILENAME_HIT_CAP`, 8) so a basename as
+    common as `mod.rs` cannot flood the page with an arbitrary subset of
+    unrelated files.
   - `meta.exact_match_degraded` / `meta.exact_match_full_scan` (#7675): the
     lane's own honesty bits. `exact_match_degraded` is `true` when the lane
     could not read the corpus at all (the same bounded-rehydrate exhaustion

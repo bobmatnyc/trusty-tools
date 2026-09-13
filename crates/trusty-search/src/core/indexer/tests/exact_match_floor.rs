@@ -17,7 +17,9 @@
 //! Test: this module.
 
 use super::*;
-use crate::core::indexer::search::exact::{extract_exact_literal, literal_regex, LiteralShape};
+use crate::core::indexer::search::exact::{
+    extract_exact_literal, literal_regex, LiteralShape, FILENAME_HIT_CAP,
+};
 
 /// The L1 literal from the spike — a WARN string that tokenizes entirely into
 /// common English words.
@@ -487,6 +489,132 @@ async fn a_filename_query_floors_the_chunks_of_that_file() {
     assert!(
         !lane.full_scan,
         "a filename query matches paths, so it is not the content-scan fallback"
+    );
+}
+
+#[tokio::test]
+async fn a_common_basename_is_capped_and_does_not_bury_the_relevant_file() {
+    // Why: round-3 HIGH — `Filename` had no analogue of the deleted
+    // `PHRASE_HIT_CAP`, so `occurrences_of` floored every chunk of every file
+    // sharing a basename, unbounded. A basename as common as `mod.rs` (510
+    // files in this repo alone) would flood the floor with an effectively
+    // arbitrary, id-ordered subset of unrelated files, burying whatever the
+    // semantic lanes ranked. #7675.
+    // What: plant more files sharing one basename than `FILENAME_HIT_CAP`,
+    // plus one differently-named chunk. The lane must contribute at most the
+    // cap (this is what fails against the pre-fix head: it returned all 12).
+    // The final page — sized to the whole tiny corpus, so its composition is
+    // deterministic regardless of fused-lane scoring — must still include the
+    // differently-named chunk, proving the capped promotion does not drop it.
+    // Test: this test.
+    let idx = make_indexer();
+    let flood = FILENAME_HIT_CAP + 4;
+    for i in 0..flood {
+        idx.add_chunk(raw(
+            &format!("flood:{i}"),
+            &format!("src/gen/mod_{i}/mod.rs"),
+            &format!("fn handler_{i}(input: &str) -> usize {{ input.len() }}"),
+        ))
+        .await
+        .unwrap();
+    }
+    idx.add_chunk(raw(
+        "relevant:other",
+        "src/core/other_module.rs",
+        "fn distinct_helper() {}",
+    ))
+    .await
+    .unwrap();
+
+    let lit = extract_exact_literal("mod.rs").expect("filename");
+    let re = literal_regex(&lit).expect("regex");
+    // `want` is deliberately generous so only `FILENAME_HIT_CAP` — not `want`
+    // — is what bounds the result.
+    let lane = idx
+        .exact_match_lane(
+            &lit,
+            &re,
+            flood + 10,
+            crate::core::indexer::SearchMode::All,
+            None,
+        )
+        .await;
+    assert!(
+        lane.hits.len() <= FILENAME_HIT_CAP,
+        "a Filename match must contribute at most FILENAME_HIT_CAP ({FILENAME_HIT_CAP}) hits \
+         to the floor, got {} from {flood} planted files sharing the basename",
+        lane.hits.len()
+    );
+
+    // Total corpus size equals top_k, so every chunk is guaranteed onto the
+    // page regardless of lane scoring — the composition check below is about
+    // whether the capped promotion still surfaces the other file, not about
+    // fused-lane tie-breaking.
+    let top_k = flood + 1;
+    let results = idx.search(&query("mod.rs", top_k)).await.unwrap();
+    assert!(
+        results.iter().any(|r| r.id == "relevant:other"),
+        "the differently-named chunk must not be dropped by the capped promotion, got {:?}",
+        results.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()
+    );
+    assert!(
+        !results.iter().all(|r| r.file.ends_with("mod.rs")),
+        "the page must not be entirely the flooded basename"
+    );
+}
+
+#[tokio::test]
+async fn a_path_shaped_query_returns_its_file_first() {
+    // Why: round-3 "must be true" — a multi-segment path query disambiguates
+    // a common basename on purpose, and the cap must keep its exact match
+    // first rather than truncate it away behind weaker basename-only hits in
+    // an arbitrary order. #7675.
+    // What: two chunks share the basename `exact.rs`; only one's whole path
+    // ends with the queried multi-segment suffix `indexer/search/exact.rs`.
+    // That one must rank first (the deterministic ordering this round adds:
+    // exact path-suffix match before bare-basename-only match).
+    // Test: this test.
+    let idx = make_indexer();
+    idx.add_chunk(raw(
+        "path:target",
+        "crates/trusty-search/src/core/indexer/search/exact.rs",
+        "fn exact_match_lane() {}",
+    ))
+    .await
+    .unwrap();
+    idx.add_chunk(raw(
+        "path:decoy",
+        "crates/trusty-other/src/render/exact.rs",
+        "fn unrelated() {}",
+    ))
+    .await
+    .unwrap();
+
+    let lit = extract_exact_literal("indexer/search/exact.rs").expect("path-shaped filename");
+    assert_eq!(
+        lit.shape,
+        LiteralShape::Filename,
+        "a path-shaped token must still read as a Filename literal"
+    );
+    let re = literal_regex(&lit).expect("regex");
+    let lane = idx
+        .exact_match_lane(&lit, &re, 10, crate::core::indexer::SearchMode::All, None)
+        .await;
+    assert_eq!(
+        lane.hits.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
+        vec!["path:target", "path:decoy"],
+        "the exact path-suffix match must rank ahead of the basename-only match"
+    );
+
+    // And it survives the full pipeline at top_k: 1 — ripgrep parity.
+    let results = idx
+        .search(&query("indexer/search/exact.rs", 1))
+        .await
+        .unwrap();
+    assert_eq!(
+        results[0].id, "path:target",
+        "a path-shaped query must return its file on the first page, got {}",
+        results[0].id
     );
 }
 
