@@ -28,14 +28,16 @@
 //!
 //! What: [`lock`] hands out a guard on one process-wide mutex. Every seeder
 //! that read-modify-writes a `.claude.json` holds it across the WHOLE cycle
-//! (read, mutate, write), never just the write. Five callers hold it: the two
+//! (read, mutate, write), never just the write. Six callers hold it: the two
 //! `~/.claude.json` seeders named above, plus
 //! [`crate::core::mcp_config::seed_builtin_servers`] and
 //! [`crate::core::standalone::trust_seed::preseed_managed_trust`] (#4076),
-//! which both target `<claude_config_dir>/.claude.json`, and
+//! which both target `<claude_config_dir>/.claude.json`,
 //! [`crate::core::claude_md_excludes::add_exclude`] (#7673), which targets a
-//! project's `.claude/settings.local.json` and inherits the same cross-process
-//! lost-update limit described under SCOPE below.
+//! project's `.claude/settings.local.json`, and
+//! [`crate::core::skill_overrides::write_skill_overrides_for`] (#7751), which
+//! targets a project's `.claude/settings.json`. The last two inherit the same
+//! cross-process lost-update limit described under SCOPE below.
 //!
 //! The guard is deliberately not keyed by path, and now covers TWO distinct
 //! files rather than one. That is still the right granularity: a path key

@@ -205,3 +205,125 @@ fn second_write_is_byte_identical() {
     );
     assert_eq!(std::fs::read(settings_path(tmp.path())).unwrap(), first);
 }
+
+#[test]
+fn every_table_skill_is_bundled_or_vouched_for() {
+    // #7751 review round 1: nothing checked the SKILL names against a real
+    // inventory, so four of the eight could be renamed to garbage with the whole
+    // suite still green. A misspelt key turns nothing off and reports success.
+    let roster: BTreeSet<String> = crate::core::manifest::framework::framework_skill_categories()
+        .expect("bundled framework manifest is valid")
+        .universal
+        .into_iter()
+        .collect();
+    let vouched: BTreeSet<&str> = UNBUNDLED_TABLE_SKILLS.iter().copied().collect();
+
+    for family in SKILL_FAMILY_TABLE {
+        for skill in family.skills {
+            assert!(
+                roster.contains(*skill) || vouched.contains(*skill),
+                "family `{}` names `{skill}`, which is neither a bundled skill nor listed in \
+                 UNBUNDLED_TABLE_SKILLS — a name no inventory knows turns nothing off",
+                family.name
+            );
+        }
+    }
+
+    // A vouched-for name that no family uses is a stale exemption: it would keep
+    // vouching for a skill the table no longer names, and hide the next typo.
+    let named: BTreeSet<&str> = SKILL_FAMILY_TABLE
+        .iter()
+        .flat_map(|family| family.skills.iter().copied())
+        .collect();
+    for skill in UNBUNDLED_TABLE_SKILLS {
+        assert!(
+            named.contains(*skill),
+            "`{skill}` is vouched for in UNBUNDLED_TABLE_SKILLS but no family names it"
+        );
+    }
+}
+
+#[test]
+fn no_skill_appears_in_two_families() {
+    // #7751 review round 1: relevance is decided per family and the skills are
+    // then flattened, so a skill listed twice would be turned off whenever ANY
+    // of its families is irrelevant, even with another family keeping it on. No
+    // duplicate exists today; this is where the next table edit lands.
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for family in SKILL_FAMILY_TABLE {
+        for skill in family.skills {
+            assert!(
+                seen.insert(*skill),
+                "`{skill}` is listed by more than one family (`{}` is the second) — \
+                 the flatten in `irrelevant_skills` would turn it off for both",
+                family.name
+            );
+        }
+    }
+}
+
+/// Fresh-file trials the concurrent-writer regression runs.
+///
+/// Why: the lost update only shows when two read-modify-write cycles actually
+/// interleave, and each trial has to be one-shot. Looping the two writers over
+/// one file self-heals a clobber — both are idempotent, so the next round
+/// re-adds what the last one dropped — which is how this defect stayed invisible
+/// to every other test here. 40 fresh files is what #7751 review round 1
+/// measured: 40 losses in 40 trials without the guard, 0 in 40 with it.
+const RACE_TRIALS: usize = 40;
+
+#[test]
+fn a_concurrent_statusline_write_loses_no_skill_overrides() {
+    // THE RACE (#7751 review round 1, HIGH): `prepare_session` writes
+    // `skillOverrides` and then `statusLine` into ONE `.claude/settings.json`,
+    // and the daemon runs that concurrently for two sessions. Both writers
+    // publish atomically, which stops a torn file but not a lost update: the
+    // writer that read first stores its own complete pre-read snapshot last and
+    // silently drops the other's keys. Only a real two-thread race proves the
+    // guard — a single-threaded test of either writer passes with or without it.
+    let rust = stacks(&["rust-engineer"]);
+    let planned = irrelevant_skills(&rust);
+    let mut lost: Vec<String> = Vec::new();
+
+    for trial in 0..RACE_TRIALS {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path();
+        std::fs::create_dir_all(project.join(".claude")).unwrap();
+        let path = settings_path(project);
+        let start = std::sync::Barrier::new(2);
+
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                start.wait();
+                write_skill_overrides_for(project, &rust).expect("the merge must never fail");
+            });
+            scope.spawn(|| {
+                start.wait();
+                crate::core::statusline_settings::ensure_statusline_entry_in(&path);
+            });
+        });
+
+        let text = std::fs::read_to_string(&path).expect("both writers create the file");
+        let value: serde_json::Value =
+            serde_json::from_str(&text).expect("a published settings.json is always valid JSON");
+        let mut missing: Vec<String> = Vec::new();
+        if value.get("statusLine").is_none() {
+            missing.push("statusLine".to_string());
+        }
+        for skill in &planned {
+            if value[SKILL_OVERRIDES_KEY].get(*skill).is_none() {
+                missing.push((*skill).to_string());
+            }
+        }
+        if !missing.is_empty() {
+            lost.push(format!("trial {trial} lost {missing:?}"));
+        }
+    }
+
+    assert!(
+        lost.is_empty(),
+        "{} of {RACE_TRIALS} concurrent trials lost an update — the read → mutate → write \
+         cycle stored a snapshot taken before a sibling writer's store (#7751, #4072). {lost:?}",
+        lost.len()
+    );
+}

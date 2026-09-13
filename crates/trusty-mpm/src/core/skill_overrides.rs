@@ -91,12 +91,13 @@ pub const SKILL_FAMILY_TABLE: &[SkillFamily] = &[
         relevant_stacks: &["rust-engineer", "tauri-engineer"],
     },
     SkillFamily {
+        // #7751 review round 1: `claude-in-chrome` was listed here and is not a
+        // skill file in any skill root — it is the Chrome MCP server
+        // (`mcp__claude-in-chrome__*`). A `skillOverrides` key that names no
+        // skill turns nothing off; keeping a browser MCP server away from a
+        // non-web project is a `tools:`/MCP gate, not this table.
         name: "web-app",
-        skills: &[
-            "claude-in-chrome",
-            "web-performance-optimization",
-            "webapp-testing",
-        ],
+        skills: &["web-performance-optimization", "webapp-testing"],
         relevant_stacks: WEB_STACKS,
     },
     SkillFamily {
@@ -125,6 +126,20 @@ pub const SKILL_FAMILY_TABLE: &[SkillFamily] = &[
         relevant_stacks: &[],
     },
 ];
+
+/// Table skills the framework manifest does not bundle (#7751 review round 1).
+///
+/// Why: `skillOverrides` addresses every skill root Claude Code lists, not only
+/// tm's bundle, so a name missing from the bundled roster is not by itself a
+/// typo. It does have to be a name somebody checked, because a misspelt entry
+/// turns nothing off and still reports success.
+/// What: each name here was verified on 2026-09-13 to exist as a skill
+/// directory under `~/.claude/skills` AND under
+/// `~/.trusty-tools/trusty-mpm/claude-config/skills` on the owner's host.
+/// Every other table skill must appear in the bundled roster.
+/// Test: `every_table_skill_is_bundled_or_vouched_for`.
+pub const UNBUNDLED_TABLE_SKILLS: &[&str] =
+    &["breeze-voice", "cto-kb-ingest", "duetto-design-system"];
 
 /// The skills [`SKILL_FAMILY_TABLE`] turns off for a project with `stacks`.
 ///
@@ -207,6 +222,9 @@ pub fn write_skill_overrides(
 /// Why: the detector reads marker files, so the merge rules are tested here
 /// against a pinned stack set.
 /// What, in order:
+/// - the whole read → mutate → write cycle runs under
+///   [`crate::core::claude_json_guard::lock`], the in-process mutex every other
+///   read-modify-write of this file already holds (#4072, #7617);
 /// - an empty `stacks` returns [`SkillOverridesOutcome::NoStack`] before reading
 ///   anything. The detector also answers empty when it fails, so a failure hides
 ///   no skill;
@@ -217,10 +235,17 @@ pub fn write_skill_overrides(
 /// - nothing is written when nothing was added, so a repeat run leaves the file
 ///   byte-identical; otherwise the file is written atomically.
 ///
+/// The "left alone" rule above is this function's own behaviour, reachable from
+/// a direct call. It is NOT what a launch does: `prepare_session` runs
+/// `session_launch::settings::merge_settings` first, which replaces a settings
+/// file it cannot parse with a fresh object (#7780), so by the time this runs
+/// the file always parses.
+///
 /// Test: `unknown_stack_turns_nothing_off`,
 /// `user_entries_and_foreign_keys_survive_the_merge`,
 /// `malformed_settings_are_left_untouched`,
-/// `second_write_is_byte_identical`.
+/// `second_write_is_byte_identical`,
+/// `a_concurrent_statusline_write_loses_no_skill_overrides`.
 pub fn write_skill_overrides_for(
     project_dir: &Path,
     stacks: &BTreeSet<String>,
@@ -229,6 +254,16 @@ pub fn write_skill_overrides_for(
     if planned.is_empty() {
         return Ok(SkillOverridesOutcome::NoStack);
     }
+
+    // #7751 review round 1 (HIGH): held across the read AND the write below.
+    // `write_json_atomic` stops a torn file, not a LOST UPDATE — a sibling
+    // writer of this same `.claude/settings.json` that read before this store
+    // republishes its own pre-read snapshot and drops these keys. Same line,
+    // same mutex, same reason as `statusline_settings::ensure_statusline_entry_in`
+    // and `claude_md_excludes::add_exclude` (#4072, #7617). No caller holds it
+    // already: `prepare_session_inner` calls this outside every guarded seeder,
+    // and the mutex is not reentrant.
+    let _guard = crate::core::claude_json_guard::lock();
 
     let path = project_dir.join(".claude").join("settings.json");
     let mut settings = match std::fs::read_to_string(&path) {
