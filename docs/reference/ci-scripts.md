@@ -144,7 +144,7 @@ gh api repos/bobmatnyc/trusty-tools/branches/main/protection \
 
 ## Operator scripts no workflow runs
 
-Two scripts in `scripts/` exist for a person or an agent at a terminal, never
+Three scripts in `scripts/` exist for a person or an agent at a terminal, never
 for CI. They are listed here because `scripts/` is where a reader looks, and a
 script nothing invokes is a script nobody finds.
 
@@ -152,10 +152,15 @@ script nothing invokes is a script nobody finds.
 |---|---|---|
 | `required-checks.sh` | `version-control`, or anyone before a merge | Prints the LIVE `required_status_checks.contexts` for a base branch, one per line. Exits 1 on an EMPTY list as well as on a `gh` failure — "nothing is required" and "the read did not work" look identical in the output, and treating either as a pass removes the last gate. `tm pr queue-check` performs the same read in-process. |
 | `is-branch-caused.sh` | anyone facing a red gate | Prints `PRE-EXISTING` / `BRANCH-CAUSED` / `INCONCLUSIVE` (exit 0/1/2) for one crate. An empty `git diff --name-only origin/main...HEAD -- <crate-dir>/` settles it immediately; otherwise it re-runs `cargo test -p <crate> --no-fail-fast` in a throwaway worktree at the base ref and compares. The caller's checkout is never touched. |
+| `select-test-crates.sh` | an agent or person choosing the rung-3/4 crate list for a change (#7753) | Prints, one per line, every workspace crate whose tests a given change set can affect: each crate that owns a changed file, plus the transitive reverse-dependency closure of those crates (`cargo metadata`'s full resolve graph, normal/dev/build edges all included). Default range is `origin/main...HEAD`; `--staged`, `--files <path>...` and `--range <a>..<b>` select the change set another way. `--cargo-args` prints `-p a -p b ...` instead, with a documented override for `trusty-common`'s empty default feature set (#4901). FAIL OPEN: a `cargo metadata` failure, a missing `jq`, or an empty/unresolvable range prints every crate it can still name and exits 0 — same doctrine as `ci-crate-relevance.sh`. Not wired into a workflow yet; see the adoption note in the issue. |
 
 `is-branch-caused.sh` has a self-test, `scripts/is-branch-caused-selftest.sh`,
 which pins the empty-diff shortcut against a synthetic repository — that path
 is the one a reader acts on without re-checking, and a false `PRE-EXISTING`
 would launder a real regression into someone else's problem.
 `required-checks.sh` has none: it is a single `gh api` call whose only logic is
-the empty-list refusal.
+the empty-list refusal. `select-test-crates.sh` has
+`scripts/select-test-crates_selftest.sh`, covering the forward-closure,
+reverse-closure, non-crate-path and fail-open cases against a throwaway
+fixture workspace, plus a short live check of the `trusty-common` feature
+override against this repo's own graph.

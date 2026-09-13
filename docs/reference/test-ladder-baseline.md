@@ -26,6 +26,12 @@ Risk labels map onto the rungs (1–2 Low, 3–4 Normal, 5–6 High).
 
 - Required tests stay in the implementation PR. Name the rung and paste its
   command in the PR body.
+- 🟡 **`scripts/select-test-crates.sh` computes the rung-3/4 crate list
+  mechanically** instead of by judgment — it maps a changed-file set to its
+  owning crate(s) and each owner's reverse-dependency closure
+  (`scripts/select-test-crates.sh --cargo-args` prints `-p a -p b ...` ready to
+  paste after `cargo test`/`cargo check`). Agent-first today (#7753); not yet
+  wired into a CI workflow.
 - 🔴 **`cargo test --workspace` is not the default inner-loop proof for a
   localized change** — it belongs at the publish boundary; a rung-4 PR does not
   owe one to merge.
