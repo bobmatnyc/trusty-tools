@@ -67,7 +67,9 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `get` — Show one user-scope MCP server's definition
   - `list` — List all user-scope MCP servers in the tm config dir
   - `remove` — Remove a user-scope MCP server by name
+  - `share` — Let untrusted projects match this server by content (#7672)
   - `test` — Verify MCP servers by running a real handshake against each
+  - `unshare` — Stop untrusted projects matching this server by content (#7672)
 - `memory` — Deterministic trusty-memory palace maintenance (issue #4837)
   - `import` — Bulk-import a directory of memory `.md` files into a palace
   - `import-auto-memory` — Migrate Claude Code's own auto-memory store into the project's palace
