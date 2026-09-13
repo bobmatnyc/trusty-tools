@@ -38,7 +38,9 @@ mod divert_hooks;
 pub use asset_notices::{PrepScope, log_prep_findings};
 mod palace_alias;
 // #7780: preserve a malformed project settings.json before a writer rewrites it.
-mod malformed_backup;
+// #7789: `pub(crate)` because the managed-tier writers in `core::standalone`
+// share the rule; the module stays here because `PrepError` does.
+pub(crate) mod malformed_backup;
 // #4448: the ONE wiring of the shadowing-agent quarantine, shared by
 // `prepare_session_inner` and `sync_session_assets`.
 mod project_hooks;

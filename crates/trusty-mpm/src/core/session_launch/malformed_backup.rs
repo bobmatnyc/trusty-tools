@@ -1,4 +1,4 @@
-//! Preserve a malformed project `settings.json` before a launch writer replaces it.
+//! Preserve a malformed `settings.json` before a writer replaces it.
 //!
 //! Why (#7780): three `prepare_session` writers read
 //! `<project>/.claude/settings.json`, coerced anything that did not parse as a
@@ -14,9 +14,23 @@
 //! unparseable file, or a valid JSON array/string/number — has its original
 //! bytes copied to a timestamped `settings.json.malformed-<stamp>` sibling
 //! first, is reported at `warn` naming that copy, and the caller then rewrites
-//! from `{}`. A file that cannot be read at all, or a copy that cannot be
-//! written, is an error: a writer never replaces bytes it could not preserve.
-//! Test: `malformed_backup_tests.rs`, `tests_malformed_settings_7780.rs`.
+//! from `{}`. A whitespace-only file is the one exception — it holds nothing to
+//! preserve, so it is treated as absent (#7789). A file that cannot be read at
+//! all, or a copy that cannot be written, is an error: a writer never replaces
+//! bytes it could not preserve.
+//!
+//! #7789: the managed-tier writers
+//! [`crate::core::standalone::settings_defaults::ensure_settings_defaults`] and
+//! `standalone::hooks::write_project_hooks_with` carried the same
+//! coerce-to-`{}` read over `<claude_config_dir>/settings.json`, so they call
+//! this loader too rather than growing a second copy of the rule.
+//! `write_project_hooks_with` is tier-agnostic — it writes whatever settings
+//! path it is handed — so the conversion also covers `tm launch`, which routes
+//! a managed clone's PROJECT `<clone>/.claude/settings.json` through the same
+//! function (`commands::install::write_project_hooks_for_dir`, called from
+//! `commands::launch`).
+//! Test: `malformed_backup_tests.rs`, `tests_malformed_settings_7780.rs`,
+//! `core::standalone::tests_malformed_settings_7789`.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -50,17 +64,20 @@ const MAX_SAME_SECOND_BACKUPS: u32 = 1000;
 /// when it is not a JSON object.
 ///
 /// Why: see the module doc — this is the whole of #7780's behaviour, in one
-/// place, because three writers share the rule and three copies of it is how
-/// two of them would keep the old silent-overwrite.
-/// What: `{}` for an absent file (the caller creates it); the parsed value for
-/// a JSON object; otherwise the original bytes are copied aside and `{}` is
-/// returned so the caller rewrites from scratch. Returns
+/// place, because five writers across two config tiers share the rule and five
+/// copies of it is how four of them would keep the old silent-overwrite.
+/// What: `{}` for an absent or whitespace-only file (the caller creates it); the
+/// parsed value for a JSON object; otherwise the original bytes are copied aside
+/// and `{}` is returned so the caller rewrites from scratch. Returns
 /// [`PrepError::SettingsBackup`] — and writes nothing — when the file exists but
-/// cannot be read, or when the copy cannot be written.
+/// cannot be read, or when the copy cannot be written. `pub(crate)` for the
+/// managed-tier callers named in the module doc (#7789); they map the error at
+/// their own call site rather than forking the loader.
 /// Test: `returns_a_json_object_untouched`, `treats_a_missing_file_as_empty`,
+/// `treats_a_whitespace_only_file_as_empty`,
 /// `backs_up_unparseable_bytes_under_a_stamped_name`,
 /// `backs_up_a_valid_non_object`, `refuses_when_the_copy_cannot_be_written`.
-pub(super) fn load_settings_object(settings_path: &Path) -> Result<Value, PrepError> {
+pub(crate) fn load_settings_object(settings_path: &Path) -> Result<Value, PrepError> {
     load_settings_object_at(settings_path, Utc::now())
 }
 
@@ -109,6 +126,14 @@ fn load_settings_object_at(settings_path: &Path, now: DateTime<Utc>) -> Result<V
         return Ok(value);
     }
 
+    // #7789: an empty or whitespace-only file holds nothing to preserve, and
+    // the managed hook writer this loader now also serves has always read one
+    // as `{}`. A zero-byte copy would be a record of nothing, named as though
+    // it were the operator's lost settings.
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        return Ok(empty_object());
+    }
+
     let stamp = now.format("%Y%m%dT%H%M%SZ").to_string();
     let backup =
         copy_aside(settings_path, &bytes, &stamp).map_err(|source| PrepError::SettingsBackup {
@@ -118,7 +143,7 @@ fn load_settings_object_at(settings_path: &Path, now: DateTime<Utc>) -> Result<V
     tracing::warn!(
         path = %settings_path.display(),
         backup = %backup.display(),
-        "project settings.json is not a JSON object; copied the original aside and rewrote it (#7780)"
+        "settings.json is not a JSON object; copied the original aside and rewrote it (#7780, #7789)"
     );
     Ok(empty_object())
 }

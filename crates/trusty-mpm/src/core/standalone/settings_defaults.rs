@@ -12,8 +12,9 @@
 //! `CLAUDE_CONFIG_DIR/settings.json` makes that config dir self-sufficient,
 //! independent of the project tier.
 //! What: [`ensure_settings_defaults`] reads the tm-owned
-//! `<claude_config_dir>/settings.json` (tolerating absent/malformed content by
-//! starting from `{}`), seeds `outputStyle` only when absent, and sets
+//! `<claude_config_dir>/settings.json` through the shared #7780 loader (absent
+//! or whitespace-only → `{}`; unparseable or non-object → the original bytes are
+//! copied aside first, #7789), seeds `outputStyle` only when absent, and sets
 //! `statusLine` when absent OR when its existing command is stale — a binary
 //! that is an ephemeral build path or no longer exists on disk (#2229). A
 //! genuinely user-customized value pointing at an existing, non-ephemeral binary
@@ -45,8 +46,14 @@ use trusty_common::claude_config::write_json_atomic;
 /// called from [`super::global_config::ensure_global_config_dir`] on every
 /// managed-driver bootstrap, so the tm-owned config dir never depends solely on
 /// the project tier for these two keys.
-/// What: reads the on-disk `settings.json` (or starts from `{}` if
-/// absent/malformed/non-object), inserts `outputStyle` =
+/// What: reads the on-disk `settings.json` through
+/// [`crate::core::session_launch::malformed_backup::load_settings_object`],
+/// which starts from `{}` for an absent or whitespace-only file and, for an
+/// unparseable or non-object one, copies the original bytes to a
+/// `settings.json.malformed-<stamp>` sibling and warns naming that copy before
+/// this function rewrites over it (#7789). A copy that cannot be written
+/// abandons the write, leaving the file exactly as it was. It inserts
+/// `outputStyle` =
 /// [`crate::core::session_launch::OUTPUT_STYLE`] only if the key is not already
 /// present, and sets `statusLine` = `{ "type": "command", "command":
 /// <resolved absolute path> statusline", "padding": 0 }` (via
@@ -70,21 +77,26 @@ use trusty_common::claude_config::write_json_atomic;
 /// `ensure_settings_defaults_preserves_existing_valid_binary_statusline`,
 /// `ensure_settings_defaults_seeds_attribution`,
 /// `ensure_settings_defaults_preserves_operator_attribution`,
-/// `ensure_settings_defaults_is_idempotent`.
+/// `ensure_settings_defaults_is_idempotent`,
+/// `ensure_settings_defaults_backs_up_a_malformed_file_before_rewriting_it`,
+/// `ensure_settings_defaults_refuses_when_the_copy_cannot_be_written`,
+/// `ensure_settings_defaults_takes_no_copy_for_a_valid_file`,
+/// `the_managed_warning_names_the_copy_it_took`.
 pub(crate) fn ensure_settings_defaults(claude_config_dir: &Path) -> anyhow::Result<()> {
     let settings_path = claude_config_dir.join("settings.json");
 
-    let existing_value: Option<serde_json::Value> = std::fs::read_to_string(&settings_path)
-        .ok()
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .filter(serde_json::Value::is_object);
+    // #7789: this read used to be `.ok().filter(is_object)`, so an unparseable
+    // or non-object managed settings.json became `{}` and the write below
+    // discarded every key the operator had put there. The shared #7780 loader
+    // copies the original bytes aside first and refuses the whole call when
+    // that copy cannot be made.
+    let original =
+        crate::core::session_launch::malformed_backup::load_settings_object(&settings_path)?;
 
-    let mut settings = existing_value
-        .clone()
-        .unwrap_or_else(|| serde_json::json!({}));
+    let mut settings = original.clone();
     let obj = settings
         .as_object_mut()
-        .expect("settings was constructed/filtered to be an object");
+        .expect("load_settings_object only ever returns a JSON object");
 
     obj.entry("outputStyle").or_insert_with(|| {
         serde_json::Value::String(crate::core::session_launch::OUTPUT_STYLE.to_string())
@@ -114,7 +126,7 @@ pub(crate) fn ensure_settings_defaults(claude_config_dir: &Path) -> anyhow::Resu
     // Structural comparison (not byte-wise) so formatting differences left by
     // editors or prior writes never trigger a spurious rewrite, matching the
     // idempotency pattern used by `global_config::ensure_mcp_config`.
-    let needs_write = existing_value.as_ref() != Some(&settings);
+    let needs_write = settings != original;
     if needs_write {
         write_json_atomic(&settings_path, &settings)?;
     }
