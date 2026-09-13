@@ -6,6 +6,49 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.36.0] — 2026-09-13
+
+### Added
+
+- `FindingCategory::Style` (wire token `"style"`) tags a pure taste, naming, formatting or idiom nit. A review whose only substantive findings are style nits now grades APPROVE — `grade::derive_verdict_with` applies it as a ceiling, so a model-proposed REQUEST_CHANGES or BLOCK is brought down too, not merely floored. Style findings also contribute nothing to the severity floor, so a High-effort style opinion can never reach the BLOCK tier. The ceiling lifts the moment one non-style substantive finding is present: a style nit alongside a real blocker still blocks. The reviewer response schema offers `"style"` and tells the model when to pick it, and an inline comment on a style finding leads with "Informational (style / preference) — does not block." `FindingCategory` is now `#[non_exhaustive]`, so future categories are additive for downstream matchers.
+- `trusty-review version [--json]`. `--json` emits the DOC-1 capability-discovery
+  envelope (`contract_version`, `tool`, `tool_version`, `verbs`) that
+  `tctl doctor --self-check trusty-review` spawns and parses. The subcommand did
+  not exist, so clap exited 2 with a usage error and the probe reported
+  `trusty-review version --json exited with exit status: 2` (#6913). It answers
+  from the binary alone — no config file, no tokio runtime, no network.
+
+### Fixed
+
+- Bedrock Converse failures now report the AWS error code and message (for example
+  `ResourceNotFoundException: Model use case details have not been submitted for this
+  account.`) instead of the SDK's flattened literal `service error`, which made a wrong
+  region, a missing credential, and an unapproved model read identically (#6912).
+- A `test-coverage` finding on its own no longer drives REQUEST_CHANGES or BLOCK. `FindingCategory::TestCoverage` has been documented as advisory since #1418, but the severity floor partitioned only `method-conformance` out of the correctness bucket, so a high-effort coverage gap floored exactly like a correctness bug. `TestCoverage` now reports `is_informational`, joining `Style` under the advisory ceiling (#7036).
+- A coverage-gap finding's inline PR comment now carries a coverage-specific "does not block" label instead of the style/preference one (#7036).
+- The CAST DD template's Report Metadata table no longer hardcodes `CAST (CAST Software) — CAST Highlight + CAST Imaging` as the Vendor / methodology value. That static string carried no provenance marker, unlike every other row in the same table, and could read as a factual claim that CAST Software's platform produced the analysis — no CAST product is invoked; trusty-analyze/trusty-search did the analysis. The row now renders `{{vendor_methodology}}`, the same self-known, provenance-tagged value the generic technical-DD template already used.
+- The CAST DD template's `## 3. CAST Scoring Model & Normalization` section no longer cites the unmeasured historical CAST benchmark figure ("~3,467 apps") as fact. The "Peer-benchmark population" row now names this reporter's own analysis-corpus population instead of borrowing CAST's proprietary-corpus number, matching the disclaimer the per-application Peer Benchmark Position table already carries.
+
+### Changed
+
+- `BedrockProvider` builds its region and Converse client through `trusty_common::inference::BedrockAdapter` rather than its own copy of the region walk and its own `aws_config::defaults(...)` call. Region precedence (explicit > `TRUSTY_AWS_REGION` > `AWS_REGION` > `us-east-1`), the error text, the retry policy, cost estimation, and tool-use extraction are unchanged. `BedrockProvider::new` is now synchronous and takes only the model id — the AWS client is built lazily on the first call, and the explicit-region parameter every caller passed `None` for is gone
+- The dependency inventory now resolves a declared range against the checkout's
+  lockfile and records which file answered. `poetry.lock`, `uv.lock` and the
+  `==` pins of `requirements.txt` are read for the first time, so a
+  `pyproject.toml` project no longer reaches the report as ranges only —
+  previously every python row was unresolved, the largest share of the 515 of
+  1230 unscannable rows a 59-repository run produced. `Dependency` gains
+  `resolved` (true only when the locked cell is one exact version) and `source`
+  (the filename it came from); the Dependency Inventory table gains a
+  `Resolved from` column that reads `not resolved` when no lockfile answered.
+  A lockfile that is present and fails to parse no longer degrades silently: it
+  is named in `DependencyInventory::lockfile_warnings` and rendered under the
+  section, and the pass carries on with that ecosystem's declared ranges. Only
+  the resolved name/version pairs are kept, so the inventory does not grow by
+  the size of the lockfile it read. `Dependency` and `DependencyInventory` are
+  now `#[non_exhaustive]` (issue #6794).
+- `llm::enforce_strict_mode` delegates to `trusty_common::inference::strict_json_schema` instead of carrying its own recursive walk. Behavior is unchanged for every schema this crate sends, and the function, its signature, and `ResponseSchema::new`'s use of it all stay put; what moves is the implementation, so the same defect cannot be fixed here and stay broken in another crate — which is what #7082 was. The shared version also descends into `$defs`, `definitions`, and `anyOf`/`oneOf`/`allOf`, which the local one did not. Refs #7082
+
 ## [0.35.0] — 2026-09-06
 
 ### Fixed

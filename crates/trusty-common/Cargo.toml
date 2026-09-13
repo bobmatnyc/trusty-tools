@@ -86,7 +86,7 @@ name = "trusty-common"
 # manifest is what a MINOR bump would force churn through, and it would record
 # no compatibility fact this comment does not. `sockbuf` also sits behind the
 # existing `uds` feature rather than adding one.
-version = "0.49.1"
+version = "0.50.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

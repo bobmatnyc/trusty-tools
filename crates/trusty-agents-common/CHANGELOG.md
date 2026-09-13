@@ -6,6 +6,221 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.8.0] — 2026-09-13
+
+### Added
+
+- Agent frontmatter carries a `provenance:` field naming which of the three
+  writers produced the file — `framework-owned`, `tm-agent-manager-built`, or
+  `user-authored`. `agents::manifest::Origin::is_framework_owned` answers only
+  from the ownership ledger, so a file with no ledger entry — every hand-written
+  agent and every stale leftover — read identically to a framework one. The new
+  `agents::provenance` module owns the three values, the parse, and the absence
+  rule: an absent field resolves to `user-authored`, never to a framework-owned
+  default (#4698).
+- `agents::builder::compose_agent_with_provenance` composes an agent and stamps
+  the field, and the deployer calls it with `framework-owned` for every file it
+  writes. Provenance is a property of the write, not of the source, so the writer
+  supplies it — which also means a new bundled asset has no per-file declaration
+  to forget (#4698).
+- `agents::provenance::reconcile_with_ledger` checks a file's declaration
+  against its ledger row. The ledger wins in both directions — it is the record
+  the deployer wrote under a lock and checksummed, while the frontmatter is the
+  copy anyone with an editor can change (#4698).
+- `agents::tier_audit::audit_provenance` scans a directory and returns one
+  `ProvenanceDisagreement` per file whose declaration contradicts its ledger row,
+  naming the file and both records. Deliberately separate from
+  `audit_agent_tier`: that answers "is this file misplaced?", and it must never
+  run on the canonical deploy directory — which is exactly where a hand-edited
+  DEPLOYED agent lives. A file with no ledger entry yields nothing; a
+  declaration cannot stand in for one, which would manufacture the user-owned
+  quarantine exemption out of a field anybody can type (#4698).
+- `agents::metadata::AgentMetadata` projects the declared `provenance:` so the
+  read-only surfaces that already report a file's `Origin` can report both
+  records (#4698).
+- `events::make_event` (used by both `publish` and `emit`) now stamps every `HarnessEvent` with a fresh `EventId` and `parent_id: None`; `events::EventId` is re-exported from `trusty_common::control_bus`. Threading real causal context (a non-`None` `parent_id`) through this crate's emit sites is future work (DOC-73 §9 Phase 3) — every event this crate emits today is a root (#6847).
+- The ticketing agent takes `tm issue transition N status:coded` when live verification of a merged fix fails and a follow-up fix PR opens. The lifecycle model gained the `status:merged -> status:coded` edge that move needs; before it, the agent had no state to move the issue to and left it at `status:merged` (owner ruling 2026-09-07).
+- `BASE-AGENT.md` makes self-analysis and improvement reporting a core property of every composed agent. At the end of a task the agent names what went wrong or ran slow, the instruction/skill/tool/harness gap that caused it, and the concrete change that prevents it. Recommendations go to `bobmatnyc/trusty-tools` issues whatever project the agent ran in: a subagent returns an "Improvement recommendations" block for its PM to route through `ticketing`, and a top-level agent files through `ticketing` itself. Filing searches open `self-improvement`-labelled issues first and comments on a match, every filed issue carries that label and links tracker #6933, and a clean run files nothing (#6935).
+- `BASE-AGENT.md` gains a continuous self-improvement fast loop beside the self-analysis section. Seven detection heuristics decide whether a run went badly; when one fires and the agent can name a different way to try, it records a hypothesis in the memory palace under the single tag `self-improvement-hypothesis`. The record names the metric it moves, that metric's baseline and harness-emitted source, the sample size and test that judge the outcome, and a status of open / improved / regressed / inconclusive with the n so far. An agent recalls open hypotheses for its area before starting and records the measurement against the same hypothesis after; promotion to improved and retirement as regressed both require a statistically significant difference, and a regressed hypothesis is retired with its measurement rather than deleted. A behavioral tweak that works stays in memory and files no issue; the scheduled post-mortem coalesces the tagged records by metric and files only the significant, fix-needing ones (#6937).
+- The changelog rule now says a fragment follows the crate whose `src/**` the diff touches, not the commit's subject, so a PR spanning three crates' sources owes three fragments (#6937).
+- Git Workflow covers a branch stacked on another PR's head: check `gh pr view <n> --json state` before the first commit and again before the final gate run, and on `MERGED` rebase `--onto origin/main <old-base-sha>` so the merged commit is not duplicated, then re-run the gates on the moved base (#6937).
+- "Never end a gate chain in a pipe" now says the grouped `( … )` form is refused before it runs under worktree isolation, so each gate goes in its own plain command with its own redirect and `echo "EXIT=$?"` (#6937).
+- The ticketing agent now runs `tm issue audit <N>` after filing and pastes its output into the report, so a filing's project, milestone and component label are proved mechanically rather than asserted (#7097).
+- `BASE-ENGINEER.md` gains an "Escape-Sensitive Edits" section: prefer the Write/Edit tool's own `content`/`new_string` argument over a shell one-liner for text containing a regex character class (`\d`, `\s`, `[\w-]`), a literal backslash, or a comment delimiter (`*/`); avoid `perl -pi -e` and similarly shell-quoted `sed` one-liners for that content, since shell quoting and the interpreter's own escape processing can each mangle it before it reaches the file; when a patch needs that content, write a small Node/Python script to an absolute path that embeds the replacement as a raw/triple-quoted string and run that instead; verify byte-for-byte (`od -c`/`xxd`) after the edit (#7121).
+- `compress_tool_output_async_with_path_using` and `compress_via_rtk_with` take an `RtkResolver`, so a caller can force the native fallback chain instead of depending on whether the host has `rtk` installed; `no_rtk` is the resolver that never resolves. `TRUSTY_COMPRESS_NO_RTK` (`1`/`true`/`yes`/`on`) selects it for a whole process, for a spawned binary that cannot be handed a resolver. Reporting `rtk_binary` still requires a subprocess that ran and exited zero, so the seam can only downgrade to the native chain, never claim the rtk path for a binary that did not run ([#7325](https://github.com/bobmatnyc/trusty-tools/issues/7325)).
+- New bundled agent asset `secrets-manager` (`assets/agents/secrets-manager.md`), registered in `agent_assets::AGENT_ASSETS` — operates `tm secrets` on behalf of the PM and other agents, never a resolved value (#7526).
+- Every dispatchable roster agent now declares a `tools:` allowlist in Claude
+  Code's vocabulary, so a dispatched subagent carries only the tools and MCP
+  servers its role uses instead of the implicit all-tools default. Measured on
+  2026-09-12: a subagent turn carried 151 deferred MCP tool names plus their
+  schemas, and an allowlist that omits `Skill` also sheds the whole ~131-entry
+  skills listing — +1.7K tokens for a two-tool agent against +51.8K for
+  general-purpose. `mcp__claude-in-chrome` reaches `web-qa` only,
+  `mcp__trusty-mpm` only `local-ops` and the two `mpm-*` managers,
+  `mcp__trusty-memory` only `memory-manager`/`research`/`code-analyzer`,
+  `mcp__trusty-review` only `code-critic` and `version-control`, and
+  `mcp__trusty-search` the engineers, QA, analysis, research, security and
+  documentation families. `Skill` survives only where the family loads a skill
+  it does not already preload: `rust-engineer`, `version-control`, `local-ops`
+  and `mpm-skills-manager`. An otherwise read-only role still carries the write
+  tool its own body mandates: `research` keeps `Write, Edit` for the capture
+  step that saves to `docs/research/`, and `code-analyzer` keeps `Write` for the
+  script its large-volume path generates under `scripts/code-review/`. For the
+  same reason `BASE-AGENT.md` — inherited by every agent, most of which no
+  longer carry `Skill` — now points at the `tm-prose-style` skill in prose
+  instead of modelling a `Skill(...)` call the agent cannot make. Per
+  `docs/specs/agent-context-minimization.md` §C, pinned by
+  `every_roster_agent_deploys_with_its_declared_tools` (#7683).
+- `tcode_tools:` — a second agent-frontmatter allowlist, parsed, override-merged
+  and emitted exactly like `tools:`, carrying `trusty-code`'s own tool
+  vocabulary. One roster serves two runtimes whose tool names do not overlap,
+  and `ToolRegistry::gated` matches by exact name, so a Claude-vocabulary list
+  read as a trusty-code allowlist gates that agent down to zero callable tools
+  (#7683). `AgentMetadata` carries `#[non_exhaustive]` from this release on, so
+  the next field it gains costs no consumer a compile error and no crate a
+  breaking bump — build one from `AgentMetadata::default()` and assign the
+  fields you need (#7683).
+- New `self_improvement` module: harness-agnostic extraction of the two BASE-AGENT closing-block sections — `extract_improvement_recommendations` returns the structured Symptom/Cause/Change/Evidence findings under `## Improvement recommendations`, and `extract_prompt_feedback` mirrors `trusty-mpm`'s `## Prompt feedback` extractor shape. Both tolerate a missing or malformed block and `##`/`###` heading depth, and never panic on arbitrary input. Slice 1 of `docs/specs/self-improvement-loop.md` (#7735).
+
+### Fixed
+
+- `tm compress` now invokes `rtk pipe`; the previous argv shape could never reach rtk and fell back to native on every call. `compress_via_rtk` spawned `rtk <tool_name>` with the whole tool name as one argv element, so `"git status"` became a request for a binary literally named `git status` — `No such file or directory`, exit 127, swallowed into the native fallback with `compression_path=native_fallback` and `pct_reduction=0.0` logged every time (#7311).
+- Splitting that name into separate argv elements would not have fixed it either: every rtk subcommand except `pipe` RUNS the named tool, so `rtk git status` executes `git status` and returns its output, discarding the stdin we hand it. Since this code compresses output that was ALREADY captured, `rtk pipe` — "read stdin, apply filter, print filtered output" — is the only correct mode. The invocation is now `rtk pipe -f <filter>` when the tool name maps onto a filter rtk accepts, and bare `rtk pipe` otherwise. No part of the tool name reaches argv; the filter names are compile-time constants pinned to rtk 0.48.0.
+- `rtk.rs` resolved the binary with its own hand-rolled `PATH` walk, a second implementation of a capability `trusty_common::bin_resolve::resolve_binary` already owns. It now calls that resolver, so a daemon started by launchd with a minimal `PATH` finds a Homebrew-installed `rtk` the same way every other trusty-* binary spawn does.
+- An `rtk` binary that runs and exits non-zero is no longer silent. The fallback contract is unchanged — the native chain still takes over — but the failure now logs a `warn` carrying the exit status, the argv that was passed, and the first line of the subprocess's stderr. `rtk` being absent from `PATH` stays a `debug` event, since that is the expected case.
+- An untracked target file written before the `provenance:` stamp existed is
+  still adopted rather than skipped forever. Adoption's test was byte equality
+  with the fresh composition, which the stamp broke for every pre-#4698 file;
+  `agents::provenance::without_provenance_line` lets adoption accept the
+  pre-stamp spelling too. The ledger now records the checksum of the bytes on
+  disk rather than of the composition, so an adopted file matches its own row
+  and the next deploy upgrades it into the stamped form (#4698).
+- The bundled `version-control` agent told the PR-open path to write a closing keyword when the PR finishes the issue, which on a Refs-only project contradicts that project's own `CLAUDE.md`. It now writes `Refs owner/repo#N` and reaches for `Closes`/`Fixes`/`Resolves` only where a merge is allowed to auto-close, and it carries a grep it must run over the drafted body before `gh pr create` and after every body edit — a closing keyword anywhere in the body is a stop, not just one in field 1 (#6895).
+- `compress::classify_tool` no longer lets a file's own path choose the filter
+  that damages it. The tool name it receives is the wrapped command, so
+  `cat crates/x/src/tests.rs` matched the `test` substring branch and
+  `filter_test_runner` returned an empty string — the whole file, silently
+  gone — while `cat …/mod.rs` reached `filter_file_read`, which strips every
+  `//` line and so removed the doc comments being read. A read verb (`cat`,
+  `head`, `sed`, `bat`, `tail`, `nl`, `less`, `more`) applied to a path with a
+  source or prose extension now classifies as `None` and passes through
+  byte-for-byte. Gate captures keep their compression: `.txt`, `.log` and
+  `.out` are deliberately not source extensions (#6986).
+- `compress::compress_tool_output` returns the original whenever a filter
+  consumed every byte of a non-empty input, so a compression path can no
+  longer emit nothing at all (#6986).
+- `BASE-AGENT.md`'s gate/wait recipes ("Never Narrate a Wait", "Empty-Output Protocol", "Never Directly Monitor a Declarative Process", "Never end a gate chain in a pipe") no longer redirect to a fixed `/tmp/*.txt` path. Every example now writes into the agent's own scratchpad directory with a filename made unique by the shell's PID (`<scratchpad>/gate-<crate>-$$.txt`), since the scratchpad is shared across concurrently dispatched agents in one session and a fixed name let one agent read a sibling's build output as its own result. The recipes also now call out that `echo "EXIT=$?"` after a redirect writes to the tool's own stdout, not into the file, so `tm wait --for file --contains "EXIT="` never matches it — the sentinel must be appended into the file too, or the agent should wait on the process with `tm wait --for run --pid` instead (#6997).
+- `BASE-ENGINEER.md`'s "Dependency Verification" section now names a fresh or unbuilt monorepo worktree's `Cannot find module '@scope/…'` wall as a missing-build precondition, not a type error (#7118).
+- The same "Dependency Verification" section now states the once-before-first-gate install/build sequence, and that `isolation: "worktree"` provisions no dependencies (#7381).
+- `BASE-AGENT.md`'s silent-skip verification bullet now names the Turborepo/Nx cache-hit false green — a `Cached: N cached` summary with N>0 re-ran nothing — and requires `Cached: 0 cached` or a forced (`--force`) run before trusting test counts (#7117).
+- `version-control.md`'s merge section now covers the worktree/base-branch collision where `gh pr merge --delete-branch` fails post-merge with `fatal: '<branch>' is already used by worktree at <path>`, and gives the `tm pr merge --no-delete-branch` / confirm-then-`gh api -X DELETE` sequence (#7104).
+- `BASE-ENGINEER.md`'s "Escape-Sensitive Edits" byte-exact-verification bullet now applies to every Write/Edit call, not only shell-routed ones, and names the git binary-reclassification failure signature (#7229).
+- `BASE-AGENT.md` no longer asserts "This project: CLAUDE.md sets 500/3000 SLOC via `scripts/check_line_cap.sh`" as a fact about whatever project the agent was dispatched into, and `rust-engineer.md` no longer instructs every run to execute `check_line_cap.sh`, `check_changelog_fragment.sh` and `check_test_pointers.sh` (#7247). Those scripts exist in `trusty-tools` and nowhere else; both assets now direct the agent to read the project's own `CLAUDE.md` and `scripts/` and state the fallbacks (a grep-based SLOC count, a `CHANGELOG.md` bullet under `## [Unreleased]`) for a project that defines no gates. `engineer_assets_name_no_repo_specific_doc_gate_script` pins it.
+- Bundled agent prompts no longer state `trusty-tools` crate names, script paths or repository slugs as facts about whatever project the agent was dispatched into (#7270). `rust-engineer.md` described `trusty-common`'s empty default feature set and `scripts/test_trusty_common_lanes.sh` as universal; `documentation.md` required `scripts/check_sld.sh` to pass; `version-control.md` read branch protection from a hardcoded `bobmatnyc/trusty-tools`; `BASE-ENGINEER.md` named this workspace's dependency table, this repo's DOC-38 SLD and a Cargo-only verify command for every language engineer. Each now points at the project's own CLAUDE.md and `scripts/`, or derives the value. `general_purpose_assets_state_no_repo_specific_literal` sweeps the whole roster for twelve such literals, exempting only the four assets whose subject IS this framework or this repo's delivery chain. The same pass closes the prose gaps from #7287 and #7271: scratchpad files are named per task and step (never `$$`, which differs per Bash call, and never a glob), a self-referential substitution is flagged as non-idempotent with Edit named as the fix, changelog fragments carry one category and are validated with the gate's `--file` argument before committing, a stacked branch's base is judged by `gh pr view --json state` and never by `git merge-base --is-ancestor` under squash merges, `security.md` requires every cited `file:line` to be re-read against the checkout before it is reported, and `BASE-ENGINEER.md` gains the commit-first recipe for proving a regression test fails.
+- The bundled `version-control` agent's conflict-detection instructions now name `git merge-tree --write-tree HEAD origin/main` as the check, with GitHub's `mergeable` field as the tiebreak — the legacy three-argument `git merge-tree <base> <a> <b>` form reported a merge clean when both flagged it as conflicting.
+- BASE-ENGINEER's escape-sensitive character list now names numeric escapes (`\uXXXX`, `\xXX`, octal `\NNN`) and states that the Edit/Write tool's own `new_string`/`content` argument is a direct-write corruption route, not only shell-routed edits (Refs #7480).
+- vercel-ops no longer audits environment variables with `vercel env ls --json` / `--format json`, which prints values the redacted table view hides; audits now use the table form only, and a genuinely needed value routes through the secrets model (epic #7517) instead of the agent's own context (Refs #7500).
+- `compress::filter_test_runner` keeps a failed test run readable. It was an
+  allowlist — a line survived only by containing `FAILED`/`error`/`warning` or
+  starting `---- ` / `failures:` — so the panic location, the `left:`/`right:`
+  assertion values and every multiline context line were dropped as noise, and
+  only the LAST `test result:` line was kept, which left a failing suite
+  followed by a passing one compressed to output ending `test result: ok`. It
+  is now a blocklist: passing and ignored per-test lines and cargo's indented
+  build-progress verbs are dropped, every other line is kept in its original
+  position, so every suite summary survives in order beside the diagnostics
+  that explain it and an unrecognised harness's output is kept rather than
+  discarded. A green run still compresses to its `running`/`Running` lines and
+  summaries (#7544).
+- `local-ops.md`'s "Long Waits" section now names the blocking verb for the two
+  task shapes the agent kept parking on. A deploy script and a reachability poll
+  are the agent's own commands, so the section states they run in the
+  foreground and that the wait goes through `tm wait --for run --pid` (or
+  `--for file --path` for a probe that writes a sentinel), never through a
+  notification the agent expects to wake it. The two narrations observed —
+  "I'll wait for the deploy monitor notification before proceeding" and
+  "Standing by" — are quoted as the shapes that end a turn with the goal unmet
+  (#7612).
+- The same section now states a margin rule for any bounded polling loop: bound
+  it ~10-15% under the harness's foreground ceiling rather than at it. The Bash
+  tool caps at 600000ms and a loop written to a nominal 600s overran that on
+  per-iteration overhead and auto-backgrounded; ~480s is the budget, re-issued
+  in the same turn when the condition has not met yet. #2501 and #2610 closed
+  this failure class on version-control and merge-release; this is the
+  recurrence on local-ops, whose task shapes the earlier fix did not reach
+  (#7612).
+- `ticketing.md` told an agent to run `gh issue create --add-project`, a flag
+  `gh issue create` does not have (it takes `--project`; `--add-project` is
+  `gh issue edit`-only). Every ticketing run that filed an issue hit this —
+  9 failures across 7 runs, recurring three more times after that. Also
+  removed a stale claim that `gh issue create --blocked-by` has no flag;
+  installed `gh` 2.98 supports it directly. `version-control.md` now names the
+  seven exact body headings (`## Outcome`, `## Changes`, `## Risk`,
+  `## Tests`, `## Baseline`, `## Docs`, `## Review`) `tm pr open` checks, so an
+  agent drafting a PR body no longer has to run `--help` to find them (#7727).
+- Agents without the `Skill` tool can reach the skills `BASE-AGENT.md` points them at. The five #7723 pointers named skills that only the `Skill` tool loads, so 35 of the 39 roster agents could not reach the moved content. Each pointer now tells the agent to `Read` `{{TM_SKILLS}}/<skill>/SKILL.md`. `deploy_agents` and `deploy_agents_filtered` take the install's absolute skills root and replace the placeholder in every composed body through the new `agents::skill_root::compose_agent_for_deploy`. A relative or otherwise unresolvable root fails the deploy with `AgentBuildError::UnresolvedSkillsRoot` before any file is written. The test `no_skill_agent_points_at_unloadable_skill` pins the rule (#7727).
+
+### Changed
+
+- `agents::builder::AgentBuildError` gained an `InvalidProvenance` variant. An
+  unrecognised `provenance:` value is rejected rather than degraded to the absent
+  default, which would read a typo as user-authored and freeze a framework file
+  permanently — #4408's unrecoverable shape reached through a new door (#4698).
+- The ticketing agent now runs `tm issue seed-labels` on first use in a repository, and re-runs it plus one retry when `gh issue edit --add-label` or `gh issue create --label` fails on an unknown label. Both commands fail outright on a label the repo has never seen, and the agent previously had no instruction that would create one (#6914).
+- The ticketing agent now runs `tm issue standard` to read the ticketing standard in effect rather than assuming what its prompt says. The standard comes from the `agents.ticketing` block in `~/.trusty-tools/trusty-mpm/config.yaml`, so a project can add or restyle a component label, name a different assignee, and point at its own `issue-state.yaml`. The agent asset also states the two rules that block cannot relax: `Refs #N` stays the PR issue-link keyword, and `trusty-mpm` stays a component label (#6918).
+- The bundled `ticketing` agent no longer leaves the milestone unset by default.
+  Its "Milestones Are Release Slots" section becomes "Milestone, Project,
+  Relationships — Set on Every New Issue": every issue it files carries exactly
+  one milestone (the parent's, else the crate's `Backlog · <crate>`, else the
+  one `tm issue standard` names), at least one GitHub Project, and every
+  relationship the brief names, all set natively on the `gh issue create` call
+  — `--milestone`, `--add-project`, `--parent`, and the `dependencies/blocked_by`
+  API for blocked-by. Titles come from `tm issue standard`, never hand-typed. An
+  issue may carry no milestone only with a `no-milestone: <reason>` comment on
+  it, and the agent verifies its own filing with
+  `gh issue view N --json milestone,projectItems` before reporting it done
+  (#7067).
+- The bundled `ticketing` agent now instructs posting a `no-component-label: <reason>` comment whenever no crate label fits the finding's file path, alongside the existing `no-milestone: <reason>` rule (#7198). Without that comment `tm issue audit` reports the absent component label as a FAIL; with it the row renders SKIP with the reason quoted.
+- The `version-control` agent ships at `model: sonnet`, up from `haiku` (#7274, owner ruling 2026-09-09). Its PR metadata is now derived rather than dictated — component labels from the diff, project and milestone from the issue the body's `Refs #N` names — which is the same judgment that already put `ticketing` at sonnet. `ticketing.md` and `version-control.md` now point at one shared section, `tm-ticketing`'s "The Labels, Project, Milestone Standard", instead of each restating the labels/project/milestone rule; `agent_assets::tests::ticketing_and_version_control_are_not_haiku` pins both tiers at the frontmatter, which is the only place the harness reads them.
+- The bundled `version-control` agent's merge-confirmation sequence now ends with `tm pr cleanup <n>`, and states that a nonzero exit is reported to the PM rather than worked around.
+- `BASE-AGENT.md` states each Write Plainly rule on one line and points at the
+  bundled `tm-prose-style` skill for the worked examples and the banned-phrase
+  inventories, cutting the composed agent prompt by 5.4 KB (#7423).
+- `BASE-ENGINEER.md` now tells the engineer to prove a regression test RED
+  against the branch's own pre-fix commit (`git merge-base origin/main HEAD` at
+  task start, or the SHA the brief names) instead of a bare `origin/main`, which
+  moves while the work is in progress. The same section adds the gate-script
+  spelling rule: run a repository script as `./scripts/<name>.sh`, never
+  `bash scripts/<name>.sh`, which an isolation worktree can refuse (#7705).
+- `BASE-AGENT.md` and `rust-engineer.md` carry only what an agent needs on
+  every turn — the long-form mechanics for waiting, empty-output/declarative-
+  process verification, the self-improvement reporting loop, and the
+  version-control-only worktree-removal guard conditions moved to on-demand
+  skills (`condition-based-waiting`, `verification-before-completion`, the new
+  `self-improvement-loop`) or to `version-control.md`'s own body, behind short
+  resident trigger + pointer text. `rust-engineer.md` also drops a dead
+  pre-`extends:` trailer that duplicated `BASE-ENGINEER.md` and stated a wrong
+  SLOC cap. Composed `rust-engineer` measured 55,872 bytes (19,981 tokens per
+  turn, 32% of an engineer subagent's floor) before this change (#7723).
+- Fix round: restores the `tm wait` exit-code table (`0`/`75`/`1`/`2`, the
+  VERBATIM re-issue rule for `75`), the scratchpad `$$`/glob collision
+  warning, and the backgrounded-`echo` gotcha inline in "Never Narrate a
+  Wait", and names the "Improvement recommendations"
+  (Symptom/Cause/Change/Evidence) and "Prompt feedback" closing-block
+  headings plus the `self-improvement-hypothesis` tag inline in
+  "Self-Improvement Reporting" — 35 of 39 roster agents carry no `Skill`
+  tool (#7683) and could not otherwise reconstruct them (#7723).
+
+### Documentation
+
+- `BASE-ENGINEER.md`'s regression-test-first section now names the
+  `git restore --source=HEAD --staged --worktree` substitute for
+  `git checkout HEAD --`, refused inside a Claude Code isolation worktree
+  (#7508).
+- The bundled `documentation` agent asset states that a spec edit driven by
+  an owner ruling must carry a dated cross-reference at the change site
+  (#7337).
+
 ## [0.7.0] — 2026-09-06
 
 ### Changed

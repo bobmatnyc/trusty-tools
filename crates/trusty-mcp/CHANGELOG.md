@@ -9,6 +9,13 @@ This crate has not cut a release yet — everything written so far is pending in
 
 ---
 
+## [0.1.5] — 2026-09-13
+
+### Added
+
+- `config`, a default-off feature carrying the one MCP-server configuration authority the trusty-* crates share: `McpServerConfig` (name, `McpTransport::Stdio`/`Http`/`Sse`, an enable flag, and an uninterpreted `extensions` map for consumer-specific keys), `McpConfigFile::{load, load_or_default, save}` over `~/.trusty-tools/mcp/servers.toml` with an atomic write, `resolve` for layering per-consumer overrides on a global list, and `config::claude_code::{read_mcp_servers, write_mcp_servers}` as pure conversions to and from the `mcpServers` map Claude Code reads. The three transports match `trusty_mpm::core::mcp_config::McpTransport` one for one, so routing `tm mcp add` through the adapter loses none of them. A server's `env` and `headers` hold credentials, so on unix `save` writes the file `0600` rather than at the default umask, and `McpTransport`'s hand-written `Debug` prints those maps' key names with every value replaced by `<redacted>`. TOML has no null, so `save` drops a null `extensions` member — the shape a consumer's `Option::None` field takes — rather than failing the whole file with `toml`'s unnamed `unsupported unit type`, and refuses a null INSIDE an array with `McpConfigError::NullExtensionValue` naming the server and the dotted key, because dropping an element would renumber the rest (#7452).
+- `McpConfigFile::parse` and `McpConfigFile::render` expose the parse and render halves of `load`/`save`, so a consumer doing a locked read-modify-write can decide from the bytes it already read instead of reading the path a second time outside its lock (#7454). `load` and `save` are unchanged and still the right entry points for a plain read or write.
+
 ## [0.1.4] — 2026-09-03
 
 ### Added
