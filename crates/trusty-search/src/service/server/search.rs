@@ -784,7 +784,10 @@ pub(crate) async fn search_report(
     // #2203: `search_with_drops`, not `search` — the tally is what lets a
     // caller tell "3 results because 3 matched" from "3 results because 7 were
     // dropped". Published as `meta.dropped` below.
-    let (mut results, mut dropped) = indexer.search_with_drops(&query).await.map_err(|e| {
+    // #7675: `search_with_outcome` also carries the exact-match verdict, which
+    // is what lets a caller see whether a literal floor or the semantic lanes
+    // decided the top hit. Published as `meta.exact_match_floor` below.
+    let outcome = indexer.search_with_outcome(&query).await.map_err(|e| {
         // #5917: a durable-corpus read failure is not an internal error, and a
         // body naming neither the index nor the fault is what let this state
         // read as "no matches" for a whole daemon lifetime. Report it as the
@@ -819,6 +822,12 @@ pub(crate) async fn search_report(
             }),
         )
     })?;
+    let crate::core::indexer::SearchOutcome {
+        mut results,
+        mut dropped,
+        exact_match,
+        ..
+    } = outcome;
     // Issue #64: defense-in-depth post-filter. Chunks are stored with `file`
     // paths relative to the index root, so anything that escapes the root
     // (absolute path pointing elsewhere, `..` traversal, or simply a path
@@ -948,6 +957,23 @@ pub(crate) async fn search_report(
             // same split `vector_unavailable`'s 503 body carries, so a caller
             // handles one contract, not two.
             "vector_disabled_by_config": handle.skip_vector,
+            // #7675: `true` when a literal the query named was found verbatim in
+            // the corpus and every chunk carrying it was floored above every
+            // chunk that was not — so the top hit is an exact occurrence, not a
+            // semantic guess. `exact_match_literal` is the text that was
+            // matched, and is present even when the floor found nothing, so a
+            // caller can tell "read as a literal query, no occurrence" from
+            // "read as a conceptual query" (where it is `null`).
+            "exact_match_floor": exact_match.applied,
+            "exact_match_literal": exact_match.literal,
+            // #7675: the fail-open guard. `exact_match_degraded` is `true` when
+            // the lane could not read the corpus at all, so an absent floor
+            // means "the lane did not run", not "the literal is not there" —
+            // the same distinction `bm25_lane_degraded` draws for its lane.
+            // `exact_match_full_scan` says the BM25 postings prefilter was
+            // unavailable and every chunk's content was matched instead.
+            "exact_match_degraded": exact_match.degraded,
+            "exact_match_full_scan": exact_match.full_scan,
         },
     });
     // #5069: a routed query's results belong to the SERVING facet's tree, which

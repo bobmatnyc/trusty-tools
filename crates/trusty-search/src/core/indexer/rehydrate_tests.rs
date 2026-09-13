@@ -721,3 +721,67 @@ async fn lane_degraded_stays_false_for_a_genuinely_empty_corpus() {
          retry-exhausted cold-start/race path may (issue #3683 finding 3)"
     );
 }
+
+/// #7675: the exact-match lane's rehydrate-exhaustion arm owes the same
+/// degraded signal its siblings already emit.
+///
+/// Why: `exact_match_lane` returned an empty `Vec` on exhaustion with no gauge,
+/// no flag and no log — bit-for-bit what "the literal is absent from the corpus"
+/// looks like. A caller could not tell a warming index from a genuine miss,
+/// which is the fail-open shape `bm25_search` and `grep_fallback_search` already
+/// close for their lanes (#3683 finding 3).
+/// What: evicts the chunk map, slows the detached rehydrate past the lane's
+/// bounded waits, and asserts the lane reports `degraded` AND flips the sticky
+/// per-index flag the shared `trusty_bm25_lane_degraded` gauge tracks.
+#[tokio::test]
+#[serial_test::serial]
+async fn exact_match_lane_degrades_observably_on_exhausted_retries() {
+    use crate::core::indexer::search::exact::{extract_exact_literal, literal_regex};
+    use std::sync::atomic::Ordering;
+
+    let dir = tempfile::tempdir().unwrap();
+    let redb_path = dir.path().join("index.redb");
+    let idx = Arc::new(make_indexer_with_corpus(&redb_path));
+    idx.index_files_batch(&[(
+        "src/trust.rs".into(),
+        "fn is_trusted(path: &str) -> bool { true }".into(),
+    )])
+    .await
+    .expect("index batch");
+
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    idx.evict_chunks_if_idle(Duration::from_nanos(1)).await;
+    assert!(idx.chunks_evicted.load(Ordering::Relaxed));
+    assert!(!idx.lane_degraded(), "must not start degraded");
+
+    let prev_wait_ms = std::env::var("TRUSTY_REHYDRATE_WAIT_MS").ok();
+    // Same budget arithmetic as the bm25 sibling above: a 5ms bounded wait
+    // reliably expires before the artificially slowed 150ms scan finishes.
+    unsafe { std::env::set_var("TRUSTY_REHYDRATE_WAIT_MS", "5") };
+    super::idle_evict::TEST_REHYDRATE_DELAY_MS.store(150, Ordering::Relaxed);
+
+    let lit = extract_exact_literal("is_trusted").expect("identifier");
+    let re = literal_regex(&lit).expect("regex");
+    let lane = idx
+        .exact_match_lane(&lit, &re, 10, crate::core::indexer::SearchMode::All, None)
+        .await;
+
+    assert!(
+        lane.hits.is_empty(),
+        "the lane cannot read a mid-rehydrate corpus"
+    );
+    assert!(
+        lane.degraded,
+        "an exhausted rehydrate must report degraded, not a literal that is absent (#7675)"
+    );
+    assert!(
+        idx.lane_degraded(),
+        "the exact lane must set the same sticky flag `bm25_search` sets (#3683 finding 3)"
+    );
+
+    super::idle_evict::TEST_REHYDRATE_DELAY_MS.store(0, Ordering::Relaxed);
+    match prev_wait_ms {
+        Some(v) => unsafe { std::env::set_var("TRUSTY_REHYDRATE_WAIT_MS", v) },
+        None => unsafe { std::env::remove_var("TRUSTY_REHYDRATE_WAIT_MS") },
+    }
+}

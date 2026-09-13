@@ -273,3 +273,47 @@ fn upsert_document_delegates_to_reporting_and_still_logs_once() {
         None => unsafe { std::env::remove_var("TRUSTY_BM25_CORPUS_CAP") },
     }
 }
+
+/// The postings intersection must name exactly the documents carrying every
+/// term, which is what makes it sound to verify a verbatim literal against.
+///
+/// Why: trusty-search's exact-match floor (#7675) replaces an `O(corpus)`
+/// content scan with this candidate set; a document missing from it is a
+/// literal the floor silently fails to find.
+/// What: three documents, one of which carries both terms.
+/// Test: this test.
+#[test]
+#[serial_test::serial]
+fn docs_containing_all_intersects_postings() {
+    let mut idx = BM25Index::new();
+    idx.upsert_document("both", "fn render_savings_segment(total: u64) {}");
+    idx.upsert_document("one", "fn render_only(total: u64) {}");
+    idx.upsert_document("other", "let savings = compute();");
+    let terms = vec!["render".to_string(), "savings".to_string()];
+    let mut got = idx.docs_containing_all(&terms).expect("terms were given");
+    got.sort_unstable();
+    assert_eq!(got, vec!["both"], "only the doc carrying both terms");
+}
+
+/// A term no document carries is a real empty answer, not an unavailable one.
+#[test]
+#[serial_test::serial]
+fn docs_containing_all_is_empty_for_an_absent_term() {
+    let mut idx = BM25Index::new();
+    idx.upsert_document("a", "fn render_savings_segment() {}");
+    let terms = vec!["render".to_string(), "absentterm".to_string()];
+    assert_eq!(
+        idx.docs_containing_all(&terms),
+        Some(Vec::new()),
+        "an absent term intersects to nothing"
+    );
+}
+
+/// No terms means no candidate set is derivable — the caller must fall back.
+#[test]
+#[serial_test::serial]
+fn docs_containing_all_is_none_for_no_terms() {
+    let mut idx = BM25Index::new();
+    idx.upsert_document("a", "fn render() {}");
+    assert!(idx.docs_containing_all(&[]).is_none());
+}

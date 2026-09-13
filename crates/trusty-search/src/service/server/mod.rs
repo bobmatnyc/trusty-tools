@@ -150,6 +150,9 @@ mod tests_index_config;
 // #2203: a search that drops rows after fusion must report how many and why.
 #[cfg(test)]
 mod tests_dropped_results;
+// #7675: a search whose top hit was decided by the exact-match floor must say so.
+#[cfg(test)]
+mod tests_exact_match_7675;
 // #5917: a search over an index whose corpus cannot be read must be refused.
 #[cfg(test)]
 mod tests_corpus_read_5917;

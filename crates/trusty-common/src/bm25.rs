@@ -15,7 +15,7 @@
 //! Test: `cargo test -p trusty-common --features bm25` covers tokenisation,
 //! ranking, incremental updates, and corpus-cap behaviour.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Default cap on the number of live documents BM25 will accept.
@@ -411,6 +411,57 @@ impl BM25Index {
         self.slot_to_id[slot] = None;
         self.free_slots.push(slot);
         self.live_docs = self.live_docs.saturating_sub(1);
+    }
+
+    /// Document ids whose postings carry EVERY term in `terms`.
+    ///
+    /// Why: a caller that must find a literal verbatim cannot afford an
+    /// `O(corpus)` regex scan over every document's raw text — trusty-search's
+    /// exact-match floor (#7675) needs a candidate set to verify instead. Every
+    /// document containing a literal verbatim necessarily contains all of that
+    /// literal's tokens, so the intersection of their postings is a superset of
+    /// the verbatim matches: sound to verify against, and `O(min df)` rather
+    /// than `O(corpus)`.
+    /// What: intersects the inverted-index postings, walking the rarest term's
+    /// list and testing membership in the rest. Returns `None` only when
+    /// `terms` is empty (no candidate set is derivable); an empty `Vec` means
+    /// no document carries all of them. Ids are returned in postings order,
+    /// which the caller must not read as a ranking.
+    ///
+    /// The result is only as complete as the corpus: a document dropped by the
+    /// `TRUSTY_BM25_CORPUS_CAP` never appears here, so a caller that requires
+    /// completeness must compare [`Self::len`] against its own document count
+    /// before trusting the candidate set.
+    /// Test: `docs_containing_all_intersects_postings`,
+    /// `docs_containing_all_is_empty_for_an_absent_term`,
+    /// `docs_containing_all_is_none_for_no_terms`.
+    pub fn docs_containing_all(&self, terms: &[String]) -> Option<Vec<&str>> {
+        if terms.is_empty() {
+            return None;
+        }
+        let mut lists: Vec<&Vec<(usize, usize)>> = Vec::with_capacity(terms.len());
+        for term in terms {
+            let Some(postings) = self.inverted.get(term.as_str()) else {
+                // A term no document carries: the intersection is empty, and
+                // that is a real answer, not an unavailable one.
+                return Some(Vec::new());
+            };
+            lists.push(postings);
+        }
+        // Walk the rarest term; every other term becomes a membership test.
+        lists.sort_by_key(|postings| postings.len());
+        let (rarest, rest) = lists.split_first()?;
+        let rest_slots: Vec<HashSet<usize>> = rest
+            .iter()
+            .map(|postings| postings.iter().map(|(slot, _)| *slot).collect())
+            .collect();
+        Some(
+            rarest
+                .iter()
+                .filter(|(slot, _)| rest_slots.iter().all(|slots| slots.contains(slot)))
+                .filter_map(|(slot, _)| self.slot_to_id.get(*slot)?.as_deref())
+                .collect(),
+        )
     }
 
     /// Score every document that contains at least one query term, returning

@@ -93,6 +93,8 @@ pub(crate) use helpers::{
 pub use corpus_fault::CorpusReadUnavailable;
 pub use migration_state::{IndexMigrationInProgress, MigrationWindow};
 pub use search::drops::SearchDrops;
+pub use search::exact::ExactMatchReport;
+pub use search::SearchOutcome;
 pub use typeahead::{TypeaheadHit, TypeaheadMode, TypeaheadResponse};
 pub(crate) use types::ChunkSnapshot;
 pub use types::{CodeChunk, CommitTimings, ParsedBatch, SearchMode, SearchQuery, SearchStage};
