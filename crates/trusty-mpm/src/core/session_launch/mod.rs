@@ -37,6 +37,8 @@ mod divert_hooks;
 /// Test: covered by `asset_notices`' own tests (this is a plain re-export).
 pub use asset_notices::{PrepScope, log_prep_findings};
 mod palace_alias;
+// #7780: preserve a malformed project settings.json before a writer rewrites it.
+mod malformed_backup;
 // #4448: the ONE wiring of the shadowing-agent quarantine, shared by
 // `prepare_session_inner` and `sync_session_assets`.
 mod project_hooks;
@@ -107,6 +109,12 @@ mod tests_claude_json_concurrency_4072;
 #[cfg(test)]
 #[path = "tests_quarantine_4448.rs"]
 mod tests_quarantine_4448;
+
+// #7780: the malformed-settings copy-aside, at every writer's call site and
+// once per `prepare_session`.
+#[cfg(test)]
+#[path = "tests_malformed_settings_7780.rs"]
+mod tests_malformed_settings_7780;
 
 use std::path::{Path, PathBuf};
 
@@ -388,6 +396,26 @@ pub enum PrepError {
     /// Test: `write_project_hooks_aborts_when_the_snapshot_fails`.
     #[error("could not snapshot {path} before rewriting it: {source}")]
     HookSnapshot {
+        /// The settings file whose rewrite was abandoned.
+        path: PathBuf,
+        /// The underlying IO error.
+        source: std::io::Error,
+    },
+    /// The project's `.claude/settings.json` could not be preserved, so the
+    /// writer that was about to replace it left it alone (#7780).
+    ///
+    /// Why its own variant rather than [`Self::Io`]: like [`Self::HookSnapshot`]
+    /// this reports the benign half of fail-closed — the file on disk survived
+    /// and only tm's update was skipped — and a bare I/O error reads as if the
+    /// launch had lost the operator's settings, which is the opposite of what
+    /// happened. Raised for a file that cannot be READ at all as well as for a
+    /// preserved copy that cannot be written; neither leaves anything downstream
+    /// able to put the original bytes back. Non-fatal, for the reason
+    /// [`Self::HookExe`] is: the session still starts.
+    /// Test: `malformed_backup::tests::refuses_when_the_copy_cannot_be_written`,
+    /// `merge_settings_refuses_when_the_copy_cannot_be_written`.
+    #[error("refused to rewrite {path}: its current contents could not be preserved: {source}")]
+    SettingsBackup {
         /// The settings file whose rewrite was abandoned.
         path: PathBuf,
         /// The underlying IO error.
