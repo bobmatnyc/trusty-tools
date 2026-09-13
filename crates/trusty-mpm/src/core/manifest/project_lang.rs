@@ -132,7 +132,7 @@ pub(crate) struct MarkerProbe {
     roots: Vec<PathBuf>,
     /// One aggregate read budget for the whole detection call.
     budget: ProbeBudget,
-    /// True when a RESOURCE cap stopped the nested walk short, so every
+    /// True when a RESOURCE cap stopped EITHER discovery pass short, so every
     /// [`Self::detect`] answer from this probe may be incomplete (#7781).
     truncated: bool,
     /// True when the nested walk left children unread at its declared depth,
@@ -157,7 +157,8 @@ impl MarkerProbe {
     /// `rust_only_repo_detects_only_rust_engineer`.
     pub(crate) fn new(project_dir: &Path, categories: &AgentCategories) -> Self {
         let budget = ProbeBudget::new();
-        let mut roots = probe_roots(project_dir, &budget);
+        let declared = probe_roots(project_dir, &budget);
+        let mut roots = declared.roots;
         let anchors = MarkerAnchors::from_categories(categories);
         // #7781 round-2: the walk reports whether a bound cut it short, and that
         // flag travels with the probe so a caller can say detection is partial.
@@ -168,7 +169,11 @@ impl MarkerProbe {
         Self {
             roots,
             budget,
-            truncated: nested.truncated,
+            // #7781 round-3: EITHER discovery path can exhaust a resource cap,
+            // and a member the declared pass dropped is often unreachable by the
+            // nested walk (it lives under a skipped directory), so the walk's
+            // flag alone under-reports.
+            truncated: declared.truncated || nested.truncated,
             depth_limited: nested.depth_limited,
         }
     }
@@ -179,10 +184,12 @@ impl MarkerProbe {
     /// Why: a caller that renders or routes on the detected set must be able to
     /// say "this list may be incomplete" — the round-1 #7781 finding. Kept
     /// separate from [`Self::depth_limited`] so it stays rare enough to act on.
-    /// What: the [`nested_probe_roots`] flag set by `MAX_SCANNED_DIRS` or the
-    /// shared member cap.
+    /// What: the OR of both discovery paths' resource caps — [`probe_roots`]'s
+    /// declared-member and pattern caps, and the [`nested_probe_roots`] flag set
+    /// by `MAX_SCANNED_DIRS` or the shared member cap.
     /// Test: `scanned_dirs_bound_reports_truncation`,
-    /// `a_small_tree_is_not_truncated`, `depth_limited_tree_is_not_truncated`.
+    /// `a_small_tree_is_not_truncated`, `depth_limited_tree_is_not_truncated`,
+    /// `declared_member_cap_is_reported_to_the_caller`.
     pub(crate) fn truncated(&self) -> bool {
         self.truncated
     }

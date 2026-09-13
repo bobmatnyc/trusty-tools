@@ -31,7 +31,12 @@
 //!
 //! Exhausting a bound is **fail-closed**: probing stops and the unread members
 //! are treated as carrying no marker, exactly as an unreadable file is. It never
-//! errors and never blocks a launch.
+//! errors and never blocks a launch. Failing closed SILENTLY is a different
+//! thing, and #7781 removed it: a member or pattern cap that drops a declared
+//! member now sets [`WorkspaceProbe::truncated`] and logs one WARN naming the
+//! bound, so `super::framework::StackDetection::truncated` covers every
+//! resource cap either discovery path applies. The byte budget is not one of
+//! them — an unaffordable read is the same absence as an unreadable file.
 //! Test: `crates/trusty-mpm/src/core/manifest/workspace_tests.rs`.
 
 use std::cell::Cell;
@@ -115,29 +120,99 @@ pub(crate) fn read_bounded(path: &Path, budget: &ProbeBudget) -> Option<String> 
     std::fs::read_to_string(path).ok()
 }
 
+/// Log the resource cap that dropped part of a bounded stack-detection scan.
+///
+/// Why: a `truncated` flag says detection is incomplete; only the log says
+/// WHICH ceiling to raise, and raising the wrong one fixes nothing. WARN is
+/// right here and only here: a repository large enough to exhaust a resource
+/// cap is the exception, so the level matches how often an operator should
+/// look. Shared with `super::nested` (#7781 round-3) so the declared-member
+/// pass and the nested walk report a tripped cap in one voice.
+/// What: one WARN naming the bound and the project it tripped on. The nested
+/// walk's DEPTH bound does NOT come through here — see
+/// `super::nested::debug_depth_limited`.
+/// Test: `scanned_dirs_bound_reports_truncation`,
+/// `declared_member_cap_is_reported_to_the_caller`.
+pub(crate) fn warn_truncated(project_dir: &Path, bound: &str) {
+    tracing::warn!(
+        bound,
+        project = %project_dir.display(),
+        "#7781: stack detection was truncated by a scan bound; a project past \
+         it is undetected"
+    );
+}
+
+/// The directories marker detection should probe, and whether a cap cut them short.
+///
+/// Why: every bound in this module fails closed by returning FEWER roots, so a
+/// capped list is byte-identical to a genuinely small workspace — the same
+/// silent-nothing `super::nested` already reports on, left unreported here.
+/// #7781 round-3: `super::framework::StackDetection::truncated` documents
+/// itself as covering every resource cap, so the declared-member pass has to
+/// contribute to it.
+/// What: `roots` is the project root followed by the in-cap member directories;
+/// `truncated` is true when [`MAX_WORKSPACE_PATTERNS`] or
+/// [`MAX_WORKSPACE_MEMBERS`] dropped a declaration, beside one
+/// [`warn_truncated`] naming that bound. `truncated` is OR-ed into
+/// `super::project_lang::MarkerProbe::truncated`.
+/// Test: `member_count_is_capped`, `pattern_count_is_capped`,
+/// `single_package_project_probes_only_root`,
+/// `declared_member_cap_is_reported_to_the_caller`.
+pub(crate) struct WorkspaceProbe {
+    /// The project root first, then each declared member directory that exists.
+    pub(crate) roots: Vec<PathBuf>,
+    /// True when a resource cap dropped a declared member, so `roots` is partial.
+    pub(crate) truncated: bool,
+}
+
 /// The directories marker detection should probe: the root, then its members.
 ///
 /// Why: the single entry point detection calls, so "where do we look" is stated
 /// once. The root is always first, so a single-package project behaves exactly
 /// as it did before this module existed.
-/// What: `[project_dir]` followed by every declared workspace member directory
-/// that exists, de-duplicated, capped at [`MAX_WORKSPACE_MEMBERS`], in
-/// deterministic (sorted-per-pattern) order.
+/// What: a [`WorkspaceProbe`] whose roots are `[project_dir]` followed by every
+/// declared workspace member directory that exists, de-duplicated, capped at
+/// [`MAX_WORKSPACE_MEMBERS`], in deterministic (sorted-per-pattern) order, and
+/// whose `truncated` reports whether a cap dropped a declared member. One WARN
+/// at most, naming the bound that tripped, whichever of the two produced it.
 /// Test: `npm_workspaces_array_members`, `pnpm_workspace_members`,
-/// `elixir_umbrella_members`, `single_package_project_probes_only_root`.
-pub(crate) fn probe_roots(project_dir: &Path, budget: &ProbeBudget) -> Vec<PathBuf> {
+/// `elixir_umbrella_members`, `single_package_project_probes_only_root`,
+/// `member_count_is_capped`.
+pub(crate) fn probe_roots(project_dir: &Path, budget: &ProbeBudget) -> WorkspaceProbe {
+    let scan = workspace_members(project_dir, budget);
+    let mut truncated_by = scan.truncated_by;
     let mut roots = vec![project_dir.to_path_buf()];
-    for member in workspace_members(project_dir, budget) {
+    for member in scan.members {
         // `roots` carries the project root plus members, so the ceiling is
         // MAX_WORKSPACE_MEMBERS members = MAX_WORKSPACE_MEMBERS + 1 entries.
         if roots.len() > MAX_WORKSPACE_MEMBERS {
+            // #7781: dropping a declared member is a RESOURCE cap; before this
+            // it was a bare `break` that returned a short list and said nothing.
+            truncated_by = Some("MAX_WORKSPACE_MEMBERS");
             break;
         }
         if !roots.contains(&member) {
             roots.push(member);
         }
     }
-    roots
+    if let Some(bound) = truncated_by {
+        warn_truncated(project_dir, bound);
+    }
+    WorkspaceProbe {
+        roots,
+        truncated: truncated_by.is_some(),
+    }
+}
+
+/// Declared members, plus the bound that dropped the ones beyond them.
+///
+/// Why: the caller needs the tripped bound's NAME, not just "something was
+/// dropped", so its one WARN can say which ceiling to raise (#7781).
+/// What: `truncated_by` is `None` when every declared pattern and member was
+/// honoured, else the name of the constant that cut the list short.
+struct MemberScan {
+    members: Vec<PathBuf>,
+    truncated_by: Option<&'static str>,
 }
 
 /// Every workspace member directory declared by `project_dir`'s root manifest.
@@ -145,9 +220,12 @@ pub(crate) fn probe_roots(project_dir: &Path, budget: &ProbeBudget) -> Vec<PathB
 /// Why/What: unions the four declaration formats, expands each declared glob,
 /// and keeps only paths that exist and are directories. Reading the DECLARATION
 /// rather than assuming `packages/*` means a workspace using any other layout is
-/// covered without this module guessing at conventions.
-/// Test: `npm_workspaces_object_form`, `unknown_root_declares_no_members`.
-fn workspace_members(project_dir: &Path, budget: &ProbeBudget) -> Vec<PathBuf> {
+/// covered without this module guessing at conventions. Both bounds it applies
+/// report themselves through [`MemberScan::truncated_by`] rather than silently
+/// shortening the list (#7781).
+/// Test: `npm_workspaces_object_form`, `unknown_root_declares_no_members`,
+/// `member_count_is_capped`, `pattern_count_is_capped`.
+fn workspace_members(project_dir: &Path, budget: &ProbeBudget) -> MemberScan {
     let mut patterns = Vec::new();
     patterns.extend(npm_workspace_patterns(project_dir, budget));
     patterns.extend(pnpm_workspace_patterns(project_dir, budget));
@@ -155,18 +233,25 @@ fn workspace_members(project_dir: &Path, budget: &ProbeBudget) -> Vec<PathBuf> {
     // #7781: a Cargo workspace declares its members the same way, and a member
     // that declares a stack the root does not was invisible before.
     patterns.extend(cargo_workspace_patterns(project_dir, budget));
+    let over_pattern_cap = patterns.len() > MAX_WORKSPACE_PATTERNS;
     patterns.truncate(MAX_WORKSPACE_PATTERNS);
 
     let mut members = Vec::new();
     for pattern in patterns {
         for dir in expand_member_glob(project_dir, &pattern) {
             if members.len() >= MAX_WORKSPACE_MEMBERS {
-                return members;
+                return MemberScan {
+                    members,
+                    truncated_by: Some("MAX_WORKSPACE_MEMBERS"),
+                };
             }
             members.push(dir);
         }
     }
-    members
+    MemberScan {
+        members,
+        truncated_by: over_pattern_cap.then_some("MAX_WORKSPACE_PATTERNS"),
+    }
 }
 
 /// npm/yarn `workspaces` from `package.json` — array form or `{ packages: [] }`.

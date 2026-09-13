@@ -6,7 +6,8 @@
 //! finding a stack when a manifest marker gains a shape it does not handle.
 //! What: anchor derivation against the BUNDLED manifest, the depth, scanned-
 //! directory and shared-member bounds and which of the two flags each one sets
-//! — `truncated` for a resource cap, `depth_limited` for the declared depth —
+//! — `truncated` for a resource cap, `depth_limited` for the declared depth,
+//! each alone and both in one walk, with the WARN and DEBUG line each emits —
 //! the skip rules, `.gitignore` parsing, determinism, symlink containment, and
 //! an unreadable subdirectory.
 //! Test: this file.
@@ -386,6 +387,10 @@ fn directory_symlink_is_not_traversed() {
 fn scanned_dirs_bound_reports_truncation() {
     use tracing_subscriber::layer::SubscriberExt;
 
+    // #4931: a thread-local subscriber never raises the process-global level,
+    // so without this the capture below is empty unless an unrelated test in
+    // the binary installed a global default first.
+    crate::test_support::enable_event_capture();
     const FANOUT: usize = 64;
     // The root, the first tier, and the second tier are all scanned. Checked at
     // COMPILE time, so raising MAX_SCANNED_DIRS without resizing the fixture
@@ -430,6 +435,134 @@ fn scanned_dirs_bound_reports_truncation() {
         lines.iter().any(|l| l.contains("MAX_SCANNED_DIRS")),
         "the WARN must name the bound that tripped, or an operator cannot tell \
          which ceiling to raise: {lines:#?}"
+    );
+}
+
+/// A resource cap and the depth bound can trip in the SAME walk (#7781 round-3).
+///
+/// Why: round-2 review — the two flags are documented as independent ("either,
+/// both, or neither"), and only the single-flag cases were pinned. The walk's
+/// resource-cap exits carried `depth_limited` out by hand, so a walk that hit
+/// both bounds would have reported the resource cap alone had either exit
+/// dropped it, and no test would have noticed.
+/// The LOG half had the same gap for real: the resource-cap exits returned
+/// before `debug_depth_limited`, so this walk set `depth_limited` and logged
+/// nothing about it. Both halves are asserted here.
+/// What: one chain to depth 3, then a depth-4 tier wide enough to exhaust
+/// `MAX_SCANNED_DIRS`. Children are sorted, so the first depth-4 directory is
+/// scanned long before the cap trips, and its unread child sets the depth flag;
+/// the cap then ends the walk. Asserts both flags, and that BOTH the WARN and
+/// the DEBUG reach a subscriber. `#[serial]` for the same subscriber reason as
+/// `scanned_dirs_bound_reports_truncation`.
+/// Test: this function IS the test.
+#[test]
+#[serial_test::serial]
+fn both_bounds_can_trip_together() {
+    use tracing_subscriber::layer::SubscriberExt;
+
+    crate::test_support::enable_event_capture();
+    let tmp = TempDir::new().unwrap();
+    // Depths 1-3 are a single chain, so the scan budget is spent at depth 4:
+    // 4 chain directories plus MAX_SCANNED_DIRS leaves exceeds the bound.
+    let tier = tmp.path().join("a/b/c");
+    for i in 0..MAX_SCANNED_DIRS {
+        fs::create_dir_all(tier.join(format!("d{i:05}"))).unwrap();
+    }
+    // The FIRST depth-4 directory in sorted order has a child the walk cannot
+    // read, which is the depth limit — reached before the scan cap trips.
+    fs::create_dir_all(tier.join("d00000/unread")).unwrap();
+
+    let buffer = trusty_common::log_buffer::LogBuffer::new(64);
+    let subscriber = tracing_subscriber::registry().with(
+        trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+    );
+    let probe = tracing::subscriber::with_default(subscriber, || {
+        let budget = ProbeBudget::new();
+        nested_probe_roots(
+            tmp.path(),
+            &bundled_anchors(),
+            &budget,
+            &[tmp.path().to_path_buf()],
+        )
+    });
+
+    assert!(
+        probe.depth_limited,
+        "a child left unread at the declared depth is the depth limit, whatever \
+         ended the walk afterwards"
+    );
+    assert!(
+        probe.truncated,
+        "the depth-4 tier is wider than MAX_SCANNED_DIRS, so the resource cap \
+         ended the walk"
+    );
+    let lines = buffer.tail(64);
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("WARN") && l.contains("MAX_SCANNED_DIRS")),
+        "the resource cap still names itself: {lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("DEBUG") && l.contains("stopped at its declared depth")),
+        "the depth limit must be logged even when a resource cap ended the walk — \
+         the early returns used to skip it: {lines:#?}"
+    );
+}
+
+/// The depth limit reaches an operator's log, at DEBUG and never as a WARN.
+///
+/// Why (#7781 round-3 review): `debug_depth_limited` was called from exactly one
+/// of the walk's three exits, so a walk that ended at a resource cap set the
+/// flag and logged nothing. The WARN half of this contract is pinned by
+/// `scanned_dirs_bound_reports_truncation`; this is its DEBUG counterpart.
+/// What: a package nested past `MAX_NESTED_DEPTH` with no resource cap in reach;
+/// captures the walk's `tracing` output in a `LogBuffer` and asserts one DEBUG
+/// line naming the declared depth, and no WARN. `#[serial]` because installing a
+/// subscriber perturbs the process-global interest cache, and
+/// `enable_event_capture` because the process-global level starts at `OFF` and
+/// only a GLOBAL default raises it — without it this capture is empty whenever
+/// no unrelated test happened to install one first (#4931, measured here).
+/// Test: this function IS the test.
+#[test]
+#[serial_test::serial]
+fn depth_limit_is_logged_at_debug() {
+    use tracing_subscriber::layer::SubscriberExt;
+
+    crate::test_support::enable_event_capture();
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "a/b/c/d/e/package.json", "{}");
+
+    let buffer = trusty_common::log_buffer::LogBuffer::new(64);
+    let subscriber = tracing_subscriber::registry().with(
+        trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+    );
+    let probe = tracing::subscriber::with_default(subscriber, || {
+        let budget = ProbeBudget::new();
+        nested_probe_roots(
+            tmp.path(),
+            &bundled_anchors(),
+            &budget,
+            &[tmp.path().to_path_buf()],
+        )
+    });
+
+    assert!(
+        probe.depth_limited,
+        "the fixture nests past the depth bound"
+    );
+    let lines = buffer.tail(64);
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("DEBUG") && l.contains("stopped at its declared depth")),
+        "the depth limit must reach the log, or only the flag records it: {lines:#?}"
+    );
+    assert!(
+        !lines.iter().any(|l| l.contains("WARN")),
+        "the declared depth is not a resource cap and must not warn: {lines:#?}"
     );
 }
 

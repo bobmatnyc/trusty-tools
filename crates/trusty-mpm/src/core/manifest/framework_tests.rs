@@ -496,6 +496,45 @@ fn truncated_detection_is_reported_to_the_caller() {
     );
 }
 
+/// The DECLARED-member cap reaches the caller, even when the walk cannot see it.
+///
+/// Why (#7781 round-3 review): `StackDetection::truncated` documents itself as
+/// covering every resource cap, and `workspace::probe_roots` dropped declared
+/// members past `MAX_WORKSPACE_MEMBERS` with a bare `break` and no signal.
+/// `truncated_detection_is_reported_to_the_caller` did not catch it: its dropped
+/// member sits at depth 1, where the nested walk meets it and trips the SHARED
+/// member cap instead, so the flag arrived for the wrong reason.
+/// What: a workspace declaring `MAX_WORKSPACE_MEMBERS + 1` members whose extra
+/// member lives under `vendor/` — a `SKIP_DIR_NAMES` directory the nested walk
+/// never descends into — so the declared pass is the ONLY thing that can report
+/// the cap. Asserts `truncated` without `depth_limited`.
+/// Test: this function IS the test.
+#[test]
+fn declared_member_cap_is_reported_to_the_caller() {
+    let tmp = TempDir::new().unwrap();
+    fs::write(
+        tmp.path().join("package.json"),
+        r#"{"workspaces":["m*","vendor/*"]}"#,
+    )
+    .unwrap();
+    for i in 0..MAX_WORKSPACE_MEMBERS {
+        touch(tmp.path(), &format!("m{i:04}/package.json"));
+    }
+    // The member past the cap, parked where the nested walk cannot find it.
+    touch(tmp.path(), "vendor/dropped/package.json");
+
+    let detected = detected_stack_engineers(tmp.path());
+    assert!(
+        detected.truncated,
+        "dropping a declared member is a resource cap, and the caller must see \
+         it whether or not the nested walk can reach that member"
+    );
+    assert!(
+        !detected.depth_limited,
+        "a one-level-deep workspace never reaches the depth bound"
+    );
+}
+
 #[test]
 fn bundled_skill_roster_is_valid() {
     // The shipped `[skill_categories]` must exactly cover the bundled skills.

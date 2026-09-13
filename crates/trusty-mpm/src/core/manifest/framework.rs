@@ -476,14 +476,24 @@ pub fn agent_scope_from(categories: &AgentCategories, project_dir: &Path) -> Age
 /// Round-2 answered it with one flag that the depth bound set on most real
 /// repositories, which is useless as a fail-closed signal; round-3 splits it.
 /// What: `truncated` means the engineer set may be INCOMPLETE because a resource
-/// cap stopped the walk, and a consumer that persists a negative conclusion must
-/// fail closed on it. `depth_limited` means manifests deeper than the declared
-/// depth were not probed, which is the design's scope, informational only. Both
-/// are propagated from the nested walk, which names the tripped resource cap in
-/// a `tracing::warn!` and the depth bound in a `tracing::debug!`.
+/// cap stopped detection — EVERY such cap, in either discovery pass: the
+/// declared-member and pattern caps of `super::workspace`, and the nested walk's
+/// scanned-directory and shared member caps (#7781 round-3). A consumer that
+/// persists a negative conclusion must fail closed on it. `depth_limited` means
+/// manifests deeper than the declared depth were not probed, which is the
+/// design's scope, informational only. The tripped resource cap is named in a
+/// `tracing::warn!` and the depth bound in a `tracing::debug!`.
+///
+/// `#[non_exhaustive]`: a future bound gets a third flag, and adding one must
+/// not be a breaking change for a downstream consumer that matched on the
+/// struct. Construction stays inside this crate, which is where every
+/// bound that could set a flag lives.
 /// Test: `detected_stack_engineers_matches_the_manifest`,
 /// `truncated_detection_is_reported_to_the_caller`,
+/// `declared_member_cap_is_reported_to_the_caller`,
 /// `core::stack_profile::tests::truncated_detection_says_so`.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct StackDetection {
     /// The `language` + `framework` stems whose declared markers are present.
     pub engineers: BTreeSet<String>,

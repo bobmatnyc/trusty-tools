@@ -27,6 +27,7 @@ fn mkdir(dir: &Path, rel: &str) {
 fn members(root: &Path) -> Vec<String> {
     let budget = ProbeBudget::new();
     probe_roots(root, &budget)
+        .roots
         .into_iter()
         .skip(1) // the root itself is always first
         .map(|p| {
@@ -49,8 +50,12 @@ fn single_package_project_probes_only_root() {
         r#"{"dependencies":{"react":"^18"}}"#,
     );
     let budget = ProbeBudget::new();
-    let roots = probe_roots(tmp.path(), &budget);
-    assert_eq!(roots, vec![tmp.path().to_path_buf()]);
+    let probe = probe_roots(tmp.path(), &budget);
+    assert_eq!(probe.roots, vec![tmp.path().to_path_buf()]);
+    assert!(
+        !probe.truncated,
+        "a flag that is always true carries no information (#7781)"
+    );
 }
 
 #[test]
@@ -301,11 +306,16 @@ fn member_count_is_capped() {
         mkdir(tmp.path(), &format!("packages/p{i:04}"));
     }
     let budget = ProbeBudget::new();
-    let roots = probe_roots(tmp.path(), &budget);
+    let probe = probe_roots(tmp.path(), &budget);
     assert_eq!(
-        roots.len(),
+        probe.roots.len(),
         MAX_WORKSPACE_MEMBERS + 1,
         "root plus at most MAX_WORKSPACE_MEMBERS members"
+    );
+    assert!(
+        probe.truncated,
+        "#7781: dropping declared members is a resource cap the caller must see, \
+         not a silently short list"
     );
 }
 
@@ -336,6 +346,11 @@ fn pattern_count_is_capped() {
         !found.iter().any(|p| p.ends_with("last")),
         "a member reachable only past the pattern cap is NOT probed: {found:?}"
     );
+    let budget = ProbeBudget::new();
+    assert!(
+        probe_roots(tmp.path(), &budget).truncated,
+        "#7781: the pattern cap drops declared members too, so it reports itself"
+    );
 }
 
 #[test]
@@ -363,11 +378,11 @@ fn budget_exhaustion_stops_probing() {
     mkdir(tmp.path(), "packages/a");
 
     let generous = ProbeBudget::new();
-    assert_eq!(probe_roots(tmp.path(), &generous).len(), 2);
+    assert_eq!(probe_roots(tmp.path(), &generous).roots.len(), 2);
 
     let starved = ProbeBudget::with_bytes(0);
     assert_eq!(
-        probe_roots(tmp.path(), &starved).len(),
+        probe_roots(tmp.path(), &starved).roots.len(),
         1,
         "no budget -> root only"
     );
@@ -385,7 +400,7 @@ fn budget_is_shared_across_members() {
     write(tmp.path(), "packages/a/package.json", r#"{"x":1}"#);
 
     let budget = ProbeBudget::with_bytes(decl.len() as u64);
-    let roots = probe_roots(tmp.path(), &budget);
+    let roots = probe_roots(tmp.path(), &budget).roots;
     assert_eq!(roots.len(), 2, "the declaration itself was affordable");
     assert!(
         !budget.take(1),

@@ -41,7 +41,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use super::schema::{AgentCategories, matches_any};
-use super::workspace::{MAX_WORKSPACE_MEMBERS, ProbeBudget, read_bounded};
+use super::workspace::{MAX_WORKSPACE_MEMBERS, ProbeBudget, read_bounded, warn_truncated};
 
 /// Deepest directory level the nested walk descends to, project root = 0.
 pub(crate) const MAX_NESTED_DEPTH: usize = 4;
@@ -243,7 +243,8 @@ fn scan_dir(dir: &Path, anchors: &MarkerAnchors, skip: &SkipDirs) -> Option<DirS
 /// designed. The two are independent: either, both, or neither can be set.
 /// Test: `scanned_dirs_bound_reports_truncation`,
 /// `a_small_tree_is_not_truncated`, `depth_bound_stops_the_walk`,
-/// `depth_limited_tree_is_not_truncated`, `member_cap_is_shared`.
+/// `depth_limited_tree_is_not_truncated`, `member_cap_is_shared`,
+/// `both_bounds_can_trip_together`, `depth_limit_is_logged_at_debug`.
 pub(crate) struct NestedProbe {
     /// Nested directories below the root that carry a declared marker.
     pub(crate) roots: Vec<PathBuf>,
@@ -251,25 +252,6 @@ pub(crate) struct NestedProbe {
     pub(crate) truncated: bool,
     /// True when children were left unread at [`MAX_NESTED_DEPTH`].
     pub(crate) depth_limited: bool,
-}
-
-/// Log the resource cap that truncated a nested walk (#7781).
-///
-/// Why: [`NestedProbe::truncated`] says detection is incomplete; only the log
-/// says WHICH ceiling to raise, and raising the wrong one fixes nothing. WARN is
-/// right here and only here: a repository large enough to exhaust a resource cap
-/// is the exception, so the level matches how often an operator should look.
-/// What: one WARN naming the bound and the project it tripped on. The depth
-/// bound does NOT come through here — see [`debug_depth_limited`].
-/// Test: `scanned_dirs_bound_reports_truncation` asserts the WARN reaches a
-/// subscriber.
-fn warn_truncated(project_dir: &Path, bound: &str) {
-    tracing::warn!(
-        bound,
-        project = %project_dir.display(),
-        "#7781: nested stack detection was truncated by a scan bound; a nested \
-         project past it is undetected"
-    );
 }
 
 /// Log that the walk stopped at its declared depth (#7781).
@@ -280,7 +262,7 @@ fn warn_truncated(project_dir: &Path, bound: &str) {
 /// anything went wrong.
 /// What: one DEBUG naming the depth and the project. The flag it accompanies is
 /// [`NestedProbe::depth_limited`], which is informational, never fail-closed.
-/// Test: `depth_bound_stops_the_walk`.
+/// Test: `depth_limit_is_logged_at_debug` captures it through a `LogBuffer`.
 fn debug_depth_limited(project_dir: &Path) {
     tracing::debug!(
         depth = MAX_NESTED_DEPTH,
@@ -305,7 +287,7 @@ fn debug_depth_limited(project_dir: &Path) {
 /// Test: `nested_ui_package_is_found`, `depth_bound_stops_the_walk`,
 /// `skipped_directories_are_never_probed`, `member_cap_is_shared`,
 /// `scanned_dirs_bound_reports_truncation`, `a_small_tree_is_not_truncated`,
-/// `depth_limited_tree_is_not_truncated`.
+/// `depth_limited_tree_is_not_truncated`, `both_bounds_can_trip_together`.
 pub(crate) fn nested_probe_roots(
     project_dir: &Path,
     anchors: &MarkerAnchors,
@@ -316,23 +298,19 @@ pub(crate) fn nested_probe_roots(
     let mut found: Vec<PathBuf> = Vec::new();
     let mut frontier = vec![project_dir.to_path_buf()];
     let mut scanned = 0usize;
-    // #7781: set once, logged once after the walk — a per-directory log would
-    // fire for every deep directory in a large repo.
+    // #7781: both are set once and logged once, after the walk — a per-directory
+    // log would fire for every deep directory in a large repo, and an early
+    // return that logged only its own bound dropped the other one's report.
     let mut depth_limited = false;
+    let mut truncated_by: Option<&'static str> = None;
 
-    for depth in 0..=MAX_NESTED_DEPTH {
+    'walk: for depth in 0..=MAX_NESTED_DEPTH {
         let mut next = Vec::new();
         for dir in std::mem::take(&mut frontier) {
             scanned += 1;
             if scanned > MAX_SCANNED_DIRS {
-                warn_truncated(project_dir, "MAX_SCANNED_DIRS");
-                // #7781 round-3: a resource cap sets `truncated`; whatever the
-                // depth bound had already recorded still rides out beside it.
-                return NestedProbe {
-                    roots: found,
-                    truncated: true,
-                    depth_limited,
-                };
+                truncated_by = Some("MAX_SCANNED_DIRS");
+                break 'walk;
             }
             let Some(scan) = scan_dir(&dir, anchors, &skip) else {
                 continue;
@@ -340,12 +318,8 @@ pub(crate) fn nested_probe_roots(
             // Depth 0 is the project root: already a probe root, never re-added.
             if depth > 0 && scan.anchored && !already.contains(&dir) && !found.contains(&dir) {
                 if already.len() + found.len() > MAX_WORKSPACE_MEMBERS {
-                    warn_truncated(project_dir, "MAX_WORKSPACE_MEMBERS");
-                    return NestedProbe {
-                        roots: found,
-                        truncated: true,
-                        depth_limited,
-                    };
+                    truncated_by = Some("MAX_WORKSPACE_MEMBERS");
+                    break 'walk;
                 }
                 found.push(dir);
             }
@@ -359,12 +333,37 @@ pub(crate) fn nested_probe_roots(
         }
         frontier = next;
     }
+    finish(project_dir, found, truncated_by, depth_limited)
+}
+
+/// The one exit of [`nested_probe_roots`]: log what stopped it, then report it.
+///
+/// Why: #7781 round-3 review — the walk had three exits, and the two early ones
+/// logged their own resource cap but skipped the depth DEBUG, so a walk that hit
+/// BOTH bounds reported `depth_limited` in the returned flag and nowhere in the
+/// log. One epilogue makes "flag set" and "line logged" impossible to drift
+/// apart, whichever bound ended the walk.
+/// What: one [`warn_truncated`] when a resource cap ended the walk, naming that
+/// cap, and one [`debug_depth_limited`] when children were left unread at the
+/// declared depth. Both, either, or neither fire; the returned flags mirror them
+/// exactly.
+/// Test: `both_bounds_can_trip_together`, `depth_limit_is_logged_at_debug`,
+/// `scanned_dirs_bound_reports_truncation`.
+fn finish(
+    project_dir: &Path,
+    roots: Vec<PathBuf>,
+    truncated_by: Option<&'static str>,
+    depth_limited: bool,
+) -> NestedProbe {
+    if let Some(bound) = truncated_by {
+        warn_truncated(project_dir, bound);
+    }
     if depth_limited {
         debug_depth_limited(project_dir);
     }
     NestedProbe {
-        roots: found,
-        truncated: false,
+        roots,
+        truncated: truncated_by.is_some(),
         depth_limited,
     }
 }

@@ -107,7 +107,8 @@ pub fn stack_profile_section(project_dir: &Path) -> String {
 /// pinned by `core::manifest::framework_tests`.
 /// What: the detected-list body or the neutral body, with [`TRUNCATED_NOTE`]
 /// and [`depth_note`] appended independently. Pure.
-/// Test: `truncated_detection_says_so`, `depth_limited_detection_says_so`.
+/// Test: `truncated_detection_says_so`, `depth_limited_detection_says_so`,
+/// `both_notes_render_when_both_bounds_trip`.
 fn render_section(detection: StackDetection) -> String {
     // #7781 round-3: a resource cap that gave up must say so, or an incomplete
     // list reads as a complete one. The depth bound states its scope instead —
@@ -389,6 +390,40 @@ mod tests {
         assert!(
             section.contains("`rust-engineer`"),
             "the depth note qualifies the list; it must not replace it"
+        );
+    }
+
+    /// Both notes render when both bounds trip, each stating its own meaning.
+    ///
+    /// Why (#7781 round-3 review): the notes are appended independently, and
+    /// only one-flag renders were pinned — a change that made them exclusive
+    /// (an `else if`, or one note overwriting the other) would have passed. A
+    /// wide, deep monorepo trips both, and it is the one case where the PM most
+    /// needs the truncation warning.
+    /// What: renders a detection carrying both flags; asserts the truncation
+    /// note, the depth note naming the depth, and the engineer list all appear
+    /// together.
+    /// Test: this function IS the test.
+    #[test]
+    fn both_notes_render_when_both_bounds_trip() {
+        let section = render_section(StackDetection {
+            truncated: true,
+            depth_limited: true,
+            ..detection(&["rust-engineer"])
+        });
+        assert!(
+            section.contains("Detection was truncated"),
+            "the resource cap still says so when the depth bound also tripped: {section}"
+        );
+        assert!(
+            section.contains(&format!(
+                "Manifests deeper than {MAX_NESTED_DEPTH} directories were not probed."
+            )),
+            "the depth note is not suppressed by the truncation note: {section}"
+        );
+        assert!(
+            section.contains("`rust-engineer`"),
+            "two notes qualify the list; they must not replace it: {section}"
         );
     }
 

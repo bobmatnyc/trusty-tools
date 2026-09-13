@@ -9,11 +9,14 @@ Changed
   beside `rust-engineer`, where it named `rust-engineer` alone before (#7781).
 - Detection now reports why it stopped, in two separate flags.
   `detected_stack_engineers` returns a
-  `StackDetection { engineers, truncated, depth_limited }` instead of a bare set.
-  `truncated` means a RESOURCE cap (directories scanned, member cap) abandoned
-  the walk, so the engineer list may be incomplete — it logs a WARN naming the
-  cap, and the **Detected Project Stack** section tells the PM to treat the list
-  as partial. `depth_limited` means manifests below the walk's declared depth
+  `StackDetection { engineers, truncated, depth_limited }` instead of a bare set
+  — a `Debug + Clone`, `#[non_exhaustive]` struct, so a later bound can add a
+  third flag without breaking a consumer. `truncated` means a RESOURCE cap
+  abandoned detection, so the engineer list may be incomplete: the directories
+  scanned and shared member caps of the nested walk, and the declared-member and
+  pattern caps applied to a root manifest's own `workspaces`/`members`
+  declaration. Each logs one WARN naming the cap, and the **Detected Project
+  Stack** section tells the PM to treat the list as partial. `depth_limited` means manifests below the walk's declared depth
   went unprobed, which is the design's scope: it logs at DEBUG and renders one
   informational line. Keeping them apart matters because the depth bound trips on
   most real repositories, so a single combined flag was true nearly always and
