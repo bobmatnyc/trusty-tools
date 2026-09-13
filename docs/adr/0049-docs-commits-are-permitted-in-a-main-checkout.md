@@ -1,6 +1,6 @@
 # 0049. A documents-only commit is permitted in a main checkout, gated on what is staged
 
-- **Status:** Accepted
+- **Status:** Superseded by [ADR-0061](0061-the-main-checkout-is-never-committed-to.md)
 - **Date:** 2026-08-16
 - **Scope:** crate `trusty-mpm` — `tm hook --pm-guard`
   (`pm_guard_bash::main_checkout`'s commit rule, `core::staged_paths`), and
@@ -17,7 +17,10 @@
   decision 4 and scopes
   [ADR-0030](0030-sessions-own-many-workstreams-from-the-tm-checkout.md)'s
   §0.5 position as encoded in DOC-66. ADR-0044's write boundary and ADR-0048's
-  remaining decisions stay in force unchanged.
+  remaining decisions stay in force unchanged. **Superseded in full by
+  [ADR-0061](0061-the-main-checkout-is-never-committed-to.md)** (owner ruling
+  2026-09-13): the staged-set commit carve-out this ADR grants no longer
+  applies; a main checkout is never committed to, docs included.
 
 ## Context
 

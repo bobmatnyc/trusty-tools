@@ -1,5 +1,41 @@
 # Parallel Worktree Discipline — Extended Reference
 
+## The delivery sequence
+
+The canonical sequence for landing any change — the owner's ruling of
+2026-09-13, refined into eight non-optional steps. Everything else in this
+document is detail; this is the rule.
+
+1. **`git fetch origin`, then create the worktree and branch together from the
+   remote tip:** `git worktree add -b <branch> <path> origin/main`. Local
+   `main` can be stale enough to lose commits or leave the branch `BEHIND` the
+   moment its PR opens.
+2. **Commit in the worktree only.** The main checkout is never committed to,
+   docs included — see [ADR-0061](../adr/0061-the-main-checkout-is-never-committed-to.md),
+   which supersedes the earlier documents-only carve-out.
+3. **Rebase onto `origin/main` and push with `--force-with-lease`** when the
+   branch conflicts or lacks a newly required check; never merge `main` into
+   the branch. A branch that is only BEHIND merges fine (#5958) and needs
+   nothing.
+4. **Push and open a PR** (`tm pr open`), body per the seven-field contract;
+   use `Refs #N`, never `Closes`.
+5. **Merge on green with squash** (`gh pr merge --squash --delete-branch
+   --auto`); the repo's review gates still apply.
+6. **Fast-forward the main checkout to `origin/main` after every merge** —
+   `git fetch && git pull --ff-only`, per the "Keep the main checkout fresh"
+   rule in `Skill(skill="tm-workflow")`'s "Worktree Discipline" section
+   (tracked toward automation by #7756). The checkout stays on `main`, clean,
+   with no local commits.
+7. **Clean up in order:** confirm `state: MERGED` (`gh pr view <n> --json
+   state`), remove the worktree, then delete the local branch with `git
+   branch -D` — a squash merge breaks `-d`'s ancestry check, see "Worktree
+   Cleanup" below. `--delete-branch` already removed the remote branch.
+   Worktree removal is PM-executed, or `version-control`'s narrow exception
+   (#5791, ADR-0056, ADR-0057) — never while another agent may still be
+   reading or testing in it.
+8. **A follow-up fix starts a NEW branch from the updated `origin/main`.**
+   Reusing the merged branch replays its squashed commits.
+
 Multiple Claude Code sessions and subagents sharing this repo concurrently is
 the normal, intended arrangement, not a hazard to work around. The main
 checkout often holds another session's uncommitted work.
@@ -7,14 +43,15 @@ checkout often holds another session's uncommitted work.
 **The write boundary that protects that work is mechanically enforced, not
 left to convention** (`tm hook --pm-guard`; [ADR-0044](../adr/0044-main-checkout-write-boundary-and-agent-worktree-ownership.md),
 [ADR-0048](../adr/0048-dispatched-writers-get-a-worktree-and-the-write-boundary-is-enforced.md),
-[ADR-0049](../adr/0049-docs-commits-are-permitted-in-a-main-checkout.md)).
+[ADR-0061](../adr/0061-the-main-checkout-is-never-committed-to.md)).
 Documents and configuration — `.md`, `.toml`, `.json`, `.yaml`,
 extension-less files, `.claude/` framework deployment, `TASK.md` — stay
-writable directly in the main checkout for the PM and every agent it
-dispatches; source edits there are denied for both. `git commit` there is
-denied too, except for a staged set that is entirely documents and
-configuration (ADR-0049) and only when no other session is writing the same
-checkout. A dispatched agent that may write is granted its own worktree under
+writable, uncommitted, directly in the main checkout for the PM and every
+agent it dispatches; source edits there are denied for both. `git commit`
+there is denied unconditionally, docs and configuration included (ADR-0061,
+owner ruling 2026-09-13, superseding ADR-0049's earlier staged-set
+carve-out) — see "The delivery sequence" above. A dispatched agent that may
+write is granted its own worktree under
 `.claude/worktrees/` automatically the moment the session is standing in a
 main checkout — see [ADR-0036](../adr/0036-all-worktrees-are-siblings-under-claude-worktrees.md)
 for where that worktree lives. The rules below are what remains a matter of
@@ -86,14 +123,14 @@ The main checkout is not automatically disqualified, but it is not
 automatically clean either. The write boundary
 ([ADR-0044](../adr/0044-main-checkout-write-boundary-and-agent-worktree-ownership.md),
 [ADR-0048](../adr/0048-dispatched-writers-get-a-worktree-and-the-write-boundary-is-enforced.md),
-[ADR-0049](../adr/0049-docs-commits-are-permitted-in-a-main-checkout.md)) denies
-source edits and source commits there, which rules out the worst case, but it
-classifies by file EXTENSION, not by directory: documents and configuration
-stay writable, and since ADR-0049 committable, directly in the main checkout.
-`crates/trusty-mpm/src/assets/skills/*.md` falls on the writable side of that
-line even though it lives under `src/` and is compiled into the `trusty-mpm`
-binary at build time via `include_str!` — so a locally-edited, uncommitted (or
-locally-committed-but-unpushed) skill file in the main checkout can still be
+[ADR-0061](../adr/0061-the-main-checkout-is-never-committed-to.md)) denies
+source edits and every commit there, which rules out the worst case, but it
+classifies a write by file EXTENSION, not by directory: documents and
+configuration stay writable — never committable, per ADR-0061 — directly in
+the main checkout. `crates/trusty-mpm/src/assets/skills/*.md` falls on the
+writable side of that line even though it lives under `src/` and is compiled
+into the `trusty-mpm` binary at build time via `include_str!` — so a
+locally-edited, uncommitted skill file in the main checkout can still be
 baked into a binary installed from there. The `git status --porcelain` check
 above is what catches that; running it costs one command.
 

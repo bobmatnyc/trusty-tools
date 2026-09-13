@@ -129,18 +129,19 @@ or the next exec is SIGKILL'd as an invalid signature (looks like an OOM).
 
 ## Worktree Discipline
 
-Main checkout is read-only for source; provision off `origin/main`; branch is
-the workstream. Full discipline: `Skill(skill="tm-workflow")`. This repo adds:
+🔴 **Canonical delivery sequence:** fetch → worktree+branch from `origin/main`
+→ commit (worktree only) → PR → squash-merge on green → fast-forward main
+checkout → remove worktree, then delete branch. Full eight-step rule:
+[worktree-discipline.md](docs/reference/worktree-discipline.md#the-delivery-sequence).
+Dispatch mechanics: `Skill(skill="tm-workflow")`.
 
-- **Delivery chain:** issue → branch → one PR → Rust gates → trusty-review →
-  squash-merge → cleanup.
 - `cargo install --path .claude/worktrees/<dirname>/crates/<name> --locked`
   — never `cp` — only from a checkout with empty `git status --porcelain`.
 - **Stage by name, never `-A`:** `git add <file>` or `git add -p` — `-A`
   stages untracked build directories like `target-worktree/`.
-- Docs/config stay writable even in the main checkout; the write boundary
-  restricts SOURCE only
-  ([ADR-0049](docs/adr/0049-docs-commits-are-permitted-in-a-main-checkout.md)).
+- Docs/config stay writable, uncommitted, in the main checkout; every commit
+  there is denied, docs included
+  ([ADR-0061](docs/adr/0061-the-main-checkout-is-never-committed-to.md)).
 - 🔴 **`.trusty-mpm/sessions/` is tracked** (owner ruling 2026-08-31) — commit
   snapshots after each pause; never "fix" the `.gitignore` re-include.
 - 🔴 The harness (not `tm hook --pm-guard`) refuses some git/script shapes in
