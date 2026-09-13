@@ -111,6 +111,10 @@ mod tests_claude_json_concurrency_4072;
 #[cfg(test)]
 #[path = "tests_quarantine_4448.rs"]
 mod tests_quarantine_4448;
+// #7751: real-path coverage for the stack-profile `skillOverrides` write.
+#[cfg(test)]
+#[path = "tests_skill_overrides_7751.rs"]
+mod tests_skill_overrides_7751;
 
 // #7780: the malformed-settings copy-aside, at every writer's call site and
 // once per `prepare_session`.
@@ -869,6 +873,22 @@ pub(super) fn prepare_session_inner(
         crate::core::trusty_tools_config::managed_claude_config_dir().as_deref(),
     ) {
         tracing::warn!("failed to write the project plugin allowlist: {err}");
+    }
+
+    // #7751: turn off the skill families this project's detected stack cannot
+    // use (owner ruling 2026-09-13), merged into the same project-tier file. An
+    // unknown stack writes nothing, and so does a detection a scan bound cut
+    // short (#7781); a malformed file is warned about and left alone. Non-fatal
+    // — a failure costs listing tokens, not the session.
+    match crate::core::skill_overrides::write_skill_overrides(project_dir) {
+        Ok(crate::core::skill_overrides::SkillOverridesOutcome::Written(added)) => {
+            tracing::info!(
+                "turned off {} skill(s) this stack cannot use: {added:?}",
+                added.len()
+            );
+        }
+        Ok(_) => {}
+        Err(err) => tracing::warn!("failed to write stack-profile skillOverrides: {err}"),
     }
 
     // Inject `tm statusline` into the project's `.claude/settings.json` so

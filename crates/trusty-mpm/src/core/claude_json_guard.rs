@@ -28,17 +28,28 @@
 //!
 //! What: [`lock`] hands out a guard on one process-wide mutex. Every seeder
 //! that read-modify-writes a `.claude.json` holds it across the WHOLE cycle
-//! (read, mutate, write), never just the write. Five callers hold it: the two
-//! `~/.claude.json` seeders named above, plus
-//! [`crate::core::mcp_config::seed_builtin_servers`] and
-//! [`crate::core::standalone::trust_seed::preseed_managed_trust`] (#4076),
-//! which both target `<claude_config_dir>/.claude.json`, and
-//! [`crate::core::claude_md_excludes::add_exclude`] (#7673), which targets a
-//! project's `.claude/settings.local.json` and inherits the same cross-process
-//! lost-update limit described under SCOPE below.
+//! (read, mutate, write), never just the write. Seven callers hold it, over
+//! four file classes:
 //!
-//! The guard is deliberately not keyed by path, and now covers TWO distinct
-//! files rather than one. That is still the right granularity: a path key
+//! - `~/.claude.json` — [`crate::core::home_trust_seed::preseed_home_trust`]
+//!   and `crate::core::session_launch::settings::preseed_workspace_trust`, the
+//!   two seeders named above.
+//! - `<claude_config_dir>/.claude.json` —
+//!   [`crate::core::mcp_config::seed_builtin_servers`] and
+//!   [`crate::core::standalone::trust_seed::preseed_managed_trust`] (#4076).
+//! - a project's `.claude/settings.local.json` —
+//!   [`crate::core::claude_md_excludes::add_exclude`] (#7673).
+//! - a `.claude/settings.json` —
+//!   [`crate::core::skill_overrides::write_skill_overrides_for`] (#7751) on a
+//!   project's, and
+//!   [`crate::core::statusline_settings::ensure_statusline_entry_in`] (#7617)
+//!   on whichever one the caller passes, user-level or project-level.
+//!
+//! The last three inherit the same cross-process lost-update limit described
+//! under SCOPE below.
+//!
+//! The guard is deliberately not keyed by path, and now covers four file
+//! classes rather than one. That is still the right granularity: a path key
 //! would let two callers that spell the same file differently — `$HOME`
 //! resolved at different moments, a symlinked config dir — take different
 //! locks and race anyway, and the cost of over-serialising is a few
