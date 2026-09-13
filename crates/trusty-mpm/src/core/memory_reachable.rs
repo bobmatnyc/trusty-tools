@@ -180,8 +180,8 @@ thread_local! {
     /// unresolved reads lets a test drive a real launch path and assert the
     /// adapter reused the prepared answer. Thread local, so parallel tests cannot
     /// disturb the count.
-    /// What: incremented by `ClaudeCodeAdapter::spawn` when it was built with
-    /// `None` and is about to probe.
+    /// What: incremented by [`resolve_spawn_memory_reachable`] when the adapter
+    /// was built with `None` and is about to probe.
     /// Test: `spawn_managed_on_main_hands_the_adapter_the_prepared_reachability`.
     pub(crate) static ADAPTER_REPROBES_ON_THIS_THREAD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
@@ -200,6 +200,23 @@ thread_local! {
 /// `unresolved_reachability_runs_the_probe`.
 pub fn resolve_memory_reachable(resolved: Option<bool>) -> bool {
     resolve_memory_reachable_with(resolved, probe_memory_reachable_blocking)
+}
+
+/// [`resolve_memory_reachable`] for the runtime adapter's spawn (#7685).
+///
+/// Why: the adapter is the one consumer whose probe is always a SECOND probe —
+/// preparation already asked — so a launch path that hands it `None` pays twice.
+/// A separate entry point makes that re-probe countable by a test without
+/// counting preparation's own probes.
+/// What: [`resolve_memory_reachable`]; under `cfg(test)` a `None` also bumps
+/// [`ADAPTER_REPROBES_ON_THIS_THREAD`].
+/// Test: `spawn_managed_on_main_hands_the_adapter_the_prepared_reachability`.
+pub fn resolve_spawn_memory_reachable(resolved: Option<bool>) -> bool {
+    #[cfg(test)]
+    if resolved.is_none() {
+        ADAPTER_REPROBES_ON_THIS_THREAD.with(|n| n.set(n.get() + 1));
+    }
+    resolve_memory_reachable(resolved)
 }
 
 /// [`resolve_memory_reachable`] with the probe supplied.
