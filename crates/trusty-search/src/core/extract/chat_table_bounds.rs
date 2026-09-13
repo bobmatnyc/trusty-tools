@@ -16,12 +16,14 @@ const MAX_XML: usize = 16 * 1024 * 1024;
 /// What: read every part once into a case-folded map, reject ambiguous duplicate names,
 /// follow the package and workbook relationships to each sheet, and bound coordinates,
 /// element counts and shared-string allocation hints before calamine allocates a range.
-/// Cells must carry an explicit `r` coordinate; no part may bypass these checks through
-/// its ZIP name or its relationship target.
+/// Cells must carry an explicit `r` coordinate. Every part calamine opens for cell or
+/// shared-string data is checked, whatever its ZIP name or relationship target; the parts
+/// it opens for anything else — `workbook.xml`, `styles.xml`, the theme — are not.
 ///
 /// Test: `relationship_targets_and_implicit_cells_are_bounded_before_calamine`,
 /// `duplicate_zip_parts_are_rejected_as_ambiguous`,
-/// `relationship_documents_reject_extra_roots_and_nested_records`.
+/// `relationship_documents_reject_extra_roots_and_nested_records`,
+/// `producer_written_workbook_passes_every_new_rejection`.
 pub(super) fn validate(bytes: &[u8]) -> Result<(), AttachmentError> {
     // #7655: a `xl/worksheets/` name scan misses sheets reached by relationship target.
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).map_err(invalid)?;
@@ -263,6 +265,7 @@ fn coordinate_bound(coordinate: &str) -> Result<(), AttachmentError> {
 mod tests {
     use super::*;
     use std::io::Write;
+    use trusty_common::chat_attachments::Attachment;
 
     const PACKAGE_RELS: &str = concat!(
         "<Relationships><Relationship Type=\"http://schemas.openxmlformats.org",
@@ -366,6 +369,31 @@ mod tests {
         );
         assert!(validate(&valid).is_ok());
         assert!(crate::core::extract::chat_tables::prepare("fixture.xlsx", "xlsx", &valid).is_ok());
+    }
+    /// #7655: the hardening adds seven rejections a hand-assembled fixture never exercises.
+    /// The fixture is a real producer's output — `soffice --convert-to xlsx` over a
+    /// three-column CSV, LibreOffice Calc 26.2.2.2 — carrying an XML declaration, the
+    /// spreadsheetml namespaces, `[Content_Types].xml`, `docProps/`, a theme, styles and
+    /// shared strings, with three package relationships and four workbook relationships.
+    #[test]
+    fn producer_written_workbook_passes_every_new_rejection() {
+        let bytes = include_bytes!("testdata/libreoffice-calc-sample.xlsx");
+        validate(bytes).expect("producer-written workbook rejected by validate");
+        let prepared = crate::core::extract::chat_tables::prepare(
+            "libreoffice-calc-sample.xlsx",
+            "xlsx",
+            bytes,
+        )
+        .expect("producer-written workbook rejected by prepare");
+        let Attachment::Table { sheets, .. } = prepared else {
+            panic!("prepare returned a non-table attachment");
+        };
+        // Prove prepare read the sheet, rather than accepting an empty shell.
+        let rows = &sheets.first().expect("one sheet").rows;
+        assert_eq!(rows.len(), 4, "{rows:#?}");
+        assert_eq!(rows[0], ["Region", "Units", "Revenue"], "{rows:#?}");
+        assert_eq!(rows[3][0], "West", "{rows:#?}");
+        assert_eq!(rows[3][2].parse::<f64>().expect("numeric cell"), 3120.75);
     }
     #[test]
     fn sparse_coordinate_cannot_expand_past_table_bounds() {
