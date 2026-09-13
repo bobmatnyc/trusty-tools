@@ -27,7 +27,9 @@ use super::divert_hooks::{divert_hook_groups, is_divert_hook_command};
 // #7688: the prompt-feedback capture's groups and its identity predicate.
 use super::prompt_feedback_hooks::{is_prompt_feedback_hook_command, prompt_feedback_hook_groups};
 use super::settings::{PM_GUARD_SUFFIX, TRUSTY_MEMORY_HOOKS, pm_guard_hook_value};
-use crate::core::standalone::hooks::{is_mpm_hook_command, mpm_hook_additions_with_exe};
+use crate::core::standalone::hooks::{
+    is_mpm_hook_command, mpm_hook_additions_with_exe, resolve_stable_hook_exe,
+};
 
 /// Build the full set of trusty-mpm-owned hook additions for the project tier.
 ///
@@ -158,15 +160,24 @@ pub(super) fn project_managed_hook_additions_with_prompt_feedback(
     // above keeps byte-identical position and content whether the flag is on or
     // off. The lifecycle triad already owns a group on both events — these are
     // additive to it, never a replacement, so the daemon's relay is untouched.
-    if prompt_feedback_enabled && let Some(hooks_obj) = hooks.as_object_mut() {
-        for (event, group) in prompt_feedback_hook_groups() {
-            let target = hooks_obj
-                .entry(event.to_string())
-                .or_insert_with(|| serde_json::Value::Array(Vec::new()));
-            if let Some(target_arr) = target.as_array_mut()
-                && !target_arr.contains(&group)
-            {
-                target_arr.push(group);
+    if prompt_feedback_enabled {
+        // #7688 fix round: resolved by the SAME rule the triad above uses, so
+        // the capture honours `exe_override` and carries the installed absolute
+        // path — never the bare `tm` the statusline resolver falls back to,
+        // which no-ops under Claude Code's minimal PATH (#1914). A refusal
+        // propagates here for the #7244 reason it does above: write nothing
+        // rather than a command tm cannot vouch for.
+        let exe = resolve_stable_hook_exe(exe_override)?;
+        if let Some(hooks_obj) = hooks.as_object_mut() {
+            for (event, group) in prompt_feedback_hook_groups(&exe) {
+                let target = hooks_obj
+                    .entry(event.to_string())
+                    .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+                if let Some(target_arr) = target.as_array_mut()
+                    && !target_arr.contains(&group)
+                {
+                    target_arr.push(group);
+                }
             }
         }
     }

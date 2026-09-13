@@ -356,12 +356,22 @@ fn pm_guard_readonly_heredoc_turn_never_touches_the_file_change_budget() {
     // "PM file-change budget 3/3 used this turn" with zero files changed.
     // Pre-fix this test fails twice over: the fourth call denies, and the
     // counter file exists.
+    //
+    // #7670: the subject here is the per-turn BUDGET, which is cwd-insensitive
+    // by intent — so the directory is pinned to one that is no checkout, the
+    // #5708 treatment its three siblings already got. Left on the runner's own
+    // cwd the writing arm below denied on call 1 under the ADR-0044
+    // main-checkout rule (#7399 routed shell redirects through it), which is a
+    // main checkout in CI and a linked worktree on a contributor machine — the
+    // same binary at the same commit, red only on `actions/checkout`.
+    let outside = tempfile::tempdir().expect("tempdir");
+    let cwd = outside.path();
     let home = isolated_home();
     let home_s = home.path().to_string_lossy().to_string();
     let payload = r#"{"hook_event_name":"PreToolUse","session_id":"issue-5356","tool_name":"Bash","tool_input":{"command":"python3 <<'PY'\nimport json\nd = json.load(open('/tmp/x.json'))\nprint([k for k in d if len(k) > 3])\nPY"}}"#;
     for n in 1..=4 {
         assert_eq!(
-            run_pm_guard(payload, &[("HOME", &home_s)]).trim(),
+            run_pm_guard_at_with_env(payload, UNREACHABLE_DAEMON, cwd, &[("HOME", &home_s)]).trim(),
             "",
             "call {n} reads a file and writes none — it must be allowed"
         );
@@ -377,9 +387,17 @@ fn pm_guard_readonly_heredoc_turn_never_touches_the_file_change_budget() {
     // operator line is a file write, and exhausts the budget as before.
     let writing = r#"{"hook_event_name":"PreToolUse","session_id":"issue-5356","tool_name":"Bash","tool_input":{"command":"python3 <<'PY' > src/lib.rs\nprint(1)\nPY"}}"#;
     for _ in 1..=3 {
-        assert_eq!(run_pm_guard(writing, &[("HOME", &home_s)]).trim(), "");
+        assert_eq!(
+            run_pm_guard_at_with_env(writing, UNREACHABLE_DAEMON, cwd, &[("HOME", &home_s)]).trim(),
+            ""
+        );
     }
-    assert_denied(&run_pm_guard(writing, &[("HOME", &home_s)]));
+    assert_denied(&run_pm_guard_at_with_env(
+        writing,
+        UNREACHABLE_DAEMON,
+        cwd,
+        &[("HOME", &home_s)],
+    ));
 }
 
 #[test]
