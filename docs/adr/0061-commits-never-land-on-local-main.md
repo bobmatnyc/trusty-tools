@@ -1,6 +1,6 @@
 # 0061. Commits never land on local `main` — it only fast-forwards to `origin/main`
 
-- **Status:** Accepted
+- **Status:** Amended by [0062](0062-session-history-as-per-session-git-refs.md)
 - **Date:** 2026-09-13
 - **Scope:** crate `trusty-mpm` — `tm hook --pm-guard`
   (`pm_guard_bash::main_checkout`'s commit rule, `core::staged_paths`); the
@@ -33,7 +33,12 @@
   fetch/pull permission, and
   [ADR-0056](0056-main-checkout-write-access-is-granted-by-role.md) /
   [ADR-0057](0057-version-control-owns-worktree-removal.md)'s role-scoped
-  exceptions for `version-control` all stay in force unchanged.
+  exceptions for `version-control` all stay in force unchanged. **Amended by
+  [ADR-0062](0062-session-history-as-per-session-git-refs.md)** (owner ruling
+  2026-09-13, tracked as #7830): the commit rules below are unchanged;
+  ADR-0062 adds a second, ref-based history for session and activity data,
+  which the amendment note below had left with no durable home once
+  `.trusty-mpm/sessions/` became gitignored.
 
 ## Context
 
@@ -145,6 +150,20 @@ ADR changes: decision 3 still governs every other document and session note,
 and decision 1's deny for local `main` is untouched. Motivation: each pause
 owed a PR plus a main fast-forward, concurrent pauses raced (#7782), and the
 fast-forward watch blocked on the dirty sessions log.
+
+## Amendment — 2026-09-13: session history moves to per-session git refs
+
+Owner ruling the same day, tracked as #7830:
+[ADR-0062](0062-session-history-as-per-session-git-refs.md) gives session and
+activity data a durable home again, without reopening the race or the
+fast-forward block the amendment above removed. Session pause and resume now
+write to a per-session git ref (`refs/tm/sessions/<user-id>/<session-key>`),
+an orphan commit chain outside the branch namespace, pushed with
+`--force-with-lease` and fetched on its own refspec. This does not change
+`.trusty-mpm/sessions/`'s gitignored, local-cache status in the working tree,
+and it does not change any commit rule stated above: a session ref write is
+not a `git commit` against the checkout's index and is not a fast-forward of
+local `main`. See ADR-0062 for the full decision.
 
 ## Related Decisions
 
