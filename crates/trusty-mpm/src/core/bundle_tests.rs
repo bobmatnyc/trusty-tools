@@ -521,11 +521,14 @@ fn bundle_table_is_complete() {
     // Issue #7723 (+1): `skills/self-improvement-loop.md` is NEW — the
     //   self-analysis/fast-loop content moved out of the resident
     //   `BASE-AGENT.md`, on-demand only. 181 + 1 = 182.
-    assert_eq!(ALL.len(), 182);
+    // Issue #7727 (+2): `tm-ticketing` and `tm-workflow` gain a
+    //   `references/README.md` each — the folders no-`Skill` agents reach by a
+    //   `{{TM_SKILLS}}` Read path. 182 + 2 = 184.
+    assert_eq!(ALL.len(), 184);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 182, "artifact paths must be unique");
+    assert_eq!(paths.len(), 184, "artifact paths must be unique");
     for artifact in ALL {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());
