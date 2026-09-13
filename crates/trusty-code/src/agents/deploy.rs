@@ -232,6 +232,7 @@ pub fn roster_target(project_root: &Path) -> PathBuf {
 /// `base_templates_are_never_deployed`,
 /// `symlinked_skill_refs_dir_is_refused_before_any_write`,
 /// `symlinked_skill_folder_is_refused_before_any_write`,
+/// `symlinked_skill_ref_file_is_refused_before_any_write`,
 /// `tests/roster_deploy_e2e.rs`.
 ///
 /// [`Origin`]: trusty_agents_common::agents::manifest::Origin
@@ -476,6 +477,22 @@ mod tests {
             .expect("symlink");
 
         assert_skill_ref_symlink_refused(project.path(), &victim, "USER SKILL - hand written");
+    }
+
+    /// #7727 review: one skill-ref file committed as a symlink to a user file.
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_skill_ref_file_is_refused_before_any_write() {
+        let project = tempfile::tempdir().expect("project");
+        let outside = tempfile::tempdir().expect("outside");
+        let victim = outside.path().join("notes.md");
+        std::fs::write(&victim, "USER FILE").expect("victim");
+        let refs = super::super::skill_refs::project_skill_refs_dir(project.path());
+        let link = refs.join("condition-based-waiting/SKILL.md");
+        std::fs::create_dir_all(link.parent().expect("parent")).expect("mkdir");
+        std::os::unix::fs::symlink(&victim, &link).expect("symlink");
+
+        assert_skill_ref_symlink_refused(project.path(), &victim, "USER FILE");
     }
 
     #[test]
