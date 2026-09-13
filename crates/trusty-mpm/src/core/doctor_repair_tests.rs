@@ -469,9 +469,27 @@ fn legacy_sources_are_refused_never_deleted() {
 }
 
 #[test]
+fn legacy_sources_refuse_names_an_unprefixed_bundled_skill() {
+    // #7783: the listing filtered on a `tm-` prefix while the check counts the
+    // whole bundled roster, so `--fix` named a subset of what `tm doctor` had
+    // just reported — which reads as though the rest were already resolved.
+    let tmp = tempfile::tempdir().unwrap();
+    let skills = tmp.path().join(".claude").join("skills");
+    let dir = skills.join("documentation-style");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("SKILL.md"), "stale copy").unwrap();
+
+    let steps = refuse_legacy_sources(tmp.path());
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    assert_eq!(steps[0].path, dir);
+    assert!(matches!(steps[0].status, StepStatus::Refused(_)));
+    assert!(dir.exists(), "a refused finding is never deleted");
+}
+
+#[test]
 fn legacy_sources_ignores_a_foreign_skill() {
-    // Only `tm-*` entries are trusty-mpm's. An unrelated user skill in the
-    // same directory must not even be mentioned.
+    // Only entries naming a BUNDLED skill are trusty-mpm's. An unrelated user
+    // skill in the same directory must not even be mentioned.
     let tmp = tempfile::tempdir().unwrap();
     let skills = tmp.path().join(".claude").join("skills");
     fs::create_dir_all(skills.join("my-own-skill")).unwrap();
