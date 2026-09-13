@@ -279,6 +279,7 @@ universal = [
   "root-cause-tracing",
   "rust-build-performance",
   "security-scanning",
+  "self-improvement-loop",
   "software-patterns",
   "systematic-debugging",
   "test-driven-development",

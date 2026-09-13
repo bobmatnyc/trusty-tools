@@ -567,4 +567,8 @@ pub const ALL: &[BundledArtifact] = &[
     // 2026-07-17; append-only) ---
     overwrite("skills/rust-build-performance.md", RUST_BUILD_PERFORMANCE),
     // --- END rust-build-performance ---
+    // --- BEGIN self-improvement-loop bundled skill (issue #7723;
+    // append-only) ---
+    overwrite("skills/self-improvement-loop.md", SELF_IMPROVEMENT_LOOP),
+    // --- END self-improvement-loop ---
 ];

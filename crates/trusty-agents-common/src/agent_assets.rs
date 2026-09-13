@@ -425,49 +425,43 @@ mod tests {
     /// is: it is what makes the detection list findable.
     #[test]
     fn self_analysis_reporting_ships_in_the_base_agent() {
+        // #7723 (epic #7681): the full self-analysis/fast-loop prose (~7KB)
+        // moved to the on-demand `self-improvement-loop` skill — see
+        // `self_improvement_loop_skill_carries_the_moved_anchors` in
+        // `trusty-mpm`'s `bundle_tests.rs` for the ten anchors this test used
+        // to assert directly. BASE-AGENT keeps only the resident trigger: the
+        // section heading, the skill name (named in prose, never a modelled
+        // `Skill(...)` call — most agents' `tools:` allowlist omits `Skill`,
+        // see `base_agent_prose_rules_survive_composition`), and the memory
+        // tag the fast loop records under.
         let flat = BASE_AGENT.replace('\n', " ");
         for (fact, needle) in [
             (
-                "the section exists",
-                "## Self-Analysis and Improvement Reporting",
-            ),
-            // #6937: the fast loop stacks on the slice-1 section above.
-            (
-                "the fast-loop section exists",
-                "## Continuous Self-Improvement — the Fast Loop",
+                "the resident section exists",
+                "## Self-Improvement Reporting",
             ),
             (
-                "the detection heuristics are headed and findable",
-                "**Detection heuristics.**",
+                "the trigger names the point in the run",
+                "before your final report",
             ),
+            ("the skill is named", "`self-improvement-loop` skill"),
             (
-                "the one memory tag is named",
-                "The tag is `self-improvement-hypothesis`",
+                "the memory tag survives as a resident fact",
+                "`self-improvement-hypothesis`",
             ),
-            (
-                "the post-mortem's query is spelled out",
-                r#"memory_list(tag: "self-improvement-hypothesis")"#,
-            ),
-            (
-                "trusty-tools is the fixed destination",
-                "bobmatnyc/trusty-tools",
-            ),
-            (
-                "a subagent returns a block instead of filing",
-                "Improvement recommendations",
-            ),
-            (
-                "dedup runs against the label",
-                "`self-improvement` label first",
-            ),
-            ("a clean run files nothing", "A clean run reports nothing"),
-            ("the post-mortem tracker is named", "#6933"),
+            ("a subagent never files directly", "No Subagent Fan-Out"),
         ] {
             assert!(
                 flat.contains(needle),
-                "`BASE-AGENT.md` must state that {fact} (#6935, #6937)"
+                "`BASE-AGENT.md` must state that {fact} (#6935, #6937, #7723)"
             );
         }
+        assert!(
+            !flat.contains("Skill(skill=\"self-improvement-loop\")"),
+            "BASE-AGENT must name `self-improvement-loop` in prose, not a \
+             modelled `Skill(...)` call — most agents' `tools:` omit `Skill` \
+             (#7683, #7723)"
+        );
     }
 
     /// An engineer's shipped prompt must not name a doc-gate script that only

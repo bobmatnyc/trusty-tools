@@ -2,7 +2,7 @@
 
 Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` roster — the authority for which skills are bundled — joined to `bundle::ALL` for each skill's frontmatter via a shared line parser. Every declared skill is `universal`: it deploys to every project, with no detection. Regenerate with `tm generate capabilities`.
 
-53 bundled skills.
+54 bundled skills.
 
 | Skill | Category | User-invocable | Description |
 |---|---|---|---|
@@ -25,6 +25,7 @@ Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` rost
 | `root-cause-tracing` | agent-reference | no | Systematically trace bugs backward through call stack to find original trigger |
 | `rust-build-performance` | agent-reference | no | Practical Rust build-performance discipline for the inner dev loop: cargo check first, measure with --timings before tuning, trim the dependency/feature graph, preserve incremental compilation, and use sccache across worktrees. Use when a Rust build feels slow or before reaching for compiler-flag tricks. |
 | `security-scanning` | agent-reference | no | CI security scanning: secrets, deps, SAST, triage, expiring exceptions |
+| `self-improvement-loop` | agent-reference | no | Self-analysis and improvement reporting for a dispatched agent: the post-mortem-routed recommendation block, plus the per-task fast-loop hypothesis record that changes behavior now |
 | `software-patterns` | agent-reference | no | Compare tradeoffs and recommend architectural patterns — dependency injection, service-oriented architecture, repository, domain events, circuit breaker, and anti-corruption layer. Use when choosing between design patterns, planning microservices boundaries, evaluating system design alternatives, or asking 'which pattern should I use' for a specific coupling or resilience problem. |
 | `systematic-debugging` | agent-reference | no | Step-by-step debugging workflow: reproduce the bug, isolate the failing component, trace to root cause, apply a targeted fix, and verify the fix resolves the issue without regressions. Use when you encounter a bug, error, exception, crash, or unexpected behavior that needs troubleshooting. |
 | `test-driven-development` | agent-reference | no | Comprehensive TDD patterns and practices for all programming languages, eliminating redundant testing guidance per agent. |

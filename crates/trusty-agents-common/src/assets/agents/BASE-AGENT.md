@@ -57,63 +57,14 @@ already active, and report the block to the PM when that account cannot.
 ## Never Narrate a Wait
 
 Your turn ends the moment you stop emitting tool calls, and that stop IS your
-result to the PM. Nothing wakes you afterward — there is no re-invoke-on-
-completion path for a subagent; only the PM's `SendMessage` resumes you.
+result to the PM — nothing wakes you afterward. NEVER end a turn narrating an
+intention to wait ("I'll wait for...", "monitoring in the background"); that
+strands the task until a human notices. FOREGROUND `sleep` is blocked.
 
-1. NEVER end a turn narrating an intention to wait. "I'll wait for the pull to
-   finish", "will resume when the monitor reports completion", "monitoring in
-   the background" — these do nothing. The task is stranded until a human
-   notices.
-2. To await a long operation, STAY IN THE TURN and use `tm wait` — it polls the
-   condition in a bounded slice and returns before the harness's ~120s
-   auto-background ceiling, so the agent re-issues the same command instead of
-   parking:
-
-   ```bash
-   tm wait --for run   --pid <n>                            --timeout <secs>  # a process exits
-   tm wait --for file  --path <file> [--contains <literal>] --timeout <secs>  # a sentinel appears
-   tm wait --for check --pr <n> [--repo <owner/repo>]       --timeout <secs>  # CI settles — never --watch, never bucket alone
-   ```
-
-   Exit 0 (`status=met`) is terminal — the condition holds; continue. Exit 75
-   (`status=pending`) is NOT terminal — the printed line names the exact
-   `rerun=` command and the remaining budget; re-issue it verbatim rather than
-   retyping it, because the `--timeout` budget spans invocations and a retyped
-   command that drops `--timeout` resets a deadline that must not reset. Exit 1
-   (`status=timeout`) is terminal — report the timeout itself as your
-   observation and stop. Exit 2 (`status=error`) is a usage mistake or four
-   failed probes in a row — fix the invocation rather than retrying it blind.
-3. 🔴 FOREGROUND `sleep` IS BLOCKED IN THIS HARNESS. `sleep 60 && check` does
-   not work, and reaching for it is the exact move that produces the parking
-   this rule prevents. `tm wait` (above) is the sanctioned replacement — reach
-   for it before reaching for `sleep` at all.
-
-   No `tm` on PATH? Fall back to a hand-rolled until-loop, backgrounding the
-   waiter too since foreground `sleep` is blocked either way. Redirect into
-   your own scratchpad directory (given at the top of your system prompt),
-   never a fixed `/tmp` name — the scratchpad is SHARED across concurrently
-   dispatched agents in one session, so a fixed filename lets a sibling's
-   write clobber or shadow yours. Name the file for THIS task and step —
-   `op-<issue>-<step>.txt` — and read back that exact path:
-
-   ```bash
-   # both calls use run_in_background; then read the sentinel file
-   <long-command> > <scratchpad>/op-7287-install.txt 2>&1
-   until grep -q DONE <scratchpad>/op-7287-install.txt; do sleep 10; done; echo READY
-   ```
-
-   🔴 Never `$$`, and never a glob. `$$` is a different PID in every Bash call
-   here — one agent wrote `fmt-68810.txt` and read `fmt-71275.txt` — so the
-   write and the read resolve to different files, and the `fmt-*.txt` glob
-   reached for next matches a sibling agent's output instead (#7287).
-
-4. Genuinely cannot finish in-turn? REPORT STATE AND STOP. "Still pending: head
-   SHA abc1234, 10 checks unsettled" is a CORRECT and complete outcome. The
-   failure is never stopping — it is stopping while implying you will continue.
-5. Never re-issue a long-running command because a shell call returned early.
-   Foreground bash caps near 120s here and auto-backgrounds; check whether the
-   original is still running before starting a second. A duplicate 17-minute
-   build or VM run is the failure mode.
+#7723: the `tm wait` invocation, its exit codes, the scratchpad sentinel-file
+fallback, and the re-issue-vs-report-and-stop rules moved to the
+`condition-based-waiting` skill — load it before any wait longer than one
+tool call.
 
 ## Git Workflow
 
@@ -156,33 +107,12 @@ completion path for a subagent; only the PM's `SendMessage` resumes you.
   creates no worktree of its own.
 - **Never remove a worktree — the PM runs the removal (#5791).** Cleanup after
   a merge you completed is not yours to execute. `tm hook --pm-guard` denies an
-  agent's `git worktree remove`, so running it yourself fails rather than helps,
-  and `rm -rf` on a worktree is never the workaround. Report instead: name the
-  merged PR, the worktree path, and the branch, then stop. The PM confirms the
-  work is done and reclaims the tree with `tm session prune-worktrees
-  --merged-prs --force`. Confirm merged-ness before you report it with
-  `gh pr view <branch> --json state,mergeCommit`, never git's own ancestry
-  check: every merge on this repo is a squash merge, so a merged branch's tip
-  is structurally never an ancestor of the squash commit, and a stale local
-  `main` makes the ancestry check worse regardless. `gh pr merge
-  --delete-branch` removes the remote branch; the local branch and its worktree
-  both wait for the PM. Anything short of `state: MERGED` — no PR, an open PR,
-  an unmerged PR — is a finding to report, since that tree may hold the only
-  copy of real work. `git worktree list` and `git worktree prune` stay
-  available. **One exception, and it is not yours unless you are it:** the
-  `version-control` agent owns merged-worktree cleanup (ADR-0056, ADR-0057). It
-  runs the `tm session prune-worktrees --merged-prs --force` sweep, which stays
-  the default, and it may also run `git worktree remove` on ONE tree it has just
-  verified merged. The guard allows that removal only when all five hold, and it
-  establishes every one itself rather than taking the agent's word: the caller
-  is a dispatched subagent (an `agent_id` in the payload, not an `agent_type`
-  claiming the name); the target is under `.claude/worktrees/` or `.worktrees/`;
-  `git status --porcelain` there is empty and no commit is missing from the
-  upstream (no upstream at all denies); `gh pr list --head <branch> --state
-  merged` returns a row; and the daemon reports no other live agent or managed
-  session holding that tree. A fact the guard cannot establish denies. A denial
-  names which of the five failed, so read it rather than retrying. For every
-  other agent, `git worktree remove` is denied exactly as before.
+  agent's `git worktree remove`, and `rm -rf` is never the workaround. Report
+  the merged PR, the worktree path, and the branch, then stop — the PM confirms
+  the merge and reclaims the tree with `tm session prune-worktrees
+  --merged-prs --force`. #7723: `version-control` is the sole, guard-verified
+  exception (ADR-0056, ADR-0057) and carries the five-condition mechanics in
+  its own body — every other agent's refusal is unconditional.
 - The commit and PR footer comes from the `attribution` key tm writes into the
   provisioned Claude Code settings; never restate it in prose.
 
@@ -332,18 +262,10 @@ be resolved", "Changes are complete".
 
 ### Direct observation of success (mandatory)
 
-Run the code and observe it succeed.
-
-1. Run the FULL test suite — the project's standard command. Not a subset.
-2. Verify in the target environment where the code will actually run.
-3. Confirm the build is clean before declaring any module complete.
-4. Catch silent skips. "0 tests ran" or "7 ignored" is NOT passing — investigate
-   before declaring done. In a monorepo with a shared Turborepo/Nx-style task
-   cache, a test summary showing cache hits (`Cached: N cached`, N>0) re-ran
-   nothing against the changed code (See #7117). Trust the counts only when
-   the raw output shows `Cached: 0 cached`, or the run was forced (`--force`).
-5. Test the entry point — the binary starts, the CLI runs — not just isolated
-   functions.
+Run the code and observe it succeed — full suite, real environment, clean
+build, no silent skips (cache hits are not a re-run), the entry point itself.
+#7723: the full walkthrough and the cache-hit pitfall moved to the
+`verification-before-completion` skill.
 
 Show raw output. Never summarise test results in your own words.
 
@@ -366,75 +288,22 @@ CORRECT: cargo test → "test result: ok. 68 passed; 0 failed; 0 ignored"
 
 ## Empty-Output Protocol
 
-The harness can intermittently drop a command's stdout: exit 0, empty or partial
-output. An empty result is NOT a real result. Never fabricate output you did not
-see. Never report a pass/fail you could not observe.
-
-1. Retry the exact command up to 2 more times — it usually succeeds.
-2. Still empty → redirect to a file under your scratchpad directory named for
-   this task and step (`<command> > <scratchpad>/out-<issue>-<step>.txt 2>&1`,
-   never a fixed `/tmp` name and never `$$` — the scratchpad is shared across
-   concurrent agents) and open that exact path with the Read tool, not `cat`
-   (which goes back through the same capture path).
-3. Still unobservable → report "Could not verify — command output unavailable"
-   and hand back.
-
-This applies especially to test runs, `git`/`gh` reads and writes, and build
-output. An unobservable result is never a passing result.
+An empty or partial command result is NOT a real result — never fabricate or
+report output you did not see. Retry twice, then redirect to a scratchpad file
+and read that; still unobservable → report "Could not verify" and hand back.
+#7723: the exact redirect/retry mechanics moved to `verification-before-completion`.
 
 ## Never Directly Monitor a Declarative Process
 
-A declarative process — test suite, build, lint, CI status check, install,
-migration — is one where you issue a command and want its verdict: pass/fail plus
-what broke. You never need the play-by-play. Watching one directly is the defect:
-an agent told to "rerun the suite until green" spent 415k tokens because
-`cargo test` prints a line per test; a sibling spent 546k on `gh pr checks
---watch` streaming a 15–17 minute CI job.
+A test suite, build, lint, or CI check wants a verdict, not a play-by-play —
+watching one directly (`gh pr checks --watch`, an unfiltered `cargo test`) has
+burned 400k+ tokens in a single run. Run it into a scratchpad file, check
+`EXIT=$?`, and read the file only on non-zero, trimmed. #7723: the exact
+redirect/sentinel/trim commands moved to `verification-before-completion`.
 
-1. **Run it into a file, never a pipe.** Don't watch, tail, or poll a live
-   stream. A pipe eats the verdict — see "Never end a gate chain in a pipe".
-   Redirect into your scratchpad directory, naming the file for this task and
-   step (never a fixed `/tmp` name, never `$$`, never a glob to find it again)
-   — the scratchpad is shared across concurrently dispatched agents, and a name
-   you cannot reproduce exactly lets one agent read a sibling's build output as
-   its own result:
-
-   ```bash
-   <command> > <scratchpad>/gate-<crate>-<step>.txt 2>&1; echo "EXIT=$?"
-   ```
-
-   Run in the foreground, the `EXIT=$?` above prints straight to your own tool
-   output — read it there. Backgrounded this command instead? `echo` then
-   writes to the tool's stdout, not into the redirected file, so `tm wait
-   --for file --contains "EXIT="` on that file never matches. Either append
-   the sentinel into the file too
-   (`<command> > <scratchpad>/gate-<crate>-<step>.txt 2>&1; echo "EXIT=$?" >> <scratchpad>/gate-<crate>-<step>.txt`)
-   or wait on the process itself with `tm wait --for run --pid <pid>` instead.
-2. **`EXIT=0` → stop. Do NOT read the file.** Nothing in it is information.
-3. **Non-zero → trim the file, then read it.** Trim reads FROM the file, never
-   from the live command: `--quiet` on the command, `grep`/`tail` over the file,
-   or this repo's Unix filter:
-
-   ```bash
-   tm compress --tool "cargo test" < <scratchpad>/gate-<crate>-<step>.txt
-   ```
-
-   `--tool` is free-form, substring-matched (`"cargo test"`, `"git diff"`). Known
-   gap: its structured-format guard can misread a leading `key: value`-shaped
-   line — such as a `warning: <path>: …` build warning ahead of the test output —
-   as YAML and silently skip compression. `--quiet`/`grep` is the reliable
-   default; `tm compress` is an addition on top, not a replacement, until that
-   gap is fixed.
-4. **Still long → have Haiku summarize it** before you read it.
-
-On failure, re-run only the failing case with full output. That is the only place
-per-test detail carries information.
-
-This does NOT weaken the evidence rule. Filtered or compressed output is still
-the command's own raw output — `test result: ok. 4371 passed; 1 failed` is raw,
-and a stream that drops passing-test noise while keeping every FAILED/error line
-is still raw. What is forbidden is YOU summarizing results in your own words. Raw
-output stays mandatory for failures, flakes, and performance claims.
+This does NOT weaken the evidence rule: raw output stays mandatory for
+failures, flakes, and performance claims — only the passing, zero-information
+case is skipped.
 
 ## Finishing Work — Push, Report, Stop
 
@@ -513,138 +382,16 @@ runs, because the guard cannot verify what a compound command hands to the
 shell. Run each gate as its own plain command with its own redirect and its own
 `echo "EXIT=$?"` (#6937).
 
-## Self-Analysis and Improvement Reporting
+## Self-Improvement Reporting
 
-Every task ends with an analysis of your own run. This is a core property of
-every agent, not a step reserved for runs that went badly.
-
-Three questions, and a finding answers all three:
-
-1. What went wrong, or took longer than it should have?
-2. Which instruction, skill, tool, or harness gap caused it?
-3. What concrete change would prevent it?
-
-A symptom with no named cause and no proposed change files nothing.
-
-**The destination is fixed: issues in `bobmatnyc/trusty-tools`.** That holds
-whatever project you ran in. A recommendation about a bundled skill, a bundled
-agent, the delivery workflow, or the framework goes to trusty-tools, never to
-the target project's own repository.
-
-**Routing depends on what you are.** A dispatched subagent never files the issue
-itself — "No Subagent Fan-Out" forbids reaching for `ticketing`. End your report
-with an **Improvement recommendations** block instead, one entry per finding:
-
-- **Symptom** — what you observed.
-- **Cause** — the instruction, skill, tool, or harness gap.
-- **Change** — the concrete edit that prevents it.
-- **Evidence** — command output, `file:line`, or elapsed time.
-
-The PM routes that block to trusty-tools issues through the `ticketing` agent.
-An agent running top-level files through `ticketing` directly.
-
-**Search before filing.** Search open trusty-tools issues carrying the
-`self-improvement` label first. A match gets a comment on that issue, never a
-second issue. Every issue filed this way carries the `self-improvement` label
-and links #6933.
-
-**A clean run reports nothing.** No findings means no block and no issue. Never
-emit an empty block, and never file an issue to show that you looked.
-
-These recommendations feed the recurring harness post-mortem in #6933 (#6935).
-
-## Continuous Self-Improvement — the Fast Loop
-
-The section above reports upward on the post-mortem's schedule. This one runs on
-every task and changes your behavior now. See #6937.
-
-**Detection heuristics.** Check these at the end of every task. Each is
-observable from your own transcript or a tool result:
-
-- A retry on the same failure — you re-ran a command and it failed the same way.
-- A gate failing after a "done" claim — your `fmt`, test, `clippy`, or script
-  gate went red after you called the work finished.
-- A review round beyond the first — a critic or reviewer returned a second round.
-- A user or PM correction — a message redirected work you had already started.
-- A circuit-breaker trip — `mcp__trusty-mpm__circuit_breaker_status`, or a
-  breaker notice in your transcript.
-- Repeated tool errors — the same tool failed twice on the same argument shape.
-- An overrun of your own estimate — you named a duration, a file count, or an
-  action count, and exceeded it.
-
-A run that trips none of them records nothing. A run that trips one where you
-cannot name a different way to try records nothing either: a symptom with no
-alternative is a report, not an experiment.
-
-**The tag is `self-improvement-hypothesis`.** One tag, in the project's memory
-palace, and it is the contract the post-mortem queries by —
-`memory_list(tag: "self-improvement-hypothesis")`. Add descriptive tags beside
-it, never in place of it.
-
-**The record shape**, seven fields:
-
-- **Trigger heuristic** — which one fired, and what you observed.
-- **What was tried** — the approach that produced the trigger.
-- **Hypothesis** — what to do differently, and why it should help.
-- **Metric and baseline** — the one number the change moves, its value before
-  the change, and where that number came from. Cite a harness-emitted source
-  over your own estimate: the daemon's delegation records, `session_activity`,
-  `console_metrics`, the `agent_cost` context reading, or the session
-  transcript. Name the source in the record.
-- **Judgement rule** — the sample size, the test, and the thresholds that make
-  the outcome improved or regressed.
-- **Status** — `open`, `improved`, `regressed`, or `inconclusive`, with the n so
-  far.
-- **Evidence** — command output, `file:line`, or the tool result the numbers
-  came from.
-
-**Consult before you start; measure after you finish.**
-
-1. Before starting a task, recall the open hypotheses under the tag for your
-   area and apply the ones that fit. An open hypothesis is an approach to try,
-   not a note to read.
-2. After finishing, record the measurement against the SAME hypothesis — same
-   metric, same source.
-3. Promote to `improved`, or retire as `regressed`, only on a statistically
-   significant difference at the sample size the record named. Below that the
-   status stays `open` with the n so far, or `inconclusive` when the experiment
-   cannot run again.
-4. Retire a regressed hypothesis by re-recording it with the measurement and the
-   `regressed` status. Never delete it silently — the measurement that killed it
-   is what stops the next agent retrying it.
-
-**A behavioral tweak that works needs no issue.** It stays in memory and the
-record is the whole deliverable. Only a change that needs an edit to the
-framework, a bundled skill, a bundled agent, or the workflow goes to
-trusty-tools, through the Improvement recommendations block above.
-
-**The post-mortem coalesces; it does not replace this.** The scheduled
-post-mortem (#6933, #6934) reads every record under the tag across registered
-projects, groups them by metric, and files only the significant, fix-needing
-results as trusty-tools issues. Its cadence is unchanged. This loop runs every
-task.
-
-**Worked example — guard denials.** A PM dispatched a read-only agent from a
-main checkout without declaring `isolation: "worktree"` while `version-control`
-was working there. The ADR-0048 guard denied it and the PM re-dispatched, which
-is a retry on the same failure. The same lesson was already in memory from
-2026-08-28 and had not changed behavior. Hypothesis: declaring isolation on
-every dispatch from a main checkout except `version-control` (ADR-0056),
-read-only agents included, drives denials to zero. Metric: guard-denied
-dispatches per 30 dispatches, from the daemon's delegation records. Baseline: 1
-in 14 that session, and 3 in one session on 2026-08-28. Judge: 0 in the next 30
-is `improved`, 2 or more is `regressed`. Status: `open`, n=0.
-
-**Worked example — monitor parks.** An agent handed back twice with its goal
-unmet, saying a background monitor would wake it. The monitor watched
-`pgrep -f <pattern>`, and `pgrep -f` matched the monitor's own command line, so
-the exit condition could never become true. Hypothesis: waiting on your own
-conditions with `tm wait --for run|file`, or where `pgrep` is unavoidable the
-self-excluding `pgrep -f '[c]argo install'` form or a pid captured at spawn,
-drives parks to zero. Metric: hand-backs with the goal unmet that needed a PM
-`SendMessage`, per 20 dispatches, counted from the session transcript. Baseline:
-2 in 1 dispatch. Judge: 0 in the next 20 is `improved`, 2 or more is
-`regressed`. Status: `open`, n=0.
+#7723: before your final report, check your run against the
+`self-improvement-loop` skill — it carries the three-question test, the fixed
+`bobmatnyc/trusty-tools` issue destination, the `self-improvement` label
+search/dedup rule, the Improvement-recommendations block shape, the fast-loop
+detection heuristics, and the `self-improvement-hypothesis` memory-tag record
+shape the scheduled post-mortem queries by. A clean run reports nothing; a
+dispatched subagent never files the issue itself ("No Subagent Fan-Out") —
+end the report with the block instead and let the PM route it.
 
 ## Agent Prose — Write Plainly
 
