@@ -334,7 +334,7 @@ fn detected_stack_engineers_matches_the_manifest() {
     let tmp = TempDir::new().unwrap();
     touch(tmp.path(), "Cargo.toml");
 
-    let detected = detected_stack_engineers(tmp.path());
+    let detected = detected_stack_engineers(tmp.path()).engineers;
     assert!(
         detected.contains("rust-engineer"),
         "a Cargo project's stack profile names rust-engineer: {detected:?}"
@@ -390,7 +390,7 @@ fn mixed_stack_repo_detects_nested_web_engineers() {
     .unwrap();
     touch(tmp.path(), "crates/app/ui/tsconfig.json");
 
-    let detected = detected_stack_engineers(tmp.path());
+    let detected = detected_stack_engineers(tmp.path()).engineers;
     for expected in [
         "rust-engineer",
         "javascript-engineer",
@@ -422,11 +422,49 @@ fn rust_only_repo_detects_only_rust_engineer() {
     let tmp = TempDir::new().unwrap();
     touch(tmp.path(), "Cargo.toml");
 
-    let detected = detected_stack_engineers(tmp.path());
+    let detected = detected_stack_engineers(tmp.path()).engineers;
     assert_eq!(
         detected,
         BTreeSet::from(["rust-engineer".to_string()]),
         "a single-crate Rust repo detects exactly one engineer"
+    );
+}
+
+/// A truncated scan reaches the public entry point as `truncated == true`.
+///
+/// Why (#7781 round-2 HIGH): every scan bound fails closed by returning fewer
+/// engineers, so a partial answer used to be identical to a complete one. The
+/// flag is the whole point of the change — it has to survive the two hops from
+/// the walk through `MarkerProbe` to this public return type, or nothing
+/// downstream can fail closed on it.
+/// What: one tree nests a directory PAST `MAX_NESTED_DEPTH` (so the depth bound
+/// leaves unwalked children); the other is shallow. Asserts the flag is set for
+/// the first and clear for the second, and that the deep tree still detects its
+/// stack — truncation reports partial detection, it never suppresses it.
+/// Test: this function IS the test.
+#[test]
+fn truncated_detection_is_reported_to_the_caller() {
+    let deep = TempDir::new().unwrap();
+    touch(deep.path(), "Cargo.toml");
+    // `a/b/c/d` sits AT the depth bound and still has a child, so the walk
+    // stops with part of the tree unread.
+    fs::create_dir_all(deep.path().join("a/b/c/d/e")).unwrap();
+
+    let detected = detected_stack_engineers(deep.path());
+    assert!(
+        detected.truncated,
+        "a tree with directories past the depth bound must report truncation"
+    );
+    assert!(
+        detected.engineers.contains("rust-engineer"),
+        "truncation reports a PARTIAL answer; it must not suppress what was found"
+    );
+
+    let shallow = TempDir::new().unwrap();
+    touch(shallow.path(), "Cargo.toml");
+    assert!(
+        !detected_stack_engineers(shallow.path()).truncated,
+        "a tree the walk read in full must not claim truncation"
     );
 }
 

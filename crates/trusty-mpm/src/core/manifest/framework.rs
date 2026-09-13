@@ -458,6 +458,25 @@ pub fn agent_scope_from(categories: &AgentCategories, project_dir: &Path) -> Age
     }
 }
 
+/// A project's detected stack engineers, and whether the scan saw the whole tree.
+///
+/// Why: [`detected_stack_engineers`] used to answer with a bare set, so a set
+/// short one engineer because a scan bound stopped the walk was indistinguishable
+/// from a project that genuinely has no such stack — the round-1 #7781 finding.
+/// A caller that routes or renders on this must be able to say "incomplete".
+/// What: the engineer stems, plus [`Self::truncated`] propagated from the nested
+/// walk's own bounds (depth, directories scanned, member cap). The bound that
+/// tripped is named in a `tracing::warn!` at the walk itself.
+/// Test: `detected_stack_engineers_matches_the_manifest`,
+/// `truncated_detection_is_reported_to_the_caller`,
+/// `core::stack_profile::tests::truncated_detection_says_so`.
+pub struct StackDetection {
+    /// The `language` + `framework` stems whose declared markers are present.
+    pub engineers: BTreeSet<String>,
+    /// True when a scan bound cut detection short, so `engineers` may be partial.
+    pub truncated: bool,
+}
+
 /// The stack engineers `project_dir`'s markers select, per the bundled manifest.
 ///
 /// Why: `core::stack_profile` primes the PM prompt with the project's actual
@@ -465,21 +484,30 @@ pub fn agent_scope_from(categories: &AgentCategories, project_dir: &Path) -> Age
 /// names `rust-engineer` for a project that never received it is the drift #1971
 /// exists to prevent. Before #4765 it imported `project_lang`'s marker table
 /// directly; that table is now a manifest field, so this is the entry point.
-/// What: the union of the declared `language` and `framework` stems whose
-/// markers are present. An unusable manifest yields an EMPTY set, which
+/// What: a [`StackDetection`] holding the union of the declared `language` and
+/// `framework` stems whose markers are present, and whether a scan bound cut the
+/// walk short. An unusable manifest yields an EMPTY, untruncated set, which
 /// `stack_profile_section` renders as its neutral "detect before routing"
 /// block — the safe answer for a prompt. The DEPLOY path does not share that
 /// leniency: [`framework_agent_scope`] refuses to resolve at all.
 /// Test: `detected_stack_engineers_matches_the_manifest`,
+/// `truncated_detection_is_reported_to_the_caller`,
 /// `core::stack_profile::tests::detected_rust_lists_rust_engineer`.
-pub fn detected_stack_engineers(project_dir: &Path) -> BTreeSet<String> {
+pub fn detected_stack_engineers(project_dir: &Path) -> StackDetection {
     let Ok(categories) = framework_agent_categories() else {
-        return BTreeSet::new();
+        return StackDetection {
+            engineers: BTreeSet::new(),
+            truncated: false,
+        };
     };
     let probe = MarkerProbe::new(project_dir, &categories);
-    let mut detected = probe.detect(&categories.language);
-    detected.extend(probe.detect(&categories.framework));
-    detected
+    let mut engineers = probe.detect(&categories.language);
+    engineers.extend(probe.detect(&categories.framework));
+    // #7781 round-2: the truncation flag rides out with the set it qualifies.
+    StackDetection {
+        engineers,
+        truncated: probe.truncated(),
+    }
 }
 
 /// The framework-tier agent selection for `project_dir`.

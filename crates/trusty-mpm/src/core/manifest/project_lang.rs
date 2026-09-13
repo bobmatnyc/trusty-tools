@@ -132,6 +132,9 @@ pub(crate) struct MarkerProbe {
     roots: Vec<PathBuf>,
     /// One aggregate read budget for the whole detection call.
     budget: ProbeBudget,
+    /// True when a bound stopped the nested walk short, so every [`Self::detect`]
+    /// answer from this probe may be incomplete (#7781).
+    truncated: bool,
 }
 
 impl MarkerProbe {
@@ -153,8 +156,26 @@ impl MarkerProbe {
         let budget = ProbeBudget::new();
         let mut roots = probe_roots(project_dir, &budget);
         let anchors = MarkerAnchors::from_categories(categories);
-        roots.extend(nested_probe_roots(project_dir, &anchors, &budget, &roots));
-        Self { roots, budget }
+        // #7781 round-2: the walk reports whether a bound cut it short, and that
+        // flag travels with the probe so a caller can say detection is partial.
+        let nested = nested_probe_roots(project_dir, &anchors, &budget, &roots);
+        roots.extend(nested.roots);
+        Self {
+            roots,
+            budget,
+            truncated: nested.truncated,
+        }
+    }
+
+    /// Whether a bound cut the nested walk short, so detection may be partial.
+    ///
+    /// Why: a caller that renders or routes on the detected set must be able to
+    /// say "this list may be incomplete" — the round-1 #7781 finding.
+    /// What: the flag [`nested_probe_roots`] returned for this project.
+    /// Test: `scanned_dirs_bound_reports_truncation`,
+    /// `a_small_tree_is_not_truncated`.
+    pub(crate) fn truncated(&self) -> bool {
+        self.truncated
     }
 
     /// Whether any of `entry`'s declared markers is present at any probe root.

@@ -19,9 +19,11 @@
 //! them, use the project's own quality gate) or a neutral "not auto-detected"
 //! block that forbids defaulting and requires a Research pass. [`resolve_pm_prompt`](crate::core::instruction_overrides::resolve_pm_prompt)
 //! ([`crate::core::instruction_overrides`]) slots the section into the prompt.
+//! Either body carries [`TRUNCATED_NOTE`] when a scan bound cut detection short
+//! (#7781), so a partial list is never read as the whole stack.
 //! Test: `detected_rust_lists_rust_engineer`, `detected_nextjs_lists_ts_family`,
 //! `detected_polyglot_lists_both_families`, `undetected_is_neutral_no_default`,
-//! `heading_present_in_both_modes`.
+//! `heading_present_in_both_modes`, `truncated_detection_says_so`.
 
 use std::path::Path;
 
@@ -37,6 +39,21 @@ use crate::core::manifest::framework::detected_stack_engineers;
 /// Test: `heading_present_in_both_modes`.
 pub const STACK_PROFILE_HEADING: &str = "## Detected Project Stack (auto-derived)";
 
+/// The one line appended when a scan bound cut stack detection short (#7781).
+///
+/// Why: the scan is bounded by depth, directories scanned, and a member cap, and
+/// each one fails closed by returning fewer engineers. Without this line the PM
+/// reads a partial list as the whole stack and routes on it.
+/// What: a single sentence appended to whichever body was rendered, detected or
+/// neutral. The bound that tripped is in the daemon log, not the prompt — the
+/// PM needs to know the list is partial, not which constant to raise.
+/// Test: `truncated_detection_says_so`.
+const TRUNCATED_NOTE: &str = "\n\n**Detection was truncated** — a scan bound \
+     (directory depth, directories scanned, or the member cap) stopped the walk \
+     before the whole tree was read, so a stack kept in an unscanned \
+     subdirectory is missing from this section. Treat the list as partial and \
+     confirm with a Research pass before concluding a stack is absent.";
+
 /// Render the per-project stack-profile section for `project_dir`.
 ///
 /// Why: the PM prompt must state the project's ACTUAL stack rather than inherit a
@@ -51,13 +68,23 @@ pub const STACK_PROFILE_HEADING: &str = "## Detected Project Stack (auto-derived
 /// returns a NEUTRAL section that forbids assuming any stack and mandates a
 /// Research pass to detect it before routing. Pure and side-effect-free apart
 /// from the filesystem `exists()` probes performed by [`detected_stack_engineers`].
+/// Either body ends with [`TRUNCATED_NOTE`] when detection was truncated (#7781).
 /// Test: `detected_rust_lists_rust_engineer`, `detected_nextjs_lists_ts_family`,
-/// `detected_polyglot_lists_both_families`, `undetected_is_neutral_no_default`.
+/// `detected_polyglot_lists_both_families`, `undetected_is_neutral_no_default`,
+/// `truncated_detection_says_so`.
 pub fn stack_profile_section(project_dir: &Path) -> String {
     // #7781: detection is no longer root-only, so neither sentence below says
     // "root" any more. The section is otherwise unchanged — only the engineer
     // set it lists does.
-    let engineers = detected_stack_engineers(project_dir);
+    let detection = detected_stack_engineers(project_dir);
+    // #7781 round-2: a bounded scan that gave up must say so, or an incomplete
+    // list reads as a complete one.
+    let note = if detection.truncated {
+        TRUNCATED_NOTE
+    } else {
+        ""
+    };
+    let engineers = detection.engineers;
 
     if engineers.is_empty() {
         return format!(
@@ -67,7 +94,7 @@ pub fn stack_profile_section(project_dir: &Path) -> String {
              not Node/TypeScript. Begin with a **MANDATORY Research phase** to \
              detect the stack from the repository before routing any \
              implementation work, then delegate to the matching \
-             `<lang>-engineer`. Never fall back to a default stack profile."
+             `<lang>-engineer`. Never fall back to a default stack profile.{note}"
         );
     }
 
@@ -89,7 +116,7 @@ pub fn stack_profile_section(project_dir: &Path) -> String {
          the real commands before citing them; do not assume `cargo`/`make \
          check` unless the project actually uses them. If a task clearly touches \
          a stack not listed above, run a Research pass to confirm before \
-         routing — never fall back to a default stack profile."
+         routing — never fall back to a default stack profile.{note}"
     )
 }
 
@@ -244,6 +271,41 @@ mod tests {
         assert!(
             !section.contains("Do NOT assume any stack"),
             "a detected polyglot project must not emit the neutral block"
+        );
+    }
+
+    /// A truncated scan is stated in the rendered section, not silently dropped.
+    ///
+    /// Why (#7781 round-2 HIGH): the PM routes on this section. A list shortened
+    /// by a scan bound reads exactly like a complete one, so the PM would
+    /// confidently conclude a stack is absent from evidence that never covered
+    /// it.
+    /// What: a Cargo project with a directory nested past `MAX_NESTED_DEPTH`, so
+    /// the depth bound leaves children unread; asserts the section still names
+    /// `rust-engineer` AND says detection was truncated. The shallow
+    /// counterpart asserts the note is absent, so it cannot be unconditional.
+    /// Test: this function IS the test.
+    #[test]
+    fn truncated_detection_says_so() {
+        let deep = TempDir::new().unwrap();
+        touch(deep.path(), "Cargo.toml");
+        fs::create_dir_all(deep.path().join("a/b/c/d/e")).unwrap();
+
+        let section = stack_profile_section(deep.path());
+        assert!(
+            section.contains("Detection was truncated"),
+            "a bounded scan that gave up must say so in the section: {section}"
+        );
+        assert!(
+            section.contains("`rust-engineer`"),
+            "truncation qualifies the list; it must not replace it"
+        );
+
+        let shallow = TempDir::new().unwrap();
+        touch(shallow.path(), "Cargo.toml");
+        assert!(
+            !stack_profile_section(shallow.path()).contains("Detection was truncated"),
+            "a fully-read tree must not carry the truncation note"
         );
     }
 

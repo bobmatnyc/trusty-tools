@@ -15,7 +15,10 @@
 //!
 //! **Bounds, and why these numbers.** Session launch waits on this walk, so
 //! every dimension is capped and every cap fails closed — an unscanned
-//! directory is simply a directory with no markers, never an error:
+//! directory is simply a directory with no markers, never an error. Failing
+//! closed SILENTLY was the round-1 review finding, so every bound now also sets
+//! [`NestedProbe::truncated`] and logs which one tripped: "no nested stack" and
+//! "the walk gave up" are no longer the same answer.
 //!
 //! | Bound | Value | Rationale |
 //! |---|---|---|
@@ -151,8 +154,12 @@ impl SkipDirs {
 ///
 /// Why: factored out so the deliberately narrow parse is testable on its own.
 /// What: one name per line, after dropping blanks, comments, and negations, and
-/// after stripping a leading and trailing `/`. A remaining `/`, or any glob
-/// metacharacter, disqualifies the line.
+/// after stripping a leading and trailing `/`. A leading `**/` is stripped too:
+/// `**/target/` is gitignore's spelling of "this bare name, at any depth",
+/// which is exactly what this skip set means, and it is the spelling most
+/// `.gitignore` files actually use (#7781). A remaining `/`, or any glob
+/// metacharacter, still disqualifies the line — those are real path and glob
+/// semantics, left to git.
 /// Test: `gitignore_path_rules_are_ignored`.
 fn gitignore_dir_names(body: &str) -> Vec<String> {
     let mut names = Vec::new();
@@ -162,6 +169,9 @@ fn gitignore_dir_names(body: &str) -> Vec<String> {
             continue;
         }
         let rule = rule.trim_end_matches('/').trim_start_matches('/');
+        // #7781: `**/<name>/` means the bare name at any depth — the same rule
+        // this skip set applies — so the prefix is dropped before the tests below.
+        let rule = rule.strip_prefix("**/").unwrap_or(rule);
         if rule.is_empty() || rule.contains('/') || rule.contains(['*', '?', '[']) {
             continue;
         }
@@ -183,8 +193,13 @@ struct DirScan {
 /// Why: one `read_dir` per directory is the whole cost model of the walk;
 /// asking "is it anchored?" and "what is below it?" separately would double it.
 /// What: `None` when the directory cannot be read — fail-closed, identical to an
-/// empty directory. Children are sorted so a capped walk is reproducible.
-/// Test: `walk_is_deterministic`, `unreadable_directory_is_not_an_error`.
+/// empty directory. Children are sorted so a capped walk is reproducible. A
+/// SYMLINK to a directory is not a child: `file_type` does not follow links, so
+/// the walk cannot leave the project tree, matching the no-escape rule
+/// `super::workspace::expand_member_glob` applies to a declared member pattern.
+/// Test: `walk_is_deterministic`, `missing_root_is_not_an_error`,
+/// `unreadable_subdirectory_is_skipped_not_an_error`,
+/// `directory_symlink_is_not_traversed`.
 fn scan_dir(dir: &Path, anchors: &MarkerAnchors, skip: &SkipDirs) -> Option<DirScan> {
     let entries = std::fs::read_dir(dir).ok()?;
     let mut anchored = false;
@@ -196,12 +211,53 @@ fn scan_dir(dir: &Path, anchors: &MarkerAnchors, skip: &SkipDirs) -> Option<DirS
         if anchors.matches(&name) {
             anchored = true;
         }
-        if !skip.skips(&name) && entry.path().is_dir() {
+        // #7781: `file_type()` reports the LINK, where `path().is_dir()` follows
+        // it — a directory symlink would otherwise let the walk escape the
+        // project (or loop) and report an outside tree as this project's stack.
+        if !skip.skips(&name) && entry.file_type().is_ok_and(|t| t.is_dir()) {
             children.push(entry.path());
         }
     }
     children.sort();
     Some(DirScan { anchored, children })
+}
+
+/// The outcome of one nested walk: what it found, and whether it saw everything.
+///
+/// Why: every bound in this module fails closed by returning fewer roots, and a
+/// short result is byte-identical to a genuinely shallow tree. Round-1 review of
+/// #7781 called that out: a consumer cannot tell "this repo has no nested stack"
+/// from "the walk gave up before reaching it", so a truncated detection silently
+/// becomes a confident, wrong answer about the project's stack.
+/// What: the probe roots, plus one flag set by whichever bound stopped the walk
+/// — the depth limit leaving unwalked children, [`MAX_SCANNED_DIRS`], or the
+/// shared [`MAX_WORKSPACE_MEMBERS`] ceiling. Each sets it beside a
+/// `tracing::warn!` naming the bound, so the reason is in the log even where the
+/// flag is only rendered as one line.
+/// Test: `scanned_dirs_bound_reports_truncation`,
+/// `a_small_tree_is_not_truncated`, `depth_bound_stops_the_walk`,
+/// `member_cap_is_shared`.
+pub(crate) struct NestedProbe {
+    /// Nested directories below the root that carry a declared marker.
+    pub(crate) roots: Vec<PathBuf>,
+    /// True when a bound stopped the walk before the tree was exhausted.
+    pub(crate) truncated: bool,
+}
+
+/// Log the bound that truncated a nested walk (#7781).
+///
+/// Why: the flag on [`NestedProbe`] says detection is incomplete; only the log
+/// says WHICH ceiling to raise, and raising the wrong one fixes nothing.
+/// What: one WARN naming the bound and the project it tripped on.
+/// Test: `scanned_dirs_bound_reports_truncation` asserts the WARN reaches a
+/// subscriber.
+fn warn_truncated(project_dir: &Path, bound: &str) {
+    tracing::warn!(
+        bound,
+        project = %project_dir.display(),
+        "#7781: nested stack detection was truncated by a scan bound; a nested \
+         project past it is undetected"
+    );
 }
 
 /// The nested directories under `project_dir` that carry a declared marker.
@@ -211,29 +267,38 @@ fn scan_dir(dir: &Path, anchors: &MarkerAnchors, skip: &SkipDirs) -> Option<DirS
 /// stated in exactly one place (#7781).
 /// What: a breadth-first walk to [`MAX_NESTED_DEPTH`], returning every visited
 /// directory below the root that [`MarkerAnchors`] matches, in deterministic
-/// (breadth-first, sorted-per-directory) order. `project_dir` itself is never
-/// returned — the caller already probes it. `already` carries the roots
+/// (breadth-first, sorted-per-directory) order, plus the
+/// [`NestedProbe::truncated`] flag described there. `project_dir` itself is
+/// never returned — the caller already probes it. `already` carries the roots
 /// resolved so far so the shared [`MAX_WORKSPACE_MEMBERS`] ceiling counts both
 /// discovery paths together and declared members are not returned twice.
 /// Test: `nested_ui_package_is_found`, `depth_bound_stops_the_walk`,
-/// `skipped_directories_are_never_probed`, `member_cap_is_shared`.
+/// `skipped_directories_are_never_probed`, `member_cap_is_shared`,
+/// `scanned_dirs_bound_reports_truncation`, `a_small_tree_is_not_truncated`.
 pub(crate) fn nested_probe_roots(
     project_dir: &Path,
     anchors: &MarkerAnchors,
     budget: &ProbeBudget,
     already: &[PathBuf],
-) -> Vec<PathBuf> {
+) -> NestedProbe {
     let skip = SkipDirs::for_project(project_dir, budget);
     let mut found: Vec<PathBuf> = Vec::new();
     let mut frontier = vec![project_dir.to_path_buf()];
     let mut scanned = 0usize;
+    // #7781: set once, warned once after the walk — a per-directory warn would
+    // fire for every deep directory in a large repo.
+    let mut depth_truncated = false;
 
     for depth in 0..=MAX_NESTED_DEPTH {
         let mut next = Vec::new();
         for dir in std::mem::take(&mut frontier) {
             scanned += 1;
             if scanned > MAX_SCANNED_DIRS {
-                return found;
+                warn_truncated(project_dir, "MAX_SCANNED_DIRS");
+                return NestedProbe {
+                    roots: found,
+                    truncated: true,
+                };
             }
             let Some(scan) = scan_dir(&dir, anchors, &skip) else {
                 continue;
@@ -241,17 +306,29 @@ pub(crate) fn nested_probe_roots(
             // Depth 0 is the project root: already a probe root, never re-added.
             if depth > 0 && scan.anchored && !already.contains(&dir) && !found.contains(&dir) {
                 if already.len() + found.len() > MAX_WORKSPACE_MEMBERS {
-                    return found;
+                    warn_truncated(project_dir, "MAX_WORKSPACE_MEMBERS");
+                    return NestedProbe {
+                        roots: found,
+                        truncated: true,
+                    };
                 }
                 found.push(dir);
             }
             if depth < MAX_NESTED_DEPTH {
                 next.extend(scan.children);
+            } else if !scan.children.is_empty() {
+                depth_truncated = true;
             }
         }
         frontier = next;
     }
-    found
+    if depth_truncated {
+        warn_truncated(project_dir, "MAX_NESTED_DEPTH");
+    }
+    NestedProbe {
+        roots: found,
+        truncated: depth_truncated,
+    }
 }
 
 #[cfg(test)]

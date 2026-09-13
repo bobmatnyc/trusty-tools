@@ -4,8 +4,10 @@
 //! is indistinguishable from a genuinely empty tree unless each one is pinned.
 //! The anchor derivation carries the same risk in reverse: it silently stops
 //! finding a stack when a manifest marker gains a shape it does not handle.
-//! What: anchor derivation against the BUNDLED manifest, the depth and skip
-//! rules, `.gitignore` parsing, determinism, and the shared member cap.
+//! What: anchor derivation against the BUNDLED manifest, the depth, scanned-
+//! directory and shared-member bounds and the truncation flag each one sets,
+//! the skip rules, `.gitignore` parsing, determinism, symlink containment, and
+//! an unreadable subdirectory.
 //! Test: this file.
 
 use super::*;
@@ -29,6 +31,7 @@ fn bundled_anchors() -> MarkerAnchors {
 fn nested(root: &Path) -> Vec<String> {
     let budget = ProbeBudget::new();
     nested_probe_roots(root, &bundled_anchors(), &budget, &[root.to_path_buf()])
+        .roots
         .into_iter()
         .map(|p| {
             p.strip_prefix(root)
@@ -105,18 +108,31 @@ fn nested_ui_package_is_found() {
     assert_eq!(nested(tmp.path()), vec!["crates/app", "crates/app/ui"]);
 }
 
-/// The walk stops at `MAX_NESTED_DEPTH`.
+/// The walk stops at `MAX_NESTED_DEPTH`, and says it stopped.
 #[test]
 fn depth_bound_stops_the_walk() {
     let tmp = TempDir::new().unwrap();
     write(tmp.path(), "a/b/c/d/package.json", "{}");
     write(tmp.path(), "a/b/c/d/e/package.json", "{}");
 
-    let found = nested(tmp.path());
-    assert!(found.contains(&"a/b/c/d".to_string()), "depth 4 is walked");
+    let budget = ProbeBudget::new();
+    let probe = nested_probe_roots(
+        tmp.path(),
+        &bundled_anchors(),
+        &budget,
+        &[tmp.path().to_path_buf()],
+    );
     assert!(
-        !found.contains(&"a/b/c/d/e".to_string()),
+        probe.roots.contains(&tmp.path().join("a/b/c/d")),
+        "depth 4 is walked"
+    );
+    assert!(
+        !probe.roots.contains(&tmp.path().join("a/b/c/d/e")),
         "depth 5 is past the bound and must not be probed"
+    );
+    assert!(
+        probe.truncated,
+        "leaving a child of the deepest walked directory unread is truncation (#7781 round-2)"
     );
 }
 
@@ -162,12 +178,31 @@ fn gitignored_directory_is_skipped() {
 }
 
 /// Only bare `.gitignore` names are honoured; path and glob rules are left to git.
+///
+/// Why: the parse is deliberately narrow, so both what it accepts and what it
+/// drops need pinning. #7781 round-2 added the `**/<name>/` form — that IS
+/// "this bare name at any depth", exactly what the skip set means, and most
+/// real `.gitignore` files spell it that way, so dropping it lost the rule.
+/// What: asserts `**/target/` and `**/out/` yield their bare names, that `/out`
+/// and `build-cache/` still do, and that a real PATH rule (`src/generated`), a
+/// glob (`*.log`), a negation, a comment, and a deeper `**/a/b/` are all
+/// dropped. `/out` and `**/out/` both mean `out`; the caller collects the
+/// result into a set, so the repeat is expected rather than de-duplicated here.
+/// Test: this function IS the test.
 #[test]
 fn gitignore_path_rules_are_ignored() {
     let names = gitignore_dir_names(
-        "# comment\n\n!kept\n**/target/\n/out\nbuild-cache/\nsrc/generated\n*.log\n",
+        "# comment\n\n!kept\n**/target/\n/out\nbuild-cache/\n**/out/\nsrc/generated\n*.log\n**/a/b/\n",
     );
-    assert_eq!(names, vec!["out".to_string(), "build-cache".to_string()]);
+    assert_eq!(
+        names,
+        vec![
+            "target".to_string(),
+            "out".to_string(),
+            "build-cache".to_string(),
+            "out".to_string(),
+        ]
+    );
 }
 
 /// The walk returns a stable order regardless of `read_dir` order.
@@ -182,13 +217,191 @@ fn walk_is_deterministic() {
     assert_eq!(nested(tmp.path()), first, "repeat runs agree");
 }
 
-/// An unreadable directory is absence, never an error.
+/// A root that does not exist is absence, never an error.
+///
+/// Why: renamed in #7781 round-2 — the old name claimed unreadable-directory
+/// coverage this body never had (it passes a MISSING path, which fails at a
+/// different `read_dir` errno and never exercises a permission denial). The
+/// real unreadable case is `unreadable_subdirectory_is_skipped_not_an_error`.
+/// What: walks a path that was never created and asserts an empty, untruncated
+/// result rather than a panic.
+/// Test: this function IS the test.
 #[test]
-fn unreadable_directory_is_not_an_error() {
+fn missing_root_is_not_an_error() {
     let tmp = TempDir::new().unwrap();
     let missing = tmp.path().join("gone");
     let budget = ProbeBudget::new();
-    assert!(nested_probe_roots(&missing, &bundled_anchors(), &budget, &[]).is_empty());
+    let probe = nested_probe_roots(&missing, &bundled_anchors(), &budget, &[]);
+    assert!(probe.roots.is_empty());
+    assert!(
+        !probe.truncated,
+        "an empty tree is read in full, not truncated"
+    );
+}
+
+/// An unreadable SUBDIRECTORY is skipped; its readable sibling is still returned.
+///
+/// Why: `scan_dir` swallows a `read_dir` error to fail closed, and #7781
+/// round-2 found nothing proved that the swallow is LOCAL — one `chmod 000`
+/// directory must not abort the walk and take every sibling's stack with it.
+/// What: `chmod 0o000` on one anchored subdirectory, an anchored sibling beside
+/// it; asserts the walk returns the sibling, does not panic, and reports no
+/// truncation (a denied directory is absence, not a tripped bound). Unix only:
+/// Windows has no equivalent mode, and the precedent for this fixture is
+/// `session_manager::worktree_git_fixture::deny_all`.
+/// Test: this function IS the test.
+#[cfg(unix)]
+#[test]
+fn unreadable_subdirectory_is_skipped_not_an_error() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "denied/app/package.json", "{}");
+    write(tmp.path(), "readable/package.json", "{}");
+
+    let denied = tmp.path().join("denied");
+    let restore = fs::metadata(&denied).unwrap().permissions();
+    fs::set_permissions(&denied, fs::Permissions::from_mode(0o000)).unwrap();
+
+    let budget = ProbeBudget::new();
+    let probe = nested_probe_roots(
+        tmp.path(),
+        &bundled_anchors(),
+        &budget,
+        &[tmp.path().to_path_buf()],
+    );
+
+    // Restore before asserting so a failure still leaves TempDir removable.
+    fs::set_permissions(&denied, restore).unwrap();
+
+    let found: Vec<String> = probe
+        .roots
+        .iter()
+        .map(|p| p.strip_prefix(tmp.path()).unwrap().to_string_lossy().into())
+        .collect();
+    assert_eq!(
+        found,
+        vec!["readable".to_string()],
+        "an unreadable directory must cost only itself, never its siblings"
+    );
+    assert!(
+        !probe.truncated,
+        "a permission denial is absence, not a tripped scan bound"
+    );
+}
+
+/// A symlink to an outside directory is not traversed (#7781 round-2).
+///
+/// Why: `entry.path().is_dir()` FOLLOWS a symlink, so a link to a directory
+/// outside the project made that outside tree's manifests part of this
+/// project's detected stack — and a link pointing at an ancestor would revisit
+/// the same subtree under a second name. `super::workspace` already refuses a
+/// declared member pattern that escapes the root; the walk must match it.
+/// What: an out-of-tree directory holding `package.json`, symlinked into the
+/// project, plus a real anchored directory. Asserts only the real one is
+/// returned. Unix only — symlink creation needs no privilege there.
+/// Test: this function IS the test.
+#[cfg(unix)]
+#[test]
+fn directory_symlink_is_not_traversed() {
+    let outside = TempDir::new().unwrap();
+    write(outside.path(), "escaped/package.json", "{}");
+
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "real/package.json", "{}");
+    std::os::unix::fs::symlink(outside.path().join("escaped"), tmp.path().join("linked")).unwrap();
+
+    assert_eq!(
+        nested(tmp.path()),
+        vec!["real"],
+        "a directory symlink must contribute no probe root — the walk cannot leave the project"
+    );
+}
+
+/// Exceeding `MAX_SCANNED_DIRS` reports truncation and says which bound tripped.
+///
+/// Why (#7781 round-2 HIGH and MEDIUM): the directory-count bound had no test
+/// at all, and it fails closed by returning a SHORT list that looks exactly
+/// like a small repo. Both halves are pinned here — the flag the caller reads
+/// and the WARN an operator reads.
+/// What: builds `FANOUT` × `FANOUT` directories at depths 1 and 2, so the walk
+/// makes `1 + 64 + 4096 = 4161` `read_dir` calls against a bound of 4096, and
+/// captures the walk's `tracing` output in a `LogBuffer`. Asserts `truncated`,
+/// and that the WARN names `MAX_SCANNED_DIRS` so a different bound cannot
+/// satisfy this test. `#[serial]` because installing a subscriber perturbs the
+/// process-global interest cache.
+/// Test: this function IS the test.
+#[test]
+#[serial_test::serial]
+fn scanned_dirs_bound_reports_truncation() {
+    use tracing_subscriber::layer::SubscriberExt;
+
+    const FANOUT: usize = 64;
+    // The root, the first tier, and the second tier are all scanned. Checked at
+    // COMPILE time, so raising MAX_SCANNED_DIRS without resizing the fixture
+    // fails the build rather than quietly turning this test into a no-op.
+    const {
+        assert!(
+            1 + FANOUT + FANOUT * FANOUT > MAX_SCANNED_DIRS,
+            "the fixture below must exceed the bound it is pinning"
+        )
+    };
+    let tmp = TempDir::new().unwrap();
+    for outer in 0..FANOUT {
+        for inner in 0..FANOUT {
+            fs::create_dir_all(tmp.path().join(format!("d{outer}/d{inner}"))).unwrap();
+        }
+    }
+
+    let buffer = trusty_common::log_buffer::LogBuffer::new(64);
+    let subscriber = tracing_subscriber::registry().with(
+        trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+    );
+    let truncated = tracing::subscriber::with_default(subscriber, || {
+        let budget = ProbeBudget::new();
+        nested_probe_roots(
+            tmp.path(),
+            &bundled_anchors(),
+            &budget,
+            &[tmp.path().to_path_buf()],
+        )
+        .truncated
+    });
+
+    assert!(truncated, "a walk stopped by MAX_SCANNED_DIRS is truncated");
+    let lines = buffer.tail(64);
+    assert!(
+        lines.iter().any(|l| l.contains("MAX_SCANNED_DIRS")),
+        "the WARN must name the bound that tripped, or an operator cannot tell \
+         which ceiling to raise: {lines:#?}"
+    );
+}
+
+/// A tree the walk reads in full reports no truncation.
+///
+/// Why: the counterpart to `scanned_dirs_bound_reports_truncation`. A flag that
+/// is always true carries no information, and the #7751 consumer that will fail
+/// closed on it would then refuse every project.
+/// What: a small, shallow tree with one nested package; asserts the package is
+/// found and `truncated` is false.
+/// Test: this function IS the test.
+#[test]
+fn a_small_tree_is_not_truncated() {
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "pkg/package.json", "{}");
+
+    let budget = ProbeBudget::new();
+    let probe = nested_probe_roots(
+        tmp.path(),
+        &bundled_anchors(),
+        &budget,
+        &[tmp.path().to_path_buf()],
+    );
+    assert_eq!(probe.roots, vec![tmp.path().join("pkg")]);
+    assert!(
+        !probe.truncated,
+        "no bound is tripped by a two-directory tree"
+    );
 }
 
 /// The member cap counts declared members and nested finds together.
@@ -206,8 +419,13 @@ fn member_cap_is_shared() {
         .map(|i| tmp.path().join(format!("filler{i}")))
         .collect();
     let budget = ProbeBudget::new();
+    let probe = nested_probe_roots(tmp.path(), &bundled_anchors(), &budget, &already);
     assert!(
-        nested_probe_roots(tmp.path(), &bundled_anchors(), &budget, &already).is_empty(),
+        probe.roots.is_empty(),
         "at the shared cap the walk contributes nothing"
+    );
+    assert!(
+        probe.truncated,
+        "hitting the member cap is truncation, not an empty tree (#7781 round-2)"
     );
 }
