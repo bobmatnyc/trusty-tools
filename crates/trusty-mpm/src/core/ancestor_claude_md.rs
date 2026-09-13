@@ -19,15 +19,18 @@
 //!
 //! Read-only, and it stops at the filesystem root. It opens a file only to
 //! shape-test it, and only when that file is small enough to be a seed. It FAILS
-//! CLOSED: a start directory that does not resolve, or an ancestor it cannot
-//! stat, is an error — never an empty scan, which would read as "nothing here".
+//! CLOSED: a start directory that does not resolve, or an ancestor probe that
+//! fails for any reason but absence or a denied permission, is an error — never
+//! an empty scan, which would read as "nothing here". A permission-denied
+//! ancestor is recorded in [`AncestorScan::unchecked`] and every surface names
+//! it (#7673).
 //! Test: `ancestor_claude_md_tests.rs`.
 
 use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::core::harness_root::HARNESS_DIR;
+use crate::core::harness_root::{HARNESS_DIR, linked_worktree_owner};
 use crate::core::instruction_pipeline::CLAUDE_MD_STUB;
 
 /// Bytes per token in the estimate this module reports.
@@ -100,6 +103,22 @@ impl AncestorMemoryFile {
     }
 }
 
+/// What one scan found, and which ancestor directories it could not look in.
+///
+/// Why (#7673): one permission-denied directory anywhere above the project — a
+/// managed mount, an NFS export — used to turn every launch and every doctor
+/// run into a scan error. It is skipped instead, but a skip must stay visible:
+/// a silent one reads exactly like a clean directory.
+/// Test: `an_unreadable_ancestor_is_recorded_and_the_rest_still_reported`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AncestorScan {
+    /// Every memory file found above the project root.
+    pub found: Vec<AncestorMemoryFile>,
+    /// Ancestor directories whose memory files could not be stat'ed
+    /// (`PermissionDenied`), in walk order, each listed once.
+    pub unchecked: Vec<PathBuf>,
+}
+
 /// Every memory file above the project `dir` belongs to, exclusions resolved.
 ///
 /// Why: the one entry point every caller shares — `tm doctor`, `tm doctor
@@ -115,7 +134,7 @@ pub fn scan(
     dir: &Path,
     home: Option<&Path>,
     managed_config_dir: Option<&Path>,
-) -> io::Result<Vec<AncestorMemoryFile>> {
+) -> io::Result<AncestorScan> {
     let root = resolve_project_root(dir, home)?;
     let layers = crate::core::claude_md_excludes::settings_layers(&root, home, managed_config_dir);
     let excludes = crate::core::claude_md_excludes::merged_excludes(&layers);
@@ -136,10 +155,15 @@ pub fn scan(
 /// never a boundary: `~/.trusty-mpm` is tm's global state directory, not a
 /// project marker, and a dotfiles `.git` at `$HOME` makes every directory under
 /// it "inside a repo" — either would resolve a project-less directory to
-/// `$HOME` and hide `$HOME/CLAUDE.md` again. With no boundary, `dir` itself.
+/// `$HOME` and hide `$HOME/CLAUDE.md` again. A boundary that is a linked
+/// worktree nested inside its main checkout resolves to that checkout — see
+/// [`nested_worktree_owner`]. With no boundary, `dir` itself.
 /// Errors when `dir` does not resolve or a probe fails for any reason other
 /// than absence.
-/// Test: `a_marker_project_under_a_dotfiles_home_reports_the_home_claude_md`,
+/// Test: `a_linked_worktree_nested_in_its_checkout_reports_nothing`,
+/// `a_clone_nested_in_another_checkout_reports_the_outer_claude_md`,
+/// `a_submodule_reports_its_superprojects_claude_md`,
+/// `a_marker_project_under_a_dotfiles_home_reports_the_home_claude_md`,
 /// `scan_does_not_report_the_git_roots_own_claude_md_for_a_nested_project_root`,
 /// `a_marker_project_inside_two_repos_reports_both_repo_roots`,
 /// `a_symlinked_start_resolves_like_its_target`,
@@ -153,10 +177,36 @@ pub fn resolve_project_root(dir: &Path, home: Option<&Path>) -> io::Result<PathB
             continue;
         }
         if is_project_boundary(candidate)? {
-            return Ok(candidate.to_path_buf());
+            // #7673: a linked worktree nested in its checkout belongs to it.
+            let owner = nested_worktree_owner(candidate, home.as_deref());
+            return Ok(owner.unwrap_or_else(|| candidate.to_path_buf()));
         }
     }
     Ok(start)
+}
+
+/// The main checkout `boundary` is a nested linked worktree of, if it is one.
+///
+/// Why (#7673): measured, Claude Code gives a linked worktree nested under its
+/// main checkout that checkout's project identity (`memory_paths.auto`) and
+/// does not load the checkout's `CLAUDE.md` twice. Stopping at the worktree's
+/// `.git` FILE reported that file as a stray and `--fix` excluded it.
+/// What: `None` unless `boundary/.git` is a file and
+/// [`linked_worktree_owner`] names a checkout that strictly encloses
+/// `boundary` and is not `home`. A worktree OUTSIDE its checkout keeps its own
+/// boundary: Claude Code walks up from the worktree, so the checkout's files
+/// never load there while the worktree's own ancestors do. A submodule and an
+/// independent clone are not linked worktrees. Any failed probe is `None`,
+/// which keeps the nearest-boundary result.
+/// Test: `a_linked_worktree_nested_in_its_checkout_reports_nothing`,
+/// `a_submodule_reports_its_superprojects_claude_md`.
+fn nested_worktree_owner(boundary: &Path, home: Option<&Path>) -> Option<PathBuf> {
+    if !std::fs::metadata(boundary.join(".git")).is_ok_and(|meta| meta.is_file()) {
+        return None;
+    }
+    let owner = std::fs::canonicalize(linked_worktree_owner(boundary)?).ok()?;
+    let encloses = owner != boundary && boundary.starts_with(&owner);
+    (encloses && home != Some(owner.as_path())).then_some(owner)
 }
 
 /// Does `dir` hold a `.git` entry or a `.trusty-mpm` directory?
@@ -180,33 +230,45 @@ fn is_project_boundary(dir: &Path) -> io::Result<bool> {
 /// What: walks `project_root`'s ancestors — its parent first, then upward to the
 /// filesystem root — and reports every existing [`MEMORY_FILE_RELATIVE_PATHS`]
 /// entry. Files INSIDE `project_root` are never reported: they are the project's
-/// own instructions, not an ancestor's. A candidate that is absent is skipped;
-/// one that cannot be stat'ed for any other reason is an error, because
-/// skipping it could hide exactly the file this scan exists to find.
+/// own instructions, not an ancestor's. A candidate that is absent is skipped.
+/// One denied by permissions records its directory in
+/// [`AncestorScan::unchecked`] and the walk continues. Any other stat failure
+/// is an error, because skipping it silently could hide exactly the file this
+/// scan exists to find.
 /// Test: `no_ancestors_yields_nothing`, `a_seed_ancestor_is_reported_as_a_seed`,
 /// `a_project_root_file_is_never_reported`,
 /// `an_excluded_ancestor_is_flagged_excluded`,
-/// `an_unreadable_ancestor_is_an_error_not_an_empty_scan`.
+/// `an_unreadable_ancestor_is_recorded_and_the_rest_still_reported`,
+/// `an_ancestor_stat_failing_for_another_reason_is_still_an_error`.
 pub fn scan_with_excludes(
     project_root: &Path,
     excludes: &BTreeSet<String>,
-) -> io::Result<Vec<AncestorMemoryFile>> {
+) -> io::Result<AncestorScan> {
     let start =
         std::fs::canonicalize(project_root).map_err(|err| context(err, "resolve", project_root))?;
     let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
-    let mut found = Vec::new();
+    let mut scanned = AncestorScan::default();
     for current in start.ancestors().skip(1) {
         for relative in MEMORY_FILE_RELATIVE_PATHS {
             let path = current.join(relative);
             let meta = match std::fs::metadata(&path) {
                 Ok(meta) => meta,
                 Err(err) if is_absent(&err) => continue,
+                // #7673: one unreadable ancestor must not fail every launch —
+                // record it so every surface can say it went unchecked.
+                Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+                    let dir = path.parent().unwrap_or(current).to_path_buf();
+                    if !scanned.unchecked.contains(&dir) {
+                        scanned.unchecked.push(dir);
+                    }
+                    continue;
+                }
                 Err(err) => return Err(context(err, "stat", &path)),
             };
             if !meta.is_file() || !seen.insert(path.clone()) {
                 continue;
             }
-            found.push(AncestorMemoryFile {
+            scanned.found.push(AncestorMemoryFile {
                 bytes: meta.len(),
                 seed_template: looks_like_seed(&path, meta.len()),
                 excluded: crate::core::claude_md_excludes::is_excluded(&path, excludes),
@@ -214,7 +276,7 @@ pub fn scan_with_excludes(
             });
         }
     }
-    Ok(found)
+    Ok(scanned)
 }
 
 /// Is `err` "nothing there" rather than "could not look"?
@@ -293,13 +355,22 @@ fn is_seed_template(content: &str) -> bool {
 /// Why: the launch WARN and `tm session instructions` must say the same thing,
 /// and both must show a FAILED scan — swallowing the error into silence would
 /// read exactly like a clean machine.
-/// What: [`warning_text`] for a successful scan; for an error, a line naming
-/// `dir`, the error, and that the ancestors went unchecked.
+/// What: for a successful scan, [`warning_text`] followed by
+/// [`unchecked_text`] — so skipped ancestors add exactly one sentence, as a
+/// WARN and never as a scan error; for an error, a line naming `dir`, the
+/// error, and that the ancestors went unchecked.
 /// Test: `a_failed_scan_is_announced_not_silent`,
-/// `the_warning_names_both_remedies`.
-pub fn scan_notice(dir: &Path, scanned: &io::Result<Vec<AncestorMemoryFile>>) -> Option<String> {
+/// `the_warning_names_both_remedies`,
+/// `a_partial_scan_notice_names_the_unchecked_directories_once`.
+pub fn scan_notice(dir: &Path, scanned: &io::Result<AncestorScan>) -> Option<String> {
     match scanned {
-        Ok(found) => warning_text(found),
+        Ok(scan) => {
+            let parts: Vec<String> = [warning_text(&scan.found), unchecked_text(&scan.unchecked)]
+                .into_iter()
+                .flatten()
+                .collect();
+            (!parts.is_empty()).then(|| parts.join(" "))
+        }
         Err(err) => Some(format!(
             "could not check for CLAUDE.md files above {}: {err}. Memory files an \
              ancestor directory loads into this session were NOT checked; `tm doctor` \
@@ -347,6 +418,32 @@ pub fn warning_text(found: &[AncestorMemoryFile]) -> Option<String> {
          them and `tm doctor --fix --yes` applies both remedies.",
         loaded.len(),
         lines.join("; ")
+    ))
+}
+
+/// One sentence naming the ancestor directories a scan could not read, or
+/// `None` when it read them all (#7673).
+///
+/// Why: the launch WARN and the doctor row must name skipped directories the
+/// same way, and must say the files there were not checked.
+/// What: `<n> director(y|ies) above this project could not be read, so CLAUDE.md
+/// files there were not checked: <dir>, <dir>.`
+/// Test: `a_partial_scan_notice_names_the_unchecked_directories_once`.
+pub fn unchecked_text(unchecked: &[PathBuf]) -> Option<String> {
+    if unchecked.is_empty() {
+        return None;
+    }
+    let listed: Vec<String> = unchecked.iter().map(|d| d.display().to_string()).collect();
+    let noun = if unchecked.len() == 1 {
+        "directory"
+    } else {
+        "directories"
+    };
+    Some(format!(
+        "{} {noun} above this project could not be read, so CLAUDE.md files there \
+         were not checked: {}.",
+        unchecked.len(),
+        listed.join(", ")
     ))
 }
 

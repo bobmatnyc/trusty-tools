@@ -158,6 +158,51 @@ fn no_exclude_is_written_for_the_git_roots_own_claude_md_from_a_nested_project_r
     );
 }
 
+/// FAILS AGAINST 89f6204e4 (#7673): `--fix` run from a linked worktree nested
+/// inside its main checkout treated the checkout's own `CLAUDE.md` as a stray
+/// and wrote an exclude for it into the worktree's settings. The worktree
+/// resolves to its main checkout, so there is no finding and nothing is written.
+#[test]
+fn fix_from_a_nested_linked_worktree_writes_no_exclude() {
+    let tmp = TempDir::new().unwrap();
+    let repo = std::fs::canonicalize(tmp.path()).unwrap().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let git = |dir: &Path, args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "git {args:?}: {stderr}");
+    };
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["config", "user.email", "t@example.com"]);
+    git(&repo, &["config", "user.name", "T"]);
+    std::fs::write(repo.join("CLAUDE.md"), "# Repo\n\nUse cargo.\n").unwrap();
+    git(&repo, &["add", "CLAUDE.md"]);
+    git(&repo, &["commit", "-qm", "init"]);
+    let wt = repo.join(".claude").join("worktrees").join("wt");
+    std::fs::create_dir_all(wt.parent().unwrap()).unwrap();
+    git(
+        &repo,
+        &["worktree", "add", "-q", "-b", "wt", wt.to_str().unwrap()],
+    );
+
+    let steps = repair_ancestor_claude_md(&wt, None, None, "20260912", RepairMode::Apply);
+
+    assert!(steps.is_empty(), "{steps:?}");
+    assert!(
+        !settings_of(&wt).exists(),
+        "no exclude in the worktree's settings"
+    );
+    assert!(
+        !settings_of(&repo).exists(),
+        "no exclude in the checkout's settings"
+    );
+}
+
 /// Regression case 6 — FAILS AGAINST ROUND 3: under a dotfiles `$HOME` repo, a
 /// marker project resolved to `$HOME`, so `--fix` found nothing to repair. The
 /// exclude for `$HOME/CLAUDE.md` must land in the RESOLVED root's

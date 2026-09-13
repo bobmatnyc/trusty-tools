@@ -90,6 +90,40 @@ fn harness_root_is_the_main_checkout_for_a_worktree() {
     );
 }
 
+/// #7673: the linked-worktree detector answers only for a linked worktree — a
+/// main checkout and a submodule (whose `.git` is also a FILE) are `None`.
+#[test]
+fn linked_worktree_owner_is_the_main_checkout_only_for_a_linked_worktree() {
+    let tmp = crate::test_support::hermetic_temp_dir();
+    let upstream = tmp.path().join("upstream");
+    init_repo(&upstream);
+    let repo = tmp.path().join("proj");
+    init_repo(&repo);
+    let wt = repo.join(".claude").join("worktrees").join("wt");
+    std::fs::create_dir_all(wt.parent().unwrap()).unwrap();
+    git(
+        &repo,
+        &["worktree", "add", "-q", "-b", "feat", wt.to_str().unwrap()],
+    );
+    git(
+        &repo,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            upstream.to_str().unwrap(),
+            "sm",
+        ],
+    );
+
+    let owner = linked_worktree_owner(&wt).expect("a linked worktree has an owner");
+    assert_eq!(canon(&owner), canon(&repo));
+    assert_eq!(linked_worktree_owner(&repo), None, "a main checkout");
+    assert_eq!(linked_worktree_owner(&repo.join("sm")), None, "a submodule");
+}
+
 #[test]
 fn harness_root_is_the_repo_root_from_a_subdirectory() {
     // A tracked subdirectory must not grow its own `.trusty-mpm/` either —

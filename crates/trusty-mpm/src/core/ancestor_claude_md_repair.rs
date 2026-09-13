@@ -58,7 +58,7 @@ pub fn repair_ancestor_claude_md(
     // #7673: resolve once, before deriving `settings`, so the exclude lands in
     // the project's root and not in whichever subdirectory `--fix` ran from.
     let scanned = resolve_project_root(project_root, home)
-        .and_then(|root| Ok((scan(&root, home, managed_config_dir)?, root)));
+        .and_then(|root| Ok((scan(&root, home, managed_config_dir)?.found, root)));
     let (found, root) = match scanned {
         Ok(pair) => pair,
         Err(err) => {

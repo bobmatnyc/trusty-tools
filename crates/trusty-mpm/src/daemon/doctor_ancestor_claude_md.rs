@@ -30,8 +30,10 @@ pub(super) const CHECK_NAME: &str = "ancestor_claude_md";
 ///
 /// Why: see the module doc.
 /// What: `Ok` with no project directory (nothing to scan) and `Ok` when nothing
-/// above the project loads. `Warn`, naming the error, when the scan cannot run —
-/// a missing or unreadable directory is not a clean result. Otherwise `Fail`
+/// above the project loads AND no ancestor was skipped. `Warn`, naming the
+/// error, when the scan cannot run — a missing or unresolvable directory is not
+/// a clean result. A permission-denied ancestor is at least `Warn`, and every
+/// message then names those directories as "not checked" (#7673). Otherwise `Fail`
 /// when any finding is a pure seed
 /// template — pure cost, no content — and `Warn` when the findings all carry
 /// real content, which loads into every session under that directory and may
@@ -43,7 +45,8 @@ pub(super) const CHECK_NAME: &str = "ancestor_claude_md";
 /// `a_seed_template_ancestor_fails`,
 /// `a_content_ancestor_warns`,
 /// `an_excluded_ancestor_is_ok`,
-/// `a_missing_project_directory_warns_not_ok`.
+/// `a_missing_project_directory_warns_not_ok`,
+/// `an_unreadable_ancestor_warns_and_names_it_not_checked`.
 pub(super) fn check_ancestor_claude_md(
     project_dir: Option<&Path>,
     home: Option<&Path>,
@@ -61,8 +64,8 @@ pub(super) fn check_ancestor_claude_md(
     // `scan` resolves it to the nearest project boundary before it walks. A scan
     // that could not run is a Warn naming why — never Ok, which would read as
     // "nothing above this project".
-    let found = match crate::core::ancestor_claude_md::scan(project, home, managed_config_dir) {
-        Ok(found) => found,
+    let scanned = match crate::core::ancestor_claude_md::scan(project, home, managed_config_dir) {
+        Ok(scanned) => scanned,
         Err(err) => {
             return DoctorCheck::new(
                 CHECK_NAME,
@@ -75,7 +78,10 @@ pub(super) fn check_ancestor_claude_md(
             );
         }
     };
-    let (excluded, loading): (Vec<_>, Vec<_>) = found.iter().partition(|f| f.excluded);
+    let (excluded, loading): (Vec<_>, Vec<_>) = scanned.found.iter().partition(|f| f.excluded);
+    // #7673: a skipped ancestor is never Ok — the row names it as not checked.
+    let unchecked = crate::core::ancestor_claude_md::unchecked_text(&scanned.unchecked)
+        .map(|text| format!(". {text}"));
 
     if loading.is_empty() {
         let suffix = if excluded.is_empty() {
@@ -86,12 +92,18 @@ pub(super) fn check_ancestor_claude_md(
                 excluded.len()
             )
         };
+        let status = if unchecked.is_some() {
+            CheckStatus::Warn
+        } else {
+            CheckStatus::Ok
+        };
         return DoctorCheck::new(
             CHECK_NAME,
-            CheckStatus::Ok,
+            status,
             format!(
-                "no CLAUDE.md above {} loads into this project's sessions{suffix}",
-                project.display()
+                "no CLAUDE.md above {} loads into this project's sessions{suffix}{}",
+                project.display(),
+                unchecked.unwrap_or_default()
             ),
         );
     }
@@ -127,9 +139,10 @@ pub(super) fn check_ancestor_claude_md(
         status,
         format!(
             "{} CLAUDE.md file(s) above the project root cost ~{total} tokens per turn \
-             (estimated at bytes/{}): {listed}. {hint}",
+             (estimated at bytes/{}): {listed}. {hint}{}",
             loading.len(),
             crate::core::ancestor_claude_md::BYTES_PER_TOKEN,
+            unchecked.unwrap_or_default(),
         ),
     )
 }
@@ -215,6 +228,43 @@ mod tests {
         assert_eq!(check.status, CheckStatus::Warn, "{}", check.message);
         assert!(
             check.message.contains("claudeMdExcludes"),
+            "{}",
+            check.message
+        );
+    }
+
+    /// FAILS AGAINST 89f6204e4 (#7673): one permission-denied ancestor turned
+    /// the row into a scan error. It is `Warn`, names the directory as not
+    /// checked, and still reports the readable file beside it.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_ancestor_warns_and_names_it_not_checked() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_tmp, ancestor, project) = fixture();
+        std::fs::write(ancestor.join("CLAUDE.md"), "# Monorepo\n").unwrap();
+        let locked = ancestor.join(".claude");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let denied = std::fs::metadata(locked.join("CLAUDE.md"))
+            .is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied);
+
+        let check = check_ancestor_claude_md(Some(&project), None, None);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        if !denied {
+            eprintln!("#7673 tests: permission bits do not bind here, skipping");
+            return;
+        }
+        assert_eq!(check.status, CheckStatus::Warn, "{}", check.message);
+        assert!(check.message.contains("not checked"), "{}", check.message);
+        assert!(check.message.contains(".claude"), "{}", check.message);
+        assert!(
+            check.message.contains("1 CLAUDE.md file(s) above"),
+            "the readable file is still reported: {}",
+            check.message
+        );
+        assert!(
+            !check.message.contains("could not check"),
             "{}",
             check.message
         );
