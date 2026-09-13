@@ -107,6 +107,9 @@ fn inputs(cwd: &Path) -> RelaunchInputs<'_> {
         prompt_file: None,
         oauth_token: None,
         gh_env_file: None,
+        // #7685: the reachable posture — the one every pre-#7685 assertion in
+        // this file was written against.
+        memory_reachable: true,
         mcp_env: &[],
     }
 }
@@ -458,6 +461,7 @@ fn attach_and_resume_share_a_byte_identical_prefix() {
         shared.oauth_token,
         shared.gh_env_file,
         shared.mcp_env,
+        shared.memory_reachable,
     );
     let prefix: String = attach
         .chars()

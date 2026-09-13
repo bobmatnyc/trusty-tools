@@ -68,6 +68,39 @@ fn materialize_agent_artifacts_writes_all_agents() {
 }
 
 #[test]
+fn no_deployed_agent_asset_enables_auto_memory() {
+    // #7685: Claude Code's subagent `memory:` frontmatter field opts a subagent
+    // into its own auto memory. The owner directive is that auto memory is not
+    // used in tm sessions — trusty-memory is the memory — so no shipped agent
+    // may carry the field. Deploys the real roster and scans what landed, so a
+    // future asset that adds the field fails here rather than in a session.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let agents = tmp.path().join("agents");
+
+    let written = materialize_agent_artifacts(&agents).unwrap();
+    assert!(!written.is_empty(), "the roster must not be empty");
+
+    for name in &written {
+        let text = std::fs::read_to_string(agents.join(name)).unwrap();
+        // The field only means anything inside the leading `---` frontmatter
+        // block; prose in the body that happens to start a line with `memory:`
+        // is not a setting.
+        let Some(rest) = text.strip_prefix("---\n") else {
+            continue;
+        };
+        let Some(frontmatter) = rest.split("\n---").next() else {
+            continue;
+        };
+        for line in frontmatter.lines() {
+            assert!(
+                !line.trim_start().starts_with("memory:"),
+                "{name} sets the subagent `memory:` frontmatter field: {line:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn materialize_agent_artifacts_prunes_files_not_in_table() {
     let tmp = tempfile::TempDir::new().unwrap();
     let agents = tmp.path().join("agents");

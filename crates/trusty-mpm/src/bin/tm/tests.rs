@@ -2398,6 +2398,60 @@ fn cli_parses_memory_import() {
     }
 }
 
+/// Why (#7685): `tm memory import-auto-memory` is the migration that makes
+/// emptying Claude Code's own `MEMORY.md` safe, so its kebab-case spelling and
+/// its all-optional flags — every one of which has a derived default — must
+/// parse. A bare invocation is the common case: cwd, the project's own palace.
+#[test]
+fn cli_parses_memory_import_auto_memory() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "memory", "import-auto-memory"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Memory {
+            action:
+                MemoryAction::ImportAutoMemory {
+                    project,
+                    palace,
+                    json,
+                    memory_socket,
+                },
+        } => {
+            assert!(project.is_none(), "the project defaults to the cwd");
+            assert!(palace.is_none(), "the palace defaults to the project's own");
+            assert!(!json);
+            assert!(memory_socket.is_none());
+        }
+        other => panic!("expected Memory/ImportAutoMemory, got {other:?}"),
+    }
+
+    let explicit = Cli::try_parse_from([
+        "trusty-mpm",
+        "memory",
+        "import-auto-memory",
+        "--project",
+        "/tmp/ws",
+        "--palace",
+        "trusty-tools",
+        "--json",
+    ])
+    .unwrap();
+    match explicit.command.unwrap() {
+        Command::Memory {
+            action:
+                MemoryAction::ImportAutoMemory {
+                    project,
+                    palace,
+                    json,
+                    ..
+                },
+        } => {
+            assert_eq!(project, Some(std::path::PathBuf::from("/tmp/ws")));
+            assert_eq!(palace.as_deref(), Some("trusty-tools"));
+            assert!(json);
+        }
+        other => panic!("expected Memory/ImportAutoMemory, got {other:?}"),
+    }
+}
+
 /// Why (#4837): `--dry-run` is the safety flag an operator reaches for first,
 /// and `--json` is the machine-readable report a caller verifies with — both
 /// must round-trip, together with the explicit `--memory-socket` override and

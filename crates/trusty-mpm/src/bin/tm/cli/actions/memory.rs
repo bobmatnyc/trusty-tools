@@ -3,7 +3,8 @@
 //! Why (issue #4837): bulk-loading a directory of memory files into a
 //! trusty-memory palace is ETL, not reasoning. Doing it through an agent cost
 //! 622k tokens for 120 files; this command group is the zero-inference path.
-//! What: [`MemoryAction`] — currently just `import`.
+//! What: [`MemoryAction`] — `import`, plus `import-auto-memory` (#7685), the
+//! one-way migration of Claude Code's own auto-memory store into the palace.
 //! Test: `cli_parses_memory_import*` in `tests.rs`.
 
 use std::path::PathBuf;
@@ -53,5 +54,33 @@ pub(crate) enum MemoryAction {
         /// the daemon has no port and publishes no address).
         #[arg(long)]
         memory_socket: Option<std::path::PathBuf>,
+    },
+
+    /// Migrate Claude Code's own auto-memory store into the project's palace.
+    ///
+    /// trusty-memory is the memory; Claude Code's auto memory is the fallback
+    /// for when it is down (owner ruling 2026-09-12). This command is what makes
+    /// emptying that fallback safe: it reads every fact file under
+    /// `<claude-config>/projects/<slug>/memory/`, stores it as a drawer tagged
+    /// `migrated-from-auto-memory` plus `name:<name>` and `type:<type>`, moves
+    /// the file into `memory.archived-<YYYYMMDD>/`, and only then empties
+    /// `MEMORY.md` — archiving a copy of it first.
+    ///
+    /// Nothing is deleted, and a fact that fails to store is left exactly where
+    /// it was, with the index untouched, so a re-run picks up the remainder.
+    /// Re-running after a clean migration finds nothing and writes nothing.
+    ImportAutoMemory {
+        /// Project whose auto-memory store is migrated. Defaults to the cwd.
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// Target palace slug. Defaults to the slug this project's sessions pin.
+        #[arg(long)]
+        palace: Option<String>,
+        /// Print the full JSON report instead of the human summary.
+        #[arg(long)]
+        json: bool,
+        /// trusty-memory socket path. Defaults to the derived one.
+        #[arg(long)]
+        memory_socket: Option<PathBuf>,
     },
 }

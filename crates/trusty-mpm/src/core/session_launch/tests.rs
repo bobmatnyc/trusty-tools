@@ -1,9 +1,13 @@
+// #7685: the public entry points moved to `entry.rs`; the ones re-exported at
+// the module boundary still arrive via `use super::*` below, and this one —
+// which has no production caller outside `entry` — is imported directly.
+use super::entry::isolated_framework_paths;
 use super::search_index::register_project_index;
 use super::settings::{
     clean_global_trusty_memory_hooks, deploy_output_style, is_stale_bare_statusline_command,
     is_stale_statusline_command, preseed_workspace_trust, resolve_palace_slug,
-    resolve_statusline_binary_with, write_enabled_plugins, write_output_style, write_project_hooks,
-    write_status_line,
+    resolve_statusline_binary_with, write_auto_memory_enabled, write_enabled_plugins,
+    write_output_style, write_project_hooks, write_status_line,
 };
 use super::*;
 use tempfile::tempdir;
@@ -899,6 +903,109 @@ fn prepare_session_sets_output_style() {
 
 #[test]
 #[serial_test::serial]
+fn prepare_session_disables_auto_memory_when_trusty_memory_is_reachable() {
+    // #7685: the launch path must write the project-tier auto-memory kill
+    // switch, not only offer the helper. Same `$HOME` discipline as
+    // `prepare_session_sets_output_style` above, and for the same reason.
+    let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+
+    crate::core::session_launch::prepare_session_with_memory_reachable(
+        &fw,
+        project,
+        Some(tmp_home.path()),
+        true,
+    )
+    .expect("prep succeeds");
+
+    let value: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        value["autoMemoryEnabled"],
+        serde_json::json!(false),
+        "trusty-memory is up and is the memory — Claude Code auto-memory must be off"
+    );
+    assert_eq!(
+        value["outputStyle"],
+        serde_json::json!("trusty-mpm"),
+        "the auto-memory write must not clobber the style the same launch wrote"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn prepare_session_restores_auto_memory_when_trusty_memory_is_down() {
+    // #7685 r3: the launch write is TWO-WAY. Seed the project with the `false` a
+    // previous healthy-trusty-memory launch would have left — the state the
+    // "leave the key alone" rule could never recover from — and assert this
+    // launch reverts it.
+    let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+    std::fs::create_dir_all(project.join(".claude")).unwrap();
+    std::fs::write(
+        project.join(".claude").join("settings.json"),
+        r#"{"autoMemoryEnabled":false}"#,
+    )
+    .unwrap();
+
+    let report = crate::core::session_launch::prepare_session_with_memory_reachable(
+        &fw,
+        project,
+        Some(tmp_home.path()),
+        false,
+    )
+    .expect("prep succeeds");
+
+    let value: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        value["autoMemoryEnabled"],
+        serde_json::json!(true),
+        "with trusty-memory down the fallback must be turned back ON: {value}"
+    );
+    assert_eq!(
+        value["outputStyle"],
+        serde_json::json!("trusty-mpm"),
+        "the auto-memory write must not skip the rest of the launch"
+    );
+    assert!(
+        !report.memory_reachable,
+        "the report must carry the reachability the adapter will reuse"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn prepare_session_reports_the_resolved_reachability() {
+    // #7685 r3: the value the runtime adapter reuses instead of probing again.
+    let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
+    let tmp = tempdir().unwrap();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+
+    let report = crate::core::session_launch::prepare_session_with_memory_reachable(
+        &fw,
+        tmp.path(),
+        Some(tmp_home.path()),
+        true,
+    )
+    .expect("prep succeeds");
+
+    assert!(report.memory_reachable);
+}
+
+#[test]
+#[serial_test::serial]
 fn prepare_session_writes_configured_style() {
     // Why: HR-4 — when `[style] active` is set in the framework config, the
     // launched session's settings.json must carry that id.
@@ -1011,6 +1118,94 @@ fn write_output_style_preserves_existing_keys() {
         serde_json::from_str(&std::fs::read_to_string(claude_dir.join("settings.json")).unwrap())
             .unwrap();
     assert_eq!(value["outputStyle"], serde_json::json!("trusty-mpm"));
+    assert_eq!(value["theme"], serde_json::json!("dark"));
+}
+
+/// #7685: Claude Code auto-memory (`MEMORY.md`) is not used in tm sessions —
+/// trusty-memory is the memory. The project tier is the half a bare `claude`
+/// launched in this directory reads.
+#[test]
+fn write_auto_memory_off_disables_auto_memory() {
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+
+    write_auto_memory_enabled(project, false).expect("write succeeds");
+
+    let value: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(value["autoMemoryEnabled"], serde_json::json!(false));
+}
+
+#[test]
+fn write_auto_memory_off_preserves_existing_keys() {
+    // The shared `merge_settings` body must carry every unrelated key through,
+    // exactly as `write_output_style` does.
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let claude_dir = project.join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    std::fs::write(
+        claude_dir.join("settings.json"),
+        r#"{"theme":"dark","outputStyle":"trusty-mpm"}"#,
+    )
+    .unwrap();
+
+    write_auto_memory_enabled(project, false).expect("write succeeds");
+
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(claude_dir.join("settings.json")).unwrap())
+            .unwrap();
+    assert_eq!(value["autoMemoryEnabled"], serde_json::json!(false));
+    assert_eq!(value["theme"], serde_json::json!("dark"));
+    assert_eq!(value["outputStyle"], serde_json::json!("trusty-mpm"));
+}
+
+#[test]
+fn write_auto_memory_off_overrides_an_enabled_value() {
+    // The directive is that auto memory is OFF here, not that it defaults off —
+    // so the write is unconditional, unlike the absent-only `attribution` seed.
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let claude_dir = project.join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    std::fs::write(
+        claude_dir.join("settings.json"),
+        r#"{"autoMemoryEnabled":true}"#,
+    )
+    .unwrap();
+
+    write_auto_memory_enabled(project, false).expect("write succeeds");
+
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(claude_dir.join("settings.json")).unwrap())
+            .unwrap();
+    assert_eq!(value["autoMemoryEnabled"], serde_json::json!(false));
+}
+
+#[test]
+fn write_auto_memory_on_reverts_a_prior_disable() {
+    // #7685 r3: the other direction, and the reason the writer is two-way at
+    // all. A `false` an earlier launch wrote has to be revertible by a later
+    // launch that finds trusty-memory gone — "leave the key alone" could not do
+    // it, so the fallback stayed dead forever.
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let claude_dir = project.join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    std::fs::write(
+        claude_dir.join("settings.json"),
+        r#"{"autoMemoryEnabled":false,"theme":"dark"}"#,
+    )
+    .unwrap();
+
+    write_auto_memory_enabled(project, true).expect("write succeeds");
+
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(claude_dir.join("settings.json")).unwrap())
+            .unwrap();
+    assert_eq!(value["autoMemoryEnabled"], serde_json::json!(true));
     assert_eq!(value["theme"], serde_json::json!("dark"));
 }
 

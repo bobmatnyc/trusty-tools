@@ -14,6 +14,70 @@
 use super::super::test_helpers::FakeTmux;
 use super::*;
 
+/// [`super::spawn_command`] with the reachable-trusty-memory posture (#7685).
+///
+/// Why: every test in this file predates the `memory_reachable` parameter and
+/// was written against the command line tm emits when trusty-memory is up —
+/// which is still the posture each of them pins. Supplying that value once here
+/// keeps those assertions about what they were written to assert instead of
+/// restating one constant ~40 times. The other branch is covered explicitly, via
+/// `super::spawn_command`, by
+/// `spawn_command_keeps_auto_memory_when_trusty_memory_is_unreachable`.
+/// What: delegates with `memory_reachable: true`.
+#[allow(clippy::too_many_arguments)]
+fn spawn_command(
+    cwd: &Path,
+    claude_bin: &str,
+    config_dir: Option<&Path>,
+    session_id: &str,
+    prompt_file: Option<&Path>,
+    oauth_token: Option<&str>,
+    gh_env_file: Option<&Path>,
+    mcp_env: &[(String, String)],
+) -> String {
+    super::spawn_command(
+        cwd,
+        claude_bin,
+        config_dir,
+        session_id,
+        prompt_file,
+        oauth_token,
+        gh_env_file,
+        mcp_env,
+        true,
+    )
+}
+
+/// [`super::resume_command`] with the reachable-trusty-memory posture (#7685).
+///
+/// Why and what: see [`spawn_command`] above. The other branch is covered by
+/// `resume_command_keeps_auto_memory_when_trusty_memory_is_unreachable`.
+#[allow(clippy::too_many_arguments)]
+fn resume_command(
+    cwd: &Path,
+    claude_bin: &str,
+    config_dir: Option<&Path>,
+    claude_session_id: Option<&str>,
+    session_id: &str,
+    prompt_file: Option<&Path>,
+    oauth_token: Option<&str>,
+    gh_env_file: Option<&Path>,
+    mcp_env: &[(String, String)],
+) -> String {
+    super::resume_command(
+        cwd,
+        claude_bin,
+        config_dir,
+        claude_session_id,
+        session_id,
+        prompt_file,
+        oauth_token,
+        gh_env_file,
+        mcp_env,
+        true,
+    )
+}
+
 /// Fixed managed-session UUID string reused across command-builder tests
 /// (#2023 component B) — a representative id, not a real session.
 const TEST_SESSION_ID: &str = "11111111-2222-3333-4444-555555555555";
@@ -65,7 +129,7 @@ impl Drop for HomeGuard {
 #[test]
 fn claude_code_adapter_identifies() {
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake);
+    let adapter = ClaudeCodeAdapter::new(fake, None);
     assert_eq!(adapter.identify(), "claude-code");
 }
 
@@ -372,10 +436,141 @@ fn spawn_command_without_token_pins_the_exact_command() {
     let dispatch = super::claude_code_exit_hint::exit_dispatch_suffix();
     let expected = format!(
         "cd '/tmp/ws' && {{ export TM_MANAGED_SESSION_ID='{TEST_SESSION_ID}'; \
-             {clock}env -u ANTHROPIC_API_KEY{scrub} {managed} claude \
+             {clock}env -u ANTHROPIC_API_KEY{scrub} {managed} \
+             CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 claude \
              --setting-sources project,local --dangerously-skip-permissions{dispatch}; }}"
     );
     assert_eq!(cmd, expected, "no-token command shape must stay pinned");
+}
+
+#[test]
+fn spawn_command_disables_auto_memory() {
+    // #7685: the variable name is HARD-CODED here on purpose, for the same
+    // reason `spawn_command_scrubs_inherited_session_markers` hard-codes its
+    // marker — deriving it from production code would let the assertion pass
+    // against an emptied constant, which is exactly the silent failure the
+    // owner directive is about. trusty-memory is the memory in tm sessions.
+    let cmd = spawn_command(
+        Path::new(TEST_CWD),
+        "claude",
+        None,
+        TEST_SESSION_ID,
+        None,
+        None,
+        None,
+        &[],
+    );
+    assert!(
+        cmd.contains("CLAUDE_CODE_DISABLE_AUTO_MEMORY=1"),
+        "spawn must disable Claude Code auto-memory: {cmd}"
+    );
+}
+
+#[test]
+fn resume_command_disables_auto_memory() {
+    // A resumed session is the same session; it must carry the same directive.
+    let cmd = resume_command(
+        Path::new(TEST_CWD),
+        "claude",
+        None,
+        Some("abc-123"),
+        TEST_SESSION_ID,
+        None,
+        None,
+        None,
+        &[],
+    );
+    assert!(
+        cmd.contains("CLAUDE_CODE_DISABLE_AUTO_MEMORY=1"),
+        "resume must disable Claude Code auto-memory: {cmd}"
+    );
+}
+
+#[test]
+fn spawn_command_keeps_auto_memory_when_trusty_memory_is_unreachable() {
+    // #7685 (owner ruling 2026-09-12): auto memory is the FALLBACK. Emitting
+    // the kill switch beside a dead trusty-memory would leave the session with
+    // no memory at all, so the assignment must be ABSENT — not merely different.
+    let cmd = super::spawn_command(
+        Path::new(TEST_CWD),
+        "claude",
+        None,
+        TEST_SESSION_ID,
+        None,
+        None,
+        None,
+        &[],
+        false,
+    );
+    assert!(
+        !cmd.contains("CLAUDE_CODE_DISABLE_AUTO_MEMORY"),
+        "with trusty-memory down the fallback must stay available: {cmd}"
+    );
+    assert!(
+        cmd.contains("--dangerously-skip-permissions"),
+        "omitting one assignment must not drop the rest of the command: {cmd}"
+    );
+}
+
+#[test]
+fn resume_command_keeps_auto_memory_when_trusty_memory_is_unreachable() {
+    // A resumed session is the same session; it gets the same fallback rule.
+    let cmd = super::resume_command(
+        Path::new(TEST_CWD),
+        "claude",
+        None,
+        Some("abc-123"),
+        TEST_SESSION_ID,
+        None,
+        None,
+        None,
+        &[],
+        false,
+    );
+    assert!(
+        !cmd.contains("CLAUDE_CODE_DISABLE_AUTO_MEMORY"),
+        "with trusty-memory down the fallback must stay available: {cmd}"
+    );
+    assert!(
+        cmd.contains("--resume abc-123"),
+        "omitting one assignment must not drop the resume target: {cmd}"
+    );
+}
+
+#[test]
+fn env_bin_prefix_keeps_auto_memory_when_trusty_memory_is_unreachable() {
+    // The lowest layer, pinned directly: nothing above it can put the
+    // assignment back if this one refuses to emit it.
+    let prefix = env_bin_prefix("claude", Some(Path::new("/tmp/cfg")), None, &[], false);
+    assert!(
+        !prefix.contains("CLAUDE_CODE_DISABLE_AUTO_MEMORY"),
+        "the unreachable branch must emit no auto-memory assignment: {prefix}"
+    );
+    assert!(
+        prefix.contains("CLAUDE_CONFIG_DIR="),
+        "every other assignment must survive: {prefix}"
+    );
+}
+
+#[test]
+fn env_bin_prefix_orders_auto_memory_before_the_config_dir() {
+    // POSIX `env` stops parsing options at the first `NAME=VALUE`, so every
+    // assignment must sit after the `-u` scrub flags. This pins the new
+    // assignment's POSITION, not only its presence.
+    let prefix = env_bin_prefix("claude", Some(Path::new("/tmp/cfg")), None, &[], true);
+    let auto = prefix
+        .find("CLAUDE_CODE_DISABLE_AUTO_MEMORY=1")
+        .expect("the auto-memory assignment must be present");
+    let scrub_end = prefix
+        .rfind("-u ")
+        .expect("the scrub flags must be present in the prefix");
+    let config = prefix
+        .find("CLAUDE_CONFIG_DIR=")
+        .expect("the config dir must be present");
+    assert!(
+        scrub_end < auto && auto < config,
+        "auto-memory must follow every -u flag and precede CLAUDE_CONFIG_DIR: {prefix}"
+    );
 }
 
 #[test]
@@ -467,7 +662,7 @@ fn env_bin_prefix_orders_scrub_flags_before_assignments() {
     // appearing after an assignment is exec'd as a command
     // (`env: -u: No such file or directory`) and kills every managed spawn.
     let dir = Path::new("/tm/config");
-    let prefix = env_bin_prefix("/abs/claude", Some(dir), Some("tok"), &[]);
+    let prefix = env_bin_prefix("/abs/claude", Some(dir), Some("tok"), &[], true);
     let last_unset = prefix
         .rfind("-u ")
         .expect("prefix must contain at least one -u flag");
@@ -519,7 +714,13 @@ fn env_bin_prefix_carries_a_non_empty_mcp_env() {
         ),
         ("TRUSTY_INDEX".to_owned(), "idx-42".to_owned()),
     ];
-    let prefix = env_bin_prefix("/abs/claude", Some(Path::new("/tm/config")), None, &mcp_env);
+    let prefix = env_bin_prefix(
+        "/abs/claude",
+        Some(Path::new("/tm/config")),
+        None,
+        &mcp_env,
+        true,
+    );
 
     assert!(
         prefix.contains(" TRUSTY_MEMORY_PALACE='owner repo slug'"),
@@ -636,7 +837,8 @@ fn resume_command_without_token_pins_the_exact_command() {
     let dispatch = super::claude_code_exit_hint::exit_dispatch_suffix();
     let expected = format!(
         "cd '/tmp/ws' && {{ export TM_MANAGED_SESSION_ID='{TEST_SESSION_ID}'; \
-             {clock}env -u ANTHROPIC_API_KEY{scrub} {managed} claude \
+             {clock}env -u ANTHROPIC_API_KEY{scrub} {managed} \
+             CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 claude \
              --setting-sources project,local --dangerously-skip-permissions --resume abc-123\
              {dispatch}; }}"
     );
@@ -909,7 +1111,7 @@ fn spawn_sends_env_scrub_when_binary_available() {
         return;
     };
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone());
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), None);
     adapter
         .spawn(
             "tmpm-test",
@@ -956,7 +1158,7 @@ fn spawn_sends_oauth_token_when_available() {
         );
     }
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone());
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), None);
     let result = adapter.spawn(
         "tmpm-test",
         Path::new("/tmp"),
@@ -980,13 +1182,50 @@ fn spawn_sends_oauth_token_when_available() {
 }
 
 #[test]
+#[serial_test::serial]
+fn spawn_uses_the_launch_resolved_reachability() {
+    // #7685 r3: the adapter must act on the value the launch already resolved,
+    // never re-probe. Both directions are asserted on ONE host, so the assertion
+    // cannot be satisfied by whatever this machine's trusty-memory happens to be
+    // doing — a re-probing adapter would answer the same way twice.
+    let _home = HomeGuard::set();
+    let Some(_claude_bin) = ClaudeCodeAdapter::resolve_claude() else {
+        return;
+    };
+    let spawn_with = |reachable: bool| {
+        let fake = FakeTmux::new();
+        let adapter = ClaudeCodeAdapter::new(fake.clone(), Some(reachable));
+        adapter
+            .spawn(
+                "tmpm-test",
+                Path::new("/tmp"),
+                "some task",
+                TEST_SESSION_ID,
+                &[],
+            )
+            .expect("spawn");
+        let sends = fake.sends.lock().unwrap();
+        sends[0].1.clone()
+    };
+
+    assert!(
+        spawn_with(true).contains("CLAUDE_CODE_DISABLE_AUTO_MEMORY=1"),
+        "an injected `reachable` must turn auto memory off"
+    );
+    assert!(
+        !spawn_with(false).contains("CLAUDE_CODE_DISABLE_AUTO_MEMORY"),
+        "an injected `unreachable` must leave the fallback alone"
+    );
+}
+
+#[test]
 fn publish_session_env_sets_id_and_config_dir() {
     // #2157 item 1: exercises publish_session_env directly (no HOME
     // redirection or real `claude` binary needed) so this call-shape
     // assertion runs unconditionally in CI, unlike the full-spawn tests
     // below which are gated on a real `claude` binary being present.
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone());
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), None);
     adapter.publish_session_env("tmpm-test", TEST_SESSION_ID, Some("/tmp/config-dir"));
     let env_sets = fake.env_sets.lock().unwrap();
     assert_eq!(
@@ -1009,7 +1248,7 @@ fn publish_session_env_sets_id_and_config_dir() {
 #[test]
 fn publish_session_env_omits_config_dir_when_absent() {
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone());
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), None);
     adapter.publish_session_env("tmpm-test", TEST_SESSION_ID, None);
     let env_sets = fake.env_sets.lock().unwrap();
     assert_eq!(
@@ -1033,7 +1272,7 @@ fn spawn_publishes_session_id_via_set_environment() {
         return;
     }
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone());
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), None);
     adapter
         .spawn(
             "tmpm-test",
@@ -1454,7 +1693,7 @@ fn spawn_resume_with_id_uses_resume_flag() {
     std::fs::write(project_dir.join("my-session-id.jsonl"), "{}").unwrap();
 
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone());
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), None);
     adapter
         .spawn_resume(
             "tmpm-test",
@@ -1510,7 +1749,7 @@ fn spawn_resume_uses_resume_flag_for_a_worktree_cwd() {
     std::fs::write(project_dir.join("worktree-session-id.jsonl"), "{}").unwrap();
 
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone());
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), None);
     adapter
         .spawn_resume(
             "tmpm-test",
@@ -1545,7 +1784,7 @@ fn spawn_resume_sends_prompt_file_when_binary_available() {
         return;
     };
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone());
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), None);
     adapter
         .spawn_resume(
             "tmpm-test",
@@ -1586,7 +1825,7 @@ fn spawn_resume_sends_oauth_token_when_available() {
         );
     }
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone());
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), None);
     let result = adapter.spawn_resume(
         "tmpm-test",
         None,
@@ -1623,7 +1862,7 @@ fn spawn_resume_with_missing_id_falls_back_gracefully() {
         return;
     };
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone());
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), None);
     adapter
         .spawn_resume(
             "tmpm-test",
@@ -1671,7 +1910,7 @@ fn spawn_resume_targets_stored_pane_id_when_known() {
         return;
     };
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone());
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), None);
     adapter
         .spawn_resume(
             "tmpm-test",
@@ -1721,7 +1960,7 @@ fn spawn_resume_falls_back_to_session_target_when_pane_id_unknown() {
         return;
     };
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone());
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), None);
     adapter
         .spawn_resume(
             "tmpm-test",
@@ -2012,7 +2251,7 @@ fn spawn_resume_without_id_no_prior_conv_sends_plain_spawn() {
     };
     let tmp = tempfile::tempdir().expect("tempdir");
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone());
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), None);
     adapter
         .spawn_resume(
             "test-tmux-session",
@@ -2651,7 +2890,7 @@ fn spawn_resume_trust_seed_stays_within_redirected_home() {
     );
 
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone());
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), None);
     adapter
         .spawn_resume(
             "tmpm-4206",
@@ -2917,7 +3156,7 @@ fn spawn_resume_never_sends_bare_continue() {
         return; // adapter path needs the real binary; the pure test above does not
     };
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone());
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), None);
     adapter
         .spawn_resume("tmpm-6765", None, &cwd, "task", None, TEST_SESSION_ID, &[])
         .expect("spawn_resume with a null claude_session_id");

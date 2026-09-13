@@ -11,6 +11,15 @@
 
 use super::*;
 
+// #7685: the sidecar probes these tests drive now live beside `doctor.rs`
+// rather than inside it. Same functions, same assertions — only the module
+// boundary moved, so the import is what changed and nothing else.
+use super::doctor_sidecars::{
+    check_memory, check_search, expected_search_index_id, index_present, probe_health,
+};
+use crate::core::doctor::{CheckStatus, DoctorCheck};
+use crate::daemon::search_rpc;
+
 #[test]
 fn index_present_matches_each_shape() {
     // Bare string array.
@@ -542,6 +551,8 @@ async fn run_doctor_produces_fifty_checks() {
         "log_drain",
         // #7424: this project's turn-1 startup context against its ceiling.
         "startup_context",
+        // #7685: whether Claude Code's own auto memory is off for this project.
+        "auto_memory",
     ];
     assert_eq!(names, expected);
     // Count derived from the list above, never a standalone literal:

@@ -193,6 +193,9 @@ fn spawn_command_sources_gh_env_file_before_env_invocation() {
         None,
         Some(Path::new("/tmp/tm-gh-env-test.sh")),
         &[],
+        // #7685: the reachable posture, which is what this assertion was
+        // written against; the gh-env prefix sits ahead of every assignment.
+        true,
     );
     assert!(
         cmd.contains(
@@ -220,6 +223,7 @@ fn spawn_command_without_gh_env_is_byte_identical_to_pre_3025() {
         None,
         None,
         &[],
+        true,
     );
     assert!(!with_none.contains("gh-env"), "cmd: {with_none}");
     assert!(!with_none.contains(". '"), "cmd: {with_none}");
@@ -241,6 +245,7 @@ fn resume_command_sources_gh_env_file_before_env_invocation() {
         None,
         Some(Path::new("/tmp/tm-gh-env-test.sh")),
         &[],
+        true,
     );
     assert!(
         cmd.contains(

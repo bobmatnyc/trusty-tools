@@ -582,15 +582,44 @@ async fn write_drawer(
     opts: &ImportOptions,
     parsed: &ParsedMemory,
 ) -> anyhow::Result<String> {
+    remember(
+        socket,
+        &opts.palace,
+        &parsed.text,
+        &parsed.tags,
+        opts.allow_secret_like,
+    )
+    .await
+}
+
+/// Post one `memory_remember` and return the new drawer id.
+///
+/// Why (#7685): the ONE `memory_remember` call site in this crate. The
+/// auto-memory migration writes the same shape with a different tag rule, and a
+/// second hand-rolled JSON-RPC call would be a second place for the `force` /
+/// declined-write contract to drift.
+/// What: posts `{ palace, text, tags, force: true, allow_secret_like }`. A
+/// response without a `drawer_id` means the daemon declined the write (a
+/// content gate fired); its `reason`/`status` is surfaced as the error so the
+/// caller's report says why.
+/// Test: `import_is_idempotent`,
+/// `auto_memory_import_stores_and_archives_each_fact`.
+pub(crate) async fn remember(
+    socket: &Path,
+    palace: &str,
+    text: &str,
+    tags: &[String],
+    allow_secret_like: bool,
+) -> anyhow::Result<String> {
     let result = trusty_common::memory_rpc::call_memory_tool_at(
         socket,
         "memory_remember",
         json!({
-            "palace": opts.palace,
-            "text": parsed.text,
-            "tags": parsed.tags,
+            "palace": palace,
+            "text": text,
+            "tags": tags,
             "force": true,
-            "allow_secret_like": opts.allow_secret_like,
+            "allow_secret_like": allow_secret_like,
         }),
     )
     .await?;

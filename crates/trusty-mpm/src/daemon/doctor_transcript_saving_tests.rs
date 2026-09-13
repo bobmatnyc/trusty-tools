@@ -248,7 +248,7 @@ fn ok_message_names_every_binary_crate_gap() {
 fn probe_supplies_an_oauth_token_so_over_scrub_is_visible() {
     let config_dir = std::path::PathBuf::from(PROBE_CONFIG_DIR);
     let prefix =
-        crate::runtime::env_bin_prefix("claude", Some(&config_dir), Some(PROBE_TOKEN), &[]);
+        crate::runtime::env_bin_prefix("claude", Some(&config_dir), Some(PROBE_TOKEN), &[], true);
     assert!(
         prefix.contains("CLAUDE_CODE_OAUTH_TOKEN="),
         "the probe prefix must carry the token assignment: {prefix}"

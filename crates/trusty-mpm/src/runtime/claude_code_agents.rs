@@ -114,6 +114,9 @@ pub(super) struct RelaunchInputs<'a> {
     pub oauth_token: Option<&'a str>,
     pub gh_env_file: Option<&'a Path>,
     pub mcp_env: &'a [(String, String)],
+    /// #7685: whether trusty-memory answered at launch. `false` keeps Claude
+    /// Code's auto memory on as the fallback — see [`super::env_bin_prefix`].
+    pub memory_reachable: bool,
 }
 
 /// Read Claude Code's live-session registry, or say why it could not be read.
@@ -241,6 +244,7 @@ pub(super) fn attach_command(inputs: &RelaunchInputs<'_>, attach_id: &str) -> St
             inputs.config_dir,
             inputs.oauth_token,
             inputs.mcp_env,
+            inputs.memory_reachable,
         ),
         exit_dispatch_suffix(),
     );
@@ -310,6 +314,7 @@ pub(super) fn relaunch_command(
             inputs.oauth_token,
             inputs.gh_env_file,
             inputs.mcp_env,
+            inputs.memory_reachable,
         ),
     }
 }

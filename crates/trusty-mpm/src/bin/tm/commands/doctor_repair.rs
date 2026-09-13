@@ -126,7 +126,8 @@ const FIX_APPLY_HINT: &str = "tm doctor --fix --yes";
 /// restores what a managed launch would write), the push-guard retrofit
 /// (`push_guard`), the session-scope re-apply (`session_scope`, #7678 — the
 /// project-tier `enabledPlugins` map and the composed session-MCP file, skipped
-/// entirely for a directory with no `.trusty-mpm/` marker),
+/// entirely for a directory with no `.trusty-mpm/` marker), the two-way
+/// auto-memory key (`auto_memory`, #7685),
 /// the output-style redeploy at BOTH style tiers
 /// (`output_style_staleness`, #5866, #7423),
 /// the `legacy_sources` refusals, and the stray-`.mcp.json`
@@ -183,6 +184,16 @@ pub(crate) fn run_repairs(apply: bool, include_frozen: bool) {
             trusty_mpm::core::trusty_tools_config::managed_claude_config_dir().as_deref(),
             trusty_mpm::core::session_mcp_scope::session_mcp_path(project).as_deref(),
             mode,
+        ));
+        // #7685: write `autoMemoryEnabled` into the project tier, in the
+        // direction reachability dictates — `false` when trusty-memory is the
+        // memory, `true` to restore the fallback when it is not answering.
+        // Additive: one boolean key, every other key preserved, through the same
+        // merge the launch path uses.
+        steps.extend(trusty_mpm::daemon::doctor_auto_memory::repair_auto_memory(
+            project,
+            mode,
+            trusty_mpm::core::memory_reachable::probe_memory_reachable_blocking(),
         ));
     } else {
         eprintln!("  could not resolve the current directory — skipped the project-scoped repairs");
