@@ -1006,7 +1006,7 @@ async fn stale_assets_for_many_is_fresh_for_a_placeholder_body_deployed_with_its
     let mut record = make_record(None);
     record.state = ManagedSessionState::Active;
     record.workspace_path = Some(workspace);
-    let id = record.id.clone();
+    let id = record.id;
 
     let result = stale_assets_for_many_under(vec![record], base.path().to_path_buf()).await;
     assert_eq!(
