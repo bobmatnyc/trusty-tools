@@ -50,15 +50,16 @@ fn has_git_ancestor(dir: &Path) -> bool {
 /// ([`SeedRefusal::WorkspaceParent`], naming the child repository found), or
 /// when the downward scan could not finish ([`SeedRefusal::ScanIncomplete`]).
 /// `Ok(false)` with `should_init` never called when `dir` is already inside a
-/// repository (through `harness_root_for` or [`has_git_ancestor`]) — running
-/// `git init` there would create a nested repository. Otherwise `Ok(true)`
-/// only when `should_init` is `Some` and returns `true`, in which case `git
-/// init` has already run and succeeded (via [`trusty_common::git::command`],
-/// creating `dir` when it does not exist yet); `Ok(false)` for a `None` seam
-/// (no prompt capability — every non-interactive caller) or a declined one.
-/// An accepted offer whose `git init` cannot be spawned or exits non-zero is
-/// `Err` carrying [`SeedRefusal::GitInitFailed`], never `Ok(false)`. Either `Ok`
-/// variant means "go ahead and seed"; only `Err` means "do not write the file".
+/// repository — `harness_root_for` is checked before the downward scan, and
+/// [`has_git_ancestor`] only after it, so an ancestor `.git` git itself rejects
+/// cannot skip the scan — because running `git init` there would create a
+/// nested repository. Otherwise `Ok(true)` only when `should_init` is `Some`
+/// and returns `true`, in which case [`run_git_init`] has left a git work tree
+/// in `dir`; `Ok(false)` for a `None` seam (no prompt capability — every
+/// non-interactive caller) or a declined one. An accepted offer that does not
+/// produce a work tree in `dir` is `Err` carrying
+/// [`SeedRefusal::GitInitFailed`], never `Ok(false)`. Either `Ok` variant means
+/// "go ahead and seed"; only `Err` means "do not write the file".
 /// Test: `a_workspace_parent_is_refused_naming_the_child`,
 /// `a_wide_node_modules_sibling_never_lets_a_workspace_parent_seed`,
 /// `an_exhausted_scan_refuses_to_seed`,
@@ -67,7 +68,8 @@ fn has_git_ancestor(dir: &Path) -> bool {
 /// `a_non_interactive_caller_declines_git_init_and_still_may_seed`,
 /// `an_accepted_offer_runs_git_init`,
 /// `an_accepted_offer_on_a_first_touch_directory_runs_git_init`,
-/// `a_failed_git_init_refuses_to_seed`.
+/// `a_failed_git_init_refuses_to_seed`,
+/// `a_stale_ancestor_git_file_cannot_bypass_the_workspace_parent_scan`.
 pub fn offer_git_init(
     dir: &Path,
     home: Option<&Path>,
@@ -76,36 +78,71 @@ pub fn offer_git_init(
     if let Some(refusal) = refuse_seed_at(dir, home) {
         return Err(refusal);
     }
-    if crate::core::harness_root::harness_root_for(dir).is_some() || has_git_ancestor(dir) {
+    if crate::core::harness_root::harness_root_for(dir).is_some() {
         // Already tracked — never offer `git init` here, because that would
         // nest a second repository inside the one that already owns `dir`.
         return Ok(false);
     }
     // #7673: only a scan that checked everything may reach the offer or the seed.
+    // #7774 review: the scan runs BEFORE the filesystem-only ancestor check, so
+    // a stale or broken ancestor `.git` cannot skip the workspace-parent refusal.
     match scan_for_child_repo(dir) {
         ChildRepoScan::Clear => {}
         ChildRepoScan::Found(child) => return Err(SeedRefusal::WorkspaceParent(child)),
         ChildRepoScan::Incomplete(stop) => return Err(SeedRefusal::ScanIncomplete(stop)),
     }
+    if has_git_ancestor(dir) {
+        // The same nested-repository rule, for an ancestor git cannot see.
+        return Ok(false);
+    }
     let wants_init = should_init.is_some_and(|f| f());
     if !wants_init {
         return Ok(false);
     }
-    // #7774 review: a failed `git init` is not a decline. The operator asked
-    // for a repository and has none, so the seed must not proceed. `dir` is
-    // the positional argument rather than `-C`, so git creates a first-touch
-    // directory the pipeline has not created yet instead of failing on it.
-    match trusty_common::git::command()
-        .args(["init", "-q"])
+    run_git_init(dir)?;
+    Ok(true)
+}
+
+/// Run `git init` for `dir` and prove it left a git work tree there.
+///
+/// Why: a failed `git init` is not a decline — the operator asked for a
+/// repository — and git's exit status alone does not prove one exists in
+/// `dir`: an inherited `GIT_DIR` puts it elsewhere, a `git` on `PATH` may do
+/// nothing, and a `-`-prefixed `dir` parses as an option (#7774 review).
+/// What: `git init -q -- <dir>` through [`trusty_common::git::command`] with
+/// `GIT_DIR` and `GIT_WORK_TREE` removed from the child environment. `dir` is
+/// positional, so git creates a first-touch directory the pipeline has not
+/// created yet, and `--` keeps it a path. `Ok(())` only when git exits 0 AND
+/// [`is_initialised_work_tree`] holds; otherwise
+/// [`SeedRefusal::GitInitFailed`].
+/// Test: `a_failed_git_init_refuses_to_seed`,
+/// `an_inherited_git_dir_cannot_redirect_git_init`,
+/// `a_git_that_exits_zero_without_initialising_refuses_to_seed`,
+/// `a_dash_prefixed_directory_is_initialised_as_a_path`.
+fn run_git_init(dir: &Path) -> Result<(), SeedRefusal> {
+    let out = trusty_common::git::command()
+        .args(["init", "-q", "--"])
         .arg(dir)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
         .output()
-    {
-        Ok(out) if out.status.success() => Ok(true),
-        Ok(out) => Err(SeedRefusal::GitInitFailed(init_failure_reason(&out))),
-        Err(e) => Err(SeedRefusal::GitInitFailed(format!(
-            "could not run git: {e}"
-        ))),
+        .map_err(|e| SeedRefusal::GitInitFailed(format!("could not run git: {e}")))?;
+    if !out.status.success() {
+        return Err(SeedRefusal::GitInitFailed(init_failure_reason(&out)));
     }
+    if !is_initialised_work_tree(dir) {
+        return Err(SeedRefusal::GitInitFailed(format!(
+            "git init exited 0 but {} has no .git/HEAD",
+            dir.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Does `dir` hold a non-bare repository's `.git/HEAD` file — what `git init`
+/// writes into the directory it initialises?
+fn is_initialised_work_tree(dir: &Path) -> bool {
+    std::fs::metadata(dir.join(".git").join("HEAD")).is_ok_and(|m| m.is_file())
 }
 
 /// Why `git init` failed, for [`SeedRefusal::GitInitFailed`]: git's own

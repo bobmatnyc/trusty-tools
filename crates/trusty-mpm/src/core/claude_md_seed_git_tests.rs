@@ -42,12 +42,10 @@ fn a_workspace_parent_is_refused_naming_the_child() {
     let parent = std::fs::canonicalize(tmp.path()).unwrap().join("workspace");
     let child_a = parent.join("service-a");
     let child_b = parent.join("service-b");
-    std::fs::create_dir_all(&child_a).unwrap();
-    std::fs::create_dir_all(&child_b).unwrap();
-    if !git_init(&child_a) || !git_init(&child_b) {
-        eprintln!("#7673 tests: git unavailable, skipping");
-        return;
-    }
+    // #7774 review: the scan only stats `<child>/.git`, so no git binary is
+    // needed and the test cannot pass by skipping.
+    std::fs::create_dir_all(child_a.join(".git")).unwrap();
+    std::fs::create_dir_all(child_b.join(".git")).unwrap();
     let home = tmp.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
 
@@ -72,11 +70,7 @@ fn a_grandchild_repository_is_found() {
     let tmp = TempDir::new().unwrap();
     let parent = std::fs::canonicalize(tmp.path()).unwrap().join("workspace");
     let grandchild = parent.join("packages").join("service-a");
-    std::fs::create_dir_all(&grandchild).unwrap();
-    if !git_init(&grandchild) {
-        eprintln!("#7673 tests: git unavailable, skipping");
-        return;
-    }
+    std::fs::create_dir_all(grandchild.join(".git")).unwrap();
     let home = tmp.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
 
@@ -266,6 +260,202 @@ fn an_accepted_offer_on_a_first_touch_directory_runs_git_init() {
     assert_eq!(calls.get(), 1);
 }
 
+/// Child-mode switch for [`offer_in_child_process`]: the directory to offer
+/// `git init` for. Set on the child `Command` only, never on this process.
+const CHILD_DIR: &str = "TM_7774_OFFER_CHILD_DIR";
+/// The home directory the child passes to [`offer_git_init`].
+const CHILD_HOME: &str = "TM_7774_OFFER_CHILD_HOME";
+/// Prefix of the line the child prints its outcome on.
+const CHILD_OUTCOME: &str = "7774-child-outcome:";
+
+/// Child half of a re-executed test: when [`offer_in_child_process`] started
+/// this process, run an accepted offer, print its outcome, and return `true`.
+fn ran_as_child() -> bool {
+    let Some(dir) = std::env::var_os(CHILD_DIR) else {
+        return false;
+    };
+    let home = std::env::var_os(CHILD_HOME).map(PathBuf::from);
+    let mut accept = || true;
+    let outcome = offer_git_init(
+        Path::new(&dir),
+        home.as_deref(),
+        Some(&mut accept as &mut dyn FnMut() -> bool),
+    );
+    println!("{CHILD_OUTCOME} {outcome:?}");
+    true
+}
+
+/// Re-run test `name` as a child process that accepts the offer for `dir`,
+/// with `cwd` and `envs` applied to the child only, and return its stdout.
+///
+/// Why: the inputs under test are process state — an inherited `GIT_DIR`, the
+/// `git` found on `PATH`, the directory a relative path resolves against.
+/// Setting them in this process would leak into every parallel test (see
+/// `docs/reference/common-pitfalls.md`), so they go on a child instead.
+fn offer_in_child_process(
+    name: &str,
+    cwd: &Path,
+    dir: &Path,
+    home: &Path,
+    envs: &[(&str, &std::ffi::OsStr)],
+) -> String {
+    // libtest names tests relative to the crate root, without the crate name.
+    let module = module_path!();
+    let module = module.split_once("::").map_or(module, |(_, rest)| rest);
+    let mut cmd = std::process::Command::new(std::env::current_exe().expect("test binary path"));
+    cmd.args([
+        format!("{module}::{name}").as_str(),
+        "--exact",
+        "--nocapture",
+        "--test-threads",
+        "1",
+    ])
+    .current_dir(cwd)
+    .env(CHILD_DIR, dir)
+    .env(CHILD_HOME, home);
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
+    let out = cmd.output().expect("re-run this test as a child process");
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        stdout.contains("1 passed") && stdout.contains(CHILD_OUTCOME),
+        "the child must have run the offer; stdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    stdout
+}
+
+/// FAILS BEFORE THE #7774 ROUND-2 FIX: git honoured an inherited `GIT_DIR`
+/// (as inside a git hook), created the repository there, exited 0, and the
+/// target was seeded with no `.git` of its own.
+#[test]
+fn an_inherited_git_dir_cannot_redirect_git_init() {
+    if ran_as_child() {
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let dir = root.join("projects");
+    std::fs::create_dir_all(&dir).unwrap();
+    let home = root.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let elsewhere = root.join("elsewhere.git");
+    let elsewhere_tree = root.join("elsewhere-tree");
+    std::fs::create_dir_all(&elsewhere_tree).unwrap();
+
+    let stdout = offer_in_child_process(
+        "an_inherited_git_dir_cannot_redirect_git_init",
+        &root,
+        &dir,
+        &home,
+        &[
+            ("GIT_DIR", elsewhere.as_os_str()),
+            ("GIT_WORK_TREE", elsewhere_tree.as_os_str()),
+        ],
+    );
+
+    assert!(stdout.contains("Ok(true)"), "{stdout}");
+    assert!(
+        dir.join(".git").join("HEAD").is_file(),
+        "the repository must be created in the target; {stdout}"
+    );
+    assert!(
+        !elsewhere.exists(),
+        "GIT_DIR must not receive the repository"
+    );
+}
+
+/// FAILS BEFORE THE #7774 ROUND-2 FIX: a `git` on `PATH` that exits 0 without
+/// doing anything was trusted, and the target was seeded with no `.git`.
+#[cfg(unix)]
+#[test]
+fn a_git_that_exits_zero_without_initialising_refuses_to_seed() {
+    if ran_as_child() {
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let dir = root.join("projects");
+    std::fs::create_dir_all(&dir).unwrap();
+    let home = root.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let shim_dir = root.join("shim-bin");
+    std::fs::create_dir_all(&shim_dir).unwrap();
+    // A symlink, not a written script: exec'ing a file this process just wrote
+    // can race another test's fork (ETXTBSY).
+    let truth = ["/usr/bin/true", "/bin/true"]
+        .into_iter()
+        .map(Path::new)
+        .find(|p| p.is_file())
+        .expect("a `true` binary at /usr/bin/true or /bin/true");
+    std::os::unix::fs::symlink(truth, shim_dir.join("git")).unwrap();
+
+    let stdout = offer_in_child_process(
+        "a_git_that_exits_zero_without_initialising_refuses_to_seed",
+        &root,
+        &dir,
+        &home,
+        &[("PATH", shim_dir.as_os_str())],
+    );
+
+    assert!(stdout.contains("Err(GitInitFailed("), "{stdout}");
+    assert!(!dir.join(".git").exists());
+}
+
+/// FAILS BEFORE THE #7774 ROUND-2 FIX: a relative target named `--bare` was
+/// parsed as a `git init` option, so git built a bare repository in the
+/// current directory, exited 0, and `./--bare` was seeded with no `.git`.
+#[test]
+fn a_dash_prefixed_directory_is_initialised_as_a_path() {
+    if ran_as_child() {
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let home = root.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+
+    let stdout = offer_in_child_process(
+        "a_dash_prefixed_directory_is_initialised_as_a_path",
+        &root,
+        Path::new("--bare"),
+        &home,
+        &[],
+    );
+
+    assert!(stdout.contains("Ok(true)"), "{stdout}");
+    assert!(
+        root.join("--bare").join(".git").join("HEAD").is_file(),
+        "`--bare` must be initialised as a directory; {stdout}"
+    );
+    assert!(
+        !root.join("HEAD").exists(),
+        "no bare repository may be built in the current directory"
+    );
+}
+
+/// FAILS BEFORE THE #7774 ROUND-2 FIX: a stale ancestor `.git` FILE (a removed
+/// worktree's `gitdir:`) counted as a repository and returned before the
+/// downward scan, so a workspace parent holding a real repository was seeded —
+/// the #7673 incident shape.
+#[test]
+fn a_stale_ancestor_git_file_cannot_bypass_the_workspace_parent_scan() {
+    let tmp = TempDir::new().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    std::fs::write(root.join(".git"), "gitdir: /nonexistent/worktrees/gone\n").unwrap();
+    let workspace = root.join("ws");
+    let app = workspace.join("app");
+    std::fs::create_dir_all(app.join(".git")).unwrap();
+    let home = root.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+
+    assert_eq!(
+        offer_git_init(&workspace, Some(&home), None),
+        Err(SeedRefusal::WorkspaceParent(app))
+    );
+}
+
 /// A declined offer, driven through the same prompt seam, leaves no `.git`.
 #[test]
 fn a_declined_offer_creates_no_git_directory() {
@@ -298,10 +488,9 @@ fn git_init_is_never_offered_inside_an_existing_repository() {
     let repo = std::fs::canonicalize(tmp.path()).unwrap().join("repo");
     let nested = repo.join("crates").join("thing");
     std::fs::create_dir_all(&nested).unwrap();
-    if !git_init(&repo) {
-        eprintln!("#7673 tests: git unavailable, skipping");
-        return;
-    }
+    // #7774 review: `harness_root_for` needs a real repository, so a failed
+    // `git init` fails the test instead of skipping it.
+    assert!(git_init(&repo), "git init must succeed for this fixture");
     let home = tmp.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
     let (mut prompt, calls) = counting_prompt(true);

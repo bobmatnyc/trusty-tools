@@ -32,7 +32,7 @@ fn compose_session_instructions_declines_git_init_without_a_prompt() {
 /// FAILS BEFORE THIS FOLLOW-UP: the same directory, but with an accepting
 /// closure injected directly — never real stdin — proving the TTY-capable
 /// path actually runs `git init` through the shared
-/// `trusty_common::git::command_in` helper, rather than a second
+/// `trusty_common::git::command` helper, rather than a second
 /// `Command::new("git")`.
 #[test]
 fn compose_session_instructions_runs_git_init_when_the_prompt_accepts() {

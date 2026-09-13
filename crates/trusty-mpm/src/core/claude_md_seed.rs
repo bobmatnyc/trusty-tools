@@ -58,8 +58,8 @@ pub enum SeedRefusal {
     /// (#7673 round 2 review, CRITICAL).
     ScanIncomplete(crate::core::child_repo_scan::ScanIncomplete),
     /// The operator accepted the `git init` offer, but `git init` could not be
-    /// spawned or exited non-zero. Carries git's stderr or the spawn error
-    /// (#7774 review).
+    /// spawned, exited non-zero, or exited 0 without leaving a git work tree in
+    /// the target. Carries git's stderr or what was missing (#7774 review).
     GitInitFailed(String),
 }
 
