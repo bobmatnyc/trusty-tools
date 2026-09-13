@@ -326,9 +326,25 @@ fn offer_in_child_process(
     stdout
 }
 
+/// Does `git -C <dir> rev-parse --show-toplevel` name `dir` itself?
+fn git_reports_top(dir: &Path) -> bool {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .is_ok_and(|out| {
+            out.status.success()
+                && std::fs::canonicalize(String::from_utf8_lossy(&out.stdout).trim()).ok()
+                    == std::fs::canonicalize(dir).ok()
+        })
+}
+
 /// FAILS BEFORE THE #7774 ROUND-2 FIX: git honoured an inherited `GIT_DIR`
 /// (as inside a git hook), created the repository there, exited 0, and the
-/// target was seeded with no `.git` of its own.
+/// target was seeded with no `.git` of its own. FAILS BEFORE THE ROUND-3 FIX:
+/// an inherited `GIT_OBJECT_DIRECTORY` / `GIT_COMMON_DIR` left a `.git/HEAD`
+/// in the target that git does not accept as a repository.
 #[test]
 fn an_inherited_git_dir_cannot_redirect_git_init() {
     if ran_as_child() {
@@ -341,6 +357,8 @@ fn an_inherited_git_dir_cannot_redirect_git_init() {
     let home = root.join("home");
     std::fs::create_dir_all(&home).unwrap();
     let elsewhere = root.join("elsewhere.git");
+    let elsewhere_objects = root.join("elsewhere-objects");
+    let elsewhere_common = root.join("elsewhere-common");
     let elsewhere_tree = root.join("elsewhere-tree");
     std::fs::create_dir_all(&elsewhere_tree).unwrap();
 
@@ -352,18 +370,80 @@ fn an_inherited_git_dir_cannot_redirect_git_init() {
         &[
             ("GIT_DIR", elsewhere.as_os_str()),
             ("GIT_WORK_TREE", elsewhere_tree.as_os_str()),
+            ("GIT_OBJECT_DIRECTORY", elsewhere_objects.as_os_str()),
+            ("GIT_COMMON_DIR", elsewhere_common.as_os_str()),
         ],
     );
 
     assert!(stdout.contains("Ok(true)"), "{stdout}");
     assert!(
-        dir.join(".git").join("HEAD").is_file(),
-        "the repository must be created in the target; {stdout}"
+        git_reports_top(&dir),
+        "git must accept the target as a work tree; {stdout}"
     );
     assert!(
         !elsewhere.exists(),
         "GIT_DIR must not receive the repository"
     );
+    assert!(
+        !elsewhere_objects.exists(),
+        "GIT_OBJECT_DIRECTORY must not receive the object store"
+    );
+}
+
+/// FAILS BEFORE THE #7774 ROUND-3 FIX: a target already holding an empty
+/// `.git/HEAD` passed the `HEAD`-is-a-file check; `git init` exits 0 without
+/// rewriting it, and git does not accept the result as a repository.
+#[test]
+fn an_existing_empty_head_refuses_to_seed() {
+    let tmp = TempDir::new().unwrap();
+    let dir = std::fs::canonicalize(tmp.path()).unwrap().join("projects");
+    std::fs::create_dir_all(dir.join(".git")).unwrap();
+    std::fs::write(dir.join(".git").join("HEAD"), "").unwrap();
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let (mut prompt, calls) = counting_prompt(true);
+
+    let outcome = offer_git_init(
+        &dir,
+        Some(&home),
+        Some(&mut prompt as &mut dyn FnMut() -> bool),
+    );
+
+    assert_eq!(calls.get(), 1);
+    match outcome {
+        Err(SeedRefusal::GitInitFailed(reason)) => assert!(!reason.is_empty()),
+        other => panic!("an init git does not accept must refuse the seed, got {other:?}"),
+    }
+}
+
+/// FAILS BEFORE THE #7774 ROUND-3 FIX: a `GIT_TEMPLATE_DIR` whose `HEAD` is
+/// garbage made `git init` copy that `HEAD`, exit 0, and pass the
+/// `HEAD`-is-a-file check with no repository git accepts.
+#[test]
+fn a_template_with_a_garbage_head_refuses_to_seed() {
+    if ran_as_child() {
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let dir = root.join("projects");
+    std::fs::create_dir_all(&dir).unwrap();
+    let home = root.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let template = root.join("template");
+    std::fs::create_dir_all(&template).unwrap();
+    std::fs::write(template.join("HEAD"), "garbage\n").unwrap();
+
+    let stdout = offer_in_child_process(
+        "a_template_with_a_garbage_head_refuses_to_seed",
+        &root,
+        &dir,
+        &home,
+        &[("GIT_TEMPLATE_DIR", template.as_os_str())],
+    );
+
+    assert!(stdout.contains("Err(GitInitFailed("), "{stdout}");
+    assert!(!git_reports_top(&dir));
 }
 
 /// FAILS BEFORE THE #7774 ROUND-2 FIX: a `git` on `PATH` that exits 0 without

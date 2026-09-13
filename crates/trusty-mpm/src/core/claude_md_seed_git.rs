@@ -54,10 +54,10 @@ fn has_git_ancestor(dir: &Path) -> bool {
 /// [`has_git_ancestor`] only after it, so an ancestor `.git` git itself rejects
 /// cannot skip the scan — because running `git init` there would create a
 /// nested repository. Otherwise `Ok(true)` only when `should_init` is `Some`
-/// and returns `true`, in which case [`run_git_init`] has left a git work tree
-/// in `dir`; `Ok(false)` for a `None` seam (no prompt capability — every
-/// non-interactive caller) or a declined one. An accepted offer that does not
-/// produce a work tree in `dir` is `Err` carrying
+/// and returns `true`, in which case [`run_git_init`] has run and git reports
+/// `dir` as the top of a work tree; `Ok(false)` for a `None` seam (no prompt
+/// capability — every non-interactive caller) or a declined one. An accepted
+/// offer after which git does not report that is `Err` carrying
 /// [`SeedRefusal::GitInitFailed`], never `Ok(false)`. Either `Ok` variant means
 /// "go ahead and seed"; only `Err` means "do not write the file".
 /// Test: `a_workspace_parent_is_refused_naming_the_child`,
@@ -108,41 +108,94 @@ pub fn offer_git_init(
 /// Why: a failed `git init` is not a decline — the operator asked for a
 /// repository — and git's exit status alone does not prove one exists in
 /// `dir`: an inherited `GIT_DIR` puts it elsewhere, a `git` on `PATH` may do
-/// nothing, and a `-`-prefixed `dir` parses as an option (#7774 review).
+/// nothing, a `-`-prefixed `dir` parses as an option, and a pre-existing or
+/// templated `HEAD` git does not rewrite leaves no usable repository (#7774
+/// review).
 /// What: `git init -q -- <dir>` through [`trusty_common::git::command`] with
-/// `GIT_DIR` and `GIT_WORK_TREE` removed from the child environment. `dir` is
-/// positional, so git creates a first-touch directory the pipeline has not
-/// created yet, and `--` keeps it a path. `Ok(())` only when git exits 0 AND
-/// [`is_initialised_work_tree`] holds; otherwise
-/// [`SeedRefusal::GitInitFailed`].
+/// every [`GIT_REDIRECT_ENV`] variable removed. `dir` is positional, so git
+/// creates a first-touch directory the pipeline has not created yet, and `--`
+/// keeps it a path. `Ok(())` only when git exits 0 AND [`is_work_tree_top`]
+/// holds; otherwise [`SeedRefusal::GitInitFailed`].
 /// Test: `a_failed_git_init_refuses_to_seed`,
 /// `an_inherited_git_dir_cannot_redirect_git_init`,
 /// `a_git_that_exits_zero_without_initialising_refuses_to_seed`,
-/// `a_dash_prefixed_directory_is_initialised_as_a_path`.
+/// `a_dash_prefixed_directory_is_initialised_as_a_path`,
+/// `an_existing_empty_head_refuses_to_seed`,
+/// `a_template_with_a_garbage_head_refuses_to_seed`.
 fn run_git_init(dir: &Path) -> Result<(), SeedRefusal> {
-    let out = trusty_common::git::command()
-        .args(["init", "-q", "--"])
+    let out = without_git_redirects(trusty_common::git::command().args(["init", "-q", "--"]))
         .arg(dir)
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
         .output()
         .map_err(|e| SeedRefusal::GitInitFailed(format!("could not run git: {e}")))?;
     if !out.status.success() {
         return Err(SeedRefusal::GitInitFailed(init_failure_reason(&out)));
     }
-    if !is_initialised_work_tree(dir) {
+    if !is_work_tree_top(dir) {
         return Err(SeedRefusal::GitInitFailed(format!(
-            "git init exited 0 but {} has no .git/HEAD",
+            "git init exited 0 but git does not report {} as the top of a work tree",
             dir.display()
         )));
     }
     Ok(())
 }
 
-/// Does `dir` hold a non-bare repository's `.git/HEAD` file — what `git init`
-/// writes into the directory it initialises?
-fn is_initialised_work_tree(dir: &Path) -> bool {
-    std::fs::metadata(dir.join(".git").join("HEAD")).is_ok_and(|m| m.is_file())
+/// Environment variables that point git at a repository, object store, index
+/// or config other than the one discovered from its working directory.
+///
+/// What: `git rev-parse --local-env-vars` (the set git itself clears when it
+/// changes repository), plus the two discovery controls. `GIT_TEMPLATE_DIR` is
+/// deliberately absent: a template is operator content, and a bad one is
+/// caught by [`is_work_tree_top`].
+const GIT_REDIRECT_ENV: &[&str] = &[
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+];
+
+/// `cmd` with every [`GIT_REDIRECT_ENV`] variable removed from its environment.
+fn without_git_redirects(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    for var in GIT_REDIRECT_ENV {
+        cmd.env_remove(var);
+    }
+    cmd
+}
+
+/// Does git itself report `dir` as the top of a work tree?
+///
+/// What: `git -C <dir> rev-parse --show-toplevel` with [`GIT_REDIRECT_ENV`]
+/// removed; `true` only when it exits 0 and names the same canonical directory
+/// as `dir`. Not `harness_root_for`, which inherits the caller's git
+/// environment and maps a linked worktree or base clone to its owner.
+fn is_work_tree_top(dir: &Path) -> bool {
+    let Ok(out) = without_git_redirects(
+        trusty_common::git::command_in(dir).args(["rev-parse", "--show-toplevel"]),
+    )
+    .output() else {
+        return false;
+    };
+    let reported = String::from_utf8_lossy(&out.stdout);
+    let reported = reported.trim();
+    if !out.status.success() || reported.is_empty() {
+        return false;
+    }
+    match (std::fs::canonicalize(reported), std::fs::canonicalize(dir)) {
+        (Ok(top), Ok(target)) => top == target,
+        _ => false,
+    }
 }
 
 /// Why `git init` failed, for [`SeedRefusal::GitInitFailed`]: git's own
