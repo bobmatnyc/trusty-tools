@@ -16,7 +16,11 @@
 //! What: [`reinstall_assets`] runs hop 1 once, then hop 2 into every target
 //! [`reinstall_targets`] enumerates, and returns a per-destination
 //! [`TierReport`] counting what was deployed, repaired, preserved, unchanged,
-//! and failed. Ownership is the deployers' existing model, unchanged: a
+//! and failed. WHICH assets a destination receives is not uniform: bundled
+//! skills reach the managed config tier alone (#6586, enforced here by
+//! [`receives_bundled_roster`] since #7783), user-custom skills reach every
+//! destination, and agents reach the two [`reinstall_targets`] attaches them
+//! to. Ownership is the deployers' existing model, unchanged: a
 //! framework-owned file that drifted is repaired (#4408), a user-customized
 //! one is preserved. `force` is the explicit clobber — agents through
 //! [`crate::core::agent_reset::reset_agents`], skills through
@@ -39,6 +43,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::core::paths::FrameworkPaths;
+use crate::core::project_skill_tier::bundled_excluded_from_project_tier;
 use crate::core::skill_deploy_tiers::skill_deploy_tiers;
 
 /// What one deploy did to one asset class at one destination.
@@ -340,6 +345,28 @@ pub fn reinstall_assets(
     report
 }
 
+/// Does this destination receive the bundled skill roster at all (#7783)?
+///
+/// Why: `tm reinstall` wrote every bundled skill to all four destinations
+/// while the other two writers — `tm install`'s
+/// [`crate::core::skill_install_tiers::deploy_install_skill_tiers`] and the
+/// session launch's [`crate::core::project_skill_tier`] — had already been
+/// brought under the 2026-09-01 ruling (#6586) that bundled skills are
+/// user-tier only. Three copies of one destination rule is how the roster
+/// splits across tiers again, so this asks the question the ruling answers and
+/// defers the ANSWER to the shared
+/// [`bundled_excluded_from_project_tier`] predicate at every other
+/// destination.
+/// What: `true` only for [`FrameworkPaths::skill_deploy_dir`] — the managed
+/// config tier, the one directory that accessor exists to name. The operator's
+/// `~/.claude/skills`, a project's `.claude/skills`, and the standalone
+/// driver's `<root>/claude-config/skills` all get `false`, so they receive the
+/// user-custom tier and nothing bundled. Pure path comparison; touches no disk.
+/// Test: `reinstall_deploys_the_bundled_roster_to_the_managed_tier_only`.
+fn receives_bundled_roster(paths: &FrameworkPaths, dest: &Path) -> bool {
+    dest == paths.skill_deploy_dir()
+}
+
 /// The set of skill names this binary ships, for the force pass's roster test.
 ///
 /// Why: `force_adopt_bundled_skills` uses the bundled roster as its ONLY
@@ -460,10 +487,14 @@ fn preserved_note(kind: &str, preserved: &[String], preview: &str) -> Option<Str
 /// [`trusty_agents_common::skills::reconcile::force_adopt_bundled_skills`],
 /// then always runs [`crate::core::skill_tiers::deploy_all_skill_tiers`] over
 /// the bundled and user tiers. The tier orchestrator's counts supply the
-/// report.
+/// report. Both passes touch the bundled tier only where
+/// [`receives_bundled_roster`] says it belongs — a re-stamp at a destination
+/// the deploy no longer writes bundled text to would adopt a stale copy
+/// nothing ever refreshes. The user tier deploys at every destination.
 /// Test: `reinstall_preserves_a_customized_skill_without_force`,
 /// `reinstall_replaces_a_customized_skill_with_force`,
-/// `reinstall_creates_a_missing_destination`.
+/// `reinstall_creates_a_missing_destination`,
+/// `reinstall_deploys_the_bundled_roster_to_the_managed_tier_only`.
 fn deploy_skills_into(
     paths: &FrameworkPaths,
     dest: &Path,
@@ -472,7 +503,11 @@ fn deploy_skills_into(
     backup_root: &Path,
     tier: &mut TierReport,
 ) {
-    if force {
+    // #7783: decided once, before either pass, so the clobber and the deploy
+    // below can never disagree about who owns this destination.
+    let bundled_here = receives_bundled_roster(paths, dest);
+
+    if force && bundled_here {
         match trusty_agents_common::skills::reconcile::force_adopt_bundled_skills(
             dest,
             bundled_stems,
@@ -499,7 +534,10 @@ fn deploy_skills_into(
         &paths.skill_source_dir(),
         &paths.user_skill_source_dir(),
         dest,
-        |_| true,
+        // #7783: `|_| true` here offered the whole bundled roster at all four
+        // destinations. Everywhere but the managed tier takes the #6586
+        // predicate `tm install` and the session launch already apply.
+        |stem| bundled_here || bundled_excluded_from_project_tier(stem),
     ) {
         Ok(deploy) => {
             tier.skills = AssetCounts {

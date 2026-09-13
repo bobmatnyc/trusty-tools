@@ -736,7 +736,8 @@ fn repair_output_style_tier(
 /// Report every `legacy_sources` finding as REFUSED — never delete one.
 ///
 /// Why (#4948, #4409): this is the check whose "obvious" repair is the one
-/// that must not ship. `legacy_sources` counts `~/.claude/skills/tm-*` copies
+/// that must not ship. `legacy_sources` counts bundled skill copies in
+/// `~/.claude/skills`
 /// and the legacy `~/.trusty-mpm/claude-config` directory; the repair that
 /// would clear the warning is deletion, inside the operator's real Claude Code
 /// config. Some of those copies are hand-edited — a checksum mismatch is
@@ -752,10 +753,16 @@ fn repair_output_style_tier(
 /// "nothing found". Refreshing the CONTENT of a tm-deployed copy there is a
 /// different operation and is still available: it goes through the skill
 /// repair, which consults tm's own ownership ledger first.
-/// What: one [`StepStatus::Refused`] step per `tm-*` entry directly under
-/// `<home>/.claude/skills`, plus one for the legacy managed-config directory
-/// if present. Reads directory names only; opens nothing; writes nothing.
+/// What: one [`StepStatus::Refused`] step per entry directly under
+/// `<home>/.claude/skills` whose name is a bundled skill stem
+/// ([`crate::core::manifest::framework::bundled_skill_stems`]), plus one for
+/// the legacy managed-config directory if present. #7783 widened that test
+/// from a `tm-` prefix to the roster so this listing names exactly the set
+/// `legacy_sources` counted — a `--fix` run that named 23 of 37 findings reads
+/// as though the other 14 were resolved. Reads directory names only; opens
+/// nothing; writes nothing.
 /// Test: `legacy_sources_are_refused_never_deleted`,
+/// `legacy_sources_refuse_names_an_unprefixed_bundled_skill`,
 /// `legacy_sources_ignores_a_foreign_skill`.
 pub fn refuse_legacy_sources(home: &Path) -> Vec<RepairStep> {
     const REASON: &str = "tm never deletes inside ~/.claude — a copy here may be hand-edited, \
@@ -765,16 +772,23 @@ pub fn refuse_legacy_sources(home: &Path) -> Vec<RepairStep> {
     let mut steps = Vec::new();
     let skills = home.join(".claude").join("skills");
     if let Ok(entries) = std::fs::read_dir(&skills) {
+        // #7783: the same roster `count_legacy_bundled_skills` counts against,
+        // so the listing and the count can never name different sets.
+        let bundled = crate::core::manifest::framework::bundled_skill_stems();
         let mut legacy: Vec<PathBuf> = entries
             .flatten()
-            .filter(|e| e.file_name().to_str().is_some_and(|n| n.starts_with("tm-")))
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
+                    .is_some_and(|n| bundled.contains(n.strip_suffix(".md").unwrap_or(n)))
+            })
             .map(|e| e.path())
             .collect();
         legacy.sort();
         steps.extend(legacy.into_iter().map(|path| RepairStep {
             check: "legacy_sources",
             path,
-            what: "leftover pre-migration tm-* skill copy".to_string(),
+            what: "leftover pre-migration bundled skill copy".to_string(),
             status: StepStatus::Refused(REASON.to_string()),
         }));
     }

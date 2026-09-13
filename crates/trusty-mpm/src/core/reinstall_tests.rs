@@ -59,6 +59,26 @@ fn standalone_dir(base: &std::path::Path) -> std::path::PathBuf {
     base.join(".trusty-mpm").join("claude-config")
 }
 
+/// A minimal USER-custom skill, in the operator's own `<root>/skills` tier.
+///
+/// Why (#7783): the bundled roster now reaches the managed config tier alone,
+/// so a test that needs a skill written at one of the OTHER destinations — to
+/// prove the destination is provisioned, served, or locked — has to use the
+/// tier that still deploys everywhere. The operator's own opt-in is that tier.
+/// Test: used by `reinstall_creates_a_missing_destination`,
+/// `reinstall_reports_a_failed_destination_and_serves_the_others`,
+/// `reinstall_serialises_against_a_held_skill_ledger_lock`,
+/// `reinstall_does_not_fail_the_command_for_an_optional_destination`.
+fn seed_user_skill(paths: &FrameworkPaths) {
+    let dir = paths.user_skill_source_dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("my-skill.md"),
+        "---\nname: my-skill\n---\n\n# Mine\n\nUser-custom skill text.\n",
+    )
+    .unwrap();
+}
+
 /// Find one tier report by label.
 fn tier<'a>(report: &'a ReinstallReport, label: &str) -> &'a TierReport {
     report
@@ -158,9 +178,20 @@ fn reinstall_reports_every_target() {
 
     assert!(!report.has_failures(), "{report:?}");
     assert_eq!(report.tiers.len(), 4, "{:?}", report.tiers);
-    for t in &report.tiers {
-        assert_eq!(t.skills.deployed, 1, "{} deployed no skill: {t:?}", t.label);
-        assert!(t.skills_dir.join("demo-skill").join("SKILL.md").is_file());
+    // #7783: the bundled skill is reported and written at the managed tier
+    // only; the other three are visited and report an honest zero.
+    let managed = tier(&report, "managed config");
+    assert_eq!(managed.skills.deployed, 1, "{managed:?}");
+    assert!(
+        managed
+            .skills_dir
+            .join("demo-skill")
+            .join("SKILL.md")
+            .is_file()
+    );
+    for label in ["operator home", "project", "standalone"] {
+        let t = tier(&report, label);
+        assert_eq!(t.skills.deployed, 0, "{label}: {t:?}");
     }
     for label in ["managed config", "standalone"] {
         let t = tier(&report, label);
@@ -181,11 +212,59 @@ fn reinstall_reports_every_target() {
 }
 
 #[test]
+fn reinstall_deploys_the_bundled_roster_to_the_managed_tier_only() {
+    // #7783: `deploy_skills_into` passed `|_| true` at every destination, so a
+    // reinstall wrote the whole bundled roster into the operator's
+    // `~/.claude/skills`, the project tier, and the standalone config dir —
+    // the exact duplication the 2026-09-01 ruling (#6586) ended for `tm
+    // install` and for session launch. The user-custom tier is the control:
+    // it must still reach all four.
+    let base = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let paths = seeded(base.path());
+    seed_user_skill(&paths);
+    std::fs::create_dir_all(project.path().join(".claude").join("skills")).unwrap();
+
+    let report = reinstall_assets(
+        &paths,
+        &standalone_dir(base.path()),
+        Some(project.path()),
+        false,
+        &base.path().join("backups"),
+    );
+
+    assert!(!report.has_failures(), "{report:?}");
+    assert_eq!(report.tiers.len(), 4, "{:?}", report.tiers);
+    assert!(
+        paths
+            .skill_deploy_dir()
+            .join("demo-skill")
+            .join("SKILL.md")
+            .is_file(),
+        "the managed tier must still receive the bundled roster"
+    );
+    for label in ["operator home", "project", "standalone"] {
+        let t = tier(&report, label);
+        assert!(
+            !t.skills_dir.join("demo-skill").exists(),
+            "{label} must receive no bundled skill: {t:?}"
+        );
+        assert!(
+            t.skills_dir.join("my-skill").join("SKILL.md").is_file(),
+            "{label} must still receive the user-custom tier: {t:?}"
+        );
+    }
+}
+
+#[test]
 fn reinstall_creates_a_missing_destination() {
     // A machine that has never run the standalone driver has no
     // `claude-config/` at all. Hop 2 must provision it rather than skip it.
+    // #7783: the skill it is provisioned with is the user-custom one — the
+    // bundled roster stops at the managed tier.
     let base = TempDir::new().unwrap();
     let paths = seeded(base.path());
+    seed_user_skill(&paths);
     let sa = standalone_dir(base.path());
     assert!(!sa.exists());
 
@@ -195,7 +274,7 @@ fn reinstall_creates_a_missing_destination() {
     assert!(sa.join("agents").join("engineer.md").is_file());
     assert!(
         sa.join("skills")
-            .join("demo-skill")
+            .join("my-skill")
             .join("SKILL.md")
             .is_file()
     );
@@ -415,6 +494,7 @@ fn reinstall_reports_a_failed_destination_and_serves_the_others() {
     // partial deploy this command exists to end.
     let base = TempDir::new().unwrap();
     let paths = seeded(base.path());
+    seed_user_skill(&paths);
     let sa = standalone_dir(base.path());
     // A regular FILE where the managed skills directory belongs: every write
     // into it fails, on every platform, without depending on permission bits.
@@ -425,10 +505,12 @@ fn reinstall_reports_a_failed_destination_and_serves_the_others() {
     let report = reinstall_assets(&paths, &sa, None, false, &base.path().join("backups"));
 
     assert!(report.has_failures(), "{report:?}");
+    // #7783: the standalone tier serves the user-custom tier, not the bundled
+    // roster — that is what "the others are still served" means there now.
     assert_eq!(tier(&report, "standalone").skills.deployed, 1);
     assert!(
         sa.join("skills")
-            .join("demo-skill")
+            .join("my-skill")
             .join("SKILL.md")
             .is_file()
     );
@@ -446,6 +528,9 @@ fn reinstall_serialises_against_a_held_skill_ledger_lock() {
 
     let base = TempDir::new().unwrap();
     let paths = seeded(base.path());
+    // #7783: the standalone tier receives the user-custom tier only, so the
+    // file whose appearance marks "the deploy ran" is that tier's.
+    seed_user_skill(&paths);
     let sa = standalone_dir(base.path());
     let dest = sa.join("skills");
     std::fs::create_dir_all(&dest).unwrap();
@@ -454,7 +539,7 @@ fn reinstall_serialises_against_a_held_skill_ledger_lock() {
     let paths_moved = paths.clone();
     let sa_moved = sa.clone();
     let backups = base.path().join("backups");
-    let marker = dest.join("demo-skill").join("SKILL.md");
+    let marker = dest.join("my-skill").join("SKILL.md");
 
     // The handle leaves the critical section rather than being joined inside
     // it: the reinstall cannot finish until we release.
@@ -661,6 +746,9 @@ fn reinstall_does_not_fail_the_command_for_an_optional_destination() {
     let base = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let paths = seeded(base.path());
+    // #7783: the project tier receives the user-custom tier only, so that is
+    // the skill whose deploy is made to fail below.
+    seed_user_skill(&paths);
     // A project tier that exists (so it is included) but whose skills path is a
     // regular file, so every write into it fails on every platform.
     std::fs::create_dir_all(project.path().join(".claude").join("skills")).unwrap();
@@ -681,7 +769,7 @@ fn reinstall_does_not_fail_the_command_for_an_optional_destination() {
         .path()
         .join(".claude")
         .join("skills")
-        .join("demo-skill");
+        .join("my-skill");
     std::fs::remove_dir_all(&deployed_dir).unwrap();
     std::fs::write(&deployed_dir, "not a directory").unwrap();
     let report = reinstall_assets(
@@ -706,7 +794,7 @@ fn reinstall_does_not_fail_the_command_for_an_optional_destination() {
     assert!(
         standalone
             .skills_dir
-            .join("demo-skill")
+            .join("my-skill")
             .join("SKILL.md")
             .is_file()
     );
