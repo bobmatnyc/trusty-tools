@@ -720,7 +720,7 @@ pub async fn run_doctor_for_manager(
 /// branches are adding checks to that list — and keeps the check free of
 /// ambient reads.
 /// What: probes trusty-memory through
-/// [`crate::core::memory_reachable::probe_memory_reachable`] (the same gate the
+/// [`crate::core::memory_reachable::probe_memory_reachability`] (the same gate the
 /// launch path consults, so a session and the row grading it cannot disagree)
 /// and resolves the managed Claude config dir, then calls
 /// [`doctor_auto_memory::check_auto_memory`].
@@ -730,9 +730,10 @@ async fn auto_memory_row(
     project_dir: Option<&Path>,
     home: &Path,
 ) -> crate::core::doctor::DoctorCheck {
-    let memory_reachable = crate::core::memory_reachable::probe_memory_reachable().await;
+    // #7685: the classified answer, so the row can say wedged versus unreachable.
+    let memory = crate::core::memory_reachable::probe_memory_reachability().await;
     let config_dir = crate::core::trusty_tools_config::managed_claude_config_dir();
-    check_auto_memory(project_dir, home, config_dir.as_deref(), memory_reachable)
+    check_auto_memory(project_dir, home, config_dir.as_deref(), &memory)
 }
 
 /// Test: `live_workspace_paths_drops_only_claims_a_probe_found_gone`.

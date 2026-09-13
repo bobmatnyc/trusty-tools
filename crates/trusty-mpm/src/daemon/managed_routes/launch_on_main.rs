@@ -153,7 +153,9 @@ pub(super) async fn spawn_managed_on_main(
 
     let synthetic_repo_url = format!("https://github.com/{owner}/{repo}");
     let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(local_path);
-    prepare_inproject_session(&fw, session_id, local_path, &synthetic_repo_url)?;
+    // #7685: keep the reachability preparation resolved; the adapter reuses it.
+    let memory_reachable =
+        prepare_inproject_session(&fw, session_id, local_path, &synthetic_repo_url)?;
 
     emit(ProvisioningStage::CreatingTmuxSession);
     let record = mgr
@@ -215,7 +217,8 @@ pub(super) async fn spawn_managed_on_main(
 
     emit(ProvisioningStage::LaunchingRuntime);
     let tmux_arc = mgr.tmux_driver();
-    let adapter = crate::runtime::build_adapter(record.runtime, tmux_arc, None);
+    // #7685: hand the adapter what preparation resolved, so it does not re-probe.
+    let adapter = crate::runtime::build_adapter(record.runtime, tmux_arc, memory_reachable);
     let gh_env = resolve_gh_env(state, local_path).await;
     if let Err(e) = adapter.spawn(
         &record.tmux_name,

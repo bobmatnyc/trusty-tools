@@ -63,6 +63,22 @@ fn rpc(state: &Stub, method: &str, params: Value) -> Result<Value, RpcError> {
         let id = format!("drawer-{}", st.writes.len());
         return Ok(json!({ "drawer_id": id, "status": "stored" }));
     }
+    if method == "memory_list" {
+        // #7685: the daemon's exact-tag filter, over what this stub stored.
+        let tag = params["tag"].as_str().unwrap_or_default().to_string();
+        let drawers: Vec<Value> = st
+            .writes
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| {
+                w["tags"]
+                    .as_array()
+                    .is_some_and(|tags| tags.iter().any(|t| t.as_str() == Some(tag.as_str())))
+            })
+            .map(|(i, w)| json!({ "drawer_id": format!("drawer-{}", i + 1), "tags": w["tags"] }))
+            .collect();
+        return Ok(json!({ "palace": params["palace"], "drawers": drawers }));
+    }
     Ok(json!({ "status": "ok" }))
 }
 
@@ -373,4 +389,54 @@ async fn auto_memory_import_on_an_absent_store_is_a_no_op() {
     assert_eq!(report.total, 0);
     assert!(report.archive.is_none());
     assert!(state.lock().expect("lock").writes.is_empty());
+}
+
+#[test]
+fn import_key_is_deterministic_per_path_and_content() {
+    // #7685: a retry can only find a crashed run's drawer by a key both runs
+    // derive identically from what is on disk.
+    let a = super::import_key(Path::new("/m/a.md"), FACT);
+    assert_eq!(a, super::import_key(Path::new("/m/a.md"), FACT));
+    assert!(a.starts_with(super::IMPORT_KEY_PREFIX), "{a}");
+    assert_ne!(a, super::import_key(Path::new("/m/b.md"), FACT));
+    assert_ne!(a, super::import_key(Path::new("/m/a.md"), OTHER_FACT));
+}
+
+#[tokio::test]
+async fn auto_memory_import_never_duplicates_a_fact_whose_marker_was_lost() {
+    // #7685 r4: the crash window. `memory_remember` succeeds, then the `.stored`
+    // sidecar never lands — here forced by a DIRECTORY where the marker file must
+    // go, which is what a kill between the two calls leaves behind. The re-run
+    // finds no marker and must still not store the fact a second time.
+    let project = tempfile::tempdir().expect("tempdir");
+    let (config, memory) = write_store(project.path(), &[("link-issues-and-prs.md", FACT)], INDEX);
+    let marker = memory.join("link-issues-and-prs.md.stored");
+    std::fs::create_dir(&marker).expect("block the marker path");
+    let (daemon, state) = start_stub().await;
+
+    let first = run_auto_memory_import(&opts(project.path(), config.path(), daemon.socket()))
+        .await
+        .expect("first run");
+    assert_eq!(first.failed, 1, "{:#?}", first.files);
+    assert_eq!(state.lock().expect("lock").writes.len(), 1);
+
+    // The "crash": the marker never landed.
+    std::fs::remove_dir(&marker).expect("unblock");
+
+    let second = run_auto_memory_import(&opts(project.path(), config.path(), daemon.socket()))
+        .await
+        .expect("second run");
+
+    assert_eq!(
+        state.lock().expect("lock").writes.len(),
+        1,
+        "exactly one stored fact across the crash and the re-run"
+    );
+    assert_eq!(second.stored, 1, "{:#?}", second.files);
+    assert_eq!(
+        second.files[0].drawer_id.as_deref(),
+        Some("drawer-1"),
+        "the re-run must reuse the drawer the crashed run wrote"
+    );
+    assert!(second.index_cleared, "{second:#?}");
 }

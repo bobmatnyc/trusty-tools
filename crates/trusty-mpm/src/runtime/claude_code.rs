@@ -16,7 +16,7 @@ use tracing::debug;
 
 // #7685: imported rather than path-qualified at each use — this file sits at
 // its SLOC cap and the qualified form wraps over three lines per call site.
-use crate::core::memory_reachable::resolve_memory_reachable;
+use crate::core::memory_reachable::{resolve_memory_reachable, resolve_spawn_memory_reachable};
 use crate::core::oauth_token::OAUTH_TOKEN_ENV_VAR;
 use crate::session_manager::ManagedTmuxDriver;
 
@@ -1148,7 +1148,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // command line only when trusty-memory answered. The launch resolved
         // this already where it could; this only probes when nothing did, so the
         // string builders below stay pure functions of their arguments.
-        let memory_reachable = resolve_memory_reachable(self.memory_reachable);
+        let memory_reachable = resolve_spawn_memory_reachable(self.memory_reachable);
         self.tmux
             .send_line(
                 tmux_name,

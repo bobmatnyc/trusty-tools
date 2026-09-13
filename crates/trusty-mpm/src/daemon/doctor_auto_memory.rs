@@ -40,13 +40,15 @@
 //! `auto_memory_repair_dry_run_writes_nothing`,
 //! `auto_memory_repair_is_silent_when_already_false`,
 //! `auto_memory_repair_reports_a_write_failure`,
-//! `auto_memory_repair_never_migrates`.
+//! `auto_memory_repair_never_migrates`,
+//! `auto_memory_names_a_wedged_trusty_memory_apart_from_a_dead_one`.
 
 use std::path::{Path, PathBuf};
 
 use crate::core::claude_config::ClaudeConfigReader;
 use crate::core::doctor::{CheckStatus, DoctorCheck};
 use crate::core::doctor_repair::{RepairMode, RepairStep, StepStatus};
+use crate::core::memory_reachable::MemoryReachability;
 use crate::core::session_launch::{AUTO_MEMORY_KEY, merge_settings_key};
 
 /// The `tm doctor` row this module produces.
@@ -182,13 +184,18 @@ fn effective_setting(project_dir: Option<&Path>, home: &Path) -> Effective {
 /// `auto_memory_warns_when_the_index_holds_facts_and_memory_is_down`,
 /// `auto_memory_project_local_overrides_project`,
 /// `auto_memory_falls_back_to_the_user_tier`,
-/// `auto_memory_fails_on_malformed_json`.
+/// `auto_memory_fails_on_malformed_json`,
+/// `auto_memory_names_a_wedged_trusty_memory_apart_from_a_dead_one`.
 pub(crate) fn check_auto_memory(
     project_dir: Option<&Path>,
     home: &Path,
     config_dir: Option<&Path>,
-    memory_reachable: bool,
+    memory: &MemoryReachability,
 ) -> DoctorCheck {
+    // #7685: the row names WHY trusty-memory is not the memory — a wedged daemon
+    // is sampled before it is restarted, a dead one is just started.
+    let memory_reachable = memory.is_reachable();
+    let memory_state = memory.describe();
     let effective = match effective_setting(project_dir, home) {
         Ok(effective) => effective,
         Err(reason) => return DoctorCheck::new(CHECK_NAME, CheckStatus::Fail, reason),
@@ -222,9 +229,9 @@ pub(crate) fn check_auto_memory(
             CHECK_NAME,
             CheckStatus::Ok,
             format!(
-                "trusty-memory is not answering, so Claude Code auto-memory is carrying this \
-                 project as the FALLBACK — {where_set}. This is the posture the directive \
-                 asks for while trusty-memory is down"
+                "{memory_state}, so Claude Code auto-memory is carrying this project as the \
+                 FALLBACK — {where_set}. This is the posture the directive asks for while \
+                 trusty-memory is down"
             ),
         );
     }
@@ -243,7 +250,7 @@ pub(crate) fn check_auto_memory(
             CHECK_NAME,
             CheckStatus::Warn,
             format!(
-                "the fallback is disabled while trusty-memory is down — {where_set}, so this \
+                "the fallback is disabled while {memory_state} — {where_set}, so this \
                  project currently has NO memory. Run `{REMEDY}` to write \
                  `{AUTO_MEMORY_KEY}: true` and restore it{stranded}"
             ),

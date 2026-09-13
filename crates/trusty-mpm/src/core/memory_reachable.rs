@@ -7,15 +7,16 @@
 //! `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` spawn assignment) therefore needs one
 //! yes/no answer, resolved the same way in every caller. A session that loses
 //! both memories is the failure this module exists to prevent.
-//! What: [`probe_memory_reachable`] issues ONE `memory.health` call against the
-//! derived socket and answers `true` when the daemon answered at all — a
-//! JSON-RPC error is the daemon refusing a call, which still proves it is there.
-//! [`probe_memory_reachable_blocking`] is the same probe for the synchronous
-//! launch path, run on its own short-lived thread so it is safe to call from
-//! inside an async runtime. [`resolve_memory_reachable`] is what consumers
-//! actually call: it takes whatever the caller already resolved and probes only
-//! when nothing did, so one launch asks the daemon once rather than once per
-//! write site.
+//! What: [`probe_memory_reachability`] issues ONE `memory.health` call against
+//! the derived socket and classifies the answer as a [`MemoryReachability`].
+//! Only a daemon that answers AND reports `status: "ok"` is reachable — a wedged
+//! or degraded daemon, an unreadable body and a refused call all keep the
+//! fallback on. [`probe_memory_reachable_blocking`] is the same probe as a
+//! boolean for the synchronous launch path, run on its own short-lived thread so
+//! it is safe to call from inside an async runtime. [`resolve_memory_reachable`]
+//! is what launch consumers actually call: it takes whatever the caller already
+//! resolved and probes only when nothing did, so one launch asks the daemon once
+//! rather than once per write site.
 //!
 //! This is deliberately NOT [`crate::daemon::doctor`]'s `probe_health`: that one
 //! retries three times and classifies four outcomes because it renders a doctor
@@ -23,6 +24,8 @@
 //! Test: `core::memory_reachable::tests`.
 
 use std::time::Duration;
+
+use trusty_common::memory_rpc::MemoryHealthStatus;
 
 /// How long one launch-time reachability probe may take.
 ///
@@ -37,37 +40,96 @@ pub const PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
 /// The trusty-memory health method both probes call.
 const HEALTH_METHOD: &str = "memory.health";
 
-/// Whether trusty-memory answered a health call within [`PROBE_TIMEOUT`].
+/// What one reachability probe observed about trusty-memory (#7685).
 ///
-/// Why: the one implementation of "is trusty-memory available" that the launch
-/// path and `tm doctor`'s `auto_memory` row both consult, so a session and the
-/// check that grades it can never disagree about which state they are in.
-/// What: resolves the daemon socket via
-/// `trusty_common::memory_rpc::resolve_memory_socket_or_unreachable` — which
-/// always yields a path, so an absent daemon simply fails to dial — and issues
-/// one `memory.health` call. `Ok` is reachable; so is a JSON-RPC error, because
-/// only a running daemon produces one. A transport failure or a timeout is
-/// unreachable.
-/// Test: `reachable_when_the_daemon_answers`,
-/// `reachable_when_the_daemon_refuses_the_call`,
+/// Why: "is trusty-memory the memory" has one yes and several different noes,
+/// and an operator reading `tm doctor`'s `auto_memory` row needs to tell them
+/// apart — a daemon that is down is restarted, a wedged one is sampled first
+/// (#4001). The launch path only needs the yes/no, via [`Self::is_reachable`].
+/// What: `Reachable` only when the daemon answered with a healthy status;
+/// `Unhealthy` when it answered with any other status (or none it could read);
+/// `Refused` when it answered with a JSON-RPC error; `Unreachable` when nothing
+/// answered within [`PROBE_TIMEOUT`].
+/// Test: `reachable_when_the_daemon_reports_ok`,
+/// `wedged_daemon_is_not_reachable`, `degraded_daemon_is_not_reachable`,
+/// `malformed_health_body_is_not_reachable`,
+/// `health_body_without_a_status_is_not_reachable`,
+/// `refused_health_call_is_not_reachable`,
 /// `unreachable_socket_answers_false`.
-pub async fn probe_memory_reachable() -> bool {
-    let socket = trusty_common::memory_rpc::resolve_memory_socket_or_unreachable();
-    probe_socket_reachable(&socket).await
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemoryReachability {
+    /// Answered, and reported `status: "ok"`.
+    Reachable,
+    /// Answered, but with a status that is not `"ok"`.
+    Unhealthy(MemoryHealthStatus),
+    /// Answered the health call with a JSON-RPC error, carrying its code.
+    Refused(i64),
+    /// Nothing answered: a dial failure, a transport error, or a timeout.
+    Unreachable,
 }
 
-/// [`probe_memory_reachable`] against an explicit socket.
+impl MemoryReachability {
+    /// Whether trusty-memory can be relied on as the memory.
+    pub fn is_reachable(&self) -> bool {
+        matches!(self, Self::Reachable)
+    }
+
+    /// One clause naming what the probe saw, for an operator-facing row.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Reachable => "trusty-memory is healthy".to_string(),
+            Self::Unhealthy(MemoryHealthStatus::Wedged) => {
+                "trusty-memory is answering but reports its worker pool WEDGED (its oldest \
+                 in-flight operation has outlived its bound)"
+                    .to_string()
+            }
+            Self::Unhealthy(MemoryHealthStatus::Degraded) => {
+                "trusty-memory is answering but reports itself DEGRADED".to_string()
+            }
+            Self::Unhealthy(other) => {
+                format!("trusty-memory is answering but reports no healthy status ({other:?})")
+            }
+            Self::Refused(code) => {
+                format!("trusty-memory refused its health call (code {code})")
+            }
+            Self::Unreachable => "trusty-memory is not answering (unreachable)".to_string(),
+        }
+    }
+}
+
+/// Probe the host's trusty-memory and classify what answered.
+///
+/// Why: the one implementation of "is trusty-memory available" that the launch
+/// path, `tm doctor`'s `auto_memory` row and `tm doctor --fix` all consult, so a
+/// session and the check that grades it can never disagree about which state
+/// they are in.
+/// What: resolves the daemon socket via
+/// `trusty_common::memory_rpc::resolve_memory_socket_or_unreachable` — which
+/// always yields a path, so an absent daemon simply fails to dial — and hands it
+/// to [`probe_socket_reachability`].
+/// Test: through [`probe_socket_reachability`].
+pub async fn probe_memory_reachability() -> MemoryReachability {
+    let socket = trusty_common::memory_rpc::resolve_memory_socket_or_unreachable();
+    probe_socket_reachability(&socket).await
+}
+
+/// [`probe_memory_reachability`] against an explicit socket.
 ///
 /// Why: the resolver reads the host's own daemon layout, which a test cannot
 /// point anywhere; this seam is what lets the stub daemon answer instead.
-/// Production reaches it only through [`probe_memory_reachable`].
-/// What: one `memory.health` call bounded by [`PROBE_TIMEOUT`]. `Ok` is
-/// reachable; so is a JSON-RPC error, because only a running daemon produces
-/// one. A transport failure or a timeout is unreachable.
-/// Test: `reachable_when_the_daemon_answers`,
-/// `reachable_when_the_daemon_refuses_the_call`,
+/// What: one `memory.health` call bounded by [`PROBE_TIMEOUT`]. The answer's
+/// `status` is read through the shared [`MemoryHealthStatus`]; only `Ok` is
+/// [`MemoryReachability::Reachable`] (#7685: `"wedged"`, `"degraded"`, an unknown
+/// value, a missing field and an unreadable body all fail closed, toward keeping
+/// auto memory on). A JSON-RPC error is `Refused`; a transport failure or a
+/// timeout is `Unreachable`.
+/// Test: `reachable_when_the_daemon_reports_ok`,
+/// `wedged_daemon_is_not_reachable`, `degraded_daemon_is_not_reachable`,
+/// `malformed_health_body_is_not_reachable`,
+/// `health_body_without_a_status_is_not_reachable`,
+/// `refused_health_call_is_not_reachable`,
 /// `unreachable_socket_answers_false`.
-pub async fn probe_socket_reachable(socket: &std::path::Path) -> bool {
+pub async fn probe_socket_reachability(socket: &std::path::Path) -> MemoryReachability {
     match trusty_common::memory_rpc::call_memory_tool_at_with_timeout(
         socket,
         HEALTH_METHOD,
@@ -76,16 +138,19 @@ pub async fn probe_socket_reachable(socket: &std::path::Path) -> bool {
     )
     .await
     {
-        Ok(_) => true,
-        // A `MemoryRpcError` is the daemon ANSWERING and refusing — it is up.
-        // Anything else (dial failure, timeout) means nothing is there.
-        Err(e) => e
-            .downcast_ref::<trusty_common::memory_rpc::MemoryRpcError>()
-            .is_some(),
+        // #7685: an answer is not health — a wedged pool answers too.
+        Ok(body) => match MemoryHealthStatus::from_health_body(&body) {
+            MemoryHealthStatus::Ok => MemoryReachability::Reachable,
+            other => MemoryReachability::Unhealthy(other),
+        },
+        Err(e) => match e.downcast_ref::<trusty_common::memory_rpc::MemoryRpcError>() {
+            Some(rpc) => MemoryReachability::Refused(rpc.code),
+            None => MemoryReachability::Unreachable,
+        },
     }
 }
 
-/// [`probe_memory_reachable`] for a synchronous caller.
+/// [`probe_memory_reachability`] as a boolean, for a synchronous caller.
 ///
 /// Why: `prepare_session*` and `RuntimeAdapter::spawn` are synchronous and are
 /// reached from BOTH async handlers (the daemon's spawn routes, the HTTP client)
@@ -102,7 +167,23 @@ pub async fn probe_socket_reachable(socket: &std::path::Path) -> bool {
 /// direction, since `false` leaves auto memory ON.
 /// Test: `blocking_probe_answers_inside_a_runtime`.
 pub fn probe_memory_reachable_blocking() -> bool {
-    block_on_probe(probe_memory_reachable())
+    block_on_probe(async { probe_memory_reachability().await.is_reachable() })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many adapter spawns on this thread had no resolved reachability (#7685).
+    ///
+    /// Why: a launch path that throws away the reachability its preparation
+    /// resolved makes the runtime adapter probe a second time, and that is
+    /// invisible in the session it produces. Counting the adapter's own
+    /// unresolved reads lets a test drive a real launch path and assert the
+    /// adapter reused the prepared answer. Thread local, so parallel tests cannot
+    /// disturb the count.
+    /// What: incremented by [`resolve_spawn_memory_reachable`] when the adapter
+    /// was built with `None` and is about to probe.
+    /// Test: `spawn_managed_on_main_hands_the_adapter_the_prepared_reachability`.
+    pub(crate) static ADAPTER_REPROBES_ON_THIS_THREAD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The reachability a launch should act on: a value already resolved, or a probe.
@@ -119,6 +200,23 @@ pub fn probe_memory_reachable_blocking() -> bool {
 /// `unresolved_reachability_runs_the_probe`.
 pub fn resolve_memory_reachable(resolved: Option<bool>) -> bool {
     resolve_memory_reachable_with(resolved, probe_memory_reachable_blocking)
+}
+
+/// [`resolve_memory_reachable`] for the runtime adapter's spawn (#7685).
+///
+/// Why: the adapter is the one consumer whose probe is always a SECOND probe —
+/// preparation already asked — so a launch path that hands it `None` pays twice.
+/// A separate entry point makes that re-probe countable by a test without
+/// counting preparation's own probes.
+/// What: [`resolve_memory_reachable`]; under `cfg(test)` a `None` also bumps
+/// [`ADAPTER_REPROBES_ON_THIS_THREAD`].
+/// Test: `spawn_managed_on_main_hands_the_adapter_the_prepared_reachability`.
+pub fn resolve_spawn_memory_reachable(resolved: Option<bool>) -> bool {
+    #[cfg(test)]
+    if resolved.is_none() {
+        ADAPTER_REPROBES_ON_THIS_THREAD.with(|n| n.set(n.get() + 1));
+    }
+    resolve_memory_reachable(resolved)
 }
 
 /// [`resolve_memory_reachable`] with the probe supplied.
