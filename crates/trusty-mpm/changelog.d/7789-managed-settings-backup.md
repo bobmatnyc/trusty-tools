@@ -8,6 +8,9 @@ Fixed
   `settings.json.malformed-<UTC stamp>`, warn naming that copy, and only then
   rewrite. Recovery on this path used to be the 3-deep pruned `.bak` snapshot
   ring alone (#7789).
+- The converted hook writer is tier-agnostic, so `tm launch` gains the same
+  preserve-then-rewrite for the PROJECT `.claude/settings.json` inside the
+  managed clone it writes hooks into (#7789).
 - A copy that cannot be written abandons that write and leaves the file exactly
   as it was, so damaged managed settings are never replaced by bytes nothing
   preserved (#7789).

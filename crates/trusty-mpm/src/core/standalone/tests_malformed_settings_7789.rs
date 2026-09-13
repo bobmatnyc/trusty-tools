@@ -13,7 +13,9 @@
 //! and the rewrite still happens; a copy that cannot be written abandons the
 //! write and leaves the original exactly as it was; a valid object costs no
 //! copy. Plus one arm asserting the warning names the copy, since every other
-//! assertion here passes with the `backup` field dropped from it.
+//! assertion here passes with the `backup` field dropped from it, and one arm
+//! running BOTH writers through `ensure_global_config_dir_with_exe` to pin the
+//! copy count at one per provisioning run.
 //! Test: this module IS the test suite.
 
 use crate::core::session_launch::PrepError;
@@ -211,6 +213,47 @@ fn write_project_hooks_takes_no_copy_for_a_valid_file() {
         read_settings(cfg)["env"]["KEEP"],
         serde_json::json!("1"),
         "an operator key must survive the merge"
+    );
+}
+
+/// One copy per provisioning run, not one per writer.
+///
+/// Why (#7789): `ensure_global_config_dir_with_exe` calls
+/// `ensure_settings_defaults` and then `ensure_managed_hooks_with_exe`, both of
+/// which now preserve-then-rewrite. Exactly one copy results only because the
+/// first ALWAYS rewrites after a copy — the seeded object can never equal `{}`
+/// — so the second reads a valid object and finds nothing to preserve. Swapping
+/// that order, or letting the first skip its rewrite, would start taking two
+/// copies per launch with every other arm in this module still green.
+/// What: provisions a managed config dir over a `{ broken` `settings.json`
+/// through the production entry point, pinning the hook binary the way the
+/// `global_config` test shim does, then asserts exactly one copy holding the
+/// original bytes and that BOTH writers' keys landed in the rewrite.
+/// Test: this IS the test.
+#[test]
+fn provisioning_takes_exactly_one_copy_when_both_managed_writers_fire() {
+    let tmp = hermetic_temp_dir();
+    let managed_root = tmp.path().join("managed");
+    let cfg = managed_root.join("claude-config");
+    std::fs::create_dir_all(&cfg).expect("create the managed config dir");
+    seed(&cfg, BROKEN);
+
+    super::global_config::ensure_global_config_dir_with_exe(
+        &managed_root,
+        &cfg,
+        Some(Path::new(TEST_EXE)),
+    )
+    .expect("provisioning proceeds once the copy is taken");
+
+    assert_one_copy_holds_the_original(&cfg);
+    let settings = read_settings(&cfg);
+    assert!(
+        settings["outputStyle"].is_string(),
+        "the defaults writer must have rewritten over the damage: {settings}"
+    );
+    assert!(
+        settings["hooks"]["PreToolUse"].is_array(),
+        "the hook writer must have merged into that rewrite: {settings}"
     );
 }
 

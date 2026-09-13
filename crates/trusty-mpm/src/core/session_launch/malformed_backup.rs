@@ -24,6 +24,11 @@
 //! `standalone::hooks::write_project_hooks_with` carried the same
 //! coerce-to-`{}` read over `<claude_config_dir>/settings.json`, so they call
 //! this loader too rather than growing a second copy of the rule.
+//! `write_project_hooks_with` is tier-agnostic — it writes whatever settings
+//! path it is handed — so the conversion also covers `tm launch`, which routes
+//! a managed clone's PROJECT `<clone>/.claude/settings.json` through the same
+//! function (`commands::install::write_project_hooks_for_dir`, called from
+//! `commands::launch`).
 //! Test: `malformed_backup_tests.rs`, `tests_malformed_settings_7780.rs`,
 //! `core::standalone::tests_malformed_settings_7789`.
 
