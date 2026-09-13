@@ -204,6 +204,12 @@ pub use skills_documentation_style_inner::{
 mod skills_rust_build_performance_inner;
 pub use skills_rust_build_performance_inner::RUST_BUILD_PERFORMANCE;
 
+// --- `self-improvement-loop` bundled skill (issue #7723) — own module,
+// on-demand only (not declared in any agent's `skills:` frontmatter).
+#[path = "bundle_skills_self_improvement_loop.rs"]
+mod skills_self_improvement_loop_inner;
+pub use skills_self_improvement_loop_inner::SELF_IMPROVEMENT_LOOP;
+
 // --- Skill-port batch 1 (issue #2903, epic #2902): 25 upstream universal/
 // skills, split across 4 modules by category to stay under the 500-SLOC cap.
 #[path = "bundle_skills_batch1_debugging.rs"]

@@ -518,11 +518,14 @@ fn bundle_table_is_complete() {
     // Issue #7526 (epic #7517) (+1): `agents/secrets-manager.md` is NEW — the
     //   bundled framework agent that operates `tm secrets` on behalf of the PM
     //   and other agents (DOC-74). 180 + 1 = 181.
-    assert_eq!(ALL.len(), 181);
+    // Issue #7723 (+1): `skills/self-improvement-loop.md` is NEW — the
+    //   self-analysis/fast-loop content moved out of the resident
+    //   `BASE-AGENT.md`, on-demand only. 181 + 1 = 182.
+    assert_eq!(ALL.len(), 182);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 181, "artifact paths must be unique");
+    assert_eq!(paths.len(), 182, "artifact paths must be unique");
     for artifact in ALL {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());
@@ -1283,6 +1286,72 @@ fn rust_build_performance_skill_is_in_bundle() {
 }
 
 #[test]
+fn self_improvement_loop_skill_is_in_bundle() {
+    // Issue #7723: the self-improvement-loop entry SKILL.md must be present
+    // in `ALL` — a source file existing under `src/assets/skills/` is not
+    // sufficient, only `ALL` registration makes `deploy_all_skill_tiers`
+    // ship it (the historical orphaned-tm-doctor.md bug).
+    assert!(
+        ALL.iter()
+            .any(|a| a.rel_path == "skills/self-improvement-loop.md"),
+        "self-improvement-loop.md must be present in the ALL bundle table"
+    );
+    assert!(SELF_IMPROVEMENT_LOOP.starts_with("---\n"));
+    assert!(SELF_IMPROVEMENT_LOOP.contains("name: self-improvement-loop"));
+}
+
+#[test]
+fn self_improvement_loop_skill_carries_the_moved_anchors() {
+    // Issue #7723: `self_analysis_reporting_ships_in_the_base_agent`
+    // (`trusty-agents-common::agent_assets`) now asserts only the resident
+    // trigger and the skill name in `BASE-AGENT.md`; this test asserts the
+    // ten anchors that section used to carry directly, against the skill
+    // they moved into.
+    let flat = SELF_IMPROVEMENT_LOOP.replace('\n', " ");
+    for (fact, needle) in [
+        (
+            "the section exists",
+            "## Self-Analysis and Improvement Reporting",
+        ),
+        (
+            "the fast-loop section exists",
+            "## Continuous Self-Improvement — the Fast Loop",
+        ),
+        (
+            "the detection heuristics are headed and findable",
+            "**Detection heuristics.**",
+        ),
+        (
+            "the one memory tag is named",
+            "The tag is `self-improvement-hypothesis`",
+        ),
+        (
+            "the post-mortem's query is spelled out",
+            r#"memory_list(tag: "self-improvement-hypothesis")"#,
+        ),
+        (
+            "trusty-tools is the fixed destination",
+            "bobmatnyc/trusty-tools",
+        ),
+        (
+            "a subagent returns a block instead of filing",
+            "Improvement recommendations",
+        ),
+        (
+            "dedup runs against the label",
+            "`self-improvement` label first",
+        ),
+        ("a clean run files nothing", "A clean run reports nothing"),
+        ("the post-mortem tracker is named", "#6933"),
+    ] {
+        assert!(
+            flat.contains(needle),
+            "`self-improvement-loop.md` must state that {fact} (#6935, #6937, #7723)"
+        );
+    }
+}
+
+#[test]
 fn rust_build_performance_declared_by_rust_family_agents() {
     // Per Bob directive 2026-07-17: rust-engineer and tauri-engineer both
     // declare `rust-build-performance` directly in their own `skills:`
@@ -1594,6 +1663,31 @@ fn the_default_output_style_stays_within_its_resident_budget() {
          {BUDGET_BYTES}-byte resident budget — move examples into \
          `tm-prose-style` rather than growing it",
         OUTPUT_STYLE.len()
+    );
+}
+
+#[test]
+fn rust_engineer_composed_body_stays_within_its_resident_budget() {
+    // Issue #7723 (epic #7681): composed rust-engineer (BASE-AGENT +
+    // BASE-ENGINEER + rust-engineer body) measured 55,872 bytes on
+    // 2026-09-13, 19,981 tokens per turn (32% of an engineer subagent's
+    // floor, the single largest component — `docs/research/
+    // token-floor-measurement-2026-09-13.md`). The #7723 trim target was
+    // ~40,000; 42,000 leaves headroom without licensing the file to regrow
+    // back toward its pre-trim size.
+    use crate::core::agent_builder::compose_agent;
+    use std::path::Path;
+
+    const BUDGET_BYTES: usize = 42_000;
+    let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
+    let composed = compose_agent("rust-engineer", assets_dir)
+        .expect("compose_agent(rust-engineer) must succeed");
+    assert!(
+        composed.len() <= BUDGET_BYTES,
+        "composed rust-engineer is {} bytes, over the {BUDGET_BYTES}-byte \
+         resident budget (#7723) — move detail into a skill rather than \
+         growing BASE-AGENT/BASE-ENGINEER/rust-engineer.md",
+        composed.len()
     );
 }
 

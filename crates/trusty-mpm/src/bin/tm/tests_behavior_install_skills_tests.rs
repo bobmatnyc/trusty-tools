@@ -85,12 +85,12 @@ fn install_then_deploy_deploys_skills() {
     }
     assert_eq!(
         result.deployed.len(),
-        134,
-        "expected 134 skill files deployed (19 /tm- portfolio + tm-prose-style (#7423) \
+        135,
+        "expected 135 skill files deployed (19 /tm- portfolio + tm-prose-style (#7423) \
          + tm-secrets (#7527) + tm-doctor + tm overview + code-review-standards + \
          contract-driven-testing + 93 skill-port batch-1 entries + 7 documentation-style \
          entries + 8 tm-capabilities entries (#4946 added references/framework.md) + 1 \
-         rust-build-performance entry); got {:?}",
+         rust-build-performance entry + 1 self-improvement-loop entry (#7723)); got {:?}",
         result.deployed
     );
     assert!(result.skipped.is_empty());
