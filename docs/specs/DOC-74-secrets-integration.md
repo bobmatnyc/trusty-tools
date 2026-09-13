@@ -477,8 +477,9 @@ managed session's other per-session state lives (the session record
 `session_manager` already tracks, cited at `crates/trusty-mpm/src/session_manager/hook_sync.rs:25-56`
 for the analogous `SessionStart`→session-record binding) — not persisted to
 disk, dropped when the session ends, and never serialized into a session
-snapshot (`.trusty-mpm/sessions/*.md` files are tracked in git per this
-repo's own convention — a cache entry must never reach one).
+snapshot (`.trusty-mpm/sessions/*.md` files were tracked in git when this was
+written; the owner ruling of 2026-09-13 gitignores them instead, and a cache
+entry must never reach one either way).
 
 ---
 

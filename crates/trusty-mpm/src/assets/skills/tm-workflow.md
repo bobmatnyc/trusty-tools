@@ -300,7 +300,8 @@ the refresh above then fails on every session. The pause commits onto its own
 `config.yaml` declares, else `origin/HEAD`, else `main`), pushes it, and opens an
 auto-merging docs-only PR. So run the fetch and `pull --ff-only` above after a
 pause PR lands, the same as after any other merge, and the snapshot is visible
-locally again.
+locally again. Where a project gitignores that store instead, a pause opens no
+PR and owes no refresh — the snapshot is machine-local and stays on disk.
 
 🟡 **One cause is an untracked path the incoming commits also add.** `--ff-only`
 then aborts with "The following untracked working tree files would be

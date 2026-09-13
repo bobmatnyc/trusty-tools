@@ -1,13 +1,16 @@
 //! Publish a session-pause snapshot as its own PR instead of a commit on the
 //! main checkout's current branch (#7282).
 //!
-//! Why: `.trusty-mpm/sessions/**` is tracked in this repo, and the PM committed
+//! Why: in a project that TRACKS `.trusty-mpm/sessions/**`, the PM committed
 //! each pause snapshot on whatever branch the main checkout happened to be on —
 //! local `main`. `main` is PR-only, so every one of those commits stranded:
 //! local `main` sat ahead 8 / behind 77, and the `pull --ff-only` refresh
 //! `tm-workflow.md` prescribes failed on every session. The owner's ruling is
 //! that sessions are live state, so a pause must reach `origin/main` the same
-//! way every other change does — through a pushed branch and a PR.
+//! way every other change does — through a pushed branch and a PR. This
+//! repository itself gitignores its own store (owner ruling 2026-09-13), so
+//! every pause here takes the `not_tracked` skip; this path serves projects
+//! that track theirs.
 //! What: [`publish_pause_snapshot`] builds the commit with git plumbing against
 //! a scratch index, so HEAD, the shared index, and the working tree are never
 //! touched: only the caller-supplied `.trusty-mpm/sessions/**` paths enter the

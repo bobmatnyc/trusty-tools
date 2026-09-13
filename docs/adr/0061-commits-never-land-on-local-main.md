@@ -133,6 +133,19 @@ that the commit's destination is never local `main`.
   documents and session notes — so nothing that used to succeed is now
   impossible.
 
+## Amendment — 2026-09-13: `.trusty-mpm/sessions/` is gitignored
+
+Owner ruling the same day, superseding the 2026-08-31 ruling that tracked the
+store: `.trusty-mpm/sessions/` is gitignored and machine-local in this
+repository. A pause snapshot is therefore never committed and never reaches
+origin, so the fast-path branch in decision 3 carries no session-store file,
+and the `.trusty-mpm/sessions/` example in decision 4 is now covered by
+ADR-0044 decision 1's uncommitted-write permission alone. Nothing else in this
+ADR changes: decision 3 still governs every other document and session note,
+and decision 1's deny for local `main` is untouched. Motivation: each pause
+owed a PR plus a main fast-forward, concurrent pauses raced (#7782), and the
+fast-forward watch blocked on the dirty sessions log.
+
 ## Related Decisions
 
 Vetted against the ADR corpus on 2026-09-13:
