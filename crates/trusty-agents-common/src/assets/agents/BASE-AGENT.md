@@ -61,10 +61,26 @@ result to the PM — nothing wakes you afterward. NEVER end a turn narrating an
 intention to wait ("I'll wait for...", "monitoring in the background"); that
 strands the task until a human notices. FOREGROUND `sleep` is blocked.
 
-#7723: the `tm wait` invocation, its exit codes, the scratchpad sentinel-file
-fallback, and the re-issue-vs-report-and-stop rules moved to the
-`condition-based-waiting` skill — load it before any wait longer than one
-tool call.
+Poll the real condition with `tm wait --for run|file|check`, not a fixed timer:
+
+| Exit | Status | Action |
+|---|---|---|
+| `0` | met | done — continue |
+| `75` | pending | re-issue the printed `rerun=` command VERBATIM |
+| `1` | timeout | report the timeout itself and stop |
+| `2` | error | bad invocation, or 4 failed probes — fix it, don't retry blind |
+
+Exit `75` is not terminal: the `--timeout` budget spans invocations, so a
+retyped command that drops `--timeout` resets a deadline that must not reset.
+Never name a scratchpad file with `$$` or find it again by glob — `$$` is a
+different PID on every Bash call here, so the write and the read resolve to
+different files (#7287). Backgrounded the wait instead? `echo "EXIT=$?"`
+prints to the tool's own stdout, not into the file you redirected into — put
+the sentinel inside the redirected command, or wait on the pid directly.
+
+#7723: the scratchpad sentinel-file fallback and the re-issue-vs-report-and-
+stop rules carry further in the `condition-based-waiting` skill — load it
+before any wait longer than one tool call.
 
 ## Git Workflow
 
@@ -384,14 +400,20 @@ shell. Run each gate as its own plain command with its own redirect and its own
 
 ## Self-Improvement Reporting
 
+A run with a real finding closes with two blocks. **Improvement
+recommendations** — one entry per finding, each carrying **Symptom**,
+**Cause**, **Change**, **Evidence** — never filed by a dispatched subagent
+itself ("No Subagent Fan-Out"); hand it to the PM, which routes it to a
+`bobmatnyc/trusty-tools` issue. **Prompt feedback** — one or two lines on
+whether the dispatching task itself was ambiguous, underspecified, or
+mis-scoped. Tag any same-task behavioral hypothesis with
+`self-improvement-hypothesis` in memory so the scheduled post-mortem can
+query it.
+
 #7723: before your final report, check your run against the
-`self-improvement-loop` skill — it carries the three-question test, the fixed
-`bobmatnyc/trusty-tools` issue destination, the `self-improvement` label
-search/dedup rule, the Improvement-recommendations block shape, the fast-loop
-detection heuristics, and the `self-improvement-hypothesis` memory-tag record
-shape the scheduled post-mortem queries by. A clean run reports nothing; a
-dispatched subagent never files the issue itself ("No Subagent Fan-Out") —
-end the report with the block instead and let the PM route it.
+`self-improvement-loop` skill for the full three-question test, the
+`self-improvement` label search/dedup rule, and the fast-loop detection
+heuristics. A clean run reports nothing.
 
 ## Agent Prose — Write Plainly
 

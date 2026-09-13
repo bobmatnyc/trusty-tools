@@ -464,6 +464,45 @@ mod tests {
         );
     }
 
+    /// #7723 fix round (code-critic WARN): 35 of 39 roster agents' `tools:`
+    /// allowlist omits `Skill` (#7683), so moving the `tm wait` exit-code
+    /// semantics and the two self-improvement closing-block headings fully
+    /// into skills left those agents with the prohibitions ("don't narrate a
+    /// wait") but no resident way to reconstruct the compliance mechanism. A
+    /// Skill-less agent must be able to emit a correct `tm wait` retry and a
+    /// correctly-headed closing report from `BASE_AGENT` alone.
+    #[test]
+    fn wait_exit_codes_and_improvement_block_headings_are_resident() {
+        let flat = BASE_AGENT.replace('\n', " ");
+        for (fact, needle) in [
+            ("exit 0 (met) is documented", "`0`"),
+            ("exit 75 (pending) is documented", "`75`"),
+            ("exit 1 (timeout) is documented", "`1`"),
+            ("exit 2 (error) is documented", "`2`"),
+            (
+                "re-issuing the rerun command verbatim is required",
+                "VERBATIM",
+            ),
+            (
+                "the Improvement recommendations heading is named",
+                "Improvement recommendations",
+            ),
+            ("its Symptom field is named", "Symptom"),
+            ("its Cause field is named", "Cause"),
+            ("its Evidence field is named", "Evidence"),
+            ("the Prompt feedback heading is named", "Prompt feedback"),
+            (
+                "the fast-loop memory tag is named",
+                "self-improvement-hypothesis",
+            ),
+        ] {
+            assert!(
+                flat.contains(needle),
+                "`BASE-AGENT.md` must state that {fact} (#7723 fix round)"
+            );
+        }
+    }
+
     /// An engineer's shipped prompt must not name a doc-gate script that only
     /// `trusty-tools` contains.
     ///
