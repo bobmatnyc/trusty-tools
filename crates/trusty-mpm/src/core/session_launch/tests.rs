@@ -2046,7 +2046,8 @@ fn prepare_session_never_retracts_the_operator_home_agents_tier() {
     // Stand in for a pre-#4409 `tm install`: a fully deployed, manifest-tracked
     // bundled roster sitting in the operator's own `~/.claude/agents`.
     let home_agents = fw.claude_agents_dir();
-    crate::core::agent_deployer::deploy_agents(&fw.agents, &home_agents).unwrap();
+    crate::core::agent_deployer::deploy_agents(&fw.agents, &home_agents, &fw.skill_deploy_dir())
+        .unwrap();
     let before: Vec<String> = std::fs::read_dir(&home_agents)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())

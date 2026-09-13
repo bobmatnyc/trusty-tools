@@ -196,7 +196,8 @@ fn deploy_roster() -> (tempfile::TempDir, tempfile::TempDir) {
     for (file_name, contents) in AGENT_ASSETS {
         fs::write(src.path().join(file_name), contents).expect("write roster asset");
     }
-    let result = deploy_agents(src.path(), tgt.path()).expect("roster deploys");
+    let skills = std::env::temp_dir().join("tm-roster-skills");
+    let result = deploy_agents(src.path(), tgt.path(), &skills).expect("roster deploys");
     assert!(
         result.failed.is_empty(),
         "every roster agent must compose and validate; failed: {:?}",
@@ -290,6 +291,203 @@ fn base_templates_declare_no_tools() {
             "`{stem}` must leave `tools:` unset so it cannot override a leaf's"
         );
     }
+}
+
+/// Skill references a no-`Skill` agent may carry without a Read path (#7727).
+///
+/// Why: a row must not widen past the pointer it was written for. A `*` row
+/// names the BASE-AGENT text it exempts, so a later mandatory pointer to the
+/// same skill in an agent's own body is still caught.
+/// What: `(agent stem or `*` for BASE-AGENT text every agent inherits, skill
+/// name, exempted text or `None` for every mention in that one agent, reason)`.
+/// Exempted text is matched after whitespace is collapsed to single spaces.
+const UNLOADABLE_SKILL_ALLOWLIST: &[(&str, &str, Option<&str>, &str)] = &[
+    (
+        "*",
+        "tm-prose-style",
+        Some("`tm-prose-style` skill, for the agents whose allowlist carries `Skill`"),
+        "BASE-AGENT names it for Skill holders only; the prose rules it expands \
+         are resident in full beside the pointer",
+    ),
+    (
+        "*",
+        "tm-workflow",
+        Some("see `tm-workflow`, \"Worktree Discipline\", for the exact provisioning commands"),
+        "the rule the agent follows (fetch, never pull) is resident in the same \
+         bullet; provisioning is the PM's. A Read path would make trusty-code \
+         embed a 42 KB tm-* skill it excludes by design",
+    ),
+    (
+        "*",
+        "tm-workflow",
+        Some("the full gate is in `tm-workflow`"),
+        "the fragment gate an agent must meet is resident in the bullets below \
+         the pointer; the merge-side enforcement is the PM's",
+    ),
+    (
+        "ticketing",
+        "tm-ticketing",
+        None,
+        "ticketing's own pointers move to a Read path in a later #7727 slice",
+    ),
+];
+
+/// Names of every skill trusty-mpm bundles: the stems of its skill assets.
+///
+/// Why: a pointer names a skill as a bare backticked token as often as it
+/// says "`<name>` skill", so detection keys on the set of real skill names.
+/// What: reads `trusty-mpm/src/assets/skills/*.md`; panics when the directory
+/// is missing or empty so the check can never pass vacuously.
+fn bundled_skill_names() -> BTreeSet<String> {
+    let dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../trusty-mpm/src/assets/skills");
+    let names: BTreeSet<String> = fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("bundled skills dir {} must exist: {e}", dir.display()))
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            let stem = path.file_stem()?.to_str()?.to_string();
+            (path.extension()? == "md").then_some(stem)
+        })
+        .collect();
+    assert!(
+        names.len() > 1,
+        "no bundled skills found in {}",
+        dir.display()
+    );
+    names
+}
+
+/// `text` with every whitespace run collapsed to one space.
+fn collapse_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Skill names that are also something else an agent body names in backticks.
+///
+/// What: `(name, what else it names)`. For these only the explicit
+/// "`<name>` skill" and `Skill(skill=` forms count as a pointer.
+const AMBIGUOUS_SKILL_NAMES: &[(&str, &str)] = &[("tm", "the trusty-mpm CLI binary")];
+
+/// Every bundled skill a body names as a backticked token or through
+/// `Skill(skill="<name>"`, in order of appearance.
+fn referenced_skills(body: &str, skills: &BTreeSet<String>) -> Vec<String> {
+    let mut hits: Vec<(usize, String)> = Vec::new();
+    for name in skills {
+        let token = if AMBIGUOUS_SKILL_NAMES.iter().any(|(n, _)| n == name) {
+            format!("`{name}` skill")
+        } else {
+            format!("`{name}`")
+        };
+        for pattern in [token, format!("Skill(skill=\"{name}\"")] {
+            hits.extend(
+                body.match_indices(&pattern)
+                    .map(|(at, _)| (at, name.clone())),
+            );
+        }
+    }
+    hits.sort();
+    hits.into_iter().map(|(_, name)| name).collect()
+}
+
+/// The widened detection sees a bare backticked skill name (#7727).
+///
+/// Why: the first parser matched only "`<name>` skill" and missed BASE-AGENT's
+/// "see `tm-workflow`" pointers, so the check below promised more than it
+/// checked.
+/// What: both pointer shapes and the `Skill(skill=` form are detected; a
+/// backticked token that is not a skill name is not.
+/// Test: this test.
+#[test]
+fn referenced_skills_detects_a_bare_backticked_skill_name() {
+    let skills = bundled_skill_names();
+    let body = "see `tm-workflow`, \"Worktree Discipline\"; use the `self-improvement-loop` \
+                skill; `Skill(skill=\"tm-ticketing\")`; run `cargo test`; the `tm` \
+                binary; the `tm` skill.";
+    assert_eq!(
+        referenced_skills(body, &skills),
+        ["tm-workflow", "self-improvement-loop", "tm-ticketing", "tm"]
+    );
+}
+
+/// A no-`Skill` agent never points at a skill it cannot load (#7727).
+///
+/// Why: an on-demand skill loads only through the `Skill` tool, which 35 of the
+/// 39 roster agents do not carry (#7699). A pointer telling one of them to use
+/// a skill is dead text unless the skill is preloaded through `skills:` or the
+/// pointer is a `{{TM_SKILLS}}` Read path the deploy resolves.
+/// What: composes every agent whose [`EXPECTED_TOOLS`] row lacks `Skill`,
+/// removes the text [`UNLOADABLE_SKILL_ALLOWLIST`] exempts, and requires each
+/// remaining bundled-skill reference to be declared or reachable by a
+/// placeholder Read path. Composes before the deploy's substitution, so the
+/// placeholder itself is what is checked. Every allowlist row must still match
+/// something, so a stale row fails too.
+/// Test: this test.
+#[test]
+fn no_skill_agent_points_at_unloadable_skill() {
+    use crate::agents::builder::compose_agent;
+    use crate::agents::metadata::agent_metadata_from_str;
+    use crate::agents::skill_root::SKILLS_ROOT_PLACEHOLDER;
+
+    let skills = bundled_skill_names();
+    let src = tempfile::tempdir().expect("source tempdir");
+    for (file_name, contents) in AGENT_ASSETS {
+        fs::write(src.path().join(file_name), contents).expect("write roster asset");
+    }
+    let mut dead = Vec::new();
+    let mut used = BTreeSet::new();
+    for (stem, tools) in EXPECTED_TOOLS {
+        if tools.split(", ").any(|tool| tool == "Skill") {
+            continue;
+        }
+        let composed = compose_agent(stem, src.path()).expect("roster agent composes");
+        let declared = agent_metadata_from_str(&composed).skills;
+        let mut scanned = collapse_whitespace(&composed);
+        let mut agent_wide = Vec::new();
+        for (row, (agent, skill, text, _)) in UNLOADABLE_SKILL_ALLOWLIST.iter().enumerate() {
+            assert!(
+                *agent != "*" || text.is_some(),
+                "a `*` row must name its text"
+            );
+            if *agent != "*" && agent != stem {
+                continue;
+            }
+            match text {
+                Some(text) if scanned.contains(text) => {
+                    scanned = scanned.replace(text, "");
+                    used.insert(row);
+                }
+                Some(_) => {}
+                None => agent_wide.push((row, *skill)),
+            }
+        }
+        for skill in referenced_skills(&scanned, &skills) {
+            let read_path = format!("{SKILLS_ROOT_PLACEHOLDER}/{skill}/");
+            if let Some((row, _)) = agent_wide.iter().find(|(_, s)| *s == skill) {
+                used.insert(*row);
+            } else if !declared.contains(&skill) && !scanned.contains(&read_path) {
+                dead.push(format!("{stem} -> `{skill}`"));
+            }
+        }
+    }
+    dead.dedup();
+    assert!(
+        dead.is_empty(),
+        "agents without `Skill` point at skills they cannot load — preload the \
+         skill or write `Read {SKILLS_ROOT_PLACEHOLDER}/<skill>/SKILL.md`:\n  {}",
+        dead.join("\n  ")
+    );
+    let stale: Vec<_> = (0..UNLOADABLE_SKILL_ALLOWLIST.len())
+        .filter(|row| !used.contains(row))
+        .map(|row| {
+            UNLOADABLE_SKILL_ALLOWLIST[row]
+                .2
+                .unwrap_or(UNLOADABLE_SKILL_ALLOWLIST[row].1)
+        })
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "allowlist rows that match nothing: {stale:?}"
+    );
 }
 
 /// No roster agent declares trusty-code's `tcode_tools:` key.

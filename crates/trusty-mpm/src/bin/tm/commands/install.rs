@@ -108,9 +108,11 @@ pub(crate) async fn install(
         "Composing agents into {}",
         paths.agent_deploy_dir().display()
     );
+    // #7727: agent bodies point at the bundled skill tier this install deploys.
     let deploy = trusty_mpm::core::agent_deployer::deploy_agents(
         &paths.agent_source_dir(),
         &paths.agent_deploy_dir(),
+        &paths.skill_deploy_dir(),
     )?;
     for line in deploy_report_lines(&deploy, &paths.agent_source_dir()) {
         println!("  {line}");
@@ -133,6 +135,7 @@ pub(crate) async fn install(
         let reset = trusty_mpm::core::agent_reset::reset_agents(
             &paths.agent_source_dir(),
             &paths.agent_deploy_dir(),
+            &paths.skill_deploy_dir(),
             filter.as_deref(),
         )?;
         for line in reset_report_lines(&reset) {

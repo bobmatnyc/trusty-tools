@@ -20,10 +20,9 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::core::agent_builder::compose_agent_with_provenance;
 use crate::core::agent_manifest::{AgentManifest, checksum};
 use crate::core::skill_manifest::SkillManifest;
-use trusty_agents_common::agents::provenance::Provenance;
+use trusty_agents_common::agents::skill_root::{check_skills_root, compose_agent_for_deploy};
 
 mod apply;
 pub use apply::{ApplyError, ApplyReport, apply_catalog};
@@ -306,17 +305,17 @@ fn classify_drift(
 /// Test: `compute_agent_catalog_hashes_skips_compose_failures`,
 /// `detect_flags_changed_agent` (exercises this transitively via
 /// [`detect_staleness`]).
-pub fn compute_agent_catalog_hashes(catalog_agents: &Path) -> HashMap<String, String> {
+pub fn compute_agent_catalog_hashes(
+    catalog_agents: &Path,
+    skills_root: &Path,
+) -> HashMap<String, String> {
     md_stems(catalog_agents)
         .into_iter()
         .filter_map(|stem| {
-            // #4698: hash what the DEPLOYER would write, stamp included. A bare
-            // `compose_agent` here would differ from every deployed file by the
-            // `provenance:` line alone and report the whole roster permanently
-            // stale.
-            let composed =
-                compose_agent_with_provenance(&stem, catalog_agents, Provenance::FrameworkOwned)
-                    .ok()?;
+            // #4698 / #7727: hash exactly what the DEPLOYER writes — provenance
+            // stamp and resolved skills root included — or every deployed file
+            // differs from its catalog hash and the roster reads permanently stale.
+            let composed = compose_agent_for_deploy(&stem, catalog_agents, skills_root).ok()?;
             let hash = checksum(&composed);
             Some((stem, hash))
         })
@@ -653,9 +652,14 @@ impl CatalogHashes {
     /// never-synced check; otherwise computes both maps. Under `cfg(test)`,
     /// every call (regardless of outcome) is appended to
     /// `COMPUTE_CALL_LOG` before either branch runs.
+    /// `skills_root` is the skills tier deployed agent bodies point at (#7727),
+    /// so the hash matches what the deployer wrote; a root the deployer would
+    /// refuse leaves the whole cache `unknown` with a warning, rather than
+    /// silently dropping every agent from the agent map.
     /// Test: `catalog_hashes_compute_is_unknown_without_either_source`,
+    /// `catalog_hashes_compute_is_unknown_for_an_unresolvable_skills_root`,
     /// `stale_assets_for_many_computes_catalog_exactly_once_per_source_pair`.
-    pub fn compute(catalog_agents: &Path, catalog_skills: &Path) -> Self {
+    pub fn compute(catalog_agents: &Path, catalog_skills: &Path, skills_root: &Path) -> Self {
         #[cfg(test)]
         COMPUTE_CALL_LOG
             .lock()
@@ -667,9 +671,21 @@ impl CatalogHashes {
                 ..Default::default()
             };
         }
+        // #7727 review: one root error would otherwise fail every compose below.
+        if let Err(e) = check_skills_root(skills_root) {
+            tracing::warn!(
+                skills_root = %skills_root.display(),
+                error = %e,
+                "agent skills root unresolvable — catalog staleness is undetermined"
+            );
+            return Self {
+                unknown: true,
+                ..Default::default()
+            };
+        }
         Self {
             unknown: false,
-            agent_hashes: compute_agent_catalog_hashes(catalog_agents),
+            agent_hashes: compute_agent_catalog_hashes(catalog_agents, skills_root),
             skill_hashes: compute_skill_catalog_hashes(catalog_skills),
         }
     }
@@ -771,11 +787,13 @@ pub fn detect_staleness(
     deployed_skills: &SkillManifest,
     deployed_agents_dir: &Path,
     deployed_skills_dir: &Path,
+    agent_skills_root: &Path,
     agent_select: impl Fn(&str) -> bool,
     skill_select: impl Fn(&str) -> bool,
     agent_ignore_staleness: impl Fn(&str) -> bool,
 ) -> StalenessReport {
-    let catalog = CatalogHashes::compute(catalog_agents, catalog_skills);
+    // #7727: `agent_skills_root` is the tier deployed agent bodies point at.
+    let catalog = CatalogHashes::compute(catalog_agents, catalog_skills, agent_skills_root);
     // #4322 + #4619 review: single-target callers use the LAZY form, so they
     // read exactly the stems their predicates select — byte-for-byte the same
     // reads as before this change. Only the fleet-wide caller pre-hashes, and
@@ -849,6 +867,7 @@ pub fn detect_for_framework(
         &deployed_skills,
         &agents_dir,
         &skills_dir,
+        &fw.skill_deploy_dir(),
         |name| plan.agent_selected(name),
         |name| plan.skill_selected(name),
         |name| plan.agent_staleness_ignored(name),

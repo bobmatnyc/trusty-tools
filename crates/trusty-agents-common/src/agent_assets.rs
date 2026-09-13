@@ -444,7 +444,11 @@ mod tests {
                 "the trigger names the point in the run",
                 "before your final report",
             ),
-            ("the skill is named", "`self-improvement-loop` skill"),
+            // #7727: a Read path, not a skill name — most agents lack `Skill`.
+            (
+                "the skill file is named",
+                "{{TM_SKILLS}}/self-improvement-loop/SKILL.md",
+            ),
             (
                 "the memory tag survives as a resident fact",
                 "`self-improvement-hypothesis`",

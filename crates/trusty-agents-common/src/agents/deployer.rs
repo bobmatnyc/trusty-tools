@@ -46,7 +46,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::agents::builder::{AgentBuildError, compose_agent_with_provenance, source_chain};
+use crate::agents::builder::{AgentBuildError, source_chain};
 use crate::agents::frontmatter::validate_frontmatter;
 use crate::agents::manifest::{
     AgentManifest, MANIFEST_FILE, ManifestEntry, ManifestError, ManifestLoad, Origin, atomic_write,
@@ -54,7 +54,8 @@ use crate::agents::manifest::{
 };
 use crate::agents::metadata::agent_metadata_from_str;
 // #4698: every file this deployer writes is stamped framework-owned.
-use crate::agents::provenance::{Provenance, without_provenance_line};
+use crate::agents::provenance::without_provenance_line;
+use crate::agents::skill_root::{check_skills_root, compose_agent_for_deploy};
 
 /// Summary of one [`deploy_agents`] run.
 ///
@@ -109,7 +110,7 @@ pub struct DeployResult {
     /// agent still needs to land, and the caller (`tm install`, session
     /// launch) needs to know WHICH agent(s) were skipped and why, rather than
     /// the whole operation failing with no roster deployed at all.
-    /// What: one entry per source agent whose [`compose_agent_with_provenance`] call
+    /// What: one entry per source agent whose [`compose_agent_for_deploy`] call
     /// returned `Err`; that agent is neither composed nor written, and
     /// processing continues with the next agent.
     /// Test: `deploy_isolates_single_malformed_agent_failure`.
@@ -163,14 +164,20 @@ pub fn is_agent_file(name: &str) -> bool {
 /// so a crash between writes leaves the old file intact. The manifest is also
 /// written atomically via [`AgentManifest::save`].
 ///
+/// `skills_root` is the absolute skills directory of the install being
+/// deployed into; every `{{TM_SKILLS}}` in a composed body becomes it (#7727,
+/// see [`crate::agents::skill_root`]).
+///
 /// Test: `deploy_new_agent`, `deploy_skips_user_modified`, `deploy_unchanged_no_write`,
-///       `deploy_aborts_on_corrupt_manifest`, `deploy_content_file_is_atomic`.
+///       `deploy_aborts_on_corrupt_manifest`, `deploy_content_file_is_atomic`,
+///       `deploy_refuses_an_unresolvable_skills_root`.
 pub fn deploy_agents(
     source_dir: &Path,
     target_dir: &Path,
+    skills_root: &Path,
 ) -> Result<DeployResult, AgentBuildError> {
     // Default policy: deploy every agent in the source directory.
-    deploy_agents_filtered(source_dir, target_dir, |_name| true)
+    deploy_agents_filtered(source_dir, target_dir, skills_root, |_name| true)
 }
 
 /// Deploy agents from `source_dir`, restricting to those `select` accepts.
@@ -190,8 +197,12 @@ pub fn deploy_agents(
 pub fn deploy_agents_filtered(
     source_dir: &Path,
     target_dir: &Path,
+    skills_root: &Path,
     select: impl Fn(&str) -> bool,
 ) -> Result<DeployResult, AgentBuildError> {
+    // #7727: an unresolvable skills root fails the whole deploy before any
+    // file or ledger write, so no agent lands with a raw placeholder.
+    check_skills_root(skills_root)?;
     // No source directory means nothing to deploy — an empty result, not an
     // error, so a fresh install with no agents still succeeds. Checked BEFORE
     // taking the ledger lock so a no-op deploy neither blocks on a concurrent
@@ -208,7 +219,7 @@ pub fn deploy_agents_filtered(
     // entries describe are then treated as untracked and frozen (the #4408
     // shape, via a race). See `manifest::with_agent_manifest_lock`.
     with_agent_manifest_lock(target_dir, || {
-        deploy_agents_locked(source_dir, target_dir, select)
+        deploy_agents_locked(source_dir, target_dir, skills_root, select)
     })
 }
 
@@ -242,6 +253,7 @@ fn is_adoptable(current: &str, composed: &str) -> bool {
 fn deploy_agents_locked(
     source_dir: &Path,
     target_dir: &Path,
+    skills_root: &Path,
     select: impl Fn(&str) -> bool,
 ) -> Result<DeployResult, AgentBuildError> {
     let mut result = DeployResult::default();
@@ -291,7 +303,8 @@ fn deploy_agents_locked(
         // grammar in play, and keeps the checksum the manifest records the
         // checksum of the exact bytes on disk.
         let composed =
-            match compose_agent_with_provenance(&name, source_dir, Provenance::FrameworkOwned) {
+            // #7727: `compose_agent_for_deploy` also resolves `{{TM_SKILLS}}`.
+            match compose_agent_for_deploy(&name, source_dir, skills_root) {
                 Ok(c) => c,
                 Err(err) => {
                     tracing::error!(

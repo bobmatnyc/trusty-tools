@@ -298,6 +298,7 @@ fn install_then_deploy_composes_agents() {
     let result = trusty_mpm::core::agent_deployer::deploy_agents(
         &paths.agent_source_dir(),
         &paths.claude_agents_dir(),
+        &paths.skill_deploy_dir(),
     )
     .unwrap();
     // #4724: EVERY bundled agent deploys on a fresh target — derived from the

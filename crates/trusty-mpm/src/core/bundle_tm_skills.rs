@@ -131,6 +131,23 @@ pub const TM_TEACHING_TEMPLATES: &str = include_str!("../assets/skills/tm-teachi
 /// Test: `tm_skills_are_in_bundle`.
 pub const TM_TICKETING: &str = include_str!("../assets/skills/tm-ticketing.md");
 
+/// `tm-ticketing` reference folder index (#7727).
+///
+/// Why: gives the skill a `references/` directory that no-`Skill` agents reach
+/// by a `{{TM_SKILLS}}` Read path, ready for detail moved out of `SKILL.md`.
+/// What: deployed to `skills/tm-ticketing/references/README.md`.
+/// Test: `tm_skills_are_in_bundle`, `install_then_deploy_deploys_skills`.
+pub const TM_TICKETING_REFERENCES_README: &str =
+    include_str!("../assets/skills/tm-ticketing/references/README.md");
+
+/// `tm-workflow` reference folder index (#7727).
+///
+/// Why: see [`TM_TICKETING_REFERENCES_README`].
+/// What: deployed to `skills/tm-workflow/references/README.md`.
+/// Test: `tm_skills_are_in_bundle`, `install_then_deploy_deploys_skills`.
+pub const TM_WORKFLOW_REFERENCES_README: &str =
+    include_str!("../assets/skills/tm-workflow/references/README.md");
+
 /// Delegation matrices and agent-selection decision trees.
 ///
 /// Why: SLIM per the portfolio design — drops native Agent/Task-tool basics,

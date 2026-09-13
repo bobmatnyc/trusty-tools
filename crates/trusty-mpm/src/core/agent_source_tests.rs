@@ -283,7 +283,7 @@ fn autodeploy_agents_deploys_when_bundle_differs() {
     let source = tmp.path().join("framework/agents");
     let target = tmp.path().join("claude-config/agents");
 
-    let out = autodeploy_agents(&source, &target);
+    let out = autodeploy_agents(&source, &target, &std::env::temp_dir());
 
     assert!(out.refreshed, "a stale (absent) source must refresh");
     assert!(
@@ -304,12 +304,12 @@ fn autodeploy_agents_is_a_noop_when_already_current() {
     let tmp = tempfile::TempDir::new().unwrap();
     let source = tmp.path().join("framework/agents");
     let target = tmp.path().join("claude-config/agents");
-    assert!(autodeploy_agents(&source, &target).refreshed);
+    assert!(autodeploy_agents(&source, &target, &std::env::temp_dir()).refreshed);
 
     let marker = target.join("engineer.md");
     let before = std::fs::metadata(&marker).unwrap().modified().unwrap();
 
-    let out = autodeploy_agents(&source, &target);
+    let out = autodeploy_agents(&source, &target, &std::env::temp_dir());
 
     assert!(!out.refreshed, "matching checksums must skip the refresh");
     assert!(
@@ -335,7 +335,7 @@ fn autodeploy_agents_fails_open_when_target_is_unwritable() {
     let target = tmp.path().join("not-a-dir");
     std::fs::write(&target, "blocking file\n").unwrap();
 
-    let out = autodeploy_agents(&source, &target);
+    let out = autodeploy_agents(&source, &target, &std::env::temp_dir());
 
     assert!(
         out.refreshed,
@@ -359,7 +359,7 @@ fn autodeploy_agents_fails_open_when_source_is_unwritable() {
     std::fs::write(&source, "blocking file\n").unwrap();
     let target = tmp.path().join("claude-config/agents");
 
-    let out = autodeploy_agents(&source, &target);
+    let out = autodeploy_agents(&source, &target, &std::env::temp_dir());
 
     assert!(!out.refreshed);
     assert!(
@@ -384,7 +384,7 @@ fn autodeploy_agents_warns_when_it_skips_a_user_modified_file() {
     )
     .unwrap();
 
-    let out = autodeploy_agents(&source, &target);
+    let out = autodeploy_agents(&source, &target, &std::env::temp_dir());
 
     assert!(
         out.warnings.iter().any(|w| w.contains("engineer.md")),
@@ -425,7 +425,7 @@ fn autodeploy_agents_for_skips_source_refresh_on_submodule() {
     assert_eq!(paths.agent_source_dir(), submodule);
     let target = tmp.path().join("claude-config/agents");
 
-    let out = autodeploy_agents_for(&paths, &target);
+    let out = autodeploy_agents_for(&paths, &target, &std::env::temp_dir());
 
     assert!(
         !out.refreshed,
@@ -459,7 +459,7 @@ fn autodeploy_agents_for_falls_back_when_the_submodule_is_empty() {
     assert_eq!(paths.agent_source_dir(), submodule);
     let target = tmp.path().join("claude-config/agents");
 
-    let out = autodeploy_agents_for(&paths, &target);
+    let out = autodeploy_agents_for(&paths, &target, &std::env::temp_dir());
 
     assert!(
         out.refreshed,
@@ -486,12 +486,16 @@ fn autodeploy_agents_overwrites_a_drifted_bundled_file() {
     let tmp = tempfile::TempDir::new().unwrap();
     let source = tmp.path().join("framework/agents");
     let target = tmp.path().join("claude-config/agents");
-    assert!(!autodeploy_agents(&source, &target).deployed.is_empty());
+    assert!(
+        !autodeploy_agents(&source, &target, &std::env::temp_dir())
+            .deployed
+            .is_empty()
+    );
 
     // Corrupt a tracked, bundled-origin deployed file.
     std::fs::write(target.join("engineer.md"), "CORRUPTED\n").unwrap();
 
-    let out = autodeploy_agents(&source, &target);
+    let out = autodeploy_agents(&source, &target, &std::env::temp_dir());
 
     assert!(
         out.deployed.iter().any(|f| f == "engineer.md"),

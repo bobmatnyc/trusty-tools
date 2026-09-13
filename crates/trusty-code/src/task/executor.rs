@@ -41,6 +41,7 @@ use crate::agent_loop::{
     AgentLoop, AgentLoopConfig, CompactionConfig, ToolEventSink, resolve_cadence_config,
 };
 use crate::agents::AgentConfig;
+use crate::agents::skill_refs::user_skill_refs_dir;
 use crate::binding::ProjectBinding;
 use crate::jsonrpc::RpcError;
 use crate::llm::{DebugCaptureSink, InferenceAdapter, wrap_with_debug_capture};
@@ -761,7 +762,10 @@ impl RegistryFactory for ProjectToolFactory {
         // `run_task::ProjectToolFactory::build`, which is private to that module).
         let model_slug = resolve_model(agent, Some(ctx));
         let mut reg = ToolRegistry::new();
-        reg.register(Arc::new(ReadFileTool::new(&self.project)));
+        // #7727: embedded agents' skill pointers resolve outside the project.
+        reg.register(Arc::new(
+            ReadFileTool::new(&self.project).with_skill_refs(user_skill_refs_dir()),
+        ));
         reg.register(Arc::new(WriteFileTool::new(&self.project)));
         // #2681: batch-write decouples turn-count from file-count.
         reg.register(Arc::new(WriteFilesTool::new(&self.project)));

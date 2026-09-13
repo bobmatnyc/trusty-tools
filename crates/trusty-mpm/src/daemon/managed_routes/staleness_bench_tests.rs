@@ -99,6 +99,7 @@ fn build_fleet(base: &Path, sessions: usize) -> Vec<SessionRecord> {
     crate::core::agent_deployer::deploy_agents_filtered(
         &agent_source,
         &fw.agent_deploy_dir(),
+        &fw.skill_deploy_dir(),
         |_| true,
     )
     .unwrap();
@@ -157,6 +158,7 @@ async fn stale_assets_per_session_agent_read(
                     Arc::new(CatalogHashes::compute(
                         &plan.agent_source,
                         &plan.skill_source,
+                        &fw.skill_deploy_dir(),
                     ))
                 })
                 .clone();

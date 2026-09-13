@@ -216,7 +216,8 @@ pub fn roster_target(project_root: &Path) -> PathBuf {
 /// 1. Skip when `.claude/agents/` or `.open-mpm/agents/` currently wins
 ///    discovery — see this module's docs.
 /// 2. Refuse a target that is not genuinely beneath `<project>/.trusty-code/`
-///    ([`crate::paths::check_native_write_target`], symlink-safe).
+///    ([`crate::paths::check_native_write_target`], symlink-safe) — the agents
+///    dir and every skill-ref file, before any write.
 /// 3. Refuse to proceed on a corrupt ledger, naming the file. Never reset it.
 /// 4. Stage every compiled-in source into a scratch directory, including the
 ///    five `BASE-*` templates so the deployer's own `extends:` composer resolves
@@ -229,6 +230,9 @@ pub fn roster_target(project_root: &Path) -> PathBuf {
 /// `corrupt_manifest_is_reported_and_nothing_is_written`,
 /// `deploy_is_skipped_when_claude_agents_dir_wins`,
 /// `base_templates_are_never_deployed`,
+/// `symlinked_skill_refs_dir_is_refused_before_any_write`,
+/// `symlinked_skill_folder_is_refused_before_any_write`,
+/// `symlinked_skill_ref_file_is_refused_before_any_write`,
 /// `tests/roster_deploy_e2e.rs`.
 ///
 /// [`Origin`]: trusty_agents_common::agents::manifest::Origin
@@ -253,10 +257,20 @@ pub fn ensure_roster_deployed(project_root: &Path) -> Result<RosterDeploy, Roste
         }
     };
 
+    // #7727 review: a repo can commit `skill-refs` (or one skill folder in it)
+    // as a symlink out of the project, so every skill-ref file is checked
+    // before anything at all is written.
+    let skill_refs = super::skill_refs::project_skill_refs_dir(project_root);
+    for (relative, _) in super::skill_refs::REFERENCED_SKILL_FILES {
+        paths::check_native_write_target(project_root, &skill_refs.join(relative))?;
+    }
+
     let staged = stage_embedded_sources()?;
     let roster: HashSet<&str> = DEFAULT_AGENTS.iter().map(EmbeddedAgent::name).collect();
 
-    let result = deploy_agents_filtered(staged.path(), &target, |stem| {
+    // #7727: the roster's skill pointers resolve to files this project holds.
+    super::skill_refs::materialize_skill_refs(&skill_refs).map_err(RosterDeployError::Stage)?;
+    let result = deploy_agents_filtered(staged.path(), &target, &skill_refs, |stem| {
         roster.contains(stem) && !is_user_edited(&manifest, &target, stem)
     })
     .map_err(RosterDeployError::Deploy)?;
@@ -408,6 +422,77 @@ mod tests {
                 "base template '{base}' must be stageable for extends resolution"
             );
         }
+    }
+
+    /// Assert a symlinked skill-ref location refuses the deploy, writes no
+    /// agent, and leaves the out-of-project victim byte-identical (#7727).
+    #[cfg(unix)]
+    fn assert_skill_ref_symlink_refused(project: &Path, victim: &Path, original: &str) {
+        let err = ensure_roster_deployed(project).expect_err("a symlink escape must be refused");
+        assert!(
+            matches!(
+                err,
+                RosterDeployError::WriteTarget(WriteTargetError::SymlinkEscape { .. })
+            ),
+            "expected a symlink-escape refusal, got {err:?}"
+        );
+        assert_eq!(std::fs::read_to_string(victim).expect("victim"), original);
+        assert!(
+            !roster_target(project).exists(),
+            "no agent may be written once the refusal fires"
+        );
+    }
+
+    /// #7727 review: `.trusty-code/skill-refs` committed as a symlink out of
+    /// the project.
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_skill_refs_dir_is_refused_before_any_write() {
+        let project = tempfile::tempdir().expect("project");
+        let outside = tempfile::tempdir().expect("outside");
+        let victim = outside.path().join("self-improvement-loop/SKILL.md");
+        std::fs::create_dir_all(victim.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&victim, "USER DATA - hand written skill").expect("victim");
+        let refs = super::super::skill_refs::project_skill_refs_dir(project.path());
+        std::fs::create_dir_all(refs.parent().expect("parent")).expect("mkdir");
+        std::os::unix::fs::symlink(outside.path(), &refs).expect("symlink");
+
+        assert_skill_ref_symlink_refused(project.path(), &victim, "USER DATA - hand written skill");
+    }
+
+    /// #7727 review: a real `skill-refs` dir whose one skill folder is a
+    /// symlink to a user's own skill.
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_skill_folder_is_refused_before_any_write() {
+        let project = tempfile::tempdir().expect("project");
+        let outside = tempfile::tempdir().expect("outside");
+        let user_skill = outside.path().join("my-skill");
+        std::fs::create_dir_all(&user_skill).expect("mkdir");
+        let victim = user_skill.join("SKILL.md");
+        std::fs::write(&victim, "USER SKILL - hand written").expect("victim");
+        let refs = super::super::skill_refs::project_skill_refs_dir(project.path());
+        std::fs::create_dir_all(&refs).expect("mkdir");
+        std::os::unix::fs::symlink(&user_skill, refs.join("verification-before-completion"))
+            .expect("symlink");
+
+        assert_skill_ref_symlink_refused(project.path(), &victim, "USER SKILL - hand written");
+    }
+
+    /// #7727 review: one skill-ref file committed as a symlink to a user file.
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_skill_ref_file_is_refused_before_any_write() {
+        let project = tempfile::tempdir().expect("project");
+        let outside = tempfile::tempdir().expect("outside");
+        let victim = outside.path().join("notes.md");
+        std::fs::write(&victim, "USER FILE").expect("victim");
+        let refs = super::super::skill_refs::project_skill_refs_dir(project.path());
+        let link = refs.join("condition-based-waiting/SKILL.md");
+        std::fs::create_dir_all(link.parent().expect("parent")).expect("mkdir");
+        std::os::unix::fs::symlink(&victim, &link).expect("symlink");
+
+        assert_skill_ref_symlink_refused(project.path(), &victim, "USER FILE");
     }
 
     #[test]

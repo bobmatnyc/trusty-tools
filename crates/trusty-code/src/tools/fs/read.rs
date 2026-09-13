@@ -36,6 +36,8 @@ pub const MAX_FILE_BYTES: u64 = 1024 * 1024; // 1 MiB
 /// Test: `cargo test -p trusty-code -- tools::fs::read`.
 pub struct ReadFileTool {
     working_dir: PathBuf,
+    /// #7727: skill-refs root whose embedded files this tool serves.
+    skill_refs: Option<PathBuf>,
 }
 
 impl ReadFileTool {
@@ -48,7 +50,31 @@ impl ReadFileTool {
     pub fn new(working_dir: impl Into<PathBuf>) -> Self {
         Self {
             working_dir: working_dir.into(),
+            skill_refs: None,
         }
+    }
+
+    /// Also serve the skill files an agent body points at beneath `dir` (#7727).
+    ///
+    /// Why: an in-process compose resolves `{{TM_SKILLS}}` to
+    /// `crate::agents::skill_refs::user_skill_refs_dir`, which lies outside the
+    /// working directory; without this the scope check refuses every pointer.
+    /// What: a request whose absolute path is exactly `dir/<entry>` for an
+    /// entry of `crate::agents::skill_refs::REFERENCED_SKILL_FILES` returns that
+    /// entry's embedded content — no disk read, so nothing else outside the
+    /// working directory becomes readable and nothing has to be written first.
+    /// Test: `skill_ref_pointer_is_served_outside_the_working_dir`,
+    /// `skill_refs_do_not_widen_the_scope`.
+    pub fn with_skill_refs(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.skill_refs = Some(dir.into());
+        self
+    }
+
+    /// The embedded skill file `path` names, when it is one this tool serves.
+    fn skill_ref(&self, path: &std::path::Path) -> Option<&'static str> {
+        let dir = self.skill_refs.as_deref().filter(|d| d.is_absolute())?;
+        let relative = path.strip_prefix(dir).ok()?;
+        crate::agents::skill_refs::embedded_skill_ref(relative)
     }
 
     /// Read file contents with optional line-range slicing.
@@ -63,6 +89,26 @@ impl ReadFileTool {
         start_line: Option<usize>,
         end_line: Option<usize>,
     ) -> Result<String, FsError> {
+        let content = match self.skill_ref(path) {
+            Some(embedded) => embedded.to_string(),
+            None => self.read_scoped(path)?,
+        };
+
+        // Apply optional line range (1-based inclusive).
+        match (start_line, end_line) {
+            (None, None) => Ok(content),
+            (start, end) => {
+                let start_idx = start.unwrap_or(1).saturating_sub(1); // 0-based
+                let lines: Vec<&str> = content.lines().collect();
+                let end_idx = end.map(|e| e.min(lines.len())).unwrap_or(lines.len());
+                let slice = lines[start_idx.min(lines.len())..end_idx].join("\n");
+                Ok(slice)
+            }
+        }
+    }
+
+    /// Read `path` from disk inside the working directory, enforcing the size cap.
+    fn read_scoped(&self, path: &std::path::Path) -> Result<String, FsError> {
         let scoped = scoped_path(&self.working_dir, path)?;
 
         let meta = std::fs::metadata(&scoped).map_err(|e| {
@@ -81,19 +127,7 @@ impl ReadFileTool {
             });
         }
 
-        let content = std::fs::read_to_string(&scoped).map_err(|e| FsError::io(&scoped, e))?;
-
-        // Apply optional line range (1-based inclusive).
-        match (start_line, end_line) {
-            (None, None) => Ok(content),
-            (start, end) => {
-                let start_idx = start.unwrap_or(1).saturating_sub(1); // 0-based
-                let lines: Vec<&str> = content.lines().collect();
-                let end_idx = end.map(|e| e.min(lines.len())).unwrap_or(lines.len());
-                let slice = lines[start_idx.min(lines.len())..end_idx].join("\n");
-                Ok(slice)
-            }
-        }
+        std::fs::read_to_string(&scoped).map_err(|e| FsError::io(&scoped, e))
     }
 }
 
@@ -290,5 +324,43 @@ mod tests {
             required.iter().any(|v| v.as_str() == Some("path")),
             "schema must list 'path' as required"
         );
+    }
+
+    /// #7727: a skill-refs pointer outside the working directory is served,
+    /// line ranges included, with nothing on disk.
+    #[tokio::test]
+    async fn skill_ref_pointer_is_served_outside_the_working_dir() {
+        use crate::agents::skill_refs::REFERENCED_SKILL_FILES;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let refs = tempfile::tempdir().expect("refs");
+        let tool = make_tool(&tmp).with_skill_refs(refs.path());
+        let (relative, content) = REFERENCED_SKILL_FILES[0];
+        let path = refs.path().join(relative).display().to_string();
+        let result = tool.execute(json!({ "path": path })).await;
+        assert!(!result.is_error(), "unexpected error: {}", result.content());
+        assert_eq!(result.content(), content);
+        let first = tool
+            .execute(json!({ "path": path, "start_line": 1, "end_line": 1 }))
+            .await;
+        assert_eq!(first.content(), content.lines().next().expect("line"));
+    }
+
+    /// #7727: serving skill refs admits only the embedded entries — any other
+    /// path beneath or above the refs root is still refused.
+    #[tokio::test]
+    async fn skill_refs_do_not_widen_the_scope() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let refs = tempfile::tempdir().expect("refs");
+        fs::write(refs.path().join("secret.txt"), "no").expect("write");
+        let tool = make_tool(&tmp).with_skill_refs(refs.path());
+        for path in [
+            refs.path().join("secret.txt"),
+            refs.path().join("x/../secret.txt"),
+            refs.path().join("self-improvement-loop/../../etc/passwd"),
+        ] {
+            let result = tool.execute(json!({ "path": path })).await;
+            assert!(result.is_error(), "{} must be refused", path.display());
+        }
     }
 }

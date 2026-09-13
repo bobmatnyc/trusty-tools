@@ -34,14 +34,12 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::core::agent_builder::{AgentBuildError, compose_agent_with_provenance, source_chain};
-// #4698: a reset writes framework-owned files, stamped like the deployer's.
+use crate::core::agent_builder::{AgentBuildError, source_chain};
 use crate::core::agent_deployer::is_agent_file;
 use crate::core::agent_manifest::{
     AgentManifest, ManifestEntry, ManifestError, ManifestLoad, Origin, atomic_write, checksum,
     with_agent_manifest_lock,
 };
-use trusty_agents_common::agents::provenance::Provenance;
 
 /// Summary of one [`reset_agents`] run.
 ///
@@ -141,8 +139,11 @@ fn backup_path(target_path: &Path) -> PathBuf {
 pub fn reset_agents(
     source_dir: &Path,
     target_dir: &Path,
+    skills_root: &Path,
     names: Option<&[String]>,
 ) -> Result<ResetResult, AgentBuildError> {
+    // #7727: refuse an unresolvable skills root before any backup or write.
+    trusty_agents_common::agents::skill_root::check_skills_root(skills_root)?;
     // Checked before the lock so a no-op reset neither blocks on a concurrent
     // writer nor creates a lock sidecar in a directory it will not touch,
     // matching `deploy_agents_filtered`.
@@ -159,7 +160,7 @@ pub fn reset_agents(
     // sessions, so it takes the same exclusive ledger lock the deploy and
     // retract paths do.
     with_agent_manifest_lock(target_dir, || {
-        reset_agents_locked(source_dir, target_dir, names)
+        reset_agents_locked(source_dir, target_dir, skills_root, names)
     })
 }
 
@@ -178,6 +179,7 @@ pub fn reset_agents(
 fn reset_agents_locked(
     source_dir: &Path,
     target_dir: &Path,
+    skills_root: &Path,
     names: Option<&[String]>,
 ) -> Result<ResetResult, AgentBuildError> {
     let mut result = ResetResult::default();
@@ -219,8 +221,12 @@ fn reset_agents_locked(
         // exactly what `agents::deployer` stamps. Composing unstamped here would
         // write a file that differs from the deployer's output by the
         // `provenance:` line and read as stale until the next deploy.
-        let composed =
-            compose_agent_with_provenance(&name, source_dir, Provenance::FrameworkOwned)?;
+        // #7727: the same composition the deployer writes, skills root resolved.
+        let composed = trusty_agents_common::agents::skill_root::compose_agent_for_deploy(
+            &name,
+            source_dir,
+            skills_root,
+        )?;
         let target_path = target_dir.join(&filename);
         let fresh_checksum = checksum(&composed);
 
@@ -310,8 +316,10 @@ fn available_agent_names(source_dir: &Path) -> std::io::Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::agent_builder::compose_agent_with_provenance;
     use std::fs;
     use tempfile::TempDir;
+    use trusty_agents_common::agents::provenance::Provenance;
 
     fn write_sources(dir: &Path) {
         fs::write(
@@ -334,7 +342,7 @@ mod tests {
         let tgt = TempDir::new().unwrap();
         write_sources(src.path());
 
-        let result = reset_agents(src.path(), tgt.path(), None).unwrap();
+        let result = reset_agents(src.path(), tgt.path(), &std::env::temp_dir(), None).unwrap();
         assert_eq!(result.recomposed.len(), 2);
         assert!(result.adopted.is_empty());
         assert!(result.backed_up.is_empty());
@@ -352,7 +360,13 @@ mod tests {
         let tgt = TempDir::new().unwrap();
         write_sources(src.path());
 
-        let result = reset_agents(src.path(), tgt.path(), Some(&["engineer".to_string()])).unwrap();
+        let result = reset_agents(
+            src.path(),
+            tgt.path(),
+            &std::env::temp_dir(),
+            Some(&["engineer".to_string()]),
+        )
+        .unwrap();
         assert_eq!(result.recomposed, vec!["engineer.md".to_string()]);
         assert!(!tgt.path().join("base-agent.md").exists());
     }
@@ -368,6 +382,7 @@ mod tests {
         let result = reset_agents(
             src.path(),
             tgt.path(),
+            &std::env::temp_dir(),
             Some(&["engineer".to_string(), "nonexistent".to_string()]),
         )
         .unwrap();
@@ -394,7 +409,13 @@ mod tests {
             .modified()
             .unwrap();
 
-        let result = reset_agents(src.path(), tgt.path(), Some(&["engineer".to_string()])).unwrap();
+        let result = reset_agents(
+            src.path(),
+            tgt.path(),
+            &std::env::temp_dir(),
+            Some(&["engineer".to_string()]),
+        )
+        .unwrap();
         assert_eq!(result.adopted, vec!["engineer.md".to_string()]);
         assert!(result.recomposed.is_empty());
         assert!(result.backed_up.is_empty());
@@ -422,7 +443,13 @@ mod tests {
         )
         .unwrap();
 
-        let result = reset_agents(src.path(), tgt.path(), Some(&["engineer".to_string()])).unwrap();
+        let result = reset_agents(
+            src.path(),
+            tgt.path(),
+            &std::env::temp_dir(),
+            Some(&["engineer".to_string()]),
+        )
+        .unwrap();
         assert_eq!(result.recomposed, vec!["engineer.md".to_string()]);
         assert_eq!(result.backed_up, vec!["engineer.md".to_string()]);
 
@@ -460,7 +487,8 @@ mod tests {
         write_sources(src.path());
 
         // Establish a normal managed deploy first.
-        crate::core::agent_deployer::deploy_agents(src.path(), tgt.path()).unwrap();
+        crate::core::agent_deployer::deploy_agents(src.path(), tgt.path(), &std::env::temp_dir())
+            .unwrap();
 
         // Bundle changes: engineer.md source now has different body content.
         fs::write(
@@ -469,7 +497,13 @@ mod tests {
         )
         .unwrap();
 
-        let result = reset_agents(src.path(), tgt.path(), Some(&["engineer".to_string()])).unwrap();
+        let result = reset_agents(
+            src.path(),
+            tgt.path(),
+            &std::env::temp_dir(),
+            Some(&["engineer".to_string()]),
+        )
+        .unwrap();
         assert_eq!(result.recomposed, vec!["engineer.md".to_string()]);
         assert!(
             result.backed_up.is_empty(),
@@ -486,6 +520,7 @@ mod tests {
         let result = reset_agents(
             Path::new("/nonexistent/trusty-mpm/agents"),
             tgt.path(),
+            &std::env::temp_dir(),
             None,
         )
         .unwrap();

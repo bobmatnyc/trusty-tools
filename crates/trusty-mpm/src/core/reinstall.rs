@@ -323,7 +323,8 @@ pub fn reinstall_assets(
             ..TierReport::default()
         };
         if let Some(dir) = &target.agents_dir {
-            deploy_agents_into(&agent_source, dir, force, &mut tier);
+            // #7727: agent bodies point at this tier's own skills directory.
+            deploy_agents_into(&agent_source, dir, &target.skills_dir, force, &mut tier);
         }
         deploy_skills_into(
             paths,
@@ -364,11 +365,17 @@ fn bundled_skill_stems(paths: &FrameworkPaths) -> BTreeSet<String> {
 /// Test: `reinstall_preserves_a_customized_agent_without_force`,
 /// `reinstall_replaces_a_customized_agent_with_force`,
 /// `reinstall_reports_a_failed_destination_and_serves_the_others`.
-fn deploy_agents_into(source: &Path, dest: &Path, force: bool, tier: &mut TierReport) {
+fn deploy_agents_into(
+    source: &Path,
+    dest: &Path,
+    skills_root: &Path,
+    force: bool,
+    tier: &mut TierReport,
+) {
     if force {
         // `reset_agents` backs a diverged file up in place as a
         // `<name>.md.bak-<nanos>` sibling, so it needs no `backup_root`.
-        match crate::core::agent_reset::reset_agents(source, dest, None) {
+        match crate::core::agent_reset::reset_agents(source, dest, skills_root, None) {
             Ok(reset) if !reset.recomposed.is_empty() => tier.notes.push(format!(
                 "forced {} agent file(s) back to the bundled composition ({} backed up in place)",
                 reset.recomposed.len(),
@@ -385,7 +392,7 @@ fn deploy_agents_into(source: &Path, dest: &Path, force: bool, tier: &mut TierRe
         }
     }
 
-    match crate::core::agent_deployer::deploy_agents(source, dest) {
+    match crate::core::agent_deployer::deploy_agents(source, dest, skills_root) {
         Ok(result) => {
             tier.agents = AssetCounts {
                 deployed: result.deployed.len(),

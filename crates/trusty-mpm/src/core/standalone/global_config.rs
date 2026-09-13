@@ -188,7 +188,8 @@ fn deploy_agents_and_skills(managed_root: &Path, claude_config_dir: &Path) -> an
         // (see core::agent_deployer). deploy_all_skill_tiers writes each flat
         // <name>.md source as <skills_dest>/<name>/SKILL.md (see
         // core::skill_deployer).
-        crate::core::agent_deployer::deploy_agents(&agents_src, &agents_dest)
+        // #7727: agent bodies point at the skills this config dir receives.
+        crate::core::agent_deployer::deploy_agents(&agents_src, &agents_dest, &skills_dest)
             .map_err(|e| anyhow::anyhow!("failed to deploy agents into managed config dir: {e}"))?;
     }
 

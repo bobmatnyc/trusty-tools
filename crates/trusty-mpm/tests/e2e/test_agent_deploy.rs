@@ -20,7 +20,8 @@ fn deploy_writes_composed_file() {
     let tgt = TempDir::new().unwrap();
     write_agent_sources(src.path());
 
-    let result = deploy_agents(src.path(), tgt.path()).expect("deploy succeeds");
+    let result =
+        deploy_agents(src.path(), tgt.path(), &std::env::temp_dir()).expect("deploy succeeds");
     assert!(result.deployed.contains(&"engineer.md".to_string()));
 
     let engineer = std::fs::read_to_string(tgt.path().join("engineer.md")).unwrap();
@@ -41,7 +42,7 @@ fn deploy_creates_manifest() {
     let tgt = TempDir::new().unwrap();
     write_agent_sources(src.path());
 
-    deploy_agents(src.path(), tgt.path()).expect("deploy succeeds");
+    deploy_agents(src.path(), tgt.path(), &std::env::temp_dir()).expect("deploy succeeds");
 
     let manifest_path = tgt.path().join(".trusty-mpm-manifest.json");
     assert!(manifest_path.exists(), "manifest file written");
@@ -62,7 +63,8 @@ fn deploy_skips_user_file() {
     let user_content = "USER OWNED FILE — not managed by trusty-mpm\n";
     std::fs::write(tgt.path().join("engineer.md"), user_content).unwrap();
 
-    let result = deploy_agents(src.path(), tgt.path()).expect("deploy succeeds");
+    let result =
+        deploy_agents(src.path(), tgt.path(), &std::env::temp_dir()).expect("deploy succeeds");
     assert!(result.skipped.contains(&"engineer.md".to_string()));
 
     let after = std::fs::read_to_string(tgt.path().join("engineer.md")).unwrap();
@@ -82,7 +84,7 @@ fn deploy_repairs_drifted_bundled_file() {
     let tgt = TempDir::new().unwrap();
     write_agent_sources(src.path());
 
-    deploy_agents(src.path(), tgt.path()).expect("first deploy");
+    deploy_agents(src.path(), tgt.path(), &std::env::temp_dir()).expect("first deploy");
     let bundled = std::fs::read_to_string(tgt.path().join("engineer.md")).unwrap();
 
     // The deployed copy corrupts into the degenerate `v1` stub from the
@@ -93,7 +95,8 @@ fn deploy_repairs_drifted_bundled_file() {
     )
     .unwrap();
 
-    let result = deploy_agents(src.path(), tgt.path()).expect("second deploy");
+    let result =
+        deploy_agents(src.path(), tgt.path(), &std::env::temp_dir()).expect("second deploy");
     assert!(result.deployed.contains(&"engineer.md".to_string()));
     assert!(!result.skipped.contains(&"engineer.md".to_string()));
 

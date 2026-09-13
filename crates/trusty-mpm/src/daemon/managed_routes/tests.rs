@@ -750,6 +750,7 @@ async fn checked_summaries_flags_stale_assets_only_for_relevant_states() {
     crate::core::agent_deployer::deploy_agents_filtered(
         &bundled,
         &session_fw.agent_deploy_dir(),
+        &session_fw.skill_deploy_dir(),
         |_| true,
     )
     .unwrap();
@@ -807,6 +808,7 @@ fn deploy_then_drift_catalog(base: &std::path::Path, workspace: &std::path::Path
     crate::core::agent_deployer::deploy_agents_filtered(
         &bundled,
         &session_fw.agent_deploy_dir(),
+        &session_fw.skill_deploy_dir(),
         |_| true,
     )
     .unwrap();
@@ -965,6 +967,55 @@ async fn stale_assets_for_many_computes_catalog_exactly_once_per_source_pair() {
     );
 }
 
+/// #7727 review: the fleet-wide staleness path (`tm sessions ls`) hashes the
+/// catalog with the same skills root the deployer resolved `{{TM_SKILLS}}`
+/// against.
+///
+/// Why: `staleness_inputs_under` passes its own skills root to
+/// `CatalogHashes::compute`, separately from `detect_for_framework`. A wrong
+/// root there marks every deployed agent that carries a skill pointer stale.
+/// What: deploys a placeholder-bearing agent into a session workspace with
+/// that workspace's `skill_deploy_dir()`, runs the real fan-out, and asserts
+/// the session reads fresh.
+/// Test: this test.
+#[tokio::test]
+async fn stale_assets_for_many_is_fresh_for_a_placeholder_body_deployed_with_its_root() {
+    use trusty_agents_common::agents::skill_root::SKILLS_ROOT_PLACEHOLDER;
+
+    let base = fake_base();
+    let fw = crate::core::paths::FrameworkPaths::under(base.path());
+    let bundled = fw.agent_source_dir();
+    std::fs::create_dir_all(&bundled).unwrap();
+    std::fs::write(
+        bundled.join("rust-engineer.md"),
+        format!("Read `{SKILLS_ROOT_PLACEHOLDER}/self-improvement-loop/SKILL.md`."),
+    )
+    .unwrap();
+    let workspace = base.path().join("placeholder-fresh");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let session_fw =
+        crate::core::paths::FrameworkPaths::for_managed_workspace_under(base.path(), &workspace);
+    crate::core::agent_deployer::deploy_agents_filtered(
+        &bundled,
+        &session_fw.agent_deploy_dir(),
+        &session_fw.skill_deploy_dir(),
+        |_| true,
+    )
+    .unwrap();
+
+    let mut record = make_record(None);
+    record.state = ManagedSessionState::Active;
+    record.workspace_path = Some(workspace);
+    let id = record.id;
+
+    let result = stale_assets_for_many_under(vec![record], base.path().to_path_buf()).await;
+    assert_eq!(
+        result.get(&id),
+        Some(&false),
+        "a body deployed with the session's own skills root must read fresh"
+    );
+}
+
 /// Issue #4322 correctness gate: skipping the probe on the LIST path must not
 /// delete the SIGNAL. The single-session fetch (`GET …/managed/{id}`, which
 /// `tm session resume` reads — the exact moment a stopped session's drift
@@ -1024,6 +1075,7 @@ async fn checked_summaries_slim_skips_stale_assets_probe() {
     crate::core::agent_deployer::deploy_agents_filtered(
         &bundled,
         &session_fw.agent_deploy_dir(),
+        &session_fw.skill_deploy_dir(),
         |_| true,
     )
     .unwrap();
@@ -1142,6 +1194,7 @@ fn fleet_with_deployed_skills(base: &std::path::Path, count: usize) -> Vec<Sessi
     crate::core::agent_deployer::deploy_agents_filtered(
         &bundled_agents,
         &fw.agent_deploy_dir(),
+        &fw.skill_deploy_dir(),
         |_| true,
     )
     .unwrap();

@@ -57,7 +57,14 @@ pub mod agent_schema;
 pub mod provenance;
 pub mod quarantine;
 pub mod quarantine_receipt;
+// #7727: the `{{TM_SKILLS}}` placeholder a deploy resolves to the install's
+// absolute skills directory, so a no-`Skill` agent can `Read` a skill file.
+pub mod skill_root;
 pub mod vcs_claim;
+
+#[cfg(test)]
+#[path = "skill_root_tests.rs"]
+mod skill_root_tests;
 
 // #7683: the deployed-roster `tools:` conformance pin — asserts every agent
 // deploys with the allowlist `docs/specs/agent-context-minimization.md` §C

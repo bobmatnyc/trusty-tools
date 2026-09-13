@@ -1,0 +1,3 @@
+Fixed
+
+- Agents without the `Skill` tool can reach the skills `BASE-AGENT.md` points them at. The five #7723 pointers named skills that only the `Skill` tool loads, so 35 of the 39 roster agents could not reach the moved content. Each pointer now tells the agent to `Read` `{{TM_SKILLS}}/<skill>/SKILL.md`. `deploy_agents` and `deploy_agents_filtered` take the install's absolute skills root and replace the placeholder in every composed body through the new `agents::skill_root::compose_agent_for_deploy`. A relative or otherwise unresolvable root fails the deploy with `AgentBuildError::UnresolvedSkillsRoot` before any file is written. The test `no_skill_agent_points_at_unloadable_skill` pins the rule (#7727).
