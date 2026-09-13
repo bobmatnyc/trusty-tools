@@ -13,6 +13,12 @@
 | `.github/workflows/semver-checks.yml` | on a `<crate>-v<version>` tag push | No — reports |
 | `bash scripts/check_semver.sh --crate <crate>` | on demand, any time | n/a |
 
+**Internal consistency is the bar — do not deliberate over external SemVer.**
+Keep the workspace self-consistent; what a third-party crates.io consumer
+would experience is not a question to weigh, hold work over, or write an
+analysis about. That governs deliberation, not the gate: CHECK 5's nonzero
+exit is still the absolute stop, and it is never advisory.
+
 `cargo publish` for this workspace is run locally by a human (`local-ops`), so
 no CI job can stop an upload. `preflight-publish.sh` is what can: the release
 sequence runs it as the last step before `cargo publish`, and a nonzero exit is

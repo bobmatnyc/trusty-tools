@@ -88,3 +88,31 @@ published page's content against the retired-term ratchet in
   add decorative spec links to make coverage numbers look better.
 - Update current docs with the code change. Preserve dated evidence, adding a
   status note or successor link when its old context could mislead a reader.
+
+## Reference pages not linked elsewhere from `CLAUDE.md`
+
+Most `docs/reference/*.md` pages are linked from the root `CLAUDE.md` rule
+they serve. These are not:
+
+- [ci-scripts.md](ci-scripts.md) — the `scripts/` checks that run only in a
+  workflow, which of them block a merge, and which have a self-test
+- [ci-gates.md](ci-gates.md) — required contexts, merge states, and the jobs
+  that gate nothing
+- [test-ladder-baseline.md](test-ladder-baseline.md) — the six rungs, their
+  commands, and baseline-red triage
+- [DOC-38](../specs/spec-linked-documentation.md) — SLD policy, enforced by
+  `scripts/check_sld.sh`
+- [threat-model.md](threat-model.md) — per-daemon bind/guard/proxy inventory
+  ([ADR-0018](../adr/0018-loopback-only-doctrine.md))
+- [generated-doc-regions.md](generated-doc-regions.md) — the
+  `<!-- BEGIN GENERATED: … -->` contract and
+  `UPDATE_DOCS=1 cargo test -p <crate> --test generated_docs`; a crate with no
+  markers is not checked
+- [public-manifest.tsv](../public-manifest.tsv) — ALLOWLIST of publishable
+  `docs/` pages, enforced by `scripts/check_public_docs.sh`; the internal
+  mdBook is unaffected
+- `scripts/check_doc_paths.sh` (#5147) — resolves backtick-quoted path
+  citations in the root `CLAUDE.md`, the crate `CLAUDE.md`/`README.md` set,
+  `docs/reference/` and `docs/architecture/`. Write a non-literal path in one
+  of the shapes its header's EXCLUDED TOKENS list covers rather than widening
+  the gate
