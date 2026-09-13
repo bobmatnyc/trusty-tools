@@ -297,8 +297,15 @@ fn base_templates_declare_no_tools() {
 ///
 /// Why: each row names ONE pointer that is deliberately not a placeholder Read
 /// path yet, so the exemption cannot widen to a whole agent.
-/// What: `(agent stem, skill name, reason)`.
-const UNLOADABLE_SKILL_ALLOWLIST: &[(&str, &str, &str)] = &[(
+/// What: `(agent stem, or `*` for a BASE-AGENT pointer every agent inherits,
+/// skill name, reason)`.
+const UNLOADABLE_SKILL_ALLOWLIST: &[(&str, &str, &str)] = &[
+    (
+        "*",
+        "tm-prose-style",
+        "BASE-AGENT names it for Skill holders only; the prose rules it expands \
+         are resident in full beside the pointer",
+    ),(
     "ticketing",
     "tm-ticketing",
     "ticketing's own pointer moves to a Read path in a later #7727 slice",
@@ -363,7 +370,7 @@ fn no_skill_agent_points_at_unloadable_skill() {
             let read_path = format!("{SKILLS_ROOT_PLACEHOLDER}/{skill}/");
             let allowed = UNLOADABLE_SKILL_ALLOWLIST
                 .iter()
-                .any(|(agent, name, _)| agent == stem && *name == skill);
+                .any(|(agent, name, _)| (*agent == "*" || agent == stem) && *name == skill);
             if !declared.contains(&skill) && !composed.contains(&read_path) && !allowed {
                 dead.push(format!("{stem} -> `{skill}`"));
             }
