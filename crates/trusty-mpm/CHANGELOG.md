@@ -350,6 +350,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   every writer after it sees valid JSON (#7780).
 - `tm reinstall` now writes bundled skills to the managed-config tier only. It offered the whole bundled roster at all four destinations, refilling the operator's `~/.claude/skills`, a project's `.claude/skills`, and the standalone config dir with copies the 2026-09-01 ruling had already removed from `tm install` and from session launch; those three destinations now take the same `bundled_excluded_from_project_tier` predicate and receive the user-custom tier only (#7783, #6586).
 - `tm doctor`'s `legacy_sources` check now counts every bundled skill stem left in `~/.claude/skills`, not only the `tm-*` prefixed ones — it under-reported the leftovers by the ~33 unprefixed bundled skills (`documentation-style`, `writing-plans`, …). `tm doctor --fix` lists the same widened set as refused, so the listing and the count no longer name different sets (#7783).
+- The managed `<claude_config_dir>/settings.json` is no longer silently coerced
+  to `{}` and rewritten when it does not parse as a JSON object. Both writers on
+  that path — `ensure_settings_defaults` (the `outputStyle` / `statusLine` /
+  `attribution` seed) and the managed hook merge behind `ensure_managed_hooks`
+  and `tm install` — now copy the original bytes to
+  `settings.json.malformed-<UTC stamp>`, warn naming that copy, and only then
+  rewrite. Recovery on this path used to be the 3-deep pruned `.bak` snapshot
+  ring alone (#7789).
+- The converted hook writer is tier-agnostic, so `tm launch` gains the same
+  preserve-then-rewrite for the PROJECT `.claude/settings.json` inside the
+  managed clone it writes hooks into (#7789).
+- A copy that cannot be written abandons that write and leaves the file exactly
+  as it was, so damaged managed settings are never replaced by bytes nothing
+  preserved (#7789).
+- Both writers share the loader added for the project tier in #7780 rather than
+  carrying a second copy of the rule. An empty or whitespace-only file now takes
+  no copy on either tier — it holds nothing to preserve, and the managed hook
+  writer has always read one as `{}` (#7789).
 
 ### Changed
 
@@ -423,6 +441,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   (`tm wait`, the scratchpad sentinel pattern, the declarative-process
   redirect-and-trim pattern) trimmed out of `BASE-AGENT.md` (#7723).
 - `tm-session-pause` and `tm-workflow` now state that a project which gitignores `.trusty-mpm/sessions/` publishes no snapshot PR and owes no main fast-forward, and that no snapshot is committed by hand to make up for it. `core::session_pause_pr`'s module doc no longer claims this repository tracks its own session store — it does not, as of the owner ruling of 2026-09-13. Behavior is unchanged: an ignored store already took the `not_tracked` skip.
+- Stack detection walks nested manifests instead of probing the project root
+  alone: Cargo `[workspace] members`, plus a bounded depth-4 walk that finds any
+  undeclared subdirectory project (`crates/*/ui`, `apps/*/web`). Dependency,
+  build-output, and fixture trees, dot-directories, directory symlinks (the walk
+  never leaves the project tree), and `.gitignore` directory names — bare or
+  `**/name/` — are skipped. On trusty-tools the PM prompt's **Detected Project
+  Stack** section now names the Svelte/TypeScript/Tauri and Python engineers
+  beside `rust-engineer`, where it named `rust-engineer` alone before (#7781).
+- Detection now reports why it stopped, in two separate flags.
+  `detected_stack_engineers` returns a
+  `StackDetection { engineers, truncated, depth_limited }` instead of a bare set
+  — a `Debug + Clone`, `#[non_exhaustive]` struct, so a later bound can add a
+  third flag without breaking a consumer. `truncated` means a RESOURCE cap
+  abandoned detection, so the engineer list may be incomplete: the directories
+  scanned and shared member caps of the nested walk, and the declared-member and
+  pattern caps applied to a root manifest's own `workspaces`/`members`
+  declaration. Each logs one WARN naming the cap, and the **Detected Project
+  Stack** section tells the PM to treat the list as partial. `depth_limited` means manifests below the walk's declared depth
+  went unprobed, which is the design's scope: it logs at DEBUG and renders one
+  informational line. Keeping them apart matters because the depth bound trips on
+  most real repositories, so a single combined flag was true nearly always and
+  could not be failed closed on (#7781).
 
 ### Documentation
 
