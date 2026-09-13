@@ -160,6 +160,8 @@ bootstrap) or `--force-add` (rare, intentional bump). Commit the regenerated
 
 ## Resolved Refactor History
 
+The dual production/test cap was introduced in [#1131](https://github.com/bobmatnyc/trusty-tools/issues/1131) and the test cap was raised to 3000 SLOC in [#4074](https://github.com/bobmatnyc/trusty-tools/issues/4074).
+
 Past violations (refactor tickets #170/#171/#172 are CLOSED and the splits have
 landed — all three former monoliths are now under the 500-SLOC cap):
 - `crates/trusty-agents/src/ctrl/mod.rs` — RESOLVED (#170). Split into focused

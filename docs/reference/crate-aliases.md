@@ -1,8 +1,9 @@
 # Crate Abbreviations and Aliases
 
-> Moved out of [`CLAUDE.md`](../../CLAUDE.md) by #7423, unchanged. That file
-> keeps the one-line rule — resolve an abbreviation here before acting on it —
-> and points at this table.
+> The full crate table lives in both [`CLAUDE.md`](../../CLAUDE.md) and this file;
+> moved out by [#7423](https://github.com/bobmatnyc/trusty-tools/pull/7423). Keep
+> both in sync — an edit to one must be mirrored in the other. `CLAUDE.md` also
+> carries the one-line rule.
 
 Resolve any crate abbreviation with this table before taking action — it applies
 everywhere: ticket descriptions, build commands, conversation.

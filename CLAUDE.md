@@ -85,8 +85,8 @@ Claim goes on at dispatch, named session + date; reclaim only if provably
 stale. Advance with `tm issue transition N status:merged`. Fix PRs use
 `Refs #N`, **never** `Closes #N`. Closes only from `status:tested` via
 `tm issue transition N closed --note "<evidence>"` (refuses without a note);
-a merged fix failing live verification stays open or returns to
-`status:coded`.
+a merged fix failing live verification stays open; it returns to
+`status:coded` only when a follow-up fix PR is filed.
 
 🔴 **Why/What/Test doc pattern, proportional depth:** `/// Why: <motivation>`,
 `/// What: <mechanics>`, `/// Test: <where coverage lives>`. Full pattern for
@@ -177,8 +177,8 @@ Dev setup (`rustup`, MSRV `1.94`+, Node/pnpm for Svelte UIs, env vars, IDE):
 website — edit `website/src/content/tools/<slug>.md` for a flagship page,
 never a crate README; `docs/public-manifest.tsv` is the allowlist:
 [website/README.md](website/README.md). Common pitfalls (shared-capability
-dedup, daemon stdout, UI build, workspace deps, global state, ignored
-tests): [common-pitfalls.md](docs/reference/common-pitfalls.md). All
+dedup, daemon stdout, UI build, workspace deps, global state, axum gating,
+process-global env, ignored tests): [common-pitfalls.md](docs/reference/common-pitfalls.md). All
 trusty-* UI builds to Foundry, not crate-local:
 [docs/design/UI/](docs/design/UI/README.md), spec
 [DOC-39](docs/specs/trusty-code-harness-ui.md) §8. Full reference index:
