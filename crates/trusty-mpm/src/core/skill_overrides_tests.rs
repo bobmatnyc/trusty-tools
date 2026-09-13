@@ -7,6 +7,15 @@ fn stacks(stems: &[&str]) -> BTreeSet<String> {
     stems.iter().map(|s| (*s).to_string()).collect()
 }
 
+/// A COMPLETE detection of `stems` — no scan bound tripped (#7781).
+fn detection(stems: &[&str]) -> StackDetection {
+    StackDetection {
+        engineers: stacks(stems),
+        truncated: false,
+        depth_limited: false,
+    }
+}
+
 fn settings_path(project: &Path) -> PathBuf {
     project.join(".claude").join("settings.json")
 }
@@ -23,7 +32,7 @@ fn read_overrides(project: &Path) -> serde_json::Value {
 fn assert_table_applied(project_stacks: &[&str]) {
     let tmp = tempfile::tempdir().unwrap();
     let detected = stacks(project_stacks);
-    write_skill_overrides_for(tmp.path(), &detected).expect("write succeeds");
+    write_skill_overrides_for(tmp.path(), &detection(project_stacks)).expect("write succeeds");
     let overrides = read_overrides(tmp.path());
 
     let mut saw_relevant = false;
@@ -118,7 +127,7 @@ fn unknown_stack_turns_nothing_off() {
     // and the settings file is not created.
     let tmp = tempfile::tempdir().unwrap();
     assert!(irrelevant_skills(&BTreeSet::new()).is_empty());
-    let outcome = write_skill_overrides_for(tmp.path(), &BTreeSet::new()).unwrap();
+    let outcome = write_skill_overrides_for(tmp.path(), &detection(&[])).unwrap();
     assert_eq!(outcome, SkillOverridesOutcome::NoStack);
     assert!(!settings_path(tmp.path()).exists());
 }
@@ -129,10 +138,74 @@ fn unknown_stack_leaves_an_existing_file_byte_identical() {
     std::fs::create_dir_all(tmp.path().join(".claude")).unwrap();
     let original = "{\"permissions\": {\"allow\": []}}\n";
     std::fs::write(settings_path(tmp.path()), original).unwrap();
-    write_skill_overrides_for(tmp.path(), &BTreeSet::new()).unwrap();
+    write_skill_overrides_for(tmp.path(), &detection(&[])).unwrap();
     assert_eq!(
         std::fs::read_to_string(settings_path(tmp.path())).unwrap(),
         original
+    );
+}
+
+#[test]
+fn truncated_detection_writes_no_overrides() {
+    // #7751 review round 2 (HIGH-2): a resource cap leaves the engineer set
+    // PARTIAL, and the `"off"` this module writes is sticky — the merge only
+    // ever ADDS keys, so no later, complete detection re-enables a skill hidden
+    // from a partial scan. Fail closed instead (#7781).
+    let truncated = StackDetection {
+        engineers: stacks(&["rust-engineer"]),
+        truncated: true,
+        depth_limited: false,
+    };
+    // Without the guard this stack turns skills off, so neither assertion below
+    // can pass vacuously.
+    assert!(!irrelevant_skills(&truncated.engineers).is_empty());
+
+    let fresh = tempfile::tempdir().unwrap();
+    assert_eq!(
+        write_skill_overrides_for(fresh.path(), &truncated).unwrap(),
+        SkillOverridesOutcome::Truncated
+    );
+    assert!(
+        !settings_path(fresh.path()).exists(),
+        "a truncated detection must not create the settings file"
+    );
+
+    let existing = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(existing.path().join(".claude")).unwrap();
+    let original = "{\"permissions\": {\"allow\": []}}\n";
+    std::fs::write(settings_path(existing.path()), original).unwrap();
+    assert_eq!(
+        write_skill_overrides_for(existing.path(), &truncated).unwrap(),
+        SkillOverridesOutcome::Truncated
+    );
+    assert_eq!(
+        std::fs::read_to_string(settings_path(existing.path())).unwrap(),
+        original,
+        "a truncated detection must leave an existing file byte-for-byte"
+    );
+}
+
+#[test]
+fn depth_limited_detection_still_writes() {
+    // #7781 round-3: the depth bound is the walk's declared SCOPE, not a
+    // resource cap, and it trips on most real repositories — blocking on it
+    // would block nearly always. It writes like an unbounded detection.
+    let tmp = tempfile::tempdir().unwrap();
+    let deep = StackDetection {
+        engineers: stacks(&["rust-engineer"]),
+        truncated: false,
+        depth_limited: true,
+    };
+
+    let outcome = write_skill_overrides_for(tmp.path(), &deep).unwrap();
+
+    assert!(
+        matches!(outcome, SkillOverridesOutcome::Written(_)),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        read_overrides(tmp.path())["breeze-voice"],
+        serde_json::json!(OFF)
     );
 }
 
@@ -146,7 +219,7 @@ fn user_entries_and_foreign_keys_survive_the_merge() {
     )
     .unwrap();
 
-    write_skill_overrides_for(tmp.path(), &stacks(&["rust-engineer"])).unwrap();
+    write_skill_overrides_for(tmp.path(), &detection(&["rust-engineer"])).unwrap();
 
     let text = std::fs::read_to_string(settings_path(tmp.path())).unwrap();
     let value: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -176,7 +249,8 @@ fn malformed_settings_are_left_untouched() {
         std::fs::create_dir_all(tmp.path().join(".claude")).unwrap();
         std::fs::write(settings_path(tmp.path()), original).unwrap();
 
-        let outcome = write_skill_overrides_for(tmp.path(), &stacks(&["rust-engineer"])).unwrap();
+        let outcome =
+            write_skill_overrides_for(tmp.path(), &detection(&["rust-engineer"])).unwrap();
 
         assert!(
             matches!(outcome, SkillOverridesOutcome::Skipped(_)),
@@ -193,7 +267,7 @@ fn malformed_settings_are_left_untouched() {
 #[test]
 fn second_write_is_byte_identical() {
     let tmp = tempfile::tempdir().unwrap();
-    let rust = stacks(&["rust-engineer"]);
+    let rust = detection(&["rust-engineer"]);
     assert!(matches!(
         write_skill_overrides_for(tmp.path(), &rust).unwrap(),
         SkillOverridesOutcome::Written(_)
@@ -281,8 +355,8 @@ fn a_concurrent_statusline_write_loses_no_skill_overrides() {
     // writer that read first stores its own complete pre-read snapshot last and
     // silently drops the other's keys. Only a real two-thread race proves the
     // guard — a single-threaded test of either writer passes with or without it.
-    let rust = stacks(&["rust-engineer"]);
-    let planned = irrelevant_skills(&rust);
+    let rust = detection(&["rust-engineer"]);
+    let planned = irrelevant_skills(&rust.engineers);
     let mut lost: Vec<String> = Vec::new();
 
     for trial in 0..RACE_TRIALS {

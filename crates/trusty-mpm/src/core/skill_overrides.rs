@@ -15,14 +15,17 @@
 //! against a detected stack set, and [`write_skill_overrides`] merges the result
 //! into `<project_dir>/.claude/settings.json` at `prepare_session`. Stacks are
 //! the engineer stems of [`detected_stack_engineers`], the same detector the
-//! "Detected Project Stack" prompt section and the agent roster read.
+//! "Detected Project Stack" prompt section and the agent roster read — and a
+//! detection a resource cap cut short turns NOTHING off, because the `"off"`
+//! this writes is sticky and no later, complete detection takes it back (#7781).
 //! Test: `svelte_project_turns_off_every_family_the_table_marks_irrelevant`,
+//! `truncated_detection_writes_no_overrides`,
 //! `prepare_session_writes_stack_profile_skill_overrides_for_a_svelte_project`.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use crate::core::manifest::framework::detected_stack_engineers;
+use crate::core::manifest::framework::{StackDetection, detected_stack_engineers};
 
 /// The Claude Code settings key this module writes.
 pub const SKILL_OVERRIDES_KEY: &str = "skillOverrides";
@@ -173,6 +176,9 @@ pub fn irrelevant_skills(stacks: &BTreeSet<String>) -> BTreeSet<&'static str> {
 pub enum SkillOverridesOutcome {
     /// No stack was detected, so nothing was turned off and no file was touched.
     NoStack,
+    /// A resource cap cut stack detection short, so the stack may be partial:
+    /// nothing was turned off and no file was touched (#7781).
+    Truncated,
     /// Every planned entry was already present; the file was not rewritten.
     Unchanged,
     /// The named skills were added as `"off"`.
@@ -207,7 +213,8 @@ pub enum SkillOverridesError {
 ///
 /// Why: `.claude/settings.json` is the project tier the listing was verified
 /// against, and it is often a tracked, user-edited file, so the write merges.
-/// What: detects the stack with [`detected_stack_engineers`] and hands it to
+/// What: detects the stack with [`detected_stack_engineers`] and hands the whole
+/// [`StackDetection`] — engineers and scan-bound flags alike — to
 /// [`write_skill_overrides_for`].
 /// Test: `prepare_session_writes_stack_profile_skill_overrides_for_a_rust_project`,
 /// `prepare_session_on_an_unknown_stack_writes_no_skill_overrides`.
@@ -217,17 +224,21 @@ pub fn write_skill_overrides(
     write_skill_overrides_for(project_dir, &detected_stack_engineers(project_dir))
 }
 
-/// [`write_skill_overrides`] against an explicit stack set.
+/// [`write_skill_overrides`] against an explicit [`StackDetection`].
 ///
 /// Why: the detector reads marker files, so the merge rules are tested here
-/// against a pinned stack set.
+/// against a pinned detection.
 /// What, in order:
+/// - a detection whose [`StackDetection::truncated`] is set returns
+///   [`SkillOverridesOutcome::Truncated`] after one warning, before anything is
+///   read. [`StackDetection::depth_limited`] alone does not block — it is the
+///   walk's declared scope rather than a resource cap (#7781);
 /// - the whole read → mutate → write cycle runs under
 ///   [`crate::core::claude_json_guard::lock`], the in-process mutex every other
 ///   read-modify-write of this file already holds (#4072, #7617);
-/// - an empty `stacks` returns [`SkillOverridesOutcome::NoStack`] before reading
-///   anything. The detector also answers empty when it fails, so a failure hides
-///   no skill;
+/// - an empty `detection.engineers` returns [`SkillOverridesOutcome::NoStack`]
+///   before reading anything. The detector also answers empty when it fails, so
+///   a failure hides no skill;
 /// - a missing file starts from `{}`; a file or `skillOverrides` value that is
 ///   not a JSON object is left alone with a warning;
 /// - each planned skill is inserted as `"off"` only when the key is absent, so
@@ -242,15 +253,33 @@ pub fn write_skill_overrides(
 /// the file always parses.
 ///
 /// Test: `unknown_stack_turns_nothing_off`,
+/// `truncated_detection_writes_no_overrides`,
+/// `depth_limited_detection_still_writes`,
 /// `user_entries_and_foreign_keys_survive_the_merge`,
 /// `malformed_settings_are_left_untouched`,
 /// `second_write_is_byte_identical`,
 /// `a_concurrent_statusline_write_loses_no_skill_overrides`.
 pub fn write_skill_overrides_for(
     project_dir: &Path,
-    stacks: &BTreeSet<String>,
+    detection: &StackDetection,
 ) -> Result<SkillOverridesOutcome, SkillOverridesError> {
-    let planned = irrelevant_skills(stacks);
+    // #7751 review round 2 (HIGH-2): fail closed on a PARTIAL detection, the
+    // same way the empty-set path below fails closed on no detection. A resource
+    // cap makes an absent stem mean "not scanned" rather than "not present", and
+    // the merge below only ever ADDS `"off"` — no later, complete detection takes
+    // one back — so a skill hidden from a partial scan stays hidden. The depth
+    // bound is the walk's declared scope, not a cap: it trips on most real
+    // repositories, so blocking on it would block nearly always (#7781).
+    if detection.truncated {
+        tracing::warn!(
+            "stack detection for {} stopped at a scan bound, so the detected \
+             stack may be partial; no stack-profile skillOverrides written",
+            project_dir.display()
+        );
+        return Ok(SkillOverridesOutcome::Truncated);
+    }
+
+    let planned = irrelevant_skills(&detection.engineers);
     if planned.is_empty() {
         return Ok(SkillOverridesOutcome::NoStack);
     }

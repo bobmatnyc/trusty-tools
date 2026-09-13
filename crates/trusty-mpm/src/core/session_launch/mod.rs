@@ -877,8 +877,9 @@ pub(super) fn prepare_session_inner(
 
     // #7751: turn off the skill families this project's detected stack cannot
     // use (owner ruling 2026-09-13), merged into the same project-tier file. An
-    // unknown stack writes nothing; a malformed file is warned about and left
-    // alone. Non-fatal — a failure costs listing tokens, not the session.
+    // unknown stack writes nothing, and so does a detection a scan bound cut
+    // short (#7781); a malformed file is warned about and left alone. Non-fatal
+    // — a failure costs listing tokens, not the session.
     match crate::core::skill_overrides::write_skill_overrides(project_dir) {
         Ok(crate::core::skill_overrides::SkillOverridesOutcome::Written(added)) => {
             tracing::info!(
