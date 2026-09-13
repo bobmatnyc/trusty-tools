@@ -13,9 +13,19 @@ loading, daemon discovery) has exactly one canonical implementation. A second
 implementation is a defect: fixes land N times, security patches miss copies, and
 silent behavioral drift emerges. Before writing `Command::new(...)`, `reqwest::Client`,
 `std::env::var()` for a concern used in multiple crates, search for an existing
-entry point (`git grep`, then trusty-common source tree) and extend it. See the
-common-entry-point principle in [CLAUDE.md](../../CLAUDE.md) and the per-domain
-status in [domain-consolidation-audit.md](domain-consolidation-audit.md).
+entry point (`git grep`, then trusty-common source tree) and extend it. Scope:
+capabilities shared ACROSS crates; duplication WITHIN one crate is not covered
+(#4058). Per-domain status: [domain-consolidation-audit.md](domain-consolidation-audit.md).
+
+🟢 **Reaching for global mutable state** — helpers should be free functions or
+small structs; avoid `lazy_static!` / `once_cell::sync::Lazy`. The one
+exception is the tracing subscriber, which uses `try_init` to stay idempotent
+across test binaries.
+
+🟢 **Re-declaring an internal dependency's path** — reference sibling crates as
+`trusty-common = { workspace = true }`; the root `Cargo.toml`'s
+`[workspace.dependencies]` table owns the path, so a member manifest never
+pins one.
 
 🔴 **Using `unwrap()` in library crates** — the compiler does not stop you, but
 it violates the project's hard rule. Use `?` with `thiserror` error types in
@@ -100,6 +110,17 @@ plus `ORT_DYLIB_PATH` pointing at a host-compatible
 and issue #2222. On a mismatched host, `trusty-embedderd`'s startup now fails
 fast with an explicit glibc-version error instead of hanging for up to
 `TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS` (default 180 s).
+
+🟡 **Editing `crates/trusty-mpm/src/assets/instructions/sections/*.md` without
+a golden refresh first (#6937)** — three snapshot tests fail before any real
+gate runs otherwise. Run `UPDATE_GOLDEN=1 cargo test -p trusty-mpm golden`,
+then read the diff of the three
+`crates/trusty-mpm/src/core/testdata/pm-prompt-*.md` goldens and confirm it
+carries only your edit.
+
+🟢 **Running an `#[ignore]`d ONNX-backed embedder test without the flag** —
+these are ignored so CI stays fast; they need
+`cargo test -p <crate> -- --include-ignored` to run at all.
 
 🟡 **An unexplained exit 137 from any gate command is usually a SIGKILL under
 memory pressure, not a real failure** — several agent worktrees building or

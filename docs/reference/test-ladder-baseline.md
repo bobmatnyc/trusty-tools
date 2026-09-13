@@ -1,10 +1,11 @@
 # Rust Test Ladder — Change Classes, Gate Commands, Baseline-Failure Protocol
 
 > This file is the authoritative answer to "how much testing does this change
-> need" for this repo. [`CLAUDE.md`](../../CLAUDE.md) keeps only the headline —
-> run the smallest deterministic gate covering the change's blast radius, and
-> scope down but never scope away — and points here (#7423). Pick the rung from
-> the change-class table below, then read its command off the per-rung table.
+> need" for this repo. [`CLAUDE.md`](../../CLAUDE.md) keeps the change-class
+> table and the headline rule — run the smallest deterministic gate covering
+> the change's blast radius, and scope down but never scope away — and points
+> here for the per-rung command table, the stage model, and baseline-failure
+> triage (#7423, #7681).
 
 The baseline-failure protocol (establish whose red it is, fix if branch-caused,
 hand a pre-existing red to `tm-ticketing` for its disposition, and the literal
