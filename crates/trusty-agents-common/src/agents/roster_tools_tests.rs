@@ -305,11 +305,13 @@ const UNLOADABLE_SKILL_ALLOWLIST: &[(&str, &str, &str)] = &[
         "tm-prose-style",
         "BASE-AGENT names it for Skill holders only; the prose rules it expands \
          are resident in full beside the pointer",
-    ),(
-    "ticketing",
-    "tm-ticketing",
-    "ticketing's own pointer moves to a Read path in a later #7727 slice",
-)];
+    ),
+    (
+        "ticketing",
+        "tm-ticketing",
+        "ticketing's own pointer moves to a Read path in a later #7727 slice",
+    ),
+];
 
 /// Every skill name a composed body refers to as "`<name>` skill" or
 /// `Skill(skill="<name>"`, in order of appearance.
