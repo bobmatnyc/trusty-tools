@@ -610,6 +610,80 @@ fn catalog_hashes_compute_is_unknown_without_either_source() {
     assert!(!report.stale);
 }
 
+/// #7727 review: a relative skills root makes the cache `unknown` instead of
+/// computing an agent map with every agent silently missing.
+#[test]
+fn catalog_hashes_compute_is_unknown_for_an_unresolvable_skills_root() {
+    let root = TempDir::new().unwrap();
+    let agents = root.path().join("agents");
+    write_agent(&agents, "rust-engineer", "v1");
+    let cache = CatalogHashes::compute(
+        &agents,
+        &root.path().join("no-skills"),
+        Path::new("relative"),
+    );
+    assert!(cache.unknown, "an unresolvable root must not read as known");
+}
+
+/// #7727 review: a deployed body carrying `{{TM_SKILLS}}` hashes as fresh
+/// against the root it was deployed with, and as stale against any other.
+///
+/// Why: every staleness fixture used placeholder-free bodies, so passing the
+/// wrong root to the catalog hash would have gone unnoticed while every real
+/// deployed agent read as permanently stale.
+/// What: deploys a placeholder-bearing catalog agent through the real
+/// deployer with `fw.skill_deploy_dir()`, asserts `detect_for_framework` is
+/// fresh, then detects against a catalog hashed with a different root.
+/// Test: this test.
+#[test]
+fn placeholder_body_is_fresh_only_against_its_deployed_skills_root() {
+    use crate::core::agent_deployer::deploy_agents_filtered;
+    use trusty_agents_common::agents::skill_root::SKILLS_ROOT_PLACEHOLDER;
+
+    let fw_root = TempDir::new().unwrap();
+    let fw = crate::core::paths::FrameworkPaths::under(fw_root.path());
+    let catalog_root = crate::content::catalog_root_for(&fw.root);
+    let sources = crate::core::manifest::ManifestSources::resolve(fw_root.path(), &catalog_root);
+    let manifest = crate::core::manifest::resolve_manifest(&sources);
+    let plan = crate::core::manifest::HarnessPlan::from_manifest(&manifest, &fw, &catalog_root);
+    write_agent(
+        &plan.agent_source,
+        "rust-engineer",
+        &format!("Read `{SKILLS_ROOT_PLACEHOLDER}/self-improvement-loop/SKILL.md`."),
+    );
+    let deployed = deploy_agents_filtered(
+        &plan.agent_source,
+        &fw.agent_deploy_dir(),
+        &fw.skill_deploy_dir(),
+        |_| true,
+    )
+    .unwrap();
+    assert_eq!(deployed.deployed.len(), 1, "{deployed:?}");
+
+    let report = detect_for_framework(&fw, fw_root.path());
+    assert!(!report.unknown, "{report:?}");
+    assert!(
+        !report.stale,
+        "deployed with its own root must be fresh: {report:?}"
+    );
+
+    let other_root = fw_root.path().join("other-skills");
+    let catalog = CatalogHashes::compute(&plan.agent_source, &plan.skill_source, &other_root);
+    let agents_dir = fw.agent_deploy_dir();
+    let report = catalog.detect(
+        &DeployedAgentHashes::read(&agents_dir, &catalog),
+        &SkillManifest::default(),
+        &fw.claude_skills_dir(),
+        |name| name == "rust-engineer",
+        |_| false,
+        |_| false,
+    );
+    assert!(
+        report.stale,
+        "a different skills root must read as stale: {report:?}"
+    );
+}
+
 /// Issue #2444 review: the whole point of [`CatalogHashes`] — compute ONCE,
 /// `detect` against TWO independent deployed targets, and confirm each
 /// target's report is exactly what a fresh [`detect_staleness`] call would

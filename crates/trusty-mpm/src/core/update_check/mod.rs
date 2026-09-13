@@ -22,7 +22,7 @@ use std::path::Path;
 
 use crate::core::agent_manifest::{AgentManifest, checksum};
 use crate::core::skill_manifest::SkillManifest;
-use trusty_agents_common::agents::skill_root::compose_agent_for_deploy;
+use trusty_agents_common::agents::skill_root::{check_skills_root, compose_agent_for_deploy};
 
 mod apply;
 pub use apply::{ApplyError, ApplyReport, apply_catalog};
@@ -652,10 +652,13 @@ impl CatalogHashes {
     /// never-synced check; otherwise computes both maps. Under `cfg(test)`,
     /// every call (regardless of outcome) is appended to
     /// `COMPUTE_CALL_LOG` before either branch runs.
-    /// Test: `catalog_hashes_compute_is_unknown_without_either_source`,
-    /// `stale_assets_for_many_computes_catalog_exactly_once_per_source_pair`.
     /// `skills_root` is the skills tier deployed agent bodies point at (#7727),
-    /// so the hash matches what the deployer wrote.
+    /// so the hash matches what the deployer wrote; a root the deployer would
+    /// refuse leaves the whole cache `unknown` with a warning, rather than
+    /// silently dropping every agent from the agent map.
+    /// Test: `catalog_hashes_compute_is_unknown_without_either_source`,
+    /// `catalog_hashes_compute_is_unknown_for_an_unresolvable_skills_root`,
+    /// `stale_assets_for_many_computes_catalog_exactly_once_per_source_pair`.
     pub fn compute(catalog_agents: &Path, catalog_skills: &Path, skills_root: &Path) -> Self {
         #[cfg(test)]
         COMPUTE_CALL_LOG
@@ -663,6 +666,18 @@ impl CatalogHashes {
             .unwrap()
             .push((catalog_agents.to_path_buf(), catalog_skills.to_path_buf()));
         if !catalog_agents.is_dir() && !catalog_skills.is_dir() {
+            return Self {
+                unknown: true,
+                ..Default::default()
+            };
+        }
+        // #7727 review: one root error would otherwise fail every compose below.
+        if let Err(e) = check_skills_root(skills_root) {
+            tracing::warn!(
+                skills_root = %skills_root.display(),
+                error = %e,
+                "agent skills root unresolvable — catalog staleness is undetermined"
+            );
             return Self {
                 unknown: true,
                 ..Default::default()

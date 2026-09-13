@@ -2,25 +2,28 @@
 //!
 //! Why: the shared `BASE-AGENT.md` tells an agent to open a skill file with its
 //! read tool at `{{TM_SKILLS}}/<skill>/SKILL.md`. trusty-mpm resolves that
-//! placeholder to its own deployed skills tier; tcode has no such tier — it
-//! embeds only `SKILL.md` bodies for catalog use and discovers disk skills from
-//! the project — so it materialises the referenced files itself and resolves
-//! the placeholder to that directory. Materialising (rather than inlining the
-//! skill bodies into every prompt) keeps the #7723 trim: the content loads only
-//! when an agent opens the file.
-//! What: [`REFERENCED_SKILL_FILES`] embeds every file a roster pointer names;
-//! [`materialize_skill_refs`] writes them beneath a directory;
-//! [`resolve_skill_refs`] materialises and substitutes when a body carries the
-//! placeholder. The directory is `<project>/.trusty-code/skill-refs` for the
-//! project roster deploy ([`project_skill_refs_dir`]) and
-//! `~/.trusty-code/skill-refs` for in-process composes with no project
-//! ([`user_skill_refs_dir`]). Neither is a skill-discovery directory, so these
-//! copies never shadow the embedded skill catalog.
-//! Test: `agents::skill_refs::tests`.
+//! placeholder to its own deployed skills tier; tcode has no such tier, and its
+//! `read_file` is confined to the run's project or scratch root, so a pointer
+//! into any other real directory is one the agent cannot open.
+//! What: [`REFERENCED_SKILL_FILES`] embeds every file a roster pointer names.
+//! Two resolutions exist:
+//! - The project roster deploy writes the files beneath
+//!   `<project>/.trusty-code/skill-refs` ([`project_skill_refs_dir`],
+//!   [`materialize_skill_refs`]); the pointers land inside the project root.
+//! - An in-process compose (embedded fallback, a disk agent carrying the
+//!   placeholder) resolves to [`user_skill_refs_dir`] with no disk I/O
+//!   ([`resolve_skill_refs`]). `read_file` built with
+//!   `ReadFileTool::with_skill_refs` serves exactly those paths from
+//!   [`embedded_skill_ref`], so the pointer opens in bound and projectless runs
+//!   alike and compose never depends on a writable home.
+//!
+//! Neither directory is a skill-discovery directory, so these copies never
+//! shadow the embedded skill catalog.
+//! Test: `agents::skill_refs::tests`, `tools::fs::read::tests::skill_ref_*`.
 
 use std::path::{Path, PathBuf};
 
-use anyhow::Context;
+use trusty_agents_common::agents::manifest::{ManifestError, atomic_write};
 use trusty_agents_common::agents::skill_root::{SKILLS_ROOT_PLACEHOLDER, resolve_skills_root};
 
 /// Directory name, beneath a `.trusty-code` root, holding the referenced files.
@@ -49,17 +52,31 @@ pub fn project_skill_refs_dir(project_root: &Path) -> PathBuf {
     crate::paths::native_child(project_root, SKILL_REFS_DIRNAME)
 }
 
-/// `~/.trusty-code/skill-refs` — the root for composes with no project.
+/// `~/.trusty-code/skill-refs` — the address in-process composes resolve to.
+///
+/// What: a path only; nothing is written there. `read_file` serves it.
 pub fn user_skill_refs_dir() -> PathBuf {
     crate::paths::private_state::private_state_dir().join(SKILL_REFS_DIRNAME)
 }
 
+/// The embedded content for `relative`, a path beneath a skill-refs root.
+///
+/// What: component-wise equality, so `a/../b` never matches `b`.
+/// Test: `embedded_skill_ref_matches_exact_entries_only`.
+pub fn embedded_skill_ref(relative: &Path) -> Option<&'static str> {
+    REFERENCED_SKILL_FILES
+        .iter()
+        .find(|(entry, _)| Path::new(entry) == relative)
+        .map(|(_, content)| *content)
+}
+
 /// Write every [`REFERENCED_SKILL_FILES`] entry beneath `dir`.
 ///
-/// What: creates parent directories and rewrites a file only when its content
-/// differs, so repeated composes do no writes. Postcondition: every entry is
-/// readable at `dir/<relative path>` with its embedded content.
-/// Test: `resolve_skill_refs_writes_readable_files`.
+/// What: creates parent directories and atomically rewrites a file only when
+/// its content differs, so repeated deploys do no writes and a concurrent
+/// reader never sees a partial file. Postcondition: every entry is readable at
+/// `dir/<relative path>` with its embedded content.
+/// Test: `materialize_skill_refs_writes_readable_files`.
 pub fn materialize_skill_refs(dir: &Path) -> std::io::Result<()> {
     for (relative, content) in REFERENCED_SKILL_FILES {
         let path = dir.join(relative);
@@ -69,31 +86,38 @@ pub fn materialize_skill_refs(dir: &Path) -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&path, content)?;
+        atomic_write(&path, content).map_err(|e| match e {
+            ManifestError::Io(io) => io,
+            other => std::io::Error::other(other),
+        })?;
     }
     Ok(())
 }
 
 /// Resolve the skills-root placeholder in a composed body against `dir`.
 ///
-/// What: a body with no placeholder is returned unchanged and touches no disk,
-/// so a plain user agent never depends on a home directory. Otherwise the files
-/// are materialised beneath `dir` and the placeholder is substituted; an
-/// unresolvable `dir` (relative, non-UTF-8) is an error naming it.
-/// Test: `resolve_skill_refs_writes_readable_files`,
-/// `resolve_skill_refs_refuses_a_relative_dir`.
-pub fn resolve_skill_refs(composed: &str, dir: &Path) -> anyhow::Result<String> {
+/// Why: compose runs for every agent resolution, so a failure here must never
+/// remove an agent from the roster (#7727 review, HIGH 2).
+/// What: pure string work. A body with no placeholder is returned unchanged.
+/// Otherwise the placeholder becomes `dir`; an unresolvable `dir` (relative —
+/// the no-home fallback — or non-UTF-8) logs a warning naming it and returns
+/// the body unchanged, so the agent still loads with an unresolved pointer.
+/// Test: `resolve_skill_refs_substitutes_without_touching_disk`,
+/// `resolve_skill_refs_keeps_the_body_for_a_relative_dir`.
+pub fn resolve_skill_refs(composed: &str, dir: &Path) -> String {
     if !composed.contains(SKILLS_ROOT_PLACEHOLDER) {
-        return Ok(composed.to_string());
+        return composed.to_string();
     }
-    let resolved = resolve_skills_root(composed, dir)?;
-    materialize_skill_refs(dir).with_context(|| {
-        format!(
-            "failed to write referenced skill files to {}",
-            dir.display()
-        )
-    })?;
-    Ok(resolved)
+    match resolve_skills_root(composed, dir) {
+        Ok(resolved) => resolved,
+        Err(e) => {
+            tracing::warn!(
+                path = %dir.display(),
+                "skill pointers left unresolved in a composed agent: {e}"
+            );
+            composed.to_string()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -101,22 +125,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolve_skill_refs_writes_readable_files() {
+    fn resolve_skill_refs_substitutes_without_touching_disk() {
         let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("skill-refs");
         let body = format!("Read `{SKILLS_ROOT_PLACEHOLDER}/self-improvement-loop/SKILL.md`.");
-        let out = resolve_skill_refs(&body, tmp.path()).unwrap();
-        let path = tmp.path().join("self-improvement-loop/SKILL.md");
+        let out = resolve_skill_refs(&body, &dir);
+        let path = dir.join("self-improvement-loop/SKILL.md");
         assert_eq!(out, format!("Read `{}`.", path.display()));
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            REFERENCED_SKILL_FILES[1].1
-        );
+        assert!(!dir.exists(), "compose must not write the refs dir");
     }
 
     #[test]
-    fn resolve_skill_refs_refuses_a_relative_dir() {
+    fn resolve_skill_refs_keeps_the_body_for_a_relative_dir() {
         let body = format!("{SKILLS_ROOT_PLACEHOLDER}/x");
-        assert!(resolve_skill_refs(&body, Path::new("relative")).is_err());
+        assert_eq!(resolve_skill_refs(&body, Path::new("relative")), body);
+    }
+
+    #[test]
+    fn materialize_skill_refs_writes_readable_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        materialize_skill_refs(tmp.path()).unwrap();
+        materialize_skill_refs(tmp.path()).unwrap();
+        for (relative, content) in REFERENCED_SKILL_FILES {
+            assert_eq!(
+                std::fs::read_to_string(tmp.path().join(relative)).unwrap(),
+                *content
+            );
+        }
+    }
+
+    #[test]
+    fn embedded_skill_ref_matches_exact_entries_only() {
+        let hit = Path::new("self-improvement-loop/SKILL.md");
+        assert_eq!(embedded_skill_ref(hit), Some(REFERENCED_SKILL_FILES[1].1));
+        for miss in [
+            "self-improvement-loop",
+            "x/../self-improvement-loop/SKILL.md",
+            "/self-improvement-loop/SKILL.md",
+        ] {
+            assert_eq!(embedded_skill_ref(Path::new(miss)), None, "{miss}");
+        }
     }
 
     #[test]

@@ -5,5 +5,7 @@ content too long to stay resident in `SKILL.md`, such as the per-phase gate
 checklists, the worktree provisioning commands, and PR body templates.
 
 An agent without the `Skill` tool opens a file here with `Read` at
-`{{TM_SKILLS}}/tm-workflow/references/<file>.md`. The deploy step replaces the
-placeholder with the install's absolute skills directory (#7727).
+`<skills>/tm-workflow/references/<file>.md`, where `<skills>` is the install's
+absolute skills directory. An agent body spells that directory
+`{{TM_SKILLS}}`, and the agent deploy resolves it; skill files are copied as
+written (#7727).

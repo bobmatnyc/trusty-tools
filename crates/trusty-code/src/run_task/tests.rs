@@ -2031,3 +2031,29 @@ async fn use_skill_absent_from_engineer_when_no_skills() {
         "sanity check: registry should still contain other always-present tools"
     );
 }
+
+/// #7727 review HIGH 1: an embedded roster agent resolved with no disk config
+/// carries skill pointers the engineer registry's `read_file` opens, although
+/// they lie outside the project root.
+#[tokio::test]
+async fn engineer_registry_reads_embedded_agent_skill_pointers() {
+    use crate::agents::skill_refs::{REFERENCED_SKILL_FILES, user_skill_refs_dir};
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    let agent = crate::agents::resolve_agent(project.path(), "rust-engineer")
+        .expect("embedded rust-engineer resolves");
+    let factory = super::ProjectToolFactory {
+        project: project.path().to_path_buf(),
+        skill_resolver: None,
+    };
+    let registry = factory.build(&agent, &RunContext::default()).await;
+    for (relative, content) in REFERENCED_SKILL_FILES {
+        let pointer = user_skill_refs_dir().join(relative).display().to_string();
+        assert!(agent.system_prompt.content.contains(&pointer), "{pointer}");
+        let out = registry
+            .dispatch("read_file", serde_json::json!({ "path": pointer }))
+            .await;
+        assert!(!out.is_error(), "{pointer}: {}", out.content());
+        assert_eq!(out.content(), *content);
+    }
+}

@@ -68,11 +68,9 @@ pub fn load_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
             path.display()
         )
     })?;
-    // #7727: a body carrying `{{TM_SKILLS}}` points at tcode's own copies.
-    let composed = super::skill_refs::resolve_skill_refs(
-        &composed,
-        &super::skill_refs::user_skill_refs_dir(),
-    )?;
+    // #7727: a body carrying `{{TM_SKILLS}}` points at the address `read_file` serves.
+    let composed =
+        super::skill_refs::resolve_skill_refs(&composed, &super::skill_refs::user_skill_refs_dir());
 
     let metadata = agent_metadata_from_str(&composed);
     let body = extract_body(&composed);
@@ -144,11 +142,14 @@ pub fn project_embedded_md_with_extends(name: &str) -> anyhow::Result<AgentConfi
 
 /// [`project_embedded_md_with_extends`] with the skill-refs root supplied.
 ///
-/// Why (#7727): the hermetic core, so a test resolves `{{TM_SKILLS}}` into a
-/// temp dir instead of the developer's real `~/.trusty-code`.
+/// Why (#7727): the hermetic core, so a test resolves `{{TM_SKILLS}}` against
+/// a temp dir instead of the developer's real `~/.trusty-code`.
 /// What: composes as the wrapper does, then
-/// [`super::skill_refs::resolve_skill_refs`] against `skill_refs_root`.
-/// Test: `embedded_agent_resolves_skill_pointers_to_readable_files`.
+/// [`super::skill_refs::resolve_skill_refs`] against `skill_refs_root`, which
+/// never writes and never fails, so the refs root cannot drop an agent.
+/// Test: `embedded_agent_skill_pointers_open_with_read_file`,
+/// `embedded_agent_composes_when_refs_dir_is_unwritable`,
+/// `embedded_agent_composes_when_refs_dir_is_relative`.
 pub fn project_embedded_md_with_extends_at(
     name: &str,
     skill_refs_root: &Path,
@@ -159,7 +160,7 @@ pub fn project_embedded_md_with_extends_at(
     let composed = compose_agent_in_memory(name, &sources).map_err(|e| {
         anyhow::anyhow!("failed to compose embedded tm-catalog agent '{name}': {e}")
     })?;
-    let composed = super::skill_refs::resolve_skill_refs(&composed, skill_refs_root)?;
+    let composed = super::skill_refs::resolve_skill_refs(&composed, skill_refs_root);
 
     let metadata = agent_metadata_from_str(&composed);
     let body = extract_body(&composed);
@@ -610,29 +611,76 @@ mod tests {
         assert!(result.is_err(), "unknown embedded agent name must error");
     }
 
-    /// #7727: an embedded roster agent's `{{TM_SKILLS}}` pointers resolve to
-    /// files that exist and carry the embedded skill content.
-    #[test]
-    fn embedded_agent_resolves_skill_pointers_to_readable_files() {
-        use super::super::skill_refs::REFERENCED_SKILL_FILES;
+    /// #7727 review HIGH 1: every pointer an embedded agent carries opens with
+    /// the real `read_file`, rooted at a bound project and at a projectless
+    /// scratch dir, although the refs root is outside both and never written.
+    #[tokio::test]
+    async fn embedded_agent_skill_pointers_open_with_read_file() {
+        use crate::agents::skill_refs::REFERENCED_SKILL_FILES;
+        use crate::tools::ReadFileTool;
+        use crate::tools::traits::ToolExecutor;
         use trusty_agents_common::agents::skill_root::SKILLS_ROOT_PLACEHOLDER;
 
         let refs = tempfile::tempdir().expect("tempdir");
-        let cfg = project_embedded_md_with_extends_at("rust-engineer", refs.path())
+        let refs_root = refs.path().join("skill-refs");
+        let cfg = project_embedded_md_with_extends_at("rust-engineer", &refs_root)
             .expect("compose rust-engineer");
         let body = &cfg.system_prompt.content;
         assert!(
             !body.contains(SKILLS_ROOT_PLACEHOLDER),
             "raw placeholder leaked"
         );
-        let mut resolved = 0;
-        for (relative, content) in REFERENCED_SKILL_FILES {
-            let path = refs.path().join(relative);
-            if body.contains(&path.display().to_string()) {
-                assert_eq!(std::fs::read_to_string(&path).unwrap(), *content);
-                resolved += 1;
+
+        let project = tempfile::tempdir().expect("project");
+        let scratch = tempfile::tempdir().expect("projectless scratch");
+        for root in [project.path(), scratch.path()] {
+            let tool = ReadFileTool::new(root).with_skill_refs(&refs_root);
+            for (relative, content) in REFERENCED_SKILL_FILES {
+                let pointer = refs_root.join(relative).display().to_string();
+                assert!(body.contains(&format!("Read `{pointer}`")), "{pointer}");
+                let out = tool.execute(serde_json::json!({ "path": pointer })).await;
+                assert!(!out.is_error(), "{pointer}: {}", out.content());
+                assert_eq!(out.content(), *content);
             }
         }
-        assert_eq!(resolved, 3, "all three BASE-AGENT skill files must resolve");
+        assert!(
+            !refs_root.exists(),
+            "compose and read must not write the refs dir"
+        );
+    }
+
+    /// #7727 review HIGH 2: a refs root that cannot be written never drops an
+    /// agent; the pointer still resolves.
+    #[cfg(unix)]
+    #[test]
+    fn embedded_agent_composes_when_refs_dir_is_unwritable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = tempfile::tempdir().expect("tempdir");
+        std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o555))
+            .expect("chmod");
+        let refs_root = home.path().join(".trusty-code").join("skill-refs");
+        let composed = project_embedded_md_with_extends_at("rust-engineer", &refs_root);
+        std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o755))
+            .expect("chmod back");
+        let cfg = composed.expect("an unwritable refs dir must not drop the agent");
+        assert!(cfg.system_prompt.content.contains(&format!(
+            "{}/self-improvement-loop/SKILL.md",
+            refs_root.display()
+        )));
+    }
+
+    /// #7727 review HIGH 2: the no-home relative root keeps the agent, with the
+    /// pointer left unresolved (and a warning naming the path).
+    #[test]
+    fn embedded_agent_composes_when_refs_dir_is_relative() {
+        use trusty_agents_common::agents::skill_root::SKILLS_ROOT_PLACEHOLDER;
+
+        let cfg = project_embedded_md_with_extends_at(
+            "rust-engineer",
+            Path::new(".trusty-code/skill-refs"),
+        )
+        .expect("a relative refs dir must not drop the agent");
+        assert!(cfg.system_prompt.content.contains(SKILLS_ROOT_PLACEHOLDER));
     }
 }

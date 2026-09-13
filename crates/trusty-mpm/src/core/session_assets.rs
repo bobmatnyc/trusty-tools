@@ -409,6 +409,51 @@ mod tests {
         );
     }
 
+    /// #7727 review: a session deployed from a `{{TM_SKILLS}}` body is fresh
+    /// against its own skills tier and stale against a catalog hashed with any
+    /// other root.
+    #[test]
+    #[serial_test::serial]
+    fn session_placeholder_body_is_fresh_only_against_its_skills_root() {
+        use trusty_agents_common::agents::skill_root::SKILLS_ROOT_PLACEHOLDER;
+
+        let (home, _guard) = fake_home();
+        let fw = FrameworkPaths::default();
+        let bundled = fw.agent_source_dir();
+        std::fs::create_dir_all(&bundled).unwrap();
+        let body = format!("Read `{SKILLS_ROOT_PLACEHOLDER}/self-improvement-loop/SKILL.md`.");
+        std::fs::write(bundled.join("rust-engineer.md"), body).unwrap();
+
+        let workspace = home.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let session_fw = FrameworkPaths::for_managed_workspace(&workspace);
+        deploy_agents_filtered(
+            &bundled,
+            &session_fw.agent_deploy_dir(),
+            &session_fw.skill_deploy_dir(),
+            |_| true,
+        )
+        .unwrap();
+
+        let record = make_record(Some(workspace.clone()), workspace);
+        assert!(
+            !session_assets_stale(&record),
+            "deployed with the session's own skills root must be fresh"
+        );
+
+        let (fw_s, plan) = session_plan(&record);
+        let other_root = home.path().join("other-skills");
+        let catalog = crate::core::update_check::CatalogHashes::compute(
+            &plan.agent_source,
+            &plan.skill_source,
+            &other_root,
+        );
+        assert!(
+            session_asset_staleness_with_catalog(&fw_s, &plan, &catalog).stale,
+            "a catalog hashed with a different skills root must read as stale"
+        );
+    }
+
     #[test]
     #[serial_test::serial]
     fn session_plan_resolves_default_bundled_source() {
