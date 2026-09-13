@@ -318,7 +318,7 @@ pub fn prepare_session_with_home(
 /// replaces the live probe. Production callers keep using the probe-resolving
 /// entry points.
 /// Test: `prepare_session_disables_auto_memory_when_trusty_memory_is_reachable`,
-/// `prepare_session_leaves_auto_memory_alone_when_trusty_memory_is_down`.
+/// `prepare_session_restores_auto_memory_when_trusty_memory_is_down`.
 pub fn prepare_session_with_memory_reachable(
     fw: &FrameworkPaths,
     project_dir: &Path,

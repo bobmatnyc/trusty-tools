@@ -12,7 +12,10 @@
 //! JSON-RPC error is the daemon refusing a call, which still proves it is there.
 //! [`probe_memory_reachable_blocking`] is the same probe for the synchronous
 //! launch path, run on its own short-lived thread so it is safe to call from
-//! inside an async runtime.
+//! inside an async runtime. [`resolve_memory_reachable`] is what consumers
+//! actually call: it takes whatever the caller already resolved and probes only
+//! when nothing did, so one launch asks the daemon once rather than once per
+//! write site.
 //!
 //! This is deliberately NOT [`crate::daemon::doctor`]'s `probe_health`: that one
 //! retries three times and classifies four outcomes because it renders a doctor
@@ -102,6 +105,38 @@ pub fn probe_memory_reachable_blocking() -> bool {
     block_on_probe(probe_memory_reachable())
 }
 
+/// The reachability a launch should act on: a value already resolved, or a probe.
+///
+/// Why (#7685): one launch used to answer this question twice — once in
+/// `prepare_session_inner` and once again in the runtime adapter's spawn — so a
+/// hung trusty-memory cost the launch two [`PROBE_TIMEOUT`] budgets instead of
+/// one. Every consumer now asks through here with whatever the caller already
+/// resolved, so threading a value UP the call chain is the only thing needed to
+/// collapse the second probe.
+/// What: `Some(value)` is taken verbatim and no socket is dialled; `None` runs
+/// [`probe_memory_reachable_blocking`].
+/// Test: `resolved_reachability_skips_the_probe`,
+/// `unresolved_reachability_runs_the_probe`.
+pub fn resolve_memory_reachable(resolved: Option<bool>) -> bool {
+    resolve_memory_reachable_with(resolved, probe_memory_reachable_blocking)
+}
+
+/// [`resolve_memory_reachable`] with the probe supplied.
+///
+/// Why: the seam a test counts. Asserting "the adapter did not probe again" needs
+/// the probe itself to be observable, and the real one dials a host socket no
+/// test can point anywhere.
+/// What: `resolved.unwrap_or_else(probe)` — nothing else, so the production
+/// entry point above cannot drift from what the test drives.
+/// Test: `resolved_reachability_skips_the_probe`,
+/// `unresolved_reachability_runs_the_probe`.
+pub(crate) fn resolve_memory_reachable_with(
+    resolved: Option<bool>,
+    probe: impl FnOnce() -> bool,
+) -> bool {
+    resolved.unwrap_or_else(probe)
+}
+
 /// Drive one reachability future to completion from synchronous code.
 ///
 /// Why: see [`probe_memory_reachable_blocking`]. Isolating the bridge keeps the
@@ -109,8 +144,11 @@ pub fn probe_memory_reachable_blocking() -> bool {
 /// and lets a test drive a socket-pinned probe through the identical mechanism.
 /// What: a scoped thread with its own current-thread runtime. A runtime that
 /// cannot be built, and a probe that panics, both answer `false` — the fail-safe
-/// direction, since `false` leaves auto memory ON.
-/// Test: `blocking_probe_answers_inside_a_runtime`.
+/// direction, since `false` leaves auto memory ON. The panic is contained by the
+/// explicit `join`: `std::thread::scope` re-raises only the panics of threads it
+/// had to join itself.
+/// Test: `blocking_probe_answers_inside_a_runtime`,
+/// `a_panicking_probe_answers_false_without_propagating`.
 fn block_on_probe<F>(probe: F) -> bool
 where
     F: std::future::Future<Output = bool> + Send,

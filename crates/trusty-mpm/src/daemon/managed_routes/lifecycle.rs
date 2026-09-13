@@ -800,7 +800,8 @@ async fn spawn_managed_inproject(
     // must land in `<worktree>/.claude/{agents,skills}` (where Claude Code's
     // project-skill discovery looks), not the real `$HOME/.claude`.
     let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&worktree);
-    prepare_inproject_session(&fw, session_id, &worktree, &synthetic_repo_url)?;
+    // #7685: reuse prep's reachability answer rather than probing again.
+    let reachable = prepare_inproject_session(&fw, session_id, &worktree, &synthetic_repo_url)?;
 
     // #1919: announce the tmux
     // stage right before the record (and its tmux session name) is created.
@@ -876,7 +877,7 @@ async fn spawn_managed_inproject(
 
     emit(ProvisioningStage::LaunchingRuntime);
     let tmux_arc = mgr.tmux_driver();
-    let adapter = crate::runtime::build_adapter(record.runtime, tmux_arc);
+    let adapter = crate::runtime::build_adapter(record.runtime, tmux_arc, reachable);
     let gh_env = resolve_gh_env(state, &worktree).await;
     if let Err(e) = adapter.spawn(
         &record.tmux_name,
@@ -993,7 +994,7 @@ pub async fn spawn_runtime_for(
     }
 
     let tmux_arc = mgr.tmux_driver();
-    let adapter = build_adapter(record.runtime, tmux_arc);
+    let adapter = build_adapter(record.runtime, tmux_arc, None);
     let gh_env = resolve_gh_env(state, &workspace).await;
     if let Err(e) = adapter.spawn(
         &record.tmux_name,
@@ -1210,7 +1211,7 @@ pub async fn resume_managed(
     // #6766: the post-send launch check below needs the driver after the
     // adapter has taken ownership of its Arc.
     let tmux_driver = tmux_arc.clone();
-    let adapter = build_adapter(record.runtime, tmux_arc);
+    let adapter = build_adapter(record.runtime, tmux_arc, None);
     // #1744: prefer --resume <id> when a claude_session_id was captured at
     // SessionStart; launch fresh when the id is absent or stale (#6765 — no
     // --continue fallback). ClaudeCodeAdapter overrides spawn_resume

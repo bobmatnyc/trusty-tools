@@ -129,7 +129,7 @@ impl Drop for HomeGuard {
 #[test]
 fn claude_code_adapter_identifies() {
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake);
+    let adapter = ClaudeCodeAdapter::new(fake, None);
     assert_eq!(adapter.identify(), "claude-code");
 }
 
@@ -1111,7 +1111,7 @@ fn spawn_sends_env_scrub_when_binary_available() {
         return;
     };
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone());
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), None);
     adapter
         .spawn(
             "tmpm-test",
@@ -1158,7 +1158,7 @@ fn spawn_sends_oauth_token_when_available() {
         );
     }
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone());
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), None);
     let result = adapter.spawn(
         "tmpm-test",
         Path::new("/tmp"),
@@ -1182,13 +1182,50 @@ fn spawn_sends_oauth_token_when_available() {
 }
 
 #[test]
+#[serial_test::serial]
+fn spawn_uses_the_launch_resolved_reachability() {
+    // #7685 r3: the adapter must act on the value the launch already resolved,
+    // never re-probe. Both directions are asserted on ONE host, so the assertion
+    // cannot be satisfied by whatever this machine's trusty-memory happens to be
+    // doing — a re-probing adapter would answer the same way twice.
+    let _home = HomeGuard::set();
+    let Some(_claude_bin) = ClaudeCodeAdapter::resolve_claude() else {
+        return;
+    };
+    let spawn_with = |reachable: bool| {
+        let fake = FakeTmux::new();
+        let adapter = ClaudeCodeAdapter::new(fake.clone(), Some(reachable));
+        adapter
+            .spawn(
+                "tmpm-test",
+                Path::new("/tmp"),
+                "some task",
+                TEST_SESSION_ID,
+                &[],
+            )
+            .expect("spawn");
+        let sends = fake.sends.lock().unwrap();
+        sends[0].1.clone()
+    };
+
+    assert!(
+        spawn_with(true).contains("CLAUDE_CODE_DISABLE_AUTO_MEMORY=1"),
+        "an injected `reachable` must turn auto memory off"
+    );
+    assert!(
+        !spawn_with(false).contains("CLAUDE_CODE_DISABLE_AUTO_MEMORY"),
+        "an injected `unreachable` must leave the fallback alone"
+    );
+}
+
+#[test]
 fn publish_session_env_sets_id_and_config_dir() {
     // #2157 item 1: exercises publish_session_env directly (no HOME
     // redirection or real `claude` binary needed) so this call-shape
     // assertion runs unconditionally in CI, unlike the full-spawn tests
     // below which are gated on a real `claude` binary being present.
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone());
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), None);
     adapter.publish_session_env("tmpm-test", TEST_SESSION_ID, Some("/tmp/config-dir"));
     let env_sets = fake.env_sets.lock().unwrap();
     assert_eq!(
@@ -1211,7 +1248,7 @@ fn publish_session_env_sets_id_and_config_dir() {
 #[test]
 fn publish_session_env_omits_config_dir_when_absent() {
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone());
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), None);
     adapter.publish_session_env("tmpm-test", TEST_SESSION_ID, None);
     let env_sets = fake.env_sets.lock().unwrap();
     assert_eq!(
@@ -1235,7 +1272,7 @@ fn spawn_publishes_session_id_via_set_environment() {
         return;
     }
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone());
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), None);
     adapter
         .spawn(
             "tmpm-test",
@@ -1656,7 +1693,7 @@ fn spawn_resume_with_id_uses_resume_flag() {
     std::fs::write(project_dir.join("my-session-id.jsonl"), "{}").unwrap();
 
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone());
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), None);
     adapter
         .spawn_resume(
             "tmpm-test",
@@ -1712,7 +1749,7 @@ fn spawn_resume_uses_resume_flag_for_a_worktree_cwd() {
     std::fs::write(project_dir.join("worktree-session-id.jsonl"), "{}").unwrap();
 
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone());
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), None);
     adapter
         .spawn_resume(
             "tmpm-test",
@@ -1747,7 +1784,7 @@ fn spawn_resume_sends_prompt_file_when_binary_available() {
         return;
     };
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone());
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), None);
     adapter
         .spawn_resume(
             "tmpm-test",
@@ -1788,7 +1825,7 @@ fn spawn_resume_sends_oauth_token_when_available() {
         );
     }
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone());
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), None);
     let result = adapter.spawn_resume(
         "tmpm-test",
         None,
@@ -1825,7 +1862,7 @@ fn spawn_resume_with_missing_id_falls_back_gracefully() {
         return;
     };
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone());
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), None);
     adapter
         .spawn_resume(
             "tmpm-test",
@@ -1873,7 +1910,7 @@ fn spawn_resume_targets_stored_pane_id_when_known() {
         return;
     };
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone());
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), None);
     adapter
         .spawn_resume(
             "tmpm-test",
@@ -1923,7 +1960,7 @@ fn spawn_resume_falls_back_to_session_target_when_pane_id_unknown() {
         return;
     };
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone());
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), None);
     adapter
         .spawn_resume(
             "tmpm-test",
@@ -2214,7 +2251,7 @@ fn spawn_resume_without_id_no_prior_conv_sends_plain_spawn() {
     };
     let tmp = tempfile::tempdir().expect("tempdir");
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone());
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), None);
     adapter
         .spawn_resume(
             "test-tmux-session",
@@ -2853,7 +2890,7 @@ fn spawn_resume_trust_seed_stays_within_redirected_home() {
     );
 
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone());
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), None);
     adapter
         .spawn_resume(
             "tmpm-4206",
@@ -3119,7 +3156,7 @@ fn spawn_resume_never_sends_bare_continue() {
         return; // adapter path needs the real binary; the pure test above does not
     };
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone());
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), None);
     adapter
         .spawn_resume("tmpm-6765", None, &cwd, "task", None, TEST_SESSION_ID, &[])
         .expect("spawn_resume with a null claude_session_id");

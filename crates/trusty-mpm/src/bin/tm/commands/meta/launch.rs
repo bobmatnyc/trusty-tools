@@ -230,7 +230,7 @@ pub(crate) async fn launch_and_wait(
     // injection (which needs the registry) is out of scope here, matching
     // the existing scope boundary around the bare-`tm` in-place relaunch
     // path (`build_inplace_resume_command`).
-    let adapter = build_adapter(RuntimeKind::ClaudeCode, mgr.tmux_driver());
+    let adapter = build_adapter(RuntimeKind::ClaudeCode, mgr.tmux_driver(), None);
     adapter
         .spawn(
             &record.tmux_name,

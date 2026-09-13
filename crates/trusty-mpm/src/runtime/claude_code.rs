@@ -14,6 +14,9 @@ use std::sync::Arc;
 
 use tracing::debug;
 
+// #7685: imported rather than path-qualified at each use — this file sits at
+// its SLOC cap and the qualified form wraps over three lines per call site.
+use crate::core::memory_reachable::resolve_memory_reachable;
 use crate::core::oauth_token::OAUTH_TOKEN_ENV_VAR;
 use crate::session_manager::ManagedTmuxDriver;
 
@@ -974,17 +977,32 @@ pub fn build_inplace_resume_command(
 /// `claude_code_adapter_identifies`.
 pub struct ClaudeCodeAdapter {
     tmux: Arc<dyn ManagedTmuxDriver + Send + Sync>,
+    /// What the launch already resolved about trusty-memory (#7685); `None`
+    /// means this adapter must ask the host itself.
+    memory_reachable: Option<bool>,
 }
 
 impl ClaudeCodeAdapter {
     /// Construct an adapter backed by the given tmux driver.
     ///
     /// Why: the session manager injects the tmux driver via `Arc<dyn …>` so
-    /// the adapter is testable without a real tmux binary.
-    /// What: stores the driver reference.
-    /// Test: used in every `ClaudeCodeAdapter` test.
-    pub fn new(tmux: Arc<dyn ManagedTmuxDriver + Send + Sync>) -> Self {
-        Self { tmux }
+    /// the adapter is testable without a real tmux binary. `memory_reachable`
+    /// (#7685) is what this launch's `prepare_session_inner` already answered one
+    /// `PROBE_TIMEOUT` ago; taking it at CONSTRUCTION rather than offering a
+    /// setter is what stops a caller spawning before pinning it. `None` — from a
+    /// caller that ran no preparation — keeps the probe, so the answer is never
+    /// guessed.
+    /// What: stores both.
+    /// Test: used in every `ClaudeCodeAdapter` test;
+    /// `spawn_uses_the_launch_resolved_reachability` pins the reachability half.
+    pub fn new(
+        tmux: Arc<dyn ManagedTmuxDriver + Send + Sync>,
+        memory_reachable: Option<bool>,
+    ) -> Self {
+        Self {
+            tmux,
+            memory_reachable,
+        }
     }
 
     /// Resolve the `claude` binary to an absolute path, or `None` if missing.
@@ -1127,10 +1145,10 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         let mcp_env = crate::core::mcp_session_env::session_mcp_env(cwd, None);
         let gh_env_file = claude_code_gh_env::write_gh_env_file(gh_env);
         // #7685: auto memory is the FALLBACK, so the kill switch goes on the
-        // command line only when trusty-memory answered. Resolved here, beside
-        // `session_mcp_env` (which likewise touches a sidecar), so the string
-        // builders below stay pure functions of their arguments.
-        let memory_reachable = crate::core::memory_reachable::probe_memory_reachable_blocking();
+        // command line only when trusty-memory answered. The launch resolved
+        // this already where it could; this only probes when nothing did, so the
+        // string builders below stay pure functions of their arguments.
+        let memory_reachable = resolve_memory_reachable(self.memory_reachable);
         self.tmux
             .send_line(
                 tmux_name,
@@ -1295,7 +1313,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             mcp_env: &mcp_env,
             // #7685: same fallback rule as `spawn` — a resumed session must not
             // lose auto memory while trusty-memory is down either.
-            memory_reachable: crate::core::memory_reachable::probe_memory_reachable_blocking(),
+            memory_reachable: resolve_memory_reachable(self.memory_reachable),
         };
         // #6863: a session Claude Code is still running in the background
         // refuses `--resume` and exits 0, leaving the pane a bare shell; ask its

@@ -239,14 +239,20 @@ impl FromStr for RuntimeKind {
 /// factory keeps that mapping in a single place so adding a backend touches only
 /// this function and the enum.
 /// What: returns a boxed adapter wrapping the shared tmux driver — a
-/// [`ClaudeCodeAdapter`] or [`TcodeAdapter`].
-/// Test: `build_adapter_returns_matching_identify`.
+/// [`ClaudeCodeAdapter`] or [`TcodeAdapter`]. `memory_reachable` is what the
+/// caller's `prepare_session*` already resolved about trusty-memory (#7685);
+/// `None` from a caller that ran no preparation leaves the adapter to probe, so
+/// the answer is never simply guessed. `TcodeAdapter` has no auto memory to
+/// decide about and ignores it.
+/// Test: `build_adapter_returns_matching_identify`,
+/// `spawn_uses_the_launch_resolved_reachability`.
 pub fn build_adapter(
     kind: RuntimeKind,
     tmux: Arc<dyn ManagedTmuxDriver + Send + Sync>,
+    memory_reachable: Option<bool>,
 ) -> Box<dyn RuntimeAdapter> {
     match kind {
-        RuntimeKind::ClaudeCode => Box::new(ClaudeCodeAdapter::new(tmux)),
+        RuntimeKind::ClaudeCode => Box::new(ClaudeCodeAdapter::new(tmux, memory_reachable)),
         RuntimeKind::Tcode => Box::new(TcodeAdapter::new(tmux)),
     }
 }
@@ -330,9 +336,9 @@ mod tests {
     #[test]
     fn build_adapter_returns_matching_identify() {
         let tmux = FakeTmux::new();
-        let claude = build_adapter(RuntimeKind::ClaudeCode, tmux.clone());
+        let claude = build_adapter(RuntimeKind::ClaudeCode, tmux.clone(), None);
         assert_eq!(claude.identify(), "claude-code");
-        let tcode = build_adapter(RuntimeKind::Tcode, tmux);
+        let tcode = build_adapter(RuntimeKind::Tcode, tmux, None);
         assert_eq!(tcode.identify(), "tcode");
     }
 }

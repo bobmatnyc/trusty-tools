@@ -22,9 +22,15 @@
 //!   AFTER that file's drawer id comes back, and a single failure also stops the
 //!   index from being truncated — so the index still names every file that is
 //!   still on disk, and a re-run picks up exactly the remainder.
+//! * **A fact is never stored twice.** "Stored" and "archived" are two states,
+//!   and the second can fail on its own. The drawer id is written to a
+//!   `<file>.stored` sidecar BEFORE the archive is attempted, so a re-run over a
+//!   fact that was stored but not filed retries only the rename and reuses the
+//!   drawer it already has.
 //!
 //! Idempotent by construction: a second run finds no fact files (they are in the
-//! archive) and an empty index, so it stores nothing.
+//! archive) and an empty index, so it stores nothing — and a second run over a
+//! half-migrated store issues no `memory_remember` for the half that landed.
 //! Test: `core::auto_memory_import::tests`.
 
 use std::path::{Path, PathBuf};
@@ -87,7 +93,8 @@ pub struct AutoFileResult {
     pub file: String,
     /// Stored, or failed.
     pub status: AutoImportStatus,
-    /// The drawer the fact landed in, when it landed.
+    /// The drawer the fact landed in, when it landed — set on a `Failed` row too
+    /// when the store succeeded and only the archive move did not (#7685).
     pub drawer_id: Option<String>,
     /// The tags written with it.
     pub tags: Vec<String>,
@@ -272,16 +279,56 @@ pub async fn run_auto_memory_import(opts: &AutoImportOptions) -> anyhow::Result<
     Ok(report)
 }
 
+/// Suffix of the sidecar marker that records a fact's completed store (#7685).
+///
+/// Why: "stored" and "archived" are two states, and the gap between them used to
+/// be invisible. A store that succeeded followed by an archive rename that failed
+/// left a fact file still on disk with its drawer already written, so the next
+/// run stored it a SECOND time and the palace grew a duplicate drawer. The marker
+/// makes the first state durable, so a re-run can tell "not migrated yet" from
+/// "migrated, not yet filed".
+/// What: appended to the fact file's full name, so `a-fact.md` gets
+/// `a-fact.md.stored`. The extension is not `.md`, so [`fact_files`] never reads
+/// a marker back as a fact.
+/// Test: `auto_memory_import_retries_only_the_archive_after_a_rename_failure`.
+const STORED_MARKER_SUFFIX: &str = ".stored";
+
+/// The marker path for one fact file.
+fn stored_marker(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(STORED_MARKER_SUFFIX);
+    PathBuf::from(name)
+}
+
+/// The drawer id a previous run recorded for this fact, if it got that far.
+///
+/// Why: reading it is what turns the second run into an archive retry instead of
+/// a second `remember`.
+/// What: the trimmed marker contents; `None` for an absent, unreadable or empty
+/// marker — all of which mean "nothing proven", so the store runs again.
+/// Test: `auto_memory_import_retries_only_the_archive_after_a_rename_failure`.
+fn stored_drawer_id(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(stored_marker(path)).ok()?;
+    let id = text.trim();
+    (!id.is_empty()).then(|| id.to_string())
+}
+
 /// Store one fact file, then move it into the archive.
 ///
 /// Why: the ORDER is the fail-open guarantee — a file is archived only after its
 /// drawer id came back, so a declined write, an unparseable file or a dead
-/// daemon all leave the fact exactly where it was.
+/// daemon all leave the fact exactly where it was. The [`STORED_MARKER_SUFFIX`]
+/// sidecar is what keeps that order from costing a DUPLICATE drawer: the drawer
+/// id is on disk before the rename is attempted, so a rename that fails leaves a
+/// re-run retrying only the rename.
 /// What: parses, derives [`migration_tags`], writes through
-/// [`crate::core::memory_import::remember`], then renames the file under
-/// `archive`. A rename failure is reported as a failure even though the drawer
-/// exists, because the file is still there and a re-run must see it.
-/// Test: `auto_memory_import_leaves_a_failed_file_in_place`.
+/// [`crate::core::memory_import::remember`], records the drawer id in the marker,
+/// then renames the file under `archive` and removes the marker. A fact whose
+/// marker already names a drawer skips the store entirely. A rename failure is
+/// still reported as a failure — the file is still there and a re-run must see
+/// it — but now carries the drawer id it will reuse.
+/// Test: `auto_memory_import_leaves_a_failed_file_in_place`,
+/// `auto_memory_import_retries_only_the_archive_after_a_rename_failure`.
 async fn migrate_one(
     socket: &Path,
     opts: &AutoImportOptions,
@@ -292,38 +339,58 @@ async fn migrate_one(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string());
-    let failed = |tags: Vec<String>, error: String| AutoFileResult {
+    let failed = |tags: Vec<String>, drawer_id: Option<String>, error: String| AutoFileResult {
         file: file.clone(),
         status: AutoImportStatus::Failed,
-        drawer_id: None,
+        drawer_id,
         tags,
         error: Some(error),
     };
 
     let source = match std::fs::read_to_string(path) {
         Ok(source) => source,
-        Err(e) => return failed(Vec::new(), format!("read failed: {e}")),
+        Err(e) => return failed(Vec::new(), None, format!("read failed: {e}")),
     };
     let parsed = match parse_memory_file(&source) {
         Ok(Some(parsed)) => parsed,
-        Ok(None) => return failed(Vec::new(), "no YAML frontmatter".to_string()),
-        Err(e) => return failed(Vec::new(), format!("parse failed: {e:#}")),
+        Ok(None) => return failed(Vec::new(), None, "no YAML frontmatter".to_string()),
+        Err(e) => return failed(Vec::new(), None, format!("parse failed: {e:#}")),
     };
     let tags = migration_tags(&parsed.name, &parsed.kind);
 
-    // `allow_secret_like`: these facts are already on this machine in plain
-    // text; refusing to move one because its prose looks token-shaped would
-    // strand it in the store this command exists to empty.
-    let drawer_id = match remember(socket, &opts.palace, &parsed.text, &tags, true).await {
-        Ok(id) => id,
-        Err(e) => return failed(tags, format!("store failed: {e:#}")),
+    let drawer_id = match stored_drawer_id(path) {
+        // A previous run already wrote this fact; storing it again would leave
+        // the palace with two drawers for one fact.
+        Some(id) => id,
+        None => {
+            // `allow_secret_like`: these facts are already on this machine in
+            // plain text; refusing to move one because its prose looks
+            // token-shaped would strand it in the store this command exists to
+            // empty.
+            let id = match remember(socket, &opts.palace, &parsed.text, &tags, true).await {
+                Ok(id) => id,
+                Err(e) => return failed(tags, None, format!("store failed: {e:#}")),
+            };
+            if let Err(e) = std::fs::write(stored_marker(path), &id) {
+                // The drawer exists but nothing records it. Reporting failure
+                // without a marker is the safe direction only because the index
+                // stays un-emptied, so an operator sees the file again.
+                return failed(tags, Some(id), format!("stored but not marked: {e}"));
+            }
+            id
+        }
     };
     if let Err(e) = archive_file(path, archive, &file) {
         return failed(
             tags,
+            Some(drawer_id.clone()),
             format!("stored as {drawer_id} but not archived: {e:#}"),
         );
     }
+    // The fact is filed; the marker has nothing left to prove. A removal that
+    // fails is harmless — `fact_files` never returns a marker, so the stray one
+    // cannot cause a re-store.
+    let _ = std::fs::remove_file(stored_marker(path));
     AutoFileResult {
         file,
         status: AutoImportStatus::Stored,

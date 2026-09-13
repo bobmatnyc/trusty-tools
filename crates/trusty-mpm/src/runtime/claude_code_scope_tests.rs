@@ -226,7 +226,7 @@ fn assert_scope_failure(err: &RuntimeError) {
 fn spawn_fails_when_the_composed_file_cannot_be_written() {
     let _home = PoisonedStateRoot::set();
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone());
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), None);
 
     let err = adapter
         .spawn(
@@ -250,7 +250,7 @@ fn spawn_fails_when_the_composed_file_cannot_be_written() {
 fn spawn_resume_fails_when_the_composed_file_cannot_be_written() {
     let _home = PoisonedStateRoot::set();
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone());
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), None);
 
     let err = adapter
         .spawn_resume(

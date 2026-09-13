@@ -215,7 +215,7 @@ pub(super) async fn spawn_managed_on_main(
 
     emit(ProvisioningStage::LaunchingRuntime);
     let tmux_arc = mgr.tmux_driver();
-    let adapter = crate::runtime::build_adapter(record.runtime, tmux_arc);
+    let adapter = crate::runtime::build_adapter(record.runtime, tmux_arc, None);
     let gh_env = resolve_gh_env(state, local_path).await;
     if let Err(e) = adapter.spawn(
         &record.tmux_name,

@@ -102,7 +102,7 @@ use crate::core::paths::FrameworkPaths;
 use crate::core::skill_deployer::DeployStats;
 use settings::{
     deploy_output_style, preseed_workspace_trust_home, remove_global_trusty_memory_hooks,
-    write_auto_memory_off, write_output_style, write_project_hooks,
+    write_auto_memory_enabled, write_output_style, write_project_hooks,
 };
 
 /// Re-export of the project-tier `enabledPlugins` writer (#7678).
@@ -305,6 +305,17 @@ pub struct PrepReport {
     /// Test: `prepare_session_reports_a_quarantined_agent_as_a_launch_notice`,
     /// `prepare_session_on_a_clean_project_reports_no_asset_notice`.
     pub asset_notices: Vec<String>,
+    /// Whether trusty-memory answered this launch's reachability probe (#7685).
+    ///
+    /// Why: the runtime adapter needs the same answer to decide
+    /// `CLAUDE_CODE_DISABLE_AUTO_MEMORY`, and it runs after preparation in the
+    /// same request. Returning the resolved value is what lets it reuse this
+    /// one rather than paying a second `PROBE_TIMEOUT` against a daemon that is
+    /// already known to be hung.
+    /// What: the value this preparation wrote `autoMemoryEnabled` against —
+    /// `true` means auto memory was turned off, `false` means it was restored.
+    /// Test: `prepare_session_reports_the_resolved_reachability`.
+    pub memory_reachable: bool,
 }
 
 /// A failure raised while preparing a session for launch.
@@ -448,7 +459,7 @@ impl PrepError {
 /// pins whether trusty-memory answered, `None` meaning "probe the host".
 /// Test: `repair_closes_gaps_on_incomplete_workspace`,
 /// `prepare_session_disables_auto_memory_when_trusty_memory_is_reachable`,
-/// `prepare_session_leaves_auto_memory_alone_when_trusty_memory_is_down`, plus
+/// `prepare_session_restores_auto_memory_when_trusty_memory_is_down`, plus
 /// every `prepare_session_*` test.
 #[derive(Clone, Copy, Default)]
 pub(super) struct HostInputs<'a> {
@@ -479,11 +490,11 @@ pub(super) fn prepare_session_inner(
     host: HostInputs<'_>,
 ) -> Result<PrepReport, PrepError> {
     let home = host.home;
-    // #7685: resolved ONCE here rather than at the write site, so the probe
-    // cannot run twice and the injected value has exactly one consumer.
-    let memory_reachable = host
-        .memory_reachable
-        .unwrap_or_else(crate::core::memory_reachable::probe_memory_reachable_blocking);
+    // #7685: resolved ONCE per launch, here, and returned on the `PrepReport` so
+    // the runtime adapter reuses this answer instead of dialling the daemon a
+    // second time.
+    let memory_reachable =
+        crate::core::memory_reachable::resolve_memory_reachable(host.memory_reachable);
     // Load the user config ONCE and thread it through both the manifest
     // resolution / catalog-root path AND the style resolution path below. Reading
     // `config.toml` a second time mid-function (the old `MpmConfig::load` just
@@ -767,16 +778,17 @@ pub(super) fn prepare_session_inner(
 
     // #7685: Claude Code auto-memory (`MEMORY.md`) is a FALLBACK — trusty-memory
     // is the memory, and auto memory stays on only when trusty-memory is not
-    // available (owner ruling 2026-09-12). Non-fatal for the same reason the
-    // write above is: a failure costs the project the setting, not its session.
-    if memory_reachable {
-        if let Err(err) = write_auto_memory_off(project_dir) {
-            tracing::warn!("failed to disable Claude Code auto-memory: {err}");
-        }
-    } else {
+    // available (owner ruling 2026-09-12). The write is TWO-WAY: `true` is
+    // written as deliberately as `false`, because only an explicit `true` can
+    // revert a `false` an earlier healthy-trusty-memory launch left behind.
+    // Non-fatal for the same reason the write above is: a failure costs the
+    // project the setting, not its session.
+    if let Err(err) = write_auto_memory_enabled(project_dir, !memory_reachable) {
+        tracing::warn!("failed to write Claude Code `{AUTO_MEMORY_KEY}`: {err}");
+    } else if !memory_reachable {
         tracing::info!(
-            "trusty-memory is not reachable — leaving Claude Code auto-memory ON as the \
-             fallback for this session, and not writing `{AUTO_MEMORY_KEY}` (#7685)"
+            "trusty-memory is not reachable — wrote `{AUTO_MEMORY_KEY}: true` to restore \
+             Claude Code auto-memory as this project's fallback (#7685)"
         );
     }
 
@@ -1026,6 +1038,7 @@ pub(super) fn prepare_session_inner(
         catchup_context,
         roster_errors,
         asset_notices,
+        memory_reachable,
     })
 }
 

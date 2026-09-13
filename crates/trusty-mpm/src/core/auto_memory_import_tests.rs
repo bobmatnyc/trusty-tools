@@ -300,6 +300,67 @@ async fn auto_memory_import_leaves_a_failed_file_in_place() {
 }
 
 #[tokio::test]
+async fn auto_memory_import_retries_only_the_archive_after_a_rename_failure() {
+    // #7685 r3: "stored" and "archived" are two states. A store that lands
+    // followed by an archive rename that fails used to leave the fact file on
+    // disk with no record of its drawer, so the next run stored it AGAIN and the
+    // palace ended up with two drawers for one fact.
+    //
+    // The rename is forced to fail by putting a FILE where the archive DIRECTORY
+    // must be: `create_dir_all` then fails deterministically, with no dependence
+    // on permission bits or on the platform's rename semantics.
+    let project = tempfile::tempdir().expect("tempdir");
+    let (config, memory) = write_store(project.path(), &[("link-issues-and-prs.md", FACT)], INDEX);
+    let archive = memory
+        .parent()
+        .expect("parent")
+        .join("memory.archived-20260912");
+    std::fs::write(&archive, "not a directory").expect("block the archive path");
+    let (daemon, state) = start_stub().await;
+    let fact = memory.join("link-issues-and-prs.md");
+
+    let first = run_auto_memory_import(&opts(project.path(), config.path(), daemon.socket()))
+        .await
+        .expect("first run");
+
+    assert_eq!(first.failed, 1, "{:#?}", first.files);
+    assert_eq!(
+        first.files[0].drawer_id.as_deref(),
+        Some("drawer-1"),
+        "a failed archive must still report the drawer the store produced"
+    );
+    assert!(fact.is_file(), "the unfiled fact stays on disk");
+    assert!(!first.index_cleared);
+
+    // Unblock the archive and re-run. The fact must be filed WITHOUT a second
+    // store.
+    std::fs::remove_file(&archive).expect("unblock");
+
+    let second = run_auto_memory_import(&opts(project.path(), config.path(), daemon.socket()))
+        .await
+        .expect("second run");
+
+    assert_eq!(second.stored, 1, "{:#?}", second.files);
+    assert_eq!(
+        second.files[0].drawer_id.as_deref(),
+        Some("drawer-1"),
+        "the retry must reuse the drawer the first run created"
+    );
+    assert_eq!(
+        state.lock().expect("lock").writes.len(),
+        1,
+        "the fact must be stored exactly once across both runs"
+    );
+    assert!(archive.join("link-issues-and-prs.md").is_file());
+    assert!(!fact.exists());
+    assert!(
+        !memory.join("link-issues-and-prs.md.stored").exists(),
+        "the marker has nothing left to prove once the fact is filed"
+    );
+    assert!(second.index_cleared, "{:#?}", second);
+}
+
+#[tokio::test]
 async fn auto_memory_import_on_an_absent_store_is_a_no_op() {
     let project = tempfile::tempdir().expect("tempdir");
     let config = tempfile::tempdir().expect("tempdir");

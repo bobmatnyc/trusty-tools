@@ -81,18 +81,41 @@ fn auto_memory_fails_when_unset_beside_a_healthy_trusty_memory() {
 }
 
 #[test]
-fn auto_memory_warns_when_on_while_trusty_memory_is_down() {
-    // ⚠️: the SAME configuration as the first test. With trusty-memory down,
-    // auto memory carrying the project is the fallback working as designed —
-    // reporting it red would train the operator to ignore the row.
+fn auto_memory_is_ok_when_on_while_trusty_memory_is_down() {
+    // ✅: the SAME configuration as the first test. With trusty-memory down,
+    // auto memory carrying the project IS the posture the directive asks for —
+    // there is nothing here for an operator to do.
     let (_tmp, home, project) = fixture(Some(ON));
+
+    let check = check_auto_memory(Some(&project), &home, None, false);
+
+    assert_eq!(check.status, CheckStatus::Ok, "{}", check.message);
+    assert!(
+        check.message.contains("FALLBACK"),
+        "the row must say why this is the correct state: {}",
+        check.message
+    );
+}
+
+#[test]
+fn auto_memory_warns_when_off_while_trusty_memory_is_down() {
+    // ⚠️ #7685 r3: the double-loss state. trusty-memory is not answering and the
+    // fallback is disabled, so this project has NO memory — and before the
+    // two-way write that state was unreachable from `--fix` and reported as a
+    // clean `Ok`.
+    let (_tmp, home, project) = fixture(Some(OFF));
 
     let check = check_auto_memory(Some(&project), &home, None, false);
 
     assert_eq!(check.status, CheckStatus::Warn, "{}", check.message);
     assert!(
-        check.message.contains("FALLBACK"),
-        "the row must say why it is not a failure: {}",
+        check.message.contains("NO memory"),
+        "the row must name the loss: {}",
+        check.message
+    );
+    assert!(
+        check.message.contains("tm doctor --fix"),
+        "the row must name the repair that restores it: {}",
         check.message
     );
 }
@@ -150,14 +173,22 @@ fn auto_memory_fails_when_the_index_still_holds_facts() {
 
 #[test]
 fn auto_memory_warns_when_the_index_holds_facts_and_memory_is_down() {
-    // Same stranded facts, but nothing can migrate them right now.
+    // Same stranded facts, but nothing can migrate them right now. The disabled
+    // fallback is the headline — a project with no memory outranks a migration
+    // that cannot run — and the stranded index is named alongside it.
     let (_tmp, home, project) = fixture(Some(OFF));
     let config = tempfile::TempDir::new().unwrap();
-    write_index(config.path(), &project, "- [a fact](a-fact.md) — text\n");
+    let index = write_index(config.path(), &project, "- [a fact](a-fact.md) — text\n");
 
     let check = check_auto_memory(Some(&project), &home, Some(config.path()), false);
 
     assert_eq!(check.status, CheckStatus::Warn, "{}", check.message);
+    assert!(check.message.contains("NO memory"), "{}", check.message);
+    assert!(
+        check.message.contains(&index.display().to_string()),
+        "the row must still name the stranded index: {}",
+        check.message
+    );
 }
 
 #[test]
@@ -214,7 +245,7 @@ fn auto_memory_repair_applies_when_absent() {
     let project = tmp.path();
     write_settings(project, ".claude/settings.json", r#"{"outputStyle": "x"}"#);
 
-    let steps = repair_auto_memory(project, RepairMode::Apply);
+    let steps = repair_auto_memory(project, RepairMode::Apply, true);
 
     assert_eq!(steps.len(), 1);
     assert!(steps[0].changed(), "{:?}", steps[0].status);
@@ -227,6 +258,38 @@ fn auto_memory_repair_applies_when_absent() {
         written["outputStyle"], "x",
         "the repair must preserve every other key"
     );
+}
+
+#[test]
+fn auto_memory_repair_restores_the_fallback_when_memory_is_down() {
+    // #7685 r3: the recovery path. A project left `false` by an earlier launch
+    // beside a healthy trusty-memory had NO route back once trusty-memory went
+    // down — `--fix` only ever wrote `false`, so the double loss was permanent.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let project = tmp.path();
+    write_settings(project, ".claude/settings.json", OFF);
+
+    let steps = repair_auto_memory(project, RepairMode::Apply, false);
+
+    assert_eq!(steps.len(), 1, "a `false` beside a dead daemon is a repair");
+    assert!(steps[0].changed(), "{:?}", steps[0].status);
+    assert!(
+        steps[0].what.contains("restoring the fallback"),
+        "the step must say what it is doing: {}",
+        steps[0].what
+    );
+    let written: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        written[AUTO_MEMORY_KEY],
+        serde_json::Value::Bool(true),
+        "the fallback must come back on: {written}"
+    );
+
+    // And the repair is idempotent in this direction too.
+    assert!(repair_auto_memory(project, RepairMode::Apply, false).is_empty());
 }
 
 #[test]
@@ -244,7 +307,7 @@ fn auto_memory_repair_never_migrates() {
     let fact = index.parent().unwrap().join("a-fact.md");
     std::fs::write(&fact, "---\nname: a-fact\n---\nbody\n").unwrap();
 
-    let steps = repair_auto_memory(&project, RepairMode::Apply);
+    let steps = repair_auto_memory(&project, RepairMode::Apply, true);
 
     assert_eq!(steps.len(), 1, "the repair writes the key and nothing else");
     assert_eq!(
@@ -262,7 +325,7 @@ fn auto_memory_repair_dry_run_writes_nothing() {
     let body = r#"{"outputStyle": "x"}"#;
     write_settings(project, ".claude/settings.json", body);
 
-    let steps = repair_auto_memory(project, RepairMode::DryRun);
+    let steps = repair_auto_memory(project, RepairMode::DryRun, true);
 
     assert_eq!(steps.len(), 1);
     assert_eq!(steps[0].status, StepStatus::Planned);
@@ -279,7 +342,7 @@ fn auto_memory_repair_is_silent_when_already_false() {
     let project = tmp.path();
     write_settings(project, ".claude/settings.json", OFF);
 
-    assert!(repair_auto_memory(project, RepairMode::Apply).is_empty());
+    assert!(repair_auto_memory(project, RepairMode::Apply, true).is_empty());
 }
 
 #[test]
@@ -291,7 +354,7 @@ fn auto_memory_repair_reports_a_write_failure() {
     let project = tmp.path();
     std::fs::create_dir_all(project.join(".claude").join("settings.json")).unwrap();
 
-    let steps = repair_auto_memory(project, RepairMode::Apply);
+    let steps = repair_auto_memory(project, RepairMode::Apply, true);
 
     assert_eq!(steps.len(), 1);
     assert!(

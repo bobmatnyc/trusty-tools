@@ -6,7 +6,7 @@ use super::search_index::register_project_index;
 use super::settings::{
     clean_global_trusty_memory_hooks, deploy_output_style, is_stale_bare_statusline_command,
     is_stale_statusline_command, preseed_workspace_trust, resolve_palace_slug,
-    resolve_statusline_binary_with, write_auto_memory_off, write_enabled_plugins,
+    resolve_statusline_binary_with, write_auto_memory_enabled, write_enabled_plugins,
     write_output_style, write_project_hooks, write_status_line,
 };
 use super::*;
@@ -939,17 +939,24 @@ fn prepare_session_disables_auto_memory_when_trusty_memory_is_reachable() {
 
 #[test]
 #[serial_test::serial]
-fn prepare_session_leaves_auto_memory_alone_when_trusty_memory_is_down() {
-    // #7685 (owner ruling 2026-09-12): auto memory is a FALLBACK. With
-    // trusty-memory unreachable the launch must NOT write the key, or the
-    // session loses both memories at once.
+fn prepare_session_restores_auto_memory_when_trusty_memory_is_down() {
+    // #7685 r3: the launch write is TWO-WAY. Seed the project with the `false` a
+    // previous healthy-trusty-memory launch would have left — the state the
+    // "leave the key alone" rule could never recover from — and assert this
+    // launch reverts it.
     let tmp_home = tempdir().unwrap();
     let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
     let project = tmp.path();
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+    std::fs::create_dir_all(project.join(".claude")).unwrap();
+    std::fs::write(
+        project.join(".claude").join("settings.json"),
+        r#"{"autoMemoryEnabled":false}"#,
+    )
+    .unwrap();
 
-    crate::core::session_launch::prepare_session_with_memory_reachable(
+    let report = crate::core::session_launch::prepare_session_with_memory_reachable(
         &fw,
         project,
         Some(tmp_home.path()),
@@ -961,15 +968,40 @@ fn prepare_session_leaves_auto_memory_alone_when_trusty_memory_is_down() {
         &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
     )
     .unwrap();
-    assert!(
-        value.get("autoMemoryEnabled").is_none(),
-        "with trusty-memory down the fallback must stay available: {value}"
+    assert_eq!(
+        value["autoMemoryEnabled"],
+        serde_json::json!(true),
+        "with trusty-memory down the fallback must be turned back ON: {value}"
     );
     assert_eq!(
         value["outputStyle"],
         serde_json::json!("trusty-mpm"),
-        "declining the auto-memory write must not skip the rest of the launch"
+        "the auto-memory write must not skip the rest of the launch"
     );
+    assert!(
+        !report.memory_reachable,
+        "the report must carry the reachability the adapter will reuse"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn prepare_session_reports_the_resolved_reachability() {
+    // #7685 r3: the value the runtime adapter reuses instead of probing again.
+    let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
+    let tmp = tempdir().unwrap();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+
+    let report = crate::core::session_launch::prepare_session_with_memory_reachable(
+        &fw,
+        tmp.path(),
+        Some(tmp_home.path()),
+        true,
+    )
+    .expect("prep succeeds");
+
+    assert!(report.memory_reachable);
 }
 
 #[test]
@@ -1097,7 +1129,7 @@ fn write_auto_memory_off_disables_auto_memory() {
     let tmp = tempdir().unwrap();
     let project = tmp.path();
 
-    write_auto_memory_off(project).expect("write succeeds");
+    write_auto_memory_enabled(project, false).expect("write succeeds");
 
     let value: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
@@ -1120,7 +1152,7 @@ fn write_auto_memory_off_preserves_existing_keys() {
     )
     .unwrap();
 
-    write_auto_memory_off(project).expect("write succeeds");
+    write_auto_memory_enabled(project, false).expect("write succeeds");
 
     let value: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(claude_dir.join("settings.json")).unwrap())
@@ -1144,12 +1176,37 @@ fn write_auto_memory_off_overrides_an_enabled_value() {
     )
     .unwrap();
 
-    write_auto_memory_off(project).expect("write succeeds");
+    write_auto_memory_enabled(project, false).expect("write succeeds");
 
     let value: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(claude_dir.join("settings.json")).unwrap())
             .unwrap();
     assert_eq!(value["autoMemoryEnabled"], serde_json::json!(false));
+}
+
+#[test]
+fn write_auto_memory_on_reverts_a_prior_disable() {
+    // #7685 r3: the other direction, and the reason the writer is two-way at
+    // all. A `false` an earlier launch wrote has to be revertible by a later
+    // launch that finds trusty-memory gone — "leave the key alone" could not do
+    // it, so the fallback stayed dead forever.
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let claude_dir = project.join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    std::fs::write(
+        claude_dir.join("settings.json"),
+        r#"{"autoMemoryEnabled":false,"theme":"dark"}"#,
+    )
+    .unwrap();
+
+    write_auto_memory_enabled(project, true).expect("write succeeds");
+
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(claude_dir.join("settings.json")).unwrap())
+            .unwrap();
+    assert_eq!(value["autoMemoryEnabled"], serde_json::json!(true));
+    assert_eq!(value["theme"], serde_json::json!("dark"));
 }
 
 /// #6807: the project tier is the only one a bare `claude` reads — the tm-owned
