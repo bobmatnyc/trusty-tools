@@ -185,15 +185,26 @@ pub(crate) const AUTO_MEMORY_KEY: &str = "autoMemoryEnabled";
 /// Why (#7685): [`write_output_style`] was the only project-settings writer and
 /// carried the read/merge/write body inline, so every new key would have copied
 /// it. The merge discipline it encodes is the part worth sharing: an existing
-/// file is parsed and every key it already carries is preserved, a missing or
-/// malformed file starts from an empty object rather than aborting the launch,
-/// and the result is written back pretty-printed. Taking a closure rather than a
-/// single key keeps a multi-key writer at one read and one write.
-/// What: creates `<project_dir>/.claude/`, loads the settings object (empty on a
-/// missing or non-object file), hands it to `mutate`, and writes it back
-/// pretty-printed.
+/// file is parsed and every key it already carries is preserved, a missing file
+/// starts from an empty object rather than aborting the launch, and the result
+/// is written back pretty-printed. Taking a closure rather than a single key
+/// keeps a multi-key writer at one read and one write.
+/// What: creates `<project_dir>/.claude/`, loads the settings object through
+/// [`super::malformed_backup::load_settings_object`], hands it to `mutate`, and
+/// writes it back pretty-printed via
+/// [`trusty_common::claude_config::write_json_atomic`].
+///
+/// #7780: a file that is not a JSON object is no longer silently coerced to
+/// `{}` and overwritten. Its bytes are copied to a
+/// `settings.json.malformed-<stamp>` sibling first (the owner's
+/// backup-then-rewrite ruling, 2026-09-13), and a copy that cannot be made
+/// refuses the rewrite outright — see [`PrepError::SettingsBackup`]. The write
+/// became atomic in the same change, so a crash mid-rewrite can no longer
+/// CREATE the torn file this function exists to survive.
 /// Test: `write_output_style_preserves_existing_keys`,
-/// `write_auto_memory_off_preserves_existing_keys`.
+/// `write_auto_memory_off_preserves_existing_keys`,
+/// `merge_settings_backs_up_a_malformed_file_before_rewriting_it`,
+/// `merge_settings_refuses_when_the_copy_cannot_be_written`.
 pub(crate) fn merge_settings<F>(project_dir: &Path, mutate: F) -> Result<(), PrepError>
 where
     F: FnOnce(&mut serde_json::Value),
@@ -205,24 +216,14 @@ where
     })?;
     let settings_path = claude_dir.join("settings.json");
 
-    // Load existing settings to preserve unrelated keys; tolerate a missing or
-    // malformed file by starting from an empty object.
-    let mut settings = match std::fs::read_to_string(&settings_path) {
-        Ok(text) => serde_json::from_str::<serde_json::Value>(&text)
-            .ok()
-            .filter(serde_json::Value::is_object)
-            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new())),
-        Err(_) => serde_json::Value::Object(serde_json::Map::new()),
-    };
+    // Load existing settings to preserve unrelated keys; a missing file starts
+    // from an empty object. #7780: a non-object file is copied aside first.
+    let mut settings = super::malformed_backup::load_settings_object(&settings_path)?;
 
     mutate(&mut settings);
 
-    let serialized = serde_json::to_string_pretty(&settings)
-        .map_err(|err| PrepError::Deploy(err.to_string()))?;
-    std::fs::write(&settings_path, serialized).map_err(|source| PrepError::Io {
-        path: settings_path.clone(),
-        source,
-    })
+    trusty_common::claude_config::write_json_atomic(&settings_path, &settings)
+        .map_err(|err| PrepError::Deploy(err.to_string()))
 }
 
 /// Set one key in the project's `.claude/settings.json`, preserving the rest.
@@ -406,9 +407,12 @@ pub(crate) fn write_enabled_plugins(
 /// What: see [`write_enabled_plugins`]. Writes nothing when `config_dir` is
 /// `None`, when the managed config dir knows about no plugins, or when the
 /// merged object already equals what is on disk — so a `--fix` against an
-/// in-sync project leaves the file, and its mtime, untouched.
+/// in-sync project leaves the file, and its mtime, untouched. #7780: when it
+/// does write over a file that is not a JSON object, the original bytes are
+/// copied to a `settings.json.malformed-<stamp>` sibling first.
 /// Test: `write_enabled_plugins_enables_an_opted_in_plugin`,
-/// `session_scope_repair_writes_nothing_when_the_settings_already_match`.
+/// `session_scope_repair_writes_nothing_when_the_settings_already_match`,
+/// `write_enabled_plugins_backs_up_a_malformed_file_before_rewriting_it`.
 pub(crate) fn write_enabled_plugins_with_trust(
     project_dir: &Path,
     config_dir: Option<&Path>,
@@ -434,12 +438,15 @@ pub(crate) fn write_enabled_plugins_with_trust(
         source,
     })?;
 
-    let serialized = serde_json::to_string_pretty(&plan.merged)
+    // #7780: `plan_enabled_plugins_with_trust` read the file with this writer's
+    // own tolerance, so `plan.merged` already discards a non-object file. This
+    // call is what turns that discard into a preserved copy — and refuses the
+    // rewrite when the copy cannot be made. Its return value is the empty object
+    // the plan already merged onto, so there is nothing here to re-read.
+    super::malformed_backup::load_settings_object(&plan.settings_path)?;
+
+    trusty_common::claude_config::write_json_atomic(&plan.settings_path, &plan.merged)
         .map_err(|err| PrepError::Deploy(err.to_string()))?;
-    std::fs::write(&plan.settings_path, serialized).map_err(|source| PrepError::Io {
-        path: plan.settings_path.clone(),
-        source,
-    })?;
     Ok(())
 }
 
@@ -473,7 +480,9 @@ pub(crate) fn write_enabled_plugins_with_trust(
 /// [`trusty_common::claude_config::merge_hook_entries`], and atomically writes
 /// the result back pretty-printed via
 /// [`trusty_common::claude_config::write_json_atomic`]. Creates the file and
-/// `.claude/` directory when absent.
+/// `.claude/` directory when absent. #7780: a file that is not a JSON object is
+/// copied to a `settings.json.malformed-<stamp>` sibling before it is replaced,
+/// and a copy that cannot be written refuses the write.
 ///
 /// `inject_prompt_context` carries the `[hooks] prompt_context` config key
 /// (#5034). It gates ONE entry — `UserPromptSubmit` → `trusty-memory
@@ -497,7 +506,8 @@ pub(crate) fn write_enabled_plugins_with_trust(
 /// `project_hooks_tests::write_project_hooks_strips_stale_prompt_context_when_disabled`,
 /// `project_hooks_tests::write_project_hooks_enabled_output_is_unchanged_by_the_toggle`,
 /// `project_hooks_tests::write_project_hooks_writes_divert_groups_when_enabled`,
-/// `project_hooks_tests::write_project_hooks_strips_stale_divert_when_disabled`.
+/// `project_hooks_tests::write_project_hooks_strips_stale_divert_when_disabled`,
+/// `write_project_hooks_backs_up_a_malformed_file_and_installs_the_pm_guard`.
 ///
 /// `exe_override` (#7244) pins the binary the hook commands name; production
 /// passes `None` and lets the resolver find the running installed binary. A
@@ -605,15 +615,14 @@ pub(super) fn write_project_hooks_with(
     })?;
     let settings_path = claude_dir.join("settings.json");
 
-    // Load existing settings to preserve unrelated keys; tolerate a missing or
-    // malformed file by starting from an empty object.
-    let original = match std::fs::read_to_string(&settings_path) {
-        Ok(text) => serde_json::from_str::<serde_json::Value>(&text)
-            .ok()
-            .filter(serde_json::Value::is_object)
-            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new())),
-        Err(_) => serde_json::Value::Object(serde_json::Map::new()),
-    };
+    // Load existing settings to preserve unrelated keys; a missing file starts
+    // from an empty object. #7780: a non-object file is copied aside to a
+    // `settings.json.malformed-<stamp>` sibling first, and a copy that cannot be
+    // made refuses this write — so the PM-guard hook below is still installed
+    // over a damaged file, but never over an unrecoverable one. The #7244
+    // snapshot further down is a different guarantee (the last three GOOD
+    // states) and still applies.
+    let original = super::malformed_backup::load_settings_object(&settings_path)?;
     // #7244: the no-op check below measures the strip+merge round trip against
     // the file as it was READ, so the pre-strip value has to outlive the strip.
     let mut settings = original.clone();
