@@ -139,9 +139,9 @@ Dispatch mechanics: `Skill(skill="tm-workflow")`.
   — never `cp` — only from a checkout with empty `git status --porcelain`.
 - **Stage by name, never `-A`:** `git add <file>` or `git add -p` — `-A`
   stages untracked build directories like `target-worktree/`.
-- Docs/config stay writable, uncommitted, in the main checkout; every commit
-  there is denied, docs included
-  ([ADR-0061](docs/adr/0061-the-main-checkout-is-never-committed-to.md)).
+- Docs/config stay writable in the main checkout; commits never land on
+  local `main` — docs/session notes reach origin only via the fast-path PR
+  ([ADR-0061](docs/adr/0061-commits-never-land-on-local-main.md)).
 - 🔴 **`.trusty-mpm/sessions/` is tracked** (owner ruling 2026-08-31) — commit
   snapshots after each pause; never "fix" the `.gitignore` re-include.
 - 🔴 The harness (not `tm hook --pm-guard`) refuses some git/script shapes in

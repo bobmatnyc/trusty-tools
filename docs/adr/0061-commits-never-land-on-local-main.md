@@ -1,4 +1,4 @@
-# 0061. The main checkout is never committed to — it only fast-forwards to `origin/main`
+# 0061. Commits never land on local `main` — it only fast-forwards to `origin/main`
 
 - **Status:** Accepted
 - **Date:** 2026-09-13

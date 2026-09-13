@@ -10,9 +10,12 @@ document is detail; this is the rule.
    remote tip:** `git worktree add -b <branch> <path> origin/main`. Local
    `main` can be stale enough to lose commits or leave the branch `BEHIND` the
    moment its PR opens.
-2. **Commit in the worktree only.** The main checkout is never committed to,
-   docs included — see [ADR-0061](../adr/0061-the-main-checkout-is-never-committed-to.md),
-   which supersedes the earlier documents-only carve-out.
+2. **Commit a source change in the worktree only.** Local `main` itself is
+   never committed to directly; a docs/session-note-only change may instead
+   take the fast-path PR straight from the main checkout — see
+   [ADR-0061](../adr/0061-commits-never-land-on-local-main.md), which amends
+   (not supersedes) ADR-0049's documents-only carve-out, corrected on #7756
+   and #7767.
 3. **Rebase onto `origin/main` and push with `--force-with-lease`** when the
    branch conflicts or lacks a newly required check; never merge `main` into
    the branch. A branch that is only BEHIND merges fine (#5958) and needs
@@ -43,14 +46,16 @@ checkout often holds another session's uncommitted work.
 **The write boundary that protects that work is mechanically enforced, not
 left to convention** (`tm hook --pm-guard`; [ADR-0044](../adr/0044-main-checkout-write-boundary-and-agent-worktree-ownership.md),
 [ADR-0048](../adr/0048-dispatched-writers-get-a-worktree-and-the-write-boundary-is-enforced.md),
-[ADR-0061](../adr/0061-the-main-checkout-is-never-committed-to.md)).
+[ADR-0061](../adr/0061-commits-never-land-on-local-main.md)).
 Documents and configuration — `.md`, `.toml`, `.json`, `.yaml`,
 extension-less files, `.claude/` framework deployment, `TASK.md` — stay
 writable, uncommitted, directly in the main checkout for the PM and every
 agent it dispatches; source edits there are denied for both. `git commit`
-there is denied unconditionally, docs and configuration included (ADR-0061,
-owner ruling 2026-09-13, superseding ADR-0049's earlier staged-set
-carve-out) — see "The delivery sequence" above. A dispatched agent that may
+targeting local `main` is denied unconditionally; a docs/session-note-only
+staged set may still reach origin through the fast-path `docs/*` branch
+(ADR-0061, owner ruling 2026-09-13, amending rather than superseding
+ADR-0049's staged-set carve-out, corrected on #7756 and #7767) — see "The
+delivery sequence" above. A dispatched agent that may
 write is granted its own worktree under
 `.claude/worktrees/` automatically the moment the session is standing in a
 main checkout — see [ADR-0036](../adr/0036-all-worktrees-are-siblings-under-claude-worktrees.md)
@@ -123,11 +128,13 @@ The main checkout is not automatically disqualified, but it is not
 automatically clean either. The write boundary
 ([ADR-0044](../adr/0044-main-checkout-write-boundary-and-agent-worktree-ownership.md),
 [ADR-0048](../adr/0048-dispatched-writers-get-a-worktree-and-the-write-boundary-is-enforced.md),
-[ADR-0061](../adr/0061-the-main-checkout-is-never-committed-to.md)) denies
-source edits and every commit there, which rules out the worst case, but it
-classifies a write by file EXTENSION, not by directory: documents and
-configuration stay writable — never committable, per ADR-0061 — directly in
-the main checkout. `crates/trusty-mpm/src/assets/skills/*.md` falls on the
+[ADR-0061](../adr/0061-commits-never-land-on-local-main.md)) denies source
+edits and every commit aimed at local `main`, which rules out the worst
+case, but it classifies a write by file EXTENSION, not by directory:
+documents and configuration stay writable directly in the main checkout,
+and reach origin only through the fast-path branch — never a commit onto
+local `main` itself, per ADR-0061.
+`crates/trusty-mpm/src/assets/skills/*.md` falls on the
 writable side of that line even though it lives under `src/` and is compiled
 into the `trusty-mpm` binary at build time via `include_str!` — so a
 locally-edited, uncommitted skill file in the main checkout can still be
