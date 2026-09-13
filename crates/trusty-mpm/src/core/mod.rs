@@ -59,6 +59,9 @@ pub mod claude_config;
 // Claude Code disable transcript saving, costing the session native
 // `--resume`/`--continue`/`/rewind` recovery.
 pub mod claude_env_scrub;
+// #7673: the three-outcome downward scan for child git repositories — found,
+// clear, or could not finish — behind the workspace-parent seed refusal.
+pub mod child_repo_scan;
 // Epic #4183 / #4286: the READER for `CLAUDE.md` named-section instruction
 // overrides. Ships before the floor text that advertises the mechanism —
 // advertising an override no code reads is issue #381 verbatim.
@@ -66,6 +69,12 @@ pub mod claude_env_scrub;
 // `tm doctor --fix`.
 pub mod claude_md_excludes;
 pub mod claude_md_sections;
+// #7673: is a CLAUDE.md tm's own seed template, and may tm seed one here? The
+// root-cause guard for the $HOME seed-template incident.
+pub mod claude_md_seed;
+// #7673 round 3: the git-init-offer half of the seed-site guard, split out so
+// `claude_md_seed.rs` stays a focused shape/site pair under the SLOC cap.
+pub mod claude_md_seed_git;
 // Issue #4754: the WRITER counterpart to `claude_md_sections` — the single
 // owner of `CLAUDE.md` section-override edits. Idempotent by construction, and
 // it borrows the reader's grammar rather than spelling a second one.

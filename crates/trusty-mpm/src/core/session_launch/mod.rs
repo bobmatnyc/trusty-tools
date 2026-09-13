@@ -697,6 +697,9 @@ pub(super) fn prepare_session_inner(
         // the count printed at session start is the roster the PM receives.
         project_dir: project_dir.to_path_buf(),
         claude_md_path: project_dir.join("CLAUDE.md"),
+        // #7673 review: the injected home, not `dirs::home_dir()` inside the
+        // guard — the same seam every other host input rides on (#5544).
+        home: home.map(Path::to_path_buf),
     };
     // #4752 (owner ruling, round 4): a session DEPENDS on its instructions, so
     // failing to build them refuses the launch. This used to return the

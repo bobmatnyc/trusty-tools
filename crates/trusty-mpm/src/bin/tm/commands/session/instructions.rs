@@ -106,7 +106,105 @@ pub(crate) fn compose_session_instructions_with_roster(
     trusty_mpm::core::instruction_pipeline::PipelineOutput,
     std::path::PathBuf,
 )> {
-    use trusty_mpm::core::instruction_pipeline::{PipelineInput, build_instructions};
+    let mut stdin_prompt = stdin_git_init_prompt(project_dir);
+    let should_init: Option<&mut dyn FnMut() -> bool> = match stdin_prompt.as_mut() {
+        Some(boxed) => Some(boxed.as_mut()),
+        None => None,
+    };
+    compose_session_instructions_with_roster_and_init(project_dir, roster, should_init)
+}
+
+/// The exact text [`stdin_git_init_prompt`] shows, naming the directory that
+/// would be initialised (#7673 round 3 review, LOW).
+///
+/// Why: split so the wording is assertable without a real TTY — the prior
+/// text never named a directory at all, which cost nothing at this call site
+/// (there is exactly one directory in view), but is wasted ambiguity on a
+/// prompt an operator actually reads.
+/// What: `"<dir> is not a git repository; initialise one? [y/N] "`.
+/// Test: `git_init_prompt_text_names_the_directory`.
+fn git_init_prompt_text(dir: &std::path::Path) -> String {
+    format!(
+        "{} is not a git repository; initialise one? [y/N] ",
+        dir.display()
+    )
+}
+
+/// A real yes/no `git init` prompt, built only when stdin is a TTY (#7673
+/// round 3 follow-up, owner ruling 2026-09-13).
+///
+/// Why: `tm sessions instructions --dir <dir>` is the one production entry
+/// point `load_or_create_claude_md` reaches with no prior git-project check
+/// (`session start`'s in-place path already refuses a non-git directory
+/// before it gets here; `tm launch`/bare `tm` already run the pre-existing,
+/// unconditional `commands::auto_git_init::ensure_git_repo` before project
+/// detection, so the seed site never sees a non-git directory from there
+/// either — see the module-choice note on [`compose_session_instructions_with_roster_and_init`]).
+/// A non-interactive caller (no TTY — piped, `--yes`-style automation, a
+/// daemon or MCP caller) must get the existing silent-decline default;
+/// asking a question nobody can answer would hang the process.
+/// What: `None` when stdin is not a terminal. Otherwise a closure that prints
+/// [`git_init_prompt_text`] — naming `dir` — on stderr, reads one line, and
+/// classifies it through the SAME confirm helper the picker's other yes/no
+/// prompts use ([`crate::commands::picker_delete::confirm_is_yes`]) rather
+/// than a new stdin reader.
+/// Test: the decline/accept DECISION is tested directly through
+/// [`compose_session_instructions_with_roster_and_init`]'s injected closure
+/// (`instructions_tests.rs`); actually reading stdin is terminal interaction,
+/// not exercised in CI, matching every other confirm prompt in this crate.
+fn stdin_git_init_prompt(dir: &std::path::Path) -> Option<Box<dyn FnMut() -> bool>> {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        return None;
+    }
+    let dir = dir.to_path_buf();
+    Some(Box::new(move || {
+        use std::io::Write as _;
+        eprint!("{}", git_init_prompt_text(&dir));
+        let _ = std::io::stderr().flush();
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line).is_err() {
+            return false;
+        }
+        crate::commands::picker_delete::confirm_is_yes(&line)
+    }))
+}
+
+/// [`compose_session_instructions_with_roster`] with the git-init-offer
+/// prompt seam threaded through explicitly, so the decline/accept decision is
+/// testable without a real TTY or stdin (#7673 round 3 follow-up).
+///
+/// Why this entry point, and not `session start`'s in-place path or `tm
+/// launch`: `start_session_in_place` only runs once
+/// `refuse_outside_a_git_project` has already certified the target is inside
+/// a git working tree, so `load_or_create_claude_md`'s seed site there can
+/// never see a non-git directory — there is nothing for this prompt to offer.
+/// `tm launch`/bare `tm` call `commands::auto_git_init::ensure_git_repo`
+/// (#6274) before project detection even runs, which already turns a plain
+/// directory into an ordinary no-origin git project (or refuses Home/
+/// filesystem-root) — by the time either reaches the seed path the directory
+/// is already resolved, so wiring a second, different git-init decision onto
+/// an already-working flow would be the parallel path the reuse note warns
+/// against, not a fix. This function is the one production call that reaches
+/// `load_or_create_claude_md` with NEITHER guard in front of it — the
+/// documented `tm sessions instructions --dir <dir>` first-touch shape.
+/// What: identical to [`compose_session_instructions_with_roster`] except
+/// `should_init` is passed straight through to
+/// [`trusty_mpm::core::instruction_pipeline::build_instructions_with_init`]
+/// instead of being derived from stdin here.
+/// Test: `compose_session_instructions_declines_git_init_without_a_prompt`,
+/// `compose_session_instructions_runs_git_init_when_the_prompt_accepts`,
+/// `compose_session_instructions_refuses_to_seed_when_git_init_fails`.
+fn compose_session_instructions_with_roster_and_init(
+    project_dir: &std::path::Path,
+    roster: Option<String>,
+    should_init: Option<&mut dyn FnMut() -> bool>,
+) -> anyhow::Result<(
+    String,
+    trusty_mpm::core::instruction_pipeline::PipelineOutput,
+    std::path::PathBuf,
+)> {
+    use trusty_mpm::core::instruction_pipeline::{PipelineInput, build_instructions_with_init};
 
     // Run the legacy pipeline for its side-effects: seed CLAUDE.md if absent
     // and populate the metadata flags (agent_count, claude_md_created, …).
@@ -116,8 +214,11 @@ pub(crate) fn compose_session_instructions_with_roster(
         // made the printed count disagree with the delivered roster.
         project_dir: project_dir.to_path_buf(),
         claude_md_path: project_dir.join("CLAUDE.md"),
+        // #7673: the seed-site guard's home. This is the CLI boundary, so the
+        // ambient read belongs here rather than inside the guard.
+        home: dirs::home_dir(),
     };
-    let output = build_instructions(&input)?;
+    let output = build_instructions_with_init(&input, should_init)?;
 
     // The single source of truth for the live PM prompt is
     // `build_system_prompt_for`, NOT the bare `resolve_pm_prompt`. The launcher
@@ -145,3 +246,7 @@ pub(crate) fn compose_session_instructions_with_roster(
 
     Ok((resolved_prompt, output, stash))
 }
+
+#[cfg(test)]
+#[path = "instructions_tests.rs"]
+mod tests;

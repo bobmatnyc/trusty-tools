@@ -129,6 +129,9 @@ fn input_in(tiers: &RosterTiers) -> PipelineInput {
     PipelineInput {
         project_dir: tiers.project(),
         claude_md_path: tiers.project().join("CLAUDE.md"),
+        // #7673: the fixture's own home, injected. The project sits beside it,
+        // so the seed-site guard permits the stub.
+        home: Some(tiers.home()),
     }
 }
 
@@ -362,7 +365,7 @@ fn load_or_create_claude_md_refuses_to_stub_a_branch_predating_the_tracked_file(
     };
     let path = fx.claude_md();
 
-    let err = load_or_create_claude_md(&path)
+    let err = load_or_create_claude_md(&path, None)
         .expect_err("a branch that merely predates the tracked CLAUDE.md must not be stubbed");
 
     assert!(
@@ -393,6 +396,7 @@ fn build_instructions_refuses_a_stale_worktree_rather_than_seeding_a_stub() {
     let input = PipelineInput {
         project_dir: fx.worktree.clone(),
         claude_md_path: fx.claude_md(),
+        home: None,
     };
 
     let err = build_instructions(&input).expect_err("a stale worktree must refuse the pipeline");
@@ -414,7 +418,7 @@ fn load_or_create_claude_md_still_seeds_when_upstream_has_no_claude_md() {
     let path = fx.claude_md();
 
     let (content, created) =
-        load_or_create_claude_md(&path).expect("a genuinely new project is still seeded");
+        load_or_create_claude_md(&path, None).expect("a genuinely new project is still seeded");
     assert!(created);
     assert_eq!(content, CLAUDE_MD_STUB);
     assert_eq!(fs::read_to_string(&path).unwrap(), CLAUDE_MD_STUB);
@@ -432,10 +436,122 @@ fn load_or_create_claude_md_reads_a_present_file_in_a_git_worktree() {
     let path = fx.claude_md();
     assert_eq!(fs::read_to_string(&path).unwrap(), fx.upstream_content);
 
-    let (content, created) = load_or_create_claude_md(&path).expect("a present file loads");
+    let (content, created) = load_or_create_claude_md(&path, None).expect("a present file loads");
     assert!(!created, "an existing CLAUDE.md is never recreated");
     assert_eq!(content, fx.upstream_content);
     assert_eq!(fs::read_to_string(&path).unwrap(), fx.upstream_content);
+}
+
+/// #7673, the 2026-09-12 finding: a tm seed template was sitting at `$HOME`,
+/// so Claude Code prepended it to every turn of every agent in every project
+/// under the home directory.
+///
+/// FAILS BEFORE THIS CHANGE: nothing consulted the home directory, so this
+/// wrote `$HOME/CLAUDE.md` and returned `Ok((stub, true))`.
+#[test]
+fn load_or_create_claude_md_refuses_to_seed_at_the_home_directory() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    // A dotfiles repo makes `$HOME` look exactly like a project root; the home
+    // refusal is first and unconditional, so it still fires.
+    fs::create_dir_all(home.join(".git")).unwrap();
+    let path = home.join("CLAUDE.md");
+
+    let err =
+        load_or_create_claude_md(&path, Some(&home)).expect_err("seeding at $HOME must be refused");
+
+    let PipelineError::Io { source, .. } = &err;
+    assert!(
+        source.to_string().contains("home directory"),
+        "the refusal must name the reason: {source}"
+    );
+    assert!(!path.exists(), "nothing is written: {err:?}");
+}
+
+/// FAILS BEFORE THIS CHANGE: any directory at all was seeded, so a `CLAUDE.md`
+/// could land at `/Users` and load into every project on the machine.
+#[test]
+fn load_or_create_claude_md_refuses_to_seed_above_the_home_directory() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("users").join("ada");
+    fs::create_dir_all(&home).unwrap();
+    // The ancestor — `/Users` in the real shape.
+    let above = tmp.path().join("users");
+    let path = above.join("CLAUDE.md");
+
+    let err = load_or_create_claude_md(&path, Some(&home))
+        .expect_err("a directory above $HOME must be refused");
+
+    let PipelineError::Io { source, .. } = &err;
+    assert!(
+        source.to_string().contains("above the home directory"),
+        "the refusal must name the reason: {source}"
+    );
+    assert!(!path.exists(), "nothing is written: {err:?}");
+}
+
+/// The CRITICAL regression of the first round: a subdirectory of a git repo is
+/// exactly what `tm session start`'s own `refuse_outside_a_git_project` gate
+/// certifies, and the seed guard must agree with it.
+#[test]
+fn load_or_create_claude_md_seeds_in_a_subdirectory_of_a_git_repo() {
+    let tmp = crate::test_support::hermetic_temp_dir();
+    let repo = tmp.path();
+    if !git_ok(repo, &["init", "--initial-branch=main"]) {
+        eprintln!("#7673 tests: git unavailable, skipping");
+        return;
+    }
+    git_identity(repo);
+    let nested = repo.join("crates").join("thing");
+    fs::create_dir_all(&nested).unwrap();
+
+    let path = nested.join("CLAUDE.md");
+    // #7673: a fixture home, never the ambient `$HOME`.
+    let home = repo.join("fixture-home");
+    let (content, created) = load_or_create_claude_md(&path, Some(&home))
+        .expect("a subdirectory of a git project seeds");
+    assert!(created);
+    assert_eq!(content, CLAUDE_MD_STUB);
+}
+
+/// A first-touch directory — the shape `tm sessions instructions --dir <dir>` is
+/// documented to accept — must still seed. The first round refused it, which is
+/// what forced the fixture workarounds this round removed.
+#[test]
+fn load_or_create_claude_md_seeds_in_a_bare_first_touch_directory() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().join("scratch");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("CLAUDE.md");
+    // #7673: a fixture home, never the ambient `$HOME`.
+    let home = tmp.path().join("fixture-home");
+
+    let (content, created) =
+        load_or_create_claude_md(&path, Some(&home)).expect("a first-touch directory seeds");
+    assert!(created);
+    assert_eq!(content, CLAUDE_MD_STUB);
+}
+
+/// FAILS BEFORE THIS ROUND: `--dir ""` yields a bare `CLAUDE.md` whose parent is
+/// the empty path, and the `if let` around the guard then bound nothing and fell
+/// through to the write with no check at all.
+#[test]
+fn load_or_create_claude_md_fails_closed_on_a_path_with_no_directory() {
+    // A name nothing in the crate root can satisfy, so the read misses and the
+    // seeding arm — the one under test — is the arm that runs.
+    let path = PathBuf::from("CLAUDE.md.7673-no-directory-component");
+
+    // #7673: a fixture home, never the ambient `$HOME`.
+    let home = std::env::temp_dir().join("7673-fixture-home");
+    let err = load_or_create_claude_md(&path, Some(&home))
+        .expect_err("a path with no directory component must be refused, never seeded");
+
+    let PipelineError::Io { source, .. } = &err;
+    assert!(
+        source.to_string().contains("no directory component"),
+        "the refusal must name the reason: {source}"
+    );
+    assert!(!path.exists(), "nothing is written: {err:?}");
 }
 
 #[test]
@@ -457,8 +573,8 @@ fn load_or_create_claude_md_still_seeds_in_a_repo_with_no_remote() {
     assert!(git_ok(dir, &["commit", "-m", "local only"]));
 
     let path = dir.join("CLAUDE.md");
-    let (content, created) =
-        load_or_create_claude_md(&path).expect("a repo with no remote is not stale, it is local");
+    let (content, created) = load_or_create_claude_md(&path, None)
+        .expect("a repo with no remote is not stale, it is local");
     assert!(created);
     assert_eq!(content, CLAUDE_MD_STUB);
     assert_eq!(fs::read_to_string(&path).unwrap(), CLAUDE_MD_STUB);
@@ -523,7 +639,7 @@ fn load_or_create_claude_md_ignores_an_abandoned_origin_main_when_upstream_answe
     ));
 
     let path = work.join("CLAUDE.md");
-    let (content, created) = load_or_create_claude_md(&path)
+    let (content, created) = load_or_create_claude_md(&path, None)
         .expect("an abandoned origin/main must not override origin/develop");
     assert!(created);
     assert_eq!(content, CLAUDE_MD_STUB);
@@ -1210,6 +1326,7 @@ fn session_start_count_matches_the_delivered_delegation_roster() {
     let input = PipelineInput {
         project_dir: tiers.project(),
         claude_md_path: tiers.project().join("CLAUDE.md"),
+        home: Some(tiers.home()),
     };
 
     let out = build_instructions(&input).expect("pipeline");
@@ -1392,6 +1509,7 @@ fn build_instructions_reports_an_unreadable_agent_file() {
     let out = build_instructions(&PipelineInput {
         project_dir: project.path().to_path_buf(),
         claude_md_path: project.path().join("CLAUDE.md"),
+        home: None,
     })
     .expect("pipeline succeeds — the roster stays fail-open");
 
@@ -1419,8 +1537,24 @@ fn build_instructions_reports_a_complete_roster_when_nothing_failed() {
     let out = build_instructions(&PipelineInput {
         project_dir: project.path().to_path_buf(),
         claude_md_path: project.path().join("CLAUDE.md"),
+        home: None,
     })
     .expect("pipeline succeeds");
     assert!(out.roster_is_complete());
     assert!(out.unreadable_agent_paths.is_empty());
+}
+
+/// FAILS BEFORE THIS ROUND (#7673 round 2 review, MEDIUM): three seed tests
+/// passed the real `$HOME` into `load_or_create_claude_md`, so their outcome
+/// depended on where the developer's home directory sits relative to the
+/// temp dir. Every seed test here must pass a fixture home instead.
+#[test]
+fn no_seed_test_reads_the_ambient_home_directory() {
+    let source = include_str!("instruction_pipeline_tests.rs");
+    let needle = concat!("dirs::", "home_dir()");
+    assert_eq!(
+        source.matches(needle).count(),
+        0,
+        "pass a fixture home under the test's temp dir, not the ambient one"
+    );
 }
