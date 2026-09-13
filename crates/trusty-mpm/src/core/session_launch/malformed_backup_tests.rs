@@ -4,8 +4,8 @@
 //! the SLOC cap, matching the `backup.rs` / `backup_tests.rs` split this crate
 //! already uses for the sibling snapshot writer.
 //! What: pins the clock through `load_settings_object_at` to exercise the
-//! pass-through, absent-file, unparseable, valid-non-object, same-second
-//! collision and fail-closed-copy arms.
+//! pass-through, absent-file, whitespace-only, unparseable, valid-non-object,
+//! same-second collision and fail-closed-copy arms.
 //! Test: this module IS the test suite for `super`.
 
 use super::*;
@@ -66,6 +66,22 @@ fn treats_a_missing_file_as_empty() {
 
     assert_eq!(value, serde_json::json!({}));
     assert!(copies(&dir).is_empty(), "nothing existed to copy");
+}
+
+/// #7789: a file that is empty or all whitespace holds nothing to preserve, and
+/// the managed hook writer this loader now also serves has always read one as
+/// `{}`. A zero-byte copy would be a record of nothing, under a name claiming
+/// to be the settings the operator lost.
+#[test]
+fn treats_a_whitespace_only_file_as_empty() {
+    let tmp = TempDir::new().unwrap();
+    let (dir, path) = seed(&tmp, b"  \n\t\n");
+
+    let value = load_settings_object_at(&path, at("2026-09-13T10:00:00Z"))
+        .expect("a whitespace-only file is not an error");
+
+    assert_eq!(value, serde_json::json!({}));
+    assert!(copies(&dir).is_empty(), "nothing was worth copying");
 }
 
 /// The reported incident: a file holding `{ broken` was replaced by tm's keys

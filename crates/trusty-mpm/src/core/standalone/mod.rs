@@ -23,4 +23,10 @@ pub mod run;
 pub mod settings_defaults;
 pub mod trust_seed;
 
+// #7789: proves both managed-tier settings.json writers are wired to the #7780
+// preserve-then-rewrite loader.
+#[cfg(test)]
+#[path = "tests_malformed_settings_7789.rs"]
+mod tests_malformed_settings_7789;
+
 pub use trust_seed::preseed_managed_trust;

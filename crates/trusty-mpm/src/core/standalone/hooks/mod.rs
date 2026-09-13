@@ -888,8 +888,9 @@ pub(crate) fn strip_hook_entries_matching_for_events(
 /// one, and MPM hook groups accumulate — each one firing on every lifecycle
 /// event. Stripping first enforces replace-by-identity (event name + "is this
 /// an MPM hook") rather than full-value equality.
-/// What: reads `settings_path` (tolerates missing/empty — starts from `{}`),
-/// strips any MPM-owned hook group for the events present in the fresh
+/// What: reads `settings_path` (missing or whitespace-only — starts from
+/// `{}`; unparseable or non-object — the original bytes are copied aside
+/// first, see below), strips any MPM-owned hook group for the events present in the fresh
 /// additions via [`strip_mpm_hook_entries_for_events`], deep-merges the MPM
 /// hook additions, and writes back atomically only when something actually
 /// changed. Returns `true` when the file was updated. `exe_override` is
@@ -900,6 +901,14 @@ pub(crate) fn strip_hook_entries_matching_for_events(
 /// can be found the error is returned and the file is not read, created, or
 /// written — a `settings.json` with no tm hooks is recoverable, one wired to a
 /// `cargo test` harness silently disables pm-guard enforcement.
+///
+/// #7789: an unparseable or non-object file is no longer coerced to `{}` and
+/// overwritten. Its original bytes are copied to a
+/// `<path>.malformed-<YYYYMMDDTHHMMSSZ>` sibling by
+/// [`crate::core::session_launch::malformed_backup::load_settings_object`],
+/// which warns naming that copy; a copy that cannot be written aborts the write
+/// and leaves the file untouched. That copy is never pruned, unlike the `.bak`
+/// snapshot below.
 ///
 /// #7244 (round 3): a rewrite that actually changes the file first copies it to
 /// `<path>.<YYYYMMDDTHHMMSSZ>.bak` via
@@ -913,7 +922,10 @@ pub(crate) fn strip_hook_entries_matching_for_events(
 /// `write_project_hooks_snapshots_the_file_it_replaces`,
 /// `write_project_hooks_takes_no_snapshot_when_the_exe_is_refused`,
 /// `write_project_hooks_takes_no_snapshot_when_nothing_changes`,
-/// `write_project_hooks_aborts_the_rewrite_when_the_snapshot_fails`.
+/// `write_project_hooks_aborts_the_rewrite_when_the_snapshot_fails`,
+/// `write_project_hooks_backs_up_a_malformed_managed_file`,
+/// `write_project_hooks_refuses_when_the_copy_cannot_be_written`,
+/// `write_project_hooks_takes_no_copy_for_a_valid_file`.
 pub fn write_project_hooks(
     settings_path: &Path,
     exe_override: Option<&Path>,
@@ -929,9 +941,10 @@ pub fn write_project_hooks(
 /// already-computed `Result` lets a test hand in the refusal directly and
 /// assert the file is untouched, while production still routes through the one
 /// resolution above.
-/// What: returns `additions`'s error unchanged before touching the filesystem;
-/// otherwise performs the read / strip / merge / snapshot / atomic-write
-/// exactly as [`write_project_hooks`] documents.
+/// What: returns `additions`'s error unchanged before touching the filesystem —
+/// ahead of the #7789 copy, so a refused write takes no copy either — then
+/// performs the read / strip / merge / snapshot / atomic-write exactly as
+/// [`write_project_hooks`] documents.
 /// Test: `write_project_hooks_writes_nothing_when_the_exe_cannot_be_resolved`,
 /// `write_project_hooks_takes_no_snapshot_when_the_exe_is_refused`.
 fn write_project_hooks_with(
@@ -943,20 +956,14 @@ fn write_project_hooks_with(
     // Before the read: a refusal must leave a missing file missing.
     let additions = additions?;
 
-    let original: serde_json::Value = match std::fs::read_to_string(settings_path) {
-        Ok(s) if s.trim().is_empty() => serde_json::Value::Object(serde_json::Map::new()),
-        Ok(s) => serde_json::from_str::<serde_json::Value>(&s)
-            .ok()
-            .filter(|v| v.is_object())
-            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            serde_json::Value::Object(serde_json::Map::new())
-        }
-        Err(e) => {
-            return Err(anyhow::Error::new(e))
-                .map_err(|e| anyhow::anyhow!("read {}: {e}", settings_path.display()));
-        }
-    };
+    // #7789: this read used to coerce an unparseable or non-object file to
+    // `{}`, so the merge below started from nothing and the write discarded
+    // every key the operator had. The shared #7780 loader copies the original
+    // bytes to a `settings.json.malformed-<stamp>` sibling first, warns naming
+    // that copy, and returns an error — writing nothing — when the copy fails.
+    // `PrepError` maps into `anyhow` here rather than the loader forking.
+    let original =
+        crate::core::session_launch::malformed_backup::load_settings_object(settings_path)?;
 
     // Replace-by-identity: drop any stale MPM-owned group for each event we
     // are about to add, so the merge below can never leave two MPM groups
@@ -1002,8 +1009,10 @@ fn write_project_hooks_with(
 /// their lifecycle events. Called from [`super::global_config::ensure_global_config_dir`]
 /// after the initial settings.json seed so the file is always wired on every
 /// managed launch.
-/// What: reads `<claude_config_dir>/settings.json` (tolerates missing / empty /
-/// malformed by starting from `{}`), deep-merges [`mpm_hook_additions`] using
+/// What: reads `<claude_config_dir>/settings.json` (missing or whitespace-only
+/// starts from `{}`; an unparseable or non-object file is copied aside first and
+/// the rewrite is abandoned when that copy fails, #7789), deep-merges
+/// [`mpm_hook_additions`] using
 /// [`trusty_common::claude_config::merge_hook_entries`], and writes back only when
 /// the merged value differs — so calling this twice produces identical files
 /// (idempotency requirement). Uses [`mpm_hook_additions_with_exe`] to embed the
