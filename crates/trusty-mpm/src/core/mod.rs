@@ -279,6 +279,8 @@ pub mod skill_deployer;
 pub mod skill_drift;
 pub mod skill_install_tiers;
 pub mod skill_manifest;
+// #7751: the stack-to-skill-family table behind the project-tier skillOverrides.
+pub mod skill_overrides;
 pub mod skill_reconcile;
 pub mod skill_repair;
 pub mod skill_retire;
