@@ -1,0 +1,3 @@
+Fixed
+
+- Deployed agents now name absolute skill file paths for the install they land in. `tm install`, `tm install --reset-agents`, `tm reinstall`, session launch, `sync-assets`, `tm catalog apply` and the managed and standalone config dirs all pass the skills tier they deploy into, so `{{TM_SKILLS}}` resolves to the default managed root, a `TRUSTY_MPM_ROOT`/`--root` override, or a reinstall tier's own skills directory. Catalog staleness hashes the same resolved bytes, so a fresh deploy does not read as drifted. `tm-ticketing` and `tm-workflow` ship a `references/` folder (#7727).

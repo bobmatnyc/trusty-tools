@@ -196,7 +196,8 @@ fn deploy_roster() -> (tempfile::TempDir, tempfile::TempDir) {
     for (file_name, contents) in AGENT_ASSETS {
         fs::write(src.path().join(file_name), contents).expect("write roster asset");
     }
-    let result = deploy_agents(src.path(), tgt.path()).expect("roster deploys");
+    let skills = std::env::temp_dir().join("tm-roster-skills");
+    let result = deploy_agents(src.path(), tgt.path(), &skills).expect("roster deploys");
     assert!(
         result.failed.is_empty(),
         "every roster agent must compose and validate; failed: {:?}",
@@ -290,6 +291,91 @@ fn base_templates_declare_no_tools() {
             "`{stem}` must leave `tools:` unset so it cannot override a leaf's"
         );
     }
+}
+
+/// Skill references a no-`Skill` agent may carry without a Read path (#7727).
+///
+/// Why: each row names ONE pointer that is deliberately not a placeholder Read
+/// path yet, so the exemption cannot widen to a whole agent.
+/// What: `(agent stem, skill name, reason)`.
+const UNLOADABLE_SKILL_ALLOWLIST: &[(&str, &str, &str)] = &[(
+    "ticketing",
+    "tm-ticketing",
+    "ticketing's own pointer moves to a Read path in a later #7727 slice",
+)];
+
+/// Every skill name a composed body refers to as "`<name>` skill" or
+/// `Skill(skill="<name>"`, in order of appearance.
+fn referenced_skills(body: &str) -> Vec<String> {
+    let flat = body.replace('\n', " ");
+    let is_name = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    };
+    let mut names = Vec::new();
+    for (end, _) in flat.match_indices("` skill") {
+        if let Some(start) = flat[..end].rfind('`') {
+            let name = &flat[start + 1..end];
+            if is_name(name) {
+                names.push(name.to_string());
+            }
+        }
+    }
+    for (at, marker) in flat.match_indices("Skill(skill=\"") {
+        let rest = &flat[at + marker.len()..];
+        if let Some(name) = rest.split('"').next().filter(|n| is_name(n)) {
+            names.push(name.to_string());
+        }
+    }
+    names
+}
+
+/// A no-`Skill` agent never points at a skill it cannot load (#7727).
+///
+/// Why: an on-demand skill loads only through the `Skill` tool, which 35 of the
+/// 39 roster agents do not carry (#7699). A pointer telling one of them to use
+/// a skill is dead text unless the skill is preloaded through `skills:` or the
+/// pointer is a `{{TM_SKILLS}}` Read path the deploy resolves.
+/// What: composes every agent whose [`EXPECTED_TOOLS`] row lacks `Skill` and
+/// requires each referenced skill to be declared, reachable by a placeholder
+/// Read path, or named in [`UNLOADABLE_SKILL_ALLOWLIST`]. Composes before the
+/// deploy's substitution, so the placeholder itself is what is checked.
+/// Test: this test.
+#[test]
+fn no_skill_agent_points_at_unloadable_skill() {
+    use crate::agents::builder::compose_agent;
+    use crate::agents::metadata::agent_metadata_from_str;
+    use crate::agents::skill_root::SKILLS_ROOT_PLACEHOLDER;
+
+    let src = tempfile::tempdir().expect("source tempdir");
+    for (file_name, contents) in AGENT_ASSETS {
+        fs::write(src.path().join(file_name), contents).expect("write roster asset");
+    }
+    let mut dead = Vec::new();
+    for (stem, tools) in EXPECTED_TOOLS {
+        if tools.split(", ").any(|tool| tool == "Skill") {
+            continue;
+        }
+        let composed = compose_agent(stem, src.path()).expect("roster agent composes");
+        let declared = agent_metadata_from_str(&composed).skills;
+        for skill in referenced_skills(&composed) {
+            let read_path = format!("{SKILLS_ROOT_PLACEHOLDER}/{skill}/");
+            let allowed = UNLOADABLE_SKILL_ALLOWLIST
+                .iter()
+                .any(|(agent, name, _)| agent == stem && *name == skill);
+            if !declared.contains(&skill) && !composed.contains(&read_path) && !allowed {
+                dead.push(format!("{stem} -> `{skill}`"));
+            }
+        }
+    }
+    dead.dedup();
+    assert!(
+        dead.is_empty(),
+        "agents without `Skill` point at skills they cannot load — preload the \
+         skill or write `Read {SKILLS_ROOT_PLACEHOLDER}/<skill>/SKILL.md`:\n  {}",
+        dead.join("\n  ")
+    );
 }
 
 /// No roster agent declares trusty-code's `tcode_tools:` key.

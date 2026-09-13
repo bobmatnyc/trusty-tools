@@ -169,6 +169,15 @@ pub const ALL: &[BundledArtifact] = &[
     overwrite("skills/tm-bug-reporting.md", TM_BUG_REPORTING),
     overwrite("skills/tm-teaching-templates.md", TM_TEACHING_TEMPLATES),
     overwrite("skills/tm-ticketing.md", TM_TICKETING),
+    // #7727: reference folders reached by `{{TM_SKILLS}}` Read paths.
+    overwrite(
+        "skills/tm-ticketing/references/README.md",
+        TM_TICKETING_REFERENCES_README,
+    ),
+    overwrite(
+        "skills/tm-workflow/references/README.md",
+        TM_WORKFLOW_REFERENCES_README,
+    ),
     overwrite("skills/tm-delegation-patterns.md", TM_DELEGATION_PATTERNS),
     overwrite("skills/tm-session-management.md", TM_SESSION_MANAGEMENT),
     overwrite("skills/tm-session-pause.md", TM_SESSION_PAUSE),

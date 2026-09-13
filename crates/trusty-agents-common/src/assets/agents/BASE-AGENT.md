@@ -78,9 +78,7 @@ different files (#7287). Backgrounded the wait instead? `echo "EXIT=$?"`
 prints to the tool's own stdout, not into the file you redirected into — put
 the sentinel inside the redirected command, or wait on the pid directly.
 
-#7723: the scratchpad sentinel-file fallback and the re-issue-vs-report-and-
-stop rules carry further in the `condition-based-waiting` skill — load it
-before any wait longer than one tool call.
+#7723: before any wait longer than one tool call, Read `{{TM_SKILLS}}/condition-based-waiting/SKILL.md`.
 
 ## Git Workflow
 
@@ -280,8 +278,7 @@ be resolved", "Changes are complete".
 
 Run the code and observe it succeed — full suite, real environment, clean
 build, no silent skips (cache hits are not a re-run), the entry point itself.
-#7723: the full walkthrough and the cache-hit pitfall moved to the
-`verification-before-completion` skill.
+#7723: full walkthrough and cache-hit pitfall: Read `{{TM_SKILLS}}/verification-before-completion/SKILL.md`.
 
 Show raw output. Never summarise test results in your own words.
 
@@ -307,15 +304,15 @@ CORRECT: cargo test → "test result: ok. 68 passed; 0 failed; 0 ignored"
 An empty or partial command result is NOT a real result — never fabricate or
 report output you did not see. Retry twice, then redirect to a scratchpad file
 and read that; still unobservable → report "Could not verify" and hand back.
-#7723: the exact redirect/retry mechanics moved to `verification-before-completion`.
+#7723: redirect/retry mechanics: Read `{{TM_SKILLS}}/verification-before-completion/SKILL.md`.
 
 ## Never Directly Monitor a Declarative Process
 
 A test suite, build, lint, or CI check wants a verdict, not a play-by-play —
 watching one directly (`gh pr checks --watch`, an unfiltered `cargo test`) has
 burned 400k+ tokens in a single run. Run it into a scratchpad file, check
-`EXIT=$?`, and read the file only on non-zero, trimmed. #7723: the exact
-redirect/sentinel/trim commands moved to `verification-before-completion`.
+`EXIT=$?`, and read the file only on non-zero, trimmed.
+#7723: redirect/sentinel/trim commands: Read `{{TM_SKILLS}}/verification-before-completion/SKILL.md`.
 
 This does NOT weaken the evidence rule: raw output stays mandatory for
 failures, flakes, and performance claims — only the passing, zero-information
@@ -410,10 +407,8 @@ mis-scoped. Tag any same-task behavioral hypothesis with
 `self-improvement-hypothesis` in memory so the scheduled post-mortem can
 query it.
 
-#7723: before your final report, check your run against the
-`self-improvement-loop` skill for the full three-question test, the
-`self-improvement` label search/dedup rule, and the fast-loop detection
-heuristics. A clean run reports nothing.
+#7723: before your final report, Read `{{TM_SKILLS}}/self-improvement-loop/SKILL.md`.
+A clean run reports nothing.
 
 ## Agent Prose — Write Plainly
 

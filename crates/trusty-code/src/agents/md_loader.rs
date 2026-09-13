@@ -68,6 +68,11 @@ pub fn load_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
             path.display()
         )
     })?;
+    // #7727: a body carrying `{{TM_SKILLS}}` points at tcode's own copies.
+    let composed = super::skill_refs::resolve_skill_refs(
+        &composed,
+        &super::skill_refs::user_skill_refs_dir(),
+    )?;
 
     let metadata = agent_metadata_from_str(&composed);
     let body = extract_body(&composed);
@@ -134,12 +139,27 @@ pub(crate) fn project_embedded_md(default_name: &str, raw: &str) -> AgentConfig 
 /// `project_embedded_md_with_extends_unknown_name_errors`,
 /// `assets::tests::default_agents_parse_and_names_match`.
 pub fn project_embedded_md_with_extends(name: &str) -> anyhow::Result<AgentConfig> {
+    project_embedded_md_with_extends_at(name, &super::skill_refs::user_skill_refs_dir())
+}
+
+/// [`project_embedded_md_with_extends`] with the skill-refs root supplied.
+///
+/// Why (#7727): the hermetic core, so a test resolves `{{TM_SKILLS}}` into a
+/// temp dir instead of the developer's real `~/.trusty-code`.
+/// What: composes as the wrapper does, then
+/// [`super::skill_refs::resolve_skill_refs`] against `skill_refs_root`.
+/// Test: `embedded_agent_resolves_skill_pointers_to_readable_files`.
+pub fn project_embedded_md_with_extends_at(
+    name: &str,
+    skill_refs_root: &Path,
+) -> anyhow::Result<AgentConfig> {
     let sources =
         build_in_memory_source_map(crate::assets::EMBEDDED_TM_AGENT_SOURCES.iter().copied());
 
     let composed = compose_agent_in_memory(name, &sources).map_err(|e| {
         anyhow::anyhow!("failed to compose embedded tm-catalog agent '{name}': {e}")
     })?;
+    let composed = super::skill_refs::resolve_skill_refs(&composed, skill_refs_root)?;
 
     let metadata = agent_metadata_from_str(&composed);
     let body = extract_body(&composed);
@@ -588,5 +608,31 @@ mod tests {
     fn project_embedded_md_with_extends_unknown_name_errors() {
         let result = project_embedded_md_with_extends("does-not-exist");
         assert!(result.is_err(), "unknown embedded agent name must error");
+    }
+
+    /// #7727: an embedded roster agent's `{{TM_SKILLS}}` pointers resolve to
+    /// files that exist and carry the embedded skill content.
+    #[test]
+    fn embedded_agent_resolves_skill_pointers_to_readable_files() {
+        use super::super::skill_refs::REFERENCED_SKILL_FILES;
+        use trusty_agents_common::agents::skill_root::SKILLS_ROOT_PLACEHOLDER;
+
+        let refs = tempfile::tempdir().expect("tempdir");
+        let cfg = project_embedded_md_with_extends_at("rust-engineer", refs.path())
+            .expect("compose rust-engineer");
+        let body = &cfg.system_prompt.content;
+        assert!(
+            !body.contains(SKILLS_ROOT_PLACEHOLDER),
+            "raw placeholder leaked"
+        );
+        let mut resolved = 0;
+        for (relative, content) in REFERENCED_SKILL_FILES {
+            let path = refs.path().join(relative);
+            if body.contains(&path.display().to_string()) {
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), *content);
+                resolved += 1;
+            }
+        }
+        assert_eq!(resolved, 3, "all three BASE-AGENT skill files must resolve");
     }
 }

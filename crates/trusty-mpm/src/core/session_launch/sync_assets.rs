@@ -149,9 +149,13 @@ pub fn sync_session_assets(
     // canonical roster. Retraction is non-fatal: a workspace that cannot be
     // cleaned must not block the asset refresh itself.
     let deploy: DeployResult =
-        deploy_agents_filtered(&plan.agent_source, &fw.agent_deploy_dir(), |name| {
-            plan.agent_selected(name)
-        })
+        // #7727: agent bodies point at the bundled skills tier.
+        deploy_agents_filtered(
+            &plan.agent_source,
+            &fw.agent_deploy_dir(),
+            &fw.skill_deploy_dir(),
+            |name| plan.agent_selected(name),
+        )
         .map_err(|e| SyncAssetsError::AgentDeploy(e.to_string()))?;
 
     // Targets `project_dir`'s own `.claude/agents`, not `fw.claude_agents_dir()`
@@ -449,7 +453,7 @@ mod tests {
 
         // Simulate the legacy per-workspace deploy an older binary performed.
         let legacy = ws_fw.claude_agents_dir();
-        deploy_agents_filtered(&bundled, &legacy, |_| true).unwrap();
+        deploy_agents_filtered(&bundled, &legacy, &std::env::temp_dir(), |_| true).unwrap();
         assert!(legacy.join("rust-engineer.md").exists());
 
         // …plus an agent the operator dropped in by hand, which trusty-mpm

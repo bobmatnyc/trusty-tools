@@ -40,6 +40,8 @@ pub mod deploy;
 pub mod describe;
 pub mod md_loader;
 pub mod protocol;
+// #7727: skill files a composed body points at by absolute path.
+pub mod skill_refs;
 
 pub use config::{
     AgentConfig, AgentInfo, LlmParams, RunnerConfig, RunnerKind, SystemPrompt, ToolsConfig,

@@ -419,6 +419,7 @@ pub(super) fn staleness_inputs_under(
                 Arc::new(CatalogHashes::compute(
                     &plan.agent_source,
                     &plan.skill_source,
+                    &fw.skill_deploy_dir(),
                 ))
             })
             .clone();

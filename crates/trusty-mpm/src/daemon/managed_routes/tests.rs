@@ -750,6 +750,7 @@ async fn checked_summaries_flags_stale_assets_only_for_relevant_states() {
     crate::core::agent_deployer::deploy_agents_filtered(
         &bundled,
         &session_fw.agent_deploy_dir(),
+        &session_fw.skill_deploy_dir(),
         |_| true,
     )
     .unwrap();
@@ -807,6 +808,7 @@ fn deploy_then_drift_catalog(base: &std::path::Path, workspace: &std::path::Path
     crate::core::agent_deployer::deploy_agents_filtered(
         &bundled,
         &session_fw.agent_deploy_dir(),
+        &session_fw.skill_deploy_dir(),
         |_| true,
     )
     .unwrap();
@@ -1024,6 +1026,7 @@ async fn checked_summaries_slim_skips_stale_assets_probe() {
     crate::core::agent_deployer::deploy_agents_filtered(
         &bundled,
         &session_fw.agent_deploy_dir(),
+        &session_fw.skill_deploy_dir(),
         |_| true,
     )
     .unwrap();
@@ -1142,6 +1145,7 @@ fn fleet_with_deployed_skills(base: &std::path::Path, count: usize) -> Vec<Sessi
     crate::core::agent_deployer::deploy_agents_filtered(
         &bundled_agents,
         &fw.agent_deploy_dir(),
+        &fw.skill_deploy_dir(),
         |_| true,
     )
     .unwrap();

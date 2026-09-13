@@ -13,11 +13,14 @@ pub mod agent;
 pub mod agent_builder;
 pub mod agent_cost;
 pub mod agent_deployer;
+// #7727: every deploy shape resolves `{{TM_SKILLS}}` to files that exist.
 pub mod agent_manifest;
 pub mod agent_metadata;
 pub mod agent_reset;
 pub mod agent_reset_workspace;
 pub mod agent_skill_codeploy;
+#[cfg(test)]
+mod skill_root_deploy_tests;
 // #4840: bundled agent assets reached `$CLAUDE_CONFIG_DIR/agents/` only via a
 // manual `tm install`; this module makes the refresh+deploy automatic.
 pub mod agent_source;

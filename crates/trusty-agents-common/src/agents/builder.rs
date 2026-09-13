@@ -69,6 +69,9 @@ pub enum AgentBuildError {
     /// [`AgentBuildError::FrontmatterParse`] string, so a caller can act on
     /// exactly this fault — the typed payload names the offending value.
     InvalidProvenance(UnknownProvenance),
+    /// #7727: the skills root a deploy substitutes into agent bodies is not a
+    /// path an agent can open (see `agents::skill_root::check_skills_root`).
+    UnresolvedSkillsRoot(String),
 }
 
 impl fmt::Display for AgentBuildError {
@@ -84,6 +87,9 @@ impl fmt::Display for AgentBuildError {
             }
             Self::Io(err) => write!(f, "io error: {err}"),
             Self::InvalidProvenance(err) => write!(f, "frontmatter parse error: {err}"),
+            Self::UnresolvedSkillsRoot(why) => {
+                write!(f, "cannot resolve the skills root for agent bodies: {why}")
+            }
         }
     }
 }

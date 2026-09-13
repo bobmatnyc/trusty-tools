@@ -15,8 +15,30 @@
 //! `cargo test -p trusty-agents-common -- agents::deployer`.
 
 use super::*;
+use crate::agents::provenance::Provenance;
 use std::fs;
 use tempfile::TempDir;
+
+/// An absolute skills root for fixtures whose bodies carry no placeholder.
+fn skills_root() -> std::path::PathBuf {
+    std::env::temp_dir().join("tm-test-skills")
+}
+
+/// #7727: a skills root an agent cannot open fails the deploy before any write.
+#[test]
+fn deploy_refuses_an_unresolvable_skills_root() {
+    let src = TempDir::new().unwrap();
+    let tgt = TempDir::new().unwrap();
+    write_sources(src.path());
+
+    let err = deploy_agents(src.path(), tgt.path(), Path::new("relative/skills")).unwrap_err();
+    assert!(
+        matches!(err, AgentBuildError::UnresolvedSkillsRoot(_)),
+        "expected UnresolvedSkillsRoot, got {err}"
+    );
+    let written: Vec<_> = fs::read_dir(tgt.path()).unwrap().flatten().collect();
+    assert!(written.is_empty(), "nothing may be written: {written:?}");
+}
 
 /// A two-file source set: a base agent and a leaf that extends it.
 fn write_sources(dir: &Path) {
@@ -40,7 +62,7 @@ fn deploy_new_agent() {
     let tgt = TempDir::new().unwrap();
     write_sources(src.path());
 
-    let result = deploy_agents(src.path(), tgt.path()).unwrap();
+    let result = deploy_agents(src.path(), tgt.path(), &skills_root()).unwrap();
     assert_eq!(result.deployed.len(), 2);
     assert!(result.deployed.contains(&"engineer.md".to_string()));
     assert!(result.skipped.is_empty());
@@ -79,7 +101,7 @@ fn deploy_redeploys_corrupted_bundled_file() {
     write_sources(src.path());
 
     // First deploy establishes the manifest with origin = Bundled.
-    deploy_agents(src.path(), tgt.path()).unwrap();
+    deploy_agents(src.path(), tgt.path(), &skills_root()).unwrap();
     let good = fs::read_to_string(tgt.path().join("engineer.md")).unwrap();
     assert!(good.contains("Engineer content."));
     assert_eq!(
@@ -91,7 +113,7 @@ fn deploy_redeploys_corrupted_bundled_file() {
     // manifest still records the checksum of the real content.
     fs::write(tgt.path().join("engineer.md"), CORRUPT_STUB).unwrap();
 
-    let result = deploy_agents(src.path(), tgt.path()).unwrap();
+    let result = deploy_agents(src.path(), tgt.path(), &skills_root()).unwrap();
     assert!(
         result.deployed.contains(&"engineer.md".to_string()),
         "a corrupted bundled agent must be re-deployed, got: {result:?}"
@@ -114,7 +136,7 @@ fn deploy_redeploys_corrupted_bundled_file() {
     );
 
     // Idempotent: a third deploy sees a matching checksum and does nothing.
-    let third = deploy_agents(src.path(), tgt.path()).unwrap();
+    let third = deploy_agents(src.path(), tgt.path(), &skills_root()).unwrap();
     assert!(third.unchanged.contains(&"engineer.md".to_string()));
     assert!(third.deployed.is_empty());
 }
@@ -147,7 +169,7 @@ fn deploy_preserves_modified_user_owned_entry() {
 
     // Two deploys, to prove the preservation is stable and not one-shot.
     for _ in 0..2 {
-        let result = deploy_agents(src.path(), tgt.path()).unwrap();
+        let result = deploy_agents(src.path(), tgt.path(), &skills_root()).unwrap();
         assert!(
             result.skipped.contains(&"engineer.md".to_string()),
             "user-owned entry must be skipped, got: {result:?}"
@@ -187,7 +209,7 @@ fn deploy_adopts_untracked_byte_identical_file() {
         .modified()
         .unwrap();
 
-    let result = deploy_agents(src.path(), tgt.path()).unwrap();
+    let result = deploy_agents(src.path(), tgt.path(), &skills_root()).unwrap();
     assert!(result.adopted.contains(&"engineer.md".to_string()));
     assert!(!result.skipped.contains(&"engineer.md".to_string()));
     assert!(!result.deployed.contains(&"engineer.md".to_string()));
@@ -209,7 +231,7 @@ fn deploy_adopts_untracked_byte_identical_file() {
         "---\nname: engineer\nrole: engineer\nextends: base-agent\nmodel: sonnet\n---\n\n# Engineer\n\nUPDATED.\n",
     )
     .unwrap();
-    let second = deploy_agents(src.path(), tgt.path()).unwrap();
+    let second = deploy_agents(src.path(), tgt.path(), &skills_root()).unwrap();
     assert!(second.deployed.contains(&"engineer.md".to_string()));
     let updated = fs::read_to_string(tgt.path().join("engineer.md")).unwrap();
     assert!(updated.contains("UPDATED."));
@@ -229,7 +251,7 @@ fn deploy_flags_untracked_modified_file_for_reset() {
     )
     .unwrap();
 
-    let result = deploy_agents(src.path(), tgt.path()).unwrap();
+    let result = deploy_agents(src.path(), tgt.path(), &skills_root()).unwrap();
     assert!(result.skipped.contains(&"engineer.md".to_string()));
     assert!(
         result
@@ -247,13 +269,13 @@ fn deploy_unchanged_no_write() {
     let tgt = TempDir::new().unwrap();
     write_sources(src.path());
 
-    deploy_agents(src.path(), tgt.path()).unwrap();
+    deploy_agents(src.path(), tgt.path(), &skills_root()).unwrap();
     let before = fs::metadata(tgt.path().join("engineer.md"))
         .unwrap()
         .modified()
         .unwrap();
 
-    let result = deploy_agents(src.path(), tgt.path()).unwrap();
+    let result = deploy_agents(src.path(), tgt.path(), &skills_root()).unwrap();
     assert!(result.unchanged.contains(&"engineer.md".to_string()));
     assert!(result.deployed.is_empty());
 
@@ -279,7 +301,7 @@ fn deploy_user_owned_skipped() {
     )
     .unwrap();
 
-    let result = deploy_agents(src.path(), tgt.path()).unwrap();
+    let result = deploy_agents(src.path(), tgt.path(), &skills_root()).unwrap();
     assert!(result.skipped.contains(&"engineer.md".to_string()));
 
     // The user's content survives untouched.
@@ -294,7 +316,12 @@ fn deploy_user_owned_skipped() {
 fn deploy_missing_source_dir_is_empty_result() {
     // Deploying from a non-existent source directory is a no-op success.
     let tgt = TempDir::new().unwrap();
-    let result = deploy_agents(Path::new("/nonexistent/trusty-mpm/agents"), tgt.path()).unwrap();
+    let result = deploy_agents(
+        Path::new("/nonexistent/trusty-mpm/agents"),
+        tgt.path(),
+        &skills_root(),
+    )
+    .unwrap();
     assert_eq!(result, DeployResult::default());
 }
 
@@ -314,7 +341,7 @@ fn deploy_aborts_on_corrupt_manifest() {
     )
     .unwrap();
 
-    let result = deploy_agents(src.path(), tgt.path());
+    let result = deploy_agents(src.path(), tgt.path(), &skills_root());
     assert!(
         result.is_err(),
         "corrupt manifest must cause an error, not a silent reset to empty"
@@ -344,7 +371,7 @@ fn deploy_injects_initial_prompt_and_tier_model() {
     )
     .unwrap();
 
-    deploy_agents(src.path(), tgt.path()).unwrap();
+    deploy_agents(src.path(), tgt.path(), &skills_root()).unwrap();
 
     let deployed = fs::read_to_string(tgt.path().join("heavy-eng.md")).unwrap();
     assert!(
@@ -372,7 +399,7 @@ fn deploy_preserves_explicit_model_and_prompt() {
     )
     .unwrap();
 
-    deploy_agents(src.path(), tgt.path()).unwrap();
+    deploy_agents(src.path(), tgt.path(), &skills_root()).unwrap();
 
     let deployed = fs::read_to_string(tgt.path().join("pinned.md")).unwrap();
     assert!(
@@ -395,7 +422,10 @@ fn deploy_filtered_respects_predicate() {
     let tgt = TempDir::new().unwrap();
     write_sources(src.path()); // base-agent.md + engineer.md
 
-    let result = deploy_agents_filtered(src.path(), tgt.path(), |name| name == "engineer").unwrap();
+    let result = deploy_agents_filtered(src.path(), tgt.path(), &skills_root(), |name| {
+        name == "engineer"
+    })
+    .unwrap();
 
     // engineer.md deployed; base-agent.md filtered out and not written.
     assert!(result.deployed.contains(&"engineer.md".to_string()));
@@ -416,7 +446,7 @@ fn declared_skills_populated_for_every_processed_agent() {
     )
     .unwrap();
 
-    let result = deploy_agents(src.path(), tgt.path()).unwrap();
+    let result = deploy_agents(src.path(), tgt.path(), &skills_root()).unwrap();
     assert_eq!(
         result.declared_skills.get("code-critic"),
         Some(&vec![
@@ -432,7 +462,7 @@ fn declared_skills_empty_when_agent_declares_none() {
     let tgt = TempDir::new().unwrap();
     write_sources(src.path()); // base-agent.md + engineer.md, neither declares skills
 
-    let result = deploy_agents(src.path(), tgt.path()).unwrap();
+    let result = deploy_agents(src.path(), tgt.path(), &skills_root()).unwrap();
     assert_eq!(result.declared_skills.get("engineer"), Some(&Vec::new()));
 }
 
@@ -455,7 +485,7 @@ fn declared_skills_populated_even_when_deploy_is_skipped() {
     )
     .unwrap();
 
-    let result = deploy_agents(src.path(), tgt.path()).unwrap();
+    let result = deploy_agents(src.path(), tgt.path(), &skills_root()).unwrap();
     assert!(result.skipped.contains(&"code-critic.md".to_string()));
     assert_eq!(
         result.declared_skills.get("code-critic"),
@@ -483,7 +513,7 @@ fn deploy_isolates_single_malformed_agent_failure() {
     )
     .unwrap();
 
-    let result = deploy_agents(src.path(), tgt.path())
+    let result = deploy_agents(src.path(), tgt.path(), &skills_root())
         .expect("a single malformed agent must not abort the whole deploy");
 
     assert!(result.deployed.contains(&"good.md".to_string()));
@@ -539,7 +569,7 @@ fn deploy_refreshes_stale_broken_frontmatter_copy_to_valid_yaml() {
         "the seeded fixture must reproduce genuinely invalid YAML"
     );
 
-    let result = deploy_agents(src.path(), tgt.path()).unwrap();
+    let result = deploy_agents(src.path(), tgt.path(), &skills_root()).unwrap();
 
     assert!(
         result.deployed.contains(&"stale-engineer.md".to_string()),
@@ -572,7 +602,7 @@ fn deploy_isolates_agent_with_invalid_composed_yaml() {
     )
     .unwrap();
 
-    let result = deploy_agents(src.path(), tgt.path()).unwrap();
+    let result = deploy_agents(src.path(), tgt.path(), &skills_root()).unwrap();
 
     assert!(result.deployed.contains(&"good.md".to_string()));
     assert!(!tgt.path().join("bad-skills.md").exists());
@@ -591,7 +621,7 @@ fn deploy_content_file_is_atomic() {
     let tgt = TempDir::new().unwrap();
     write_sources(src.path());
 
-    deploy_agents(src.path(), tgt.path()).unwrap();
+    deploy_agents(src.path(), tgt.path(), &skills_root()).unwrap();
 
     for entry in fs::read_dir(tgt.path()).unwrap() {
         let entry = entry.unwrap();
@@ -613,7 +643,7 @@ fn deploy_content_file_is_atomic() {
 /// Deploy `write_sources` into `tgt`, then downgrade one entry to a user-owned
 /// origin so retraction has both ownership tiers to discriminate between.
 fn deploy_then_mark_user_owned(src: &Path, tgt: &Path, filename: &str) {
-    deploy_agents(src, tgt).unwrap();
+    deploy_agents(src, tgt, &skills_root()).unwrap();
     let mut manifest = AgentManifest::load(tgt);
     manifest.managed.get_mut(filename).unwrap().origin = Origin::User;
     manifest.save(tgt).unwrap();
@@ -655,7 +685,7 @@ fn retract_preserves_untracked_hand_placed_file() {
     let src = TempDir::new().unwrap();
     let tgt = TempDir::new().unwrap();
     write_sources(src.path());
-    deploy_agents(src.path(), tgt.path()).unwrap();
+    deploy_agents(src.path(), tgt.path(), &skills_root()).unwrap();
 
     let hand_placed = tgt.path().join("my-own-agent.md");
     let content = "---\nname: my-own-agent\ndescription: mine\n---\n\nMine.\n";
@@ -676,7 +706,7 @@ fn retract_removes_drifted_framework_file() {
     let src = TempDir::new().unwrap();
     let tgt = TempDir::new().unwrap();
     write_sources(src.path());
-    deploy_agents(src.path(), tgt.path()).unwrap();
+    deploy_agents(src.path(), tgt.path(), &skills_root()).unwrap();
     fs::write(tgt.path().join("engineer.md"), CORRUPT_STUB).unwrap();
 
     let result = retract_framework_agents(tgt.path()).unwrap();
@@ -693,7 +723,7 @@ fn retract_clears_manifest_and_dir_when_nothing_remains() {
     let base = TempDir::new().unwrap();
     let tgt = base.path().join("agents");
     write_sources(src.path());
-    deploy_agents(src.path(), &tgt).unwrap();
+    deploy_agents(src.path(), &tgt, &skills_root()).unwrap();
 
     let result = retract_framework_agents(&tgt).unwrap();
 
@@ -708,7 +738,7 @@ fn retract_is_idempotent() {
     let src = TempDir::new().unwrap();
     let tgt = TempDir::new().unwrap();
     write_sources(src.path());
-    deploy_agents(src.path(), tgt.path()).unwrap();
+    deploy_agents(src.path(), tgt.path(), &skills_root()).unwrap();
 
     let first = retract_framework_agents(tgt.path()).unwrap();
     assert_eq!(first.removed.len(), 2);
@@ -736,7 +766,7 @@ fn retract_filtered_respects_predicate() {
     let src = TempDir::new().unwrap();
     let tgt = TempDir::new().unwrap();
     write_sources(src.path());
-    deploy_agents(src.path(), tgt.path()).unwrap();
+    deploy_agents(src.path(), tgt.path(), &skills_root()).unwrap();
 
     let result = retract_framework_agents_filtered(tgt.path(), |stem| stem == "engineer").unwrap();
 
@@ -759,7 +789,7 @@ fn retract_refuses_on_corrupt_manifest() {
     let src = TempDir::new().unwrap();
     let tgt = TempDir::new().unwrap();
     write_sources(src.path());
-    deploy_agents(src.path(), tgt.path()).unwrap();
+    deploy_agents(src.path(), tgt.path(), &skills_root()).unwrap();
     fs::write(tgt.path().join(MANIFEST_FILE), b"not valid json{{{").unwrap();
 
     let err = retract_framework_agents(tgt.path()).unwrap_err();
@@ -786,7 +816,7 @@ fn deploy_stamps_provenance_and_the_manifest_still_round_trips() {
     let tgt = TempDir::new().unwrap();
     write_sources(src.path());
 
-    let result = deploy_agents(src.path(), tgt.path()).unwrap();
+    let result = deploy_agents(src.path(), tgt.path(), &skills_root()).unwrap();
     assert_eq!(result.deployed.len(), 2, "both agents written: {result:?}");
 
     for filename in ["base-agent.md", "engineer.md"] {
@@ -814,7 +844,7 @@ fn deploy_stamps_provenance_and_the_manifest_still_round_trips() {
     }
 
     // A second run sees everything current — no churn from the new field.
-    let again = deploy_agents(src.path(), tgt.path()).unwrap();
+    let again = deploy_agents(src.path(), tgt.path(), &skills_root()).unwrap();
     assert_eq!(again.unchanged.len(), 2, "idempotent: {again:?}");
     assert!(again.deployed.is_empty());
 }
@@ -833,7 +863,7 @@ fn deploy_adopts_an_untracked_file_written_before_the_provenance_stamp() {
     assert!(!unstamped.contains("provenance"));
     fs::write(tgt.path().join("engineer.md"), &unstamped).unwrap();
 
-    let result = deploy_agents(src.path(), tgt.path()).unwrap();
+    let result = deploy_agents(src.path(), tgt.path(), &skills_root()).unwrap();
     assert!(
         result.adopted.contains(&"engineer.md".to_string()),
         "adopted, not skipped: {result:?}"
@@ -851,7 +881,7 @@ fn deploy_adopts_an_untracked_file_written_before_the_provenance_stamp() {
 
     // The next run finds a matching checksum and a differing composition, so it
     // refreshes into the stamped form.
-    let second = deploy_agents(src.path(), tgt.path()).unwrap();
+    let second = deploy_agents(src.path(), tgt.path(), &skills_root()).unwrap();
     assert!(
         second.deployed.contains(&"engineer.md".to_string()),
         "upgraded on the next run: {second:?}"
@@ -878,7 +908,7 @@ fn deploy_stamps_an_agent_whose_source_declares_no_provenance() {
             .contains("provenance")
     );
 
-    deploy_agents(src.path(), tgt.path()).unwrap();
+    deploy_agents(src.path(), tgt.path(), &skills_root()).unwrap();
     assert!(
         fs::read_to_string(tgt.path().join("solo.md"))
             .unwrap()

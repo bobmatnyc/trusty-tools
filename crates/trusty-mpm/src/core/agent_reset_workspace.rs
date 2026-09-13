@@ -413,6 +413,7 @@ mod tests {
         crate::core::agent_deployer::deploy_agents(
             &fw_root.join("framework").join("agents"),
             &workspace.join(".claude").join("agents"),
+            &workspace.join(".claude").join("skills"),
         )
         .unwrap();
     }

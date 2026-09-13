@@ -566,9 +566,13 @@ pub(super) fn prepare_session_inner(
     crate::core::provisioning_stage::emit(
         crate::core::provisioning_stage::ProvisioningStage::DeployingAgents,
     );
-    let deploy = match deploy_agents_filtered(&plan.agent_source, &fw.agent_deploy_dir(), |name| {
-        plan.agent_selected(name)
-    }) {
+    // #7727: `fw.skill_deploy_dir()` is the skills tier the agent bodies name.
+    let deploy = match deploy_agents_filtered(
+        &plan.agent_source,
+        &fw.agent_deploy_dir(),
+        &fw.skill_deploy_dir(),
+        |name| plan.agent_selected(name),
+    ) {
         Ok(result) => result,
         Err(err) => {
             // LOUD: an empty agent roster means the launched session has

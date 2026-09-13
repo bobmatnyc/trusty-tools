@@ -40,8 +40,7 @@ fn write_skill(dir: &Path, stem: &str, body: &str) {
 /// agent (i.e. as if it had just been deployed from this exact catalog).
 fn deployed_agent_matching(catalog_agents: &Path, stem: &str) -> AgentManifest {
     // #4698: the ledger records what the DEPLOYER wrote, stamp included.
-    let composed =
-        compose_agent_with_provenance(stem, catalog_agents, Provenance::FrameworkOwned).unwrap();
+    let composed = compose_agent_for_deploy(stem, catalog_agents, &std::env::temp_dir()).unwrap();
     let mut m = AgentManifest::default();
     m.managed.insert(
         format!("{stem}.md"),
@@ -84,6 +83,7 @@ fn detect_unknown_when_never_synced() {
         &SkillManifest::default(),
         &root.path().join("dep-agents"),
         &root.path().join("dep-skills"),
+        &std::env::temp_dir(),
         |_| true,
         |_| true,
         |_| false,
@@ -113,6 +113,7 @@ fn detect_not_stale_when_identical() {
         &dep_skills,
         &root.path().join("dep-agents"),
         &root.path().join("dep-skills"),
+        &std::env::temp_dir(),
         |_| true,
         |_| true,
         |_| false,
@@ -144,6 +145,7 @@ fn detect_flags_changed_agent() {
         &SkillManifest::default(),
         &root.path().join("dep-agents"),
         &root.path().join("dep-skills"),
+        &std::env::temp_dir(),
         |_| true,
         |_| true,
         |_| false,
@@ -170,6 +172,7 @@ fn detect_flags_new_agent() {
         &SkillManifest::default(),
         &root.path().join("dep-agents"),
         &root.path().join("dep-skills"),
+        &std::env::temp_dir(),
         |_| true,
         |_| true,
         |_| false,
@@ -193,6 +196,7 @@ fn detect_flags_new_skill() {
         &SkillManifest::default(),
         &root.path().join("dep-agents"),
         &root.path().join("dep-skills"),
+        &std::env::temp_dir(),
         |_| true,
         |_| true,
         |_| false,
@@ -220,6 +224,7 @@ fn detect_flags_changed_skill() {
         &dep_skills,
         &root.path().join("dep-agents"),
         &root.path().join("dep-skills"),
+        &std::env::temp_dir(),
         |_| true,
         |_| true,
         |_| false,
@@ -248,6 +253,7 @@ fn detect_respects_selection() {
         &SkillManifest::default(),
         &root.path().join("dep-agents"),
         &root.path().join("dep-skills"),
+        &std::env::temp_dir(),
         |name| name == "rust-engineer", // exclude php-engineer
         |_| true,
         |_| false,
@@ -280,6 +286,7 @@ fn detect_respects_ignore_staleness() {
         &SkillManifest::default(),
         &root.path().join("dep-agents"),
         &root.path().join("dep-skills"),
+        &std::env::temp_dir(),
         |_| true, // both agents SELECTED (deploy roster unaffected)
         |_| true,
         |name| name == "engineer", // but staleness-exempt
@@ -307,6 +314,7 @@ fn detect_caps_change_list() {
         &SkillManifest::default(),
         &root.path().join("dep-agents"),
         &root.path().join("dep-skills"),
+        &std::env::temp_dir(),
         |_| true,
         |_| true,
         |_| false,
@@ -373,6 +381,7 @@ fn detect_unknown_when_only_one_tree_missing_is_not_unknown() {
         &SkillManifest::default(),
         &root.path().join("dep-agents"),
         &root.path().join("dep-skills"),
+        &std::env::temp_dir(),
         |_| true,
         |_| true,
         |_| false,
@@ -388,8 +397,7 @@ fn detect_unknown_when_only_one_tree_missing_is_not_unknown() {
 /// deployed WITHOUT recording a manifest entry (the #1940 root-cause scenario).
 fn deploy_agent_on_disk(catalog_agents: &Path, deployed_dir: &Path, stem: &str) {
     // #4698: simulate the deployer's bytes, stamp included.
-    let composed =
-        compose_agent_with_provenance(stem, catalog_agents, Provenance::FrameworkOwned).unwrap();
+    let composed = compose_agent_for_deploy(stem, catalog_agents, &std::env::temp_dir()).unwrap();
     fs::create_dir_all(deployed_dir).unwrap();
     fs::write(deployed_dir.join(format!("{stem}.md")), composed).unwrap();
 }
@@ -427,6 +435,7 @@ fn detect_reconciles_deployed_but_unmanifested() {
         &SkillManifest::default(),
         &dep_agents_dir,
         &dep_skills_dir,
+        &std::env::temp_dir(),
         |_| true,
         |_| true,
         |_| false,
@@ -462,6 +471,7 @@ fn detect_user_owned_on_disk_not_reported() {
         &SkillManifest::default(),
         &dep_agents_dir,
         &root.path().join("dep-skills"),
+        &std::env::temp_dir(),
         |_| true,
         |_| true,
         |_| false,
@@ -495,6 +505,7 @@ fn detect_user_modified_managed_not_reported() {
         &SkillManifest::default(),
         &dep_agents_dir,
         &root.path().join("dep-skills"),
+        &std::env::temp_dir(),
         |_| true,
         |_| true,
         |_| false,
@@ -555,7 +566,7 @@ fn compute_agent_catalog_hashes_skips_compose_failures() {
     write_agent(&agents, "good", "v1");
     fs::write(agents.join("broken.md"), "---\nunterminated").unwrap();
 
-    let hashes = compute_agent_catalog_hashes(&agents);
+    let hashes = compute_agent_catalog_hashes(&agents, &std::env::temp_dir());
     assert!(hashes.contains_key("good"));
     assert!(
         !hashes.contains_key("broken"),
@@ -581,6 +592,7 @@ fn catalog_hashes_compute_is_unknown_without_either_source() {
     let cache = CatalogHashes::compute(
         &root.path().join("no-agents"),
         &root.path().join("no-skills"),
+        &std::env::temp_dir(),
     );
     let report = cache.detect(
         &DeployedAgentHashes::with_manifest(
@@ -639,7 +651,7 @@ fn catalog_hashes_shared_across_two_deployed_targets() {
     let b_skill_manifest = SkillManifest::default();
 
     // Compute the catalog side EXACTLY ONCE, then detect against both targets.
-    let cache = CatalogHashes::compute(&catalog_agents, &catalog_skills);
+    let cache = CatalogHashes::compute(&catalog_agents, &catalog_skills, &std::env::temp_dir());
 
     let report_a = cache.detect(
         &DeployedAgentHashes::with_manifest(a_agent_manifest.clone(), &a_agents_dir, &cache),
@@ -680,6 +692,7 @@ fn catalog_hashes_shared_across_two_deployed_targets() {
         &a_skill_manifest,
         &a_agents_dir,
         &a_skills_dir,
+        &std::env::temp_dir(),
         |_| true,
         |_| true,
         |_| false,
@@ -692,6 +705,7 @@ fn catalog_hashes_shared_across_two_deployed_targets() {
         &b_skill_manifest,
         &b_agents_dir,
         &b_skills_dir,
+        &std::env::temp_dir(),
         |_| true,
         |_| true,
         |_| false,
@@ -740,6 +754,7 @@ fn single_target_detect_reads_only_selected_agents() {
         &SkillManifest::default(),
         &deployed_agents_dir,
         &deployed_skills_dir,
+        &std::env::temp_dir(),
         // Selects exactly one of the four catalog agents.
         |name| name == "alpha",
         |_| true,

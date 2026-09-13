@@ -119,7 +119,8 @@ fn pipeline_counts_deployed_agents() {
     // Deploy a real composed engineer agent into the pipeline's agents dir.
     let src = TempDir::new().unwrap();
     write_agent_sources(src.path());
-    deploy_agents(src.path(), &agents_tier(&input)).expect("deploy succeeds");
+    deploy_agents(src.path(), &agents_tier(&input), &std::env::temp_dir())
+        .expect("deploy succeeds");
 
     let out = build_instructions(&input).expect("pipeline succeeds");
     assert!(out.agent_count >= 1, "deployed agents counted");

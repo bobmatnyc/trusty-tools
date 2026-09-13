@@ -263,7 +263,12 @@ pub fn ensure_managed_config_dir_with_root_and_exe(
     // deploy must not block a session — so anything it could not do comes back
     // as a warning line instead.
     let agents_dest = config_dir.join("agents");
-    let agents = crate::core::agent_source::autodeploy_agents_for(fw, &agents_dest);
+    // #7727: agent bodies point at the skills this same config dir receives.
+    let agents = crate::core::agent_source::autodeploy_agents_for(
+        fw,
+        &agents_dest,
+        &config_dir.join("skills"),
+    );
     if agents.refreshed {
         tracing::info!(
             "managed config dir: bundled agent source refreshed from the running binary"

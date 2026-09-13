@@ -256,7 +256,10 @@ pub fn ensure_roster_deployed(project_root: &Path) -> Result<RosterDeploy, Roste
     let staged = stage_embedded_sources()?;
     let roster: HashSet<&str> = DEFAULT_AGENTS.iter().map(EmbeddedAgent::name).collect();
 
-    let result = deploy_agents_filtered(staged.path(), &target, |stem| {
+    // #7727: the roster's skill pointers resolve to files this project holds.
+    let skill_refs = super::skill_refs::project_skill_refs_dir(project_root);
+    super::skill_refs::materialize_skill_refs(&skill_refs).map_err(RosterDeployError::Stage)?;
+    let result = deploy_agents_filtered(staged.path(), &target, &skill_refs, |stem| {
         roster.contains(stem) && !is_user_edited(&manifest, &target, stem)
     })
     .map_err(RosterDeployError::Deploy)?;

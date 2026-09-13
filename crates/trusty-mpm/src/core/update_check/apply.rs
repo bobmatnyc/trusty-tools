@@ -200,9 +200,13 @@ pub fn apply_catalog<G: GitBackend>(
     // #4409: the canonical bundled-agent tier is the tm-managed config dir, so
     // a catalog apply refreshes THAT, never the workspace's project tier.
     let agent_target = fw.agent_deploy_dir();
-    let deploy = deploy_agents_filtered(&plan.agent_source, &agent_target, |name| {
-        plan.agent_selected(name)
-    })
+    // #7727: agent bodies point at the bundled skills tier.
+    let deploy = deploy_agents_filtered(
+        &plan.agent_source,
+        &agent_target,
+        &fw.skill_deploy_dir(),
+        |name| plan.agent_selected(name),
+    )
     .map_err(|e| ApplyError::AgentDeploy(e.to_string()))?;
     report.agents_deployed = deploy.deployed;
     report.agents_skipped = deploy.skipped;
