@@ -130,13 +130,7 @@ while [ $# -gt 0 ]; do
     --files)
       MODE="files"
       shift
-      # A changed path can itself start with `--` (unusual, but valid to
-      # git). Stop at the first flag-looking token as before, but recognize
-      # a literal `--` as the conventional end-of-options sentinel: once
-      # seen, consume every remaining token as a path unconditionally (#7777
-      # review). With no `--` sentinel, a `--`-prefixed token still falls
-      # through to the unknown-argument arm below — see the header's Exit
-      # note for why that scope exclusion is deliberate.
+      # #7777: a literal `--` ends options so a `--`-prefixed path is still a path
       while [ $# -gt 0 ] && [ "$1" != "--" ] && [ "${1#--}" = "$1" ]; do
         FILES+=("$1")
         shift
@@ -151,18 +145,7 @@ while [ $# -gt 0 ]; do
       ;;
     --range)
       MODE="range"
-      # #7777 review round 1: a bare trailing `--range` (no value) must not
-      # hang. `shift 2` with only one token left fails under `set -uo
-      # pipefail` (no `-e`), so `$#` never drops and the `while` loop
-      # re-enters this arm forever, spinning at ~100% CPU. Consume exactly
-      # what is there — one token or two — so `$#` always shrinks; an empty
-      # RANGE_SPEC then hits the "no range given" fail-open check below
-      # (never nothing).
-      #
-      # #7777 review round 2: `$2` must also look like a range, not the next
-      # flag — `--range --cargo-args` would otherwise silently swallow
-      # `--cargo-args` as the range value (same disambiguation `--files`
-      # already does for a flag-looking token).
+      # #7777: consume one or two tokens so a bare --range cannot loop, and reject a flag-looking value
       if [ $# -ge 2 ] && [ "${2#--}" = "$2" ]; then
         RANGE_SPEC="$2"
         shift 2
@@ -187,17 +170,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# ---------------------------------------------------------------------------
-# bash4+ required from here on (associative arrays below, #7777 review).
-# macOS ships bash 3.2.57 as `/bin/bash` (CLAUDE.md's own portability note).
-# Under bash <4, `declare -A` fails as a non-fatal error under
-# `set -uo pipefail` (no `-e`) and the script falls through to an empty
-# result at exit 0 — indistinguishable from a legitimate zero-crate answer.
-# Guard here, before the first `declare -A`, and route through the same
-# FAIL OPEN doctrine used everywhere else in this script: warn loud on
-# stderr, print every crate name we can still find (no associative array
-# needed for that), exit 0. Never silently emit nothing.
-# ---------------------------------------------------------------------------
+# #7777: guard bash <4 before the first declare -A, which fails silently and empties the result
 if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ] 2>/dev/null; then
   echo "select-test-crates: WARNING: running under bash ${BASH_VERSION:-<unknown>} (need bash 4+ for associative arrays) — printing ALL crates" >&2
   BASH32_NAMES=""
@@ -321,15 +294,7 @@ emit_output() {
 
 # fail_open <reason> — warn, print every crate we can still name, exit 0.
 #
-# #7777 review round 2: most fail-open triggers (a bare `--range`, `--files`
-# with no paths, an unresolvable `--range`, no `jq`) fire in step 1, before
-# step 2 (Prerequisites) has ever run `cargo metadata` — so ALL_CRATES is
-# still empty here in the common case, not the exception. Try `cargo
-# metadata --no-deps` directly first, mirroring the bash<4 guard's own
-# offline-then-online ordering above, rather than dropping straight to
-# fallback_all_crates()'s shallow one-level `crates/*/Cargo.toml` scan, which
-# MISSES a nested workspace member (crates/trusty-agents/ui/src-tauri ->
-# trusty-agents-ui, crates/trusty-audit/ui/src-tauri -> trusty-audit-ui).
+# #7777: try cargo metadata first; the shallow scan misses nested members (trusty-agents-ui)
 fail_open() {
   local reason="$1"
   echo "select-test-crates: WARNING: ${reason} — printing ALL crates" >&2
