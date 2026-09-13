@@ -196,3 +196,67 @@ fn refuses_an_unreadable_file() {
         "unexpected error: {err}"
     );
 }
+
+/// #7780's second closure condition: the operator is TOLD where their bytes
+/// went. Without this the `backup` field could be dropped from the warning and
+/// every other test in this file would still pass, leaving a copy nobody can
+/// locate. Serial because [`crate::test_support::enable_event_capture`] raises
+/// the process-global tracing level.
+#[test]
+#[serial_test::serial]
+fn warns_with_the_path_of_the_copy_it_took() {
+    use tracing_subscriber::layer::SubscriberExt;
+
+    let tmp = TempDir::new().unwrap();
+    let (dir, path) = seed(&tmp, b"{ broken");
+
+    // #4931: `with_default` is thread-local and never raises the process-global
+    // MAX_LEVEL, so without this the capture records nothing.
+    crate::test_support::enable_event_capture();
+    let buffer = trusty_common::log_buffer::LogBuffer::new(16);
+    let subscriber = tracing_subscriber::registry().with(
+        trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+    );
+    tracing::subscriber::with_default(subscriber, || {
+        load_settings_object_at(&path, at("2026-09-13T10:00:00Z")).expect("copied aside");
+    });
+
+    let copy = dir.join("settings.json.malformed-20260913T100000Z");
+    assert_eq!(copies(&dir).len(), 1, "exactly one copy was taken");
+    let lines = buffer.tail(16);
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains(&copy.display().to_string())),
+        "the warning must name the copy at {}, else the operator cannot recover \
+         their bytes: {lines:#?}",
+        copy.display()
+    );
+}
+
+/// The named wrapper the writer that does not need the value calls. It must take
+/// the same copy and refuse on the same terms as the loader — a wrapper that
+/// quietly swallowed the error would re-open #7780 for its caller.
+#[test]
+fn preserve_if_malformed_copies_aside_and_refuses_when_it_cannot() {
+    let tmp = TempDir::new().unwrap();
+    let (dir, path) = seed(&tmp, b"{ broken");
+
+    preserve_if_malformed(&path).expect("a copied-aside file is not an error");
+    assert_eq!(copies(&dir).len(), 1, "the wrapper must take the copy");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let result = preserve_if_malformed(&path);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let err = result.expect_err("an uncopyable original must refuse");
+        assert!(
+            matches!(err, PrepError::SettingsBackup { .. }),
+            "unexpected error: {err}"
+        );
+    }
+}

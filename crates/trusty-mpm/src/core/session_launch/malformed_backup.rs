@@ -64,6 +64,22 @@ pub(super) fn load_settings_object(settings_path: &Path) -> Result<Value, PrepEr
     load_settings_object_at(settings_path, Utc::now())
 }
 
+/// Preserve the file a writer is about to replace, without taking its contents.
+///
+/// Why: a writer that already holds the object it means to write still owes the
+/// copy — [`crate::core::session_launch::settings::write_enabled_plugins_with_trust`]
+/// planned its merge from a non-object file that was silently discarded. Calling
+/// [`load_settings_object`] for its side effect alone reads as dead code to the
+/// next editor; DELETING THIS CALL RESTORES #7780's SILENT OVERWRITE for that
+/// writer, so the name says what the call is for.
+/// What: [`load_settings_object`] with the loaded value dropped — the copy, the
+/// warning and the fail-closed refusal are the whole of the contract.
+/// Test: `write_enabled_plugins_backs_up_a_malformed_file_before_rewriting_it`,
+/// `preserve_if_malformed_copies_aside_and_refuses_when_it_cannot`.
+pub(super) fn preserve_if_malformed(settings_path: &Path) -> Result<(), PrepError> {
+    load_settings_object(settings_path).map(|_| ())
+}
+
 /// [`load_settings_object`] with the clock supplied by the caller.
 ///
 /// Why: the stamp is the copy's identity, so the naming and same-second
@@ -131,7 +147,9 @@ fn copy_aside(settings_path: &Path, bytes: &[u8], stamp: &str) -> io::Result<Pat
 /// the name the same operation as checking it.
 /// What: tries `<name>.malformed-<stamp>`, then `<name>.malformed-<stamp>-1`, …
 /// up to [`MAX_SAME_SECOND_BACKUPS`]. An `AlreadyExists` moves to the next
-/// candidate; any other error is the caller's.
+/// candidate; any other error is the caller's. A directory sitting on a
+/// candidate name also reports `AlreadyExists`, so it is stepped over rather
+/// than treated as a failure.
 /// Test: `never_overwrites_a_copy_taken_in_the_same_second`,
 /// `refuses_when_the_copy_cannot_be_written`.
 fn claim_backup_name(settings_path: &Path, stamp: &str) -> io::Result<PathBuf> {

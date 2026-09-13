@@ -37,10 +37,10 @@ mod divert_hooks;
 /// Test: covered by `asset_notices`' own tests (this is a plain re-export).
 pub use asset_notices::{PrepScope, log_prep_findings};
 mod palace_alias;
-// #4448: the ONE wiring of the shadowing-agent quarantine, shared by
-// `prepare_session_inner` and `sync_session_assets`.
 // #7780: preserve a malformed project settings.json before a writer rewrites it.
 mod malformed_backup;
+// #4448: the ONE wiring of the shadowing-agent quarantine, shared by
+// `prepare_session_inner` and `sync_session_assets`.
 mod project_hooks;
 // #7688: the `Stop`/`SubagentStop` prompt-feedback capture groups.
 mod prompt_feedback_hooks;

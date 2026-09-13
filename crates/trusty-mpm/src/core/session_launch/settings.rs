@@ -441,9 +441,8 @@ pub(crate) fn write_enabled_plugins_with_trust(
     // #7780: `plan_enabled_plugins_with_trust` read the file with this writer's
     // own tolerance, so `plan.merged` already discards a non-object file. This
     // call is what turns that discard into a preserved copy — and refuses the
-    // rewrite when the copy cannot be made. Its return value is the empty object
-    // the plan already merged onto, so there is nothing here to re-read.
-    super::malformed_backup::load_settings_object(&plan.settings_path)?;
+    // rewrite when the copy cannot be made.
+    super::malformed_backup::preserve_if_malformed(&plan.settings_path)?;
 
     trusty_common::claude_config::write_json_atomic(&plan.settings_path, &plan.merged)
         .map_err(|err| PrepError::Deploy(err.to_string()))?;
