@@ -55,6 +55,10 @@ pub mod workstreams;
 
 pub mod transport;
 
+// #7735: shared closing-block extraction (Improvement recommendations /
+// Prompt feedback), slice 1 of docs/specs/self-improvement-loop.md.
+pub mod self_improvement;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
