@@ -196,3 +196,133 @@ fn a_symlink_to_a_repository_counts_as_found() {
 
     assert_eq!(scan_for_child_repo(&ws), ChildRepoScan::Found(linked));
 }
+
+/// FAILS BEFORE ROUND 3: a skip-listed name was skipped before its `.git` was
+/// checked, so a vendored submodule one level under `vendor/` scanned `Clear`.
+#[test]
+fn a_repository_under_a_skip_listed_name_is_found() {
+    let tmp = TempDir::new().unwrap();
+    let ws = workspace(&tmp);
+    let lib = ws.join("vendor").join("some-lib");
+    std::fs::create_dir_all(lib.join(".git")).unwrap();
+
+    assert_eq!(scan_for_child_repo(&ws), ChildRepoScan::Found(lib));
+}
+
+/// FAILS BEFORE ROUND 3: a skip-listed directory that is itself a repository
+/// scanned `Clear`.
+#[test]
+fn a_repository_that_is_a_skip_listed_directory_is_found() {
+    let tmp = TempDir::new().unwrap();
+    let ws = workspace(&tmp);
+    let build = ws.join("build");
+    std::fs::create_dir_all(build.join(".git")).unwrap();
+
+    assert_eq!(scan_for_child_repo(&ws), ChildRepoScan::Found(build));
+}
+
+/// FAILS BEFORE ROUND 3: a skip-listed directory was never read, so one too
+/// wide to check still scanned `Clear`.
+#[test]
+fn a_skip_listed_directory_wider_than_its_check_cap_is_incomplete() {
+    let tmp = TempDir::new().unwrap();
+    let ws = workspace(&tmp);
+    let node_modules = ws.join("node_modules");
+    fill(&node_modules, SKIP_DIR_CHECK_CAP + 1);
+
+    assert_eq!(
+        scan_for_child_repo(&ws),
+        ChildRepoScan::Incomplete(ScanIncomplete::SkipDirTooWide { path: node_modules })
+    );
+}
+
+/// FAILS BEFORE ROUND 3: the symlink arm used `.exists()`, which reads a
+/// permission error as "no `.git`", so a locked linked repository was `Clear`.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_symlink_target_is_incomplete() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let tmp = TempDir::new().unwrap();
+    let ws = workspace(&tmp);
+    let locked = ws.parent().unwrap().join("locked-repo");
+    std::fs::create_dir_all(locked.join(".git")).unwrap();
+    let linked = ws.join("linked");
+    symlink(&locked, &linked).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let _restore = RestoreMode(locked.clone());
+    if std::fs::read_dir(&locked).is_ok() {
+        eprintln!("#7673 tests: running with permission overrides (root?), skipping");
+        return;
+    }
+
+    match scan_for_child_repo(&ws) {
+        ChildRepoScan::Incomplete(ScanIncomplete::Unreadable { path, .. }) => {
+            assert_eq!(path, linked);
+        }
+        other => panic!("an unreadable symlink target must stop the scan, got {other:?}"),
+    }
+}
+
+/// A symlink to a file or to nothing cannot be a repository, so it neither
+/// stops the scan nor counts as found (`AGENTS.md -> CLAUDE.md` is common).
+#[cfg(unix)]
+#[test]
+fn a_symlink_to_a_file_or_to_nothing_is_not_a_repository() {
+    use std::os::unix::fs::symlink;
+    let tmp = TempDir::new().unwrap();
+    let ws = workspace(&tmp);
+    std::fs::write(ws.join("CLAUDE.md"), "x").unwrap();
+    symlink(ws.join("CLAUDE.md"), ws.join("AGENTS.md")).unwrap();
+    symlink(ws.join("missing"), ws.join("dangling")).unwrap();
+    std::fs::create_dir_all(ws.join("vendor")).unwrap();
+    symlink(ws.join("CLAUDE.md"), ws.join("vendor").join("linked-file")).unwrap();
+
+    assert_eq!(scan_for_child_repo(&ws), ChildRepoScan::Clear);
+}
+
+/// Ratchet: `Clear` is built once, as the tail expression after the queue
+/// loop, so no early exit can answer "clear" (#7673 round 3 review).
+#[test]
+fn clear_is_constructed_in_one_place() {
+    let source = include_str!("child_repo_scan.rs");
+    let code: Vec<&str> = source
+        .lines()
+        .take_while(|l| !l.trim_start().starts_with("#[cfg(test)]"))
+        .map(|l| l.split("//").next().unwrap_or("").trim())
+        .collect();
+    let needle = "ChildRepoScan::Clear";
+    let sites: Vec<usize> = (0..code.len())
+        .filter(|&i| code[i].contains(needle))
+        .collect();
+    assert_eq!(
+        sites.len(),
+        1,
+        "`{needle}` must be constructed exactly once"
+    );
+    let site = sites[0];
+    assert_eq!(
+        code[site], needle,
+        "`Clear` must be a bare tail expression, not a mapped arm"
+    );
+
+    let loop_start = code
+        .iter()
+        .position(|l| *l == "while let Some(current) = queue.pop_front() {")
+        .expect("the walk drains a queue");
+    assert!(loop_start < site, "`Clear` must follow the queue loop");
+    assert!(
+        code[loop_start..site].iter().all(|l| !l.contains("fn ")),
+        "`Clear` must sit in the function that drains the queue"
+    );
+    let word_uses = code
+        .iter()
+        .filter(|l| {
+            l.split(|c: char| !c.is_alphanumeric() && c != '_')
+                .any(|w| w == "Clear")
+        })
+        .count();
+    assert_eq!(
+        word_uses, 2,
+        "only the variant declaration and its one construction name `Clear`"
+    );
+}
