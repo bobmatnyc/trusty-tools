@@ -20,6 +20,7 @@ use crate::cli::McpTransportArg;
 use trusty_mpm::core::mcp_config::{
     self, McpTransport, build_remote_entry, build_stdio_entry, strip_arg_separator,
 };
+use trusty_mpm::core::mcp_share::{McpShareStore, share_store_root};
 use trusty_mpm::core::mcp_test::{self, McpTestResult};
 
 /// Resolve the `.claude.json`-bearing config dir for a `tm mcp` invocation.
@@ -84,6 +85,70 @@ fn parse_headers(items: &[String]) -> Result<Map<String, Value>> {
 /// clap: its first element is the command (stdio) or URL (http/sse); any
 /// remaining elements are stdio subprocess args (rejected for http/sse).
 /// Test: `cli_parses_mcp_add`, `cli_parses_mcp_add_http`; CRUD in `core::mcp_config`.
+///
+/// Dispatch one `tm mcp <verb>` invocation.
+///
+/// Why (#7672): the verb list grew past what `main`'s single match arm could
+/// hold without pushing that file over the 500-SLOC production cap, and the
+/// arm was pure routing with no `main`-level concern in it. Keeping the routing
+/// beside the handlers it routes to also means a new verb touches one file.
+/// What: maps each [`crate::cli::McpCmd`] variant onto its handler below.
+///
+/// # Errors
+///
+/// Propagates the selected handler's error unchanged.
+/// Test: `cli_parses_mcp_add`, `cli_parses_mcp_share`, `cli_parses_mcp_unshare`,
+/// `cli_parses_mcp_remove_list_get`.
+pub(crate) async fn dispatch(cmd: crate::cli::McpCmd) -> Result<()> {
+    use crate::cli::McpCmd;
+    match cmd {
+        McpCmd::Add {
+            name,
+            transport,
+            env,
+            header,
+            command_and_args,
+            root,
+            project,
+            share_with_projects,
+        } => add_cmd(
+            root.as_deref(),
+            &name,
+            transport,
+            &env,
+            &header,
+            &command_and_args,
+            AddPlacement {
+                project,
+                share_with_projects,
+            },
+        ),
+        McpCmd::Share { name, root } => share_cmd(root.as_deref(), &name, true),
+        McpCmd::Unshare { name, root } => share_cmd(root.as_deref(), &name, false),
+        McpCmd::Remove { name, root } => remove_cmd(root.as_deref(), &name),
+        McpCmd::List { json, root } => list_cmd(root.as_deref(), json),
+        McpCmd::Get { name, json, root } => get_cmd(root.as_deref(), &name, json),
+        McpCmd::Test { name, json, root } => test_cmd(root.as_deref(), name.as_deref(), json).await,
+    }
+}
+
+/// Where `tm mcp add` puts the server, and who may load it.
+///
+/// Why: clap hands these two independent booleans down together, and an
+/// argument list of eight trips `clippy::too_many_arguments`. Grouping them
+/// also keeps the two flags that decide WHO can load the server in one place.
+/// What: `project` writes the project's own `.mcp.json` instead of the shared
+/// user scope; `share_with_projects` records the #7672 content-match grant.
+/// Test: `cli_parses_mcp_share`, `cli_parses_mcp_unshare`.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct AddPlacement {
+    /// Write the server into THIS project's `.mcp.json` (`--project`, #7422).
+    pub project: bool,
+    /// Let an untrusted project match this user-scope entry by content
+    /// (`--share-with-projects`, #7672).
+    pub share_with_projects: bool,
+}
+
 pub(crate) fn add_cmd(
     root: Option<&str>,
     name: &str,
@@ -91,8 +156,12 @@ pub(crate) fn add_cmd(
     env: &[String],
     header: &[String],
     command_and_args: &[String],
-    project: bool,
+    placement: AddPlacement,
 ) -> Result<()> {
+    let AddPlacement {
+        project,
+        share_with_projects,
+    } = placement;
     let config_dir = resolve_config_dir(root)?;
     let command_or_url = command_and_args.first().map(String::as_str);
     // Drop a leading `--` separator (clap's `trailing_var_arg` keeps it in the
@@ -170,8 +239,14 @@ pub(crate) fn add_cmd(
         return Ok(());
     }
 
-    let changed = mcp_config::add_server(&config_dir, name, entry)?;
-    if changed {
+    let outcome = register_at(
+        &config_dir,
+        share_store_root().as_deref(),
+        name,
+        entry,
+        share_with_projects,
+    )?;
+    if outcome.changed {
         println!(
             "Added MCP server '{name}' to {}",
             config_dir.join(".claude.json").display()
@@ -182,23 +257,261 @@ pub(crate) fn add_cmd(
     } else {
         println!("MCP server '{name}' already present (no change)");
     }
+    if outcome.shared {
+        println!(
+            "  Shared with projects: an untrusted project whose .mcp.json declares exactly \n  this server now loads it, until the server's command, args or env change."
+        );
+    }
+    if outcome.grant_dropped {
+        println!(
+            "  Dropped the earlier `tm mcp share` grant for '{name}': it was recorded against \n  the entry this write replaced. Re-share it with `tm mcp share {name}` if still wanted."
+        );
+    }
     Ok(())
+}
+
+/// What one registry write did to the server and to its share grant (#7672).
+///
+/// Why: a grant is recorded against CONTENT, so every write that changes the
+/// content has to say what became of the grant — leaving that to the caller is
+/// how a replaced entry kept a grant describing the entry before it.
+/// What: `changed` is [`mcp_config::add_server`]'s own answer; exactly one of
+/// `shared` and `grant_dropped` can be set, and only for a write that changed
+/// something.
+/// Test: `add_drops_a_stale_grant_unless_it_reshares`.
+pub(crate) struct RegisterOutcome {
+    /// The registry entry was added or replaced.
+    pub changed: bool,
+    /// A grant bound to the entry just written was recorded.
+    pub shared: bool,
+    /// A grant recorded against the REPLACED entry was dropped.
+    pub grant_dropped: bool,
+}
+
+/// Write one user-scope registry entry and settle its share grant (#7672).
+///
+/// Why: the hermetic half of [`add_cmd`] — both roots are arguments, so the
+/// lifecycle can be tested without redirecting `$HOME` (banned in this binary,
+/// see the `env_isolation_tests` ratchet).
+/// What: writes the entry, then either re-records the grant against what was
+/// just written (`share_with_projects`) or drops any grant the replaced entry
+/// carried. A `store_root` of `None` means the home directory would not resolve:
+/// `--share-with-projects` is then an error, and the drop is logged and skipped.
+///
+/// # Errors
+///
+/// The registry write, or a `--share-with-projects` that cannot be recorded.
+/// Test: `add_drops_a_stale_grant_unless_it_reshares`.
+pub(crate) fn register_at(
+    config_dir: &Path,
+    store_root: Option<&Path>,
+    name: &str,
+    entry: Value,
+    share_with_projects: bool,
+) -> Result<RegisterOutcome> {
+    let changed = mcp_config::add_server(config_dir, name, entry)?;
+    if share_with_projects {
+        let root =
+            store_root.context("cannot resolve the home directory holding ~/.trusty-tools")?;
+        record_share_at(config_dir, root, name)?;
+        return Ok(RegisterOutcome {
+            changed,
+            shared: true,
+            grant_dropped: false,
+        });
+    }
+    // #7672: this write replaced the content a grant described, so the grant
+    // goes with it. A digest mismatch already stops the stale grant from
+    // matching; dropping it keeps the record honest about what is shared.
+    let grant_dropped = changed && drop_grant_quietly(store_root, name);
+    Ok(RegisterOutcome {
+        changed,
+        shared: false,
+        grant_dropped,
+    })
+}
+
+/// Handle `tm mcp share <name>` and `tm mcp unshare <name>` (#7672).
+///
+/// Why: content equivalence lets an UNTRUSTED project's `.mcp.json` load a
+/// server whose spec it reproduces exactly. Registering a server is not that
+/// consent — this workspace ships credential-bearing servers with an empty
+/// `env`, so their spec is public and reproducible — so the operator names the
+/// servers projects may reach that way.
+/// What: for a share, REFUSES a name with no registered server — a grant for an
+/// absent name is a dangling one that would attach to whatever is registered
+/// under that name next — and otherwise records the grant against the entry's
+/// current [`trusty_mpm::core::mcp_content_trust::spec_digest`]. An unshare
+/// needs no registered server: dropping a grant is never the harmful direction.
+///
+/// # Errors
+///
+/// An unresolvable state root, an unregistered name on a share, or an
+/// unreadable, malformed or unwritable store.
+/// Test: `cli_parses_mcp_share`, `cli_parses_mcp_unshare`,
+/// `share_refuses_a_name_with_no_registered_server`; the store itself in
+/// `core::mcp_share`.
+pub(crate) fn share_cmd(root: Option<&str>, name: &str, share: bool) -> Result<()> {
+    let config_dir = resolve_config_dir(root)?;
+    let store_root =
+        share_store_root().context("cannot resolve the home directory holding ~/.trusty-tools")?;
+    if !share {
+        if drop_share_at(&store_root, name)? {
+            println!("Unshared MCP server '{name}': only a TRUSTED project loads it from now on.");
+        } else {
+            println!("MCP server '{name}' is not shared with projects (no change)");
+        }
+        return Ok(());
+    }
+    if record_share_at(&config_dir, &store_root, name)? {
+        println!(
+            "Shared MCP server '{name}' with projects: an untrusted project whose \n  \
+             .mcp.json declares exactly this server's command, args and env now loads it.\n  \
+             The grant covers THAT content — change the server and share it again."
+        );
+    } else {
+        println!(
+            "MCP server '{name}' is already shared with projects at this exact content (no change)"
+        );
+    }
+    Ok(())
+}
+
+/// Record `name`'s grant against its CURRENT registry content (#7672).
+///
+/// Why: the hermetic core of `tm mcp share`, and the one place a grant is
+/// created. Both roots are arguments so the refusal can be tested without
+/// redirecting `$HOME`.
+/// What: `true` when the store changed. Bails when `name` is not registered, and
+/// when its entry will not normalize — a grant for either could never match a
+/// project declaration, so recording one would only mislead.
+///
+/// # Errors
+///
+/// An unregistered or unmodellable name, or an unreadable/unwritable store.
+/// Test: `share_refuses_a_name_with_no_registered_server`.
+pub(crate) fn record_share_at(config_dir: &Path, store_root: &Path, name: &str) -> Result<bool> {
+    let Some(entry) = mcp_config::get_server(config_dir, name)? else {
+        bail!(
+            "'{name}' is not a registered MCP server in {}, so there is nothing to \
+             share.\n  Register it first, then share it:\n    tm mcp add {name} -- \
+             <command> [args...]\n    tm mcp share {name}",
+            config_dir.display()
+        );
+    };
+    let Some(digest) = trusty_mpm::core::mcp_content_trust::spec_digest(&entry) else {
+        bail!(
+            "MCP server '{name}' cannot be shared: its registry entry carries a shape tm's \
+             content comparison does not model, so no project declaration could ever match it"
+        );
+    };
+    let mut store = McpShareStore::load(store_root)?;
+    let changed = store.share(name, &digest);
+    if changed {
+        store.save()?;
+    }
+    Ok(changed)
+}
+
+/// Drop `name`'s grant; `true` when one was there.
+///
+/// Why: the counterpart to [`record_share_at`], and the one place a grant is
+/// revoked — `tm mcp unshare`, `tm mcp remove`, and a `tm mcp add` that replaces
+/// an entry all go through it.
+///
+/// # Errors
+///
+/// An unreadable, malformed or unwritable store.
+/// Test: `remove_drops_the_grant_so_a_reused_name_is_not_known`.
+pub(crate) fn drop_share_at(store_root: &Path, name: &str) -> Result<bool> {
+    let mut store = McpShareStore::load(store_root)?;
+    if !store.unshare(name) {
+        return Ok(false);
+    }
+    store.save()?;
+    Ok(true)
+}
+
+/// [`drop_share_at`], for a caller whose own operation must not fail with it.
+///
+/// Why: `tm mcp remove` and `tm mcp add` are registry operations. A corrupt or
+/// unwritable share store must not block the write the operator asked for, but
+/// the failure has to be visible rather than swallowed. // See #7672
+/// What: `true` when a grant was dropped; `false`, with a warning, on any
+/// failure or unresolvable root.
+/// Test: `remove_drops_the_grant_so_a_reused_name_is_not_known`.
+fn drop_grant_quietly(store_root: Option<&Path>, name: &str) -> bool {
+    let Some(root) = store_root else {
+        tracing::warn!(
+            "cannot resolve ~/.trusty-tools, so '{name}' keeps any `tm mcp share` grant"
+        );
+        return false;
+    };
+    match drop_share_at(root, name) {
+        Ok(dropped) => dropped,
+        Err(err) => {
+            tracing::warn!("could not drop the `tm mcp share` grant for '{name}': {err}");
+            false
+        }
+    }
 }
 
 /// Handle `tm mcp remove <name>`.
 ///
 /// Why: drop a server the operator no longer wants injected into managed sessions.
-/// What: calls [`mcp_config::remove_server`]; prints whether it was removed or
-/// was already absent.
-/// Test: `cli_parses_mcp_remove`; CRUD in `core::mcp_config`.
+/// What: calls [`mcp_config::remove_server`] and drops the server's share grant
+/// with it — a grant left behind would apply to whatever is registered under
+/// that name next (#7672). Prints what each half did.
+/// Test: `cli_parses_mcp_remove`, `remove_drops_the_grant_so_a_reused_name_is_not_known`;
+/// CRUD in `core::mcp_config`.
 pub(crate) fn remove_cmd(root: Option<&str>, name: &str) -> Result<()> {
     let config_dir = resolve_config_dir(root)?;
-    if mcp_config::remove_server(&config_dir, name)? {
+    let outcome = remove_at(&config_dir, share_store_root().as_deref(), name)?;
+    if outcome.removed {
         println!("Removed MCP server '{name}'");
     } else {
         println!("MCP server '{name}' not found (no change)");
     }
+    if outcome.grant_dropped {
+        println!("  Also dropped its `tm mcp share` grant with projects.");
+    }
     Ok(())
+}
+
+/// What one `tm mcp remove` did to the registry and to the share grant (#7672).
+///
+/// Why: the two halves can disagree — a name with no registered server can
+/// still carry a grant — so the caller prints what each one actually did.
+/// Test: `remove_drops_the_grant_so_a_reused_name_is_not_known`.
+pub(crate) struct RemoveOutcome {
+    /// The registry entry was there and is gone.
+    pub removed: bool,
+    /// A share grant for that name was there and is gone.
+    pub grant_dropped: bool,
+}
+
+/// Drop one registry entry and the grant that described it (#7672).
+///
+/// Why: the hermetic half of [`remove_cmd`], and the direction the PR #7692
+/// re-review named: a grant left behind after a remove applies to whatever is
+/// registered under that name next, which is an unrelated server.
+/// What: removes the entry, then drops the grant best-effort — a broken share
+/// store is logged, never allowed to fail the removal the operator asked for.
+///
+/// # Errors
+///
+/// The registry write.
+/// Test: `remove_drops_the_grant_so_a_reused_name_is_not_known`.
+pub(crate) fn remove_at(
+    config_dir: &Path,
+    store_root: Option<&Path>,
+    name: &str,
+) -> Result<RemoveOutcome> {
+    let removed = mcp_config::remove_server(config_dir, name)?;
+    Ok(RemoveOutcome {
+        removed,
+        grant_dropped: drop_grant_quietly(store_root, name),
+    })
 }
 
 /// Handle `tm mcp list [--json]`.
@@ -476,7 +789,7 @@ mod tests {
             &[],
             &[],
             &command_and_args,
-            false,
+            AddPlacement::default(),
         )
         .unwrap();
 
@@ -513,7 +826,7 @@ mod tests {
             &[],
             &[],
             &command_and_args,
-            false,
+            AddPlacement::default(),
         )
         .unwrap();
 
@@ -525,5 +838,115 @@ mod tests {
             serde_json::json!(["run", "--", "tool"]),
             "leading `--` stripped once; the deeper `--` is preserved"
         );
+    }
+
+    /// A registry dir and a share-store root, both under one tempdir. Neither
+    /// is `$HOME`-derived: this binary's `env_isolation_tests` ratchet bans a
+    /// `set_var` here, so the lifecycle functions take both roots instead.
+    fn roots(tmp: &tempfile::TempDir) -> (PathBuf, PathBuf) {
+        let cfg = tmp.path().join("claude-config");
+        let store = tmp.path().join("state");
+        std::fs::create_dir_all(&store).unwrap();
+        (cfg, store)
+    }
+
+    /// Is this registry entry, under this name, content-trusted for an
+    /// untrusted project — the question the launch path asks (#7672)?
+    fn is_known(cfg: &Path, store: &Path, name: &str, entry: &Value) -> bool {
+        use trusty_mpm::core::mcp_content_trust::{KnownServers, Verdict};
+
+        let registry = mcp_config::list_servers(cfg).unwrap();
+        let grants = McpShareStore::load(store).unwrap().grants();
+        KnownServers::from_registry(&registry, &grants).classify(name, entry) == Verdict::Known
+    }
+
+    /// PR #7692 re-review, HIGH (a): a grant for a name with no registered
+    /// server is dangling — it would attach to whatever gets registered under
+    /// that name later. Refuse it, and write nothing.
+    #[test]
+    fn share_refuses_a_name_with_no_registered_server() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (cfg, store) = roots(&tmp);
+
+        let err = record_share_at(&cfg, &store, "ghost").unwrap_err();
+
+        assert!(
+            err.to_string().contains("is not a registered MCP server"),
+            "{err}"
+        );
+        assert!(
+            !store.join("mcp-shared.json").exists(),
+            "a refused share must not write a grant record"
+        );
+        // Revoking is the harmless direction, so it needs no registered server.
+        assert!(!drop_share_at(&store, "ghost").unwrap());
+    }
+
+    /// PR #7692 re-review, HIGH (b): share, remove, then register something
+    /// unrelated under the same name. The stale grant must not make that
+    /// unrelated, unshared server matchable by content.
+    #[test]
+    fn remove_drops_the_grant_so_a_reused_name_is_not_known() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (cfg, store) = roots(&tmp);
+        let original = serde_json::json!({"type": "stdio", "command": "echo", "args": ["one"]});
+        mcp_config::add_server(&cfg, "helper", original.clone()).unwrap();
+        assert!(record_share_at(&cfg, &store, "helper").unwrap());
+        assert!(is_known(&cfg, &store, "helper", &original), "sanity");
+
+        let removed = remove_at(&cfg, Some(store.as_path()), "helper").unwrap();
+
+        assert!(removed.removed && removed.grant_dropped);
+        // The name is reused by a different server, added the DEFAULT way.
+        let unrelated = serde_json::json!({"type": "stdio", "command": "echo", "args": ["two"]});
+        register_at(
+            &cfg,
+            Some(store.as_path()),
+            "helper",
+            unrelated.clone(),
+            false,
+        )
+        .unwrap();
+
+        assert!(
+            !is_known(&cfg, &store, "helper", &unrelated),
+            "an unshared server must not inherit the removed server's grant"
+        );
+    }
+
+    /// PR #7692 re-review, HIGH (b), the other direction: `tm mcp add` over an
+    /// existing name replaces the content a grant described, so the grant goes
+    /// — unless the operator re-grants it in the same breath.
+    #[test]
+    fn add_drops_a_stale_grant_unless_it_reshares() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (cfg, store) = roots(&tmp);
+        let original = serde_json::json!({"type": "stdio", "command": "echo", "args": ["one"]});
+        mcp_config::add_server(&cfg, "helper", original).unwrap();
+        record_share_at(&cfg, &store, "helper").unwrap();
+
+        let replacement = serde_json::json!({"type": "stdio", "command": "echo", "args": ["two"]});
+        let outcome = register_at(
+            &cfg,
+            Some(store.as_path()),
+            "helper",
+            replacement.clone(),
+            false,
+        )
+        .unwrap();
+
+        assert!(outcome.changed && outcome.grant_dropped && !outcome.shared);
+        assert!(
+            !is_known(&cfg, &store, "helper", &replacement),
+            "the replacement was never shared, so it must not load untrusted"
+        );
+
+        // `--share-with-projects` re-records the grant against what it wrote.
+        let third = serde_json::json!({"type": "stdio", "command": "echo", "args": ["three"]});
+        let reshared =
+            register_at(&cfg, Some(store.as_path()), "helper", third.clone(), true).unwrap();
+
+        assert!(reshared.shared && !reshared.grant_dropped);
+        assert!(is_known(&cfg, &store, "helper", &third));
     }
 }

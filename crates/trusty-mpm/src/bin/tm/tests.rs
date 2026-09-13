@@ -131,6 +131,7 @@ fn cli_parses_mcp_add() {
                 command_and_args,
                 root,
                 project: _,
+                share_with_projects: _,
             },
     }) = cli.command
     else {
@@ -208,6 +209,68 @@ fn cli_parses_mcp_add_http() {
     assert_eq!(transport, McpTransportArg::Http);
     assert_eq!(header, vec!["Authorization: Bearer t"]);
     assert_eq!(command_and_args, vec!["https://x/mcp"]);
+}
+
+#[test]
+fn cli_parses_mcp_share() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "mcp", "share", "slack-mcp"]).unwrap();
+    let Some(Command::Mcp {
+        cmd: McpCmd::Share { name, .. },
+    }) = cli.command
+    else {
+        panic!("expected mcp share");
+    };
+    assert_eq!(name, "slack-mcp");
+
+    // #7672: the same grant, taken at add time, defaults OFF.
+    let add = Cli::try_parse_from(["trusty-mpm", "mcp", "add", "x", "--", "echo", "hi"]).unwrap();
+    let Some(Command::Mcp {
+        cmd: McpCmd::Add {
+            share_with_projects,
+            ..
+        },
+    }) = add.command
+    else {
+        panic!("expected mcp add");
+    };
+    assert!(
+        !share_with_projects,
+        "registering a server must not share it by default"
+    );
+}
+
+#[test]
+fn cli_parses_mcp_unshare() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "mcp", "unshare", "slack-mcp"]).unwrap();
+    let Some(Command::Mcp {
+        cmd: McpCmd::Unshare { name, .. },
+    }) = cli.command
+    else {
+        panic!("expected mcp unshare");
+    };
+    assert_eq!(name, "slack-mcp");
+
+    let add = Cli::try_parse_from([
+        "trusty-mpm",
+        "mcp",
+        "add",
+        "--share-with-projects",
+        "x",
+        "--",
+        "echo",
+        "hi",
+    ])
+    .unwrap();
+    let Some(Command::Mcp {
+        cmd: McpCmd::Add {
+            share_with_projects,
+            ..
+        },
+    }) = add.command
+    else {
+        panic!("expected mcp add");
+    };
+    assert!(share_with_projects);
 }
 
 #[test]
