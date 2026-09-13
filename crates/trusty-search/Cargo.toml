@@ -41,7 +41,7 @@ name = "trusty-search"
 # `trusty_common::machine_tier::MemoryTier` and gained a `Degraded` variant. Both
 # are 0.x breaks for a downstream matcher (the type identity changed, and an
 # exhaustive match no longer compiles), so Cargo's 0.x rule puts this in MINOR.
-version = "0.54.0"
+version = "0.54.1"
 edition = "2021"
 description = "Machine-wide hybrid code search service: BM25 + vector + KG, zero cold-start, MCP server"
 readme = "README.md"
