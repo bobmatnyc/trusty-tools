@@ -7,9 +7,14 @@ Changed
   `**/name/` — are skipped. On trusty-tools the PM prompt's **Detected Project
   Stack** section now names the Svelte/TypeScript/Tauri and Python engineers
   beside `rust-engineer`, where it named `rust-engineer` alone before (#7781).
-- Detection now reports whether it saw the whole tree. `detected_stack_engineers`
-  returns a `StackDetection { engineers, truncated }` instead of a bare set, each
-  scan bound (depth, directories scanned, member cap) logs a WARN naming itself,
-  and the **Detected Project Stack** section states in one line when the list is
-  partial — a short answer used to be indistinguishable from a repo that really
-  has no nested stack (#7781).
+- Detection now reports why it stopped, in two separate flags.
+  `detected_stack_engineers` returns a
+  `StackDetection { engineers, truncated, depth_limited }` instead of a bare set.
+  `truncated` means a RESOURCE cap (directories scanned, member cap) abandoned
+  the walk, so the engineer list may be incomplete — it logs a WARN naming the
+  cap, and the **Detected Project Stack** section tells the PM to treat the list
+  as partial. `depth_limited` means manifests below the walk's declared depth
+  went unprobed, which is the design's scope: it logs at DEBUG and renders one
+  informational line. Keeping them apart matters because the depth bound trips on
+  most real repositories, so a single combined flag was true nearly always and
+  could not be failed closed on (#7781).

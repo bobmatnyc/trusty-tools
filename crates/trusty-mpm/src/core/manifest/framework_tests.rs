@@ -11,6 +11,7 @@
 //! is broken" distinction.
 //! Test: this file.
 
+use super::super::workspace::MAX_WORKSPACE_MEMBERS;
 use super::*;
 use std::fs;
 use tempfile::TempDir;
@@ -430,17 +431,20 @@ fn rust_only_repo_detects_only_rust_engineer() {
     );
 }
 
-/// A truncated scan reaches the public entry point as `truncated == true`.
+/// Both scan flags reach the public entry point, and stay distinct there.
 ///
-/// Why (#7781 round-2 HIGH): every scan bound fails closed by returning fewer
-/// engineers, so a partial answer used to be identical to a complete one. The
-/// flag is the whole point of the change — it has to survive the two hops from
-/// the walk through `MarkerProbe` to this public return type, or nothing
-/// downstream can fail closed on it.
-/// What: one tree nests a directory PAST `MAX_NESTED_DEPTH` (so the depth bound
-/// leaves unwalked children); the other is shallow. Asserts the flag is set for
-/// the first and clear for the second, and that the deep tree still detects its
-/// stack — truncation reports partial detection, it never suppresses it.
+/// Why (#7781 round-2 HIGH, split in round-3): every scan bound fails closed by
+/// returning fewer engineers, so a partial answer used to be identical to a
+/// complete one. The flags have to survive the two hops from the walk through
+/// `MarkerProbe` to this public return type, or nothing downstream can act on
+/// them — and they have to arrive SEPARATE, because #7751 fails closed on
+/// `truncated` alone and an ordinary deep repository must not trip it.
+/// What: three trees. One nests a directory past `MAX_NESTED_DEPTH` and must
+/// report `depth_limited` without `truncated`, while still detecting its stack
+/// — a bound reports a partial answer, it never suppresses one. One declares
+/// more workspace members than `MAX_WORKSPACE_MEMBERS` so the shared member cap
+/// trips, and must report `truncated` without `depth_limited`. One is shallow
+/// and must report neither.
 /// Test: this function IS the test.
 #[test]
 fn truncated_detection_is_reported_to_the_caller() {
@@ -452,19 +456,43 @@ fn truncated_detection_is_reported_to_the_caller() {
 
     let detected = detected_stack_engineers(deep.path());
     assert!(
-        detected.truncated,
-        "a tree with directories past the depth bound must report truncation"
+        detected.depth_limited,
+        "a tree with directories past the depth bound must report the depth limit"
+    );
+    assert!(
+        !detected.truncated,
+        "#7781 round-3: the depth bound is scope, not a resource cap — the \
+         fail-closed flag must stay clear"
     );
     assert!(
         detected.engineers.contains("rust-engineer"),
-        "truncation reports a PARTIAL answer; it must not suppress what was found"
+        "a bound reports a PARTIAL answer; it must not suppress what was found"
+    );
+
+    // One member past the cap, so the walk meets an anchored directory the
+    // declared-member pass had no room for: the shared ceiling trips.
+    let wide = TempDir::new().unwrap();
+    fs::write(wide.path().join("package.json"), r#"{"workspaces":["m*"]}"#).unwrap();
+    for i in 0..=MAX_WORKSPACE_MEMBERS {
+        touch(wide.path(), &format!("m{i:04}/package.json"));
+    }
+
+    let detected = detected_stack_engineers(wide.path());
+    assert!(
+        detected.truncated,
+        "exhausting the shared member cap is truncation the caller must see"
+    );
+    assert!(
+        !detected.depth_limited,
+        "a one-level-deep workspace never reaches the depth bound"
     );
 
     let shallow = TempDir::new().unwrap();
     touch(shallow.path(), "Cargo.toml");
+    let detected = detected_stack_engineers(shallow.path());
     assert!(
-        !detected_stack_engineers(shallow.path()).truncated,
-        "a tree the walk read in full must not claim truncation"
+        !detected.truncated && !detected.depth_limited,
+        "a tree the walk read in full must claim neither bound"
     );
 }
 

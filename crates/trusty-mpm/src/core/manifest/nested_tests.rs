@@ -5,7 +5,8 @@
 //! The anchor derivation carries the same risk in reverse: it silently stops
 //! finding a stack when a manifest marker gains a shape it does not handle.
 //! What: anchor derivation against the BUNDLED manifest, the depth, scanned-
-//! directory and shared-member bounds and the truncation flag each one sets,
+//! directory and shared-member bounds and which of the two flags each one sets
+//! — `truncated` for a resource cap, `depth_limited` for the declared depth —
 //! the skip rules, `.gitignore` parsing, determinism, symlink containment, and
 //! an unreadable subdirectory.
 //! Test: this file.
@@ -108,7 +109,15 @@ fn nested_ui_package_is_found() {
     assert_eq!(nested(tmp.path()), vec!["crates/app", "crates/app/ui"]);
 }
 
-/// The walk stops at `MAX_NESTED_DEPTH`, and says it stopped.
+/// The walk stops at `MAX_NESTED_DEPTH`, and says so as a DEPTH limit.
+///
+/// Why (#7781 round-3): the depth bound is the design's declared scope and
+/// trips on most real repositories, so reporting it as `truncated` made that
+/// flag near-universally true and useless as the #7751 fail-closed signal.
+/// What: a tree with an anchored directory one level past the bound; asserts
+/// the walk reaches depth 4, refuses depth 5, and reports `depth_limited`
+/// WITHOUT `truncated`.
+/// Test: this function IS the test.
 #[test]
 fn depth_bound_stops_the_walk() {
     let tmp = TempDir::new().unwrap();
@@ -131,8 +140,47 @@ fn depth_bound_stops_the_walk() {
         "depth 5 is past the bound and must not be probed"
     );
     assert!(
-        probe.truncated,
-        "leaving a child of the deepest walked directory unread is truncation (#7781 round-2)"
+        probe.depth_limited,
+        "leaving a child of the deepest walked directory unread is the depth limit (#7781)"
+    );
+    assert!(
+        !probe.truncated,
+        "the depth bound is the declared scope, never a resource cap (#7781 round-3)"
+    );
+}
+
+/// A tree stopped by the depth bound alone reports no resource truncation.
+///
+/// Why (#7781 round-3): this is the discrimination the split exists for. A
+/// consumer that fails closed on `truncated` (#7751) must not be tripped by an
+/// ordinary deep repository, and this test fails if the depth site ever sets
+/// `truncated` again.
+/// What: an anchored package nested past the bound, with no resource cap in
+/// reach; asserts `depth_limited` is set, `truncated` is clear, and the
+/// packages within the bound are still returned.
+/// Test: this function IS the test.
+#[test]
+fn depth_limited_tree_is_not_truncated() {
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "a/package.json", "{}");
+    write(tmp.path(), "a/b/c/d/e/package.json", "{}");
+
+    let budget = ProbeBudget::new();
+    let probe = nested_probe_roots(
+        tmp.path(),
+        &bundled_anchors(),
+        &budget,
+        &[tmp.path().to_path_buf()],
+    );
+    assert_eq!(
+        probe.roots,
+        vec![tmp.path().join("a")],
+        "everything within the bound is still found"
+    );
+    assert!(probe.depth_limited, "the walk left depth-5 children unread");
+    assert!(
+        !probe.truncated,
+        "no resource cap was exhausted, so the fail-closed flag stays clear"
     );
 }
 
@@ -326,10 +374,12 @@ fn directory_symlink_is_not_traversed() {
 /// and the WARN an operator reads.
 /// What: builds `FANOUT` × `FANOUT` directories at depths 1 and 2, so the walk
 /// makes `1 + 64 + 4096 = 4161` `read_dir` calls against a bound of 4096, and
-/// captures the walk's `tracing` output in a `LogBuffer`. Asserts `truncated`,
-/// and that the WARN names `MAX_SCANNED_DIRS` so a different bound cannot
-/// satisfy this test. `#[serial]` because installing a subscriber perturbs the
-/// process-global interest cache.
+/// captures the walk's `tracing` output in a `LogBuffer`. Asserts `truncated`
+/// AND `!depth_limited` — the two-tier fixture never reaches the depth bound, so
+/// this pins the resource cap alone (#7781 round-3) — and that the WARN names
+/// `MAX_SCANNED_DIRS` so a different bound cannot satisfy this test.
+/// `#[serial]` because installing a subscriber perturbs the process-global
+/// interest cache.
 /// Test: this function IS the test.
 #[test]
 #[serial_test::serial]
@@ -357,7 +407,7 @@ fn scanned_dirs_bound_reports_truncation() {
     let subscriber = tracing_subscriber::registry().with(
         trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
     );
-    let truncated = tracing::subscriber::with_default(subscriber, || {
+    let probe = tracing::subscriber::with_default(subscriber, || {
         let budget = ProbeBudget::new();
         nested_probe_roots(
             tmp.path(),
@@ -365,10 +415,16 @@ fn scanned_dirs_bound_reports_truncation() {
             &budget,
             &[tmp.path().to_path_buf()],
         )
-        .truncated
     });
 
-    assert!(truncated, "a walk stopped by MAX_SCANNED_DIRS is truncated");
+    assert!(
+        probe.truncated,
+        "a walk stopped by MAX_SCANNED_DIRS is truncated"
+    );
+    assert!(
+        !probe.depth_limited,
+        "a two-tier fixture never reaches the depth bound (#7781 round-3)"
+    );
     let lines = buffer.tail(64);
     assert!(
         lines.iter().any(|l| l.contains("MAX_SCANNED_DIRS")),
@@ -400,7 +456,11 @@ fn a_small_tree_is_not_truncated() {
     assert_eq!(probe.roots, vec![tmp.path().join("pkg")]);
     assert!(
         !probe.truncated,
-        "no bound is tripped by a two-directory tree"
+        "no resource cap is tripped by a two-directory tree"
+    );
+    assert!(
+        !probe.depth_limited,
+        "a two-directory tree is read to its own bottom, well inside the depth bound"
     );
 }
 
@@ -426,6 +486,6 @@ fn member_cap_is_shared() {
     );
     assert!(
         probe.truncated,
-        "hitting the member cap is truncation, not an empty tree (#7781 round-2)"
+        "the member cap is a RESOURCE cap: hitting it is truncation, not an empty tree (#7781)"
     );
 }

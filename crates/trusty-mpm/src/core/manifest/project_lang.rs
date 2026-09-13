@@ -132,9 +132,12 @@ pub(crate) struct MarkerProbe {
     roots: Vec<PathBuf>,
     /// One aggregate read budget for the whole detection call.
     budget: ProbeBudget,
-    /// True when a bound stopped the nested walk short, so every [`Self::detect`]
-    /// answer from this probe may be incomplete (#7781).
+    /// True when a RESOURCE cap stopped the nested walk short, so every
+    /// [`Self::detect`] answer from this probe may be incomplete (#7781).
     truncated: bool,
+    /// True when the nested walk left children unread at its declared depth,
+    /// which is the walk's designed scope rather than a failure (#7781).
+    depth_limited: bool,
 }
 
 impl MarkerProbe {
@@ -158,24 +161,41 @@ impl MarkerProbe {
         let anchors = MarkerAnchors::from_categories(categories);
         // #7781 round-2: the walk reports whether a bound cut it short, and that
         // flag travels with the probe so a caller can say detection is partial.
+        // Round-3: two flags, because a resource cap and the declared depth are
+        // not the same event.
         let nested = nested_probe_roots(project_dir, &anchors, &budget, &roots);
         roots.extend(nested.roots);
         Self {
             roots,
             budget,
             truncated: nested.truncated,
+            depth_limited: nested.depth_limited,
         }
     }
 
-    /// Whether a bound cut the nested walk short, so detection may be partial.
+    /// Whether a RESOURCE cap cut the nested walk short, so detection may be
+    /// partial.
     ///
     /// Why: a caller that renders or routes on the detected set must be able to
-    /// say "this list may be incomplete" — the round-1 #7781 finding.
-    /// What: the flag [`nested_probe_roots`] returned for this project.
+    /// say "this list may be incomplete" — the round-1 #7781 finding. Kept
+    /// separate from [`Self::depth_limited`] so it stays rare enough to act on.
+    /// What: the [`nested_probe_roots`] flag set by `MAX_SCANNED_DIRS` or the
+    /// shared member cap.
     /// Test: `scanned_dirs_bound_reports_truncation`,
-    /// `a_small_tree_is_not_truncated`.
+    /// `a_small_tree_is_not_truncated`, `depth_limited_tree_is_not_truncated`.
     pub(crate) fn truncated(&self) -> bool {
         self.truncated
+    }
+
+    /// Whether the nested walk stopped at its declared depth.
+    ///
+    /// Why: informational only (#7781 round-3). Most real repositories nest
+    /// deeper than the walk descends, so a consumer that fails closed on this
+    /// would refuse nearly every project.
+    /// What: the [`nested_probe_roots`] flag set by `MAX_NESTED_DEPTH`.
+    /// Test: `depth_bound_stops_the_walk`, `depth_limited_tree_is_not_truncated`.
+    pub(crate) fn depth_limited(&self) -> bool {
+        self.depth_limited
     }
 
     /// Whether any of `entry`'s declared markers is present at any probe root.

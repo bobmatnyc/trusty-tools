@@ -45,6 +45,16 @@ use super::schema::{
     AgentCategories, AgentSet, ContentSource, GatedAgent, HarnessManifest, SkillCategories,
 };
 
+/// The nested walk's declared depth, re-exported beside [`StackDetection`].
+///
+/// Why: #7781 round-3 — a renderer reporting [`StackDetection::depth_limited`]
+/// has to name the depth, and the walk itself is private to this module tree.
+/// Re-exporting the one constant keeps the rendered number from drifting into a
+/// hand-copied literal.
+/// What: `super::nested::MAX_NESTED_DEPTH`.
+/// Test: `core::stack_profile::tests::depth_limited_detection_says_so`.
+pub(crate) use super::nested::MAX_NESTED_DEPTH;
+
 /// File name of the bundled framework-tier manifest.
 ///
 /// Why: named once so the error messages, the docs, and any future on-disk
@@ -458,23 +468,31 @@ pub fn agent_scope_from(categories: &AgentCategories, project_dir: &Path) -> Age
     }
 }
 
-/// A project's detected stack engineers, and whether the scan saw the whole tree.
+/// A project's detected stack engineers, and why the scan stopped where it did.
 ///
 /// Why: [`detected_stack_engineers`] used to answer with a bare set, so a set
 /// short one engineer because a scan bound stopped the walk was indistinguishable
 /// from a project that genuinely has no such stack — the round-1 #7781 finding.
-/// A caller that routes or renders on this must be able to say "incomplete".
-/// What: the engineer stems, plus [`Self::truncated`] propagated from the nested
-/// walk's own bounds (depth, directories scanned, member cap). The bound that
-/// tripped is named in a `tracing::warn!` at the walk itself.
+/// Round-2 answered it with one flag that the depth bound set on most real
+/// repositories, which is useless as a fail-closed signal; round-3 splits it.
+/// What: `truncated` means the engineer set may be INCOMPLETE because a resource
+/// cap stopped the walk, and a consumer that persists a negative conclusion must
+/// fail closed on it. `depth_limited` means manifests deeper than the declared
+/// depth were not probed, which is the design's scope, informational only. Both
+/// are propagated from the nested walk, which names the tripped resource cap in
+/// a `tracing::warn!` and the depth bound in a `tracing::debug!`.
 /// Test: `detected_stack_engineers_matches_the_manifest`,
 /// `truncated_detection_is_reported_to_the_caller`,
 /// `core::stack_profile::tests::truncated_detection_says_so`.
 pub struct StackDetection {
     /// The `language` + `framework` stems whose declared markers are present.
     pub engineers: BTreeSet<String>,
-    /// True when a scan bound cut detection short, so `engineers` may be partial.
+    /// True when a resource cap cut detection short, so `engineers` may be
+    /// partial — fail closed on this.
     pub truncated: bool,
+    /// True when manifests below the walk's declared depth went unprobed —
+    /// informational, not a failure.
+    pub depth_limited: bool,
 }
 
 /// The stack engineers `project_dir`'s markers select, per the bundled manifest.
@@ -485,8 +503,8 @@ pub struct StackDetection {
 /// exists to prevent. Before #4765 it imported `project_lang`'s marker table
 /// directly; that table is now a manifest field, so this is the entry point.
 /// What: a [`StackDetection`] holding the union of the declared `language` and
-/// `framework` stems whose markers are present, and whether a scan bound cut the
-/// walk short. An unusable manifest yields an EMPTY, untruncated set, which
+/// `framework` stems whose markers are present, plus that type's two independent
+/// flags. An unusable manifest yields an EMPTY, unflagged set, which
 /// `stack_profile_section` renders as its neutral "detect before routing"
 /// block — the safe answer for a prompt. The DEPLOY path does not share that
 /// leniency: [`framework_agent_scope`] refuses to resolve at all.
@@ -498,15 +516,18 @@ pub fn detected_stack_engineers(project_dir: &Path) -> StackDetection {
         return StackDetection {
             engineers: BTreeSet::new(),
             truncated: false,
+            depth_limited: false,
         };
     };
     let probe = MarkerProbe::new(project_dir, &categories);
     let mut engineers = probe.detect(&categories.language);
     engineers.extend(probe.detect(&categories.framework));
-    // #7781 round-2: the truncation flag rides out with the set it qualifies.
+    // #7781 round-3: both flags ride out with the set they qualify, separately —
+    // only `truncated` is a fail-closed signal.
     StackDetection {
         engineers,
         truncated: probe.truncated(),
+        depth_limited: probe.depth_limited(),
     }
 }
 
