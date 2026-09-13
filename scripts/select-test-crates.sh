@@ -81,6 +81,7 @@
 #   scripts/select-test-crates.sh                    # origin/main...HEAD
 #   scripts/select-test-crates.sh --staged            # index + untracked
 #   scripts/select-test-crates.sh --files a.rs b.rs   # explicit path list
+#   scripts/select-test-crates.sh --files -- --odd.rs # `--`-prefixed path
 #   scripts/select-test-crates.sh --range <a>..<b>    # explicit two-dot range
 #   scripts/select-test-crates.sh --cargo-args         # `-p a -p b ...`
 #
@@ -88,7 +89,22 @@
 #   line (--cargo-args). No output at all is a valid, correct answer for a
 #   change set that maps to no crate (docs-only).
 #
-# Exit: always 0. See FAIL OPEN above.
+# Exit: 0 for every well-formed invocation, including every detection
+#   failure covered by FAIL OPEN above (a bad `--range`, missing value on
+#   `--range`, unresolvable ref, missing `cargo`/`jq`, bash <4 — see below).
+#   A malformed CLI invocation — an argument this parser does not recognize
+#   at all — exits 2 with a usage message on stderr; that scope exclusion is
+#   deliberate (#7777 review) so a real usage typo stays visible to a human
+#   or CI caller instead of silently vanishing into a full-workspace run. A
+#   `--files` path that itself starts with `--` is NOT such a typo — pass it
+#   after a literal `--` sentinel (see Usage above) and it is treated as a
+#   path, exit 0, same as any other file.
+#
+# Requires bash 4+ (associative arrays). macOS ships bash 3.2.57 as
+#   `/bin/bash`; under it this script detects the version up front, warns on
+#   stderr, and routes through the same FAIL OPEN behavior — it never falls
+#   through to bash 3.2's silent `declare -A` failure and an empty result
+#   indistinguishable from "nothing to test" (#7777 review).
 #
 # Test: scripts/select-test-crates_selftest.sh
 
@@ -114,15 +130,40 @@ while [ $# -gt 0 ]; do
     --files)
       MODE="files"
       shift
-      while [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; do
+      # A changed path can itself start with `--` (unusual, but valid to
+      # git). Stop at the first flag-looking token as before, but recognize
+      # a literal `--` as the conventional end-of-options sentinel: once
+      # seen, consume every remaining token as a path unconditionally (#7777
+      # review). With no `--` sentinel, a `--`-prefixed token still falls
+      # through to the unknown-argument arm below — see the header's Exit
+      # note for why that scope exclusion is deliberate.
+      while [ $# -gt 0 ] && [ "$1" != "--" ] && [ "${1#--}" = "$1" ]; do
         FILES+=("$1")
         shift
       done
+      if [ $# -gt 0 ] && [ "$1" = "--" ]; then
+        shift
+        while [ $# -gt 0 ]; do
+          FILES+=("$1")
+          shift
+        done
+      fi
       ;;
     --range)
       MODE="range"
-      RANGE_SPEC="${2:-}"
-      shift 2
+      # #7777 review: a bare trailing `--range` (no value) must not hang.
+      # `shift 2` with only one token left fails under `set -uo pipefail`
+      # (no `-e`), so `$#` never drops and the `while` loop re-enters this
+      # arm forever, spinning at ~100% CPU. Consume exactly what is there —
+      # one token or two — so `$#` always shrinks; an empty RANGE_SPEC then
+      # hits the "no range given" fail-open check below (never nothing).
+      if [ $# -ge 2 ]; then
+        RANGE_SPEC="$2"
+        shift 2
+      else
+        RANGE_SPEC=""
+        shift
+      fi
       ;;
     --cargo-args)
       CARGO_ARGS_MODE=1
@@ -139,6 +180,62 @@ while [ $# -gt 0 ]; do
       ;;
   esac
 done
+
+# ---------------------------------------------------------------------------
+# bash4+ required from here on (associative arrays below, #7777 review).
+# macOS ships bash 3.2.57 as `/bin/bash` (CLAUDE.md's own portability note).
+# Under bash <4, `declare -A` fails as a non-fatal error under
+# `set -uo pipefail` (no `-e`) and the script falls through to an empty
+# result at exit 0 — indistinguishable from a legitimate zero-crate answer.
+# Guard here, before the first `declare -A`, and route through the same
+# FAIL OPEN doctrine used everywhere else in this script: warn loud on
+# stderr, print every crate name we can still find (no associative array
+# needed for that), exit 0. Never silently emit nothing.
+# ---------------------------------------------------------------------------
+if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ] 2>/dev/null; then
+  echo "select-test-crates: WARNING: running under bash ${BASH_VERSION:-<unknown>} (need bash 4+ for associative arrays) — printing ALL crates" >&2
+  BASH32_NAMES=""
+  if command -v cargo >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    BASH32_NAMES="$(cargo metadata --no-deps --format-version 1 --offline 2>/dev/null | jq -r '.packages[].name' 2>/dev/null)"
+    [ -n "$BASH32_NAMES" ] || BASH32_NAMES="$(cargo metadata --no-deps --format-version 1 2>/dev/null | jq -r '.packages[].name' 2>/dev/null)"
+  fi
+  if [ -z "$BASH32_NAMES" ]; then
+    BASH32_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"
+    if [ -n "$BASH32_ROOT" ] && [ -d "${BASH32_ROOT}/crates" ]; then
+      for f in "${BASH32_ROOT}"/crates/*/Cargo.toml; do
+        [ -f "$f" ] || continue
+        n="$(awk '
+          /^\[package\]/ { inpkg = 1; next }
+          /^\[/ { inpkg = 0 }
+          inpkg && /^name[[:space:]]*=/ {
+            line = $0
+            sub(/^name[[:space:]]*=[[:space:]]*"/, "", line)
+            sub(/".*/, "", line)
+            print line
+            exit
+          }
+        ' "$f")"
+        [ -n "$n" ] && BASH32_NAMES="${BASH32_NAMES}${BASH32_NAMES:+$'\n'}${n}"
+      done
+    fi
+  fi
+  if [ -z "$BASH32_NAMES" ]; then
+    echo "select-test-crates: WARNING: could not determine any crate names under bash <4 — no output produced" >&2
+    exit 0
+  fi
+  if [ "$CARGO_ARGS_MODE" = "1" ]; then
+    BASH32_ARGS=""
+    while IFS= read -r n; do
+      [ -n "$n" ] || continue
+      BASH32_ARGS="${BASH32_ARGS:+$BASH32_ARGS }-p $n"
+      [ "$n" = "trusty-common" ] && BASH32_ARGS="${BASH32_ARGS} --features unconditional-only"
+    done < <(printf '%s\n' "$BASH32_NAMES" | sort -u)
+    [ -n "$BASH32_ARGS" ] && printf '%s\n' "$BASH32_ARGS"
+  else
+    printf '%s\n' "$BASH32_NAMES" | sort -u
+  fi
+  exit 0
+fi
 
 TMPDIR_SELF="$(mktemp -d 2>/dev/null)" || {
   echo "select-test-crates: WARNING: cannot create a temp dir — no output produced" >&2

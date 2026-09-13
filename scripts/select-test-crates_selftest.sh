@@ -202,6 +202,71 @@ echo "fixture: empty change set fails open"
 empty_out="$(cd "${FIXTURE}" && bash "${SCRIPT}" --files 2>/dev/null)"
 assert_eq "--files with no paths -> all crates" "${ALL_EIGHT}" "${empty_out}"
 
+# ---------------------------------------------------------------------------
+# --range mode (#7777 review, finding 4): the original selftest never drove
+# `--range` at all, which is exactly where the missing-value infinite loop
+# lived (finding 1) — a coverage gap, not a broken assertion mechanism.
+# BASE_SHA is the "base" commit made for the --staged case above; a second
+# commit here gives --range a real two-commit diff to resolve.
+# ---------------------------------------------------------------------------
+echo "fixture: --range mode"
+
+BASE_SHA="$(cd "${FIXTURE}" && git rev-parse HEAD)"
+(cd "${FIXTURE}" && echo 'pub fn changed() {}' >>crates/mid/src/lib.rs)
+(cd "${FIXTURE}" && git add crates/mid/src/lib.rs >/dev/null 2>&1 && git commit -qm "range fixture: touch mid" >/dev/null 2>&1)
+RANGE_SHA="$(cd "${FIXTURE}" && git rev-parse HEAD)"
+
+assert_eq "--range <base>..<head> touching mid -> mid, top (same closure as --files)" \
+  "mid
+top" "$(cd "${FIXTURE}" && bash "${SCRIPT}" --range "${BASE_SHA}..${RANGE_SHA}" 2>/dev/null)"
+
+# Bounded-time: at 1c8d621aa a bare trailing `--range` (no value) spins
+# forever at ~100% CPU instead of failing open (finding 1) — `timeout`
+# turns that hang into a bounded, assertable failure instead of stalling
+# this whole selftest run.
+range_missing_out="$(cd "${FIXTURE}" && timeout 8 bash "${SCRIPT}" --range 2>/dev/null)"
+range_missing_exit=$?
+assert_eq "--range with no value terminates promptly (not a 124 timeout)" \
+  "0" "${range_missing_exit}"
+assert_eq "--range with no value fails open -> all crates, never nothing" \
+  "${ALL_EIGHT}" "${range_missing_out}"
+
+assert_eq "--range with an unresolvable ref fails open -> all crates" \
+  "${ALL_EIGHT}" "$(cd "${FIXTURE}" && bash "${SCRIPT}" --range 'no-such-ref..also-fake' 2>/dev/null)"
+
+# ---------------------------------------------------------------------------
+# bash 3.2 path (#7777 review, finding 2): macOS ships bash 3.2.57 as
+# /bin/bash. `declare -A` there is a non-fatal error under `set -uo
+# pipefail` (no `-e`), so the unguarded script fell through to exit 0 with
+# EMPTY stdout for a real crate-affecting change — indistinguishable from a
+# legitimate "nothing to test" answer. Only meaningful where /bin/bash is
+# actually pre-4 (this host); a Linux CI runner's /bin/bash is typically
+# bash 4+ already, so this skips there rather than asserting something that
+# was never reachable.
+# ---------------------------------------------------------------------------
+echo "fixture: bash 3.2 compatibility guard"
+LEGACY_BASH="/bin/bash"
+LEGACY_MAJOR=""
+# shellcheck disable=SC2016  # single-quoted: BASH_VERSINFO must expand inside the child bash, not this one
+[ -x "${LEGACY_BASH}" ] && LEGACY_MAJOR="$("${LEGACY_BASH}" -c 'echo "${BASH_VERSINFO[0]}"' 2>/dev/null)"
+if [ -n "${LEGACY_MAJOR}" ] && [ "${LEGACY_MAJOR}" -lt 4 ] 2>/dev/null; then
+  legacy_stderr="${WORK}/legacy-bash.stderr"
+  legacy_out="$(cd "${FIXTURE}" && "${LEGACY_BASH}" "${SCRIPT}" --files crates/mid/src/lib.rs 2>"${legacy_stderr}")"
+  assert_eq "bash <4: real crate change never prints empty (fails open to all crates)" \
+    "${ALL_EIGHT}" "${legacy_out}"
+  case "$(cat "${legacy_stderr}" 2>/dev/null)" in
+    *"bash 4+"*)
+      CASES=$((CASES + 1))
+      printf '  ok   %-62s -> %s\n' "bash <4 warns loudly on stderr" "present"
+      ;;
+    *)
+      fail "bash <4 stderr warning missing"
+      ;;
+  esac
+else
+  echo "  skip: /bin/bash on this host is not pre-4 — nothing to guard here (macOS repro in #7777 review)"
+fi
+
 echo "live: this repo's own trusty-common feature override"
 live_out="$(cd "${REPO_ROOT}" && bash "${SCRIPT}" --files crates/trusty-common/src/lib.rs --cargo-args 2>/dev/null)"
 case "${live_out}" in
