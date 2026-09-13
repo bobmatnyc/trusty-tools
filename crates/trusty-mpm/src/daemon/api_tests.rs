@@ -1275,6 +1275,8 @@ async fn doctor_endpoint_returns_report() {
         "startup_context",
         // #7685: whether Claude Code's own auto memory is off for this project.
         "auto_memory",
+        // #7673: every CLAUDE.md ABOVE the project root.
+        "ancestor_claude_md",
     ];
     assert_eq!(names, expected);
     // Count derived from the list above, never a standalone literal:

@@ -432,7 +432,7 @@ fn an_absent_path_still_matches_the_recorded_spelling_of_itself() {
 }
 
 #[tokio::test]
-async fn run_doctor_produces_fifty_checks() {
+async fn run_doctor_produces_fifty_two_checks() {
     // Issue #2158 added the `deployment` probe (nine → ten); issue #2246
     // adds `oauth_token` (ten → eleven); issue #2876 adds `skill_staleness`
     // and `legacy_sources` (eleven → thirteen); DOC-42 / issue #2889 adds
@@ -465,7 +465,9 @@ async fn run_doctor_produces_fifty_checks() {
     // (forty-six → forty-seven); issue #7497 adds `disk_usage`
     // (forty-seven → forty-eight); issue #7616 adds
     // `instruction_compression` (forty-eight → forty-nine); issue #7617 adds
-    // `statusline` (forty-nine → fifty).
+    // `statusline` (forty-nine → fifty); issue #7685 adds `auto_memory`
+    // (fifty → fifty-one); issue #7673 adds `ancestor_claude_md` (fifty-one →
+    // fifty-two).
     //
     // The test NAME had drifted four additions behind the tally above by the
     // time #6586 landed — it still read `thirty_two`. Renaming it is part of
@@ -553,6 +555,8 @@ async fn run_doctor_produces_fifty_checks() {
         "startup_context",
         // #7685: whether Claude Code's own auto memory is off for this project.
         "auto_memory",
+        // #7673: every CLAUDE.md ABOVE the project root.
+        "ancestor_claude_md",
     ];
     assert_eq!(names, expected);
     // Count derived from the list above, never a standalone literal:

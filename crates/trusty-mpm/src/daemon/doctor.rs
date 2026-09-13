@@ -95,6 +95,11 @@ use doctor_transcript_saving::check_transcript_saving;
 // `#[path] mod` pair per check does not fit.
 use super::{doctor_auto_memory::check_auto_memory, doctor_startup_context::check_startup_context};
 
+// #7673: every CLAUDE.md ABOVE the project root.
+#[path = "doctor_ancestor_claude_md.rs"]
+mod doctor_ancestor_claude_md;
+use doctor_ancestor_claude_md::check_ancestor_claude_md;
+
 // Split out to keep this file under the 500-SLOC production cap (issue #2876 —
 // the skill-staleness and legacy-instruction-source probes).
 #[path = "doctor_staleness.rs"]
@@ -393,7 +398,7 @@ use doctor_sidecars::{check_memory, check_search};
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_fifty_checks`,
+/// Test: `run_doctor_produces_fifty_two_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -636,6 +641,14 @@ pub(crate) async fn run_doctor_with_claims(
     // #7685: whether Claude Code's own auto memory is off for this project.
     // trusty-memory is the memory here; read-only, `tm doctor --fix` writes.
     checks.push(auto_memory_row(project_dir, &home).await);
+    // #7673: every `CLAUDE.md` ABOVE the project root, which Claude Code
+    // prepends to every session beneath it. No other row looks above the
+    // project. Read-only; `tm doctor --fix --yes` is the repair.
+    checks.push(check_ancestor_claude_md(
+        project_dir,
+        Some(home.as_path()),
+        crate::core::trusty_tools_config::managed_claude_config_dir().as_deref(),
+    ));
 
     DoctorReport::from_checks(checks)
 }
@@ -712,7 +725,7 @@ pub async fn run_doctor_for_manager(
 /// and resolves the managed Claude config dir, then calls
 /// [`doctor_auto_memory::check_auto_memory`].
 /// Test: the three verdicts are covered directly in `doctor_auto_memory_tests`;
-/// this wiring is covered by `run_doctor_produces_fifty_checks`.
+/// this wiring is covered by `run_doctor_produces_fifty_two_checks`.
 async fn auto_memory_row(
     project_dir: Option<&Path>,
     home: &Path,

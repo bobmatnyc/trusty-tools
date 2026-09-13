@@ -711,6 +711,14 @@ pub(super) fn prepare_session_inner(
         }
     })?;
 
+    // #7673: one WARN per launch naming every `CLAUDE.md` ABOVE this project —
+    // Claude Code prepends each to every turn and the session cannot see where
+    // the text came from. `project_dir` may be a subdirectory (`session start`
+    // in place); the scan resolves the nearest project boundary itself. A scan
+    // that fails is announced, never silent.
+    let managed_config = crate::core::trusty_tools_config::managed_claude_config_dir();
+    crate::core::ancestor_claude_md::warn_ancestors(project_dir, home, managed_config.as_deref());
+
     // Resolve the EFFECTIVE output style, folding the manifest's default in as
     // the lowest precedence below the existing HR-4 sources. Precedence:
     // explicit `--style` flag > `[style] active` config key > manifest `[style]

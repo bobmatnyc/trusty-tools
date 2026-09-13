@@ -25,6 +25,10 @@ pub mod agent_source;
 // Code's fullscreen renderer captures the mouse wheel, costing the pane both
 // native and tmux scrollback.
 pub mod alt_screen;
+// #7673: memory files ABOVE the project root — the scan, the launch WARN, and
+// the two `tm doctor --fix` repairs (rename a seed aside, exclude a real one).
+pub mod ancestor_claude_md;
+pub mod ancestor_claude_md_repair;
 pub mod artifact;
 // #6807: the attribution footer is one constant, shared by the settings seed
 // and the `tm pr open` body validator.
@@ -58,6 +62,9 @@ pub mod claude_env_scrub;
 // Epic #4183 / #4286: the READER for `CLAUDE.md` named-section instruction
 // overrides. Ships before the floor text that advertises the mechanism —
 // advertising an override no code reads is issue #381 verbatim.
+// #7673: Claude Code's `claudeMdExcludes` key — read across layers, extended by
+// `tm doctor --fix`.
+pub mod claude_md_excludes;
 pub mod claude_md_sections;
 // Issue #4754: the WRITER counterpart to `claude_md_sections` — the single
 // owner of `CLAUDE.md` section-override edits. Idempotent by construction, and

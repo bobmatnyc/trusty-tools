@@ -172,6 +172,36 @@ pub fn harness_root_for(dir: &Path) -> Option<PathBuf> {
         return git_rev_parse_path(dir, "--show-toplevel");
     }
 
+    owner_of_common_dir(common_dir)
+}
+
+/// The checkout `dir`'s LINKED worktree belongs to, or `None` when `dir` is not
+/// in a linked worktree (#7673).
+///
+/// Why: the one worktree detector in the crate. `harness_root_for` answers a
+/// wider question — it also resolves plain checkouts, subdirectories and bare
+/// repos to their toplevel — and a caller that only needs "is this a linked
+/// worktree, and of what" must not re-parse `.git` files to find out.
+/// What: `None` unless `--git-dir` differs from `--git-common-dir` (a submodule
+/// and an independent clone both have them equal); otherwise the same owner
+/// [`harness_root_for`] reports for a linked worktree. Any failed probe is
+/// `None`.
+/// Test: `linked_worktree_owner_is_the_main_checkout_only_for_a_linked_worktree`.
+pub fn linked_worktree_owner(dir: &Path) -> Option<PathBuf> {
+    let common_dir = git_rev_parse_path(dir, "--git-common-dir")?;
+    let git_dir = git_rev_parse_path(dir, "--git-dir")?;
+    if git_dir == common_dir {
+        return None;
+    }
+    owner_of_common_dir(common_dir)
+}
+
+/// The checkout that owns a linked worktree's shared git directory.
+///
+/// What: `<main>/.git` → `<main>`; any other directory through
+/// [`map_base_clone_to_project`].
+/// Test: see [`linked_worktree_owner`].
+fn owner_of_common_dir(common_dir: PathBuf) -> Option<PathBuf> {
     if common_dir.file_name().is_some_and(|n| n == ".git") {
         return Some(common_dir.parent()?.to_path_buf());
     }
