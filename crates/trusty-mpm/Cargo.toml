@@ -67,7 +67,11 @@ name = "trusty-mpm"
 # 1.5.36 (Refs #7616 #7617 #7658): patch, version-only — owner-authorized
 # reinstall so `tm --version` identifies the build carrying the fold/doctor,
 # statusline core-setup, and ledger dedupe fixes merged since 1.5.35.
-version = "1.5.36"
+# 1.5.37 (Refs #7751): patch — trusty-mpm is excluded from the semver gate
+# (binary-only consumer surface, no library dependents), so the feat commit
+# in this PR does not require a minor bump; required by the "PR version bump
+# vs crates.io" check since 1.5.36 is already published.
+version = "1.5.37"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
