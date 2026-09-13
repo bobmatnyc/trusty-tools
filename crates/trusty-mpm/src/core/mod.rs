@@ -65,6 +65,9 @@ pub mod claude_env_scrub;
 pub mod claude_md_excludes;
 pub mod claude_md_sections;
 pub mod claude_md_seed;
+// #7673 round 3: the git-init-offer half of the seed-site guard, split out so
+// `claude_md_seed.rs` stays a focused shape/site pair under the SLOC cap.
+pub mod claude_md_seed_git;
 // Issue #4754: the WRITER counterpart to `claude_md_sections` — the single
 // owner of `CLAUDE.md` section-override edits. Idempotent by construction, and
 // it borrows the reader's grammar rather than spelling a second one.

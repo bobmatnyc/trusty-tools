@@ -18,7 +18,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::core::ancestor_claude_md::{AncestorMemoryFile, scan, stale_seed_name};
+use crate::core::ancestor_claude_md::{
+    AncestorMemoryFile, resolve_project_root, scan, stale_seed_name,
+};
 use crate::core::claude_md_excludes::{ExcludeWrite, add_exclude};
 use crate::core::doctor_repair::{RepairMode, RepairStep, StepStatus};
 
@@ -48,8 +50,13 @@ pub fn repair_ancestor_claude_md(
     today: &str,
     mode: RepairMode,
 ) -> Vec<RepairStep> {
+    // #7673 round 3: resolve BEFORE deriving `settings` too — `scan` resolves
+    // internally, but the exclude write below must land in the REAL project's
+    // `.claude/settings.local.json`, not whatever subdirectory the `--fix`
+    // caller (current process cwd) happened to be standing in.
+    let project_root = resolve_project_root(project_root);
     let settings = project_root.join(".claude").join("settings.local.json");
-    scan(project_root, home, managed_config_dir)
+    scan(&project_root, home, managed_config_dir)
         .into_iter()
         .filter(|found| !found.excluded)
         .map(|found| step_for(&found, &settings, today, mode))

@@ -32,7 +32,7 @@ use crate::core::instruction_pipeline::CLAUDE_MD_STUB;
 /// Test: `seeding_into_home_is_refused`,
 /// `seeding_above_the_home_directory_is_refused`,
 /// `a_path_with_no_directory_component_is_refused`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SeedRefusal {
     /// The target directory is the operator's home directory.
     Home,
@@ -41,6 +41,12 @@ pub enum SeedRefusal {
     AboveHome,
     /// The target path has no directory component to judge (#7673 review).
     NoDirectory,
+    /// The target is a WORKSPACE PARENT: a git repository lives beneath it, so
+    /// seeding here would inject the file into every project under it
+    /// (#7673 round 3, owner ruling 2026-09-13). Carries the child repository
+    /// [`offer_git_init`][`crate::core::claude_md_seed_git::offer_git_init`]
+    /// found.
+    WorkspaceParent(std::path::PathBuf),
 }
 
 impl SeedRefusal {
@@ -48,7 +54,8 @@ impl SeedRefusal {
     ///
     /// Why: a refusal the operator cannot act on is a wedge. Every message names
     /// the exact path and what would make the seed legitimate.
-    /// Test: `the_home_refusal_names_the_path`.
+    /// Test: `the_home_refusal_names_the_path`,
+    /// `the_workspace_parent_refusal_names_the_child_repository`.
     pub fn message(self, path: &Path) -> String {
         match self {
             Self::Home => format!(
@@ -69,6 +76,15 @@ impl SeedRefusal {
                  so the seed site cannot be checked against the home directory. Pass the \
                  project's own directory.",
                 path.display()
+            ),
+            Self::WorkspaceParent(child) => format!(
+                "refusing to seed a CLAUDE.md at {} — {} is a git repository beneath it, so \
+                 Claude Code would prepend the file to every session in every project under \
+                 this directory, including that one. Seed inside {} (or the specific project \
+                 you meant) instead.",
+                path.display(),
+                child.display(),
+                child.display()
             ),
         }
     }

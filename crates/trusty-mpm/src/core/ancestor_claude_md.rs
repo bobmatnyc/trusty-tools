@@ -107,15 +107,50 @@ pub fn scan(
     home: Option<&Path>,
     managed_config_dir: Option<&Path>,
 ) -> Vec<AncestorMemoryFile> {
-    // Canonicalised ONCE, here: the walk below reports canonical paths, and an
-    // exclude entry `--fix` wrote from a previous scan must compare equal to
-    // them. On macOS a temp or symlinked project reaches the same file under two
-    // spellings, and comparing one against the other reports an already-excluded
-    // ancestor as an outstanding finding.
-    let root = std::fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
+    // #7673 round 3: resolve to the project's REAL root FIRST. Every caller —
+    // `tm doctor` (an arbitrary process cwd), `session start`'s in-place path
+    // (an unresolved subdirectory), and `--fix` — used to hand this whatever
+    // directory it happened to be standing in; a nested subdirectory then made
+    // the project's OWN root `CLAUDE.md` look like a stray ancestor, and
+    // `tm doctor --fix --yes` excluded the project's own instructions. Resolving
+    // here, once, means every caller of `scan` is correct for free.
+    let root = resolve_project_root(project_root);
     let layers = crate::core::claude_md_excludes::settings_layers(&root, home, managed_config_dir);
     let excludes = crate::core::claude_md_excludes::merged_excludes(&layers);
     scan_with_excludes(&root, &excludes)
+}
+
+/// The project's real root, regardless of which subdirectory `dir` names.
+///
+/// Why (#7673 round 3): `scan_with_excludes` walks every ancestor of whatever
+/// path it is handed with no git-boundary awareness, so a caller that passes a
+/// SUBDIRECTORY of a project — `tm doctor` run from `crates/trusty-mpm` in this
+/// very repo, or `session start`'s in-place path on a git checkout with no
+/// parseable remote — made the scan start inside the project instead of above
+/// it, reporting the project's own root `CLAUDE.md` as a stray ancestor.
+/// What: the git toplevel when `dir` is inside a git working tree, through
+/// [`crate::core::harness_root::harness_root_for`] — the same project-root
+/// definition `session start`'s own git-project refusal and the seed guard
+/// both already trust, so this cannot disagree with either; otherwise the
+/// nearest ancestor of `dir` (inclusive) holding a `.trusty-mpm` marker — tm's
+/// registration directory for a project that is not a git checkout at all;
+/// otherwise `dir` itself. Every branch is canonicalized.
+/// Test: `scan_does_not_report_the_git_roots_own_claude_md_for_a_nested_project_root`,
+/// `resolve_project_root_finds_the_registered_marker_above_a_nested_dir`,
+/// `resolve_project_root_falls_back_to_the_given_dir_with_no_git_or_marker`.
+pub fn resolve_project_root(dir: &Path) -> PathBuf {
+    let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    if let Some(root) = crate::core::harness_root::harness_root_for(&dir) {
+        return std::fs::canonicalize(&root).unwrap_or(root);
+    }
+    let mut candidate = Some(dir.as_path());
+    while let Some(d) = candidate {
+        if d.join(".trusty-mpm").is_dir() {
+            return d.to_path_buf();
+        }
+        candidate = d.parent();
+    }
+    dir
 }
 
 /// [`scan`] against an already-resolved exclude set.

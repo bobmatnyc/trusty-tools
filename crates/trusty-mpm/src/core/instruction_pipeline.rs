@@ -1071,6 +1071,27 @@ fn load_or_create_claude_md(
                     ),
                 });
             }
+            // #7673 round 3 (owner ruling 2026-09-13): a marker-less, non-git
+            // directory below home is still seedable, but not when it is a
+            // WORKSPACE PARENT — a git repository lives beneath it, so the seed
+            // would become an ancestor `CLAUDE.md` for every project under it.
+            // `should_init: None` — this call site has no prompt capability
+            // (it runs from session launch, never an interactive terminal), so
+            // the non-interactive default applies: `git init` is never offered
+            // here, exactly as today; only the new workspace-parent refusal is
+            // new behavior.
+            if let Some(dir) = path.parent().filter(|p| !p.as_os_str().is_empty())
+                && let Err(refusal) =
+                    crate::core::claude_md_seed_git::offer_git_init(dir, home, None)
+            {
+                return Err(PipelineError::Io {
+                    path: path.clone(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        refusal.message(dir),
+                    ),
+                });
+            }
             // #5228: a stale branch's missing CLAUDE.md must never be stubbed over.
             if let Some(upstream) = upstream_tracking(path) {
                 return Err(PipelineError::Io {

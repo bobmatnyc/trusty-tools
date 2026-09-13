@@ -947,6 +947,11 @@ fn prepare_session_inner(
     // surfaced. Silent when there is nothing above the project, or when the
     // operator has already listed it in `claudeMdExcludes`. #7673 review: the
     // INJECTED home, the same one the seed guard now rides on (#5544).
+    // #7673 round 3: `project_dir` here can be an unresolved subdirectory —
+    // `session start`'s in-place path hands this the literal directory named on
+    // the command line, which may sit below the git toplevel. `warn_ancestors`
+    // (via `scan`) resolves to the real root before it walks, so this cannot
+    // warn about the project's own root CLAUDE.md.
     let managed_config = crate::core::trusty_tools_config::managed_claude_config_dir();
     crate::core::ancestor_claude_md::warn_ancestors(project_dir, home, managed_config.as_deref());
 

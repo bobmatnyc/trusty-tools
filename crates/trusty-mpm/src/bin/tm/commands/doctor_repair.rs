@@ -190,6 +190,12 @@ pub(crate) fn run_repairs(apply: bool, include_frozen: bool) {
         // `claudeMdExcludes` rather than touching someone's notes. Project-
         // scoped because the exclude is written into THIS project's
         // `.claude/settings.local.json`.
+        // #7673 round 3: `project` is `std::env::current_dir()` a few lines up —
+        // an arbitrary cwd, not necessarily the project root. `repair_ancestor_
+        // claude_md` resolves it (to the git toplevel or the registered
+        // `.trusty-mpm` marker) before both scanning and deriving the settings
+        // path, so `tm doctor --fix --yes` run from a subdirectory writes the
+        // exclude into the REAL project's `.claude/settings.local.json`.
         steps.extend(repair_ancestor_claude_md(
             project,
             dirs::home_dir().as_deref(),

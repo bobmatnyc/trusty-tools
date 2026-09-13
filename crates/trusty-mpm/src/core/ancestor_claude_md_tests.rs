@@ -172,6 +172,66 @@ fn the_rename_target_carries_the_date() {
     );
 }
 
+/// `git -C <dir> init -q`, reporting whether git was available at all.
+fn git_init(dir: &Path) -> bool {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["init", "-q"])
+        .output()
+        .is_ok_and(|out| out.status.success())
+}
+
+/// FAILS BEFORE THIS ROUND (#7673 review, CRITICAL): `scan_with_excludes`
+/// walked literal ancestors of whatever directory it was handed, with no
+/// git-boundary awareness, so a caller that passed a SUBDIRECTORY of a
+/// project — exactly what `tm doctor` does when run from `crates/trusty-mpm`
+/// in this repo — reported the project's own root `CLAUDE.md` as a stray
+/// ancestor. `scan` must resolve to the git toplevel first and never report a
+/// file at or below it.
+#[test]
+fn scan_does_not_report_the_git_roots_own_claude_md_for_a_nested_project_root() {
+    let tmp = TempDir::new().unwrap();
+    let repo = std::fs::canonicalize(tmp.path()).unwrap().join("repo");
+    let nested = repo.join("crates").join("thing");
+    std::fs::create_dir_all(&nested).unwrap();
+    if !git_init(&repo) {
+        eprintln!("#7673 tests: git unavailable, skipping");
+        return;
+    }
+    std::fs::write(repo.join("CLAUDE.md"), "# Root project\n\nUse cargo.\n").unwrap();
+
+    let found = scan(&nested, None, None);
+
+    assert!(found.is_empty(), "{found:?}");
+}
+
+/// The registered-project half of [`resolve_project_root`]: a non-git project
+/// marked by `.trusty-mpm` is found from a nested subdirectory too.
+#[test]
+fn resolve_project_root_finds_the_registered_marker_above_a_nested_dir() {
+    let tmp = TempDir::new().unwrap();
+    let project = std::fs::canonicalize(tmp.path())
+        .unwrap()
+        .join("registered");
+    std::fs::create_dir_all(project.join(".trusty-mpm")).unwrap();
+    let nested = project.join("sub").join("dir");
+    std::fs::create_dir_all(&nested).unwrap();
+
+    assert_eq!(resolve_project_root(&nested), project);
+}
+
+/// With neither a git ancestor nor a `.trusty-mpm` marker, `resolve_project_root`
+/// falls back to the given directory itself, canonicalized.
+#[test]
+fn resolve_project_root_falls_back_to_the_given_dir_with_no_git_or_marker() {
+    let tmp = TempDir::new().unwrap();
+    let dir = std::fs::canonicalize(tmp.path()).unwrap().join("scratch");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    assert_eq!(resolve_project_root(&dir), dir);
+}
+
 /// `scan` (as opposed to `scan_with_excludes`) resolves the exclude set from the
 /// project's own settings layers.
 #[test]

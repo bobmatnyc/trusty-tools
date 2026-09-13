@@ -120,6 +120,47 @@ fn an_already_excluded_ancestor_yields_no_step() {
     assert!(steps.is_empty(), "{steps:?}");
 }
 
+/// `git -C <dir> init -q`, reporting whether git was available at all.
+fn git_init(dir: &Path) -> bool {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["init", "-q"])
+        .output()
+        .is_ok_and(|out| out.status.success())
+}
+
+/// FAILS BEFORE THIS ROUND (#7673 review, CRITICAL): `repair_ancestor_claude_md`
+/// scanned from whatever subdirectory it was handed — exactly what `tm doctor
+/// --fix --yes` run from `crates/trusty-mpm` in this repo does — and excluded
+/// the project's OWN root `CLAUDE.md`, suppressing the project's own
+/// instructions. A nested `project_root` must resolve to the git toplevel
+/// first, so the root's own file is never a finding and no exclude is written.
+#[test]
+fn no_exclude_is_written_for_the_git_roots_own_claude_md_from_a_nested_project_root() {
+    let tmp = TempDir::new().unwrap();
+    let repo = std::fs::canonicalize(tmp.path()).unwrap().join("repo");
+    let nested = repo.join("crates").join("thing");
+    std::fs::create_dir_all(&nested).unwrap();
+    if !git_init(&repo) {
+        eprintln!("#7673 tests: git unavailable, skipping");
+        return;
+    }
+    std::fs::write(repo.join("CLAUDE.md"), "# Root project\n\nUse cargo.\n").unwrap();
+
+    let steps = repair_ancestor_claude_md(&nested, None, None, "20260912", RepairMode::Apply);
+
+    assert!(steps.is_empty(), "{steps:?}");
+    assert!(
+        !settings_of(&nested).exists(),
+        "no exclude may be written at all, let alone at the nested directory"
+    );
+    assert!(
+        !settings_of(&repo).exists(),
+        "the root's own CLAUDE.md is the project's, not a finding — nothing to exclude"
+    );
+}
+
 /// A second `--fix` on the same day must not overwrite the first run's rescue
 /// copy, which would destroy the only remaining bytes of the original.
 #[test]

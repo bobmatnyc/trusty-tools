@@ -54,6 +54,11 @@ pub(super) fn check_ancestor_claude_md(
         );
     };
 
+    // #7673 round 3: `project` here is `std::env::current_dir()` from the CLI —
+    // an arbitrary process cwd, not necessarily the project's own root. `scan`
+    // resolves to the real root (git toplevel, or the registered `.trusty-mpm`
+    // marker) before it walks, so running `tm doctor` from a crate subdirectory
+    // no longer reports the repo's own root CLAUDE.md as a stray ancestor.
     let found = crate::core::ancestor_claude_md::scan(project, home, managed_config_dir);
     let (excluded, loading): (Vec<_>, Vec<_>) = found.iter().partition(|f| f.excluded);
 
