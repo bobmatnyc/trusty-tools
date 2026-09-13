@@ -59,7 +59,7 @@ struct GhProjectList {
 /// Render the live filing-target section.
 ///
 /// Why: the agent needs the exact titles it must hand to
-/// `gh issue create --milestone` / `--add-project`, from the repo it is about
+/// `gh issue create --milestone` / `--project`, from the repo it is about
 /// to file into — a hand-typed name is the failure this replaces.
 /// What: open milestones (GitHub's list-milestones endpoint defaults to
 /// `state=open`) and the owner's open projects, each rendered as a counted

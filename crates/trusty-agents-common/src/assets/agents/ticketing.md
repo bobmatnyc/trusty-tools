@@ -198,15 +198,19 @@ name is the failure this replaces.
 
 ```bash
 gh issue create --title "…" --body "…" \
-  --milestone "Backlog · mpm/core" --add-project "trusty-mpm" --parent 7067 \
+  --milestone "Backlog · mpm/core" --project "trusty-mpm" --parent 7067 \
   --assignee @me --label "ws/$WS_NAME" --label bug --label trusty-mpm
 gh issue edit 7070 --milestone "mpm 1.4" --add-project "trusty-mpm"
 ```
 
-Installed `gh` is 2.98 — `--milestone`, `--add-project` and `--parent` all work
-on `issue create` and `issue edit`, and the token carries the `project` scope.
-Blocked-by has no flag; it is the API call in `tm-ticketing`, "Relationships
-(native, never prose)":
+Installed `gh` is 2.98 — `--milestone` and `--parent` work unchanged on both
+`issue create` and `issue edit`; the project flag does not — `issue create`
+takes `--project`, `issue edit` takes `--add-project` — and the token carries
+the `project` scope. `issue create` also takes `--blocked-by <numbers>`
+directly; use that instead of the API call below when filing the issue for the
+first time. The API call remains the only route to add or remove a blocked-by
+relationship on an issue that already exists — see `tm-ticketing`,
+"Relationships (native, never prose)":
 
 ```bash
 BLOCKER_ID=$(gh api repos/OWNER/REPO/issues/BLOCKER_NUM --jq .id)
@@ -255,7 +259,7 @@ a `gh`-authenticated repo — this is the common case), use `gh` directly:
 # full label set per "Label at Creation" above — type + component + optional
 # priority — plus the milestone and project every new issue carries (#7067)
 gh issue create --title "Title" --body "Details" \
-  --milestone "Backlog · search/core" --add-project "trusty-search" \
+  --milestone "Backlog · search/core" --project "trusty-search" \
   --assignee @me --label "ws/$WS_NAME" --label bug --label trusty-search
 gh issue edit 4069 --add-label refactor --add-label trusty-common
 gh issue list --search "search terms" --state all   # search open AND closed FIRST

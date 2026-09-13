@@ -542,15 +542,20 @@ existing style.
 ## Minimal PR Body (seven fields)
 
 The `version-control` agent writes this; the PM supplies the material.
+`tm pr open` checks each field against its own heading below, verbatim
+(`#7727` — every heading must be an ATX `## ` line, one to six `#`s, matched
+case-insensitively against the canonical word or a stated alias):
 
-1. Primary outcome and linked issue(s), with the `Refs owner/repo#N` link.
-2. What changed, and what is intentionally out of scope.
-3. Risk / blast radius.
-4. Test evidence at the applicable levels.
-5. Baseline/pre-existing failures and their canonical issue (see below).
-6. Documentation/changelog status.
-7. Review-finding disposition: fixed here, kept on the parent, or separately
-   ticketed.
+1. `## Outcome` — primary outcome and linked issue(s), with the
+   `Refs owner/repo#N` link.
+2. `## Changes` — what changed, and what is intentionally out of scope.
+3. `## Risk` — risk / blast radius.
+4. `## Tests` — test evidence at the applicable levels.
+5. `## Baseline` — baseline/pre-existing failures and their canonical issue
+   (see below).
+6. `## Docs` — documentation/changelog status.
+7. `## Review` — review-finding disposition: fixed here, kept on the parent,
+   or separately ticketed.
 
 🔴 **Field 1 models `Refs`, not a closing keyword (#6895).** `Closes`, `Fixes`
 and `Resolves` go in only when the project's `CLAUDE.md` permits a merge to

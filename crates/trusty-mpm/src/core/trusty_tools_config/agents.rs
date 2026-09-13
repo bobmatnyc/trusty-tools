@@ -177,7 +177,8 @@ pub struct TicketingConfig {
 
     // #7067: the milestone/project slice of the standard. Titles, never ids —
     // an agent reads a title back from `tm issue standard` and hands the same
-    // string to `gh issue create --add-project`.
+    // string to `gh issue create --project` (#7727: issue edit takes
+    // --add-project; issue create does not).
     /// GitHub Project (v2) TITLE every new issue joins by default.
     ///
     /// `None` → no default; the agent picks a project by crate/topic fit from

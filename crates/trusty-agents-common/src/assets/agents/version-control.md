@@ -85,7 +85,12 @@ this grep is what covers the hand-assembled `gh` fallback and every later
 
 🔴 **Open every PR with `tm pr open --title <title> --body-file <path> [--issue N]
 [--rung 1-6] [--base main] [--docs-only]`.** It validates the seven-field body
-contract and the exact attribution footer, and attaches the shipped
+contract against seven exact headings, verbatim (#7727): `## Outcome`,
+`## Changes`, `## Risk`, `## Tests`, `## Baseline`, `## Docs`, `## Review` — in
+that order, matching `tm-workflow.md`'s "Minimal PR Body (seven fields)"
+section. A body missing one of these, or holding it empty, exits 2 naming
+which field, before `gh` is ever called. It also checks the exact attribution
+footer, and attaches the shipped
 `--assignee @me --label trusty-mpm --label ws/<session>` defaults itself — you
 never type them. Before spawning `gh` it runs
 `scripts/check_changelog_fragment.sh` (`--docs-only` skips this gate for a PR

@@ -308,14 +308,15 @@ filing in a repository; never hand-type a title it did not print.
 
 ```bash
 gh issue create --title "…" --body "…" \
-  --milestone "Backlog · mpm/core" --add-project "trusty-mpm" \
+  --milestone "Backlog · mpm/core" --project "trusty-mpm" \
   --label bug --label trusty-mpm
 gh issue edit 7067 --milestone "mpm 1.4" --add-project "trusty-mpm"
 ```
 
-Installed `gh` is 2.98; `--milestone`, `--add-project`, and `--parent` are all
-supported on `issue create` and `issue edit`, and the token carries the
-`project` scope.
+Installed `gh` is 2.98; `--milestone` and `--parent` are supported unchanged on
+both `issue create` and `issue edit`, and the token carries the `project`
+scope. The project flag differs by subcommand: `issue create` takes
+`--project`, `issue edit` takes `--add-project`.
 
 **Choosing the milestone — a stated rule, in order:**
 
