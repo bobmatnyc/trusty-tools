@@ -1,6 +1,6 @@
 # 0049. A documents-only commit is permitted in a main checkout, gated on what is staged
 
-- **Status:** Accepted
+- **Status:** Accepted, amended by [ADR-0061](0061-commits-never-land-on-local-main.md)
 - **Date:** 2026-08-16
 - **Scope:** crate `trusty-mpm` — `tm hook --pm-guard`
   (`pm_guard_bash::main_checkout`'s commit rule, `core::staged_paths`), and
@@ -17,7 +17,12 @@
   decision 4 and scopes
   [ADR-0030](0030-sessions-own-many-workstreams-from-the-tm-checkout.md)'s
   §0.5 position as encoded in DOC-66. ADR-0044's write boundary and ADR-0048's
-  remaining decisions stay in force unchanged.
+  remaining decisions stay in force unchanged. **Amended by
+  [ADR-0061](0061-commits-never-land-on-local-main.md)** (owner ruling
+  2026-09-13, corrected on #7756, #7767): this ADR's staged-set carve-out
+  still governs whether a documents-only commit is permitted; ADR-0061 adds
+  one destination constraint — the commit lands on the fast-path `docs/*`
+  branch, never local `main`.
 
 ## Context
 
