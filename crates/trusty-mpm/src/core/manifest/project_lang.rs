@@ -17,8 +17,9 @@
 //! manifest as [`super::schema::GatedAgent::markers`]. What is left here is the
 //! MECHANISM: how a marker string is evaluated against a directory, bounded and
 //! fail-closed. Declaration lives in the manifest; evaluation lives here.
-//! What: [`MarkerProbe`] resolves a project's probe roots (the project dir plus
-//! every declared workspace member) and a single shared [`ProbeBudget`] once,
+//! What: [`MarkerProbe`] resolves a project's probe roots (the project dir, every
+//! declared workspace member, and every nested manifest directory the bounded
+//! walk in [`super::nested`] finds — #7781) and a shared [`ProbeBudget`] once,
 //! then answers [`MarkerProbe::detect`] for any list of declared entries. A
 //! possibly-EMPTY result is a valid answer, never an error — `super::framework`
 //! composes it with the declared categories into the final
@@ -30,7 +31,8 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use super::schema::GatedAgent;
+use super::nested::{MarkerAnchors, nested_probe_roots};
+use super::schema::{AgentCategories, GatedAgent};
 use super::workspace::{ProbeBudget, probe_roots};
 
 /// Whether a single marker is present in `dir`.
@@ -125,18 +127,82 @@ fn marker_present_in_any(roots: &[PathBuf], marker: &str, budget: &ProbeBudget) 
 /// each declared category.
 /// Test: `budget_is_shared_across_members`, `npm_monorepo_member_declares_react`.
 pub(crate) struct MarkerProbe {
-    /// The project dir followed by every declared workspace member.
+    /// The project dir, every declared workspace member, then every nested
+    /// manifest directory the bounded walk found (#7781).
     roots: Vec<PathBuf>,
     /// One aggregate read budget for the whole detection call.
     budget: ProbeBudget,
+    /// True when a RESOURCE cap stopped EITHER discovery pass short, so every
+    /// [`Self::detect`] answer from this probe may be incomplete (#7781).
+    truncated: bool,
+    /// True when the nested walk left children unread at its declared depth,
+    /// which is the walk's designed scope rather than a failure (#7781).
+    depth_limited: bool,
 }
 
 impl MarkerProbe {
     /// Resolve `project_dir`'s probe roots under a fresh shared budget.
-    pub(crate) fn new(project_dir: &Path) -> Self {
+    ///
+    /// Why: #7781 — a repository that keeps a second stack in an UNDECLARED
+    /// subdirectory (trusty-tools' own `crates/*/ui` Svelte apps) showed none of
+    /// it to root-and-declared-members probing, so the PM prompt named
+    /// `rust-engineer` alone for a repo with eight Svelte front ends. Owner
+    /// ruling 2026-09-13: root-only stack detection is not enough.
+    /// What: declared roots from [`probe_roots`] first — so a project with no
+    /// nested manifest behaves exactly as before — then the bounded nested walk
+    /// of [`nested_probe_roots`], whose anchors are derived from `categories`
+    /// rather than restated here. Both share this call's one [`ProbeBudget`].
+    /// Test: `nested_ui_package_is_found`,
+    /// `mixed_stack_repo_detects_nested_web_engineers`,
+    /// `rust_only_repo_detects_only_rust_engineer`.
+    pub(crate) fn new(project_dir: &Path, categories: &AgentCategories) -> Self {
         let budget = ProbeBudget::new();
-        let roots = probe_roots(project_dir, &budget);
-        Self { roots, budget }
+        let declared = probe_roots(project_dir, &budget);
+        let mut roots = declared.roots;
+        let anchors = MarkerAnchors::from_categories(categories);
+        // #7781 round-2: the walk reports whether a bound cut it short, and that
+        // flag travels with the probe so a caller can say detection is partial.
+        // Round-3: two flags, because a resource cap and the declared depth are
+        // not the same event.
+        let nested = nested_probe_roots(project_dir, &anchors, &budget, &roots);
+        roots.extend(nested.roots);
+        Self {
+            roots,
+            budget,
+            // #7781 round-3: EITHER discovery path can exhaust a resource cap,
+            // and a member the declared pass dropped is often unreachable by the
+            // nested walk (it lives under a skipped directory), so the walk's
+            // flag alone under-reports.
+            truncated: declared.truncated || nested.truncated,
+            depth_limited: nested.depth_limited,
+        }
+    }
+
+    /// Whether a RESOURCE cap cut the nested walk short, so detection may be
+    /// partial.
+    ///
+    /// Why: a caller that renders or routes on the detected set must be able to
+    /// say "this list may be incomplete" — the round-1 #7781 finding. Kept
+    /// separate from [`Self::depth_limited`] so it stays rare enough to act on.
+    /// What: the OR of both discovery paths' resource caps — [`probe_roots`]'s
+    /// declared-member and pattern caps, and the [`nested_probe_roots`] flag set
+    /// by `MAX_SCANNED_DIRS` or the shared member cap.
+    /// Test: `scanned_dirs_bound_reports_truncation`,
+    /// `a_small_tree_is_not_truncated`, `depth_limited_tree_is_not_truncated`,
+    /// `declared_member_cap_is_reported_to_the_caller`.
+    pub(crate) fn truncated(&self) -> bool {
+        self.truncated
+    }
+
+    /// Whether the nested walk stopped at its declared depth.
+    ///
+    /// Why: informational only (#7781 round-3). Most real repositories nest
+    /// deeper than the walk descends, so a consumer that fails closed on this
+    /// would refuse nearly every project.
+    /// What: the [`nested_probe_roots`] flag set by `MAX_NESTED_DEPTH`.
+    /// Test: `depth_bound_stops_the_walk`, `depth_limited_tree_is_not_truncated`.
+    pub(crate) fn depth_limited(&self) -> bool {
+        self.depth_limited
     }
 
     /// Whether any of `entry`'s declared markers is present at any probe root.
@@ -190,7 +256,7 @@ mod tests {
     /// Test: this helper IS the test surface for the tests that call it.
     fn detected_engineers(dir: &Path) -> BTreeSet<String> {
         let categories = framework_agent_categories().expect("bundled manifest must be valid");
-        let probe = MarkerProbe::new(dir);
+        let probe = MarkerProbe::new(dir, &categories);
         let mut detected = probe.detect(&categories.language);
         detected.extend(probe.detect(&categories.framework));
         detected
@@ -199,7 +265,7 @@ mod tests {
     /// The `platform` stems the BUNDLED manifest's markers select for `dir`.
     fn detected_platforms(dir: &Path) -> BTreeSet<String> {
         let categories = framework_agent_categories().expect("bundled manifest must be valid");
-        MarkerProbe::new(dir).detect(&categories.platform)
+        MarkerProbe::new(dir, &categories).detect(&categories.platform)
     }
 
     fn touch(dir: &Path, name: &str) {
@@ -669,8 +735,11 @@ mod tests {
             stem: "ungated-engineer".to_string(),
             markers: Vec::new(),
         };
+        let categories = framework_agent_categories().expect("bundled manifest must be valid");
         assert!(
-            MarkerProbe::new(tmp.path()).detect(&[ungated]).is_empty(),
+            MarkerProbe::new(tmp.path(), &categories)
+                .detect(&[ungated])
+                .is_empty(),
             "an entry declaring no markers can never be selected"
         );
     }

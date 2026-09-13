@@ -19,13 +19,19 @@
 //! them, use the project's own quality gate) or a neutral "not auto-detected"
 //! block that forbids defaulting and requires a Research pass. [`resolve_pm_prompt`](crate::core::instruction_overrides::resolve_pm_prompt)
 //! ([`crate::core::instruction_overrides`]) slots the section into the prompt.
+//! Either body carries [`TRUNCATED_NOTE`] when a RESOURCE cap cut detection
+//! short (#7781), so a partial list is never read as the whole stack, and
+//! [`depth_note`] when the walk stopped at its declared depth.
 //! Test: `detected_rust_lists_rust_engineer`, `detected_nextjs_lists_ts_family`,
 //! `detected_polyglot_lists_both_families`, `undetected_is_neutral_no_default`,
-//! `heading_present_in_both_modes`.
+//! `heading_present_in_both_modes`, `truncated_detection_says_so`,
+//! `depth_limited_detection_says_so`.
 
 use std::path::Path;
 
-use crate::core::manifest::framework::detected_stack_engineers;
+use crate::core::manifest::framework::{
+    MAX_NESTED_DEPTH, StackDetection, detected_stack_engineers,
+};
 
 /// Heading that delimits the auto-derived stack-profile block in the PM prompt.
 ///
@@ -36,6 +42,35 @@ use crate::core::manifest::framework::detected_stack_engineers;
 /// What: the Markdown `##` heading prepended to the detected-stack body.
 /// Test: `heading_present_in_both_modes`.
 pub const STACK_PROFILE_HEADING: &str = "## Detected Project Stack (auto-derived)";
+
+/// The one line appended when a RESOURCE cap cut stack detection short (#7781).
+///
+/// Why: the scan is bounded by directories scanned and a member cap, and each
+/// one fails closed by returning fewer engineers. Without this line the PM reads
+/// a partial list as the whole stack and routes on it. The DEPTH bound does not
+/// render here — round-3 found it trips on most repositories, so folding it in
+/// made this warning near-universal and therefore ignorable.
+/// What: a single sentence appended to whichever body was rendered, detected or
+/// neutral. The cap that tripped is in the daemon log, not the prompt — the
+/// PM needs to know the list is partial, not which constant to raise.
+/// Test: `truncated_detection_says_so`.
+const TRUNCATED_NOTE: &str = "\n\n**Detection was truncated** — a scan bound \
+     (directories scanned, or the member cap) stopped the walk before the whole \
+     tree was read, so a stack kept in an unscanned subdirectory is missing \
+     from this section. Treat the list as partial and confirm with a Research \
+     pass before concluding a stack is absent.";
+
+/// The one line appended when the walk stopped at its declared depth (#7781).
+///
+/// Why: round-3 — the depth bound is the design's scope, not a failure, so it
+/// gets a plain statement of fact rather than [`TRUNCATED_NOTE`]'s call to
+/// treat the list as partial and go research it.
+/// What: one sentence naming [`MAX_NESTED_DEPTH`], so the rendered number cannot
+/// drift from the walk's own constant.
+/// Test: `depth_limited_detection_says_so`.
+fn depth_note() -> String {
+    format!("\n\nManifests deeper than {MAX_NESTED_DEPTH} directories were not probed.")
+}
 
 /// Render the per-project stack-profile section for `project_dir`.
 ///
@@ -51,20 +86,51 @@ pub const STACK_PROFILE_HEADING: &str = "## Detected Project Stack (auto-derived
 /// returns a NEUTRAL section that forbids assuming any stack and mandates a
 /// Research pass to detect it before routing. Pure and side-effect-free apart
 /// from the filesystem `exists()` probes performed by [`detected_stack_engineers`].
+/// Either body ends with [`TRUNCATED_NOTE`] when a resource cap truncated
+/// detection, and with [`depth_note`] when the walk stopped at its declared
+/// depth — independently, so both can appear (#7781).
 /// Test: `detected_rust_lists_rust_engineer`, `detected_nextjs_lists_ts_family`,
-/// `detected_polyglot_lists_both_families`, `undetected_is_neutral_no_default`.
+/// `detected_polyglot_lists_both_families`, `undetected_is_neutral_no_default`,
+/// `depth_limited_detection_says_so`.
 pub fn stack_profile_section(project_dir: &Path) -> String {
-    let engineers = detected_stack_engineers(project_dir);
+    // #7781: detection is no longer root-only, so neither sentence below says
+    // "root" any more. The section is otherwise unchanged — only the engineer
+    // set it lists does.
+    render_section(detected_stack_engineers(project_dir))
+}
+
+/// Render an already-probed [`StackDetection`] as the prompt section.
+///
+/// Why: split out in #7781 round-3 so the note rules can be tested against a
+/// constructed detection. Provoking a RESOURCE cap through the filesystem costs
+/// hundreds of directories per assertion, and the end-to-end path is already
+/// pinned by `core::manifest::framework_tests`.
+/// What: the detected-list body or the neutral body, with [`TRUNCATED_NOTE`]
+/// and [`depth_note`] appended independently. Pure.
+/// Test: `truncated_detection_says_so`, `depth_limited_detection_says_so`,
+/// `both_notes_render_when_both_bounds_trip`.
+fn render_section(detection: StackDetection) -> String {
+    // #7781 round-3: a resource cap that gave up must say so, or an incomplete
+    // list reads as a complete one. The depth bound states its scope instead —
+    // one note per meaning, so neither is diluted by the other.
+    let mut note = String::new();
+    if detection.truncated {
+        note.push_str(TRUNCATED_NOTE);
+    }
+    if detection.depth_limited {
+        note.push_str(&depth_note());
+    }
+    let engineers = detection.engineers;
 
     if engineers.is_empty() {
         return format!(
             "{STACK_PROFILE_HEADING}\n\n\
              No known language or framework marker files were found in this \
-             project's root. **Do NOT assume any stack** — not Rust, not Python, \
+             project. **Do NOT assume any stack** — not Rust, not Python, \
              not Node/TypeScript. Begin with a **MANDATORY Research phase** to \
              detect the stack from the repository before routing any \
              implementation work, then delegate to the matching \
-             `<lang>-engineer`. Never fall back to a default stack profile."
+             `<lang>-engineer`. Never fall back to a default stack profile.{note}"
         );
     }
 
@@ -76,7 +142,7 @@ pub fn stack_profile_section(project_dir: &Path) -> String {
 
     format!(
         "{STACK_PROFILE_HEADING}\n\n\
-         trusty-mpm probed this project's root marker files and detected the \
+         trusty-mpm probed this project's marker files and detected the \
          stack below. Route hands-on code work to the matching language \
          engineer(s) — prefer the most specific — and never a generic \
          `engineer` when one of these fits:\n\n\
@@ -86,7 +152,7 @@ pub fn stack_profile_section(project_dir: &Path) -> String {
          the real commands before citing them; do not assume `cargo`/`make \
          check` unless the project actually uses them. If a task clearly touches \
          a stack not listed above, run a Research pass to confirm before \
-         routing — never fall back to a default stack profile."
+         routing — never fall back to a default stack profile.{note}"
     )
 }
 
@@ -241,6 +307,123 @@ mod tests {
         assert!(
             !section.contains("Do NOT assume any stack"),
             "a detected polyglot project must not emit the neutral block"
+        );
+    }
+
+    /// A detection for `engineers`, with both scan flags clear.
+    fn detection(engineers: &[&str]) -> StackDetection {
+        StackDetection {
+            engineers: engineers.iter().map(|s| (*s).to_string()).collect(),
+            truncated: false,
+            depth_limited: false,
+        }
+    }
+
+    /// A RESOURCE-capped scan is stated in the section, not silently dropped.
+    ///
+    /// Why (#7781 round-2 HIGH): the PM routes on this section. A list shortened
+    /// by a scan bound reads exactly like a complete one, so the PM would
+    /// confidently conclude a stack is absent from evidence that never covered
+    /// it.
+    /// What: renders a detection carrying `truncated` alone; asserts the section
+    /// still names `rust-engineer` AND says detection was truncated, and that it
+    /// does NOT carry the depth note (round-3: the two notes are separate, and
+    /// neither is unconditional). The unflagged counterpart asserts both notes
+    /// are absent. The resource cap is provoked for real through the filesystem
+    /// in `core::manifest::framework_tests`.
+    /// Test: this function IS the test.
+    #[test]
+    fn truncated_detection_says_so() {
+        let section = render_section(StackDetection {
+            truncated: true,
+            ..detection(&["rust-engineer"])
+        });
+        assert!(
+            section.contains("Detection was truncated"),
+            "a resource cap that gave up must say so in the section: {section}"
+        );
+        assert!(
+            section.contains("`rust-engineer`"),
+            "truncation qualifies the list; it must not replace it"
+        );
+        assert!(
+            !section.contains("were not probed"),
+            "the depth note belongs to the depth bound, not a resource cap"
+        );
+
+        let read_in_full = render_section(detection(&["rust-engineer"]));
+        assert!(
+            !read_in_full.contains("Detection was truncated")
+                && !read_in_full.contains("were not probed"),
+            "a fully-read tree must carry neither note"
+        );
+    }
+
+    /// The depth bound renders its own one-line note, never the truncation one.
+    ///
+    /// Why (#7781 round-3): the depth bound trips on most real repositories, so
+    /// rendering it as truncation told the PM to treat almost every stack list
+    /// as partial and go research it — advice that is ignored once it is
+    /// universal. The depth limit is the design's scope; it states that and
+    /// nothing more.
+    /// What: end-to-end — a Cargo project with a directory nested past
+    /// `MAX_NESTED_DEPTH`; asserts the section names `rust-engineer`, carries the
+    /// depth note naming the depth, and does NOT claim truncation.
+    /// Test: this function IS the test.
+    #[test]
+    fn depth_limited_detection_says_so() {
+        let deep = TempDir::new().unwrap();
+        touch(deep.path(), "Cargo.toml");
+        fs::create_dir_all(deep.path().join("a/b/c/d/e")).unwrap();
+
+        let section = stack_profile_section(deep.path());
+        assert!(
+            section.contains(&format!(
+                "Manifests deeper than {MAX_NESTED_DEPTH} directories were not probed."
+            )),
+            "the depth bound states its scope, naming the depth: {section}"
+        );
+        assert!(
+            !section.contains("Detection was truncated"),
+            "the declared depth is not a resource cap and must not read as one"
+        );
+        assert!(
+            section.contains("`rust-engineer`"),
+            "the depth note qualifies the list; it must not replace it"
+        );
+    }
+
+    /// Both notes render when both bounds trip, each stating its own meaning.
+    ///
+    /// Why (#7781 round-3 review): the notes are appended independently, and
+    /// only one-flag renders were pinned — a change that made them exclusive
+    /// (an `else if`, or one note overwriting the other) would have passed. A
+    /// wide, deep monorepo trips both, and it is the one case where the PM most
+    /// needs the truncation warning.
+    /// What: renders a detection carrying both flags; asserts the truncation
+    /// note, the depth note naming the depth, and the engineer list all appear
+    /// together.
+    /// Test: this function IS the test.
+    #[test]
+    fn both_notes_render_when_both_bounds_trip() {
+        let section = render_section(StackDetection {
+            truncated: true,
+            depth_limited: true,
+            ..detection(&["rust-engineer"])
+        });
+        assert!(
+            section.contains("Detection was truncated"),
+            "the resource cap still says so when the depth bound also tripped: {section}"
+        );
+        assert!(
+            section.contains(&format!(
+                "Manifests deeper than {MAX_NESTED_DEPTH} directories were not probed."
+            )),
+            "the depth note is not suppressed by the truncation note: {section}"
+        );
+        assert!(
+            section.contains("`rust-engineer`"),
+            "two notes qualify the list; they must not replace it: {section}"
         );
     }
 

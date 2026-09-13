@@ -154,7 +154,7 @@ grep.
 
 ## Detected Project Stack (auto-derived)
 
-No known language or framework marker files were found in this project's root. **Do NOT assume any stack** — not Rust, not Python, not Node/TypeScript. Begin with a **MANDATORY Research phase** to detect the stack from the repository before routing any implementation work, then delegate to the matching `<lang>-engineer`. Never fall back to a default stack profile.
+No known language or framework marker files were found in this project. **Do NOT assume any stack** — not Rust, not Python, not Node/TypeScript. Begin with a **MANDATORY Research phase** to detect the stack from the repository before routing any implementation work, then delegate to the matching `<lang>-engineer`. Never fall back to a default stack profile.
 
 ---
 

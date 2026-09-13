@@ -11,6 +11,7 @@
 //! is broken" distinction.
 //! Test: this file.
 
+use super::super::workspace::MAX_WORKSPACE_MEMBERS;
 use super::*;
 use std::fs;
 use tempfile::TempDir;
@@ -334,7 +335,7 @@ fn detected_stack_engineers_matches_the_manifest() {
     let tmp = TempDir::new().unwrap();
     touch(tmp.path(), "Cargo.toml");
 
-    let detected = detected_stack_engineers(tmp.path());
+    let detected = detected_stack_engineers(tmp.path()).engineers;
     assert!(
         detected.contains("rust-engineer"),
         "a Cargo project's stack profile names rust-engineer: {detected:?}"
@@ -360,6 +361,178 @@ fn detected_stack_engineers_matches_the_manifest() {
             "`{stem}` is reported to the prompt but is not a declared stack agent"
         );
     }
+}
+
+/// A Cargo workspace with nested Svelte UIs detects the web engineers too.
+///
+/// Why (#7781, owner ruling 2026-09-13): root-only detection answered
+/// `rust-engineer` alone for trusty-tools itself, whose eight Svelte front ends
+/// live in `crates/*/ui` and are declared by no root manifest key — so the PM
+/// was primed to route front-end work to a Rust specialist. This fails on the
+/// pre-#7781 commit, where the nested `package.json` is never probed.
+/// What: builds that layout in a temp dir — root `Cargo.toml` with a
+/// `[workspace]` section, a member crate, and a `ui/` package declaring
+/// `svelte` — and asserts the Rust, JS/TS, and Svelte engineers are all named.
+/// Test: this function IS the test.
+#[test]
+fn mixed_stack_repo_detects_nested_web_engineers() {
+    let tmp = TempDir::new().unwrap();
+    fs::write(
+        tmp.path().join("Cargo.toml"),
+        "[workspace]\nmembers = [\"crates/*\"]\n",
+    )
+    .unwrap();
+    touch(tmp.path(), "crates/app/Cargo.toml");
+    fs::create_dir_all(tmp.path().join("crates/app/ui")).unwrap();
+    fs::write(
+        tmp.path().join("crates/app/ui/package.json"),
+        r#"{"devDependencies":{"svelte":"^5.0.0"}}"#,
+    )
+    .unwrap();
+    touch(tmp.path(), "crates/app/ui/tsconfig.json");
+
+    let detected = detected_stack_engineers(tmp.path()).engineers;
+    for expected in [
+        "rust-engineer",
+        "javascript-engineer",
+        "typescript-engineer",
+        "svelte-engineer",
+    ] {
+        assert!(
+            detected.contains(expected),
+            "a Cargo workspace with a nested Svelte UI must detect `{expected}`: {detected:?}"
+        );
+    }
+    assert!(
+        !detected.contains("python-engineer"),
+        "the walk must not invent a stack the repo has no marker for: {detected:?}"
+    );
+}
+
+/// A repo with only a root `Cargo.toml` still detects `rust-engineer` alone.
+///
+/// Why: the nested walk must add stacks the repo really has and nothing else.
+/// A walk that over-detects would put every engineer in every roster, which is
+/// the noise the gates exist to remove (#1941), so the narrow case is pinned
+/// beside the wide one.
+/// What: a temp dir holding one `Cargo.toml`; asserts the detected set is
+/// exactly `{rust-engineer}`.
+/// Test: this function IS the test.
+#[test]
+fn rust_only_repo_detects_only_rust_engineer() {
+    let tmp = TempDir::new().unwrap();
+    touch(tmp.path(), "Cargo.toml");
+
+    let detected = detected_stack_engineers(tmp.path()).engineers;
+    assert_eq!(
+        detected,
+        BTreeSet::from(["rust-engineer".to_string()]),
+        "a single-crate Rust repo detects exactly one engineer"
+    );
+}
+
+/// Both scan flags reach the public entry point, and stay distinct there.
+///
+/// Why (#7781 round-2 HIGH, split in round-3): every scan bound fails closed by
+/// returning fewer engineers, so a partial answer used to be identical to a
+/// complete one. The flags have to survive the two hops from the walk through
+/// `MarkerProbe` to this public return type, or nothing downstream can act on
+/// them — and they have to arrive SEPARATE, because #7751 fails closed on
+/// `truncated` alone and an ordinary deep repository must not trip it.
+/// What: three trees. One nests a directory past `MAX_NESTED_DEPTH` and must
+/// report `depth_limited` without `truncated`, while still detecting its stack
+/// — a bound reports a partial answer, it never suppresses one. One declares
+/// more workspace members than `MAX_WORKSPACE_MEMBERS` so the shared member cap
+/// trips, and must report `truncated` without `depth_limited`. One is shallow
+/// and must report neither.
+/// Test: this function IS the test.
+#[test]
+fn truncated_detection_is_reported_to_the_caller() {
+    let deep = TempDir::new().unwrap();
+    touch(deep.path(), "Cargo.toml");
+    // `a/b/c/d` sits AT the depth bound and still has a child, so the walk
+    // stops with part of the tree unread.
+    fs::create_dir_all(deep.path().join("a/b/c/d/e")).unwrap();
+
+    let detected = detected_stack_engineers(deep.path());
+    assert!(
+        detected.depth_limited,
+        "a tree with directories past the depth bound must report the depth limit"
+    );
+    assert!(
+        !detected.truncated,
+        "#7781 round-3: the depth bound is scope, not a resource cap — the \
+         fail-closed flag must stay clear"
+    );
+    assert!(
+        detected.engineers.contains("rust-engineer"),
+        "a bound reports a PARTIAL answer; it must not suppress what was found"
+    );
+
+    // One member past the cap, so the walk meets an anchored directory the
+    // declared-member pass had no room for: the shared ceiling trips.
+    let wide = TempDir::new().unwrap();
+    fs::write(wide.path().join("package.json"), r#"{"workspaces":["m*"]}"#).unwrap();
+    for i in 0..=MAX_WORKSPACE_MEMBERS {
+        touch(wide.path(), &format!("m{i:04}/package.json"));
+    }
+
+    let detected = detected_stack_engineers(wide.path());
+    assert!(
+        detected.truncated,
+        "exhausting the shared member cap is truncation the caller must see"
+    );
+    assert!(
+        !detected.depth_limited,
+        "a one-level-deep workspace never reaches the depth bound"
+    );
+
+    let shallow = TempDir::new().unwrap();
+    touch(shallow.path(), "Cargo.toml");
+    let detected = detected_stack_engineers(shallow.path());
+    assert!(
+        !detected.truncated && !detected.depth_limited,
+        "a tree the walk read in full must claim neither bound"
+    );
+}
+
+/// The DECLARED-member cap reaches the caller, even when the walk cannot see it.
+///
+/// Why (#7781 round-3 review): `StackDetection::truncated` documents itself as
+/// covering every resource cap, and `workspace::probe_roots` dropped declared
+/// members past `MAX_WORKSPACE_MEMBERS` with a bare `break` and no signal.
+/// `truncated_detection_is_reported_to_the_caller` did not catch it: its dropped
+/// member sits at depth 1, where the nested walk meets it and trips the SHARED
+/// member cap instead, so the flag arrived for the wrong reason.
+/// What: a workspace declaring `MAX_WORKSPACE_MEMBERS + 1` members whose extra
+/// member lives under `vendor/` — a `SKIP_DIR_NAMES` directory the nested walk
+/// never descends into — so the declared pass is the ONLY thing that can report
+/// the cap. Asserts `truncated` without `depth_limited`.
+/// Test: this function IS the test.
+#[test]
+fn declared_member_cap_is_reported_to_the_caller() {
+    let tmp = TempDir::new().unwrap();
+    fs::write(
+        tmp.path().join("package.json"),
+        r#"{"workspaces":["m*","vendor/*"]}"#,
+    )
+    .unwrap();
+    for i in 0..MAX_WORKSPACE_MEMBERS {
+        touch(tmp.path(), &format!("m{i:04}/package.json"));
+    }
+    // The member past the cap, parked where the nested walk cannot find it.
+    touch(tmp.path(), "vendor/dropped/package.json");
+
+    let detected = detected_stack_engineers(tmp.path());
+    assert!(
+        detected.truncated,
+        "dropping a declared member is a resource cap, and the caller must see \
+         it whether or not the nested walk can reach that member"
+    );
+    assert!(
+        !detected.depth_limited,
+        "a one-level-deep workspace never reaches the depth bound"
+    );
 }
 
 #[test]

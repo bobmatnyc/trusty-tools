@@ -45,6 +45,16 @@ use super::schema::{
     AgentCategories, AgentSet, ContentSource, GatedAgent, HarnessManifest, SkillCategories,
 };
 
+/// The nested walk's declared depth, re-exported beside [`StackDetection`].
+///
+/// Why: #7781 round-3 — a renderer reporting [`StackDetection::depth_limited`]
+/// has to name the depth, and the walk itself is private to this module tree.
+/// Re-exporting the one constant keeps the rendered number from drifting into a
+/// hand-copied literal.
+/// What: `super::nested::MAX_NESTED_DEPTH`.
+/// Test: `core::stack_profile::tests::depth_limited_detection_says_so`.
+pub(crate) use super::nested::MAX_NESTED_DEPTH;
+
 /// File name of the bundled framework-tier manifest.
 ///
 /// Why: named once so the error messages, the docs, and any future on-disk
@@ -420,7 +430,7 @@ pub fn framework_agent_categories() -> Result<AgentCategories, FrameworkManifest
 pub fn agent_scope_from(categories: &AgentCategories, project_dir: &Path) -> AgentSet {
     // One probe — so the stack and platform questions share ONE read budget and
     // one workspace-member resolution, not two of each.
-    let probe = MarkerProbe::new(project_dir);
+    let probe = MarkerProbe::new(project_dir, categories);
     let mut stacks = probe.detect(&categories.language);
     stacks.extend(probe.detect(&categories.framework));
     let platforms = probe.detect(&categories.platform);
@@ -458,6 +468,43 @@ pub fn agent_scope_from(categories: &AgentCategories, project_dir: &Path) -> Age
     }
 }
 
+/// A project's detected stack engineers, and why the scan stopped where it did.
+///
+/// Why: [`detected_stack_engineers`] used to answer with a bare set, so a set
+/// short one engineer because a scan bound stopped the walk was indistinguishable
+/// from a project that genuinely has no such stack — the round-1 #7781 finding.
+/// Round-2 answered it with one flag that the depth bound set on most real
+/// repositories, which is useless as a fail-closed signal; round-3 splits it.
+/// What: `truncated` means the engineer set may be INCOMPLETE because a resource
+/// cap stopped detection — EVERY such cap, in either discovery pass: the
+/// declared-member and pattern caps of `super::workspace`, and the nested walk's
+/// scanned-directory and shared member caps (#7781 round-3). A consumer that
+/// persists a negative conclusion must fail closed on it. `depth_limited` means
+/// manifests deeper than the declared depth were not probed, which is the
+/// design's scope, informational only. The tripped resource cap is named in a
+/// `tracing::warn!` and the depth bound in a `tracing::debug!`.
+///
+/// `#[non_exhaustive]`: a future bound gets a third flag, and adding one must
+/// not be a breaking change for a downstream consumer that matched on the
+/// struct. Construction stays inside this crate, which is where every
+/// bound that could set a flag lives.
+/// Test: `detected_stack_engineers_matches_the_manifest`,
+/// `truncated_detection_is_reported_to_the_caller`,
+/// `declared_member_cap_is_reported_to_the_caller`,
+/// `core::stack_profile::tests::truncated_detection_says_so`.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct StackDetection {
+    /// The `language` + `framework` stems whose declared markers are present.
+    pub engineers: BTreeSet<String>,
+    /// True when a resource cap cut detection short, so `engineers` may be
+    /// partial — fail closed on this.
+    pub truncated: bool,
+    /// True when manifests below the walk's declared depth went unprobed —
+    /// informational, not a failure.
+    pub depth_limited: bool,
+}
+
 /// The stack engineers `project_dir`'s markers select, per the bundled manifest.
 ///
 /// Why: `core::stack_profile` primes the PM prompt with the project's actual
@@ -465,21 +512,33 @@ pub fn agent_scope_from(categories: &AgentCategories, project_dir: &Path) -> Age
 /// names `rust-engineer` for a project that never received it is the drift #1971
 /// exists to prevent. Before #4765 it imported `project_lang`'s marker table
 /// directly; that table is now a manifest field, so this is the entry point.
-/// What: the union of the declared `language` and `framework` stems whose
-/// markers are present. An unusable manifest yields an EMPTY set, which
+/// What: a [`StackDetection`] holding the union of the declared `language` and
+/// `framework` stems whose markers are present, plus that type's two independent
+/// flags. An unusable manifest yields an EMPTY, unflagged set, which
 /// `stack_profile_section` renders as its neutral "detect before routing"
 /// block — the safe answer for a prompt. The DEPLOY path does not share that
 /// leniency: [`framework_agent_scope`] refuses to resolve at all.
 /// Test: `detected_stack_engineers_matches_the_manifest`,
+/// `truncated_detection_is_reported_to_the_caller`,
 /// `core::stack_profile::tests::detected_rust_lists_rust_engineer`.
-pub fn detected_stack_engineers(project_dir: &Path) -> BTreeSet<String> {
+pub fn detected_stack_engineers(project_dir: &Path) -> StackDetection {
     let Ok(categories) = framework_agent_categories() else {
-        return BTreeSet::new();
+        return StackDetection {
+            engineers: BTreeSet::new(),
+            truncated: false,
+            depth_limited: false,
+        };
     };
-    let probe = MarkerProbe::new(project_dir);
-    let mut detected = probe.detect(&categories.language);
-    detected.extend(probe.detect(&categories.framework));
-    detected
+    let probe = MarkerProbe::new(project_dir, &categories);
+    let mut engineers = probe.detect(&categories.language);
+    engineers.extend(probe.detect(&categories.framework));
+    // #7781 round-3: both flags ride out with the set they qualify, separately —
+    // only `truncated` is a fail-closed signal.
+    StackDetection {
+        engineers,
+        truncated: probe.truncated(),
+        depth_limited: probe.depth_limited(),
+    }
 }
 
 /// The framework-tier agent selection for `project_dir`.
