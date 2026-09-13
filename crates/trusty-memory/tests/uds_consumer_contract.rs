@@ -156,6 +156,14 @@ async fn shared_client_reaches_the_health_method_consumers_dial_by_literal() {
         result.get("status").and_then(|v| v.as_str()).is_some(),
         "a health answer carries a status: {result}"
     );
+    // #7685: the client-side reading of that status is pinned to the handler, so
+    // a renamed status string fails here rather than reading every healthy
+    // daemon as unhealthy in `tm`'s launch gate.
+    assert_eq!(
+        trusty_common::memory_rpc::MemoryHealthStatus::from_health_body(&result),
+        trusty_common::memory_rpc::MemoryHealthStatus::Ok,
+        "a healthy daemon's status must read as Ok: {result}"
+    );
 }
 
 /// Why: the dispatcher's ~75 methods reach the socket through the fallback, and

@@ -792,6 +792,82 @@ async fn spawn_managed_on_main_creates_record_without_worktree() {
     );
 }
 
+/// `tm connect`'s launch-on-main spawn hands the adapter the prepared reachability (#7685).
+///
+/// Why: preparation resolves reachability, and the runtime adapter used to be
+/// built with `None`, so it dialled the probe again — a second `PROBE_TIMEOUT`
+/// against a daemon already known to be hung, on every launch.
+/// What: drives the real `spawn_managed_on_main` and counts the adapter spawns
+/// on this thread that had no resolved value and so probed again (the spawn runs
+/// synchronously on a current-thread runtime). The count is observable when the
+/// adapter reaches its reachability read (a `claude` binary is resolvable); the
+/// source assertion covers hosts where the adapter stops earlier. Preparation's
+/// own probes, including the deployment auto-repair's re-preparation, are not
+/// the adapter's and are not counted.
+/// Test: itself.
+#[tokio::test]
+#[serial_test::serial]
+async fn spawn_managed_on_main_hands_the_adapter_the_prepared_reachability() {
+    const SRC: &str = include_str!("launch_on_main.rs");
+    assert!(
+        SRC.contains("build_adapter(record.runtime, tmux_arc, memory_reachable)"),
+        "launch-on-main must hand the adapter the reachability preparation resolved"
+    );
+
+    let tmp_home = tempfile::TempDir::new().expect("tmp home");
+    let _home = set_home(tmp_home.path());
+    let data_root = tempfile::TempDir::new().expect("tmp data root");
+    let state = std::sync::Arc::new(
+        crate::daemon::state::DaemonState::with_root_isolated_managed(
+            data_root.path().to_path_buf(),
+        )
+        .await,
+    );
+    let checkout = tempfile::TempDir::new().expect("tmp checkout dir");
+    let local_path = checkout.path();
+    assert!(
+        std::process::Command::new("git")
+            .arg("init")
+            .current_dir(local_path)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false),
+        "git init must succeed in this test fixture"
+    );
+    let params = SpawnParams {
+        repo_url: local_path.to_string_lossy().into_owned(),
+        git_ref: "main".into(),
+        task: "".into(),
+        name_hint: None,
+        runtime: None,
+        ephemeral: Some(true),
+        mcp_initiated: false,
+        inject_task: None,
+        deliverable_id: None,
+        force_new: false,
+        worktree: false,
+    };
+
+    crate::core::memory_reachable::ADAPTER_REPROBES_ON_THIS_THREAD.with(|n| n.set(0));
+    spawn_managed_on_main(
+        &state,
+        &ManagedSessionId::new(),
+        &params,
+        crate::runtime::RuntimeKind::ClaudeCode,
+        local_path,
+        "acme",
+        "writing",
+    )
+    .await
+    .expect("spawn_managed_on_main must succeed against a real git repo");
+
+    assert_eq!(
+        crate::core::memory_reachable::ADAPTER_REPROBES_ON_THIS_THREAD.with(std::cell::Cell::get),
+        0,
+        "the adapter must reuse the reachability preparation resolved, not probe again"
+    );
+}
+
 /// The concurrent-collision detector `spawn_managed_on_main` warns on (#3455)
 /// fires ONLY for an already-`Active` session whose cwd is EXACTLY the same
 /// main checkout — a session on a different path, or a non-Active one on the

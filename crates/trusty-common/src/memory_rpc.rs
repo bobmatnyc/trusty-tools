@@ -125,6 +125,56 @@ impl MemoryRpcError {
     }
 }
 
+/// The `status` a trusty-memory `memory.health` answer reports (#7685).
+///
+/// Why: a daemon that answers its health call is not necessarily one that can
+/// write. trusty-memory's handler reports `"wedged"` from the worker pool's
+/// oldest in-flight age on its cheap path (#4001), and `"degraded"` when a deep
+/// probe's round trip fails, so a consumer that stops at "the call returned" reads
+/// a stuck palace as healthy. `trusty-common` sits below `trusty-memory` in the
+/// dependency graph, so the strings cannot be imported from the producer; this is
+/// the one client-side reading of them, pinned against the real handler by
+/// `shared_client_reaches_the_health_method_consumers_dial_by_literal` in
+/// `trusty-memory/tests/uds_consumer_contract.rs`.
+/// What: [`Self::Ok`], [`Self::Degraded`] and [`Self::Wedged`] for the three
+/// strings the handler emits; [`Self::Unrecognised`] for any other string and
+/// [`Self::Missing`] for a body with no string `status` at all. Only `Ok` is
+/// healthy — see [`Self::is_ok`].
+/// Test: `health_status_reads_every_handler_string`,
+/// `health_status_fails_closed_on_an_unexpected_body`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MemoryHealthStatus {
+    /// `"ok"` — the daemon reports itself healthy.
+    Ok,
+    /// `"degraded"` — a deep probe's remember/recall round trip failed.
+    Degraded,
+    /// `"wedged"` — the oldest in-flight palace operation outlived its bound.
+    Wedged,
+    /// A `status` string this client does not know.
+    Unrecognised(String),
+    /// No string `status` field — a non-object body, or an object without one.
+    Missing,
+}
+
+impl MemoryHealthStatus {
+    /// Read the `status` out of a `memory.health` result.
+    pub fn from_health_body(body: &Value) -> Self {
+        match body.get("status").and_then(Value::as_str) {
+            Some("ok") => Self::Ok,
+            Some("degraded") => Self::Degraded,
+            Some("wedged") => Self::Wedged,
+            Some(other) => Self::Unrecognised(other.to_string()),
+            None => Self::Missing,
+        }
+    }
+
+    /// Whether the daemon reported itself healthy. Everything but `Ok` is not.
+    pub fn is_ok(&self) -> bool {
+        matches!(self, Self::Ok)
+    }
+}
+
 /// A path nothing can be serving, for a caller that must never see an error.
 ///
 /// Why a path under a directory that cannot exist rather than an empty one: a
@@ -300,6 +350,41 @@ mod tests {
             std::env::remove_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV);
         }
         assert_eq!(resolved, PathBuf::from(UNREACHABLE_PLACEHOLDER));
+    }
+
+    /// Why (#7685): the three strings trusty-memory's health handler emits must
+    /// each map to their own variant, and only `"ok"` may read as healthy.
+    /// Test: itself.
+    #[test]
+    fn health_status_reads_every_handler_string() {
+        for (status, expected, healthy) in [
+            ("ok", MemoryHealthStatus::Ok, true),
+            ("degraded", MemoryHealthStatus::Degraded, false),
+            ("wedged", MemoryHealthStatus::Wedged, false),
+        ] {
+            let read = MemoryHealthStatus::from_health_body(&json!({ "status": status }));
+            assert_eq!(read, expected, "status {status}");
+            assert_eq!(read.is_ok(), healthy, "status {status}");
+        }
+    }
+
+    /// Why (#7685): a body this client cannot read is not evidence of health.
+    /// Test: itself.
+    #[test]
+    fn health_status_fails_closed_on_an_unexpected_body() {
+        for (body, expected) in [
+            (
+                json!({ "status": "warming" }),
+                MemoryHealthStatus::Unrecognised("warming".to_string()),
+            ),
+            (json!({ "version": "1.0" }), MemoryHealthStatus::Missing),
+            (json!({ "status": 1 }), MemoryHealthStatus::Missing),
+            (json!("not a health body"), MemoryHealthStatus::Missing),
+        ] {
+            let read = MemoryHealthStatus::from_health_body(&body);
+            assert_eq!(read, expected, "body {body}");
+            assert!(!read.is_ok(), "body {body} must not read as healthy");
+        }
     }
 
     /// Why: every fail-open caller degrades on "the daemon is not running", and

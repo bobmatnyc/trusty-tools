@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use super::*;
 use crate::core::auto_memory_import::{INDEX_FILE, auto_memory_dir};
 use crate::core::doctor::CheckStatus;
+use crate::core::memory_reachable::MemoryReachability;
 
 /// Write `<root>/<rel>` with `body`, creating parents.
 fn write_settings(root: &Path, rel: &str, body: &str) {
@@ -53,7 +54,7 @@ fn auto_memory_fails_when_on_beside_a_healthy_trusty_memory() {
     // directive unmet.
     let (_tmp, home, project) = fixture(Some(ON));
 
-    let check = check_auto_memory(Some(&project), &home, None, true);
+    let check = check_auto_memory(Some(&project), &home, None, &MemoryReachability::Reachable);
 
     assert_eq!(check.status, CheckStatus::Fail, "{}", check.message);
     assert!(
@@ -74,7 +75,7 @@ fn auto_memory_fails_when_unset_beside_a_healthy_trusty_memory() {
     // Claude Code defaults auto memory ON.
     let (_tmp, home, project) = fixture(Some(r#"{"outputStyle": "x"}"#));
 
-    let check = check_auto_memory(Some(&project), &home, None, true);
+    let check = check_auto_memory(Some(&project), &home, None, &MemoryReachability::Reachable);
 
     assert_eq!(check.status, CheckStatus::Fail, "{}", check.message);
     assert!(check.message.contains("unset"), "{}", check.message);
@@ -87,7 +88,12 @@ fn auto_memory_is_ok_when_on_while_trusty_memory_is_down() {
     // there is nothing here for an operator to do.
     let (_tmp, home, project) = fixture(Some(ON));
 
-    let check = check_auto_memory(Some(&project), &home, None, false);
+    let check = check_auto_memory(
+        Some(&project),
+        &home,
+        None,
+        &MemoryReachability::Unreachable,
+    );
 
     assert_eq!(check.status, CheckStatus::Ok, "{}", check.message);
     assert!(
@@ -105,7 +111,12 @@ fn auto_memory_warns_when_off_while_trusty_memory_is_down() {
     // clean `Ok`.
     let (_tmp, home, project) = fixture(Some(OFF));
 
-    let check = check_auto_memory(Some(&project), &home, None, false);
+    let check = check_auto_memory(
+        Some(&project),
+        &home,
+        None,
+        &MemoryReachability::Unreachable,
+    );
 
     assert_eq!(check.status, CheckStatus::Warn, "{}", check.message);
     assert!(
@@ -121,13 +132,41 @@ fn auto_memory_warns_when_off_while_trusty_memory_is_down() {
 }
 
 #[test]
+fn auto_memory_names_a_wedged_trusty_memory_apart_from_a_dead_one() {
+    // #7685: a wedged daemon answers its health call, so it is not "down" — but
+    // it cannot write, so it is not the memory either. The row must keep the
+    // fallback posture AND say which of the two an operator is looking at.
+    let (_tmp, home, project) = fixture(Some(OFF));
+    let wedged =
+        MemoryReachability::Unhealthy(trusty_common::memory_rpc::MemoryHealthStatus::Wedged);
+
+    let check = check_auto_memory(Some(&project), &home, None, &wedged);
+    let dead = check_auto_memory(
+        Some(&project),
+        &home,
+        None,
+        &MemoryReachability::Unreachable,
+    );
+
+    assert_eq!(check.status, CheckStatus::Warn, "{}", check.message);
+    assert!(check.message.contains("WEDGED"), "{}", check.message);
+    assert!(!dead.message.contains("WEDGED"), "{}", dead.message);
+    assert!(dead.message.contains("unreachable"), "{}", dead.message);
+}
+
+#[test]
 fn auto_memory_ok_when_off_and_the_index_is_empty() {
     // ✅: off, and nothing stranded in the store it turned off.
     let (_tmp, home, project) = fixture(Some(OFF));
     let config = tempfile::TempDir::new().unwrap();
     write_index(config.path(), &project, "   \n");
 
-    let check = check_auto_memory(Some(&project), &home, Some(config.path()), true);
+    let check = check_auto_memory(
+        Some(&project),
+        &home,
+        Some(config.path()),
+        &MemoryReachability::Reachable,
+    );
 
     assert_eq!(check.status, CheckStatus::Ok, "{}", check.message);
     assert!(
@@ -143,7 +182,12 @@ fn auto_memory_ok_when_the_project_has_no_auto_memory_store() {
     let (_tmp, home, project) = fixture(Some(OFF));
     let config = tempfile::TempDir::new().unwrap();
 
-    let check = check_auto_memory(Some(&project), &home, Some(config.path()), true);
+    let check = check_auto_memory(
+        Some(&project),
+        &home,
+        Some(config.path()),
+        &MemoryReachability::Reachable,
+    );
 
     assert_eq!(check.status, CheckStatus::Ok, "{}", check.message);
 }
@@ -156,7 +200,12 @@ fn auto_memory_fails_when_the_index_still_holds_facts() {
     let config = tempfile::TempDir::new().unwrap();
     let index = write_index(config.path(), &project, "- [a fact](a-fact.md) — text\n");
 
-    let check = check_auto_memory(Some(&project), &home, Some(config.path()), true);
+    let check = check_auto_memory(
+        Some(&project),
+        &home,
+        Some(config.path()),
+        &MemoryReachability::Reachable,
+    );
 
     assert_eq!(check.status, CheckStatus::Fail, "{}", check.message);
     assert!(
@@ -180,7 +229,12 @@ fn auto_memory_warns_when_the_index_holds_facts_and_memory_is_down() {
     let config = tempfile::TempDir::new().unwrap();
     let index = write_index(config.path(), &project, "- [a fact](a-fact.md) — text\n");
 
-    let check = check_auto_memory(Some(&project), &home, Some(config.path()), false);
+    let check = check_auto_memory(
+        Some(&project),
+        &home,
+        Some(config.path()),
+        &MemoryReachability::Unreachable,
+    );
 
     assert_eq!(check.status, CheckStatus::Warn, "{}", check.message);
     assert!(check.message.contains("NO memory"), "{}", check.message);
@@ -198,7 +252,7 @@ fn auto_memory_project_local_overrides_project() {
     // not make the setting effective when this one contradicts it.
     write_settings(&project, ".claude/settings.local.json", ON);
 
-    let check = check_auto_memory(Some(&project), &home, None, true);
+    let check = check_auto_memory(Some(&project), &home, None, &MemoryReachability::Reachable);
 
     assert_eq!(check.status, CheckStatus::Fail, "{}", check.message);
     assert!(
@@ -213,7 +267,7 @@ fn auto_memory_falls_back_to_the_user_tier() {
     let (_tmp, home, project) = fixture(None);
     write_settings(&home, ".claude/settings.json", OFF);
 
-    let check = check_auto_memory(Some(&project), &home, None, true);
+    let check = check_auto_memory(Some(&project), &home, None, &MemoryReachability::Reachable);
 
     assert_eq!(check.status, CheckStatus::Ok, "{}", check.message);
     assert!(
@@ -228,8 +282,11 @@ fn auto_memory_fails_on_malformed_json() {
     let (_tmp, home, project) = fixture(Some("not json{{{"));
 
     // A settings file Claude Code cannot parse is a finding either way round.
-    for reachable in [true, false] {
-        let check = check_auto_memory(Some(&project), &home, None, reachable);
+    for reachable in [
+        MemoryReachability::Reachable,
+        MemoryReachability::Unreachable,
+    ] {
+        let check = check_auto_memory(Some(&project), &home, None, &reachable);
         assert_eq!(check.status, CheckStatus::Fail, "{}", check.message);
         assert!(
             check.message.contains("not valid JSON"),

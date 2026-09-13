@@ -26,7 +26,10 @@
 //!   and the second can fail on its own. The drawer id is written to a
 //!   `<file>.stored` sidecar BEFORE the archive is attempted, so a re-run over a
 //!   fact that was stored but not filed retries only the rename and reuses the
-//!   drawer it already has.
+//!   drawer it already has. The sidecar alone cannot cover a crash between
+//!   `memory_remember` returning and the sidecar landing, so every drawer also
+//!   carries a deterministic [`IMPORT_KEY_PREFIX`] tag, and a fact with no sidecar
+//!   is looked up by that tag before it is stored (#7685).
 //!
 //! Idempotent by construction: a second run finds no fact files (they are in the
 //! archive) and an empty index, so it stores nothing — and a second run over a
@@ -48,6 +51,18 @@ use crate::core::memory_import::{parse_memory_file, remember};
 /// What: the literal tag, applied to every drawer this module stores.
 /// Test: `auto_memory_import_stores_and_archives_each_fact`.
 pub const MIGRATION_TAG: &str = "migrated-from-auto-memory";
+
+/// Prefix of the idempotency tag every migrated drawer carries (#7685).
+///
+/// Why: the `.stored` sidecar is written AFTER `memory_remember` returns, so a
+/// process killed in between — or a client that timed out on a write the daemon
+/// completed — leaves a drawer nothing local records, and the next run stored the
+/// fact a second time. The key is written INTO the drawer, in the same palace
+/// write as the fact, so no crash point can separate the two.
+/// What: `import-key:` followed by [`import_key`]'s hash of the fact file's path
+/// and contents.
+/// Test: `auto_memory_import_never_duplicates_a_fact_whose_marker_was_lost`.
+pub const IMPORT_KEY_PREFIX: &str = "import-key:";
 
 /// Claude Code's index file inside an auto-memory directory.
 pub const INDEX_FILE: &str = "MEMORY.md";
@@ -356,13 +371,22 @@ async fn migrate_one(
         Ok(None) => return failed(Vec::new(), None, "no YAML frontmatter".to_string()),
         Err(e) => return failed(Vec::new(), None, format!("parse failed: {e:#}")),
     };
-    let tags = migration_tags(&parsed.name, &parsed.kind);
+    let key = import_key(path, &source);
+    let mut tags = migration_tags(&parsed.name, &parsed.kind);
+    tags.push(key.clone());
 
     let drawer_id = match stored_drawer_id(path) {
         // A previous run already wrote this fact; storing it again would leave
         // the palace with two drawers for one fact.
         Some(id) => id,
         None => {
+            // #7685: no sidecar is not proof of no drawer — a run killed between
+            // the store and the sidecar leaves exactly that. Ask the palace first.
+            match drawer_with_tag(socket, &opts.palace, &key).await {
+                Ok(Some(id)) => return finish(path, archive, file.clone(), tags, id),
+                Ok(None) => {}
+                Err(e) => return failed(tags, None, format!("lookup failed: {e:#}")),
+            }
             // `allow_secret_like`: these facts are already on this machine in
             // plain text; refusing to move one because its prose looks
             // token-shaped would strand it in the store this command exists to
@@ -372,20 +396,42 @@ async fn migrate_one(
                 Err(e) => return failed(tags, None, format!("store failed: {e:#}")),
             };
             if let Err(e) = std::fs::write(stored_marker(path), &id) {
-                // The drawer exists but nothing records it. Reporting failure
-                // without a marker is the safe direction only because the index
-                // stays un-emptied, so an operator sees the file again.
+                // The drawer exists but nothing local records it. The index
+                // stays un-emptied, and the drawer's import-key tag is what the
+                // next run finds it by (#7685).
                 return failed(tags, Some(id), format!("stored but not marked: {e}"));
             }
             id
         }
     };
+    finish(path, archive, file.clone(), tags, drawer_id)
+}
+
+/// Archive a fact whose drawer exists, and report it stored.
+///
+/// Why: both the fresh store and a drawer recovered by its import key end the
+/// same way, and a second copy of the archive-or-report tail is where the two
+/// would drift.
+/// What: renames the file under `archive` and removes its marker; a rename
+/// failure is reported as a failure carrying the drawer id a re-run will reuse.
+/// Test: `auto_memory_import_retries_only_the_archive_after_a_rename_failure`,
+/// `auto_memory_import_never_duplicates_a_fact_whose_marker_was_lost`.
+fn finish(
+    path: &Path,
+    archive: &Path,
+    file: String,
+    tags: Vec<String>,
+    drawer_id: String,
+) -> AutoFileResult {
     if let Err(e) = archive_file(path, archive, &file) {
-        return failed(
+        let error = format!("stored as {drawer_id} but not archived: {e:#}");
+        return AutoFileResult {
+            file,
+            status: AutoImportStatus::Failed,
+            drawer_id: Some(drawer_id),
             tags,
-            Some(drawer_id.clone()),
-            format!("stored as {drawer_id} but not archived: {e:#}"),
-        );
+            error: Some(error),
+        };
     }
     // The fact is filed; the marker has nothing left to prove. A removal that
     // fails is harmless — `fact_files` never returns a marker, so the stray one
@@ -398,6 +444,49 @@ async fn migrate_one(
         tags,
         error: None,
     }
+}
+
+/// The idempotency tag for one fact file (#7685).
+///
+/// Why: a retry must find the drawer a crashed run already wrote, and it can only
+/// look for something both runs derive identically from what is on disk.
+/// What: [`IMPORT_KEY_PREFIX`] plus the first 32 hex digits of SHA-256 over the
+/// file's path, a NUL, and its contents — the same fact at the same path always
+/// yields the same tag, and an edited fact yields a new one.
+/// Test: `import_key_is_deterministic_per_path_and_content`.
+fn import_key(path: &Path, source: &str) -> String {
+    use sha2::{Digest as _, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(path.to_string_lossy().as_bytes());
+    hasher.update([0u8]);
+    hasher.update(source.as_bytes());
+    let digest = format!("{:x}", hasher.finalize());
+    format!("{IMPORT_KEY_PREFIX}{}", &digest[..32])
+}
+
+/// The drawer in `palace` carrying `tag`, if one exists (#7685).
+///
+/// Why: see [`IMPORT_KEY_PREFIX`] — this is the lookup that turns a lost sidecar
+/// into a reuse instead of a second store.
+/// What: one `memory_list { palace, tag, limit: 1 }`; the daemon matches the tag
+/// exactly before applying the limit. An answer with no `drawers` array is an
+/// error rather than "none", because storing on a misread would duplicate.
+/// Test: `auto_memory_import_never_duplicates_a_fact_whose_marker_was_lost`.
+async fn drawer_with_tag(socket: &Path, palace: &str, tag: &str) -> anyhow::Result<Option<String>> {
+    let result = trusty_common::memory_rpc::call_memory_tool_at(
+        socket,
+        "memory_list",
+        serde_json::json!({ "palace": palace, "tag": tag, "limit": 1 }),
+    )
+    .await?;
+    let drawers = result
+        .get("drawers")
+        .and_then(serde_json::Value::as_array)
+        .context("memory_list answered without a drawers array")?;
+    Ok(drawers
+        .iter()
+        .find_map(|d| d.get("drawer_id").and_then(serde_json::Value::as_str))
+        .map(str::to_string))
 }
 
 /// The tag set one migrated fact carries.

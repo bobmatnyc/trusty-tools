@@ -1148,6 +1148,13 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // command line only when trusty-memory answered. The launch resolved
         // this already where it could; this only probes when nothing did, so the
         // string builders below stay pure functions of their arguments.
+        #[cfg(test)]
+        if self.memory_reachable.is_none() {
+            // #7685: observable re-probe, so a launch path that drops the
+            // prepared value fails its test.
+            crate::core::memory_reachable::ADAPTER_REPROBES_ON_THIS_THREAD
+                .with(|n| n.set(n.get() + 1));
+        }
         let memory_reachable = resolve_memory_reachable(self.memory_reachable);
         self.tmux
             .send_line(

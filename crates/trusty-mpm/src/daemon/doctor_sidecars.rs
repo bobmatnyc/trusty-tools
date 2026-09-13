@@ -295,7 +295,10 @@ fn interpret_health(
         );
     }
 
-    if body.get("status").and_then(|v| v.as_str()) == Some("degraded") {
+    // #7685: read the status through the one shared client-side parser.
+    if trusty_common::memory_rpc::MemoryHealthStatus::from_health_body(body)
+        == trusty_common::memory_rpc::MemoryHealthStatus::Degraded
+    {
         let detail = body
             .get("detail")
             .and_then(|v| v.as_str())
