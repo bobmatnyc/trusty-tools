@@ -193,7 +193,8 @@ fn stdin_git_init_prompt(dir: &std::path::Path) -> Option<Box<dyn FnMut() -> boo
 /// [`trusty_mpm::core::instruction_pipeline::build_instructions_with_init`]
 /// instead of being derived from stdin here.
 /// Test: `compose_session_instructions_declines_git_init_without_a_prompt`,
-/// `compose_session_instructions_runs_git_init_when_the_prompt_accepts`.
+/// `compose_session_instructions_runs_git_init_when_the_prompt_accepts`,
+/// `compose_session_instructions_refuses_to_seed_when_git_init_fails`.
 fn compose_session_instructions_with_roster_and_init(
     project_dir: &std::path::Path,
     roster: Option<String>,

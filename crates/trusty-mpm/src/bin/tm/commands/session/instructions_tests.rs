@@ -56,6 +56,32 @@ fn compose_session_instructions_runs_git_init_when_the_prompt_accepts() {
     );
 }
 
+/// FAILS BEFORE THE #7774 REVIEW FIX: an accepted offer whose `git init` exited
+/// non-zero was read as a decline, so `CLAUDE.md` was still seeded into the
+/// non-git directory. A `.git` FILE with no `gitdir:` line is a directory no
+/// repository check detects and `git init` cannot initialise.
+#[test]
+fn compose_session_instructions_refuses_to_seed_when_git_init_fails() {
+    let tmp = TempDir::new().unwrap();
+    let dir = std::fs::canonicalize(tmp.path()).unwrap().join("project");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(".git"), "not a gitfile\n").unwrap();
+    let mut accept = || true;
+
+    let err = compose_session_instructions_with_roster_and_init(
+        &dir,
+        None,
+        Some(&mut accept as &mut dyn FnMut() -> bool),
+    )
+    .expect_err("a failed git init must refuse the seed");
+
+    assert!(format!("{err:#}").contains("`git init` failed"), "{err:#}");
+    assert!(
+        !dir.join("CLAUDE.md").exists(),
+        "no CLAUDE.md may be seeded after git init fails"
+    );
+}
+
 /// The decision half of [`stdin_git_init_prompt`] — never a real TTY check in
 /// a test, but the function itself degrades correctly when one is absent. This
 /// asserts the shape compiles and returns `None` is exercised implicitly by

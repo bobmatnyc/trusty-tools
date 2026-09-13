@@ -29,13 +29,15 @@ use crate::core::instruction_pipeline::CLAUDE_MD_STUB;
 /// directory component is refused because the site cannot be judged at all.
 /// A workspace parent is refused because a child repository sits beneath it,
 /// and a directory whose downward scan could not finish is refused because
-/// one might (#7673).
+/// one might (#7673). An accepted `git init` offer that failed is refused
+/// because the operator asked for a repository and did not get one (#7774).
 /// What: one variant per reason, each rendering its own operator-facing message
 /// through [`SeedRefusal::message`].
 /// Test: `seeding_into_home_is_refused`,
 /// `seeding_above_the_home_directory_is_refused`,
 /// `a_path_with_no_directory_component_is_refused`,
-/// `an_exhausted_scan_refuses_to_seed`.
+/// `an_exhausted_scan_refuses_to_seed`,
+/// `a_failed_git_init_refuses_to_seed`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SeedRefusal {
     /// The target directory is the operator's home directory.
@@ -55,6 +57,10 @@ pub enum SeedRefusal {
     /// exhausted or an I/O error — so a workspace parent cannot be ruled out
     /// (#7673 round 2 review, CRITICAL).
     ScanIncomplete(crate::core::child_repo_scan::ScanIncomplete),
+    /// The operator accepted the `git init` offer, but `git init` could not be
+    /// spawned or exited non-zero. Carries git's stderr or the spawn error
+    /// (#7774 review).
+    GitInitFailed(String),
 }
 
 impl SeedRefusal {
@@ -102,6 +108,13 @@ impl SeedRefusal {
                  every project under this directory. If {dir} is a single project, run \
                  `git init` there yourself and retry; otherwise run tm from the actual project \
                  directory.",
+                dir = path.display()
+            ),
+            // #7774 review: a failed init is not a decline; say so and name the cause.
+            Self::GitInitFailed(reason) => format!(
+                "refusing to seed a CLAUDE.md at {dir} — `git init` failed there ({reason}), so \
+                 it is still not a git repository. Fix the cause and run `git init` in {dir} \
+                 yourself, or decline the offer to seed without a repository.",
                 dir = path.display()
             ),
         }

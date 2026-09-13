@@ -18,9 +18,10 @@
 //! `dir` is a workspace parent. Otherwise it asks the caller's `should_init`
 //! seam, defaulting to declined (no `git init`, seed anyway) for every
 //! non-interactive caller: `None` means "no prompt capability", and a real
-//! `git init` only ever runs through [`trusty_common::git::command_in`] — the
+//! `git init` only ever runs through [`trusty_common::git::command`] — the
 //! workspace's one `git` subprocess entry point — never a second
-//! `Command::new("git")`.
+//! `Command::new("git")`. An accepted offer whose `git init` fails refuses the
+//! seed rather than reading as a decline (#7774 review).
 //! Test: `claude_md_seed_git_tests.rs`.
 
 use std::path::Path;
@@ -52,17 +53,21 @@ fn has_git_ancestor(dir: &Path) -> bool {
 /// repository (through `harness_root_for` or [`has_git_ancestor`]) — running
 /// `git init` there would create a nested repository. Otherwise `Ok(true)`
 /// only when `should_init` is `Some` and returns `true`, in which case `git
-/// init` has already run (via [`trusty_common::git::command_in`]); `Ok(false)`
-/// for a `None` seam (no prompt capability — every non-interactive caller) or
-/// a declined one. Either `Ok` variant means "go ahead and seed"; only `Err`
-/// means "do not write the file".
+/// init` has already run and succeeded (via [`trusty_common::git::command`],
+/// creating `dir` when it does not exist yet); `Ok(false)` for a `None` seam
+/// (no prompt capability — every non-interactive caller) or a declined one.
+/// An accepted offer whose `git init` cannot be spawned or exits non-zero is
+/// `Err` carrying [`SeedRefusal::GitInitFailed`], never `Ok(false)`. Either `Ok`
+/// variant means "go ahead and seed"; only `Err` means "do not write the file".
 /// Test: `a_workspace_parent_is_refused_naming_the_child`,
 /// `a_wide_node_modules_sibling_never_lets_a_workspace_parent_seed`,
 /// `an_exhausted_scan_refuses_to_seed`,
 /// `an_unreadable_child_directory_refuses_to_seed`,
 /// `git_init_is_never_offered_inside_an_existing_repository`,
 /// `a_non_interactive_caller_declines_git_init_and_still_may_seed`,
-/// `an_accepted_offer_runs_git_init`.
+/// `an_accepted_offer_runs_git_init`,
+/// `an_accepted_offer_on_a_first_touch_directory_runs_git_init`,
+/// `a_failed_git_init_refuses_to_seed`.
 pub fn offer_git_init(
     dir: &Path,
     home: Option<&Path>,
@@ -86,10 +91,31 @@ pub fn offer_git_init(
     if !wants_init {
         return Ok(false);
     }
-    let out = trusty_common::git::command_in(dir)
+    // #7774 review: a failed `git init` is not a decline. The operator asked
+    // for a repository and has none, so the seed must not proceed. `dir` is
+    // the positional argument rather than `-C`, so git creates a first-touch
+    // directory the pipeline has not created yet instead of failing on it.
+    match trusty_common::git::command()
         .args(["init", "-q"])
-        .output();
-    Ok(out.is_ok_and(|o| o.status.success()))
+        .arg(dir)
+        .output()
+    {
+        Ok(out) if out.status.success() => Ok(true),
+        Ok(out) => Err(SeedRefusal::GitInitFailed(init_failure_reason(&out))),
+        Err(e) => Err(SeedRefusal::GitInitFailed(format!(
+            "could not run git: {e}"
+        ))),
+    }
+}
+
+/// Why `git init` failed, for [`SeedRefusal::GitInitFailed`]: git's own
+/// trimmed stderr, or the exit status when git wrote nothing.
+fn init_failure_reason(out: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    match stderr.trim() {
+        "" => format!("git init exited with {}", out.status),
+        text => text.to_string(),
+    }
 }
 
 #[cfg(test)]

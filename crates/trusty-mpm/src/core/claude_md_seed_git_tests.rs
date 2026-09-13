@@ -204,6 +204,68 @@ fn an_accepted_offer_runs_git_init() {
     assert_eq!(calls.get(), 1);
 }
 
+/// A directory where `git init` exits non-zero: a `.git` FILE with no valid
+/// `gitdir:` line. Neither `harness_root_for` nor [`has_git_ancestor`] sees a
+/// repository and the downward scan is clear, so the offer is reached.
+fn dir_where_git_init_fails(tmp: &TempDir) -> (PathBuf, PathBuf) {
+    let dir = std::fs::canonicalize(tmp.path()).unwrap().join("projects");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(".git"), "not a gitfile\n").unwrap();
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    (dir, home)
+}
+
+/// FAILS BEFORE THE #7774 REVIEW FIX: a failed `git init` returned `Ok(false)`,
+/// the same answer as a decline, so the caller seeded the non-git directory.
+#[test]
+fn a_failed_git_init_refuses_to_seed() {
+    let tmp = TempDir::new().unwrap();
+    let (dir, home) = dir_where_git_init_fails(&tmp);
+    let (mut prompt, calls) = counting_prompt(true);
+
+    let refusal = offer_git_init(
+        &dir,
+        Some(&home),
+        Some(&mut prompt as &mut dyn FnMut() -> bool),
+    )
+    .expect_err("an accepted offer whose git init fails must refuse the seed");
+
+    assert_eq!(calls.get(), 1);
+    let msg = refusal.message(&dir);
+    assert!(msg.contains("`git init` failed"), "{msg}");
+    assert!(msg.contains(&dir.display().to_string()), "{msg}");
+}
+
+/// FAILS BEFORE THE #7774 REVIEW FIX: `git -C <dir> init` cannot run in a
+/// first-touch directory the pipeline has not created yet, so an accepted
+/// offer there silently produced no repository.
+#[test]
+fn an_accepted_offer_on_a_first_touch_directory_runs_git_init() {
+    let tmp = TempDir::new().unwrap();
+    let dir = std::fs::canonicalize(tmp.path())
+        .unwrap()
+        .join("new")
+        .join("project");
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let (mut prompt, calls) = counting_prompt(true);
+
+    let ran = offer_git_init(
+        &dir,
+        Some(&home),
+        Some(&mut prompt as &mut dyn FnMut() -> bool),
+    )
+    .expect("a first-touch directory is not refused");
+
+    assert!(ran, "an accepted offer must report that git init ran");
+    assert!(
+        dir.join(".git").is_dir(),
+        "git init must create the directory"
+    );
+    assert_eq!(calls.get(), 1);
+}
+
 /// A declined offer, driven through the same prompt seam, leaves no `.git`.
 #[test]
 fn a_declined_offer_creates_no_git_directory() {
