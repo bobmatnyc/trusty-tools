@@ -229,6 +229,26 @@ fn body_reports_empty_section() {
     assert!(report.missing.is_empty());
 }
 
+/// #7727: the seven body headings `tm pr open` checks must be named,
+/// verbatim, in every asset that tells an agent how to write a PR body —
+/// otherwise the asset drifts from the checker silently, the way it did
+/// before this test existed (three of five ticketing-audit PR-opening runs
+/// failed `tm pr open` and burned a turn on `--help` to find the headings).
+#[test]
+fn seven_body_headings_are_named_verbatim_in_the_assets() {
+    for f in FIELDS {
+        let heading = format!("## {}", f.heading());
+        assert!(
+            trusty_agents_common::agent_assets::VERSION_CONTROL.contains(&heading),
+            "version-control.md is missing {heading:?}"
+        );
+        assert!(
+            trusty_mpm::core::bundle::TM_WORKFLOW.contains(&heading),
+            "tm-workflow.md is missing {heading:?}"
+        );
+    }
+}
+
 #[test]
 fn body_accepts_alias_headings() {
     let body = format!(
