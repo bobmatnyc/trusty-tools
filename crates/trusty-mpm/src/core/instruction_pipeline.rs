@@ -808,6 +808,29 @@ impl std::error::Error for PipelineError {
 /// `build_instructions_refuses_a_stale_worktree_rather_than_seeding_a_stub`,
 /// `session_start_count_matches_the_delivered_delegation_roster`
 pub fn build_instructions(input: &PipelineInput) -> Result<PipelineOutput, PipelineError> {
+    build_instructions_with_init(input, None)
+}
+
+/// [`build_instructions`] with the git-init-offer prompt seam threaded through
+/// (#7673 round 3 follow-up).
+///
+/// Why: the owner's ruling is that tm OFFERS a real yes/no before creating a
+/// git repository, never a silent decision either way. `should_init` is the
+/// seam that offer lives behind — see
+/// [`crate::core::claude_md_seed_git::offer_git_init`]. `None` (every caller
+/// except the one CLI entry point that established a TTY) keeps this
+/// byte-for-byte identical to [`build_instructions`] before this follow-up.
+/// What: identical to [`build_instructions`] except
+/// [`load_or_create_claude_md_with_init`] receives `should_init` instead of a
+/// hard-coded `None`.
+/// Test: every `pipeline_*`/`build_instructions_*` test covers the `None`
+/// path (unchanged) by calling [`build_instructions`]; the `Some` path is
+/// covered at the one CLI entry point that can establish a TTY, in
+/// `bin/tm/commands/session/instructions_tests.rs`.
+pub fn build_instructions_with_init(
+    input: &PipelineInput,
+    should_init: Option<&mut dyn FnMut() -> bool>,
+) -> Result<PipelineOutput, PipelineError> {
     // #4588: resolved by `resolve_roster` — the SAME function that renders the
     // delegation section delivered to the PM — so `agent_count`, which
     // `tm session start` prints verbatim, cannot describe a different set of
@@ -822,8 +845,18 @@ pub fn build_instructions(input: &PipelineInput) -> Result<PipelineOutput, Pipel
     // `CLAUDE.md` natively and the real launch prompt is built by
     // `resolve_pm_prompt`/`build_system_prompt_for`, so the content is read
     // back only to report whether this call created it.
-    let (_claude_md, claude_md_created) =
-        load_or_create_claude_md(&input.claude_md_path, input.home.as_deref())?;
+    // #7673 round 3 follow-up: `None` routes through the plain
+    // `load_or_create_claude_md` — the same call every test in this module
+    // and every pre-follow-up caller already exercises — so adding the prompt
+    // seam changes nothing observable for a caller that does not supply one.
+    let (_claude_md, claude_md_created) = match should_init {
+        Some(f) => load_or_create_claude_md_with_init(
+            &input.claude_md_path,
+            input.home.as_deref(),
+            Some(f),
+        )?,
+        None => load_or_create_claude_md(&input.claude_md_path, input.home.as_deref())?,
+    };
 
     Ok(PipelineOutput {
         agent_count,
@@ -1049,6 +1082,30 @@ fn load_or_create_claude_md(
     path: &PathBuf,
     home: Option<&std::path::Path>,
 ) -> Result<(String, bool), PipelineError> {
+    load_or_create_claude_md_with_init(path, home, None)
+}
+
+/// [`load_or_create_claude_md`] with the git-init-offer prompt seam threaded
+/// through (#7673 round 3 follow-up).
+///
+/// Why: the owner's ruling is that tm OFFERS to create a git repository before
+/// seeding into one that has none — a real yes/no, not a silent decision. A
+/// `should_init` of `None` keeps every existing caller's behavior byte-for-byte
+/// unchanged (the non-interactive default this module already applied);
+/// `Some` is for a CLI entry point that has established it is running on a TTY
+/// and built a real confirm closure (see `bin/tm/commands/session/instructions.rs`).
+/// What: identical to [`load_or_create_claude_md`] except the seed site's
+/// `crate::core::claude_md_seed_git::offer_git_init` call receives `should_init`
+/// instead of a hard-coded `None`.
+/// Test: `load_or_create_claude_md_seeds_in_a_subdirectory_of_a_git_repo` and
+/// the rest of [`load_or_create_claude_md`]'s pointer list cover the `None`
+/// path (unchanged); the `Some` path is covered at the CLI entry point in
+/// `instructions_tests.rs`, which is the only caller that can establish a TTY.
+fn load_or_create_claude_md_with_init(
+    path: &PathBuf,
+    home: Option<&std::path::Path>,
+    should_init: Option<&mut dyn FnMut() -> bool>,
+) -> Result<(String, bool), PipelineError> {
     match std::fs::read_to_string(path) {
         Ok(text) => Ok((text, false)),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -1075,14 +1132,14 @@ fn load_or_create_claude_md(
             // directory below home is still seedable, but not when it is a
             // WORKSPACE PARENT — a git repository lives beneath it, so the seed
             // would become an ancestor `CLAUDE.md` for every project under it.
-            // `should_init: None` — this call site has no prompt capability
-            // (it runs from session launch, never an interactive terminal), so
-            // the non-interactive default applies: `git init` is never offered
-            // here, exactly as today; only the new workspace-parent refusal is
-            // new behavior.
+            // `should_init` is threaded from the caller: `None` for every
+            // call site with no prompt capability (the non-interactive
+            // default — seed with no git, exactly as before this follow-up),
+            // `Some` only for a CLI entry point that already established it
+            // is running on a TTY.
             if let Some(dir) = path.parent().filter(|p| !p.as_os_str().is_empty())
                 && let Err(refusal) =
-                    crate::core::claude_md_seed_git::offer_git_init(dir, home, None)
+                    crate::core::claude_md_seed_git::offer_git_init(dir, home, should_init)
             {
                 return Err(PipelineError::Io {
                     path: path.clone(),
