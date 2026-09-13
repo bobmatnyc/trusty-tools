@@ -79,8 +79,8 @@ impl MemoryReachability {
         match self {
             Self::Reachable => "trusty-memory is healthy".to_string(),
             Self::Unhealthy(MemoryHealthStatus::Wedged) => {
-                "trusty-memory is answering but reports its worker pool WEDGED (writes are not \
-                 progressing)"
+                "trusty-memory is answering but reports its worker pool WEDGED (its oldest \
+                 in-flight operation has outlived its bound)"
                     .to_string()
             }
             Self::Unhealthy(MemoryHealthStatus::Degraded) => {

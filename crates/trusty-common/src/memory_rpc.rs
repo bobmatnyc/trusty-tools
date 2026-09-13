@@ -129,9 +129,12 @@ impl MemoryRpcError {
 ///
 /// Why: a daemon that answers its health call is not necessarily one that can
 /// write. trusty-memory's handler reports `"wedged"` from the worker pool's
-/// oldest in-flight age on its cheap path (#4001), and `"degraded"` when a deep
-/// probe's round trip fails, so a consumer that stops at "the call returned" reads
-/// a stuck palace as healthy. `trusty-common` sits below `trusty-memory` in the
+/// oldest in-flight age on its cheap path, and `"degraded"` when a deep probe's
+/// round trip fails, so a consumer that stops at "the call returned" reads a
+/// stuck palace as healthy. This reads only that reported string — it does not
+/// itself inspect thread or lock state, so it cannot tell a stuck write lock
+/// apart from any other cause of a slow operation; that deeper observation is
+/// tracked on #4001. `trusty-common` sits below `trusty-memory` in the
 /// dependency graph, so the strings cannot be imported from the producer; this is
 /// the one client-side reading of them, pinned against the real handler by
 /// `shared_client_reaches_the_health_method_consumers_dial_by_literal` in

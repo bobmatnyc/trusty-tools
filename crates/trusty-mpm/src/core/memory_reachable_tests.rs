@@ -53,9 +53,12 @@ async fn reachable_when_the_daemon_reports_ok() {
 
 #[tokio::test]
 async fn wedged_daemon_is_not_reachable() {
-    // #7685: the #4001 state — the listener answers while a palace write lock is
-    // stuck. Reading it as reachable turns auto memory OFF beside a memory that
-    // cannot write, leaving the session with none.
+    // #7685: the listener answers while trusty-memory reports its worker pool
+    // wedged. The probe only reads that reported status string — it does not
+    // itself detect a stuck palace write lock (#4001 tracks that deeper
+    // observation). Reading "answered" as reachable turns auto memory OFF
+    // beside a memory that has told us it is not keeping up, leaving the
+    // session with none.
     let reach = probe_body(json!({
         "status": "wedged",
         "worker": { "in_flight": 3, "oldest_age_secs": 600, "wedged": true },

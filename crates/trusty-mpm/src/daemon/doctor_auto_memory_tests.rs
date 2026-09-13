@@ -134,8 +134,9 @@ fn auto_memory_warns_when_off_while_trusty_memory_is_down() {
 #[test]
 fn auto_memory_names_a_wedged_trusty_memory_apart_from_a_dead_one() {
     // #7685: a wedged daemon answers its health call, so it is not "down" — but
-    // it cannot write, so it is not the memory either. The row must keep the
-    // fallback posture AND say which of the two an operator is looking at.
+    // it reports itself unhealthy, so it should not be trusted as the memory
+    // either. The row must keep the fallback posture AND say which of the two
+    // an operator is looking at.
     let (_tmp, home, project) = fixture(Some(OFF));
     let wedged =
         MemoryReachability::Unhealthy(trusty_common::memory_rpc::MemoryHealthStatus::Wedged);
