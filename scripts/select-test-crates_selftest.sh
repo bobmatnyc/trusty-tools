@@ -220,10 +220,10 @@ assert_eq "--range <base>..<head> touching mid -> mid, top (same closure as --fi
   "mid
 top" "$(cd "${FIXTURE}" && bash "${SCRIPT}" --range "${BASE_SHA}..${RANGE_SHA}" 2>/dev/null)"
 
-# Bounded-time: at 1c8d621aa a bare trailing `--range` (no value) spins
-# forever at ~100% CPU instead of failing open (finding 1) — `timeout`
-# turns that hang into a bounded, assertable failure instead of stalling
-# this whole selftest run.
+# Bounded-time: at 7e4efe7f3 (pre-fix, #7777 review round 1) a bare trailing
+# `--range` (no value) spins forever at ~100% CPU instead of failing open
+# (finding 1) — `timeout` turns that hang into a bounded, assertable
+# failure instead of stalling this whole selftest run.
 range_missing_out="$(cd "${FIXTURE}" && timeout 8 bash "${SCRIPT}" --range 2>/dev/null)"
 range_missing_exit=$?
 assert_eq "--range with no value terminates promptly (not a 124 timeout)" \
@@ -233,6 +233,56 @@ assert_eq "--range with no value fails open -> all crates, never nothing" \
 
 assert_eq "--range with an unresolvable ref fails open -> all crates" \
   "${ALL_EIGHT}" "$(cd "${FIXTURE}" && bash "${SCRIPT}" --range 'no-such-ref..also-fake' 2>/dev/null)"
+
+# #7777 review round 2, MEDIUM: `--range` must not swallow the next
+# recognized flag as its value — `--range --cargo-args` used to silently
+# take "--cargo-args" as RANGE_SPEC, the resulting git diff failed, and the
+# script fell open in the WRONG output format (plain names, not `-p a -p b`)
+# instead of respecting the caller's `--cargo-args` request.
+assert_eq "--range --cargo-args does not swallow --cargo-args as the range value" \
+  "-p base -p consumer1 -p consumer2 -p devonly -p isolated -p leaf -p mid -p top" \
+  "$(cd "${FIXTURE}" && bash "${SCRIPT}" --range --cargo-args 2>/dev/null)"
+
+# ---------------------------------------------------------------------------
+# nested workspace member reached through an early fail-open (#7777 review
+# round 2, HIGH finding 1): `fail_open()` used to skip straight to
+# `fallback_all_crates()`'s shallow, one-level `crates/*/Cargo.toml` scan
+# whenever ALL_CRATES was not already populated — true for most fail-open
+# triggers, including `--files` with no paths, since that fires in step 1,
+# before `cargo metadata` has ever run. That shallow scan cannot see a
+# member nested inside another crate's directory (this repo's own
+# `trusty-agents-ui`, `trusty-audit-ui` — see the root Cargo.toml's
+# `members` list). A separate, minimal workspace pins the shape without
+# touching the shared 8-crate FIXTURE above.
+# ---------------------------------------------------------------------------
+echo "fixture: a nested workspace member survives an early fail-open"
+
+NESTED="${WORK}/nested"
+mkdir -p "${NESTED}/crates/alpha/src" "${NESTED}/crates/alpha/ui/src-tauri/src"
+: >"${NESTED}/crates/alpha/src/lib.rs"
+: >"${NESTED}/crates/alpha/ui/src-tauri/src/lib.rs"
+{
+  echo '[package]'
+  echo 'name = "alpha"'
+  echo 'version = "0.1.0"'
+  echo 'edition = "2021"'
+} >"${NESTED}/crates/alpha/Cargo.toml"
+{
+  echo '[package]'
+  echo 'name = "alpha-ui"'
+  echo 'version = "0.1.0"'
+  echo 'edition = "2021"'
+} >"${NESTED}/crates/alpha/ui/src-tauri/Cargo.toml"
+{
+  echo '[workspace]'
+  echo 'resolver = "2"'
+  echo 'members = ["crates/*", "crates/alpha/ui/src-tauri"]'
+} >"${NESTED}/Cargo.toml"
+
+nested_out="$(cd "${NESTED}" && bash "${SCRIPT}" --files 2>/dev/null)"
+assert_eq "fail-open before cargo metadata has run still finds a nested member" \
+  "alpha
+alpha-ui" "${nested_out}"
 
 # ---------------------------------------------------------------------------
 # bash 3.2 path (#7777 review, finding 2): macOS ships bash 3.2.57 as
