@@ -115,8 +115,11 @@ use crate::core::instruction_pipeline::{PipelineInput, PipelineOutput, build_ins
 use crate::core::paths::FrameworkPaths;
 use crate::core::skill_deployer::DeployStats;
 use settings::{
-    deploy_output_style, preseed_workspace_trust_home, remove_global_trusty_memory_hooks,
-    write_auto_memory_enabled, write_output_style,
+    deploy_output_style,
+    preseed_workspace_trust_home,
+    remove_global_trusty_memory_hooks,
+    write_auto_memory_enabled,
+    write_output_style,
     // #7688: the launch path is the only caller that turns the capture on, so
     // the plain `write_project_hooks` is no longer reached from this module.
     // write_enabled_plugins is not imported here: it is already brought into
