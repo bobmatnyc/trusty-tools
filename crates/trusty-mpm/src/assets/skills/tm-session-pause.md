@@ -26,11 +26,12 @@ When invoked, this skill:
    `tm` sessions in the same project don't clobber each other's resume target).
 4. **Prunes stale git worktrees** left behind by decommissioned managed
    sessions (see below).
-5. **Publishes the snapshot** — where the project tracks
-   `.trusty-mpm/sessions/`, commits it on a fresh `chore/sessions-*` branch off
-   the project's default branch, pushes, and opens an auto-merging docs-only PR
-   (#7282).
-6. Prints the snapshot path and the PR URL so you can resume later.
+5. **Publishes the snapshot** — ONLY where the project tracks
+   `.trusty-mpm/sessions/`, by committing it on a fresh `chore/sessions-*`
+   branch off the project's default branch, pushing, and opening an
+   auto-merging docs-only PR (#7282). A project that gitignores the store
+   publishes nothing, and no snapshot is committed by hand to make up for it.
+6. Prints the snapshot path, plus the PR URL when one was opened.
 
 ## Usage
 

@@ -206,10 +206,8 @@ docs/certificates/*.mobileprovision
 /engagement.toml
 /engagement.toml.lock
 
-# >>> tracked session snapshots (owner ruling 2026-08-31) >>>
-# Session snapshots are shared history/intent for other sessions and harnesses.
-# This re-include must stay BELOW `**/.trusty-mpm/*` and the auto-managed
-# scaffolding block above — last match wins. Covers the ROOT store only;
-# crate-level `.trusty-mpm/` dirs stay ignored.
-!.trusty-mpm/sessions/
-# <<< tracked session snapshots <<<
+# The session store is IGNORED — owner ruling 2026-09-13, superseding the
+# 2026-08-31 ruling that tracked it. Tracking it made every pause owe a PR plus
+# a main fast-forward, raced when two sessions paused at once (#7782), and left
+# the ff-watch blocked on a dirty sessions log. `**/.trusty-mpm/*` above already
+# ignores it; do not re-add a `!.trusty-mpm/sessions/` negation here.

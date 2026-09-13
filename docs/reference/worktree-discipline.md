@@ -164,13 +164,15 @@ When staging changes in a worktree, always name files explicitly: `git add <file
 Never use `git add -A` in a worktree, as it stages untracked build directories.
 The ignored directory name is `target-worktree/`, verified with `git check-ignore -v target-worktree/` from the worktree root.
 
-## `.trusty-mpm/sessions/` Is Tracked
+## `.trusty-mpm/sessions/` Is Ignored
 
-Owner ruling, 2026-08-31: session snapshots and the pause log are committed —
-never gitignored — so other sessions and harnesses can read prior work and
-intent. Commit new snapshot files after each pause. The re-include line at the
-end of `.gitignore` overrides the auto-managed ignore block above it; do not
-"fix" either rule.
+Owner ruling, 2026-09-13, superseding the 2026-08-31 ruling that tracked it:
+the session store is gitignored and machine-local. Snapshots and the pause log
+stay on disk; nothing about a pause reaches origin, so no fast-path PR and no
+main fast-forward is owed for one. Tracking it made every pause owe both,
+raced when two sessions paused at once (#7782), and left the fast-forward watch
+blocked on a dirty sessions log. `**/.trusty-mpm/*` in `.gitignore` covers the
+store; do not re-add a `!.trusty-mpm/sessions/` negation.
 
 ## Harness Refusals Inside an Isolation Worktree
 

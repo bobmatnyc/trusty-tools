@@ -1,6 +1,6 @@
 # 0049. A documents-only commit is permitted in a main checkout, gated on what is staged
 
-- **Status:** Accepted, amended by [ADR-0061](0061-commits-never-land-on-local-main.md)
+- **Status:** Amended by [0061](0061-commits-never-land-on-local-main.md)
 - **Date:** 2026-08-16
 - **Scope:** crate `trusty-mpm` — `tm hook --pm-guard`
   (`pm_guard_bash::main_checkout`'s commit rule, `core::staged_paths`), and
