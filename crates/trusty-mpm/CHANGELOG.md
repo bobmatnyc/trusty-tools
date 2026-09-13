@@ -318,6 +318,38 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   hit `tm pr open`'s exit 2 with no asset naming the headings it checks
   (#7727).
 - Deployed agents now name absolute skill file paths for the install they land in. `tm install`, `tm install --reset-agents`, `tm reinstall`, session launch, `sync-assets`, `tm catalog apply` and the managed and standalone config dirs all pass the skills tier they deploy into, so `{{TM_SKILLS}}` resolves to the default managed root, a `TRUSTY_MPM_ROOT`/`--root` override, or a reinstall tier's own skills directory. Catalog staleness hashes the same resolved bytes, so a fresh deploy does not read as drifted. An unresolvable skills root leaves catalog staleness unknown, with a warning, instead of dropping every agent from the comparison. `tm-ticketing` and `tm-workflow` ship a `references/` folder (#7727).
+- The prompt-feedback `Stop` / `SubagentStop` hook groups (#7688) now carry the
+  same stable installed binary path the lifecycle triad does. They resolved
+  their own command through the statusline resolver, which ignored the caller's
+  pinned exe and falls back to the bare literal `tm` — so on a host with no
+  installed `tm` on `PATH` the groups were written with a command Claude Code's
+  minimal `PATH` cannot launch, while the triad beside them refused to write at
+  all for that same condition (#7244). A launch that cannot resolve a stable
+  binary now writes no capture group instead of a dead one (#1914).
+- The eight broken intra-doc links that made `cargo doc -p trusty-mpm` exit 101
+  under `#![deny(rustdoc::broken_intra_doc_links)]` now resolve, so the crate's
+  docs.rs pages render `build_instructions`,
+  `build_system_prompt_for_with_style`,
+  `build_system_prompt_for_with_style_and_native` and `DoctorCheck` as
+  hyperlinks instead of dead literal text. Three names that no public path can
+  reach — the `#[cfg(test)]` counter `ADAPTER_REPROBES_ON_THIS_THREAD` and the
+  crate-private `maybe_register_palace_alias` / `palace_alias` — are now written
+  as plain code rather than as links that could never resolve (#7351).
+- A project `.claude/settings.json` that is not a JSON object is no longer
+  silently overwritten at launch. The three `prepare_session` writers that used
+  to coerce it to `{}` — the output-style / auto-memory merge, the plugin
+  allowlist, and the project-hooks merge — now copy the original bytes to
+  `.claude/settings.json.malformed-<UTC stamp>`, warn naming that copy, and then
+  rewrite atomically. A file holding `{ broken` previously came back as tm's own
+  keys alone, with nothing kept and nothing logged (#7780).
+- A copy that cannot be written refuses the rewrite and leaves the file exactly
+  as it was; so does a file that cannot be read at all. The rewrite still
+  happens when the copy succeeds, so a project with damaged settings keeps
+  getting its PM-guard hook (#1977) rather than launching unguarded (#7780).
+- One copy per launch, not one per writer: the first writer repairs the file, so
+  every writer after it sees valid JSON (#7780).
+- `tm reinstall` now writes bundled skills to the managed-config tier only. It offered the whole bundled roster at all four destinations, refilling the operator's `~/.claude/skills`, a project's `.claude/skills`, and the standalone config dir with copies the 2026-09-01 ruling had already removed from `tm install` and from session launch; those three destinations now take the same `bundled_excluded_from_project_tier` predicate and receive the user-custom tier only (#7783, #6586).
+- `tm doctor`'s `legacy_sources` check now counts every bundled skill stem left in `~/.claude/skills`, not only the `tm-*` prefixed ones — it under-reported the leftovers by the ~33 unprefixed bundled skills (`documentation-style`, `writing-plans`, …). `tm doctor --fix` lists the same widened set as refused, so the listing and the count no longer name different sets (#7783).
 
 ### Changed
 
@@ -390,6 +422,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   sections carrying the agent-operational wait/verification mechanics
   (`tm wait`, the scratchpad sentinel pattern, the declarative-process
   redirect-and-trim pattern) trimmed out of `BASE-AGENT.md` (#7723).
+- `tm-session-pause` and `tm-workflow` now state that a project which gitignores `.trusty-mpm/sessions/` publishes no snapshot PR and owes no main fast-forward, and that no snapshot is committed by hand to make up for it. `core::session_pause_pr`'s module doc no longer claims this repository tracks its own session store — it does not, as of the owner ruling of 2026-09-13. Behavior is unchanged: an ignored store already took the `not_tracked` skip.
 
 ### Documentation
 
