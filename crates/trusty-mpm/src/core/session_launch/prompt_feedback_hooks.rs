@@ -24,7 +24,7 @@
 //! `project_managed_hook_additions_omits_prompt_feedback_when_disabled`,
 //! `is_project_managed_hook_command_recognises_prompt_feedback`).
 
-use super::settings::resolve_statusline_binary;
+use std::path::Path;
 
 /// The `tm hook` sub-flag the capture is invoked with.
 ///
@@ -51,17 +51,27 @@ const PROMPT_FEEDBACK_EVENTS: [&str; 2] = ["Stop", "SubagentStop"];
 ///
 /// Why: the single composition point for this hook's command string, so
 /// [`is_prompt_feedback_hook_command`] has exactly one shape to recognise. The
-/// binary is resolved to an ABSOLUTE path via [`resolve_statusline_binary`] for
-/// the same reason the PM guard is (#1914): a bare `tm` silently no-ops under
-/// Claude Code's minimal `PATH`, which would leave the hook un-fired and the
-/// feature invisibly dead.
+/// binary is the caller's ALREADY-RESOLVED `resolve_stable_hook_exe` path — the
+/// same stable installed path the lifecycle triad beside it bakes in — for the
+/// reason the PM guard is (#1914): a bare `tm` silently no-ops under Claude
+/// Code's minimal `PATH`, which would leave the hook un-fired and the feature
+/// invisibly dead.
+///
+/// #7688 fix round: this used to resolve its own binary through
+/// `settings::resolve_statusline_binary`, which ignored the caller's
+/// `exe_override` and whose LAST RESORT is the bare literal `"tm"`. On a host
+/// with no installed `tm` on `PATH` — a CI runner, a fresh machine — the group
+/// was therefore written with a command that cannot run, while the triad three
+/// lines above refused to write anything at all for exactly that condition
+/// (#7244). Taking the resolved path as an argument makes the two agree by
+/// construction.
 /// What: `(event, group)` pairs — one per [`PROMPT_FEEDBACK_EVENTS`] entry,
-/// each an empty-matcher group invoking `<abs-path> hook --prompt-feedback`
+/// each an empty-matcher group invoking `<exe> hook --prompt-feedback`
 /// with the same 10-second timeout the PM guard uses. An empty matcher because
 /// neither event carries a tool name to match on.
 /// Test: `project_managed_hook_additions_includes_prompt_feedback_when_enabled`.
-pub(super) fn prompt_feedback_hook_groups() -> Vec<(&'static str, serde_json::Value)> {
-    let command = format!("{}{}", resolve_statusline_binary(), PROMPT_FEEDBACK_SUFFIX);
+pub(super) fn prompt_feedback_hook_groups(exe: &Path) -> Vec<(&'static str, serde_json::Value)> {
+    let command = format!("{}{}", exe.display(), PROMPT_FEEDBACK_SUFFIX);
     PROMPT_FEEDBACK_EVENTS
         .iter()
         .map(|event| {

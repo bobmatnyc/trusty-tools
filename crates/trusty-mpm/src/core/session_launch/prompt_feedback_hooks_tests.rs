@@ -83,10 +83,16 @@ fn project_managed_hook_additions_includes_prompt_feedback_when_enabled() {
             1,
             "{event} must carry exactly one capture group, got {captures:?}"
         );
-        assert!(
-            captures[0].starts_with('/'),
-            "the hook binary must be an absolute path (#1914), got {:?}",
-            captures[0]
+        // 🔴 The pinned exe, not merely "some absolute path". `starts_with('/')`
+        // alone passed on any machine with `tm` installed and failed only on a
+        // runner without one, because the builder resolved its own binary and
+        // ignored the override entirely — a red CI shard nobody could reproduce
+        // locally. Comparing against STABLE_EXE fails on the pre-fix builder
+        // wherever it runs, and still pins the #1914 absolute-path contract.
+        assert_eq!(
+            captures[0],
+            format!("{STABLE_EXE}{PROMPT_FEEDBACK_SUFFIX}"),
+            "the capture must invoke the resolved absolute exe (#1914)"
         );
     }
 }
