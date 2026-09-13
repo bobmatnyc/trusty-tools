@@ -24,7 +24,8 @@ fn cli_parses_hook_divert_check() {
         cli.command.unwrap(),
         Command::Hook {
             pm_guard: false,
-            divert_check: true
+            divert_check: true,
+            prompt_feedback: false
         }
     ));
 }

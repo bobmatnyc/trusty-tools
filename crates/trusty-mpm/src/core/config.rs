@@ -266,6 +266,21 @@ pub struct PmConfig {
     /// `None` → use the compiled-in default (enabled). `Some(false)` disables
     /// it globally (not recommended for production).
     pub circuit_breaker: Option<bool>,
+
+    /// Ask every composed prompt for a `## Prompt feedback` addendum (#7688).
+    ///
+    /// Why: this is the HOST default for a feature a project overrides. It sits
+    /// beside `circuit_breaker` because both are PM-layer toggles with the same
+    /// `Option<bool>` shape, and reusing the section means no new parse surface.
+    /// What: `None` (the default) or `Some(false)` → nothing is injected on
+    /// either side and every deployed byte is what it was before #7688.
+    /// `Some(true)` → on for every project that does not set the key itself.
+    /// `<project>/.trusty-mpm.toml`'s own `prompt_self_improvement` outranks
+    /// this either way; see
+    /// [`crate::core::prompt_self_improvement::enabled_for`].
+    /// Test: `config_prompt_self_improvement_defaults_to_none`,
+    /// `config_prompt_self_improvement_parses`.
+    pub prompt_self_improvement: Option<bool>,
 }
 
 /// `[hooks]` section — per-hook opt-outs for the project-tier hook block

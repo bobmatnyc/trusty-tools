@@ -24,6 +24,8 @@
 //! Test: `project_hooks_tests.rs`.
 
 use super::divert_hooks::{divert_hook_groups, is_divert_hook_command};
+// #7688: the prompt-feedback capture's groups and its identity predicate.
+use super::prompt_feedback_hooks::{is_prompt_feedback_hook_command, prompt_feedback_hook_groups};
 use super::settings::{PM_GUARD_SUFFIX, TRUSTY_MEMORY_HOOKS, pm_guard_hook_value};
 use crate::core::standalone::hooks::{is_mpm_hook_command, mpm_hook_additions_with_exe};
 
@@ -60,10 +62,44 @@ use crate::core::standalone::hooks::{is_mpm_hook_command, mpm_hook_additions_wit
 /// [`mpm_hook_additions_with_exe`] resolve); a test passes an installed-looking
 /// path so its assertions do not depend on whether the host running them has
 /// `tm` installed.
+///
+/// #7688: production now reaches
+/// [`project_managed_hook_additions_with_prompt_feedback`] instead, so this
+/// three-argument form survives as the pre-#7688 REFERENCE its own tests (and
+/// `the_disabled_block_is_byte_identical_to_the_pre_7688_writer`) assert
+/// against. Keeping it is what makes "the flag off changes nothing" a checkable
+/// claim rather than a comment.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn project_managed_hook_additions(
     exe_override: Option<&std::path::Path>,
     inject_prompt_context: bool,
     divert_enabled: bool,
+) -> Result<serde_json::Value, crate::core::standalone::hooks::StableHookExeError> {
+    // #7688: `false` is the pre-existing behaviour, byte for byte.
+    project_managed_hook_additions_with_prompt_feedback(
+        exe_override,
+        inject_prompt_context,
+        divert_enabled,
+        false,
+    )
+}
+
+/// [`project_managed_hook_additions`], with the #7688 capture toggled.
+///
+/// Why: an ADDITIVE seam rather than a fourth parameter on the function above,
+/// whose existing call sites all assert shapes this flag does not change — see
+/// the same reasoning on
+/// [`super::settings::write_project_hooks_with_prompt_feedback`].
+/// What: `prompt_feedback_enabled = true` APPENDS one empty-matcher group onto
+/// `Stop` and one onto `SubagentStop`, after every existing group, so no other
+/// group's bytes change either way; `false` writes none.
+/// Test: `project_managed_hook_additions_includes_prompt_feedback_when_enabled`,
+/// `project_managed_hook_additions_omits_prompt_feedback_when_disabled`.
+pub(super) fn project_managed_hook_additions_with_prompt_feedback(
+    exe_override: Option<&std::path::Path>,
+    inject_prompt_context: bool,
+    divert_enabled: bool,
+    prompt_feedback_enabled: bool,
 ) -> Result<serde_json::Value, crate::core::standalone::hooks::StableHookExeError> {
     // #7244: resolved first — a refusal must reach the caller before the
     // project's `.claude/` directory is created or its settings file read.
@@ -118,6 +154,23 @@ pub(super) fn project_managed_hook_additions(
         }
     }
 
+    // #7688: APPENDED last, onto `Stop` and `SubagentStop` only, so every group
+    // above keeps byte-identical position and content whether the flag is on or
+    // off. The lifecycle triad already owns a group on both events — these are
+    // additive to it, never a replacement, so the daemon's relay is untouched.
+    if prompt_feedback_enabled && let Some(hooks_obj) = hooks.as_object_mut() {
+        for (event, group) in prompt_feedback_hook_groups() {
+            let target = hooks_obj
+                .entry(event.to_string())
+                .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+            if let Some(target_arr) = target.as_array_mut()
+                && !target_arr.contains(&group)
+            {
+                target_arr.push(group);
+            }
+        }
+    }
+
     Ok(serde_json::json!({ "hooks": hooks }))
 }
 
@@ -144,14 +197,22 @@ pub(super) fn project_managed_hook_events() -> Vec<String> {
     // installed-looking path makes the resolution unconditionally succeed
     // without a filesystem or PATH lookup; the path itself never reaches a
     // file, because only the keys are read.
-    project_managed_hook_additions(Some(EVENT_KEY_PROBE_EXE.as_ref()), true, true)
-        .ok()
-        .and_then(|additions| {
-            additions["hooks"]
-                .as_object()
-                .map(|events| events.keys().cloned().collect())
-        })
-        .unwrap_or_default()
+    project_managed_hook_additions_with_prompt_feedback(
+        Some(EVENT_KEY_PROBE_EXE.as_ref()),
+        true,
+        true,
+        // #7688: the strip domain is the full OWNED set, so the probe turns
+        // every toggle on — otherwise a stale `Stop` capture group would
+        // survive the flag being turned back off.
+        true,
+    )
+    .ok()
+    .and_then(|additions| {
+        additions["hooks"]
+            .as_object()
+            .map(|events| events.keys().cloned().collect())
+    })
+    .unwrap_or_default()
 }
 
 /// A stable-looking binary path used only to enumerate hook EVENT KEYS.
@@ -178,16 +239,20 @@ const EVENT_KEY_PROBE_EXE: &str = "/usr/local/bin/tm";
 /// `trusty-memory`/PM-guard groups on every launch instead of replacing them.
 /// What: returns `true` for a lifecycle-triad command
 /// ([`is_mpm_hook_command`]), a `trusty-memory ` command, a PM-guard command
-/// (ends with [`PM_GUARD_SUFFIX`]), or a diversion-check command (#6887,
-/// [`is_divert_hook_command`]).
+/// (ends with [`PM_GUARD_SUFFIX`]), a diversion-check command (#6887,
+/// [`is_divert_hook_command`]), or a prompt-feedback capture (#7688,
+/// [`is_prompt_feedback_hook_command`]).
 /// Test: `is_project_managed_hook_command_recognises_all_three_sources`,
-/// `is_project_managed_hook_command_recognises_divert_check`.
+/// `is_project_managed_hook_command_recognises_divert_check`,
+/// `is_project_managed_hook_command_recognises_prompt_feedback`.
 pub(super) fn is_project_managed_hook_command(cmd: &str) -> bool {
     is_mpm_hook_command(cmd)
         || cmd.starts_with("trusty-memory ")
         || cmd.ends_with(PM_GUARD_SUFFIX)
         // #6887: without this arm the strip never removes a stale divert group.
         || is_divert_hook_command(cmd)
+        // #7688: likewise for a stale capture group when the flag flips off.
+        || is_prompt_feedback_hook_command(cmd)
 }
 
 #[cfg(test)]

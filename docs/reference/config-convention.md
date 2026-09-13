@@ -74,6 +74,9 @@ worktree = false
 agent_worktree = false
 # Default model id or tier alias for sessions launched in this project.
 default_model = opus
+# Does every prompt composed for this project ask for a `## Prompt feedback`
+# addendum? (#7688)
+prompt_self_improvement = true
 ```
 
 **This file is committed.** It is tracked in git, travels with clones, and shows
@@ -91,6 +94,7 @@ Where a setting appears here, this file is the **top** of its precedence chain:
 | `worktree` | `.trusty-mpm.toml` → the `projects.json` registry → built-in `true` |
 | `agent_worktree` | `.trusty-mpm.toml` → built-in `true` |
 | `default_model` | `.trusty-mpm.toml` → `config.yaml`'s `default_model` → `config.toml`'s `[models] default` → built-in `sonnet` |
+| `prompt_self_improvement` | `.trusty-mpm.toml` → `config.toml`'s `[pm] prompt_self_improvement` → built-in `false` |
 
 `worktree` and `agent_worktree` answer different questions and neither implies
 the other. `worktree` decides where a managed SESSION is placed; `agent_worktree`
@@ -106,6 +110,22 @@ a second concurrent writer in the same checkout is still refused.
 `default_model` is a *default*: an explicit `--model`, a per-agent
 `[models.agents]` entry, and an agent's own frontmatter are all more specific and
 still win over it.
+
+`prompt_self_improvement` (#7688) asks the model what was wrong with the prompt
+it received. On, the composed PM prompt gains a section requesting a
+`## Prompt feedback` addendum of at most 5 lines — what was unclear, what was
+unnecessary — and telling the PM to append the same request to every dispatch
+brief it sends, which is how a dispatched agent is asked. `tm hook
+--prompt-feedback` is registered on `Stop` and `SubagentStop` only where the flag
+is on; it extracts that section into `~/.trusty-mpm/prompt-feedback.jsonl`, which
+`tm prompt-feedback` reads back. Off — the default — nothing is injected and
+nothing is registered. It belongs on this committed surface because whether a
+repository wants its prompts critiqued is a property of the repository: a
+high-churn harness repo is where the signal pays, and a stable consumer project
+is where five extra lines per response are pure cost. Nothing is written into the
+deployed agent files, which are one machine-global set shared by every project on
+the host, so two projects disagreeing about the flag never rewrite each other's
+copies.
 
 Two settings are deliberately **not** here. `workspace_root` decides where a
 project gets cloned, so it cannot be read from a project that does not exist

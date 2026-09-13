@@ -480,16 +480,22 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Hook {
             pm_guard,
             divert_check,
+            prompt_feedback,
         }) => {
             if pm_guard {
                 commands::pm_guard::pm_guard(&url).await
             // #6887: a separate hook mode, not a pm-guard variant.
             } else if divert_check {
                 commands::divert_check::divert_check().await
+            // #7688: likewise — the capture never relays to the daemon.
+            } else if prompt_feedback {
+                commands::prompt_feedback_hook::prompt_feedback_hook().await
             } else {
                 hook(&client, &url).await
             }
         }
+        // #7688: the read-back for what the capture above collected.
+        Some(Command::PromptFeedback(args)) => commands::prompt_feedback_cli::run(args).await,
         // #6887: the cheap worker `--divert-check` steers the agent to.
         Some(Command::Divert { action }) => commands::divert::run(action).await,
         Some(Command::Memory { action }) => memory(action).await,

@@ -89,7 +89,24 @@ fn cli_parses_hook() {
         cli.command.unwrap(),
         Command::Hook {
             pm_guard: false,
-            divert_check: false
+            divert_check: false,
+            prompt_feedback: false
+        }
+    ));
+}
+
+/// Why (#7688): the launch path registers `tm hook --prompt-feedback` as the
+/// `Stop` / `SubagentStop` capture; parsing must round-trip the flag so the
+/// dispatcher routes to the capture instead of the observability relay.
+#[test]
+fn cli_parses_hook_prompt_feedback() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "hook", "--prompt-feedback"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Hook {
+            pm_guard: false,
+            divert_check: false,
+            prompt_feedback: true
         }
     ));
 }
@@ -104,7 +121,8 @@ fn cli_parses_hook_pm_guard() {
         cli.command.unwrap(),
         Command::Hook {
             pm_guard: true,
-            divert_check: false
+            divert_check: false,
+            prompt_feedback: false
         }
     ));
 }

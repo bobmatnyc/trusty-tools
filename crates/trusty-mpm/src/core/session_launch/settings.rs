@@ -525,9 +525,43 @@ pub(super) fn write_project_hooks(
     inject_prompt_context: bool,
     divert_enabled: bool,
 ) -> Result<(), PrepError> {
+    // #7688: `false` is the pre-existing behaviour, byte for byte.
+    write_project_hooks_with_prompt_feedback(
+        project_dir,
+        exe_override,
+        inject_prompt_context,
+        divert_enabled,
+        false,
+    )
+}
+
+/// [`write_project_hooks`], with the #7688 prompt-feedback capture toggled.
+///
+/// Why: an ADDITIVE seam rather than a fifth parameter on
+/// [`write_project_hooks`], because that function has ~28 call sites and every
+/// one of them is asserting a shape this flag does not change. Widening it
+/// would have edited all of them to say `false` — pure churn over a default,
+/// and a diff in which the one call site that matters is invisible. Same
+/// convention as [`write_project_hooks_with`] and
+/// `build_system_prompt_for_with_style`.
+/// What: identical to [`write_project_hooks`], except
+/// `prompt_feedback_enabled = true` registers the `Stop` / `SubagentStop`
+/// capture groups. The launch path is the only caller that passes `true`.
+/// Test: `project_hooks_tests::write_project_hooks_writes_prompt_feedback_when_enabled`,
+/// `project_hooks_tests::write_project_hooks_strips_stale_prompt_feedback_when_disabled`.
+pub(super) fn write_project_hooks_with_prompt_feedback(
+    project_dir: &Path,
+    exe_override: Option<&Path>,
+    inject_prompt_context: bool,
+    divert_enabled: bool,
+    prompt_feedback_enabled: bool,
+) -> Result<(), PrepError> {
     // #6887: `divert_enabled` adds two `PreToolUse` groups; the strip below is
     // deliberately NOT narrowed by it, so flipping the manifest key back to
     // false removes what a prior launch wrote.
+    //
+    // #7688: `prompt_feedback_enabled` adds a `Stop` and a `SubagentStop` group
+    // under the same rule.
     //
     // #7244: resolved BEFORE `create_dir_all` and before the read — when no
     // stable installed binary resolves this call must leave the project's
@@ -535,10 +569,11 @@ pub(super) fn write_project_hooks(
     // than rewriting every hook to point at a `cargo test` harness.
     write_project_hooks_with(
         project_dir,
-        super::project_hooks::project_managed_hook_additions(
+        super::project_hooks::project_managed_hook_additions_with_prompt_feedback(
             exe_override,
             inject_prompt_context,
             divert_enabled,
+            prompt_feedback_enabled,
         ),
     )
 }

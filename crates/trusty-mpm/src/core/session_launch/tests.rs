@@ -103,6 +103,26 @@ fn build_system_prompt_includes_trusty_block() {
     assert!(prompt.contains("# PM Agent -- Trusty MPM"));
 }
 
+/// Pin the #7688 prompt-feedback addendum OFF for a prompt-composition test.
+///
+/// Why: `build_system_prompt_for` resolves `prompt_self_improvement` from the
+/// project file first and the operator's `~/.trusty-mpm/config.toml` second, so
+/// a host with `[pm] prompt_self_improvement = true` appends a section to every
+/// prompt these tests compose. Writing the project layer takes the host read out
+/// of the assertion without touching the process-global `$HOME` — the #5544
+/// flake class. The same reason `enabled_for_with_host` exists one layer down.
+/// What: writes `prompt_self_improvement = false` into `project_dir`'s
+/// `.trusty-mpm.toml`. The project layer outranks the host in both directions.
+/// Test: `build_system_prompt_for_applies_project_override`,
+/// `build_system_prompt_for_no_override_matches_bundled_sections`.
+fn pin_prompt_feedback_off(project_dir: &std::path::Path) {
+    std::fs::write(
+        project_dir.join(crate::core::project_config::PROJECT_CONFIG_FILE),
+        "prompt_self_improvement = false\n",
+    )
+    .unwrap();
+}
+
 #[test]
 fn build_system_prompt_for_applies_project_override() {
     // Why: the live launch prompt must reflect the project's customization
@@ -114,6 +134,7 @@ fn build_system_prompt_for_applies_project_override() {
     // second half of this test now asserts it has no effect.
     let tmp = tempdir().unwrap();
     let project = tmp.path();
+    pin_prompt_feedback_off(project);
     std::fs::write(
         project.join("CLAUDE.md"),
         "<!-- TRUSTY-MPM: WORKFLOW START v=1 -->\n\
@@ -141,6 +162,7 @@ fn build_system_prompt_for_no_override_matches_bundled_sections() {
     // Why: with no override files the live prompt must still carry all
     // bundled sections and the BASE_PM floor last.
     let tmp = tempdir().unwrap();
+    pin_prompt_feedback_off(tmp.path());
     let prompt = build_system_prompt_for(tmp.path());
     assert!(prompt.contains("# PM Agent -- Trusty MPM"));
     assert!(prompt.contains("# Agent Delegation Routing"));

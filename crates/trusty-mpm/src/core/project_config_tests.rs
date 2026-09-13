@@ -208,3 +208,52 @@ fn project_config_rejects_unknown_session_key() {
         "expected a Malformed error, got {err:?}"
     );
 }
+
+/// #7688: the prompt-self-improvement toggle parses as a top-level scalar,
+/// exactly like `worktree` and `agent_worktree`.
+#[test]
+fn project_config_parses_prompt_self_improvement() {
+    let cfg = ProjectLevelConfig::from_toml(
+        "prompt_self_improvement = true\n",
+        Path::new("/p/.trusty-mpm.toml"),
+    )
+    .unwrap();
+    assert_eq!(cfg.prompt_self_improvement, Some(true));
+
+    let off = ProjectLevelConfig::from_toml("prompt_self_improvement = false\n", Path::new("/p"))
+        .unwrap();
+    assert_eq!(off.prompt_self_improvement, Some(false));
+}
+
+/// An absent key declines to decide, so the host layer answers — it does NOT
+/// mean "off".
+#[test]
+fn project_config_prompt_self_improvement_defaults_to_none() {
+    let cfg = ProjectLevelConfig::from_toml("worktree = true\n", Path::new("/p")).unwrap();
+    assert_eq!(cfg.prompt_self_improvement, None);
+}
+
+/// It is a top-level key, not a member of `[session]` — that table is two
+/// allowlists and nothing else.
+#[test]
+fn project_config_rejects_prompt_self_improvement_inside_session() {
+    let raw = "[session]\nprompt_self_improvement = true\n";
+    let err = ProjectLevelConfig::from_toml(raw, Path::new("/p")).unwrap_err();
+    assert!(
+        matches!(err, ProjectConfigError::Malformed { .. }),
+        "expected a Malformed error, got {err:?}"
+    );
+}
+
+/// This repository's own committed config turns the flag on (owner ruling
+/// 2026-09-12), and it must keep parsing against the schema that reads it.
+#[test]
+fn this_repositorys_project_config_enables_prompt_self_improvement() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join(PROJECT_CONFIG_FILE);
+    let raw = std::fs::read_to_string(&path).expect("the committed project config is readable");
+    let cfg = ProjectLevelConfig::from_toml(&raw, &path).expect("it parses");
+    assert_eq!(cfg.prompt_self_improvement, Some(true));
+}

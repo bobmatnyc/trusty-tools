@@ -193,6 +193,29 @@ pub struct ProjectLevelConfig {
     /// `project_config_rejects_unknown_session_key`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<SessionScopeConfig>,
+
+    /// Ask every prompt composed for this project for a `## Prompt feedback`
+    /// addendum (#7688).
+    ///
+    /// Why: whether a repository wants its prompts critiqued is a property of
+    /// the repository — a high-churn harness repo is exactly where the signal
+    /// pays, and a stable consumer project is where the extra five lines per
+    /// response are pure cost. So it belongs on this committed surface, and it
+    /// is a top-level scalar for the same reason [`Self::worktree`] and
+    /// [`Self::agent_worktree`] are: it decides one thing with one boolean.
+    /// It is deliberately NOT a member of [`SessionScopeConfig`], which is two
+    /// ALLOWLISTS and nothing else — a toggle there would give that table two
+    /// unrelated meanings.
+    ///
+    /// What: `None` (the default) → this project does not decide, and
+    /// `~/.trusty-mpm/config.toml`'s `[pm] prompt_self_improvement` answers,
+    /// failing that `false`. `Some(true)` → on even where the host default is
+    /// off. `Some(false)` → off even where the host default is on. Full chain:
+    /// [`crate::core::prompt_self_improvement::enabled_for`].
+    /// Test: `project_config_parses_prompt_self_improvement`,
+    /// `project_config_prompt_self_improvement_defaults_to_none`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_self_improvement: Option<bool>,
 }
 
 /// The `[session]` table: this project's MCP-server and plugin allowlists.
