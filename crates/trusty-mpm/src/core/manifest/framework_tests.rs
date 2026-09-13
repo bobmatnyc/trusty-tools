@@ -362,6 +362,74 @@ fn detected_stack_engineers_matches_the_manifest() {
     }
 }
 
+/// A Cargo workspace with nested Svelte UIs detects the web engineers too.
+///
+/// Why (#7781, owner ruling 2026-09-13): root-only detection answered
+/// `rust-engineer` alone for trusty-tools itself, whose eight Svelte front ends
+/// live in `crates/*/ui` and are declared by no root manifest key — so the PM
+/// was primed to route front-end work to a Rust specialist. This fails on the
+/// pre-#7781 commit, where the nested `package.json` is never probed.
+/// What: builds that layout in a temp dir — root `Cargo.toml` with a
+/// `[workspace]` section, a member crate, and a `ui/` package declaring
+/// `svelte` — and asserts the Rust, JS/TS, and Svelte engineers are all named.
+/// Test: this function IS the test.
+#[test]
+fn mixed_stack_repo_detects_nested_web_engineers() {
+    let tmp = TempDir::new().unwrap();
+    fs::write(
+        tmp.path().join("Cargo.toml"),
+        "[workspace]\nmembers = [\"crates/*\"]\n",
+    )
+    .unwrap();
+    touch(tmp.path(), "crates/app/Cargo.toml");
+    fs::create_dir_all(tmp.path().join("crates/app/ui")).unwrap();
+    fs::write(
+        tmp.path().join("crates/app/ui/package.json"),
+        r#"{"devDependencies":{"svelte":"^5.0.0"}}"#,
+    )
+    .unwrap();
+    touch(tmp.path(), "crates/app/ui/tsconfig.json");
+
+    let detected = detected_stack_engineers(tmp.path());
+    for expected in [
+        "rust-engineer",
+        "javascript-engineer",
+        "typescript-engineer",
+        "svelte-engineer",
+    ] {
+        assert!(
+            detected.contains(expected),
+            "a Cargo workspace with a nested Svelte UI must detect `{expected}`: {detected:?}"
+        );
+    }
+    assert!(
+        !detected.contains("python-engineer"),
+        "the walk must not invent a stack the repo has no marker for: {detected:?}"
+    );
+}
+
+/// A repo with only a root `Cargo.toml` still detects `rust-engineer` alone.
+///
+/// Why: the nested walk must add stacks the repo really has and nothing else.
+/// A walk that over-detects would put every engineer in every roster, which is
+/// the noise the gates exist to remove (#1941), so the narrow case is pinned
+/// beside the wide one.
+/// What: a temp dir holding one `Cargo.toml`; asserts the detected set is
+/// exactly `{rust-engineer}`.
+/// Test: this function IS the test.
+#[test]
+fn rust_only_repo_detects_only_rust_engineer() {
+    let tmp = TempDir::new().unwrap();
+    touch(tmp.path(), "Cargo.toml");
+
+    let detected = detected_stack_engineers(tmp.path());
+    assert_eq!(
+        detected,
+        BTreeSet::from(["rust-engineer".to_string()]),
+        "a single-crate Rust repo detects exactly one engineer"
+    );
+}
+
 #[test]
 fn bundled_skill_roster_is_valid() {
     // The shipped `[skill_categories]` must exactly cover the bundled skills.

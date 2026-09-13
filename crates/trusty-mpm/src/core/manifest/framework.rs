@@ -420,7 +420,7 @@ pub fn framework_agent_categories() -> Result<AgentCategories, FrameworkManifest
 pub fn agent_scope_from(categories: &AgentCategories, project_dir: &Path) -> AgentSet {
     // One probe — so the stack and platform questions share ONE read budget and
     // one workspace-member resolution, not two of each.
-    let probe = MarkerProbe::new(project_dir);
+    let probe = MarkerProbe::new(project_dir, categories);
     let mut stacks = probe.detect(&categories.language);
     stacks.extend(probe.detect(&categories.framework));
     let platforms = probe.detect(&categories.platform);
@@ -476,7 +476,7 @@ pub fn detected_stack_engineers(project_dir: &Path) -> BTreeSet<String> {
     let Ok(categories) = framework_agent_categories() else {
         return BTreeSet::new();
     };
-    let probe = MarkerProbe::new(project_dir);
+    let probe = MarkerProbe::new(project_dir, &categories);
     let mut detected = probe.detect(&categories.language);
     detected.extend(probe.detect(&categories.framework));
     detected

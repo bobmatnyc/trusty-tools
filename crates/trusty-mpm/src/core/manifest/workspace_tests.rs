@@ -246,6 +246,48 @@ fn pattern_with_parent_escape_is_rejected() {
     );
 }
 
+/// A Cargo workspace's declared members become probe roots (#7781).
+///
+/// Why: the root `Cargo.toml` is the only place a Cargo workspace names its
+/// crates, and a member carrying a second stack was invisible to root-only
+/// probing — the root-only limit the owner ruled insufficient on 2026-09-13.
+/// What: declares `crates/*` and a literal member, asserts both expand.
+/// Test: this function IS the test.
+#[test]
+fn cargo_workspace_members() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"crates/*\", \"tools/cli\"]\n",
+    );
+    mkdir(tmp.path(), "crates/alpha");
+    mkdir(tmp.path(), "crates/beta");
+    mkdir(tmp.path(), "tools/cli");
+
+    assert_eq!(
+        members(tmp.path()),
+        vec!["crates/alpha", "crates/beta", "tools/cli"]
+    );
+}
+
+/// A single-crate `Cargo.toml` declares no members, and malformed TOML is absence.
+#[test]
+fn non_workspace_cargo_toml_declares_no_members() {
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "Cargo.toml", "[package]\nname = \"solo\"\n");
+    mkdir(tmp.path(), "crates/alpha");
+    assert!(members(tmp.path()).is_empty());
+
+    let broken = TempDir::new().unwrap();
+    write(broken.path(), "Cargo.toml", "[workspace\nmembers = [");
+    mkdir(broken.path(), "crates/alpha");
+    assert!(
+        members(broken.path()).is_empty(),
+        "unparseable TOML is fail-closed, not an error"
+    );
+}
+
 #[test]
 fn member_count_is_capped() {
     // The enumeration bound, exercised past its limit.

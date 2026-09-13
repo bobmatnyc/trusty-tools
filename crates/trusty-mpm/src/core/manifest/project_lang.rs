@@ -17,8 +17,9 @@
 //! manifest as [`super::schema::GatedAgent::markers`]. What is left here is the
 //! MECHANISM: how a marker string is evaluated against a directory, bounded and
 //! fail-closed. Declaration lives in the manifest; evaluation lives here.
-//! What: [`MarkerProbe`] resolves a project's probe roots (the project dir plus
-//! every declared workspace member) and a single shared [`ProbeBudget`] once,
+//! What: [`MarkerProbe`] resolves a project's probe roots (the project dir, every
+//! declared workspace member, and every nested manifest directory the bounded
+//! walk in [`super::nested`] finds — #7781) and a shared [`ProbeBudget`] once,
 //! then answers [`MarkerProbe::detect`] for any list of declared entries. A
 //! possibly-EMPTY result is a valid answer, never an error — `super::framework`
 //! composes it with the declared categories into the final
@@ -30,7 +31,8 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use super::schema::GatedAgent;
+use super::nested::{MarkerAnchors, nested_probe_roots};
+use super::schema::{AgentCategories, GatedAgent};
 use super::workspace::{ProbeBudget, probe_roots};
 
 /// Whether a single marker is present in `dir`.
@@ -125,7 +127,8 @@ fn marker_present_in_any(roots: &[PathBuf], marker: &str, budget: &ProbeBudget) 
 /// each declared category.
 /// Test: `budget_is_shared_across_members`, `npm_monorepo_member_declares_react`.
 pub(crate) struct MarkerProbe {
-    /// The project dir followed by every declared workspace member.
+    /// The project dir, every declared workspace member, then every nested
+    /// manifest directory the bounded walk found (#7781).
     roots: Vec<PathBuf>,
     /// One aggregate read budget for the whole detection call.
     budget: ProbeBudget,
@@ -133,9 +136,24 @@ pub(crate) struct MarkerProbe {
 
 impl MarkerProbe {
     /// Resolve `project_dir`'s probe roots under a fresh shared budget.
-    pub(crate) fn new(project_dir: &Path) -> Self {
+    ///
+    /// Why: #7781 — a repository that keeps a second stack in an UNDECLARED
+    /// subdirectory (trusty-tools' own `crates/*/ui` Svelte apps) showed none of
+    /// it to root-and-declared-members probing, so the PM prompt named
+    /// `rust-engineer` alone for a repo with eight Svelte front ends. Owner
+    /// ruling 2026-09-13: root-only stack detection is not enough.
+    /// What: declared roots from [`probe_roots`] first — so a project with no
+    /// nested manifest behaves exactly as before — then the bounded nested walk
+    /// of [`nested_probe_roots`], whose anchors are derived from `categories`
+    /// rather than restated here. Both share this call's one [`ProbeBudget`].
+    /// Test: `nested_ui_package_is_found`,
+    /// `mixed_stack_repo_detects_nested_web_engineers`,
+    /// `rust_only_repo_detects_only_rust_engineer`.
+    pub(crate) fn new(project_dir: &Path, categories: &AgentCategories) -> Self {
         let budget = ProbeBudget::new();
-        let roots = probe_roots(project_dir, &budget);
+        let mut roots = probe_roots(project_dir, &budget);
+        let anchors = MarkerAnchors::from_categories(categories);
+        roots.extend(nested_probe_roots(project_dir, &anchors, &budget, &roots));
         Self { roots, budget }
     }
 
@@ -190,7 +208,7 @@ mod tests {
     /// Test: this helper IS the test surface for the tests that call it.
     fn detected_engineers(dir: &Path) -> BTreeSet<String> {
         let categories = framework_agent_categories().expect("bundled manifest must be valid");
-        let probe = MarkerProbe::new(dir);
+        let probe = MarkerProbe::new(dir, &categories);
         let mut detected = probe.detect(&categories.language);
         detected.extend(probe.detect(&categories.framework));
         detected
@@ -199,7 +217,7 @@ mod tests {
     /// The `platform` stems the BUNDLED manifest's markers select for `dir`.
     fn detected_platforms(dir: &Path) -> BTreeSet<String> {
         let categories = framework_agent_categories().expect("bundled manifest must be valid");
-        MarkerProbe::new(dir).detect(&categories.platform)
+        MarkerProbe::new(dir, &categories).detect(&categories.platform)
     }
 
     fn touch(dir: &Path, name: &str) {
@@ -669,8 +687,11 @@ mod tests {
             stem: "ungated-engineer".to_string(),
             markers: Vec::new(),
         };
+        let categories = framework_agent_categories().expect("bundled manifest must be valid");
         assert!(
-            MarkerProbe::new(tmp.path()).detect(&[ungated]).is_empty(),
+            MarkerProbe::new(tmp.path(), &categories)
+                .detect(&[ungated])
+                .is_empty(),
             "an entry declaring no markers can never be selected"
         );
     }

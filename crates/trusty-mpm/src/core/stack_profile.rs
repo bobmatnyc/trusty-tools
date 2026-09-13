@@ -54,13 +54,16 @@ pub const STACK_PROFILE_HEADING: &str = "## Detected Project Stack (auto-derived
 /// Test: `detected_rust_lists_rust_engineer`, `detected_nextjs_lists_ts_family`,
 /// `detected_polyglot_lists_both_families`, `undetected_is_neutral_no_default`.
 pub fn stack_profile_section(project_dir: &Path) -> String {
+    // #7781: detection is no longer root-only, so neither sentence below says
+    // "root" any more. The section is otherwise unchanged — only the engineer
+    // set it lists does.
     let engineers = detected_stack_engineers(project_dir);
 
     if engineers.is_empty() {
         return format!(
             "{STACK_PROFILE_HEADING}\n\n\
              No known language or framework marker files were found in this \
-             project's root. **Do NOT assume any stack** — not Rust, not Python, \
+             project. **Do NOT assume any stack** — not Rust, not Python, \
              not Node/TypeScript. Begin with a **MANDATORY Research phase** to \
              detect the stack from the repository before routing any \
              implementation work, then delegate to the matching \
@@ -76,7 +79,7 @@ pub fn stack_profile_section(project_dir: &Path) -> String {
 
     format!(
         "{STACK_PROFILE_HEADING}\n\n\
-         trusty-mpm probed this project's root marker files and detected the \
+         trusty-mpm probed this project's marker files and detected the \
          stack below. Route hands-on code work to the matching language \
          engineer(s) — prefer the most specific — and never a generic \
          `engineer` when one of these fits:\n\n\

@@ -18,6 +18,7 @@
 mod apply;
 mod default;
 pub mod framework;
+mod nested;
 pub(crate) mod project_lang;
 mod resolve;
 mod schema;

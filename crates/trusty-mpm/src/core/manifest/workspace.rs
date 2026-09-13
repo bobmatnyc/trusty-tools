@@ -12,7 +12,9 @@
 //! authorised for monorepos that do.
 //! What: [`probe_roots`] returns the project root followed by every workspace
 //! member directory the ROOT MANIFEST ITSELF declares — npm/yarn `workspaces`,
-//! `pnpm-workspace.yaml` `packages:`, and an Elixir umbrella's `apps_path:`.
+//! `pnpm-workspace.yaml` `packages:`, an Elixir umbrella's `apps_path:`, and
+//! Cargo `[workspace] members` (#7781). Members a root manifest does NOT
+//! declare are found by the nested walk in `super::nested`, not here.
 //! Declared globs are honoured rather than conventional paths being assumed, so
 //! a workspace using `libs/*` or `services/*` is covered without this module
 //! guessing. [`ProbeBudget`] bounds the whole walk.
@@ -140,7 +142,7 @@ pub(crate) fn probe_roots(project_dir: &Path, budget: &ProbeBudget) -> Vec<PathB
 
 /// Every workspace member directory declared by `project_dir`'s root manifest.
 ///
-/// Why/What: unions the three declaration formats, expands each declared glob,
+/// Why/What: unions the four declaration formats, expands each declared glob,
 /// and keeps only paths that exist and are directories. Reading the DECLARATION
 /// rather than assuming `packages/*` means a workspace using any other layout is
 /// covered without this module guessing at conventions.
@@ -150,6 +152,9 @@ fn workspace_members(project_dir: &Path, budget: &ProbeBudget) -> Vec<PathBuf> {
     patterns.extend(npm_workspace_patterns(project_dir, budget));
     patterns.extend(pnpm_workspace_patterns(project_dir, budget));
     patterns.extend(elixir_umbrella_patterns(project_dir, budget));
+    // #7781: a Cargo workspace declares its members the same way, and a member
+    // that declares a stack the root does not was invisible before.
+    patterns.extend(cargo_workspace_patterns(project_dir, budget));
     patterns.truncate(MAX_WORKSPACE_PATTERNS);
 
     let mut members = Vec::new();
@@ -232,6 +237,38 @@ fn pnpm_workspace_patterns(project_dir: &Path, budget: &ProbeBudget) -> Vec<Stri
         in_packages = trimmed == "packages:";
     }
     patterns
+}
+
+/// Cargo `[workspace] members` globs from the root `Cargo.toml` (#7781).
+///
+/// Why: a Cargo workspace root declares its crates and nothing else — no
+/// dependency of a member appears in it. A member that carries a second stack
+/// (a Tauri crate's `src-tauri`, a crate shipping a Python sidecar) was
+/// therefore invisible to root-only probing, which is the root-only limit the
+/// owner ruled insufficient on 2026-09-13.
+/// What: parses the root `Cargo.toml` and returns the string entries of
+/// `[workspace] members`. `exclude` is not honoured: probing one extra
+/// directory can only add a marker the repository genuinely contains, and the
+/// member cap already bounds the count. A file that is absent, oversized,
+/// unaffordable, or not valid TOML yields no patterns — fail-closed, as
+/// everywhere else in this module.
+/// Test: `cargo_workspace_members`, `non_workspace_cargo_toml_declares_no_members`.
+fn cargo_workspace_patterns(project_dir: &Path, budget: &ProbeBudget) -> Vec<String> {
+    let Some(raw) = read_bounded(&project_dir.join("Cargo.toml"), budget) else {
+        return Vec::new();
+    };
+    let Ok(doc) = raw.parse::<toml::Value>() else {
+        return Vec::new();
+    };
+    doc.get("workspace")
+        .and_then(|ws| ws.get("members"))
+        .and_then(toml::Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// An Elixir umbrella's member directory from `mix.exs`'s `apps_path:`.
