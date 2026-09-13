@@ -27,11 +27,15 @@ use crate::core::instruction_pipeline::CLAUDE_MD_STUB;
 /// file there is an ancestor of every project beneath it. A directory ABOVE
 /// `$HOME` is refused for the same reason and more so. A target path with no
 /// directory component is refused because the site cannot be judged at all.
-/// What: three variants, each rendering its own operator-facing message through
-/// [`SeedRefusal::message`].
+/// A workspace parent is refused because a child repository sits beneath it,
+/// and a directory whose downward scan could not finish is refused because
+/// one might (#7673).
+/// What: one variant per reason, each rendering its own operator-facing message
+/// through [`SeedRefusal::message`].
 /// Test: `seeding_into_home_is_refused`,
 /// `seeding_above_the_home_directory_is_refused`,
-/// `a_path_with_no_directory_component_is_refused`.
+/// `a_path_with_no_directory_component_is_refused`,
+/// `an_exhausted_scan_refuses_to_seed`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SeedRefusal {
     /// The target directory is the operator's home directory.
@@ -47,6 +51,10 @@ pub enum SeedRefusal {
     /// [`offer_git_init`][`crate::core::claude_md_seed_git::offer_git_init`]
     /// found.
     WorkspaceParent(std::path::PathBuf),
+    /// The downward scan for child repositories could not finish — budget
+    /// exhausted or an I/O error — so a workspace parent cannot be ruled out
+    /// (#7673 round 2 review, CRITICAL).
+    ScanIncomplete(crate::core::child_repo_scan::ScanIncomplete),
 }
 
 impl SeedRefusal {
@@ -55,7 +63,8 @@ impl SeedRefusal {
     /// Why: a refusal the operator cannot act on is a wedge. Every message names
     /// the exact path and what would make the seed legitimate.
     /// Test: `the_home_refusal_names_the_path`,
-    /// `the_workspace_parent_refusal_names_the_child_repository`.
+    /// `the_workspace_parent_refusal_names_the_child_repository`,
+    /// `the_scan_incomplete_refusal_tells_the_operator_how_to_proceed`.
     pub fn message(self, path: &Path) -> String {
         match self {
             Self::Home => format!(
@@ -85,6 +94,15 @@ impl SeedRefusal {
                 path.display(),
                 child.display(),
                 child.display()
+            ),
+            // #7673: say what stopped the scan and how the operator gets unstuck.
+            Self::ScanIncomplete(stop) => format!(
+                "refusing to seed a CLAUDE.md at {dir} — tm could not rule out git repositories \
+                 beneath it ({stop}), and a file here would be prepended to every session in \
+                 every project under this directory. If {dir} is a single project, run \
+                 `git init` there yourself and retry; otherwise run tm from the actual project \
+                 directory.",
+                dir = path.display()
             ),
         }
     }

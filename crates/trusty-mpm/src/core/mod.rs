@@ -59,6 +59,9 @@ pub mod claude_config;
 // Claude Code disable transcript saving, costing the session native
 // `--resume`/`--continue`/`/rewind` recovery.
 pub mod claude_env_scrub;
+// #7673: the three-outcome downward scan for child git repositories — found,
+// clear, or could not finish — behind the workspace-parent seed refusal.
+pub mod child_repo_scan;
 // Epic #4183 / #4286: the READER for `CLAUDE.md` named-section instruction
 // overrides. Ships before the floor text that advertises the mechanism —
 // advertising an override no code reads is issue #381 verbatim.

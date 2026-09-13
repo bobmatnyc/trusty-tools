@@ -4,6 +4,8 @@
 //! 500-SLOC production cap.
 
 use super::*;
+use crate::core::child_repo_scan::ScanIncomplete;
+use std::path::PathBuf;
 use tempfile::TempDir;
 
 /// `git -C <dir> init -q`, reporting whether git was available at all.
@@ -83,46 +85,83 @@ fn a_grandchild_repository_is_found() {
     assert_eq!(err, SeedRefusal::WorkspaceParent(grandchild));
 }
 
-/// FAILS BEFORE THIS ROUND (#7673 round 3 review, MEDIUM): the original
-/// two-level, depth-bound scan never looked past `<parent>/packages/<name>`,
-/// so a pnpm/yarn/npm SCOPED package — `<parent>/packages/@scope/pkg-a`, a
-/// common convention — sat one level past the bound and was never found. The
-/// budget-bounded scan has no notion of depth at all, so it reaches this
-/// repository the same way it reaches a two-level one.
-#[test]
-fn a_scoped_package_repository_three_levels_down_is_found() {
-    let tmp = TempDir::new().unwrap();
+/// A workspace-parent fixture: `<tmp>/workspace` plus a `<tmp>/home`.
+fn workspace_and_home(tmp: &TempDir) -> (PathBuf, PathBuf) {
     let parent = std::fs::canonicalize(tmp.path()).unwrap().join("workspace");
-    let deep = parent.join("packages").join("@scope").join("pkg-a");
-    std::fs::create_dir_all(&deep).unwrap();
-    if !git_init(&deep) {
-        eprintln!("#7673 tests: git unavailable, skipping");
-        return;
-    }
-
-    assert_eq!(find_child_git_repo(&parent), Some(deep));
+    std::fs::create_dir_all(&parent).unwrap();
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    (parent, home)
 }
 
-/// A repository far enough down a single-child chain to exceed
-/// [`WORKSPACE_SCAN_BUDGET`] sits outside the scan — cheap by design, not
-/// exhaustive. This is what keeps the scan bounded against a cycle or a
-/// pathologically deep tree; it is the deliberate trade-off the module doc
-/// names, not a bug.
+/// FAILS BEFORE THIS ROUND (#7673 round 2 review, CRITICAL): `node_modules`,
+/// created first, held more subdirectories than the scan budget; the scan ran
+/// out before `packages/app` and its `None` was read as "workspace is clear",
+/// so tm seeded the workspace parent. Whatever order `read_dir` gives, the
+/// only acceptable answers are the two refusals.
 #[test]
-fn a_repository_beyond_the_scan_budget_is_not_found() {
+fn a_wide_node_modules_sibling_never_lets_a_workspace_parent_seed() {
     let tmp = TempDir::new().unwrap();
-    let dir = std::fs::canonicalize(tmp.path()).unwrap().join("workspace");
-    let mut deep = dir.clone();
-    for _ in 0..(WORKSPACE_SCAN_BUDGET + 50) {
-        deep = deep.join("d");
+    let (parent, home) = workspace_and_home(&tmp);
+    for i in 0..300 {
+        std::fs::create_dir_all(parent.join("node_modules").join(format!("pkg{i:03}"))).unwrap();
     }
-    std::fs::create_dir_all(&deep).unwrap();
-    if !git_init(&deep) {
-        eprintln!("#7673 tests: git unavailable, skipping");
+    let app = parent.join("packages").join("app");
+    std::fs::create_dir_all(app.join(".git")).unwrap();
+
+    match offer_git_init(&parent, Some(&home), None) {
+        Err(SeedRefusal::WorkspaceParent(child)) => assert_eq!(child, app),
+        Err(SeedRefusal::ScanIncomplete(_)) => {}
+        other => panic!("a workspace parent must never seed, got {other:?}"),
+    }
+}
+
+/// FAILS BEFORE THIS ROUND: a directory wider than the budget, holding no
+/// repository at all, exhausted the scan and was seeded as if clear.
+#[test]
+fn an_exhausted_scan_refuses_to_seed() {
+    let tmp = TempDir::new().unwrap();
+    let (parent, home) = workspace_and_home(&tmp);
+    for i in 0..(crate::core::child_repo_scan::WORKSPACE_SCAN_BUDGET + 44) {
+        std::fs::create_dir_all(parent.join(format!("d{i:03}"))).unwrap();
+    }
+
+    assert_eq!(
+        offer_git_init(&parent, Some(&home), None),
+        Err(SeedRefusal::ScanIncomplete(ScanIncomplete::BudgetExhausted))
+    );
+}
+
+/// FAILS BEFORE THIS ROUND: an unreadable child was skipped, so the directory
+/// seeded without the scan having looked inside it.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_child_directory_refuses_to_seed() {
+    use std::os::unix::fs::PermissionsExt;
+    struct RestoreMode(PathBuf);
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+    let tmp = TempDir::new().unwrap();
+    let (parent, home) = workspace_and_home(&tmp);
+    let locked = parent.join("locked");
+    std::fs::create_dir_all(&locked).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let _restore = RestoreMode(locked.clone());
+    if std::fs::read_dir(&locked).is_ok() {
+        eprintln!("#7673 tests: running with permission overrides (root?), skipping");
         return;
     }
 
-    assert_eq!(find_child_git_repo(&dir), None);
+    match offer_git_init(&parent, Some(&home), None) {
+        Err(SeedRefusal::ScanIncomplete(ScanIncomplete::Unreadable { path, .. })) => {
+            assert_eq!(path, locked);
+        }
+        other => panic!("an unreadable child must refuse the seed, got {other:?}"),
+    }
+    assert!(!parent.join(".git").exists());
 }
 
 /// FAILS BEFORE THIS ROUND (regression b): a marker-less, non-git directory
@@ -254,4 +293,30 @@ fn the_workspace_parent_refusal_names_the_child_repository() {
         SeedRefusal::WorkspaceParent(PathBuf::from("/ws/service-a")).message(Path::new("/ws"));
     assert!(msg.contains("/ws/service-a"), "{msg}");
     assert!(msg.contains("/ws"), "{msg}");
+}
+
+/// The scan-incomplete refusal names the directory, says the scan could not
+/// rule out child repositories, and names both ways forward.
+#[test]
+fn the_scan_incomplete_refusal_tells_the_operator_how_to_proceed() {
+    let msg = SeedRefusal::ScanIncomplete(ScanIncomplete::Unreadable {
+        path: PathBuf::from("/ws/locked"),
+        error: "Permission denied (os error 13)".to_string(),
+    })
+    .message(Path::new("/ws"));
+    assert!(msg.contains("at /ws "), "{msg}");
+    assert!(msg.contains("could not rule out git repositories"), "{msg}");
+    assert!(msg.contains("/ws/locked could not be read"), "{msg}");
+    assert!(msg.contains("run `git init` there yourself"), "{msg}");
+    assert!(
+        msg.contains("run tm from the actual project directory"),
+        "{msg}"
+    );
+
+    let exhausted =
+        SeedRefusal::ScanIncomplete(ScanIncomplete::BudgetExhausted).message(Path::new("/ws"));
+    assert!(
+        exhausted.contains("stopped after checking 256 directories"),
+        "{exhausted}"
+    );
 }

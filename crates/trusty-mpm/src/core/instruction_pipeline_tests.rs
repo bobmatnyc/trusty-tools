@@ -506,7 +506,9 @@ fn load_or_create_claude_md_seeds_in_a_subdirectory_of_a_git_repo() {
     fs::create_dir_all(&nested).unwrap();
 
     let path = nested.join("CLAUDE.md");
-    let (content, created) = load_or_create_claude_md(&path, dirs::home_dir().as_deref())
+    // #7673: a fixture home, never the ambient `$HOME`.
+    let home = repo.join("fixture-home");
+    let (content, created) = load_or_create_claude_md(&path, Some(&home))
         .expect("a subdirectory of a git project seeds");
     assert!(created);
     assert_eq!(content, CLAUDE_MD_STUB);
@@ -521,9 +523,11 @@ fn load_or_create_claude_md_seeds_in_a_bare_first_touch_directory() {
     let dir = tmp.path().join("scratch");
     fs::create_dir_all(&dir).unwrap();
     let path = dir.join("CLAUDE.md");
+    // #7673: a fixture home, never the ambient `$HOME`.
+    let home = tmp.path().join("fixture-home");
 
-    let (content, created) = load_or_create_claude_md(&path, dirs::home_dir().as_deref())
-        .expect("a first-touch directory seeds");
+    let (content, created) =
+        load_or_create_claude_md(&path, Some(&home)).expect("a first-touch directory seeds");
     assert!(created);
     assert_eq!(content, CLAUDE_MD_STUB);
 }
@@ -537,7 +541,9 @@ fn load_or_create_claude_md_fails_closed_on_a_path_with_no_directory() {
     // seeding arm — the one under test — is the arm that runs.
     let path = PathBuf::from("CLAUDE.md.7673-no-directory-component");
 
-    let err = load_or_create_claude_md(&path, dirs::home_dir().as_deref())
+    // #7673: a fixture home, never the ambient `$HOME`.
+    let home = std::env::temp_dir().join("7673-fixture-home");
+    let err = load_or_create_claude_md(&path, Some(&home))
         .expect_err("a path with no directory component must be refused, never seeded");
 
     let PipelineError::Io { source, .. } = &err;
@@ -1536,4 +1542,19 @@ fn build_instructions_reports_a_complete_roster_when_nothing_failed() {
     .expect("pipeline succeeds");
     assert!(out.roster_is_complete());
     assert!(out.unreadable_agent_paths.is_empty());
+}
+
+/// FAILS BEFORE THIS ROUND (#7673 round 2 review, MEDIUM): three seed tests
+/// passed the real `$HOME` into `load_or_create_claude_md`, so their outcome
+/// depended on where the developer's home directory sits relative to the
+/// temp dir. Every seed test here must pass a fixture home instead.
+#[test]
+fn no_seed_test_reads_the_ambient_home_directory() {
+    let source = include_str!("instruction_pipeline_tests.rs");
+    let needle = concat!("dirs::", "home_dir()");
+    assert_eq!(
+        source.matches(needle).count(),
+        0,
+        "pass a fixture home under the test's temp dir, not the ambient one"
+    );
 }
