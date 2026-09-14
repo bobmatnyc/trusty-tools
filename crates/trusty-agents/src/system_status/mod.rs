@@ -81,6 +81,16 @@ pub struct SystemStatusReport {
     pub daemons: Vec<daemons::DaemonStatus>,
     pub mcp_servers: Vec<McpServerStatus>,
     pub credentials: Vec<credentials::CredentialStatus>,
+    /// The active agent's `[[stores]]` bindings, resolved live (#7882).
+    ///
+    /// Why: a binding naming a trusty-search index that does not exist was
+    /// only observable by opening the GUI config pane and hitting `GET
+    /// /api/agents/:name/stores` — nothing an owner sees day to day, which is
+    /// how cto-assistant's dead binding survived for weeks (#7876). Putting
+    /// the resolved statuses in the one report both `tagent system status`
+    /// and the `system_status` tool render gives that failure a routine
+    /// surface. Empty for an agent that binds nothing, which is normal.
+    pub stores: Vec<crate::stores::StoreStatus>,
     pub agent_registry_count: usize,
     pub skills_count: usize,
 }
@@ -264,6 +274,8 @@ async fn gather_inner(tagent: TagentSelfStatus) -> SystemStatusReport {
     let credentials =
         credentials::list_status(trusty_common::credentials::default_store().as_ref());
 
+    let stores = store_status(&tagent.active_agent).await;
+
     let project_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let (agent_registry_count, skills_count) = registry_counts::counts(&project_root).await;
 
@@ -272,7 +284,38 @@ async fn gather_inner(tagent: TagentSelfStatus) -> SystemStatusReport {
         daemons: vec![search, memory, analyze, mpm],
         mcp_servers,
         credentials,
+        stores,
         agent_registry_count,
         skills_count,
     }
+}
+
+/// Resolve the active agent's OKG store bindings against the live daemons.
+///
+/// Why (#7882): the missing-index case had exactly one reader — the GUI
+/// config pane. Routing the SAME `stores::resolve_store_statuses` the sidecar
+/// route uses through this report means the CLI and the pane cannot disagree
+/// about whether a bound index exists, and neither can miss it.
+/// What: an agent that will not load, or binds nothing, yields an empty vec —
+/// no probe, no error, matching every other subsystem's "degrade, never fail"
+/// contract. Daemon addresses are resolved the same way
+/// `api::server::agent_stores::agent_stores_route` resolves them.
+/// Test: `super::format::tests::render_text_flags_a_missing_store_index`
+/// covers the rendering; `stores::status`'s own tests cover resolution.
+async fn store_status(active_agent: &str) -> Vec<crate::stores::StoreStatus> {
+    let Ok(cfg) = crate::agents::AgentConfig::by_name_async(active_agent).await else {
+        return Vec::new();
+    };
+    if cfg.stores.bindings.is_empty() {
+        return Vec::new();
+    }
+    crate::stores::resolve_store_statuses(
+        active_agent,
+        &cfg.stores,
+        trusty_common::resolve_daemon_base_url("trusty-search").as_deref(),
+        trusty_common::memory_rpc::resolve_memory_socket()
+            .ok()
+            .as_deref(),
+    )
+    .await
 }

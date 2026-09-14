@@ -52,6 +52,9 @@ async fn gather_report_serializes_to_json_with_expected_keys() {
         "daemons",
         "mcp_servers",
         "credentials",
+        // #7882: the active agent's resolved store bindings ride in the same
+        // report, so `--json` consumers see a dead index without a second call.
+        "stores",
         "agent_registry_count",
         "skills_count",
     ] {

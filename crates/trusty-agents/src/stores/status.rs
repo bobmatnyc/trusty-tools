@@ -31,6 +31,16 @@
 //! discoverable" whether or not the daemon was up. The palace half dials the
 //! socket through `trusty_common::memory_rpc`.
 //!
+//! **Issue #7882: a missing index is not a soft state.** Every failure mode
+//! above collapsing to `connected: false` also collapsed the one failure a
+//! HUMAN must fix — a binding naming an index that was never created — into
+//! the same shape as a stopped daemon, with nothing periodic or startup-level
+//! reporting it. cto-assistant's `[[stores]]` binding sat on a nonexistent
+//! index for weeks that way (#7876). [`StoreFault`] classifies the
+//! not-connected paths and [`StoreStatus::error`] carries the actionable
+//! message for the standing-misconfiguration class only, so a down daemon
+//! stays distinguishable from a bad binding on every surface.
+//!
 //! What: [`StoreStatus`] is the per-store report (serialized straight to the
 //! sidecar API and the GUI card). [`resolve_store_statuses`] resolves a whole
 //! [`StoresConfig`]; the search base URL and the memory socket are injected so
@@ -53,6 +63,62 @@ use super::config::{AgentStoreBinding, StoresConfig};
 /// within a couple of seconds rather than stalling agent boot or an API
 /// request behind it.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Why a store is not connected, classified (#7882).
+///
+/// Why: `connected: false` plus a prose `reason` collapsed two categories a
+/// client must treat differently — a TRANSIENT operational state (the daemon
+/// is down, the corpus failed to open) that clears when the daemon comes back,
+/// and a STANDING MISCONFIGURATION (the binding names an index that was never
+/// created) that clears only when a human acts. cto-assistant's binding named
+/// a nonexistent index for weeks precisely because the two looked identical
+/// (#7876). This enum is the machine-readable distinction; [`StoreStatus::error`]
+/// is the operator-facing half.
+/// What: one variant per not-connected path in [`resolve_one`], serialized
+/// `snake_case`. [`StoreFault::MissingIndex`] — and only it — is an error:
+/// the daemon ANSWERED and said the index id is not registered, which no
+/// amount of waiting fixes. `DaemonUnreachable` deliberately stays a soft
+/// state so a laptop with trusty-search stopped does not report every store
+/// as broken.
+/// Test: `reports_a_missing_index_as_an_error_naming_index_and_assistant`,
+/// `daemon_unreachable_stays_distinguishable_from_a_missing_index`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StoreFault {
+    /// The binding itself is unusable; nothing was probed.
+    InvalidBinding,
+    /// trusty-search could not be found or could not be reached.
+    DaemonUnreachable,
+    /// trusty-search answered `404` — the bound index id does not exist.
+    MissingIndex,
+    /// The index exists but its corpus or a staged lane is broken (#4115),
+    /// or the daemon answered unusably.
+    IndexUnhealthy,
+}
+
+impl StoreFault {
+    /// The operator-facing message for a fault that will never self-heal.
+    ///
+    /// Why (#7882): only a fault a HUMAN must fix earns an `error` field —
+    /// promoting a down daemon to an error would train readers to ignore the
+    /// field entirely, which is the failure mode this issue is about.
+    /// What: `Some(message)` for [`StoreFault::MissingIndex`], naming the
+    /// assistant, the store and the index id so the line is actionable
+    /// without cross-referencing `agent.toml`; `None` for every other fault,
+    /// whose prose already lives in `reason`.
+    /// Test: `reports_a_missing_index_as_an_error_naming_index_and_assistant`.
+    fn error_for(self, agent_name: &str, store: &str, index: &str) -> Option<String> {
+        match self {
+            StoreFault::MissingIndex => Some(format!(
+                "assistant `{agent_name}` binds store `{store}` to trusty-search index \
+                 `{index}`, which does not exist on the daemon — create the index or \
+                 correct the binding"
+            )),
+            _ => None,
+        }
+    }
+}
 
 /// One bound store's resolved, live status.
 ///
@@ -128,6 +194,18 @@ pub struct StoreStatus {
     /// reason.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub failed_stages: Vec<String>,
+    /// Which category of failure this is (#7882). `None` when connected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fault: Option<StoreFault>,
+    /// An operator-actionable error naming the assistant and the index id.
+    ///
+    /// Why (#7882): `Some` ONLY for a standing misconfiguration — today, a
+    /// bound index the daemon says does not exist. A client that renders this
+    /// field as an error, and `reason` as a soft state, gets the fail-open
+    /// case surfaced without also crying wolf every time a daemon is stopped.
+    /// Test: `reports_a_missing_index_as_an_error_naming_index_and_assistant`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 impl StoreStatus {
@@ -136,7 +214,16 @@ impl StoreStatus {
     /// Why: Every not-connected path (invalid config, undiscoverable daemon,
     /// 404, timeout) produces the same shape; building it in one place keeps
     /// the `Option` fields from drifting out of sync.
-    fn disconnected(binding: &AgentStoreBinding, agent_name: &str, reason: String) -> Self {
+    /// What: #7882 makes `fault` mandatory at every call site — a new
+    /// not-connected path cannot be added without classifying it, which is
+    /// how the missing-index case stayed indistinguishable from a down daemon.
+    fn disconnected(
+        binding: &AgentStoreBinding,
+        agent_name: &str,
+        reason: String,
+        fault: StoreFault,
+    ) -> Self {
+        let error = fault.error_for(agent_name, &binding.name, binding.resolved_index());
         Self {
             name: binding.name.clone(),
             tree: binding.resolved_tree(agent_name),
@@ -153,6 +240,8 @@ impl StoreStatus {
             pending_index: None,
             synced_index: None,
             failed_stages: Vec::new(),
+            fault: Some(fault),
+            error,
         }
     }
 }
@@ -234,6 +323,7 @@ pub async fn resolve_store_statuses(
                         b,
                         agent_name,
                         format!("HTTP client unavailable: {e}"),
+                        StoreFault::DaemonUnreachable,
                     )
                 })
                 .collect();
@@ -258,7 +348,7 @@ async fn resolve_one(
     // Config problems short-circuit before any network call — an unusable
     // binding has nothing meaningful to probe.
     if let Some(issue) = binding.validate() {
-        return StoreStatus::disconnected(binding, agent_name, issue);
+        return StoreStatus::disconnected(binding, agent_name, issue, StoreFault::InvalidBinding);
     }
 
     let index = binding.resolved_index().to_string();
@@ -267,6 +357,7 @@ async fn resolve_one(
             binding,
             agent_name,
             "trusty-search daemon not discoverable (no address file; is it running?)".to_string(),
+            StoreFault::DaemonUnreachable,
         );
     };
 
@@ -281,13 +372,26 @@ async fn resolve_one(
                 binding,
                 agent_name,
                 format!("trusty-search unreachable at {search_base}: {e}"),
+                StoreFault::DaemonUnreachable,
             );
         }
         Ok(resp) if resp.status() == reqwest::StatusCode::NOT_FOUND => {
+            // #7882: the daemon ANSWERED and said the id is unknown — a
+            // standing misconfiguration, not a transient outage. Log it on
+            // every probe (stderr, per the daemon-stdout rule) so a binding
+            // pointing at a never-created index cannot sit unnoticed the way
+            // cto-assistant's did (#7876).
+            tracing::warn!(
+                agent = agent_name,
+                store = %binding.name,
+                index = %index,
+                "bound store names a trusty-search index that does not exist"
+            );
             return StoreStatus::disconnected(
                 binding,
                 agent_name,
                 format!("search index `{index}` is not registered on the trusty-search daemon"),
+                StoreFault::MissingIndex,
             );
         }
         Ok(resp) if !resp.status().is_success() => {
@@ -296,6 +400,7 @@ async fn resolve_one(
                 binding,
                 agent_name,
                 format!("trusty-search returned HTTP {code} for index `{index}`"),
+                StoreFault::IndexUnhealthy,
             );
         }
         Ok(resp) => match resp.json::<serde_json::Value>().await {
@@ -304,6 +409,7 @@ async fn resolve_one(
                     binding,
                     agent_name,
                     format!("trusty-search returned an unreadable status body: {e}"),
+                    StoreFault::IndexUnhealthy,
                 );
             }
             Ok(body) => {
@@ -321,8 +427,8 @@ async fn resolve_one(
                     .get("status")
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_string);
-                let (connected, reason) = if failed_stages.is_empty() {
-                    (true, None)
+                let (connected, reason, fault) = if failed_stages.is_empty() {
+                    (true, None, None)
                 } else {
                     (
                         false,
@@ -333,6 +439,7 @@ async fn resolve_one(
                             failed_stages.len(),
                             failed_stages.join(", "),
                         )),
+                        Some(StoreFault::IndexUnhealthy),
                     )
                 };
                 StoreStatus {
@@ -354,6 +461,10 @@ async fn resolve_one(
                     pending_index: None,
                     synced_index: None,
                     failed_stages,
+                    fault,
+                    // #7882: a reachable index is never a standing
+                    // misconfiguration — a broken corpus is operational.
+                    error: None,
                 }
             }
         },

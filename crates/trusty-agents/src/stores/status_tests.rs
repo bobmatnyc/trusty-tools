@@ -220,6 +220,66 @@ async fn reports_missing_index_as_not_connected() {
     assert_eq!(out[0].tree, "okg://izzie");
 }
 
+/// Issue #7882 regression: a binding naming an index the daemon does not
+/// have must surface as an ERROR, naming both the index id and the assistant.
+///
+/// Why: before the fix this was `connected: false` with a prose `reason` and
+/// nothing else — the identical shape a stopped daemon produces — so
+/// cto-assistant's binding pointed at a never-created index for weeks with
+/// nothing an owner sees day to day reporting it (#7876).
+/// What: asserts the SERIALIZED shape (the wire contract the sidecar route and
+/// the GUI config pane read) rather than the Rust fields, so this test
+/// compiles against the pre-fix code and fails there on the absent `error`
+/// key rather than on a build break.
+/// Test: itself.
+#[tokio::test]
+async fn reports_a_missing_index_as_an_error_naming_index_and_assistant() {
+    let base = mock_daemon().await;
+    let stores = stores_toml("[[stores]]\nname = \"cto-kb\"\nindex = \"never-created\"\n");
+    let out = resolve_store_statuses("cto-assistant", &stores, Some(&base), None).await;
+    let wire = serde_json::to_value(&out[0]).unwrap();
+
+    let error = wire
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| {
+            panic!("a bound index the daemon does not have must be an error: {wire}")
+        });
+    assert!(
+        error.contains("never-created"),
+        "the error must name the index id: {error}"
+    );
+    assert!(
+        error.contains("cto-assistant"),
+        "the error must name the assistant: {error}"
+    );
+    assert_eq!(
+        wire.get("fault").and_then(Value::as_str),
+        Some("missing_index"),
+        "the fault must be machine-readable: {wire}"
+    );
+}
+
+/// Issue #7882: promoting the missing-index case must not sweep a stopped
+/// daemon along with it — a laptop with trusty-search down is an operational
+/// state, not a misconfiguration an owner should be told to fix.
+#[tokio::test]
+async fn daemon_unreachable_stays_distinguishable_from_a_missing_index() {
+    let stores = stores_toml("[[stores]]\nname = \"cto-kb\"\nindex = \"never-created\"\n");
+    let out = resolve_store_statuses("cto-assistant", &stores, None, None).await;
+    let wire = serde_json::to_value(&out[0]).unwrap();
+
+    assert_eq!(
+        wire.get("fault").and_then(Value::as_str),
+        Some("daemon_unreachable"),
+        "{wire}"
+    );
+    assert!(
+        wire.get("error").is_none(),
+        "a down daemon is not an operator error: {wire}"
+    );
+}
+
 #[tokio::test]
 async fn reports_missing_palace_without_downgrading_index() {
     let base = mock_daemon().await;
