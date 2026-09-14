@@ -101,7 +101,26 @@ impl StatuslineWrite {
 /// `a_divergent_entry_is_still_repaired_against_the_resolution`.
 pub fn ensure_statusline_entry_in(settings_path: &Path) -> StatuslineWrite {
     // #7617: held across the read AND the write below — see "Write safety".
-    let _guard = crate::core::claude_json_guard::lock();
+    // #7762: that guard was the process-wide `claude_json_guard` mutex, blind to
+    // `tm launch` and `tm doctor --fix` writing this file from separate
+    // PROCESSES. `settings_lock` is the same span against an `flock(2)` sidecar.
+    // A lock that cannot be taken is `Refused`, never an unlocked write.
+    match crate::core::settings_lock::with_settings_lock(settings_path, || {
+        ensure_statusline_entry_locked(settings_path)
+    }) {
+        Ok(outcome) => outcome,
+        Err(err) => StatuslineWrite::Refused(err.to_string()),
+    }
+}
+
+/// The read / decide / write body of [`ensure_statusline_entry_in`], run under
+/// the settings lock.
+///
+/// Why (#7762): the lock must span the read and the write, and the cycle is long
+/// enough that inlining it as a closure hid the acquisition.
+/// What: exactly what [`ensure_statusline_entry_in`] documents.
+/// Test: see [`ensure_statusline_entry_in`].
+fn ensure_statusline_entry_locked(settings_path: &Path) -> StatuslineWrite {
     let raw = match std::fs::read_to_string(settings_path) {
         Ok(text) => Some(text),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,

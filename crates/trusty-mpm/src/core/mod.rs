@@ -274,6 +274,9 @@ pub mod session_scope_drift;
 pub mod session_links;
 pub mod session_record;
 pub mod session_store;
+// #7762: the one cross-process critical section and `.bak`-free atomic publish
+// every `settings.json` writer in this crate goes through.
+pub(crate) mod settings_lock;
 pub mod skill_deploy_tiers;
 pub mod skill_deployer;
 pub mod skill_drift;

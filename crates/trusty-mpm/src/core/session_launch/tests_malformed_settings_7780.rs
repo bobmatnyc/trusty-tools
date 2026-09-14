@@ -109,6 +109,11 @@ fn merge_settings_backs_up_a_malformed_file_before_rewriting_it() {
 /// still allowing `fs::write` onto the existing `settings.json` — the exact
 /// shape in which the pre-#7780 writer destroyed it. Unix-only: the directory
 /// permission bit is the portable way to express that.
+///
+/// #7762: the settings lock's sidecar is pre-created before the mode change. A
+/// non-writable directory refuses a new entry, so without it the writer would
+/// fail at the lock rather than at the copy this test is about; opening an
+/// EXISTING file for write needs permission on the file, not its directory.
 #[cfg(unix)]
 #[test]
 fn merge_settings_refuses_when_the_copy_cannot_be_written() {
@@ -119,6 +124,7 @@ fn merge_settings_refuses_when_the_copy_cannot_be_written() {
     let path = seed_settings(project, BROKEN);
     let claude = project.join(".claude");
 
+    std::fs::write(claude.join("settings.json.lock"), b"").expect("pre-create the lock sidecar");
     std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o500)).unwrap();
     let result = settings::write_output_style(project, None);
     // Restore before asserting, so a failed assertion still leaves a removable

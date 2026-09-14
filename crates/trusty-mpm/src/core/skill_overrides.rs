@@ -207,6 +207,15 @@ pub enum SkillOverridesError {
         /// The atomic writer's error chain.
         message: String,
     },
+    /// The cross-process settings lock could not be acquired, so the file was
+    /// neither read nor written (#7762).
+    #[error("lock {path}: {source}")]
+    Lock {
+        /// The settings file.
+        path: PathBuf,
+        /// The underlying IO error.
+        source: std::io::Error,
+    },
 }
 
 /// Merge this project's stack-profile `skillOverrides` into its settings (#7751).
@@ -284,26 +293,53 @@ pub fn write_skill_overrides_for(
         return Ok(SkillOverridesOutcome::NoStack);
     }
 
-    // #7751 review round 1 (HIGH): held across the read AND the write below.
-    // `write_json_atomic` stops a torn file, not a LOST UPDATE — a sibling
-    // writer of this same `.claude/settings.json` that read before this store
-    // republishes its own pre-read snapshot and drops these keys. Same line,
-    // same mutex, same reason as `statusline_settings::ensure_statusline_entry_in`
-    // and `claude_md_excludes::add_exclude` (#4072, #7617). No caller holds it
-    // already: `prepare_session_inner` calls this outside every guarded seeder,
-    // and the mutex is not reentrant.
-    let _guard = crate::core::claude_json_guard::lock();
-
     let path = project_dir.join(".claude").join("settings.json");
-    let mut settings = match std::fs::read_to_string(&path) {
+
+    // #7751 review round 1 (HIGH): held across the read AND the write below.
+    // Atomic publishing stops a torn file, not a LOST UPDATE — a sibling writer
+    // of this same `.claude/settings.json` that read before this store
+    // republishes its own pre-read snapshot and drops these keys.
+    //
+    // #7762: that guard was the process-wide `claude_json_guard` mutex, which
+    // could not see `tm doctor --fix` writing the file from another PROCESS.
+    // `settings_lock` is the same discipline against an `flock(2)` sidecar, so
+    // it covers both. No caller holds it already: `prepare_session_inner` calls
+    // this outside every other settings writer, and the lock is not reentrant.
+    crate::core::settings_lock::with_settings_lock(&path, || {
+        write_skill_overrides_locked(&path, planned)
+    })
+    .map_err(|source| SkillOverridesError::Lock {
+        path: path.clone(),
+        source,
+    })?
+}
+
+/// The read / merge / publish body of [`write_skill_overrides_for`], run under
+/// the settings lock.
+///
+/// Why (#7762): the lock has to span the read and the write, and inlining the
+/// whole cycle as a closure buried the acquisition it exists to show.
+/// What: exactly the merge [`write_skill_overrides_for`] documents. `planned` is
+/// the already-computed set of skills to turn off.
+/// Test: see [`write_skill_overrides_for`].
+fn write_skill_overrides_locked(
+    path: &Path,
+    planned: BTreeSet<&'static str>,
+) -> Result<SkillOverridesOutcome, SkillOverridesError> {
+    let mut settings = match std::fs::read_to_string(path) {
         Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
             Ok(value) if value.is_object() => value,
-            _ => return Ok(skip(&path, "the file is not a JSON object")),
+            _ => return Ok(skip(path, "the file is not a JSON object")),
         },
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             serde_json::Value::Object(serde_json::Map::new())
         }
-        Err(source) => return Err(SkillOverridesError::Read { path, source }),
+        Err(source) => {
+            return Err(SkillOverridesError::Read {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
     };
 
     let Some(overrides) = settings
@@ -315,7 +351,7 @@ pub fn write_skill_overrides_for(
         .and_then(serde_json::Value::as_object_mut)
     else {
         return Ok(skip(
-            &path,
+            path,
             "its `skillOverrides` value is not a JSON object",
         ));
     };
@@ -334,9 +370,12 @@ pub fn write_skill_overrides_for(
         return Ok(SkillOverridesOutcome::Unchanged);
     }
 
-    trusty_common::claude_config::write_json_atomic(&path, &settings).map_err(|err| {
+    // #7762: `settings_lock::publish` rather than `write_json_atomic` — the same
+    // stage-and-rename, without the `<path>.bak` copy this once-per-launch
+    // writer would drop into every managed project.
+    crate::core::settings_lock::publish(path, &settings).map_err(|err| {
         SkillOverridesError::Write {
-            path: path.clone(),
+            path: path.to_path_buf(),
             message: format!("{err:#}"),
         }
     })?;

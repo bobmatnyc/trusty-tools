@@ -76,10 +76,17 @@ fn assert_one_copy_holds_the_original(dir: &Path) {
 
 /// Run `f` with `dir` non-writable, restoring the mode before returning, so a
 /// failed assertion still leaves a removable temp dir behind.
+///
+/// #7762: the settings lock's sidecar is created here, BEFORE the mode change.
+/// A non-writable directory refuses a new entry, so without this the writer
+/// would fail at the lock rather than at the copy — and these tests are about
+/// the copy. Opening an existing file for write needs permission on the FILE,
+/// not on its directory, so the lock is still acquirable while the copy is not.
 #[cfg(unix)]
 fn with_unwritable_dir<T>(dir: &Path, f: impl FnOnce() -> T) -> T {
     use std::os::unix::fs::PermissionsExt;
 
+    std::fs::write(dir.join("settings.json.lock"), b"").expect("pre-create the lock sidecar");
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o500)).unwrap();
     let out = f();
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();

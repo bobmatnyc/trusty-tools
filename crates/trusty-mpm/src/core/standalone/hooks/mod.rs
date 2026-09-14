@@ -706,34 +706,56 @@ pub fn remove_global_trusty_mpm_hooks() -> anyhow::Result<usize> {
 /// Test: `remove_global_hooks_at_strips_only_the_two_global_files`,
 /// `remove_global_hooks_at_ignores_project_settings_below_home`.
 pub fn remove_global_trusty_mpm_hooks_at(home: &Path) -> anyhow::Result<usize> {
-    use trusty_common::claude_config::write_json_atomic;
-
     let files = global_settings_files(home);
 
     let mut changed = 0usize;
     for path in &files {
-        let text = match std::fs::read_to_string(path) {
-            Ok(s) if s.trim().is_empty() => continue,
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        let mut val: serde_json::Value = match serde_json::from_str::<serde_json::Value>(&text) {
-            Ok(v) if v.is_object() => v,
-            _ => continue,
-        };
-
-        if strip_mpm_hook_entries(&mut val) {
-            if let Err(e) = write_json_atomic(path, &val) {
-                eprintln!(
-                    "warning: could not remove MPM hooks from {}: {e}",
-                    path.display()
-                );
-            } else {
-                changed += 1;
-            }
+        // #7762: an absent file is skipped BEFORE the lock — acquiring one would
+        // create `~/.claude/` and a sidecar for a file this sweep will not touch.
+        if !path.exists() {
+            continue;
+        }
+        // #7762: the strip re-reads under the lock, so nothing published between
+        // the two reads is discarded.
+        let stripped = crate::core::settings_lock::with_settings_lock(path, || {
+            strip_global_hooks_locked(path)
+        });
+        match stripped {
+            Ok(Ok(true)) => changed += 1,
+            Ok(Ok(false)) => {}
+            Ok(Err(e)) | Err(e) => eprintln!(
+                "warning: could not remove MPM hooks from {}: {e}",
+                path.display()
+            ),
         }
     }
     Ok(changed)
+}
+
+/// Strip this crate's hook entries from one global settings file, under the
+/// settings lock.
+///
+/// Why (#7762): the read and the write have to be one critical section, and the
+/// sweep's per-file body is where that section starts and ends.
+/// What: `Ok(true)` when the file was rewritten, `Ok(false)` when it was empty,
+/// unparseable, not an object, or carried no entry to strip. Missing, empty,
+/// unparseable and non-object files stay silent skips, as the sweep always
+/// treated them.
+/// Test: `remove_global_hooks_at_strips_only_the_two_global_files`.
+fn strip_global_hooks_locked(path: &Path) -> std::io::Result<bool> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(s) if s.trim().is_empty() => return Ok(false),
+        Ok(s) => s,
+        Err(_) => return Ok(false),
+    };
+    let mut val: serde_json::Value = match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(v) if v.is_object() => v,
+        _ => return Ok(false),
+    };
+    if !strip_mpm_hook_entries(&mut val) {
+        return Ok(false);
+    }
+    crate::core::settings_lock::publish(path, &val).map(|()| true)
 }
 
 /// Remove every trusty-mpm hook entry from a settings JSON value in-place.
@@ -951,10 +973,30 @@ fn write_project_hooks_with(
     settings_path: &Path,
     additions: Result<serde_json::Value, StableHookExeError>,
 ) -> anyhow::Result<bool> {
-    use trusty_common::claude_config::{merge_hook_entries, write_json_atomic};
-
     // Before the read: a refusal must leave a missing file missing.
     let additions = additions?;
+
+    // #7762: the read, the merge and the publish are one critical section —
+    // `tm launch`, the daemon and `tm doctor --fix` all merge into this same
+    // file from separate PROCESSES.
+    crate::core::settings_lock::with_settings_lock(settings_path, || {
+        write_project_hooks_locked(settings_path, &additions)
+    })?
+}
+
+/// The read / strip / merge / snapshot / publish body of
+/// [`write_project_hooks_with`], run under the settings lock.
+///
+/// Why (#7762): the lock must span the read and the write; splitting keeps the
+/// acquisition visible at the entry point.
+/// What: exactly what [`write_project_hooks`] documents, minus the `additions`
+/// refusal its caller has already raised.
+/// Test: see [`write_project_hooks`].
+fn write_project_hooks_locked(
+    settings_path: &Path,
+    additions: &serde_json::Value,
+) -> anyhow::Result<bool> {
+    use trusty_common::claude_config::merge_hook_entries;
 
     // #7789: this read used to coerce an unparseable or non-object file to
     // `{}`, so the merge below started from nothing and the write discarded
@@ -974,7 +1016,7 @@ fn write_project_hooks_with(
         strip_mpm_hook_entries_for_events(&mut base, Some(&event_keys));
     }
 
-    let merged = merge_hook_entries(&base, &additions);
+    let merged = merge_hook_entries(&base, additions);
 
     if merged == original {
         return Ok(false);
@@ -997,7 +1039,10 @@ fn write_project_hooks_with(
         },
     )?;
 
-    write_json_atomic(settings_path, &merged)
+    // #7762: `settings_lock::publish` rather than `write_json_atomic` — the #7244
+    // snapshot above already keeps the last three good states, so the `.bak`
+    // copy was a fourth one nobody reads.
+    crate::core::settings_lock::publish(settings_path, &merged)
         .map_err(|e| anyhow::anyhow!("write {}: {e}", settings_path.display()))?;
     Ok(true)
 }

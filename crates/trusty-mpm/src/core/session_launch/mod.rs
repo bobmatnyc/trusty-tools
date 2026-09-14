@@ -122,6 +122,11 @@ mod tests_skill_overrides_7751;
 #[path = "tests_malformed_settings_7780.rs"]
 mod tests_malformed_settings_7780;
 
+// #7762: the cross-process settings lock, at the call sites that race.
+#[cfg(test)]
+#[path = "tests_settings_lock_7762.rs"]
+mod tests_settings_lock_7762;
+
 use std::path::{Path, PathBuf};
 
 use crate::core::agent_deployer::{DeployResult, deploy_agents_filtered, retract_framework_agents};
@@ -423,6 +428,24 @@ pub enum PrepError {
     #[error("refused to rewrite {path}: its current contents could not be preserved: {source}")]
     SettingsBackup {
         /// The settings file whose rewrite was abandoned.
+        path: PathBuf,
+        /// The underlying IO error.
+        source: std::io::Error,
+    },
+    /// The cross-process lock guarding a `settings.json` could not be acquired,
+    /// so the writer read nothing and wrote nothing (#7762).
+    ///
+    /// Why its own variant rather than [`Self::Io`]: this is the fail-closed arm
+    /// of [`crate::core::settings_lock`], and the remedy is specific — a stale
+    /// sidecar, a permissions problem on `.claude/`, or another `tm` holding the
+    /// file for longer than expected. The alternative it replaces is a writer
+    /// that proceeds unlocked and silently drops a concurrent writer's keys.
+    /// Non-fatal, for the reason [`Self::HookExe`] is: the session still starts,
+    /// with whatever is already on disk.
+    /// Test: `merge_settings_refuses_when_the_lock_cannot_be_acquired`.
+    #[error("could not acquire the settings lock for {path}: {source}")]
+    SettingsLock {
+        /// The settings file whose update was abandoned.
         path: PathBuf,
         /// The underlying IO error.
         source: std::io::Error,
