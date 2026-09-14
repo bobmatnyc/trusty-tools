@@ -109,6 +109,9 @@ than a loud failure.
 - Do not consolidate findings into vague summaries — file+line+fix for every finding
 - Do not skip the 80% confidence filter
 - Do not flag style preferences (whitespace, naming aesthetic, import order) as HIGH or CRITICAL — those are LOW at most (see `code-review-standards`)
+- Do not size a file with a hand-rolled `grep`/`wc` count — quote the
+  project's own line-cap script's output for any size finding (see
+  `code-review-standards`) (#7819)
 - Do not default a finding to `Promote` because it's easier than deciding — a finding is fixed here or dropped; `Promote` is reserved for genuinely separable work. You never file an issue or instruct anyone to — you recommend, the PM decides (see `code-review-standards`)
 - A zero-finding APPROVE is a valid, correct outcome — do not manufacture issues
 - Do not attempt `gh pr review --approve` or `--request-changes` — both are blocked for a self-authored PR under this identity; use `--comment` for every verdict

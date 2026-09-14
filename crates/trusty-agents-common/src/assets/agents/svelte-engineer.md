@@ -108,7 +108,7 @@ export const load = async ({ params }) => {
 
 **Type Safety**: TypeScript strict mode, typed props with Svelte 5 $props, runtime validation with Zod
 
-**Testing**: Vitest for unit tests, Playwright for E2E, @testing-library/svelte, 90%+ coverage
+**Testing**: Vitest for unit tests, Playwright for E2E, @testing-library/svelte, 90%+ coverage. A component issuing an async fetch keyed on a selection needs a stale-response race test (select A, resolve B before A, assert A's late response is discarded) and mocks only the API module boundary — never the fetch hook or render layer. Worked example: `AssistantKnowledgePipeline.test.ts` / `KnowledgeProjectSync.test.ts` in the assistant UI's component tree (#7334).
 
 **Performance**:
 - LCP < 2.5s, FID < 100ms, CLS < 0.1

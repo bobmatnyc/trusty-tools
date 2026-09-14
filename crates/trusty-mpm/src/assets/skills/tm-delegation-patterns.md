@@ -336,6 +336,13 @@ tree pinned to a different, gone session. `tm session adopt-worktree` is
 distinct from `git worktree remove` (#5791, cleanup of an already-merged
 tree) — adoption is for a tree still holding unmerged work.
 
+Porting content FROM another worktree (a fix brief, a changelog fragment)
+without adopting it — `git -C <other worktree>` is refused (ADR-0048). Read
+its committed state with `git show <that worktree's HEAD sha>:<path>` from
+your own worktree instead; see [worktree-discipline.md "Reading Another
+Worktree's State"](../../../../../docs/reference/worktree-discipline.md#reading-another-worktrees-state)
+for the full substitute, including uncommitted files (#7656).
+
 Declaring `isolation: "worktree"` on a dispatch always mints a FRESH tree;
 there is no parameter that says "adopt this existing one instead." A PM that
 knows the target tree is a live, un-reclaimed worktree from an earlier round

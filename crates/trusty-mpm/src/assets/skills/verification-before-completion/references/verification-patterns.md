@@ -66,6 +66,12 @@ Complete patterns for verifying different types of claims before making them.
 - Test fails differently: Fix changed behavior, investigate
 - Can't revert cleanly: Use version control, stash changes
 
+**A revert-and-confirm step must reach the CHANGED code path, not stop at an
+earlier guard.** `--base no-such-ref` failing at an upstream merge-base check
+proves that guard exists, not that your change caught the failure — confirm
+the injected failure fires inside the code you actually modified before
+trusting the RED result (#7440).
+
 ## Build Verification
 
 **Correct Pattern:**

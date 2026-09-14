@@ -86,6 +86,12 @@ npm audit / cargo audit / bandit -r src/
 
 Surface failures with the failing command output and remediation steps — do not silently swallow errors.
 
+**Pin a verify script to what's deployed, not what's on disk.** During a
+rollout, `main` keeps moving — an unpinned `verify.sh` run against a newer
+disk copy than the deployed target produces spurious failures. Pin it:
+`git show <deployed-sha>:path/to/verify.sh > scratchpad/verify.sh` and run
+that copy (#7565).
+
 ## Long Waits — Block On Your Own Gates, Never On CI
 
 🔴 A release cut, `cargo build --release`, or a publish wait is YOUR command: run

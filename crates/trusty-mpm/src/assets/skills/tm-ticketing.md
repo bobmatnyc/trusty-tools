@@ -448,6 +448,11 @@ claim is provably stale: the named session is gone AND nothing referencing the
 issue — branch push, PR, comment — has moved since the claim. Either alone is
 not enough. When in doubt, leave it.
 
+**Filing a NEW issue is not itself a dispatch.** Apply `status:in-progress`
+only when the dispatch brief explicitly says a dispatch is starting on this
+issue now — a freshly created issue stays plain open unless that same brief
+assigns it for immediate work; when in doubt, file open (#7803).
+
 **Advances are event-driven, not swept.** The agent that observed the event owes
 the label pass then and there:
 
