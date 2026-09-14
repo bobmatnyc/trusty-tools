@@ -243,9 +243,10 @@ const MISSING_GROUP_CHECK: &str = "hooks_missing_tm_group";
 /// state its next launch would write, rather than with PM lifecycle hooks
 /// offline until then.
 /// What: one step for `<project>/.claude/settings.json` when
-/// [`crate::core::session_launch::missing_lifecycle_hook_events`] names at
-/// least one gap — no step for a complete file, a missing file, or one tm
-/// never provisioned. Applying calls
+/// [`crate::core::session_launch::missing_lifecycle_hook_events`] or (#7849)
+/// [`crate::core::session_launch::project_hook_group_gaps`] names at least one
+/// gap — no step for a complete file, a missing file, or one tm never
+/// provisioned. Applying calls
 /// [`crate::core::session_launch::ensure_project_hooks`], the SAME merge a
 /// launch runs: tm's own prior entries are replaced by identity, every other
 /// entry (the `trusty-memory inbox-check` under `SessionStart`) is preserved,
@@ -254,7 +255,8 @@ const MISSING_GROUP_CHECK: &str = "hooks_missing_tm_group";
 /// skip.
 /// Test: `missing_group_repair_merges_the_sessionstart_group_back`,
 /// `missing_group_repair_dry_run_changes_nothing`,
-/// `missing_group_repair_is_silent_for_a_complete_file`.
+/// `missing_group_repair_is_silent_for_a_complete_file`,
+/// `missing_group_repair_closes_a_toggle_driven_gap`.
 pub fn repair_missing_hook_group(project_dir: &Path, mode: RepairMode) -> Vec<RepairStep> {
     repair_missing_hook_group_with(project_dir, None, mode)
 }
@@ -280,7 +282,26 @@ pub(crate) fn repair_missing_hook_group_with(
     else {
         return Vec::new();
     };
-    let gaps = crate::core::session_launch::missing_lifecycle_hook_events(&val);
+    let mut gaps = crate::core::session_launch::missing_lifecycle_hook_events(&val);
+    // #7849: the lifecycle triad was the whole gate, so a toggle-driven group —
+    // the one `hooks_missing_tm_group` now also reports — was a finding `--fix`
+    // could never close. The merge below already writes it; only this gate was
+    // blind to it. Appended rather than merged-and-sorted so the lifecycle
+    // events keep the order the pre-#7849 message used.
+    // An unresolvable hook binary yields no toggle events here on purpose: this
+    // step's own apply arm would refuse for that same reason, and the verdict
+    // for an unverifiable hook set belongs to `tm validate`'s
+    // `ProjectHookDiagnosticIncomplete`, not to a repair step that cannot act.
+    let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(project_dir);
+    for (event, _) in
+        crate::core::session_launch::project_hook_group_gaps(&fw, project_dir, &val, exe_override)
+            .unwrap_or_default()
+            .missing
+    {
+        if !gaps.contains(&event) {
+            gaps.push(event);
+        }
+    }
     if gaps.is_empty() {
         return Vec::new();
     }

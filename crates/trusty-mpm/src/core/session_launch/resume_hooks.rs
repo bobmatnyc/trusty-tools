@@ -15,7 +15,7 @@
 //! stayed hidden behind `SavingsTotal::is_zero`.
 //! What: [`ensure_project_hooks`] re-derives the same manifest/config layers
 //! `prepare_session_inner` resolves and calls the SAME
-//! [`super::settings::write_project_hooks`] merge — no second merge
+//! [`super::settings::write_project_hooks_with`] merge — no second merge
 //! implementation, so the #7244 no-op exit (a file that already carries every
 //! group is left byte-identical) and the snapshot-before-write rule come
 //! along unchanged. [`missing_lifecycle_hook_events`] is the read-only
@@ -29,7 +29,7 @@ use serde_json::Value;
 
 use super::PrepError;
 use super::project_hooks::is_project_managed_hook_command;
-use super::settings::write_project_hooks;
+use super::settings::write_project_hooks_with;
 use crate::core::standalone::hooks::MPM_LIFECYCLE_HOOK_EVENTS;
 use crate::core::standalone::hooks::cleanup::{event_names_matching, tm_hook_event_names};
 
@@ -41,9 +41,10 @@ use crate::core::standalone::hooks::cleanup::{event_names_matching, tm_hook_even
 /// re-derivation those paths need (they hold no `HarnessPlan`, exactly like
 /// `core::mcp_session_env`) lives in one place.
 /// What: resolves [`crate::core::paths::FrameworkPaths::for_managed_workspace`],
-/// reads `[hooks] prompt_context` from [`crate::core::config::MpmConfig`] and
-/// `[divert] enabled` from the re-resolved plan, then delegates to
-/// [`write_project_hooks`] — which strips tm's own prior entries, deep-merges
+/// resolves every toggle through
+/// [`super::hook_group_diff::project_hook_additions_for`] (#7849), then
+/// delegates to
+/// [`write_project_hooks_with`] — which strips tm's own prior entries, deep-merges
 /// the additions, returns without writing when the result equals the file as
 /// read, and otherwise snapshots before the atomic write. Foreign entries
 /// (the `trusty-memory inbox-check` under `SessionStart`) survive: the strip
@@ -85,19 +86,20 @@ pub(crate) fn ensure_project_hooks_with(
     if !settings_is_writable_object(project_dir) {
         return Ok(());
     }
-    let config = crate::core::config::MpmConfig::load(&fw.root);
-    let plan = crate::core::mcp_session_env::resolve_plan(fw, project_dir);
-    write_project_hooks(
+    // #7849: the toggles now resolve in ONE place, shared with the read-only
+    // diff `tm validate --repair` and `tm doctor` report from. This call used
+    // to hard-code the #7688 capture off, so every resume STRIPPED the two
+    // `Stop`/`SubagentStop` groups the launch had just written — the strip
+    // domain covers them whether or not the write does.
+    write_project_hooks_with(
         project_dir,
-        exe_override,
-        config.hooks.prompt_context,
-        plan.divert_enabled,
+        super::hook_group_diff::project_hook_additions_for(fw, project_dir, exe_override),
     )
 }
 
 /// May the hooks writer rewrite `<project_dir>/.claude/settings.json`?
 ///
-/// Why (#7490): [`write_project_hooks`]'s read step coerces an unparseable or
+/// Why (#7490): [`write_project_hooks_with`]'s read step coerces an unparseable or
 /// non-object file into an EMPTY object and keeps going. Its no-op exit then
 /// compares the merge against that fallback rather than against the file, so
 /// the comparison always differs and the file is snapshotted and replaced with

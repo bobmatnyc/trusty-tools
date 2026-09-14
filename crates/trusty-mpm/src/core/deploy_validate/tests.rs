@@ -452,6 +452,9 @@ fn describe_is_non_empty_for_every_variant() {
         DeploymentGap::OutputStyleUnknownId("x".to_string()),
         DeploymentGap::OutputStyleFileMissing("x".to_string()),
         DeploymentGap::HooksMissing,
+        // #7849
+        DeploymentGap::ProjectHookGroupMissing("Stop".to_string(), "tm hook --x".to_string()),
+        DeploymentGap::ProjectHookGroupStale("Stop".to_string(), "tm hook --x".to_string()),
     ];
     for gap in gaps {
         assert!(!gap.describe().is_empty());
@@ -645,5 +648,405 @@ fn a_stray_project_tier_bundled_skill_does_not_satisfy_completeness() {
             .contains(&DeploymentGap::SkillMissing("tm-doctor".to_string())),
         "a stray project-tier copy must not satisfy completeness, gaps: {:?}",
         report.gaps
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #7849 — toggle-driven project hook groups.
+// ---------------------------------------------------------------------------
+
+/// The stable installed-looking binary every #7849 fixture pins.
+///
+/// Why: both the writer and the validator resolve the hook command through
+/// `resolve_stable_hook_exe`, which refuses the test binary's own build-tree
+/// path. Pinning one path makes the two agree without asking whether the host
+/// running them has `tm` installed.
+/// What: [`crate::test_support::STABLE_HOOK_EXE`] as a `&Path`.
+/// Test: every `#7849` test below.
+fn stable_exe() -> &'static Path {
+    Path::new(crate::test_support::STABLE_HOOK_EXE)
+}
+
+/// A hermetic, fully-provisioned PROJECT — `claude_home_dir()` IS the workspace,
+/// so the file `validate_settings` reads is the one the hook writer writes.
+///
+/// Why (#7849): `fully_provisioned` puts the settings file at the framework
+/// base, which is not a project directory, so the toggle resolution
+/// (`.trusty-mpm.toml`) has nowhere to live. This mirrors
+/// `validate_filtered_but_manifest_matching_workspace_has_no_gaps`'s layout
+/// instead: `for_managed_project(base, workspace)`.
+/// What: the same roster/style/settings seeding `fully_provisioned` does, minus
+/// the hooks — the caller writes those through the launch-path writer.
+/// Test: `repair_adds_the_prompt_feedback_groups_after_the_flag_flips_on`.
+fn provisioned_project(base: &Path) -> (FrameworkPaths, std::path::PathBuf) {
+    let workspace = base.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let mut fw = FrameworkPaths::for_managed_project(base, &workspace);
+    fw.trusty_mpm_root = None;
+
+    seed_agent_source(&fw, &["engineer", "BASE-AGENT"]);
+    seed_skill_source(&fw, &["tm-doctor"]);
+
+    let agents_dir = fw.agent_deploy_dir();
+    std::fs::create_dir_all(&agents_dir).unwrap();
+    std::fs::write(
+        agents_dir.join("engineer.md"),
+        "---\nname: engineer\n---\n\nagent\n",
+    )
+    .unwrap();
+    std::fs::write(
+        agents_dir.join("BASE-AGENT.md"),
+        "---\nname: base-agent\n---\n\nbase\n",
+    )
+    .unwrap();
+    AgentManifest::default().save(&agents_dir).unwrap();
+
+    let skills_dir = managed_skills_dir(&fw);
+    std::fs::create_dir_all(skills_dir.join("tm-doctor")).unwrap();
+    std::fs::write(skills_dir.join("tm-doctor").join("SKILL.md"), "skill").unwrap();
+    crate::core::skill_manifest::SkillManifest::default()
+        .save(&skills_dir)
+        .unwrap();
+
+    deploy_style_file(&fw);
+    write_settings(&fw, r#"{"outputStyle": "trusty-mpm"}"#);
+    (fw, workspace)
+}
+
+/// Write the committed project flag, which outranks the host default.
+///
+/// Why: `prompt_self_improvement::enabled_for` falls back to
+/// `~/.trusty-mpm/config.toml` when the project declines, so a fixture that
+/// simply omitted the key would read the operator's machine. Stating it here
+/// removes the `$HOME` dependency in both directions.
+/// What: `.trusty-mpm.toml` carrying `prompt_self_improvement = <on>`.
+/// Test: `repair_adds_the_prompt_feedback_groups_after_the_flag_flips_on`.
+fn write_project_flag(workspace: &Path, on: bool) {
+    std::fs::write(
+        workspace.join(crate::core::project_config::PROJECT_CONFIG_FILE),
+        format!("prompt_self_improvement = {on}\n"),
+    )
+    .unwrap();
+}
+
+/// Read `<workspace>/.claude/settings.json`.
+fn read_project_settings(workspace: &Path) -> serde_json::Value {
+    let text = std::fs::read_to_string(workspace.join(".claude").join("settings.json")).unwrap();
+    serde_json::from_str(&text).unwrap()
+}
+
+/// The hook events carrying a `--prompt-feedback` capture group, sorted.
+fn prompt_feedback_events(workspace: &Path) -> Vec<String> {
+    let val = read_project_settings(workspace);
+    let Some(hooks) = val.get("hooks").and_then(serde_json::Value::as_object) else {
+        return Vec::new();
+    };
+    let mut events: Vec<String> = hooks
+        .iter()
+        .filter(|(_, groups)| {
+            groups.as_array().is_some_and(|groups| {
+                groups.iter().any(|group| {
+                    group
+                        .get("hooks")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|inner| {
+                            inner.iter().any(|entry| {
+                                entry
+                                    .get("command")
+                                    .and_then(serde_json::Value::as_str)
+                                    .is_some_and(|c| c.ends_with(" hook --prompt-feedback"))
+                            })
+                        })
+                })
+            })
+        })
+        .map(|(event, _)| event.clone())
+        .collect();
+    events.sort();
+    events
+}
+
+/// Seed a project whose settings file the launch-path writer produced with the
+/// flag OFF, then flip the flag ON — the #7849 incident shape.
+fn project_with_the_flag_flipped_on(base: &Path) -> (FrameworkPaths, std::path::PathBuf) {
+    let (fw, workspace) = provisioned_project(base);
+    write_project_flag(&workspace, false);
+    crate::core::session_launch::ensure_project_hooks_with(&fw, &workspace, Some(stable_exe()))
+        .expect("the launch-path writer must succeed against a pinned installed binary");
+    assert!(
+        prompt_feedback_events(&workspace).is_empty(),
+        "the flag was off, so no capture group may have been written"
+    );
+    write_project_flag(&workspace, true);
+    (fw, workspace)
+}
+
+/// THE #7849 REGRESSION TEST — fails on the pre-fix code.
+///
+/// Why: `validate_settings` only asked whether `hooks` was present and
+/// non-empty, so a project whose `prompt_self_improvement` flipped on after its
+/// settings file was written reported "no gaps found" and `--repair` rewrote
+/// nothing. The capture never registered until the next fresh session.
+/// What: seeds the incident shape, runs `--repair`, and asserts the two capture
+/// groups landed and the workspace validates complete.
+/// Test: itself.
+#[test]
+fn repair_adds_the_prompt_feedback_groups_after_the_flag_flips_on() {
+    let tmp = TempDir::new().unwrap();
+    let (fw, workspace) = project_with_the_flag_flipped_on(tmp.path());
+
+    let outcome = super::validate_and_repair_with_exe(&fw, &workspace, None, Some(stable_exe()));
+
+    assert!(
+        !outcome.before.is_complete(),
+        "the flag flip must be reported as a gap, got: {:?}",
+        outcome.before.gaps
+    );
+    assert_eq!(
+        prompt_feedback_events(&workspace),
+        vec!["Stop".to_string(), "SubagentStop".to_string()],
+        "--repair must add exactly the two capture groups"
+    );
+    assert!(
+        outcome.is_complete(),
+        "the repair must close the gap it found, left: {:?}",
+        outcome.after.gaps
+    );
+}
+
+/// A second `--repair` changes nothing.
+///
+/// Why: the spawn/resume gate calls this on every launch; a repair that
+/// rewrote the file each time would snapshot on every session and push the one
+/// prior state worth keeping out of the archive (#7244's lesson).
+/// What: repairs twice and compares the file bytes across the second call.
+/// Test: itself.
+#[test]
+fn a_second_repair_leaves_the_settings_file_byte_identical() {
+    let tmp = TempDir::new().unwrap();
+    let (fw, workspace) = project_with_the_flag_flipped_on(tmp.path());
+    let path = workspace.join(".claude").join("settings.json");
+
+    super::validate_and_repair_with_exe(&fw, &workspace, None, Some(stable_exe()));
+    let after_first = std::fs::read(&path).unwrap();
+
+    let outcome = super::validate_and_repair_with_exe(&fw, &workspace, None, Some(stable_exe()));
+    assert!(
+        outcome.before.is_complete(),
+        "the second run must find nothing to do, got: {:?}",
+        outcome.before.gaps
+    );
+    assert_eq!(
+        after_first,
+        std::fs::read(&path).unwrap(),
+        "a second --repair must not rewrite the file"
+    );
+}
+
+/// A hook-group repair preserves every foreign entry and every foreign key.
+///
+/// Why: the file is the project's own, not tm's. A resync that dropped a
+/// hand-added hook or an unrelated settings key would trade one defect for a
+/// worse one.
+/// What: plants a foreign `Stop` group and a foreign top-level key, repairs,
+/// and asserts both survive alongside the added capture groups.
+/// Test: itself.
+#[test]
+fn a_hook_group_repair_leaves_foreign_entries_untouched() {
+    let tmp = TempDir::new().unwrap();
+    let (fw, workspace) = project_with_the_flag_flipped_on(tmp.path());
+    let path = workspace.join(".claude").join("settings.json");
+
+    let mut val = read_project_settings(&workspace);
+    val["permissions"] = serde_json::json!({ "allow": ["Bash(ls:*)"] });
+    val["hooks"]["Stop"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "matcher": "",
+            "hooks": [{ "type": "command", "command": "/opt/other-harness/run --stop" }]
+        }));
+    std::fs::write(&path, serde_json::to_string_pretty(&val).unwrap()).unwrap();
+
+    super::validate_and_repair_with_exe(&fw, &workspace, None, Some(stable_exe()));
+
+    let after = read_project_settings(&workspace);
+    assert_eq!(
+        after["permissions"],
+        serde_json::json!({ "allow": ["Bash(ls:*)"] }),
+        "an unrelated settings key must survive the repair"
+    );
+    let stop_commands: Vec<String> = after["hooks"]["Stop"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|g| g.get("hooks").and_then(serde_json::Value::as_array))
+        .flatten()
+        .filter_map(|e| e.get("command").and_then(serde_json::Value::as_str))
+        .map(str::to_string)
+        .collect();
+    assert!(
+        stop_commands
+            .iter()
+            .any(|c| c == "/opt/other-harness/run --stop"),
+        "the foreign Stop entry must survive: {stop_commands:?}"
+    );
+}
+
+/// A capture group the flag no longer asks for is reported and removed.
+///
+/// Why (#7849, the other direction): a stale group keeps firing forever — it
+/// spawns a `tm` process at the end of every turn in a project that turned the
+/// feature off. The strip domain in the writer already covers it; what was
+/// missing was anything that noticed.
+/// What: writes the file with the flag ON, flips it OFF, repairs, and asserts
+/// the two groups are gone and every other group survives.
+/// Test: itself.
+#[test]
+fn repair_removes_a_stale_prompt_feedback_group_when_the_flag_is_off() {
+    let tmp = TempDir::new().unwrap();
+    let (fw, workspace) = provisioned_project(tmp.path());
+    write_project_flag(&workspace, true);
+    crate::core::session_launch::ensure_project_hooks_with(&fw, &workspace, Some(stable_exe()))
+        .expect("write with the flag on");
+    assert_eq!(prompt_feedback_events(&workspace).len(), 2);
+    let before_guard = read_project_settings(&workspace)["hooks"]["PreToolUse"].clone();
+
+    write_project_flag(&workspace, false);
+    let outcome = super::validate_and_repair_with_exe(&fw, &workspace, None, Some(stable_exe()));
+
+    assert!(
+        outcome.before.gaps.iter().any(|g| matches!(
+            g,
+            DeploymentGap::ProjectHookGroupStale(event, _) if event == "Stop"
+        )),
+        "the stale group must be reported, got: {:?}",
+        outcome.before.gaps
+    );
+    assert!(
+        prompt_feedback_events(&workspace).is_empty(),
+        "--repair must remove the group the flag no longer asks for"
+    );
+    assert_eq!(
+        read_project_settings(&workspace)["hooks"]["PreToolUse"],
+        before_guard,
+        "only the stale group may be removed"
+    );
+}
+
+/// A settings file that will not parse is a FAIL, never "no gaps found".
+///
+/// Why (#7849 fail-open check): the toggle probe reads the parsed value, so a
+/// file that never parsed must reach the existing `SettingsMalformed` gap and
+/// stop there — silently treating an unreadable file as a complete one is the
+/// same defect this issue is about, moved one probe along.
+/// What: overwrites the settings file with invalid JSON and asserts the report
+/// names it and reports no hook-group gap derived from a value nobody read.
+/// Test: itself.
+#[test]
+fn a_malformed_settings_file_is_a_fail_not_a_silent_pass() {
+    let tmp = TempDir::new().unwrap();
+    let (fw, workspace) = project_with_the_flag_flipped_on(tmp.path());
+    std::fs::write(
+        workspace.join(".claude").join("settings.json"),
+        "{ not json",
+    )
+    .unwrap();
+
+    let report = super::validate_workspace_with_exe(&fw, Some(stable_exe()));
+
+    assert!(!report.is_complete(), "a malformed file is never complete");
+    assert!(
+        report
+            .gaps
+            .iter()
+            .any(|g| matches!(g, DeploymentGap::SettingsMalformed(_))),
+        "the parse failure must be named, got: {:?}",
+        report.gaps
+    );
+    assert!(
+        !report.gaps.iter().any(DeploymentGap::is_project_hook_group),
+        "no hook-group verdict may be derived from a value nobody parsed: {:?}",
+        report.gaps
+    );
+}
+
+/// An unresolvable hook binary leaves the report INCOMPLETE, never clean.
+///
+/// Why (#7849, fail-open check): the first cut swallowed the resolution error
+/// into an empty diff, so a project with real drift validated complete and
+/// `tm doctor` stayed silent whenever the running binary could not be resolved
+/// — the same symptom this issue is about, gated on the exe instead of on the
+/// toggle.
+/// What: builds the real drift fixture, then hands the validator a probe that
+/// refuses. The probe seam is used rather than a foreign `exe_override`
+/// because `resolve_stable_hook_exe` rescues a refused override from `$PATH`
+/// and the well-known daemon directories, so a path pin cannot reach this arm
+/// on a host that has `tm` installed. Asserts the report is not complete, names
+/// the diagnostic, and that every gap routes to the in-place resync — which is
+/// what makes `--repair` surface the same refusal as `repair_error`.
+/// Test: itself.
+#[test]
+fn an_unresolvable_hook_binary_is_an_incomplete_diagnostic_never_a_clean_report() {
+    let tmp = TempDir::new().unwrap();
+    let (fw, _workspace) = project_with_the_flag_flipped_on(tmp.path());
+
+    let report = super::validate_workspace_with_probe(&fw, &|_, _, _| {
+        Err(crate::core::standalone::hooks::StableHookExeError::Unresolved)
+    });
+
+    assert!(
+        !report.is_complete(),
+        "an unverifiable hook set must never read as complete"
+    );
+    assert!(
+        report
+            .gaps
+            .iter()
+            .any(|g| matches!(g, DeploymentGap::ProjectHookDiagnosticIncomplete(_))),
+        "the resolution failure must be named, got: {:?}",
+        report.gaps
+    );
+    assert!(
+        report.gaps.iter().all(DeploymentGap::is_project_hook_group),
+        "every gap must route to the in-place resync, got: {:?}",
+        report.gaps
+    );
+}
+
+/// A writer failure surfaces as a repair error, never as "no gaps found".
+///
+/// Why (#7849 fail-open check): the whole defect was a silent success. A repair
+/// that cannot write must say so — reporting the workspace complete because
+/// nothing could be changed is the same failure in a new place.
+/// What: seeds the incident shape, makes `.claude/` unwritable so the
+/// snapshot-before-write refuses, and asserts the outcome carries an error and
+/// stays incomplete.
+/// Test: itself.
+#[test]
+fn a_hook_writer_failure_surfaces_rather_than_reporting_no_gaps() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().unwrap();
+    let (fw, workspace) = project_with_the_flag_flipped_on(tmp.path());
+    let claude_dir = workspace.join(".claude");
+
+    let original = std::fs::metadata(&claude_dir).unwrap().permissions();
+    std::fs::set_permissions(&claude_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let outcome = super::validate_and_repair_with_exe(&fw, &workspace, None, Some(stable_exe()));
+    std::fs::set_permissions(&claude_dir, original).unwrap();
+
+    assert!(
+        !outcome.before.is_complete(),
+        "the gap must still be reported, got: {:?}",
+        outcome.before.gaps
+    );
+    assert!(
+        outcome.repair_error.is_some(),
+        "a refused write must surface as a repair error"
+    );
+    assert!(
+        !outcome.is_complete() && !outcome.repaired,
+        "a refused write must never report the workspace repaired"
     );
 }

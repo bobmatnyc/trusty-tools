@@ -91,7 +91,7 @@ pub(super) fn project_managed_hook_additions(
 /// Why: an ADDITIVE seam rather than a fourth parameter on the function above,
 /// whose existing call sites all assert shapes this flag does not change — see
 /// the same reasoning on
-/// [`super::settings::write_project_hooks_with_prompt_feedback`].
+/// [`super::settings::write_project_hooks`].
 /// What: `prompt_feedback_enabled = true` APPENDS one empty-matcher group onto
 /// `Stop` and one onto `SubagentStop`, after every existing group, so no other
 /// group's bytes change either way; `false` writes none.
@@ -264,6 +264,26 @@ pub(super) fn is_project_managed_hook_command(cmd: &str) -> bool {
         || is_divert_hook_command(cmd)
         // #7688: likewise for a stale capture group when the flag flips off.
         || is_prompt_feedback_hook_command(cmd)
+}
+
+/// Recognise a hook command only the PROJECT tier ever writes.
+///
+/// Why (#7849): the toggle-driven gap probe compares a settings file against
+/// what THIS writer would produce, and `tm doctor` hands it every settings file
+/// it can reach — including the USER-tier `~/.claude/settings.json`, which
+/// [`crate::core::standalone::hooks::ensure_managed_hooks`] provisions with the
+/// lifecycle triad alone. Gating on [`is_project_managed_hook_command`] would
+/// therefore match that file too and report every project-tier group missing
+/// from it. The `trusty-memory` block and the PM guard are written by this
+/// module and by nothing else, so either one identifies the project tier.
+/// What: `true` for a PM-guard command (ends with [`PM_GUARD_SUFFIX`]) or a
+/// `trusty-memory ` command. Deliberately narrower than
+/// [`is_project_managed_hook_command`], which is a STRIP domain rather than a
+/// tier marker.
+/// Test: `the_tier_marker_ignores_a_user_tier_lifecycle_command`,
+/// `the_tier_marker_recognises_the_pm_guard`.
+pub(super) fn is_project_tier_marker_command(cmd: &str) -> bool {
+    cmd.ends_with(PM_GUARD_SUFFIX) || cmd.starts_with("trusty-memory ")
 }
 
 #[cfg(test)]
