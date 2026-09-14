@@ -26,6 +26,8 @@ Fixed
   changelogs already use).
 - **Everything after it is the bullet text**, copied through verbatim. Match the
   crate CHANGELOG's existing style.
+- **Every line after the category line must start with `- `.** A body line
+  with no leading `- ` is rejected the same way a second category is.
 - **The file must sit directly in `changelog.d/`.** A nested one
   (`changelog.d/sub/…`) is rejected at release time; `changelog.d/README.md` is
   the tracked directory placeholder and is never treated as a fragment.
@@ -187,6 +189,14 @@ confined to an inline `#[cfg(test)] mod tests { … }` block inside a `src/**`
 production file still owes a fragment: the file itself is a production path
 under that rule, even though `check_line_cap.sh` excludes that exact block from
 the SLOC count (#5153). Same input, two different rulings, by design.
+
+### A revert-only change cannot use `--staged`
+
+`--staged` clears a crate whose fragment for the reverted change is still in
+the working tree or index. It cannot clear a crate whose earlier-in-branch
+fragment was already committed and is now being reverted — that fragment has
+nothing left staged to find. Commit the revert, then run the default
+(post-commit) gate instead of reaching for `--staged` a second time.
 
 ### Two gates that need a real commit, not the working tree
 
