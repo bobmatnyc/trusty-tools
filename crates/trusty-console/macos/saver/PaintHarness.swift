@@ -7,7 +7,7 @@
 //   "whatever the view paints when there is no live page", and all three were
 //   reported as a black screen. Nothing measured them, because measuring them
 //   means reading pixels, not navigation callbacks.
-// What: nine modes, each instantiating the bundle's principal class offscreen
+// What: twelve modes, each instantiating the bundle's principal class offscreen
 //   and reading its rendered bitmap through
 //   `bitmapImageRepForCachingDisplay` / `cacheDisplay`:
 //     offline — points the view at a closed port; asserts the frame is not black
@@ -46,6 +46,19 @@
 //     failure   its retry. Asserts the instance is NOT replaced there — the
 //               assertion that fails a view which spends a process on every
 //               brief console restart.
+//     occluded  #7846: the never-answering listener with the view's visibility
+//               verdict FORCED to occluded. Asserts a load that outlives the
+//               6 s deadline behind an occluded window neither fails nor
+//               retries, and then that flipping the verdict to visible produces
+//               the failure and the retry after all.
+//     occluded- #7846: a listener that hangs up instead, so every attempt fails
+//     failing   for real while occluded. Asserts the retry backoff still runs
+//               and the WKWebView instance is never replaced — a rebuild into
+//               the same occluded window is the loop the issue reports.
+//     visibility #7846: the never-answering listener with the verdict forced to
+//     -unknown  UNKNOWN. Asserts the view waits — no rebuild where the unfixed
+//               one rebuilds — but only for a bounded number of re-asks, after
+//               which it judges loads again and does reach the rebuild.
 //   Every mode takes the frame it runs at — `--frame WxH`, default 1280x800 —
 //   so the ultrawide geometry #6871 was reported on is reachable.
 // Test: it IS the test. README.md, "Paint harness", has the invocations;
@@ -226,6 +239,45 @@ let oneFailureRetryWait: TimeInterval = 20
 /// where exactly one failure has been counted.
 let oneFailureSettleSeconds: TimeInterval = 3
 
+// MARK: - Occluded-window thresholds (#7846)
+
+/// The view's `WindowVisibility` raw values, mirrored so the harness can force
+/// one through KVC. They must move together with the enum in
+/// `TrustyConsoleSaver.swift`; a mismatch reads as "ask AppKit" and the modes
+/// below would then measure the harness's own offscreen window.
+let visibilityVisible = 1
+let visibilityHidden = 2
+let visibilityUnknown = 3
+/// The `@objc` setter the seam is reached through. Absent from any bundle built
+/// before #7846, and `setValue(_:forKey:)` on a missing key raises an ObjC
+/// exception Swift cannot catch — so it is probed, never assumed.
+let visibilitySetterSelector = "setWindowVisibilityOverride:"
+
+/// How long `occluded` and `occluded-failing` watch an occluded view. The fixed
+/// view absorbs a timed-out load into a 60 s wait, so `occluded` sees exactly
+/// the one attempt inside this window; the unfixed one fails at about 6 s and
+/// retries every 8 s, so the same window holds four of its attempts and the
+/// rebuild its third failure triggers at about 34 s.
+let occludedObservationSeconds: TimeInterval = 45
+/// Connection attempts `occluded-failing` demands. A connection the console
+/// drops is a real failure whether or not anyone is looking at the screen, so
+/// the retry backoff must keep running there — the fix suppresses the REBUILD,
+/// not the retry. Well under what the unfixed and fixed bundles both produce.
+let occludedFailingMinAttempts = 3
+/// How long `occluded` then watches after the verdict flips to visible and the
+/// occlusion notification is posted. The view ends its wait inside that
+/// callback, so the attempt lands immediately and this is slack, not a budget.
+let occludedRecoverySeconds: TimeInterval = 35
+/// How long `visibility-unknown` requires the view to go without a rebuild.
+/// Three re-asks at the 8 s fast retry interval put the fall-back at about 34 s
+/// and the third COUNTED failure after it at about 62 s, where the unfixed view
+/// — which never waits — reaches its third at about 34 s and rebuilds there.
+let unknownQuietSeconds: TimeInterval = 45
+/// How long it then watches for the rebuild that proves the fall-back fired
+/// rather than the view waiting forever. Post-fix that lands at about 62 s, so
+/// this window holds it with 18 s of slack.
+let unknownFallbackSeconds: TimeInterval = 35
+
 // MARK: - Arguments
 
 func note(_ message: String) {
@@ -287,9 +339,11 @@ let bundlePath = positional.count > 1
     : NSHomeDirectory() + "/Library/Screen Savers/TrustyConsole.saver"
 
 guard ["offline", "slow", "preview", "resize", "stop", "suspend", "suspend-cold",
-       "recreate", "one-failure"].contains(mode) else {
+       "recreate", "one-failure", "occluded", "occluded-failing",
+       "visibility-unknown"].contains(mode) else {
     note("usage: paintharness <offline|slow|preview|resize|stop|suspend|suspend-cold"
-        + "|recreate|one-failure> [bundlePath] [--frame WxH] [--start WxH]")
+        + "|recreate|one-failure|occluded|occluded-failing|visibility-unknown>"
+        + " [bundlePath] [--frame WxH] [--start WxH]")
     note("  --frame  the frame to run at (default 1280x800; env SAVER_HARNESS_FRAME)")
     note("  --start  resize mode only: the frame to construct at (default 320x200)")
     exit(64)
@@ -361,20 +415,26 @@ func closedPort() -> Int {
 /// shape of a daemon that has bound its socket during a restart but cannot yet
 /// answer an HTTP request. Counts every connection it accepts, which is how the
 /// harness sees the view give up and retry.
+///
+/// `hangsUp: true` closes each connection instead of holding it, so the load
+/// fails at once rather than stalling. #7846's `occluded-failing` mode needs
+/// hard failures it can also COUNT, which a closed port cannot give it.
 final class SilentListener {
     private let listener: NWListener
     private let lock = NSLock()
     private var connections: [NWConnection] = []
     private var count = 0
+    private let hangsUp: Bool
 
     /// Defaulted rather than assigned once at the end, because the connection
     /// handler below captures `self` and Swift will not allow that until every
     /// stored property holds a value.
     private(set) var port = 0
 
-    init?() {
+    init?(hangsUp: Bool = false) {
         guard let listener = try? NWListener(using: .tcp, on: .any) else { return nil }
         self.listener = listener
+        self.hangsUp = hangsUp
         let ready = DispatchSemaphore(value: 0)
         listener.stateUpdateHandler = { if case .ready = $0 { ready.signal() } }
         listener.newConnectionHandler = { [weak self] connection in
@@ -383,8 +443,17 @@ final class SilentListener {
             self.count += 1
             // Held so ARC does not release the connection and close the socket,
             // which would look to the client like a refusal rather than a stall.
-            self.connections.append(connection)
+            if !self.hangsUp { self.connections.append(connection) }
             self.lock.unlock()
+            guard !self.hangsUp else {
+                // Started and then closed, not merely cancelled: an accepted
+                // connection that is dropped is a hard, fast failure at the
+                // client, where an unstarted cancel can present as the stall
+                // this listener's other mode exists to produce.
+                connection.start(queue: .global())
+                DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) { connection.cancel() }
+                return
+            }
             connection.start(queue: .global())
         }
         listener.start(queue: .global())
@@ -638,6 +707,17 @@ var page: PageListener?
 switch mode {
 case "offline":
     pointView(atPort: closedPort())
+case "occluded-failing":
+    // #7846: every attempt has to fail for a REAL reason while the window is
+    // occluded — the rebuild this mode must not reach is counted off hard
+    // failures, not off the deadline. A listener that accepts and then hangs up
+    // produces one per attempt AND counts them, which a closed port cannot.
+    guard let listener = SilentListener(hangsUp: true) else {
+        note("could not start the hang-up listener")
+        finish(6)
+    }
+    silent = listener
+    pointView(atPort: listener.port)
 case "suspend", "suspend-cold":
     // #7112 happens to a page that is already live, so these modes need an
     // endpoint that answers rather than one that stalls. `suspend-cold` serves a
@@ -649,12 +729,15 @@ case "suspend", "suspend-cold":
     }
     page = listener
     pointView(atPort: listener.port)
-case "slow", "stop", "recreate", "one-failure":
+case "slow", "stop", "recreate", "one-failure", "occluded", "visibility-unknown":
     // #6900 wants the same endpoint `slow` uses: a load that is in flight and
     // stays there is the state the stop has to interrupt, and every connection
     // the view opens is counted. #7606's two modes want it for a third reason —
     // it is the only endpoint that makes every load fail the same way, so the
-    // failure COUNT is the variable under test.
+    // failure COUNT is the variable under test. #7846's two want it for a
+    // fourth: a load that is still in flight when the deadline elapses is the
+    // exact shape an occluded window produces, and the connection count is how
+    // the harness sees the view either give up on it or wait.
     guard let listener = SilentListener() else {
         note("could not start the silent listener")
         finish(6)
@@ -700,6 +783,47 @@ window.orderFrontRegardless()
 window.setFrameOrigin(NSPoint(x: -5000, y: -5000)) // offscreen: do not disturb the operator
 
 note("constructed at \(Int(initialSize.width))x\(Int(initialSize.height)); view.bounds=\(NSStringFromRect(view.bounds))")
+
+// MARK: - Window-visibility verdict (#7846)
+
+/// Force the view's window-visibility verdict, or report that the bundle has no
+/// seam to force it through.
+///
+/// AppKit reports no `.visible` for the window above — it is parked off every
+/// display — so a view left to ask AppKit runs every mode as occluded. Before
+/// #7846 that made no difference; now it decides whether a load deadline counts,
+/// so every mode that asserts the deadline path has to say which verdict it
+/// means. A bundle built before #7846 answers `false` here rather than raising
+/// an ObjC exception on an unknown key.
+func forceVisibility(_ verdict: Int) -> Bool {
+    guard view.responds(to: NSSelectorFromString(visibilitySetterSelector)) else { return false }
+    view.setValue(verdict, forKey: "windowVisibilityOverride")
+    return (view.value(forKey: "windowVisibilityOverride") as? Int) == verdict
+}
+
+/// What each mode needs the view to believe. The modes that predate #7846 take
+/// `visible`, which is the verdict their assertions were written against; the
+/// three #7846 modes take the state under test. `suspend` and `suspend-cold`
+/// are deliberately absent: their #7112 assertions turn on the view's own
+/// occluded-window reasoning, so forcing a verdict there would change what they
+/// measure.
+let forcedVisibility: Int? = {
+    switch mode {
+    case "slow", "stop", "recreate", "one-failure": return visibilityVisible
+    case "occluded", "occluded-failing": return visibilityHidden
+    case "visibility-unknown": return visibilityUnknown
+    default: return nil
+    }
+}()
+/// Whether the seam took. Only the #7846 modes fail on its absence — for the
+/// older modes the forced verdict merely restores what they measured before it
+/// existed, and an old bundle has the old behaviour to measure.
+var visibilitySeamPresent = true
+if let forcedVisibility {
+    visibilitySeamPresent = forceVisibility(forcedVisibility)
+    note("window-visibility verdict forced to \(forcedVisibility):"
+        + " \(visibilitySeamPresent ? "accepted" : "NO SEAM in this bundle (pre-#7846)")")
+}
 
 // No run loop first: `cacheDisplay` drives `draw(_:)` synchronously, so this is
 // the earliest frame the view can possibly produce.
@@ -1172,6 +1296,131 @@ case "suspend", "suspend-cold":
     } else if lowestInk < minInkRatio {
         failures.append(String(format: "nothing drawn during the recovery: ink=%.4f < %.4f",
                                lowestInk, minInkRatio))
+    }
+
+case "occluded", "occluded-failing", "visibility-unknown":
+    guard let listener = silent else { break }
+    if !visibilitySeamPresent {
+        // The mode cannot mean anything without the seam, and a bundle that
+        // lacks it is a bundle from before the fix. Reported, then measured
+        // anyway: the pre-fix behaviour under the harness's own occluded window
+        // is exactly what the assertions below are written to catch.
+        failures.append("no #7846 visibility seam in this bundle —"
+            + " the verdict could not be forced, so this run is pre-fix behaviour")
+    }
+
+    /// The view's timers and WebKit's callbacks all land on the main run loop,
+    /// so a plain sleep would stop the machinery under test.
+    func pump(_ seconds: TimeInterval, until condition: () -> Bool = { false }) {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline && !condition() {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+    }
+
+    func currentWebView() -> WKWebView? {
+        view.subviews.compactMap { $0 as? WKWebView }.first
+    }
+
+    // Held strongly for the length of the run: identity is the assertion, and a
+    // released object's address can be handed to its replacement.
+    guard let original = currentWebView() else {
+        failures.append("the view built no web view")
+        break
+    }
+
+    if mode == "visibility-unknown" {
+        // --- an unanswerable window waits, but not forever -------------------
+        // Nothing reports this view's window either way, so every timed-out load
+        // is absorbed into a wait — until the probe budget runs out, after which
+        // they are judged again. The REBUILD is what makes both halves visible
+        // from outside: a view that never waited reaches three counted failures
+        // inside the quiet window, and a view that waits forever never reaches
+        // them at all. The connection cadence cannot tell those apart, because
+        // the wait re-issues the attempt on the same fast interval the retry
+        // backoff uses.
+        note("watching an unknown-visibility view for \(Int(unknownQuietSeconds))s"
+            + " — the first attempts must not be counted as failures")
+        pump(unknownQuietSeconds)
+        note("connection attempts while waiting: \(listener.accepted)")
+        if let now = currentWebView(), now !== original {
+            failures.append("counted an unanswerable window's timeouts as failures:"
+                + " the web view was rebuilt inside \(Int(unknownQuietSeconds))s")
+        }
+        note("watching \(Int(unknownFallbackSeconds))s for the bounded fall-back")
+        pump(unknownFallbackSeconds, until: { currentWebView() !== original })
+        note("connection attempts after the fall-back window: \(listener.accepted)")
+        if currentWebView() === original {
+            failures.append("the view waited forever on an unknown verdict:"
+                + " no rebuild in \(Int(unknownQuietSeconds + unknownFallbackSeconds))s,"
+                + " so the bounded fall-back never fired")
+        }
+        break
+    }
+
+    // --- an occluded window is a wait, never a failure ----------------------
+    // `occluded` stalls every load, so a view that respects the occlusion makes
+    // exactly one attempt and keeps it. `occluded-failing` fails every load for
+    // real, so the retries must continue — what must not happen there is the
+    // rebuild, which would put a fresh WebContent process behind the same
+    // occluded window and start the loop again.
+    let stalls = mode == "occluded"
+    note("watching an occluded view for \(Int(occludedObservationSeconds))s")
+    var lowestInk = Double.greatestFiniteMagnitude
+    let occludedUntil = Date().addingTimeInterval(occludedObservationSeconds)
+    while Date() < occludedUntil {
+        if let rep = capture(view), let frame = stats(of: rep) {
+            lowestInk = min(lowestInk, frame.inkRatio)
+            if frame.nonBlackRatio < minNonBlackRatio {
+                failures.append(String(format: "frame went black while occluded: nonBlack=%.4f",
+                                       frame.nonBlackRatio))
+                break
+            }
+        }
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+    }
+    let occludedAttempts = listener.accepted
+    note("connection attempts while occluded: \(occludedAttempts)")
+    if stalls, occludedAttempts != 1 {
+        failures.append("the occluded view gave up on a load WebKit was still throttling:"
+            + " \(occludedAttempts) connection attempt(s) in \(Int(occludedObservationSeconds))s,"
+            + " expected exactly 1")
+    }
+    if !stalls, occludedAttempts < occludedFailingMinAttempts {
+        failures.append("the occluded view stopped retrying a console that was failing for real:"
+            + " \(occludedAttempts) connection attempt(s), expected >= \(occludedFailingMinAttempts)")
+    }
+    if let now = currentWebView(), now !== original {
+        failures.append("rebuilt the web view while occluded —"
+            + " the replacement inherits the occlusion, which is the loop #7846 reports")
+    }
+    // #6838 must not regress across the wait: the fallback keeps drawing.
+    note(String(format: "lowest ink while occluded: %.4f", lowestInk))
+    if lowestInk < minInkRatio, lowestInk != Double.greatestFiniteMagnitude {
+        failures.append(String(format: "fallback stopped drawing while occluded: ink=%.4f < %.4f",
+                               lowestInk, minInkRatio))
+    }
+
+    // --- and a window that comes back gets the load judged after all --------
+    guard stalls else { break }
+    guard visibilitySeamPresent, forceVisibility(visibilityVisible) else {
+        note("skipping the visible-again half: no seam to flip the verdict with")
+        break
+    }
+    // The notification AppKit posts when a window stops being occluded. Posting
+    // it by hand is the only way to reach that path here — the window is parked
+    // off every display, so AppKit never posts it for real — and the view reads
+    // the verdict back through the seam, not from the notification's payload.
+    NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification,
+                                    object: window)
+    note("verdict flipped to visible; watching \(Int(occludedRecoverySeconds))s"
+        + " for the attempt that follows")
+    pump(occludedRecoverySeconds, until: { listener.accepted > occludedAttempts })
+    note("connection attempts after the window came back: \(listener.accepted)")
+    if listener.accepted <= occludedAttempts {
+        failures.append("the load was never judged once the window was visible:"
+            + " still \(listener.accepted) connection attempt(s) after"
+            + " \(Int(occludedRecoverySeconds))s — the deadline did not restart")
     }
 
 default:

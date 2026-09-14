@@ -148,7 +148,8 @@ daemon**: each mode builds its own endpoint.
 swiftc -O -swift-version 5 -o target/console-saver/harness/paintharness \
   crates/trusty-console/macos/saver/PaintHarness.swift
 
-for mode in offline slow preview resize stop suspend suspend-cold recreate one-failure; do
+for mode in offline slow preview resize stop suspend suspend-cold recreate one-failure \
+            occluded occluded-failing visibility-unknown; do
   ./target/console-saver/harness/paintharness "$mode" \
     target/console-saver/TrustyConsole.saver || echo "FAILED: $mode"
 done
@@ -168,6 +169,9 @@ unoptimised build spends over a second in it.
 | `suspend-cold` | the same listener, serving a page that is `hidden` from its **first** read | the same re-entrant assertion, then the view recovers inside 90 s with no visible-then-hidden history to reason from — the bounded forced-recovery deadline, measured at 69 s (#7112) |
 | `recreate` | the never-answering listener again | after three consecutive failed loads the `WKWebView` **instance** is replaced and the replacement opens its own connection; the fallback keeps drawing across the swap (#7606) |
 | `one-failure` | the same listener, watched only as far as the first failure and its retry | the instance is **not** replaced — the assertion that fails a view which spends a WebContent process on every brief console restart (#7606) |
+| `occluded` | the never-answering listener, with the view's window-visibility verdict forced to occluded | a load that outlives the 6 s deadline behind an occluded window is **not** failed: exactly **one** connection attempt in 45 s and no rebuild. Then the verdict flips to visible and the occlusion notification is posted, and the attempt that had been waiting is issued at once (#7846) |
+| `occluded-failing` | a listener that accepts and hangs up, so every load fails for real, still occluded | the retry backoff keeps running — ≥3 attempts — and the `WKWebView` instance is **never** replaced. A rebuild into the same occluded window is the loop #7846 reports |
+| `visibility-unknown` | the never-answering listener, verdict forced to unknown | the view waits: no rebuild inside 45 s, where the unfixed one rebuilds at ~34 s. Then the bounded fall-back fires and the rebuild does arrive by 80 s, so the wait cannot be silent and endless (#7846) |
 
 ### Stop path (#6900)
 
@@ -306,6 +310,57 @@ immediate ground the real full-screen saver would take. Whether the real
 `WallpaperAgent`-hosted page reports `visible` at all before the NotVisible flip
 is likewise settled only in host, and the log lines above say which happened.
 
+### Occluded windows and the load deadline (#7846)
+
+The owner's saver logged 3483 `offline — load did not finish within 6s` against
+23 `didFinish` over six hours while the console answered `/ui/screensaver` in
+0.6 ms throughout, and rebuilt its web view 1146 times. The window was occluded
+the whole time: WebKit throttles a backgrounded `WKWebView`, the navigation
+misses the 6 s deadline because nothing is driving it, and the #7606 rebuild
+builds a fresh web view into the same occluded window, where it is throttled
+the same way.
+
+So the deadline now asks, before it fails a load, whether this view's window is
+on screen at all — `NSWindow.occlusionState`, the same signal #7112's recovery
+already reasons from. Three answers:
+
+| Verdict | What the deadline does |
+|---|---|
+| visible | exactly what it did before: abandon the attempt, `enterOffline`, retry |
+| occluded | waits. Re-asks once a minute, and if the attempt it was waiting on has ended, issues another one. No `enterOffline`, no failure counted, no banner raised |
+| unknown | waits too, but only three re-asks at the fast retry interval; then it logs one `.error` line and judges loads the ordinary way until something answers |
+
+`NSURLErrorTimedOut` is absorbed into that wait as well, because the network
+process goes on running the 5 s request timer while the WebContent process is
+throttled — the timeout says the same thing the deadline does. Every other
+error still reaches `enterOffline`: refused, connection lost, a dead WebContent
+process are all statements about the console that occlusion does not explain.
+What an occluded window does suppress is the REBUILD — `noteLoadFailure`
+declines to count while the window is off screen, so a real outage still retries
+on its own backoff without spending a WebContent process per three attempts.
+
+The log says which happened, and `waiting —` never reads as `offline —`:
+
+```
+load deadline waiting — occluded window (0s so far)
+load deadline waiting — occluded window, the load timed out (6s so far)
+load deadline waiting — window visibility unknown, probe 2 of 3 (14s so far)
+window visibility still unknown after 3 probe(s) — judging the load on the ordinary deadline from here
+window visible again after 45s of waiting — loading
+failure not counted toward the rebuild — occluded window (…)
+```
+
+**The harness forces the verdict; it cannot produce one.** AppKit reports no
+`.visible` for a window parked off every display, so every mode would otherwise
+run as occluded — and the real host's occlusion cannot be staged from an
+unsandboxed harness anyway. The view carries an `@objc`
+`windowVisibilityOverride` for this: zero means ask AppKit, and the three
+#7846 modes set 1/2/3 through KVC, which is all an out-of-process harness can
+reach on a dynamically loaded principal class. The four never-answering modes
+that predate #7846 set it to visible, which is the verdict their assertions
+were always written against. `suspend` and `suspend-cold` deliberately leave it
+alone: their #7112 assertions turn on the view's own occluded-window reasoning.
+
 ### Frame size (#6871)
 
 Every mode runs at the frame you give it, so the ultrawide geometry #6871 was
@@ -437,6 +492,11 @@ configuration sheet this phase (`hasConfigureSheet` is `false`).
   to the live page the moment one succeeds — no saver restart. The 8 s is
   derived from the 6 s deadline, not chosen: a retry that lands inside it
   supersedes the attempt in flight and WebKit reports that as -999 (#7606).
+- **Waiting** — the 6 s deadline and a request timeout both WAIT rather than
+  fail while this view's own window is occluded, because a throttled web view
+  misses them for a reason the console has nothing to do with; an occluded
+  failure of any kind never feeds the rebuild count (#7846). See "Occluded
+  windows and the load deadline" below.
 - **Preview** — the System Settings thumbnail (`isPreview == true`) never
   constructs a web view; it paints the same asset at full opacity, with no
   banner.
