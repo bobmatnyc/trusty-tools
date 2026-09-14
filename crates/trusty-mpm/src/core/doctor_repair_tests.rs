@@ -100,6 +100,45 @@ fn hooks_repair_applies_and_backs_up() {
     );
 }
 
+/// `--fix` leaves no lock sidecar beside a settings file it never writes (#7762).
+///
+/// Why: [`repair_hooks_contamination`] loops over `settings.json` AND
+/// `settings.local.json`, and most projects have only the first. Taking the
+/// settings lock before checking the file exists dropped a
+/// `settings.local.json.lock` into every project that ran `tm doctor --fix` —
+/// an untracked file for a repair that reports nothing.
+#[test]
+fn hooks_repair_leaves_no_sidecar_for_an_absent_settings_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_mixed_settings(tmp.path());
+    let claude = tmp.path().join(".claude");
+    assert!(
+        !claude.join("settings.local.json").exists(),
+        "the fixture must NOT have a local settings file"
+    );
+
+    let steps = repair_hooks_contamination(tmp.path(), RepairMode::Apply);
+
+    assert_eq!(
+        steps.len(),
+        1,
+        "only the existing file is repaired: {steps:?}"
+    );
+    assert!(
+        !claude.join("settings.local.json.lock").exists(),
+        "a repair that writes nothing must not leave a lock sidecar: {:?}",
+        fs::read_dir(&claude)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !claude.join("settings.local.json").exists(),
+        "nor may it create the settings file itself"
+    );
+}
+
 #[test]
 fn hooks_repair_dry_run_changes_nothing() {
     let tmp = tempfile::tempdir().unwrap();

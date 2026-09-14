@@ -36,8 +36,6 @@
 
 use std::path::Path;
 
-use trusty_common::claude_config::write_json_atomic;
-
 /// Seed `outputStyle`, `statusLine`, and `attribution` into
 /// `<claude_config_dir>/settings.json` when a key is absent, preserving every
 /// other key untouched.
@@ -85,13 +83,29 @@ use trusty_common::claude_config::write_json_atomic;
 pub(crate) fn ensure_settings_defaults(claude_config_dir: &Path) -> anyhow::Result<()> {
     let settings_path = claude_config_dir.join("settings.json");
 
+    // #7762: the read below and the write at the bottom are one critical
+    // section. `tm doctor --fix` repairs this same managed file from another
+    // PROCESS, and an interleaved cycle drops whichever writer read first.
+    crate::core::settings_lock::with_settings_lock(&settings_path, || {
+        ensure_settings_defaults_locked(&settings_path)
+    })?
+}
+
+/// The read / seed / publish body of [`ensure_settings_defaults`], run under the
+/// settings lock.
+///
+/// Why (#7762): the lock must span the read and the write; splitting keeps the
+/// acquisition visible at the entry point.
+/// What: exactly what [`ensure_settings_defaults`] documents.
+/// Test: see [`ensure_settings_defaults`].
+fn ensure_settings_defaults_locked(settings_path: &Path) -> anyhow::Result<()> {
     // #7789: this read used to be `.ok().filter(is_object)`, so an unparseable
     // or non-object managed settings.json became `{}` and the write below
     // discarded every key the operator had put there. The shared #7780 loader
     // copies the original bytes aside first and refuses the whole call when
     // that copy cannot be made.
     let original =
-        crate::core::session_launch::malformed_backup::load_settings_object(&settings_path)?;
+        crate::core::session_launch::malformed_backup::load_settings_object(settings_path)?;
 
     let mut settings = original.clone();
     let obj = settings
@@ -128,7 +142,9 @@ pub(crate) fn ensure_settings_defaults(claude_config_dir: &Path) -> anyhow::Resu
     // idempotency pattern used by `global_config::ensure_mcp_config`.
     let needs_write = settings != original;
     if needs_write {
-        write_json_atomic(&settings_path, &settings)?;
+        // #7762: `settings_lock::publish` rather than `write_json_atomic` — the
+        // same stage-and-rename, without the `<path>.bak` copy nothing reads.
+        crate::core::settings_lock::publish(settings_path, &settings)?;
     }
     Ok(())
 }

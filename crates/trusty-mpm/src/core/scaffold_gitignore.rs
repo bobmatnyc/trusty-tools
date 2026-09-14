@@ -64,14 +64,27 @@ pub const SCAFFOLD_GITIGNORE_END: &str = "# <<< trusty-mpm harness scaffolding <
 /// override, and `.trusty-mpm/config.toml` is written by `tm project init` —
 /// both are project config an operator MAY want tracked, so ignoring them would
 /// repeat the over-broad `.claude/` mistake called out above.
-/// What: trailing-slash directory patterns plus the one stash FILE, so only the
-/// harness-owned subtrees are ignored, not sibling config.
+///
+/// #7762 added the two `settings*.json.lock` sidecars. Every managed launch now
+/// runs its settings write under an `flock(2)` sidecar
+/// ([`crate::core::settings_lock`]), and that sidecar is created beside a file
+/// the project legitimately tracks — so without these two lines the very fix
+/// that stopped the launch dropping a `.bak` starts dropping a `.lock` into
+/// `git status` instead. The settings files themselves stay absent from this
+/// list, exactly as the "Important Note" above requires: only the harness's own
+/// lock artifact is ignored, never the config it guards.
+/// What: trailing-slash directory patterns, the one stash FILE, and the two lock
+/// sidecars — so only the harness-owned subtrees and artifacts are ignored, not
+/// sibling config.
 /// Test: `writes_block_to_fresh_gitignore`,
-/// `block_covers_session_output_but_not_project_config`.
+/// `block_covers_session_output_but_not_project_config`,
+/// `lock_entries_match_the_settings_lock_sidecar`.
 pub const SCAFFOLD_IGNORED_PATHS: &[&str] = &[
     ".claude/agents/",
     ".claude/skills/",
     ".claude/output-styles/",
+    ".claude/settings.json.lock",
+    ".claude/settings.local.json.lock",
     ".trusty-mpm/sessions/",
     ".trusty-mpm/logs/",
     ".trusty-mpm/last-instructions.md",
@@ -80,14 +93,21 @@ pub const SCAFFOLD_IGNORED_PATHS: &[&str] = &[
 /// Ensure `<project_dir>/.gitignore` carries the tm-scaffolding managed
 /// block, when `project_dir` is a git working tree.
 ///
-/// Why/What: see the module doc. Returns `Ok(true)` when the block was
-/// (freshly) written, `Ok(false)` when it was already present or
-/// `project_dir` is not a git repo (both are legitimate no-ops, not
-/// failures). Propagates genuine I/O errors (permissions, disk full) so the
-/// non-fatal caller can log them rather than silently swallowing a real
-/// problem.
+/// Why/What: see the module doc. Returns `Ok(true)` when the block was written
+/// or refreshed, `Ok(false)` when it was already up to date or `project_dir` is
+/// not a git repo (both are legitimate no-ops, not failures). Propagates genuine
+/// I/O errors (permissions, disk full) so the non-fatal caller can log them
+/// rather than silently swallowing a real problem.
+///
+/// #7762: the begin marker alone used to be the whole idempotency check, so a
+/// project scaffolded before a path was added to [`SCAFFOLD_IGNORED_PATHS`]
+/// never gained it — the new entry reached fresh projects only. A block whose
+/// body is missing a managed path is now re-rendered in place, which is what
+/// carries the two `settings*.json.lock` entries to the projects that already
+/// have a block.
 /// Test: `writes_block_to_fresh_gitignore`, `idempotent_on_repeat_call`,
-/// `preserves_unrelated_existing_content`, `noop_when_not_a_git_repo`.
+/// `preserves_unrelated_existing_content`, `noop_when_not_a_git_repo`,
+/// `an_existing_block_gains_newly_managed_paths`.
 pub fn ensure_scaffold_gitignored(project_dir: &Path) -> std::io::Result<bool> {
     if !project_dir.join(".git").exists() {
         return Ok(false);
@@ -96,13 +116,13 @@ pub fn ensure_scaffold_gitignored(project_dir: &Path) -> std::io::Result<bool> {
     let gitignore_path = project_dir.join(".gitignore");
     let existing = std::fs::read_to_string(&gitignore_path).unwrap_or_default();
 
-    // Idempotent: the begin marker's presence anywhere in the file means a
-    // prior run already installed the block — never append a duplicate.
+    // The begin marker's presence anywhere in the file means a prior run already
+    // installed the block — never append a duplicate; refresh that one instead.
     if existing
         .lines()
         .any(|line| line == SCAFFOLD_GITIGNORE_BEGIN)
     {
-        return Ok(false);
+        return refresh_block(&gitignore_path, &existing);
     }
 
     let mut block = String::new();
@@ -112,14 +132,7 @@ pub fn ensure_scaffold_gitignored(project_dir: &Path) -> std::io::Result<bool> {
     if !existing.is_empty() {
         block.push('\n');
     }
-    block.push_str(SCAFFOLD_GITIGNORE_BEGIN);
-    block.push('\n');
-    for path in SCAFFOLD_IGNORED_PATHS {
-        block.push_str(path);
-        block.push('\n');
-    }
-    block.push_str(SCAFFOLD_GITIGNORE_END);
-    block.push('\n');
+    block.push_str(&render_block());
 
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -130,6 +143,86 @@ pub fn ensure_scaffold_gitignored(project_dir: &Path) -> std::io::Result<bool> {
     tracing::info!(
         path = %gitignore_path.display(),
         "added tm harness-scaffolding block to .gitignore (issue #3427)"
+    );
+    Ok(true)
+}
+
+/// The managed block exactly as it is written: begin, every managed path, end.
+///
+/// What: newline-terminated throughout, including the end marker, so a caller
+/// can append it or splice it between two slices of an existing file.
+/// Test: `writes_block_to_fresh_gitignore`.
+fn render_block() -> String {
+    let mut block = String::new();
+    block.push_str(SCAFFOLD_GITIGNORE_BEGIN);
+    block.push('\n');
+    for path in SCAFFOLD_IGNORED_PATHS {
+        block.push_str(path);
+        block.push('\n');
+    }
+    block.push_str(SCAFFOLD_GITIGNORE_END);
+    block.push('\n');
+    block
+}
+
+/// Re-render an already-installed block that is missing a managed path (#7762).
+///
+/// Why: this is the upgrade path. Every entry added to
+/// [`SCAFFOLD_IGNORED_PATHS`] after a project was first scaffolded would
+/// otherwise reach only projects that never ran tm before.
+/// What: locates the begin/end markers, and rewrites the whole file with a
+/// freshly [`render_block`]ed body between them when any managed path is absent
+/// from the current one. Content OUTSIDE the markers is carried through
+/// verbatim, including operator lines added between them and the block — the
+/// entire file is rewritten, so the trailing-newline shape of the original is
+/// preserved deliberately rather than incidentally. A block whose END marker was
+/// hand-deleted is left alone: rewriting it would have to guess where the
+/// operator's own lines resume.
+/// Test: `an_existing_block_gains_newly_managed_paths`,
+/// `idempotent_on_repeat_call`, `a_block_with_no_end_marker_is_left_alone`.
+fn refresh_block(gitignore_path: &Path, existing: &str) -> std::io::Result<bool> {
+    let lines: Vec<&str> = existing.lines().collect();
+    let Some(begin) = lines.iter().position(|l| *l == SCAFFOLD_GITIGNORE_BEGIN) else {
+        return Ok(false);
+    };
+    let Some(end) = lines[begin..]
+        .iter()
+        .position(|l| *l == SCAFFOLD_GITIGNORE_END)
+        .map(|offset| begin + offset)
+    else {
+        tracing::warn!(
+            path = %gitignore_path.display(),
+            "tm scaffolding block has no end marker — leaving it as the operator edited it"
+        );
+        return Ok(false);
+    };
+
+    let current = &lines[begin..=end];
+    if SCAFFOLD_IGNORED_PATHS
+        .iter()
+        .all(|managed| current.iter().any(|line| line.trim() == *managed))
+    {
+        return Ok(false);
+    }
+
+    let mut rebuilt = String::new();
+    for line in &lines[..begin] {
+        rebuilt.push_str(line);
+        rebuilt.push('\n');
+    }
+    rebuilt.push_str(&render_block());
+    for line in &lines[end + 1..] {
+        rebuilt.push_str(line);
+        rebuilt.push('\n');
+    }
+    if !existing.ends_with('\n') {
+        rebuilt.pop();
+    }
+    std::fs::write(gitignore_path, rebuilt)?;
+
+    tracing::info!(
+        path = %gitignore_path.display(),
+        "refreshed the tm harness-scaffolding block in .gitignore (issue #7762)"
     );
     Ok(true)
 }
@@ -218,6 +311,102 @@ mod tests {
             second.matches(SCAFFOLD_GITIGNORE_BEGIN).count(),
             1,
             "the begin marker must appear exactly once"
+        );
+    }
+
+    /// The two lock entries are spelled by `settings_lock`, not by hand (#7762).
+    ///
+    /// Why: the sidecar name is decided in `settings_lock::lock_sidecar` and
+    /// written here as a literal. This is what stops the two drifting — if the
+    /// sidecar suffix ever changes, this fails instead of the operator's
+    /// `git status` quietly growing an untracked file.
+    #[test]
+    fn lock_entries_match_the_settings_lock_sidecar() {
+        for settings in [".claude/settings.json", ".claude/settings.local.json"] {
+            let sidecar = crate::core::settings_lock::lock_sidecar(Path::new(settings));
+            let expected = sidecar.to_str().expect("a UTF-8 fixture path");
+            assert!(
+                SCAFFOLD_IGNORED_PATHS.contains(&expected),
+                "{expected} must be in SCAFFOLD_IGNORED_PATHS: {SCAFFOLD_IGNORED_PATHS:?}"
+            );
+        }
+        // The guarded files themselves stay trackable — only the lock artifact
+        // is ignored (issue #3427's "Important Note").
+        for spared in [".claude/settings.json", ".claude/settings.local.json"] {
+            assert!(
+                !SCAFFOLD_IGNORED_PATHS.contains(&spared),
+                "{spared} is project config and must stay trackable"
+            );
+        }
+    }
+
+    /// A project scaffolded before #7762 gains the new entries on the next pass.
+    ///
+    /// Why: the begin marker alone used to be the whole idempotency check, so an
+    /// existing block never gained an entry added later — the fix would have
+    /// reached only projects that had never run tm.
+    #[test]
+    fn an_existing_block_gains_newly_managed_paths() {
+        let tmp = crate::test_support::hermetic_temp_dir();
+        init_git_repo(tmp.path());
+        let gitignore_path = tmp.path().join(".gitignore");
+        // A pre-#7762 block: the markers plus the paths managed at that time.
+        std::fs::write(
+            &gitignore_path,
+            format!(
+                "node_modules/\n\n{SCAFFOLD_GITIGNORE_BEGIN}\n\
+                 .claude/agents/\n.claude/skills/\n.claude/output-styles/\n\
+                 {SCAFFOLD_GITIGNORE_END}\ncustom-tail/\n"
+            ),
+        )
+        .unwrap();
+
+        let refreshed = ensure_scaffold_gitignored(tmp.path()).unwrap();
+
+        assert!(refreshed, "a stale block must be refreshed");
+        let content = std::fs::read_to_string(&gitignore_path).unwrap();
+        for managed in SCAFFOLD_IGNORED_PATHS {
+            assert!(
+                content.lines().any(|l| l.trim() == *managed),
+                "missing {managed} after the refresh:\n{content}"
+            );
+        }
+        assert_eq!(
+            content.matches(SCAFFOLD_GITIGNORE_BEGIN).count(),
+            1,
+            "the refresh must replace the block, not add a second one"
+        );
+        assert!(
+            content.starts_with("node_modules/\n"),
+            "content before the block must survive:\n{content}"
+        );
+        assert!(
+            content.ends_with("custom-tail/\n"),
+            "content after the block must survive:\n{content}"
+        );
+        // And the refresh is itself idempotent.
+        assert!(!ensure_scaffold_gitignored(tmp.path()).unwrap());
+    }
+
+    /// A block whose end marker was hand-deleted is not rewritten.
+    ///
+    /// Why: the refresh needs both markers to know where the managed lines stop.
+    /// Guessing would delete whatever the operator wrote below the block.
+    #[test]
+    fn a_block_with_no_end_marker_is_left_alone() {
+        let tmp = crate::test_support::hermetic_temp_dir();
+        init_git_repo(tmp.path());
+        let gitignore_path = tmp.path().join(".gitignore");
+        let mangled = format!("{SCAFFOLD_GITIGNORE_BEGIN}\n.claude/agents/\nmine/\n");
+        std::fs::write(&gitignore_path, &mangled).unwrap();
+
+        let changed = ensure_scaffold_gitignored(tmp.path()).unwrap();
+
+        assert!(!changed);
+        assert_eq!(
+            std::fs::read_to_string(&gitignore_path).unwrap(),
+            mangled,
+            "an operator-edited block must be left byte-for-byte alone"
         );
     }
 

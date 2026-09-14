@@ -189,10 +189,10 @@ pub(crate) const AUTO_MEMORY_KEY: &str = "autoMemoryEnabled";
 /// starts from an empty object rather than aborting the launch, and the result
 /// is written back pretty-printed. Taking a closure rather than a single key
 /// keeps a multi-key writer at one read and one write.
-/// What: creates `<project_dir>/.claude/`, loads the settings object through
+/// What: creates `<project_dir>/.claude/`, then — holding the cross-process
+/// settings lock across the WHOLE cycle — loads the settings object through
 /// [`super::malformed_backup::load_settings_object`], hands it to `mutate`, and
-/// writes it back pretty-printed via
-/// [`trusty_common::claude_config::write_json_atomic`].
+/// publishes it back pretty-printed via [`crate::core::settings_lock::publish`].
 ///
 /// #7780: a file that is not a JSON object is no longer silently coerced to
 /// `{}` and overwritten. Its bytes are copied to a
@@ -201,10 +201,29 @@ pub(crate) const AUTO_MEMORY_KEY: &str = "autoMemoryEnabled";
 /// refuses the rewrite outright — see [`PrepError::SettingsBackup`]. The write
 /// became atomic in the same change, so a crash mid-rewrite can no longer
 /// CREATE the torn file this function exists to survive.
+///
+/// #7762: atomicity was never the whole problem. `tm doctor --fix` repairs this
+/// same file from another PROCESS, so a read here and a write there interleave
+/// into a lost update that no in-process guard can see. The lock now spans the
+/// read and the write, and the publish dropped `write_json_atomic`'s `<path>.bak`
+/// — a copy taken on every launch is litter in the operator's project, not a
+/// recovery artifact.
+///
+/// # Contract
+///
+/// - **`mutate` must be pure** — it edits the `Value` it is handed and does no
+///   I/O of its own on a settings file. It runs INSIDE the lock, and
+///   `settings_lock` is not reentrant (#7762): a `mutate` that reached another
+///   settings writer — `merge_settings` itself, `add_exclude`,
+///   `write_skill_overrides` — would block forever on a lock its own caller
+///   holds. No current closure does anything but assign keys.
+///
 /// Test: `write_output_style_preserves_existing_keys`,
 /// `write_auto_memory_off_preserves_existing_keys`,
 /// `merge_settings_backs_up_a_malformed_file_before_rewriting_it`,
-/// `merge_settings_refuses_when_the_copy_cannot_be_written`.
+/// `merge_settings_refuses_when_the_copy_cannot_be_written`,
+/// `concurrent_merges_of_distinct_keys_never_lose_an_update`,
+/// `merge_settings_refuses_when_the_lock_cannot_be_acquired`.
 pub(crate) fn merge_settings<F>(project_dir: &Path, mutate: F) -> Result<(), PrepError>
 where
     F: FnOnce(&mut serde_json::Value),
@@ -216,14 +235,26 @@ where
     })?;
     let settings_path = claude_dir.join("settings.json");
 
-    // Load existing settings to preserve unrelated keys; a missing file starts
-    // from an empty object. #7780: a non-object file is copied aside first.
-    let mut settings = super::malformed_backup::load_settings_object(&settings_path)?;
+    crate::core::settings_lock::with_settings_lock(&settings_path, || {
+        // Load existing settings to preserve unrelated keys; a missing file
+        // starts from an empty object. #7780: a non-object file is copied aside
+        // first. #7762: this read is inside the lock, so nothing can publish
+        // between it and the write below.
+        let mut settings = super::malformed_backup::load_settings_object(&settings_path)?;
 
-    mutate(&mut settings);
+        mutate(&mut settings);
 
-    trusty_common::claude_config::write_json_atomic(&settings_path, &settings)
-        .map_err(|err| PrepError::Deploy(err.to_string()))
+        crate::core::settings_lock::publish(&settings_path, &settings).map_err(|source| {
+            PrepError::Io {
+                path: settings_path.clone(),
+                source,
+            }
+        })
+    })
+    .map_err(|source| PrepError::SettingsLock {
+        path: settings_path.clone(),
+        source,
+    })?
 }
 
 /// Set one key in the project's `.claude/settings.json`, preserving the rest.
@@ -410,6 +441,13 @@ pub(crate) fn write_enabled_plugins(
 /// in-sync project leaves the file, and its mtime, untouched. #7780: when it
 /// does write over a file that is not a JSON object, the original bytes are
 /// copied to a `settings.json.malformed-<stamp>` sibling first.
+///
+/// #7762: the plan is computed TWICE and that is deliberate. The first pass is
+/// an unlocked pre-check whose only job is to return early for the in-sync case,
+/// because taking the lock would create a `.claude/` and a lock sidecar in a
+/// project this writer is not going to touch. The pass that decides what to
+/// write is the one inside the lock, so the bytes published are always derived
+/// from a read no other process could have raced.
 /// Test: `write_enabled_plugins_enables_an_opted_in_plugin`,
 /// `session_scope_repair_writes_nothing_when_the_settings_already_match`,
 /// `write_enabled_plugins_backs_up_a_malformed_file_before_rewriting_it`.
@@ -421,14 +459,15 @@ pub(crate) fn write_enabled_plugins_with_trust(
     let Some(config_dir) = config_dir else {
         return Ok(());
     };
-    let Some(plan) = crate::core::session_scope_drift::plan_enabled_plugins_with_trust(
-        project_dir,
-        config_dir,
-        trusted,
-    ) else {
-        return Ok(());
+    let plan_now = || {
+        crate::core::session_scope_drift::plan_enabled_plugins_with_trust(
+            project_dir,
+            config_dir,
+            trusted,
+        )
+        .filter(|plan| !plan.drift.is_empty())
     };
-    if plan.drift.is_empty() {
+    if plan_now().is_none() {
         return Ok(());
     }
 
@@ -437,16 +476,30 @@ pub(crate) fn write_enabled_plugins_with_trust(
         path: claude_dir.clone(),
         source,
     })?;
+    let settings_path = claude_dir.join("settings.json");
 
-    // #7780: `plan_enabled_plugins_with_trust` read the file with this writer's
-    // own tolerance, so `plan.merged` already discards a non-object file. This
-    // call is what turns that discard into a preserved copy — and refuses the
-    // rewrite when the copy cannot be made.
-    super::malformed_backup::preserve_if_malformed(&plan.settings_path)?;
+    crate::core::settings_lock::with_settings_lock(&settings_path, || {
+        let Some(plan) = plan_now() else {
+            return Ok(());
+        };
 
-    trusty_common::claude_config::write_json_atomic(&plan.settings_path, &plan.merged)
-        .map_err(|err| PrepError::Deploy(err.to_string()))?;
-    Ok(())
+        // #7780: `plan_enabled_plugins_with_trust` read the file with this
+        // writer's own tolerance, so `plan.merged` already discards a non-object
+        // file. This call is what turns that discard into a preserved copy — and
+        // refuses the rewrite when the copy cannot be made.
+        super::malformed_backup::preserve_if_malformed(&plan.settings_path)?;
+
+        crate::core::settings_lock::publish(&plan.settings_path, &plan.merged).map_err(|source| {
+            PrepError::Io {
+                path: plan.settings_path.clone(),
+                source,
+            }
+        })
+    })
+    .map_err(|source| PrepError::SettingsLock {
+        path: settings_path.clone(),
+        source,
+    })?
 }
 
 /// Write the project-tier trusty-mpm-owned hooks into the project's
@@ -614,6 +667,32 @@ pub(super) fn write_project_hooks_with(
     })?;
     let settings_path = claude_dir.join("settings.json");
 
+    // #7762: the read below and the publish at the bottom are one critical
+    // section — `tm doctor --fix` merges this same hook group from another
+    // process, and an interleaved cycle drops whichever writer read first.
+    crate::core::settings_lock::with_settings_lock(&settings_path, || {
+        write_project_hooks_locked(&settings_path, &additions)
+    })
+    .map_err(|source| PrepError::SettingsLock {
+        path: settings_path.clone(),
+        source,
+    })?
+}
+
+/// The read / strip / merge / no-op / snapshot / publish body of
+/// [`write_project_hooks_with`], run under the settings lock.
+///
+/// Why (#7762): the whole cycle has to sit inside one closure for the lock to
+/// span it, and a closure this long inline made the acquisition itself hard to
+/// see. Split out rather than nested so the lock is the only thing
+/// [`write_project_hooks_with`] does.
+/// What: exactly what [`write_project_hooks_with`] documents, minus the
+/// `additions` refusal and the directory creation its caller has already done.
+/// Test: see [`write_project_hooks_with`].
+fn write_project_hooks_locked(
+    settings_path: &Path,
+    additions: &serde_json::Value,
+) -> Result<(), PrepError> {
     // Load existing settings to preserve unrelated keys; a missing file starts
     // from an empty object. #7780: a non-object file is copied aside to a
     // `settings.json.malformed-<stamp>` sibling first, and a copy that cannot be
@@ -621,7 +700,7 @@ pub(super) fn write_project_hooks_with(
     // over a damaged file, but never over an unrecoverable one. The #7244
     // snapshot further down is a different guarantee (the last three GOOD
     // states) and still applies.
-    let original = super::malformed_backup::load_settings_object(&settings_path)?;
+    let original = super::malformed_backup::load_settings_object(settings_path)?;
     // #7244: the no-op check below measures the strip+merge round trip against
     // the file as it was READ, so the pre-strip value has to outlive the strip.
     let mut settings = original.clone();
@@ -642,7 +721,7 @@ pub(super) fn write_project_hooks_with(
         super::project_hooks::is_project_managed_hook_command,
     );
 
-    let merged = trusty_common::claude_config::merge_hook_entries(&settings, &additions);
+    let merged = trusty_common::claude_config::merge_hook_entries(&settings, additions);
 
     // #7244: every managed launch calls this, and almost every call produces
     // the same bytes as the last one. Without this exit the snapshot below
@@ -658,15 +737,21 @@ pub(super) fn write_project_hooks_with(
     // closed — a rewrite whose prior state could not be preserved does not
     // happen. Non-fatal to the launch, like every other `PrepError` bar
     // `Instructions`: the session starts with the hooks already on disk.
-    backup::snapshot_then_prune(&settings_path, backup::HOOK_SETTINGS_SNAPSHOTS_KEPT).map_err(
+    backup::snapshot_then_prune(settings_path, backup::HOOK_SETTINGS_SNAPSHOTS_KEPT).map_err(
         |source| PrepError::HookSnapshot {
-            path: settings_path.clone(),
+            path: settings_path.to_path_buf(),
             source,
         },
     )?;
 
-    trusty_common::claude_config::write_json_atomic(&settings_path, &merged)
-        .map_err(|err| PrepError::Deploy(err.to_string()))?;
+    // #7762: no `.bak` — the #7244 snapshot above already keeps the last three
+    // good states, so `write_json_atomic`'s copy was a fourth one nobody read.
+    crate::core::settings_lock::publish(settings_path, &merged).map_err(|source| {
+        PrepError::Io {
+            path: settings_path.to_path_buf(),
+            source,
+        }
+    })?;
     Ok(())
 }
 

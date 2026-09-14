@@ -144,6 +144,35 @@ pub fn repoint_settings_file(
         );
     }
 
+    // #7762: an absent file is skipped BEFORE the lock, for the reason
+    // `cleanup::clean_settings_file` gives — the driver hands this every settings
+    // path on the machine, existing or not, and locking one would create a
+    // sidecar for a file this repair never writes.
+    if !path.exists() {
+        return Ok(None);
+    }
+    // Only the APPLY arm takes the lock: a dry run writes nothing, and locking it
+    // would leave a sidecar beside every file `tm doctor` inspects.
+    if !force {
+        return repoint_settings_file_inner(path, installed, false);
+    }
+    crate::core::settings_lock::with_settings_lock(path, || {
+        repoint_settings_file_inner(path, installed, true)
+    })?
+}
+
+/// The read / rewrite / snapshot / publish body of [`repoint_settings_file`].
+///
+/// Why (#7762): the apply arm runs this under the settings lock and the dry-run
+/// arm runs it bare, so the body has to be callable both ways.
+/// What: exactly what [`repoint_settings_file`] documents, minus the `installed`
+/// validation its caller has already done.
+/// Test: see [`repoint_settings_file`].
+fn repoint_settings_file_inner(
+    path: &Path,
+    installed: &Path,
+    force: bool,
+) -> anyhow::Result<Option<RepointOutcome>> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -174,7 +203,9 @@ pub fn repoint_settings_file(
     if force {
         backup_path = snapshot_then_prune(path, HOOK_SETTINGS_SNAPSHOTS_KEPT)
             .map_err(|e| anyhow::anyhow!("snapshot {}: {e}", path.display()))?;
-        trusty_common::claude_config::write_json_atomic(path, &val)
+        // #7762: `settings_lock::publish` rather than `write_json_atomic` — the
+        // snapshot taken just above is the copy this repair reports.
+        crate::core::settings_lock::publish(path, &val)
             .map_err(|e| anyhow::anyhow!("write {}: {e}", path.display()))?;
     }
 

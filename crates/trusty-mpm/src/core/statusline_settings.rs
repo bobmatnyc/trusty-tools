@@ -87,11 +87,14 @@ impl StatuslineWrite {
 ///    reader sees one writer's complete payload or the other's, never a splice
 ///    (#4077), and leaves `<path>.bak` behind.
 /// 2. **The read-modify-write cycle is serialised** — the whole load → mutate →
-///    store runs under [`crate::core::claude_json_guard::lock`], the same
-///    in-process mutex the `.claude.json` seeders take (#4072). Atomicity alone
-///    stops corruption but not a LOST UPDATE: two writers that both read the
-///    pre-seed file would each publish their own complete copy, and the second
-///    would drop whatever the first added.
+///    store runs under [`crate::core::settings_lock::with_settings_lock`], an
+///    `flock(2)` sidecar beside the settings file (#7762). Atomicity alone stops
+///    corruption but not a LOST UPDATE: two writers that both read the pre-seed
+///    file would each publish their own complete copy, and the second would drop
+///    whatever the first added. The guard used to be
+///    [`crate::core::claude_json_guard::lock`], a process-wide mutex — which
+///    could not see `tm launch`, the daemon, and `tm doctor --fix` writing this
+///    same file from three separate PROCESSES.
 ///
 /// Test: `a_fresh_file_is_seeded`, `a_stale_entry_is_repaired`,
 /// `a_customized_entry_is_kept`, `an_unparseable_file_is_refused`,
@@ -101,7 +104,26 @@ impl StatuslineWrite {
 /// `a_divergent_entry_is_still_repaired_against_the_resolution`.
 pub fn ensure_statusline_entry_in(settings_path: &Path) -> StatuslineWrite {
     // #7617: held across the read AND the write below — see "Write safety".
-    let _guard = crate::core::claude_json_guard::lock();
+    // #7762: that guard was the process-wide `claude_json_guard` mutex, blind to
+    // `tm launch` and `tm doctor --fix` writing this file from separate
+    // PROCESSES. `settings_lock` is the same span against an `flock(2)` sidecar.
+    // A lock that cannot be taken is `Refused`, never an unlocked write.
+    match crate::core::settings_lock::with_settings_lock(settings_path, || {
+        ensure_statusline_entry_locked(settings_path)
+    }) {
+        Ok(outcome) => outcome,
+        Err(err) => StatuslineWrite::Refused(err.to_string()),
+    }
+}
+
+/// The read / decide / write body of [`ensure_statusline_entry_in`], run under
+/// the settings lock.
+///
+/// Why (#7762): the lock must span the read and the write, and the cycle is long
+/// enough that inlining it as a closure hid the acquisition.
+/// What: exactly what [`ensure_statusline_entry_in`] documents.
+/// Test: see [`ensure_statusline_entry_in`].
+fn ensure_statusline_entry_locked(settings_path: &Path) -> StatuslineWrite {
     let raw = match std::fs::read_to_string(settings_path) {
         Ok(text) => Some(text),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,

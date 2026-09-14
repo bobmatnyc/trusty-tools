@@ -173,6 +173,7 @@ const PM_GUARD_REMOVAL_CLAUSE: &str =
 /// sweep stays `tm hooks clean`, which pays that cost once on request rather
 /// than on every diagnostic.
 /// Test: `hooks_repair_applies_and_backs_up`,
+/// `hooks_repair_leaves_no_sidecar_for_an_absent_settings_file`,
 /// `hooks_repair_dry_run_changes_nothing`,
 /// `hooks_repair_leaves_foreign_entries_alone`,
 /// `hooks_repair_warns_when_it_removes_the_pm_guard`,

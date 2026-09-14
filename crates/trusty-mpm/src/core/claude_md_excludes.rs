@@ -145,7 +145,25 @@ pub fn is_excluded(path: &Path, excludes: &BTreeSet<String>) -> bool {
 pub fn add_exclude(settings_path: &Path, absolute: &Path) -> ExcludeWrite {
     // Held across the read AND the write: atomicity alone stops corruption but
     // not a lost update, and two sessions on one machine race this file (#4072).
-    let _guard = crate::core::claude_json_guard::lock();
+    // #7762: the guard is now an `flock(2)` sidecar rather than a process-wide
+    // mutex, because the racing writers — `tm launch`, the daemon, `tm doctor
+    // --fix` — are separate PROCESSES. A lock that cannot be taken is `Refused`.
+    match crate::core::settings_lock::with_settings_lock(settings_path, || {
+        add_exclude_locked(settings_path, absolute)
+    }) {
+        Ok(outcome) => outcome,
+        Err(err) => ExcludeWrite::Refused(err.to_string()),
+    }
+}
+
+/// The read / append / write body of [`add_exclude`], run under the settings
+/// lock.
+///
+/// Why (#7762): the lock must span the read and the write; splitting keeps the
+/// acquisition visible at the entry point.
+/// What: exactly what [`add_exclude`] documents.
+/// Test: see [`add_exclude`].
+fn add_exclude_locked(settings_path: &Path, absolute: &Path) -> ExcludeWrite {
     let raw = match std::fs::read_to_string(settings_path) {
         Ok(text) => Some(text),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,

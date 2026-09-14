@@ -313,20 +313,21 @@ fn write_project_hooks_preserves_foreign_hooks() {
     );
 }
 
-/// Why (issue #2972): the final write must go through
-/// `trusty_common::claude_config::write_json_atomic` (temp-file + rename), not
-/// a plain `fs::write`, so a crash mid-write can never leave a
-/// torn/truncated `settings.json`. `write_json_atomic` backs the prior file up
-/// to `<path>.bak` before replacing it — that backup only appears when the
-/// atomic path actually ran, so its presence after a second write (and
-/// absence after the first) is an observable proxy for "the atomic
-/// temp-file+rename mechanism was used" without reaching into private
-/// trusty-common internals.
-/// What: writes twice, asserting no `.bak`/`.tmp` after the first write (file
-/// didn't exist yet), a `.bak` byte-identical to the pre-second-write content
-/// after the second, no leftover `.tmp` file (the rename is what makes the
-/// write atomic), and that the JSON payload itself is unchanged by the write
-/// mechanism swap.
+/// Why (issue #2972): the final write must be a temp-file + rename, not a plain
+/// `fs::write`, so a crash mid-write can never leave a torn/truncated
+/// `settings.json`.
+///
+/// #7762 changed the observable proxy. The writer no longer calls
+/// `write_json_atomic`, whose `<path>.bak` this test read as "the atomic path
+/// ran" — that copy is now deliberately absent, because a `.bak` written on
+/// every launch is untracked litter in the operator's project. The #7244
+/// snapshot is the surviving record of the replaced file, written by the same
+/// branch, so it proves the same thing.
+/// What: writes twice, asserting no snapshot and no staging file after the first
+/// write (the file did not exist yet), a snapshot byte-identical to the
+/// pre-second-write content after the second, no `<path>.bak` and no leftover
+/// staging file either time (the rename is what makes the write atomic), and
+/// that the JSON payload itself is unchanged.
 #[test]
 fn write_project_hooks_writes_via_atomic_path() {
     let tmp = TempDir::new().unwrap();
@@ -334,7 +335,29 @@ fn write_project_hooks_writes_via_atomic_path() {
     let claude_dir = project.join(".claude");
     let settings_path = claude_dir.join("settings.json");
     let bak_path = claude_dir.join("settings.json.bak");
-    let tmp_path = claude_dir.join("settings.json.tmp");
+
+    // Every `.claude/` entry that is a snapshot of `settings.json`, by the same
+    // rule the prune applies.
+    let snapshots = || -> Vec<String> {
+        std::fs::read_dir(&claude_dir)
+            .expect("read .claude")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| {
+                crate::core::standalone::hooks::backup::is_snapshot_of("settings.json", name)
+            })
+            .collect()
+    };
+    // #7762: the publish stages under `<name>.<pid>.<seq>.tmp` and renames, so a
+    // surviving `.tmp` means the rename did not happen.
+    let staging = || -> Vec<String> {
+        std::fs::read_dir(&claude_dir)
+            .expect("read .claude")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect()
+    };
 
     super::super::settings::write_project_hooks(
         project,
@@ -345,12 +368,14 @@ fn write_project_hooks_writes_via_atomic_path() {
     .expect("first write succeeds");
     assert!(settings_path.exists(), "settings.json must be created");
     assert!(
-        !bak_path.exists(),
-        "no backup expected on first write (file did not previously exist)"
+        snapshots().is_empty(),
+        "no snapshot expected on first write (file did not previously exist): {:?}",
+        snapshots()
     );
     assert!(
-        !tmp_path.exists(),
-        "the .tmp file must be renamed away, never left behind"
+        staging().is_empty(),
+        "the staging file must be renamed away, never left behind: {:?}",
+        staging()
     );
     let first_content = std::fs::read_to_string(&settings_path).unwrap();
 
@@ -365,18 +390,23 @@ fn write_project_hooks_writes_via_atomic_path() {
         true,
     )
     .expect("second write succeeds");
-    assert!(
-        bak_path.exists(),
-        "write_json_atomic must back up the prior file before replacing it"
+    let taken = snapshots();
+    assert_eq!(
+        taken.len(),
+        1,
+        "the writer must snapshot the prior file before replacing it: {taken:?}"
     );
     assert!(
-        !tmp_path.exists(),
-        "the .tmp file must be renamed away, never left behind"
+        staging().is_empty(),
+        "the staging file must be renamed away, never left behind: {:?}",
+        staging()
     );
-    let backup_content = std::fs::read_to_string(&bak_path).unwrap();
+    // #7762: a launch must not drop a `.bak` into the operator's project.
+    assert!(!bak_path.exists(), "a launch must not drop a .bak");
+    let backup_content = std::fs::read_to_string(claude_dir.join(&taken[0])).unwrap();
     assert_eq!(
         backup_content, first_content,
-        "the backup must be a byte-identical copy of the pre-second-write content"
+        "the snapshot must be a byte-identical copy of the pre-second-write content"
     );
 
     let value: serde_json::Value =

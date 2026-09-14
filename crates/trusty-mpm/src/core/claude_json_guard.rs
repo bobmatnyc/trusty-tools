@@ -28,8 +28,8 @@
 //!
 //! What: [`lock`] hands out a guard on one process-wide mutex. Every seeder
 //! that read-modify-writes a `.claude.json` holds it across the WHOLE cycle
-//! (read, mutate, write), never just the write. Seven callers hold it, over
-//! four file classes:
+//! (read, mutate, write), never just the write. Four callers hold it, over two
+//! file classes:
 //!
 //! - `~/.claude.json` — [`crate::core::home_trust_seed::preseed_home_trust`]
 //!   and `crate::core::session_launch::settings::preseed_workspace_trust`, the
@@ -37,23 +37,21 @@
 //! - `<claude_config_dir>/.claude.json` —
 //!   [`crate::core::mcp_config::seed_builtin_servers`] and
 //!   [`crate::core::standalone::trust_seed::preseed_managed_trust`] (#4076).
-//! - a project's `.claude/settings.local.json` —
-//!   [`crate::core::claude_md_excludes::add_exclude`] (#7673).
-//! - a `.claude/settings.json` —
-//!   [`crate::core::skill_overrides::write_skill_overrides_for`] (#7751) on a
-//!   project's, and
-//!   [`crate::core::statusline_settings::ensure_statusline_entry_in`] (#7617)
-//!   on whichever one the caller passes, user-level or project-level.
 //!
-//! The last three inherit the same cross-process lost-update limit described
-//! under SCOPE below.
+//! #7762 took the `settings.json` / `settings.local.json` writers OFF this
+//! mutex. They were here for the right reason under the wrong primitive: their
+//! racing writers are `tm launch`, the daemon and `tm doctor --fix`, which are
+//! separate PROCESSES, and the SCOPE note below says plainly that an in-process
+//! mutex cannot serialise those. They now hold
+//! [`crate::core::settings_lock`]'s `flock(2)` sidecar, which serialises threads
+//! and processes alike. Nothing acquires both locks, so there is no acquisition
+//! order to get wrong.
 //!
-//! The guard is deliberately not keyed by path, and now covers four file
-//! classes rather than one. That is still the right granularity: a path key
-//! would let two callers that spell the same file differently — `$HOME`
-//! resolved at different moments, a symlinked config dir — take different
-//! locks and race anyway, and the cost of over-serialising is a few
-//! microseconds on a once-per-session path.
+//! The guard is deliberately not keyed by path. That is still the right
+//! granularity for the seeders left on it: a path key would let two callers that
+//! spell the same file differently — `$HOME` resolved at different moments, a
+//! symlinked config dir — take different locks and race anyway, and the cost of
+//! over-serialising is a few microseconds on a once-per-session path.
 //!
 //! SCOPE: this is an in-process lock. It does not (and is not meant to)
 //! serialise two separate `tm` processes racing the same file — that needs an
@@ -65,7 +63,9 @@
 //! through a per-call filename and publishes by `rename`, so a reader always
 //! sees one writer's complete bytes. Before #4077 that claim was false — the
 //! shared fixed `<path>.tmp` meant a cross-process race COULD publish a torn
-//! file, and this comment asserted otherwise.
+//! file, and this comment asserted otherwise. Closing the lost update for
+//! `.claude.json` too is the natural extension of #7762's sidecar and is
+//! deliberately not done here.
 //!
 //! Test: `concurrent_seeds_preserve_every_workspace_entry` and
 //! `concurrent_home_and_workspace_seeds_preserve_both_entries`, in

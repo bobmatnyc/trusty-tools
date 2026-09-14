@@ -53,6 +53,12 @@
 /.claude/settings.json*.bak
 /.claude/settings.json.bak*
 
+# The `flock(2)` sidecars every managed settings write now takes (#7762). Like
+# the backups above they are machine-local write-path artifacts, created beside
+# the file they guard on every launch and every `tm doctor --fix`.
+/.claude/settings.json.lock
+/.claude/settings.local.json.lock
+
 # Project-tier agent files are NEVER tracked in this repo. They are deployed
 # artifacts, not source: the bundled roster is the product and lives in
 # crates/trusty-mpm/src/assets/agents/ (and crates/trusty-code/src/assets/agents/).

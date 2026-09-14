@@ -313,6 +313,31 @@ pub fn event_names_matching(val: &Value, matches_cmd: impl Fn(&str) -> bool) -> 
 /// `clean_settings_file_malformed_json_is_noop`,
 /// `clean_settings_file_non_object_json_is_noop`.
 pub fn clean_settings_file(path: &Path, force: bool) -> anyhow::Result<Option<CleanOutcome>> {
+    // #7762: an absent file is skipped BEFORE the lock. `tm doctor --fix` calls
+    // this for `settings.local.json` in every project whether or not one exists,
+    // and acquiring the lock would create a sidecar for a file this repair is
+    // about to report `Ok(None)` for. Same pre-check as
+    // `super::remove_global_trusty_mpm_hooks_at`.
+    if !path.exists() {
+        return Ok(None);
+    }
+    // Only the APPLY arm takes the lock. A dry run writes nothing, so locking it
+    // would create a sidecar beside every settings file `tm doctor` merely
+    // inspects — and the read it does is of a whole file every writer publishes
+    // by rename, so it always sees one complete version.
+    if !force {
+        return clean_settings_file_inner(path, false);
+    }
+    crate::core::settings_lock::with_settings_lock(path, || clean_settings_file_inner(path, true))?
+}
+
+/// The read / strip / backup / write body of [`clean_settings_file`].
+///
+/// Why (#7762): the apply arm runs this under the settings lock and the dry-run
+/// arm runs it bare, so the body has to be callable both ways.
+/// What: exactly what [`clean_settings_file`] documents.
+/// Test: see [`clean_settings_file`].
+fn clean_settings_file_inner(path: &Path, force: bool) -> anyhow::Result<Option<CleanOutcome>> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -346,7 +371,10 @@ pub fn clean_settings_file(path: &Path, force: bool) -> anyhow::Result<Option<Cl
 
         let changed = strip_mpm_hook_entries(&mut val);
         debug_assert!(changed, "removed_events was non-empty but nothing stripped");
-        trusty_common::claude_config::write_json_atomic(path, &val)
+        // #7762: `settings_lock::publish` rather than `write_json_atomic` — the
+        // `<path>.bak-<epoch>` copy taken just above is the one this function
+        // reports, so the writer's own second `.bak` was never read.
+        crate::core::settings_lock::publish(path, &val)
             .map_err(|e| anyhow::anyhow!("write {}: {e}", path.display()))?;
         backup_path = Some(bak);
     }
