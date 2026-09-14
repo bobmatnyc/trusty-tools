@@ -664,6 +664,43 @@ fn agent_output_keys_concurrent_streams_separately() {
     assert_eq!(app.chat[1].text, "sub-1 sub-2");
 }
 
+/// Two agents sharing ONE `turn_id` must still get their own bubbles.
+///
+/// Why: this is the case that actually pins the `agent_id` half of the key.
+/// `agent_output_keys_concurrent_streams_separately` above varies BOTH halves,
+/// so it passes even if the key collapses to `turn_id` alone — a code-critic
+/// pass on this branch proved that by mutation. The delta contract
+/// (`trusty_code::events::Event::AgentMessageDelta`) requires consumers to
+/// group by the PAIR precisely because a producer can get session-global
+/// `turn_id` uniqueness wrong; this test is the defense against that, and it
+/// is red against a `turn_id`-only key.
+#[test]
+fn agent_output_keys_shared_turn_id_by_agent_id() {
+    let mut app = ReplApp::new("demo", "u");
+    apply(&mut app, agent_output("pm-1", "turn-shared", "pm-1", false));
+    apply(
+        &mut app,
+        agent_output("eng-1", "turn-shared", "sub-1", false),
+    );
+    apply(
+        &mut app,
+        agent_output("pm-1", "turn-shared", " pm-2", false),
+    );
+    apply(
+        &mut app,
+        agent_output("eng-1", "turn-shared", " sub-2", false),
+    );
+
+    assert_eq!(
+        app.chat.len(),
+        2,
+        "two agents sharing a turn_id must not collapse into one bubble: {:?}",
+        app.chat.iter().map(|c| &c.text).collect::<Vec<_>>()
+    );
+    assert_eq!(app.chat[0].text, "pm-1 pm-2");
+    assert_eq!(app.chat[1].text, "sub-1 sub-2");
+}
+
 /// Two turns from the SAME agent must also get their own bubbles — the key
 /// is the pair, not the agent id alone.
 #[test]
