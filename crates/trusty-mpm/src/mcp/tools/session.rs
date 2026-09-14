@@ -412,7 +412,17 @@ pub(super) fn session_tools() -> Vec<Value> {
              snapshot file is written either way. Every no-PR outcome reports \
              `snapshot_publish.status: \"skipped\"` with a `reason` — \
              `not_tracked` (the project git-ignores `.trusty-mpm/sessions/`), \
-             `not_a_git_repo`, or `unchanged`. Also \
+             `not_a_git_repo`, or `unchanged`. SEPARATELY, and on every project \
+             tracked or not, the snapshot is appended to this session's own \
+             append-only git ref `refs/tm/sessions/<user-id>/<session-key>` and \
+             lease-pushed to `origin` (ADR-0062, #7830): `ref_name` names the \
+             ref, `ref_published` says whether the push landed, and \
+             `ref_error` carries the reason when it did not. A ref failure NEVER \
+             fails the pause — the local snapshot is the primary write — so a \
+             non-null `ref_error` is yours to REPORT to the operator, not to \
+             retry. With `[session_refs] enabled = false` in \
+             `~/.trusty-mpm/config.toml` no ref is written at all and both \
+             `ref_name` and `ref_error` are null. Also \
              prunes orphaned managed-session \
              git worktrees in-process (same engine as `tm session prune-worktrees`) \
              unless `prune_worktrees` is set to `false`. That prune NEVER removes a \

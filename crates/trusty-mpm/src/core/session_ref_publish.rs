@@ -324,10 +324,11 @@ fn git(
 ) -> Result<String, RefPublishError> {
     let mut cmd = trusty_common::git::command_in(repo);
     cmd.args(args);
-    // A pause runs inside the daemon, with no terminal: an https remote that
-    // wants credentials must fail fast into `ref_error`, never block the pause
-    // on a prompt nobody can answer.
+    // A pause runs inside the daemon, with no terminal: an https or ssh remote
+    // that wants credentials must fail fast into `ref_error`, never block the
+    // pause on a `/dev/tty` prompt nobody can answer.
     cmd.env("GIT_TERMINAL_PROMPT", "0");
+    cmd.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
     if let Some(idx) = index_file {
         cmd.env("GIT_INDEX_FILE", idx);
     }
@@ -515,11 +516,14 @@ pub fn publish_session_ref_as(
 
     let blob = git(
         req.repo,
+        // `--no-filters`, and deliberately NOT `--path` (git rejects the pair):
+        // the blob must be byte-exact with the file the reader writes back, and
+        // `--path` is what makes git apply the `.gitattributes` clean filter or
+        // CRLF conversion for a path this store never commits.
         &[
             "hash-object",
             "-w",
-            "--path",
-            &tree_path,
+            "--no-filters",
             "--",
             &req.snapshot_path.to_string_lossy(),
         ],
@@ -674,8 +678,14 @@ pub fn publish_receipt(req: &SessionRefRequest<'_>, enabled: bool) -> SessionRef
     if !enabled {
         return SessionRefReceipt::default();
     }
-    let ref_name = session_ref_for(req.repo, req.session_id);
-    match publish_session_ref(req) {
+    // Resolved ONCE: `resolve_user_id` reads `gh`'s config and may shell out to
+    // `git config`, and the receipt needs the same answer the publish uses.
+    let user_id = resolve_user_id(req.repo);
+    let ref_name = user_id
+        .as_deref()
+        .zip(session_key(req.session_id))
+        .map(|(user, key)| format!("{SESSION_REF_ROOT}/{user}/{key}"));
+    match publish_session_ref_as(req, user_id.as_deref()) {
         Ok(out) => SessionRefReceipt {
             ref_name: Some(out.ref_name),
             published: true,

@@ -18,3 +18,6 @@ Added
     restores the previous behaviour exactly
   - retention of old session refs and the cross-user sharing model are out of
     scope here — both are deferred by ADR-0062 decision 8
+  - known follow-up: a lost lease is classified from git's human-readable push
+    stderr rather than from `git push --porcelain`, so a future git wording
+    change could reclassify it as a plain transport failure

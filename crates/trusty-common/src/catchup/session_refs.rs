@@ -10,14 +10,20 @@
 //! `session_log::resolve_session_snapshot`) reads the cache, never the refs.
 //! This module is the one place that turns refs back into cache files, so the
 //! read path stays unchanged.
+//!
+//! **A ref is remote input, and the cache it feeds becomes the resuming PM's
+//! todos.** Every trust decision here is therefore taken from the REF KEY,
+//! which the remote's own ref namespace pins, and never from the commit's own
+//! text: [`LocalRefIdentity`] decides which refs are this writer's at all, the
+//! synthesized `session_id` is derived from the key, and exactly one blob — the
+//! `session-*.md` the commit names, inside that session's own directory — is
+//! ever written. A tree carrying `sessions-log.jsonl`, a second snapshot, or a
+//! `Session-Id` trailer disagreeing with the key changes nothing on disk.
 //! What: [`ensure_fetch_refspec`] adds `+refs/tm/sessions/*:refs/tm/sessions/*`
 //! to `remote.origin.fetch` idempotently — without it a plain fetch sees no
 //! session refs at all (ADR-0062 decision 5). [`list_session_refs`] is the
 //! `git for-each-ref` aggregator of decision 6. [`hydrate_session_cache`]
-//! composes the two: fetch, enumerate, read each tip's tree, and materialize
-//! every snapshot missing on disk plus the `sessions-log.jsonl` pause line that
-//! attributes it. Nothing here ever overwrites a file that already exists —
-//! the working tree is the live copy while a session is running.
+//! composes the two under one [`LocalRefIdentity`].
 //!
 //! Errors are `anyhow`, matching every sibling in this module
 //! ([`super::pause`], [`super::session_log`]); the typed, branch-on-it error is
@@ -25,10 +31,12 @@
 //! caller has to tell a stale lease from a transport failure.
 //! Test: `session_refs_tests.rs`.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 
+use super::session_id::TMUX_WINDOW_ID_PREFIX;
 use super::session_log::{self, SessionLogEntry};
 
 /// Namespace every session ref lives under (ADR-0062 decision 1).
@@ -46,12 +54,32 @@ pub const SESSION_REF_FETCH_REFSPEC: &str = "+refs/tm/sessions/*:refs/tm/session
 /// Repo-relative root of the session cache, as it appears inside a ref's tree.
 ///
 /// Why: the write side stores each snapshot at its repo-relative path, so the
-/// reader can mirror a tree entry straight back onto disk with no second
-/// naming convention to keep in sync.
+/// reader can mirror the named tree entry straight back onto disk with no
+/// second naming convention to keep in sync.
 pub const SESSIONS_STORE_PREFIX: &str = ".trusty-mpm/sessions/";
 
 /// `remote.origin.fetch` — the config key the refspec is appended to.
 const FETCH_CONFIG_KEY: &str = "remote.origin.fetch";
+
+/// Who this checkout is, for deciding which session refs are its own.
+///
+/// Why: hydration writes into the store the resuming PM reads as its own state,
+/// so "which refs may write here" is a trust decision and must not be taken
+/// from data the remote controls. The ref KEY carries both halves of the
+/// answer, and this is what it is compared against. `trusty-common` cannot
+/// resolve a `gh` login (that lives in trusty-mpm alongside the write side), so
+/// the caller supplies it.
+/// What: the sanitized user id the write side publishes under, and this host's
+/// sanitized name — `None` only when no hostname resolves, which is also the
+/// case in which the write side leaves a tmux session key unqualified.
+/// Test: `a_foreign_users_ref_is_ignored`, `a_foreign_hosts_tmux_ref_is_ignored`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalRefIdentity {
+    /// The `<user-id>` half of the refs this checkout owns.
+    pub user_id: String,
+    /// This host's sanitized name, as the write side prefixes a tmux key with.
+    pub host: Option<String>,
+}
 
 /// One `refs/tm/sessions/**` ref and the commit it points at.
 ///
@@ -62,7 +90,7 @@ const FETCH_CONFIG_KEY: &str = "remote.origin.fetch";
 /// Test: `list_session_refs_enumerates_every_session`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRefTip {
-    /// Full ref name, e.g. `refs/tm/sessions/octocat/tmux-window-230`.
+    /// Full ref name, e.g. `refs/tm/sessions/octocat/host-tmux-window-230`.
     pub name: String,
     /// The commit the ref points at.
     pub commit: String,
@@ -73,7 +101,8 @@ pub struct SessionRefTip {
 /// Why: hydration is fail-open and mostly a no-op, so a caller that logs it
 /// needs to tell "nothing to do" from "restored four snapshots" without
 /// re-listing the directory.
-/// What: how many refs were seen, which snapshot files were written, and how
+/// What: how many refs the aggregator found (including refs this identity does
+/// not own and therefore skipped), which snapshot files were written, and how
 /// many `sessions-log.jsonl` pause lines were synthesized.
 /// Test: `hydration_restores_a_deleted_snapshot_and_its_log_line`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -108,10 +137,16 @@ impl GitOut {
 /// maintenance against one shared object store.
 /// What: captures raw stdout bytes — a snapshot blob is copied through this,
 /// and lossy UTF-8 would corrupt it — plus the exit status and stderr.
+/// Hydration runs inside the daemon, which has no terminal, so
+/// `GIT_TERMINAL_PROMPT=0` and an SSH `BatchMode=yes` are pinned on EVERY
+/// spawn: a remote that wants a credential must fail fast, never block a
+/// catch-up on a `/dev/tty` prompt nobody can answer.
 /// Test: exercised by every test in `session_refs_tests.rs`.
 fn git(repo: &Path, args: &[&str]) -> Result<GitOut> {
     let out = crate::git::command_in(repo)
         .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
         .output()
         .with_context(|| format!("could not run `git {}`", args.join(" ")))?;
     Ok(GitOut {
@@ -175,7 +210,9 @@ pub fn ensure_fetch_refspec(repo: &Path) -> Result<bool> {
 /// refs, never by committing. `for-each-ref` is that read.
 /// What: `git for-each-ref --format=<sha> <ref> refs/tm/sessions/`, parsed into
 /// [`SessionRefTip`]s in git's own (lexicographic) order. An empty namespace
-/// yields an empty vec, not an error.
+/// yields an empty vec, not an error. This enumerates EVERY session ref,
+/// including other users'; deciding which are this checkout's own is
+/// [`hydrate_session_cache`]'s job.
 /// Test: `list_session_refs_enumerates_every_session`.
 pub fn list_session_refs(repo: &Path) -> Result<Vec<SessionRefTip>> {
     let out = git_ok(
@@ -200,37 +237,37 @@ pub fn list_session_refs(repo: &Path) -> Result<Vec<SessionRefTip>> {
     Ok(refs)
 }
 
-/// One `<path>` → `<blob sha>` entry from a ref tip's tree.
-type TreeEntry = (String, String);
-
-/// The regular-file entries in `commit`'s tree, recursively.
+/// The blob sha of `want` in `commit`'s tree, if the tree carries it.
 ///
-/// What: `git ls-tree -r <commit>` lines are `<mode> <type> <sha>\t<path>`;
-/// only `blob` rows are returned, as `(path, sha)`.
-fn tree_entries(repo: &Path, commit: &str) -> Result<Vec<TreeEntry>> {
-    let out = git_ok(repo, &["ls-tree", "-r", commit], "ls-tree")?;
-    let mut entries = Vec::new();
+/// Why: only ONE path is ever materialized — the `session-*.md` the commit
+/// names — so the tree is queried for that path rather than walked. A tree
+/// carrying `sessions-log.jsonl`, a second snapshot, or anything else
+/// contributes nothing (#7830 review, CRITICAL).
+/// What: `git ls-tree <commit> -- <want>` lines are `<mode> <type> <sha>\t<path>`;
+/// the sha is returned only for a `blob` row whose path is exactly `want`.
+/// Test: `a_tree_carrying_extra_blobs_writes_only_the_named_snapshot`.
+fn blob_at(repo: &Path, commit: &str, want: &str) -> Result<Option<String>> {
+    let out = git_ok(repo, &["ls-tree", commit, "--", want], "ls-tree")?;
     for line in out.text().lines() {
         let Some((meta, path)) = line.split_once('\t') else {
             continue;
         };
         let fields: Vec<&str> = meta.split_whitespace().collect();
-        if fields.len() < 3 || fields[1] != "blob" {
-            continue;
+        if fields.len() >= 3 && fields[1] == "blob" && path.trim() == want {
+            return Ok(Some(fields[2].to_string()));
         }
-        entries.push((path.trim().to_string(), fields[2].to_string()));
     }
-    Ok(entries)
+    Ok(None)
 }
 
 /// The trailer value for `key` in a ref commit's message, if present.
 ///
-/// Why: the write side stamps `Session-Id`/`Session-Snapshot`/`Session-Timestamp`
-/// into the commit message so hydration can rebuild the `sessions-log.jsonl`
-/// attribution line without inferring it from the ref name — the ref key is the
-/// user plus a hostname-qualified session key, which is deliberately NOT the
-/// session id (#7830).
+/// Why: the write side stamps `Session-Snapshot` / `Session-Timestamp` into the
+/// commit message so hydration knows WHICH path in the tree is the snapshot and
+/// when the pause happened. `Session-Id` is deliberately NOT read from here —
+/// see [`session_id_for_key`].
 /// What: scans `git cat-file commit <sha>` output for `<key>: <value>`.
+/// Test: `commit_trailers_are_read_back`.
 fn commit_trailer(message: &str, key: &str) -> Option<String> {
     let needle = format!("{key}:");
     message.lines().find_map(|line| {
@@ -240,21 +277,105 @@ fn commit_trailer(message: &str, key: &str) -> Option<String> {
     })
 }
 
-/// Restore this project's session cache from its session refs.
+/// Split `refs/tm/sessions/<user>/<key>` into its two halves.
+fn split_ref_key(ref_name: &str) -> Option<(&str, &str)> {
+    let rest = ref_name.strip_prefix(SESSION_REF_PREFIX)?;
+    let (user, key) = rest.split_once('/')?;
+    (!user.is_empty() && !key.is_empty() && !key.contains('/')).then_some((user, key))
+}
+
+/// The session id a ref key names, when this identity owns that ref.
+///
+/// Why (#7830 review, CRITICAL): the session id decides which directory a
+/// snapshot lands in AND which session `sessions-log.jsonl` attributes it to —
+/// which is what `resolve_session_snapshot` and `redact_sessions_not_owned_by`
+/// both read. Taking it from the commit's `Session-Id` trailer let any writer
+/// with push access to the refspec file forged text under a victim session's
+/// id, and the resuming PM would read it as its own todos. The ref KEY is
+/// pinned by the remote's ref namespace, so it is the only trustworthy source.
+/// The same rule fixes a benign bug: host A's `hostA-tmux-window-230` used to
+/// hydrate into host B's `sessions/tmux-window-230/`, undoing exactly the
+/// hostname qualification the write side adds.
+/// What, in order: (1) a key prefixed with THIS host's name followed by
+/// `tmux-window-` is ours, and the session id is the key with that prefix
+/// removed; (2) a BARE `tmux-window-N` key is ours only when no hostname
+/// resolves here, because that is the one case in which the write side leaves
+/// it unqualified; (3) any other key mentioning `tmux-window-` belongs to some
+/// other host and is refused; (4) anything else is a globally unique managed
+/// session id and is its own key.
+/// Test: `a_foreign_hosts_tmux_ref_is_ignored`,
+/// `a_host_qualified_tmux_ref_hydrates_under_the_bare_session_id`,
+/// `a_managed_session_key_is_its_own_session_id`.
+fn session_id_for_key(key: &str, identity: &LocalRefIdentity) -> Option<String> {
+    if let Some(host) = &identity.host
+        && let Some(rest) = key.strip_prefix(&format!("{host}-"))
+        && rest.starts_with(TMUX_WINDOW_ID_PREFIX)
+    {
+        return Some(rest.to_string());
+    }
+    if key.starts_with(TMUX_WINDOW_ID_PREFIX) {
+        return identity.host.is_none().then(|| key.to_string());
+    }
+    if key.contains(TMUX_WINDOW_ID_PREFIX) {
+        return None;
+    }
+    Some(key.to_string())
+}
+
+/// Whether `rel` is a snapshot path `session_id` is allowed to own.
+///
+/// Why (#7830 review, CRITICAL): `rel` comes from a commit message, so without
+/// this a ref could name `sessions-log.jsonl` — whose every component is
+/// `Normal`, so containment alone passes — and overwrite the attribution index
+/// on a fresh clone, or write into another session's directory.
+/// What: every component is an ordinary name; the basename is `session-*.md`,
+/// the shape [`super::pause::write_pause_snapshot`] writes and
+/// `session_log::snapshot_path_in` reads; and the path is either flat at the
+/// store root (the pre-#5272 / unsafe-id layout) or one level under this
+/// session's OWN directory.
+/// Test: `a_tree_carrying_extra_blobs_writes_only_the_named_snapshot`,
+/// `a_traversing_tree_path_is_refused`.
+fn is_own_snapshot_path(rel: &str, session_id: &str) -> bool {
+    let path = Path::new(rel);
+    let components: Vec<&std::ffi::OsStr> = path
+        .components()
+        .map(|c| match c {
+            std::path::Component::Normal(n) => Some(n),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()
+        .unwrap_or_default();
+    if components.is_empty() || components.len() > 2 {
+        return false;
+    }
+    let Some(name) = components.last().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    if !(name.starts_with("session-") && name.ends_with(".md")) {
+        return false;
+    }
+    match components.len() {
+        1 => true,
+        _ => components[0].to_str() == Some(session_id),
+    }
+}
+
+/// Restore this project's session cache from the session refs this identity owns.
 ///
 /// Why: ADR-0062 decision 4 makes `.trusty-mpm/sessions/` a cache and the ref
 /// the durable copy, so a fresh clone (or a deleted cache) has to be able to
 /// rebuild what resume reads. Running this BEFORE
 /// `session_finder::find_paused_sessions` is what lets the entire read path
 /// stay unchanged (#7830 closure condition 4).
-/// What: [`ensure_fetch_refspec`], then a plain `git fetch origin` — which now
-/// carries the session refspec because of that config line, and would carry
-/// nothing without it — then, for every ref [`list_session_refs`] reports, reads
-/// the TIP commit's tree and writes back any `.trusty-mpm/sessions/**` blob
-/// that is missing on disk, plus the matching `pause` line in
-/// `sessions-log.jsonl` when the log has none for that snapshot. An existing
-/// file is NEVER overwritten: a live session's working copy is newer than any
-/// ref, and clobbering it would lose the pause in progress.
+/// What: [`ensure_fetch_refspec`], then a fetch SCOPED to
+/// [`SESSION_REF_FETCH_REFSPEC`] — a catch-up must not pull every branch on the
+/// remote as a side effect — then, for every ref [`list_session_refs`] reports
+/// whose key [`session_id_for_key`] says this identity owns, the tip commit's
+/// `Session-Snapshot` path, and ONLY that path, is written back when it is
+/// missing on disk and passes [`is_own_snapshot_path`]. The matching `pause`
+/// line is appended when the log has none. An existing file is NEVER
+/// overwritten: a live session's working copy is newer than any ref, and
+/// clobbering it would lose the pause in progress.
 ///
 /// Only the tip is read. Each ref commit's tree carries exactly the one
 /// snapshot that pause wrote (ADR-0062 decision 7 keeps the chain's commits
@@ -264,90 +385,82 @@ fn commit_trailer(message: &str, key: &str) -> Option<String> {
 /// scope, alongside the retention policy ADR-0062 decision 8 defers.
 /// Test: `hydration_restores_a_deleted_snapshot_and_its_log_line`,
 /// `hydration_never_overwrites_a_file_already_on_disk`,
-/// `hydration_is_idempotent_across_two_runs`.
-pub fn hydrate_session_cache(repo: &Path) -> Result<HydrationOutcome> {
+/// `hydration_is_idempotent_across_two_runs`,
+/// `a_foreign_users_ref_is_ignored`, `a_foreign_hosts_tmux_ref_is_ignored`,
+/// `a_tree_carrying_extra_blobs_writes_only_the_named_snapshot`,
+/// `a_forged_session_id_trailer_loses_to_the_ref_key`.
+pub fn hydrate_session_cache(repo: &Path, identity: &LocalRefIdentity) -> Result<HydrationOutcome> {
     ensure_fetch_refspec(repo)?;
-    git_ok(repo, &["fetch", "origin"], "fetch")?;
+    git_ok(
+        repo,
+        &["fetch", "origin", SESSION_REF_FETCH_REFSPEC],
+        "fetch",
+    )?;
 
     let sessions_dir = repo.join(".trusty-mpm").join("sessions");
     let mut outcome = HydrationOutcome::default();
+    // Read the log ONCE: it was re-read per tree entry per ref, which is
+    // O(refs x log lines) on a store whose whole point is to accumulate.
+    let mut recorded: HashSet<String> = session_log::read_log(&sessions_dir)
+        .into_iter()
+        .filter(|e| e.event == session_log::EVENT_PAUSE)
+        .map(|e| e.snapshot)
+        .collect();
 
     for tip in list_session_refs(repo)? {
         outcome.refs_seen += 1;
+        let Some((user, key)) = split_ref_key(&tip.name) else {
+            continue;
+        };
+        if user != identity.user_id {
+            continue;
+        }
+        let Some(session_id) = session_id_for_key(key, identity) else {
+            continue;
+        };
         let message = git_ok(repo, &["cat-file", "commit", &tip.commit], "cat-file")?.text();
-        for (path, blob) in tree_entries(repo, &tip.commit)? {
-            let Some(rel) = path.strip_prefix(SESSIONS_STORE_PREFIX) else {
-                continue;
-            };
-            if !is_contained_relative(rel) {
-                tracing::warn!(ref_name = %tip.name, path = %path, "session ref carries a path outside the store; skipped");
-                continue;
+        let Some(rel) = commit_trailer(&message, "Session-Snapshot") else {
+            continue;
+        };
+        if !is_own_snapshot_path(&rel, &session_id) {
+            tracing::warn!(
+                ref_name = %tip.name,
+                snapshot = %rel,
+                "session ref names a snapshot path it does not own; skipped"
+            );
+            continue;
+        }
+        let tree_path = format!("{SESSIONS_STORE_PREFIX}{rel}");
+        let Some(blob) = blob_at(repo, &tip.commit, &tree_path)? else {
+            continue;
+        };
+
+        let target = sessions_dir.join(&rel);
+        if !target.exists() {
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
             }
-            let target = sessions_dir.join(rel);
-            if !target.exists() {
-                if let Some(parent) = target.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                let blob_bytes = git_ok(repo, &["cat-file", "blob", &blob], "cat-file")?;
-                std::fs::write(&target, &blob_bytes.stdout)?;
-                outcome.snapshots_written.push(target);
-            }
-            if synthesize_log_entry(&sessions_dir, &message, rel)? {
-                outcome.log_entries_added += 1;
-            }
+            let bytes = git_ok(repo, &["cat-file", "blob", &blob], "cat-file")?;
+            std::fs::write(&target, &bytes.stdout)?;
+            outcome.snapshots_written.push(target);
+        }
+        if !recorded.contains(&rel) {
+            let timestamp = commit_trailer(&message, "Session-Timestamp")
+                .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+            session_log::append_entry(
+                &sessions_dir,
+                &SessionLogEntry {
+                    session_id,
+                    event: session_log::EVENT_PAUSE.to_string(),
+                    snapshot: rel.clone(),
+                    timestamp,
+                },
+            )?;
+            recorded.insert(rel);
+            outcome.log_entries_added += 1;
         }
     }
     Ok(outcome)
-}
-
-/// Whether `rel` is a plain relative path that stays inside the store.
-///
-/// Why: a ref is remote input. A tree entry naming `../../.ssh/authorized_keys`
-/// would otherwise be written outside `.trusty-mpm/sessions/`, which is the
-/// same containment rule `session_log::snapshot_path_in` applies to the log's
-/// own untrusted `snapshot` field.
-fn is_contained_relative(rel: &str) -> bool {
-    !rel.is_empty()
-        && Path::new(rel)
-            .components()
-            .all(|c| matches!(c, std::path::Component::Normal(_)))
-}
-
-/// Append the `pause` line that attributes `rel` to its session, if absent.
-///
-/// Why: `resolve_session_snapshot` reads `sessions-log.jsonl`, not the
-/// directory — a snapshot with no pause line belongs to nobody and resolves for
-/// nobody (#5272). A hydrated file without its log line would restore the bytes
-/// and still fail the resume, so the two are restored together.
-/// What: reads the commit's `Session-Id` / `Session-Timestamp` trailers and
-/// appends a [`SessionLogEntry`] whose `snapshot` is `rel` — store-relative,
-/// exactly as [`super::pause::write_pause_snapshot`] records it. Returns
-/// `Ok(false)` when the log already carries a `pause` line for this snapshot,
-/// or when the commit names no session id.
-/// Test: `hydration_restores_a_deleted_snapshot_and_its_log_line`,
-/// `hydration_is_idempotent_across_two_runs`.
-fn synthesize_log_entry(sessions_dir: &Path, message: &str, rel: &str) -> Result<bool> {
-    let Some(session_id) = commit_trailer(message, "Session-Id") else {
-        return Ok(false);
-    };
-    let already = session_log::read_log(sessions_dir)
-        .iter()
-        .any(|e| e.event == session_log::EVENT_PAUSE && e.snapshot == rel);
-    if already {
-        return Ok(false);
-    }
-    let timestamp = commit_trailer(message, "Session-Timestamp")
-        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
-    session_log::append_entry(
-        sessions_dir,
-        &SessionLogEntry {
-            session_id,
-            event: session_log::EVENT_PAUSE.to_string(),
-            snapshot: rel.to_string(),
-            timestamp,
-        },
-    )?;
-    Ok(true)
 }
 
 #[cfg(test)]
