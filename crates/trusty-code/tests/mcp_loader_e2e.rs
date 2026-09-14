@@ -59,16 +59,26 @@ fn global_config(dir: &std::path::Path, servers: &[(&str, &str)]) -> PathBuf {
     path
 }
 
-/// A global `servers.toml` whose FIRST server is a fixture wedged on
-/// `initialize` and whose second is a healthy one.
-fn hung_then_healthy(dir: &std::path::Path) -> PathBuf {
+/// A global `servers.toml` of `wedged` servers, then one healthy `fixture`.
+///
+/// Why TWO wedged servers by default: with only one, a sequential loader costs
+/// one budget plus the healthy server's few milliseconds — indistinguishable
+/// from a concurrent one, so the test would pass against the very defect it
+/// exists to catch. N wedged servers make the sequential cost N budgets and
+/// the concurrent cost one.
+fn wedged_then_healthy(dir: &std::path::Path, wedged: usize) -> PathBuf {
     let binary = fixture_binary();
-    let text = format!(
-        "[[servers]]\nname = \"wedged\"\n[servers.transport]\ntype = \"stdio\"\ncommand = {binary:?}\n\
-         [servers.transport.env]\nTCODE_FIXTURE_HANG = \"1\"\n\n\
-         [[servers]]\nname = \"fixture\"\n[servers.transport]\ntype = \"stdio\"\ncommand = {binary:?}\n\
+    let mut text = String::new();
+    for i in 0..wedged {
+        text.push_str(&format!(
+            "[[servers]]\nname = \"wedged-{i}\"\n[servers.transport]\ntype = \"stdio\"\ncommand = {binary:?}\n\
+             [servers.transport.env]\nTCODE_FIXTURE_HANG = \"1\"\n\n"
+        ));
+    }
+    text.push_str(&format!(
+        "[[servers]]\nname = \"fixture\"\n[servers.transport]\ntype = \"stdio\"\ncommand = {binary:?}\n\
          [servers.transport.env]\nTCODE_FIXTURE_TOKEN = \"fixture-token-5428\"\n"
-    );
+    ));
     let path = dir.join("servers.toml");
     std::fs::write(&path, text).expect("writing the global fixture");
     path
@@ -178,17 +188,19 @@ async fn spawn_failure_isolates_the_healthy_server() {
 }
 
 /// Why: the per-server startup bound is only worth having if the servers are
-/// attempted CONCURRENTLY. Connected in sequence, N wedged connectors would
-/// cost N × the bound before the agent loop starts, so the worst case grew
-/// with the operator's config. Two servers, the first wedged on `initialize`:
-/// the whole load must cost about ONE budget, and the healthy sibling — second
-/// in config order — must still register and dispatch.
+/// attempted CONCURRENTLY. Connected in sequence, N wedged connectors cost
+/// N × the bound before the agent loop starts, so the worst case grew with the
+/// operator's config. THREE wedged servers plus a healthy one: concurrently
+/// the load costs about one budget, sequentially at least three, so the
+/// margin below tells the two apart. The healthy sibling — last in config
+/// order — must still register and dispatch.
 #[tokio::test]
 async fn a_hung_server_does_not_serialise_its_siblings() {
     let home = tempdir().expect("tempdir");
     let project = tempdir().expect("tempdir");
-    let global = hung_then_healthy(home.path());
-    let budget = Duration::from_millis(1_500);
+    const WEDGED: usize = 3;
+    let global = wedged_then_healthy(home.path(), WEDGED);
+    let budget = Duration::from_millis(1_000);
 
     let started = Instant::now();
     let set = McpToolSet::load_within(&global, project.path(), budget).await;
@@ -198,28 +210,35 @@ async fn a_hung_server_does_not_serialise_its_siblings() {
     let diagnostics = register_configured_tools(&mut registry, &set);
 
     assert!(
-        elapsed < budget * 2,
-        "two servers, one wedged: the load took {elapsed:?}, which is at least \
-         two budgets of {budget:?} — the connections are running in sequence",
+        elapsed >= budget,
+        "the wedged servers must actually have been waited out: {elapsed:?}",
     );
     assert!(
-        elapsed >= budget,
-        "the wedged server must actually have been waited out: {elapsed:?}",
+        elapsed < budget * 2,
+        "{WEDGED} wedged servers plus one healthy: the load took {elapsed:?}. \
+         Concurrently that is about one budget of {budget:?}; sequentially it \
+         would be at least {:?}. The connections are running in sequence.",
+        budget * WEDGED as u32,
     );
 
     // Config order survives the concurrency.
-    assert_eq!(diagnostics.statuses[0].name, "wedged");
-    assert_eq!(diagnostics.statuses[1].name, "fixture");
-    assert!(!diagnostics.statuses[0].usable);
-    assert!(
-        diagnostics.statuses[0]
-            .detail
-            .as_deref()
-            .is_some_and(|d| d.contains("handshake")),
-        "the wedged server reports the timeout: {:?}",
-        diagnostics.statuses[0],
-    );
-    assert!(diagnostics.statuses[1].usable);
+    let names: Vec<&str> = diagnostics
+        .statuses
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["wedged-0", "wedged-1", "wedged-2", "fixture"]);
+    for status in &diagnostics.statuses[..WEDGED] {
+        assert!(!status.usable);
+        assert!(
+            status
+                .detail
+                .as_deref()
+                .is_some_and(|d| d.contains("handshake")),
+            "a wedged server reports the timeout: {status:?}",
+        );
+    }
+    assert!(diagnostics.statuses[WEDGED].usable);
     assert_eq!(
         registry
             .dispatch("mcp__fixture__echo", json!({"message": "unblocked"}))
