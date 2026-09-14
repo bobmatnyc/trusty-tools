@@ -126,14 +126,23 @@ pub const SCAFFOLD_IGNORED_PATHS: &[&str] = &[
 /// Test: `writes_block_to_fresh_gitignore`, `idempotent_on_repeat_call`,
 /// `preserves_unrelated_existing_content`, `noop_when_not_a_git_repo`,
 /// `an_existing_block_gains_newly_managed_paths`,
-/// `this_repos_committed_block_matches_the_generator`.
+/// `this_repos_committed_block_matches_the_generator`,
+/// `an_unreadable_gitignore_is_reported_not_treated_as_empty`.
 pub fn ensure_scaffold_gitignored(project_dir: &Path) -> std::io::Result<bool> {
     if !project_dir.join(".git").exists() {
         return Ok(false);
     }
 
     let gitignore_path = project_dir.join(".gitignore");
-    let existing = std::fs::read_to_string(&gitignore_path).unwrap_or_default();
+    // #7932: only a MISSING file reads as empty. A present-but-unreadable one
+    // used to as well, which appends a second managed block over a first one
+    // this call could not see — the same fail-open family as the half-written
+    // refresh below.
+    let existing = match std::fs::read_to_string(&gitignore_path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e),
+    };
 
     // The begin marker's presence anywhere in the file means a prior run already
     // installed the block — never append a duplicate; refresh that one instead.

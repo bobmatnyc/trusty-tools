@@ -427,6 +427,45 @@ fn this_repos_committed_block_matches_the_generator() {
     );
 }
 
+/// A `.gitignore` that exists but cannot be read is an error, not an empty file.
+///
+/// Why (#7932): `unwrap_or_default()` on the read made an unreadable file
+/// indistinguishable from a missing one, so the call appended a SECOND managed
+/// block over a first one it could not see. Only `NotFound` may read as empty.
+/// Windows has no equivalent of a chmod-000 file, so this is a Unix test.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_gitignore_is_reported_not_treated_as_empty() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let tmp = crate::test_support::hermetic_temp_dir();
+    init_git_repo(tmp.path());
+    let gitignore_path = tmp.path().join(".gitignore");
+    let existing = format!("node_modules/\n{SCAFFOLD_GITIGNORE_BEGIN}\n{SCAFFOLD_GITIGNORE_END}\n");
+    std::fs::write(&gitignore_path, &existing).unwrap();
+
+    let original = std::fs::metadata(&gitignore_path).unwrap().permissions();
+    std::fs::set_permissions(&gitignore_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // Root reads it regardless — skip rather than assert a false property.
+    if std::fs::read_to_string(&gitignore_path).is_ok() {
+        std::fs::set_permissions(&gitignore_path, original).unwrap();
+        return;
+    }
+
+    let result = ensure_scaffold_gitignored(tmp.path());
+    std::fs::set_permissions(&gitignore_path, original).unwrap();
+
+    assert!(
+        result.is_err(),
+        "an unreadable .gitignore must be reported, not treated as empty: {result:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&gitignore_path).unwrap(),
+        existing,
+        "the file must be untouched — never a second appended block"
+    );
+}
+
 /// A failed rewrite leaves the operator's file intact and reports the error.
 ///
 /// Why: the refresh replaces the whole file. A non-atomic write that fails
