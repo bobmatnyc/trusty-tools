@@ -184,6 +184,17 @@ job on every PR built off `main` until fixed. Also flagged on #7351.
 matches zero tests and exits 0 — the #4307 class of a green run that proved
 nothing.
 
+### A `--path`-included module filters by module path, not source basename (#7866)
+
+`crates/trusty-mpm/src/test_support.rs` pulls in `test_tmux_session.rs` via
+`#[path = "test_tmux_session.rs"] pub(crate) mod tmux_session;`, so the
+compiled path is `test_support::tmux_session` — the source file's basename
+never appears in any test name. `cargo test -p trusty-mpm --lib
+test_tmux_session` filters against a path that does not exist and returns `0
+passed; 0 failed; 7361 filtered out`: green, same #4307 class as the
+`tests_behavior_*` case above, nothing ran. The working invocation filters on
+the module name instead: `cargo test -p trusty-mpm --lib tmux_session`.
+
 ## The Three Stages in Cargo Terms
 
 `Skill(skill="tm-workflow")` ("Test Scope Widens by Stage") sets the framework
