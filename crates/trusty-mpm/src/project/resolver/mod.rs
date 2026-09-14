@@ -13,6 +13,8 @@
 //! covering exact-name, URL, keyword, multi-candidate disambiguation, clamping,
 //! no-match, tie-breaking, and confidence-capping scenarios.
 
+use std::path::PathBuf;
+
 use thiserror::Error;
 
 use super::record::Project;
@@ -408,6 +410,46 @@ pub fn fleet_by_project(sessions: &[SessionRecord], projects: &[Project]) -> Vec
             }
         })
         .collect()
+}
+
+/// The local directory a session for `project` runs in (#7887).
+///
+/// Why: since ADR-0055 the daemon clones nothing and creates no worktree, so
+/// every `session_new` caller must hand it a directory that already exists on
+/// this host — and a registry row holds no such field, only `repo_url`. Each
+/// caller re-deriving that answer is what let the `tm ls` new-session picker
+/// send a project's GitHub URL and be refused by the daemon (#7887). This is
+/// the one answer every ADR-0055-era caller asks for.
+/// What: an absolute `repo_url` IS that directory, returned verbatim. Any other
+/// `repo_url` is parsed for its `owner`/`repo`
+/// ([`parse_github_path`](trusty_common::github_path::parse_github_path)) and
+/// resolved to the managed clone under the projects root —
+/// `<repos_root>/<owner>/<repo>`, via
+/// [`base_clone_path`](crate::daemon::managed_routes::inproject::base_clone_path),
+/// so this agrees with every other managed checkout. `None` when `repo_url` is
+/// empty, names no repository, or names one with no owner: a guessed directory
+/// is worse than no answer. Existence is NOT checked here — the caller decides
+/// what a missing directory means, and must never fall back to the URL.
+/// Test: `local_checkout_for_derives_the_managed_clone_path`,
+/// `local_checkout_for_keeps_an_absolute_repo_url`,
+/// `local_checkout_for_refuses_what_names_no_project`.
+pub fn local_checkout_for(project: &Project) -> Option<PathBuf> {
+    let trimmed = project.repo_url.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.starts_with('/') {
+        return Some(PathBuf::from(trimmed));
+    }
+    let gh = trusty_common::github_path::parse_github_path(trimmed)?;
+    // A one-segment `repo_url` parses with a placeholder owner; that names no
+    // real checkout, so it is a refusal rather than a directory to guess at.
+    if gh.owner == trusty_common::github_path::UNKNOWN_OWNER {
+        return None;
+    }
+    Some(crate::daemon::managed_routes::inproject::base_clone_path(
+        &gh.owner, &gh.repo,
+    ))
 }
 
 // ---------------------------------------------------------------------------

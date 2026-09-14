@@ -29,7 +29,7 @@ use trusty_mpm::project::Project;
 
 use crate::commands::session_picker_order::{group_rank, recency_key};
 
-use super::new_session::{Target, repo_is_session_project, row_labels};
+use super::new_session::{CheckoutOf, Target, repo_is_session_project, row_labels};
 
 /// Sort tier for a project no session in the list belongs to.
 ///
@@ -88,13 +88,15 @@ pub(crate) fn group_of(repo: &str) -> (u8, String) {
 /// What: drops every row
 /// [`is_offerable_project`](crate::commands::projects::offerable::is_offerable_project)
 /// rejects (#7406, unchanged), sorts the rest by [`Rank`], and appends
-/// [`Target::Other`] so the typed-path escape is always the last row.
+/// [`Target::Other`] so the typed-path escape is always the last row. Each row
+/// carries `checkout_of`'s answer for its project (#7887).
 /// Test: `new_session_order_is_independent_of_registry_iteration_order`,
 /// `new_session_order_puts_a_live_session_project_first`,
 /// `new_session_order_groups_by_owner_then_domain`.
 pub(crate) fn ordered_targets(
     projects: &[Project],
     sessions: &[ManagedSessionSummary],
+    checkout_of: CheckoutOf,
 ) -> Vec<Target> {
     let registered: Vec<Target> = projects
         .iter()
@@ -102,6 +104,9 @@ pub(crate) fn ordered_targets(
         .map(|p| Target::Registered {
             name: p.name.clone(),
             repo: p.repo_url.clone(),
+            // #7887: `repo_url` labels and matches the row; the session runs
+            // in this directory, which the registry does not store.
+            checkout: checkout_of(p),
         })
         .collect();
     // The label is what the operator reads, so it is also what the alphabetical
@@ -143,7 +148,7 @@ struct Facts {
 /// Reduce one target to its [`Facts`] against the session list the TUI holds.
 fn facts(target: &Target, label: &str, sessions: &[ManagedSessionSummary]) -> Facts {
     let (name, repo) = match target {
-        Target::Registered { name, repo } => (name.as_str(), repo.as_str()),
+        Target::Registered { name, repo, .. } => (name.as_str(), repo.as_str()),
         // Never ranked: `ordered_targets` appends the escape row after sorting.
         Target::Other => ("", ""),
     };

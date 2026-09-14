@@ -10,9 +10,11 @@
 //! shared rename validator), the delete-outcome wording, the key mapping, and
 //! `TestBackend` renders at 80x24, 200x50, and 20x5.
 
+use std::path::{Path, PathBuf};
+
 use ratatui::{Terminal, backend::TestBackend};
 use trusty_mpm::client::ManagedSessionSummary;
-use trusty_mpm::project::Project;
+use trusty_mpm::project::{Project, local_checkout_for};
 use trusty_mpm::session_manager::rename::validate_session_name;
 
 use super::layout::{self, Column};
@@ -1048,13 +1050,40 @@ fn project(name: &str, repo_url: &str) -> Project {
 
 /// Two registered projects, plus the typed-path escape `targets_from` appends.
 fn targets() -> Vec<Target> {
-    new_session::targets_from(
+    new_session::targets_from_with(
         &[
             project("trusty-tools", "https://github.com/bobmatnyc/trusty-tools"),
             project("apex", "https://github.com/duetto/apex"),
         ],
         &[],
+        stub_checkout,
     )
+}
+
+/// Where the fixture row named `name` is checked out (#7887).
+///
+/// Why: the picker hands the create call a registered row's DIRECTORY and
+/// refuses one that is not on this host, so a fixture row that a test confirms
+/// needs a directory that really exists. This crate's own source tree supplies
+/// them — which directory stands for which project is arbitrary; that two rows
+/// differ, and that both exist, is the whole requirement.
+fn fixture_checkout(name: &str) -> PathBuf {
+    let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+    match name {
+        "apex" => here.join("src").join("daemon"),
+        "zeta" => here.join("src").join("client"),
+        _ => here.join("src"),
+    }
+}
+
+/// [`fixture_checkout`] as the picker's checkout resolver (#7887).
+fn stub_checkout(project: &Project) -> Option<PathBuf> {
+    Some(fixture_checkout(&project.name))
+}
+
+/// A checkout resolver naming a directory this host does not have (#7887).
+fn missing_checkout(project: &Project) -> Option<PathBuf> {
+    Some(PathBuf::from("/nonexistent/7887").join(&project.name))
 }
 
 /// Stand-in for the real git resolution, so the unregistered-path branch is
@@ -1091,6 +1120,7 @@ fn new_session_targets_from_puts_the_path_escape_last() {
         Some(&Target::Registered {
             name: "trusty-tools".to_string(),
             repo: "https://github.com/bobmatnyc/trusty-tools".to_string(),
+            checkout: Some(fixture_checkout("trusty-tools")),
         })
     );
     assert_eq!(targets.last(), Some(&Target::Other));
@@ -1118,6 +1148,8 @@ fn new_session_key_opens_the_flow() {
 /// the operator moved onto, not the first row and not the cwd. Driving it from
 /// the keystrokes, then through [`new_session::perform_with`] with fakes, is
 /// what makes an implementation that creates something else fail here.
+/// #7887: "the repo of the row" is that row's local checkout — the create call
+/// takes a directory, never the registry's URL.
 #[tokio::test]
 async fn new_session_confirming_a_registered_project_creates_without_registering() {
     let sessions = fleet();
@@ -1128,11 +1160,12 @@ async fn new_session_confirming_a_registered_project_creates_without_registering
     let Action::Create(request) = action else {
         panic!("expected a create action, got {action:?}");
     };
+    let apex = fixture_checkout("apex").display().to_string();
     assert_eq!(
         request,
         NewSessionRequest {
             register: None,
-            repo: "https://github.com/duetto/apex".to_string(),
+            repo: apex.clone(),
             label: "apex".to_string(),
         }
     );
@@ -1155,9 +1188,88 @@ async fn new_session_confirming_a_registered_project_creates_without_registering
     assert_eq!(outcome, AttachOutcome::Attached);
     assert_eq!(
         calls.into_inner(),
-        vec!["create:https://github.com/duetto/apex".to_string()],
+        vec![format!("create:{apex}")],
         "a registered project must not be registered again"
     );
+}
+
+/// A registered row carries the directory a session in it runs in (#7887).
+///
+/// Why: the registry stores no path, so the row is where that answer has to be
+/// resolved. This asserts the PRODUCTION wiring — `targets_from` asking
+/// `local_checkout_for` — which the stub-driven tests below deliberately do not.
+#[test]
+fn new_session_registered_target_carries_its_local_checkout() {
+    let rows =
+        new_session::targets_from(&[project("cto", "https://github.com/bob-duetto/cto")], &[]);
+    let Some(Target::Registered { repo, checkout, .. }) = rows.first() else {
+        panic!("the registry row is not a target, got {rows:?}");
+    };
+    assert_eq!(
+        repo, "https://github.com/bob-duetto/cto",
+        "the row keeps its identity"
+    );
+    let checkout = checkout.as_ref().expect("a GitHub row names a directory");
+    assert!(checkout.is_absolute(), "{checkout:?}");
+    assert!(
+        checkout.ends_with("bob-duetto/cto"),
+        "not the managed clone path: {checkout:?}"
+    );
+}
+
+/// Confirming a registered row sends its directory, never its URL (#7887).
+///
+/// Why: the owner's `tm ls` sent `https://github.com/bob-duetto/cto` as
+/// `repo_url` and the daemon's ADR-0055 check refused it — trusty-mpm clones
+/// nothing, so the only form it accepts is a directory that already exists.
+/// Against the pre-fix picker this fails with that URL in `request.repo`.
+#[test]
+fn new_session_confirming_a_registered_project_sends_its_local_checkout() {
+    let mut flow = NewSessionFlow::with_resolver(
+        new_session::targets_from_with(
+            &[project("cto", "https://github.com/bob-duetto/cto")],
+            &[],
+            stub_checkout,
+        ),
+        stub_identity,
+    );
+    match flow.apply(Input::Enter) {
+        Step::Create(request) => {
+            assert_eq!(request.register, None, "the project is already registered");
+            assert_eq!(request.repo, fixture_checkout("cto").display().to_string());
+            assert!(Path::new(&request.repo).is_dir(), "{request:?}");
+        }
+        other => panic!("the registered row was not confirmed, got {other:?}"),
+    }
+}
+
+/// A registered project with no checkout names the path and the clone (#7887).
+///
+/// Why: falling back to the URL only moves the failure into the daemon's
+/// background provisioning job, whose message names neither this project nor
+/// where its checkout belongs. The refusal has to arrive here, with the step
+/// that fixes it.
+#[test]
+fn new_session_registered_project_without_a_checkout_names_the_clone_step() {
+    let mut flow = NewSessionFlow::with_resolver(
+        new_session::targets_from_with(
+            &[project("cto", "https://github.com/bob-duetto/cto")],
+            &[],
+            missing_checkout,
+        ),
+        stub_identity,
+    );
+    match flow.apply(Input::Enter) {
+        Step::Reject(message) => {
+            assert!(message.contains("/nonexistent/7887/cto"), "{message}");
+            assert!(
+                message
+                    .contains("git clone https://github.com/bob-duetto/cto /nonexistent/7887/cto"),
+                "{message}"
+            );
+        }
+        other => panic!("a missing checkout was not refused, got {other:?}"),
+    }
 }
 
 /// An unregistered path is registered FIRST, then created in.
@@ -1444,10 +1556,14 @@ fn overlay_rows(screen: &[String]) -> Vec<String> {
 }
 
 /// A registered row built straight, bypassing the offerable filter.
+///
+/// #7887: `checkout` is the production resolver's own answer for the row, so a
+/// row built here compares equal to the one `targets_from` produces.
 fn target(name: &str, repo: &str) -> Target {
     Target::Registered {
         name: name.to_string(),
         repo: repo.to_string(),
+        checkout: local_checkout_for(&project(name, repo)),
     }
 }
 
@@ -1744,7 +1860,8 @@ fn new_session_typing_filters_the_rows() {
 #[test]
 fn new_session_filter_keeps_the_selection_valid() {
     let mut flow = NewSessionFlow::with_resolver(
-        new_session::targets_from(&six_projects(), &[]),
+        // #7887: Enter below sends a directory, so the rows need one.
+        new_session::targets_from_with(&six_projects(), &[], stub_checkout),
         stub_identity,
     );
     // Move onto `bobmatnyc/trusty-tools`, then filter it away.
@@ -1760,7 +1877,7 @@ fn new_session_filter_keeps_the_selection_valid() {
         flow.apply(Input::Enter),
         Step::Create(NewSessionRequest {
             register: None,
-            repo: "https://github.com/zed/zeta".to_string(),
+            repo: fixture_checkout("zeta").display().to_string(),
             label: "zeta".to_string(),
         })
     );
@@ -2064,12 +2181,18 @@ fn new_session_entry_builds_a_clone_and_register_request() {
 ///
 /// Why: `register` is an unqualified upsert, so a redundant call would replace
 /// the stored record's optional fields with the two this flow can supply.
+/// #7887: and it starts the session in that row's CHECKOUT — typing a
+/// registered `owner/repo` must send what picking its row sends.
 #[test]
 fn new_session_entry_reuses_a_registered_project() {
     let request = super::new_session_entry::request_for_entry("bobmatnyc/trusty-tools", &targets())
         .expect("a registered project is still a project");
     assert_eq!(request.register, None);
-    assert_eq!(request.repo, "https://github.com/bobmatnyc/trusty-tools");
+    assert_eq!(
+        request.repo,
+        fixture_checkout("trusty-tools").display().to_string()
+    );
+    assert_ne!(request.repo, "https://github.com/bobmatnyc/trusty-tools");
     assert_eq!(request.label, "trusty-tools");
 }
 
@@ -2110,7 +2233,7 @@ fn new_session_entry_does_not_hijack_a_matching_filter() {
         flow.apply(Input::Enter),
         Step::Create(NewSessionRequest {
             register: None,
-            repo: "https://github.com/duetto/apex".to_string(),
+            repo: fixture_checkout("apex").display().to_string(),
             label: "apex".to_string(),
         })
     );

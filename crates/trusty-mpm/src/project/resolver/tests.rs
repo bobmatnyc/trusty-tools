@@ -530,3 +530,46 @@ fn resolver_reason_label() {
     assert!(!ResolutionReason::KeywordMatch.label().is_empty());
     assert!(!ResolutionReason::TicketKeyword.label().is_empty());
 }
+
+// ---- local checkout (#7887) ----
+
+/// A row holding only a GitHub URL resolves to its managed clone directory.
+///
+/// #7887's core claim: `bob-duetto/cto` IS `<repos_root>/bob-duetto/cto`, and
+/// never the URL the registry stores.
+#[test]
+fn local_checkout_for_derives_the_managed_clone_path() {
+    let project = proj("cto", "https://github.com/bob-duetto/cto");
+    assert_eq!(
+        local_checkout_for(&project),
+        Some(
+            crate::daemon::managed_routes::inproject::repos_root()
+                .join("bob-duetto")
+                .join("cto")
+        )
+    );
+    // An `ssh` remote names the same checkout as its `https` spelling.
+    assert_eq!(
+        local_checkout_for(&proj("cto", "git@github.com:bob-duetto/cto.git")),
+        local_checkout_for(&project)
+    );
+}
+
+#[test]
+fn local_checkout_for_keeps_an_absolute_repo_url() {
+    assert_eq!(
+        local_checkout_for(&proj("tools", "/Users/me/work/trusty-tools")),
+        Some(PathBuf::from("/Users/me/work/trusty-tools"))
+    );
+}
+
+#[test]
+fn local_checkout_for_refuses_what_names_no_project() {
+    assert_eq!(local_checkout_for(&proj("empty", "")), None);
+    assert_eq!(
+        local_checkout_for(&proj("host-only", "https://github.com/")),
+        None
+    );
+    // One segment: the owner would have to be invented, so there is no answer.
+    assert_eq!(local_checkout_for(&proj("no-owner", "cto")), None);
+}
