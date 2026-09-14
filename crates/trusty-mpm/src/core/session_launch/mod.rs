@@ -40,7 +40,7 @@ mod hook_group_diff;
 /// have surfaced only half of them. See [`asset_notices::log_prep_findings`].
 /// Test: covered by `asset_notices`' own tests (this is a plain re-export).
 pub use asset_notices::{PrepScope, log_prep_findings};
-pub(crate) use hook_group_diff::project_hook_group_gaps;
+pub(crate) use hook_group_diff::{ProjectHookGroupGaps, project_hook_group_gaps};
 mod palace_alias;
 // #7780: preserve a malformed project settings.json before a writer rewrites it.
 // #7789: `pub(crate)` because the managed-tier writers in `core::standalone`

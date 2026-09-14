@@ -194,7 +194,8 @@ fn a_file_tm_never_provisioned_has_no_gaps() {
         &workspace,
         &foreign,
         Some(std::path::Path::new(STABLE_HOOK_EXE)),
-    );
+    )
+    .expect("a pinned installed binary resolves");
 
     assert!(
         gaps.is_empty(),
@@ -223,11 +224,45 @@ fn a_user_tier_file_has_no_project_tier_gaps() {
         &workspace,
         &user_tier,
         Some(std::path::Path::new(STABLE_HOOK_EXE)),
-    );
+    )
+    .expect("a pinned installed binary resolves");
 
     assert!(
         gaps.is_empty(),
         "the user tier is not the project tier: {gaps:?}"
+    );
+}
+
+/// An unresolvable hook binary is an `Err`, never an empty diff.
+///
+/// Why (#7849, fail-open check): the first cut returned
+/// `ProjectHookGroupGaps::default()` on that arm, so `is_complete()` read true
+/// and `tm doctor` stayed silent — the same "no gaps found" symptom this issue
+/// is about, gated on exe resolution instead of on the toggle. It is reachable
+/// in production whenever `tm validate --repair` runs from a build tree whose
+/// `current_exe`/`$PATH` differ from the daemon's.
+/// What: hands the refusal in through the `_with` seam, because
+/// `resolve_stable_hook_exe`'s `$PATH` fallback rescues a refused
+/// `exe_override` on every host that has `tm` installed. The settings value
+/// carries the PM guard, so the tier gate passes and the resolution is actually
+/// consulted.
+/// Test: itself.
+#[test]
+fn an_unresolved_hook_binary_is_an_error_never_an_empty_diff() {
+    let project_tier = serde_json::json!({
+        "hooks": {
+            "PreToolUse": [{
+                "matcher": "",
+                "hooks": [{ "type": "command", "command": "/usr/local/bin/tm hook --pm-guard" }]
+            }]
+        }
+    });
+
+    let gaps = project_hook_group_gaps_with(&project_tier, || Err(StableHookExeError::Unresolved));
+
+    assert!(
+        gaps.is_err(),
+        "an unknown answer must never be reported as an empty diff: {gaps:?}"
     );
 }
 
@@ -249,7 +284,7 @@ fn a_flipped_on_flag_is_a_missing_group() {
     )
     .expect("flip the flag");
 
-    let gaps = project_hook_group_gaps(&off_fw, &workspace, &written, exe);
+    let gaps = project_hook_group_gaps(&off_fw, &workspace, &written, exe).expect("resolve");
 
     let events: Vec<&str> = gaps.missing.iter().map(|(e, _)| e.as_str()).collect();
     assert_eq!(
@@ -276,7 +311,7 @@ fn a_flipped_off_flag_is_a_stale_group() {
     )
     .expect("flip the flag");
 
-    let gaps = project_hook_group_gaps(&on_fw, &workspace, &written, exe);
+    let gaps = project_hook_group_gaps(&on_fw, &workspace, &written, exe).expect("resolve");
 
     let events: Vec<&str> = gaps.stale.iter().map(|(e, _)| e.as_str()).collect();
     assert_eq!(

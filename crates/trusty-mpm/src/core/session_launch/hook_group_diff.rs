@@ -15,7 +15,9 @@
 //! What: [`project_hook_additions_for`] resolves the three toggles and builds
 //! the additions block (the ONE builder the launch path and the resume merge
 //! also use, so the comparison can never expect a shape no writer produces);
-//! [`project_hook_group_gaps`] diffs that block against a settings value.
+//! [`project_hook_group_gaps`] diffs that block against a settings value, and
+//! reports an unresolvable hook binary as an `Err` rather than as an empty diff
+//! — an UNKNOWN answer must never read as a complete one.
 //! Read-only — the repair is a call to
 //! [`super::resume_hooks::ensure_project_hooks_with`], which merges through the
 //! same writer.
@@ -98,31 +100,54 @@ impl ProjectHookGroupGaps {
 /// Why: see the module doc. This is the read-only predicate
 /// `core::deploy_validate` and `tm doctor`'s `hooks_missing_tm_group` share, so
 /// the two surfaces can never disagree about what a complete hook set is.
-/// What: empty for a file tm's PROJECT tier never provisioned (the #7490 rule,
-/// restated: a foreign project owes tm no hook group, and the user tier owes it
-/// no project-tier one — see [`is_project_tier_marker_command`]). Empty, too,
-/// when no stable binary resolves: the expected COMMANDS cannot be known, and a
-/// gap nothing can close would drive the spawn/resume gate into a permanent
-/// repair loop (#7244's fail-closed rule, applied to a diagnostic).
-/// Otherwise every expected group the file does not carry, and every tm-owned
-/// command on an owned event that no expected group names.
+/// What: `Ok` with no gaps for a file tm's PROJECT tier never provisioned (the
+/// #7490 rule, restated: a foreign project owes tm no hook group, and the user
+/// tier owes it no project-tier one — see [`is_project_tier_marker_command`]).
+/// `Err` when no stable binary resolves, because the expected COMMANDS cannot
+/// then be known and the answer is UNKNOWN rather than "complete" — swallowing
+/// that into an empty diff reproduced this very issue one probe along, gated on
+/// exe resolution instead of on the toggle. Otherwise `Ok` with every expected
+/// group the file does not carry, and every tm-owned command on an owned event
+/// that no expected group names.
 /// Test: `a_flipped_on_flag_is_a_missing_group`,
 /// `a_flipped_off_flag_is_a_stale_group`,
 /// `a_file_tm_never_provisioned_has_no_gaps`,
-/// `a_user_tier_file_has_no_project_tier_gaps`.
+/// `a_user_tier_file_has_no_project_tier_gaps`,
+/// `an_unresolved_hook_binary_is_an_error_never_an_empty_diff`.
 pub(crate) fn project_hook_group_gaps(
     fw: &FrameworkPaths,
     project_dir: &Path,
     settings: &Value,
     exe_override: Option<&Path>,
-) -> ProjectHookGroupGaps {
+) -> Result<ProjectHookGroupGaps, StableHookExeError> {
+    project_hook_group_gaps_with(settings, || {
+        project_hook_additions_for(fw, project_dir, exe_override)
+    })
+}
+
+/// [`project_hook_group_gaps`] with the expected additions supplied by the
+/// caller.
+///
+/// Why (#7849): `resolve_stable_hook_exe` falls back to any `tm` on `$PATH` or
+/// in the well-known daemon directories, so a refused `exe_override` is rescued
+/// on every host that has the binary installed — which is every developer
+/// machine. The refusal arm therefore cannot be reached from outside, exactly
+/// as [`super::settings::write_project_hooks_with`] found for the writer.
+/// Taking the already-computed `Result` lets a test hand the refusal in
+/// directly, on any host.
+/// What: the tier gate, then `expected()?`, then the comparison. `expected` is
+/// not called at all for a file tm's project tier never provisioned, so a
+/// foreign project never pays for a resolution it does not need.
+/// Test: `an_unresolved_hook_binary_is_an_error_never_an_empty_diff`,
+/// `a_file_tm_never_provisioned_has_no_gaps`.
+pub(crate) fn project_hook_group_gaps_with(
+    settings: &Value,
+    expected: impl FnOnce() -> Result<Value, StableHookExeError>,
+) -> Result<ProjectHookGroupGaps, StableHookExeError> {
     if event_names_matching(settings, is_project_tier_marker_command).is_empty() {
-        return ProjectHookGroupGaps::default();
+        return Ok(ProjectHookGroupGaps::default());
     }
-    let Ok(expected) = project_hook_additions_for(fw, project_dir, exe_override) else {
-        return ProjectHookGroupGaps::default();
-    };
-    diff_hook_groups(&expected, settings)
+    Ok(diff_hook_groups(&expected()?, settings))
 }
 
 /// Compare an expected `{"hooks": {...}}` block against a settings value.

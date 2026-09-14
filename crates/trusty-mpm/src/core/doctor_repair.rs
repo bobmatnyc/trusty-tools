@@ -288,9 +288,14 @@ pub(crate) fn repair_missing_hook_group_with(
     // could never close. The merge below already writes it; only this gate was
     // blind to it. Appended rather than merged-and-sorted so the lifecycle
     // events keep the order the pre-#7849 message used.
+    // An unresolvable hook binary yields no toggle events here on purpose: this
+    // step's own apply arm would refuse for that same reason, and the verdict
+    // for an unverifiable hook set belongs to `tm validate`'s
+    // `ProjectHookDiagnosticIncomplete`, not to a repair step that cannot act.
     let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(project_dir);
     for (event, _) in
         crate::core::session_launch::project_hook_group_gaps(&fw, project_dir, &val, exe_override)
+            .unwrap_or_default()
             .missing
     {
         if !gaps.contains(&event) {

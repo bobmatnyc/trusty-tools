@@ -62,7 +62,8 @@
 //! `repair_removes_a_stale_prompt_feedback_group_when_the_flag_is_off`,
 //! `a_hook_group_repair_leaves_foreign_entries_untouched`,
 //! `a_malformed_settings_file_is_a_fail_not_a_silent_pass`,
-//! `a_hook_writer_failure_surfaces_rather_than_reporting_no_gaps` (issue
+//! `a_hook_writer_failure_surfaces_rather_than_reporting_no_gaps`,
+//! `an_unresolvable_hook_binary_is_an_incomplete_diagnostic_never_a_clean_report` (issue
 //! #7849); the expected-set resolution itself is covered by `expected_set`'s
 //! own test module.
 
@@ -130,6 +131,13 @@ pub enum DeploymentGap {
     /// current config no longer asks for (#7849) — a toggle that flipped back
     /// off, or a command naming a binary path that no longer resolves.
     ProjectHookGroupStale(String, String),
+    /// The toggle-driven hook probe could not run, so whether the file carries
+    /// the right groups is UNKNOWN (#7849) — carries the resolution error.
+    ///
+    /// Why this is a gap rather than a silent skip: an unknown answer reported
+    /// as "complete" is the exact defect #7849 is about, moved one probe along
+    /// and gated on binary resolution instead of on the toggle.
+    ProjectHookDiagnosticIncomplete(String),
 }
 
 impl DeploymentGap {
@@ -179,6 +187,11 @@ impl DeploymentGap {
                 "settings.json carries a `{event}` hook group running `{command}` that this \
                  project's config no longer asks for; run `tm validate --repair` to remove it"
             ),
+            Self::ProjectHookDiagnosticIncomplete(detail) => format!(
+                "the toggle-driven hook-group check could not run, so this project's hook set \
+                 is UNVERIFIED: {detail} — install tm (`cargo install trusty-mpm`) so the hook \
+                 commands can be resolved, then re-run `tm validate --repair`"
+            ),
         }
     }
 
@@ -188,12 +201,20 @@ impl DeploymentGap {
     /// it would also rewrite the output style, the plugin allowlist and the
     /// statusline — work the resync does not need, and a fatal refusal it does
     /// not deserve.
-    /// What: `true` for the two `#7849` variants, `false` for every other.
-    /// Test: `repair_adds_the_prompt_feedback_groups_after_the_flag_flips_on`.
+    /// What: `true` for the three `#7849` variants, `false` for every other.
+    /// [`Self::ProjectHookDiagnosticIncomplete`] is included so an unverifiable
+    /// hook set still takes the resync branch: that branch calls the writer,
+    /// which resolves the same binary and surfaces the same refusal as
+    /// `repair_error`, instead of the deploy pipeline refusing for an unrelated
+    /// reason.
+    /// Test: `repair_adds_the_prompt_feedback_groups_after_the_flag_flips_on`,
+    /// `an_unresolvable_hook_binary_is_an_incomplete_diagnostic_never_a_clean_report`.
     fn is_project_hook_group(&self) -> bool {
         matches!(
             self,
-            Self::ProjectHookGroupMissing(..) | Self::ProjectHookGroupStale(..)
+            Self::ProjectHookGroupMissing(..)
+                | Self::ProjectHookGroupStale(..)
+                | Self::ProjectHookDiagnosticIncomplete(..)
         )
     }
 }
@@ -244,18 +265,53 @@ pub fn validate_workspace(fw: &FrameworkPaths) -> ValidationReport {
 /// a test process is one — so without this seam the probe would silently skip
 /// in every test that exercises it. Mirrors the seam
 /// [`validate_and_repair_with_exe`] already carries for the repair half.
-/// What: the body of [`validate_workspace`], forwarding `hook_exe` to the
-/// settings probe. Production callers pass `None` and keep resolving the
-/// running installed binary.
+/// What: binds `hook_exe` into the hook-group probe and delegates to
+/// [`validate_workspace_with_probe`]. Production callers pass `None` and keep
+/// resolving the running installed binary.
 /// Test: `repair_adds_the_prompt_feedback_groups_after_the_flag_flips_on`.
 pub fn validate_workspace_with_exe(
     fw: &FrameworkPaths,
     hook_exe: Option<&Path>,
 ) -> ValidationReport {
+    validate_workspace_with_probe(fw, &|fw, project_dir, settings| {
+        crate::core::session_launch::project_hook_group_gaps(fw, project_dir, settings, hook_exe)
+    })
+}
+
+/// The hook-group probe [`validate_workspace_with_probe`] runs.
+///
+/// Why: named so the `&dyn Fn` in two signatures cannot drift apart.
+/// What: `(paths, project dir, parsed settings) -> gaps or the resolution
+/// error`.
+/// Test: see [`validate_workspace_with_probe`].
+type HookGroupProbe<'a> = &'a dyn Fn(
+    &FrameworkPaths,
+    &Path,
+    &serde_json::Value,
+) -> Result<
+    crate::core::session_launch::ProjectHookGroupGaps,
+    crate::core::standalone::hooks::StableHookExeError,
+>;
+
+/// [`validate_workspace`] with the hook-group probe supplied by the caller.
+///
+/// Why (#7849): `resolve_stable_hook_exe` rescues a refused `exe_override` from
+/// `$PATH` and from the well-known daemon directories, so the REFUSAL arm is
+/// unreachable on any host that has `tm` installed — and pinning a path is
+/// therefore not enough to test what happens when resolution fails. This seam
+/// hands the probe's answer in directly, the same convention
+/// [`crate::core::session_launch`]'s writers use for the identical reason.
+/// What: the body of [`validate_workspace`], with `probe` replacing the bound
+/// [`crate::core::session_launch::project_hook_group_gaps`] call.
+/// Test: `an_unresolvable_hook_binary_is_an_incomplete_diagnostic_never_a_clean_report`.
+pub(crate) fn validate_workspace_with_probe(
+    fw: &FrameworkPaths,
+    probe: HookGroupProbe<'_>,
+) -> ValidationReport {
     let mut gaps = Vec::new();
     validate_agents(fw, &mut gaps);
     validate_skills(fw, &mut gaps);
-    validate_settings(fw, hook_exe, &mut gaps);
+    validate_settings(fw, probe, &mut gaps);
     ValidationReport { gaps }
 }
 
@@ -338,7 +394,11 @@ fn validate_skills(fw: &FrameworkPaths, gaps: &mut Vec<DeploymentGap>) {
 /// Probe `.claude/settings.json` for a resolvable `outputStyle`, a configured
 /// `hooks` key, and (#7849) the toggle-driven hook groups this project's
 /// current config asks for.
-fn validate_settings(fw: &FrameworkPaths, hook_exe: Option<&Path>, gaps: &mut Vec<DeploymentGap>) {
+fn validate_settings(
+    fw: &FrameworkPaths,
+    probe: HookGroupProbe<'_>,
+    gaps: &mut Vec<DeploymentGap>,
+) {
     let settings_path = fw.claude_home_dir().join(".claude").join("settings.json");
     let text = match std::fs::read_to_string(&settings_path) {
         Ok(text) => text,
@@ -395,8 +455,21 @@ fn validate_settings(fw: &FrameworkPaths, hook_exe: Option<&Path>, gaps: &mut Ve
     // directions. A file tm's project tier never provisioned yields nothing,
     // so a foreign project is never told to adopt tm's hooks.
     let project_dir = fw.claude_home_dir();
-    let group_gaps =
-        crate::core::session_launch::project_hook_group_gaps(fw, &project_dir, &value, hook_exe);
+    // #7849 (fail-open check): an Err here means the expected commands could
+    // not be resolved, so whether the file is right is UNKNOWN. Reporting
+    // UNKNOWN as complete is the same defect this issue is about, gated on the
+    // hook binary instead of on the toggle — so it becomes a gap the caller
+    // sees, and `--repair` still attempts the resync (which surfaces the same
+    // refusal as `repair_error`).
+    let group_gaps = match probe(fw, &project_dir, &value) {
+        Ok(group_gaps) => group_gaps,
+        Err(e) => {
+            gaps.push(DeploymentGap::ProjectHookDiagnosticIncomplete(
+                e.to_string(),
+            ));
+            return;
+        }
+    };
     for (event, command) in group_gaps.missing {
         gaps.push(DeploymentGap::ProjectHookGroupMissing(event, command));
     }

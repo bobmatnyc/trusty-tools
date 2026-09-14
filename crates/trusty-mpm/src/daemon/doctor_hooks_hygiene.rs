@@ -117,6 +117,24 @@ pub(super) fn check_hooks_hygiene(
     project_dir: Option<&Path>,
     active_workspace_paths: &[PathBuf],
 ) -> (DoctorCheck, DoctorCheck, DoctorCheck, DoctorCheck) {
+    check_hooks_hygiene_with_exe(project_dir, active_workspace_paths, None)
+}
+
+/// [`check_hooks_hygiene`] with the hook binary pinned by the caller.
+///
+/// Why (#7849): the toggle-driven probe compares the file against the COMMANDS
+/// the writer would produce, and resolving those needs an installed binary. A
+/// test process is a build artifact, so with `None` the probe's answer depends
+/// on whether the host happens to have `tm` installed — green on a developer
+/// machine, a resolution error on CI, for the same fixture. Mirrors the seam
+/// [`crate::core::deploy_validate::validate_workspace_with_exe`] carries.
+/// What: as [`check_hooks_hygiene`]; production passes `None`.
+/// Test: `check_hooks_hygiene_reports_a_missing_toggle_driven_group`.
+pub(super) fn check_hooks_hygiene_with_exe(
+    project_dir: Option<&Path>,
+    active_workspace_paths: &[PathBuf],
+    hook_exe: Option<&Path>,
+) -> (DoctorCheck, DoctorCheck, DoctorCheck, DoctorCheck) {
     let files = candidate_settings_files(project_dir, active_workspace_paths);
 
     let mut contaminated: Vec<PathBuf> = Vec::new();
@@ -134,7 +152,7 @@ pub(super) fn check_hooks_hygiene(
         // toggle-driven group — the #7688 `Stop`/`SubagentStop` capture, the
         // #6887 diversion groups — was unreported on a project whose flag
         // flipped on after its settings file was written.
-        gaps.extend(toggle_driven_gaps(path));
+        gaps.extend(toggle_driven_gaps(path, hook_exe));
         if !gaps.is_empty() {
             missing.push((path.clone(), gaps));
         }
@@ -219,12 +237,15 @@ pub(super) fn check_hooks_hygiene(
 /// two surfaces cannot disagree about what is missing.
 /// What: `<event> (asks for `<command>`)` per missing group, and nothing at all
 /// for a file whose project directory cannot be derived, that tm's project tier
-/// never provisioned, or for which no stable binary resolves. The STALE half of
+/// never provisioned, or for which no stable binary resolves — this check names
+/// a COMMAND, which an unresolved binary cannot supply; the missing-hook-set
+/// verdict for that case is `check_deployment_completeness`'s
+/// `ProjectHookDiagnosticIncomplete`, not a second copy here. The STALE half of
 /// the diff is deliberately not reported here: `tm doctor`'s own
 /// `hooks_contamination` check already owns "an entry that should not be
 /// there", and this check is the inverse of it (#7490).
 /// Test: `check_hooks_hygiene_reports_a_missing_toggle_driven_group`.
-fn toggle_driven_gaps(settings_path: &Path) -> Vec<String> {
+fn toggle_driven_gaps(settings_path: &Path, hook_exe: Option<&Path>) -> Vec<String> {
     // `<project>/.claude/settings.json` → `<project>`.
     let Some(project_dir) = settings_path.parent().and_then(Path::parent) else {
         return Vec::new();
@@ -233,7 +254,11 @@ fn toggle_driven_gaps(settings_path: &Path) -> Vec<String> {
         return Vec::new();
     };
     let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(project_dir);
-    let gaps = crate::core::session_launch::project_hook_group_gaps(&fw, project_dir, &val, None);
+    let Ok(gaps) =
+        crate::core::session_launch::project_hook_group_gaps(&fw, project_dir, &val, hook_exe)
+    else {
+        return Vec::new();
+    };
     if gaps.is_empty() {
         return Vec::new();
     }

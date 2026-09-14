@@ -971,6 +971,49 @@ fn a_malformed_settings_file_is_a_fail_not_a_silent_pass() {
     );
 }
 
+/// An unresolvable hook binary leaves the report INCOMPLETE, never clean.
+///
+/// Why (#7849, fail-open check): the first cut swallowed the resolution error
+/// into an empty diff, so a project with real drift validated complete and
+/// `tm doctor` stayed silent whenever the running binary could not be resolved
+/// — the same symptom this issue is about, gated on the exe instead of on the
+/// toggle.
+/// What: builds the real drift fixture, then hands the validator a probe that
+/// refuses. The probe seam is used rather than a foreign `exe_override`
+/// because `resolve_stable_hook_exe` rescues a refused override from `$PATH`
+/// and the well-known daemon directories, so a path pin cannot reach this arm
+/// on a host that has `tm` installed. Asserts the report is not complete, names
+/// the diagnostic, and that every gap routes to the in-place resync — which is
+/// what makes `--repair` surface the same refusal as `repair_error`.
+/// Test: itself.
+#[test]
+fn an_unresolvable_hook_binary_is_an_incomplete_diagnostic_never_a_clean_report() {
+    let tmp = TempDir::new().unwrap();
+    let (fw, _workspace) = project_with_the_flag_flipped_on(tmp.path());
+
+    let report = super::validate_workspace_with_probe(&fw, &|_, _, _| {
+        Err(crate::core::standalone::hooks::StableHookExeError::Unresolved)
+    });
+
+    assert!(
+        !report.is_complete(),
+        "an unverifiable hook set must never read as complete"
+    );
+    assert!(
+        report
+            .gaps
+            .iter()
+            .any(|g| matches!(g, DeploymentGap::ProjectHookDiagnosticIncomplete(_))),
+        "the resolution failure must be named, got: {:?}",
+        report.gaps
+    );
+    assert!(
+        report.gaps.iter().all(DeploymentGap::is_project_hook_group),
+        "every gap must route to the in-place resync, got: {:?}",
+        report.gaps
+    );
+}
+
 /// A writer failure surfaces as a repair error, never as "no gaps found".
 ///
 /// Why (#7849 fail-open check): the whole defect was a silent success. A repair

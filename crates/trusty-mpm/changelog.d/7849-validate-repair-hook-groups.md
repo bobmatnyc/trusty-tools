@@ -18,3 +18,7 @@ Fixed
   check warning forever (#7849).
 - A settings file that fails to parse, and a hook write the repair cannot
   perform, are reported as failures rather than as "no gaps found" (#7849).
+- A hook binary the toggle-driven probe cannot resolve is reported as an
+  unverified hook set rather than as a complete one, so a `tm validate --repair`
+  run from a build tree whose `current_exe`/`$PATH` differ from the daemon's no
+  longer prints "no gaps found" for a project that is really adrift (#7849).
