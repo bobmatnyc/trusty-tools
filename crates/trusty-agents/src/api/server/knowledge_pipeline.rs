@@ -119,7 +119,8 @@ impl Context {
             root,
             name,
             entries.into_values().collect(),
-            global.listeners,
+            // #7609: the derived view, projected out of `[[channels]]`.
+            global.listeners(),
         )
         .await?;
         context.search_socket = trusty_common::search_rpc::search_socket().ok();

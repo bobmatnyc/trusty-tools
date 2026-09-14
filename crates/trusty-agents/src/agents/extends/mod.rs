@@ -475,7 +475,12 @@ pub fn merge_extends(base: AgentConfig, child: AgentConfig) -> AgentConfig {
     // that re-declares the same listener name overrides the base's filter
     // for it (matches the child-wins-on-override intent of the scalar rules
     // above), rather than appending a shadowing duplicate.
-    merged.listeners = union_listener_bindings(merged.listeners, child.listeners);
+    merged.legacy_listeners =
+        union_listener_bindings(merged.legacy_listeners, child.legacy_listeners);
+    // #7609: `channels` is the merged spelling of the same idea, so it unions
+    // by `id` exactly the way `listeners` unioned by `name` — and it is the
+    // one the derived `AgentConfig::listeners()` view reads.
+    merged.channels = union_channels_by_id(merged.channels, child.channels);
 
     // `stores` (#3816): child REPLACES rather than unions. Unlike listeners
     // and tools — where "the base's surface plus my extras" is the intent —
@@ -544,6 +549,31 @@ fn union_opt_vec(base: Option<Vec<String>>, child: Option<Vec<String>>) -> Optio
             Some(b)
         }
     }
+}
+
+/// Union two channel lists, base-first, keyed by `id`.
+///
+/// Why (#7609): the channels merge replaced `[[listeners]]` with
+/// `[[channels]]`, and inheritance has to keep the semantics it had — a child
+/// that re-declares the same channel REPLACES the base's entry in place rather
+/// than appending a shadowing duplicate. `id` is the channel's stable storage
+/// key, which is what a listener binding's `name` became.
+/// What: the same body as [`union_listener_bindings`], keyed on `id`.
+/// Test: `extends_unions_channels_by_id`,
+/// `extends_unions_listener_bindings_by_name` (`extends/tests.rs`).
+fn union_channels_by_id(
+    base: Vec<crate::channels::Channel>,
+    child: Vec<crate::channels::Channel>,
+) -> Vec<crate::channels::Channel> {
+    let mut merged = base;
+    for child_channel in child {
+        if let Some(existing) = merged.iter_mut().find(|c| c.id == child_channel.id) {
+            *existing = child_channel;
+        } else {
+            merged.push(child_channel);
+        }
+    }
+    merged
 }
 
 /// Union two `[[listeners]]` binding lists, base-first, keyed by `name` —

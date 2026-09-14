@@ -14,8 +14,9 @@
 //! [`trusty_common::credentials::Secret`]; [`status`] holds the per-binding
 //! dispatch-failure counter the assistant's channel view reads.
 //! [`model::Channel`] is the ONE type a listener and a channel binding both
-//! collapse into (#7609), and [`resolve_channels`] states which of two
-//! bindings on the same destination wins.
+//! collapse into (#7609); [`migrate`] drains the legacy `[[listeners]]` tables
+//! into it and [`resolve_channels`] states which of two bindings on the same
+//! destination wins.
 //! [`ChannelAdapter::addresses`] is how a binding claims an inbound event —
 //! equality on a destination id for Slack and Telegram, a sender or label match
 //! for Gmail (#7427).
@@ -28,8 +29,9 @@
 // #7427: adapter model for two-way channel connectors (epic #7425 item b).
 pub(crate) mod credentials;
 mod gworkspace;
-// #7609: listeners and channel bindings are one type now — the model and the
-// global-vs-assistant precedence rule.
+// #7609: listeners and channel bindings are one type now — the model, its
+// storage migrations, and the global-vs-assistant precedence rule.
+pub mod migrate;
 pub mod model;
 mod registry;
 pub mod resolve;

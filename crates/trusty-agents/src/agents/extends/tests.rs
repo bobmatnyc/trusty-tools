@@ -22,7 +22,11 @@ use tempfile::TempDir;
 
 /// Parse a minimal agent config from TOML for direct merge/resolve tests.
 fn cfg(toml: &str) -> AgentConfig {
-    toml::from_str(toml).expect("valid test agent TOML")
+    let mut parsed: AgentConfig = toml::from_str(toml).expect("valid test agent TOML");
+    // #7609: mirror `AgentConfig::from_toml_str`, which folds the deprecated
+    // `[[listeners]]` table into `channels` on every real parse.
+    parsed.absorb_legacy_listeners();
+    parsed
 }
 
 /// Build a config declaring `extends = <base>` plus name/model/desc/body.
@@ -761,14 +765,11 @@ name = "gmail-personal"
 event_types = ["message.received"]
 "#);
     let merged = merge_extends(base, ch);
-    assert_eq!(merged.listeners.len(), 2, "distinct names both retained");
-    assert!(
-        merged
-            .listeners
-            .iter()
-            .any(|b| b.name == "calendar-personal")
-    );
-    assert!(merged.listeners.iter().any(|b| b.name == "gmail-personal"));
+    // #7609: read through the derived view; `channels` is what unions now.
+    let bindings = merged.listeners();
+    assert_eq!(bindings.len(), 2, "distinct names both retained");
+    assert!(bindings.iter().any(|b| b.name == "calendar-personal"));
+    assert!(bindings.iter().any(|b| b.name == "gmail-personal"));
 }
 
 #[test]
@@ -807,12 +808,11 @@ event_types = ["message.received"]
 filter = { from = ["*@family.com"] }
 "#);
     let merged = merge_extends(base, ch);
-    assert_eq!(
-        merged.listeners.len(),
-        1,
-        "same-name binding replaces, not appends"
-    );
-    assert_eq!(merged.listeners[0].filter.from, vec!["*@family.com"]);
+    // #7609: same semantics, now keyed on the channel `id`.
+    let bindings = merged.listeners();
+    assert_eq!(bindings.len(), 1, "same-name binding replaces, not appends");
+    assert_eq!(bindings[0].filter.from, vec!["*@family.com"]);
+    assert_eq!(merged.channels.len(), 1, "channels union by id, not append");
 }
 
 #[test]

@@ -135,7 +135,8 @@ pub(super) fn sources(
             sources.insert(source.id.clone(), source);
         }
     }
-    for binding in &agent.listeners {
+    // #7609: the derived view, projected out of the assistant's channels.
+    for binding in &agent.listeners() {
         if let Some(listener) = listeners.iter().find(|c| c.name == binding.name)
             && let Some(source) = listener_source(listener, binding)
         {

@@ -567,7 +567,26 @@ pub async fn serve_with_config(cfg: ApiConfig) -> Result<()> {
     let listener_project_path =
         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let global_config = crate::mcp::config::GlobalConfig::load().await;
-    crate::listeners::poll::spawn_listeners(global_config.listeners, listener_project_path.clone());
+    // #7609: the derived view, projected out of `[[channels]]`.
+    crate::listeners::poll::spawn_listeners(
+        global_config.listeners(),
+        listener_project_path.clone(),
+    );
+
+    // #7609: the per-assistant half of the listeners->channels merge. Runs
+    // once per process, here because this is the only startup path that
+    // already holds the global channels a binding resolves its provider from.
+    // Awaited rather than detached so anything it reports is in the log before
+    // the server answers a channel request.
+    let assistant_dirs = crate::agents::agents_dir_candidates();
+    let assistant_globals = global_config.channels.clone();
+    if let Err(e) = tokio::task::spawn_blocking(move || {
+        crate::channels::migrate::migrate_assistant_channels(&assistant_dirs, &assistant_globals)
+    })
+    .await
+    {
+        tracing::warn!(error = %e, "channel migration: assistant sweep task failed");
+    }
 
     // #6537: same fire-and-forget pattern as the listeners above — a
     // config problem is logged and the drain alone is skipped, never a
