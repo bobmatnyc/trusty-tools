@@ -131,7 +131,7 @@ The tool returns:
   "session_refs": {
     "hydrated": true,
     "refs_seen": 0,
-    "owned": 0,
+    "own_ref_found": false,
     "restored": 0,
     "error": "<why the cache was not refreshed, or null>"
   }
@@ -149,13 +149,15 @@ knowledge of the repo state if anything looks stale.
 > `.trusty-mpm/sessions/` cache is rebuilt from THIS caller's own git ref
 > `refs/tm/sessions/<user-id>/<session-key>`, which is what lets a resume from
 > a fresh clone work at all. `refs_seen` counts every session ref on the remote,
-> yours or not; `owned` is 0 or 1 and says whether YOURS was among them;
-> `restored` counts the snapshot files written back. **`refs_seen > 0` with
-> `owned: 0` is permanent, not transient** — after a hostname change or a `gh`
-> account switch you own none of your old refs and never will, so report it
-> instead of reading five refs as five recoverable sessions. A non-null `error`
-> means the cache was NOT refreshed; the catch-up still succeeds, so say so
-> rather than treating an empty digest as "nothing paused".
+> yours or not; `own_ref_found` says whether YOURS was among them; `restored`
+> counts the snapshot files written back. It is a different field from the
+> per-session `sessions[].owned` and answers a different question.
+> **`refs_seen > 0` with `own_ref_found: false` is permanent, not transient** —
+> after a hostname change or a `gh` account switch you reach none of your old
+> refs and never will, so report it instead of reading five refs as five
+> recoverable sessions. A non-null `error` means the cache was NOT refreshed;
+> the catch-up still succeeds, so say so rather than treating an empty digest as
+> "nothing paused".
 
 > **`sessions` is a page, and `truncated` says so.** The response is fitted to
 > a size you can read in one tool result, so on a project with a long pause

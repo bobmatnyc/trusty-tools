@@ -467,7 +467,7 @@ fn a_foreign_users_ref_is_ignored() {
 
     let outcome = hydrate_session_cache(&fx.work, &alpha_target()).unwrap();
     assert_eq!(outcome.refs_seen, 1, "the ref is seen, but not trusted");
-    assert_eq!(outcome.owned, 0, "{outcome:?}");
+    assert!(!outcome.own_ref_found, "{outcome:?}");
     assert!(outcome.snapshots_written.is_empty(), "{outcome:?}");
     assert_eq!(outcome.log_entries_added, 0, "{outcome:?}");
     assert!(!fx.sessions_dir().join(ALPHA).exists());
@@ -513,7 +513,10 @@ fn only_the_callers_own_ref_is_hydrated() {
 
     let outcome = hydrate_session_cache(&fx.work, &alpha_target()).unwrap();
     assert_eq!(outcome.refs_seen, 2, "both refs exist on the remote");
-    assert_eq!(outcome.owned, 1, "exactly one of them is this caller's");
+    assert!(
+        outcome.own_ref_found,
+        "exactly one of them is this caller's"
+    );
     assert_eq!(outcome.snapshots_written.len(), 1, "{outcome:?}");
 
     let sessions_dir = fx.sessions_dir();
@@ -554,7 +557,7 @@ fn a_foreign_hosts_tmux_ref_is_ignored() {
     let mine = target(USER, &format!("{HOST}-tmux-window-230"), "tmux-window-230");
     let outcome = hydrate_session_cache(&fx.work, &mine).unwrap();
     assert_eq!(outcome.refs_seen, 1);
-    assert_eq!(outcome.owned, 0, "{outcome:?}");
+    assert!(!outcome.own_ref_found, "{outcome:?}");
     assert!(outcome.snapshots_written.is_empty(), "{outcome:?}");
     assert_eq!(outcome.log_entries_added, 0, "{outcome:?}");
     assert!(!fx.sessions_dir().exists());
@@ -581,7 +584,7 @@ fn a_host_qualified_tmux_ref_hydrates_under_the_bare_session_id() {
 
     let mine = target(USER, &format!("{HOST}-tmux-window-230"), "tmux-window-230");
     let outcome = hydrate_session_cache(&fx.work, &mine).unwrap();
-    assert_eq!(outcome.owned, 1, "{outcome:?}");
+    assert!(outcome.own_ref_found, "{outcome:?}");
     assert_eq!(outcome.snapshots_written.len(), 1, "{outcome:?}");
 
     let sessions_dir = fx.sessions_dir();

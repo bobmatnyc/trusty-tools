@@ -337,14 +337,16 @@ pub(super) fn session_tools() -> Vec<Value> {
              `refs/tm/sessions/<user-id>/<session-key>` (ADR-0062, #7830), so a \
              resume from a fresh clone still resolves. `session_refs` reports \
              that pass: `hydrated` (it ran), `refs_seen` (how many session refs \
-             exist on the remote, this caller's or not), `owned` (0 or 1 — \
-             whether this caller's own ref was among them), `restored` (how \
-             many snapshot files were written back), and `error`. \
-             `refs_seen > 0` with `owned: 0` is a real and PERMANENT state, not \
-             a transient: after a hostname change or a `gh` account switch this \
-             caller owns none of its old refs and never will, so report it \
-             rather than reading five refs as five restorable sessions. A \
-             hydration failure never fails the catch-up. \
+             exist on the remote, this caller's or not), `own_ref_found` \
+             (whether this caller's own ref was among them), `restored` (how \
+             many snapshot files were written back), and `error`. Note that \
+             `session_refs.own_ref_found` is about THIS CALLER'S REF and is \
+             unrelated to the per-session `sessions[].owned` below. \
+             `refs_seen > 0` with `own_ref_found: false` is a real and \
+             PERMANENT state, not a transient: after a hostname change or a \
+             `gh` account switch this caller reaches none of its old refs and \
+             never will, so report it rather than reading five refs as five \
+             restorable sessions. A hydration failure never fails the catch-up. \
              Each entry in `sessions` carries `owned`: true when the \
              session is attributable to you (your `session_id` paused it, or \
              you are in the window that did). A session you do not own is \

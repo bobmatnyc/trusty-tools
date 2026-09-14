@@ -127,20 +127,23 @@ pub struct SessionRefTip {
 /// Why (#7830 review round 2): `refs_seen` alone cannot be read as success. A
 /// host that changed its name, or an operator who switched `gh` account, owns
 /// none of its old refs any more — every pass then sees five refs, restores
-/// nothing, and reports the same shape as a pass with nothing to do. `owned`
-/// and `restored` are what separate the two.
+/// nothing, and reports the same shape as a pass with nothing to do.
+/// `own_ref_found` and the written-snapshot count are what separate the two.
 /// What: how many refs the aggregator enumerated, whether the caller's own ref
-/// was among them (0 or 1 — hydration reads exactly one ref), which snapshot
-/// files were written, and how many `sessions-log.jsonl` pause lines were
-/// synthesized.
+/// was among them, which snapshot files were written, and how many
+/// `sessions-log.jsonl` pause lines were synthesized.
+///
+/// `own_ref_found` is deliberately NOT called `owned`: `sessions[].owned` in the
+/// same catch-up response is a per-session boolean about attribution, and one
+/// paragraph carrying both would read as one concept (#7830 review round 3).
 /// Test: `hydration_restores_a_deleted_snapshot_and_its_log_line`,
-/// `only_the_callers_own_ref_is_hydrated`.
+/// `only_the_callers_own_ref_is_hydrated`, `a_foreign_users_ref_is_ignored`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HydrationOutcome {
     /// Number of `refs/tm/sessions/**` refs the aggregator found, trusted or not.
     pub refs_seen: usize,
-    /// Whether the caller's own ref was among them: 0 or 1.
-    pub owned: usize,
+    /// Whether the caller's own ref was among them.
+    pub own_ref_found: bool,
     /// Absolute paths of the snapshot files this pass created.
     pub snapshots_written: Vec<PathBuf>,
     /// Number of `pause` entries appended to `sessions-log.jsonl`.
@@ -424,13 +427,14 @@ pub fn hydrate_session_cache(repo: &Path, target: &SessionRefTarget) -> Result<H
             tracing::warn!(
                 refs_seen = outcome.refs_seen,
                 expected_ref = %want,
+                own_ref_found = false,
                 "session refs exist on this remote but none is this caller's; \
                  nothing was restored"
             );
         }
         return Ok(outcome);
     };
-    outcome.owned = 1;
+    outcome.own_ref_found = true;
 
     let sessions_dir = repo.join(".trusty-mpm").join("sessions");
     let message = git_ok(repo, &["cat-file", "commit", &tip.commit], "cat-file")?.text();

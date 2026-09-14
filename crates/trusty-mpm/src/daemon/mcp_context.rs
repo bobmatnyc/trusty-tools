@@ -120,7 +120,7 @@ fn catchup_payload(
         "session_refs": {
             "hydrated": session_refs.hydrated,
             "refs_seen": session_refs.refs_seen,
-            "owned": session_refs.owned,
+            "own_ref_found": session_refs.own_ref_found,
             "restored": session_refs.restored,
             "error": session_refs.error,
         },
@@ -138,9 +138,12 @@ fn catchup_payload(
 /// the failure text otherwise. `Default` is the "disabled" state.
 ///
 /// `refs_seen` alone cannot be read as success (#7830 review round 2): after a
-/// hostname change or a `gh` account switch every old ref is unowned forever,
-/// so `hydrated: true, refs_seen: 5, owned: 0, restored: 0` is a real and
-/// permanent state that used to look identical to "nothing to do".
+/// hostname change or a `gh` account switch every old ref is unreachable
+/// forever, so `hydrated: true, refs_seen: 5, own_ref_found: false,
+/// restored: 0` is a real and permanent state that used to look identical to
+/// "nothing to do". The field is `own_ref_found` rather than `owned` because
+/// `sessions[].owned` in the same response is a different, per-session concept
+/// (#7830 review round 3).
 /// Test: `catchup_reports_a_hydration_failure_without_failing_the_catchup`,
 /// `catchup_hydrates_a_deleted_cache_from_the_session_ref`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -149,8 +152,8 @@ struct HydrationReceipt {
     hydrated: bool,
     /// How many `refs/tm/sessions/**` refs the aggregator enumerated.
     refs_seen: usize,
-    /// Whether the caller's own ref was among them: 0 or 1.
-    owned: usize,
+    /// Whether the caller's own ref was among them.
+    own_ref_found: bool,
     /// How many snapshot files this pass wrote back.
     restored: usize,
     /// Why the pass did not complete, when it did not.
@@ -341,7 +344,7 @@ async fn hydrate_session_refs(project_dir: &Path, session_id: Option<&str>) -> H
         Ok(Ok(outcome)) => {
             tracing::debug!(
                 refs_seen = outcome.refs_seen,
-                owned = outcome.owned,
+                own_ref_found = outcome.own_ref_found,
                 snapshots = outcome.snapshots_written.len(),
                 log_entries = outcome.log_entries_added,
                 "session-ref hydration finished"
@@ -349,7 +352,7 @@ async fn hydrate_session_refs(project_dir: &Path, session_id: Option<&str>) -> H
             HydrationReceipt {
                 hydrated: true,
                 refs_seen: outcome.refs_seen,
-                owned: outcome.owned,
+                own_ref_found: outcome.own_ref_found,
                 restored: outcome.snapshots_written.len(),
                 error: None,
             }
@@ -1623,7 +1626,7 @@ mod tests {
         let body = catchup_payload(Default::default(), 0, None, receipt);
         assert_eq!(body["session_refs"]["hydrated"], false, "{body}");
         assert_eq!(body["session_refs"]["refs_seen"], 0, "{body}");
-        assert_eq!(body["session_refs"]["owned"], 0, "{body}");
+        assert_eq!(body["session_refs"]["own_ref_found"], false, "{body}");
         assert_eq!(body["session_refs"]["restored"], 0, "{body}");
         assert_eq!(body["session_refs"]["error"], error, "{body}");
 
@@ -1720,7 +1723,7 @@ mod tests {
         let receipt = hydrate_session_refs(&repo, Some("s-hydrate")).await;
         assert!(receipt.hydrated, "{receipt:?}");
         assert_eq!(receipt.refs_seen, 1, "{receipt:?}");
-        assert_eq!(receipt.owned, 1, "{receipt:?}");
+        assert!(receipt.own_ref_found, "{receipt:?}");
         assert_eq!(receipt.restored, 1, "{receipt:?}");
 
         let resumed = session_context_catchup(
