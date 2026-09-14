@@ -86,7 +86,11 @@ name = "trusty-common"
 # manifest is what a MINOR bump would force churn through, and it would record
 # no compatibility fact this comment does not. `sockbuf` also sits behind the
 # existing `uds` feature rather than adding one.
-version = "0.50.0"
+# 0.51.0 (#7830): minor — the new public `catchup::session_refs` module is
+# additive (rebuilds the local session cache from `refs/tm/sessions/**`); no
+# existing public item was removed or changed, so a MINOR bump under Cargo's
+# 0.x rule.
+version = "0.51.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
