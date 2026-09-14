@@ -351,15 +351,14 @@ pub struct DaemonState {
     /// via [`Self::set_launchd_supervision`]. Empty until then.
     /// Test: `health_response_serializes_launchd_supervision_field`.
     pub(super) launchd_supervision: std::sync::RwLock<String>,
-    /// Fingerprint of the executable this daemon started from (issue #7822).
+    /// Id of the build this daemon is running (issues #7822, #7873).
     ///
     /// Why: see [`crate::daemon::api::types::HealthResponse::build_id`] — the
     /// semver `/health` already publishes cannot tell two same-version builds
     /// apart, which is exactly the daemon that outlived a merge.
-    /// What: the [`crate::core::build_identity`] string, written once at startup
-    /// by `daemon_run::run_daemon`. Empty until then, and empty is what the
-    /// client reads as "cannot tell" — a value computed lazily at `/health` time
-    /// would describe the binary on disk, not the one this process is running.
+    /// What: the [`crate::core::build_identity::build_id`] string, written once
+    /// at startup by `daemon_run::run_daemon`. Empty until then, and empty is
+    /// what the client reads as "cannot tell".
     /// Test: `health_response_serializes_build_id_field`.
     pub(super) build_identity: std::sync::RwLock<String>,
     /// Layer-3 portfolio manager state (`tm manager`, epic #2109, DOC-36 §3.1).
@@ -750,12 +749,13 @@ impl DaemonState {
             .clone()
     }
 
-    /// Record the build fingerprint of the executable this daemon started from
-    /// (issue #7822). Called once by `daemon_run::run_daemon`, at startup.
+    /// Record the id of the build this daemon is running (issue #7822). Called
+    /// once by `daemon_run::run_daemon`, at startup.
     ///
-    /// Why: capturing it later would fingerprint the binary on disk, which after
-    /// a `cargo install` is precisely the build this process is NOT running —
-    /// the check would then clear the daemon it exists to flag.
+    /// Why: `/health` has to name the build this PROCESS runs, not whatever
+    /// `cargo install` last wrote — the check would otherwise clear the daemon
+    /// it exists to flag. #7873 made the value compile-time, so the recording
+    /// point no longer carries that guarantee on its own.
     /// What: stores the string; a poisoned lock is recovered from rather than
     /// panicking a running daemon over a diagnostic field.
     /// Test: `health_response_serializes_build_id_field`.
@@ -767,9 +767,9 @@ impl DaemonState {
         *slot = value.into();
     }
 
-    /// Read the startup build fingerprint for `/health` (issue #7822).
+    /// Read the recorded build id for `/health` (issue #7822).
     ///
-    /// What: the stored fingerprint, or `""` before startup recorded one — which
+    /// What: the stored id, or `""` before startup recorded one — which
     /// `tm doctor` reports as "cannot tell", never as a match.
     /// Test: `health_response_serializes_build_id_field`.
     pub fn build_identity(&self) -> String {
