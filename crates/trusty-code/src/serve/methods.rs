@@ -4,10 +4,10 @@
 //! whole path works end-to-end without pulling in `session.*`/`task.*`/
 //! `harness.describe` scope (those land in #2054/#2056/#2066). `ping` and
 //! `health` are the minimal, side-effect-free pair for that job, shared
-//! verbatim across both transports: the STDIO `health` JSON-RPC method and
-//! the HTTP `GET /health` route (`crate::serve::http::health_handler`) both
-//! call [`health_payload`] so the two transports can never drift into
-//! different shapes.
+//! verbatim across both transports: the STDIO and socket `health` methods
+//! are one registration, so they cannot drift into different shapes. #6637
+//! PR 2c retired the third caller, an anonymous HTTP `GET /health` route, and
+//! `liveness_payload` — the trimmed body it answered — with it.
 //! What: `register` wires both methods into a [`Router`]; `ping` returns
 //! `{"pong": true}`; `health` returns [`health_payload`]'s server name,
 //! crate version, static `"ok"` status, pid, and the daemon's project
@@ -74,10 +74,9 @@ async fn health(
 /// The shared `health` payload:
 /// `{"server","version","status","pid","binding"}`.
 ///
-/// Why: pulled out of the `health` JSON-RPC handler so
-/// `crate::serve::http::health_handler` (`GET /health`) can return the
-/// identical shape without duplicating the `json!` literal — one source of
-/// truth for what "healthy" means over either transport.
+/// Why: pulled out of the `health` JSON-RPC handler so a second caller can
+/// return the identical shape without duplicating the `json!` literal — one
+/// source of truth for what "healthy" means over either transport.
 ///
 /// `pid` and `binding` are ADDITIVE (#4512) — every field that was here
 /// before is unchanged, so an older client that only reads
@@ -113,24 +112,6 @@ async fn health(
 /// `health_payload_reports_a_bound_project_root`,
 /// `health_payload_reports_incremental_index_drops`,
 /// `health_payload_reports_incremental_index_truncations`.
-/// The whole of what an UNAUTHENTICATED `GET /health` caller may learn
-/// (#6472).
-///
-/// Why: [`health_payload`] answers `pid`, the bound project's absolute root
-/// path, the daemon's version, and its index counters. Those are process and
-/// filesystem facts about the operator's machine, and until #6472 any local
-/// process — including a page in the operator's browser — could read them
-/// without presenting anything. A liveness poller needs none of it: it needs
-/// to know the daemon answered. This payload is deliberately not derived from
-/// [`health_payload`] by filtering, because a filter grows a hole every time a
-/// field is added upstream; a field added to `health_payload` cannot leak here.
-/// What: `{"status": "ok"}`. Nothing conditional, nothing derived.
-/// Test: `liveness_payload_discloses_only_status`, and end-to-end in
-/// `http_tests::http_health_anonymous_discloses_only_liveness`.
-pub(crate) fn liveness_payload() -> Value {
-    json!({ "status": "ok" })
-}
-
 pub(crate) fn health_payload(binding: &ProjectBinding) -> Value {
     // #2798: publish the background-index loss counters where a health check
     // already looks, so a saturated pool is not invisible.
@@ -180,23 +161,7 @@ mod tests {
         assert_eq!(result["version"], crate::VERSION);
     }
 
-    /// The anonymous payload must carry `status` and NOTHING else — the
-    /// #6472 regression. Asserting the key SET (not just the absence of
-    /// `pid`/`binding`) is what makes a future field addition fail here
-    /// rather than leak.
-    #[test]
-    fn liveness_payload_discloses_only_status() {
-        let payload = liveness_payload();
-        let obj = payload.as_object().expect("liveness payload is an object");
-        assert_eq!(obj["status"], "ok");
-        assert_eq!(
-            obj.keys().collect::<Vec<_>>(),
-            vec!["status"],
-            "an anonymous /health caller must learn only that the daemon is up"
-        );
-    }
-
-    /// `health_payload` (shared with the HTTP `GET /health` route) must carry
+    /// `health_payload` (the one `health` body both transports answer) must carry
     /// the original three fields UNCHANGED plus #4512's additive `pid` and
     /// `binding` — pinned so the backward-compatible promise in this
     /// function's docs can't be broken by a later edit.

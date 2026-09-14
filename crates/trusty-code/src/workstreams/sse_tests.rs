@@ -1,14 +1,15 @@
-//! Tests for `sse::aggregate_live`/`sse::routes` (DOC-48 §5.3, §5.3.1; issue
-//! #3297).
+//! Tests for `sse::aggregate_live` (DOC-48 §5.3, §5.3.1; issue #3297).
+//!
+//! #6637 PR 2c: the three route tests that drove `sse::routes` through
+//! `tower::ServiceExt::oneshot` moved to `crate::serve::uds_tests`, which
+//! asserts the same three properties against `workstream.events` over a real
+//! socket — the route itself retired with the daemon's TCP listener.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
 use serde_json::Value;
 use tokio::sync::Mutex;
-use tower::util::ServiceExt;
 use uuid::Uuid;
 
 use super::*;
@@ -211,102 +212,5 @@ async fn empty_workstream_stream_yields_nothing() {
     assert!(
         outcome.is_err(),
         "an empty workstream must not forward any session's events"
-    );
-}
-
-async fn app_with_store(
-    session_ids: Vec<String>,
-) -> (axum::Router, WorkstreamId, tempfile::TempDir) {
-    let (store, id, dir) = seeded_store(session_ids).await;
-    (routes(store), id, dir)
-}
-
-/// `GET /workstreams/{unknown-id}/events` must return a real HTTP `404` with
-/// a `-32002 not_found` envelope.
-#[tokio::test]
-async fn unknown_id_returns_404() {
-    let (app, _id, _dir) = app_with_store(vec![]).await;
-
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/workstreams/{}/events", WorkstreamId::new()))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
-    let v: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(v["error"]["code"], -32002);
-}
-
-/// A malformed (non-UUID) workstream id must return `400`, not `404` or a
-/// panic.
-#[tokio::test]
-async fn malformed_id_returns_400() {
-    let (app, _id, _dir) = app_with_store(vec![]).await;
-
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/workstreams/not-a-uuid/events")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-}
-
-/// `GET /workstreams/{id}/events` on a workstream with bound sessions must
-/// stream a live event tagged for one of them as an SSE `data:` frame.
-#[tokio::test]
-async fn route_streams_live_tagged_event_for_bound_session() {
-    let s1 = unique_session_id("s1");
-    let (app, id, _dir) = app_with_store(vec![s1.clone()]).await;
-
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/workstreams/{id}/events"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    // Safe to publish only now: `aggregate_live` calls `crate::events::
-    // subscribe()` synchronously while building the response (before
-    // `.oneshot()`'s future resolves), so the subscription is already live
-    // by the time this `.await` above returns — no race to guard against.
-    crate::events::publish(session_started(&s1));
-
-    let want = format!("\"session_id\":\"{s1}\"");
-    let mut stream = resp.into_body().into_data_stream();
-    let mut collected = Vec::new();
-    let read = tokio::time::timeout(Duration::from_secs(5), async {
-        while !String::from_utf8_lossy(&collected).contains(&want) {
-            match stream.next().await {
-                Some(Ok(chunk)) => collected.extend_from_slice(&chunk),
-                _ => break,
-            }
-        }
-    })
-    .await;
-
-    assert!(read.is_ok(), "timed out waiting for the tagged SSE frame");
-    let text = String::from_utf8(collected).unwrap();
-    assert!(text.contains(&want), "body so far: {text}");
-    assert!(
-        text.contains("\"event_type\":\"session_started\""),
-        "body so far: {text}"
     );
 }

@@ -1,6 +1,6 @@
-//! `tcode serve` daemon: STDIO + HTTP JSON-RPC transports + proof-of-life,
-//! `session.*`, and `task.*` methods (#2053, #2054, #2056, #2058,
-//! M1 control-plane cut line).
+//! `tcode serve` daemon: STDIO + Unix-socket JSON-RPC transports plus the
+//! proof-of-life, `session.*`, and `task.*` methods (#2053, #2054, #2056,
+//! #2058, M1 control-plane cut line; retransported in #6637).
 //!
 //! Why: this module is the foundation the `tcode serve` binary subcommand
 //! delegates to. It owns assembling the [`crate::jsonrpc::Router`] (and,
@@ -14,40 +14,34 @@
 //! (including #2058's read-only `session.get_transcript`), and (#2056)
 //! `crate::task::protocol::register`'s `task.run` — later tickets add
 //! `harness.describe` #2066 here, one line each). [`run_stdio`] and
-//! [`run_http`] both build a router + registry via `build_router` and hand
-//! them to their respective transport ([`transport::run_stdio_loop`] /
-//! [`http::run_http`]) — every method behaves identically over either
-//! transport because both dispatch through the same `Router` against the
-//! same `SessionRegistry`. Both also call
+//! [`uds::run_daemon`] both build a router + registry via `build_router` and
+//! hand them to their respective transport ([`transport::run_stdio_loop`] /
+//! [`trusty_common::uds::server::serve_until`]) — every method behaves
+//! identically over either transport because both dispatch through the same
+//! `Router` against the same `SessionRegistry`. Both also call
 //! `SessionRegistry::shutdown_executions` before returning, so a graceful
 //! stop (SIGTERM/stdin EOF) gives any in-flight `task.run` execution a
 //! bounded chance to unwind — the same connection-safe-restart discipline
 //! (issue #534) this crate's daemons already apply to connections, now
 //! extended to background tasks.
 //!
-//! What's NOT here yet: the transports are independent modes (`--stdio` xor
-//! `--http`), not simultaneous; running both at once would need a shared
-//! `Arc<Router>`/`Arc<SessionRegistry>` across two concurrently-spawned
-//! tasks, which no current ticket requires (the registry is already `Arc`,
-//! so this is a small extension when it's needed).
+//! **No HTTP listener is bound here (#6637 PR 2c, ADR-0032).** The loopback
+//! TCP port, its REST bridge, its bearer/origin-guard stack and the
+//! `http_addr` discovery file are gone; the webview's HTTP is served by
+//! `trusty-code-gui`, which dials this daemon's socket.
 //!
 //! Test: `serve::tests::*`.
 //!
 //! [`build_router`]: crate::serve::build_router
 //! [`methods::register`]: crate::serve::methods::register
 //! [`run_stdio`]: crate::serve::run_stdio
-//! [`run_http`]: crate::serve::run_http
+//! [`uds::run_daemon`]: crate::serve::uds::run_daemon
 //! [`transport::run_stdio_loop`]: crate::serve::transport::run_stdio_loop
-//! [`http::run_http`]: crate::serve::http::run_http
 
-pub mod discovery;
-pub mod http;
 pub mod methods;
-pub mod rest;
 pub mod transport;
-// #6637: the daemon's native transport. `run_http` below is now a thin naming
-// of `uds::run_daemon` — the socket binds first and fatally, HTTP is additive
-// on top only until `trusty-code-gui` serves its own webview (PR 2).
+// #6637: the daemon's only network transport. `uds::run_daemon` is the
+// persistent daemon's whole body.
 pub mod uds;
 
 use std::sync::Arc;
@@ -70,43 +64,17 @@ use crate::workstreams::{SharedWorkstreamStore, WorkstreamStore};
 /// guarantee (see `SessionRegistry::shutdown_executions`'s docs).
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 
-/// Default TCP port for `tcode serve --http` when `--port` is omitted.
-///
-/// Why: the trusty-* family reserves a block of fixed local ports so
-/// operators/tooling can find a daemon without a discovery file
-/// (`trusty-search` 7878, `trusty-mpm` daemon 7880).
-/// `trusty-review` used to hold 7891 and `trusty-embedderd` 7890; neither does
-/// now — #6277 moved review to a Unix socket and #6289 retired embedderd's
-/// `--http` mode outright (ADR-0032). This constant previously reused `7881`, which turned
-/// out to collide with `trusty-mpm`'s supervisor metrics listener — the two
-/// defaults were picked independently and nothing pinned them apart, so a
-/// fresh install with both `tm supervisor` and `tcode serve` running answered
-/// `/health` on `tcode`'s port with the supervisor's generic
-/// `{"status":"ok"}`, masking a real 404 for every other route (#3364). That
-/// listener is retired (#6288 — the supervisor publishes to a file), so 7881
-/// is free again; this constant stays on `7882` because a released value is
-/// not reused. `7882` is verified free against
-/// the full known-sibling table in
-/// `docs/architecture/port-assignments.md` and matches the session-local
-/// workaround used to confirm the fix (`tcode serve --http --port 7882`).
-/// Pass `--port 0` to bind an OS-assigned ephemeral port instead (e.g. for
-/// tests or running multiple instances side by side); the real bound port
-/// is always logged to stderr regardless of which is used.
-/// What: `7882`.
-/// Test: `default_http_port_is_documented_value`,
-/// `default_http_port_does_not_collide_with_known_siblings`.
-pub const DEFAULT_HTTP_PORT: u16 = 7882;
-
 /// Assemble the router (+ its session registry) with every method this
 /// build of `tcode` knows about, scoped to `project`.
 ///
 /// Why: single place that lists which method groups are wired in, so a new
 /// ticket adding `harness.describe` touches exactly one line here plus its
-/// own `register` function. Both transports (`run_stdio`, `run_http`) call
-/// this so they can never drift into different method surfaces, and both
-/// need the SAME `SessionRegistry` instance — `run_http` hands it separately
-/// to the `GET /sessions/{id}/events` SSE route, which bypasses the `Router`
-/// entirely (see `crate::serve::http` module docs). `task.run` (#2056) is
+/// own `register` function. Both transports (`run_stdio`,
+/// `uds::run_daemon`) call this so they can never drift into different
+/// method surfaces, and both need the SAME `SessionRegistry` instance —
+/// `uds::run_daemon` hands it separately to the `session.events` stream
+/// method, which bypasses the `Router` entirely (see
+/// `crate::session::events_stream`). `task.run` (#2056) is
 /// the first method that needs `project` for more than logging — it resolves
 /// `agents_dir` from it via `crate::agents::locate_agents_dir` (the same
 /// `.claude/agents` / `.open-mpm/agents` convention `tcode run-task` uses)
@@ -152,11 +120,11 @@ pub const DEFAULT_HTTP_PORT: u16 = 7882;
 /// user-level `~/.claude/agents` when projectless rather than to the process
 /// CWD (which would silently bind a directory nobody chose).
 /// (issue #3297) Also returns the [`SharedWorkstreamStore`] itself (not just
-/// the `Router` it registered `workstream.*` against) — `run_http` needs the
-/// SAME handle to hand to `crate::serve::http::run_http`, which merges
-/// `crate::workstreams::sse::routes` (the `GET /workstreams/{id}/events`
-/// aggregation route) alongside the JSON-RPC-backed REST surface. This is
-/// why the return type grew a third element rather than staying a 2-tuple.
+/// the `Router` it registered `workstream.*` against) — `uds::run_daemon`
+/// needs the SAME handle for the `workstream.events` stream method
+/// (`crate::workstreams::events_stream`), which serves the fan-out outside
+/// the `Router`. This is why the return type grew a third element rather
+/// than staying a 2-tuple.
 ///
 /// Test: `run_stdio_router_recognises_proof_of_life_methods`,
 /// `build_router_wires_session_methods`, `build_router_wires_task_run`,
@@ -189,7 +157,7 @@ pub async fn build_router(
 /// resolve the REAL `~/.trusty-code` would read/write the developer's (or
 /// CI runner's) actual home directory on every `cargo test` run — this seam
 /// lets tests pass a throwaway tempdir instead, while `build_router` (the
-/// only entry point `run_stdio`/`run_http` call) always uses the real
+/// only entry point `run_stdio`/`uds::run_daemon` call) always uses the real
 /// directory.
 /// What: identical to `build_router`'s full docs otherwise — loads (or
 /// creates) the workstream store at `data_dir` via `binding`'s derived
@@ -269,23 +237,6 @@ pub async fn run_stdio(binding: ProjectBinding) -> Result<()> {
     sessions.shutdown_executions(SHUTDOWN_GRACE).await;
     info!("tcode serve --stdio: stopped");
     Ok(())
-}
-
-/// Run `tcode serve --http` to completion.
-///
-/// Why: the top-level entry point `main.rs` calls for the `serve --http`
-/// subcommand.
-/// What (#6637): the persistent daemon binds its Unix socket FIRST and
-/// fatally, then adds the HTTP listener on `port` (`0` = OS-assigned
-/// ephemeral port) on top of the SAME router and session registry — see
-/// [`uds::run_daemon`], which owns the whole body including the bounded
-/// `SessionRegistry::shutdown_executions` drain. `--http` no longer selects a
-/// transport; it selects whether the transient TCP listener
-/// `trusty-code-gui`'s webview still needs is bound alongside the socket.
-/// Test: `uds::uds_tests::*` cover the bind, the method surface and the
-/// streams; `http::tests` cover the routing/dispatch logic on the HTTP half.
-pub async fn run_http(binding: ProjectBinding, port: u16) -> Result<()> {
-    uds::run_daemon(binding, Some(port)).await
 }
 
 #[cfg(test)]
@@ -410,76 +361,6 @@ mod tests {
                 resp.error.is_none(),
                 "{method} must be registered, got {:?}",
                 resp.error
-            );
-        }
-    }
-
-    /// `DEFAULT_HTTP_PORT` must stay the documented value (7882) so a
-    /// change is a deliberate edit to both the constant and its doc comment,
-    /// not an accidental drift.
-    #[test]
-    fn default_http_port_is_documented_value() {
-        assert_eq!(DEFAULT_HTTP_PORT, 7882);
-    }
-
-    /// Cross-crate port-uniqueness contract (#3364).
-    ///
-    /// Why: `DEFAULT_HTTP_PORT` previously reused `7881`, silently colliding
-    /// with `trusty-mpm`'s supervisor metrics listener (since retired, #6288)
-    /// — the supervisor's generic `/health` masked the collision until a real
-    /// `tcode` route 404'd. This mirrors the `default_port_does_not_collide_
-    /// with_known_siblings` guard already used by `trusty-console` and
-    /// `trusty-review` so a future edit here that reintroduces a collision
-    /// fails this test instead of shipping a crash-loop.
-    /// What: asserts `DEFAULT_HTTP_PORT` is absent from the known-sibling
-    /// ports list.
-    /// Test: this is the test.
-    #[test]
-    fn default_http_port_does_not_collide_with_known_siblings() {
-        // (binary, port, source-of-truth pointer)
-        // #6286: trusty-memory has NO ROW either, for the reason the analyze
-        // note below gives — it serves a Unix socket since ADR-0032, so 7070 is
-        // not reserved by anything.
-        let known_siblings: &[(&str, u16, &str)] = &[
-            (
-                "trusty-search",
-                7878,
-                "trusty-search/src/service/constants.rs::DEFAULT_PORT",
-            ),
-            // #6287: trusty-analyze has NO ROW. It no longer binds a TCP port —
-            // it serves a Unix socket (ADR-0032), so 7879 is not reserved by
-            // anything and listing it would forbid a future daemon from a free
-            // port.
-            (
-                "trusty-mpm",
-                7880,
-                "trusty-mpm/src/core/discovery.rs::DEFAULT_DAEMON_ADDR",
-            ),
-            // #6288: no trusty-mpm-supervisor row. The collision that motivated
-            // this guard (#3364) was against its 7881 listener; the supervisor
-            // now publishes to `~/.trusty-mpm/supervisor-metrics.json` and binds
-            // nothing, so 7881 is free and a guard naming it would refuse a
-            // value nothing holds.
-            (
-                "trusty-console",
-                7788,
-                "trusty-console/src/lib.rs::DEFAULT_PORT",
-            ),
-            // #6289: no trusty-embedderd row. Its `--http` mode is retired
-            // (ADR-0032); it serves stdio and a Unix socket only, so 7890 is
-            // free and a guard naming it would refuse a value nothing holds.
-            // #6277: no trusty-review row. It serves a Unix socket rather
-            // than a TCP port (ADR-0032), so 7891 is free.
-            (
-                "trusty-agents",
-                8080,
-                "trusty-agents/src/runtime/mode_dispatch.rs (--port default 8080)",
-            ),
-        ];
-        for (binary, port, source) in known_siblings {
-            assert_ne!(
-                DEFAULT_HTTP_PORT, *port,
-                "trusty-code DEFAULT_HTTP_PORT {DEFAULT_HTTP_PORT} collides with {binary}'s {port} ({source})"
             );
         }
     }

@@ -29,18 +29,18 @@
 //!   projects (see [`check_binding`]). We neither attach — that would silently
 //!   operate against the wrong repository — nor start a competing daemon on a
 //!   socket that is already bound.
-//! * **Nothing answering** -> spawn `<current_exe> serve --http [--project
-//!   <path>]` as a child and wait for the SOCKET to answer. The child handle is
-//!   dropped once it is up; the daemon outlives this process.
+//! * **Nothing answering** -> spawn `<current_exe> serve [--project <path>]`
+//!   as a child and wait for the SOCKET to answer. The child handle is dropped
+//!   once it is up; the daemon outlives this process.
 //!
 //! **The `TCODE_DAEMON_URL` branch is gone (#6637).** It existed so an operator
 //! could point the TUI at a daemon on another port, and its refuse-to-spawn arm
 //! existed so a spawn could not silently ignore that instruction. A socket path
 //! is derived from the data directory, so `TRUSTY_DATA_DIR_OVERRIDE` already
 //! points both this client and a spawned daemon at the same place — there is no
-//! address to name and no instruction to contradict. `--http` stays on the
-//! spawn command line only because `trusty-code-gui`'s webview still needs the
-//! transient TCP listener; the socket binds either way.
+//! address to name and no instruction to contradict. The spawn command line
+//! carries no transport flag either: #6637 PR 2c made `tcode serve` the
+//! socket daemon outright.
 //!
 //! The binary is resolved with [`super::tcode_exe::resolve`]
 //! (`std::env::current_exe()`), never a bare `tcode` PATH lookup, so a
@@ -333,12 +333,10 @@ enum Outcome {
     Exited(std::io::Result<String>),
 }
 
-/// Build and spawn `<tcode_exe> serve --http [--project <path>]`.
+/// Build and spawn `<tcode_exe> serve [--project <path>]`.
 ///
-/// `--http` is unchanged from before #6637 and is not a contradiction: the
-/// persistent-daemon mode binds the socket first and fatally, and the flag now
-/// selects only whether the transient TCP listener `trusty-code-gui` still
-/// needs comes up beside it. PR 2 drops the flag with the listener.
+/// No transport flag: #6637 PR 2c retired `--http`/`--port`, so a bare
+/// `tcode serve` IS the persistent socket daemon.
 ///
 /// There is deliberately no `kill_on_drop(true)`: the spawned daemon must
 /// survive this process, so the one thing the `Child` handle must NOT do is
@@ -350,7 +348,7 @@ fn spawn_daemon(
     log_path: Option<&Path>,
 ) -> Result<Child> {
     let mut cmd = Command::new(tcode_exe);
-    cmd.arg("serve").arg("--http");
+    cmd.arg("serve");
     if let Some(project) = project {
         cmd.arg("--project").arg(project);
     }
@@ -365,7 +363,7 @@ fn spawn_daemon(
     }
     cmd.spawn().with_context(|| {
         format!(
-            "tcode tui: could not start a daemon with `{} serve --http`",
+            "tcode tui: could not start a daemon with `{} serve`",
             tcode_exe.display()
         )
     })
@@ -402,7 +400,7 @@ fn daemon_log_path() -> Option<PathBuf> {
 fn log_hint(log_path: Option<&Path>) -> String {
     match log_path {
         Some(path) => format!("see {} for the daemon's own output", path.display()),
-        None => "run `tcode serve --http` by hand to see why".to_string(),
+        None => "run `tcode serve` by hand to see why".to_string(),
     }
 }
 

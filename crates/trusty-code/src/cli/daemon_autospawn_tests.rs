@@ -474,9 +474,13 @@ async fn spawns_a_daemon_when_none_is_running() {
     // #6231: the stub is a real child, and readiness came from the socket
     // rather than from it — so its argv has to be waited for, not assumed.
     let argv = stub.argv().await;
+    assert!(argv.contains("serve"), "must spawn `serve`: {argv}");
+    // #6637: `--http` retired with the TCP listener; a bare `serve` IS the
+    // socket daemon, and reintroducing the flag would abort the child on an
+    // unrecognised argument.
     assert!(
-        argv.contains("serve") && argv.contains("--http"),
-        "must spawn `serve --http`: {argv}"
+        !argv.contains("--http"),
+        "must not pass the retired --http flag: {argv}"
     );
     assert!(
         argv.contains("--project") && argv.contains(canonical.to_str().expect("utf8")),

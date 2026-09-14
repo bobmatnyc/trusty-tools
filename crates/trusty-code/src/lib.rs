@@ -483,18 +483,20 @@ pub mod prompt;
 /// Test: `jsonrpc::error::tests::*`, `jsonrpc::router::tests::*`.
 pub mod jsonrpc;
 
-/// `tcode serve` daemon: STDIO + HTTP JSON-RPC transports + proof-of-life
-/// methods.
+/// `tcode serve` daemon: STDIO + Unix-socket JSON-RPC transports plus the
+/// proof-of-life methods.
 ///
 /// Why: the foundation of the M1 control-plane cut line (#2053) — proves the
 /// transport + router work end-to-end via `ping`/`health` before `session.*`
 /// (#2054), `task.*` (#2056), and `harness.describe` (#2066) land on top.
-/// Both transports dispatch through the same `Router`, so the method
-/// surface can never drift between `--stdio` and `--http`.
-/// What: `build_router`, `run_stdio`, `run_http`, `DEFAULT_HTTP_PORT`, and
-/// the `methods`/`transport`/`http` submodules.
+/// Both transports dispatch through the same `Router`, so the method surface
+/// can never drift between `--stdio` and the socket. #6637 retired the third
+/// transport, a loopback TCP listener, along with its REST bridge and bearer
+/// stack; `trusty-code-gui` serves the webview's HTTP over this socket.
+/// What: `build_router`, `run_stdio`, `uds::run_daemon`, and the
+/// `methods`/`transport`/`uds` submodules.
 /// Test: `serve::tests::*`, `serve::methods::tests::*`,
-/// `serve::transport::tests::*`, `serve::http::tests::*`.
+/// `serve::transport::tests::*`, `serve::uds::uds_tests::*`.
 pub mod serve;
 
 /// Daemon-side directory inspection for the UI's project picker (UI Phase-1).
@@ -576,16 +578,6 @@ pub mod cli_client;
 /// in `tests/tui_client_engine.rs`.
 pub mod tui_client;
 
-/// The client-side credential for the daemon's transient HTTP listener
-/// (#5439, relocated in #6637).
-///
-/// Why its own module: it used to sit in `tui_client::discovery`, which #6637
-/// deleted along with the rest of the HTTP client. `session::connector`'s
-/// `TcodeConnector` still speaks HTTP until PR 2 moves the webview bridge into
-/// `trusty-code-gui`, so the credential half outlives the discovery half.
-/// What: `TCODE_DAEMON_TOKEN` and the loopback-gated resolver.
-/// Test: `http_credential::http_credential_tests`.
-pub mod http_credential;
 
 // ── Package-level re-exports ──
 

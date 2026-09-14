@@ -56,6 +56,13 @@ use super::registry::SessionRegistry;
 /// `session.create` resolves and persists the session's binding (explicit
 /// `workstream_id` param, or DOC-48 §4.2's ambient active-workstream
 /// default) through it before returning.
+/// The method name `session.attach` registers under.
+///
+/// Why named (#6637): `crate::serve::uds::JsonRpcFallback` refuses this one
+/// name over the socket and points the caller at `session.events`. A literal
+/// on each side is a rename away from a refusal that silently stops firing.
+pub const ATTACH_METHOD: &str = "session.attach";
+
 pub fn register(
     router: &mut Router,
     registry: Arc<SessionRegistry>,
@@ -101,7 +108,7 @@ pub fn register(
 
     let r = registry.clone();
     router.register(
-        "session.attach",
+        ATTACH_METHOD,
         move |params: Value, ctx: ConnectionContext| {
             let r = r.clone();
             async move { attach(&r, params, ctx).await }

@@ -1,18 +1,18 @@
-//! Workstream-level SSE event aggregation route (DOC-48 §5.3, §5.3.1; issue
-//! #3297, epic #3292); thin `trusty-agents-common::transport` adapter (issue
-//! #3299, Phase 1B).
+//! Workstream-level event aggregation (DOC-48 §5.3, §5.3.1; issue #3297,
+//! epic #3292); thin `trusty-agents-common::transport` adapter (issue #3299,
+//! Phase 1B); transport-free since #6637 PR 2c.
 //!
 //! # Spec References
 //!
 //! - [`SPEC-WS-05~draft`](docs/specs/DOC-48-tcode-workstreams.md#SPEC-WS-05~draft) §5.3, §5.3.1
 //! - [`SPEC-WS-07~draft`](docs/specs/DOC-48-tcode-workstreams.md#SPEC-WS-07~draft) AC-7
 //!
-//! Why: `GET /sessions/{id}/events` (`crate::serve::http::session_events_sse`)
-//! is a direct lookup against ONE session's ring buffer + live filter. A
+//! Why: `session.events` (`crate::session::events_stream`) is a direct lookup
+//! against ONE session's ring buffer + live filter. A
 //! workstream is a GROUP of sessions (§2.1), so observing "this workstream"
 //! is not a lookup at all — it is a fan-out: subscribe once to the daemon's
 //! existing session-scoped event bus (`crate::events::subscribe`, already
-//! shared by every per-session SSE connection) and forward only the events
+//! shared by every per-session tail) and forward only the events
 //! whose `session_id` is currently bound to this workstream, tagged with the
 //! generic `{session_id, event_type, payload}` envelope AC-7.2 requires.
 //! "Currently bound" is re-checked against the store on every event (not a
@@ -34,33 +34,25 @@
 //! What: [`WorkstreamEventEnvelope`] (a type alias over the shared
 //! `EventEnvelope<Event>`), [`aggregate_live`] (this module's adapter
 //! function — constructs the two trait impls and the `classify` closure,
-//! then delegates to the shared combinator), and [`routes`] (the single
-//! `GET /workstreams/{id}/events` axum route, merged into
-//! `crate::serve::http::build_axum_router` alongside `rest::workstreams`).
-//! Unknown workstream id -> `404`; malformed (non-UUID) id -> `400`; a
-//! CLOSED workstream is still observable (`200`, not `404`) because its
-//! existing bound sessions "remain valid and may accumulate turns" after
-//! closure (§4.4) — closing only stops NEW session bindings, not event
-//! delivery for the ones it already has. A workstream with zero bound
-//! sessions returns `200` with a stream that simply never emits (until a
-//! future session is added or the workstream's activation state changes) —
-//! it does not error or close early.
+//! then delegates to the shared combinator), and [`map_store_err`].
+//!
+//! **This module binds nothing (#6637 PR 2c).** It used to carry the
+//! `GET /workstreams/{id}/events` axum route as well; that route retired with
+//! the daemon's TCP listener. `crate::workstreams::events_stream` is the one
+//! caller now — it registers the same fan-out as the `workstream.events`
+//! stream method and owns the id validation the route used to do, so the
+//! refusals (`invalid_params` for a non-UUID, `not_found` for an unknown id)
+//! are unchanged and a CLOSED workstream stays observable (§4.4). A
+//! workstream with zero bound sessions yields a stream that simply never
+//! emits, rather than an error.
 //! Test: `sse_tests`.
 
-use std::convert::Infallible;
-
 use async_trait::async_trait;
-use axum::extract::{Path, State};
-use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
-use axum::routing::get;
-use axum::{Json, Router as AxumRouter};
 use futures_util::{Stream, StreamExt};
 use tokio_stream::wrappers::BroadcastStream;
 use trusty_agents_common::transport::{
     BoxEventStream, EventSource, MembershipProvider, SourceEvent,
 };
-use trusty_mcp::Response;
-use uuid::Uuid;
 
 use crate::events::Event;
 use crate::jsonrpc::RpcError;
@@ -149,10 +141,10 @@ fn classify(event: &Event, target: &str) -> Option<bool> {
 /// Build the live aggregation stream for one workstream (no ring-buffer
 /// replay — see module docs).
 ///
-/// Why: the single seam [`routes`]' handler drives; kept as a free function
-/// (not inlined into the handler) so a unit test can exercise the fan-out
-/// logic directly against a `SharedWorkstreamStore`, without going through
-/// axum at all. As of Phase 1B (issue #3299) this is a thin adapter over
+/// Why: the single seam [`crate::workstreams::events_stream::open`] drives;
+/// kept as a free function so a unit test can exercise the fan-out logic
+/// directly against a `SharedWorkstreamStore`, without opening a socket.
+/// As of Phase 1B (issue #3299) this is a thin adapter over
 /// [`trusty_agents_common::transport::aggregate_live`] — see this module's
 /// docs for the trait impls it supplies.
 /// What: delegates to the shared combinator with [`TcodeEventSource`],
@@ -177,15 +169,6 @@ pub fn aggregate_live(
     )
 }
 
-/// Serialise one [`WorkstreamEventEnvelope`] as an SSE `data:` frame — mirrors
-/// `crate::serve::http::sse_event_for`'s (practically infallible) fallback
-/// convention.
-fn sse_event_for(envelope: &WorkstreamEventEnvelope) -> SseEvent {
-    SseEvent::default()
-        .json_data(envelope)
-        .unwrap_or_else(|_| SseEvent::default().data("{}"))
-}
-
 /// Map a [`StoreError`] onto the JSON-RPC error taxonomy (mirrors
 /// `crate::workstreams::protocol::map_store_err`, kept separate since that
 /// function is private to `protocol`).
@@ -197,69 +180,6 @@ pub(super) fn map_store_err(err: StoreError) -> RpcError {
         StoreError::NotFound(id) => RpcError::not_found(format!("workstream not found: {id}")),
         StoreError::Io(_) | StoreError::Serialize(_) => RpcError::internal(err.to_string()),
     }
-}
-
-/// Shared axum state for this route: just the workstream store.
-#[derive(Clone)]
-struct WorkstreamSseState {
-    store: SharedWorkstreamStore,
-}
-
-/// `GET /workstreams/{id}/events` — SSE aggregation over a workstream's
-/// bound sessions.
-///
-/// Why: see module docs for the full fan-out design.
-/// What: `400` (`-32602 invalid_params`) if `id` is not a valid UUID; `404`
-/// (`-32002 not_found`) if it names no existing workstream (a CLOSED
-/// workstream is NOT a 404 — see module docs); otherwise `200` with an SSE
-/// stream from [`aggregate_live`], kept alive with axum's default
-/// keep-alive comments (matching `session_events_sse`'s convention).
-/// Test: `sse_tests::unknown_id_returns_404`,
-/// `sse_tests::malformed_id_returns_400`.
-async fn workstream_events_sse(
-    State(state): State<WorkstreamSseState>,
-    Path(id): Path<String>,
-) -> Result<
-    Sse<impl Stream<Item = Result<SseEvent, Infallible>>>,
-    (axum::http::StatusCode, Json<Response>),
-> {
-    let ws_id = Uuid::parse_str(&id).map(WorkstreamId::from).map_err(|e| {
-        let err = RpcError::invalid_params(format!("invalid workstream id: {e}"));
-        (
-            axum::http::StatusCode::BAD_REQUEST,
-            Json(Response::err(None, err.code, err.message)),
-        )
-    })?;
-
-    {
-        let mut store = state.store.lock().await;
-        store.get(ws_id).await.map_err(map_store_err).map_err(|e| {
-            (
-                axum::http::StatusCode::NOT_FOUND,
-                Json(Response::err(None, e.code, e.message)),
-            )
-        })?;
-    }
-
-    let stream = aggregate_live(ws_id, state.store.clone()).map(|env| Ok(sse_event_for(&env)));
-    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
-}
-
-/// Build the `GET /workstreams/{id}/events` route group.
-///
-/// Why: kept separate from `crate::serve::http::build_axum_router` so this
-/// route is unit-testable via `tower::util::ServiceExt::oneshot` on its own,
-/// exactly like every `rest::*` group — `crate::serve::rest::workstreams`
-/// merges the CRUD/activation REST surface, this merges the observation
-/// surface, both sharing the SAME `SharedWorkstreamStore` handle the daemon
-/// boot path constructs.
-/// What: one route, `with_state`-erased to `axum::Router<()>` so the caller
-/// can `.merge()` it.
-/// Test: `sse_tests::*`.
-pub fn routes(store: SharedWorkstreamStore) -> AxumRouter {
-    AxumRouter::new()
-        .route("/workstreams/{id}/events", get(workstream_events_sse))
-        .with_state(WorkstreamSseState { store })
 }
 
 #[cfg(test)]

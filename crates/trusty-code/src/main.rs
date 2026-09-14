@@ -17,12 +17,13 @@
 //! subcommand body except `run_serve`.
 //!
 //! What: thin clap CLI. `serve` (#2053) delegates to
-//! `trusty_code::serve::{run_stdio, run_http}` for its two transports.
+//! `trusty_code::serve::uds::run_daemon` (the persistent daemon on its
+//! Unix socket) or, with `--stdio`, to `trusty_code::serve::run_stdio`.
 //! `run-workflow` remains a stub. `workstream` (`ws` alias, #3296, DOC-48
 //! §5.4) is the same thin-client shape over `workstream.*` — see
 //! [`WorkstreamCommand`] and `crate::cli::workstream`. `tui` (#4424, DOC-50
 //! §4.1/AC-2.4) is the odd one out: instead of spawning its own ephemeral
-//! `--stdio` child, it attaches to an ALREADY-RUNNING `tcode serve --http`
+//! `--stdio` child, it attaches to an ALREADY-RUNNING `tcode serve`
 //! daemon and hands `trusty_code::tui_client::CodeEngine` to
 //! `trusty_code_tui::run::run` — see `crate::cli::tui`.
 //!
@@ -74,9 +75,9 @@ enum Command {
     /// Start the per-project orchestration server.
     ///
     /// Accepts JSON-RPC 2.0 task requests from CLI clients, TUI frontends,
-    /// and MCP callers. One instance per project. Exactly one transport must
-    /// be selected: `--stdio` XOR `--http` (they are independent modes, not
-    /// simultaneous — see `trusty_code::serve` module docs).
+    /// and MCP callers. One instance per project. The default is the
+    /// persistent daemon on its Unix socket; `--stdio` serves one ephemeral
+    /// NDJSON session instead (see `trusty_code::serve` module docs).
     Serve {
         // #6999: same stale `.claude/`-only wording as `run-task` carried.
         /// Path to the project root. Its configuration is read from
@@ -93,27 +94,16 @@ enum Command {
         #[arg(long, short, value_name = "PATH")]
         project: Option<PathBuf>,
 
-        /// Serve JSON-RPC 2.0 over stdio (NDJSON on stdin/stdout), matching
-        /// the trusty-memory/trusty-search MCP stdio convention.
-        #[arg(long, conflicts_with = "http")]
-        stdio: bool,
-
-        /// Serve JSON-RPC 2.0 over HTTP: `POST /rpc` + `GET /health`,
-        /// matching the trusty-memory/trusty-search axum daemon convention.
-        #[arg(long, conflicts_with = "stdio")]
-        http: bool,
-
-        /// TCP port for `--http`. `0` binds an OS-assigned ephemeral port.
-        /// Defaults to `trusty_code::serve::DEFAULT_HTTP_PORT`.
+        /// Serve one ephemeral JSON-RPC 2.0 session over stdio (NDJSON on
+        /// stdin/stdout), matching the trusty-memory/trusty-search MCP stdio
+        /// convention, instead of running the persistent daemon.
         ///
-        /// Requires `--http` AND conflicts with `--stdio` — both are needed:
-        /// `requires = "http"` alone does not fire when `--stdio` is also
-        /// present, because clap evaluates `--stdio`'s `conflicts_with =
-        /// "http"` first and short-circuits before the requires-graph check,
-        /// so `--stdio --port N` would otherwise be silently accepted with
-        /// the port discarded.
-        #[arg(long, value_name = "PORT", requires = "http", conflicts_with = "stdio")]
-        port: Option<u16>,
+        /// #6637: without this flag `tcode serve` IS the persistent daemon on
+        /// its Unix socket. The `--http`/`--port` pair that used to select a
+        /// loopback TCP listener is gone — the daemon binds no TCP port, and
+        /// the webview's HTTP is served by `trusty-code-gui`.
+        #[arg(long)]
+        stdio: bool,
     },
 
     /// Launch the interactive TUI REPL, starting a `tcode serve` daemon if
@@ -488,12 +478,7 @@ async fn main() -> Result<()> {
     };
 
     match cli.command {
-        Command::Serve {
-            project,
-            stdio,
-            http,
-            port,
-        } => run_serve(project, stdio, http, port).await,
+        Command::Serve { project, stdio } => run_serve(project, stdio).await,
 
         // #4424: the launch point for the TUI REPL — reuses `run_thin_client`
         // so a daemon-resolution failure prints `tcode tui: <actionable
@@ -732,35 +717,25 @@ async fn run_thin_client(
     Ok(())
 }
 
-/// Execute `tcode serve`: dispatches to whichever transport was selected.
+/// Execute `tcode serve`: the persistent daemon, or one stdio session.
 ///
 /// Why: keeps `main`'s match arm a one-liner, matching the shape of the
 /// `cli::*` subcommand wrappers. The binary layer owns only the CLI-shaped
-/// concern (which transport was requested, and the port); `trusty_code::serve`
-/// owns router assembly and both transport loops, all fully unit-tested
-/// offline. clap's `conflicts_with`/`requires` on the `Serve` variant already
-/// reject `--stdio --http` together and `--port` without `--http` before this
-/// function ever runs.
-/// What: `--http` delegates to `trusty_code::serve::run_http` (port defaults
-/// to `serve::DEFAULT_HTTP_PORT` when `--port` is omitted); `--stdio`
-/// delegates to `trusty_code::serve::run_stdio`. Both run until shutdown
-/// (SIGTERM/SIGINT, or stdin EOF for `--stdio`), logging to stderr only.
-/// Neither flag given prints actionable usage and exits 1 rather than
-/// silently doing nothing.
+/// concern (which transport was requested); `trusty_code::serve` owns router
+/// assembly and both transport loops, all fully unit-tested offline.
+/// What: the default delegates to `trusty_code::serve::uds::run_daemon`, which
+/// binds the daemon's Unix socket and serves it until SIGTERM/SIGINT; `--stdio`
+/// delegates to `trusty_code::serve::run_stdio`, which returns on stdin EOF as
+/// well. #6637 retired `--http`/`--port`, so there is no third arm and no
+/// "pick a transport" refusal.
 /// `project` is optional: `None` serves PROJECTLESS. It is resolved into a
 /// typed `ProjectBinding` HERE, at the boundary, so an unusable `--project`
 /// (missing, or not a directory) fails fast with an actionable message rather
 /// than surfacing later as a confusing per-task error.
-/// Test: exercised manually (`tcode serve --project . --stdio` /
-/// `tcode serve --stdio` projectless / `--http [--port N]`);
-/// `trusty_code::serve::tests`, `serve::transport::tests`, and
-/// `serve::http::tests` cover the router/transport logic this delegates to.
-async fn run_serve(
-    project: Option<PathBuf>,
-    stdio: bool,
-    http: bool,
-    port: Option<u16>,
-) -> Result<()> {
+/// Test: `trusty_code::serve::tests`, `serve::transport::tests` and
+/// `serve::uds::uds_tests` cover the router/transport logic this delegates to;
+/// `tests/cli_e2e.rs` drives the real binary.
+async fn run_serve(project: Option<PathBuf>, stdio: bool) -> Result<()> {
     let binding = match trusty_code::binding::ProjectBinding::resolve(project) {
         Ok(b) => b,
         Err(e) => {
@@ -772,14 +747,6 @@ async fn run_serve(
             process::exit(1);
         }
     };
-    if http {
-        let port = port.unwrap_or(trusty_code::serve::DEFAULT_HTTP_PORT);
-        if let Err(e) = trusty_code::serve::run_http(binding, port).await {
-            eprintln!("tcode serve --http: fatal error: {e:#}");
-            process::exit(1);
-        }
-        return Ok(());
-    }
 
     if stdio {
         if let Err(e) = trusty_code::serve::run_stdio(binding).await {
@@ -789,10 +756,9 @@ async fn run_serve(
         return Ok(());
     }
 
-    eprintln!(
-        "tcode serve: pick a transport — `--stdio` (NDJSON on stdin/stdout) or \
-         `--http [--port N]` (POST /rpc + GET /health) [project={}]",
-        binding.label().unwrap_or_else(|| "<projectless>".into())
-    );
-    process::exit(1);
+    if let Err(e) = trusty_code::serve::uds::run_daemon(binding).await {
+        eprintln!("tcode serve: fatal error: {e:#}");
+        process::exit(1);
+    }
+    Ok(())
 }
