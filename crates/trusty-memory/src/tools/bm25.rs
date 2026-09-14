@@ -13,7 +13,6 @@
 
 use crate::bm25_lane::BM25Hit;
 use crate::AppState;
-use serde_json::{json, Value};
 use uuid::Uuid;
 
 // Why (#5329): `bm25_data_dir_for_palace` was REMOVED from this module. It
@@ -346,31 +345,4 @@ pub(crate) fn bm25_hits_to_recall_results(
             })
         })
         .collect()
-}
-
-/// Serialize `recall` results into a JSON shape the MCP client can render.
-pub(crate) fn serialize_recall(
-    palace: &str,
-    query: &str,
-    results: Vec<trusty_common::memory_core::retrieval::RecallResult>,
-) -> Value {
-    let payload: Vec<Value> = results
-        .iter()
-        .map(|r| {
-            json!({
-                "drawer_id": r.drawer.id.to_string(),
-                "content":   r.drawer.content(),
-                "score":     r.score,
-                "layer":     r.layer,
-                "tags":      r.drawer.tags,
-                "importance": r.drawer.importance,
-                "drawer_type": r.drawer.drawer_type.as_str(),
-            })
-        })
-        .collect();
-    json!({
-        "palace": palace,
-        "query": query,
-        "results": payload,
-    })
 }

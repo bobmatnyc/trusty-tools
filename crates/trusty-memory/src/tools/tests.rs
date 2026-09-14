@@ -564,6 +564,8 @@ mod kg_retract_tests;
 mod last_used_tests;
 // #6318: the no-palace palace index, and the read/write split that bounds it.
 mod palace_index_tests;
+// Owner ruling 2026-09-14: creator-tag hiding and the `min_score` floor.
+mod recall_projection_tests;
 mod write_budget_tests;
 
 /// Why: #4776 — `kg_list_subjects` is the discovery read that makes `kg_query`
