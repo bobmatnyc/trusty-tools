@@ -323,6 +323,12 @@ regardless of wording.
 time, each waited for before the next. Serializing always works. Hand-rolling to
 parallelize anyway is what this forbids.
 
+**Concurrent cargo invocations in one checkout also contend, silently.** Two
+agents running `cargo test`/`cargo build` in the same checkout serialize on
+cargo's own `target/` build lock with no signal to either agent — one run
+measured ~10 minutes for a command that normally finishes in seconds (#7895).
+`isolation: "worktree"` avoids it: each worktree gets its own `target/`.
+
 ## Salvaging a Dead Agent's Worktree
 
 A dispatch that names an existing worktree left behind by a stopped or dead
@@ -436,6 +442,13 @@ into a blocking wait.
 **Cross-check `state` before calling anything green.** Treat `bucket` as
 advisory: under GitHub API eventual-consistency lag it can report a false DONE
 while a check has not settled.
+
+**A handed-over branch may not be green.** The agent's own gate can pass while
+CI fails — a file the engineer never touched can already carry `cargo fmt`
+drift, so `cargo fmt --check` is red before re-engagement even starts
+(trusty-things#287). State that explicitly in the re-engagement brief: run the
+full gate first, since the branch may not be green as handed over. Do not
+assume the hand-over inherited a clean baseline.
 
 **Sizing a `Monitor`, if you use one.** Size the interval to the known CI
 wall-clock — 5 minutes or more for a ~15-minute run. Message only on state

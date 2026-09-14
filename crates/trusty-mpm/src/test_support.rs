@@ -43,6 +43,14 @@ use tempfile::TempDir;
 ///
 /// The same file backs the `tm` binary's copy of this module — see its own
 /// docs for why one source file serves both targets.
+///
+/// A `cargo test` filter matches the compiled module path, not the source
+/// file's basename (#7866). This module compiles as `test_support::tmux_session`
+/// even though its source lives in `test_tmux_session.rs`, so `cargo test -p
+/// trusty-mpm --lib test_tmux_session` filters against a path that does not
+/// exist and silently returns `0 passed; 0 failed; 7361 filtered out` —
+/// green, but nothing ran. Filter on `tmux_session` instead: `cargo test -p
+/// trusty-mpm --lib tmux_session`.
 #[path = "test_tmux_session.rs"]
 pub(crate) mod tmux_session;
 
