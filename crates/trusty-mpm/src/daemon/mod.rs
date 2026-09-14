@@ -278,37 +278,13 @@ pub async fn serve_with_shutdown(
         }
     }
 
-    // Run inproject-hygiene for all managed base clones (#1709):
-    // fetch, safety-gated `git merge --ff-only` (#2177) to the default branch,
-    // prune stale worktrees. It never runs `git reset --hard` — this comment
-    // claimed it did until #5784, and `inproject_hygiene.rs`'s own header is
-    // the authority. This is intentionally synchronous (git subprocess calls) so
-    // we offload it to a blocking thread. Failures are logged as warnings;
-    // they do not block the daemon from starting.
-    // Default ON (the #2177 guard makes it safe); set
-    // TRUSTY_MPM_INPROJECT_HYGIENE=0 to disable the whole sweep (#2190).
-    if inproject_hygiene_enabled() {
-        let repos_root = managed_routes::inproject::repos_root();
-        // #5784: `repos_root()` is only $HOME-scoped when nothing overrode it.
-        // Precedence is TRUSTY_MPM_REPOS_ROOT > TRUSTY_MPM_WORKSPACE_ROOT /
-        // config > $HOME-derived, and a scratch daemon launched from the
-        // operator's shell inherits those exports — so a reassigned $HOME can
-        // still point this sweep, which fetches and fast-forwards real clones,
-        // at the operator's real repos root. Skip when the two disagree.
-        match crate::core::host_state_gate::host_state_access().skip_reason() {
-            Some(reason) => tracing::warn!(
-                repos_root = %repos_root.display(),
-                "inproject-hygiene skipped — {reason}"
-            ),
-            None => {
-                tokio::task::spawn_blocking(move || {
-                    managed_routes::inproject_hygiene::run_hygiene_for_all_bases(&repos_root);
-                });
-            }
-        }
-    } else {
-        info!("inproject-hygiene disabled via TRUSTY_MPM_INPROJECT_HYGIENE");
-    }
+    // Run inproject-hygiene for all managed base clones (#1709): fetch,
+    // safety-gated `git merge --ff-only` (#2177) to the default branch, prune
+    // stale worktrees. It never runs `git reset --hard`. #7965 moved the env
+    // gate, the #5784 host-state refusal and the maintenance lane into the
+    // service module, so this file carries one line per background loop and the
+    // bound lives next to the sweep it governs.
+    managed_routes::inproject_hygiene_sweep::spawn_if_enabled(Arc::clone(&state));
 
     // #3304 + ADR-0011 loopback-only doctrine (#3330): the daemon binds
     // loopback ONLY — there is no secondary (Tailscale) listener anymore, so
@@ -654,46 +630,6 @@ fn orphan_gc_enabled() -> bool {
 /// (unset) — i.e. default ON.
 /// Test: `parse_orphan_gc_enabled_default_and_overrides`.
 fn parse_orphan_gc_enabled(raw: Option<&str>) -> bool {
-    match raw {
-        Some(v) => {
-            let v = v.trim().to_ascii_lowercase();
-            !matches!(v.as_str(), "0" | "false" | "off" | "no")
-        }
-        None => true,
-    }
-}
-
-/// Whether the startup inproject-hygiene sweep is enabled (default ON).
-///
-/// Why: operators need an escape hatch to disable the hygiene sweep entirely
-/// (e.g. while investigating an unexpected git state in a base clone).
-/// Defaulting ON is safe now that the reset step is gated by the #2177
-/// dirty/ahead-of-origin guard, so the fetch + prune + guarded-reset behaviour
-/// still applies out of the box.
-/// What: reads `TRUSTY_MPM_INPROJECT_HYGIENE` and delegates to the pure
-/// [`parse_inproject_hygiene_enabled`]; a thin wrapper so the parsing is
-/// testable without mutating process-global env.
-/// Test: parsing covered by `parse_inproject_hygiene_enabled_*` below.
-fn inproject_hygiene_enabled() -> bool {
-    parse_inproject_hygiene_enabled(
-        std::env::var("TRUSTY_MPM_INPROJECT_HYGIENE")
-            .ok()
-            .as_deref(),
-    )
-}
-
-/// Pure parse of the `TRUSTY_MPM_INPROJECT_HYGIENE` raw value into an
-/// on/off decision.
-///
-/// Why: mirrors [`parse_orphan_gc_enabled`] — env vars are process-global, so
-/// testing the policy by mutating them is racy under the multi-threaded test
-/// harness. Taking the raw value as a parameter makes the decision a pure
-/// function that needs no env mutation.
-/// What: returns `false` only for an explicit `0`/`false`/`off`/`no`
-/// (case-insensitive, trimmed); `true` for any other value, including `None`
-/// (unset) — i.e. default ON.
-/// Test: `parse_inproject_hygiene_enabled_default_and_overrides`.
-fn parse_inproject_hygiene_enabled(raw: Option<&str>) -> bool {
     match raw {
         Some(v) => {
             let v = v.trim().to_ascii_lowercase();
@@ -1381,38 +1317,6 @@ mod orphan_gc_config_tests {
                 parse_orphan_gc_interval(Some(bad)),
                 ORPHAN_GC_INTERVAL_SECS,
                 "{bad:?}"
-            );
-        }
-    }
-}
-
-#[cfg(test)]
-mod inproject_hygiene_config_tests {
-    use super::parse_inproject_hygiene_enabled;
-
-    /// `TRUSTY_MPM_INPROJECT_HYGIENE` defaults ON and only explicit falsey
-    /// values disable (#2190).
-    ///
-    /// Tests the PURE parser with raw values — no process-global env mutation,
-    /// so it is safe to run in parallel with any sibling test (the #1458 review
-    /// fix for env-var test flakiness).
-    #[test]
-    fn parse_inproject_hygiene_enabled_default_and_overrides() {
-        assert!(
-            parse_inproject_hygiene_enabled(None),
-            "unset must default ON"
-        );
-
-        for off in ["0", "false", "off", "no", "OFF", " false "] {
-            assert!(
-                !parse_inproject_hygiene_enabled(Some(off)),
-                "{off:?} must disable"
-            );
-        }
-        for on in ["1", "true", "yes", "anything", "  "] {
-            assert!(
-                parse_inproject_hygiene_enabled(Some(on)),
-                "{on:?} must keep enabled"
             );
         }
     }

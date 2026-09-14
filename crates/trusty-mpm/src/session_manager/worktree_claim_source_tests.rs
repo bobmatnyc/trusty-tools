@@ -109,6 +109,77 @@ async fn dead_sessions_claims_are_discarded_and_live_ones_are_not() {
     );
 }
 
+/// A driver whose liveness probe never answers in time (#7965).
+struct SleepingTmux;
+
+impl crate::session_manager::ManagedTmuxDriver for SleepingTmux {
+    fn create_session(
+        &self,
+        _n: &str,
+        _w: &str,
+    ) -> Result<(), crate::session_manager::ManagedError> {
+        Ok(())
+    }
+    fn kill_session(&self, _n: &str) -> Result<(), crate::session_manager::ManagedError> {
+        Ok(())
+    }
+    fn send_line(&self, _n: &str, _t: &str) -> Result<(), crate::session_manager::ManagedError> {
+        Ok(())
+    }
+    fn capture(&self, _n: &str, _l: usize) -> Result<String, crate::session_manager::ManagedError> {
+        Ok(String::new())
+    }
+    fn list_sessions(&self) -> Result<Vec<String>, crate::session_manager::ManagedError> {
+        std::thread::sleep(std::time::Duration::from_secs(10));
+        Ok(Vec::new())
+    }
+}
+
+/// 🔴 #7965 REGRESSION: a tmux that never answers bounds the probe, and every
+/// claim stays LIVE — the #5856 fail direction, reached by timeout instead of by
+/// error.
+///
+/// Why both halves in one test: a bound that returned an EMPTY claim set would
+/// satisfy the timing assertion while deleting live sessions' worktrees, which is
+/// the exact harm #7232 and #2919 exist to prevent. Pre-fix this call blocks for
+/// the driver's full 10 seconds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_slow_tmux_probe_is_bounded_and_leaves_every_claim_live() {
+    let dir = TempDir::new().unwrap();
+    let workspace = PathBuf::from("/srv/projects/acme");
+    let mgr = SessionManager::new(dir.path(), std::sync::Arc::new(SleepingTmux))
+        .await
+        .unwrap();
+    {
+        let mut store = mgr.store.write().await;
+        store
+            .upsert(tombstoned("tm-gone", &workspace))
+            .await
+            .unwrap();
+    }
+
+    let started = std::time::Instant::now();
+    let claims = mgr.workspace_claims(None).await;
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < super::TMUX_PROBE_TIMEOUT + std::time::Duration::from_secs(3),
+        "the probe must bound itself; it took {elapsed:?} (#7965)"
+    );
+    assert!(
+        !claims.claims.is_empty(),
+        "the claim set must not empty out when tmux does not answer"
+    );
+    for claim in &claims.claims {
+        assert_eq!(
+            claim.liveness,
+            ClaimLiveness::Live,
+            "a probe that timed out must leave {} live",
+            claim.session
+        );
+    }
+}
+
 /// 🔴 #5856, restated for this producer: an unobservable tmux is not an empty
 /// tmux. Every claim stays live, so the gate refuses exactly as it did before.
 #[tokio::test]

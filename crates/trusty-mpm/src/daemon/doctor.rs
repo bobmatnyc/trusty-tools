@@ -610,6 +610,10 @@ pub(crate) async fn run_doctor_with_claims(
     // `core::git_maintenance` are the prevention half). Both read-only.
     checks.push(check_maintenance_config(repos_root));
     checks.push(check_live_maintenance_processes());
+    // #7965: each background sweep's kill switch, whether a pass is in flight,
+    // and how long the last one took — so an operator can SEE a sweep overrunning
+    // instead of inferring it from request latency.
+    checks.push(crate::daemon::services::sweep_status::check_background_sweeps());
     // Issue #4033: where the RUNNING binary came from, and whether that source
     // still exists. Reports UNKNOWN — never Ok — when provenance cannot be
     // determined. Read-only; never installs, moves, or deletes.

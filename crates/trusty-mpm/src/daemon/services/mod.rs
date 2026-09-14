@@ -20,7 +20,17 @@ pub mod hook_service;
 pub mod merged_pr_reclaim;
 pub mod pairing_service;
 pub mod session_service;
+// #7965: the single background-maintenance lane both sweeps take, and the
+// last-pass timings `tm doctor` reports.
+pub(crate) mod sweep_status;
 pub mod tmux_service;
+
+// #7965: the cross-sweep latency contract — a running sweep never pushes a
+// request past the client's discovery budget. It spans both sweeps, so it lives
+// beside neither.
+#[cfg(test)]
+#[path = "sweep_latency_tests.rs"]
+mod sweep_latency_tests;
 
 pub use hook_service::{HookDecision, HookService};
 pub use pairing_service::{PairCode, PairStatus, PairingService};

@@ -427,7 +427,21 @@ pub(crate) fn reclaim_with_probes(
     // #7357: the caller's adopted anchors, passed straight through.
     adopted: &[PathBuf],
 ) -> ReclaimOutcome {
-    let initial = (probes.in_use_now)().unwrap_or_default();
+    // 🔴 #7965: `unwrap_or_default()` stood here, and an empty `LiveClaims` reads
+    // as "nothing claims anything" — the exact downgrade the fail-closed contract
+    // forbids, applied to EVERY candidate at once. A probe that could not answer
+    // now demotes the whole pass to a REPORT: candidates are still surveyed and
+    // listed, and nothing is deleted.
+    let (initial, mode) = match (probes.in_use_now)() {
+        Some(claims) => (claims, mode),
+        None => {
+            tracing::warn!(
+                "worktree-reclaim: the claim probe could not be read; surveying only, \
+                 deleting nothing (#7965)"
+            );
+            (LiveClaims::default(), ReclaimMode::Report)
+        }
+    };
     let survey = survey_with_index(
         repos_root,
         &initial,

@@ -358,6 +358,14 @@ pub(crate) async fn run_one_tick(state: &Arc<DaemonState>) {
         warn!("worktree-reclaim sweep: skipped — {reason}");
         return;
     }
+    // #7965: one subprocess storm at a time. This pass and the in-project hygiene
+    // sweep both spend minutes in `git`/`gh`, and running them together is what
+    // pushed `GET /health` past the client's 500 ms probe.
+    let Ok(_permit) = super::sweep_status::lane().acquire().await else {
+        warn!("worktree-reclaim sweep: maintenance lane closed; pass not run");
+        return;
+    };
+    let _timing = super::sweep_status::RECLAIM.begin();
     match reclaim(
         state,
         &configured_workspace_root(),
