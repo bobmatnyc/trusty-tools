@@ -1,0 +1,3 @@
+Changed
+
+- `BASE-AGENT.md` states a numeric hand-back cap in place of the qualitative "verbosity scales with what went wrong" sentence: a clean run is at most 300 words, a run with failures at most 600, raw gate output in fenced blocks does not count, and detail over the cap moves to a scratchpad file the report links with a one-line summary per section (owner ruling 2026-09-14). Paid for within the 42,000-byte composed-prompt budget by cutting three passages that restated a rule the same file already states: two duplicate pointers to `verification-before-completion/SKILL.md`, the `echo "EXIT=$?"` sentinel mechanics repeated under "Never end a gate chain in a pipe", and the background-monitor bullet that already deferred to "Never Narrate a Wait".

@@ -75,9 +75,8 @@ retyped command that drops `--timeout` resets a deadline that must not reset.
 Name a scratchpad file `<task-slug>-<step>.txt`, never `$$` or a generic
 name, and never glob the shared scratchpad to relocate it — both collide
 across concurrently dispatched agents (#7238, #7287); read back the exact
-path. Backgrounded the wait instead? `echo "EXIT=$?"` prints to the tool's
-own stdout, not the redirected file — sentinel inside the redirected
-command, or wait on the pid directly.
+path. Backgrounded the wait instead? Sentinel it the way "Never end a gate
+chain in a pipe" below sentinels a backgrounded gate.
 
 #7723: before any wait longer than one tool call, Read `{{TM_SKILLS}}/condition-based-waiting/SKILL.md`.
 
@@ -283,7 +282,7 @@ during verification can discard an uncommitted fix — WIP-commit first
 
 Run the code and observe it succeed — full suite, real environment, clean
 build, no silent skips (cache hits are not a re-run), the entry point itself.
-#7723: full walkthrough and cache-hit pitfall: Read `{{TM_SKILLS}}/verification-before-completion/SKILL.md`.
+#7723: full walkthrough, cache-hit pitfall, redirect/retry/sentinel/trim commands: Read `{{TM_SKILLS}}/verification-before-completion/SKILL.md`.
 
 Show raw output. Never summarise test results in your own words.
 
@@ -312,7 +311,6 @@ and read that; still unobservable → report "Could not verify" and hand back.
 A `gh` list read (`--comments`, `--jq`) exiting 0 with no stdout looks
 identical whether the result is genuinely empty or the filter ate it — fetch
 once without `--jq` and check the byte count before trusting it (#7383).
-#7723: redirect/retry mechanics: Read `{{TM_SKILLS}}/verification-before-completion/SKILL.md`.
 
 ## Never Directly Monitor a Declarative Process
 
@@ -324,7 +322,6 @@ pattern (`grep -E '^ Tasks:|ℹ (pass|fail) [0-9]+$'`), never a broad keyword a
 log wall or state blob can dominate. Terraform is worse than a lost exit
 code: a piped/killed `plan`/`apply` abandons the state lock, blocking every
 other session on that key until `terraform force-unlock` (#7315, #7722).
-#7723: redirect/sentinel/trim commands: Read `{{TM_SKILLS}}/verification-before-completion/SKILL.md`.
 
 This does NOT weaken the evidence rule: raw output stays mandatory for
 failures, flakes, and performance claims — only the passing, zero-information
@@ -370,9 +367,8 @@ the evidence you owe. Run it as a plain foreground command with an explicit long
 - Keep gates crate-scoped (`cargo test -p <crate>`) so they finish inside one
   invocation. Re-issue in the SAME turn if one legitimately outlasts the ceiling.
 - Already backgrounded a command? Poll it to completion in the same turn.
-- Never spawn a background monitor, watcher, poller, or timer as a wake
-  mechanism and end your turn expecting it to report back — see "Never Narrate
-  a Wait".
+- Never spawn a background monitor, watcher, or timer as a wake mechanism —
+  see "Never Narrate a Wait".
 - Armed a `Monitor`, `/loop`, or `/schedule` whose goal completed or went moot?
   Disarm it before reporting. A stale monitor re-fires as a spurious wake.
 - `pnpm test -- --force` silently drops `--force` before turbo sees it,
@@ -445,7 +441,10 @@ banned-phrase inventories and the ASD-STE-100 note sit in the
 - **Ticket and PR bodies you draft** are sparse — point at the spec, issue or
   PR, never paste a diff. Hand the text to the PM; you do not file it yourself.
 - **Verbosity scales with what went wrong**, not with how much work you did.
-  A long report about a clean run is a defect; "Nothing to report" is complete.
+  A long report about a clean run is a defect: cap a clean run at 300 words, a
+  run with failures at 600; "Nothing to report" is complete. Raw gate output in
+  fenced blocks does not count. Over cap, move the detail to a scratchpad file
+  and link it with a one-line summary per section.
 - **Prose only**, and PM/agent prose only: this governs how something is said,
   never whether it is said. Sparse-on-success governs the prose around the
   evidence, never the evidence itself — raw output stays mandatory for failures.
