@@ -243,7 +243,10 @@ scan (known provider key shapes such as `ghp_`, `sk-ant-`, `AKIA`, and PEM
 private-key headers); it is not a general secret detector and will not catch a
 password, a customer name, or an internal URL you typed into the summary. Keep
 the pause text to what you would put in a PR description, or set
-`[session_refs] enabled = false`.
+`[session_refs] enabled = false`. Anyone with push access to `origin` can also
+write a session ref, by the same permission that lets them push a branch —
+ADR-0062 decision 10; a repository whose push set is not trusted should turn
+this off.
 
 **If `skipped_dirty_worktrees` is non-empty, you MUST report it** — do not let
 it disappear into the tool result. Each entry is

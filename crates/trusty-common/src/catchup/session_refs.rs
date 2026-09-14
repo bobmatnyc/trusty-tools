@@ -16,9 +16,12 @@
 //!
 //! **`refs/tm/sessions/**` carries no server-side access control. Anyone with
 //! push access to `origin` can create a ref under ANY user id and any session
-//! key, with any content.** The gate below limits WHICH refs are read; it does
-//! not authenticate them and cannot. Two consequences follow, and both are why
-//! the scope is as narrow as it is:
+//! key, with any content.** The owner's 2026-09-14 ruling (ADR-0062 decision
+//! 10) accepts that: a collaborator with push access is trusted to write
+//! session history, by the same permission that lets them push a branch. The
+//! gate below is DEFENCE IN DEPTH, not authentication — it limits which ref is
+//! read and cannot verify who wrote it. Two consequences follow, and both are
+//! why the scope is as narrow as it is:
 //!
 //! - Hydration reads exactly ONE ref — the caller's own
 //!   `<user-id>/<session-key>` ([`SessionRefTarget`]) — and never enumerates
@@ -412,6 +415,8 @@ pub fn hydrate_session_cache(repo: &Path, target: &SessionRefTarget) -> Result<H
         refs_seen: inventory.len(),
         ..HydrationOutcome::default()
     };
+    // See #7830 — ADR-0062 decision 10: push access is the trust boundary, so
+    // this exact-name match is defence in depth, not authentication.
     let Some(tip) = inventory.iter().find(|t| t.name == want) else {
         if outcome.refs_seen > 0 {
             // #7830 review round 2: five refs and nothing restored is what a
