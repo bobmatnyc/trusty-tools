@@ -332,7 +332,22 @@ pub(super) fn session_tools() -> Vec<Value> {
              resolves the newest snapshot THIS WINDOW paused in this project \
              instead. `resolved_via` says which answered (`session_id`, \
              `tmux_window`, or null), so do not read a window match as an exact \
-             one. Each entry in `sessions` carries `owned`: true when the \
+             one. Before any of that is read, the local session cache is \
+             rebuilt from THIS caller's own append-only git ref \
+             `refs/tm/sessions/<user-id>/<session-key>` (ADR-0062, #7830), so a \
+             resume from a fresh clone still resolves. `session_refs` reports \
+             that pass: `hydrated` (it ran), `refs_seen` (how many session refs \
+             exist on the remote, this caller's or not), `own_ref_found` \
+             (whether this caller's own ref was among them), `restored` (how \
+             many snapshot files were written back), and `error`. Note that \
+             `session_refs.own_ref_found` is about THIS CALLER'S REF and is \
+             unrelated to the per-session `sessions[].owned` below. \
+             `refs_seen > 0` with `own_ref_found: false` is a real and \
+             PERMANENT state, not a transient: after a hostname change or a \
+             `gh` account switch this caller reaches none of its old refs and \
+             never will, so report it rather than reading five refs as five \
+             restorable sessions. A hydration failure never fails the catch-up. \
+             Each entry in `sessions` carries `owned`: true when the \
              session is attributable to you (your `session_id` paused it, or \
              you are in the window that did). A session you do not own is \
              listed with `format`, `paused_at` and `summary` only — its \
@@ -412,7 +427,17 @@ pub(super) fn session_tools() -> Vec<Value> {
              snapshot file is written either way. Every no-PR outcome reports \
              `snapshot_publish.status: \"skipped\"` with a `reason` — \
              `not_tracked` (the project git-ignores `.trusty-mpm/sessions/`), \
-             `not_a_git_repo`, or `unchanged`. Also \
+             `not_a_git_repo`, or `unchanged`. SEPARATELY, and on every project \
+             tracked or not, the snapshot is appended to this session's own \
+             append-only git ref `refs/tm/sessions/<user-id>/<session-key>` and \
+             lease-pushed to `origin` (ADR-0062, #7830): `ref_name` names the \
+             ref, `ref_published` says whether the push landed, and \
+             `ref_error` carries the reason when it did not. A ref failure NEVER \
+             fails the pause — the local snapshot is the primary write — so a \
+             non-null `ref_error` is yours to REPORT to the operator, not to \
+             retry. With `[session_refs] enabled = false` in \
+             `~/.trusty-mpm/config.toml` no ref is written at all and both \
+             `ref_name` and `ref_error` are null. Also \
              prunes orphaned managed-session \
              git worktrees in-process (same engine as `tm session prune-worktrees`) \
              unless `prune_worktrees` is set to `false`. That prune NEVER removes a \

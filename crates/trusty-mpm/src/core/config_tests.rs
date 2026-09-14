@@ -48,6 +48,41 @@ fn config_hooks_defaults_to_enabled() {
     assert!(HooksConfig::default().prompt_context);
 }
 
+/// Why (#7830 / ADR-0062): session-ref publishing is the ruling, so it must be
+/// on for a host that never edits a config file. A present-but-empty section,
+/// and a config that never mentions it, both leave it enabled — otherwise
+/// adding the section for a future key would silently stop publishing session
+/// history.
+#[test]
+fn config_session_refs_defaults_to_enabled() {
+    let dir = tempfile::TempDir::new().unwrap();
+    assert!(MpmConfig::load(dir.path()).session_refs.enabled);
+    assert!(
+        load_from_str(dir.path(), "[session_refs]\n")
+            .session_refs
+            .enabled
+    );
+    assert!(
+        load_from_str(dir.path(), "[hooks]\nprompt_context = false\n")
+            .session_refs
+            .enabled
+    );
+    assert!(SessionRefsConfig::default().enabled);
+}
+
+/// Why (#7830): the off switch is the whole reason the section exists — an
+/// operator who does not want machine data pushed to `origin` needs one
+/// supported way to say so.
+#[test]
+fn config_session_refs_can_be_disabled() {
+    let dir = tempfile::TempDir::new().unwrap();
+    assert!(
+        !load_from_str(dir.path(), "[session_refs]\nenabled = false\n")
+            .session_refs
+            .enabled
+    );
+}
+
 /// #7688: the host default is OFF, and "off" is spelled `None` — the key
 /// declines to decide so a project's own `.trusty-mpm.toml` can.
 #[test]

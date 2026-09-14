@@ -90,6 +90,17 @@ durable and shared through the same remote.
    changes what content is safe to push. The existing secret-scan gate that
    blocks a push carrying a credential applies to this refspec the same way
    it applies to the branch refspec.
+10. **Push access is the trust boundary (owner ruling 2026-09-14).**
+    `refs/tm/sessions/**` carries no server-side access control: a
+    collaborator with push access to `origin` can create a ref under any
+    user id and any session key. That collaborator is trusted to write
+    session history, and the integrity of a session ref rests on the forge's
+    push permission — the same boundary that already governs who can push a
+    branch. The reader hydrates only the caller's own ref
+    (`<user-id>/<session-key>`) as defence in depth, not as authentication.
+    Signed-commit verification and forge-side ref rules are deferred
+    alongside decision 8; a repository whose push set is not trusted should
+    set `[session_refs] enabled = false`.
 
 ## Consequences
 
@@ -98,6 +109,16 @@ durable and shared through the same remote.
 - **No race between concurrent sessions.** The ref key already separates
   every session's history; `--force-with-lease` catches the one remaining
   case — a session racing itself across two processes.
+- **Push access is the trust boundary (owner ruling 2026-09-14).**
+  `refs/tm/sessions/**` carries no server-side access control: a collaborator
+  with push access to `origin` can create a ref under any user id and any
+  session key. That collaborator is trusted to write session history, and the
+  integrity of a session ref rests on the forge's push permission — the same
+  boundary that already governs who can push a branch. The reader hydrates
+  only the caller's own ref (`<user-id>/<session-key>`) as defence in depth,
+  not as authentication. Signed-commit verification and forge-side ref rules
+  are deferred alongside decision 8; a repository whose push set is not
+  trusted should set `[session_refs] enabled = false`.
 - **These refs are invisible in the GitHub UI, in PR diffs, and to branch
   protection.** `refs/tm/sessions/**` is not `refs/heads/**`, so no PR ever
   lists a session-ref commit and no branch-protection rule ever inspects

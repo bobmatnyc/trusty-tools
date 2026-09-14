@@ -205,7 +205,7 @@ explicitly ONLY to attribute the pause to a specific id you already know — nev
 to supply a "stable-looking" string of your own.
 
 The tool returns
-`{ session_id, snapshot_path, timestamp, pruned_worktrees, skipped_dirty_worktrees, snapshot_publish }`,
+`{ session_id, snapshot_path, timestamp, pruned_worktrees, skipped_dirty_worktrees, snapshot_publish, ref_name, ref_published, ref_error }`,
 where `session_id` is the id it filed the snapshot under and `snapshot_publish`
 names the branch, commit and PR the snapshot was published as (see "How the
 Snapshot Reaches the Default Branch" above). It writes
@@ -219,6 +219,34 @@ in the same project keep their own history), and computes the
 itself — no separate `git status`/`git log` shell-out needed.
 
 Report the returned `snapshot_path` to the user.
+
+### The Session Ref (ADR-0062, #7830)
+
+Every pause — on a project that tracks `.trusty-mpm/sessions/` or not — also
+appends the snapshot to this session's own append-only git ref,
+`refs/tm/sessions/<user-id>/<session-key>`, and lease-pushes it to `origin`.
+That ref is what a resume from a fresh clone rebuilds its cache from.
+
+- **`ref_published: false` with a non-null `ref_error` MUST be reported.** The
+  local snapshot is the primary write and is already on disk, so the pause
+  succeeded — but the durable copy did not reach `origin` and nothing else will
+  say so. Report the `ref_error` text verbatim; do not retry it yourself.
+- `ref_name` names the ref the pause targeted, even when the push failed.
+- With `[session_refs] enabled = false` in `~/.trusty-mpm/config.toml` no ref is
+  written at all: `ref_name` and `ref_error` are both `null` and
+  `ref_published` is `false`.
+
+**Operator-visible:** a pause PUSHES your summary, in-progress items and next
+steps to whatever `origin` the project has — a company remote, a fork, a
+third-party host. The only gate before that push is a prefix-based credential
+scan (known provider key shapes such as `ghp_`, `sk-ant-`, `AKIA`, and PEM
+private-key headers); it is not a general secret detector and will not catch a
+password, a customer name, or an internal URL you typed into the summary. Keep
+the pause text to what you would put in a PR description, or set
+`[session_refs] enabled = false`. Anyone with push access to `origin` can also
+write a session ref, by the same permission that lets them push a branch —
+ADR-0062 decision 10; a repository whose push set is not trusted should turn
+this off.
 
 **If `skipped_dirty_worktrees` is non-empty, you MUST report it** — do not let
 it disappear into the tool result. Each entry is
