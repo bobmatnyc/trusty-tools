@@ -205,6 +205,9 @@ async fn search_all_fanout_compact_hit_omits_the_dropped_keys() {
 /// A call that omits `compact` keeps the pre-#7676 hit shape on all five
 /// tools — every field still present, and no `compact` key injected into the
 /// daemon body.
+///
+/// #7493 added the byte ceiling, whose only mark on an under-cap response is
+/// `meta.truncated: false`; this pins that it is the ONLY difference.
 #[tokio::test]
 async fn default_calls_keep_the_legacy_hit_shape() {
     let baseline: Vec<String> = full_hit(0)
@@ -213,6 +216,14 @@ async fn default_calls_keep_the_legacy_hit_shape() {
         .keys()
         .cloned()
         .collect();
+    let mut meta_baseline: Vec<String> = search_body(1)["meta"]
+        .as_object()
+        .expect("fixture meta is an object")
+        .keys()
+        .cloned()
+        .collect();
+    meta_baseline.push("truncated".to_string());
+    meta_baseline.sort();
 
     for (tool, args) in [
         (
@@ -245,6 +256,19 @@ async fn default_calls_keep_the_legacy_hit_shape() {
             bodies.lock().await[0].get("compact").is_none(),
             "{tool}: a default call must not inject `compact` into the daemon body"
         );
+        // #7493: the byte ceiling adds `meta.truncated: false` and nothing else.
+        let mut meta_keys: Vec<String> = payload["meta"]
+            .as_object()
+            .expect("meta survives the default call")
+            .keys()
+            .cloned()
+            .collect();
+        meta_keys.sort();
+        assert_eq!(
+            meta_keys, meta_baseline,
+            "{tool}: `meta.truncated` must be the only added key"
+        );
+        assert_eq!(payload["meta"]["truncated"], false, "{tool}");
     }
 }
 
