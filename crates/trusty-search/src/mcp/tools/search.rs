@@ -61,7 +61,10 @@ pub(super) async fn dispatch_search_tool(
             // full chunk alongside it is a contradiction — compact wins, and
             // the fan-out's `compact: !full_content` then guarantees the
             // `compact_snippet` that replaces it.
-            let want_compact = compact::wants_compact(args);
+            let want_compact = match compact::wants_compact(args) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let full_content = !want_compact
                 && args
                     .get("full_content")
@@ -167,7 +170,10 @@ pub(super) async fn dispatch_search_tool(
             // so pin the daemon's own compact flag on. A `{query: object}`
             // caller that set `compact: false` is overridden, not obeyed —
             // the tool-level flag is the one the caller just asked for.
-            let want_compact = compact::wants_compact(args);
+            let want_compact = match compact::wants_compact(args) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             if want_compact {
                 body["compact"] = Value::Bool(true);
             }
@@ -374,7 +380,7 @@ impl McpServer {
         }
         // #7676: same contract as the `search` arm — pin the daemon's compact
         // flag so `compact_snippet` is present before `content` is dropped.
-        let want_compact = compact::wants_compact(args);
+        let want_compact = compact::wants_compact(args)?;
         if want_compact {
             body["compact"] = Value::Bool(true);
         }
