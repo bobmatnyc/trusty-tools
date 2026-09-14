@@ -827,6 +827,7 @@ Removed from MVP status line (shows session/model/project/workstream only). Cost
 | Spec | Relationship |
 |---|---|
 | DOC-39 (trusty-code Harness UI) | This spec is the TUI implementation of DOC-39's layer-priority axiom and thin-client constraint. [`SPEC-TCUI-01~draft`](./trusty-code-harness-ui.md#SPEC-TCUI-01~draft) and [`SPEC-TCUI-09~draft`](./trusty-code-harness-ui.md#SPEC-TCUI-09~draft) are the binding constraints. |
+| [ADR-0063](../adr/0063-tui-is-the-primary-interactive-surface.md) (TUI is trusty-code's primary interactive surface) | This spec's TUI is the primary interactive entry point named by ADR-0063; DOC-39 §1.4 (`SPEC-TCUI-10~draft`) is amended accordingly. |
 | DOC-48 (tcode Workstreams) | This spec integrates workstream awareness into the TUI. The TUI surfaces the active workstream and responds to `WorkstreamActivationChanged` events (DOC-48 §5.3). |
 | DOC-38 (Spec-Linked Documentation) | This spec follows [`SPEC-SLD-02~draft`](./spec-linked-documentation.md#SPEC-SLD-02~draft) reference grammar and conventions. |
 

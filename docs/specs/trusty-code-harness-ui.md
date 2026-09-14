@@ -75,9 +75,13 @@ of the product trusty-code was always meant to be**.
 The parity/bake-off harness is **how you score a harness, not what one is**. Comparison
 runs remain normative under the parity spec and are unaffected by this document.
 
-**Platform: an SPA (web/Tauri) driving our API.** Not a TUI, not a terminal renderer.
-"Driving our API" is the whole of it: **web and Tauri are two shells over one daemon, and
-differ in packaging only** (§2.1). The slash in "web/Tauri" is not a fork.
+**Platform: an SPA (web/Tauri) driving our API — DEFERRED, not dropped.**
+[ADR-0063](../adr/0063-tui-is-the-primary-interactive-surface.md) makes the
+interactive TUI (§1.4) trusty-code's primary interactive surface; this SPA/Tauri
+platform remains the eventual second UI target but ships after the TUI, not
+before it. Where this platform does ship, "driving our API" stays the whole of
+it: **web and Tauri are two shells over one daemon, and differ in packaging
+only** (§2.1). The slash in "web/Tauri" is not a fork.
 
 ### 1.3 Non-goals
 
@@ -99,16 +103,16 @@ The proposal has no non-goals. A spec must. **Out of scope for this document:**
 6. **No new persistence engine.** Workstream durability (§4.10) names a requirement and
    a prerequisite; it does not pick a store.
 
-### 1.4 Secondary Entry Point — the Interactive TUI {#SPEC-TCUI-10~draft}
+### 1.4 Primary Entry Point — the Interactive TUI {#SPEC-TCUI-10~draft}
 
 **ID:** SPEC-TCUI-10~draft
 **Status:** Draft
 
-**Platform designation (reaffirmed):** The primary interactive Platform is the SPA (web/Tauri) defined in §1.2. "Not a TUI, not a terminal renderer" refers to this primary platform.
+**Platform designation (updated by [ADR-0063](../adr/0063-tui-is-the-primary-interactive-surface.md)):** The primary interactive Platform is the TUI (`tcode tui`, shared seam `crates/trusty-code-tui`, DOC-50). The SPA (web/Tauri) framing in §1.2 is deferred, not dropped, and remains the eventual second UI target. "Not a TUI, not a terminal renderer" in §1.2 describes that deferred SPA platform, not the TUI specified here.
 
-**Secondary/Alternative Entry Point — DOC-50 (trusty-code Interactive TUI):** The vision spec (§1.2) reserves the TUI layer as a "future layer… a foundation for later UI layers: TUI, TELGUI, REST — all thin clients over the same JSON-RPC surface." DOC-50 implements this future TUI layer as a **sanctioned secondary entry point** for terminal-native users and automation workflows. The TUI is **NOT a competing platform** — it is an additional thin client adhering to the same daemon-communication model (API → CLI → TUI → Web layer priority, C-1 through C-4 thin-client axioms) and sharing the same daemon API surface with the SPA.
+**Primary Entry Point — DOC-50 (trusty-code Interactive TUI):** The vision spec (§1.2) reserves the TUI layer as a "future layer… a foundation for later UI layers: TUI, TELGUI, REST — all thin clients over the same JSON-RPC surface." DOC-50 implements this layer as the **primary interactive entry point**, per ADR-0063, for terminal-native users, automation workflows, and the owner's own prototyping loop. The TUI is an additional thin client adhering to the same daemon-communication model (API → CLI → TUI → Web layer priority, C-1 through C-4 thin-client axioms) and shares the same daemon API surface the deferred SPA will use.
 
-**Scope:** The TUI remains a thin client (no business logic, no filesystem access, all daemon-sourced). It is an alternative to the SPA for interactive use, not a replacement. See [`docs/specs/DOC-50-tcode-tui-claude-code-clone.md`](./DOC-50-tcode-tui-claude-code-clone.md) for the TUI specification.
+**Scope:** The TUI remains a thin client (no business logic, no filesystem access, all daemon-sourced). It leads trusty-code's interactive surface while the SPA is deferred. See [`docs/specs/DOC-50-tcode-tui-claude-code-clone.md`](./DOC-50-tcode-tui-claude-code-clone.md) for the TUI specification.
 
 ---
 
@@ -1697,6 +1701,15 @@ This is carried forward verbatim because it is the one piece of the visual syste
 
 ## Changelog
 
+- **2026-09-14** — **TUI flips to primary interactive surface**
+  ([ADR-0063](../adr/0063-tui-is-the-primary-interactive-surface.md), owner
+  ruling 2026-09-14). Amends **§1.2**: the SPA (web/Tauri) platform is marked
+  **deferred, not dropped**, pointing at ADR-0063. Amends **§1.4**
+  (`SPEC-TCUI-10~draft`, retitled "Primary Entry Point"): the interactive TUI
+  (`tcode tui`, `crates/trusty-code-tui`, DOC-50) is now trusty-code's
+  primary interactive entry point; the SPA remains the eventual second UI
+  target. §2.1's thin-client axiom (`SPEC-TCUI-09~draft`) is unchanged and
+  binding on both surfaces. Spec IDs are unchanged; no renumbering.
 - **2026-07-19** — **Code-critic PR #3460 review fixes (same-day, before merge).**
   Amends §4.6.2: AC-6.11 now requires the rejected-reuse disambiguation probe (HIGH 1 —
   `begin_execution` rejects "terminal" and "still running" identically; a still-running

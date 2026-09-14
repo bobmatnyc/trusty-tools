@@ -1,6 +1,6 @@
 # ADR Index — All Decisions
 
-**Last updated:** 2026-09-13 | **Format version:** 1.1
+**Last updated:** 2026-09-14 | **Format version:** 1.1
 
 This index is the complete, concise vetting surface for workspace ADRs. The ADR
 files remain authoritative for full context, decision text, and consequences.
@@ -73,6 +73,7 @@ Crate-specific ADRs have independent sequences and indexes under
 | [0060](0060-mcp-config-authority-in-trusty-mcp.md) | One MCP config authority in trusty-mcp | Proposed | `trusty-mcp` owns MCP server config, in a file shared by `trusty-code` and `trusty-agents`; `trusty-mpm` keeps Claude Code's own MCP config through an adapter; an Assistant's MCP connections resolve from a global tier and a per-assistant override tier. | `trusty-mcp`, `trusty-agents`, `trusty-code`, `trusty-mpm` |
 | [0061](0061-commits-never-land-on-local-main.md) | Commits never land on local `main` | Amended by 0062 | `git commit` aimed at local `main` is denied unconditionally; a docs/session-note-only staged set may still reach origin, but only through the fast-path `docs/*` branch (ADR-0049, amended), never local `main`; the checkout advances only by fast-forward to `origin/main`, per the owner's 2026-09-13 ruling and its #7756/#7767 corrections. | `trusty-mpm` |
 | [0062](0062-session-history-as-per-session-git-refs.md) | Session history as per-session, append-only git refs | Accepted | Session and activity data lives in one git ref per session, `refs/tm/sessions/<user-id>/<session-key>`, an orphan append-only commit chain pushed with `--force-with-lease` on its own refspec — never a commit on a code branch — so a pause needs no PR and no fast-forward, and concurrent pauses no longer race. | `trusty-mpm` |
+| [0063](0063-tui-is-the-primary-interactive-surface.md) | TUI is trusty-code's primary interactive surface | Accepted | The interactive TUI (`tcode tui`, `crates/trusty-code-tui`, DOC-50) is trusty-code's primary interactive surface; the SPA/Tauri platform of DOC-39 §1.2 is deferred, not dropped, and the thin-client axiom stays binding on both. | `trusty-code` |
 
 ## Notes
 
