@@ -91,13 +91,13 @@ pub(crate) async fn run_daemon(
     // restart-race rationale and the pure decision table.
     let supervised = apply_supervision_signal(&state);
 
-    // #7822: fingerprint THIS executable now, at startup — the semver `/health`
-    // reports cannot distinguish two builds cut under the same version, and a
-    // fingerprint read later would describe whatever `cargo install` last wrote
-    // rather than the build this process is actually running.
-    state.set_build_identity(
-        trusty_mpm::core::build_identity::current_exe_identity().unwrap_or_default(),
-    );
+    // #7822: publish the build THIS process runs — the semver `/health` reports
+    // cannot distinguish two builds cut under the same version.
+    // #7873: the id is compiled in, so it describes this process's own build no
+    // matter when it is read, and is the same value the `tm` bin running
+    // `tm doctor` carries. The startup call site stays only because that is
+    // where every other `/health` field is recorded.
+    state.set_build_identity(trusty_mpm::core::build_identity::build_id());
 
     // #4230: record the opt-in so `/health` can distinguish a deliberate
     // unsupervised run from an unwanted orphan. Without it `tm doctor` would call

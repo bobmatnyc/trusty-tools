@@ -37,9 +37,9 @@
 //! version — the 2026-09-13 incident, where a 1.5.36 daemon served the pre-#7789
 //! settings writer while the installed binary was also 1.5.36 and this check
 //! reported `Ok`. When the versions agree the verdict now turns on the build
-//! fingerprints in [`BuildIdentity`] (see [`crate::core::build_identity`] for
-//! what a fingerprint is and why it is an mtime/size stat). An absent
-//! fingerprint reports "cannot tell", never `Ok`.
+//! ids in [`BuildIdentity`] (see [`crate::core::build_identity`] for what the
+//! id is, and why #7873 made it compile-time rather than a stat of the calling
+//! binary's own file). An absent id reports "cannot tell", never `Ok`.
 //!
 //! Test: the `tests` module below covers match / older / newer / unparseable /
 //! empty-daemon-version branches, plus every #7822 build-identity branch.
@@ -77,17 +77,18 @@ pub fn parse_version_triple(raw: &str) -> Option<(u64, u64, u64)> {
     Some((major, minor, patch))
 }
 
-/// The two build fingerprints the verdict turns on once the versions agree
-/// (issue #7822).
+/// The two build ids the verdict turns on once the versions agree (issue
+/// #7822).
 ///
 /// Why: passed as one struct rather than two loose `&str` parameters so a call
-/// site cannot silently swap the daemon's fingerprint for the installed one —
-/// they are the same type and the mistake would invert nothing observable.
-/// What: `installed` is the fingerprint of the binary running the CHECK (`tm
-/// doctor` always executes as the just-installed binary), `None` when this
-/// process cannot fingerprint itself. `daemon` is what the daemon captured at
-/// its own startup and published on `/health`, `""` from a daemon predating the
-/// field. Either gap yields "cannot tell", never a pass.
+/// site cannot silently swap the daemon's id for the installed one — they are
+/// the same type and the mistake would invert nothing observable.
+/// What: `installed` is the id compiled into the binary running the CHECK (`tm
+/// doctor` always executes as the just-installed binary). #7873 made that id
+/// compile-time, so the in-tree caller always has one; `None` remains the
+/// contract for a caller that does not, and never reads as a pass. `daemon` is
+/// what the daemon recorded at its own startup and published on `/health`, `""`
+/// from a daemon predating the field. Either gap yields "cannot tell".
 /// Test: `staleness_warns_when_build_identity_differs`,
 /// `staleness_warns_when_daemon_omits_build_identity`,
 /// `staleness_warns_when_installed_build_identity_is_unknown`,

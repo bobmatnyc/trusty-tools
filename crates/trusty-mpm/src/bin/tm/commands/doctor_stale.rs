@@ -17,7 +17,7 @@
 //! exercised indirectly by the executor's live-daemon doctor test.
 
 use trusty_mpm::client::HealthSnapshot;
-use trusty_mpm::core::build_identity::current_exe_identity;
+use trusty_mpm::core::build_identity::build_id;
 use trusty_mpm::core::doctor::DoctorCheck;
 use trusty_mpm::core::version_staleness::{BuildIdentity, check_daemon_version_staleness};
 
@@ -40,15 +40,16 @@ use trusty_mpm::core::version_staleness::{BuildIdentity, check_daemon_version_st
 /// skip.
 pub(crate) fn stale_daemon_check(snapshot: &HealthSnapshot, restart_hint: &str) -> DoctorCheck {
     // #7822: the version pair alone cleared a daemon serving pre-merge code
-    // under the same semver, so the build fingerprints decide once they agree.
-    // This process IS the installed binary, so fingerprinting `current_exe()`
-    // here is the installed side of the comparison.
-    let installed_build = current_exe_identity();
+    // under the same semver, so the build ids decide once they agree.
+    // #7873: that id is the compile-time one this `tm` bin was built with, not
+    // a stat of its file on disk — the daemon runs the sibling `trusty-mpm`
+    // bin, a different file from the same build, so a file fingerprint could
+    // never match and the Warn never cleared.
     check_daemon_version_staleness(
         env!("CARGO_PKG_VERSION"),
         &snapshot.version,
         BuildIdentity {
-            installed: installed_build.as_deref(),
+            installed: Some(build_id()),
             daemon: &snapshot.build_id,
         },
         restart_hint,
