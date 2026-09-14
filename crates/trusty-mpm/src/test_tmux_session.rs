@@ -259,6 +259,15 @@ impl ScratchTmuxSession {
     /// hundreds of leaked panes exhausts it — so every tmux spawn on that
     /// machine fails until the panes are reaped. That is a machine fault, not a
     /// fixture one; no test-side change creates a pty.
+    ///
+    /// #7848: the lib's only caller is
+    /// `core::process::tests::claude_pid_resolves_through_disclaim_wrapper`,
+    /// which is `#[cfg(target_os = "macos")]` — so a lib-crate compilation on
+    /// a non-macOS host (CI's Linux runner) has no reachable caller and sees
+    /// this as unused. The `tm` binary's own tests call it unconditionally.
+    /// See the module docs on the two-target `#[path]` split this file
+    /// already lives with.
+    #[allow(dead_code)]
     pub(crate) fn spawn(tmux_bin: &str, name: &str, pane_command: &str) -> Self {
         Self::spawn_in(tmux_bin, name, None, pane_command)
     }
@@ -271,6 +280,12 @@ impl ScratchTmuxSession {
     /// keeps [`ScratchTmuxSession::spawn`].
     /// What: adds `-c <cwd>` when `cwd` is `Some`; otherwise identical.
     /// Test: [`tests::a_session_opened_under_the_root_is_killed_on_drop`].
+    ///
+    /// #7848: reachable in the lib only through [`Self::spawn`], which is
+    /// itself lib-dead on a non-macOS compilation — see its doc comment. See
+    /// the module docs on the two-target `#[path]` split this file already
+    /// lives with.
+    #[allow(dead_code)]
     pub(crate) fn spawn_in(
         tmux_bin: &str,
         name: &str,
