@@ -13,8 +13,10 @@
 //! What: [`run`] reads the PR once
 //! (`gh pr view <n> --json
 //! number,title,body,isDraft,labels,reviewDecision,mergeStateStatus,mergeable,headRefName`),
-//! re-validates the body with [`body::validate`] — the same check `tm pr open`
-//! runs — and either refuses with one line and no `gh pr merge` call, or merges
+//! re-validates the body with [`body::validate`] — reporting the seven-field
+//! gaps and refusing only on a missing attribution footer, which is the half
+//! that belongs to the commit message this command writes (#7868) — and either
+//! refuses with one line and no `gh pr merge` call, or merges
 //! with `--squash --delete-branch --subject "<title> (#<n>)" --body-file <tmp>`
 //! where the temp file holds that validated body. The refusal itself is
 //! [`decide`], a pure function of the viewed fields plus the validation result.
@@ -102,9 +104,14 @@ pub(crate) enum Decision {
 /// live `gh`. A PR that is simultaneously draft and mislabelled must report one
 /// stable reason, and only a test can pin which.
 ///
-/// What: refuses, in this order, on a failed body validation, a draft, a
+/// What: refuses, in this order, on `body_failures`, a draft, a
 /// `do-not-merge` label in any case, a `CHANGES_REQUESTED` review decision, and
 /// a conflict — the last naming `gh pr update-branch`, which is the fix.
+///
+/// `body_failures` is [`body::BodyReport::merge_failures`] — the attribution
+/// footer alone (#7868). The footer IS part of the landing commit message this
+/// command writes, so a body missing it would put an unattributed commit on
+/// `main`; the seven-field contract is not, and is reported by [`run`] instead.
 ///
 /// A conflict is `mergeable == CONFLICTING` or `mergeStateStatus == DIRTY`;
 /// the two are separate GraphQL enums and `CONFLICTING` never appears in
@@ -123,7 +130,8 @@ pub(crate) enum Decision {
 /// `merge_refuses_changes_requested`, `merge_behind_is_not_a_refusal`,
 /// `merge_refuses_conflicting_with_update_branch_hint`,
 /// `merge_refuses_dirty_merge_state_with_update_branch_hint`,
-/// `merge_other_merge_states_fall_through_to_gh`.
+/// `merge_other_merge_states_fall_through_to_gh`,
+/// `pr_7868_a_sparse_body_is_not_a_merge_refusal`.
 pub(crate) fn decide(view: &MergeView, body_failures: &[String]) -> Decision {
     if !body_failures.is_empty() {
         return Decision::Refuse(format!(
@@ -254,9 +262,26 @@ fn pr_view<R: GhRunner>(gh: &R, args: &PrMergeArgs) -> anyhow::Result<MergeView>
 /// `merge_argv_carries_squash_delete_and_body_file`.
 pub(crate) fn run<R: GhRunner>(gh: &R, args: &PrMergeArgs) -> anyhow::Result<i32> {
     let view = pr_view(gh, args)?;
-    let failures = body::validate(&view.body).failures();
+    let report = body::validate(&view.body);
 
-    match decide(&view, &failures) {
+    // #7868: the seven-field contract is the OPEN gate. Re-running it here made
+    // a body written to the sparse prose rules unmergeable by the one command
+    // that passes the reviewed body through `--body-file`, so the operator fell
+    // back to raw `gh pr merge` and lost that guarantee. The gaps are reported;
+    // only the footer still refuses.
+    let gaps = report.contract_gaps();
+    if !gaps.is_empty() {
+        eprintln!(
+            "tm pr merge: #{}: the body does not fill every field of the seven-field contract — \
+             reported, not a refusal (#7868):",
+            args.pr
+        );
+        for gap in &gaps {
+            eprintln!("  - {gap}");
+        }
+    }
+
+    match decide(&view, &report.merge_failures()) {
         Decision::Refuse(reason) => {
             eprintln!(
                 "tm pr merge: refusing to merge #{} — {reason}; `gh pr merge` was not called",

@@ -5,7 +5,8 @@
 
 use super::body::{self, ATTRIBUTION_FOOTER, FIELDS, Field, IssueLink};
 use super::merge;
-use super::metadata::{self, ChangedPaths, PrMetadata, RefsIssue, RefsLookup};
+use super::metadata::{self, ChangedPaths, PrMetadata, RefKind, RefsIssue, RefsLookup};
+use super::metadata_apply::{self, ApplyOutcome};
 use super::open::{self, ChangelogVerdict, Preflight};
 use super::queue_check;
 use super::{GhRun, GhRunner, repo_slug};
@@ -15,10 +16,23 @@ use trusty_mpm::core::trusty_tools_config::ResolvedTicketing;
 
 // ── fakes ────────────────────────────────────────────────────────────────
 
-/// A `gh` seam that answers by argv-prefix match, in registration order.
+/// How a [`FakeGh`] route is matched against the joined argv.
+///
+/// Why (#7646): the per-field retry's argv is a PREFIX of the combined edit's,
+/// so a substring route cannot tell "apply the label alone" from "apply
+/// everything at once" — and a test of the retry has to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RouteMatch {
+    /// The needle appears anywhere in the joined argv.
+    Contains,
+    /// The needle IS the joined argv.
+    Exact,
+}
+
+/// A `gh` seam that answers by argv match, in registration order.
 struct FakeGh {
-    /// (argv substring that must appear in the joined argv, response).
-    routes: Vec<(String, GhRun)>,
+    /// (how to match, needle, response).
+    routes: Vec<(RouteMatch, String, GhRun)>,
     /// Every argv this fake was asked to run, in order.
     seen: std::cell::RefCell<Vec<Vec<String>>>,
 }
@@ -33,7 +47,22 @@ impl FakeGh {
 
     fn on(mut self, needle: &str, stdout: &str) -> Self {
         self.routes.push((
+            RouteMatch::Contains,
             needle.to_string(),
+            GhRun {
+                success: true,
+                stdout: stdout.to_string(),
+                stderr: String::new(),
+            },
+        ));
+        self
+    }
+
+    /// A successful route matching the WHOLE argv (#7646).
+    fn on_exact(mut self, argv: &str, stdout: &str) -> Self {
+        self.routes.push((
+            RouteMatch::Exact,
+            argv.to_string(),
             GhRun {
                 success: true,
                 stdout: stdout.to_string(),
@@ -45,10 +74,29 @@ impl FakeGh {
 
     fn on_fail(mut self, needle: &str, stderr: &str) -> Self {
         self.routes.push((
+            RouteMatch::Contains,
             needle.to_string(),
             GhRun {
                 success: false,
                 stdout: String::new(),
+                stderr: stderr.to_string(),
+            },
+        ));
+        self
+    }
+
+    /// A route that fails while still printing to stdout (#7869).
+    ///
+    /// Why: that is exactly what `gh pr create` does when it creates the PR and
+    /// then 502s on the follow-up call that applies the assignee and labels —
+    /// the URL is on stdout and the exit status is non-zero.
+    fn on_partial(mut self, needle: &str, stdout: &str, stderr: &str) -> Self {
+        self.routes.push((
+            RouteMatch::Contains,
+            needle.to_string(),
+            GhRun {
+                success: false,
+                stdout: stdout.to_string(),
                 stderr: stderr.to_string(),
             },
         ));
@@ -64,8 +112,12 @@ impl GhRunner for FakeGh {
     fn run(&self, args: &[String]) -> anyhow::Result<GhRun> {
         self.seen.borrow_mut().push(args.to_vec());
         let joined = args.join(" ");
-        for (needle, run) in &self.routes {
-            if joined.contains(needle.as_str()) {
+        for (how, needle, run) in &self.routes {
+            let hit = match how {
+                RouteMatch::Contains => joined.contains(needle.as_str()),
+                RouteMatch::Exact => joined == *needle,
+            };
+            if hit {
                 return Ok(run.clone());
             }
         }
@@ -1047,10 +1099,19 @@ const ISSUE_JSON: &str = r#"{"number":7274,"milestone":{"title":"mpm 1.6"},
 fn refs_issue() -> RefsIssue {
     RefsIssue {
         number: 7274,
+        kind: RefKind::Issue,
         milestone: Some("mpm 1.6".to_string()),
         projects: vec!["trusty-mpm".to_string()],
     }
 }
+
+/// The `gh pr view --json number,milestone,projectItems` payload for a link
+/// line that names a PULL REQUEST rather than an issue (#7786).
+const PR_REF_JSON: &str =
+    r#"{"number":7782,"milestone":{"title":"mpm 1.6"},"projectItems":[{"title":"Harness"}]}"#;
+
+/// The verbatim GraphQL answer `gh issue view <pr-number>` gives (#7786).
+const NOT_AN_ISSUE: &str = "GraphQL: Could not resolve to an Issue with the number of 7782";
 
 #[test]
 fn metadata_inherits_milestone_and_projects() {
@@ -1154,6 +1215,7 @@ fn metadata_multi_crate_diff() {
 fn metadata_notes_an_issue_with_no_milestone() {
     let bare = RefsIssue {
         number: 99,
+        kind: RefKind::Issue,
         milestone: None,
         projects: Vec::new(),
     };
@@ -1178,7 +1240,7 @@ fn metadata_notes_an_issue_with_no_milestone() {
 #[test]
 fn metadata_parses_a_gh_issue_view_payload() {
     let facts = serde_json::from_str(ISSUE_JSON).expect("the fixture parses");
-    let issue = RefsIssue::from_facts(7274, &facts);
+    let issue = RefsIssue::from_facts(7274, RefKind::Issue, &facts);
     assert_eq!(issue.milestone.as_deref(), Some("mpm 1.6"));
     assert_eq!(
         issue.projects,
@@ -1193,6 +1255,7 @@ fn metadata_edit_argv_carries_every_field() {
         milestone: Some("mpm 1.6".to_string()),
         projects: vec!["trusty-mpm".to_string()],
         notes: Vec::new(),
+        inherited_from: Some(7274),
     };
     let argv = metadata::edit_argv("4242", Some("o/r"), &meta).join(" ");
     assert!(argv.starts_with("pr edit 4242 --repo o/r"), "{argv}");
@@ -1204,13 +1267,13 @@ fn metadata_edit_argv_carries_every_field() {
 #[test]
 fn metadata_finds_the_first_refs() {
     let body = "## Outcome\n\nRefs #7274\n\nRefs #9999\n";
-    assert_eq!(metadata::first_refs_issue(body), Some(7274));
+    assert_eq!(metadata::first_linked_issue(body), Some(7274));
 }
 
 #[test]
 fn metadata_finds_a_qualified_refs() {
     assert_eq!(
-        metadata::first_refs_issue("Refs bobmatnyc/trusty-tools#7274\n"),
+        metadata::first_linked_issue("Refs bobmatnyc/trusty-tools#7274\n"),
         Some(7274)
     );
 }
@@ -1218,11 +1281,11 @@ fn metadata_finds_a_qualified_refs() {
 #[test]
 fn metadata_ignores_refs_mid_sentence() {
     assert_eq!(
-        metadata::first_refs_issue("This one refs #12 in passing.\nRefs #34\n"),
+        metadata::first_linked_issue("This one refs #12 in passing.\nRefs #34\n"),
         Some(34),
         "only a line that STARTS with the keyword is the link line"
     );
-    assert_eq!(metadata::first_refs_issue("## Outcome\n\ntext\n"), None);
+    assert_eq!(metadata::first_linked_issue("## Outcome\n\ntext\n"), None);
 }
 
 /// #7274 round 2: a body that quotes the convention before stating its own
@@ -1232,15 +1295,15 @@ fn metadata_ignores_refs_inside_a_fence() {
     let body =
         "## Outcome\n\nEvery fix PR reads:\n\n```\nfix(x): y\n\nRefs #999\n```\n\nRefs #7274\n";
     assert_eq!(
-        metadata::first_refs_issue(body),
+        metadata::first_linked_issue(body),
         Some(7274),
         "a fenced sample is not the PR's own link"
     );
     // An info string opens a fence the same way a bare one does.
     let tagged = "```text\nRefs #999\n```\n\nRefs #7274\n";
-    assert_eq!(metadata::first_refs_issue(tagged), Some(7274));
+    assert_eq!(metadata::first_linked_issue(tagged), Some(7274));
     // A body whose only `Refs` is fenced has no link at all.
-    assert_eq!(metadata::first_refs_issue("```\nRefs #999\n```\n"), None);
+    assert_eq!(metadata::first_linked_issue("```\nRefs #999\n```\n"), None);
 }
 
 #[test]
@@ -1279,7 +1342,11 @@ fn open_applies_pr_metadata() {
 fn open_without_refs_says_so() {
     let (_d, path) = scratch_body(&full_body());
     let args = open_args(&path.to_string_lossy());
-    let gh = FakeGh::new().on("pr create", "https://github.com/o/r/pull/7\n");
+    let gh = FakeGh::new()
+        .on("pr create", "https://github.com/o/r/pull/7\n")
+        // #7869: an unrouted edit is now a PARTIAL apply, not a swallowed
+        // warning, and this test is about the label LANDING.
+        .on("pr edit 7", "");
     let pre = FakePreflight::ok().with_diff(&["crates/trusty-mpm/src/lib.rs"]);
     let code = open::run(&gh, &args, &pre).expect("create succeeds");
     assert_eq!(code, super::EXIT_OK);
@@ -1300,6 +1367,10 @@ fn open_without_refs_says_so() {
     );
 }
 
+/// #7869: a failed metadata apply never aborts the run — the PR exists and is
+/// reported — but it is no longer reported as a success either. After the one
+/// per-field retry has also failed, the exit code is `EXIT_PARTIAL`, which is
+/// distinct from "a check failed and `gh` was never called".
 #[test]
 fn open_survives_a_failed_metadata_edit() {
     let (_d, path) = scratch_body(&full_body());
@@ -1311,9 +1382,16 @@ fn open_survives_a_failed_metadata_edit() {
     let code = open::run(&gh, &args, &pre).expect("a failed edit is not an error");
     assert_eq!(
         code,
-        super::EXIT_OK,
-        "the PR already exists; the metadata apply is best-effort"
+        super::EXIT_PARTIAL,
+        "the PR exists, so this is a partial apply — never a silent success"
     );
+    // The retry ran once and no more: the combined edit, then the label step.
+    let edits = gh
+        .calls()
+        .into_iter()
+        .filter(|c| c.join(" ").starts_with("pr edit"))
+        .count();
+    assert_eq!(edits, 2, "one combined edit, then exactly one retry step");
 }
 
 /// #7274 round 2: the diff-read failure arm reaches `plan`. The note itself is
@@ -1347,6 +1425,11 @@ fn open_notes_an_unreadable_diff() {
 
 /// #7274 round 2: a `Refs` line whose `gh issue view` fails still opens the PR
 /// and still applies the component label the diff earned.
+///
+/// The failure here is deliberately NOT the `Could not resolve to an Issue`
+/// answer — that one earns a `gh pr view` retry (#7786), which
+/// `pr_7786_a_pr_ref_inherits_through_gh_pr_view` covers. This is the arm where
+/// the read failed for any other reason and there is nothing to retry.
 #[test]
 fn open_notes_an_unreadable_refs_issue() {
     let mut body = full_body();
@@ -1358,7 +1441,7 @@ fn open_notes_an_unreadable_refs_issue() {
     let args = open_args(&path.to_string_lossy());
     let gh = FakeGh::new()
         .on("pr create", "https://github.com/o/r/pull/4242\n")
-        .on_fail("issue view 7274", "GraphQL: Could not resolve to an Issue")
+        .on_fail("issue view 7274", "HTTP 502 (api.github.com/graphql)")
         .on("pr edit 4242", "");
     let pre = FakePreflight::ok().with_diff(&["crates/trusty-mpm/src/lib.rs"]);
     let code = open::run(&gh, &args, &pre).expect("an unreadable issue is not an error");
@@ -1378,6 +1461,276 @@ fn open_notes_an_unreadable_refs_issue() {
     assert!(edit.contains("--add-label trusty-mpm"), "{edit}");
     assert!(!edit.contains("--milestone"), "{edit}");
     assert!(!edit.contains("--add-project"), "{edit}");
+}
+
+// ── B7: the `tm pr open` / `tm pr merge` metadata contract ───────────────
+
+/// A `full_body` with `line` inserted immediately above the footer.
+fn body_linking(line: &str) -> String {
+    full_body().replace(
+        ATTRIBUTION_FOOTER,
+        &format!("{line}\n\n{ATTRIBUTION_FOOTER}"),
+    )
+}
+
+/// The `gh pr edit` argv the run issued, joined, if one did.
+fn first_edit(gh: &FakeGh) -> Option<String> {
+    gh.calls()
+        .into_iter()
+        .map(|c| c.join(" "))
+        .find(|c| c.starts_with("pr edit"))
+}
+
+/// REGRESSION (#7869): metadata inheritance must not depend on WHICH sanctioned
+/// keyword links the issue. `metadata::first_refs_issue` matched only `Refs`, so
+/// every `tm pr open --closes` PR opened with no project and no milestone and
+/// the PM re-applied both by hand.
+/// Red before the fix: no `gh issue view` runs at all, and the only `gh pr edit`
+/// carries the component label with no `--milestone`.
+#[test]
+fn pr_7869_a_closes_link_inherits_the_issues_metadata() {
+    let (_d, path) = scratch_body(&full_body());
+    let mut args = open_args(&path.to_string_lossy());
+    args.issue = Some(7274);
+    args.closes = true;
+    let gh = FakeGh::new()
+        .on("pr create", "https://github.com/o/r/pull/4242\n")
+        .on("issue view 7274", ISSUE_JSON)
+        .on("pr edit 4242", "");
+    let pre = FakePreflight::ok().with_diff(&["crates/trusty-mpm/src/lib.rs"]);
+
+    assert_eq!(
+        open::run(&gh, &args, &pre).expect("create succeeds"),
+        super::EXIT_OK
+    );
+
+    let edit = first_edit(&gh).expect("a `gh pr edit` ran");
+    assert!(
+        edit.contains("--milestone mpm 1.6"),
+        "a `Closes #N` body inherits the milestone too: {edit}"
+    );
+    assert!(edit.contains("--add-project trusty-mpm"), "{edit}");
+    assert!(edit.contains("--add-label trusty-mpm"), "{edit}");
+}
+
+/// REGRESSION (#7869, observed on PR #7918): `gh pr create` creates the PR and
+/// THEN applies the assignee and labels over separate API calls. A 502 on one of
+/// those exited non-zero with the PR already open, and `tm pr open` bailed
+/// printing no number — the caller had to find the PR with `gh pr list --head`.
+/// Red before the fix: `open::run` returns `Err`, so no number and no URL are
+/// printed and nothing is retried.
+#[test]
+fn pr_7869_a_create_that_fails_after_creating_reports_the_pr_and_retries() {
+    let (_d, path) = scratch_body(&full_body());
+    let args = open_args(&path.to_string_lossy());
+    let gh = FakeGh::new()
+        .on("label create", "")
+        .on_partial(
+            "pr create",
+            "https://github.com/o/r/pull/7918\n",
+            "HTTP 502: Something went wrong (graphql)",
+        )
+        .on("pr edit 7918", "");
+    let pre = FakePreflight::ok();
+
+    assert_eq!(
+        open::run(&gh, &args, &pre).expect("a PR that exists is not an error"),
+        super::EXIT_OK,
+        "the retry succeeded, so the command is a success"
+    );
+    let edit = first_edit(&gh).expect("the create's own metadata step was retried");
+    assert!(edit.contains("--add-assignee"), "{edit}");
+    assert!(edit.contains("--add-label trusty-mpm"), "{edit}");
+    assert!(edit.contains("--add-label ws/tm-test-01"), "{edit}");
+    // The PR is real, so it is registered for post-merge cleanup like any other.
+    assert_eq!(pre.cleanup_registry().entries()[0].pr, 7918);
+}
+
+/// REGRESSION (#7869): the same partial create whose retry ALSO fails exits
+/// non-zero — but as `EXIT_PARTIAL`, never as `EXIT_CHECK_FAILED`, which means
+/// "a check failed and `gh` was never called".
+#[test]
+fn pr_7869_a_create_retry_that_also_fails_exits_non_zero() {
+    let (_d, path) = scratch_body(&full_body());
+    let args = open_args(&path.to_string_lossy());
+    let gh = FakeGh::new()
+        .on("label create", "")
+        .on_partial(
+            "pr create",
+            "https://github.com/o/r/pull/7918\n",
+            "HTTP 502: Something went wrong (graphql)",
+        )
+        .on_fail("pr edit 7918", "HTTP 502: Something went wrong (graphql)");
+
+    assert_eq!(
+        open::run(&gh, &args, &FakePreflight::ok()).expect("the PR still exists"),
+        super::EXIT_PARTIAL
+    );
+}
+
+/// #7869: a `gh pr create` that failed with NO PR URL on stdout is still a hard
+/// error. "The PR exists" must be read off evidence, never assumed.
+#[test]
+fn pr_7869_a_create_that_fails_with_no_url_is_still_an_error() {
+    let (_d, path) = scratch_body(&full_body());
+    let args = open_args(&path.to_string_lossy());
+    let gh = FakeGh::new()
+        .on("label create", "")
+        .on_fail("pr create", "pull request create failed: not authorized");
+    let err = open::run(&gh, &args, &FakePreflight::ok()).expect_err("no PR means a real failure");
+    assert!(format!("{err:#}").contains("not authorized"), "{err:#}");
+}
+
+/// REGRESSION (#7786): `tm pr open --issue N` where N names a PULL REQUEST made
+/// `gh issue view` 404 (`Could not resolve to an Issue with the number of
+/// 7782`), and the milestone and projects that PR carried were abandoned after
+/// the one failed read — PR #7784 shipped with neither.
+/// Red before the fix: no `gh pr view 7782` runs, and the `gh pr edit` carries
+/// no `--milestone` and no `--add-project`.
+#[test]
+fn pr_7786_a_pr_ref_inherits_through_gh_pr_view() {
+    let (_d, path) = scratch_body(&body_linking("Refs #7782"));
+    let args = open_args(&path.to_string_lossy());
+    let gh = FakeGh::new()
+        .on("pr create", "https://github.com/o/r/pull/4242\n")
+        .on_fail("issue view 7782", NOT_AN_ISSUE)
+        .on("pr view 7782", PR_REF_JSON)
+        .on("pr edit 4242", "");
+    let pre = FakePreflight::ok().with_diff(&["crates/trusty-mpm/src/lib.rs"]);
+
+    assert_eq!(
+        open::run(&gh, &args, &pre).expect("create succeeds"),
+        super::EXIT_OK
+    );
+    assert!(
+        gh.calls()
+            .iter()
+            .any(|c| c.join(" ").starts_with("pr view 7782")),
+        "the 404 earns a `gh pr view` fallback: {:?}",
+        gh.calls()
+    );
+    let edit = first_edit(&gh).expect("a `gh pr edit` ran");
+    assert!(edit.contains("--milestone mpm 1.6"), "{edit}");
+    assert!(edit.contains("--add-project Harness"), "{edit}");
+}
+
+/// #7786: the fallback asks only for the three fields a PR can answer.
+/// `issue_audit::AUDIT_JSON_FIELDS` includes `parent`, `blockedBy` and
+/// `subIssues`, which `gh pr view` rejects outright — reusing it would turn the
+/// fallback into a second guaranteed failure.
+#[test]
+fn metadata_pr_view_argv_asks_only_for_pr_fields() {
+    let argv = metadata::pr_view_argv(7782).join(" ");
+    assert_eq!(argv, "pr view 7782 --json number,milestone,projectItems");
+    for issue_only in ["parent", "blockedBy", "subIssues"] {
+        assert!(!argv.contains(issue_only), "{argv}");
+    }
+}
+
+/// REGRESSION (#7646): `apply_metadata` applied labels, milestone and projects
+/// in ONE `gh pr edit`, so a milestone `gh` could not resolve — PR #7639
+/// inherited the closed `tm 1.3.5` from #4642 — failed the whole edit and the
+/// PR ended up with no component label either, warned about with nothing but
+/// `gh`'s raw stderr (`'tm 1.3.5' not found`).
+/// Red before the fix: exactly one `gh pr edit` runs, the component label never
+/// lands, and the run exits 0 as though the metadata had been applied.
+#[test]
+fn pr_7646_a_failed_edit_names_the_field_and_retries_per_field() {
+    let (_d, path) = scratch_body(&body_linking("Refs #7274"));
+    let args = open_args(&path.to_string_lossy());
+    let gh = FakeGh::new()
+        .on("pr create", "https://github.com/o/r/pull/7639\n")
+        .on("issue view 7274", ISSUE_JSON)
+        // The per-field label retry succeeds — matched EXACTLY, because the
+        // combined edit's argv starts with the same three tokens. Every edit
+        // carrying the unresolvable milestone fails, the combined one included.
+        .on_exact("pr edit 7639 --add-label trusty-mpm", "")
+        .on_fail("pr edit 7639", "'mpm 1.6' not found");
+    let pre = FakePreflight::ok().with_diff(&["crates/trusty-mpm/src/lib.rs"]);
+
+    assert_eq!(
+        open::run(&gh, &args, &pre).expect("the PR exists"),
+        super::EXIT_PARTIAL,
+        "an unresolvable milestone is a partial apply, not a success"
+    );
+    let edits: Vec<String> = gh
+        .calls()
+        .into_iter()
+        .map(|c| c.join(" "))
+        .filter(|c| c.starts_with("pr edit"))
+        .collect();
+    assert!(
+        edits
+            .iter()
+            .any(|e| e == "pr edit 7639 --add-label trusty-mpm"),
+        "the component label lands on its own despite the bad milestone: {edits:?}"
+    );
+    assert!(
+        edits.iter().any(|e| e.contains("--milestone mpm 1.6")
+            && !e.contains("--add-label")
+            && !e.contains("--add-project")),
+        "the milestone was retried by itself: {edits:?}"
+    );
+}
+
+/// #7646 / Fail-Open Check: a metadata step that failed is never reported as
+/// applied. The outcome names it as missing, with its value and the issue it was
+/// inherited from, so the caller's exit message can say what the PR lacks.
+#[test]
+fn pr_7646_a_failed_step_is_reported_missing_never_applied() {
+    let (_d, path) = scratch_body(&body_linking("Refs #7274"));
+    let args = open_args(&path.to_string_lossy());
+    let gh = FakeGh::new()
+        .on("issue view 7274", ISSUE_JSON)
+        .on_exact("pr edit 4242 --add-label trusty-mpm", "")
+        .on_fail("pr edit 4242", "'mpm 1.6' not found");
+    let pre = FakePreflight::ok().with_diff(&["crates/trusty-mpm/src/lib.rs"]);
+
+    let missing = match metadata_apply::apply(&gh, &args, &pre, "4242", &body_linking("Refs #7274"))
+    {
+        ApplyOutcome::Partial(missing) => missing,
+        ApplyOutcome::Applied => panic!("a failed milestone step must not read as Applied"),
+    };
+    let joined = missing.join("; ");
+    assert!(joined.contains("milestone \"mpm 1.6\""), "{joined}");
+    assert!(joined.contains("inherited from #7274"), "{joined}");
+    assert!(
+        !joined.contains("component labels"),
+        "the label DID apply on retry, so it is not missing: {joined}"
+    );
+}
+
+/// REGRESSION (#7868): `tm pr merge` re-ran the seven-field OPEN gate, so a body
+/// written to the sparse prose rules (defect / evidence / resolution, no filled
+/// headings for fields the change does not touch) could not be merged by the one
+/// command that passes the reviewed body through `--body-file`. The PM merged
+/// with raw `gh pr merge` instead, losing that guarantee entirely.
+/// Red before the fix: `decide` refuses, naming seven missing body fields.
+#[test]
+fn pr_7868_a_sparse_body_is_not_a_merge_refusal() {
+    let sparse = format!(
+        "## Defect\n\n`tm pr open` dropped the milestone.\n\n\
+         ## Evidence\n\n`gh pr view 7639 --json milestone` returned null.\n\n\
+         ## Resolution\n\nThe apply retries per field.\n\n{ATTRIBUTION_FOOTER}\n"
+    );
+    // The body genuinely fails the seven-field contract — that is the point.
+    assert_eq!(body::validate(&sparse).contract_gaps().len(), 7);
+
+    let view = merge_view(&sparse, serde_json::json!({}));
+    assert_eq!(
+        merge_decision(&view),
+        merge::Decision::Merge,
+        "a sparse body carrying the footer merges"
+    );
+}
+
+/// #7868: the footer is still a hard refusal even on a sparse body — it is part
+/// of the landing commit message `tm pr merge` writes, unlike the seven fields.
+#[test]
+fn pr_7868_a_sparse_body_without_the_footer_still_refuses() {
+    let view = merge_view("## Defect\n\nsomething broke.\n", serde_json::json!({}));
+    let reason = merge_refusal(&view).expect("refused");
+    assert!(reason.contains("attribution footer"), "{reason}");
 }
 
 // ── post-merge cleanup registry (#7275) ──────────────────────────────────
@@ -1717,7 +2070,9 @@ fn merge_view(body: &str, patch: serde_json::Value) -> merge::MergeView {
 
 /// The decision `tm pr merge` would reach for this view.
 fn merge_decision(view: &merge::MergeView) -> merge::Decision {
-    let failures = body::validate(&view.body).failures();
+    // #7868: mirrors `merge::run` — the footer refuses, the seven-field gaps
+    // are reported.
+    let failures = body::validate(&view.body).merge_failures();
     merge::decide(view, &failures)
 }
 
