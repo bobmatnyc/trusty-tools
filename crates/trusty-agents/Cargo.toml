@@ -147,6 +147,10 @@ serde_yaml = { workspace = true }
 toml_edit = "0.22"
 base64 = "0.22"
 axum = { workspace = true }
+# #6433 slice 2: `ServiceExt::oneshot` is how `api::uds::dispatch` calls the
+# axum router without a listener. Promoted from a dev-dependency, where it had
+# served the router tests, and switched to the workspace pin.
+tower = { workspace = true }
 tower-http = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 backon = "1"
@@ -216,7 +220,6 @@ path = "src/main.rs"
 tokio = { version = "1", features = ["full", "test-util"] }
 tokio-test = "0.4"
 tempfile = "3"
-tower = { version = "0.5", features = ["util"] }
 serial_test = "3"
 # Exposes async-openai's `OpenAIConfig::api_key()` (a `SecretString`) in
 # tests so credential-resolution tests can assert on the actual value that

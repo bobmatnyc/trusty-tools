@@ -6,11 +6,15 @@
 //! previously only reachable via `docs/performance/runs/*.json`.
 //! What: `types` defines the wire shape. `builder` projects in-process
 //! `WorkflowContext` + `PerfRecord` into a `PmResponse`. `server` (Phase 2)
-//! exposes an axum HTTP API on top of those primitives.
+//! defines the axum router on top of those primitives; `uds` (#6433) is the
+//! transport that carries it — a hardened Unix socket, not a TCP port.
 //! Test: Each submodule carries its own unit tests.
 
 pub mod builder;
 pub mod server;
+// #6433 slice 2: the `--serve`/`--api` daemon's transport — a hardened Unix
+// socket in place of the loopback TCP listener (ADR-0032, ADR-0018).
+pub mod uds;
 pub mod types;
 pub mod watchdog;
 
