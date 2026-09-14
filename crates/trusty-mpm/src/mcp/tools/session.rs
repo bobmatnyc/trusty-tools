@@ -332,7 +332,20 @@ pub(super) fn session_tools() -> Vec<Value> {
              resolves the newest snapshot THIS WINDOW paused in this project \
              instead. `resolved_via` says which answered (`session_id`, \
              `tmux_window`, or null), so do not read a window match as an exact \
-             one. Each entry in `sessions` carries `owned`: true when the \
+             one. Before any of that is read, the local session cache is \
+             rebuilt from THIS caller's own append-only git ref \
+             `refs/tm/sessions/<user-id>/<session-key>` (ADR-0062, #7830), so a \
+             resume from a fresh clone still resolves. `session_refs` reports \
+             that pass: `hydrated` (it ran), `refs_seen` (how many session refs \
+             exist on the remote, this caller's or not), `owned` (0 or 1 — \
+             whether this caller's own ref was among them), `restored` (how \
+             many snapshot files were written back), and `error`. \
+             `refs_seen > 0` with `owned: 0` is a real and PERMANENT state, not \
+             a transient: after a hostname change or a `gh` account switch this \
+             caller owns none of its old refs and never will, so report it \
+             rather than reading five refs as five restorable sessions. A \
+             hydration failure never fails the catch-up. \
+             Each entry in `sessions` carries `owned`: true when the \
              session is attributable to you (your `session_id` paused it, or \
              you are in the window that did). A session you do not own is \
              listed with `format`, `paused_at` and `summary` only — its \

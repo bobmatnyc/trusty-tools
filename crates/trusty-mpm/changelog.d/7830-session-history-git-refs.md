@@ -8,8 +8,11 @@ Added
     lease-pushes it with `--force-with-lease`; a stale lease is reported, never
     retried with `--force`
   - `session_context_catchup` hydrates the local `.trusty-mpm/sessions/` cache
-    from those refs before anything reads it, so a fresh clone resolves its
-    snapshot through the unchanged read path
+    from the caller's OWN ref before anything reads it, so a fresh clone
+    resolves its snapshot through the unchanged read path; the response's
+    `session_refs` object reports `hydrated`, `refs_seen`, `owned`, `restored`
+    and `error`, and `refs_seen > 0` with `owned: 0` is the permanent state a
+    hostname change or a `gh` account switch leaves behind
   - the publish is fail-open: a ref or push failure never fails the pause, and
     the response carries `ref_name`, `ref_published` and `ref_error`
   - a pre-push credential scan refuses to publish a snapshot carrying

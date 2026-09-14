@@ -120,6 +120,8 @@ fn catchup_payload(
         "session_refs": {
             "hydrated": session_refs.hydrated,
             "refs_seen": session_refs.refs_seen,
+            "owned": session_refs.owned,
+            "restored": session_refs.restored,
             "error": session_refs.error,
         },
     })
@@ -131,9 +133,14 @@ fn catchup_payload(
 /// was built from. When hydration cannot run — no `origin`, no user id, an
 /// unreachable remote — the caller must be able to see that the cache was NOT
 /// refreshed, rather than infer "nothing paused" from an empty digest.
-/// What: whether the pass completed, how many refs the aggregator saw, and the
-/// failure text otherwise. `Default` is the "disabled" state: not hydrated, no
-/// refs, no error.
+/// What: whether the pass completed, how many refs the aggregator saw, whether
+/// the caller's OWN ref was among them, how many snapshots were restored, and
+/// the failure text otherwise. `Default` is the "disabled" state.
+///
+/// `refs_seen` alone cannot be read as success (#7830 review round 2): after a
+/// hostname change or a `gh` account switch every old ref is unowned forever,
+/// so `hydrated: true, refs_seen: 5, owned: 0, restored: 0` is a real and
+/// permanent state that used to look identical to "nothing to do".
 /// Test: `catchup_reports_a_hydration_failure_without_failing_the_catchup`,
 /// `catchup_hydrates_a_deleted_cache_from_the_session_ref`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -142,6 +149,10 @@ struct HydrationReceipt {
     hydrated: bool,
     /// How many `refs/tm/sessions/**` refs the aggregator enumerated.
     refs_seen: usize,
+    /// Whether the caller's own ref was among them: 0 or 1.
+    owned: usize,
+    /// How many snapshot files this pass wrote back.
+    restored: usize,
     /// Why the pass did not complete, when it did not.
     error: Option<String>,
 }
@@ -243,7 +254,7 @@ pub async fn session_context_catchup(
     // BEFORE anything reads it, so a fresh clone resolves its snapshot through
     // the unchanged read path.
     let session_refs = if config.session_refs.enabled {
-        hydrate_session_refs(&primary).await
+        hydrate_session_refs(&primary, session_id).await
     } else {
         HydrationReceipt::default()
     };
@@ -294,13 +305,15 @@ pub async fn session_context_catchup(
 /// snapshot resolver, the attribution index — reads the cache, so hydrating it
 /// first is what lets the entire read path stay unchanged on a fresh clone.
 /// What: [`trusty_common::catchup::session_refs::hydrate_session_cache`] on a
-/// blocking thread (it shells out to git and fetches), under the
-/// [`local_ref_identity`] this checkout publishes as — hydration only ever
-/// restores THIS writer's own refs. Fail-open: a directory that is not a
-/// checkout, has no `origin`, or is offline leaves the cache exactly as it
-/// found it, because a catch-up must never fail on an unreachable remote. It is
-/// never silent either: the failure is a `tracing::warn!` AND the returned
-/// receipt, which reaches the response's `session_refs` object (#7830 review).
+/// blocking thread (it shells out to git and fetches), for the ONE ref
+/// [`session_ref_target`] names — this caller's own. `refs/tm/sessions/**` has
+/// no server-side access control, so reading anything wider would materialize a
+/// ref an attacker with push access authored (#7830 review round 2). Fail-open:
+/// a directory that is not a checkout, has no `origin`, or is offline leaves the
+/// cache exactly as it found it, because a catch-up must never fail on an
+/// unreachable remote. It is never silent either: the failure is a
+/// `tracing::warn!` AND the returned receipt, which reaches the response's
+/// `session_refs` object.
 ///
 /// Only the PRIMARY project is hydrated, not every project an `all_projects`
 /// peek walks: `resolved_snapshot` — the value a resume acts on — is resolved
@@ -308,10 +321,10 @@ pub async fn session_context_catchup(
 /// would put N network round-trips on a read.
 /// Test: `catchup_hydrates_a_deleted_cache_from_the_session_ref`,
 /// `catchup_reports_a_hydration_failure_without_failing_the_catchup`.
-async fn hydrate_session_refs(project_dir: &Path) -> HydrationReceipt {
-    let Some(identity) = local_ref_identity(project_dir) else {
-        let error = "no user id resolved for this checkout, so no session ref \
-                     can be attributed to it"
+async fn hydrate_session_refs(project_dir: &Path, session_id: Option<&str>) -> HydrationReceipt {
+    let Some(target) = session_ref_target(project_dir, session_id) else {
+        let error = "no session ref can be attributed to this caller: it named no \
+                     session id, or no user id resolved for this checkout"
             .to_string();
         tracing::warn!(project = %project_dir.display(), "session-ref hydration skipped: {error}");
         return HydrationReceipt {
@@ -321,13 +334,14 @@ async fn hydrate_session_refs(project_dir: &Path) -> HydrationReceipt {
     };
     let dir = project_dir.to_path_buf();
     let hydrated = tokio::task::spawn_blocking(move || {
-        trusty_common::catchup::session_refs::hydrate_session_cache(&dir, &identity)
+        trusty_common::catchup::session_refs::hydrate_session_cache(&dir, &target)
     })
     .await;
     match hydrated {
         Ok(Ok(outcome)) => {
             tracing::debug!(
                 refs_seen = outcome.refs_seen,
+                owned = outcome.owned,
                 snapshots = outcome.snapshots_written.len(),
                 log_entries = outcome.log_entries_added,
                 "session-ref hydration finished"
@@ -335,6 +349,8 @@ async fn hydrate_session_refs(project_dir: &Path) -> HydrationReceipt {
             HydrationReceipt {
                 hydrated: true,
                 refs_seen: outcome.refs_seen,
+                owned: outcome.owned,
+                restored: outcome.snapshots_written.len(),
                 error: None,
             }
         }
@@ -360,24 +376,29 @@ async fn hydrate_session_refs(project_dir: &Path) -> HydrationReceipt {
     }
 }
 
-/// Who this checkout is, for deciding which session refs it owns (#7830 review).
+/// The ONE session ref this caller may hydrate from (#7830 review round 2).
 ///
-/// Why: hydration writes into the store the resuming PM reads as its own state,
-/// so the identity that gates it must be the SAME one the write side publishes
-/// under — otherwise a ref this host could never have written could still land
-/// in its cache. Building it here, from the write side's own resolver, is what
-/// keeps the two ends from drifting.
-/// What: [`crate::core::session_ref_publish::resolve_user_id`] plus this host's
-/// sanitized name. `None` when no user id resolves — the same condition that
-/// skips the publish, so nothing to hydrate either.
-/// Test: `catchup_hydrates_a_deleted_cache_from_the_session_ref`.
-fn local_ref_identity(
+/// Why: `refs/tm/sessions/**` has no server-side access control — anyone with
+/// push access to `origin` can create a ref under any login. The gate can
+/// therefore only limit WHICH ref is read, never authenticate it, so the scope
+/// is the single ref this caller's own pauses write. Building it from the write
+/// side's own [`crate::core::session_ref_publish::resolve_user_id`] and
+/// `session_key` is what keeps the reader and the writer on one naming rule.
+/// What: `None` when the caller named no session id, or when no user id
+/// resolves, or when the id cannot be a ref component — each the same condition
+/// that skips the publish, so there is nothing to hydrate either.
+/// Test: `catchup_hydrates_a_deleted_cache_from_the_session_ref`,
+/// `catchup_reports_a_hydration_failure_without_failing_the_catchup`.
+fn session_ref_target(
     project_dir: &Path,
-) -> Option<trusty_common::catchup::session_refs::LocalRefIdentity> {
-    use crate::core::session_ref_publish::{resolve_user_id, sanitize_ref_component};
-    Some(trusty_common::catchup::session_refs::LocalRefIdentity {
+    session_id: Option<&str>,
+) -> Option<trusty_common::catchup::session_refs::SessionRefTarget> {
+    use crate::core::session_ref_publish::{resolve_user_id, session_key};
+    let session_id = session_id?;
+    Some(trusty_common::catchup::session_refs::SessionRefTarget {
         user_id: resolve_user_id(project_dir)?,
-        host: sysinfo::System::host_name().and_then(|h| sanitize_ref_component(&h)),
+        session_key: session_key(session_id)?,
+        session_id: session_id.to_string(),
     })
 }
 
@@ -1590,7 +1611,7 @@ mod tests {
             assert!(out.status.success(), "fixture `git {args:?}` failed");
         }
 
-        let receipt = hydrate_session_refs(repo).await;
+        let receipt = hydrate_session_refs(repo, Some("s-hydrate-fail")).await;
         assert!(!receipt.hydrated, "{receipt:?}");
         assert_eq!(receipt.refs_seen, 0, "{receipt:?}");
         let error = receipt
@@ -1602,6 +1623,8 @@ mod tests {
         let body = catchup_payload(Default::default(), 0, None, receipt);
         assert_eq!(body["session_refs"]["hydrated"], false, "{body}");
         assert_eq!(body["session_refs"]["refs_seen"], 0, "{body}");
+        assert_eq!(body["session_refs"]["owned"], 0, "{body}");
+        assert_eq!(body["session_refs"]["restored"], 0, "{body}");
         assert_eq!(body["session_refs"]["error"], error, "{body}");
 
         let live = session_context_catchup(repo.to_str().unwrap(), None, None, false, true, 0)
@@ -1694,9 +1717,11 @@ mod tests {
         std::fs::remove_dir_all(repo.join(".trusty-mpm/sessions")).unwrap();
         assert!(!snapshot_path.exists());
 
-        let receipt = hydrate_session_refs(&repo).await;
+        let receipt = hydrate_session_refs(&repo, Some("s-hydrate")).await;
         assert!(receipt.hydrated, "{receipt:?}");
         assert_eq!(receipt.refs_seen, 1, "{receipt:?}");
+        assert_eq!(receipt.owned, 1, "{receipt:?}");
+        assert_eq!(receipt.restored, 1, "{receipt:?}");
 
         let resumed = session_context_catchup(
             repo.to_str().unwrap(),

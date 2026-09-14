@@ -127,7 +127,14 @@ The tool returns:
   "resolved_snapshot": "<path or null>",
   "resolved_via": "session_id" | "tmux_window" | null,
   "undatable_sessions_dropped": 0,
-  "watermark_advanced": false
+  "watermark_advanced": false,
+  "session_refs": {
+    "hydrated": true,
+    "refs_seen": 0,
+    "owned": 0,
+    "restored": 0,
+    "error": "<why the cache was not refreshed, or null>"
+  }
 }
 ```
 
@@ -136,6 +143,19 @@ work, next steps, git context — confirm which session to resume from if more
 than one is listed, restore the todo state from it, and confirm with the user
 before continuing work. Cross-check `recent_commits` against your own
 knowledge of the repo state if anything looks stale.
+
+> **`session_refs` says whether the cache you just read was refreshed
+> (ADR-0062, #7830).** Before the digest is built, the local
+> `.trusty-mpm/sessions/` cache is rebuilt from THIS caller's own git ref
+> `refs/tm/sessions/<user-id>/<session-key>`, which is what lets a resume from
+> a fresh clone work at all. `refs_seen` counts every session ref on the remote,
+> yours or not; `owned` is 0 or 1 and says whether YOURS was among them;
+> `restored` counts the snapshot files written back. **`refs_seen > 0` with
+> `owned: 0` is permanent, not transient** — after a hostname change or a `gh`
+> account switch you own none of your old refs and never will, so report it
+> instead of reading five refs as five recoverable sessions. A non-null `error`
+> means the cache was NOT refreshed; the catch-up still succeeds, so say so
+> rather than treating an empty digest as "nothing paused".
 
 > **`sessions` is a page, and `truncated` says so.** The response is fitted to
 > a size you can read in one tool result, so on a project with a long pause

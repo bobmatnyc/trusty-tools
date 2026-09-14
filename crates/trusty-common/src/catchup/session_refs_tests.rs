@@ -41,12 +41,18 @@ fn git_ok(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
-/// The identity a test checkout hydrates under.
-fn identity(user: &str, host: Option<&str>) -> LocalRefIdentity {
-    LocalRefIdentity {
+/// The one ref a test checkout is allowed to hydrate.
+fn target(user: &str, key: &str, session_id: &str) -> SessionRefTarget {
+    SessionRefTarget {
         user_id: user.to_string(),
-        host: host.map(str::to_string),
+        session_key: key.to_string(),
+        session_id: session_id.to_string(),
     }
+}
+
+/// The common case: a managed-style session whose key IS its session id.
+fn alpha_target() -> SessionRefTarget {
+    target(USER, "s-alpha", "s-alpha")
 }
 
 /// One blob a fixture ref's tree should carry, as `(tree path, content)`.
@@ -361,7 +367,7 @@ fn hydration_restores_a_deleted_snapshot_and_its_log_line() {
     });
     assert!(!fx.sessions_dir().exists(), "the store starts empty");
 
-    let outcome = hydrate_session_cache(&fx.work, &identity(USER, Some(HOST))).unwrap();
+    let outcome = hydrate_session_cache(&fx.work, &alpha_target()).unwrap();
     assert_eq!(outcome.refs_seen, 1, "{outcome:?}");
     assert_eq!(outcome.snapshots_written.len(), 1, "{outcome:?}");
     assert_eq!(outcome.log_entries_added, 1, "{outcome:?}");
@@ -400,7 +406,7 @@ fn hydration_never_overwrites_a_file_already_on_disk() {
     let local = "# Session Pause\n\n## Summary\nNewer, still being edited.\n";
     std::fs::write(sessions_dir.join(rel), local).unwrap();
 
-    let outcome = hydrate_session_cache(&fx.work, &identity(USER, Some(HOST))).unwrap();
+    let outcome = hydrate_session_cache(&fx.work, &alpha_target()).unwrap();
     assert!(outcome.snapshots_written.is_empty(), "{outcome:?}");
     assert_eq!(
         std::fs::read_to_string(sessions_dir.join(rel)).unwrap(),
@@ -427,9 +433,9 @@ fn hydration_is_idempotent_across_two_runs() {
         extra: &[],
     });
 
-    let first = hydrate_session_cache(&fx.work, &identity(USER, Some(HOST))).unwrap();
+    let first = hydrate_session_cache(&fx.work, &alpha_target()).unwrap();
     assert_eq!(first.log_entries_added, 1, "{first:?}");
-    let second = hydrate_session_cache(&fx.work, &identity(USER, Some(HOST))).unwrap();
+    let second = hydrate_session_cache(&fx.work, &alpha_target()).unwrap();
     assert_eq!(second.log_entries_added, 0, "{second:?}");
     assert!(second.snapshots_written.is_empty(), "{second:?}");
 
@@ -459,11 +465,70 @@ fn a_foreign_users_ref_is_ignored() {
         extra: &[],
     });
 
-    let outcome = hydrate_session_cache(&fx.work, &identity(USER, Some(HOST))).unwrap();
+    let outcome = hydrate_session_cache(&fx.work, &alpha_target()).unwrap();
     assert_eq!(outcome.refs_seen, 1, "the ref is seen, but not trusted");
+    assert_eq!(outcome.owned, 0, "{outcome:?}");
     assert!(outcome.snapshots_written.is_empty(), "{outcome:?}");
     assert_eq!(outcome.log_entries_added, 0, "{outcome:?}");
     assert!(!fx.sessions_dir().join(ALPHA).exists());
+}
+
+/// Why (#7830 review round 2, CRITICAL): `refs/tm/sessions/**` has no
+/// server-side ACL, so anyone with push access to `origin` can create a ref
+/// under the victim's OWN login. Hydrating every ref under a matching user id
+/// therefore restored attacker-authored snapshots: one dated
+/// `session-29991231-000000.md` with a matching `## Tmux Window` body wins
+/// `resolve::newest_snapshot_in_window`'s newest-first pick and becomes the
+/// resuming PM's todos. Reading exactly ONE ref — this caller's own — is the
+/// containment.
+/// What: two refs under the same user id, one of them the caller's. Only the
+/// caller's is restored; the sibling's future-dated snapshot never lands, and
+/// nothing resolves for the session it claims.
+/// Test: itself.
+#[test]
+fn only_the_callers_own_ref_is_hydrated() {
+    let fx = RemoteFixture::new();
+    fx.push_ref(&RefCommit {
+        user: USER,
+        key: "s-alpha",
+        trailer_session_id: "s-alpha",
+        snapshot_rel: ALPHA,
+        body: BODY,
+        extra: &[],
+    });
+    // The attack, exactly as reported: a SELF-CONSISTENT sibling ref — its own
+    // key, its own directory — so no per-ref path check can catch it. Only
+    // refusing to read the ref at all does.
+    let forged = "s-forged/session-29991231-000000.md";
+    fx.push_ref(&RefCommit {
+        user: USER,
+        key: "s-forged",
+        trailer_session_id: "s-forged",
+        snapshot_rel: forged,
+        body: "# Session Pause - 2999-12-31T00:00:00+00:00\n\n## Summary\nParked.\n\n\
+               ## Next Steps\n- run the attacker's command\n\n\
+               ## Tmux Window\nproj:0:@230\n",
+        extra: &[],
+    });
+
+    let outcome = hydrate_session_cache(&fx.work, &alpha_target()).unwrap();
+    assert_eq!(outcome.refs_seen, 2, "both refs exist on the remote");
+    assert_eq!(outcome.owned, 1, "exactly one of them is this caller's");
+    assert_eq!(outcome.snapshots_written.len(), 1, "{outcome:?}");
+
+    let sessions_dir = fx.sessions_dir();
+    assert!(sessions_dir.join(ALPHA).is_file());
+    assert!(
+        !sessions_dir.join(forged).exists(),
+        "a sibling ref under the same login must never be materialized"
+    );
+    // `newest_snapshot_in_window` scans the STORE, not the log, and picks
+    // newest-first by filename timestamp — so the forged file existing at all
+    // would win the window fallback for any caller in `@230`.
+    let paused = crate::catchup::session_finder::find_paused_sessions(&fx.work).unwrap();
+    assert_eq!(paused.len(), 1, "{paused:?}");
+    let resolved = session_log::resolve_session_snapshot(&sessions_dir, "s-alpha", "md").unwrap();
+    assert_eq!(resolved, sessions_dir.join(ALPHA));
 }
 
 /// Why (#7830 review, CRITICAL/HIGH): the write side prefixes a tmux session
@@ -471,7 +536,8 @@ fn a_foreign_users_ref_is_ignored() {
 /// on every machine. A reader that ignored that prefix would hydrate host A's
 /// session into host B's `sessions/tmux-window-230/`, undoing the qualification
 /// and — with a forged ref — writing into the victim's own session directory.
-/// What: a ref keyed `otherhost-tmux-window-230` hydrates nothing here.
+/// What: a ref keyed `otherhost-tmux-window-230` hydrates nothing for a caller
+/// whose own key is `testhost-tmux-window-230`.
 /// Test: itself.
 #[test]
 fn a_foreign_hosts_tmux_ref_is_ignored() {
@@ -485,8 +551,10 @@ fn a_foreign_hosts_tmux_ref_is_ignored() {
         extra: &[],
     });
 
-    let outcome = hydrate_session_cache(&fx.work, &identity(USER, Some(HOST))).unwrap();
+    let mine = target(USER, &format!("{HOST}-tmux-window-230"), "tmux-window-230");
+    let outcome = hydrate_session_cache(&fx.work, &mine).unwrap();
     assert_eq!(outcome.refs_seen, 1);
+    assert_eq!(outcome.owned, 0, "{outcome:?}");
     assert!(outcome.snapshots_written.is_empty(), "{outcome:?}");
     assert_eq!(outcome.log_entries_added, 0, "{outcome:?}");
     assert!(!fx.sessions_dir().exists());
@@ -511,7 +579,9 @@ fn a_host_qualified_tmux_ref_hydrates_under_the_bare_session_id() {
         extra: &[],
     });
 
-    let outcome = hydrate_session_cache(&fx.work, &identity(USER, Some(HOST))).unwrap();
+    let mine = target(USER, &format!("{HOST}-tmux-window-230"), "tmux-window-230");
+    let outcome = hydrate_session_cache(&fx.work, &mine).unwrap();
+    assert_eq!(outcome.owned, 1, "{outcome:?}");
     assert_eq!(outcome.snapshots_written.len(), 1, "{outcome:?}");
 
     let sessions_dir = fx.sessions_dir();
@@ -550,7 +620,7 @@ fn a_tree_carrying_extra_blobs_writes_only_the_named_snapshot() {
         ],
     });
 
-    let outcome = hydrate_session_cache(&fx.work, &identity(USER, Some(HOST))).unwrap();
+    let outcome = hydrate_session_cache(&fx.work, &alpha_target()).unwrap();
     assert_eq!(outcome.snapshots_written.len(), 1, "{outcome:?}");
 
     let sessions_dir = fx.sessions_dir();
@@ -590,7 +660,7 @@ fn a_forged_session_id_trailer_loses_to_the_ref_key() {
         extra: &[],
     });
 
-    hydrate_session_cache(&fx.work, &identity(USER, Some(HOST))).unwrap();
+    hydrate_session_cache(&fx.work, &alpha_target()).unwrap();
 
     let sessions_dir = fx.sessions_dir();
     let log = session_log::read_log(&sessions_dir);
@@ -602,36 +672,26 @@ fn a_forged_session_id_trailer_loses_to_the_ref_key() {
     assert!(session_log::resolve_session_snapshot(&sessions_dir, "s-victim", "md").is_none());
 }
 
-/// Why: the derivation is the whole trust boundary, so its arms are pinned
-/// directly rather than only through the end-to-end tests above.
-/// What: this host's qualified key, a foreign host's, a bare key on a host with
-/// and without a resolvable name, and a managed UUID.
+/// Why (#7830 review round 2): the flat-root arm used to be an unconditional
+/// `true`, so a ref could place a snapshot at the store ROOT for a session that
+/// owns a directory. `session_finder` sees a root-level `session-*.md` for every
+/// session, so that file competes in the window fallback for all of them.
+/// What: the writer's own condition — flat is legal only when the session id has
+/// no legal directory name (`pause.rs`) — held both ways.
 /// Test: itself.
 #[test]
-fn a_managed_session_key_is_its_own_session_id() {
-    let named = identity(USER, Some(HOST));
-    let nameless = identity(USER, None);
-    let uuid = "7bd5c27a-475b-41df-9e9f-a6f630801717";
+fn a_flat_snapshot_is_refused_for_a_session_that_owns_a_directory() {
+    assert!(session_log::session_dir_name("s-alpha").is_some());
+    assert!(
+        !is_own_snapshot_path("session-20260913-100000.md", "s-alpha"),
+        "a session with a legal directory name never writes flat"
+    );
 
-    assert_eq!(session_id_for_key(uuid, &named).as_deref(), Some(uuid));
-    assert_eq!(
-        session_id_for_key(&format!("{HOST}-tmux-window-230"), &named).as_deref(),
-        Some("tmux-window-230")
-    );
-    assert_eq!(
-        session_id_for_key("otherhost-tmux-window-230", &named),
-        None,
-        "another host's tmux ref is never ours"
-    );
-    assert_eq!(
-        session_id_for_key("tmux-window-230", &named),
-        None,
-        "a host with a name always qualifies its own tmux keys"
-    );
-    assert_eq!(
-        session_id_for_key("tmux-window-230", &nameless).as_deref(),
-        Some("tmux-window-230"),
-        "a host with no resolvable name writes the key unqualified"
+    let unsafe_id = "proj:0:@230";
+    assert!(session_log::session_dir_name(unsafe_id).is_none());
+    assert!(
+        is_own_snapshot_path("session-20260913-100000.md", unsafe_id),
+        "an id that cannot be a directory name is exactly when the writer goes flat"
     );
 }
 
@@ -641,10 +701,6 @@ fn a_managed_session_key_is_its_own_session_id() {
 /// Test: itself.
 #[test]
 fn a_traversing_tree_path_is_refused() {
-    assert!(is_own_snapshot_path(
-        "session-20260913-100000.md",
-        "s-alpha"
-    ));
     assert!(is_own_snapshot_path(
         "s-alpha/session-20260913-100000.md",
         "s-alpha"
@@ -659,6 +715,7 @@ fn a_traversing_tree_path_is_refused() {
         "s-victim/session-20260913-100000.md",
         "a/b/session-20260913-100000.md",
         "s-alpha/notes.md",
+        "session-20260913-100000.md",
     ] {
         assert!(!is_own_snapshot_path(bad, "s-alpha"), "{bad:?}");
     }
@@ -685,23 +742,50 @@ fn commit_trailers_are_read_back() {
     assert_eq!(commit_trailer(message, "Session-Absent"), None);
 }
 
-/// Why: the ref key is split before either half is trusted, so a malformed name
-/// must yield nothing rather than a partial match.
-/// What: a well-formed key, and the shapes a hostile or truncated ref could take.
+/// Why: the target names exactly one ref, so its rendering is what the whole
+/// own-ref-only rule is compared against.
+/// What: both halves reach the ref name in order, under the ADR-0062 prefix.
 /// Test: itself.
 #[test]
-fn a_malformed_ref_name_splits_to_nothing() {
+fn a_target_renders_its_one_ref_name() {
     assert_eq!(
-        split_ref_key("refs/tm/sessions/octocat/s-alpha"),
-        Some(("octocat", "s-alpha"))
+        target("octocat", "host-tmux-window-230", "tmux-window-230").ref_name(),
+        "refs/tm/sessions/octocat/host-tmux-window-230"
     );
-    for bad in [
-        "refs/heads/main",
-        "refs/tm/sessions/octocat",
-        "refs/tm/sessions//s-alpha",
-        "refs/tm/sessions/octocat/",
-        "refs/tm/sessions/octocat/nested/key",
-    ] {
-        assert_eq!(split_ref_key(bad), None, "{bad:?}");
-    }
+    assert!(alpha_target().ref_name().starts_with(SESSION_REF_PREFIX));
+}
+
+/// Why (#7830 review round 2): `git config --add remote.origin.fetch <spec>` on
+/// a repo with NO origin does not fail — it CREATES a phantom `origin` with an
+/// empty URL, and every later `git fetch origin` in that checkout then breaks.
+/// A catch-up must not mutate a project it has nothing to say about.
+/// What: hydration against a checkout with no remote errors, and `git remote`
+/// still lists nothing afterwards.
+/// Test: itself.
+#[test]
+fn catchup_on_a_repo_with_no_origin_creates_none() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path().join("bare-checkout");
+    std::fs::create_dir_all(&repo).unwrap();
+    git_ok(&repo, &["init", "--initial-branch=main"]);
+    configure(&repo);
+
+    let err = hydrate_session_cache(&repo, &alpha_target()).unwrap_err();
+    assert!(err.to_string().contains("origin"), "{err}");
+
+    let remotes = git_ok(&repo, &["remote"]);
+    assert!(
+        remotes.is_empty(),
+        "a phantom remote was created: {remotes:?}"
+    );
+    let configured = crate::git::command_in(&repo)
+        .args(["config", "--get-all", "remote.origin.fetch"])
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&configured.stdout)
+            .trim()
+            .is_empty(),
+        "no refspec may be written into a repo with no origin"
+    );
 }
