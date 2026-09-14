@@ -66,6 +66,16 @@ uses `build.rs` to invoke pnpm if `ui-dist/` is stale. If pnpm is not
 installed, the build script fails loudly. Install pnpm or set
 `SKIP_UI_BUILD=1` if you are not changing the UI.
 
+🔴 **Two checkouts sharing one `CARGO_TARGET_DIR` can reuse stale build
+artifacts silently** — cargo's incremental cache keys on source content it can
+see, not on which checkout produced the last build, so a second checkout's
+build can finish suspiciously fast (measured: 1.33s) and embed the FIRST
+checkout's artifacts rather than its own. Symptom: a build that completes far
+faster than the change should allow, whose output doesn't match the checkout
+that ran it. Give each worktree its own `CARGO_TARGET_DIR`, or rely on the
+default per-checkout `target/`, rather than pointing several checkouts of the
+same crate at one shared directory by hand.
+
 🟡 **`[patch.crates-io]` only works at the workspace root** — do not add
 `[patch]` tables inside individual crate `Cargo.toml` files; Cargo ignores
 them. All patches must live in the root `Cargo.toml`.
