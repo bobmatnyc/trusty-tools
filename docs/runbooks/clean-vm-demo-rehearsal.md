@@ -1,11 +1,5 @@
 # Clean-VM Demo Rehearsal Runbook — trusty-mpm 1.0.1 + trusty-installer 0.4.7
 
-> **[ADR-0055](../adr/0055-trusty-mpm-stops-creating-worktrees-the-sentinel-becomes-authoritative.md)
-> (#6000):** trusty-mpm no longer clones a remote `repo_url` or creates a worktree
-> on `tm sessions new`'s behalf. `tm sessions new` takes an ABSOLUTE path to an
-> EXISTING local git checkout with a GitHub remote instead of a URL — Step 6
-> below clones the throwaway repo locally first, then passes that path.
-
 **Duration:** ~10 minutes  
 **Target:** Fresh macOS Apple Silicon VM with NO Claude Code, NO tmux, NO ~/.trusty-tools  
 **Objective:** Dry-run the full install → workflow pipeline before the live demo.

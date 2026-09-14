@@ -1,12 +1,5 @@
 # Mac Laptop Demo Runbook — Presenter Script for Brand-New MacBook
 
-> **[ADR-0055](../adr/0055-trusty-mpm-stops-creating-worktrees-the-sentinel-becomes-authoritative.md)
-> (#6000):** trusty-mpm no longer clones a remote `repo_url` or creates a worktree
-> on `tm sessions new`'s behalf. `tm sessions new` now takes an ABSOLUTE path to
-> an EXISTING local git checkout with a GitHub remote instead of a URL — this
-> runbook's Step 3 (prep) clones the demo repo locally the night before so Beat 4
-> still passes a single command on stage; see Beat 4 for the exact invocation.
-
 **Duration:** T-minus 10 min prep (night before) + ~8 min live demo  
 **Target Audience:** Live demo watchers  
 **Setup:** Brand-new Apple Silicon MacBook (Homebrew + Claude Code already present; tmux to be pre-seeded)  
