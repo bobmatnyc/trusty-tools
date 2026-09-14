@@ -22,7 +22,7 @@ use std::path::Path;
 use super::bash_tokens::{TokenizeError, tokenize};
 use super::{
     evaluate_bash_command, evaluate_destructive_delete_command, evaluate_secret_file_copy_command,
-    unclassifiable_command,
+    strip_quoted_heredoc_bodies, unclassifiable_command,
 };
 use crate::commands::pm_guard_secret_read::evaluate_secret_file_read_command;
 
@@ -381,4 +381,103 @@ fn guard_tokenizer_still_refuses_a_real_secret_read_copy_and_delete() {
         evaluate_destructive_delete_command("rm -rf /", cwd()).is_some(),
         "deleting the filesystem root must still refuse"
     );
+}
+
+/// #7190 review round 2: a quoted string that merely NAMES a here-document
+/// operator opens no body, so it hides no deletion.
+///
+/// Why: the fallback scan #7190 added to recover a body whose own quotes do not
+/// balance searched the raw bytes for `<<'WORD'` with no quote state at all,
+/// and it ran whenever the primary scan claimed nothing — including the
+/// ordinary case where the primary scan read every quote correctly. A `<<'PY'`
+/// written inside a double-quoted argument was therefore read as a real
+/// operator, and every line up to the next one reading `PY` was blanked before
+/// the deletion rule scanned it. `rm -rf /` between the two was allowed.
+/// What: three shapes, each a fake operator inside a string wrapping a real
+/// deletion — the reported double-quoted outer string, a single-quoted outer
+/// string with a `<<"WORD"` delimiter, and the same fake operator behind a
+/// genuine quoted body whose apostrophe unbalances the command, which is the
+/// one state that still arms the fallback. Each must leave the command
+/// byte-identical through the stripper and refuse at the deletion rule.
+/// Test: itself.
+#[test]
+fn guard_7190_a_quoted_operator_opens_no_heredoc_body() {
+    for command in [
+        // The reported shape.
+        "echo \"note: use <<'PY' syntax\"\nrm -rf /\nPY",
+        // Outer string single-quoted, fake delimiter double-quoted.
+        "echo 'note: use <<\"PY\" syntax'\nrm -rf /\nPY",
+        // A real `<<'PY'` body ahead of it leaves the command's quotes
+        // unbalanced, so the fallback runs — and must still reject the fake
+        // operator that follows.
+        "python3 - <<'PY'\n# don't\nPY\necho \"use <<'ZZ' here\"\nrm -rf /\nZZ",
+    ] {
+        assert!(
+            evaluate_destructive_delete_command(command, cwd()).is_some(),
+            "a `<<'WORD'` inside a string opens no body: {command}"
+        );
+    }
+    for command in [
+        "echo \"note: use <<'PY' syntax\"\nrm -rf /\nPY",
+        "echo 'note: use <<\"PY\" syntax'\nrm -rf /\nPY",
+    ] {
+        assert_eq!(
+            strip_quoted_heredoc_bodies(command),
+            command,
+            "no body was opened, so no byte may be blanked: {command}"
+        );
+    }
+}
+
+/// #7190 review round 2: a here-document scan that ABANDONED claims nothing,
+/// rather than handing the command to the weaker fallback.
+///
+/// Why: [`super::heredoc::HeredocBodies::scan`] gives up on the whole command
+/// when a delimiter has no terminator line, and that empty result is
+/// indistinguishable from "no here-document here". The fallback used to run on
+/// both, so an unparsable command — the one case the guard must fail closed on
+/// — got its lines blanked by a scan with no quote state.
+/// What: a valid quoted body followed by an unterminated `<<EOF`. The deletion
+/// inside the first body is not stripped, so the command refuses.
+/// Test: itself.
+#[test]
+fn guard_7190_an_abandoned_heredoc_scan_claims_no_body() {
+    let command = "cat <<'PY'\nrm -rf /\nPY\ncat <<EOF\nno terminator";
+    assert_eq!(
+        strip_quoted_heredoc_bodies(command),
+        command,
+        "an abandoned scan may not blank anything"
+    );
+    assert!(
+        evaluate_destructive_delete_command(command, cwd()).is_some(),
+        "a command this guard cannot parse must refuse"
+    );
+}
+
+/// #7190 stays fixed: a genuine quoted body is still stripped, including one
+/// opened after a closed quoted argument on the same line.
+///
+/// Why: the round-2 fix adds quote state to the fallback scan. An operator that
+/// follows a quoted word which CLOSES is live syntax, and rejecting it would
+/// re-open #7190 for every `cat "some file" <<'PY'`.
+/// What: both rows must allow — the first is claimed by the primary scan, the
+/// second only by the fallback, since the body's apostrophe unbalances the
+/// command's quotes.
+/// Test: itself.
+#[test]
+fn guard_7190_a_body_after_a_closed_quoted_word_is_still_stripped() {
+    for command in [
+        "cat \"my notes.txt\" <<'PY'\nrm -rf /\nPY",
+        "cat \"my notes.txt\" <<'PY'\n# don't delete\nrm -rf /\nPY",
+    ] {
+        assert!(
+            !strip_quoted_heredoc_bodies(command).contains("rm -rf"),
+            "a real quoted body must still be blanked: {command}"
+        );
+        assert_eq!(
+            evaluate_destructive_delete_command(command, cwd()),
+            None,
+            "a quoted here-document body runs nothing: {command}"
+        );
+    }
 }
