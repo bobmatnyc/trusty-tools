@@ -1056,6 +1056,9 @@ pub struct SystemPrompt {
     /// injected without hard-coding them into the system prompt text.
     /// What: Skill names (e.g. `"tdd"`) resolved by a `SkillResolver` and
     /// appended to the effective system prompt string at runtime.
+    /// See #7904: `[skills].allow` (`SkillsConfig`, above) grants dispatch-time
+    /// tool access by skill id; this field only injects prompt text and never
+    /// affects that grant, so the two combine additively — neither overrides.
     /// Test: Parse a TOML with `skills = ["foo"]` and assert the field equals
     /// `Some(vec!["foo"])`.
     #[serde(default)]

@@ -218,6 +218,9 @@ pub(super) async fn skills_at(dirs: &[PathBuf], name: &str, project_root: &Path)
 /// it. Tool-less skills have nothing to match, so they are granted exactly when
 /// `[skills].allow` names them — which is also why they need their own clause
 /// instead of falling out of the glob test as `false`.
+/// See #7904: `[system_prompt].skills` (`config.rs::SystemPrompt::skills`) is
+/// an unrelated mechanism — Markdown skill-doc text appended to the prompt —
+/// and never affects this grant; the two combine additively, neither wins.
 /// What: Returns the granted ids. `patterns == None` (no capability declared)
 /// grants nothing, matching the persona path's `else` arm.
 /// Test: `skills_route_reports_granted_skills_with_human_names`,
