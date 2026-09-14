@@ -170,7 +170,19 @@ export const DEFINED_LISTENERS: ListenerDefinition[] = [
  * to); `reason` is present only when it is false. Palace health is separate
  * so a missing palace downgrades one line, not the whole store. Every
  * optional field is omitted by the server when absent — never guessed.
+ *
+ * #7882: `fault` classifies WHY a store is not connected and `error` carries
+ * the operator-actionable message for the one class a human must fix — a
+ * binding naming a trusty-search index that does not exist. Render `error` as
+ * an error and `reason` as a soft state: a stopped daemon (`fault:
+ * "daemon_unreachable"`) never sets `error`.
  */
+export type OkgStoreFault =
+  | 'invalid_binding'
+  | 'daemon_unreachable'
+  | 'missing_index'
+  | 'index_unhealthy';
+
 export interface OkgStoreBinding {
   name: string;
   tree: string;
@@ -183,6 +195,8 @@ export interface OkgStoreBinding {
   index_status?: string;
   palace_connected?: boolean;
   palace_reason?: string;
+  fault?: OkgStoreFault;
+  error?: string;
 }
 
 /** `GET /api/agents/:name/stores`'s wire shape. */
