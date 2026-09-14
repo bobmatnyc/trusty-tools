@@ -30,6 +30,12 @@
 //!   `memory_remember` returning and the sidecar landing, so every drawer also
 //!   carries a deterministic [`IMPORT_KEY_PREFIX`] tag, and a fact with no sidecar
 //!   is looked up by that tag before it is stored (#7685).
+//! * **A marker is a claim, not proof.** #7752: a sidecar naming a drawer the
+//!   palace no longer holds used to archive its file anyway, so a drawer deleted
+//!   between the two runs took the fact's only other copy with it. Every marker
+//!   is now checked against the palace before the file moves — the drawer is
+//!   still there and the file is archived, it is gone and the marker is cleared
+//!   with the file left live, or the palace cannot answer and nothing moves.
 //!
 //! Idempotent by construction: a second run finds no fact files (they are in the
 //! archive) and an empty index, so it stores nothing — and a second run over a
@@ -304,7 +310,8 @@ pub async fn run_auto_memory_import(opts: &AutoImportOptions) -> anyhow::Result<
 /// "migrated, not yet filed".
 /// What: appended to the fact file's full name, so `a-fact.md` gets
 /// `a-fact.md.stored`. The extension is not `.md`, so [`fact_files`] never reads
-/// a marker back as a fact.
+/// a marker back as a fact. #7752: what it records is durable, not authoritative
+/// — [`verify_marker`] re-checks it against the palace before the file moves.
 /// Test: `auto_memory_import_retries_only_the_archive_after_a_rename_failure`.
 const STORED_MARKER_SUFFIX: &str = ".stored";
 
@@ -328,6 +335,54 @@ fn stored_drawer_id(path: &Path) -> Option<String> {
     (!id.is_empty()).then(|| id.to_string())
 }
 
+/// What the palace says about a fact whose marker names a drawer (#7752).
+#[derive(Debug)]
+enum MarkerVerdict {
+    /// The palace still holds this fact; archive it under this drawer id.
+    Live(String),
+    /// The palace no longer holds it, and the stale marker has been cleared.
+    Gone,
+}
+
+/// Check a `.stored` marker against the live palace before trusting it (#7752).
+///
+/// Why: the marker records that a store SUCCEEDED, never that the drawer is
+/// still there. A drawer deleted after the marker landed — a `memory_forget`, a
+/// rebuilt palace, a palace slug that moved — used to archive the fact file
+/// anyway, and the archive move is what put the fact out of the live set: the
+/// content then survived nowhere. Verifying first is what keeps "archived" from
+/// ever meaning "lost".
+/// What: one [`drawer_with_tag`] lookup for this fact's [`import_key`], which is
+/// the tag the drawer carries. A hit is [`MarkerVerdict::Live`] under the id the
+/// palace actually reports — it supersedes the marker, which may name a drawer
+/// the palace has since replaced. A miss clears the stale marker and answers
+/// [`MarkerVerdict::Gone`], so the file stays live and the next run re-imports it
+/// through the ordinary no-marker path; it is not re-stored here, because a
+/// drawer the operator deliberately forgot must not be silently resurrected. A
+/// palace that cannot answer is an `Err`: nothing is proven, so the caller moves
+/// nothing.
+/// Test: `auto_memory_import_does_not_archive_when_the_stored_drawer_is_gone`,
+/// `auto_memory_import_leaves_the_file_alone_when_the_palace_cannot_be_reached`,
+/// `auto_memory_import_retries_only_the_archive_after_a_rename_failure`.
+async fn verify_marker(
+    socket: &Path,
+    palace: &str,
+    path: &Path,
+    key: &str,
+) -> anyhow::Result<MarkerVerdict> {
+    match drawer_with_tag(socket, palace, key).await? {
+        Some(id) => Ok(MarkerVerdict::Live(id)),
+        None => {
+            // A marker nothing in the palace backs is worse than no marker: it
+            // is what would archive the file. Remove it so the next run takes
+            // the ordinary store path. A removal that fails leaves the marker,
+            // and the next run reaches this same verdict again.
+            let _ = std::fs::remove_file(stored_marker(path));
+            Ok(MarkerVerdict::Gone)
+        }
+    }
+}
+
 /// Store one fact file, then move it into the archive.
 ///
 /// Why: the ORDER is the fail-open guarantee — a file is archived only after its
@@ -339,11 +394,14 @@ fn stored_drawer_id(path: &Path) -> Option<String> {
 /// What: parses, derives [`migration_tags`], writes through
 /// [`crate::core::memory_import::remember`], records the drawer id in the marker,
 /// then renames the file under `archive` and removes the marker. A fact whose
-/// marker already names a drawer skips the store entirely. A rename failure is
-/// still reported as a failure — the file is still there and a re-run must see
-/// it — but now carries the drawer id it will reuse.
+/// marker already names a drawer skips the store entirely — but only after
+/// [`verify_marker`] confirms the palace still holds it (#7752). A rename failure
+/// is still reported as a failure — the file is still there and a re-run must
+/// see it — but now carries the drawer id it will reuse.
 /// Test: `auto_memory_import_leaves_a_failed_file_in_place`,
-/// `auto_memory_import_retries_only_the_archive_after_a_rename_failure`.
+/// `auto_memory_import_retries_only_the_archive_after_a_rename_failure`,
+/// `auto_memory_import_does_not_archive_when_the_stored_drawer_is_gone`,
+/// `auto_memory_import_leaves_the_file_alone_when_the_palace_cannot_be_reached`.
 async fn migrate_one(
     socket: &Path,
     opts: &AutoImportOptions,
@@ -377,8 +435,34 @@ async fn migrate_one(
 
     let drawer_id = match stored_drawer_id(path) {
         // A previous run already wrote this fact; storing it again would leave
-        // the palace with two drawers for one fact.
-        Some(id) => id,
+        // the palace with two drawers for one fact. #7752: but the marker only
+        // proves the store happened, so the palace is asked whether the drawer
+        // is still there before the file is moved out of the live set.
+        Some(marked) => match verify_marker(socket, &opts.palace, path, &key).await {
+            Ok(MarkerVerdict::Live(id)) => id,
+            Ok(MarkerVerdict::Gone) => {
+                tracing::warn!(
+                    file = %file,
+                    drawer_id = %marked,
+                    palace = %opts.palace,
+                    "auto-memory fact was marked stored but its drawer is gone from the palace; \
+                     the marker was cleared and the file left in place (#7752)"
+                );
+                return failed(
+                    tags,
+                    None,
+                    format!(
+                        "marked as stored in drawer {marked}, but palace {} no longer holds it — \
+                         the marker was cleared and the file left in place; re-run to import it \
+                         again",
+                        opts.palace
+                    ),
+                );
+            }
+            // Fail-open: an unanswerable palace proves nothing either way, so
+            // the marker stays and the file does not move.
+            Err(e) => return failed(tags, Some(marked), format!("lookup failed: {e:#}")),
+        },
         None => {
             // #7685: no sidecar is not proof of no drawer — a run killed between
             // the store and the sidecar leaves exactly that. Ask the palace first.

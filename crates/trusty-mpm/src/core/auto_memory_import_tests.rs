@@ -49,6 +49,9 @@ const INDEX: &str = "- [link issues and prs](link-issues-and-prs.md) — owner r
 struct StubState {
     writes: Vec<Value>,
     deny: HashSet<String>,
+    /// #7752: drawer ids the palace has since forgotten — stored, then deleted,
+    /// so `memory_list` stops reporting them while the write history remains.
+    forgotten: HashSet<String>,
 }
 
 type Stub = Arc<Mutex<StubState>>;
@@ -70,10 +73,11 @@ fn rpc(state: &Stub, method: &str, params: Value) -> Result<Value, RpcError> {
             .writes
             .iter()
             .enumerate()
-            .filter(|(_, w)| {
-                w["tags"]
-                    .as_array()
-                    .is_some_and(|tags| tags.iter().any(|t| t.as_str() == Some(tag.as_str())))
+            .filter(|(i, w)| {
+                !st.forgotten.contains(&format!("drawer-{}", i + 1))
+                    && w["tags"]
+                        .as_array()
+                        .is_some_and(|tags| tags.iter().any(|t| t.as_str() == Some(tag.as_str())))
             })
             .map(|(i, w)| json!({ "drawer_id": format!("drawer-{}", i + 1), "tags": w["tags"] }))
             .collect();
@@ -439,4 +443,138 @@ async fn auto_memory_import_never_duplicates_a_fact_whose_marker_was_lost() {
         "the re-run must reuse the drawer the crashed run wrote"
     );
     assert!(second.index_cleared, "{second:#?}");
+}
+
+#[tokio::test]
+async fn auto_memory_import_does_not_archive_when_the_stored_drawer_is_gone() {
+    // #7752: the marker records that a store SUCCEEDED, never that the drawer
+    // still exists. A drawer deleted after the marker landed used to archive the
+    // fact file anyway — and the archive move is what takes the fact out of the
+    // live set, so the content then survived nowhere.
+    //
+    // The setup is the rename-failure one: a FILE where the archive DIRECTORY
+    // must be leaves the fact on disk with its marker written. The palace then
+    // forgets the drawer the marker names.
+    let project = tempfile::tempdir().expect("tempdir");
+    let (config, memory) = write_store(project.path(), &[("link-issues-and-prs.md", FACT)], INDEX);
+    let archive = memory
+        .parent()
+        .expect("parent")
+        .join("memory.archived-20260912");
+    std::fs::write(&archive, "not a directory").expect("block the archive path");
+    let (daemon, state) = start_stub().await;
+    let fact = memory.join("link-issues-and-prs.md");
+    let marker = memory.join("link-issues-and-prs.md.stored");
+
+    let first = run_auto_memory_import(&opts(project.path(), config.path(), daemon.socket()))
+        .await
+        .expect("first run");
+    assert_eq!(first.failed, 1, "{:#?}", first.files);
+    assert_eq!(marker_id(&marker), Some("drawer-1".to_string()));
+
+    // The deletion the marker cannot see, and an archive path that would now
+    // work — so the only thing standing between the file and the archive is the
+    // verification.
+    std::fs::remove_file(&archive).expect("unblock");
+    state
+        .lock()
+        .expect("lock")
+        .forgotten
+        .insert("drawer-1".to_string());
+
+    let second = run_auto_memory_import(&opts(project.path(), config.path(), daemon.socket()))
+        .await
+        .expect("second run");
+
+    assert_eq!(second.stored, 0, "{:#?}", second.files);
+    assert_eq!(second.failed, 1, "{:#?}", second.files);
+    assert!(
+        fact.is_file(),
+        "a fact whose drawer is gone must stay in the live set"
+    );
+    assert!(
+        !archive.join("link-issues-and-prs.md").exists(),
+        "archiving it would leave the content nowhere"
+    );
+    assert!(
+        !second.index_cleared,
+        "the index still names a file that is still on disk: {second:#?}"
+    );
+    let error = second.files[0].error.clone().unwrap_or_default();
+    assert!(error.contains("drawer-1"), "{error}");
+    assert!(error.contains("no longer holds it"), "{error}");
+    assert!(
+        !marker.exists(),
+        "the stale marker is cleared, so the next run takes the ordinary store path"
+    );
+    assert_eq!(
+        state.lock().expect("lock").writes.len(),
+        1,
+        "a drawer the operator may have deleted on purpose is not re-stored behind their back"
+    );
+
+    // Recovery: with the marker gone, the next run imports the fact again.
+    let third = run_auto_memory_import(&opts(project.path(), config.path(), daemon.socket()))
+        .await
+        .expect("third run");
+    assert_eq!(third.stored, 1, "{:#?}", third.files);
+    assert_eq!(third.files[0].drawer_id.as_deref(), Some("drawer-2"));
+    assert!(archive.join("link-issues-and-prs.md").is_file());
+    assert!(third.index_cleared, "{third:#?}");
+}
+
+#[tokio::test]
+async fn auto_memory_import_leaves_the_file_alone_when_the_palace_cannot_be_reached() {
+    // #7752 Fail-Open Check: a palace that cannot answer proves nothing either
+    // way, so the marker stands and the file does not move. Archiving on an
+    // unanswered lookup would be the same data loss as archiving on a stale one.
+    let project = tempfile::tempdir().expect("tempdir");
+    let (config, memory) = write_store(project.path(), &[("link-issues-and-prs.md", FACT)], INDEX);
+    let fact = memory.join("link-issues-and-prs.md");
+    let marker = memory.join("link-issues-and-prs.md.stored");
+    std::fs::write(&marker, "drawer-1").expect("write marker");
+    let (daemon, state) = start_stub().await;
+    state
+        .lock()
+        .expect("lock")
+        .deny
+        .insert("memory_list".to_string());
+
+    let report = run_auto_memory_import(&opts(project.path(), config.path(), daemon.socket()))
+        .await
+        .expect("migration runs");
+
+    assert_eq!(report.stored, 0, "{:#?}", report.files);
+    assert_eq!(report.failed, 1, "{:#?}", report.files);
+    assert_eq!(
+        report.files[0].drawer_id.as_deref(),
+        Some("drawer-1"),
+        "the unverified drawer id is still reported: {:#?}",
+        report.files
+    );
+    assert!(fact.is_file(), "an unverifiable marker archives nothing");
+    assert!(
+        !memory
+            .parent()
+            .expect("parent")
+            .join("memory.archived-20260912")
+            .exists()
+    );
+    assert_eq!(
+        marker_id(&marker),
+        Some("drawer-1".to_string()),
+        "an unanswered lookup is not proof the drawer is gone, so the marker stands"
+    );
+    assert!(!report.index_cleared);
+    assert!(
+        state.lock().expect("lock").writes.is_empty(),
+        "an unverifiable marker must not trigger a second store either"
+    );
+}
+
+/// The drawer id a `.stored` marker names, if the marker is there.
+fn marker_id(marker: &Path) -> Option<String> {
+    std::fs::read_to_string(marker)
+        .ok()
+        .map(|t| t.trim().to_string())
 }
