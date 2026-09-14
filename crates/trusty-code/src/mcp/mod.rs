@@ -8,20 +8,29 @@
 //! invisible here. This module is the loader that closes that gap: shared
 //! config in, registered tools out.
 //!
-//! What: [`McpToolSet::load`] is the whole lifecycle and runs ONCE per task
-//! run, before the agent loop — resolve the two tiers ([`config`]), gate the
-//! untrusted project tier ([`trust`]), spawn each enabled stdio server in
-//! isolation ([`spawn`]), and wrap each advertised tool as a `ToolExecutor`
-//! ([`tool`]). [`register_configured_tools`] is the cheap per-registry half,
-//! and is what the two registry-building sites call. The set is shared across
-//! every registry a run builds, so the servers are spawned once and the client
-//! handles stay alive exactly as long as a tool that can call them.
+//! What: [`McpToolSet::load`](crate::mcp::McpToolSet::load) is the whole
+//! lifecycle and runs ONCE per task run, before the agent loop — resolve the
+//! two tiers ([`config`](crate::mcp::config)), gate the untrusted project tier
+//! ([`trust`](crate::mcp::trust)), spawn each enabled stdio server in isolation
+//! ([`spawn`](crate::mcp::spawn)), and wrap each advertised tool as a
+//! `ToolExecutor` ([`tool`](crate::mcp::tool)).
+//! [`register_configured_tools`](crate::mcp::register_configured_tools) is the
+//! cheap per-registry half, and is what the two registry-building sites call.
+//! The set is shared across every registry a run builds, so the servers are
+//! spawned once and the client handles stay alive exactly as long as a tool
+//! that can call them.
+//!
+//! Every link above is spelled `crate::mcp::…` rather than module-relative:
+//! `pub mod mcp;` in `lib.rs` carries its own `///` block, and rustdoc merges
+//! that with this `//!` one and resolves the whole thing in the CRATE ROOT's
+//! scope, where a bare `config` or `trust` names nothing (#5428).
 //!
 //! What this slice does NOT do: no catalog over the API or CLI (slice 2), and
 //! no remote transports — an `http` or `sse` entry is recognised and reported
 //! as not usable, never silently dropped.
 //!
-//! Test: [`tests`] — the unit modules; `crates/trusty-code/tests/mcp_loader_e2e.rs`
+//! Test: `tests` — the unit modules, which are `#[cfg(test)]` and so cannot be
+//! a link target in rustdoc's public pass; `crates/trusty-code/tests/mcp_loader_e2e.rs`
 //! — spawn, register and dispatch against a real stdio MCP server.
 
 pub mod config;

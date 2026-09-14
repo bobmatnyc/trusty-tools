@@ -17,7 +17,9 @@
 //! Failure is fail-open-and-visible, never a silent empty catalog: a file that
 //! exists and does not parse yields zero servers from that tier PLUS an
 //! [`McpIssue`] and a `tracing::warn!` naming the path. See
-//! [`super::tests::config_tests::a_malformed_global_file_yields_zero_servers_and_an_issue`].
+//! `super::tests::config_tests::a_malformed_global_file_yields_zero_servers_and_an_issue`
+//! — a plain code span, not a link: the test modules are `#[cfg(test)]` and do
+//! not exist in rustdoc's public pass.
 //!
 //! Test: `super::tests::config_tests` — the whole module.
 
