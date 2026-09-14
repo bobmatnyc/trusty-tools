@@ -269,7 +269,7 @@ this table is generated from it, not maintained by hand.
 | `chat_session_delete` | `palace`, `session_id` | Delete a chat session (and its full history) from a palace. |
 | `chat_session_get` | `session_id`, `palace?` | Retrieve a full chat session: metadata plus every turn in chronological order. |
 | `chat_session_list` | `limit?`, `offset?`, `palace?` | List chat sessions in a palace as paginated metadata (id, title, timestamps, message_count) ordered most-recently-updated first. |
-| `chat_session_recall` | `session_id`, `palace?` | Retrieve a full chat session with all turns in order (alias for chat_session_get, preferred name for agent-facing recall). |
+| `chat_session_recall` | `session_id`, `full?`, `max_bytes?`, `palace?` | Retrieve a full chat session with all turns in order (alias for chat_session_get, preferred name for agent-facing recall). |
 | `chat_turn_append` | `palace`, `session_id`, `prompt`, `response`, `attachments?` | Append a prompt/response PAIR to a chat session as two consecutive messages (user role then assistant role). |
 | `console_metrics` | — | Return a ConsoleMetricsReport with palace aggregate statistics (palace_count, counted_palace_count, cached_palace_count, total_drawers,… |
 | `discover_aliases` | `palace`, `project_root?` | Auto-discover project aliases by scanning Cargo workspace members, binary names, first-letter abbreviations, and the git remote. |
@@ -279,15 +279,15 @@ this table is generated from it, not maintained by hand.
 | `kg_bootstrap` | `palace?`, `project_path?` | Seed the knowledge graph from well-known project files (Cargo.toml, package.json, pyproject.toml, go.mod, CLAUDE.md, .git/config). |
 | `kg_gaps` | `palace?` | List knowledge gaps detected in the memory palace graph. |
 | `kg_list_subjects` | `limit?`, `palace?`, `with_counts?` | List the subjects this palace's knowledge graph actually holds, ordered by subject. |
-| `kg_query` | `subject`, `palace?` | Query active knowledge-graph triples for a subject. |
+| `kg_query` | `subject`, `full?`, `max_bytes?`, `palace?` | Query active knowledge-graph triples for a subject. |
 | `kg_retract_triple` | `palace`, `subject`, `predicate`, `object` | Retract one fact from the temporal knowledge graph — the inverse of kg_assert. |
-| `list_prompt_facts` | — | List every active prompt-fact triple (aliases, conventions, facts, shorthands) across all palaces. |
+| `list_prompt_facts` | `full?`, `max_bytes?` | List every active prompt-fact triple (aliases, conventions, facts, shorthands) across all palaces. |
 | `memory_forget` | `palace`, `drawer_id` | Delete a drawer from a palace by its UUID. |
-| `memory_list` | `limit?`, `palace?`, `room?`, `tag?`, `wing?` | List drawers in a palace, optionally filtered by wing, room type, or tag. |
+| `memory_list` | `full?`, `limit?`, `max_bytes?`, `palace?`, `room?`, `tag?`, `wing?` | List drawers in a palace, optionally filtered by wing, room type, or tag. |
 | `memory_note` | `palace`, `content`, `context?`, `cwd?`, `expires_at?`, `fact_key?`, `room?`, `tags?`, `workstream?` | Curated shortcut for short, high-signal facts ("User prefers snake_case", "Deploy target is prod-east"). |
-| `memory_recall` | `query`, `include_creator_tags?`, `min_score?`, `palace?`, `room?`, `top_k?`, `wing?` | Recall memories using L0+L1+L2 progressive retrieval. |
-| `memory_recall_all` | `q`, `deep?`, `include_creator_tags?`, `top_k?` | Semantic search across ALL palaces simultaneously. |
-| `memory_recall_deep` | `query`, `include_creator_tags?`, `min_score?`, `palace?`, `room?`, `top_k?` | Deep recall using L3 full HNSW search. |
+| `memory_recall` | `query`, `full?`, `include_creator_tags?`, `max_bytes?`, `min_score?`, `palace?`, `room?`, `top_k?`, `wing?` | Recall memories using L0+L1+L2 progressive retrieval. |
+| `memory_recall_all` | `q`, `deep?`, `full?`, `include_creator_tags?`, `max_bytes?`, `top_k?` | Semantic search across ALL palaces simultaneously. |
+| `memory_recall_deep` | `query`, `full?`, `include_creator_tags?`, `max_bytes?`, `min_score?`, `palace?`, `room?`, `top_k?` | Deep recall using L3 full HNSW search. |
 | `memory_remember` | `palace`, `text`, `allow_secret_like?`, `context?`, `cwd?`, `expires_at?`, `fact_key?`, `force?`, `room?`, `tags?`, `wing?`, `workstream?` | Store a memory (drawer) in a palace room. |
 | `memory_send_message` | `to_palace`, `purpose`, `content`, `cwd?`, `from_palace?`, `workstream?` | Send an inter-project message (issue #99). |
 | `palace_compact` | `palace` | Remove orphaned vector index entries (vectors with no matching drawer row). |

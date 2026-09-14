@@ -79,7 +79,9 @@ fn seed_embedder() {
     trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
 }
 
-fn test_state() -> (AppState, tempfile::TempDir) {
+// #7493: `byte_cap_tests` needs the same fixture for its router-consistency
+// test; a second copy is how the two drift.
+pub(super) fn test_state() -> (AppState, tempfile::TempDir) {
     skip_palace_enforcement();
     seed_embedder();
     let tmp = tempfile::tempdir().expect("tempdir");
