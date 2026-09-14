@@ -92,8 +92,13 @@ pub(crate) mod worktree_claim_source;
 mod worktree_protection;
 // #2919: the survey and the fresh-recheck delete loop that acts on it.
 pub(crate) mod worktree_reclaim_sweep;
+// #7889: the bounded `git fetch` that makes gate 6's landing refs current, so a
+// squash-merged branch is not misread as holding unsaved work.
+pub(crate) mod worktree_landing_refresh;
 pub(crate) mod worktree_reconcile;
 pub(crate) mod worktree_registry;
+// #7885: the one audit line every removal route writes before it deletes.
+pub(crate) mod worktree_removal_audit;
 // #7196: the machine an SSH config `Host` alias names, so an aliased origin
 // resolves to a real GitHub host before it becomes a `--repo` slug.
 pub(crate) mod ssh_host_alias;

@@ -238,6 +238,52 @@ impl GitWorktreeFixture {
         git_ok(&self.repo, &["fetch", "--prune", "origin"]);
     }
 
+    /// Land `wt`'s patch on the BARE REMOTE's `main` without telling this
+    /// checkout (#7889).
+    ///
+    /// Why: every other squash helper here merges inside `self.repo` and pushes,
+    /// and a push updates `refs/remotes/origin/main` as a side effect — so none
+    /// of them can produce the state #7889 is about, where the merge happened on
+    /// GitHub (under an `-r2` branch name, via `gh pr merge --squash`) and this
+    /// checkout has not fetched since. That stale ref is what gate 6 reads.
+    /// What: commits `file` in `wt` and never pushes it, then lands the SAME
+    /// patch as one commit through a SEPARATE clone of the bare remote. This
+    /// fixture's own `refs/remotes/origin/main` is untouched and stale
+    /// afterwards, which is the point.
+    /// Test: `worktree_7889_a_stale_origin_main_no_longer_spares_a_squash_merged_branch`.
+    pub(crate) fn land_on_the_remote_only(&self, wt: &Path, file: &str) {
+        let content = format!("landed content of {file}\n");
+        std::fs::write(wt.join(file), &content).expect("fixture: write file");
+        git_ok(wt, &["add", file]);
+        git_ok(wt, &["commit", "-m", "feat: parked work, continued on -r2"]);
+
+        let tmp_root = self
+            .repos_root
+            .parent()
+            .expect("fixture: repos root has a parent");
+        let remote = tmp_root.join("remote.git");
+        let scratch_name = format!("landing-{file}");
+        git_ok(
+            tmp_root,
+            &[
+                "clone",
+                remote.to_str().expect("utf8 remote"),
+                &scratch_name,
+            ],
+        );
+        let scratch = tmp_root.join(&scratch_name);
+        git_ok(&scratch, &["config", "user.email", "ci@test.invalid"]);
+        git_ok(&scratch, &["config", "user.name", "CI"]);
+        git_ok(&scratch, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(scratch.join(file), &content).expect("fixture: write landed file");
+        git_ok(&scratch, &["add", file]);
+        git_ok(
+            &scratch,
+            &["commit", "-m", "feat: squashed -r2 work (#7889)"],
+        );
+        git_ok(&scratch, &["push", "origin", "main"]);
+    }
+
     /// Commit `files` as SEPARATE commits in `wt`, then squash-merge the branch
     /// to `origin/main` and prune the refs that made them reachable (#6507).
     ///

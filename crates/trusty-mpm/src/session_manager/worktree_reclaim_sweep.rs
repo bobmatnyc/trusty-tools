@@ -33,9 +33,13 @@
 //! if that re-check is deleted, driven by probes that change state BETWEEN the
 //! survey and the delete.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+// #7889: the bounded per-repository fetch that makes gate 6's landing refs
+// current before anything is classified against them.
+use super::worktree_landing_refresh::refresh_landing_refs;
 
 use super::worktree_reclaim::{
     AgentStateProbe, BranchPrState, KeepList, LiveClaims, NOT_INSPECTED_REASON, PrIndex,
@@ -80,16 +84,36 @@ pub(crate) struct SurveyBudget {
     pub classify: Option<Instant>,
 }
 
+/// How long the reclaim path's byte-measurement phase may run (#7884).
+///
+/// Why: measurement walks every file under every worktree, `target/` included,
+/// and this module's own note records it exceeding 600 s over 46 worktrees. On
+/// the destructive path it ran UNBOUNDED, which is the hang #7884 observed:
+/// `tm session prune-worktrees --merged-prs` sat six minutes at 0.01 s CPU
+/// under 12 concurrent `rustc` processes — I/O-starved inside that walk — and
+/// once dropped the connection with "connection closed before message
+/// completed". Nothing that walk produces can change WHAT is reclaimed; it
+/// produces the `bytes_freed` figure in the report, and an unmeasured candidate
+/// is already modelled as `None` rather than as zero.
+/// What: 120 s, against a client bound of
+/// [`RECLAIM_SURVEY_REQUEST_TIMEOUT`](crate::client::http_client::RECLAIM_SURVEY_REQUEST_TIMEOUT).
+/// Test: `worktree_7884_the_reclaim_pass_bounds_its_measurement_phase`.
+pub(crate) const RECLAIM_MEASURE_BUDGET: Duration = Duration::from_secs(120);
+
 impl SurveyBudget {
-    /// A budget that never expires — the operator-invoked reclaim path.
+    /// The operator-invoked reclaim path's budget (#2919, #7884).
     ///
-    /// Why: a human who typed `--merged-prs` is waiting for a correct answer,
-    /// not a fast one, and a partial classification on the DESTRUCTIVE path
-    /// would silently shrink what gets reclaimed rather than shrink a report.
-    /// Test: `reclaim_uses_an_unbounded_budget`.
-    pub(crate) fn unbounded() -> Self {
+    /// Why: CLASSIFICATION stays unbounded — a human who typed `--merged-prs` is
+    /// waiting for a correct answer, not a fast one, and a partial
+    /// classification on the DESTRUCTIVE path would silently shrink what gets
+    /// reclaimed rather than shrink a report. MEASUREMENT is bounded, because it
+    /// decides nothing and is where the #7884 hang lives; degrading it costs one
+    /// reported number, already modelled as absent.
+    /// Test: `reclaim_leaves_classification_unbounded`,
+    /// `worktree_7884_the_reclaim_pass_bounds_its_measurement_phase`.
+    pub(crate) fn for_reclaim() -> Self {
         Self {
-            measure: None,
+            measure: Some(RECLAIM_MEASURE_BUDGET),
             classify: None,
         }
     }
@@ -132,6 +156,9 @@ pub(crate) fn survey_with_index(
     adopted: &[PathBuf],
 ) -> ReclaimSurvey {
     let mut indexes: BTreeMap<PathBuf, PrIndex> = BTreeMap::new();
+    // #7889: which repositories have already had their landing refs refreshed
+    // this sweep. One fetch per repository, never one per worktree.
+    let mut refreshed: BTreeSet<PathBuf> = BTreeSet::new();
     let mut candidates = Vec::new();
     for scanned in scan_registered_worktrees(repos_root, adopted) {
         if budget.classify.is_some_and(|d| Instant::now() >= d) {
@@ -146,6 +173,25 @@ pub(crate) fn survey_with_index(
                 verdict: ReclaimVerdict::blocked(ReclaimGate::Deadline, NOT_INSPECTED_REASON),
             });
             continue;
+        }
+        // #7889: gate 6 reads `refs/remotes/*/main` to decide what has already
+        // landed, and nothing else in this path updates it — so a branch whose
+        // pull request squash-merged on GitHub still counted its commits as
+        // unpushed. Refreshed once per repository, and only on the same
+        // `per_branch_fallback` opt-in every other network call here rides, so
+        // the `tm doctor` probe's three-second budget pays for none of it.
+        // A FAILED refresh changes nothing: the stale refs stand, which counts
+        // MORE unpushed commits, which refuses.
+        if per_branch_fallback
+            && refreshed.insert(scanned.registry_root.clone())
+            && let Err(e) = refresh_landing_refs(&scanned.registry_root)
+        {
+            tracing::warn!(
+                root = %scanned.registry_root.display(),
+                "worktree-reclaim: could not refresh this repository's landing refs, so \
+                 gate 6 judges every candidate under it against possibly stale \
+                 remote-tracking refs — the refusing direction (#7889): {e}"
+            );
         }
         let index = indexes
             .entry(scanned.registry_root.clone())
@@ -447,7 +493,7 @@ pub(crate) fn reclaim_with_probes(
         &initial,
         probes.index_for,
         probes.agent_state,
-        SurveyBudget::unbounded(),
+        SurveyBudget::for_reclaim(),
         true,
         &(probes.keep_list)(),
         adopted,
@@ -530,7 +576,16 @@ pub(crate) fn reclaim_with_probes(
                 .push(format!("{}: {reason}", path.display()));
             continue;
         }
-        let outcome = super::decommission::remove_session_worktree(&path);
+        // #7885: the route names itself in the audit line the remover emits
+        // before it deletes — an operator reading the log after the fact could
+        // not otherwise tell this pass from the orphan sweep.
+        let outcome = super::decommission::remove_session_worktree(
+            &path,
+            &format!(
+                "merged-PR reclaim: every gate passed and the pre-delete re-check agreed \
+                 ({pr_now:?})"
+            ),
+        );
         if outcome.removed() && !path.exists() {
             // #7504: the AUDIT LINE. It carries path, branch, pull request and
             // bytes freed because the reclaim is now automatic: nobody typed the

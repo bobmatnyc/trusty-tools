@@ -302,7 +302,13 @@ impl WorktreeRemoval {
 /// `remove_cleans_up_an_unregistered_leftover_inside_a_repo`,
 /// `remove_still_removes_a_healthy_worktree`; integration coverage via the
 /// decommission round-trip tests that set up real git worktrees.
-pub(super) fn remove_session_worktree(path: &Path) -> WorktreeRemoval {
+/// #7885: `reason` names WHICH route asked for this removal. Every route ended
+/// here already, and each logged differently or not at all — two merged
+/// worktrees lost their tracked `crates/` subtree on 2026-09-14 and no log named
+/// either path or session, so the mechanism could not be identified even after
+/// the fact. It is a required argument rather than a defaulted one because a
+/// route that cannot say why it is deleting is the case that went unrecorded.
+pub(super) fn remove_session_worktree(path: &Path, reason: &str) -> WorktreeRemoval {
     if !path.exists() {
         // Already gone — either removed by a concurrent decommission or by a
         // previous partial run. Treat as success (idempotent removal).
@@ -343,6 +349,11 @@ pub(super) fn remove_session_worktree(path: &Path) -> WorktreeRemoval {
         );
     }
 
+    // #7885: the audit line, HERE — past the ownership gate, so it describes a
+    // removal that is actually going to be attempted, and ahead of every
+    // destructive branch below (`git worktree remove --force` and both
+    // `remove_unclaimed_directory` call sites), so no route can delete unlogged.
+    super::worktree_removal_audit::audit_removal(path, reason);
     // #4207: ask git which checkout owns this worktree's registry instead of
     // guessing that it is the grandparent directory. The grandparent rule held
     // only for the two shapes it was written against; a worktree registered to
@@ -997,8 +1008,13 @@ impl SessionManager {
                         // call in spawn_blocking + tokio::time::timeout so a hung
                         // git process cannot stall the async executor indefinitely.
                         let ws_clone = ws.clone();
-                        let join =
-                            tokio::task::spawn_blocking(move || remove_session_worktree(&ws_clone));
+                        // #7885: name the route in the audit line.
+                        let join = tokio::task::spawn_blocking(move || {
+                            remove_session_worktree(
+                                &ws_clone,
+                                "session decommission: the session ended and its tree is clean",
+                            )
+                        });
                         let outcome =
                             match tokio::time::timeout(GIT_WORKTREE_REMOVE_TIMEOUT, join).await {
                                 Ok(Ok(outcome)) => outcome,

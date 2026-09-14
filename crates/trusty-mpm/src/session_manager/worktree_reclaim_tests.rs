@@ -1138,7 +1138,7 @@ fn the_remover_really_refuses_what_tm_provisioned_rejects() {
         !tm_provisioned(&path),
         "precondition: the classifier rejects this shape"
     );
-    let removed = crate::session_manager::decommission::remove_session_worktree(&path);
+    let removed = crate::session_manager::decommission::remove_session_worktree(&path, "test");
     assert!(!removed.removed(), "the remover must refuse it too");
     assert!(
         path.exists(),

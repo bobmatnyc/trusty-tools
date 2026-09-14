@@ -514,13 +514,19 @@ fn survey_reclaims_a_worktree_claimed_only_by_the_calling_session() {
 /// The other half: the same worktree, claimed by a DIFFERENT live session, is
 /// still refused — and the refusal names that session and denies it is the
 /// caller (#6806 closure criterion 2).
+///
+/// #7652: the claim is on THE WORKTREE, not on the project checkout above it. A
+/// project-root claim is evidence about the project, and obeying it as a veto
+/// blocked every nested worktree of every project another session had open;
+/// `worktree_7652_a_foreign_project_root_claim_no_longer_blocks_a_nested_worktree`
+/// owns that case. The protection this test is about is unchanged.
 #[test]
 fn survey_still_blocks_a_worktree_a_foreign_session_claims() {
     let fx = GitWorktreeFixture::new();
     let path = fx.add_worktree("foreign-survey-6806");
     land(&path);
     let claims = LiveClaims {
-        claims: vec![WorkspaceClaim::new("tm-other-01", &fx.repo)],
+        claims: vec![WorkspaceClaim::new("tm-other-01", &path)],
         caller: Some("tm-client-03".to_string()),
     };
     let s = survey_with_index(
@@ -852,6 +858,9 @@ fn a_dead_sessions_claim_does_not_block_the_dry_run() {
 
 /// The other half: the same fixture with a LIVE claimant is still blocked, so
 /// #7232 cannot have widened into "claims no longer count".
+///
+/// #7652: the claim names the worktree itself rather than the checkout above it,
+/// which is the shape that still vetoes. Liveness is what this test varies.
 #[test]
 fn a_live_sessions_claim_still_blocks_the_dry_run() {
     let fx = GitWorktreeFixture::new();
@@ -859,7 +868,7 @@ fn a_live_sessions_claim_still_blocks_the_dry_run() {
     land(&path);
     let live = LiveClaims::foreign(vec![WorkspaceClaim::with_liveness(
         "tm-other-01",
-        &fx.repo,
+        &path,
         ClaimLiveness::Live,
     )]);
     let out = reclaim_with_probes(
@@ -1329,12 +1338,39 @@ fn recheck_refuses_the_repositorys_main_checkout() {
 }
 
 #[test]
-fn reclaim_uses_an_unbounded_budget() {
+fn reclaim_leaves_classification_unbounded() {
     // A human waiting on `--merged-prs` wants a correct answer, not a fast one.
     // A partial classification on the DESTRUCTIVE path silently shrinks what
-    // gets reclaimed.
-    let b = SurveyBudget::unbounded();
-    assert!(b.measure.is_none() && b.classify.is_none());
+    // gets reclaimed. #7884 bounds MEASUREMENT only — see the sibling test.
+    assert!(SurveyBudget::for_reclaim().classify.is_none());
+}
+
+/// 🔴 #7884: the reclaim pass's byte-measurement phase is BOUNDED.
+///
+/// Why: that walk covers every file under every worktree, `target/` included,
+/// and the module's own note records it exceeding 600 s over 46 worktrees. Run
+/// unbounded on the destructive path it is the observed hang:
+/// `prune-worktrees --merged-prs` sat 6+ minutes at 0.01 s CPU under 12
+/// concurrent `rustc` processes, and once dropped the connection outright.
+/// Measurement decides nothing — an unmeasured candidate is already reported as
+/// `None`, not zero — so the bound cannot shrink what gets reclaimed. Fails on
+/// `0f2bd5134`, where `reclaim_with_probes` passes `SurveyBudget::unbounded()`
+/// and `measure` is `None`.
+#[test]
+fn worktree_7884_the_reclaim_pass_bounds_its_measurement_phase() {
+    let budget = SurveyBudget::for_reclaim();
+    let measure = budget
+        .measure
+        .expect("the destructive path must not walk bytes without a deadline");
+    assert_eq!(measure, super::RECLAIM_MEASURE_BUDGET);
+    assert!(
+        measure <= std::time::Duration::from_secs(300),
+        "the bound must be well inside the client's own request timeout, or it \
+         is not a bound the operator ever sees: {measure:?}"
+    );
+    // `for_reclaim` has exactly one call site — `reclaim_with_probes`, the
+    // destructive entry point — and `unbounded` no longer exists, so the
+    // constructor's value IS the value that path runs under.
 }
 
 /// END-TO-END probe against a REAL worktree store (#2919 acceptance criterion).
@@ -1559,7 +1595,7 @@ fn remove_session_worktree_refuses_a_git_locked_worktree() {
     std::fs::write(path.join("precious.txt"), "operator work\n").expect("write precious file");
     fx.lock_worktree(&path);
 
-    let outcome = crate::session_manager::decommission::remove_session_worktree(&path);
+    let outcome = crate::session_manager::decommission::remove_session_worktree(&path, "test");
     assert!(
         path.exists() && path.join("precious.txt").exists(),
         "a locked worktree must survive — git declined, and declining is a \

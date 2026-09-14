@@ -813,6 +813,41 @@ fn git_must(dir: &Path, args: &[&str]) {
     );
 }
 
+/// 🔴 #7889: a branch whose work landed on the REMOTE — under an `-r2` name,
+/// squash-merged on GitHub — is spared by gate 6 only because this checkout's
+/// `refs/remotes/origin/main` predates the merge.
+///
+/// Why: the #6507 discount is evidence-based and correct, and it reads that
+/// evidence from a ref nothing in the reclaim path ever updates. Observed
+/// 2026-09-14: `prune-worktrees --merged-prs --force` spared
+/// `agent-a2e6bc07b2ac613b4` at gate 6 with "1 unpushed commit(s)" although its
+/// content had squash-merged as PR #7909, and a fleet run reclaimed 0 of ~40
+/// worktrees for the same reason. Fails on `0f2bd5134`, where nothing fetches
+/// and the second assertion still counts the commit as unsaved.
+#[test]
+fn worktree_7889_a_stale_origin_main_no_longer_spares_a_squash_merged_branch() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("agent-a2e6bc07b");
+    fx.land_on_the_remote_only(&wt, "landed.rs");
+
+    // The observed shape, pinned: the work IS on the remote, and this checkout
+    // cannot see it, so gate 6 reports unsaved work.
+    let dirt = inspect_dirt(&wt).expect("the stale-ref state must reproduce the refusal");
+    assert_eq!(
+        dirt.unpushed_commits, 1,
+        "the fixture must leave exactly the one commit gate 6 miscounted: {dirt:?}"
+    );
+
+    crate::session_manager::worktree_landing_refresh::refresh_landing_refs(&wt)
+        .expect("the fixture's origin is reachable");
+
+    assert!(
+        inspect_dirt(&wt).is_none(),
+        "once the landing ref is current the squash clears the branch; got {:?}",
+        inspect_dirt(&wt)
+    );
+}
+
 /// The #6507 regression. A branch whose PR squash-merged, and whose remote
 /// branch was then deleted, holds no work a removal could destroy — its patch
 /// is on `origin/main` under a different SHA. Before this fix
