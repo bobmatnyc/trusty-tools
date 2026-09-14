@@ -67,14 +67,22 @@ async fn settings_grant_replacements_survive_extends() {
     let tmp = tempfile::tempdir().unwrap();
     let dirs = tmp.path().join("agents");
     std::fs::create_dir(&dirs).unwrap();
-    let base = "[agent]\nname='base'\nrole='assistant'\nmodel='fixture'\ndescription='Synthetic'\n[llm]\nmax_tokens=128\ntemperature=0.0\n[system_prompt]\ncontent='Synthetic'\n[tools]\nallow=['memory_write','memory_recall']\nscopes=['memory.write','memory.read']\n[skills]\nallow=['first','second']\n[subagents]\ndelegate_allowed=['research-agent','project-manager']\n";
+    let base = "[agent]\nname='base'\nrole='assistant'\nmodel='fixture'\ndescription='Synthetic'\n[llm]\nmax_tokens=128\ntemperature=0.0\n[system_prompt]\ncontent='Synthetic'\n[tools]\nallow=['memory_write','memory_recall']\nscopes=['memory.write','memory.read']\n[skills]\nallow=['tm-ticketing','tm-workflow']\n[subagents]\ndelegate_allowed=['research-agent','project-manager']\n";
     std::fs::write(dirs.join("base.toml"), base).unwrap();
     let path = dirs.join("fixture.toml");
     std::fs::write(&path, "[agent]\nname='fixture'\nrole='assistant'\nextends='base'\nmodel='fixture'\ndescription='Synthetic'\n[llm]\nmax_tokens=128\ntemperature=0.0\n[system_prompt]\ncontent='Synthetic'\n").unwrap();
     for empty in [false, true] {
         let tools = if empty { vec![] } else { vec!["memory_recall"] };
         let scopes = if empty { vec![] } else { vec!["memory.read"] };
-        let skills = if empty { vec![] } else { vec!["first"] };
+        // #7881: a synthetic name (`first`) no longer round-trips — an
+        // assistant's `[skills].allow` write is now bounded by the server-owned
+        // floor, so the fixture takes a floor member the same way the sibling
+        // `delegates` list takes one.
+        let skills = if empty {
+            vec![]
+        } else {
+            vec![crate::agents::skill_floor::ASSISTANT_REACHABLE_SKILLS[0]]
+        };
         let delegates = if empty {
             vec![]
         } else {

@@ -315,6 +315,16 @@ pub(super) async fn run_subagent(name: &str) -> Result<()> {
     {
         let resolver = FsSkillResolver::from_defaults();
         for s in skills {
+            // #7881: the server-owned floor. A persona names a skill; whether an
+            // ASSISTANT may load it is the product's call, not the file's.
+            if !crate::agents::skill_floor::skill_is_reachable(
+                &cfg.agent.role,
+                cfg.skills.allow.as_deref(),
+                s,
+            ) {
+                tracing::warn!(agent = %name, skill = %s, "skill is off the assistant floor; refused");
+                continue;
+            }
             if let Some(text) = resolver.resolve(s) {
                 let layer = format!("# Skill: {s}\n\n{text}");
                 builder = builder.add_skill(layer);

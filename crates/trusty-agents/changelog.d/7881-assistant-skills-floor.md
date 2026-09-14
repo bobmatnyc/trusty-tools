@@ -1,0 +1,3 @@
+Added
+- Server-owned skill floor for assistant-kind agents (`agents::skill_floor`): the bundled non-coding skill names an assistant may ever load, intersected with its own `[skills].allow` so a persona, a `PATCH /api/agents/:name` write, or a turn-originated `settings.patch` can only narrow it. Enforced at all three prompt-injection sites (subprocess, in-process, ctrl turn — including the BM25 dynamic lane) and on the write path, which now refuses a widening `skills_allow` with `400` instead of writing it verbatim.
+- `tagent skills effective <agent>` prints one agent's resolved skill set, the floor it is bound by, and a reachable/REFUSED marker per declared `[system_prompt].skills` entry.

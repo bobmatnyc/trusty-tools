@@ -318,6 +318,17 @@ impl InProcessAgentRunner {
         }
         if let Some(skills) = &cfg.system_prompt.skills {
             for s in skills {
+                // #7881: the server-owned assistant skill floor, applied at the
+                // same seam as the subprocess path so the two runners cannot
+                // disagree about what a persona may load.
+                if !crate::agents::skill_floor::skill_is_reachable(
+                    &cfg.agent.role,
+                    cfg.skills.allow.as_deref(),
+                    s,
+                ) {
+                    tracing::warn!(agent = %agent_name, skill = %s, "skill is off the assistant floor; refused");
+                    continue;
+                }
                 if let Some(text) = self.skill_resolver.resolve(s) {
                     builder = builder.add_skill(format!("# Skill: {s}\n\n{text}"));
                 }

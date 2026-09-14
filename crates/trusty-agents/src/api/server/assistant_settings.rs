@@ -49,9 +49,10 @@ pub(super) fn patch_grants(
     if let Some(ceiling) = req.ceiling.as_ref() {
         ceiling.check(req)?;
     }
+    let skills_to_write = skills_narrowed_to_floor(doc, req.skills_allow.as_deref())?;
     for (table, key, entries) in [
         ("permissions", "scopes", &req.scopes),
-        ("skills", "allow", &req.skills_allow),
+        ("skills", "allow", &skills_to_write),
     ] {
         if let Some(entries) = entries {
             let target = doc
@@ -96,6 +97,54 @@ pub(super) fn patch_grants(
     }
     Ok(())
 }
+/// Narrow a requested `[skills].allow` write to the server-owned assistant
+/// skill floor (#7881).
+///
+/// Why: `PATCH /api/agents/:name` writes this list verbatim today — the
+/// `tools_allow` precedent ADR-0024 decision 4 named as the one NOT to copy,
+/// and the same defect the sub-agent whitelist closed for delegation. Without
+/// a floor here, a GUI or API write hands an assistant any skill name at all,
+/// coding skills included, and the config an operator READS stops being the
+/// config that is enforced.
+/// What: reads `[agent].role` out of the document about to be edited. A role
+/// that is missing, non-string or unparseable binds the floor anyway
+/// (`role_is_assistant_kind_or_unknown`) — a lookup that cannot be resolved
+/// refuses rather than defaulting to everything. A non-assistant agent is
+/// outside the rule and its list passes through unchanged. For the assistant
+/// kind the whole list must be on
+/// `agents::skill_floor::ASSISTANT_REACHABLE_SKILLS`; one offender refuses the
+/// WHOLE request, before any table is touched, with the offenders named. An
+/// empty list is a legitimate narrowing and is accepted.
+/// Test: `super::tests::agent_patch::patch_agent_rejects_a_skills_allow_that_widens_past_the_floor`,
+/// `patch_agent_writes_a_narrowed_skills_allow`,
+/// `patch_agent_skills_allow_floor_binds_an_agent_with_no_readable_role`.
+fn skills_narrowed_to_floor(
+    doc: &toml_edit::DocumentMut,
+    requested: Option<&[String]>,
+) -> Result<Option<Vec<String>>, super::grant_ceiling::GrantRefusal> {
+    let Some(requested) = requested else {
+        return Ok(None);
+    };
+    let role = doc
+        .get("agent")
+        .and_then(|a| a.get("role"))
+        .and_then(|v| v.as_str());
+    if !crate::agents::skill_floor::role_is_assistant_kind_or_unknown(role) {
+        return Ok(Some(requested.to_vec()));
+    }
+    match crate::agents::skill_floor::narrow_skills_to_floor(requested) {
+        Ok(narrowed) => Ok(Some(narrowed)),
+        Err(refused) => Err(super::grant_ceiling::GrantRefusal {
+            field: "skills.allow".to_string(),
+            message: format!(
+                "skills.allow may only narrow the server-owned assistant skill floor, never \
+                 widen it — refused: {refused:?}"
+            ),
+            refused,
+        }),
+    }
+}
+
 fn error(message: impl std::fmt::Display) -> Error {
     (
         StatusCode::BAD_REQUEST,
