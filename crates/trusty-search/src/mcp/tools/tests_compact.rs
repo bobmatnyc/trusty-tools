@@ -296,3 +296,51 @@ async fn compact_halves_the_bytes_of_a_ten_hit_search() {
         "compact must at least halve the payload: {full_len} -> {compact_len}"
     );
 }
+
+/// Dispatch a tool expected to fail, returning the in-band error text.
+async fn call_err(server: &McpServer, tool: &str, arguments: Value) -> String {
+    let resp = server
+        .dispatch(req(
+            "tools/call",
+            serde_json::json!({ "name": tool, "arguments": arguments }),
+        ))
+        .await;
+    let result = resp.result.expect("tools/call returns a result envelope");
+    assert_eq!(result["isError"], true, "{tool} was expected to error");
+    result["content"][0]["text"]
+        .as_str()
+        .expect("text content node")
+        .to_string()
+}
+
+/// A `compact` that is not a boolean is rejected on every tool that takes it,
+/// exactly like `full` — it used to coerce to `false` and return full hits
+/// byte-identical to a call that never asked for compaction.
+#[tokio::test]
+async fn a_non_boolean_compact_is_rejected() {
+    for (tool, mut args) in [
+        (
+            "search",
+            serde_json::json!({ "index_id": "demo", "query": "handler" }),
+        ),
+        (
+            "search_lexical",
+            serde_json::json!({ "index_id": "demo", "query": "handler_0" }),
+        ),
+        (
+            "search_semantic",
+            serde_json::json!({ "index_id": "demo", "query": "handler" }),
+        ),
+        (
+            "search_kg",
+            serde_json::json!({ "index_id": "demo", "query": "handler_0" }),
+        ),
+        ("search_all", serde_json::json!({ "query": "handler" })),
+    ] {
+        let (base, _bodies, _paths) = spawn_mock_daemon(ready_status(), search_body(1)).await;
+        let server = McpServer::new(base);
+        args["compact"] = Value::String("true".into());
+        let msg = call_err(&server, tool, args).await;
+        assert!(msg.contains("compact must be a boolean"), "{tool}: {msg}");
+    }
+}

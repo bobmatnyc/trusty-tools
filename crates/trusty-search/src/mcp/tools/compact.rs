@@ -25,6 +25,8 @@
 
 use serde_json::Value;
 
+use super::types::DispatchError;
+
 /// The hit fields compact mode removes.
 ///
 /// `content` is redundant with `compact_snippet`; `id` and `file` are
@@ -46,12 +48,26 @@ pub(super) const DROPPED_FIELDS: [&str; 10] = [
     "on_branch",
 ];
 
-/// `true` when the caller asked for compact hits. Default `false`, so an
-/// existing caller's response shape does not change.
-pub(super) fn wants_compact(args: &Value) -> bool {
-    args.get("compact")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
+/// `true` when the caller asked for compact hits. Absent or `null` is
+/// `false`, so an existing caller's response shape does not change.
+///
+/// A present `compact` that is not a boolean is rejected rather than read as
+/// `false`: `compact: "true"` used to return full hits byte-identical to a
+/// call that never asked for compaction, with nothing in the response to say
+/// the flag was dropped. Mirrors the `full` / `max_bytes` rejection in
+/// [`super::byte_cap`].
+///
+/// Test: `a_non_boolean_compact_is_rejected`.
+// #7676: a silently ignored `compact` is indistinguishable from no `compact`.
+pub(super) fn wants_compact(args: &Value) -> Result<bool, DispatchError> {
+    match args.get("compact") {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Bool(b)) => Ok(*b),
+        Some(other) => Err(DispatchError::InvalidParams(format!(
+            "compact must be a boolean (true drops `content` and the KG/ranking \
+             metadata from every hit); got {other}"
+        ))),
+    }
 }
 
 /// Drop [`DROPPED_FIELDS`] from every hit in `resp["results"]`.
