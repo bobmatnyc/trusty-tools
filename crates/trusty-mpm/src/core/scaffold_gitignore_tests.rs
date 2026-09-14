@@ -432,7 +432,12 @@ fn this_repos_committed_block_matches_the_generator() {
 /// Why (#7932): `unwrap_or_default()` on the read made an unreadable file
 /// indistinguishable from a missing one, so the call appended a SECOND managed
 /// block over a first one it could not see. Only `NotFound` may read as empty.
-/// Windows has no equivalent of a chmod-000 file, so this is a Unix test.
+///
+/// The fixture is WRITE-ONLY (`0o200`), not `0o000`: a mode that also blocks
+/// the append makes the pre-fix code fail at the `open` instead, so the test
+/// would pass against the bug it exists to catch. Write-only is the mode that
+/// separates them — the read fails, the append would have succeeded.
+/// Windows has no equivalent, so this is a Unix test.
 #[cfg(unix)]
 #[test]
 fn an_unreadable_gitignore_is_reported_not_treated_as_empty() {
@@ -445,7 +450,7 @@ fn an_unreadable_gitignore_is_reported_not_treated_as_empty() {
     std::fs::write(&gitignore_path, &existing).unwrap();
 
     let original = std::fs::metadata(&gitignore_path).unwrap().permissions();
-    std::fs::set_permissions(&gitignore_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    std::fs::set_permissions(&gitignore_path, std::fs::Permissions::from_mode(0o200)).unwrap();
     // Root reads it regardless — skip rather than assert a false property.
     if std::fs::read_to_string(&gitignore_path).is_ok() {
         std::fs::set_permissions(&gitignore_path, original).unwrap();
