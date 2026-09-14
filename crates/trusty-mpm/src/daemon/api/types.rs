@@ -103,6 +103,23 @@ pub struct HealthResponse {
     /// Test: `health_response_serializes_version_field`.
     #[serde(default)]
     pub version: String,
+    /// Fingerprint of the executable this daemon process started from (#7822).
+    ///
+    /// Why: [`Self::version`] alone let a stale daemon read as current. Semver
+    /// is a RELEASE label, so a daemon started before a same-version merge
+    /// reports exactly what the freshly installed binary reports — which on
+    /// 2026-09-13 let a 1.5.36 daemon serve the pre-#7789 settings writer while
+    /// `tm doctor` called it a match.
+    /// What: [`crate::core::build_identity::current_exe_identity`] captured ONCE
+    /// at startup by `daemon_run::run_daemon` (a `/health`-time read would stat
+    /// whatever `cargo install` last wrote, which is the file a stale daemon is
+    /// NOT running) and stored on
+    /// [`crate::daemon::DaemonState::set_build_identity`]. `#[serde(default)]`
+    /// → `""` for a daemon predating the field, which the client reports as
+    /// "cannot tell", never as a pass.
+    /// Test: `health_response_serializes_build_id_field`.
+    #[serde(default)]
+    pub build_id: String,
     /// OS process id of the daemon that answered this request (issue #4230).
     ///
     /// Why: `supervised` is computed from

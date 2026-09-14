@@ -931,6 +931,23 @@ fn health_snapshot_supervised_is_none_when_absent() {
     );
 }
 
+/// #7822: a daemon predating `build_id` must parse, yielding `""` — the value
+/// the staleness check reads as "cannot tell whether this build is current"
+/// rather than as a match on the version string alone.
+#[test]
+fn health_snapshot_build_id_is_empty_when_absent() {
+    let minimal: HealthSnapshot =
+        serde_json::from_value(serde_json::json!({ "status": "ok" })).expect("minimal body parses");
+    assert_eq!(minimal.build_id, "");
+
+    let full: HealthSnapshot = serde_json::from_value(serde_json::json!({
+        "status": "ok",
+        "build_id": "1757731440:74125312",
+    }))
+    .expect("body with the field parses");
+    assert_eq!(full.build_id, "1757731440:74125312");
+}
+
 /// #4230: an older daemon omits `pid`, so the authoritative PID comparison is
 /// unavailable and the verdict must fall back rather than compare against a
 /// fabricated zero.
