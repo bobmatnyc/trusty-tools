@@ -42,6 +42,10 @@ pub mod memory_ops;
 // #6318: the no-palace fallback every palace-scoped READ tool shares.
 pub mod palace_index;
 pub mod palace_ops;
+// Owner ruling 2026-09-14: the recall read family, split out of `memory_ops`
+// at the 500-SLOC cap, plus the projection that shapes what a hit shows.
+pub mod recall_ops;
+pub mod recall_projection;
 pub mod room_definitions;
 pub mod room_ops;
 pub mod task_definitions;
@@ -81,14 +85,14 @@ use kg_ops::{
     handle_upgrade_tool,
 };
 use memory_ops::{
-    handle_memory_forget, handle_memory_list, handle_memory_note, handle_memory_recall,
-    handle_memory_recall_all, handle_memory_recall_deep, handle_memory_remember,
+    handle_memory_forget, handle_memory_list, handle_memory_note, handle_memory_remember,
     handle_memory_send_message,
 };
 use palace_ops::{
     handle_palace_compact, handle_palace_create, handle_palace_delete, handle_palace_info,
     handle_palace_list, handle_palace_reembed, handle_palace_unalias, handle_palace_update,
 };
+use recall_ops::{handle_memory_recall, handle_memory_recall_all, handle_memory_recall_deep};
 use room_ops::{handle_room_create, handle_room_list, handle_room_rename};
 use task_ops::{handle_task_add, handle_task_complete, handle_task_list};
 use wing_ops::{handle_wing_create, handle_wing_list, handle_wing_rename};

@@ -158,7 +158,9 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
                         "query":  {"type": "string"},
                         "room":   {"type": "string", "description": "ADR-0027: restrict the semantic layer to this room. The always-on identity/essential layers (L0/L1) are still returned — they are the palace's baseline grounding, not search results. Use room_list to discover a palace's rooms."},
                         "top_k":  {"type": "integer", "default": 10},
-                        "wing":   {"type": "string", "description": "ADR-0027: optional wing (scope) id or label. Restricts the L2 search to the rooms that wing owns — 'recall everything the engineer wing has learned' in one query. Palace identity/essentials (L0/L1) are always included since they are not any one wing's property. Mutually exclusive with `room`. Omit for an unscoped recall. Errors if the wing does not exist (see wing_list)."}
+                        "wing":   {"type": "string", "description": "ADR-0027: optional wing (scope) id or label. Restricts the L2 search to the rooms that wing owns — 'recall everything the engineer wing has learned' in one query. Palace identity/essentials (L0/L1) are always included since they are not any one wing's property. Mutually exclusive with `room`. Omit for an unscoped recall. Errors if the wing does not exist (see wing_list)."},
+                        "min_score": {"type": "number", "description": "Optional relevance floor. Hits scored by the query — L2, L3, and the lexical lane — are dropped below it before top_k is applied. Setting it makes the search fetch a wider candidate set (4x top_k, capped at 200) so removed hits are backfilled rather than leaving you short; when the corpus holds fewer than top_k qualifying drawers you still get fewer, which no widening can change. L0/L1 identity and essential drawers are never filtered: their scores are a flat 1.0 and an importance value, neither comparable to a similarity. Omit for no floor, which is the previous behaviour. Must be a number — a quoted value like \"0.4\" is rejected, not coerced. 0.4 is the recommended value for PM-context recall: the L2 lane returns loosely related drawers in the 0.38-0.46 band, so 0.4 cuts most of them while keeping hits that are genuinely on topic. The response reports `dropped_below_floor` so you can tell how many were removed and lower the floor if it was too aggressive."},
+                        "include_creator_tags": {"type": "boolean", "default": false, "description": "Return the `creator:*` attribution tags (client, version, source, cwd) on each hit. They are hidden by default because they are provenance rather than topic, and they are roughly four tags on every drawer this daemon wrote — most of a recall response's tag bytes. Nothing is deleted: the tags stay in storage and stay queryable through memory_list's `tag` filter. Set true when you are auditing who wrote a memory."}
                     },
                     "required": memory_recall_required,
                 }
@@ -172,7 +174,9 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
                         "palace": {"type": "string"},
                         "query":  {"type": "string"},
                         "room":   {"type": "string", "description": "ADR-0027: restrict the deep search to this room. Same semantics as memory_recall's `room`."},
-                        "top_k":  {"type": "integer", "default": 10}
+                        "top_k":  {"type": "integer", "default": 10},
+                        "min_score": {"type": "number", "description": "Optional relevance floor. Same semantics as memory_recall's `min_score`, applied to the L3 deep lane."},
+                        "include_creator_tags": {"type": "boolean", "default": false, "description": "Same semantics as memory_recall's `include_creator_tags`."}
                     },
                     "required": memory_recall_required,
                 }
@@ -437,7 +441,8 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
                     "properties": {
                         "q":     {"type": "string", "description": "Free-text query"},
                         "top_k": {"type": "integer", "default": 10},
-                        "deep":  {"type": "boolean", "default": false}
+                        "deep":  {"type": "boolean", "default": false},
+                        "include_creator_tags": {"type": "boolean", "default": false, "description": "Same semantics as memory_recall's `include_creator_tags`. This tool takes no `min_score`: one floor across palaces would mean a different thing in each corpus."}
                     },
                     "required": ["q"],
                 }
