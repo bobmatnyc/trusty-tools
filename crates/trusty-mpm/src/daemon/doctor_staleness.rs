@@ -39,6 +39,11 @@ use crate::core::doctor::{CheckStatus, DoctorCheck};
 /// neither is present. `home` is the base to resolve both paths under (the real
 /// home in production, a temp dir in tests).
 ///
+/// #7610: the `claude-config` finding names only that child as safe to
+/// delete and calls out its live siblings under the same `~/.trusty-mpm`
+/// parent (`usage/`, `session-manager/`, `statusline/`) — the parent itself
+/// is never superseded, only the one child directory is.
+///
 /// #7102: the remediation it prints must be one that actually clears it. It
 /// used to offer `tm install`, whose skill step wrote this same directory, so
 /// following the advice reproduced the warning; the installer now deploys
@@ -71,9 +76,17 @@ pub(super) fn check_legacy_instruction_sources(home: &Path) -> DoctorCheck {
 
     let legacy_config = home.join(".trusty-mpm").join("claude-config");
     if legacy_config.is_dir() {
+        // #7610: name only the `claude-config` child as safe to delete — its
+        // parent `~/.trusty-mpm` also holds `usage/` (savings ledger),
+        // `session-manager/` (session store), and `statusline/`, all live and
+        // read by `tm repair savings-ledger` / `tm statusline` today. A reader
+        // acting on "safe to delete" against the parent directory would take
+        // those out with it.
         findings.push(
-            "legacy ~/.trusty-mpm/claude-config directory (superseded by the tm-owned \
-             ~/.trusty-tools config home — safe to delete once no session references it)"
+            "legacy ~/.trusty-mpm/claude-config directory only (superseded by the tm-owned \
+             ~/.trusty-tools config home — safe to delete; sibling directories \
+             ~/.trusty-mpm/usage, ~/.trusty-mpm/session-manager, and ~/.trusty-mpm/statusline \
+             are live and not covered by this advice — do not delete the ~/.trusty-mpm parent)"
                 .to_string(),
         );
     }
@@ -186,13 +199,24 @@ mod tests {
 
     #[test]
     fn legacy_sources_warns_on_claude_config() {
-        // The legacy managed-config dir must be flagged.
+        // The legacy managed-config dir must be flagged, scoped to the
+        // `claude-config` child — never worded as though the `~/.trusty-mpm`
+        // parent itself is safe to delete (#7610).
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join(".trusty-mpm").join("claude-config")).unwrap();
 
         let check = check_legacy_instruction_sources(tmp.path());
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(check.message.contains("claude-config"));
+        // #7610: the message must name the live siblings under the same
+        // parent so a reader does not delete the ledger or session store.
+        assert!(check.message.contains("usage"), "{}", check.message);
+        assert!(
+            check.message.contains("session-manager"),
+            "{}",
+            check.message
+        );
+        assert!(check.message.contains("statusline"), "{}", check.message);
     }
 
     #[test]

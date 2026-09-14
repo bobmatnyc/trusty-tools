@@ -731,6 +731,14 @@ pub(super) fn pm_guard_hook_value() -> serde_json::Value {
 /// no palace variable and the session's trusty-memory resolves for itself —
 /// through the same entry point, so it reaches the same verdict rather than
 /// papering over the failure. Read-only; never panics.
+///
+/// #7712: `TRUSTY_MEMORY_PALACE` in the process env dominates BOTH the
+/// explicit `git_remote` argument and the workspace's own `origin` fallback —
+/// it is precedence level 1 ahead of either path-derived level. A test that
+/// wants to exercise git-remote or path derivation must clear
+/// `TRUSTY_MEMORY_PALACE` first (`EnvVarGuard::clear("TRUSTY_MEMORY_PALACE")`
+/// in this crate's tests), or a value left over from the ambient environment
+/// silently wins and the test exercises the override path instead.
 /// Test: `resolve_palace_slug_*` (override / git-fallback / pin / none), plus
 /// `session_mcp_env_exports_palace_when_memory_enabled`.
 pub(crate) fn resolve_palace_slug(project_path: &Path, git_remote: Option<&str>) -> Option<String> {
