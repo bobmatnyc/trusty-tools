@@ -25,6 +25,26 @@
 //!   A producer bug that undercounts its baseline therefore shows as a missing
 //!   contribution, never as a negative or inflated displayed figure.
 //!
+//! **Who writes this ledger (#7636).** Six files share the `savings*` name
+//! prefix with no map between them — the #7658 engineer read ~1100 lines
+//! before a 30-line fix, and the original brief for that fix described a
+//! repair arm ([`crate::core::savings_repair`]) that already existed. This is
+//! that map: producer, the `technique` it writes, how the row reaches the
+//! ledger, and what stops it duplicating.
+//!
+//! | Producer | Technique | Append path | Dedup guard |
+//! |---|---|---|---|
+//! | `savings` (this module) | none — shared writer/reader, not a producer | [`append_row`] and [`append_row_once`] are the ledger's only two writers | `append_row`: none, every call appends. `append_row_once`: [`row_presence`] on `(session_id, technique, basis)`, held under an exclusive file lock |
+//! | [`crate::core::savings_instructions`] | `instruction-compression` | `record_instruction_compression_in` calls [`append_row_once`] directly | inherited from `append_row_once` |
+//! | [`crate::core::savings_sidecar`] | `instruction-compression` (staged) | stages a [`SavingsRow`] to `pending-savings/<key>.json` when no session id exists yet; a later hook's `emit_staged_row` claims it via an atomic rename and calls [`append_row_once`] | `append_row_once`'s guard, plus the claim rename — of two racing hooks, only the one whose rename succeeds appends |
+//! | [`crate::core::savings_repair`] | none — not a producer | never appends; rewrites the ledger atomically (temp file + rename) from the kept rows' original bytes | N/A — quarantines already-written rows to a sidecar, never adds new ones |
+//! | [`crate::core::savings_divert`] | `divert` | `record_divert` calls [`append_row`] directly | none — a second diversion of the same file is a second real saving, so suppressing it would delete data |
+//! | [`crate::core::savings_compress`] | `compress` | `record_compress` calls [`append_row`] directly | none, same reasoning as `savings_divert` |
+//!
+//! Only the two `instruction-compression` producers route through
+//! `append_row_once`; `divert` and `compress` keep the unguarded [`append_row`]
+//! on purpose (see its own doc for why).
+//!
 //! **[`SavingsTotal::percent_saved`] denominator (owner ruling 2026-09-08,
 //! #7179).** The `💸` segment shows a whole-number percent of tokens avoided,
 //! not a dollar figure: `saved / (session actual tokens + saved)` — the
