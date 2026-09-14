@@ -71,7 +71,17 @@ use super::delegation::is_assistant_kind;
 /// `SubagentAllowSet::resolve`'s normalization, so the two gates cannot drift
 /// on spelling. Nothing is REMOVED from any catalog to achieve this — only
 /// reachability changes, exactly as decision 4 did for sub-agents.
-/// Test: `floor_contains_no_coding_skill`,
+///
+/// This list is hand-authored, so it is pinned against the live catalogs rather
+/// than trusted: `every_bundled_skill_is_classified` reads
+/// trusty-mpm's `framework-manifest.toml` and this crate's
+/// `.trusty-agents/skills/` tree and FAILS on any bundled skill that is neither
+/// here nor on one of the two exclusion lists beside that test. A newly bundled
+/// skill therefore forces a decision instead of defaulting to unreachable.
+/// Test: `every_bundled_skill_is_classified`,
+/// `floor_and_exclusions_are_disjoint`,
+/// `pending_owner_ruling_names_are_off_the_floor`,
+/// `floor_is_either_bundled_or_declared_off_catalog`,
 /// `floor_names_are_normalized_and_unique`,
 /// `bundled_assistant_personas_declare_only_reachable_skills`.
 pub(crate) const ASSISTANT_REACHABLE_SKILLS: &[&str] = &[
