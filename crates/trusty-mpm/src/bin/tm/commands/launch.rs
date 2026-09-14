@@ -125,6 +125,11 @@ pub(crate) async fn launch(
     // the origin remote of a real repository instead of failing on "not a git
     // repo". A fresh repo has no origin, and since #6276 step 2 starts a session
     // in that checkout rather than stopping there.
+    // #7749: a refusal is NOT an error here — the outcome is deliberately
+    // discarded, and step 2 then reads `Ok(None)` from a directory with no
+    // repository at all, which is the live-checkout plan. That route is pinned
+    // by `launch_route_after_a_scan_refusal_falls_through_to_the_live_checkout`;
+    // the refusal `ensure_git_repo` prints is the operator's explanation.
     super::auto_git_init::ensure_git_repo(&live_path)?;
 
     // Auto-register the git project root as a local path alias (non-fatal, silent).

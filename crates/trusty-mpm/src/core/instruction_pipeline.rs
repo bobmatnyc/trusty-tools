@@ -1189,6 +1189,14 @@ fn load_or_create_claude_md_with_init(
             // is stale by the time bytes land. A repository that appeared in
             // that window is the workspace parent #7673 refuses, so the guard is
             // re-taken as the LAST thing before the write.
+            // #7764 review: `create_dir_all` above runs first, so a refusal here
+            // can leave an empty directory behind. Accepted, not cleaned up: the
+            // only directory this call creates is one that did not exist a
+            // moment earlier, whose own scan was `Clear` by construction
+            // (`scan_for_child_repo` treats a missing root as nothing to find),
+            // so the recheck can refuse it only if another process creates a
+            // repository inside it inside this window — and removing the
+            // directory would then race that same process for its parent.
             if let Some(dir) = seed_dir(path)
                 && let Err(refusal) =
                     crate::core::claude_md_seed_git::recheck_before_seed(dir, home)

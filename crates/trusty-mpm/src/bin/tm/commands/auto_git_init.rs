@@ -182,25 +182,51 @@ pub(crate) fn initialized_message(dir: &Path) -> String {
 /// the directory and the specific reason it is not a project. #7749: the two
 /// scan arms carry what the scan learned — the child repository, or what
 /// stopped the walk — so the operator can act on it rather than re-deriving it.
+/// #7749 review: they also carry their OWN remedy. "Run tm from a project
+/// directory" is right for `$HOME` and `/`, and wrong for a scan arm — tm was
+/// run from a directory the operator considers a project, and
+/// [`trusty_mpm::core::child_repo_scan::WORKSPACE_SCAN_BUDGET`] is 256
+/// directories, so a sizeable plain directory hits
+/// [`AutoInitRefusal::ScanIncomplete`] routinely. Both scan arms give the
+/// remedy `SeedRefusal::ScanIncomplete` gives.
 /// Test: `refusal_message_names_the_home_directory`,
 /// `refusal_message_names_the_filesystem_root`,
 /// `refusal_message_names_the_child_repository`,
 /// `refusal_message_says_what_stopped_the_scan`.
 pub(crate) fn refusal_message(refusal: &AutoInitRefusal, dir: &Path) -> String {
-    let reason = match refusal {
-        AutoInitRefusal::HomeDirectory => "that is your home directory, not a project".to_string(),
-        AutoInitRefusal::FilesystemRoot => "that is the filesystem root, not a project".to_string(),
-        AutoInitRefusal::WorkspaceParent(child) => format!(
-            "{} is a git repository beneath it, so a .git here would become an ancestor \
-             repository for that project and every other one under this directory",
-            child.display()
+    // #7749: a directory tm cannot rule out is still one the operator can
+    // settle themselves, so the scan arms point at `git init` here first and
+    // at the actual project directory second.
+    let scan_remedy = format!(
+        "If {dir} is a single project, run `git init` there yourself and retry; otherwise run \
+         tm from the actual project directory.",
+        dir = dir.display()
+    );
+    const SITE_REMEDY: &str = "Run tm from a project directory.";
+    let (reason, remedy) = match refusal {
+        AutoInitRefusal::HomeDirectory => (
+            "that is your home directory, not a project".to_string(),
+            SITE_REMEDY.to_string(),
         ),
-        AutoInitRefusal::ScanIncomplete(stop) => {
-            format!("tm could not rule out git repositories beneath it ({stop})")
-        }
+        AutoInitRefusal::FilesystemRoot => (
+            "that is the filesystem root, not a project".to_string(),
+            SITE_REMEDY.to_string(),
+        ),
+        AutoInitRefusal::WorkspaceParent(child) => (
+            format!(
+                "{} is a git repository beneath it, so a .git here would become an ancestor \
+                 repository for that project and every other one under this directory",
+                child.display()
+            ),
+            scan_remedy,
+        ),
+        AutoInitRefusal::ScanIncomplete(stop) => (
+            format!("tm could not rule out git repositories beneath it ({stop})"),
+            scan_remedy,
+        ),
     };
     format!(
-        "tm: not initializing git in {} — {reason}. Run tm from a project directory.",
+        "tm: not initializing git in {} — {reason}. {remedy}",
         dir.display()
     )
 }

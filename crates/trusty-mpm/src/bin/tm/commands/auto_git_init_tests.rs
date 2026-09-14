@@ -243,10 +243,20 @@ fn refusal_message_names_the_child_repository() {
     );
     assert!(msg.contains("/Users/someone/ws/api"), "{msg}");
     assert!(msg.contains("ancestor"), "{msg}");
+    // #7749 review: the scan arms carry the seed guard's remedy, not the
+    // site-guard trailer.
+    assert!(
+        msg.contains("run `git init` there yourself and retry"),
+        "{msg}"
+    );
+    assert!(!msg.contains("Run tm from a project directory."), "{msg}");
 }
 
 /// #7749: an unfinished scan says what stopped it, which is the only thing the
-/// operator can act on.
+/// operator can act on. #7749 review: and what to do about it — this arm fires
+/// for any plain directory wider than the 256-directory scan budget, where the
+/// old shared trailer ("Run tm from a project directory.") told an operator
+/// already standing in their project to go stand in it.
 #[test]
 fn refusal_message_says_what_stopped_the_scan() {
     let msg = refusal_message(
@@ -255,6 +265,28 @@ fn refusal_message_says_what_stopped_the_scan() {
     );
     assert!(msg.contains("could not rule out git repositories"), "{msg}");
     assert!(msg.contains("the scan stopped after checking"), "{msg}");
+    assert!(
+        msg.contains(
+            "If /Users/someone/ws is a single project, run `git init` there yourself and \
+             retry; otherwise run tm from the actual project directory."
+        ),
+        "{msg}"
+    );
+    assert!(!msg.contains("Run tm from a project directory."), "{msg}");
+}
+
+/// #7749 review: the site guards keep the trailer that is right for them —
+/// nobody wants `git init` in `$HOME` or at `/`.
+#[test]
+fn refusal_message_keeps_the_site_trailer_for_home_and_root() {
+    for (refusal, dir) in [
+        (AutoInitRefusal::HomeDirectory, "/Users/someone"),
+        (AutoInitRefusal::FilesystemRoot, "/"),
+    ] {
+        let msg = refusal_message(&refusal, Path::new(dir));
+        assert!(msg.ends_with("Run tm from a project directory."), "{msg}");
+        assert!(!msg.contains("git init"), "{msg}");
+    }
 }
 
 /// The prerequisite error names `git` — this feature never installs the binary.
@@ -467,6 +499,56 @@ impl Drop for RestoreMode {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
     }
+}
+
+// ── What `tm launch` does after a refusal ────────────────────────────────────
+
+/// #7749 review: the route `tm launch` takes once this guard refuses, pinned
+/// as observed rather than assumed.
+///
+/// A plain directory with more than `WORKSPACE_SCAN_BUDGET` subdirectories
+/// refuses at `launch.rs:128` and nothing is initialized. The launch does NOT
+/// stop there: `git config --get remote.origin.url` outside a repository exits
+/// 1, which `get_origin_url` maps to `Ok(None)`, which `plan_for_origin` maps
+/// to `OriginPlan::LiveCheckout` — so `launch` calls `connect` on a directory
+/// that has no repository. `connect` performs no git check of its own, so the
+/// refusal printed here is the operator's only explanation of why no managed
+/// clone was made, which is why it now names the remedy.
+#[test]
+fn launch_route_after_a_scan_refusal_falls_through_to_the_live_checkout() {
+    use crate::commands::origin_plan::{OriginPlan, plan_for_origin};
+    use trusty_mpm::core::child_repo_scan::WORKSPACE_SCAN_BUDGET;
+
+    let tmp = hermetic_temp_dir();
+    let ws = tmp.path().join("wide-workspace");
+    std::fs::create_dir(&ws).unwrap();
+    for i in 0..=WORKSPACE_SCAN_BUDGET {
+        std::fs::create_dir(ws.join(format!("d{i}"))).unwrap();
+    }
+
+    // Step 1 — `launch.rs:128`: the downward scan cannot finish, so the guard
+    // refuses and writes nothing.
+    let outcome = ensure_git_repo_with(&ws, Some(tmp.path()), "git").unwrap();
+    assert_eq!(
+        outcome,
+        AutoInitOutcome::Refused(AutoInitRefusal::ScanIncomplete(
+            ScanIncomplete::BudgetExhausted
+        ))
+    );
+    assert!(!ws.join(".git").exists(), "nothing may be initialized");
+
+    // Step 2 — `launch.rs` reads the origin of a directory with no repository.
+    // This is `Ok(None)`, not an error: git-config exits 1 for a key it cannot
+    // find, and outside a repository there is no key.
+    let origin =
+        trusty_mpm::daemon::managed_routes::inproject::get_origin_url(&ws).unwrap_or_else(|e| {
+            panic!("git config outside a repository must not be an error, got: {e}")
+        });
+    assert_eq!(origin, None);
+
+    // Step 3 — that is the live-checkout plan, so the launch continues into
+    // `connect` against the un-initialized directory instead of stopping.
+    assert_eq!(plan_for_origin(origin.as_deref()), OriginPlan::LiveCheckout);
 }
 
 /// A path that is not a directory is the caller's error to report; this call
