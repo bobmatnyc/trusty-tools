@@ -105,7 +105,7 @@ pub fn repair_session_scope_with_trust(
     if let Some(step) = plugin_step(project_dir, config_dir, mode, trusted) {
         steps.push(step);
     }
-    if let Some(step) = mcp_path.and_then(|path| mcp_step(path, project_dir, config_dir, mode)) {
+    if let Some(step) = mcp_path.and_then(|path| mcp_step(path, config_dir, mode)) {
         steps.push(step);
     }
     steps
@@ -205,7 +205,7 @@ fn verify_plugin_write(project_dir: &Path, config_dir: &Path, trusted: bool) -> 
 ///
 /// Why: unlike `enabledPlugins`, this file is NOT a settings file and is not
 /// read from the repository: it is handed to Claude Code as
-/// `--strict-mcp-config --mcp-config <path>` at spawn and rewritten on every
+/// `--mcp-config <path>` at spawn and rewritten on every
 /// launch. Repairing it therefore changes nothing for a session already running
 /// — it makes the next launch correct, and it makes `--fix` honest about having
 /// re-applied both halves of the scope rather than one.
@@ -215,13 +215,11 @@ fn verify_plugin_write(project_dir: &Path, config_dir: &Path, trusted: bool) -> 
 /// writer, permissions included, that the spawn path calls.
 /// Test: `session_scope_repair_provisions_an_absent_mcp_file`,
 /// `session_scope_repair_leaves_a_current_mcp_file_alone`.
-fn mcp_step(
-    path: &Path,
-    project_dir: &Path,
-    config_dir: &Path,
-    mode: RepairMode,
-) -> Option<RepairStep> {
-    let want = match crate::core::session_mcp_scope::composed_body(project_dir, config_dir) {
+fn mcp_step(path: &Path, config_dir: &Path, mode: RepairMode) -> Option<RepairStep> {
+    // #7892: the composed body no longer varies by project, so the repair does
+    // not take one — a project directory here would only imply a dependency
+    // that no longer exists.
+    let want = match crate::core::session_mcp_scope::composed_body(config_dir) {
         Ok(body) => body,
         Err(err) => {
             return Some(RepairStep {
@@ -243,19 +241,17 @@ fn mcp_step(
          would compose)"
             .to_string()
     } else {
-        "write the session-scoped MCP config (absent — this project has not launched since \
-         default-deny scoping landed)"
+        "write the session MCP config (absent — this project has not launched since \
+         tm began composing one)"
             .to_string()
     };
 
     let status = match mode {
         RepairMode::DryRun => StepStatus::Planned,
-        RepairMode::Apply => {
-            match crate::core::session_mcp_scope::provision_at(path, project_dir, config_dir) {
-                Ok(_) => StepStatus::Applied { backup: None },
-                Err(err) => StepStatus::Failed(err.to_string()),
-            }
-        }
+        RepairMode::Apply => match crate::core::session_mcp_scope::provision_at(path, config_dir) {
+            Ok(_) => StepStatus::Applied { backup: None },
+            Err(err) => StepStatus::Failed(err.to_string()),
+        },
     };
 
     Some(RepairStep {

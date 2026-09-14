@@ -393,10 +393,11 @@ pub(super) fn write_output_style(
 /// otherwise, and merges that map into the existing `enabledPlugins` object.
 /// The opt-in list reaches this function through
 /// [`crate::core::session_mcp_scope::granted_plugins`], so an UNTRUSTED project
-/// grants nothing and every enumerated key is written `false` — the same gate
-/// [`crate::core::session_mcp_scope::resolve_scope_with_trust`] applies to the
-/// server half of that `[session]` table, for the same reason: the file ships
-/// with the clone.
+/// grants nothing and every enumerated key is written `false`. Since #7892 the
+/// plugin half of `[session]` is the ONLY half trust gates: the server half
+/// follows Claude Code's own scoping, and `[session] mcp_servers` is parsed and
+/// ignored. Plugins keep the gate because Claude Code has no per-project plugin
+/// approval to defer to, and the file ships with the clone.
 /// tm owns ONLY the keys it enumerated: a key for a plugin tm cannot see is the
 /// operator's and is carried through untouched, the same merge discipline
 /// [`write_output_style`]'s `attribution` seed and
@@ -432,9 +433,8 @@ pub(crate) fn write_enabled_plugins(
 /// Why: the trust bit lives under the operator's `$HOME`, so `tm doctor --fix`
 /// could not be tested end-to-end against a TRUSTED project without redirecting
 /// it. Splitting the lookup from the write mirrors
-/// [`crate::core::session_mcp_scope::resolve_scope_with_trust`] and
 /// [`crate::core::session_mcp_scope::granted_plugins_with_trust`], which already
-/// do exactly this for the server half of the same `[session]` table.
+/// does exactly this for the same `[session] plugins` list.
 /// What: see [`write_enabled_plugins`]. Writes nothing when `config_dir` is
 /// `None`, when the managed config dir knows about no plugins, or when the
 /// merged object already equals what is on disk — so a `--fix` against an

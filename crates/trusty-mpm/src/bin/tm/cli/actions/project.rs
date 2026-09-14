@@ -25,14 +25,18 @@ pub(crate) enum ProjectAction {
         #[arg(long)]
         dir: Option<String>,
     },
-    /// Grant (or revoke) consent for a project's `[mcp.custom]` manifest
-    /// entries to be bridged into fleet sessions (issue #3033 security fix).
+    /// Grant (or revoke) consent for a project's `[session] plugins` opt-ins.
     ///
-    /// A project-scope `[mcp.custom]` entry ships with the cloned repo
-    /// itself, so `session_launch::custom_mcp` refuses to honor it until the
+    /// A `[session] plugins` list ships with the cloned repo itself, and a
+    /// Claude Code plugin brings its own skills, commands and hooks into every
+    /// session in the project, so tm refuses to honor the list until the
     /// operator explicitly runs this command. Trust is recorded in USER-scope
     /// state under `~/.trusty-tools/trusty-mpm/project-trust.json` — never
     /// inside the repo — so a cloned repo can never self-trust.
+    ///
+    /// #7892: this no longer affects MCP servers. A user-scope server loads in
+    /// every session with no grant, and a project's `.mcp.json` follows Claude
+    /// Code's own approval.
     ///
     /// IMPORTANT: trust is PER-DIRECTORY (a canonicalized path), not
     /// per-repo-content. Replacing what's checked out at an already-trusted

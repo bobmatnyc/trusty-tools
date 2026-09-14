@@ -246,7 +246,7 @@ fn session_scope_repair_provisions_an_absent_mcp_file() {
     assert_eq!(steps[0].status, StepStatus::Applied { backup: None });
     assert_eq!(
         std::fs::read_to_string(&mcp).unwrap(),
-        crate::core::session_mcp_scope::composed_body(&project, &config).unwrap(),
+        crate::core::session_mcp_scope::composed_body(&config).unwrap(),
         "the repair writes exactly what a launch composes"
     );
 }
@@ -257,7 +257,7 @@ fn session_scope_repair_leaves_a_current_mcp_file_alone() {
     let project = managed_project(tmp.path(), "repo");
     let config = managed_config(tmp.path(), &[]);
     let mcp = tmp.path().join("state").join("session-mcp").join("k.json");
-    crate::core::session_mcp_scope::provision_at(&mcp, &project, &config).unwrap();
+    crate::core::session_mcp_scope::provision_at(&mcp, &config).unwrap();
     let before = std::fs::metadata(&mcp).unwrap().modified().unwrap();
 
     let steps = repair_session_scope_with_trust(
@@ -273,20 +273,5 @@ fn session_scope_repair_leaves_a_current_mcp_file_alone() {
         std::fs::metadata(&mcp).unwrap().modified().unwrap(),
         before,
         "a current composed file must not be rewritten"
-    );
-}
-
-#[test]
-fn composed_body_matches_the_provisioned_file() {
-    let tmp = TempDir::new().unwrap();
-    let project = managed_project(tmp.path(), "repo");
-    let config = managed_config(tmp.path(), &[]);
-    let mcp = tmp.path().join("session-mcp").join("k.json");
-
-    crate::core::session_mcp_scope::provision_at(&mcp, &project, &config).unwrap();
-
-    assert_eq!(
-        std::fs::read_to_string(&mcp).unwrap(),
-        crate::core::session_mcp_scope::composed_body(&project, &config).unwrap()
     );
 }

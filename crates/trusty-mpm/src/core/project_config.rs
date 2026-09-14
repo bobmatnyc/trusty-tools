@@ -220,17 +220,15 @@ pub struct ProjectLevelConfig {
 
 /// The `[session]` table: this project's MCP-server and plugin allowlists.
 ///
-/// Why: two independent allowlists that answer the same question ("what may a
-/// session in this repository load?") share one table so an operator reads them
-/// together. Both are ALLOWLISTS, never deny-lists: an absent key denies.
-/// What: `mcp_servers` names entries of the tm-managed `.claude.json`
-/// `mcpServers` map — the trusty-* builtins and this project's own `.mcp.json`
-/// load unconditionally and need no entry. `plugins` names Claude Code plugins,
-/// either as the full `<plugin>@<marketplace>` key or the bare `<plugin>` half.
+/// Why: `plugins` is an ALLOWLIST, never a deny-list: an absent key denies, and
+/// the list takes effect only once `tm project trust <path>` has recorded a
+/// grant for the directory. `mcp_servers` was its MCP counterpart until #7892
+/// retired it — see that field's own doc.
+/// What: `plugins` names Claude Code plugins, either as the full
+/// `<plugin>@<marketplace>` key or the bare `<plugin>` half.
 ///
 /// ```toml
 /// [session]
-/// mcp_servers = ["slack-mcp", "gworkspace-mcp"]
 /// plugins = ["aws-core"]
 /// ```
 /// Test: `project_config_parses_session_scope`,
@@ -240,13 +238,14 @@ pub struct ProjectLevelConfig {
 // allow, which reads as a tm bug rather than a typo. Fail loudly instead.
 #[serde(deny_unknown_fields)]
 pub struct SessionScopeConfig {
-    /// Shared-map MCP server names this project's sessions may load.
+    /// RETIRED by #7892; parsed so an existing file still loads, never read.
     ///
-    /// Why: see [`ProjectLevelConfig::session`]. Naming a server that the
-    /// managed `.claude.json` does not declare is a no-op, not an error — the
-    /// allowlist grants access to a declaration, it does not create one.
-    /// What: `None` or an empty list → only the trusty-* builtins and this
-    /// project's own `.mcp.json` load.
+    /// Why: this was the `[session]` half that opted a user-scope MCP server
+    /// into one project. Under the Claude Code standard every user-scope server
+    /// loads in every session with no opt-in, so the key grants nothing. It
+    /// stays in the schema because the table is `deny_unknown_fields`: removing
+    /// it would turn an existing `.trusty-mpm.toml` into a parse error.
+    /// What: accepted and ignored. Delete it from your config when convenient.
     /// Test: `project_config_parses_session_scope`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_servers: Option<Vec<String>>,

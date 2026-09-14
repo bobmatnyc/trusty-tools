@@ -1,26 +1,28 @@
-//! Local per-project trust store gating project-scope custom MCP bridging.
+//! Local per-project trust store gating a project's `[session] plugins` list.
 //!
-//! Why (issue #3033 security review, `session_launch::custom_mcp`): a
-//! project-scope `[mcp.custom]` manifest entry ships WITH the cloned repo
-//! itself, unlike a user-scope `tm mcp add` registry entry, which the
-//! operator personally typed into their OWN machine. Without an explicit
-//! consent step, a malicious or compromised repo could smuggle a live MCP
-//! server declaration (arbitrary stdio command execution, or a remote
-//! endpoint impersonating `trusty-memory`/`trusty-search`) into every fleet
-//! session launched against it, the very first time anyone runs `tm session
-//! start` against that clone. This store is the durable, per-project,
-//! USER-scope (never repo-scope) trust decision that gates that: it lives
-//! under `~/.trusty-tools/trusty-mpm/`, the same tm-owned root
+//! Why (issue #3033 security review; narrowed to plugins by #7892): a
+//! `[session] plugins` list ships WITH the cloned repo itself, unlike a
+//! user-scope registration the operator personally typed into their OWN
+//! machine. A Claude Code plugin brings its own skills, slash commands and
+//! hooks into every session in the project, and tm's panes run
+//! `--dangerously-skip-permissions`, so without an explicit consent step a
+//! hostile clone could turn an operator-installed plugin's whole catalog on the
+//! first time anyone runs `tm session start` against it. This store is the
+//! durable, per-project, USER-scope (never repo-scope) decision that gates
+//! that: it lives under `~/.trusty-tools/trusty-mpm/`, the same tm-owned root
 //! [`crate::core::trusty_tools_config::managed_claude_config_dir`] nests
 //! `claude-config/` under — never inside any project working directory — so a
 //! cloned repo cannot flip its own trust bit no matter what it contains.
-//! `session_launch::custom_mcp::inject_custom_trusty_mcps` calls
-//! [`is_project_trusted`] before honoring ANY project-scope `[mcp.custom]`
-//! entry for a given project path; the `tm project trust` /
-//! `tm project trust --revoke` CLI verbs (`bin/tm/commands/project.rs`) are
-//! the only way to flip it. User-scope registry entries (`tm mcp add`) are
-//! NOT gated by this store — the operator already consented to those by
-//! registering them locally.
+//! [`crate::core::session_mcp_scope::granted_plugins`] is the one live reader;
+//! the `tm project trust` / `tm project trust --revoke` CLI verbs
+//! (`bin/tm/commands/project.rs`) are the only way to flip it.
+//!
+//! #7892 REMOVED THE MCP HALF. Under the Claude Code standard every user-scope
+//! server in the protected `.claude.json` loads in every session with no grant,
+//! and a project's own `.mcp.json` follows Claude Code's native approval
+//! (`enableAllProjectMcpServers` / `enabledMcpjsonServers`, or its prompt), so
+//! this store has nothing to say about MCP servers. Claude Code has no
+//! equivalent per-project plugin approval, which is why the plugin half stays.
 //!
 //! What: [`ProjectTrustStore`] persists a set of trusted, canonicalized
 //! project paths to `<root>/project-trust.json`. [`ProjectTrustStore::load`]/
@@ -34,10 +36,9 @@
 //! trailing slash or a symlinked ancestor; a path that cannot be canonicalized
 //! (e.g. it no longer exists) falls back to the path as given rather than
 //! failing the operation. [`is_project_trusted`] is the convenience, non-fatal
-//! entry point `session_launch::custom_mcp` calls: it resolves the production
-//! store root and treats ANY error (unreadable home dir, malformed JSON, I/O
-//! failure) as "not trusted" — fail-closed, matching this store's whole
-//! purpose.
+//! entry point the launch path calls: it resolves the production store root and
+//! treats ANY error (unreadable home dir, malformed JSON, I/O failure) as "not
+//! trusted" — fail-closed, matching this store's whole purpose.
 //! Test: `trust_store_new_is_empty`, `trust_inserts_new_entry`,
 //! `trust_is_idempotent`, `revoke_removes_trust`,
 //! `revoke_unknown_path_is_noop`, `is_trusted_after_trust_and_revoke`,
@@ -48,7 +49,7 @@
 //! finding 2 — read this before relying on a trust decision).** [`normalize`]
 //! canonicalizes and stores a filesystem PATH — it records nothing about what
 //! is checked out there (no commit hash, no remote URL, no content digest).
-//! Once a directory is trusted, EVERY future `[mcp.custom]` read from that
+//! Once a directory is trusted, EVERY future `[session] plugins` read from that
 //! same canonical path is honored, no matter what later replaces the
 //! directory's contents: `rm -rf` + `git clone <different-repo>` into the same
 //! path, `git checkout` to an attacker-controlled branch, or any other content
@@ -241,7 +242,7 @@ pub fn trust_store_root() -> Option<PathBuf> {
 
 /// Non-fatal, fail-closed convenience check: is `project_path` trusted?
 ///
-/// Why: `session_launch::custom_mcp` must never let a store read failure
+/// Why: the launch path must never let a store read failure
 /// (missing home dir, malformed JSON, permissions) silently fall through to
 /// "trusted" — the entire point of this module is a fail-closed gate, so
 /// every error path here returns `false`.

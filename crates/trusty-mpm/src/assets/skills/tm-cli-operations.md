@@ -45,19 +45,30 @@ This map is **user scope**. There is deliberately **no `--scope` flag**:
 `tm mcp` is inherently user scope. (Stock `claude mcp add` cannot target this
 relocated dir, which is why `tm mcp` exists.)
 
-🔴 **Since #7422, user scope is DECLARED but not LOADED.** A session loads the
-trusty-* builtins, the project's own `.mcp.json`, and only the user-scope
-servers that project's `.trusty-mpm.toml` names:
+🔴 **Since #7892, user scope is standard Claude Code user scope.** Every server
+in that map loads in EVERY tm session, in every project, with no grant — no
+`tm project trust`, no `tm mcp share`, no `[session] mcp_servers` entry. tm adds
+its four trusty-* builtins on top through the session file it passes with
+`--mcp-config`; it does not pass `--strict-mcp-config`, which is what used to
+suppress the user scope. A server added with `claude mcp add --scope user` under
+that `CLAUDE_CONFIG_DIR` appears in the next tm session with no further step.
+
+A project's own `.mcp.json` follows **Claude Code's** approval, not tm's:
+`enableAllProjectMcpServers` / `enabledMcpjsonServers` in settings, or the
+prompt. A non-interactive pane cannot prompt, so there it connects unasked —
+the same posture as `claude -p`.
+
+`tm mcp list` lists all three sources, with each `.mcp.json` entry's approval
+state, and `tm doctor`'s `session_scope` check reports the same inventory.
+`[session] plugins` is the one thing still gated on `tm project trust`, because
+Claude Code has no per-project plugin approval:
 
 ```toml
 [session]
-mcp_servers = ["slack-mcp", "gworkspace-mcp"]
 plugins = ["aws-core"]
 ```
 
-`tm mcp list` marks each row `opted-in` or `scoped-out` for the current
-directory, and `tm doctor`'s `session_scope` check names what a project stopped
-loading. Full rules, failure arms and migration:
+Full rules and failure arms:
 [session-mcp-plugin-scope.md](../../../../../docs/reference/session-mcp-plugin-scope.md).
 
 **ANTI-PATTERN — do not hand-edit a project's `.mcp.json`.** When asked to
@@ -67,8 +78,8 @@ loading. Full rules, failure arms and migration:
 `.mcp.json` is **project scope**: visible only inside that one repo/worktree
 and invisible to every other project. When a server genuinely belongs to ONE
 repository, `tm mcp add <name> --project -- <command>` writes it there for you
-(#7422) — that is the supported project-scope path, and the declaration doubles
-as the permission because a session always loads its own `.mcp.json`.
+— that is the supported project-scope path. Whether the session connects it is
+Claude Code's approval decision, not tm's (#7892).
 
 **Where these servers actually reach (issue #2739, inverted by #4181):**
 
@@ -77,11 +88,10 @@ as the permission because a session always loads its own `.mcp.json`.
 - **Daemon-managed / fleet sessions** (`tm session new`) launch
   `claude --setting-sources user,project,local`, so they read that same
   user-scope map directly. Since ADR-0042 (#4181) nothing is injected into a
-  workspace `.mcp.json`, and there is no native-server allowlist. Since #7422 a
-  server you `tm mcp add` reaches a fleet session only in a project whose
-  `.trusty-mpm.toml` names it under `[session] mcp_servers`. Proof:
+  workspace `.mcp.json`, and there is no native-server allowlist. Since #7892 a
+  server you `tm mcp add` reaches EVERY fleet session, in every project. Proof:
   `prepare_session_reaches_an_operator_registered_server_through_user_scope`,
-  `resolve_scope_excludes_a_shared_only_server`.
+  `resolve_scope_never_filters_the_user_scope`.
 - **Project scope**: a project's own `<project>/.trusty-mpm/manifest.toml`
   `[mcp.custom.<name>]` table (the same per-project override file
   `[agents]`/`[skills]` already use) declares servers scoped to THAT project's
@@ -92,17 +102,16 @@ as the permission because a session always loads its own `.mcp.json`.
   reserved name (`trusty-memory`, `trusty-mpm`, `trusty-review`,
   `trusty-search`) declared here is always REJECTED — a project manifest can
   never override one (issue #3033).
-- **Consent gate (issue #3033):** because a project-scope `[mcp.custom]` entry
-  ships with the cloned repo itself, it is honored ONLY after the operator
-  explicitly runs `tm project trust [--dir <path>]` for that project — an
-  untrusted project's `[mcp.custom]` table is skipped entirely (a single
-  warning names the project and hints the trust command). Trust state lives in
-  USER-scope config (`~/.trusty-tools/trusty-mpm/project-trust.json`), never
-  inside the repo, so a cloned repo can never self-trust. Revoke with
+- **Consent gate (issue #3033, narrowed by #7892):** `tm project trust
+  [--dir <path>]` now grants exactly one thing — the project's
+  `[session] plugins` opt-ins. A plugin ships its own skills, commands and hooks
+  into every session in the project and Claude Code has no per-project approval
+  for one, so the list is ignored until the operator grants it. Trust state
+  lives in USER-scope config (`~/.trusty-tools/trusty-mpm/project-trust.json`),
+  never inside the repo, so a cloned repo can never self-trust. Revoke with
   `tm project trust --revoke [--dir <path>]`; `tm project list`/`tm project
-  info` show an `[mcp-trusted]` marker / trust line for the current state.
-  User-scope registry entries (`tm mcp add`) are unaffected — you already
-  consented to those by registering them locally.
+  info` show a `[plugin-trusted]` marker / trust line. **It no longer gates MCP
+  servers**, and `tm mcp share` / `tm mcp unshare` are retired to notices.
 
 ### The 4 auto-provisioned framework built-ins
 

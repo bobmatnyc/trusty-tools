@@ -7,20 +7,21 @@
 //! What: [`compose_session_instructions`] and
 //! [`compose_session_instructions_with_roster`] (the one source of truth for
 //! the PM prompt a session receives, and the `last-instructions.md` stash), plus
-//! [`print_excluded_scope`], the stderr companion naming what default-deny
-//! scoping leaves out.
+//! [`print_excluded_scope`], the stderr companion naming the PLUGINS this
+//! project does not load. // #7892: MCP servers are no longer scoped out, so
+//! the server half of that companion is gone.
 //! Test: `compose_session_instructions_*` in `session_tests.rs`.
 
-/// Print, on stderr, what this project's sessions will not load (#7422).
+/// Print, on stderr, the plugins this project's sessions will not load.
 ///
 /// Why: `tm session instructions` is where an operator goes to see what a
-/// session actually receives, and since default-deny scoping that answer
-/// includes an absence — the shared MCP servers and installed plugins this
-/// project does not opt into. stderr, not stdout, because the prompt on stdout
-/// is piped into files and diffs.
-/// What: one line per excluded server and plugin, then the `[session]` keys
-/// that opt them back in. Silent when nothing is excluded, and silent when the
-/// managed config dir does not resolve (there is no shared map to scope).
+/// session actually receives, and for plugins that answer still includes an
+/// absence — an installed plugin this project does not opt into. stderr, not
+/// stdout, because the prompt on stdout is piped into files and diffs.
+/// What: one line per excluded plugin, then the `[session]` key that opts them
+/// back in. Silent when nothing is excluded, and silent when the managed config
+/// dir does not resolve. // #7892: no MCP line — every user-scope server loads
+/// in every session, and `.mcp.json` is Claude Code's to approve.
 /// Test: `session_scope::check_session_scope` covers the same derivation;
 /// `print_excluded_scope_is_silent_when_nothing_is_excluded`.
 pub(crate) fn print_excluded_scope(project_dir: &std::path::Path) {
@@ -28,26 +29,22 @@ pub(crate) fn print_excluded_scope(project_dir: &std::path::Path) {
     else {
         return;
     };
-    let scope = trusty_mpm::core::session_mcp_scope::resolve_scope(project_dir, &config_dir);
     // #7422: the granted list, not the declared one — an untrusted project's
     // `[session] plugins` entry grants nothing and must report as scoped out.
     let plugins = trusty_mpm::core::session_plugin_scope::excluded_plugins(
         &config_dir,
         &trusty_mpm::core::session_mcp_scope::granted_plugins(project_dir),
     );
-    if scope.excluded.is_empty() && plugins.is_empty() {
+    if plugins.is_empty() {
         return;
     }
     eprintln!();
-    eprintln!("scoped out for this project (#7422):");
-    for name in &scope.excluded {
-        eprintln!("  mcp server  {name}");
-    }
+    eprintln!("plugins scoped out for this project (#7422):");
     for name in &plugins {
         eprintln!("  plugin      {name}");
     }
     eprintln!(
-        "  opt in via [session] mcp_servers / plugins in {}",
+        "  opt in via [session] plugins in {}",
         trusty_mpm::core::project_config::PROJECT_CONFIG_FILE
     );
 }

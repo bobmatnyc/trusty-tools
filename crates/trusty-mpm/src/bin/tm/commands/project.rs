@@ -5,8 +5,9 @@
 //! What: `project` dispatcher, `scaffold_project_dir`, `resolve_dir`.
 //! `Trust`/`Trust { revoke: true }` are handled entirely LOCALLY (no daemon
 //! HTTP round-trip, unlike `Init`/`List`/`Info`) via
-//! `trusty_mpm::core::project_trust::ProjectTrustStore` — issue #3033's
-//! consent gate for project-scope custom MCP bridging.
+//! `trusty_mpm::core::project_trust::ProjectTrustStore` — the consent gate for
+//! a project's `[session] plugins` opt-ins. // #7892: it no longer gates MCP
+//! servers; those follow the Claude Code standard.
 //! Test: `cli_parses_project_*` in `tests.rs`, `project_init_scaffolds_dotdir`/
 //! `project_init_keeps_existing_config` in `tests_behavior_a.rs`,
 //! `project_trust_grants_and_revokes` in `tests_project_trust_tests.rs`.
@@ -35,7 +36,7 @@ pub(crate) fn resolve_dir(dir: Option<String>) -> anyhow::Result<std::path::Path
 /// What: `Init` registers the directory (`POST /projects`) and scaffolds a
 /// local `.trusty-mpm/`; `List` prints the persistent registry
 /// (`GET /api/v1/projects`, see [`list_rows`] for why not `GET /projects`)
-/// with an `[mcp-trusted]` marker per project; `Info` prints the current
+/// with an `[plugin-trusted]` marker per project; `Info` prints the current
 /// directory's project via `GET /projects/current` plus its trust status;
 /// `Trust` is handled entirely locally by [`trust_cmd`] (no daemon round-trip — see its
 /// own doc). Trust status in `List`/`Info` is read from the SAME local
@@ -88,9 +89,10 @@ pub(crate) async fn project(
                 let body: serde_json::Value = resp.error_for_status()?.json().await?;
                 println!("{}", serde_json::to_string_pretty(&body)?);
             }
+            // #7892: the grant covers `[session] plugins` only.
             let trusted = trusty_mpm::core::project_trust::is_project_trusted(&path);
             println!(
-                "project-scope custom MCP trust: {}",
+                "project plugin-opt-in trust: {}",
                 if trusted { "trusted" } else { "untrusted" }
             );
         }
@@ -111,7 +113,7 @@ pub(crate) async fn project(
 /// registry, and it is the same store the MCP tool reads — so this reads there.
 /// What: `GET /api/v1/projects` via [`trusty_mpm::client::DaemonClient::registry_list_projects`],
 /// rendered by the SAME [`crate::commands::projects::registry::render_project_line`]
-/// `tm projects list` uses, plus the `[mcp-trusted]` marker this verb has always
+/// `tm projects list` uses, plus the `[plugin-trusted]` marker this verb has always
 /// carried. Trust is keyed on a local PATH and the registry record holds none,
 /// so the local alias store (`~/.trusty-mpm/project-paths.json`) supplies it;
 /// a project with no local alias simply gets no marker. Returns the rows
@@ -138,8 +140,11 @@ pub(crate) async fn list_rows(client: &reqwest::Client, url: &str) -> anyhow::Re
 }
 
 /// One `tm project list` row: the shared registry line plus the trust marker.
+///
+/// // #7892: the marker names the plugin grant, the only thing trust still
+/// gates.
 pub(crate) fn project_list_row(p: &trusty_mpm::project::Project, trusted: bool) -> String {
-    let marker = if trusted { " [mcp-trusted]" } else { "" };
+    let marker = if trusted { " [plugin-trusted]" } else { "" };
     format!(
         "{}{marker}",
         crate::commands::projects::registry::render_project_line(p)
@@ -163,8 +168,8 @@ fn local_project_paths() -> std::collections::HashMap<String, std::path::PathBuf
 /// `project trust` / `project trust --revoke` handler (issue #3033).
 ///
 /// Why: entirely LOCAL and synchronous — unlike the other `project` actions,
-/// this must work without a running daemon (mirrors how
-/// `session_launch::custom_mcp` itself reads/writes plain files, never HTTP).
+/// this must work without a running daemon, because the launch path that reads
+/// the grant reads plain files and never HTTP.
 /// What: resolves the target directory (defaults to cwd, same as every other
 /// `project` action), loads the trust store from
 /// [`trusty_mpm::core::project_trust::trust_store_root`], and calls `trust`/
@@ -205,9 +210,11 @@ pub(crate) fn trust_cmd_in(
         }
     } else if store.trust(&path) {
         store.save()?;
+        // #7892: say what the grant actually covers now.
         println!(
-            "trusted {} — its [mcp.custom] manifest entries will now be bridged into fleet \
-             sessions",
+            "trusted {} — its [session] plugins opt-ins now apply. MCP servers are not \
+             gated by this: a user-scope server loads in every session, and this \
+             project's .mcp.json follows Claude Code's own approval.",
             path.display()
         );
     } else {

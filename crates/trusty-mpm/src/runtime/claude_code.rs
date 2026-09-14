@@ -377,11 +377,13 @@ fn spawn_command(
         // #4451: the relocated spawn must load the `user` tier — that is where
         // `CLAUDE_CONFIG_DIR/agents` (the bundled roster) lives.
         crate::core::model_inject::setting_sources_flag(config_dir),
-        // #7422: default-deny MCP scoping, rendered from the same spawn posture
-        // as the flag above so the two can never drift. `spawn` wrote the file
-        // before this builder ran; an empty string here means the spawn does not
-        // relocate its config dir and reads the operator's own `~/.claude.json`.
-        crate::core::session_mcp_scope::strict_mcp_flag_string(
+        // #7892: the ADDITIVE `--mcp-config`, rendered from the same spawn
+        // posture as the flag above so the two can never drift. No
+        // `--strict-mcp-config`: the operator's user-scope servers load beside
+        // tm's builtins. `spawn` wrote the file before this builder ran; an
+        // empty string here means the spawn does not relocate its config dir
+        // and reads the operator's own `~/.claude.json`.
+        crate::core::session_mcp_scope::mcp_config_flag_string(
             crate::core::session_mcp_scope::scoped_for(cwd, config_dir).as_deref(),
         ),
         crate::core::model_inject::PERMISSION_MODE_FLAG,
@@ -469,8 +471,8 @@ fn resume_command(
         prompt_file_flag(prompt_file),
         // #4451: same relocated-tier contract as `spawn_command`.
         crate::core::model_inject::setting_sources_flag(config_dir),
-        // #7422: same default-deny MCP scoping as `spawn_command`.
-        crate::core::session_mcp_scope::strict_mcp_flag_string(
+        // #7892: same additive `--mcp-config` as `spawn_command`.
+        crate::core::session_mcp_scope::mcp_config_flag_string(
             crate::core::session_mcp_scope::scoped_for(cwd, config_dir).as_deref(),
         ),
         crate::core::model_inject::PERMISSION_MODE_FLAG,
@@ -893,10 +895,11 @@ fn compose_inplace_args(
             .chain(crate::core::model_inject::PERMISSION_MODE_FLAG.split_whitespace())
             .map(str::to_owned),
     );
-    // #7422: default-deny MCP scoping. Unquoted tokens — this path `exec`s with
-    // no shell in between, so a quoted path would name a file claude cannot
-    // open, exactly as for `--append-system-prompt-file` above.
-    args.extend(crate::core::session_mcp_scope::strict_mcp_argv(
+    // #7892: the additive `--mcp-config`, no `--strict-mcp-config`. Unquoted
+    // tokens — this path `exec`s with no shell in between, so a quoted path
+    // would name a file claude cannot open, exactly as for
+    // `--append-system-prompt-file` above.
+    args.extend(crate::core::session_mcp_scope::mcp_config_argv(
         crate::core::session_mcp_scope::scoped_for(cwd, config_dir).as_deref(),
     ));
 
