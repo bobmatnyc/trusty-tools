@@ -17,7 +17,10 @@
 //   discard the page's layers without terminating its process (#7112). After
 //   three consecutive attempts fail to put a live page on screen, the web view
 //   itself is torn down and rebuilt, because a reload cannot leave the frozen
-//   WebContent process a fresh one replaces (#7606).
+//   WebContent process a fresh one replaces (#7606). While the saver's own
+//   window is occluded the load deadline WAITS instead of expiring, because
+//   WebKit throttles a backgrounded web view and the deadline would otherwise
+//   measure that throttling rather than the console (#7846).
 // Test: `LoadHarness.swift` in this directory resolves the principal class,
 //   instantiates the view outside the screen-saver host and asserts `didFinish`
 //   fires; `PaintHarness.swift` reads the rendered bitmap in the offline,
@@ -29,8 +32,12 @@
 //   hidden from its first answer under an unoccluded window is reloaded too —
 //   without either reloading a healthy page (#7112), and in the `recreate` and
 //   `one-failure` states asserts three consecutive failed loads replace the web
-//   view instance while one does not (#7606). The in-host run is manual — see
-//   README.md, "Manual verification".
+//   view instance while one does not (#7606), and in the `occluded`,
+//   `occluded-failing` and `visibility-unknown` states asserts an occluded
+//   window neither fails a load nor feeds the rebuild count, that a window
+//   coming back restarts the deadline, and that an unknown answer falls back to
+//   the ordinary deadline (#7846). The in-host run is manual — see README.md,
+//   "Manual verification".
 //
 // Two constraints below are load-tested spike findings, not preference:
 //   * the class is `public` and carries NO `@objc(Name)` rename, so the runtime
@@ -204,6 +211,22 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
     /// nothing about spawning WebContent processes at the 60 s floor would make
     /// it answer.
     private static let slowRecreateCooldown: TimeInterval = 600
+    /// #7846: how long an occluded view waits before re-asking about its window
+    /// and, if the attempt it was waiting on has ended, trying again.
+    ///
+    /// A minute rather than [`fastRetryInterval`]'s eight seconds, because a
+    /// screen nobody can see earns no urgency: the occlusion notification is
+    /// what makes a returning window immediate, and this is only the backstop
+    /// for a notification that never arrives. The owner's six-hour log is what
+    /// the eight-second cadence costs when every attempt is throttled.
+    private static let occludedRetryInterval: TimeInterval = 60
+    /// #7846: how many consecutive re-asks may answer UNKNOWN before the view
+    /// stops waiting and judges the load on the ordinary deadline. Waiting on an
+    /// answer nobody gave is a fail-open, and a fail-open with no bound is a
+    /// saver that waits silently forever; three re-asks at the fast retry
+    /// cadence is under half a minute of patience for a view that has not yet
+    /// been put in a window.
+    private static let maxUnknownVisibilityProbes = 3
 
     private var webView: WKWebView?
     private var retryTimer: Timer?
@@ -258,6 +281,18 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
     private var consecutiveLoadFailures = 0
     /// #7606: when the web view was last rebuilt, for the recreate cooldown.
     private var lastRecreateAt: Date?
+    /// #7846: whether this view is waiting for a window to be on screen rather
+    /// than judging a load. Spans attempts, because the thing being waited on is
+    /// the window and not any one attempt, and it is what entitles the attempt
+    /// in flight to a fresh full deadline when the window comes back.
+    private var waitingForWindow = false
+    /// #7846: when the current run of waiting began, so the log says how long
+    /// the view has been waiting rather than only that it is.
+    private var waitingForWindowSince: Date?
+    /// #7846: consecutive re-asks answered UNKNOWN, for
+    /// [`maxUnknownVisibilityProbes`]. Latches at the bound, so the fall-back
+    /// stays fallen back; cleared by any answer either way.
+    private var unknownVisibilityProbes = 0
     private var state: DisplayState
     private let config = SaverConfig.current()
     /// #6839: the bundled render of the dashboard, drawn whenever the live page
@@ -478,6 +513,10 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
         expectingCancellation = false
         consecutiveLoadFailures = 0
         lastRecreateAt = nil
+        // #7846: nothing is waiting for a window any more either.
+        waitingForWindow = false
+        waitingForWindowSince = nil
+        unknownVisibilityProbes = 0
         if let occlusionObserver {
             NotificationCenter.default.removeObserver(occlusionObserver)
             self.occlusionObserver = nil
@@ -565,22 +604,159 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
     ///   `timeoutInterval`, and #6838 is precisely the case where nothing came
     ///   back at all. This view owns when it stops waiting.
     /// What: one-shot timer; if the load has not reached `.live` by then, the
-    ///   view enters the offline state and the retry backoff takes over.
+    ///   view enters the offline state and the retry backoff takes over — unless
+    ///   [`loadDeadlineIsDue`] says the window was not on screen to load into
+    ///   (#7846). Called once per attempt, so the deferral bookkeeping resets
+    ///   here and nowhere else.
     /// Test: `PaintHarness.swift`'s `slow` mode counts the retries this produces
-    ///   against a listener that accepts and never answers.
+    ///   against a listener that accepts and never answers; its `occluded` mode
+    ///   asserts an occluded attempt produces none.
     private func startLoadWatchdog() {
+        scheduleLoadDeadline(Self.loadDeadline)
+    }
+
+    /// Arms the one timer that owns both the deadline and the #7846 wait, so the
+    /// two can never run against each other.
+    ///
+    /// The fired closure has three jobs: re-issue an attempt the wait outlived,
+    /// keep waiting while the window is off screen, or judge the load the way
+    /// this view always has.
+    private func scheduleLoadDeadline(_ interval: TimeInterval) {
         loadTimer?.invalidate()
-        let deadline = Self.loadDeadline
-        loadTimer = Timer.scheduledTimer(withTimeInterval: deadline, repeats: false) { [weak self] _ in
+        loadTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
             guard let self else { return }
             self.loadTimer = nil
-            guard self.state != .live else { return }
+            guard self.state != .live, self.state != .stopped, self.state != .preview else { return }
+            // #7846: a wait tick whose attempt has already ended re-issues it.
+            // Without this an occluded saver stops loading entirely, and a
+            // console that came back while nobody was looking is never picked up.
+            if self.waitingForWindow, self.loadStartedAt == nil {
+                os_log("loading again after waiting for a visible window",
+                       log: saverLog, type: .info)
+                self.loadConsole()
+                return
+            }
+            if let wait = self.windowWaitVerdict() {
+                self.waitForWindow(wait.reason, recheckIn: wait.interval)
+                return
+            }
+            if self.waitingForWindow, self.resumeAfterWait() { return }
             // #7606: giving up on an attempt means cancelling it. Left running,
             // it stays outstanding until the next `load` supersedes it, and the
             // -999 that comes back then is indistinguishable from a real one.
             self.abandonInFlightLoad()
-            self.enterOffline("load did not finish within \(Int(deadline))s")
+            self.enterOffline("load did not finish within \(Int(Self.loadDeadline))s")
         }
+    }
+
+    /// Why: #7846. WebKit throttles a `WKWebView` in an occluded window, so an
+    ///   attempt that runs there runs out of time because nothing is driving it,
+    ///   not because the console is down. The owner's saver logged 3483 such
+    ///   expiries against 23 completed loads over six hours while
+    ///   `/ui/screensaver` answered in 0.6 ms throughout — each one an
+    ///   [`enterOffline`], and every third one a #7606 rebuild whose fresh web
+    ///   view inherited the same occlusion.
+    /// What: answers whether this view may go on waiting for a window instead of
+    ///   judging the load, and how long before it re-asks. An occluded window
+    ///   waits at [`occludedRetryInterval`], which is deliberately slow — a
+    ///   screen nobody can see earns no urgency. A window nobody can report on
+    ///   waits at the fast retry cadence, but only [`maxUnknownVisibilityProbes`]
+    ///   times: after that the count LATCHES at the bound and every later
+    ///   expiry is judged the way it was before this fix, until some answer
+    ///   either way clears it. A visible window never waits.
+    /// Test: `PaintHarness.swift`'s `occluded` mode (no failure while occluded),
+    ///   `visibility-unknown` (the bounded fall-back), and `slow` (the unchanged
+    ///   visible path).
+    private func windowWaitVerdict() -> (reason: String, interval: TimeInterval)? {
+        switch currentWindowVisibility() {
+        case .visible:
+            unknownVisibilityProbes = 0
+            return nil
+        case .hidden:
+            unknownVisibilityProbes = 0
+            return ("occluded window", Self.occludedRetryInterval)
+        case .unknown:
+            guard unknownVisibilityProbes < Self.maxUnknownVisibilityProbes else { return nil }
+            unknownVisibilityProbes += 1
+            guard unknownVisibilityProbes < Self.maxUnknownVisibilityProbes else {
+                // The fail-open's bound, logged once: the count stays at the
+                // bound, so this line is not repeated until something answers.
+                os_log("window visibility still unknown after %{public}@ probe(s) — judging the load on the ordinary deadline from here",
+                       log: saverLog, type: .error, String(unknownVisibilityProbes))
+                return nil
+            }
+            return ("window visibility unknown, probe \(unknownVisibilityProbes)"
+                + " of \(Self.maxUnknownVisibilityProbes)", Self.fastRetryInterval)
+        }
+    }
+
+    /// The wait itself. `waiting —` rather than `offline —`, because an operator
+    /// reading `log show` has to be able to tell a throttled load from an outage
+    /// (#7846), and the banner that says "offline" is never raised from here.
+    private func waitForWindow(_ reason: String, recheckIn interval: TimeInterval) {
+        let first = !waitingForWindow
+        waitingForWindow = true
+        if waitingForWindowSince == nil { waitingForWindowSince = Date() }
+        let waited = waitingForWindowSince.map { Date().timeIntervalSince($0) } ?? 0
+        // First of a run at `.default` so `log show` carries it after the fact;
+        // the re-asks at `.info`, which is memory-only — a saver left occluded
+        // overnight must not fill the persisted log with one line per re-ask.
+        os_log("load deadline waiting — %{public}@ (%{public}@s so far)",
+               log: saverLog, type: first ? .default : .info,
+               reason, String(format: "%.0f", waited))
+        scheduleLoadDeadline(interval)
+    }
+
+    /// Why: a load that spent its deadline throttled behind an occluded window
+    ///   has not been given a chance to finish, so failing it the moment the
+    ///   window returns would report an outage the console never had (#7846).
+    /// What: ends the wait. An attempt still in flight gets one fresh FULL
+    ///   deadline measured from the window coming back; an attempt the wait
+    ///   outlived is simply re-issued, because the wait was the only thing
+    ///   holding it. Reached from the occlusion notification, which is what
+    ///   normally observes the change, and from the re-ask above when no
+    ///   notification arrives.
+    /// Test: `PaintHarness.swift`'s `occluded` mode flips the visibility seam,
+    ///   posts the occlusion notification AppKit would, and asserts the attempt
+    ///   that follows.
+    @discardableResult
+    private func resumeAfterWait() -> Bool {
+        guard waitingForWindow, state != .live, state != .stopped, state != .preview else { return false }
+        let waited = waitingForWindowSince.map { Date().timeIntervalSince($0) } ?? 0
+        waitingForWindow = false
+        waitingForWindowSince = nil
+        unknownVisibilityProbes = 0
+        os_log("window visible again after %{public}@s of waiting — %{public}@",
+               log: saverLog, type: .default, String(format: "%.0f", waited),
+               loadStartedAt == nil ? "loading" : "restarting the load deadline")
+        if loadStartedAt == nil {
+            loadConsole()
+        } else {
+            startLoadWatchdog()
+        }
+        return true
+    }
+
+    /// Why: a request that times out while the window is off screen says the
+    ///   load ran out of time, which is what an occluded web view does — WebKit
+    ///   throttles the page while the network process goes on running the 5 s
+    ///   request timer. It is not evidence about the console, and #7846 is what
+    ///   happens when the view treats it as evidence anyway.
+    /// What: absorbs `NSURLErrorTimedOut` into the wait when the window is not
+    ///   on screen, ending the attempt and arming the re-ask that will re-issue
+    ///   it. Every other error — refused, connection lost, a dead WebContent
+    ///   process — is untouched and still reaches [`enterOffline`], because those
+    ///   say something about the console that occlusion does not explain.
+    /// Test: `PaintHarness.swift`'s `occluded` mode, whose stalling endpoint
+    ///   produces exactly this error, against `occluded-failing`, whose hang-up
+    ///   endpoint does not.
+    private func absorbTimeoutWhileOccluded(_ nsError: NSError) -> Bool {
+        guard nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorTimedOut,
+              state != .stopped, state != .preview,
+              let wait = windowWaitVerdict() else { return false }
+        loadStartedAt = nil
+        waitForWindow(wait.reason + ", the load timed out", recheckIn: wait.interval)
+        return true
     }
 
     /// Why: the view abandons a load in two places — the watchdog above and the
@@ -689,6 +865,16 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
     @discardableResult
     private func noteLoadFailure(_ reason: String) -> Bool {
         guard state != .stopped, state != .preview else { return false }
+        // #7846: a replacement web view is built into the same occluded window
+        // and is throttled the same way, so a failure counted here can only feed
+        // a rebuild loop — 1146 of them in the owner's six-hour log. Retries
+        // still run, because a console that comes back must be picked up whether
+        // or not anyone is looking at the screen.
+        guard currentWindowVisibility() != .hidden else {
+            os_log("failure not counted toward the rebuild — occluded window (%{public}@)",
+                   log: saverLog, type: .info, reason)
+            return false
+        }
         consecutiveLoadFailures += 1
         guard consecutiveLoadFailures >= Self.recreateAfterFailures else { return false }
 
@@ -758,6 +944,47 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
         webView = makeWebView()
         needsDisplay = true
         loadConsole()
+    }
+
+    // MARK: - Window visibility (#7846)
+
+    /// Whether this view is on screen at all, as AppKit sees it.
+    ///
+    /// #7846: distinct from `document.visibilityState`, which the view cannot
+    /// use while a load is in flight — the web view is `isHidden` until
+    /// `didFinish`, so WebKit reports its page hidden for every attempt,
+    /// including the ones that are about to succeed.
+    private enum WindowVisibility: Int {
+        /// The window reports itself unoccluded: the saver IS on screen, and a
+        /// load that misses its deadline here missed it for a real reason.
+        case visible = 1
+        /// The window is occluded. WebKit throttles a backgrounded web view, so
+        /// the deadline would measure the throttling and not the console.
+        case hidden = 2
+        /// Nothing has reported either way — no window yet. Treated as a wait,
+        /// but a bounded one; see [`maxUnknownVisibilityProbes`].
+        case unknown = 3
+    }
+
+    /// #7846: TEST SEAM. Zero — the default — means ask AppKit; any other value
+    /// is a forced [`WindowVisibility`] raw value.
+    ///
+    /// Why: `PaintHarness.swift` parks its window off every display, and AppKit
+    ///   reports no `.visible` for such a window, so every harness mode would
+    ///   otherwise run as occluded and the modes that assert today's deadline
+    ///   path would stop asserting anything. The occlusion the real host applies
+    ///   cannot be produced from a harness either way, so the verdict is the
+    ///   seam rather than the window.
+    /// What: `@objc` so the harness can reach it by KVC — it loads the principal
+    ///   class by name and has no Swift type to cast to.
+    /// Test: `PaintHarness.swift`'s `occluded`, `occluded-failing` and
+    ///   `visibility-unknown` modes set it; every other mode leaves it at zero.
+    @objc public var windowVisibilityOverride: Int = 0
+
+    private func currentWindowVisibility() -> WindowVisibility {
+        if let forced = WindowVisibility(rawValue: windowVisibilityOverride) { return forced }
+        guard let window else { return .unknown }
+        return window.occlusionState.contains(.visible) ? .visible : .hidden
     }
 
     // MARK: - Visibility recovery (#7112)
@@ -892,9 +1119,10 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
     ///   its web content NotVisible, because the view logged nothing about
     ///   visibility at all.
     /// What: logs this view's window's occlusion transitions at `.default` so
-    ///   `log show` carries them next to RunningBoard's own rows, and re-probes
-    ///   the moment the window is visible again instead of waiting out the rest
-    ///   of the interval.
+    ///   `log show` carries them next to RunningBoard's own rows, re-probes the
+    ///   moment the window is visible again instead of waiting out the rest of
+    ///   the interval, and hands a load that waited out an occlusion its fresh
+    ///   deadline (#7846).
     /// Test: manual — README.md, "Manual verification".
     private func observeOcclusion() {
         guard occlusionObserver == nil else { return }
@@ -902,7 +1130,7 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
         // reports CHANGES, and a view that never sees one must not be left
         // guessing. No window yet means treated as on screen — see
         // [`windowIsOccluded`].
-        windowIsOccluded = window.map { !$0.occlusionState.contains(.visible) } ?? false
+        windowIsOccluded = currentWindowVisibility() == .hidden
         occlusionObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.didChangeOcclusionStateNotification,
             object: nil,
@@ -911,11 +1139,17 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
             guard let self,
                   let changed = notification.object as? NSWindow,
                   changed === self.window else { return }
-            let visible = changed.occlusionState.contains(.visible)
+            // #7846: read through the same accessor the load deadline uses, so a
+            // forced verdict cannot mean two different things in one view.
+            let visible = self.currentWindowVisibility() != .hidden
             self.windowIsOccluded = !visible
             os_log("window occlusion changed — visible=%{public}@",
                    log: saverLog, type: .default, visible ? "true" : "false")
-            if visible { self.probeVisibility() }
+            guard visible else { return }
+            self.probeVisibility()
+            // See #7846: the load that was waiting for this is entitled to a
+            // full deadline of on-screen time, not the remainder of one.
+            self.resumeAfterWait()
         }
     }
 
@@ -1052,6 +1286,10 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
         retryTimer = nil
         loadTimer?.invalidate()
         loadTimer = nil
+        // #7846: this attempt is over, so its deferral bookkeeping is too.
+        waitingForWindow = false
+        waitingForWindowSince = nil
+        unknownVisibilityProbes = 0
         // #6838: the next outage starts its own backoff clock, so a console that
         // came back and went again gets fast retries a second time.
         offlineSince = nil
@@ -1067,26 +1305,43 @@ public final class TrustyConsoleSaverView: ScreenSaverView, WKNavigationDelegate
                webView.url?.absoluteString ?? "<nil>", webView.title ?? "<nil>")
     }
 
+    /// Why: #7606 asks that a cancellation this view provoked in
+    ///   [`abandonInFlightLoad`] is not counted as a network failure — the
+    ///   attempt replacing it is already accounted for, and counting it turned
+    ///   one failure into two and halved the effective retry interval. The check
+    ///   sat only on the provisional callback, so a cancellation that landed
+    ///   after the navigation had COMMITTED reached `didFail` and was counted
+    ///   anyway; `didFail code=-999` is what the owner's #7846 log is full of.
+    /// What: shared by both failure callbacks. Clears the flag either way, since
+    ///   the attempt it belonged to has ended.
+    /// Test: `PaintHarness.swift`'s `recreate` and `one-failure` modes count the
+    ///   failures the view reaches before it rebuilds.
+    private func isOwnCancellation(_ nsError: NSError) -> Bool {
+        defer { expectingCancellation = false }
+        guard expectingCancellation,
+              nsError.domain == NSURLErrorDomain,
+              nsError.code == NSURLErrorCancelled else { return false }
+        os_log("ignored own cancellation — %{public}@", log: saverLog, type: .info,
+               Self.describe(nsError))
+        return true
+    }
+
     public func webView(_ webView: WKWebView,
                         didFailProvisionalNavigation navigation: WKNavigation!,
                         withError error: Error) {
         let nsError = error as NSError
-        // #7606: a cancellation this view asked for in [`abandonInFlightLoad`] is
-        // not a failure to count and not a reason to retry — the attempt that
-        // replaces it is already accounted for. Counting it is what turned one
-        // failure into two and halved the effective retry interval.
-        if expectingCancellation, nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorCancelled {
-            expectingCancellation = false
-            os_log("ignored own cancellation — %{public}@", log: saverLog, type: .info,
-                   Self.describe(nsError))
-            return
-        }
-        expectingCancellation = false
+        if isOwnCancellation(nsError) { return }
+        // See #7846.
+        if absorbTimeoutWhileOccluded(nsError) { return }
         enterOffline("didFailProvisionalNavigation " + Self.describe(nsError))
     }
 
     public func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        enterOffline("didFail " + Self.describe(error as NSError))
+        let nsError = error as NSError
+        // See #7846.
+        if isOwnCancellation(nsError) { return }
+        if absorbTimeoutWhileOccluded(nsError) { return }
+        enterOffline("didFail " + Self.describe(nsError))
     }
 
     public func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
