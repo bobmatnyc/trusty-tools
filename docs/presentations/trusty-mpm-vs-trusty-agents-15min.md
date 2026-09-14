@@ -8,7 +8,13 @@ ds_source: "Foundry v2 (docs/design/UI/design-system/); tokens.css + foundry.css
 
 # trusty-mpm vs trusty-agents: One Platform, Two Products
 
-> **ADR-0055 (#6000):** `tm sessions new` no longer accepts a remote URL — trusty-mpm clones no repository and creates no worktree for a session. Clone the repository yourself first, then pass the resulting local path. Every `tm sessions new https://…` line below needs that two-step treatment before it will run.
+> **[ADR-0055](../adr/0055-trusty-mpm-stops-creating-worktrees-the-sentinel-becomes-authoritative.md)
+> (#6000):** trusty-mpm no longer clones a remote `repo_url` or creates a worktree
+> on `tm sessions new`'s behalf. `tm sessions new` takes an ABSOLUTE path to an
+> EXISTING local git checkout with a GitHub remote instead of a URL — Slide 4's
+> demo script already `cd`s into an existing local checkout, so it passes
+> `$(pwd)` rather than a URL; Slide 9's entry point and the closing call-to-action
+> below are updated the same way.
 
 ## Slide 1: Title Slide
 **Key Message:** One platform serving two distinct missions — learn which tool you need.
@@ -108,8 +114,8 @@ trusty-mpm is the orchestrator for CODING WORK. You give it a repo URL, and it h
 # 1. Install (one-liner)
 $ curl -sSf https://raw.githubusercontent.com/bobmatnyc/trusty-tools/main/install.sh | sh
 
-# 2. Launch a session from any repo
-$ cd my-project && tm sessions new https://github.com/user/my-project
+# 2. Launch a session from an existing local checkout (ADR-0055: a path, not a URL)
+$ cd my-project && tm sessions new $(pwd)
 
 # 3. Claude Code starts, PM loads the instruction set
 [Session tm-abc123 provisioned; Claude Code launching...]
@@ -281,7 +287,7 @@ This is the magic of trusty-agents. It's not just a chatbot; it's a learning sys
 **Domain:** Project work, PRs, tests, review gates  
 **Personas:** Engineer agents, QA agents, review bots  
 **Memory:** Shared codebase context, project state  
-**Entry point:** CLI (`tm sessions new <repo>`)  
+**Entry point:** CLI (`tm sessions new <local-checkout-path>`)
 **Durability:** Session pause/resume; worktree cleanup on close  
 
 ### Right Column: trusty-agents (Task/Event Harness)
@@ -441,7 +447,7 @@ curl -sSf https://raw.githubusercontent.com/bobmatnyc/trusty-tools/main/install.
 
 ### Right: Next Steps
 1. **Run `tm status`** — Check daemon status
-2. **Run `tm sessions new https://github.com/<your-repo>`** — Start a session on your project
+2. **Run `tm sessions new <path-to-your-local-clone>`** — Start a session on your project (clone it first if you haven't; ADR-0055)
 3. **Join the workstream** — Slack channel #trusty-users; Discord for open-source contributors
 
 **Bottom Banner (call-to-action):**

@@ -1,11 +1,16 @@
 # Mac Laptop Demo Runbook — Presenter Script for Brand-New MacBook
 
-> **ADR-0055 (#6000):** `tm sessions new` no longer accepts a remote URL — trusty-mpm clones no repository and creates no worktree for a session. Clone the repository yourself first, then pass the resulting local path. Every `tm sessions new https://…` line below needs that two-step treatment before it will run.
+> **[ADR-0055](../adr/0055-trusty-mpm-stops-creating-worktrees-the-sentinel-becomes-authoritative.md)
+> (#6000):** trusty-mpm no longer clones a remote `repo_url` or creates a worktree
+> on `tm sessions new`'s behalf. `tm sessions new` now takes an ABSOLUTE path to
+> an EXISTING local git checkout with a GitHub remote instead of a URL — this
+> runbook's Step 3 (prep) clones the demo repo locally the night before so Beat 4
+> still passes a single command on stage; see Beat 4 for the exact invocation.
 
 **Duration:** T-minus 10 min prep (night before) + ~8 min live demo  
 **Target Audience:** Live demo watchers  
 **Setup:** Brand-new Apple Silicon MacBook (Homebrew + Claude Code already present; tmux to be pre-seeded)  
-**Objective:** Deliver a flawless single-URL install → remote repo provisioning → live Claude Code PM session demo on the new machine, showcasing trusty-mpm 1.0.1 + trusty-installer 0.4.8.
+**Objective:** Deliver a flawless single-command install → local-checkout provisioning → live Claude Code PM session demo on the new machine, showcasing trusty-mpm 1.0.1 + trusty-installer 0.4.8.
 
 ---
 
@@ -66,14 +71,23 @@ tmux new-session -d
 
 ---
 
-### Step 3: Prepare the Demo Repo URL
+### Step 3: Prepare the Demo Repo (Local Clone Required, ADR-0055)
 
-Have a throwaway GitHub repo URL ready (NOT on screen during demo):
+`tm sessions new` provisions from an existing local checkout, not a URL — clone
+the throwaway demo repo now so Beat 4 is still a single command on stage:
 
-1. **Throwaway demo repo URL:** Create or use a non-critical GitHub repo for the live demo.
+1. **Throwaway demo repo:** Create or use a non-critical GitHub repo for the live demo.
    - Example: `https://github.com/bobmatnyc/trusty-demo-test.git`
-   - **Check the default branch:** If it's NOT `main` (e.g., `master`), you'll add `--git-ref master` to the `tm sessions new` command in Beat 3.
    - Ensure you have push access to this repo.
+2. **Clone it locally, off to the side** (NOT in `~/trusty-mpm-projects/`, which
+   `tm sessions new` provisions into itself):
+   ```bash
+   git clone https://github.com/bobmatnyc/trusty-demo-test.git ~/demo-repos/trusty-demo-test
+   ```
+   - **Check the default branch:** If it's NOT `main` (e.g., `master`), you'll add
+     `--git-ref master` to the `tm sessions new` command in Beat 4.
+   - This local clone is only the SOURCE trusty-mpm reads the GitHub remote from;
+     Beat 4 still provisions its own worktree under `~/trusty-mpm-projects/`.
 
 ---
 
@@ -123,7 +137,7 @@ tmux -V
 
 ### Core Beats (4 beats, ~8 minutes)
 
-These four beats showcase the core story: single-URL install → daemon health → provision remote repo with one command → Claude Code PM opens inside the provisioned environment.
+These four beats showcase the core story: single-command install → daemon health → provision from the pre-cloned local checkout with one command → Claude Code PM opens inside the provisioned environment.
 
 ---
 
@@ -204,28 +218,36 @@ tm doctor
 
 ---
 
-### Beat 4: Provision Remote Repo & Launch Claude Code (CENTERPIECE)
+### Beat 4: Provision From the Local Checkout & Launch Claude Code (CENTERPIECE)
 
-**THE CORE STORY:** One command provisions everything — clones the repo, creates a tmux session, scaffolds .claude and .trusty-mpm config directories, and launches Claude Code inside the newly provisioned environment.
+**THE CORE STORY:** One command still provisions everything — since
+[ADR-0055](../adr/0055-trusty-mpm-stops-creating-worktrees-the-sentinel-becomes-authoritative.md),
+that command takes the local path you cloned in prep (Step 3) rather than a
+URL, reads its GitHub remote, and provisions a fresh worktree, tmux session,
+and `.claude`/`.trusty-mpm` config from there — clone, worktree, config, and
+session, from one command.
 
-**Talk track:** "This is where trusty-mpm does its magic. One command does what normally takes multiple steps: clone the repo, bootstrap the environment, set up tmux, and launch the PM session."
+**Talk track:** "This is where trusty-mpm does its magic. One command does what normally takes multiple steps: provision a worktree, bootstrap the environment, set up tmux, and launch the PM session — from a local checkout of the repo."
 
 **Command (in the MacBook terminal):**
 
 ```bash
-# Replace <throwaway-repo> with your demo repo URL
-tm sessions new https://github.com/bobmatnyc/trusty-demo-test.git --task "Explore the provisioned environment and show how PM works"
+# Pass the LOCAL path you cloned in prep (Step 3), not a URL — trusty-mpm
+# clones no repository itself since ADR-0055.
+tm sessions new ~/demo-repos/trusty-demo-test --task "Explore the provisioned environment and show how PM works"
 ```
 
 **Note:** If your throwaway repo's default branch is NOT `main` (e.g., `master`), add `--git-ref master`:
 
 ```bash
-tm sessions new https://github.com/bobmatnyc/trusty-demo-test.git --git-ref master --task "Explore the provisioned environment and show how PM works"
+tm sessions new ~/demo-repos/trusty-demo-test --git-ref master --task "Explore the provisioned environment and show how PM works"
 ```
 
 **Expected:**
-- Repo is cloned into `~/.trusty-mpm-projects/bobmatnyc/trusty-demo-test/`.
-- `.trusty-mpm/` and `.claude/` directories are created inside the cloned repo with PM config.
+- trusty-mpm reads the GitHub remote off `~/demo-repos/trusty-demo-test` and
+  provisions its own base clone + session worktree under
+  `~/trusty-mpm-projects/bobmatnyc/trusty-demo-test/`.
+- `.trusty-mpm/` and `.claude/` directories are created inside the provisioned worktree with PM config.
 - A new tmux session is created and named after the repo (e.g., `tm-trusty-demo-test-01`).
 - Output shows the session name and attaching instructions.
 
@@ -257,7 +279,7 @@ tm sessions attach tm-trusty-demo-test-01
 
 **This is a natural, expected moment.** The audience watches Bob auth live inside Claude Code in the new environment. No CLI token-pasting; it's all UI-driven and self-evident.
 
-**Talk track after auth completes:** "Claude Code is now authenticated and ready to work inside the provisioned repo. The PM session is fully loaded. This is the trusty-mpm workflow: provision from a URL, launch the PM, everything is in context."
+**Talk track after auth completes:** "Claude Code is now authenticated and ready to work inside the provisioned repo. The PM session is fully loaded. This is the trusty-mpm workflow: provision from a local checkout, launch the PM, everything is in context."
 
 ---
 
@@ -410,6 +432,7 @@ To get the new MacBook back to pre-demo state (clean, ready for another run):
 ```bash
 # Delete the demo repo and session artifacts
 rm -rf ~/.trusty-mpm-projects/bobmatnyc/trusty-demo-test
+rm -rf ~/demo-repos/trusty-demo-test    # the Step 3 local clone (ADR-0055)
 rm -rf ~/.trusty-mpm/sessions/tm-trusty-demo-test-01*
 
 # Stop the trusty-mpm daemon (and related services)
@@ -508,10 +531,11 @@ tm version
 tm start
 tm doctor
 
-# Beat 4: Provision repo & launch Claude Code (THE CENTERPIECE)
-tm sessions new https://github.com/bobmatnyc/trusty-demo-test.git --task "Explore the provisioned environment"
+# Beat 4: Provision from the local checkout (Step 3 prep) & launch Claude Code (THE CENTERPIECE)
+# ADR-0055: pass the LOCAL path cloned in prep, not a URL.
+tm sessions new ~/demo-repos/trusty-demo-test --task "Explore the provisioned environment"
 # OR with custom git-ref:
-tm sessions new https://github.com/bobmatnyc/trusty-demo-test.git --git-ref master --task "Explore the provisioned environment"
+tm sessions new ~/demo-repos/trusty-demo-test --git-ref master --task "Explore the provisioned environment"
 
 tm sessions attach tm-trusty-demo-test-01
 # Watch Claude Code open; Bob authenticates inside Claude Code on stage (~30 sec)
@@ -543,6 +567,7 @@ gh pr view 1 --web  # optional
 
 ```bash
 rm -rf ~/.trusty-mpm-projects/bobmatnyc/trusty-demo-test
+rm -rf ~/demo-repos/trusty-demo-test    # the Step 3 local clone (ADR-0055)
 rm -rf ~/.trusty-mpm/sessions/tm-trusty-demo-test-01*
 launchctl unload ~/Library/LaunchAgents/com.trusty.mpm.plist 2>/dev/null || true
 launchctl unload ~/Library/LaunchAgents/com.trusty.mpm.supervisor.plist 2>/dev/null || true
@@ -554,7 +579,7 @@ rm -rf ~/.trusty-tools
 
 ## Notes for Bob (Stage Craft)
 
-- **The centerpiece is Beat 4.** The story is: "One command provisions everything—clone, worktree, config, session, Claude Code." Emphasize this moment. The audience should walk away remembering that single `tm sessions new <url>` command as the magic move.
+- **The centerpiece is Beat 4.** The story is: "One command provisions everything—worktree, config, session, Claude Code, from a local checkout." Emphasize this moment. The audience should walk away remembering that single `tm sessions new <local-path>` command as the magic move — the local clone happened in prep, off-stage.
 
 - **Speak through the install (Beat 1).** Narrate what's happening as the checklist progresses: "Downloading trusty-mpm… Claude Code is already here so that's satisfied… tmux is already here too… now installing tm… bootstrapping the daemon…" The audience won't hear the mechanics; you're providing the story. This also primes them for the "already satisfied" components.
 

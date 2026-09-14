@@ -1,6 +1,10 @@
 # Trusty-Tools Installation Tiers — Draft Reference Material
 
-> **ADR-0055 (#6000):** `tm sessions new` no longer accepts a remote URL — trusty-mpm clones no repository and creates no worktree for a session. Clone the repository yourself first, then pass the resulting local path. Every `tm sessions new https://…` line below needs that two-step treatment before it will run.
+> **[ADR-0055](adr/0055-trusty-mpm-stops-creating-worktrees-the-sentinel-becomes-authoritative.md)
+> (#6000):** trusty-mpm no longer clones a remote `repo_url` or creates a worktree
+> on `tm sessions new`'s behalf. `tm sessions new` takes an ABSOLUTE path to an
+> EXISTING local git checkout with a GitHub remote instead of a URL. Clone the
+> repository yourself first (`git clone <url> <dir>`), then pass `<dir>`.
 
 **Status:** Draft input for Bob's live-environment walkthrough documentation.  
 **Date:** 2026-07-26  
@@ -901,7 +905,7 @@ curl -sSf https://raw.githubusercontent.com/bobmatnyc/trusty-tools/main/install.
 
 ### GitHub CLI Not Authenticated
 
-**Trigger:** After install, running `tm sessions new <repo>` or `gh pr create` fails with "not authenticated" or "no token found".
+**Trigger:** After install, running `tm sessions new <local-checkout-path>` or `gh pr create` fails with "not authenticated" or "no token found".
 
 **Symptom:** `gh auth status` shows "Not logged in" or command fails with authentication error.
 
@@ -916,8 +920,8 @@ gh auth login
 gh auth status
 # Should show "Logged in to github.com as <your-user>".
 
-# Then retry:
-tm sessions new <repo-url>
+# Then retry (ADR-0055: pass the local checkout path, not a URL):
+tm sessions new <local-checkout-path>
 ```
 
 ---
@@ -1035,7 +1039,9 @@ The following are intentionally OUT OF SCOPE for a standard installation and are
    ```
 4. **First session:**
    ```bash
-   tm sessions new https://github.com/<user>/<repo>.git --task "My task"
+   # ADR-0055: clone first, then pass the local path — tm clones no repo itself.
+   git clone https://github.com/<user>/<repo>.git ~/repos/<repo>
+   tm sessions new ~/repos/<repo> --task "My task"
    tm sessions attach <SESSION-ID>
    ```
 
