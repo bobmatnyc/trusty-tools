@@ -94,6 +94,16 @@ pub struct AppState {
     /// `GET /api/console/machine-status/history` and its SSE stream. In-memory
     /// only — a restart begins an empty window by design (owner ruling, #6516).
     machine_history: crate::machine_history::MachineHistory,
+    /// The console-hosted event bus (#6848), when its ingest socket bound
+    /// (#6851).
+    ///
+    /// Why an `Option` rather than always present: DOC-73 §4.1's non-blocking
+    /// invariant lets a console that could not bind the ingest socket serve
+    /// everything else. `None` is that console — and it is what the SSE route
+    /// answers `503` for, so a viewer can tell a bus with nothing to say from
+    /// one that is not there (DOC-73 §8.5).
+    /// Test: `crate::event_stream::tests::a_dead_bus_answers_503_json`.
+    event_bus: Option<Arc<crate::event_bus::EventBus>>,
     http_client: Arc<reqwest::Client>,
     /// The client the proxy uses for Server-Sent Events (#6155).
     ///
@@ -265,6 +275,10 @@ impl AppState {
             mpm_metrics_cache: MetricsCache::new(),
             host_metrics_cache: crate::host_status::HostMetricsCache::new(),
             machine_history: crate::machine_history::MachineHistory::new(),
+            // #6851: wired by `with_event_bus` in `run_serve`; every test that
+            // does not opt in gets the dead-bus surface, which is the truth
+            // for a state with no ingest socket behind it.
+            event_bus: None,
             http_client: Arc::new(client),
             stream_client: Arc::new(stream_client),
             analyze_handle,
@@ -387,6 +401,25 @@ impl AppState {
     /// Test: `machine_history_route_cold_cache_returns_empty_200`.
     pub fn machine_history(&self) -> &crate::machine_history::MachineHistory {
         &self.machine_history
+    }
+
+    /// Attach the console event bus (#6851).
+    ///
+    /// Why a builder rather than a `new` parameter: the bus is best-effort —
+    /// `run_serve` may have none to give — and every existing caller of
+    /// `AppState::new`, tests included, would otherwise have to name it.
+    /// Test: `crate::event_stream::tests::a_healthy_empty_bus_answers_200_event_stream`.
+    #[must_use]
+    pub(crate) fn with_event_bus(mut self, bus: Arc<crate::event_bus::EventBus>) -> Self {
+        self.event_bus = Some(bus);
+        self
+    }
+
+    /// The console event bus, or `None` on a console whose ingest never bound.
+    ///
+    /// Test: `crate::event_stream::tests::a_dead_bus_answers_503_json`.
+    pub(crate) fn event_bus(&self) -> Option<&Arc<crate::event_bus::EventBus>> {
+        self.event_bus.as_ref()
     }
 
     /// Gather whichever per-service `ConsoleMetricsReport`s are currently cached

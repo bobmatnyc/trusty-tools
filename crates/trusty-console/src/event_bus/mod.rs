@@ -33,6 +33,8 @@ pub(crate) mod log;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use bus::{EventBus, EventBusConfig};
+// #6851: `BusFrame` is what the SSE route renders; `EventBus` is what it
+// subscribes to.
+pub(crate) use bus::{BusFrame, EventBus, EventBusConfig};
 pub(crate) use ingest::{bind_ingest, ingest_socket_path, serve_ingest};
 pub(crate) use log::{DurableLog, LogConfig};

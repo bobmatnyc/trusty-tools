@@ -140,6 +140,27 @@ pub(crate) struct BusFrame {
     pub persisted: bool,
 }
 
+/// One reader's attachment to the bus: what it missed, and what comes next
+/// (issue #6851).
+///
+/// Why the three fields travel together: they are one atomic reading of the
+/// bus, taken under a single lock by [`EventBus::subscribe_since`]. Splitting
+/// them across calls reintroduces exactly the gap-or-duplicate window that
+/// method exists to close.
+/// What: `backfill` is the ring's events after the caller's resume point,
+/// oldest-first; `next_seq` is the seq the next accepted event will carry;
+/// `receiver` delivers every event ingested from the snapshot onward.
+pub(crate) struct BusSubscription {
+    /// Ring events with `seq` greater than the requested resume point,
+    /// oldest-first. Empty when the caller asked for no backfill.
+    pub backfill: Vec<HarnessEvent>,
+    /// The seq the next accepted event will carry, as of the snapshot.
+    pub next_seq: u64,
+    /// Live fan-out from the snapshot onward — no event in `backfill` is
+    /// repeated here, and none between the two is lost.
+    pub receiver: broadcast::Receiver<BusFrame>,
+}
+
 /// The ring plus its dedup set, always mutated together under one lock.
 struct Ring {
     capacity: usize,
@@ -285,11 +306,55 @@ impl EventBus {
     /// receives `Lagged` on its next `recv` rather than stalling ingest —
     /// DOC-73 §4.3's "ingest never blocks on fan-out" rule.
     /// Test: `super::tests::a_subscriber_receives_ingested_events`.
-    // Reserved for the SSE route a later slice adds (#6851); exercised today
-    // only by this module's own tests.
+    // #6851: the SSE route subscribes through `subscribe_since` instead, which
+    // pairs this receiver with a ring snapshot under one lock. This bare form
+    // is exercised only by this module's own tests.
     #[allow(dead_code)]
     pub(crate) fn subscribe(&self) -> broadcast::Receiver<BusFrame> {
         self.sender.subscribe()
+    }
+
+    /// Subscribe with a ring snapshot taken under the same lock, so a
+    /// resuming reader gets no gap and no duplicate (issue #6851, DOC-73
+    /// §4.4).
+    ///
+    /// Why this cannot be two calls: [`EventBus::subscribe`] followed by a
+    /// separate ring read has a window between them. An event ingested in
+    /// that window lands in the ring read AND in the broadcast (a duplicate)
+    /// or, with the two calls the other way round, in neither (a gap).
+    /// [`EventBus::ingest`] holds `ring`'s lock across BOTH the ring push and
+    /// the `broadcast::Sender::send` — the invariant that fn's doc comment
+    /// already establishes for seq ordering — so taking the receiver while
+    /// holding that same lock makes "already in the ring" and "will arrive
+    /// live" exactly complementary.
+    /// What: `since_seq` `Some(n)` fills [`BusSubscription::backfill`] with
+    /// every ring event whose `seq` is greater than `n`, oldest-first; `None`
+    /// backfills nothing (a fresh viewer reads its history from the polling
+    /// route, DOC-73 §4.4). `next_seq` is the seq the next accepted event
+    /// will carry, read under the same lock, which is what lets the caller
+    /// tell "caught up" from "the events you asked for were evicted".
+    /// Test: `crate::event_stream::tests::a_reconnect_resumes_without_gap_or_duplicate`,
+    /// `crate::event_stream::tests::backfill_and_live_frames_never_overlap`.
+    pub(crate) fn subscribe_since(&self, since_seq: Option<u64>) -> BusSubscription {
+        let ring = self.lock_ring();
+        // #6851: receiver taken UNDER the ring lock — see this fn's docs.
+        let receiver = self.sender.subscribe();
+        let backfill = match since_seq {
+            Some(since) => ring
+                .events
+                .iter()
+                .filter(|event| event.seq > since)
+                .cloned()
+                .collect(),
+            None => Vec::new(),
+        };
+        let next_seq = self.next_seq.load(Ordering::Relaxed);
+        drop(ring);
+        BusSubscription {
+            backfill,
+            next_seq,
+            receiver,
+        }
     }
 
     /// Replay everything the durable log has persisted after `since_seq`, in

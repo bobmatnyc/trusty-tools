@@ -51,9 +51,12 @@ pub mod connector;
 pub mod console_ui;
 pub mod detect;
 // #6848: the console-hosted event bus core — UDS ingest, the bounded ring,
-// dedup and eviction counters, and the subscriber fan-out a later slice
-// (#6851) wires into an SSE route. No route surface in this crate yet.
+// dedup and eviction counters, and the subscriber fan-out `event_stream`
+// serves over SSE.
 pub(crate) mod event_bus;
+// #6851: SSE fan-out of that bus at GET /api/console/events/stream/sse, with
+// `Last-Event-ID` resume.
+pub(crate) mod event_stream;
 // #6517: background whole-machine host-metrics sampler + cache feeding the
 // machine-status route.
 pub mod host_status;
@@ -303,6 +306,92 @@ pub fn run_port(args: PortArgs) -> Result<()> {
     Ok(())
 }
 
+/// Bind the event-bus ingest socket and start the bus behind it (#6848,
+/// DOC-73 §4.1/§4.2).
+///
+/// Why best-effort, unlike the webhook ingress: DOC-73 §4.1's "non-blocking
+/// invariant" makes the bus's own availability an observability concern, never
+/// one console's HTTP surface depends on — a console that could not bind this
+/// socket still serves everything else. #6851 makes that state visible rather
+/// than silent: `None` here is what `GET /api/console/events/stream/sse`
+/// answers `503` for, so a viewer distinguishes a bus with nothing to say from
+/// one that is not there.
+///
+/// Why it runs before `AppState`: the SSE route reads the bus out of the state,
+/// so the bus has to exist before the state is built. The listener task it
+/// spawns is independent of everything after it.
+/// What: resolves the socket path, binds it, opens the durable NDJSON log so
+/// seq numbering resumes from the log's recovered high-water mark rather than
+/// restarting at 1 (DOC-73 §4.3), spawns `serve_ingest`, and returns the shared
+/// bus. Every failure arm logs and returns `None`.
+/// Test: `crate::event_stream::tests::a_dead_bus_answers_503_json` covers the
+/// `None` surface; the bind and log paths are covered by
+/// `crate::event_bus::tests`.
+async fn start_event_bus() -> Option<Arc<event_bus::EventBus>> {
+    let socket = match event_bus::ingest_socket_path() {
+        Ok(socket) => socket,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not resolve the console event-bus ingest socket path");
+            return None;
+        }
+    };
+    let listener = match event_bus::bind_ingest(&socket).await {
+        Ok(listener) => listener,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "could not bind the console event-bus ingest socket; \
+                 producers cannot push events this run"
+            );
+            return None;
+        }
+    };
+    info!(socket = %socket.display(), "console event-bus ingest ready");
+
+    // #6848 slice 3b: open the durable log BEFORE the bus, so seq resumes from
+    // its recovered high-water mark. Failing to open it degrades to
+    // `EventBus::new` (no durability, seq restarts at 1) under the same
+    // non-blocking invariant the bind failure above already follows.
+    let bus = match event_bus::LogConfig::resolve_default() {
+        Ok(log_config) => match event_bus::DurableLog::open(log_config).await {
+            Ok((log, recovered)) => {
+                info!(
+                    next_seq = recovered.next_seq,
+                    "console event-bus durable log ready"
+                );
+                event_bus::EventBus::with_log(
+                    event_bus::EventBusConfig::default(),
+                    Some(log),
+                    recovered.next_seq,
+                )
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "could not open the console event-bus durable log; \
+                     events this run will not survive a restart"
+                );
+                event_bus::EventBus::new(event_bus::EventBusConfig::default())
+            }
+        },
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "could not resolve the console event-bus durable log directory; \
+                 events this run will not survive a restart"
+            );
+            event_bus::EventBus::new(event_bus::EventBusConfig::default())
+        }
+    };
+
+    let bus = Arc::new(bus);
+    let serving = Arc::clone(&bus);
+    tokio::spawn(async move {
+        event_bus::serve_ingest(listener, serving, shutdown_signal()).await;
+    });
+    Some(bus)
+}
+
 /// Run the `serve` subcommand.
 ///
 /// Why: Separating the serve logic from `run()` keeps `run()` thin and allows
@@ -323,7 +412,13 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
 
     // ── service setup ───────────────────────────────────────────────────────
     let connectors = detect::all_connectors();
-    let state = server::AppState::new(connectors);
+    // #6851: the bus is built first because the SSE route reads it out of the
+    // state. A console with no bus still serves everything else.
+    let mut state = server::AppState::new(connectors);
+    if let Some(bus) = start_event_bus().await {
+        state = state.with_event_bus(bus);
+    }
+    let state = state;
 
     // Kick off an eager first poll so the cache is warm before the first
     // HTTP request arrives.
@@ -496,79 +591,6 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
     );
     webhook::start_retry_sweep(ingress.clone(), WEBHOOK_RETRY_INTERVAL);
     let router = server::build_router_with_webhooks(state.clone(), self_origins, ingress);
-
-    // ── event-bus ingest (#6848, DOC-73 §4.1/§4.2) ──────────────────────────
-    // Console hosts the one event bus in the workspace; `trusty-mpm`,
-    // `trusty-code`, `trusty-agents` and `trusty-analyze` push `HarnessEvent`
-    // frames here over a UDS socket. Best-effort, unlike the webhook ingress
-    // above: no route in this crate reads the bus yet (that is #6850/#6851),
-    // and DOC-73 §4.1's "non-blocking invariant" makes the bus's own
-    // availability an observability concern, never one console's HTTP surface
-    // depends on — a console that could not bind this socket still serves
-    // everything else.
-    match event_bus::ingest_socket_path() {
-        Ok(socket) => match event_bus::bind_ingest(&socket).await {
-            Ok(listener) => {
-                info!(
-                    socket = %socket.display(),
-                    "console event-bus ingest ready"
-                );
-                // #6848 slice 3b: open the durable NDJSON log before the bus
-                // itself, so seq numbering resumes from the log's recovered
-                // high-water mark rather than restarting at 1 on every
-                // console restart (DOC-73 §4.3). Failing to open it degrades
-                // to `EventBus::new` (no durability, seq restarts at 1) per
-                // the same non-blocking invariant the ingest-bind failure
-                // above already follows — a console that cannot open its
-                // event log still serves everything else.
-                let bus = match event_bus::LogConfig::resolve_default() {
-                    Ok(log_config) => match event_bus::DurableLog::open(log_config).await {
-                        Ok((log, recovered)) => {
-                            info!(
-                                next_seq = recovered.next_seq,
-                                "console event-bus durable log ready"
-                            );
-                            event_bus::EventBus::with_log(
-                                event_bus::EventBusConfig::default(),
-                                Some(log),
-                                recovered.next_seq,
-                            )
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                error = %e,
-                                "could not open the console event-bus durable log; \
-                                 events this run will not survive a restart"
-                            );
-                            event_bus::EventBus::new(event_bus::EventBusConfig::default())
-                        }
-                    },
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            "could not resolve the console event-bus durable log directory; \
-                             events this run will not survive a restart"
-                        );
-                        event_bus::EventBus::new(event_bus::EventBusConfig::default())
-                    }
-                };
-                let bus = Arc::new(bus);
-                tokio::spawn(async move {
-                    event_bus::serve_ingest(listener, bus, shutdown_signal()).await;
-                });
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "could not bind the console event-bus ingest socket; \
-                     producers cannot push events this run"
-                );
-            }
-        },
-        Err(e) => {
-            tracing::warn!(error = %e, "could not resolve the console event-bus ingest socket path");
-        }
-    }
 
     // ── bind primary listener ───────────────────────────────────────────────
     let primary_addr = *addrs.first().context("bind address list is empty")?;

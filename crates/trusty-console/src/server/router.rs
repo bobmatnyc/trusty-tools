@@ -129,6 +129,13 @@ fn build_router_inner(
             "/api/console/machine-status/stream",
             get(crate::routes::machine_history::stream_handler),
         )
+        // #6851: SSE fan-out of the console event bus (DOC-73 §4.4). The path
+        // is a static segment under `/events/stream`, so it neither shadows
+        // nor is shadowed by the polling route beside it.
+        .route(
+            crate::event_stream::SSE_PATH,
+            get(crate::event_stream::sse_handler),
+        )
         // ── trusty-mpm session-manager surface (#1222: P2 tab + P3 front door) ──
         // The console is the SINGLE HTTP front door for the session REST API;
         // every handler calls a trusty-mpm MCP tool via the stdio bridge — never
