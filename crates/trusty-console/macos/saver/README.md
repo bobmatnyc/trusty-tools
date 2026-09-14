@@ -118,11 +118,23 @@ codesign --verify --deep --strict --verbose=2 ~/Library/Screen\ Savers/TrustyCon
 
 ### Smoke test (automated)
 
+Check the daemon is up with the tooling-native commands first — they read the
+LaunchAgent's own state and the module's configured port rather than a
+hardcoded default (#7865):
+
+```bash
+trusty-console service status                            # preferred
+trusty-console port                                       # preferred — bound/default port
+```
+
+`curl` against the default port is a fallback for a console not managed by
+`trusty-console service`, or when only the HTTP route needs checking:
+
 ```bash
 swiftc -swift-version 5 -o target/console-saver/harness/loadharness \
   crates/trusty-console/macos/saver/LoadHarness.swift
 
-curl -s http://127.0.0.1:7788/health                    # console must be up
+curl -s http://127.0.0.1:7788/health                    # fallback — console must be up
 ./target/console-saver/harness/loadharness \
   target/console-saver/TrustyConsole.saver \
   http://127.0.0.1:7788/ui                              # optional URL override
