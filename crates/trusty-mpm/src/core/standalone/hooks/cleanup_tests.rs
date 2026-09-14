@@ -228,6 +228,13 @@ fn clean_settings_file_missing_file_is_noop() {
     let result = clean_settings_file(&path, true).unwrap();
     assert!(result.is_none());
     assert!(!path.exists(), "a missing file must never be created");
+    // #7762: nor may the apply arm leave the lock sidecar of a file it never
+    // writes — `tm doctor --fix` calls this for every project's absent
+    // `settings.local.json`.
+    assert!(
+        !crate::core::settings_lock::lock_sidecar(&path).exists(),
+        "no sidecar may be created for a file that does not exist"
+    );
 }
 
 #[test]

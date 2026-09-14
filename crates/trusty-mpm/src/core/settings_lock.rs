@@ -29,10 +29,15 @@
 //! - **Not reentrant.** Two nested [`with_settings_lock`] calls on one path
 //!   self-deadlock; the inner acquisition uses a different descriptor. No writer
 //!   in this crate calls another writer of the same file.
-//! - **One identity per file.** The lock sidecar is named from the CANONICAL
-//!   parent directory, so two processes that spell one file differently — a
-//!   symlinked project root, macOS's `/var` → `/private/var` — still take the
-//!   same lock.
+//! - **One identity per DIRECTORY spelling.** The lock sidecar is named from the
+//!   canonical parent directory, so two processes that spell one directory
+//!   differently — a symlinked project root, macOS's `/var` → `/private/var` —
+//!   still take the same lock. The FILE name is not resolved: a `settings.json`
+//!   that is itself a symlink to another file is two identities and therefore
+//!   two sidecars, and those two writers do not serialise. No caller creates
+//!   that shape — every one of them joins a literal `settings.json` or
+//!   `settings.local.json` onto a `.claude` directory — so it is an untested
+//!   gap, not a covered case (#7762).
 //! - **No `.bak`.** `trusty_common::claude_config::write_json_atomic` publishes a
 //!   `<path>.bak` sibling on every call, which for a once-per-launch writer is
 //!   untracked litter in every managed project (#7762). [`publish`] is that
@@ -58,26 +63,39 @@ use serde_json::Value;
 /// `f`'s own return value passes through untouched, so the `Err` returned here is
 /// only ever an acquisition failure — a caller can never confuse "could not lock"
 /// with "the work failed".
+///
+/// #7762: an acquisition failure is re-wrapped to name the SIDECAR. Every
+/// consumer's own error already names the settings file, and the file the
+/// operator has to inspect is the other one — a sidecar left by another uid is
+/// opened `O_RDWR` here and fails forever, so a message that named only
+/// `settings.json` sent them to `chmod` a file that was never the problem.
 /// Test: `serialises_concurrent_threads`, `errors_when_the_lock_is_unopenable`,
-/// `errors_when_the_parent_cannot_be_created`.
+/// `errors_when_the_parent_cannot_be_created`,
+/// `an_acquisition_failure_names_the_sidecar`.
 pub(crate) fn with_settings_lock<R>(settings_path: &Path, f: impl FnOnce() -> R) -> io::Result<R> {
     let stable = stable_path(settings_path)?;
-    trusty_common::file_lock::with_exclusive_lock(&stable, f)
+    trusty_common::file_lock::with_exclusive_lock(&stable, f).map_err(|source| {
+        io::Error::new(
+            source.kind(),
+            format!("lock sidecar {}: {source}", lock_sidecar(&stable).display()),
+        )
+    })
 }
 
-/// The sidecar path [`with_settings_lock`] locks for `settings_path`.
+/// The `.lock` sidecar spelling for `settings_path`, verbatim.
 ///
-/// Why: the tests, and any future reader wondering which file appeared beside
-/// their settings, need the spelling named once rather than re-derived.
-/// What: `trusty_common::file_lock::lock_path` of the [`stable_path`] identity —
-/// `<canonical dir>/settings.json.lock`. Errors for the same reasons
-/// [`stable_path`] does.
-/// Test: `lock_path_is_a_sidecar_of_the_settings_file`.
-#[cfg(test)]
-pub(crate) fn lock_path(settings_path: &Path) -> io::Result<PathBuf> {
-    Ok(trusty_common::file_lock::lock_path(&stable_path(
-        settings_path,
-    )?))
+/// Why (#7762): three callers need this name — the acquisition-failure message
+/// above, the `.gitignore` block
+/// [`crate::core::scaffold_gitignore`] scaffolds into a managed project, and the
+/// tests. Spelling `.lock` at each of them is how the three drift apart.
+/// What: `trusty_common::file_lock::lock_path` of the path AS GIVEN — pure, no
+/// canonicalisation and no I/O — so a relative `.claude/settings.json` yields the
+/// relative `.claude/settings.json.lock` a `.gitignore` entry needs, and the
+/// [`stable_path`] identity yields the absolute sidecar actually locked.
+/// Test: `lock_sidecar_is_named_after_the_settings_file`,
+/// `scaffold_gitignore::tests::lock_entries_match_the_settings_lock_sidecar`.
+pub(crate) fn lock_sidecar(settings_path: &Path) -> PathBuf {
+    trusty_common::file_lock::lock_path(settings_path)
 }
 
 /// Publish `value` over `settings_path` atomically, leaving no `.bak`.
@@ -91,9 +109,16 @@ pub(crate) fn lock_path(settings_path: &Path) -> io::Result<PathBuf> {
 /// operator's project, not a recovery artifact.
 /// What: serialises `value` pretty-printed (byte-compatible with
 /// `write_json_atomic`, no trailing newline), [`stage`]s it beside
-/// `settings_path`, renames it into place, and fsyncs the parent directory so
-/// the rename itself is durable. Any failure removes the staged file and returns
-/// `Err` with `settings_path` untouched.
+/// `settings_path`, and renames it into place. Any failure up to and including
+/// the rename removes the staged file and returns `Err` with `settings_path`
+/// untouched.
+///
+/// The parent-directory fsync that follows is BEST EFFORT (#7762): both the
+/// open and the sync have their results discarded, because neither failing
+/// un-publishes the rename that already succeeded, and on macOS a directory
+/// descriptor is one of the cases `F_FULLFSYNC` can refuse. What it buys when it
+/// does work is durability of the rename across a power loss; what it never
+/// affects is the atomicity a reader sees, which the rename alone provides.
 /// Test: `publish_replaces_the_file_and_leaves_no_bak`,
 /// `publish_leaves_no_staged_file_behind`,
 /// `a_crash_between_stage_and_rename_leaves_the_original_intact`.
@@ -106,8 +131,9 @@ pub(crate) fn publish(settings_path: &Path, value: &Value) -> io::Result<()> {
         return Err(err);
     }
 
-    // Durability of the rename itself. Unix-only: Windows exposes no directory
-    // handle to sync, and its rename is already committed to the log.
+    // #7762: best-effort durability of the rename itself — a failure here does
+    // not un-publish it, so it is not an error. Unix-only: Windows exposes no
+    // directory handle to sync, and its rename is already committed to the log.
     #[cfg(unix)]
     if let Ok(dir) = std::fs::File::open(parent_of(settings_path)) {
         let _ = dir.sync_all();

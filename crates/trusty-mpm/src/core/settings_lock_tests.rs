@@ -15,6 +15,30 @@ use tempfile::TempDir;
 
 use super::*;
 
+/// The absolute sidecar `with_settings_lock` takes for `settings_path`.
+///
+/// Why: the canonical identity is what the lock is actually keyed by, and three
+/// tests need it. It lives here rather than in `super` because production has no
+/// use for it — the entry point already holds the [`stable_path`] it derives it
+/// from.
+fn lock_path(settings_path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    Ok(lock_sidecar(&stable_path(settings_path)?))
+}
+
+/// The sidecar is the settings file's own name plus `.lock`, wherever it sits.
+///
+/// Why (#7762): `scaffold_gitignore` writes this spelling into a managed
+/// project's `.gitignore` as a relative entry, so the pure, un-canonicalised
+/// form is a contract and not an implementation detail.
+#[test]
+fn lock_sidecar_is_named_after_the_settings_file() {
+    assert_eq!(
+        lock_sidecar(std::path::Path::new(".claude/settings.json")),
+        std::path::PathBuf::from(".claude/settings.json.lock"),
+        "a relative settings path must yield a relative sidecar"
+    );
+}
+
 /// The sidecar sits beside the settings file, named after it.
 #[test]
 fn lock_path_is_a_sidecar_of_the_settings_file() {
@@ -104,6 +128,27 @@ fn errors_when_the_lock_is_unopenable() {
 
     assert!(result.is_err(), "an unopenable sidecar must not lock");
     assert!(!ran.load(Ordering::SeqCst), "the closure must not have run");
+}
+
+/// The acquisition failure names the SIDECAR, not the settings file (#7762).
+///
+/// Why: every consumer's own error already names `settings.json`. The file the
+/// operator must inspect — a sidecar another uid left `0644`, which this opens
+/// `O_RDWR` and therefore fails on forever — appears nowhere unless this wrapper
+/// puts it there.
+#[test]
+fn an_acquisition_failure_names_the_sidecar() {
+    let dir = TempDir::new().expect("tempdir");
+    let settings = dir.path().join("settings.json");
+    std::fs::create_dir(lock_path(&settings).expect("lock path")).expect("occupy the sidecar");
+
+    let err = with_settings_lock(&settings, || ()).expect_err("an unopenable sidecar must error");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("settings.json.lock"),
+        "the message must name the sidecar: {message}"
+    );
 }
 
 /// A parent directory that cannot exist is an error, not an unlocked write.

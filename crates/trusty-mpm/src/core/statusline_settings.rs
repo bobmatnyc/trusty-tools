@@ -87,11 +87,14 @@ impl StatuslineWrite {
 ///    reader sees one writer's complete payload or the other's, never a splice
 ///    (#4077), and leaves `<path>.bak` behind.
 /// 2. **The read-modify-write cycle is serialised** — the whole load → mutate →
-///    store runs under [`crate::core::claude_json_guard::lock`], the same
-///    in-process mutex the `.claude.json` seeders take (#4072). Atomicity alone
-///    stops corruption but not a LOST UPDATE: two writers that both read the
-///    pre-seed file would each publish their own complete copy, and the second
-///    would drop whatever the first added.
+///    store runs under [`crate::core::settings_lock::with_settings_lock`], an
+///    `flock(2)` sidecar beside the settings file (#7762). Atomicity alone stops
+///    corruption but not a LOST UPDATE: two writers that both read the pre-seed
+///    file would each publish their own complete copy, and the second would drop
+///    whatever the first added. The guard used to be
+///    [`crate::core::claude_json_guard::lock`], a process-wide mutex — which
+///    could not see `tm launch`, the daemon, and `tm doctor --fix` writing this
+///    same file from three separate PROCESSES.
 ///
 /// Test: `a_fresh_file_is_seeded`, `a_stale_entry_is_repaired`,
 /// `a_customized_entry_is_kept`, `an_unparseable_file_is_refused`,

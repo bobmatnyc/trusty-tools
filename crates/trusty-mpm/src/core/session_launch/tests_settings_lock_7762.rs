@@ -175,6 +175,15 @@ fn merge_settings_refuses_when_the_lock_cannot_be_acquired() {
         "unexpected error: {err}"
     );
     assert!(!err.is_fatal(), "the session must still launch");
+    // #7762: the message must name the SIDECAR. The variant already names
+    // `settings.json`, and a sidecar another uid left behind is the file the
+    // operator has to deal with — naming only the settings file sends them to
+    // chmod the wrong one.
+    let message = err.to_string();
+    assert!(
+        message.contains("settings.json.lock"),
+        "the refusal must name the sidecar, not just the settings file: {message}"
+    );
     assert_eq!(
         std::fs::read(&settings_path).unwrap(),
         b"{\"kept\":true}",

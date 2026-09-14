@@ -144,9 +144,15 @@ pub fn repoint_settings_file(
         );
     }
 
-    // #7762: only the APPLY arm takes the lock, for the reason
-    // `cleanup::clean_settings_file` gives — a dry run writes nothing, and
-    // locking it would leave a sidecar beside every file `tm doctor` inspects.
+    // #7762: an absent file is skipped BEFORE the lock, for the reason
+    // `cleanup::clean_settings_file` gives — the driver hands this every settings
+    // path on the machine, existing or not, and locking one would create a
+    // sidecar for a file this repair never writes.
+    if !path.exists() {
+        return Ok(None);
+    }
+    // Only the APPLY arm takes the lock: a dry run writes nothing, and locking it
+    // would leave a sidecar beside every file `tm doctor` inspects.
     if !force {
         return repoint_settings_file_inner(path, installed, false);
     }

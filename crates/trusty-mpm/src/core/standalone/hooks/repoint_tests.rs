@@ -207,6 +207,12 @@ fn repoint_settings_file_missing_file_is_noop() {
             .expect("a missing file is not an error")
             .is_none()
     );
+    // #7762: the driver hands this every settings path on the machine, so an
+    // absent one must not gain a lock sidecar for a write that never happens.
+    assert!(
+        !crate::core::settings_lock::lock_sidecar(&missing).exists(),
+        "no sidecar may be created for a file that does not exist"
+    );
 }
 
 #[test]

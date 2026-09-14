@@ -313,10 +313,18 @@ pub fn event_names_matching(val: &Value, matches_cmd: impl Fn(&str) -> bool) -> 
 /// `clean_settings_file_malformed_json_is_noop`,
 /// `clean_settings_file_non_object_json_is_noop`.
 pub fn clean_settings_file(path: &Path, force: bool) -> anyhow::Result<Option<CleanOutcome>> {
-    // #7762: only the APPLY arm takes the lock. A dry run writes nothing, so
-    // locking it would create a sidecar beside every settings file `tm doctor`
-    // merely inspects — and the read it does is of a whole file every writer
-    // publishes by rename, so it always sees one complete version.
+    // #7762: an absent file is skipped BEFORE the lock. `tm doctor --fix` calls
+    // this for `settings.local.json` in every project whether or not one exists,
+    // and acquiring the lock would create a sidecar for a file this repair is
+    // about to report `Ok(None)` for. Same pre-check as
+    // `super::remove_global_trusty_mpm_hooks_at`.
+    if !path.exists() {
+        return Ok(None);
+    }
+    // Only the APPLY arm takes the lock. A dry run writes nothing, so locking it
+    // would create a sidecar beside every settings file `tm doctor` merely
+    // inspects — and the read it does is of a whole file every writer publishes
+    // by rename, so it always sees one complete version.
     if !force {
         return clean_settings_file_inner(path, false);
     }

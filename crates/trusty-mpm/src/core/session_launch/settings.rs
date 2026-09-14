@@ -208,6 +208,16 @@ pub(crate) const AUTO_MEMORY_KEY: &str = "autoMemoryEnabled";
 /// read and the write, and the publish dropped `write_json_atomic`'s `<path>.bak`
 /// — a copy taken on every launch is litter in the operator's project, not a
 /// recovery artifact.
+///
+/// # Contract
+///
+/// - **`mutate` must be pure** — it edits the `Value` it is handed and does no
+///   I/O of its own on a settings file. It runs INSIDE the lock, and
+///   `settings_lock` is not reentrant (#7762): a `mutate` that reached another
+///   settings writer — `merge_settings` itself, `add_exclude`,
+///   `write_skill_overrides` — would block forever on a lock its own caller
+///   holds. No current closure does anything but assign keys.
+///
 /// Test: `write_output_style_preserves_existing_keys`,
 /// `write_auto_memory_off_preserves_existing_keys`,
 /// `merge_settings_backs_up_a_malformed_file_before_rewriting_it`,
