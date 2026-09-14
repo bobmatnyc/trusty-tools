@@ -21,7 +21,9 @@
 //! `git init` only ever runs through [`trusty_common::git::command`] — the
 //! workspace's one `git` subprocess entry point — never a second
 //! `Command::new("git")`. An accepted offer whose `git init` fails refuses the
-//! seed rather than reading as a decline (#7774 review).
+//! seed rather than reading as a decline (#7774 review). [`recheck_before_seed`]
+//! is the same guard taken a second time, immediately before the bytes land,
+//! because the caller does further work between the two (#7764).
 //! Test: `claude_md_seed_git_tests.rs`.
 
 use std::path::Path;
@@ -101,6 +103,26 @@ pub fn offer_git_init(
     }
     run_git_init(dir)?;
     Ok(true)
+}
+
+/// Take the workspace-parent guard again, immediately before the seed write
+/// (#7764).
+///
+/// Why: [`offer_git_init`] answers "may tm seed here", and the seed call site
+/// then runs several git subprocesses and creates directories before writing.
+/// A child repository created inside that window was invisible to the earlier
+/// scan, and the file landed above it — the injection #7673 exists to refuse.
+/// The window cannot be eliminated (no filesystem lock spans it), so the check
+/// that DECIDES the write is the one taken last.
+/// What: [`offer_git_init`] with no prompt seam, so it can never run a second
+/// `git init`, and its `Ok` payload — "the operator accepted an offer" — is
+/// discarded as already spent. A directory the first call DID initialise is a
+/// repository by now, so the harness-root arm answers before the scan and an
+/// accepted offer still seeds.
+/// Test: `a_child_repository_created_between_the_check_and_the_write_refuses_the_seed`,
+/// `an_accepted_git_init_offer_still_seeds_through_the_recheck`.
+pub fn recheck_before_seed(dir: &Path, home: Option<&Path>) -> Result<(), SeedRefusal> {
+    offer_git_init(dir, home, None).map(|_| ())
 }
 
 /// Run `git init` for `dir` and prove it left a git work tree there.

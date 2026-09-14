@@ -1033,6 +1033,33 @@ fn git_succeeds(dir: &std::path::Path, args: &[&str]) -> bool {
         .is_ok_and(|out| out.status.success())
 }
 
+/// The directory a seed at `path` would land in, or `None` when the path has no
+/// usable directory component — what `--dir ""` produces (#7673 review).
+fn seed_dir(path: &std::path::Path) -> Option<&std::path::Path> {
+    path.parent().filter(|p| !p.as_os_str().is_empty())
+}
+
+/// A refused seed, as the fatal [`PipelineError`] this seam's callers expect.
+///
+/// Why: three checks can refuse one seed — the site guard, the workspace-parent
+/// offer, and the #7764 pre-write re-check — and which one fired must not
+/// change the shape of what the operator sees. One constructor keeps them from
+/// drifting apart.
+/// What: `InvalidInput` carrying [`SeedRefusal::message`] for `named`, the
+/// directory the refusal is about, while the error's `path` stays the file.
+/// Test: `load_or_create_claude_md_refuses_to_seed_at_the_home_directory`,
+/// `a_child_repository_created_between_the_check_and_the_write_refuses_the_seed`.
+fn seed_refused(
+    path: &std::path::Path,
+    named: &std::path::Path,
+    refusal: crate::core::claude_md_seed::SeedRefusal,
+) -> PipelineError {
+    PipelineError::Io {
+        path: path.to_path_buf(),
+        source: std::io::Error::new(std::io::ErrorKind::InvalidInput, refusal.message(named)),
+    }
+}
+
 /// Load `CLAUDE.md`, seeding the stub (and parent directories) if it does not
 /// exist. A pre-existing `CLAUDE.md` is read back byte-identical and never
 /// written to (issue #2170 — trusty-mpm must never modify a target project's
@@ -1097,10 +1124,16 @@ fn load_or_create_claude_md(
 /// What: identical to [`load_or_create_claude_md`] except the seed site's
 /// `crate::core::claude_md_seed_git::offer_git_init` call receives `should_init`
 /// instead of a hard-coded `None`.
+/// #7764: the workspace-parent guard is taken TWICE — once here through
+/// `offer_git_init`, which may also run `git init`, and once through
+/// `crate::core::claude_md_seed_git::recheck_before_seed` immediately before the
+/// write, because `upstream_tracking` runs several git subprocesses in between
+/// and a child repository created in that window would otherwise be missed.
 /// Test: `load_or_create_claude_md_seeds_in_a_subdirectory_of_a_git_repo` and
 /// the rest of [`load_or_create_claude_md`]'s pointer list cover the `None`
 /// path (unchanged); the `Some` path is covered at the CLI entry point in
-/// `instructions_tests.rs`, which is the only caller that can establish a TTY.
+/// `instructions_tests.rs`, which is the only caller that can establish a TTY,
+/// and by `a_child_repository_created_between_the_check_and_the_write_refuses_the_seed`.
 fn load_or_create_claude_md_with_init(
     path: &PathBuf,
     home: Option<&std::path::Path>,
@@ -1116,17 +1149,7 @@ fn load_or_create_claude_md_with_init(
             // parent — what `--dir ""` produces — fails closed inside
             // `refuse_seed_for` rather than skipping the guard.
             if let Some(refusal) = crate::core::claude_md_seed::refuse_seed_for(path, home) {
-                let named = path
-                    .parent()
-                    .filter(|p| !p.as_os_str().is_empty())
-                    .unwrap_or(path);
-                return Err(PipelineError::Io {
-                    path: path.clone(),
-                    source: std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        refusal.message(named),
-                    ),
-                });
+                return Err(seed_refused(path, seed_dir(path).unwrap_or(path), refusal));
             }
             // #7673 round 3 (owner ruling 2026-09-13): a marker-less, non-git
             // directory below home is still seedable, but not when it is a
@@ -1137,17 +1160,11 @@ fn load_or_create_claude_md_with_init(
             // default — seed with no git, exactly as before this follow-up),
             // `Some` only for a CLI entry point that already established it
             // is running on a TTY.
-            if let Some(dir) = path.parent().filter(|p| !p.as_os_str().is_empty())
+            if let Some(dir) = seed_dir(path)
                 && let Err(refusal) =
                     crate::core::claude_md_seed_git::offer_git_init(dir, home, should_init)
             {
-                return Err(PipelineError::Io {
-                    path: path.clone(),
-                    source: std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        refusal.message(dir),
-                    ),
-                });
+                return Err(seed_refused(path, dir, refusal));
             }
             // #5228: a stale branch's missing CLAUDE.md must never be stubbed over.
             if let Some(upstream) = upstream_tracking(path) {
@@ -1166,6 +1183,17 @@ fn load_or_create_claude_md_with_init(
                     path: parent.to_path_buf(),
                     source,
                 })?;
+            }
+            // #7764: every check above ran before the git subprocesses in
+            // `upstream_tracking` and the directory creation here, so its answer
+            // is stale by the time bytes land. A repository that appeared in
+            // that window is the workspace parent #7673 refuses, so the guard is
+            // re-taken as the LAST thing before the write.
+            if let Some(dir) = seed_dir(path)
+                && let Err(refusal) =
+                    crate::core::claude_md_seed_git::recheck_before_seed(dir, home)
+            {
+                return Err(seed_refused(path, dir, refusal));
             }
             std::fs::write(path, CLAUDE_MD_STUB).map_err(|source| PipelineError::Io {
                 path: path.clone(),

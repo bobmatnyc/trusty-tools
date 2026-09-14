@@ -14,9 +14,17 @@
 //! is the pure [`plan_auto_init`]; the "is there a repository here" stderr
 //! discrimination is the pure [`stderr_means_no_repository`]. Nothing here
 //! installs the `git` executable — a missing `git` is a prerequisite error.
+//! #7749: the upward probe is not enough. A directory with a repository BENEATH
+//! it is a workspace parent, and a `.git` written here becomes an ancestor
+//! repository for every project under it, so the guards also run the downward
+//! [`trusty_mpm::core::child_repo_scan::scan_for_child_repo`] — the same scan
+//! the `CLAUDE.md` seed guard uses — and refuse on a child repository or on a
+//! scan that could not finish.
 //! Test: `auto_git_init_tests.rs`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use trusty_mpm::core::child_repo_scan::{ChildRepoScan, ScanIncomplete, scan_for_child_repo};
 
 /// The git executable this module drives.
 const GIT_PROGRAM: &str = "git";
@@ -55,14 +63,23 @@ pub(crate) enum RepoContext {
 /// Why: `git init` writes a `.git` directory that git then treats as a
 /// project root for every descendant. In `$HOME` or at `/` that is a
 /// long-lived mistake nobody asked for, so those two directories refuse
-/// rather than initialize.
-/// Test: `plan_refuses_the_home_directory`, `plan_refuses_the_filesystem_root`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// rather than initialize. #7749: a workspace parent is the same mistake one
+/// level down — the `.git` adopts every child project instead of every sibling
+/// directory — and a scan that could not finish cannot rule one out.
+/// Test: `plan_refuses_the_home_directory`, `plan_refuses_the_filesystem_root`,
+/// `plan_refuses_a_workspace_parent`, `plan_refuses_an_unfinished_scan`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AutoInitRefusal {
     /// The directory is the operator's home directory.
     HomeDirectory,
     /// The directory is the filesystem root.
     FilesystemRoot,
+    /// #7749: a git repository lives beneath the directory, which makes it a
+    /// workspace parent. Carries the child repository the scan found.
+    WorkspaceParent(PathBuf),
+    /// #7749: the downward scan stopped before checking everything, so a child
+    /// repository cannot be ruled out. Fails closed — nothing is initialized.
+    ScanIncomplete(ScanIncomplete),
 }
 
 /// The decision [`ensure_git_repo`] acts on.
@@ -104,23 +121,31 @@ pub(crate) fn stderr_means_no_repository(stderr: &str) -> bool {
     stderr.contains(NO_REPO_STDERR)
 }
 
-/// Decide what to do about `dir`, given git's verdict and the home directory.
+/// Decide what to do about `dir`, given git's verdict, the home directory, and
+/// a downward scan for child repositories.
 ///
 /// Why: the whole decision, free of process spawning and filesystem access, so
 /// every arm is asserted directly. `context` is checked FIRST so a home
 /// directory (or `/`) that IS already a repository keeps behaving exactly as it
 /// does today — the guards only ever prevent a NEW repository.
 /// What: `AlreadyGit` when git reports a repository; `Refuse` when `dir` is the
-/// filesystem root or the home directory; `Init` otherwise. `dir` and `home`
-/// are expected canonicalized by the caller so the comparison is not defeated
-/// by a symlinked `$HOME`.
+/// filesystem root or the home directory; `Init` otherwise. #7749: `Init` is
+/// reached only through `scan`, which is `Clear` exactly when a completed walk
+/// found no repository beneath `dir` — `Found` and `Incomplete` both refuse, so
+/// a workspace parent never gets a `.git` and an unfinished walk never reads as
+/// absence. `scan` is a closure, so the walk costs nothing on the arms decided
+/// before it. `dir` and `home` are expected canonicalized by the caller so the
+/// comparison is not defeated by a symlinked `$HOME`.
 /// Test: `plan_initializes_a_plain_directory`, `plan_refuses_the_home_directory`,
 /// `plan_refuses_the_filesystem_root`,
-/// `plan_leaves_an_existing_repo_alone_even_in_the_home_directory`.
+/// `plan_leaves_an_existing_repo_alone_even_in_the_home_directory`,
+/// `plan_refuses_a_workspace_parent`, `plan_refuses_an_unfinished_scan`,
+/// `plan_does_not_scan_when_an_earlier_guard_already_decided`.
 pub(crate) fn plan_auto_init(
     dir: &Path,
     home: Option<&Path>,
     context: RepoContext,
+    scan: impl FnOnce() -> ChildRepoScan,
 ) -> AutoInitPlan {
     if context == RepoContext::Present {
         return AutoInitPlan::AlreadyGit;
@@ -131,7 +156,17 @@ pub(crate) fn plan_auto_init(
     if home == Some(dir) {
         return AutoInitPlan::Refuse(AutoInitRefusal::HomeDirectory);
     }
-    AutoInitPlan::Init
+    // #7749: a `.git` here would become an ancestor repository for every child
+    // project, so only a scan that finished and found nothing may initialize.
+    match scan() {
+        ChildRepoScan::Clear => AutoInitPlan::Init,
+        ChildRepoScan::Found(child) => {
+            AutoInitPlan::Refuse(AutoInitRefusal::WorkspaceParent(child))
+        }
+        ChildRepoScan::Incomplete(stop) => {
+            AutoInitPlan::Refuse(AutoInitRefusal::ScanIncomplete(stop))
+        }
+    }
 }
 
 /// The one-line notice printed after a successful `git init`.
@@ -144,13 +179,25 @@ pub(crate) fn initialized_message(dir: &Path) -> String {
 /// The stderr notice printed when a sanity guard refuses.
 ///
 /// Why: a refusal that does not say WHY reads as a malfunction. Each arm names
-/// the directory and the specific reason it is not a project.
+/// the directory and the specific reason it is not a project. #7749: the two
+/// scan arms carry what the scan learned — the child repository, or what
+/// stopped the walk — so the operator can act on it rather than re-deriving it.
 /// Test: `refusal_message_names_the_home_directory`,
-/// `refusal_message_names_the_filesystem_root`.
-pub(crate) fn refusal_message(refusal: AutoInitRefusal, dir: &Path) -> String {
+/// `refusal_message_names_the_filesystem_root`,
+/// `refusal_message_names_the_child_repository`,
+/// `refusal_message_says_what_stopped_the_scan`.
+pub(crate) fn refusal_message(refusal: &AutoInitRefusal, dir: &Path) -> String {
     let reason = match refusal {
-        AutoInitRefusal::HomeDirectory => "that is your home directory, not a project",
-        AutoInitRefusal::FilesystemRoot => "that is the filesystem root, not a project",
+        AutoInitRefusal::HomeDirectory => "that is your home directory, not a project".to_string(),
+        AutoInitRefusal::FilesystemRoot => "that is the filesystem root, not a project".to_string(),
+        AutoInitRefusal::WorkspaceParent(child) => format!(
+            "{} is a git repository beneath it, so a .git here would become an ancestor \
+             repository for that project and every other one under this directory",
+            child.display()
+        ),
+        AutoInitRefusal::ScanIncomplete(stop) => {
+            format!("tm could not rule out git repositories beneath it ({stop})")
+        }
     };
     format!(
         "tm: not initializing git in {} — {reason}. Run tm from a project directory.",
@@ -232,10 +279,14 @@ fn repo_context(program: &str, dir: &Path) -> anyhow::Result<RepoContext> {
 /// a repository, so every path that works today is unchanged.
 /// What: probes with [`repo_context`], decides with [`plan_auto_init`], runs
 /// `git init` and prints [`initialized_message`] for the `Init` arm, prints
-/// [`refusal_message`] for the `Refuse` arm. Errors only when `git` is missing
-/// (see [`missing_git_error`]), when git's verdict is unreadable, or when
-/// `git init` itself fails.
-/// Test: `auto_init_initializes_a_plain_directory` and the rest of
+/// [`refusal_message`] for the `Refuse` arm. #7749: the `scan` seam
+/// [`plan_auto_init`] consults is [`scan_for_child_repo`] over `dir` itself,
+/// evaluated only when no cheaper guard already decided. Errors only when `git`
+/// is missing (see [`missing_git_error`]), when git's verdict is unreadable, or
+/// when `git init` itself fails.
+/// Test: `auto_init_initializes_a_plain_directory`,
+/// `auto_init_refuses_a_workspace_parent_with_a_deep_child_repository`,
+/// `auto_init_refuses_when_the_downward_scan_cannot_finish`, and the rest of
 /// `auto_git_init_tests.rs`.
 pub(crate) fn ensure_git_repo(dir: &Path) -> anyhow::Result<AutoInitOutcome> {
     ensure_git_repo_with(dir, dirs::home_dir().as_deref(), GIT_PROGRAM)
@@ -262,10 +313,14 @@ pub(crate) fn ensure_git_repo_with(
     let context = repo_context(program, dir)?;
     let canonical = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
     let home_canonical = home.map(|h| h.canonicalize().unwrap_or_else(|_| h.to_path_buf()));
-    match plan_auto_init(&canonical, home_canonical.as_deref(), context) {
+    // #7749: the downward scan is the last guard consulted, so it runs only for
+    // a directory git already reported as having no repository at all.
+    match plan_auto_init(&canonical, home_canonical.as_deref(), context, || {
+        scan_for_child_repo(dir)
+    }) {
         AutoInitPlan::AlreadyGit => Ok(AutoInitOutcome::AlreadyGit),
         AutoInitPlan::Refuse(refusal) => {
-            eprintln!("{}", refusal_message(refusal, dir));
+            eprintln!("{}", refusal_message(&refusal, dir));
             Ok(AutoInitOutcome::Refused(refusal))
         }
         AutoInitPlan::Init => {
