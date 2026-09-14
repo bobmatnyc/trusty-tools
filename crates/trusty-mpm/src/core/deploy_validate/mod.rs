@@ -30,7 +30,13 @@
 //! bundled roster (the pre-#2171 behavior) — see `expected_set`'s module doc
 //! for the full fallback contract. [`validate_workspace`] also checks
 //! `.claude/settings.json` (at [`FrameworkPaths::claude_home_dir`]) for a
-//! resolvable `outputStyle` and a configured `hooks` key.
+//! resolvable `outputStyle`, a configured `hooks` key, and — since #7849 —
+//! every TOGGLE-DRIVEN hook group this project's current config asks for,
+//! recomputed through the launch path's own builder
+//! ([`crate::core::session_launch::project_hook_group_gaps`]). That last probe
+//! is what lets `--repair` resync a flag that flipped after the settings file
+//! was written; the repair itself is an in-place merge through the same locked
+//! writer, not a re-run of the deploy pipeline.
 //! [`validate_and_repair`] re-runs
 //! [`crate::core::session_launch::prepare_session_with_repo_url`] — the exact
 //! deploy pipeline `spawn_managed`/`resume_managed` already use — when the
@@ -51,7 +57,13 @@
 //! `repair_is_a_noop_on_already_complete_workspace`,
 //! `repair_closes_a_managed_tier_bundled_skill_gap` (issue #6586),
 //! `a_stray_project_tier_bundled_skill_does_not_satisfy_completeness` (issue
-//! #6586); the expected-set resolution itself is covered by `expected_set`'s
+//! #6586), `repair_adds_the_prompt_feedback_groups_after_the_flag_flips_on`,
+//! `a_second_repair_leaves_the_settings_file_byte_identical`,
+//! `repair_removes_a_stale_prompt_feedback_group_when_the_flag_is_off`,
+//! `a_hook_group_repair_leaves_foreign_entries_untouched`,
+//! `a_malformed_settings_file_is_a_fail_not_a_silent_pass`,
+//! `a_hook_writer_failure_surfaces_rather_than_reporting_no_gaps` (issue
+//! #7849); the expected-set resolution itself is covered by `expected_set`'s
 //! own test module.
 
 use std::path::Path;
@@ -110,6 +122,14 @@ pub enum DeploymentGap {
     OutputStyleFileMissing(String),
     /// `.claude/settings.json` has no (non-empty) `hooks` key configured.
     HooksMissing,
+    /// A tm-owned hook group this project's CURRENT config asks for is absent
+    /// from `.claude/settings.json` (#7849) — named by its event and the
+    /// command the group would run.
+    ProjectHookGroupMissing(String, String),
+    /// `.claude/settings.json` carries a tm-owned hook group this project's
+    /// current config no longer asks for (#7849) — a toggle that flipped back
+    /// off, or a command naming a binary path that no longer resolves.
+    ProjectHookGroupStale(String, String),
 }
 
 impl DeploymentGap {
@@ -151,7 +171,30 @@ impl DeploymentGap {
                 format!("outputStyle {id:?} has no deployed style file")
             }
             Self::HooksMissing => "settings.json has no hooks configured".to_string(),
+            Self::ProjectHookGroupMissing(event, command) => format!(
+                "settings.json has no `{event}` hook group running `{command}` — this \
+                 project's config asks for it; run `tm validate --repair` to add it"
+            ),
+            Self::ProjectHookGroupStale(event, command) => format!(
+                "settings.json carries a `{event}` hook group running `{command}` that this \
+                 project's config no longer asks for; run `tm validate --repair` to remove it"
+            ),
         }
+    }
+
+    /// Whether this gap is a project-tier hook group the in-place resync closes.
+    ///
+    /// Why (#7849): a hook-group gap does not need the deploy pipeline. Running
+    /// it would also rewrite the output style, the plugin allowlist and the
+    /// statusline — work the resync does not need, and a fatal refusal it does
+    /// not deserve.
+    /// What: `true` for the two `#7849` variants, `false` for every other.
+    /// Test: `repair_adds_the_prompt_feedback_groups_after_the_flag_flips_on`.
+    fn is_project_hook_group(&self) -> bool {
+        matches!(
+            self,
+            Self::ProjectHookGroupMissing(..) | Self::ProjectHookGroupStale(..)
+        )
     }
 }
 
@@ -190,10 +233,29 @@ impl ValidationReport {
 /// findings into a [`ValidationReport`]. Pure filesystem reads — no writes.
 /// Test: every `validate_*` test in this module's `tests` submodule.
 pub fn validate_workspace(fw: &FrameworkPaths) -> ValidationReport {
+    validate_workspace_with_exe(fw, None)
+}
+
+/// [`validate_workspace`] with the hook binary pinned by the caller.
+///
+/// Why (#7849): the toggle-driven hook probe compares the file against the
+/// COMMANDS the writer would produce, and those carry the resolved stable
+/// binary path. `resolve_stable_hook_exe` refuses a build-artifact binary, and
+/// a test process is one — so without this seam the probe would silently skip
+/// in every test that exercises it. Mirrors the seam
+/// [`validate_and_repair_with_exe`] already carries for the repair half.
+/// What: the body of [`validate_workspace`], forwarding `hook_exe` to the
+/// settings probe. Production callers pass `None` and keep resolving the
+/// running installed binary.
+/// Test: `repair_adds_the_prompt_feedback_groups_after_the_flag_flips_on`.
+pub fn validate_workspace_with_exe(
+    fw: &FrameworkPaths,
+    hook_exe: Option<&Path>,
+) -> ValidationReport {
     let mut gaps = Vec::new();
     validate_agents(fw, &mut gaps);
     validate_skills(fw, &mut gaps);
-    validate_settings(fw, &mut gaps);
+    validate_settings(fw, hook_exe, &mut gaps);
     ValidationReport { gaps }
 }
 
@@ -273,9 +335,10 @@ fn validate_skills(fw: &FrameworkPaths, gaps: &mut Vec<DeploymentGap>) {
     }
 }
 
-/// Probe `.claude/settings.json` for a resolvable `outputStyle` and a
-/// configured `hooks` key.
-fn validate_settings(fw: &FrameworkPaths, gaps: &mut Vec<DeploymentGap>) {
+/// Probe `.claude/settings.json` for a resolvable `outputStyle`, a configured
+/// `hooks` key, and (#7849) the toggle-driven hook groups this project's
+/// current config asks for.
+fn validate_settings(fw: &FrameworkPaths, hook_exe: Option<&Path>, gaps: &mut Vec<DeploymentGap>) {
     let settings_path = fw.claude_home_dir().join(".claude").join("settings.json");
     let text = match std::fs::read_to_string(&settings_path) {
         Ok(text) => text,
@@ -322,6 +385,23 @@ fn validate_settings(fw: &FrameworkPaths, gaps: &mut Vec<DeploymentGap>) {
         .is_some_and(|o| !o.is_empty());
     if !hooks_present {
         gaps.push(DeploymentGap::HooksMissing);
+        return;
+    }
+
+    // #7849: a non-empty `hooks` key was the whole test, so a toggle that
+    // flipped on after this file was written was invisible — and a toggle that
+    // flipped off left its group firing forever. The diff recomputes what the
+    // launch-path writer would produce for THIS project and names both
+    // directions. A file tm's project tier never provisioned yields nothing,
+    // so a foreign project is never told to adopt tm's hooks.
+    let project_dir = fw.claude_home_dir();
+    let group_gaps =
+        crate::core::session_launch::project_hook_group_gaps(fw, &project_dir, &value, hook_exe);
+    for (event, command) in group_gaps.missing {
+        gaps.push(DeploymentGap::ProjectHookGroupMissing(event, command));
+    }
+    for (event, command) in group_gaps.stale {
+        gaps.push(DeploymentGap::ProjectHookGroupStale(event, command));
     }
 }
 
@@ -414,13 +494,35 @@ pub fn validate_and_repair_with_exe(
     repo_url: Option<&str>,
     hook_exe: Option<&Path>,
 ) -> RepairOutcome {
-    let before = validate_workspace(fw);
+    let before = validate_workspace_with_exe(fw, hook_exe);
     if before.is_complete() {
         return RepairOutcome {
             after: before.clone(),
             before,
             repaired: false,
             repair_error: None,
+        };
+    }
+
+    // #7849: a hook-group-only gap is resynced in place through the SAME locked
+    // writer the launch path uses, not by re-running the deploy pipeline — that
+    // pipeline closes this gap too (it calls the same writer), but it also
+    // rewrites the output style, the plugin allowlist and the statusline, and
+    // it can refuse fatally for a reason a hook resync has nothing to do with.
+    // An Err here is reported: a repair that could not write must never leave
+    // the caller reading "no gaps found" (the fail-open shape this issue is).
+    if before.gaps.iter().all(DeploymentGap::is_project_hook_group) {
+        let repair_error =
+            crate::core::session_launch::ensure_project_hooks_with(fw, workspace, hook_exe)
+                .err()
+                .map(|e| e.to_string());
+        let after = validate_workspace_with_exe(fw, hook_exe);
+        let repaired = repair_error.is_none() && after.is_complete();
+        return RepairOutcome {
+            before,
+            after,
+            repaired,
+            repair_error,
         };
     }
 
@@ -432,7 +534,7 @@ pub fn validate_and_repair_with_exe(
         Err(e) => Some(e.to_string()),
     };
 
-    let after = validate_workspace(fw);
+    let after = validate_workspace_with_exe(fw, hook_exe);
     // #4781: `repaired` is a statement about the OUTCOME, never about the
     // attempt — a fatally-refused repair left the workspace exactly as broken
     // as it found it.

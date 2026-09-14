@@ -1260,3 +1260,37 @@ fn pm_guard_and_divert_commands_end_in_a_known_argv_tail() {
         "statusLine argv {argv:?} is not in the #7262 classifier's vocabulary"
     );
 }
+
+/// The tier marker recognises what only this writer writes.
+///
+/// Why (#7849): the marker decides whether a settings file is one tm's PROJECT
+/// tier provisioned, which is what keeps the toggle-driven gap probe quiet on a
+/// foreign project.
+/// What: the PM guard and the `trusty-memory` block both answer yes.
+/// Test: itself.
+#[test]
+fn the_tier_marker_recognises_the_pm_guard() {
+    assert!(super::is_project_tier_marker_command(&format!(
+        "/usr/local/bin/tm{PM_GUARD_SUFFIX}"
+    )));
+    assert!(super::is_project_tier_marker_command(
+        "trusty-memory inbox-check"
+    ));
+}
+
+/// The tier marker is NOT satisfied by a user-tier lifecycle command.
+///
+/// Why (#7849): `~/.claude/settings.json` carries the lifecycle triad and
+/// nothing else. Treating it as project-tier would make `tm doctor` report the
+/// whole project-tier hook set missing from it, on every machine.
+/// What: a bare `<exe> hook` answers no, and so does a foreign command.
+/// Test: itself.
+#[test]
+fn the_tier_marker_ignores_a_user_tier_lifecycle_command() {
+    assert!(!super::is_project_tier_marker_command(
+        "/usr/local/bin/tm hook"
+    ));
+    assert!(!super::is_project_tier_marker_command(
+        "/opt/other-harness/run --stop"
+    ));
+}

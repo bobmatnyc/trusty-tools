@@ -30,12 +30,17 @@ pub use entry::{
 };
 // #6887: the bulk-read diversion `PreToolUse` groups.
 mod divert_hooks;
+// #7849: the read-only diff between a project's settings file and the hook
+// groups its CURRENT config asks for, shared by `deploy_validate` and
+// `tm doctor`.
+mod hook_group_diff;
 /// The ONE way a non-terminal launch path surfaces a `PrepReport`'s findings.
 ///
 /// Why: five spawn paths wrote the same two loops by hand, and a sixth would
 /// have surfaced only half of them. See [`asset_notices::log_prep_findings`].
 /// Test: covered by `asset_notices`' own tests (this is a plain re-export).
 pub use asset_notices::{PrepScope, log_prep_findings};
+pub(crate) use hook_group_diff::project_hook_group_gaps;
 mod palace_alias;
 // #7780: preserve a malformed project settings.json before a writer rewrites it.
 // #7789: `pub(crate)` because the managed-tier writers in `core::standalone`
@@ -54,6 +59,10 @@ mod quarantine_shadows;
 // missing, plus the read-only gap predicate `tm doctor` reports from.
 mod resume_hooks;
 pub use resume_hooks::{ensure_project_hooks, missing_lifecycle_hook_events};
+// #7849: `deploy_validate` repairs a toggle-driven hook gap through this exact
+// writer, and drives it from a hermetic `FrameworkPaths` so the repair never
+// reads the operator's `$HOME`.
+pub(crate) use resume_hooks::ensure_project_hooks_with;
 mod search_index;
 mod settings;
 mod skills;
@@ -140,7 +149,7 @@ use settings::{
     write_auto_memory_enabled,
     write_output_style,
     // #7688: the launch path is the only caller that turns the capture on, so
-    // the plain `write_project_hooks` is no longer reached from this module.
+    // the plain `write_project_hooks` is not reached from this module.
     // write_enabled_plugins is not imported here: it is already brought into
     // scope by the pub(crate) re-export below (#7678).
     write_project_hooks_with_prompt_feedback,

@@ -581,6 +581,12 @@ pub(crate) fn write_enabled_plugins_with_trust(
 /// `project_hooks_tests::write_project_hooks_takes_no_snapshot_when_nothing_changes`,
 /// `project_hooks_tests::write_project_hooks_takes_no_snapshot_when_the_exe_is_refused`,
 /// `project_hooks_tests::write_project_hooks_aborts_when_the_snapshot_fails`.
+/// #7849: production no longer reaches this four-argument form — the resume
+/// merge, its last caller, now resolves every toggle (the #7688 flag included)
+/// through [`super::hook_group_diff::project_hook_additions_for`]. It survives
+/// as the pre-#7688 REFERENCE its own tests assert against, exactly as
+/// [`super::project_hooks::project_managed_hook_additions`] does one layer down.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn write_project_hooks(
     project_dir: &Path,
     exe_override: Option<&Path>,

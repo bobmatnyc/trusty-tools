@@ -283,3 +283,45 @@ fn missing_events_is_empty_for_a_file_tm_never_provisioned() {
         "a project tm never provisioned owes no tm hook group: {gaps:?}"
     );
 }
+
+/// The resume merge writes the prompt-feedback capture, never strips it.
+///
+/// Why (#7849): this call hard-coded the #7688 flag `false` while the strip
+/// domain covered `Stop`/`SubagentStop` either way, so every resume REMOVED the
+/// two capture groups the launch had just written. A project with the flag on
+/// therefore lost the capture at its first resume and never got it back.
+/// What: seeds the incident file in a project whose committed flag is on, runs
+/// the merge twice, and asserts both capture groups are present after each.
+/// Test: itself.
+#[test]
+fn resume_merge_registers_the_prompt_feedback_capture_when_the_flag_is_on() {
+    let project = tempfile::tempdir().expect("tempdir");
+    let path = seed_settings(project.path(), &incident_settings());
+    std::fs::write(
+        project
+            .path()
+            .join(crate::core::project_config::PROJECT_CONFIG_FILE),
+        "prompt_self_improvement = true\n",
+    )
+    .expect("write project config");
+    let exe = Some(std::path::Path::new(STABLE_HOOK_EXE));
+    let base = tempfile::tempdir().expect("tempdir");
+    let fw = crate::core::paths::FrameworkPaths::for_managed_workspace_under(
+        base.path(),
+        project.path(),
+    );
+
+    for pass in ["first", "second"] {
+        ensure_project_hooks_with(&fw, project.path(), exe)
+            .unwrap_or_else(|e| panic!("{pass} merge: {e}"));
+        for event in ["Stop", "SubagentStop"] {
+            let commands = commands_for(&read_settings(&path), event);
+            assert!(
+                commands
+                    .iter()
+                    .any(|c| c == &format!("{STABLE_HOOK_EXE} hook --prompt-feedback")),
+                "{pass} merge must leave the {event} capture registered: {commands:?}"
+            );
+        }
+    }
+}

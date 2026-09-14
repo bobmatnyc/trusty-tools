@@ -915,6 +915,53 @@ fn missing_group_repair_is_silent_for_a_complete_file() {
     );
 }
 
+/// `--fix` closes a toggle-driven gap, not only a lifecycle one (#7849).
+///
+/// Why: `hooks_missing_tm_group` now also reports the group a flipped
+/// `prompt_self_improvement` asks for, and its remediation line names
+/// `tm doctor --fix`. Gating this repair on the lifecycle triad alone left that
+/// remediation a dead end — the check would warn forever after a `--fix` that
+/// produced no step.
+/// What: writes the file through the launch-path merge with the committed flag
+/// OFF, flips it ON, and asserts `--fix --yes` produces one applied step naming
+/// `Stop` and that the capture command lands in the file.
+/// Test: itself.
+#[test]
+fn missing_group_repair_closes_a_toggle_driven_gap() {
+    let project = tempfile::tempdir().unwrap();
+    let exe = Some(Path::new("/usr/local/bin/tm"));
+    let path = write_missing_group_settings(project.path());
+    let flag = project
+        .path()
+        .join(crate::core::project_config::PROJECT_CONFIG_FILE);
+    fs::write(&flag, "prompt_self_improvement = false\n").unwrap();
+    crate::core::session_launch::ensure_project_hooks(project.path(), exe).unwrap();
+    assert!(
+        repair_missing_hook_group_with(project.path(), exe, RepairMode::DryRun).is_empty(),
+        "the fixture must start complete, or this test proves nothing"
+    );
+
+    fs::write(&flag, "prompt_self_improvement = true\n").unwrap();
+    let steps = repair_missing_hook_group_with(project.path(), exe, RepairMode::Apply);
+
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    assert!(
+        steps[0].what.contains("Stop"),
+        "the step must name the unwired capture event: {}",
+        steps[0].what
+    );
+    assert!(
+        matches!(steps[0].status, StepStatus::Applied { .. }),
+        "the merge must apply: {steps:?}"
+    );
+    assert!(
+        fs::read_to_string(&path)
+            .unwrap()
+            .contains("/usr/local/bin/tm hook --prompt-feedback"),
+        "the capture command must land in the file"
+    );
+}
+
 /// Why (#7617, #5866's lesson): the new `statusline` check's remediation line
 /// names `tm doctor --fix`, so the step it names has to exist and has to write.
 /// Test: itself.

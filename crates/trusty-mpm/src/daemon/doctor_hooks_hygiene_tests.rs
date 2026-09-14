@@ -278,6 +278,44 @@ fn check_hooks_hygiene_reports_a_missing_sessionstart_group() {
     );
 }
 
+/// A toggle-driven group the project asks for is reported too (#7849).
+///
+/// Why: `missing_lifecycle_hook_events` tests the base triad only, so a project
+/// whose `prompt_self_improvement` flipped on after its settings file was
+/// written looked complete to `tm doctor` — the same blind spot `tm validate`
+/// had.
+/// What: merges with the committed flag OFF, flips it ON, and asserts the check
+/// names the `Stop` capture and the `tm validate --repair` remedy.
+/// Test: itself.
+#[test]
+fn check_hooks_hygiene_reports_a_missing_toggle_driven_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("flag-flipped-project");
+    write_settings(&project, &missing_sessionstart_value());
+    let flag = project.join(crate::core::project_config::PROJECT_CONFIG_FILE);
+    std::fs::write(&flag, "prompt_self_improvement = false\n").unwrap();
+    crate::core::session_launch::ensure_project_hooks(
+        &project,
+        Some(Path::new("/usr/local/bin/tm")),
+    )
+    .expect("the merge must succeed against a pinned installed binary");
+
+    std::fs::write(&flag, "prompt_self_improvement = true\n").unwrap();
+
+    let (_contamination, _foreign, _build_tree, missing) = check_hooks_hygiene(Some(&project), &[]);
+    assert_eq!(missing.status, CheckStatus::Warn);
+    assert!(
+        missing.message.contains("Stop (asks for"),
+        "the report must name the unwired capture: {}",
+        missing.message
+    );
+    assert!(
+        missing.message.contains("tm validate --repair"),
+        "the report must name the in-place remedy: {}",
+        missing.message
+    );
+}
+
 /// A file carrying every lifecycle group reports Ok (#7490).
 #[test]
 fn check_hooks_hygiene_missing_group_check_is_ok_for_a_complete_file() {

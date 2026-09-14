@@ -129,7 +129,12 @@ pub(super) fn check_hooks_hygiene(
         };
         // #7490: empty for a file tm never provisioned, so a foreign project
         // never grows a finding telling it to adopt tm's hooks.
-        let gaps = crate::core::session_launch::missing_lifecycle_hook_events(&val);
+        let mut gaps = crate::core::session_launch::missing_lifecycle_hook_events(&val);
+        // #7849: `missing_lifecycle_hook_events` tests the base triad only, so a
+        // toggle-driven group — the #7688 `Stop`/`SubagentStop` capture, the
+        // #6887 diversion groups — was unreported on a project whose flag
+        // flipped on after its settings file was written.
+        gaps.extend(toggle_driven_gaps(path));
         if !gaps.is_empty() {
             missing.push((path.clone(), gaps));
         }
@@ -205,6 +210,39 @@ pub(super) fn check_hooks_hygiene(
     )
 }
 
+/// The toggle-driven hook groups one settings file is missing (#7849).
+///
+/// Why: `missing_lifecycle_hook_events` answers only for the six-event
+/// lifecycle triad, which every toggle is additive to — so the group a flipped
+/// flag asks for was invisible to `tm doctor` exactly as it was to
+/// `tm validate`. This reuses the SAME diff the validator reports from, so the
+/// two surfaces cannot disagree about what is missing.
+/// What: `<event> (asks for `<command>`)` per missing group, and nothing at all
+/// for a file whose project directory cannot be derived, that tm's project tier
+/// never provisioned, or for which no stable binary resolves. The STALE half of
+/// the diff is deliberately not reported here: `tm doctor`'s own
+/// `hooks_contamination` check already owns "an entry that should not be
+/// there", and this check is the inverse of it (#7490).
+/// Test: `check_hooks_hygiene_reports_a_missing_toggle_driven_group`.
+fn toggle_driven_gaps(settings_path: &Path) -> Vec<String> {
+    // `<project>/.claude/settings.json` → `<project>`.
+    let Some(project_dir) = settings_path.parent().and_then(Path::parent) else {
+        return Vec::new();
+    };
+    let Some(val) = read_settings(settings_path) else {
+        return Vec::new();
+    };
+    let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(project_dir);
+    let gaps = crate::core::session_launch::project_hook_group_gaps(&fw, project_dir, &val, None);
+    if gaps.is_empty() {
+        return Vec::new();
+    }
+    gaps.missing
+        .into_iter()
+        .map(|(event, command)| format!("{event} (asks for `{command}`)"))
+        .collect()
+}
+
 /// Render the `hooks_missing_tm_group` check from the collected gaps (#7490).
 ///
 /// Why: the operator has to see WHICH event is unwired and in which file. The
@@ -240,11 +278,13 @@ fn missing_group_check(gaps: &[(PathBuf, Vec<String>)]) -> DoctorCheck {
         "hooks_missing_tm_group",
         CheckStatus::Warn,
         format!(
-            "{} tm-provisioned settings file{} lack{} a tm hook group for at least one \
-             lifecycle event, so `tm hook` never fires for it — a missing `SessionStart` \
-             costs the session its savings row and the 💸 statusline segment. \
-             `tm doctor --fix` previews merging the groups back in and `--yes` applies it, \
-             preserving every other entry (issue #7490). {}{}",
+            "{} tm-provisioned settings file{} lack{} a tm hook group this project asks \
+             for, so `tm hook` never fires for it — a missing `SessionStart` costs the \
+             session its savings row and the 💸 statusline segment, and a missing \
+             `Stop (asks for … --prompt-feedback)` costs it every prompt-feedback row \
+             (#7849). `tm doctor --fix` previews merging the groups back in and `--yes` \
+             applies it, preserving every other entry (issue #7490); \
+             `tm validate --repair --path <project>` resyncs one project in place. {}{}",
             gaps.len(),
             if gaps.len() == 1 { "" } else { "s" },
             if gaps.len() == 1 { "s" } else { "" },
