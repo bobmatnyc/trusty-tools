@@ -12,7 +12,8 @@
 //! Test: this IS the test module.
 
 use crate::tools::recall_projection::{
-    apply_score_floor, include_creator_tags_arg, min_score_arg, serialize_recall, RecallProjection,
+    apply_score_floor, candidate_window, include_creator_tags_arg, min_score_arg, serialize_recall,
+    RecallProjection, MAX_CANDIDATE_WINDOW,
 };
 use serde_json::json;
 use trusty_common::memory_core::palace::Drawer;
@@ -186,21 +187,123 @@ fn recall_response_reports_the_dropped_count() {
 #[test]
 fn min_score_arg_is_absent_by_default() {
     let args = json!({ "query": "anything" });
-    assert_eq!(min_score_arg(&args), None);
+    assert_eq!(
+        min_score_arg(&args, "memory_recall").expect("no floor"),
+        None
+    );
     assert!(!include_creator_tags_arg(&args));
+    // An explicit null is "no floor" too, not a malformed floor.
+    let nulled = json!({ "min_score": null });
+    assert_eq!(
+        min_score_arg(&nulled, "memory_recall").expect("null is absent"),
+        None
+    );
+    assert_eq!(
+        min_score_arg(&json!({ "min_score": 0.4 }), "memory_recall").expect("numeric"),
+        Some(0.4)
+    );
+    // JSON does not distinguish an integer's type from `0.4`'s.
+    assert_eq!(
+        min_score_arg(&json!({ "min_score": 1 }), "memory_recall").expect("integer"),
+        Some(1.0)
+    );
 }
 
-/// Why: a floor arriving as a JSON string is a client bug, and silently reading
-/// it as `0.0` would filter nothing while looking like it filtered.
-/// What: a quoted number resolves to "no floor"; a real number is taken, as is
-/// an integer, which JSON does not distinguish from `0.4`'s type.
+/// Why: a present-but-unusable floor must not resolve to the same answer as no
+/// floor. Doing so returns an unfiltered set beside `dropped_below_floor: 0`,
+/// which a caller reads as "nothing was below the floor" — it cannot tell a
+/// floor that matched everything from a floor that never ran. An argument whose
+/// whole job is to exclude must fail closed.
+/// What: a bool and an array both error, and the message names the tool so the
+/// caller knows which call was rejected.
 /// Test: this test.
 #[test]
-fn min_score_arg_ignores_a_non_numeric_floor() {
-    assert_eq!(min_score_arg(&json!({ "min_score": "0.4" })), None);
-    assert_eq!(min_score_arg(&json!({ "min_score": true })), None);
-    assert_eq!(min_score_arg(&json!({ "min_score": 0.4 })), Some(0.4));
-    assert_eq!(min_score_arg(&json!({ "min_score": 1 })), Some(1.0));
+fn min_score_arg_rejects_a_non_numeric_value() {
+    let err = min_score_arg(&json!({ "min_score": true }), "memory_recall")
+        .expect_err("a bool floor must be rejected");
+    assert!(
+        err.to_string()
+            .contains("memory_recall: 'min_score' must be a number"),
+        "unexpected message: {err}"
+    );
+    assert!(min_score_arg(&json!({ "min_score": [0.4] }), "memory_recall_deep").is_err());
+}
+
+/// Why: `"0.4"` is the most likely spelling of this bug — a client that
+/// stringifies its arguments. Coercing it would hide the client defect; leaving
+/// it as "no floor" would hide the filter never running. Neither is acceptable,
+/// so it is rejected outright.
+/// What: a numeric string errors rather than parsing to `0.4`.
+/// Test: this test.
+#[test]
+fn min_score_arg_rejects_a_numeric_string() {
+    let err = min_score_arg(&json!({ "min_score": "0.4" }), "memory_recall")
+        .expect_err("a quoted floor must be rejected, not coerced");
+    assert!(
+        err.to_string().contains("must be a number"),
+        "unexpected message: {err}"
+    );
+}
+
+/// Why: the lanes truncate to the count they are handed, so applying the floor
+/// to exactly `top_k` candidates leaves the caller short by however many the
+/// floor removed. The widened window is what gives the floor something to
+/// backfill from.
+/// What: no floor means no widening — an unfiltered recall must not pay for
+/// candidates it will never drop.
+/// Test: this test.
+#[test]
+fn candidate_window_is_top_k_without_a_floor() {
+    assert_eq!(candidate_window(10, None), 10);
+    assert_eq!(candidate_window(500, None), 500);
+}
+
+/// Why: the widening is bounded work, not proportional work — an uncapped
+/// factor would ask both the HNSW lane and BM25 for 2000 candidates at
+/// `top_k: 500`.
+/// What: 4x below the cap, clamped at the cap above it, and never below what
+/// the caller actually asked for.
+/// Test: this test.
+#[test]
+fn candidate_window_widens_and_caps_with_a_floor() {
+    assert_eq!(candidate_window(3, Some(0.4)), 12);
+    assert_eq!(candidate_window(10, Some(0.4)), 40);
+    assert_eq!(candidate_window(500, Some(0.4)), 500);
+    assert!(candidate_window(100, Some(0.4)) <= MAX_CANDIDATE_WINDOW);
+}
+
+/// Why: this is the finding's whole point — before the widening, a `top_k` of 3
+/// fetched 3 candidates, and a floor that removed 2 of them returned 1. The two
+/// halves have to compose: a window wide enough to hold the candidates, then a
+/// floor that leaves `top_k` of them.
+/// What: `top_k: 3` widens to 12, so all six candidates reach the floor; three
+/// are below it and the caller still gets three qualifying hits, not one.
+/// Test: this test.
+#[test]
+fn a_widened_window_fills_top_k_after_the_floor() {
+    let top_k = 3;
+    let fetch_k = candidate_window(top_k, Some(0.4));
+    let mut candidates = vec![
+        hit(2, 0.90, &["a"]),
+        hit(2, 0.35, &["b"]),
+        hit(2, 0.80, &["c"]),
+        hit(2, 0.30, &["d"]),
+        hit(2, 0.70, &["e"]),
+        hit(2, 0.20, &["f"]),
+    ];
+    assert!(
+        candidates.len() <= fetch_k,
+        "the widened window must hold every candidate: {} > {fetch_k}",
+        candidates.len()
+    );
+    let dropped = apply_score_floor(&mut candidates, Some(0.4), top_k);
+    assert_eq!(dropped, 3);
+    assert_eq!(candidates.len(), top_k);
+    let kept: Vec<&str> = candidates
+        .iter()
+        .map(|r| r.drawer.tags[0].as_str())
+        .collect();
+    assert_eq!(kept, vec!["a", "c", "e"]);
 }
 
 /// Why: the ruling's stated motive is token savings, so the saving is measured

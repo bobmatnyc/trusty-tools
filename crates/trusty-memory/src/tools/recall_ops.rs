@@ -34,8 +34,8 @@ use super::palace_index::{resolve_palace_or_index, PalaceScope};
 // Owner ruling 2026-09-14: the recall projection — creator-tag hiding and the
 // optional `min_score` floor — applies to every recall response this file emits.
 use super::recall_projection::{
-    apply_score_floor, include_creator_tags_arg, min_score_arg, project_tags, serialize_recall,
-    RecallProjection,
+    apply_score_floor, candidate_window, include_creator_tags_arg, min_score_arg, project_tags,
+    serialize_recall, RecallProjection,
 };
 use super::wing_ops::resolve_wing_arg;
 
@@ -180,7 +180,10 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
     // Owner ruling 2026-09-14: both projection arguments are read once, here,
     // so the warming short-circuit below and the fused path answer identically.
     let include_creator_tags = include_creator_tags_arg(&args);
-    let min_score = min_score_arg(&args);
+    let min_score = min_score_arg(&args, "memory_recall")?;
+    // A floored recall asks the lanes for a wider candidate set, so hits the
+    // floor removes are backfilled instead of leaving the caller short.
+    let fetch_k = candidate_window(top_k, min_score);
 
     let handle = open_palace_handle(state, &palace)?;
     // ADR-0027 T7 + T9: resolved BEFORE the warming short-circuit below, so a
@@ -196,7 +199,7 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
     // this fallback ignores the query, so entering it while the embedder is live
     // makes every query return the same drawers.
     if !vector_lane_available(state) {
-        let mut results = recall_without_embedder(state, &handle, query, &scope, top_k).await;
+        let mut results = recall_without_embedder(state, &handle, query, &scope, fetch_k).await;
         let dropped_below_floor = apply_score_floor(&mut results, min_score, top_k);
         return Ok(serialize_recall(
             &palace,
@@ -221,15 +224,17 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
     // scoped, so no out-of-scope drawer can enter through the lexical
     // lane. The warming path above is different: it hydrates BM25-only hits,
     // which is why it filters explicitly.
-    let vector_fut = recall_scoped(&handle, embedder.as_ref(), query, &scope, top_k);
+    let vector_fut = recall_scoped(&handle, embedder.as_ref(), query, &scope, fetch_k);
     // #5036: key the lexical lane on the RESOLVED palace id. `open_palace`
     // follows aliases, so the requested slug can address a different palace
     // than the vector lane just searched.
-    let bm25_fut = bm25_search_optional(state, handle.id.as_str(), query, top_k);
+    let bm25_fut = bm25_search_optional(state, handle.id.as_str(), query, fetch_k);
     let (vector_res, bm25_res) = tokio::join!(vector_fut, bm25_fut);
     let mut results = vector_res.context("recall")?;
     if let Some(bm25_hits) = bm25_res {
-        fuse_bm25_into_recall(&mut results, &bm25_hits, top_k);
+        // `fetch_k`, not `top_k`: this truncation feeds the floor, so cutting to
+        // the caller's count here would undo the widened window.
+        fuse_bm25_into_recall(&mut results, &bm25_hits, fetch_k);
     }
     // Owner ruling 2026-09-14: the floor runs AFTER fusion — the RRF bonus is
     // part of the score the caller set a bar against, so filtering before it
@@ -261,7 +266,8 @@ pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> 
     // arguments as `memory_recall`, for the reason ADR-0027 D4.1 gives about
     // `room`/`wing` — two spellings of one option is how these two drift.
     let include_creator_tags = include_creator_tags_arg(&args);
-    let min_score = min_score_arg(&args);
+    let min_score = min_score_arg(&args, "memory_recall_deep")?;
+    let fetch_k = candidate_window(top_k, min_score);
 
     let handle = open_palace_handle(state, &palace)?;
     // ADR-0027 T7 + T9: deep recall is no longer the odd one out — it takes the
@@ -272,7 +278,7 @@ pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> 
     // Issue #1970: same warming-fallback posture as memory_recall.
     // #4836: and the same embedder-state gate, for the same reason.
     if !vector_lane_available(state) {
-        let mut results = recall_without_embedder(state, &handle, query, &scope, top_k).await;
+        let mut results = recall_without_embedder(state, &handle, query, &scope, fetch_k).await;
         let dropped_below_floor = apply_score_floor(&mut results, min_score, top_k);
         return Ok(serialize_recall(
             &palace,
@@ -290,14 +296,15 @@ pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> 
     // same as its `memory_recall` sibling. It was the one dispatch path that
     // had the fusion available and did not call it, so a deep recall answered
     // by vector centroid alone.
-    let vector_fut = recall_deep_scoped(&handle, embedder.as_ref(), query, &scope, top_k);
-    let bm25_fut = bm25_search_optional(state, handle.id.as_str(), query, top_k);
+    let vector_fut = recall_deep_scoped(&handle, embedder.as_ref(), query, &scope, fetch_k);
+    let bm25_fut = bm25_search_optional(state, handle.id.as_str(), query, fetch_k);
     let (vector_res, bm25_res) = tokio::join!(vector_fut, bm25_fut);
     let mut results = vector_res.context("recall_deep")?;
     // ADR-0027 T7: no scope filter needed on the lexical side — the fusion only
     // boosts drawers already in the vector list, which is already scoped.
     if let Some(bm25_hits) = bm25_res {
-        fuse_bm25_into_recall(&mut results, &bm25_hits, top_k);
+        // `fetch_k`, not `top_k` — see the `memory_recall` sibling.
+        fuse_bm25_into_recall(&mut results, &bm25_hits, fetch_k);
     }
     // Owner ruling 2026-09-14: after fusion, same as `memory_recall`.
     let dropped_below_floor = apply_score_floor(&mut results, min_score, top_k);

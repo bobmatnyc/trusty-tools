@@ -17,6 +17,7 @@
 //! already filters with. [`serialize_recall`] applies both.
 //! Test: `tools::tests::recall_projection_tests`.
 
+use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use trusty_common::memory_core::retrieval::RecallResult;
 
@@ -63,21 +64,76 @@ pub(crate) fn include_creator_tags_arg(args: &Value) -> bool {
         .unwrap_or(false)
 }
 
-/// Read the optional `min_score` floor.
+/// Read the optional `min_score` floor, rejecting a present non-numeric value.
 ///
-/// Why: `None` means no floor, which is what every caller written before this
-/// argument existed gets — the filter must be opt-in or it changes results
-/// nobody asked it to change.
-/// What: `args["min_score"]` as an `f32`; a missing or non-numeric value yields
-/// `None`. No finiteness guard: JSON has no NaN or infinity literal, so
-/// `as_f64` on a JSON number is always finite.
+/// Why: absent means no floor, which is what every caller written before this
+/// argument existed gets. A PRESENT but non-numeric value is a different thing
+/// and must not collapse into the same answer: silently treating `"0.4"` as
+/// "no floor" returns an unfiltered result set alongside
+/// `dropped_below_floor: 0`, which reads as "nothing was below the floor" — a
+/// caller cannot tell a floor that matched everything from a floor that never
+/// ran. Failing open on an argument whose whole job is to exclude is the worst
+/// available default, so this errors instead.
+/// What: `None` when the key is absent or `null`. `Some` for a JSON number.
+/// Anything else — a string, a bool, an array — is an error naming `tool`, with
+/// no string-to-number coercion: `"0.4"` is rejected, not parsed. No finiteness
+/// guard is needed; JSON has no NaN or infinity literal, so `as_f64` on a JSON
+/// number is always finite.
 /// Test: `min_score_arg_is_absent_by_default`,
-/// `min_score_arg_ignores_a_non_numeric_floor`.
-pub(crate) fn min_score_arg(args: &Value) -> Option<f32> {
-    args.get("min_score")
-        .and_then(|v| v.as_f64())
-        .map(|f| f as f32)
+/// `min_score_arg_rejects_a_non_numeric_value`,
+/// `min_score_arg_rejects_a_numeric_string`.
+pub(crate) fn min_score_arg(args: &Value, tool: &str) -> Result<Option<f32>> {
+    match args.get("min_score") {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => match v.as_f64() {
+            Some(f) => Ok(Some(f as f32)),
+            None => Err(anyhow!(
+                "{tool}: 'min_score' must be a number, got {v} — \
+                 a quoted value is not coerced; omit it for no floor"
+            )),
+        },
+    }
 }
+
+/// How many candidates a lane should return so the floor has room to work.
+///
+/// Why: the retrieval lanes truncate to the `top_k` they are handed, so
+/// applying the floor to exactly `top_k` candidates means a below-floor hit
+/// inside that window is dropped with nothing to backfill it — the caller asked
+/// for 10 and gets 6, having paid a slot for each of the 4 removed. Asking the
+/// lane for a wider window first is what lets the floor discard and still fill
+/// `top_k`. It is a mitigation, not a guarantee: a corpus with fewer than
+/// `top_k` qualifying drawers still returns fewer, and no window makes that
+/// untrue.
+/// What: `top_k` unchanged when no floor is set — an unfiltered recall must not
+/// pay for candidates it will never drop. With a floor, `top_k * 4` capped at
+/// [`MAX_CANDIDATE_WINDOW`], which bounds the extra HNSW and BM25 work a large
+/// `top_k` would otherwise multiply.
+/// Test: `candidate_window_is_top_k_without_a_floor`,
+/// `candidate_window_widens_and_caps_with_a_floor`,
+/// `a_widened_window_fills_top_k_after_the_floor`.
+pub(crate) fn candidate_window(top_k: usize, min_score: Option<f32>) -> usize {
+    match min_score {
+        None => top_k,
+        Some(_) => top_k.saturating_mul(CANDIDATE_WINDOW_FACTOR).min(
+            MAX_CANDIDATE_WINDOW.max(top_k), // never ask for less than the caller wanted
+        ),
+    }
+}
+
+/// How much wider than `top_k` a floored recall fetches.
+const CANDIDATE_WINDOW_FACTOR: usize = 4;
+
+/// Ceiling on the widened candidate window.
+///
+/// Why: the widening is bounded work, not proportional work — without a cap a
+/// `top_k` of 500 would ask both the HNSW lane and BM25 for 2000 candidates per
+/// call. 200 covers every realistic `top_k` (the default is 10, so the factor
+/// applies unclipped below 50) while keeping the worst case fixed.
+/// What: the upper bound [`candidate_window`] clamps to, except that a `top_k`
+/// already above it is never reduced.
+/// Test: `candidate_window_widens_and_caps_with_a_floor`.
+pub(crate) const MAX_CANDIDATE_WINDOW: usize = 200;
 
 /// Drop query-scored hits below `min_score`, then cut to `top_k`.
 ///
@@ -93,9 +149,15 @@ pub(crate) fn min_score_arg(args: &Value) -> Option<f32> {
 /// `len() <= top_k` postcondition rather than inheriting it from whichever lane
 /// produced `results`. Returns the number of hits the floor removed; `0` when
 /// `min_score` is `None`.
+///
+/// `results` is expected to be the [`candidate_window`]-sized set, not a
+/// `top_k`-sized one: the removals are backfilled only from candidates the lane
+/// was actually asked for. Fewer than `top_k` still comes back when the widened
+/// window itself holds fewer qualifying drawers, which no window can fix.
 /// Test: `score_floor_drops_below_and_keeps_above`,
 /// `score_floor_keeps_identity_and_essential_layers`,
-/// `score_floor_applies_before_top_k`.
+/// `score_floor_applies_before_top_k`,
+/// `a_widened_window_fills_top_k_after_the_floor`.
 pub(crate) fn apply_score_floor(
     results: &mut Vec<RecallResult>,
     min_score: Option<f32>,
