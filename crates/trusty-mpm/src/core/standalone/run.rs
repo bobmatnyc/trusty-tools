@@ -60,13 +60,14 @@ use super::registry::ManagedRegistry;
 /// launching shell already exports; the two are decided independently.
 ///
 /// Issue #7422: `mcp_config` names the composed, default-deny MCP file, and
-/// `--strict-mcp-config --mcp-config <it>` is appended only when it is `Some`.
+/// `--mcp-config <it>` is appended only when it is `Some` (#7892: never
+/// `--strict-mcp-config`, which would suppress the operator's user scope).
 /// The caller passes the path its own `provision` call returned, so the file
 /// and the flag come from one decision — this builder never derives a path a
 /// caller did not write, which is what let `doctor_transcript_saving` build an
 /// argv naming a file that did not exist.
-/// Test: `test_build_launch_command_carries_the_strict_mcp_flags`,
-/// `test_build_launch_command_omits_the_strict_mcp_flags_without_a_file`,
+/// Test: `test_build_launch_command_carries_the_mcp_config_flag_and_not_strict`,
+/// `test_build_launch_command_omits_the_mcp_config_flag_without_a_file`,
 /// `test_build_launch_command_sets_env_and_cwd`,
 /// `test_build_launch_command_adds_bare_with_api_key`,
 /// `test_build_launch_command_no_bare_without_api_key`,
@@ -100,12 +101,12 @@ pub fn build_launch_command(
     // Always add bypass-permissions for fully automated orchestration (consistent with
     // all other tm launch paths that use PERMISSION_MODE_FLAG).
     cmd.arg(crate::core::model_inject::PERMISSION_MODE_FLAG);
-    // #7422: default-deny MCP scoping. The caller passes the file its own
-    // `provision` call just wrote, so the flag and the file come from ONE
-    // decision — a builder that named the path itself would emit an argv
-    // pointing at a file nobody composed. Argv tokens go straight to `exec`, so
-    // the path is unquoted.
-    cmd.args(crate::core::session_mcp_scope::strict_mcp_argv(mcp_config));
+    // #7892: the additive `--mcp-config`, never `--strict-mcp-config`. The
+    // caller passes the file its own `provision` call just wrote, so the flag
+    // and the file come from ONE decision — a builder that named the path
+    // itself would emit an argv pointing at a file nobody composed. Argv tokens
+    // go straight to `exec`, so the path is unquoted.
+    cmd.args(crate::core::session_mcp_scope::mcp_config_argv(mcp_config));
     // WI-10: when ANTHROPIC_API_KEY is set, add --bare so Claude Code bypasses
     // keychain/OAuth reads and uses the API key directly. When the key is absent
     // the session relies on the keychain entry created by `tm login`.
@@ -297,7 +298,7 @@ mod tests {
 
     /// #7422: given a composed file, `tm run`'s argv names exactly that file.
     #[test]
-    fn test_build_launch_command_carries_the_strict_mcp_flags() {
+    fn test_build_launch_command_carries_the_mcp_config_flag_and_not_strict() {
         let tmp = TempDir::new().unwrap();
         let repo = tmp.path().join("repo");
         let cfg = tmp.path().join("claude-config");
@@ -310,8 +311,8 @@ mod tests {
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         assert!(
-            args.iter().any(|a| a == "--strict-mcp-config"),
-            "tm run must refuse every server outside its composed file: {args:?}"
+            !args.iter().any(|a| a == "--strict-mcp-config"),
+            "the launch line must never narrow the user scope: {args:?}"
         );
         let pos = args
             .iter()
@@ -327,7 +328,7 @@ mod tests {
     /// #7422: a caller that composed no file gets no flag, so no argv can name
     /// a path nobody wrote (`doctor_transcript_saving`'s probe is that caller).
     #[test]
-    fn test_build_launch_command_omits_the_strict_mcp_flags_without_a_file() {
+    fn test_build_launch_command_omits_the_mcp_config_flag_without_a_file() {
         let tmp = TempDir::new().unwrap();
         let cmd = build_launch_command(
             &tmp.path().join("repo"),

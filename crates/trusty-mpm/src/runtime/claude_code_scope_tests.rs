@@ -50,7 +50,7 @@ fn expected_path() -> String {
 
 #[test]
 #[serial_test::serial]
-fn spawn_command_carries_the_strict_mcp_flags() {
+fn spawn_command_carries_the_mcp_config_flag_and_not_strict() {
     let cmd = spawn_command(
         Path::new(SCOPE_CWD),
         "claude",
@@ -63,9 +63,11 @@ fn spawn_command_carries_the_strict_mcp_flags() {
         // #7685: the reachable posture — MCP scoping is orthogonal to it.
         true,
     );
+    // #7892: additive, never strict — the operator's user-scope servers load
+    // beside tm's builtins.
     assert!(
-        cmd.contains("--strict-mcp-config"),
-        "a relocated spawn must refuse every server outside its composed file: {cmd}"
+        !cmd.contains("--strict-mcp-config"),
+        "a relocated spawn must not narrow the operator's user scope: {cmd}"
     );
     assert!(
         cmd.contains(&format!("--mcp-config '{}'", expected_path())),
@@ -75,7 +77,7 @@ fn spawn_command_carries_the_strict_mcp_flags() {
 
 #[test]
 #[serial_test::serial]
-fn spawn_command_omits_the_strict_mcp_flags_without_a_config_dir() {
+fn spawn_command_omits_the_mcp_config_flag_without_a_config_dir() {
     let cmd = spawn_command(
         Path::new(SCOPE_CWD),
         "claude",
@@ -88,14 +90,14 @@ fn spawn_command_omits_the_strict_mcp_flags_without_a_config_dir() {
         true,
     );
     assert!(
-        !cmd.contains("--strict-mcp-config"),
+        !cmd.contains("--mcp-config"),
         "a spawn reading the operator's own ~/.claude.json is not tm's to scope: {cmd}"
     );
 }
 
 #[test]
 #[serial_test::serial]
-fn resume_command_carries_the_strict_mcp_flags() {
+fn resume_command_carries_the_mcp_config_flag_and_not_strict() {
     let cmd = resume_command(
         Path::new(SCOPE_CWD),
         "claude",
@@ -109,7 +111,7 @@ fn resume_command_carries_the_strict_mcp_flags() {
         true,
     );
     assert!(
-        cmd.contains("--strict-mcp-config"),
+        !cmd.contains("--strict-mcp-config"),
         "a resumed pane must be scoped exactly like a fresh one: {cmd}"
     );
     assert!(
@@ -120,7 +122,7 @@ fn resume_command_carries_the_strict_mcp_flags() {
 
 #[test]
 #[serial_test::serial]
-fn resume_command_omits_the_strict_mcp_flags_without_a_config_dir() {
+fn resume_command_omits_the_mcp_config_flag_without_a_config_dir() {
     let cmd = resume_command(
         Path::new(SCOPE_CWD),
         "claude",
@@ -133,12 +135,12 @@ fn resume_command_omits_the_strict_mcp_flags_without_a_config_dir() {
         &[],
         true,
     );
-    assert!(!cmd.contains("--strict-mcp-config"), "{cmd}");
+    assert!(!cmd.contains("--mcp-config"), "{cmd}");
 }
 
 #[test]
 #[serial_test::serial]
-fn compose_inplace_args_carries_the_strict_mcp_flags_unquoted() {
+fn compose_inplace_args_carries_the_mcp_config_flag_unquoted() {
     let args = compose_inplace_args(
         Path::new(SCOPE_CWD),
         Some(Path::new(SCOPE_CONFIG_DIR)),
@@ -149,7 +151,7 @@ fn compose_inplace_args_carries_the_strict_mcp_flags_unquoted() {
         .iter()
         .position(|a| a == "--mcp-config")
         .expect("the in-place relaunch must carry --mcp-config");
-    assert!(args.iter().any(|a| a == "--strict-mcp-config"));
+    assert!(!args.iter().any(|a| a == "--strict-mcp-config"), "{args:?}");
     assert_eq!(
         args[pos + 1],
         expected_path(),
@@ -159,9 +161,9 @@ fn compose_inplace_args_carries_the_strict_mcp_flags_unquoted() {
 
 #[test]
 #[serial_test::serial]
-fn compose_inplace_args_omits_the_strict_mcp_flags_without_a_config_dir() {
+fn compose_inplace_args_omits_the_mcp_config_flag_without_a_config_dir() {
     let args = compose_inplace_args(Path::new(SCOPE_CWD), None, None, None);
-    assert!(!args.iter().any(|a| a == "--strict-mcp-config"), "{args:?}");
+    assert!(!args.iter().any(|a| a == "--mcp-config"), "{args:?}");
 }
 
 // ---------------------------------------------------------------------------

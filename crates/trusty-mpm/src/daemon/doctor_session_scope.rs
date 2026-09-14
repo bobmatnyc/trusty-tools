@@ -1,25 +1,25 @@
-//! `tm doctor` probe for what this project's sessions will NOT load (#7422).
+//! `tm doctor` probe for what this project's sessions load, and what they owe.
 //!
-//! Why: default-deny changes what a session sees without changing anything the
-//! operator can see. A server that used to connect now silently does not, and
-//! the only clue is a tool that is no longer there. This probe is the migration
-//! aid: run it in each project and it names every shared MCP server and every
-//! installed plugin that project's sessions have stopped loading, plus the exact
-//! keys that put one back.
+//! Why: since #7892 tm scopes NO MCP server out — the operator's user-scope
+//! entries in the protected `.claude.json` load in every session, tm's builtins
+//! are added on top, and a project's own `.mcp.json` follows Claude Code's
+//! native approval. So the MCP half of this probe stopped being a migration aid
+//! and became a plain inventory: it names what will load, including each
+//! `.mcp.json` entry's Claude Code approval state, and never reports a server
+//! as scoped out.
 //!
-//! What: [`check_session_scope`] is INFORMATIONAL — `Ok` when nothing is
-//! excluded, `Warn` when something is, and never `Fail`. An excluded server is
-//! the designed outcome, not a fault; failing doctor over it would make a
-//! correctly-scoped project look broken.
+//! PLUGINS ARE STILL SCOPED, and that half is unchanged. Claude Code has no
+//! per-project plugin approval, so `[session] plugins` stays gated on
+//! `tm project trust` (#7422) and this probe stays the only surface that says
+//! which installed plugins a project's sessions do not load.
 //!
-//! #7678 added the second half, and it is the half that makes the first
-//! trustworthy: the probe now also compares the project's `.claude/settings.json`
-//! against the `enabledPlugins` map `prepare_session` would write. Until it did,
-//! this check reported the DECISION while the plugins it named were still
-//! loading — a session paused before that write existed, or resumed across the
-//! upgrade that added it, runs against a settings file that never took it. So
-//! `Ok` now means "the file matches", not merely "nothing is scoped out", and
-//! `tm doctor --fix` re-applies the write.
+//! What: [`check_session_scope`] is INFORMATIONAL — `Ok` when the project's
+//! `.claude/settings.json` already carries the `enabledPlugins` map
+//! `prepare_session` would write and nothing is excluded, `Warn` when it does
+//! not, and never `Fail`. #7678 added that settings comparison, and it is the
+//! half that makes the rest trustworthy: the plugin write happens ONCE, at
+//! launch, so a session paused before it existed runs against a file that never
+//! took it. `tm doctor --fix` re-applies the write.
 //! Test: the `tests` module below.
 
 use std::path::Path;
@@ -33,25 +33,23 @@ use crate::core::doctor::{CheckStatus, DoctorCheck};
 /// Test: `doctor_checks_match_run_doctor_names`.
 pub(super) const CHECK_NAME: &str = "session_scope";
 
-/// Report the MCP servers and plugins this project's sessions will not load.
+/// Report what this project's sessions load, and what its settings still owe.
 ///
-/// Why: see the module doc — this is the one surface that tells an operator why
-/// a server stopped connecting, and where to opt it back in.
-/// What: `Ok` with no project directory (nothing to scope), `Ok` when nothing
+/// Why: see the module doc — one surface for the MCP inventory (#7892) and the
+/// plugin scope decision (#7422) that still gates.
+/// What: `Ok` with no project directory (nothing to scope), `Ok` when no plugin
 /// is excluded AND the project's `.claude/settings.json` already carries the
-/// `enabledPlugins` map a launch would write, otherwise `Warn` naming the
-/// excluded servers and plugins, every missing or divergent settings key, and
-/// the `.trusty-mpm.toml` keys that restore them. Either arm reports the
-/// KNOWN/UNKNOWN split for an untrusted project (#7672): the entries its own
-/// `.mcp.json` loaded by content match are named, so an operator sees which of
-/// their declarations needed no grant. Read-only: it composes the same
+/// `enabledPlugins` map a launch would write, otherwise `Warn`. Either arm
+/// states the server inventory: tm's builtins, the operator's user-scope
+/// servers, and each `.mcp.json` entry with its Claude Code approval state.
+/// Read-only: it composes the same
 /// [`crate::core::session_mcp_scope::resolve_scope`] decision and the same
 /// [`crate::core::session_scope_drift::plan_enabled_plugins`] the launch path
 /// does, and writes nothing — `tm doctor --fix` owns the write (#7678).
 /// Test: `session_scope_ok_when_nothing_is_excluded`,
-/// `session_scope_warns_and_names_the_excluded_server`,
+/// `session_scope_never_reports_a_user_scope_server_as_excluded`,
+/// `session_scope_reports_the_project_mcp_json_approval_state`,
 /// `session_scope_reports_an_excluded_plugin`,
-/// `session_scope_reports_the_content_trusted_split`,
 /// `session_scope_is_ok_without_a_project`.
 pub(super) fn check_session_scope(
     project_dir: Option<&Path>,
@@ -65,13 +63,11 @@ pub(super) fn check_session_scope(
 
 /// [`check_session_scope`] against an explicit trust decision (#7678).
 ///
-/// Why: the hermetic seam, mirroring
-/// [`crate::core::session_mcp_scope::resolve_scope_with_trust`]. The trust bit
-/// lives under the operator's `$HOME`, so without it no test could exercise the
-/// one state that must report `Ok` — a project whose settings file already
-/// carries the scope AND whose opt-ins leave nothing excluded.
+/// Why: the hermetic seam for the PLUGIN half — the trust bit lives under the
+/// operator's `$HOME`, so without it no test could exercise the one state that
+/// must report `Ok`. The server half no longer reads it at all (#7892).
 /// What: see [`check_session_scope`]; `trusted` replaces the store lookup for
-/// both the server and the plugin halves.
+/// the plugin half.
 /// Test: `session_scope_warns_when_the_project_settings_lack_the_scope`,
 /// `session_scope_is_ok_once_the_settings_carry_the_scope`,
 /// `session_scope_names_each_divergent_key`.
@@ -88,7 +84,9 @@ pub(super) fn check_session_scope_with_trust(
         );
     };
 
-    let scope = crate::core::session_mcp_scope::resolve_scope_with_trust(project, config, trusted);
+    // #7892: the composed set no longer varies by project, so this read takes
+    // only the config dir and consults no trust grant.
+    let scope = crate::core::session_mcp_scope::resolve_scope(config);
     // #7422: read the same GRANTED list the launch write uses, so an untrusted
     // project's declared plugins report excluded here and are written `false` there.
     let granted = crate::core::session_mcp_scope::granted_plugins_with_trust(project, trusted);
@@ -99,52 +97,21 @@ pub(super) fn check_session_scope_with_trust(
         crate::core::session_scope_drift::plan_enabled_plugins_with_trust(project, config, trusted)
             .map(|plan| plan.drift)
             .unwrap_or_default();
+    let inventory = server_inventory(project, config, &scope);
 
-    // #7672: an untrusted project is no longer a flat verdict — say how many of
-    // its own declarations loaded because their content was already known.
-    let by_content = if scope.content_trusted.is_empty() {
-        String::new()
-    } else {
-        format!(
-            " ({} matched a server you already have: {})",
-            scope.content_trusted.len(),
-            scope.content_trusted.join(", ")
-        )
-    };
-
-    if scope.excluded.is_empty()
-        && plugins.is_empty()
-        && scope.degraded.is_none()
-        && drift.is_empty()
-    {
+    if plugins.is_empty() && scope.degraded.is_none() && drift.is_empty() {
         return DoctorCheck::new(
             CHECK_NAME,
             CheckStatus::Ok,
             format!(
-                "sessions in {} load {} MCP server(s); nothing is scoped out{by_content} and \
-                 .claude/settings.json already carries the scope decision",
+                "sessions in {} load {inventory}; .claude/settings.json already carries \
+                 the plugin scope decision",
                 project.display(),
-                scope.included.len()
             ),
         );
     }
 
-    let mut parts: Vec<String> = Vec::new();
-    if !by_content.is_empty() {
-        parts.push(format!(
-            "MCP servers loaded by content match: {}",
-            scope.content_trusted.join(", ")
-        ));
-    }
-    if !scope.excluded.is_empty() {
-        parts.push(format!(
-            "MCP servers NOT loaded: {} — opt in with `[session] mcp_servers = {:?}` in {}/{}",
-            scope.excluded.join(", "),
-            scope.excluded,
-            project.display(),
-            crate::core::project_config::PROJECT_CONFIG_FILE,
-        ));
-    }
+    let mut parts: Vec<String> = vec![inventory];
     if !plugins.is_empty() {
         parts.push(format!(
             "plugins NOT loaded: {} — opt in with `[session] plugins = [...]`",
@@ -169,12 +136,61 @@ pub(super) fn check_session_scope_with_trust(
         ));
     }
     if let Some(reason) = &scope.degraded {
-        parts.push(format!(
-            "some of this project's own declarations did not load: {reason}"
-        ));
+        parts.push(reason.clone());
     }
 
     DoctorCheck::new(CHECK_NAME, CheckStatus::Warn, parts.join("; "))
+}
+
+/// One line naming every MCP server a session in `project` will connect.
+///
+/// Why (#7892): the check used to name what tm withheld. There is nothing left
+/// to withhold, so the useful answer is the inventory — and it has three
+/// sources with three different owners, which an operator debugging a missing
+/// tool needs told apart.
+/// What: tm's builtins from the composed file, the operator's user-scope
+/// entries from the protected `.claude.json`, and each `<project>/.mcp.json`
+/// entry tagged with the state
+/// [`crate::core::project_mcp_approval::project_mcp_state`] read out of Claude
+/// Code's own settings.
+/// Test: `session_scope_never_reports_a_user_scope_server_as_excluded`,
+/// `session_scope_reports_the_project_mcp_json_approval_state`.
+fn server_inventory(
+    project: &Path,
+    config: &Path,
+    scope: &crate::core::session_mcp_scope::McpScope,
+) -> String {
+    let mut parts = vec![format!(
+        "{} tm builtin MCP server(s): {}",
+        scope.included.len(),
+        scope.included.join(", ")
+    )];
+    if !scope.user_scope.is_empty() {
+        parts.push(format!(
+            "{} user-scope server(s) from the protected config, which load in every \
+             session: {}",
+            scope.user_scope.len(),
+            scope.user_scope.join(", ")
+        ));
+    }
+    let project_servers = crate::core::project_mcp_approval::project_mcp_state(project, config);
+    if !project_servers.is_empty() {
+        parts.push(format!(
+            "{} .mcp.json entr{} under Claude Code's own approval: {}",
+            project_servers.len(),
+            if project_servers.len() == 1 {
+                "y"
+            } else {
+                "ies"
+            },
+            project_servers
+                .iter()
+                .map(|s| format!("{} ({})", s.name, s.approval.label()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    parts.join("; ")
 }
 
 #[cfg(test)]
@@ -240,11 +256,19 @@ mod tests {
         let check = check_session_scope(Some(&project), Some(&cfg));
 
         assert_eq!(check.status, CheckStatus::Ok, "{}", check.message);
-        assert!(check.message.contains("nothing is scoped out"));
+        assert!(
+            check.message.contains("tm builtin MCP server(s)"),
+            "the inventory replaces the exclusion report (#7892): {}",
+            check.message
+        );
     }
 
+    /// #7892, inverted from `session_scope_warns_and_names_the_excluded_server`:
+    /// a user-scope server in an untrusted project used to be reported as
+    /// scoped out with a `.trusty-mpm.toml` opt-in hint. It now loads, so the
+    /// check must say so and must offer no opt-in.
     #[test]
-    fn session_scope_warns_and_names_the_excluded_server() {
+    fn session_scope_never_reports_a_user_scope_server_as_excluded() {
         let tmp = TempDir::new().unwrap();
         let project = tmp.path().join("repo");
         let cfg = tmp.path().join("cfg");
@@ -253,29 +277,33 @@ mod tests {
 
         let check = check_session_scope(Some(&project), Some(&cfg));
 
-        assert_eq!(check.status, CheckStatus::Warn, "{}", check.message);
+        assert_eq!(check.status, CheckStatus::Ok, "{}", check.message);
         assert!(
             check.message.contains("slack-mcp"),
-            "the excluded server must be named: {}",
+            "the server that loads must be named: {}",
             check.message
         );
         assert!(
-            check.message.contains(".trusty-mpm.toml"),
-            "the message must say where to opt in: {}",
+            !check.message.contains("mcp_servers"),
+            "there is no opt-in left to suggest: {}",
+            check.message
+        );
+        assert!(
+            !check.message.contains("NOT loaded"),
+            "nothing about an MCP server is withheld any more: {}",
             check.message
         );
     }
 
-    /// #7672: an untrusted project whose `.mcp.json` matches a server the
-    /// operator already registered must read as a split, never as a flat
-    /// "untrusted" verdict.
+    /// #7892: a project's own `.mcp.json` is Claude Code's to approve, so the
+    /// check reports that state instead of classifying the entries itself.
     #[test]
-    fn session_scope_reports_the_content_trusted_split() {
+    fn session_scope_reports_the_project_mcp_json_approval_state() {
         let tmp = TempDir::new().unwrap();
         let project = tmp.path().join("repo");
         let cfg = tmp.path().join("cfg");
         std::fs::create_dir_all(&project).unwrap();
-        shared_config(&cfg, &["slack-mcp"]);
+        shared_config(&cfg, &[]);
         std::fs::write(
             project.join(".mcp.json"),
             serde_json::to_string_pretty(&json!({"mcpServers": {
@@ -285,18 +313,29 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+        project_settings(
+            &project,
+            json!({
+                "enabledMcpjsonServers": ["slack-mcp"],
+                "disabledMcpjsonServers": ["smuggled"],
+            }),
+        );
 
         let check = check_session_scope(Some(&project), Some(&cfg));
 
-        assert_eq!(check.status, CheckStatus::Warn, "{}", check.message);
         assert!(
-            check.message.contains("slack-mcp"),
-            "the content-matched entry must be named: {}",
+            check.message.contains("slack-mcp (approved)"),
+            "an approved entry must read as approved: {}",
             check.message
         );
         assert!(
-            check.message.contains("smuggled"),
-            "the unknown entry must be named: {}",
+            check.message.contains("smuggled (refused)"),
+            "a refused entry must read as refused: {}",
+            check.message
+        );
+        assert!(
+            !check.message.contains("tm project trust"),
+            "tm no longer gates .mcp.json: {}",
             check.message
         );
     }
@@ -403,7 +442,9 @@ mod tests {
 
         assert_eq!(after.status, CheckStatus::Ok, "{}", after.message);
         assert!(
-            after.message.contains("already carries the scope decision"),
+            after
+                .message
+                .contains("already carries the plugin scope decision"),
             "{}",
             after.message
         );

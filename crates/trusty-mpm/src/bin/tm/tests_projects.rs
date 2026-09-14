@@ -521,13 +521,13 @@ async fn project_list_reads_the_persistent_registry() {
     );
 }
 
-/// The `[mcp-trusted]` marker survives the move to the registry route (#5994).
+/// The `[plugin-trusted]` marker survives the move to the registry route (#5994).
 #[test]
 fn project_list_row_marks_a_trusted_local_path() {
     let p = registry_project();
     assert!(
-        crate::commands::project::project_list_row(&p, true).ends_with(" [mcp-trusted]"),
+        crate::commands::project::project_list_row(&p, true).ends_with(" [plugin-trusted]"),
         "a trusted project keeps the marker this verb has always carried"
     );
-    assert!(!crate::commands::project::project_list_row(&p, false).contains("mcp-trusted"));
+    assert!(!crate::commands::project::project_list_row(&p, false).contains("plugin-trusted"));
 }

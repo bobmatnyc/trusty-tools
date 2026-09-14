@@ -386,10 +386,11 @@ pub fn build_claude_command_with(
     // can never drift.
     cmd.push(' ');
     cmd.push_str(setting_sources_flag(config_dir));
-    // #7422: default-deny MCP scoping. The caller composed the file (and
-    // aborts its own launch when it could not); this only renders the two
-    // flags that point the session at it. Empty when the caller passed `None`.
-    cmd.push_str(&crate::core::session_mcp_scope::strict_mcp_flag_string(
+    // #7892: the additive `--mcp-config`, never `--strict-mcp-config`. The
+    // caller composed the file (and aborts its own launch when it could not);
+    // this only renders the flag that points the session at it. Empty when the
+    // caller passed `None`.
+    cmd.push_str(&crate::core::session_mcp_scope::mcp_config_flag_string(
         scoped_mcp,
     ));
     cmd.push(' ');
@@ -978,7 +979,7 @@ mod tests {
     /// #7422: the pane line carries the default-deny MCP flags when — and only
     /// when — the caller composed a file for it.
     #[test]
-    fn claude_command_carries_the_strict_mcp_flags() {
+    fn claude_command_carries_the_mcp_config_flag_and_not_strict() {
         let scoped = Path::new("/state/session-mcp/ab12.json");
         let cmd = build_claude_command_with(
             None,
@@ -988,9 +989,10 @@ mod tests {
             &[],
             Some(scoped),
         );
+        // #7892: strict would suppress the operator's user-scope servers.
         assert!(
-            cmd.contains("--strict-mcp-config"),
-            "missing the default-deny scoping flag: {cmd}"
+            !cmd.contains("--strict-mcp-config"),
+            "the launch line must never narrow the user scope: {cmd}"
         );
         assert!(
             cmd.contains("--mcp-config '/state/session-mcp/ab12.json'"),
@@ -1001,7 +1003,7 @@ mod tests {
     /// #7422: no composed file, no flags — a spawn that reads the operator's
     /// own `~/.claude.json` is not tm's to scope.
     #[test]
-    fn claude_command_omits_the_strict_mcp_flags_without_a_file() {
+    fn claude_command_omits_the_mcp_config_flag_without_a_file() {
         let cmd = build_claude_command(None, None, None, &[], None);
         assert!(!cmd.contains("--strict-mcp-config"), "{cmd}");
         assert!(!cmd.contains("--mcp-config"), "{cmd}");

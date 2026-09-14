@@ -55,41 +55,37 @@ pub(crate) enum McpCmd {
         #[arg(long)]
         root: Option<String>,
         /// Declare the server in THIS project's `.mcp.json` instead of the
-        /// shared user scope (#7422).
+        /// user scope.
         ///
         /// One declaration point, tracked in git, reviewed in the PR that
-        /// needed it. Requires the project to be trusted (`tm project trust`),
-        /// because an in-repo declaration cannot be its own permission. Without
-        /// the flag the server goes to the shared user scope, where it loads
-        /// only in a TRUSTED project whose `.trusty-mpm.toml` names it under
-        /// `[session] mcp_servers`.
+        /// needed it. Claude Code approves project-scope servers itself
+        /// (`enableAllProjectMcpServers` / `enabledMcpjsonServers`, or its
+        /// prompt). Without the flag the server goes to the user scope, where
+        /// it loads in every tm session with no grant (#7892).
         #[arg(long)]
         project: bool,
-        /// Let an UNTRUSTED project's `.mcp.json` load this server when its
-        /// entry matches this one exactly (#7672).
+        /// Retired by #7892; accepted and ignored.
         ///
-        /// Off by default: registering a server is not lending it to
-        /// unreviewed repository content. Reversible with `tm mcp unshare`.
+        /// A user-scope server already loads in every project, so there is
+        /// nothing left to share.
         #[arg(long = "share-with-projects")]
         share_with_projects: bool,
     },
-    /// Let untrusted projects match this server by content (#7672).
+    /// Retired by #7892; prints why and does nothing.
     ///
-    /// A project's `.mcp.json` entry that equals this server's spec exactly
-    /// then loads with no `tm project trust`. Share only servers whose tools
-    /// are safe to attach to a session reading unreviewed code.
+    /// Kept so scripts and runbooks that spell it keep exiting zero.
     Share {
-        /// Server name to share.
+        /// Server name (accepted, unused).
         name: String,
-        /// Override the managed root (switches to the standalone config dir).
+        /// Accepted and ignored — there is no per-root share state left.
         #[arg(long)]
         root: Option<String>,
     },
-    /// Stop untrusted projects matching this server by content (#7672).
+    /// Retired by #7892; prints why and does nothing.
     Unshare {
-        /// Server name to stop sharing.
+        /// Server name (accepted, unused).
         name: String,
-        /// Override the managed root (switches to the standalone config dir).
+        /// Accepted and ignored — there is no per-root share state left.
         #[arg(long)]
         root: Option<String>,
     },

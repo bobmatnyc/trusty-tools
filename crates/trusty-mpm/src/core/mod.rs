@@ -158,13 +158,7 @@ pub mod local_repo_url;
 pub mod managed_config;
 pub mod manifest;
 pub mod mcp_config;
-// #7672: an in-repo MCP declaration whose executable spec already exists
-// out-of-repo is not a new grant — see `session_mcp_scope`.
-pub mod mcp_content_trust;
 pub mod mcp_provenance;
-// #7672: registering a server and lending it to unreviewed repository content
-// are two decisions; this is the second one.
-pub mod mcp_share;
 // #4181: per-project MCP pins now travel as spawn environment variables, not as
 // arguments injected into a workspace `.mcp.json` (ADR-0042).
 pub mod mcp_session_env;
@@ -210,6 +204,9 @@ pub mod project_aliases;
 /// The committed, project-level `.trusty-mpm.toml` config surface (#5207).
 pub mod project_config;
 pub mod project_discovery;
+// #7892: `.mcp.json` follows Claude Code's own approval flow, so tm reports
+// that state rather than deciding it.
+pub mod project_mcp_approval;
 // #4880: the project skill tier redeploys on project-manifest change.
 pub mod project_skill_tier;
 // #6649: `tm doctor --fix-agents` sweeps bundled AGENT copies stranded at the
