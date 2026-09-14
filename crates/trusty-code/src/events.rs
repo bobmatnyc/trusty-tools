@@ -414,15 +414,31 @@ pub enum Event {
     },
 
     // -- Agent activity --
-    /// (DOC-39 AC-13) not yet emitted by any production call site — reserved
-    /// for a future agent-lifecycle producer. `agent_id` is defined now so
-    /// that producer never has to retrofit it onto an already-shipped wire
-    /// shape.
+    /// A delegated sub-agent's own loop is about to start (#7940).
+    ///
+    /// Why: delegation was invisible to a `session.attach`ed client — a
+    /// sub-agent's tool calls and message deltas arrived attributed but with
+    /// nothing to say when the delegation began, what it was for, or that it
+    /// was a delegation at all. This is the opening bracket a UI renders a
+    /// delegation block from; [`Event::AgentDone`]/[`Event::AgentFailed`]
+    /// close it.
+    /// What: emitted once per `delegate_to_agent` dispatch by
+    /// `runner::in_process::InProcessAgentRunner::run_pipeline` — the ONE
+    /// production construction site for a delegated sub-agent loop — carrying
+    /// the same `agent_id` that loop then stamps on every
+    /// `ToolStarted`/`AgentMessageDelta` of its run, so a consumer can file
+    /// them under this block. `task_preview` is the delegated task truncated
+    /// via [`preview`]; it is `#[serde(default)]` so a transcript recorded
+    /// before this field existed still deserializes.
+    /// Test: `session::registry_tests::record_agent_spawned_publishes_event`,
+    /// `runner::tests::delegation_emits_spawned_then_done_on_the_sink`.
     AgentSpawned {
         session_id: String,
         agent: String,
         #[serde(default)]
         agent_id: String,
+        #[serde(default)]
+        task_preview: String,
     },
     AgentMessage {
         session_id: String,
@@ -474,7 +490,9 @@ pub enum Event {
         delta: String,
         done: bool,
     },
-    /// (DOC-39 AC-13) see [`Event::AgentSpawned`]'s note — not yet emitted.
+    /// A delegated sub-agent's loop returned normally (#7940) — the closing
+    /// bracket for the [`Event::AgentSpawned`] carrying the same `agent_id`.
+    /// `status` is a short label (`"success"`).
     AgentDone {
         session_id: String,
         agent: String,
@@ -482,7 +500,9 @@ pub enum Event {
         agent_id: String,
         status: String,
     },
-    /// (DOC-39 AC-13) see [`Event::AgentSpawned`]'s note — not yet emitted.
+    /// A delegated sub-agent's loop aborted (#7940) — the failing closing
+    /// bracket for the [`Event::AgentSpawned`] carrying the same `agent_id`.
+    /// `error` is the runner's error text, previewed.
     AgentFailed {
         session_id: String,
         agent: String,

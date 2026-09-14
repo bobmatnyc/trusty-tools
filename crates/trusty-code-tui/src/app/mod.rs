@@ -111,6 +111,7 @@ mod reduce;
 
 pub use reduce::apply;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
@@ -150,6 +151,32 @@ pub enum ChatRole {
     /// An informational status line (e.g. "Connection lost", a tool
     /// invocation notice).
     Status,
+    /// The header or footer line framing one delegated sub-agent's block
+    /// (#7940). Rendered flush-left with its own glyph so the block's start
+    /// and end are scannable.
+    Delegation,
+    /// Output or a tool notice produced by a delegated sub-agent (#7940).
+    /// Rendered indented inside the [`ChatRole::Delegation`] frame above it.
+    Delegated,
+}
+
+/// One delegated sub-agent whose block is currently open in the scrollback
+/// (#7940).
+///
+/// Why: the reducer needs two things after a delegation starts — whether an
+/// arriving `(agent_id, turn_id)` stream belongs inside a delegation block,
+/// and which agent name the status line should show. Both are answered by
+/// this pair, kept in a `Vec` so the first-seen order is the display order.
+/// What: `agent_id` is the seam's opaque id (empty only for a producer that
+/// announced the delegation before the sub-agent existed — see
+/// [`crate::event::ReplEvent::DelegationStarted`]); `agent` is the display
+/// name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Delegation {
+    /// The opaque per-spawn agent id this block is keyed on.
+    pub agent_id: String,
+    /// The delegated agent's display name.
+    pub agent: String,
 }
 
 /// All mutable state the shared render/event loop needs to draw one frame.
@@ -230,6 +257,18 @@ pub struct ReplApp {
     /// Index into `chat` of the in-progress streaming assistant entry, if
     /// any. `None` when idle.
     pub streaming_idx: Option<usize>,
+    /// Delegated sub-agents whose scrollback block is currently open, in
+    /// first-seen order (#7940). Pushed by
+    /// [`crate::event::ReplEvent::DelegationStarted`], removed by
+    /// `DelegationFinished`. The last entry names the agent the status line
+    /// shows — see [`Self::active_agent`].
+    pub delegations: Vec<Delegation>,
+    /// Index into `chat` of the in-progress bubble for one `(agent_id,
+    /// turn_id)` stream (#7940). Separate from [`Self::streaming_idx`] —
+    /// which is the single unkeyed slot
+    /// [`crate::event::ReplEvent::AssistantOutput`] uses — precisely so two
+    /// agents streaming at once cannot land in one bubble.
+    pub agent_streams: HashMap<(String, String), usize>,
     /// Engine-supplied statusline segments, most recently pushed via
     /// [`crate::event::ReplEvent::StatuslineUpdate`].
     pub statusline: Vec<StatuslineSegment>,
@@ -311,6 +350,8 @@ impl ReplApp {
             active_picker: None,
             busy: false,
             streaming_idx: None,
+            delegations: Vec::new(),
+            agent_streams: HashMap::new(),
             statusline: Vec::new(),
             active_workstream: None,
             quit: false,
@@ -399,7 +440,28 @@ impl ReplApp {
     pub fn clear_scrollback(&mut self) {
         self.chat.clear();
         self.streaming_idx = None;
+        // #7940: both keyed-stream maps index INTO `chat`, so clearing it
+        // without clearing them would leave every key pointing at a stale
+        // (or out-of-range) row.
+        self.agent_streams.clear();
+        self.delegations.clear();
         self.scroll_offset = 0;
+    }
+
+    /// The delegated agent whose work is currently in flight, if any
+    /// (#7940).
+    ///
+    /// Why: the status line shows "who is working right now"; that is the
+    /// most recently opened, not-yet-closed delegation, and it must revert
+    /// on its own when the block closes rather than needing the engine to
+    /// push a statusline update.
+    /// What: the last entry of [`Self::delegations`]; `None` when no
+    /// delegation is open.
+    /// Test: `delegation_started_pushes_header_and_sets_active_agent`,
+    /// `delegation_finished_pushes_footer_and_clears_active_agent`,
+    /// `build_statusline_appends_active_agent_while_delegating`.
+    pub fn active_agent(&self) -> Option<&str> {
+        self.delegations.last().map(|d| d.agent.as_str())
     }
 
     /// Open an inline picker (DOC-50 §3.2/§6 Q6), staged by

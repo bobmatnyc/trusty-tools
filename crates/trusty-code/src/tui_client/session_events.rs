@@ -14,7 +14,7 @@
 
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
-use trusty_code_tui::ReplEvent;
+use trusty_code_tui::{DelegationOutcome, ReplEvent};
 
 use crate::events::{Event, SessionEventEnvelope};
 
@@ -52,15 +52,20 @@ pub(super) fn terminal_stream_failure_event(reason: String) -> ReplEvent {
 /// Why: kept as a free function (not a method) so it's directly unit
 /// testable against a hand-built envelope, no HTTP/mock server needed.
 /// What: `Message`/`AgentMessage`/`PmThinking` -> `AssistantOutput` chunks
-/// (`done: false`); `ToolStarted` -> `ToolInvocation{result: None}`;
-/// `ToolFinished`/`ToolError` -> `ToolInvocation{result: Some(..)}`, keyed
-/// by the SAME `call_id` so the (future) tool-card renderer can pair them;
+/// (`done: false`); `AgentMessageDelta` -> `AgentOutput`, keyed by
+/// `(agent_id, turn_id)` (#7940); `ToolStarted` -> `ToolInvocation{result:
+/// None}`; `ToolFinished`/`ToolError` -> `ToolInvocation{result: Some(..)}`,
+/// keyed by the SAME `call_id` so the (future) tool-card renderer can pair
+/// them; `PmDelegating`/`AgentSpawned` -> `DelegationStarted` and
+/// `AgentDone`/`AgentFailed` -> `DelegationFinished` (#7940);
 /// `SessionDone` -> a final `AssistantOutput{done: true}` (`is_error` iff
 /// `status == "failed"`); `SessionCancelled` -> a status message. Every
-/// other event kind (progress/telemetry/agent-lifecycle events this MVP
-/// doesn't yet render) is silently ignored — forward-compatible with new
-/// `Event` variants (no `match` arm needed per new kind, thanks to the
-/// catch-all).
+/// other event kind (progress/telemetry this client doesn't render) is
+/// silently ignored — forward-compatible with new `Event` variants (no
+/// `match` arm needed per new kind, thanks to the catch-all). #7940 pins
+/// what that catch-all may swallow: `engine_tests::
+/// every_agent_attributed_event_maps_or_is_explicitly_ignored` fails if a
+/// NEW agent-attributed variant lands in it unclassified.
 /// Test: `engine_tests::forward_message_emits_assistant_output_chunk_not_done`,
 /// `engine_tests::forward_tool_started_emits_tool_invocation_with_call_id`,
 /// `engine_tests::forward_tool_finished_carries_result_and_shares_call_id`,
@@ -70,7 +75,12 @@ pub(super) fn terminal_stream_failure_event(reason: String) -> ReplEvent {
 /// `engine_tests::forward_unrelated_event_is_ignored`,
 /// `engine_tests::forward_agent_message_delta_not_done_appends`,
 /// `engine_tests::forward_agent_message_delta_done_finalizes`,
-/// `engine_tests::forward_agent_message_delta_distinct_agent_ids_not_merged`.
+/// `engine_tests::forward_agent_message_delta_distinct_agent_ids_not_merged`,
+/// `engine_tests::forward_agent_spawned_opens_a_delegation`,
+/// `engine_tests::forward_pm_delegating_opens_a_delegation_without_an_id`,
+/// `engine_tests::forward_agent_done_closes_the_delegation`,
+/// `engine_tests::forward_agent_failed_closes_with_the_error`,
+/// `engine_tests::every_agent_attributed_event_maps_or_is_explicitly_ignored`.
 pub(super) fn forward_session_event(
     envelope: SessionEventEnvelope,
     tx: &UnboundedSender<ReplEvent>,
@@ -86,36 +96,88 @@ pub(super) fn forward_session_event(
             });
             false
         }
-        // tcode streaming epic #3696 Slice 2: wire the Slice 0 contract
-        // (`Event::AgentMessageDelta`, `events.rs:459`) into the SAME
-        // `AssistantOutput` chunk-append machinery `Message`/`AgentMessage`
-        // above already use, so no new rendering path is needed in
-        // `trusty-code-tui` — `done: false` appends via `ReplApp::streaming_idx`,
-        // `done: true` finalizes (`reduce.rs:141-172`).
-        //
-        // KNOWN GAP (reported, not fixed here — see PR description): the
-        // Slice 0 contract requires consumers to group deltas by
-        // `(agent_id, turn_id)`, not `turn_id` alone, because this codebase
-        // runs sub-agents concurrently and a producer could get `turn_id`
-        // scoping wrong (`events.rs:436-456`). `ReplEvent::AssistantOutput`
-        // carries neither id, and `ReplApp::streaming_idx` is a single
-        // `Option<usize>` shared by the whole app (not keyed at all) — so
-        // two agents legitimately streaming concurrently within ONE human
-        // turn (the busy-guard at `trusty-code-tui/src/app/mod.rs:457-471` only
-        // rules out a SECOND top-level turn starting, not concurrent
-        // sub-agents inside the current one) will interleave into the same
-        // chat bubble today. Fixing this requires threading a key through
-        // `trusty-code-tui`'s `ReplEvent`/`ReplApp` (out of this slice's file
-        // scope — a shared, cross-slice type). Tracked as a follow-up.
-        Event::AgentMessageDelta { delta, done, .. } => {
-            let _ = tx.send(ReplEvent::AssistantOutput {
+        // tcode streaming epic #3696 Slice 2 wired this into the unkeyed
+        // `AssistantOutput` append machinery; #7940 moves it onto
+        // `ReplEvent::AgentOutput`, which carries the `(agent_id, turn_id)`
+        // key the Slice 0 contract (`events.rs`, `Event::AgentMessageDelta`)
+        // tells consumers to group by. That closes the gap this arm used to
+        // document: two agents streaming concurrently inside ONE human turn
+        // — routine once the PM delegates — landed in a single chat bubble
+        // with their words physically interleaved.
+        Event::AgentMessageDelta {
+            agent_id,
+            turn_id,
+            delta,
+            done,
+            ..
+        } => {
+            let _ = tx.send(ReplEvent::AgentOutput {
+                agent_id,
+                turn_id,
                 chunk: delta,
                 done,
-                is_error: false,
+            });
+            false
+        }
+        // #7940: the delegation brackets. `PmDelegating` is the delegating
+        // agent's announcement and carries no `agent_id` yet; `AgentSpawned`
+        // is the sub-agent's actual spawn and does. Both map to the SAME
+        // start event — the reducer adopts an already-announced block rather
+        // than opening a second one (see `ReplEvent::DelegationStarted`), so
+        // a producer emitting either or both renders one block.
+        Event::PmDelegating {
+            agent,
+            task_preview,
+            ..
+        } => {
+            let _ = tx.send(ReplEvent::DelegationStarted {
+                agent_id: String::new(),
+                agent,
+                task: task_preview,
+            });
+            false
+        }
+        Event::AgentSpawned {
+            agent,
+            agent_id,
+            task_preview,
+            ..
+        } => {
+            let _ = tx.send(ReplEvent::DelegationStarted {
+                agent_id,
+                agent,
+                task: task_preview,
+            });
+            false
+        }
+        Event::AgentDone {
+            agent,
+            agent_id,
+            status,
+            ..
+        } => {
+            let _ = tx.send(ReplEvent::DelegationFinished {
+                agent_id,
+                agent,
+                outcome: DelegationOutcome::Finished(status),
+            });
+            false
+        }
+        Event::AgentFailed {
+            agent,
+            agent_id,
+            error,
+            ..
+        } => {
+            let _ = tx.send(ReplEvent::DelegationFinished {
+                agent_id,
+                agent,
+                outcome: DelegationOutcome::Failed(error),
             });
             false
         }
         Event::ToolStarted {
+            agent_id,
             tool,
             call_id,
             args_preview,
@@ -123,6 +185,7 @@ pub(super) fn forward_session_event(
         } => {
             let _ = tx.send(ReplEvent::ToolInvocation {
                 id: call_id,
+                agent_id,
                 tool_name: tool,
                 args: json!(args_preview),
                 result: None,
@@ -130,6 +193,7 @@ pub(super) fn forward_session_event(
             false
         }
         Event::ToolFinished {
+            agent_id,
             tool,
             call_id,
             result_preview,
@@ -143,6 +207,7 @@ pub(super) fn forward_session_event(
             };
             let _ = tx.send(ReplEvent::ToolInvocation {
                 id: call_id,
+                agent_id,
                 tool_name: tool,
                 args: Value::Null,
                 result: Some(result),
@@ -150,6 +215,7 @@ pub(super) fn forward_session_event(
             false
         }
         Event::ToolError {
+            agent_id,
             tool,
             call_id,
             error,
@@ -157,6 +223,7 @@ pub(super) fn forward_session_event(
         } => {
             let _ = tx.send(ReplEvent::ToolInvocation {
                 id: call_id,
+                agent_id,
                 tool_name: tool,
                 args: Value::Null,
                 result: Some(format!("ERROR: {error}")),

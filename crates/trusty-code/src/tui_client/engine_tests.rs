@@ -14,7 +14,7 @@ use super::*;
 use crate::events::{Event, SessionEventEnvelope};
 use crate::tui_client::session_events::{forward_session_event, terminal_stream_failure_event};
 use crate::tui_client::workstream_subscription::parse_workstream_envelope;
-use trusty_code_tui::{StatuslineSegment, WorkstreamSummary};
+use trusty_code_tui::{DelegationOutcome, StatuslineSegment, WorkstreamSummary};
 
 fn envelope(event: Event) -> SessionEventEnvelope {
     SessionEventEnvelope::new("s-1".to_string(), 1, chrono::Utc::now(), event)
@@ -157,11 +157,10 @@ fn forward_unrelated_event_is_ignored() {
     assert!(rx.try_recv().is_err());
 }
 
-/// tcode streaming epic #3696 Slice 2: a non-final `AgentMessageDelta`
-/// (`done: false`) must forward as an `AssistantOutput` chunk with
-/// `done: false`, reusing the SAME append machinery `Message`/`AgentMessage`
-/// use (`trusty-code-tui reduce.rs`'s `streaming_idx`-keyed append) — no new
-/// rendering path.
+/// tcode streaming epic #3696 Slice 2, re-keyed by #7940: a non-final
+/// `AgentMessageDelta` (`done: false`) must forward as an `AgentOutput`
+/// chunk carrying the producer's `(agent_id, turn_id)` pair, which is what
+/// the reducer opens a per-stream bubble on.
 #[test]
 fn forward_agent_message_delta_not_done_appends() {
     let (tx, mut rx) = unbounded_channel();
@@ -179,18 +178,19 @@ fn forward_agent_message_delta_not_done_appends() {
     assert!(!terminal);
     assert_eq!(
         rx.try_recv().expect("event"),
-        ReplEvent::AssistantOutput {
+        ReplEvent::AgentOutput {
+            agent_id: "agent-1".into(),
+            turn_id: "turn-1".into(),
             chunk: "Hello".into(),
             done: false,
-            is_error: false,
         }
     );
 }
 
 /// The final delta (`done: true`) for a turn must forward `done: true` (so
-/// `apply_assistant_output` finalizes the streaming bubble) — and, unlike
-/// `SessionDone`, is NOT terminal for the SSE pump itself: one agent's turn
-/// finishing doesn't mean the whole session stream is over.
+/// the reducer finalizes that stream's bubble) — and, unlike `SessionDone`,
+/// is NOT terminal for the SSE pump itself: one agent's turn finishing
+/// doesn't mean the whole session stream is over.
 #[test]
 fn forward_agent_message_delta_done_finalizes() {
     let (tx, mut rx) = unbounded_channel();
@@ -211,28 +211,22 @@ fn forward_agent_message_delta_done_finalizes() {
     );
     assert_eq!(
         rx.try_recv().expect("event"),
-        ReplEvent::AssistantOutput {
+        ReplEvent::AgentOutput {
+            agent_id: "agent-1".into(),
+            turn_id: "turn-1".into(),
             chunk: " world".into(),
             done: true,
-            is_error: false,
         }
     );
 }
 
 /// Two agents streaming concurrently and sharing a `turn_id` (the Slice 0
-/// contract's defensive `(agent_id, turn_id)` grouping scenario,
-/// `events.rs:436-456`) must each forward as their OWN independent
-/// `AssistantOutput` message, in call order — `forward_session_event` never
-/// accumulates or merges chunks itself; it is a stateless 1:1 mapper.
-///
-/// NOTE (see PR description / module doc comment on the `AgentMessageDelta`
-/// arm): this proves `forward_session_event` doesn't merge them. It does
-/// NOT prove the two stay visually separate once downstream in
-/// `trusty-code-tui` — `ReplEvent::AssistantOutput` carries no `agent_id`/
-/// `turn_id`, and `ReplApp::streaming_idx` is a single unkeyed
-/// `Option<usize>`, so today the reducer WOULD interleave them into one
-/// chat bubble. That gap lives in `trusty-code-tui` (out of this crate's file
-/// scope) and is tracked as a follow-up, not fixed in this slice.
+/// contract's defensive `(agent_id, turn_id)` grouping scenario) must each
+/// forward carrying their OWN `agent_id` — `forward_session_event` never
+/// accumulates or merges chunks itself; it is a stateless 1:1 mapper, and
+/// the id it preserves is what lets the reducer keep the two apart. The
+/// reducer half of that guarantee is
+/// `trusty_code_tui::app::reduce::tests::agent_output_keys_concurrent_streams_separately`.
 #[test]
 fn forward_agent_message_delta_distinct_agent_ids_not_merged() {
     let (tx, mut rx) = unbounded_channel();
@@ -260,22 +254,314 @@ fn forward_agent_message_delta_distinct_agent_ids_not_merged() {
     );
     assert_eq!(
         rx.try_recv().expect("event"),
-        ReplEvent::AssistantOutput {
+        ReplEvent::AgentOutput {
+            agent_id: "agent-1".into(),
+            turn_id: "turn-shared".into(),
             chunk: "from-agent-1".into(),
             done: false,
-            is_error: false,
         },
-        "agent-1's delta must forward as its own message, not merged with agent-2's"
+        "agent-1's delta must keep its own agent_id, not merge with agent-2's"
     );
     assert_eq!(
         rx.try_recv().expect("event"),
-        ReplEvent::AssistantOutput {
+        ReplEvent::AgentOutput {
+            agent_id: "agent-2".into(),
+            turn_id: "turn-shared".into(),
             chunk: "from-agent-2".into(),
             done: false,
-            is_error: false,
         },
-        "agent-2's delta must forward as its own message, not merged with agent-1's"
+        "agent-2's delta must keep its own agent_id, not merge with agent-1's"
     );
+}
+
+// ── #7940: delegation brackets ────────────────────────────────────────────
+
+/// The daemon's `AgentSpawned` must open a delegation block carrying the
+/// spawn's own `agent_id` — the key every later tool/message event of that
+/// sub-agent's run is attributed with.
+#[test]
+fn forward_agent_spawned_opens_a_delegation() {
+    let (tx, mut rx) = unbounded_channel();
+    let terminal = forward_session_event(
+        envelope(Event::AgentSpawned {
+            session_id: "s-1".into(),
+            agent: "engineer".into(),
+            agent_id: "spawn-7".into(),
+            task_preview: "add the delegation renderer".into(),
+        }),
+        &tx,
+    );
+    assert!(!terminal);
+    assert_eq!(
+        rx.try_recv().expect("event"),
+        ReplEvent::DelegationStarted {
+            agent_id: "spawn-7".into(),
+            agent: "engineer".into(),
+            task: "add the delegation renderer".into(),
+        }
+    );
+}
+
+/// `PmDelegating` is the delegating agent's ANNOUNCEMENT and carries no
+/// `agent_id` — it must still open a block (with an empty id) so the task
+/// summary is visible before the sub-agent exists; the reducer adopts that
+/// block when the real `AgentSpawned` lands.
+#[test]
+fn forward_pm_delegating_opens_a_delegation_without_an_id() {
+    let (tx, mut rx) = unbounded_channel();
+    forward_session_event(
+        envelope(Event::PmDelegating {
+            session_id: "s-1".into(),
+            agent: "engineer".into(),
+            task_preview: "add the delegation renderer".into(),
+        }),
+        &tx,
+    );
+    assert_eq!(
+        rx.try_recv().expect("event"),
+        ReplEvent::DelegationStarted {
+            agent_id: String::new(),
+            agent: "engineer".into(),
+            task: "add the delegation renderer".into(),
+        }
+    );
+}
+
+/// `AgentDone` closes the block with a `Finished` outcome, and — like an
+/// agent turn ending — is NOT terminal for the session stream.
+#[test]
+fn forward_agent_done_closes_the_delegation() {
+    let (tx, mut rx) = unbounded_channel();
+    let terminal = forward_session_event(
+        envelope(Event::AgentDone {
+            session_id: "s-1".into(),
+            agent: "engineer".into(),
+            agent_id: "spawn-7".into(),
+            status: "success".into(),
+        }),
+        &tx,
+    );
+    assert!(
+        !terminal,
+        "a delegation finishing must not end the session stream"
+    );
+    assert_eq!(
+        rx.try_recv().expect("event"),
+        ReplEvent::DelegationFinished {
+            agent_id: "spawn-7".into(),
+            agent: "engineer".into(),
+            outcome: DelegationOutcome::Finished("success".into()),
+        }
+    );
+}
+
+/// `AgentFailed` closes the block carrying the error text — the whole point
+/// of a two-variant outcome is that a failed delegation cannot render the
+/// same as a finished one.
+#[test]
+fn forward_agent_failed_closes_with_the_error() {
+    let (tx, mut rx) = unbounded_channel();
+    forward_session_event(
+        envelope(Event::AgentFailed {
+            session_id: "s-1".into(),
+            agent: "engineer".into(),
+            agent_id: "spawn-7".into(),
+            error: "turn cap exceeded".into(),
+        }),
+        &tx,
+    );
+    assert_eq!(
+        rx.try_recv().expect("event"),
+        ReplEvent::DelegationFinished {
+            agent_id: "spawn-7".into(),
+            agent: "engineer".into(),
+            outcome: DelegationOutcome::Failed("turn cap exceeded".into()),
+        }
+    );
+}
+
+/// Classify every [`Event`] variant as agent-attributed or not (#7940).
+///
+/// Why: `forward_session_event`'s `_ => false` catch-all silently drops
+/// anything it has no arm for, which is exactly how `PmDelegating`/
+/// `AgentSpawned` went unrendered for as long as they did. This `match` has
+/// NO catch-all, so a new `Event` variant fails to COMPILE here until
+/// someone decides which side it falls on — that compile break, not the
+/// runtime assertions below, is what stops the next agent-attributed
+/// variant from being dropped unnoticed.
+/// What: returns `Some(kind)` for a variant carrying an `agent` field,
+/// `None` otherwise.
+fn agent_attributed_kind(event: &Event) -> Option<&'static str> {
+    match event {
+        // Agent-attributed: every variant carrying an `agent` field.
+        Event::ToolStarted { .. }
+        | Event::ToolFinished { .. }
+        | Event::ToolError { .. }
+        | Event::SearchPerformed { .. }
+        | Event::MemoryRecalled { .. }
+        | Event::PmDelegating { .. }
+        | Event::AgentSpawned { .. }
+        | Event::AgentMessage { .. }
+        | Event::AgentMessageDelta { .. }
+        | Event::AgentDone { .. }
+        | Event::AgentFailed { .. } => Some(event.kind()),
+        // Not agent-attributed. `AgentStarted`/`ReportGenerated` carry an
+        // `agent_name`, not an `agent`, and neither has a producer on this
+        // daemon's session path.
+        Event::AgentStarted { .. }
+        | Event::SessionStarted { .. }
+        | Event::SessionDone { .. }
+        | Event::SessionCancelled { .. }
+        | Event::SessionStatusChanged { .. }
+        | Event::SessionInput { .. }
+        | Event::Log { .. }
+        | Event::Progress { .. }
+        | Event::Message { .. }
+        | Event::PmThinking { .. }
+        | Event::ToolCalled { .. }
+        | Event::ToolResult { .. }
+        | Event::AstOperation { .. }
+        | Event::PhaseStarted { .. }
+        | Event::PhaseDone { .. }
+        | Event::PhaseSkipped { .. }
+        | Event::PersonaDetected { .. }
+        | Event::LlmRequested { .. }
+        | Event::LlmResponded { .. }
+        | Event::ReportGenerated { .. }
+        | Event::RecapGenerated { .. }
+        | Event::IndexReadiness { .. }
+        | Event::ContextBudget { .. }
+        | Event::SessionAdded { .. }
+        | Event::SessionActivityUpdate { .. }
+        | Event::WorkstreamActivationChanged { .. }
+        | Event::WorkstreamStateInferred { .. }
+        | Event::Ping => None,
+    }
+}
+
+/// Agent-attributed kinds this client deliberately does NOT render, with the
+/// reason (#7940). An entry here is a decision, not an oversight.
+const INTENTIONALLY_IGNORED: &[(&str, &str)] = &[
+    (
+        "search_performed",
+        "search telemetry; the tool_started/tool_finished pair for the same call already renders",
+    ),
+    (
+        "memory_recalled",
+        "recall telemetry; same reason as search_performed",
+    ),
+];
+
+/// Every agent-attributed `Event` the daemon can emit during a delegation
+/// must map to at least one `ReplEvent`, or be named in
+/// [`INTENTIONALLY_IGNORED`] (#7940).
+///
+/// Why: a delegation's whole value in the TUI is that nothing about it goes
+/// missing. Before this, `PmDelegating` and `AgentSpawned` fell into the
+/// catch-all and rendered as nothing at all, with no test that could tell.
+#[test]
+fn every_agent_attributed_event_maps_or_is_explicitly_ignored() {
+    for event in delegation_event_samples() {
+        let Some(kind) = agent_attributed_kind(&event) else {
+            panic!("sample {} is not agent-attributed", event.kind());
+        };
+        let (tx, mut rx) = unbounded_channel();
+        forward_session_event(envelope(event), &tx);
+        let mapped = rx.try_recv().is_ok();
+        let ignored = INTENTIONALLY_IGNORED.iter().any(|(k, _)| *k == kind);
+        assert!(
+            mapped != ignored,
+            "`{kind}` must either map to a ReplEvent or be listed in INTENTIONALLY_IGNORED \
+             (mapped={mapped}, ignored={ignored})"
+        );
+    }
+}
+
+/// One sample of every agent-attributed `Event` the daemon emits during a
+/// delegation (#7940). `agent_attributed_kind`'s exhaustive `match` is what
+/// forces a new variant to be classified; this list is what actually drives
+/// it through `forward_session_event`.
+fn delegation_event_samples() -> Vec<Event> {
+    vec![
+        Event::PmDelegating {
+            session_id: "s-1".into(),
+            agent: "engineer".into(),
+            task_preview: "t".into(),
+        },
+        Event::AgentSpawned {
+            session_id: "s-1".into(),
+            agent: "engineer".into(),
+            agent_id: "spawn-1".into(),
+            task_preview: "t".into(),
+        },
+        Event::AgentMessage {
+            session_id: "s-1".into(),
+            agent: "engineer".into(),
+            text: "hi".into(),
+        },
+        Event::AgentMessageDelta {
+            session_id: "s-1".into(),
+            agent: "engineer".into(),
+            agent_id: "spawn-1".into(),
+            turn_id: "turn-1".into(),
+            delta: "hi".into(),
+            done: false,
+        },
+        Event::ToolStarted {
+            session_id: "s-1".into(),
+            agent: "engineer".into(),
+            agent_id: "spawn-1".into(),
+            tool: "bash".into(),
+            call_id: "c1".into(),
+            args_preview: "ls".into(),
+        },
+        Event::ToolFinished {
+            session_id: "s-1".into(),
+            agent: "engineer".into(),
+            agent_id: "spawn-1".into(),
+            tool: "bash".into(),
+            call_id: "c1".into(),
+            success: true,
+            result_preview: "ok".into(),
+        },
+        Event::ToolError {
+            session_id: "s-1".into(),
+            agent: "engineer".into(),
+            agent_id: "spawn-1".into(),
+            tool: "bash".into(),
+            call_id: "c1".into(),
+            error: "boom".into(),
+        },
+        Event::SearchPerformed {
+            session_id: "s-1".into(),
+            agent: "engineer".into(),
+            agent_id: "spawn-1".into(),
+            lane: "lexical".into(),
+            query: "q".into(),
+            hit_count: Some(1),
+            hits: vec![],
+            latency_ms: 1,
+        },
+        Event::MemoryRecalled {
+            session_id: "s-1".into(),
+            agent: "engineer".into(),
+            agent_id: "spawn-1".into(),
+            query: "q".into(),
+            results: vec![],
+        },
+        Event::AgentDone {
+            session_id: "s-1".into(),
+            agent: "engineer".into(),
+            agent_id: "spawn-1".into(),
+            status: "success".into(),
+        },
+        Event::AgentFailed {
+            session_id: "s-1".into(),
+            agent: "engineer".into(),
+            agent_id: "spawn-1".into(),
+            error: "boom".into(),
+        },
+    ]
 }
 
 #[test]

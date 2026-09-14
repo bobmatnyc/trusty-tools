@@ -435,7 +435,7 @@ impl InProcessAgentRunner {
             // (DOC-39 AC-13) Attribute this SPAWN's tool events with the fresh
             // id minted above — the missing half of the UI Phase-1 attribution
             // that let two same-named concurrent delegations collide.
-            .with_agent_id(agent_id);
+            .with_agent_id(agent_id.clone());
         if let Some(sink) = &self.sink {
             agent_loop = agent_loop.with_tool_event_sink(Arc::clone(sink));
         }
@@ -443,13 +443,31 @@ impl InProcessAgentRunner {
             agent_loop = agent_loop.with_cancel_flag(Arc::clone(cancel));
         }
 
-        agent_loop
+        // #7940: bracket the sub-agent's loop with the delegation-lifecycle
+        // hooks. Here specifically for the same reason `agent_id` is minted
+        // here: this is the ONE production site that runs exactly once per
+        // `delegate_to_agent` dispatch, so a spawn can never be reported
+        // twice or without the id its tool/message events carry.
+        if let Some(sink) = &self.sink {
+            sink.agent_spawned(agent_name, &agent_id, task).await;
+        }
+        let outcome = agent_loop
             .run(&system, task)
             .await
             .map_err(|source| RunnerError::Loop {
                 name: agent_name.to_string(),
                 source,
-            })
+            });
+        if let Some(sink) = &self.sink {
+            match &outcome {
+                Ok(_) => sink.agent_done(agent_name, &agent_id, "success").await,
+                Err(e) => {
+                    sink.agent_failed(agent_name, &agent_id, &e.to_string())
+                        .await
+                }
+            }
+        }
+        outcome
     }
 }
 

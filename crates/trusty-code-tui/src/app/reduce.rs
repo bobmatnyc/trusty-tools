@@ -33,8 +33,8 @@
 //! # Spec References
 //! - [`SPEC-TTUI-05~draft`](docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-05~draft) — Slice 5 deliverable (§5, Slice 5): line-editor keymap + Ctrl-C daemon cancel.
 
-use super::ReplApp;
-use crate::event::{KeyCode, KeyInput, ReplEvent};
+use super::{ChatLine, ChatRole, Delegation, ReplApp};
+use crate::event::{DelegationOutcome, KeyCode, KeyInput, ReplEvent};
 use crate::text::{strip_interior_blank_lines, trim_surrounding_blank_lines};
 
 /// How many lines a Page-Up/Page-Down key press scrolls.
@@ -85,13 +85,39 @@ pub fn apply(app: &mut ReplApp, ev: ReplEvent) {
         } => apply_assistant_output(app, chunk, done, is_error),
         ReplEvent::ToolInvocation {
             id: _,
+            agent_id,
             tool_name,
             args,
             result,
-        } => match result {
-            None => app.push_status(format!("[TOOL] {tool_name}: {args}")),
-            Some(r) => app.push_status(format!("[RESULT] {r}")),
-        },
+        } => {
+            let text = match result {
+                None => format!("[TOOL] {tool_name}: {args}"),
+                Some(r) => format!("[RESULT] {r}"),
+            };
+            // #7940: a delegated sub-agent's tool calls belong inside its own
+            // block, not interleaved with the primary agent's at top level.
+            if is_delegated(app, &agent_id) {
+                push_delegated(app, ChatRole::Delegated, text);
+            } else {
+                app.push_status(text);
+            }
+        }
+        ReplEvent::AgentOutput {
+            agent_id,
+            turn_id,
+            chunk,
+            done,
+        } => apply_agent_output(app, agent_id, turn_id, chunk, done),
+        ReplEvent::DelegationStarted {
+            agent_id,
+            agent,
+            task,
+        } => apply_delegation_started(app, agent_id, agent, task),
+        ReplEvent::DelegationFinished {
+            agent_id,
+            agent,
+            outcome,
+        } => apply_delegation_finished(app, agent_id, agent, outcome),
         ReplEvent::StatusMessage(msg) => app.push_status(msg),
         ReplEvent::ClearScrollback => app.clear_scrollback(),
         ReplEvent::StatuslineUpdate(segments) => app.statusline = segments,
@@ -139,8 +165,6 @@ pub fn apply(app: &mut ReplApp, ev: ReplEvent) {
 /// [`tests::apply_assistant_output_finalizes_as_error_role`],
 /// [`tests::apply_assistant_output_refreshes_last_bash_block_on_finalize`].
 fn apply_assistant_output(app: &mut ReplApp, chunk: String, done: bool, is_error: bool) {
-    use crate::app::ChatRole;
-
     match app.streaming_idx {
         Some(idx) => {
             if let Some(entry) = app.chat.get_mut(idx) {
@@ -148,7 +172,7 @@ fn apply_assistant_output(app: &mut ReplApp, chunk: String, done: bool, is_error
             }
         }
         None => {
-            app.chat.push(super::ChatLine {
+            app.chat.push(ChatLine {
                 role: ChatRole::Assistant,
                 text: chunk,
             });
@@ -169,6 +193,156 @@ fn apply_assistant_output(app: &mut ReplApp, chunk: String, done: bool, is_error
         }
         app.update_last_bash_block();
     }
+}
+
+/// Whether `agent_id` names a delegation whose block is currently open
+/// (#7940).
+///
+/// Why: an empty `agent_id` means "no attribution", which must never match
+/// an open block — otherwise an unattributed event would be filed under
+/// whichever delegation happened to be running.
+fn is_delegated(app: &ReplApp, agent_id: &str) -> bool {
+    !agent_id.is_empty() && app.delegations.iter().any(|d| d.agent_id == agent_id)
+}
+
+/// Push one line into the scrollback with `role`, pinning the view to the
+/// newest content (#7940).
+fn push_delegated(app: &mut ReplApp, role: ChatRole, text: String) {
+    app.chat.push(ChatLine { role, text });
+    app.scroll_offset = 0;
+}
+
+/// Accumulate one attributed output chunk into the bubble for its
+/// `(agent_id, turn_id)` stream (#7940).
+///
+/// Why: [`apply_assistant_output`] accumulates into ONE unkeyed slot
+/// (`ReplApp::streaming_idx`), so a primary agent and a delegated sub-agent
+/// streaming inside the same human turn appended into a single chat entry —
+/// their words physically interleaved. Keying the in-progress entry by the
+/// producer's own `(agent_id, turn_id)` pair makes that impossible by
+/// construction rather than by luck of arrival order.
+/// What: find-or-open the entry for the key, append, and on `done` trim it
+/// and drop the key. The entry's role is decided ONCE, when it is opened:
+/// `Delegated` when the id names an open delegation block, `Assistant`
+/// otherwise. `busy` is deliberately untouched — one agent's turn ending is
+/// not the human turn ending, which only `AssistantOutput { done: true }`
+/// reports.
+/// Test: [`tests::agent_output_keys_concurrent_streams_separately`],
+/// [`tests::agent_output_finalizes_and_drops_its_key`],
+/// [`tests::agent_output_inside_a_delegation_is_delegated_role`].
+fn apply_agent_output(
+    app: &mut ReplApp,
+    agent_id: String,
+    turn_id: String,
+    chunk: String,
+    done: bool,
+) {
+    let key = (agent_id, turn_id);
+    let idx = match app.agent_streams.get(&key) {
+        Some(&idx) => idx,
+        None => {
+            // A terminal delta carries no text of its own (see
+            // `ReplEvent::AgentOutput`), so opening a bubble for one whose
+            // stream we never saw would push a permanently blank entry.
+            if done && chunk.is_empty() {
+                return;
+            }
+            let role = if is_delegated(app, &key.0) {
+                ChatRole::Delegated
+            } else {
+                ChatRole::Assistant
+            };
+            app.chat.push(ChatLine {
+                role,
+                text: String::new(),
+            });
+            let idx = app.chat.len() - 1;
+            app.agent_streams.insert(key.clone(), idx);
+            idx
+        }
+    };
+    if let Some(entry) = app.chat.get_mut(idx) {
+        entry.text.push_str(&chunk);
+    }
+    app.scroll_offset = 0;
+
+    if done {
+        app.agent_streams.remove(&key);
+        if let Some(entry) = app.chat.get_mut(idx) {
+            let trimmed = trim_surrounding_blank_lines(&entry.text);
+            entry.text = strip_interior_blank_lines(&trimmed);
+        }
+        app.update_last_bash_block();
+    }
+}
+
+/// Open a delegated sub-agent's scrollback block (#7940).
+///
+/// Why: this is what makes delegation visible at all — without a header the
+/// sub-agent's output and tool calls arrive indistinguishable from the
+/// primary agent's.
+/// What: pushes a [`ChatRole::Delegation`] header and registers the
+/// delegation so later attributed events file under it. A second
+/// `DelegationStarted` for the same agent ADOPTS the open block instead of
+/// opening a duplicate — a producer that announces its intent to delegate
+/// before the sub-agent exists (no `agent_id` yet) and then reports the real
+/// spawn emits two events for one delegation.
+/// Test: [`tests::delegation_started_pushes_header_and_sets_active_agent`],
+/// [`tests::delegation_started_with_id_adopts_an_announced_block`],
+/// [`tests::delegation_started_twice_for_distinct_ids_opens_two_blocks`].
+fn apply_delegation_started(app: &mut ReplApp, agent_id: String, agent: String, task: String) {
+    if let Some(open) = app
+        .delegations
+        .iter_mut()
+        .find(|d| d.agent == agent && (d.agent_id.is_empty() || d.agent_id == agent_id))
+    {
+        if open.agent_id.is_empty() {
+            open.agent_id = agent_id;
+        }
+        return;
+    }
+    app.delegations.push(Delegation {
+        agent_id,
+        agent: agent.clone(),
+    });
+    let text = if task.trim().is_empty() {
+        format!("▶ {agent}")
+    } else {
+        format!("▶ {agent} — {task}")
+    };
+    push_delegated(app, ChatRole::Delegation, text);
+}
+
+/// Close a delegated sub-agent's scrollback block with its outcome (#7940).
+///
+/// Why: a block with no footer reads as still-running forever, and "finished"
+/// vs. "blew up" is the single fact an operator watching a delegation most
+/// needs.
+/// What: pushes a [`ChatRole::Delegation`] footer naming the outcome, drops
+/// the delegation (so [`ReplApp::active_agent`] reverts), and drops any
+/// still-open stream key for that agent — a failed loop aborts mid-turn and
+/// never sends its terminal chunk, which would otherwise leak a map entry
+/// for the life of the session. The footer renders even for an id this
+/// client never saw start (a TUI that attached mid-delegation), rather than
+/// dropping the only report of how the run ended.
+/// Test: [`tests::delegation_finished_pushes_footer_and_clears_active_agent`],
+/// [`tests::delegation_finished_failed_footer_carries_the_error`],
+/// [`tests::delegation_finished_drops_an_unterminated_stream_key`].
+fn apply_delegation_finished(
+    app: &mut ReplApp,
+    agent_id: String,
+    agent: String,
+    outcome: DelegationOutcome,
+) {
+    app.delegations
+        .retain(|d| !(d.agent_id == agent_id && d.agent == agent));
+    app.agent_streams.retain(|(aid, _), _| aid != &agent_id);
+    let text = match outcome {
+        DelegationOutcome::Finished(status) if status.trim().is_empty() => format!("└ {agent}"),
+        DelegationOutcome::Finished(status) => format!("└ {agent} — {status}"),
+        DelegationOutcome::Failed(error) => format!("└ {agent} — failed: {error}"),
+    };
+    push_delegated(app, ChatRole::Delegation, text);
 }
 
 /// Dispatch one translated key press to the appropriate `ReplApp` mutator.
