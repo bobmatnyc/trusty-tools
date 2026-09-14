@@ -164,6 +164,23 @@ When staging changes in a worktree, always name files explicitly: `git add <file
 Never use `git add -A` in a worktree, as it stages untracked build directories.
 The ignored directory name is `target-worktree/`, verified with `git check-ignore -v target-worktree/` from the worktree root.
 
+`git check-ignore -v <path>` exits 1 for a path that is still TRACKED, even
+when a `.gitignore` rule matches it — the tracked-file check runs before the
+pattern match, so exit 1 there answers "is this path tracked", not "does a
+rule match it". Before untracking a matched path from the index, ask the
+pattern-only question instead: `git check-ignore -v --no-index <path>`.
+
+## Reading Another Worktree's State
+
+`git -C <other worktree path>` is refused from inside an isolation worktree
+(ADR-0048) — not only for `diff`, for any git subcommand redirected at
+another tree. Read that tree's working-tree files directly with `cat`/`grep`
+or the Read tool; for its committed state, use `git show <sha>:<path>` from
+your OWN worktree against the other worktree's HEAD sha (found with `git show
+<sha> -- <path> > <scratchpad>/base`, then `diff -u <scratchpad>/base <other
+worktree>/<path>`) — the shared object database makes this work without
+touching the other tree at all.
+
 ## `.trusty-mpm/sessions/` Is Ignored
 
 Owner ruling, 2026-09-13, superseding the 2026-08-31 ruling that tracked it:
@@ -253,6 +270,8 @@ above applies to the whole test ladder, not only to the line-cap check.
 | a directory argument with a trailing `/` (`find crates/<crate>/ -name …`) | drop the trailing slash: `find crates/<crate> -name …` |
 | a pattern or path containing the literal token `worktree` (`grep -n worktree <file>`) | re-spell around the literal token, or read the file with the Read tool |
 | `grep` over more than one file (`grep -rn <pattern> <dir1> <dir2>`, or a glob matching several files) | one `grep` call per file, or `git grep -l <pattern>` to list matches first |
+| `cd <worktree> && <command>` — `./scripts/<name>.sh`, `grep`, or any other non-`git` command joined with `&&` | `cd <worktree>; <command>` (semicolon, not `&&`); a `git` command instead uses `git -C <absolute worktree path> …` |
+| a shell-variable path next to an interpreter/script invocation, compounded with the assignment or a second command in the same call (`S=…; python3 $S/script.py; cargo test … > $S/out.txt`) | substitute the literal absolute path for the variable, and give the invocation its own Bash call — never compound it with the assignment or a second command |
 
 One reported shape is refused HERE too, for a reason of our own: `$'…'` quoting
 (`grep -n $'\tfixture' README.md`). The guard's lexer cannot decode it, so it
@@ -273,4 +292,6 @@ Every refusal costs the agent a full turn of its resident prompt, so reach for t
 | `cat >> <file> <<'EOF'` — heredoc append into a file | the Write tool or Edit tool |
 | `env HOME=<tmp> ./target/debug/deps/<bin>` — environment override in a test | inject the path as a parameter to the test (#5544), never set a global env var |
 | a filename containing the literal substring `diff` or `token` | rename the file to avoid that substring |
+| a filename or script body containing ANY known command word as a substring — not only `diff`/`token`/`git` above (e.g. `fix_tac_tests.py`, matched on `tac`) | rename the file to avoid the substring; the guard matches command words anywhere in the argument text, never only in command position |
+| `cat -n <abs>/.gitignore` | the Read tool — `.gitignore` is an ordinary file here |
 | `git push origin HEAD:<pr-branch>` after creating a local branch from that PR branch (cross-branch push) | until the fast-forward exemption lands, set `TM_ALLOW_CROSS_BRANCH_PUSH=1` in the environment, and use `--force-with-lease` only after a rebase (#2867) |

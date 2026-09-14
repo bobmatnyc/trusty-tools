@@ -48,9 +48,9 @@ was exercised.
 | # | Development proof | PR gate — the command to run | Hardening / release gate |
 |---|---|---|---|
 | 1 | Read the rendered file | `bash scripts/check_sld.sh` (plus `check_doc_numbers.sh` / `check_line_cap.sh` if those surfaces were touched). No Cargo test by default. | CI required checks only |
-| 2 | Fail-before / pass-after, repeated: `cargo test -p <crate> <test> -- --exact --nocapture` run ~10× | `cargo fmt --check` && `cargo test -p <crate> --no-fail-fast`; add `-- --test-threads=1` when the flake is isolation-shaped | `cargo test --workspace` **only** when shared test infrastructure changed |
-| 3 | One targeted regression test that provably fails before the change | `cargo fmt --check` && `cargo check -p <crate>` && `cargo clippy -p <crate> -- -D warnings` && `cargo test -p <crate> --no-fail-fast` | Workspace gate only when release policy requires it |
-| 4 | Targeted regression plus `cargo test -p <lib>` | rung 3 for the library, then `cargo check --workspace` && `cargo test -p <consumer> --no-fail-fast` for **each direct dependent** | `cargo test --workspace` && `cargo clippy --workspace --all-targets -- -D warnings` at HARDEN/release |
+| 2 | Fail-before / pass-after, repeated: `cargo test -p <crate> <test> -- --exact --nocapture` run ~10× | `bash scripts/check_test_pointers.sh` && `cargo fmt` && `cargo fmt --check` && `cargo test -p <crate> --no-fail-fast`; add `-- --test-threads=1` when the flake is isolation-shaped; add `RUST_LOG=warn` once, up front, for any target that spawns a binary and asserts on its stderr | `cargo test --workspace` **only** when shared test infrastructure changed |
+| 3 | One targeted regression test that provably fails before the change | `bash scripts/check_test_pointers.sh` && `cargo fmt` && `cargo fmt --check` && `cargo check -p <crate>` && `cargo clippy -p <crate> -- -D warnings` && `cargo test -p <crate> --no-fail-fast`; add `cargo doc -p <crate> --no-deps` when a doc comment changed or an import was dropped; add `RUST_LOG=warn` once, up front, for any target that spawns a binary and asserts on its stderr | Workspace gate only when release policy requires it |
+| 4 | Targeted regression plus `cargo test -p <lib>` | rung 3 for the library, then `SKIP_UI_BUILD=1 cargo check --workspace` && `cargo test -p <consumer> --no-fail-fast` for **each direct dependent**; add `bash scripts/check_agent_assets.sh` (and `--update` when a deliberately-forked tcode agent's shared source changed) for any change under `crates/trusty-agents-common/src/assets/agents/` | `cargo test --workspace` && `cargo clippy --workspace --all-targets -- -D warnings` at HARDEN/release |
 | 5 | Targeted plus failure-path and concurrency tests | rung 4, plus `cargo test -p <crate> --no-fail-fast -- --include-ignored` for gated integration coverage, plus an adversarial review round (`code-critic`) | full workspace, `cargo audit`, and for release tooling `scripts/check-publish-ready.sh <crate>` && `scripts/preflight-publish.sh <crate>` |
 | 6 | Rust crate tests **plus** direct UI/API evidence (curl the route, call the MCP tool, load the page) | rung 3 or 4 for the Rust side, plus `pnpm -C crates/<crate>/ui test` (where the package defines one; otherwise `… build`) and one smoke run of the binary | full product/e2e gate plus `cargo test -- --include-ignored` when hardening |
 
@@ -144,6 +144,46 @@ The same shape exists wherever a non-default feature gates real code —
 (#5264). Before reading a crate-scoped green as a gate, check whether the module
 you edited is behind a `#[cfg(feature = …)]` the command did not enable.
 
+### Why `check_test_pointers.sh` and mutating `cargo fmt` run first
+
+`scripts/check_test_pointers.sh` catches a dangling `Test:` doc-comment
+pointer in seconds, with no build. Run it, and the mutating `cargo fmt`, before
+`cargo check`/`clippy`/`test` — not after — so `cargo fmt --check` CONFIRMS a
+tree the mutating pass already formatted instead of DISCOVERING formatting
+drift only after a full build/test run has already paid for itself. Same root
+cause across #7671, #7674, #7678, #7688: `fmt --check` failing at the end of a
+gate chain that had already run the expensive steps.
+
+### A stderr-asserting test needs `RUST_LOG=warn` to match CI
+
+`.github/workflows/ci.yml` exports `RUST_LOG=warn` workspace-wide; a local
+shell commonly exports `info` or nothing. A test target that spawns a child
+binary and asserts on its stderr output reads a different log level in each
+environment, so it can pass locally and fail on every `main` run for the same
+commit. Run it once under `RUST_LOG=warn` locally before trusting a local
+green. Evidence: #7641 was green locally and red on `main` for two days before
+the level mismatch was found.
+
+### A doc-comment or import edit owes `cargo doc -p <crate> --no-deps`
+
+None of `cargo fmt`, `check`, `clippy`, or `test` resolves an intra-doc link
+target — only `cargo doc` does. `trusty-mpm` denies broken intra-doc links at
+the crate root (`crates/trusty-mpm/src/lib.rs:25`,
+`#![deny(rustdoc::broken_intra_doc_links)]`), so a PR that edits a doc comment
+or drops an import can pass every other rung-3 gate and still fail
+`cargo doc`. Two links broke this way in `crates/trusty-mpm/src/bin/tm/commands/guided.rs`
+(merged as 3dbf64d77), reddening the non-required `Rustdoc intra-doc links`
+job on every PR built off `main` until fixed. Also flagged on #7351.
+
+### The `tests_behavior_*` modules run through the `tm` bin target
+
+`tests_behavior_*` under `crates/trusty-mpm/src/bin/tm/` are modules of the
+`tm` bin target, not standalone integration-test binaries: run them as
+`cargo test -p trusty-mpm --bin tm <fn>`, never `cargo test -p trusty-mpm
+--test <stem> <fn>`. A `--test '*' <name>` filter against them silently
+matches zero tests and exits 0 — the #4307 class of a green run that proved
+nothing.
+
 ## The Three Stages in Cargo Terms
 
 `Skill(skill="tm-workflow")` ("Test Scope Widens by Stage") sets the framework
@@ -234,6 +274,25 @@ scoping down by rung is. It is never licence to make a red gate green by
 deleting, `#[ignore]`-ing, `cfg`-gating, `--exclude`-ing, or `--lib`-narrowing
 coverage. A red gate blocks at every stage; only a *pending* full-corpus check is
 tolerated at merge, never a failing one.
+
+## Reproducing a Ranking Regression (`trusty-search`)
+
+A fixture with one long chunk carrying the single literal match, alongside
+short and dense decoy chunks, is the reliable shape for reproducing a BM25
+ranking regression. BM25's length normalization otherwise buries the true
+match under shorter, denser decoys, so a fixture built the other way around
+(short truth chunk, long decoys) can fail to reproduce the regression at all.
+Found in #7675.
+
+## Asserting a Pinned Value: Equality, Not Shape
+
+When a test injects a pinned value specifically to remove host dependence
+(a resolved exe path, a fixed timestamp, a canned ID), assert equality with
+that exact pinned value — never a shape or prefix predicate like
+`starts_with('/')`. A shape check still passes on a wrong-but-plausible value,
+which is exactly what let #7813's defect through: the exact resolved exe path
+was wrong, but it still started with `/`, so `starts_with('/')` never caught
+it. Refs #7813.
 
 ## How Much Gate Output the PR Body Owes
 

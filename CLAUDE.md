@@ -51,7 +51,7 @@ in the PR body.** Risk maps to rung (1–2 Low, 3–4 Normal, 5–6 High).
 | 1 | Docs, comments, changelog fragments only | Low | Doc gates only (`check_sld.sh`, + line-cap if touched). No Cargo test by default. |
 | 2 | Test-only stabilization — flake fix, fixture, test harness | Low | `fmt --check` + `test -p <crate> --no-fail-fast`, flake re-run ~10× |
 | 3 | Localized behavior inside one crate | Normal | `fmt --check` + `check` + `clippy` + `test --no-fail-fast` `-p <crate>`, + one regression test that failed before |
-| 4 | **Cross-crate change** — public API or shared library | Normal → High | Rung 3 on the library, then `check --workspace` + `test -p <consumer> --no-fail-fast` for **each direct dependent** |
+| 4 | **Cross-crate change** — public API or shared library | Normal → High | Rung 3 on the library, then `SKIP_UI_BUILD=1 check --workspace` + `test -p <consumer> --no-fail-fast` for **each direct dependent** |
 | 5 | Cross-crate contract, persistence, security, process lifecycle, **release tooling** | High | Rung 4 + `--include-ignored` integration coverage, failure-path tests, `code-critic` round |
 | 6 | **UI / API surface** — Svelte UIs, MCP schemas, HTTP routes | High | Rung 3/4 for Rust + the UI package's test/build + one binary smoke run |
 
