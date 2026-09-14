@@ -98,7 +98,9 @@ use std::path::{Component, Path};
 
 use trusty_mpm::core::project_aliases::main_checkout_root;
 
-use super::{PathEnv, resolve_target_path, split_shell_segments};
+use super::{
+    PathEnv, resolve_target_path, split_shell_segments, strip_quoted_heredoc_bodies, tokenize,
+};
 use crate::commands::hook_rewrite::first_command_token;
 
 /// Deny reason for `rm`/`rmdir`/`unlink`/`find -delete` targeting a
@@ -170,7 +172,13 @@ fn evaluate_destructive_delete_command_in(
     env: &PathEnv,
 ) -> Option<&'static str> {
     let mut effective_cwd = cwd.to_path_buf();
-    for segment in split_shell_segments(command) {
+    // #7190: a quoted here-document body is stdin data the shell neither
+    // expands nor runs, so its Python/SQL/prose lines are not segments of this
+    // command. An UNQUOTED body and a body handed to a shell both stay in
+    // place — `cat <<EOF` still substitutes `$(rm -rf /)`, and `bash <<'SH'`
+    // still runs its own source.
+    let command = strip_quoted_heredoc_bodies(command);
+    for segment in split_shell_segments(&command) {
         let trimmed = segment.trim();
         if trimmed.is_empty() {
             continue;
@@ -184,14 +192,14 @@ fn evaluate_destructive_delete_command_in(
         // detection was, since a missed `cd` only leaves `effective_cwd`
         // stale rather than letting a delete verb through unclassified.
         if first_command_token(trimmed).as_deref() == Some("cd") {
-            if let Some(argv) = shlex::split(trimmed)
+            if let Ok(argv) = tokenize(trimmed)
                 && let Some(dest) = argv.get(1)
             {
                 effective_cwd = resolve_target_path(dest, &effective_cwd, env);
             }
             continue;
         }
-        let Some(argv) = shlex::split(trimmed) else {
+        let Ok(argv) = tokenize(trimmed) else {
             // Unbalanced quotes — cannot tokenize this segment at all. Fail
             // CLOSED (item 2) only when the raw text plausibly names one of
             // the delete verbs as a whole word; an unparseable segment with

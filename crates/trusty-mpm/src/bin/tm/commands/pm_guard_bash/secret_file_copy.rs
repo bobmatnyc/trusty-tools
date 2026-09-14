@@ -157,7 +157,10 @@ use std::path::Path;
 use trusty_mpm::core::project_aliases::is_worktree_path;
 use trusty_mpm::daemon::managed_routes::inproject::untracked_sync::glob_match;
 
-use super::{PathEnv, resolve_target_path, split_shell_segments, unresolved_target};
+use super::bash_tokens::RedirectRole;
+use super::{
+    PathEnv, redirect_role, resolve_target_path, split_shell_segments, tokenize, unresolved_target,
+};
 use crate::commands::hook_rewrite::first_command_token;
 // #7266 fix round: the READ guard's own target predicate, so "a name the read
 // guard refuses" has ONE definition that both rules read.
@@ -696,7 +699,7 @@ fn evaluate_secret_file_copy_command_in(
         // Same `cd`-tracking shape as the sibling ABSOLUTE guards: a
         // deliberate, partial closing of `cd worktree && cp secret .`.
         if first_command_token(trimmed).as_deref() == Some("cd") {
-            if let Some(argv) = shlex::split(trimmed)
+            if let Ok(argv) = tokenize(trimmed)
                 && let Some(dest) = argv.get(1)
             {
                 effective_cwd = resolve_target_path(dest, &effective_cwd, env);
@@ -706,7 +709,7 @@ fn evaluate_secret_file_copy_command_in(
         // Unparseable segment: skip rather than fail closed — see the module
         // doc's residual-bypass list for why this differs from
         // `destructive_delete`'s blanket refusal.
-        let Some(argv) = shlex::split(trimmed) else {
+        let Ok(argv) = tokenize(trimmed) else {
             continue;
         };
         // #7266 fix round: the rename rule runs FIRST and ignores the
@@ -1030,25 +1033,17 @@ fn redirection_target(argv: &[String]) -> Option<String> {
             expect_operand = true;
             continue;
         }
-        match redirect_tail(bare) {
-            Some("") => expect_operand = true,
-            Some(attached) => return Some(attached.to_string()),
-            None => {}
+        // #7743: the shared classifier is what tells a file from a file
+        // DESCRIPTOR. This parser used to read the fd-dup token as a file
+        // named after the descriptor, so a read-only listing of a dotenv
+        // path with stderr merged was refused as laundering it.
+        match redirect_role(bare) {
+            RedirectRole::TargetFollows => expect_operand = true,
+            RedirectRole::Target(attached) => return Some(attached.to_string()),
+            RedirectRole::FileDescriptor | RedirectRole::None => {}
         }
     }
     None
-}
-
-/// The text a redirect token carries after its operator: `Some("")` for the
-/// operator alone, `Some(target)` when the file is attached, `None` when the
-/// token is not an output redirection at all.
-fn redirect_tail(token: &str) -> Option<&str> {
-    let (fd, rest) = token.split_once('>')?;
-    if !(fd.is_empty() || fd == "&" || fd.chars().all(|c| c.is_ascii_digit())) {
-        return None;
-    }
-    let rest = rest.strip_prefix('>').unwrap_or(rest);
-    Some(rest.strip_prefix('|').unwrap_or(rest))
 }
 
 /// Deny reason for a secret-shaped source about to land under a name the read
@@ -1711,10 +1706,13 @@ mod tests {
             Some("notes.md")
         );
         assert_eq!(redirection_target(&argv("cat .env")), None);
-        // A `2>&1` fd-dup names no file this rule cares about.
+        // #7743: an fd-dup names no file this rule cares about. The
+        // assertion used to pin the descriptor spelling as a filename,
+        // beside a comment already stating what the answer should be.
+        assert_eq!(redirection_target(&argv("cargo test 2>&1")), None);
         assert_eq!(
-            redirection_target(&argv("cargo test 2>&1")).as_deref(),
-            Some("&1")
+            redirection_target(&argv("cat .env &> notes.md")).as_deref(),
+            Some("notes.md")
         );
     }
 }
