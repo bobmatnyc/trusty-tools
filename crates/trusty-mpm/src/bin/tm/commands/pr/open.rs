@@ -8,23 +8,24 @@
 //! expensive to catch later — a thin body reaches the review gate, a missing
 //! fragment reaches CI, a missing `ws/` label is never noticed at all.
 //! What: [`run`] validates, then either prints the assembled argv
-//! (`--dry-run`) or runs `gh pr create`. Every failure exits
+//! (`--dry-run`) or runs `gh pr create`. A pre-flight failure exits
 //! [`super::EXIT_CHECK_FAILED`] naming the check, and `gh` is never spawned.
-//! Test: the sibling `tests.rs` — `open_*`.
+//! Once the PR exists the contract changes (#7869): every later step reports
+//! against a NAMED PR, and metadata that could not be applied exits
+//! [`super::EXIT_PARTIAL`] rather than hiding the number the caller needs.
+//! Test: the sibling `tests.rs` — `open_*`, `pr_7869_*`.
 
 use std::path::Path;
 
 use anyhow::Context as _;
 
 use trusty_mpm::core::component_labels::CrateOwnership;
-use trusty_mpm::core::issue_audit::IssueFacts;
-use trusty_mpm::core::issue_audit_gh::view_argv;
 use trusty_mpm::core::policy_labels;
 use trusty_mpm::core::trusty_tools_config::ResolvedTicketing;
 
 use super::body::{self, IssueLink};
-use super::metadata::{self, ChangedPaths, PrMetadata, RefsIssue, RefsLookup};
-use super::{EXIT_CHECK_FAILED, EXIT_OK, GhRunner, argv};
+use super::metadata_apply;
+use super::{EXIT_CHECK_FAILED, EXIT_OK, EXIT_PARTIAL, GhRunner, argv};
 use crate::cli::PrOpenArgs;
 
 // #6918: both label names come from `core::policy_labels`, the crate's one
@@ -216,7 +217,7 @@ fn head_docs_only_conflict(args: &PrOpenArgs) -> Option<String> {
 /// component labels.
 /// What: the `--head` branch when one was named, else `HEAD`.
 /// Test: `open_head_drives_the_preflight_diff_revision`.
-fn diff_head(args: &PrOpenArgs) -> &str {
+pub(crate) fn diff_head(args: &PrOpenArgs) -> &str {
     head_branch(args).unwrap_or("HEAD")
 }
 
@@ -263,6 +264,25 @@ pub(crate) struct OpenPlan {
     pub(crate) supplied: Vec<&'static str>,
     /// The body as it will be sent, after the issue link was applied.
     pub(crate) body: String,
+    /// The assignee `gh pr create` was told to set (#7869).
+    ///
+    /// Why: when the create exits non-zero AFTER creating the PR, the retry has
+    /// to re-apply exactly what the create was applying. Reading it back off
+    /// the argv would be a second spelling of the same fact.
+    /// Test: `pr_7869_a_create_that_fails_after_creating_reports_the_pr_and_retries`.
+    pub(crate) assignee: String,
+}
+
+impl OpenPlan {
+    /// The labels `gh pr create` carries: the convention label and `ws/<x>`.
+    ///
+    /// Test: `pr_7869_a_create_that_fails_after_creating_reports_the_pr_and_retries`.
+    pub(crate) fn create_labels(&self) -> Vec<String> {
+        vec![
+            policy_labels::CONVENTION_LABEL.to_string(),
+            self.workstream_label.clone(),
+        ]
+    }
 }
 
 /// Validate the inputs and assemble the `gh pr create` invocation.
@@ -382,6 +402,7 @@ pub(crate) fn plan(
         label_seed_argv,
         supplied: report.supplied.iter().map(|f| f.heading()).collect(),
         body: linked,
+        assignee: ticketing.default_assignee.clone(),
     })
 }
 
@@ -460,9 +481,25 @@ pub(crate) fn run<R: GhRunner, P: Preflight>(
     }
 
     let out = gh.run(&plan.argv)?;
-    if !out.success {
-        anyhow::bail!("`gh pr create` failed: {}", out.stderr.trim());
-    }
+    // #7869: `gh pr create` creates the PR and THEN applies the assignee and
+    // labels over separate API calls. A 502 on one of those exits non-zero with
+    // the PR already created, and bailing here printed no number at all — the
+    // caller had to find PR #7918 with `gh pr list --head`. The URL on stdout is
+    // the proof the PR exists, so that case is reported, not swallowed.
+    let created_partially = if out.success {
+        false
+    } else {
+        anyhow::ensure!(
+            created_pr_url(&out.stdout).is_some(),
+            "`gh pr create` failed: {}",
+            out.stderr.trim()
+        );
+        eprintln!(
+            "tm pr open: `gh pr create` exited non-zero AFTER creating the PR: {}",
+            out.stderr.trim()
+        );
+        true
+    };
     let url = out
         .stdout
         .lines()
@@ -481,100 +518,45 @@ pub(crate) fn run<R: GhRunner, P: Preflight>(
         println!("  test-ladder rung claimed: {rung}");
     }
     println!("  body fields supplied: {}", plan.supplied.join(", "));
+
+    let mut missing: Vec<String> = Vec::new();
+    // #7869: retry the create's own metadata step once, before the derived half.
+    if created_partially {
+        missing.extend(metadata_apply::retry_create_defaults(gh, args, number, &plan).missing());
+    }
     // #7274: the PR half of the labels/project/milestone standard, applied
     // after the PR exists because every step needs its number.
-    apply_metadata(gh, args, pre, number, &plan.body);
+    missing.extend(metadata_apply::apply(gh, args, pre, number, &plan.body).missing());
     // #7275: record the PR so the daemon can clean up after it merges.
     record_for_cleanup(pre, url, number);
-    Ok(EXIT_OK)
+
+    if missing.is_empty() {
+        return Ok(EXIT_OK);
+    }
+    // #7869: the PR exists, so the exit code says "partially applied", never
+    // "the check failed and gh was not called".
+    eprintln!(
+        "tm pr open: PR #{number} EXISTS ({url}) but this metadata could not be applied: {}",
+        missing.join("; ")
+    );
+    Ok(EXIT_PARTIAL)
 }
 
-/// Apply the PR's component labels, milestone and projects — best-effort.
+/// The PR URL `gh pr create` printed, when its stdout carries a parsable one.
 ///
-/// Why (#7274): the standard is now one rule over issues and PRs, and a PR's
-/// share of it is entirely derived — labels from its own diff, project and
-/// milestone from the issue its `Refs #N` names. None of it is worth failing
-/// an open over: the PR already exists by this point, and a `tm pr open` that
-/// reported failure after creating a PR would be worse than a warning. So each
-/// step prints a named warning on failure and the command still exits 0.
-/// What: reads the diff and the linked issue, calls [`metadata::plan`], and
-/// runs one `gh pr edit`. Prints what it applied, and one line per thing the
-/// standard wanted and this PR could not get.
-/// Test: `open_applies_pr_metadata`, `open_without_refs_says_so`,
-/// `open_survives_a_failed_metadata_edit`, `open_notes_an_unreadable_diff`,
-/// `open_notes_an_unreadable_refs_issue`.
-fn apply_metadata<R: GhRunner, P: Preflight>(
-    gh: &R,
-    args: &PrOpenArgs,
-    pre: &P,
-    pr: &str,
-    body: &str,
-) {
-    // #7274 round 2: a failed read reaches `plan` as its own state, so the note
-    // it prints names the failure rather than blaming an empty answer.
-    let read = pre.changed_paths(&args.base, diff_head(args));
-    let changed = match &read {
-        Ok(paths) => ChangedPaths::Read(&paths[..]),
-        Err(e) => {
-            eprintln!("  warning: the diff could not be read: {e:#}");
-            ChangedPaths::Unreadable
-        }
-    };
-    let number = metadata::first_refs_issue(body);
-    let issue = number.and_then(|n| match refs_issue(gh, args, n) {
-        Ok(issue) => Some(issue),
-        Err(e) => {
-            eprintln!("  warning: issue #{n} could not be read: {e:#}");
-            None
-        }
-    });
-    let refs = match (number, issue.as_ref()) {
-        (_, Some(issue)) => RefsLookup::Found(issue),
-        (Some(n), None) => RefsLookup::Unreadable(n),
-        (None, None) => RefsLookup::Absent,
-    };
-    let meta = metadata::plan(refs, changed, &pre.ownership());
-    if !meta.is_empty() {
-        let edit = metadata::edit_argv(pr, args.repo.as_deref(), &meta);
-        match gh.run(&edit) {
-            Ok(out) if out.success => report_applied(&meta),
-            Ok(out) => eprintln!("  warning: `gh pr edit` failed: {}", out.stderr.trim()),
-            Err(e) => eprintln!("  warning: `gh pr edit` could not run: {e:#}"),
-        }
-    }
-    for note in &meta.notes {
-        println!("  {note}");
-    }
-}
-
-/// Print what the edit actually applied.
-fn report_applied(meta: &PrMetadata) {
-    if !meta.labels.is_empty() {
-        println!("  component labels: {}", meta.labels.join(", "));
-    }
-    if let Some(milestone) = &meta.milestone {
-        println!("  milestone: {milestone}");
-    }
-    if !meta.projects.is_empty() {
-        println!("  projects: {}", meta.projects.join(", "));
-    }
-}
-
-/// Read the `Refs` issue's milestone and projects through `gh`.
-///
-/// Why: `view_argv` is the issue audit's own field list, so this reads the
-/// issue exactly the way `tm issue audit` does rather than inventing a second
-/// `--json` spelling that could drift from it.
-fn refs_issue<R: GhRunner>(gh: &R, args: &PrOpenArgs, number: u64) -> anyhow::Result<RefsIssue> {
-    let mut view = view_argv(number);
-    if let Some(repo) = args.repo.as_deref().filter(|r| !r.trim().is_empty()) {
-        view.push("--repo".to_string());
-        view.push(repo.to_string());
-    }
-    let json = gh.run(&view)?.stdout_ok(&view)?;
-    let facts: IssueFacts =
-        serde_json::from_str(&json).context("`gh issue view --json` returned unreadable JSON")?;
-    Ok(RefsIssue::from_facts(number, &facts))
+/// Why (#7869): this is the only evidence that a non-zero `gh pr create` still
+/// created the PR. It is deliberately stricter than the success path's read —
+/// concluding "the PR exists" off a line that merely contains `http` would turn
+/// a genuine create failure into a silent success.
+/// What: the last stdout line that starts with `http` and names a `/pull/` path.
+/// Test: `pr_7869_a_create_that_fails_after_creating_reports_the_pr_and_retries`,
+/// `pr_7869_a_create_that_fails_with_no_url_is_still_an_error`.
+fn created_pr_url(stdout: &str) -> Option<&str> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .rev()
+        .find(|l| l.starts_with("http") && l.contains("/pull/"))
 }
 
 /// Record the PR just opened, so the daemon can clean up after it merges

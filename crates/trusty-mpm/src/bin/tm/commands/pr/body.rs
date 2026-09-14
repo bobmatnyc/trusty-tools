@@ -129,7 +129,29 @@ pub(crate) struct BodyReport {
 
 impl BodyReport {
     /// The failed checks, one human line each. Empty means the body is good.
+    ///
+    /// This is the OPEN gate: the seven-field contract and the footer together.
+    /// Test: `body_reports_each_missing_field`, `body_reports_empty_section`.
     pub(crate) fn failures(&self) -> Vec<String> {
+        let mut out = self.contract_gaps();
+        out.extend(self.footer_failure());
+        out
+    }
+
+    /// The seven-field contract's gaps alone — no footer verdict.
+    ///
+    /// Why (#7868): the contract is a gate on a body the author can still
+    /// cheaply rewrite, which is true at open time and false at merge time.
+    /// `tm pr merge` re-ran the whole gate, so a body written to the sparse
+    /// prose rules could not be merged by the one command that passes the
+    /// validated body through `--body-file`; the operator fell back to raw
+    /// `gh pr merge`, losing that guarantee entirely. Separating the two halves
+    /// lets merge report the gaps and still merge.
+    /// What: one line per missing heading, then one per heading whose section
+    /// held no content, in contract order.
+    /// Test: `pr_7868_a_sparse_body_is_not_a_merge_refusal`,
+    /// `body_reports_each_missing_field`.
+    pub(crate) fn contract_gaps(&self) -> Vec<String> {
         let mut out = Vec::new();
         for f in &self.missing {
             out.push(format!(
@@ -145,13 +167,30 @@ impl BodyReport {
                 f.heading()
             ));
         }
-        if !self.footer_ok {
-            out.push(format!(
+        out
+    }
+
+    /// The checks that block a squash-MERGE: the footer, and nothing else.
+    ///
+    /// Why (#7868): the footer is part of the landing commit message this
+    /// command writes, so a body missing it would put an unattributed commit on
+    /// `main` — that is the merge's own contract, unlike the seven fields.
+    /// What: [`Self::footer_failure`] as a list, so the caller's shape is the
+    /// same as [`Self::failures`]'.
+    /// Test: `merge_refuses_missing_footer`,
+    /// `pr_7868_a_sparse_body_is_not_a_merge_refusal`.
+    pub(crate) fn merge_failures(&self) -> Vec<String> {
+        self.footer_failure().into_iter().collect()
+    }
+
+    /// The footer verdict as a failure line, when it failed.
+    fn footer_failure(&self) -> Option<String> {
+        (!self.footer_ok).then(|| {
+            format!(
                 "body does not end with the attribution footer `{ATTRIBUTION_FOOTER}` \
                  (a single trailing `{SESSION_LINK_PREFIX}…` line after it is allowed)"
-            ));
-        }
-        out
+            )
+        })
     }
 }
 
@@ -417,7 +456,14 @@ pub(crate) fn apply_issue_link(
 }
 
 /// GitHub's closing keywords, lowercased.
-const CLOSING_KEYWORDS: [&str; 9] = [
+///
+/// Shared with `metadata::first_linked_issue` (#7869): a body linking its issue
+/// with a closing keyword links it exactly as `Refs #N` does, so one list
+/// decides both "is this an unrequested auto-close?" and "which issue does this
+/// PR inherit from?".
+/// Test: `issue_link_rejects_every_closing_keyword`,
+/// `pr_7869_a_closes_link_inherits_the_issues_metadata`.
+pub(crate) const CLOSING_KEYWORDS: [&str; 9] = [
     "close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved",
 ];
 

@@ -22,11 +22,11 @@
 //!
 //! Exit codes are the verb surface:
 //!
-//! | verb | 0 | 1 | 2 |
-//! |---|---|---|---|
-//! | `open` | PR created (or `--dry-run` printed the argv) | — | a pre-flight check failed; `gh` was never called |
-//! | `merge` | squash-merged, or auto-merge armed | a hold signal or a failed body check refused it; `gh pr merge` was never called | usage or `gh` error |
-//! | `queue-check` | every listed PR is mergeable | at least one is blocked | usage or `gh` error |
+//! | verb | 0 | 1 | 2 | 3 |
+//! |---|---|---|---|---|
+//! | `open` | PR created (or `--dry-run` printed the argv) | — | a pre-flight check failed; `gh` was never called | the PR EXISTS; some metadata could not be applied (#7869) |
+//! | `merge` | squash-merged, or auto-merge armed | a hold signal or a missing attribution footer refused it; `gh pr merge` was never called | usage or `gh` error | — |
+//! | `queue-check` | every listed PR is mergeable | at least one is blocked | usage or `gh` error | — |
 //!
 //! Test: the sibling `tests.rs`; `cli_parses_pr_*` in `tests.rs`.
 
@@ -34,6 +34,7 @@ pub(crate) mod body;
 pub(crate) mod cleanup;
 pub(crate) mod merge;
 pub(crate) mod metadata;
+pub(crate) mod metadata_apply;
 pub(crate) mod open;
 pub(crate) mod queue_check;
 
@@ -51,6 +52,16 @@ pub(crate) const EXIT_OK: i32 = 0;
 pub(crate) const EXIT_BLOCKED: i32 = 1;
 /// Exit code: a pre-flight check failed, or the invocation was wrong.
 pub(crate) const EXIT_CHECK_FAILED: i32 = 2;
+/// Exit code: the PR EXISTS but some of its metadata could not be applied.
+///
+/// Why (#7869): 2 means "a check failed and `gh` was never called", which is
+/// the opposite of what a partial apply is — `tm pr open` reported exit 2 for
+/// PR #7918 after creating it, so the caller read it as "no PR" and went
+/// hunting with `gh pr list --head`. A code of its own keeps "nothing
+/// happened" and "the PR is open but incomplete" distinguishable.
+/// Test: `pr_7646_a_failed_edit_names_the_field_and_retries_per_field`,
+/// `pr_7869_a_create_retry_that_also_fails_exits_non_zero`.
+pub(crate) const EXIT_PARTIAL: i32 = 3;
 
 /// One completed `gh` invocation, as this module needs it.
 ///
