@@ -144,91 +144,44 @@ than one is listed, restore the todo state from it, and confirm with the user
 before continuing work. Cross-check `recent_commits` against your own
 knowledge of the repo state if anything looks stale.
 
-> **`session_refs` says whether the cache you just read was refreshed
-> (ADR-0062, #7830).** Before the digest is built, the local
-> `.trusty-mpm/sessions/` cache is rebuilt from THIS caller's own git ref
-> `refs/tm/sessions/<user-id>/<session-key>`, which is what lets a resume from
-> a fresh clone work at all. `refs_seen` counts every session ref on the remote,
-> yours or not; `own_ref_found` says whether YOURS was among them; `restored`
-> counts the snapshot files written back. It is a different field from the
-> per-session `sessions[].owned` and answers a different question.
-> **`refs_seen > 0` with `own_ref_found: false` is permanent, not transient** —
-> after a hostname change or a `gh` account switch you reach none of your old
-> refs and never will, so report it instead of reading five refs as five
-> recoverable sessions. A non-null `error` means the cache was NOT refreshed;
-> the catch-up still succeeds, so say so rather than treating an empty digest as
-> "nothing paused".
+> **Omit `session_id`; the tool resolves your own pause automatically** — it
+> derives the id your pause was filed under, tries that first, then
+> `tmux_window` only when it owns nothing (no "latest overall" fallback,
+> #5272). `resolved_via` names the match; a window match is a claim, not a
+> guarantee — window ids are reused after a kill/recreate. `null` means
+> neither matched; pick from `sessions[]` deliberately. Never invent a
+> `session_id`, or resumes report "no snapshot resolved" again (#6888).
+> Ownership also gates `sessions[].owned`: an unowned entry keeps only
+> `format`/`paused_at`/`summary` (#5272, #5386) — report it as "another
+> session paused here", or pass its id to read it on purpose.
 
-> **`sessions` is a page, and `truncated` says so.** The response is fitted to
-> a size you can read in one tool result, so on a project with a long pause
-> history `sessions` holds a page rather than all of them (#5557). When
-> `truncated` is `true`, `truncation_notice` names what was withheld and the
-> `sessions_offset` that retrieves it — re-call with that value to walk the
-> rest. This does not weaken `full: true`: full history is paged, never
-> dropped, and `sessions_next_offset` is `null` once you have all of it. Page 0
-> is ordered with the sessions you own first, so it carries your own entry;
-> that is why a resume normally needs only page 0.
->
-> Two things the page does NOT promise. `over_budget: true` means nothing was
-> withheld but one record is larger than a whole page — it ships intact, and
-> `page_bytes` says how big the response got; no offset can shrink it. And the
-> offset is positional into a list rebuilt from disk on each call, so if a
-> session pauses while you are walking pages, a later page can repeat a record
-> you already have — de-duplicate on `source_file` or `paused_at` if you are
-> collecting them. Neither is a dropped record.
+> **`sessions` and `resolved_snapshot` answer different questions, and can
+> disagree under a recent watermark:** `sessions` is what paused since your
+> last catch-up; `resolved_snapshot` is what to resume from. Resume from
+> `resolved_snapshot`; treat `sessions` as the digest.
 
-> **`sessions` and `resolved_snapshot` answer different questions** and
-> legitimately disagree under a recent watermark: `sessions` is "what paused
-> since your last catch-up", `resolved_snapshot` is "what should I resume
-> from". Resume from `resolved_snapshot`; treat `sessions` as the digest.
+> **`sessions` is a page, not the full history (#5557).** `truncated: true`
+> names what was withheld via `truncation_notice`/`sessions_offset`;
+> `full: true` pages instead of dropping it; `over_budget: true` means one
+> oversized record shipped intact. The offset is positional into a list
+> rebuilt from disk each call — a mid-walk pause can duplicate a record, so
+> de-duplicate on `source_file`/`paused_at`. Page 0 lists your own sessions
+> first, so a normal resume needs only it; `undatable_sessions_dropped`
+> non-zero means that many lacked a timestamp and were withheld — re-call
+> with `full: true`.
 
-> **You only see a session's detail if you own it.** Each `sessions[]` entry
-> carries `owned`. It is `true` when your `session_id` paused that snapshot, or
-> when you are sitting in the tmux window that did. For a session you do NOT
-> own, the entry keeps `format`, `paused_at` and `summary` and nothing else —
-> `source_file`, `tmux_window`, `in_progress`, `next_steps` and `git_context`
-> come back null. That is the correct response, not missing data: those fields
-> are what would let you load or restore another session's state, and handing
-> them to any caller reconstructed by hand the cross-session resume #5272
-> removed (#5386). Report an unowned session as "another session paused here"
-> and move on. To read one on purpose, pass ITS `session_id` — the explicit
-> opt-in — and it becomes owned for that call.
+> **`session_refs` says whether the cache was refreshed (ADR-0062, #7830)**
+> from your own git ref `refs/tm/sessions/<user-id>/<session-key>` —
+> `refs_seen`/`own_ref_found`/`restored` count remote refs, whether yours
+> matched, and snapshots restored. `refs_seen > 0` with `own_ref_found:
+> false` is permanent (a hostname or `gh` account change loses old refs for
+> good); a non-null `error` means the cache was not refreshed though the
+> catch-up still succeeded — report both rather than reading an empty
+> digest as "nothing paused".
 
-> **Never invent a `session_id` here either.** Omit it and the tool derives the
-> same id `session_context_pause` derived when it wrote the snapshot — your
-> managed session id, or your tmux window id — so the exact-id route finds your
-> own pause without you retyping a string (#6888). An id you make up matches
-> nothing and is the reason resumes used to report "no snapshot resolved".
-
-> **`resolved_snapshot` belongs to the `session_id` you passed or that was
-> derived for you, or to your tmux window — nothing else.** Several sessions
-> share one `.trusty-mpm/sessions/` store, so there is still no "latest overall"
-> fallback (#5272). The tool tries your `session_id` first; only when that
-> owns nothing does it try `tmux_window`, matching the `@id` component against
-> snapshots this project paused. Pass neither, or a `session_id` that never
-> paused from a window that never paused, and you get `null` — that is the
-> correct answer, not a failure; pick a snapshot out of `sessions[]` and
-> resume from it deliberately. To read another session's state on purpose,
-> pass that session's id.
-
-> **Check `resolved_via` before you call it yours.** `"session_id"` means the
-> id you passed owns that snapshot. `"tmux_window"` means it was paused from
-> the window you are sitting in — which is why a relaunch (new harness session
-> id, same window) still resolves — but the id differs, so say so when you
-> report what you resumed from. Window ids are reused after a window is killed
-> and recreated, so a `tmux_window` match is an ownership claim, not a
-> guarantee.
-
-> **Empty is not always empty.** An empty `sessions` array means "nothing
-> paused since last catch-up" only when `undatable_sessions_dropped` is `0`.
-> Non-zero means that many paused sessions exist but carried no derivable pause
-> timestamp and were withheld — re-call with `full: true` to see them.
-
-> **Watermark note:** a manual `/tm-session-resume` is a *read*, not a state
-> transition — `watermark_advanced` in the tool's response is always `false`.
-> It does **not** advance the internal watermark used by
-> auto-inject-on-session-start. Only the automatic injection path does. This is
-> intentional — calling the tool repeatedly is always safe.
+> **`watermark_advanced` is always `false` for a manual resume** — this is a
+> read, not a state transition, so calling the tool repeatedly is always
+> safe; only the automatic injection path advances the watermark.
 
 The CLI `tm session catchup` command still works unchanged for scripted /
 non-MCP callers — the tool is additive, not a replacement.
