@@ -47,6 +47,12 @@ corrupts the file outright (#7480).
   embeds the replacement as a raw or triple-quoted string, then run that
   script — one interpretation of the string, by the language runtime that
   owns it, never an intermediate shell.
+- **Numeric escapes in Edit/Write arguments are decoded to actual bytes, not
+  passed as literal text.** A `new_string` or `content` argument containing
+  `\x00`, `\uXXXX`, `\0`, or an octal `\NNN` sequence is written as the byte
+  it encodes (e.g., `\x00` → the actual NUL byte), not the literal text
+  `\x00`. Detect with `od -c <file>` over the modified region; NUL appears as
+  `\0` (<!-- #7480 -->).
 - **A substitution whose replacement contains its own pattern is not
   idempotent.** `s/super::settings::/super::super::settings::/g` matches what it
   just wrote, so every already-correct line is rewritten and a second run
