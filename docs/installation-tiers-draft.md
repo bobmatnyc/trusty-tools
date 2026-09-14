@@ -1,11 +1,5 @@
 # Trusty-Tools Installation Tiers — Draft Reference Material
 
-> **[ADR-0055](adr/0055-trusty-mpm-stops-creating-worktrees-the-sentinel-becomes-authoritative.md)
-> (#6000):** trusty-mpm no longer clones a remote `repo_url` or creates a worktree
-> on `tm sessions new`'s behalf. `tm sessions new` takes an ABSOLUTE path to an
-> EXISTING local git checkout with a GitHub remote instead of a URL. Clone the
-> repository yourself first (`git clone <url> <dir>`), then pass `<dir>`.
-
 **Status:** Draft input for Bob's live-environment walkthrough documentation.  
 **Date:** 2026-07-26  
 **Purpose:** Structured reference for two coherent installation tiers; Bob will synthesize the final walkthrough prose.

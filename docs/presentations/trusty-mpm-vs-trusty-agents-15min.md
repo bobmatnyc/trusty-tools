@@ -8,14 +8,6 @@ ds_source: "Foundry v2 (docs/design/UI/design-system/); tokens.css + foundry.css
 
 # trusty-mpm vs trusty-agents: One Platform, Two Products
 
-> **[ADR-0055](../adr/0055-trusty-mpm-stops-creating-worktrees-the-sentinel-becomes-authoritative.md)
-> (#6000):** trusty-mpm no longer clones a remote `repo_url` or creates a worktree
-> on `tm sessions new`'s behalf. `tm sessions new` takes an ABSOLUTE path to an
-> EXISTING local git checkout with a GitHub remote instead of a URL — Slide 4's
-> demo script already `cd`s into an existing local checkout, so it passes
-> `$(pwd)` rather than a URL; Slide 9's entry point and the closing call-to-action
-> below are updated the same way.
-
 ## Slide 1: Title Slide
 **Key Message:** One platform serving two distinct missions — learn which tool you need.
 
