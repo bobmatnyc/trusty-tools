@@ -73,7 +73,8 @@ pub fn tool_descriptors() -> Value {
                     "mode":             { "type": "string", "enum": ["code", "text", "data"], "default": "code" },
                     "exclude_archived": { "type": "boolean", "default": false },
                     "path_prefix":      { "type": "string", "description": "Restrict results to chunks whose file path starts with this prefix, applied before top_k truncation (issue #3401)." },
-                    "repos":            { "type": "array", "items": { "type": "string" }, "description": "Restrict results to chunks whose file path names one of these repos as a path segment (issue #3401)." }
+                    "repos":            { "type": "array", "items": { "type": "string" }, "description": "Restrict results to chunks whose file path names one of these repos as a path segment (issue #3401)." },
+                    "compact":          { "type": "boolean", "default": false, "description": "Return only `path`, `start_line`, `end_line`, `compact_snippet`, `score`, and `match_reason` per hit. Drops `content` and the KG/ranking metadata, halving the tokens a hit costs (issue #7676). Use it when you want to locate code and then read the file." }
                 },
                 "examples": [
                     { "index_id": "trusty-tools", "query": "code that handles JWT verification" },
@@ -94,7 +95,8 @@ pub fn tool_descriptors() -> Value {
                     "mode":          { "type": "string", "enum": ["code", "text", "data"], "default": "code" },
                     "refine_query":  { "type": "string", "description": "Optional: rerank and filter expanded KG neighbours by cosine similarity to this natural-language description. Neighbours below the 0.4 cosine threshold are dropped. Omit to use default KG expansion without filtering." },
                     "path_prefix":   { "type": "string", "description": "Restrict results to chunks whose file path starts with this prefix, applied before top_k truncation (issue #3401)." },
-                    "repos":         { "type": "array", "items": { "type": "string" }, "description": "Restrict results to chunks whose file path names one of these repos as a path segment (issue #3401)." }
+                    "repos":         { "type": "array", "items": { "type": "string" }, "description": "Restrict results to chunks whose file path names one of these repos as a path segment (issue #3401)." },
+                    "compact":       { "type": "boolean", "default": false, "description": "Return only `path`, `start_line`, `end_line`, `compact_snippet`, `score`, and `match_reason` per hit. Drops `content` and the KG/ranking metadata, halving the tokens a hit costs (issue #7676). Note it drops `calls` and `inherits_from`, so leave it off when the edges are what you came for." }
                 },
                 "examples": [
                     { "index_id": "trusty-tools", "query": "validate_token" },

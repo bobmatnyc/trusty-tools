@@ -161,6 +161,24 @@ async fn search_lexical_compact_hit_omits_the_dropped_keys() {
     assert_eq!(bodies[0]["stage"], "lexical", "the lane pin still holds");
 }
 
+/// The semantic and graph lanes route through the same `run_lane_search`, so
+/// they honour `compact` too — and their descriptors advertise it.
+#[tokio::test]
+async fn semantic_and_kg_lanes_honour_compact() {
+    for tool in ["search_semantic", "search_kg"] {
+        let (base, bodies, _paths) = spawn_mock_daemon(ready_status(), search_body(1)).await;
+        let server = McpServer::new(base);
+        let (payload, _) = call(
+            &server,
+            tool,
+            serde_json::json!({ "index_id": "demo", "query": "handler", "compact": true }),
+        )
+        .await;
+        assert_compact_shape(&payload, tool);
+        assert_eq!(bodies.lock().await[0]["compact"], true);
+    }
+}
+
 /// Same guarantee on the cross-project fan-out, where `compact` also has to
 /// win over `full_content` — the two ask for opposite things.
 #[tokio::test]
@@ -184,7 +202,7 @@ async fn search_all_fanout_compact_hit_omits_the_dropped_keys() {
     );
 }
 
-/// A call that omits `compact` keeps the pre-#7676 hit shape on all three
+/// A call that omits `compact` keeps the pre-#7676 hit shape on all five
 /// tools — every field still present, and no `compact` key injected into the
 /// daemon body.
 #[tokio::test]
@@ -203,6 +221,14 @@ async fn default_calls_keep_the_legacy_hit_shape() {
         ),
         (
             "search_lexical",
+            serde_json::json!({ "index_id": "demo", "query": "handler_0" }),
+        ),
+        (
+            "search_semantic",
+            serde_json::json!({ "index_id": "demo", "query": "handler" }),
+        ),
+        (
+            "search_kg",
             serde_json::json!({ "index_id": "demo", "query": "handler_0" }),
         ),
         ("search_all", serde_json::json!({ "query": "handler" })),

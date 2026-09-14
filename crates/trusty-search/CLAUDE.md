@@ -814,9 +814,9 @@ this table is generated from it, not maintained by hand.
 | `search` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `index_id?`, `mode?`, `path_prefix?`, `repos?`, `top_k?` | Unified hybrid search (BM25+vector+KG+RRF) with mode-aware ranking (issue #77). |
 | `search_all` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `full_content?`, `index_id?`, `max_fanout_concurrency?`, `mode?`, `path_prefix?`, `repos?`, `serial?`, `top_k?` | When in doubt, use this. |
 | `search_health` | `index_id?` | Diagnose this session's search back-end (issue #5264). |
-| `search_kg` | `query`, `index_id?`, `mode?`, `path_prefix?`, `refine_query?`, `repos?`, `top_k?` | Explore code structure from a known seed — either a chunk_id (from a previous search result) or a symbol name. |
+| `search_kg` | `query`, `compact?`, `index_id?`, `mode?`, `path_prefix?`, `refine_query?`, `repos?`, `top_k?` | Explore code structure from a known seed — either a chunk_id (from a previous search result) or a symbol name. |
 | `search_lexical` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `index_id?`, `mode?`, `path_prefix?`, `repos?`, `top_k?` | Find code by exact symbol name, regex, or literal string. |
-| `search_semantic` | `query`, `exclude_archived?`, `index_id?`, `mode?`, `path_prefix?`, `repos?`, `top_k?` | Find code by meaning, not by literal text. |
+| `search_semantic` | `query`, `compact?`, `exclude_archived?`, `index_id?`, `mode?`, `path_prefix?`, `repos?`, `top_k?` | Find code by meaning, not by literal text. |
 | `search_similar` | `file`, `function?`, `index?`, `top_k?` | Find chunks semantically similar to a given file/function via HNSW (issue #31) |
 | `typeahead` | `query`, `index_id?`, `limit?`, `mode?` | Fast per-keystroke autocomplete suggestions for an index. |
 | `upgrade` | `check?`, `confirm?` | Check for or install a new version of trusty-search (issue #537). |
