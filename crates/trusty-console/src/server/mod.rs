@@ -158,6 +158,17 @@ pub struct AppState {
     /// What: `None` in production, which resolves the real path.
     /// Test: `tests/analyze_uds_bridge.rs` sets it on every case.
     pub(crate) analyze_socket: Option<Arc<PathBuf>>,
+    /// The console-hosted event bus (#6848), when one was wired (#6850).
+    ///
+    /// Why an `Option` rather than a bus built in [`AppState::new`]: the real
+    /// bus is opened with its durable log in `run_serve` and shared with the
+    /// UDS ingest listener, so it cannot be constructed here; and building a
+    /// throwaway 8192-slot broadcast channel per `AppState` just to replace it
+    /// moments later would allocate for nothing. `None` is a wiring fault, not
+    /// an empty bus — `GET /api/console/events/stream` answers `503` for it
+    /// and `200` with an empty list for a bus that simply has no events.
+    /// Test: `crate::routes::events::tests::bus_absent_is_a_503`.
+    event_bus: Option<Arc<crate::event_bus::EventBus>>,
     /// When this server's state was built, which is when the console started
     /// serving (#6908).
     ///
@@ -272,8 +283,27 @@ impl AppState {
             search_socket: None,
             memory_socket: None,
             analyze_socket: None,
+            event_bus: None,
             started_at: Instant::now(),
         }
+    }
+
+    /// Attach the console event bus this state's routes read (#6850).
+    ///
+    /// Why a builder rather than a `new` parameter: every existing call site
+    /// and test constructs `AppState::new(connectors)`, and only `run_serve`
+    /// has a bus to give — it opens the durable log first and shares the same
+    /// `Arc` with the UDS ingest listener, so both the reader and the writer
+    /// see one ring.
+    /// Test: `crate::routes::events::tests::the_route_is_mounted`.
+    pub fn with_event_bus(mut self, bus: Arc<crate::event_bus::EventBus>) -> Self {
+        self.event_bus = Some(bus);
+        self
+    }
+
+    /// The console event bus, or `None` when this console wired none (#6850).
+    pub(crate) fn event_bus(&self) -> Option<&Arc<crate::event_bus::EventBus>> {
+        self.event_bus.as_ref()
     }
 
     /// Access the per-service MCP handle map.

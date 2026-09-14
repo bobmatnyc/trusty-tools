@@ -140,6 +140,31 @@ pub(crate) struct BusFrame {
     pub persisted: bool,
 }
 
+/// One read of the ring, as [`EventBus::events_since`] returns it (#6850).
+///
+/// Why three fields rather than just the events: a cursor-based reader cannot
+/// tell "you are up to date" from "everything you asked for was evicted"
+/// without knowing how far back retention reaches, and cannot advance its
+/// cursor past events that were examined and filtered out without knowing
+/// where the scan stopped. Both facts have to come from the same lock hold as
+/// the events themselves, or a concurrent ingest can make them describe
+/// different rings.
+/// What: `events` is the matching suffix, oldest first; `oldest_seq` is the
+/// lowest `seq` the ring still holds (`None` when empty); `last_examined_seq`
+/// is the `seq` of the last event the scan looked at, matching or not (`None`
+/// when nothing above the cursor was examined).
+/// Test: `crate::routes::events` derives `dropped` and `next_seq` from these
+/// three and asserts both in its own tests.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RingSlice {
+    /// Matching retained events with `seq > since_seq`, oldest first.
+    pub events: Vec<HarnessEvent>,
+    /// The oldest `seq` still retained; `None` when the ring is empty.
+    pub oldest_seq: Option<u64>,
+    /// The `seq` of the last event examined, whether or not it matched.
+    pub last_examined_seq: Option<u64>,
+}
+
 /// The ring plus its dedup set, always mutated together under one lock.
 struct Ring {
     capacity: usize,
@@ -290,6 +315,54 @@ impl EventBus {
     #[allow(dead_code)]
     pub(crate) fn subscribe(&self) -> broadcast::Receiver<BusFrame> {
         self.sender.subscribe()
+    }
+
+    /// Read the ring: every retained event with `seq > since_seq` that
+    /// `matches`, oldest first, at most `limit` of them.
+    ///
+    /// Why: #6850's `GET /api/console/events/stream` reads this ring directly
+    /// (DOC-73 §4.4; owner ruling 2026-09-05 retires the drained per-daemon
+    /// cursor). The route needs three facts that must be read under ONE lock
+    /// or they can disagree with each other — what is retained after the
+    /// caller's cursor, how far back retention still reaches, and how far the
+    /// scan got. Taking `matches` as a predicate rather than a filter type
+    /// keeps every filter and cursor policy in the route, where the query
+    /// contract lives, and keeps allocation proportional to what matched
+    /// instead of to the ring.
+    /// What: walks the ring in `seq` order, skipping everything at or below
+    /// `since_seq`, and stops as soon as `limit` events have matched. The ring
+    /// is contiguous in `seq` — every accepted event takes the next value and
+    /// a dedup hit consumes none — so the events above `since_seq` are exactly
+    /// the ones the caller has not seen, and [`RingSlice::oldest_seq`] is what
+    /// lets the route count what eviction removed. The predicate runs under
+    /// the ring lock; it is a pure test over one event and never calls back
+    /// into the bus.
+    /// Test: `super::tests::events_since_reads_the_suffix_above_the_cursor`,
+    /// `super::tests::events_since_reports_the_oldest_retained_seq_after_eviction`,
+    /// `super::tests::events_since_stops_at_the_limit`, and the route cases in
+    /// `crate::routes::events::tests`.
+    pub(crate) fn events_since(
+        &self,
+        since_seq: u64,
+        matches: &dyn Fn(&HarnessEvent) -> bool,
+        limit: usize,
+    ) -> RingSlice {
+        let ring = self.lock_ring();
+        let mut slice = RingSlice {
+            events: Vec::new(),
+            oldest_seq: ring.events.front().map(|e| e.seq),
+            last_examined_seq: None,
+        };
+        for event in ring.events.iter().filter(|e| e.seq > since_seq) {
+            slice.last_examined_seq = Some(event.seq);
+            if matches(event) {
+                slice.events.push(event.clone());
+                if slice.events.len() >= limit {
+                    break;
+                }
+            }
+        }
+        slice
     }
 
     /// Replay everything the durable log has persisted after `since_seq`, in

@@ -33,6 +33,7 @@ pub(crate) mod log;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use bus::{EventBus, EventBusConfig};
+// #6850: `RingSlice` is what `crate::routes::events` reads the ring through.
+pub(crate) use bus::{EventBus, EventBusConfig, RingSlice};
 pub(crate) use ingest::{bind_ingest, ingest_socket_path, serve_ingest};
 pub(crate) use log::{DurableLog, LogConfig};

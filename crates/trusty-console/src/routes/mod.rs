@@ -23,6 +23,9 @@ pub mod deletes;
 // #6929: the two READ-ONLY Disk-view routes (DOC-73 §16.5) — `disk/tree` and
 // `disk/worktrees/{id}`, both proxying trusty-mpm's `disk_survey` MCP tool.
 pub mod disk;
+// #6850: `GET /api/console/events/stream` — one cursor-based page of the
+// event-bus ring, filtered server-side (DOC-73 §4.4).
+pub mod events;
 // #6641: the bounded sample window + per-service transition log, as JSON and as
 // a live event stream.
 pub mod machine_history;

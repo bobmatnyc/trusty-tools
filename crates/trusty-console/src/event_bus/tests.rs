@@ -222,6 +222,83 @@ async fn concurrent_producers_write_the_durable_log_in_seq_order() {
     );
 }
 
+// ─── EventBus::events_since, the ring read #6850's route uses ──────────────
+
+/// Ingest `n` events and return the bus. Every event is `Ping` from `Mpm`, so
+/// only `seq` distinguishes them — which is all these cursor cases care about.
+fn bus_with(n: usize, capacity: usize) -> EventBus {
+    let bus = EventBus::new(EventBusConfig { capacity });
+    for _ in 0..n {
+        assert_eq!(bus.ingest(make_event(None)), IngestOutcome::Ingested);
+    }
+    bus
+}
+
+#[test]
+fn events_since_reads_the_suffix_above_the_cursor() {
+    let bus = bus_with(5, 16);
+    let slice = bus.events_since(2, &|_| true, usize::MAX);
+
+    let seqs: Vec<u64> = slice.events.iter().map(|e| e.seq).collect();
+    assert_eq!(seqs, vec![3, 4, 5], "`since_seq` is an exclusive lower bound");
+    assert_eq!(slice.oldest_seq, Some(1));
+    assert_eq!(slice.last_examined_seq, Some(5));
+}
+
+#[test]
+fn events_since_on_an_empty_ring_reports_nothing_retained() {
+    let bus = bus_with(0, 16);
+    let slice = bus.events_since(0, &|_| true, usize::MAX);
+
+    assert!(slice.events.is_empty());
+    assert_eq!(slice.oldest_seq, None);
+    assert_eq!(slice.last_examined_seq, None);
+}
+
+#[test]
+fn events_since_reports_the_oldest_retained_seq_after_eviction() {
+    // Capacity 3, six ingests: seqs 1-3 are evicted, 4-6 retained.
+    let bus = bus_with(6, 3);
+    let slice = bus.events_since(0, &|_| true, usize::MAX);
+
+    let seqs: Vec<u64> = slice.events.iter().map(|e| e.seq).collect();
+    assert_eq!(seqs, vec![4, 5, 6]);
+    assert_eq!(
+        slice.oldest_seq,
+        Some(4),
+        "the caller asked from 0 but retention now starts at 4"
+    );
+}
+
+#[test]
+fn events_since_stops_at_the_limit() {
+    let bus = bus_with(5, 16);
+    let slice = bus.events_since(0, &|_| true, 2);
+
+    let seqs: Vec<u64> = slice.events.iter().map(|e| e.seq).collect();
+    assert_eq!(seqs, vec![1, 2]);
+    assert_eq!(
+        slice.last_examined_seq,
+        Some(2),
+        "the scan stops on the limit-th match, so the cursor resumes there"
+    );
+}
+
+#[test]
+fn events_since_advances_the_cursor_past_filtered_out_events() {
+    let bus = bus_with(4, 16);
+    // Match only seq 2, so 3 and 4 are examined and discarded.
+    let slice = bus.events_since(0, &|e| e.seq == 2, usize::MAX);
+
+    let seqs: Vec<u64> = slice.events.iter().map(|e| e.seq).collect();
+    assert_eq!(seqs, vec![2]);
+    assert_eq!(
+        slice.last_examined_seq,
+        Some(4),
+        "a non-matching event is still examined; the cursor must not re-scan it"
+    );
+}
+
 // ─── the UDS ingest listener, over a real socket ───────────────────────────
 
 /// Bind a fresh ingest listener under `tmp` and start serving it in the
