@@ -40,15 +40,14 @@ its actual byte (#7480).
   shell one-liner (`perl -pi -e`, a shell-quoted `sed`) for a replacement
   containing `\d`, `\s`, `\w`, `\n` as a literal token, or `*/` — the shell's
   own quoting and escape processing each get a chance to mangle it. If a
-  shell route is unavoidable, write a small script to an absolute path (Node
-  `fs.writeFileSync`, Python `pathlib.Path.write_text`) embedding the
-  replacement as a raw/triple-quoted string instead.
+  shell route is unavoidable, write a small script (Node `fs.writeFileSync`,
+  Python `pathlib.Path.write_text`) with the replacement as a raw/triple-quoted
+  string.
 - **Numeric escapes in Edit/Write arguments are decoded to actual bytes, not
   passed as literal text.** A `new_string` or `content` argument containing
   `\x00`, `\uXXXX`, `\0`, or an octal `\NNN` sequence is written as the byte
   it encodes (e.g., `\x00` → the actual NUL byte), not the literal text
-  `\x00`. Detect with `od -c <file>` over the modified region; NUL appears as
-  `\0` (<!-- #7480 -->).
+  `\x00` (#7480) — caught by the same check below.
 - **A substitution whose replacement contains its own pattern is not
   idempotent.** `s/super::settings::/super::super::settings::/g` matches what it
   just wrote, so every already-correct line is rewritten and a second run
@@ -97,6 +96,14 @@ restore is where the work gets lost.
 8. **Net-new module, nothing on `origin/main` to revert to** (that checkout
    is a compile error there): revert the one decision the fix embodies inside
    the new code instead, confirm the test fails, then restore (#7552).
+
+## Squashing WIP Commits
+
+Same moving-ref hazard as item 2 above, different command: `git reset --soft
+origin/main` mid-squash staged a deletion of a file `origin/main` had gained,
+which would have reverted a merged PR (#7849). Reset to the merge-base or
+task-start SHA instead — `git reset --soft $(git merge-base origin/main
+HEAD)` — and check `git status --porcelain` before committing.
 
 ## Right-Level Engineering
 
@@ -153,8 +160,6 @@ When the tests pass, you are DONE restructuring — do not refactor working
 code into a "better" shape after. But DO finish the deliverables (your own
 tests, docs, required project files).
 
-- **One implementation per feature.** Never leave two versions of the same logic
-  (an inline version AND a module version).
 - **If you refactor, FINISH it.** Update all call sites, delete the old code,
   verify tests still pass. If tests break, revert to the working version.
 - **No dead code in deliverables.** If nothing references a file and it is not a
@@ -197,9 +202,8 @@ Search before creating. Consolidate before shipping.
 - Different domains + <50% similarity → leave separate, document why.
 
 Do NOT merge cross-domain logic, differently-optimised hotspots, or test with
-production code. When consolidating: preserve the best of each version,
-update references, delete (don't comment out) the old code, verify tests
-pass.
+production code. When consolidating, preserve the best of each version and
+finish the same way as any refactor (Ship Working Code, above).
 
 ## Debugging Protocol
 
@@ -263,9 +267,8 @@ Before returning, re-read the prompt for "Deliverables" / "Requirements" /
       (file/class/method/block) and, where the project defines specs, its own
       spec-link-back convention.
 - [ ] Project config present if standalone.
-- [ ] Build passes — run the project's own verify command before returning, the
-      one its CLAUDE.md or build config names (in a Cargo project, typically
-      `cargo check --all-targets && cargo test && cargo clippy -- -D warnings`).
+- [ ] Build passes — run the project's own verify command before returning,
+      the one its CLAUDE.md or build config names.
 - [ ] Branch adds/edits a CI job → run that job's own steps locally first (#7385).
 - [ ] A ruling names candidate readers → enumerate the actual readers
       (file:symbol) in the report; empty set → build the reader or say it's

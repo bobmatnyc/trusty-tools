@@ -170,6 +170,22 @@ pattern match, so exit 1 there answers "is this path tracked", not "does a
 rule match it". Before untracking a matched path from the index, ask the
 pattern-only question instead: `git check-ignore -v --no-index <path>`.
 
+## Squashing WIP Commits
+
+Squashing multiple WIP commits into one before push, `git reset --soft`
+reuses the branch tip's history — but the reset target matters. `git reset
+--soft origin/main` mid-task, after `origin/main` had advanced, staged a
+deletion of a file `origin/main` had gained; committing it blind would have
+reverted an already-merged PR (#7849). Same hazard class BASE-ENGINEER
+documents for regression-test reverts (#7271).
+
+- **Reset to the merge-base or a SHA captured at task start, never to
+  `origin/main` directly:** `git reset --soft $(git merge-base origin/main
+  HEAD)`, or the SHA your brief names. `origin/main` is a moving ref — it
+  advances while you work.
+- **Inspect `git status --porcelain` before committing** and confirm every
+  staged path is one you actually touched.
+
 ## Reading Another Worktree's State
 
 `git -C <other worktree path>` is refused from inside an isolation worktree
