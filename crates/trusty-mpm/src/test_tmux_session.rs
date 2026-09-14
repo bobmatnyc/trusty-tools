@@ -99,6 +99,24 @@ fn tmux_output_owned(tmux_bin: &str, args: &[String]) -> std::io::Result<std::pr
     super::tmux_spawn(tmux_bin, args)
 }
 
+/// The global `-L <socket>` args a tmux invocation needs to reach a private
+/// server instead of the machine-shared default one, or none at all.
+///
+/// See #7848: `a_session_outside_the_root_is_left_alone` and its siblings
+/// spawn a real session on the shared default server to prove a guard leaves
+/// it alone; a concurrent `tm` process sweeping or killing sessions on that
+/// same server can remove it between the guard's drop and the assertion,
+/// failing the test for a reason unrelated to the property it checks. Every
+/// `*_on_socket` entry point below threads `socket` through to this helper so
+/// a caller that supplies one gets a server nothing else on the host can
+/// reach.
+fn socket_prefix(socket: Option<&str>) -> Vec<String> {
+    match socket {
+        Some(name) => vec!["-L".to_string(), name.to_string()],
+        None => Vec::new(),
+    }
+}
+
 /// Age past which a reserved-namespace session is certainly leaked (#6116).
 ///
 /// Why: no test in this suite holds a tmux session for anything close to half
@@ -220,6 +238,9 @@ fn sweep_stale_reserved_sessions(tmux_bin: &str) {
 /// [`tests::drop_kills_only_the_exact_name_it_created`].
 pub(crate) struct ScratchTmuxSession {
     tmux_bin: String,
+    /// `-L` target this guard's own tmux calls address, or `None` for the
+    /// machine-shared default server. See #7848.
+    socket: Option<String>,
     name: String,
 }
 
@@ -256,14 +277,49 @@ impl ScratchTmuxSession {
         cwd: Option<&std::path::Path>,
         pane_command: &str,
     ) -> Self {
+        Self::spawn_in_on_socket(tmux_bin, None, name, cwd, pane_command)
+    }
+
+    /// [`ScratchTmuxSession::spawn`] against a private tmux server rather than
+    /// the shared default one.
+    ///
+    /// See #7848: threads `socket` into the same `-L` position every other
+    /// call in this fixture uses, so a caller that scopes its own tests to a
+    /// private server (e.g. `PrivateTmuxServer` in [`tests`]) never touches
+    /// the machine-shared one.
+    pub(crate) fn spawn_on_socket(
+        tmux_bin: &str,
+        socket: Option<&str>,
+        name: &str,
+        pane_command: &str,
+    ) -> Self {
+        Self::spawn_in_on_socket(tmux_bin, socket, name, None, pane_command)
+    }
+
+    /// [`ScratchTmuxSession::spawn_in`] against `socket`, or the shared default
+    /// server when `socket` is `None`. The core implementation every other
+    /// `spawn*` entry point on this type delegates to.
+    pub(crate) fn spawn_in_on_socket(
+        tmux_bin: &str,
+        socket: Option<&str>,
+        name: &str,
+        cwd: Option<&std::path::Path>,
+        pane_command: &str,
+    ) -> Self {
         // #6116: reap what an earlier hard-killed run leaked, before adding to
         // the namespace. Once per process, mirroring `test_support`'s
-        // `sweep_stale_test_dirs`.
-        SWEEP_ONCE.call_once(|| sweep_stale_reserved_sessions(tmux_bin));
-        let mut args: Vec<String> = ["new-session", "-d", "-s", name]
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect();
+        // `sweep_stale_test_dirs`. The sweep targets the shared default
+        // server, so it is skipped entirely for a private-socket spawn — see
+        // #7848.
+        if socket.is_none() {
+            SWEEP_ONCE.call_once(|| sweep_stale_reserved_sessions(tmux_bin));
+        }
+        let mut args: Vec<String> = socket_prefix(socket);
+        args.extend(
+            ["new-session", "-d", "-s", name]
+                .iter()
+                .map(|s| (*s).to_string()),
+        );
         if let Some(dir) = cwd {
             args.push("-c".to_string());
             args.push(dir.to_string_lossy().into_owned());
@@ -286,6 +342,7 @@ impl ScratchTmuxSession {
         );
         Self {
             tmux_bin: tmux_bin.to_string(),
+            socket: socket.map(str::to_string),
             name: name.to_string(),
         }
     }
@@ -299,9 +356,25 @@ impl ScratchTmuxSession {
     ///
     /// `=` pins tmux to an exact match; see the module docs for why the bare
     /// form is unsafe here.
+    ///
+    /// #7848: only the `tm` binary's own tests call this form now — the
+    /// lib's tests in this file moved to [`Self::exists_on_socket`] — so the
+    /// lib-crate compilation of this shared file sees it as unused. See the
+    /// module docs on the two-target `#[path]` split this file already lives
+    /// with.
+    #[allow(dead_code)]
     pub(crate) fn exists(tmux_bin: &str, name: &str) -> bool {
-        tmux_output(tmux_bin, &["has-session", "-t", &format!("={name}")])
-            .is_ok_and(|out| out.status.success())
+        Self::exists_on_socket(tmux_bin, None, name)
+    }
+
+    /// [`ScratchTmuxSession::exists`] against `socket` rather than the shared
+    /// default server (#7848).
+    pub(crate) fn exists_on_socket(tmux_bin: &str, socket: Option<&str>, name: &str) -> bool {
+        let mut args = socket_prefix(socket);
+        args.push("has-session".to_string());
+        args.push("-t".to_string());
+        args.push(format!("={name}"));
+        tmux_output_owned(tmux_bin, &args).is_ok_and(|out| out.status.success())
     }
 
     /// Whether `tmux_bin` runs at all, for fixtures that skip rather than fail
@@ -316,16 +389,24 @@ impl Drop for ScratchTmuxSession {
     fn drop(&mut self) {
         // Best-effort by construction: `Drop` runs during unwinding, where a
         // panic would abort the process and bury the original failure.
-        let _ = tmux_output(
-            &self.tmux_bin,
-            &["kill-session", "-t", &format!("={}", self.name)],
-        );
+        let mut args = socket_prefix(self.socket.as_deref());
+        args.push("kill-session".to_string());
+        args.push("-t".to_string());
+        args.push(format!("={}", self.name));
+        let _ = tmux_output_owned(&self.tmux_bin, &args);
     }
 }
 
 /// Live session names, or an empty set when tmux will not answer.
-fn live_session_names(tmux_bin: &str) -> std::collections::BTreeSet<String> {
-    let Ok(out) = tmux_output(tmux_bin, &["list-sessions", "-F", "#{session_name}"]) else {
+///
+/// `socket` addresses a private server via `-L` (#7848); `None` reaches the
+/// shared default one.
+fn live_session_names(tmux_bin: &str, socket: Option<&str>) -> std::collections::BTreeSet<String> {
+    let mut args = socket_prefix(socket);
+    args.push("list-sessions".to_string());
+    args.push("-F".to_string());
+    args.push("#{session_name}".to_string());
+    let Ok(out) = tmux_output_owned(tmux_bin, &args) else {
         return std::collections::BTreeSet::new();
     };
     if !out.status.success() {
@@ -349,17 +430,15 @@ fn live_session_names(tmux_bin: &str) -> std::collections::BTreeSet<String> {
 /// Test: [`tests::a_session_outside_the_root_is_left_alone`].
 fn sessions_with_pane_under(
     tmux_bin: &str,
+    socket: Option<&str>,
     root: &std::path::Path,
 ) -> std::collections::BTreeSet<String> {
-    let Ok(out) = tmux_output(
-        tmux_bin,
-        &[
-            "list-panes",
-            "-a",
-            "-F",
-            "#{session_name}\t#{pane_current_path}",
-        ],
-    ) else {
+    let mut args = socket_prefix(socket);
+    args.push("list-panes".to_string());
+    args.push("-a".to_string());
+    args.push("-F".to_string());
+    args.push("#{session_name}\t#{pane_current_path}".to_string());
+    let Ok(out) = tmux_output_owned(tmux_bin, &args) else {
         return std::collections::BTreeSet::new();
     };
     if !out.status.success() {
@@ -403,24 +482,45 @@ fn sessions_with_pane_under(
 /// [`tests::a_session_predating_the_guard_is_left_alone`].
 pub(crate) struct FixtureTmuxSessions {
     tmux_bin: String,
+    /// `-L` target this guard's own tmux calls address, or `None` for the
+    /// machine-shared default server. See #7848.
+    socket: Option<String>,
     root: std::path::PathBuf,
     preexisting: std::collections::BTreeSet<String>,
 }
 
 impl FixtureTmuxSessions {
     /// Start owning any session that appears under `root` from now on.
+    ///
+    /// #7848: only the `tm` binary's own tests call this form now — the
+    /// lib's tests in this file moved to [`Self::watch_on_socket`] — so the
+    /// lib-crate compilation of this shared file sees it as unused. See the
+    /// module docs on the two-target `#[path]` split this file already lives
+    /// with.
+    #[allow(dead_code)]
     pub(crate) fn watch(tmux_bin: &str, root: &std::path::Path) -> Self {
+        Self::watch_on_socket(tmux_bin, None, root)
+    }
+
+    /// [`Self::watch`] against a private tmux server rather than the shared
+    /// default one (#7848).
+    pub(crate) fn watch_on_socket(
+        tmux_bin: &str,
+        socket: Option<&str>,
+        root: &std::path::Path,
+    ) -> Self {
         Self {
             tmux_bin: tmux_bin.to_string(),
+            socket: socket.map(str::to_string),
             root: root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
-            preexisting: live_session_names(tmux_bin),
+            preexisting: live_session_names(tmux_bin, socket),
         }
     }
 
     /// The sessions this guard currently owns — new since [`Self::watch`] and
     /// rooted under the fixture directory.
     pub(crate) fn spawned(&self) -> Vec<String> {
-        sessions_with_pane_under(&self.tmux_bin, &self.root)
+        sessions_with_pane_under(&self.tmux_bin, self.socket.as_deref(), &self.root)
             .into_iter()
             .filter(|name| !self.preexisting.contains(name))
             .collect()
@@ -433,7 +533,11 @@ impl Drop for FixtureTmuxSessions {
             eprintln!("test-support: killing fixture tmux session '{name}' (#6542)");
             // Best-effort: `Drop` runs during unwinding, where a panic would
             // abort the process and bury the original failure.
-            let _ = tmux_output(&self.tmux_bin, &["kill-session", "-t", &format!("={name}")]);
+            let mut args = socket_prefix(self.socket.as_deref());
+            args.push("kill-session".to_string());
+            args.push("-t".to_string());
+            args.push(format!("={name}"));
+            let _ = tmux_output_owned(&self.tmux_bin, &args);
         }
     }
 }
@@ -459,6 +563,60 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.subsec_nanos());
         reserved_session_name(&format!("guard-{tag}-{nanos}"))
+    }
+
+    /// A private tmux server for exactly one test, addressed by `-L <name>`
+    /// so no other process on the host — a concurrent `tm` daemon, a sibling
+    /// test binary, another engineer's `cargo test` run — can see, adopt, or
+    /// kill what this test spawns.
+    ///
+    /// Why: `a_session_outside_the_root_is_left_alone` and its siblings spawn
+    /// a REAL session on the shared default tmux server to prove a guard
+    /// leaves it alone. Observed 2026-09-14: a concurrent `tm` process swept
+    /// or killed that session between the guard's drop and the assertion,
+    /// failing the test for a reason unrelated to the property it checks. A
+    /// private-per-test socket removes the shared surface entirely (#7848).
+    /// What: mints a socket name from the same reserved-test constant
+    /// [`reserved_session_name`] uses, unique per test and process so
+    /// concurrent test binaries never collide, and tears down the WHOLE
+    /// server — not just the sessions inside it — with `-L <name>
+    /// kill-server` on drop. Best-effort: a server that never started (no
+    /// session spawned before an early panic) yields a harmless failing
+    /// `kill-server`.
+    /// Test: every test below that spawns a real tmux session passes this
+    /// fixture's `name()` as `-L` to every tmux call it makes.
+    struct PrivateTmuxServer {
+        tmux_bin: String,
+        socket: String,
+    }
+
+    impl PrivateTmuxServer {
+        fn new(tmux_bin: &str, tag: &str) -> Self {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.subsec_nanos());
+            Self {
+                tmux_bin: tmux_bin.to_string(),
+                socket: format!(
+                    "{}sock-{tag}-{}-{nanos}",
+                    trusty_common::session_naming::RESERVED_TEST_PREFIX,
+                    std::process::id()
+                ),
+            }
+        }
+
+        /// The `-L` target every tmux call in this test must pass.
+        fn name(&self) -> &str {
+            &self.socket
+        }
+    }
+
+    impl Drop for PrivateTmuxServer {
+        fn drop(&mut self) {
+            // See #7848: best-effort — `kill-server` fails harmlessly when no
+            // session was ever spawned on this socket.
+            let _ = tmux_output(&self.tmux_bin, &["-L", &self.socket, "kill-server"]);
+        }
     }
 
     /// The spawn seam this file routes every tmux invocation through is a
@@ -569,10 +727,14 @@ not-an-epoch tm-xtest-garbage-01
             eprintln!("tmux not available; skipping");
             return;
         }
+        // See #7848: a private server so a concurrent process on the host
+        // cannot touch the session this test spawns. Declared first so it
+        // drops LAST, after every guard that addresses it.
+        let server = PrivateTmuxServer::new(TMUX, "panic");
         let name = scratch_name("panic");
-        let session = ScratchTmuxSession::spawn(TMUX, &name, "sh");
+        let session = ScratchTmuxSession::spawn_on_socket(TMUX, Some(server.name()), &name, "sh");
         assert!(
-            ScratchTmuxSession::exists(TMUX, session.name()),
+            ScratchTmuxSession::exists_on_socket(TMUX, Some(server.name()), session.name()),
             "fixture precondition: the session must be live before the panic"
         );
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
@@ -586,7 +748,7 @@ not-an-epoch tm-xtest-garbage-01
             "the closure must actually have panicked, or this proves nothing"
         );
         assert!(
-            !ScratchTmuxSession::exists(TMUX, &name),
+            !ScratchTmuxSession::exists_on_socket(TMUX, Some(server.name()), &name),
             "session '{name}' survived a panicking test — this is #6116, where a \
              post-hoc kill-session placed after the code under test never ran"
         );
@@ -601,18 +763,21 @@ not-an-epoch tm-xtest-garbage-01
             eprintln!("tmux not available; skipping");
             return;
         }
+        let server = PrivateTmuxServer::new(TMUX, "exact"); // See #7848
         let owned_name = scratch_name("exact");
         let sibling_name = format!("{owned_name}-sibling");
-        let sibling = ScratchTmuxSession::spawn(TMUX, &sibling_name, "sh");
+        let sibling =
+            ScratchTmuxSession::spawn_on_socket(TMUX, Some(server.name()), &sibling_name, "sh");
         {
-            let _owned = ScratchTmuxSession::spawn(TMUX, &owned_name, "sh");
+            let _owned =
+                ScratchTmuxSession::spawn_on_socket(TMUX, Some(server.name()), &owned_name, "sh");
         }
         assert!(
-            !ScratchTmuxSession::exists(TMUX, &owned_name),
+            !ScratchTmuxSession::exists_on_socket(TMUX, Some(server.name()), &owned_name),
             "the guard must kill its own session on drop"
         );
         assert!(
-            ScratchTmuxSession::exists(TMUX, &sibling_name),
+            ScratchTmuxSession::exists_on_socket(TMUX, Some(server.name()), &sibling_name),
             "'{sibling_name}' shares a prefix with the dropped guard's name but was created \
              by someone else; a bare `-t` target would have killed it"
         );
@@ -630,10 +795,17 @@ not-an-epoch tm-xtest-garbage-01
             eprintln!("tmux not available; skipping");
             return;
         }
+        let server = PrivateTmuxServer::new(TMUX, "under"); // See #7848
         let root = tempfile::tempdir().expect("fixture root");
         let name = scratch_name("under");
-        let guard = FixtureTmuxSessions::watch(TMUX, root.path());
-        let owner = ScratchTmuxSession::spawn_in(TMUX, &name, Some(root.path()), "sh");
+        let guard = FixtureTmuxSessions::watch_on_socket(TMUX, Some(server.name()), root.path());
+        let owner = ScratchTmuxSession::spawn_in_on_socket(
+            TMUX,
+            Some(server.name()),
+            &name,
+            Some(root.path()),
+            "sh",
+        );
         assert_eq!(
             guard.spawned(),
             vec![name.clone()],
@@ -641,7 +813,7 @@ not-an-epoch tm-xtest-garbage-01
         );
         drop(guard);
         assert!(
-            !ScratchTmuxSession::exists(TMUX, &name),
+            !ScratchTmuxSession::exists_on_socket(TMUX, Some(server.name()), &name),
             "session '{name}' survived the guard — this is #6542, where the \
              guided-fallback tests left one tm-<uuid> session behind per run"
         );
@@ -656,18 +828,29 @@ not-an-epoch tm-xtest-garbage-01
             eprintln!("tmux not available; skipping");
             return;
         }
+        // See #7848: scoped to a private server, declared first so it drops
+        // LAST — no other process on the host can sweep or kill the session
+        // this test leaves alive between the guard's drop and the assertion
+        // below.
+        let server = PrivateTmuxServer::new(TMUX, "outside");
         let root = tempfile::tempdir().expect("fixture root");
         let elsewhere = tempfile::tempdir().expect("unrelated dir");
         let name = scratch_name("outside");
-        let guard = FixtureTmuxSessions::watch(TMUX, root.path());
-        let sibling = ScratchTmuxSession::spawn_in(TMUX, &name, Some(elsewhere.path()), "sh");
+        let guard = FixtureTmuxSessions::watch_on_socket(TMUX, Some(server.name()), root.path());
+        let sibling = ScratchTmuxSession::spawn_in_on_socket(
+            TMUX,
+            Some(server.name()),
+            &name,
+            Some(elsewhere.path()),
+            "sh",
+        );
         assert!(
             guard.spawned().is_empty(),
             "a session outside the fixture root is not this guard's to claim"
         );
         drop(guard);
         assert!(
-            ScratchTmuxSession::exists(TMUX, &name),
+            ScratchTmuxSession::exists_on_socket(TMUX, Some(server.name()), &name),
             "'{name}' sits outside the fixture root and belongs to someone else"
         );
         drop(sibling);
@@ -682,17 +865,24 @@ not-an-epoch tm-xtest-garbage-01
             eprintln!("tmux not available; skipping");
             return;
         }
+        let server = PrivateTmuxServer::new(TMUX, "predates"); // See #7848
         let root = tempfile::tempdir().expect("fixture root");
         let name = scratch_name("predates");
-        let earlier = ScratchTmuxSession::spawn_in(TMUX, &name, Some(root.path()), "sh");
-        let guard = FixtureTmuxSessions::watch(TMUX, root.path());
+        let earlier = ScratchTmuxSession::spawn_in_on_socket(
+            TMUX,
+            Some(server.name()),
+            &name,
+            Some(root.path()),
+            "sh",
+        );
+        let guard = FixtureTmuxSessions::watch_on_socket(TMUX, Some(server.name()), root.path());
         assert!(
             guard.spawned().is_empty(),
             "a session that predates the guard is not new, so not the guard's"
         );
         drop(guard);
         assert!(
-            ScratchTmuxSession::exists(TMUX, &name),
+            ScratchTmuxSession::exists_on_socket(TMUX, Some(server.name()), &name),
             "'{name}' predates the guard and must survive it"
         );
         drop(earlier);
@@ -707,20 +897,25 @@ not-an-epoch tm-xtest-garbage-01
             eprintln!("tmux not available; skipping");
             return;
         }
+        let server = PrivateTmuxServer::new(TMUX, "dup"); // See #7848
         let name = scratch_name("dup");
-        let owner = ScratchTmuxSession::spawn(TMUX, &name, "sh");
+        let owner = ScratchTmuxSession::spawn_on_socket(TMUX, Some(server.name()), &name, "sh");
         let second = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            ScratchTmuxSession::spawn(TMUX, &name, "sh")
+            ScratchTmuxSession::spawn_on_socket(TMUX, Some(server.name()), &name, "sh")
         }));
         assert!(
             second.is_err(),
             "a duplicate `new-session` must panic, not hand out a second owner"
         );
         assert!(
-            ScratchTmuxSession::exists(TMUX, &name),
+            ScratchTmuxSession::exists_on_socket(TMUX, Some(server.name()), &name),
             "the failed spawn must leave the original owner's session untouched"
         );
         drop(owner);
-        assert!(!ScratchTmuxSession::exists(TMUX, &name));
+        assert!(!ScratchTmuxSession::exists_on_socket(
+            TMUX,
+            Some(server.name()),
+            &name
+        ));
     }
 }
