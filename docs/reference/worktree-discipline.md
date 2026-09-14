@@ -311,3 +311,14 @@ Every refusal costs the agent a full turn of its resident prompt, so reach for t
 | a filename or script body containing ANY known command word as a substring — not only `diff`/`token`/`git` above (e.g. `fix_tac_tests.py`, matched on `tac`) | rename the file to avoid the substring; the guard matches command words anywhere in the argument text, never only in command position |
 | `cat -n <abs>/.gitignore` | the Read tool — `.gitignore` is an ordinary file here |
 | `git push origin HEAD:<pr-branch>` after creating a local branch from that PR branch (cross-branch push) | until the fast-forward exemption lands, set `TM_ALLOW_CROSS_BRANCH_PUSH=1` in the environment, and use `--force-with-lease` only after a rebase (#2867) |
+
+### Own-worktree cwd, `stdout`-bearing patterns, and scratchpad reads — 2026-09-14
+
+Surfaced on [#7749](https://github.com/bobmatnyc/trusty-tools/issues/7749) and
+[#7762](https://github.com/bobmatnyc/trusty-tools/issues/7762).
+
+| Refused | Works instead |
+|---|---|
+| a `grep` whose pattern contains the literal token `stdout` (e.g. searching a test log for `---- <test> stdout ----`) — refused as "too complex to verify that it stays inside the worktree" | `sed -n '/^failures:/,/^test result/p' <file>` |
+| `cd <own-worktree-root> && <cmd>` — refused even when the target is the agent's own worktree | run the bare command; cwd is already the worktree, `cd` is unnecessary |
+| read-only `grep`/`find` against the scratchpad path, run from inside a worktree | `cd` into the scratchpad first, then run the bare command |
