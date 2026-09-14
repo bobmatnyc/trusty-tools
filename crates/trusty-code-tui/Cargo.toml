@@ -4,13 +4,20 @@ description = "Engine-agnostic terminal-UI seam (TuiEngine trait + ReplEvent) sh
 homepage = "https://github.com/bobmatnyc/trusty-tools"
 keywords = ["tui", "repl", "terminal", "ratatui", "engine-adapter"]
 categories = ["command-line-interface", "asynchronous"]
-version = "0.1.1"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
 readme = "README.md"
+# 0.2.0 (#7940): MINOR bump — pre-1.0, so a breaking change is a minor. The
+# breaking part is `ReplEvent::ToolInvocation`'s new required `agent_id`
+# field, which any out-of-tree constructor must now supply; the rest is
+# additive (`ReplEvent::AgentOutput`/`DelegationStarted`/`DelegationFinished`,
+# `DelegationOutcome`, `ChatRole::Delegation`/`Delegated`, `Delegation`,
+# `ReplApp::delegations`/`agent_streams`/`active_agent`).
+#
 # 0.1.1 (#6605/#6577): PATCH bump — 0.1.0 is already published and this PR
 # edits several doc comments' `# Spec References` link paths to be
 # repo-root-relative. No public item changes shape; the `PR version bump vs
