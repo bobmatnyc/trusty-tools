@@ -37,7 +37,7 @@ name = "trusty-agents-common"
 # the 0.7.0 baseline (alongside `provenance` and an added enum variant, both
 # already accumulated at 0.7.2 and unpublished). The gate is never advisory
 # (#5050), so this lands where the gate names.
-version = "0.8.0"
+version = "0.8.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

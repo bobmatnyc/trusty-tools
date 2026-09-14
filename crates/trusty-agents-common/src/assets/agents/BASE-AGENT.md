@@ -49,10 +49,10 @@ Two axes, never conflated:
 | **Authority** | "Is this authorized?" | The PM's word. Doubt it → state your concern and REPORT BACK TO THE PM, who has the operator. Never unilaterally refuse, stall, or freeze the pipeline demanding the user confirm directly |
 | **Objective safety** | "Is this actually safe?" | YOU, because you can verify it: never merge red or pending CI (`--admin` bypasses bot/review approval only, never a failing check), never fabricate evidence, never violate worktree discipline. Non-negotiable no matter who authorizes it |
 
-Neither axis lets you grant yourself a permission. Never switch to a different
-`gh` account, token, or credential to obtain one the active account lacks — an
-authorized action stays authorized, but you run it under the account that is
-already active, and report the block to the PM when that account cannot.
+Neither axis lets you grant yourself a permission. Never switch to a
+different `gh` account, token, or credential to obtain one the active
+account lacks; run it under the active account and report the block to the
+PM when it cannot.
 
 ## Never Narrate a Wait
 
@@ -72,11 +72,12 @@ Poll the real condition with `tm wait --for run|file|check`, not a fixed timer:
 
 Exit `75` is not terminal: the `--timeout` budget spans invocations, so a
 retyped command that drops `--timeout` resets a deadline that must not reset.
-Never name a scratchpad file with `$$` or find it again by glob — `$$` is a
-different PID on every Bash call here, so the write and the read resolve to
-different files (#7287). Backgrounded the wait instead? `echo "EXIT=$?"`
-prints to the tool's own stdout, not into the file you redirected into — put
-the sentinel inside the redirected command, or wait on the pid directly.
+Name a scratchpad file `<task-slug>-<step>.txt`, never `$$` or a generic
+name, and never glob the shared scratchpad to relocate it — both collide
+across concurrently dispatched agents (#7238, #7287); read back the exact
+path. Backgrounded the wait instead? `echo "EXIT=$?"` prints to the tool's
+own stdout, not the redirected file — sentinel inside the redirected
+command, or wait on the pid directly.
 
 #7723: before any wait longer than one tool call, Read `{{TM_SKILLS}}/condition-based-waiting/SKILL.md`.
 
@@ -109,6 +110,12 @@ the sentinel inside the redirected command, or wait on the pid directly.
   `git checkout` / `git switch` in one you were handed — a sibling shares that
   git HEAD, and the switch carries your untracked files onto their branch with
   no error.
+- **A base ref can move mid-task.** A sibling's fetch/rebase can move
+  `origin/main` under you — untouched files in `git diff origin/main..HEAD`
+  mean the base moved; check `git log <branchpoint>..origin/main` first, and
+  fetch+compare tips before pushing to a branch you did not create (#7382).
+- **Under worktree isolation, write scratch scripts with the Write tool and
+  run by path** — a heredoc or shell loop over paths is refused there (#7238).
 - **Do not create your own worktree (#5649).** Isolation is the PM's to declare
   with `isolation: "worktree"`, which is the only mechanism `tm hook --pm-guard`
   can see — a worktree you make yourself leaves you counted against the shared
@@ -135,8 +142,9 @@ user-visible change. A missing entry is a review-gate failure, not optional
 polish — the full gate is in `tm-workflow`.
 
 - Project uses fragments → write `<package>/changelog.d/<issue-or-pr>-<slug>.md`.
-  First line is the category (`Added`/`Fixed`/`Changed`/…), the rest is the
-  bullet. The per-PR filename is what keeps two concurrent PRs from conflicting.
+  First line is the category (`Added`/`Fixed`/`Changed`/…); every following
+  line must begin with `- ` (e.g. `Fixed` / `- one-line description`). The
+  per-PR filename keeps two concurrent PRs from conflicting.
 - **One category per fragment.** The first line IS the category and everything
   after it belongs to that category — a second category word inside the body is
   a gate failure, not a style nit, and cost two agents an amend cycle (#7287).
@@ -172,11 +180,10 @@ script name that the checkout does not contain.
 
 ## Native-First Connector Routing
 
-When both can do the job, prefer this workspace's native MCP servers over
-claude.ai's hosted connectors: `mcp__gworkspace-mcp__*` (Gmail/Calendar/Drive/
-Docs/Sheets) over `mcp__claude_ai_Gmail__*` / `mcp__claude_ai_Google_*`;
-`mcp__slack-mcp__*` over `mcp__claude_ai_Slack__*`. Soft preference (ADR-0014) —
-the claude.ai connectors stay available as fallback, never disabled.
+Prefer this workspace's native MCP servers over claude.ai's hosted connectors
+when both can do the job: `mcp__gworkspace-mcp__*` over `mcp__claude_ai_Gmail__*`/
+`mcp__claude_ai_Google_*`; `mcp__slack-mcp__*` over `mcp__claude_ai_Slack__*`.
+Soft preference (ADR-0014) — claude.ai connectors stay available as fallback.
 
 ## Handoff Protocol
 
@@ -192,39 +199,35 @@ and any constraints.
 
 ## No Subagent Fan-Out
 
-Do your own work or report back. Never spawn subagents — the Agent/Task tool is
-reserved for the top-level PM/orchestrator.
+Do your own work or report back. Never spawn subagents — the Agent/Task tool
+is reserved for the top-level PM/orchestrator.
 
-- Genuinely parallel work (a research sweep, several independent fixes): do it
-  serially, or report back so the PM can parallelise it.
-- This covers documentation a parent would normally have delegated — changelog
-  fragments, README edits, doc-comment updates. Do them yourself.
-- An untyped dispatch (no `subagent_type`) is the worst case: it bypasses the
-  roster and every guardrail attached to a named agent. Never dispatch without
-  one — and under this rule, never dispatch at all.
+- Genuinely parallel work: do it serially, or report back so the PM can
+  parallelise it.
+- Covers documentation a parent would have delegated — changelog fragments,
+  README edits, doc-comment updates. Do them yourself.
+- An untyped dispatch (no `subagent_type`) bypasses the roster and every
+  guardrail attached to a named agent — never dispatch without one, and
+  under this rule, never dispatch at all.
 
 ## Proactive Code Quality
 
-- Search before creating. Use grep/glob and code search to find existing
-  implementations. Reuse, don't duplicate.
+- Search before creating; reuse, don't duplicate.
 - Mimic local patterns: naming, file structure, error handling.
-- Suggest improvements — max 2 per task unless security or data-loss critical.
+- Suggest improvements — max 2 per task unless security/data-loss critical.
   Give `file:line`, impact, suggestion, effort. Ask before implementing.
 
 ## File-Size Precheck
 
-Before the first edit to any production source file, measure its current
-size with the project's cap tool. If current size plus the planned addition
-would exceed the cap, plan the split before writing and name it in the
-report — the split ships in the same PR, never a follow-up.
+Before the first edit to a production source file, measure its size with the
+project's cap tool. Current size + planned addition over cap → plan the
+split before writing and name it in the report; the split ships in the same
+PR.
 
 Framework default: 500 lines production / 3000 lines test, non-comment
 non-blank lines only. A project's CLAUDE.md overrides the numbers and the
-measuring command; use its named tool, or fall back to
-`grep -cvE '^\s*(//|#|$)' <file>`. CLAUDE.md is the only override surface —
-never invent a config key, and never invent a script name — read the CLAUDE.md
-in front of you for the cap tool this project actually ships. When it names
-none, the fallback count above IS the measurement.
+measuring command — use its named tool, or fall back to
+`grep -cvE '^\s*(//|#|$)' <file>`; never invent a config key or script name.
 
 ## Minimalism Principle
 
@@ -234,13 +237,11 @@ to adding it. If removing something doesn't break functionality, remove it.
 ## Effort Matches Blast Radius
 
 Spend verification effort in proportion to what the change can break. Run the
-smallest deterministic gate that covers what you changed; widen when the change
-is wider, never by default. A broad gate on a narrow change adds no signal and
-imports unrelated failures.
+smallest deterministic gate that covers what you changed; widen only when the
+change is wider — a broad gate on a narrow change adds no signal.
 
-Consolidation — deduplication, a file split, a stale doc, a rename — ships
-inside the next change that touches that code. Do not open a standalone cleanup
-change for it, and do not grow the current change to absorb it.
+Consolidation — dedup, a file split, a stale doc, a rename — ships inside the
+next change that touches that code; never a standalone cleanup change.
 
 The exception is a defect you would otherwise ship in code you are already
 editing. A bug, a security hole, a broken contract: fix it now, not later.
@@ -274,6 +275,10 @@ Never claim completion without verification evidence.
 Forbidden: "This should work now", "The fix has been applied", "The issue should
 be resolved", "Changes are complete".
 
+`git checkout -f` / `reset --hard` / `checkout HEAD --` on a dirty tree
+during verification can discard an uncommitted fix — WIP-commit first
+(`git commit -m "wip: <step>"`) (#7440).
+
 ### Direct observation of success (mandatory)
 
 Run the code and observe it succeed — full suite, real environment, clean
@@ -304,6 +309,9 @@ CORRECT: cargo test → "test result: ok. 68 passed; 0 failed; 0 ignored"
 An empty or partial command result is NOT a real result — never fabricate or
 report output you did not see. Retry twice, then redirect to a scratchpad file
 and read that; still unobservable → report "Could not verify" and hand back.
+A `gh` list read (`--comments`, `--jq`) exiting 0 with no stdout looks
+identical whether the result is genuinely empty or the filter ate it — fetch
+once without `--jq` and check the byte count before trusting it (#7383).
 #7723: redirect/retry mechanics: Read `{{TM_SKILLS}}/verification-before-completion/SKILL.md`.
 
 ## Never Directly Monitor a Declarative Process
@@ -311,7 +319,11 @@ and read that; still unobservable → report "Could not verify" and hand back.
 A test suite, build, lint, or CI check wants a verdict, not a play-by-play —
 watching one directly (`gh pr checks --watch`, an unfiltered `cargo test`) has
 burned 400k+ tokens in a single run. Run it into a scratchpad file, check
-`EXIT=$?`, and read the file only on non-zero, trimmed.
+`EXIT=$?`, and read the file only on non-zero, trimmed with an ANCHORED
+pattern (`grep -E '^ Tasks:|ℹ (pass|fail) [0-9]+$'`), never a broad keyword a
+log wall or state blob can dominate. Terraform is worse than a lost exit
+code: a piped/killed `plan`/`apply` abandons the state lock, blocking every
+other session on that key until `terraform force-unlock` (#7315, #7722).
 #7723: redirect/sentinel/trim commands: Read `{{TM_SKILLS}}/verification-before-completion/SKILL.md`.
 
 This does NOT weaken the evidence rule: raw output stays mandatory for
@@ -330,27 +342,24 @@ gh pr checks <pr>                                          # one shot
 
 Two ways that read misleads:
 
-- **`bucket` can report a false DONE.** Under GitHub API eventual-consistency lag
-  a check surfaces as bucketed-complete before it has settled. Cross-check
-  `state` before calling anything green.
+- **`bucket` can report a false DONE** under GitHub API eventual-consistency
+  lag — cross-check `state` before calling anything green.
 - **Repeated `gh pr update-branch` is a treadmill.** When main drifts faster than
   CI completes, each update mints a new untested head and restarts the clock.
   Merge the head that is actually green; BEHIND is not a correctness gate.
 
 ### Never `gh pr checks --watch`
 
-`--watch` streams every check's output into your context for the whole run — one
-engineer burned 546k tokens over 54 minutes on a single PR. The reason blocking
-CI waits are retired is **context cost**, not runnability. Do not reintroduce it,
-and do not substitute a manual poll loop for it.
+`--watch` streams every check's output into your context for the whole run
+(546k tokens burned in one run). Blocking CI waits are retired for **context
+cost**, not runnability — do not reintroduce it or substitute a manual poll
+loop.
 
 ### Report, don't promise
 
-Hand back an observation: "pushed `<sha>`; 3 checks pending — PM to re-engage
-when they settle." Ending with "I'll report back once CI is green", "monitoring
-the checks", "standing by", or "waiting for the notification" is a
-PROTOCOL VIOLATION, not a status update — nothing re-invokes a stopped agent, so
-a promise to return strands the task.
+Hand back an observation: "pushed `<sha>`; 3 checks pending — PM to re-engage."
+Ending with "I'll report back once CI is green", "monitoring the checks", or
+"standing by" is a PROTOCOL VIOLATION — nothing re-invokes a stopped agent.
 
 ### Your own gates DO block, in the foreground
 
@@ -366,29 +375,33 @@ the evidence you owe. Run it as a plain foreground command with an explicit long
   a Wait".
 - Armed a `Monitor`, `/loop`, or `/schedule` whose goal completed or went moot?
   Disarm it before reporting. A stale monitor re-fires as a spurious wake.
+- `pnpm test -- --force` silently drops `--force` before turbo sees it,
+  replaying the cache — use `pnpm exec turbo run test --force` and confirm
+  `Cached: 0 cached` (#7560).
+- Stop a dev server with `lsof -ti tcp:<port> | xargs kill` FIRST — `pkill -f
+  <path>` misses a bundled server whose argv lacks the path (#7562).
 
 ### Never end a gate chain in a pipe
 
-🔴 A pipeline's exit status is the LAST command's. `cargo test … | tail` AND
-`cargo test … | tm compress` both exit 0 on a failing suite — the trim this file
-recommends is itself the trap, not just an aside. FORBIDDEN: it produced a false
-green twice in one day, once for an engineer and once for a reviewer. Redirect,
-then echo the status:
+🔴 A pipeline's exit status is the LAST command's — `cargo test … | tail` and
+`cargo test … | tm compress` both exit 0 on a failing suite (the trim this
+file recommends is itself the trap). FORBIDDEN: produced a false green twice
+in one day. Redirect, then echo the status:
 
 ```bash
 ( <gate> && <gate> ) > <scratchpad>/gates-<step>.txt 2>&1; echo "EXIT=$?"
 ```
 
-Redirect into your scratchpad directory, naming the file for this task and step
-and never a fixed `/tmp` name — the same collision risk applies here as above.
-Backgrounded this chain? The same sentinel gap applies: append `echo "EXIT=$?"`
-into the file too, or use `tm wait --for run --pid <pid>` — see "Never Directly
-Monitor a Declarative Process" above.
+Name the file for this task and step, never a fixed `/tmp` name — same
+collision risk as above. Backgrounded this chain? Append `echo "EXIT=$?"`
+into the file too, or use `tm wait --for run --pid <pid>`.
 
 `EXIT=0` → don't read the file. Non-zero → Read only the failing portion. Trim
 the FILE when it is long (`tm compress --tool "cargo test" < <scratchpad>/gates-<step>.txt`),
 never the live command. Must you genuinely pipe? `set -o pipefail` in the SAME
-invocation — `$PIPESTATUS` is a bashism and this harness runs zsh.
+invocation — `$PIPESTATUS` is a bashism and this harness runs zsh. Under
+`pipefail`, `|| true` at the END suppresses every stage's exit — wrap only
+the one command expected to fail (#7440).
 
 Under worktree isolation the grouped `( … )` form above is refused before it
 runs, because the guard cannot verify what a compound command hands to the

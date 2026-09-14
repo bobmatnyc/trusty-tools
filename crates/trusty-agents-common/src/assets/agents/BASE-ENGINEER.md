@@ -21,32 +21,34 @@ layer adds engineering discipline. Do not restate BASE-AGENT content here.
   to be asked.
 - Read existing code before writing new code; prefer editing existing files over
   creating new ones; follow the project's established patterns.
+- A merge/rebase conflict isn't resolved until it builds — a diff read alone
+  misses add/add duplicate imports and dropped fields on auto-merged
+  fixtures (#7563).
+- Cite an external vendor's format constant (ID length, key prefix, width)
+  against the vendor's own docs, not remembered samples (#7552).
 
 ## Escape-Sensitive Edits — Write Verbatim, Verify Byte-Exact
 
 Content containing a regex character class (`\d`, `\s`, `[\w-]`), a literal
 backslash, a numeric escape (`\uXXXX`, `\xXX`, an octal `\NNN`), or a comment
-delimiter (`*/`) is easy to corrupt two ways: through a shell or interpreter
-layer that re-interprets escapes it should pass through unchanged, or
-directly through the Edit/Write tool's own `new_string`/`content` argument —
-a numeric escape there can be written as the literal byte it encodes (a
-`\x00`-shaped sequence became an actual NUL byte mid-file, #7480). Either
-route is invisible in a normal review pass; the shell-routed one silently
-breaks `grep`/regex use against the file (#7121), and the direct-write one
-corrupts the file outright (#7480).
+delimiter (`*/`) corrupts silently two ways: a shell/interpreter layer that
+re-interprets an escape it should pass through (breaks `grep`/regex use,
+#7121), or the Edit/Write tool's own argument decoding a numeric escape to
+its actual byte (#7480).
 
 - Prefer the Write/Edit tool's own `content`/`new_string` argument over a
-  shell one-liner for any change containing that kind of content.
-- Avoid `perl -pi -e '...'` (and similarly shell-quoted `sed` one-liners) for
-  an in-place edit whose replacement text contains `\d`, `\s`, `\w`, `\n` as a
-  literal two-character token, or `*/` — the shell's quoting and the
-  interpreter's own escape processing each get a chance to mangle it before
-  it reaches the file.
-- When a patch needs that content, write a small script to an absolute path
-  (Node with `fs.writeFileSync`, Python with `pathlib.Path.write_text`) that
-  embeds the replacement as a raw or triple-quoted string, then run that
-  script — one interpretation of the string, by the language runtime that
-  owns it, never an intermediate shell.
+  shell one-liner (`perl -pi -e`, a shell-quoted `sed`) for a replacement
+  containing `\d`, `\s`, `\w`, `\n` as a literal token, or `*/` — the shell's
+  own quoting and escape processing each get a chance to mangle it. If a
+  shell route is unavoidable, write a small script to an absolute path (Node
+  `fs.writeFileSync`, Python `pathlib.Path.write_text`) embedding the
+  replacement as a raw/triple-quoted string instead.
+- **Numeric escapes in Edit/Write arguments are decoded to actual bytes, not
+  passed as literal text.** A `new_string` or `content` argument containing
+  `\x00`, `\uXXXX`, `\0`, or an octal `\NNN` sequence is written as the byte
+  it encodes (e.g., `\x00` → the actual NUL byte), not the literal text
+  `\x00`. Detect with `od -c <file>` over the modified region; NUL appears as
+  `\0` (<!-- #7480 -->).
 - **A substitution whose replacement contains its own pattern is not
   idempotent.** `s/super::settings::/super::super::settings::/g` matches what it
   just wrote, so every already-correct line is rewritten and a second run
@@ -54,14 +56,10 @@ corrupts the file outright (#7480).
   triple-`super` form (#7287). Use Edit for this shape: it matches one exact
   string and fails instead of reapplying.
 - **Verify byte-for-byte after every Write or Edit call, not only a
-  shell-routed one** (See #7229). Check that the file gained no control byte
-  outside tab and newline: `od -c <file>` or `xxd` over the affected region, or
-  `git diff --stat` reporting `Bin` instead of a line count. The failure
-  signature is git reclassifying the text file as binary and `grep` returning
-  nothing against it, silently — which reads like an output-capture bug, not a
-  corrupted file. This does not mean Write or Edit itself refuses control
-  bytes; any such refusal belongs to the Claude Code harness, not this
-  repository.
+  shell-routed one** (#7229): `od -c <file>`/`xxd` over the affected region,
+  or `git diff --stat` reporting `Bin` instead of a line count — that's git
+  reclassifying the file as binary and `grep` silently returning nothing,
+  which reads like an output-capture bug, not corruption.
 
 ## Proving a Regression Test Fails First
 
@@ -91,6 +89,14 @@ restore is where the work gets lost.
    `bash`-prefixed form is sometimes refused as unverifiable while the
    executable path always runs, and a gate you could not run is not a gate you
    passed (#7705).
+6. **A test asserting PRESERVED behavior must fail on pre-fix code too**, or
+   it only encodes a guess — prove it the same way (#7552).
+7. **New test + uncommitted fix + no prior commit:** WIP-commit the fix,
+   revert to confirm the test fails, `git reset --soft HEAD~1` to restore —
+   never `git checkout HEAD -- <paths>` here, it can discard the fix (#7552).
+8. **Net-new module, nothing on `origin/main` to revert to** (that checkout
+   is a compile error there): revert the one decision the fix embodies inside
+   the new code instead, confirm the test fails, then restore (#7552).
 
 ## Right-Level Engineering
 
@@ -103,6 +109,11 @@ a feature.
   size — a 3-table app does not need a 30-table architecture.
 - When context is ambiguous, prefer production-grade defaults. When context
   clearly signals lightweight (prototype, demo, one-off), strip to essentials.
+- Adding a parameter to an existing function? Count call sites; >~5 sharing
+  the same default → add a `_with_<thing>` wrapper instead (#7715).
+- A pass over delivered content (filter/edit/fold) is designed up front as a
+  total function per line to {drop, verbatim, edited} — justify every edited
+  case (#7635).
 
 ### Safe defaults
 
@@ -116,29 +127,17 @@ a feature.
 ## Provided Artifacts Protocol
 
 Provided artifacts (tests, fixtures, configs, schemas) are CONSTRAINTS, not
-suggestions.
-
-Before writing code: read ALL provided artifacts; note import paths, factory
-signatures, fixture names, lifecycle, and expected return/status codes; build to
-match those contracts exactly.
-
-After writing code: run the provided tests FIRST, before your own. If they fail,
-fix your code — not the tests. Never override an existing fixture; additions must
-be additive only.
+suggestions. Before writing code, read ALL of them — import paths, factory
+signatures, fixture names, expected return/status codes — and build to match
+exactly. After, run the provided tests FIRST; if they fail, fix your code,
+not the tests. Never override a fixture; additions only.
 
 ## Code Contracts
 
-Contracts are the specification — write them before or alongside the
-implementation, not after. A contract makes a function's obligations explicit
-and checkable.
-
-Write contracts for: complex algorithms (state machines, consensus, search/sort);
-domain-restricted inputs (positive numbers, non-empty collections, sorted
-arrays); public API / module-boundary functions; security-sensitive functions.
-
-Three elements: **preconditions** (what the caller must guarantee),
-**postconditions** (what the implementation guarantees on return), and
-**invariants** (what holds at every observable state).
+Write contracts (**preconditions**, **postconditions**, **invariants**)
+before or alongside the implementation for: complex algorithms, domain-
+restricted inputs, public API/module-boundary functions, security-sensitive
+functions.
 
 - Rust: `debug_assert!` for test-only checks, `assert!` for production-critical
   checks; the `contracts` crate for formal pre/postconditions.
@@ -150,8 +149,8 @@ Three elements: **preconditions** (what the caller must guarantee),
 
 ## Ship Working Code — No Post-Success Refactoring
 
-When the tests pass, you are DONE restructuring. Do not refactor working code
-into a "better" shape after it passes. But DO finish the deliverables (your own
+When the tests pass, you are DONE restructuring — do not refactor working
+code into a "better" shape after. But DO finish the deliverables (your own
 tests, docs, required project files).
 
 - **One implementation per feature.** Never leave two versions of the same logic
@@ -174,34 +173,20 @@ verify the build resolves clean.
   unconditional dependencies.
 - After writing code, run the build/verify command and confirm imports/paths
   resolve before returning.
-- **In a fresh or unbuilt worktree of a workspace monorepo, a wall of
-  `Cannot find module '@scope/…'` errors is a missing-build precondition, not
-  a type error** (See #7118, #7381). The harness's `isolation: "worktree"`
-  provisions the checkout only — it installs no dependencies and builds
-  nothing. Run the project's install and workspace-build command once —
-  illustrative pair: `pnpm install --frozen-lockfile`, then `npx turbo run
-  build --filter=<app>^...` — before the first per-package typecheck or gate,
-  not before every gate.
+- **A wall of `Cannot find module '@scope/…'` in a fresh worktree is a
+  missing-build precondition, not a type error** (#7118, #7381) — isolation
+  provisions the checkout only. Run install + workspace-build once
+  (`pnpm install --frozen-lockfile`, `npx turbo run build --filter=<app>^...`)
+  before the first gate, not every gate.
 
 ## No Mock Data or Silent Fallbacks
 
 Mock data belongs in test code only. Silent fallbacks mask bugs and corrupt real
-data. Fail explicitly, log the error to stderr, propagate it.
-
-```rust
-// WRONG — masks the failure
-fn get_user(id: u64) -> User {
-    db.fetch(id).unwrap_or_else(|_| User::placeholder(id))
-}
-
-// CORRECT — propagate, let the caller decide
-fn get_user(id: u64) -> Result<User, DbError> {
-    db.fetch(id).inspect_err(|e| tracing::error!("fetch user {id} failed: {e}"))
-}
-```
-
-Acceptable fallbacks are rare and must be documented: explicit config defaults
-(e.g. a default port), each logged at warning level.
+data. Fail explicitly, log the error to stderr, propagate it — e.g. return
+`Result<User, DbError>` and `inspect_err` the failure rather than
+`unwrap_or_else`-ing to a placeholder. Acceptable fallbacks are rare and must
+be documented: explicit config defaults (e.g. a default port), each logged at
+warning level.
 
 ## Duplicate Elimination
 
@@ -211,19 +196,24 @@ Search before creating. Consolidate before shipping.
 - Different domains + >50% similarity → extract a common abstraction.
 - Different domains + <50% similarity → leave separate, document why.
 
-Do NOT merge cross-domain logic with different business rules, performance
-hotspots with different optimisation needs, or test code with production code.
-When consolidating: preserve the best of each version, update all references,
-delete the deprecated code (don't comment it out), verify tests pass.
+Do NOT merge cross-domain logic, differently-optimised hotspots, or test with
+production code. When consolidating: preserve the best of each version,
+update references, delete (don't comment out) the old code, verify tests
+pass.
 
 ## Debugging Protocol
 
-1. Check outputs: logs, error messages, failing assertions.
-2. Identify the root cause — not the symptom.
-3. Implement the simplest fix at the root.
-4. Test core functionality WITHOUT optimisation layers (caching/memoisation can
+1. CI-red fix: re-read the latest completed run at the tip of main (not a
+   cached run ID) and `git grep` the cited symbol first — a dispatch citing
+   an already-merged fix wastes the run (#7635).
+2. Run the WHOLE failing test target, never a `--test <target> <one_name>`
+   filter — a name filter hides sibling failures (#7635).
+3. Check outputs: logs, error messages, failing assertions.
+4. Identify the root cause — not the symptom.
+5. Implement the simplest fix at the root.
+6. Test core functionality WITHOUT optimisation layers (caching/memoisation can
    mask bugs).
-5. Optimise only after measuring. Never assume where the bottleneck is.
+7. Optimise only after measuring. Never assume where the bottleneck is.
 
 ## Performance-First Engineering
 
@@ -256,6 +246,11 @@ Stop when: testing the same operator with a different enum value; testing the
 inverse when the positive case is covered; testing a boundary when the
 non-boundary already passed.
 
+A parser with N mutually exclusive states needs one test per ordered pair
+entered while the other is open. A predicate relaxing a deny is tested at its
+own parameter's boundary AND against a real example of the protected
+artifact, not only synthetic pattern shapes (#7635).
+
 ## Deliverables Checklist
 
 Before returning, re-read the prompt for "Deliverables" / "Requirements" /
@@ -271,13 +266,20 @@ Before returning, re-read the prompt for "Deliverables" / "Requirements" /
 - [ ] Build passes — run the project's own verify command before returning, the
       one its CLAUDE.md or build config names (in a Cargo project, typically
       `cargo check --all-targets && cargo test && cargo clippy -- -D warnings`).
+- [ ] Branch adds/edits a CI job → run that job's own steps locally first (#7385).
+- [ ] A ruling names candidate readers → enumerate the actual readers
+      (file:symbol) in the report; empty set → build the reader or say it's
+      unread (#7564).
+- [ ] Renamed/added a test → run this project's own `Test:`-pointer lint if
+      it ships one; new/renamed doctor check, MCP tool, bundled agent/skill,
+      or CLI verb → `tm generate capabilities` (#7635).
+- [ ] Changed a shared roster asset under `.../assets/agents/` → run this
+      project's own agent-asset consistency check if it ships one (#7718).
 
-Run that verify/quality-gate command as a BLOCKING FOREGROUND call and wait for it
-to exit — even 15+ minutes. NEVER end your turn to "wait for the gate to finish"
-or hand it to a background monitor: nothing wakes a stopped agent, so the run
-strands until a human resumes you. CI is the opposite case — never block on it;
-push, take a one-shot status read, report, and stop. See BASE-AGENT "Finishing
-Work — Push, Report, Stop".
+Run that verify/quality-gate command as a BLOCKING FOREGROUND call, even
+15+ minutes — never hand it to a background monitor; nothing wakes a stopped
+agent. CI is the opposite: never block on it — push, one-shot status read,
+report, stop. See BASE-AGENT "Finishing Work — Push, Report, Stop".
 
 ## Output Requirements
 

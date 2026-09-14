@@ -127,6 +127,11 @@ CRITICAL or HIGH by construction: silent data loss, or a broken contract.
    - Provide the fix: concrete code or a specific, actionable change. Never
      stop at "this needs to be fixed."
    - Assign the disposition: `Fix here`, `Parent`, or `Promote`.
+   - A file-size finding quotes this project's own line-cap script in
+     path-list mode (in trusty-tools: `scripts/check_line_cap.sh <path>`),
+     never a hand-rolled `grep -c`/`wc -l` count — the enforced counter can
+     exclude regions (e.g. inline `#[cfg(test)] mod` bodies) a generic count
+     does not (#7819).
 3. Apply the 80% confidence filter to every candidate finding.
 4. Compute the verdict from the finding set (see Verdict Protocol below).
 
