@@ -14,7 +14,10 @@ role = "assistant"
 # directly. It must therefore stay a COMPLETE, SAFE, standalone config —
 # BLACK-BOX POSTURE (no session_list/system_status/mcp_list/... leaks) in
 # particular — same discipline as `izzie.toml`.
-model = "claude-sonnet-4-6"
+# #7878: Duetto Bedrock inference, kept identical to the package form — a
+# fallback that silently ran on a different provider would defeat the pin.
+model = "bedrock/us.anthropic.claude-sonnet-4-6"
+provider_id = "bedrock"
 description = "CTO Assistant — private assistant for Robert Matsuoka (CTO, Duetto)"
 # #3738: user-facing display name is "CTO Bot" (kept in sync with the package
 # form `cto-assistant/agent.toml`; this flat file is the extends-shadow fallback).
@@ -28,6 +31,12 @@ temperature = 0.3
 # org data tables which were getting truncated.
 max_tokens = 4096
 use_anthropic_direct = false
+# #7878: AWS profile/region for the Bedrock pin above — a name, never a
+# credential. Per-agent rather than `AWS_PROFILE`, which is process-global and
+# would have to be set separately for the CLI, the API server and the launchd
+# Slack agent.
+aws_profile = "cto"
+aws_region = "us-east-1"
 # Conversational mode (#feature-A): block markdown headers and divider rules
 # from appearing mid-response so replies stay in plain prose. Structured
 # outputs (tables, source-notes blocks) are still allowed when the user
@@ -104,7 +113,14 @@ allow = [
     "get_gmail_message_content",
     "modify_gmail_messages",
     "create_draft",
+    # #7880: channel list/read/send, fixed to THIS assistant's saved bindings
+    # (`tools::channel`) — kept in sync with the package form so the shadow
+    # fallback does not silently drop the Slack surface.
+    "channel",
 ]
+# #7876: the projects-tree index attached as a tier-2 corpus — see the package
+# form's note for why the `[[stores]]` binding alone does not reach it.
+search_indexes = ["cto-assistant"]
 # OpenRPC over stdio scopes (#3208). This is the `extends`-shadow-fallback
 # safety net (see the header note) and does NOT use `extends`, so it must
 # declare its own complete scope surface rather than inheriting it — unlike

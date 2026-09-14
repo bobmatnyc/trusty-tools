@@ -243,6 +243,81 @@ content = "c"
     assert_eq!(merged.llm.max_tokens, 4096);
 }
 
+// --- #7878: per-key `[llm]` aws_profile/aws_region ------------------------
+
+#[test]
+fn extends_llm_child_overrides_aws_profile_and_region() {
+    // An overlay pinned to a different AWS account than its base must reach
+    // that account. Before #7878 the wholesale-inherit rule dropped both keys,
+    // so `cto-assistant` (which extends `assistant`) silently dispatched on
+    // whatever the process-global `AWS_PROFILE` happened to be.
+    let base = cfg(r#"
+[agent]
+name = "base"
+role = "r"
+model = "m"
+description = "d"
+[llm]
+temperature = 0.7
+max_tokens = 1024
+aws_profile = "default"
+aws_region = "us-west-2"
+[system_prompt]
+content = "b"
+"#);
+    let ch = cfg(r#"
+[agent]
+name = "child"
+role = "agent"
+model = ""
+description = ""
+extends = "base"
+[llm]
+aws_profile = "cto"
+aws_region = "us-east-1"
+[system_prompt]
+content = "c"
+"#);
+    let merged = merge_extends(base, ch);
+    assert_eq!(merged.llm.aws_profile.as_deref(), Some("cto"));
+    assert_eq!(merged.llm.aws_region.as_deref(), Some("us-east-1"));
+}
+
+#[test]
+fn extends_llm_inherits_aws_profile_when_child_omits_it() {
+    // The other half of the per-key rule: an overlay that declares neither key
+    // keeps the base's account, exactly as before #7878.
+    let base = cfg(r#"
+[agent]
+name = "base"
+role = "r"
+model = "m"
+description = "d"
+[llm]
+temperature = 0.7
+max_tokens = 1024
+aws_profile = "default"
+aws_region = "us-west-2"
+[system_prompt]
+content = "b"
+"#);
+    let ch = cfg(r#"
+[agent]
+name = "child"
+role = "agent"
+model = ""
+description = ""
+extends = "base"
+[llm]
+temperature = 0.3
+[system_prompt]
+content = "c"
+"#);
+    let merged = merge_extends(base, ch);
+    assert_eq!(merged.llm.aws_profile.as_deref(), Some("default"));
+    assert_eq!(merged.llm.aws_region.as_deref(), Some("us-west-2"));
+}
+
 #[test]
 fn extends_runner_and_persistent_session_child_override() {
     // #3106 MEDIUM: a child's non-default `runner` and opt-in

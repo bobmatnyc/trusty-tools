@@ -336,6 +336,30 @@ pub fn merge_extends(base: AgentConfig, child: AgentConfig) -> AgentConfig {
         merged.llm.max_tokens = child.llm.max_tokens;
     }
 
+    // --- `[llm]` aws_profile/aws_region: PER-KEY child-overrides-when-declared
+    // (#7878) ---
+    //
+    // Why: these two name the AWS account a Bedrock-pinned agent dispatches
+    // against, and the wholesale-inherit rule below made them unreachable for
+    // every `extends` overlay — the exact shape every shipped assistant uses.
+    // Pinning `cto-assistant` to Duetto's Bedrock account therefore had only
+    // two other answers, both wrong: put the profile on the shared base, where
+    // it would also capture `izzie`, or fall back to the process-global
+    // `AWS_PROFILE`, which the CLI, the API server and the launchd Slack agent
+    // each set separately. The block above ends by naming the bar for adding a
+    // field here — "a real UNSET sentinel or an explicit `Option`, not a
+    // heuristic". Both fields are already `Option<String>`, so `Some` means
+    // declared and `None` means omitted with nothing inferred.
+    // What: child value wins when `Some`, else the base's stands.
+    // Test: `extends_llm_child_overrides_aws_profile_and_region`,
+    // `extends_llm_inherits_aws_profile_when_child_omits_it`.
+    if child.llm.aws_profile.is_some() {
+        merged.llm.aws_profile = child.llm.aws_profile.clone();
+    }
+    if child.llm.aws_region.is_some() {
+        merged.llm.aws_region = child.llm.aws_region.clone();
+    }
+
     // #3936: computed BEFORE the `child.tools.*` partial moves below (`scopes`
     // and `search_indexes` are moved out of `child.tools` by `union_opt_vec`
     // a few lines down) — `effective_scopes` needs to borrow `child.tools`
@@ -472,8 +496,9 @@ pub fn merge_extends(base: AgentConfig, child: AgentConfig) -> AgentConfig {
 
     // --- Inherited-from-base-wholesale bundles ---
     //
-    // The REST of `llm.*` (everything except `temperature`/`max_tokens`,
-    // handled per-key above), plus `compress`, `runner_config`, `session`,
+    // The REST of `llm.*` (everything except `temperature`/`max_tokens` and
+    // `aws_profile`/`aws_region`, handled per-key above), plus `compress`,
+    // `runner_config`, `session`,
     // `plugins`, and `rbac`, are NOT in the §2.5 merge table and are
     // intentionally inherited from the base as-is (a personalization overlay
     // refines persona/tools/name/sampling, not the base's other runtime

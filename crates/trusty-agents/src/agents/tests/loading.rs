@@ -1586,7 +1586,9 @@ fn bundled_persona_agents_do_not_use_claude_code_runner() {
         ("assistant", "claude-sonnet-4-6"),
         ("pm", "claude-opus-4-6"),
         ("personal-assistant", "claude-sonnet-4-6"),
-        ("cto-assistant", "claude-sonnet-4-6"),
+        // #7878: pinned to Duetto Bedrock, so the slug carries the
+        // `bedrock/` routing marker and the inference-profile id.
+        ("cto-assistant", "bedrock/us.anthropic.claude-sonnet-4-6"),
         ("izzie", "claude-sonnet-4-6"),
     ];
     for (name, expected_model) in cases {
@@ -1622,7 +1624,14 @@ fn bundled_persona_shadowed_flat_duplicates_do_not_use_claude_code_runner() {
     // directory package (`cto-assistant/agent.toml`, `izzie/agent.toml`) and
     // are never reached via `by_name` while the package is present — load
     // them directly by path so this hygiene guard actually exercises them.
-    for name in ["cto-assistant", "izzie"] {
+    // #7878: each flat shadow must still name the SAME model as its package,
+    // because the shadow is the fallback the loader reaches when the package's
+    // `extends` chain fails — a fallback on a different provider would be a
+    // silent routing change, not a degraded one.
+    for (name, expected_model) in [
+        ("cto-assistant", "bedrock/us.anthropic.claude-sonnet-4-6"),
+        ("izzie", "claude-sonnet-4-6"),
+    ] {
         let path = bundled_agents_dir().join(format!("{name}.toml"));
         let cfg = AgentConfig::load(&path)
             .unwrap_or_else(|e| panic!("shadowed flat agent '{name}.toml' must still parse: {e}"));
@@ -1633,7 +1642,7 @@ fn bundled_persona_shadowed_flat_duplicates_do_not_use_claude_code_runner() {
             "shadowed flat agent '{name}.toml' must not declare runner = \"claude-code\" (#3358)"
         );
         assert_eq!(
-            cfg.agent.model, "claude-sonnet-4-6",
+            cfg.agent.model, expected_model,
             "shadowed flat agent '{name}.toml' model mismatch"
         );
     }
