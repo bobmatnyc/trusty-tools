@@ -43,13 +43,13 @@
 //! Test: `new_session_*` in `super::tests`.
 
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use trusty_common::github_path::parse_remote_url;
 use trusty_mpm::client::{DaemonClient, ManagedSessionSummary};
-use trusty_mpm::project::Project;
 use trusty_mpm::project::record::repo_url_matches;
+use trusty_mpm::project::{Project, local_checkout_for};
 
 use crate::commands::picker_launch_new::LaunchIsolation;
 use crate::commands::projects::registry::RegisterInput;
@@ -65,9 +65,9 @@ const PICK_ROWS: usize = 8;
 /// Why: the registry answers "which projects does tm already know", and the
 /// operator's own checkout answers the rest. Both are rows in one list rather
 /// than two separate prompts, so a single Enter confirms either.
-/// What: [`Self::Registered`] carries the registry's `repo_url` verbatim — the
-/// same string `tm session new <repo>` takes — and [`Self::Other`] is the
-/// escape hatch that opens the free-text path entry.
+/// What: [`Self::Registered`] carries the registry's `repo_url` — the row's
+/// identity — beside the directory a session in it actually runs in (#7887),
+/// and [`Self::Other`] is the escape hatch that opens the free-text path entry.
 /// Test: `new_session_targets_from_puts_the_path_escape_last`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Target {
@@ -75,12 +75,29 @@ pub(crate) enum Target {
     Registered {
         /// The registry key, shown in the row and used as the status label.
         name: String,
-        /// The registry's `repo_url`, passed through to the create call.
+        /// The registry's `repo_url` — what the row is LABELLED and matched by.
+        ///
+        /// #7887: never the create call's argument. It is typically a GitHub
+        /// URL, and since ADR-0055 the daemon takes an existing directory.
         repo: String,
+        /// The directory a session in this project runs in (#7887).
+        ///
+        /// [`local_checkout_for`]'s answer for the registry row, resolved when
+        /// the list is built; `None` when `repo_url` names no project at all.
+        checkout: Option<PathBuf>,
     },
     /// Type a path to a checkout the registry does not have yet.
     Other,
 }
+
+/// How a registry row becomes the directory a session in it runs in (#7887).
+///
+/// Why: the production answer ([`local_checkout_for`]) depends on this host's
+/// projects root and on what is on its disk, neither of which a unit test
+/// should need. A function pointer keeps the whole registered-row branch
+/// decidable with a stub — the same seam [`Resolver`] is for typed paths.
+/// Test: `new_session_confirming_a_registered_project_sends_its_local_checkout`.
+pub(crate) type CheckoutOf = fn(&Project) -> Option<PathBuf>;
 
 /// A project identity resolved from a typed checkout path.
 ///
@@ -363,11 +380,16 @@ impl NewSessionFlow {
                 Step::Redraw
             }
             Input::Enter => match self.targets.get(self.selected) {
-                Some(Target::Registered { name, repo }) => Step::Create(NewSessionRequest {
-                    register: None,
-                    repo: repo.clone(),
-                    label: name.clone(),
-                }),
+                // #7887: the create call takes the project's DIRECTORY; the
+                // stored `repo_url` is the row's identity, not its workspace.
+                Some(Target::Registered {
+                    name,
+                    repo,
+                    checkout,
+                }) => match request_for_registered(name, repo, checkout.as_deref()) {
+                    Ok(request) => Step::Create(request),
+                    Err(message) => Step::Reject(message),
+                },
                 Some(Target::Other) => self.confirm_escape_row(),
                 None => Step::Ignore,
             },
@@ -458,6 +480,49 @@ impl NewSessionFlow {
     }
 }
 
+/// The create request for a registered row, or why it cannot be one (#7887).
+///
+/// Why: the picker used to hand the create call the row's stored `repo_url`,
+/// which for a cloned project is a GitHub URL. Since ADR-0055 the daemon
+/// clones nothing, so that URL was refused by the background provisioning job
+/// one hop later, in a message naming neither this project nor where its
+/// checkout belongs. Both confirm sites — Enter on the row here, and the typed
+/// `owner/repo` reuse in [`super::new_session_entry::request_for_entry`] — ask
+/// this ONE function, so they cannot disagree about what a registered row
+/// creates.
+/// What: `Ok` carrying the row's resolved local checkout as the create
+/// argument, and no `register` leg — the project is already in the registry.
+/// `Err` when `repo_url` names no project directory, and when the directory it
+/// names is not on this host: that message names the expected path and the
+/// `git clone` that would produce it. There is deliberately no fall back to the
+/// URL — the daemon would only refuse it again, later and less clearly.
+/// Test: `new_session_confirming_a_registered_project_sends_its_local_checkout`,
+/// `new_session_registered_project_without_a_checkout_names_the_clone_step`,
+/// `new_session_entry_reuses_a_registered_project`.
+pub(crate) fn request_for_registered(
+    name: &str,
+    repo: &str,
+    checkout: Option<&Path>,
+) -> Result<NewSessionRequest, String> {
+    let Some(checkout) = checkout else {
+        return Err(format!(
+            "{name} is registered as {repo}, which names no project directory — \
+             re-register it with the path of its checkout"
+        ));
+    };
+    let path = checkout.display();
+    if !checkout.is_dir() {
+        return Err(format!(
+            "{name} has no checkout at {path} — clone it first: git clone {repo} {path}"
+        ));
+    }
+    Ok(NewSessionRequest {
+        register: None,
+        repo: path.to_string(),
+        label: name.to_string(),
+    })
+}
+
 /// Turn the operator's typed path into a create request.
 ///
 /// Why (#7395 requirement 2): a path the registry already holds must NOT be
@@ -495,7 +560,7 @@ pub(crate) fn request_for_path(
         });
     };
     let known = targets.iter().any(|t| match t {
-        Target::Registered { name, repo } => *name == id.name || *repo == id.repo_url,
+        Target::Registered { name, repo, .. } => *name == id.name || *repo == id.repo_url,
         Target::Other => false,
     });
     Ok(NewSessionRequest {
@@ -565,13 +630,26 @@ pub(crate) async fn fetch_targets(
 /// #7421: the surviving rows are ordered by
 /// [`super::new_session_order::ordered_targets`] rather than left in the
 /// registry's `HashMap` iteration order.
+/// #7887: each row also carries the directory a session in it runs in, from
+/// [`local_checkout_for`] — the registry has no such field, so this is where
+/// that one answer is asked for.
 /// Test: `new_session_targets_from_drops_a_scratchpad_registration`,
+/// `new_session_registered_target_carries_its_local_checkout`,
 /// `new_session_order_is_independent_of_registry_iteration_order`.
 pub(crate) fn targets_from(
     projects: &[Project],
     sessions: &[ManagedSessionSummary],
 ) -> Vec<Target> {
-    super::new_session_order::ordered_targets(projects, sessions)
+    targets_from_with(projects, sessions, local_checkout_for)
+}
+
+/// [`targets_from`] with an explicit [`CheckoutOf`] (the test seam, #7887).
+pub(crate) fn targets_from_with(
+    projects: &[Project],
+    sessions: &[ManagedSessionSummary],
+    checkout_of: CheckoutOf,
+) -> Vec<Target> {
+    super::new_session_order::ordered_targets(projects, sessions, checkout_of)
 }
 
 /// One display label per target — `owner/repo`, never a URL or a path (#7406).
@@ -590,7 +668,7 @@ pub(crate) fn row_labels(targets: &[Target]) -> Vec<String> {
     let labels: Vec<Option<Label>> = targets
         .iter()
         .map(|t| match t {
-            Target::Registered { name, repo } => Some(label_for(name, repo)),
+            Target::Registered { name, repo, .. } => Some(label_for(name, repo)),
             Target::Other => None,
         })
         .collect();

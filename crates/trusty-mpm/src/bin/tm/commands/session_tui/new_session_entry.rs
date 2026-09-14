@@ -140,9 +140,12 @@ fn is_host(segment: &str) -> bool {
 /// [`request_for_path`](super::new_session::request_for_path) does for a path.
 /// What: an unrecognised entry is an `Err` the overlay shows inline and nothing
 /// is created. A recognised one whose name or URL is already a registered
-/// target reuses that row's stored `repo` and skips the registration; anything
-/// else carries a `register` leg, and its clone URL as the create argument —
-/// the daemon clones it, the same provisioning `tm session new <url>` triggers.
+/// target starts a session in that row's own checkout and skips the
+/// registration — through
+/// [`request_for_registered`](super::new_session::request_for_registered), the
+/// same builder the arrow-key confirm uses (#7887), so typing a registered
+/// `owner/repo` cannot send something different from picking its row. Anything
+/// else carries a `register` leg and its clone URL as the create argument.
 /// Test: `new_session_entry_builds_a_clone_and_register_request`,
 /// `new_session_entry_reuses_a_registered_project`,
 /// `new_session_entry_rejects_malformed_text`.
@@ -158,19 +161,19 @@ pub(crate) fn request_for_entry(
         ));
     };
     let known = targets.iter().find_map(|t| match t {
-        Target::Registered { name, repo } => {
-            (*name == entry.name || *repo == entry.repo_url).then(|| (name.clone(), repo.clone()))
-        }
+        Target::Registered {
+            name,
+            repo,
+            checkout,
+        } => (*name == entry.name || *repo == entry.repo_url)
+            .then(|| (name.clone(), repo.clone(), checkout.clone())),
         Target::Other => None,
     });
     // Already registered: start the session in the row the registry holds
-    // rather than cloning a second copy of it.
-    if let Some((name, repo)) = known {
-        return Ok(NewSessionRequest {
-            register: None,
-            repo,
-            label: name,
-        });
+    // rather than cloning a second copy of it. #7887: in that row's DIRECTORY —
+    // the stored `repo_url` is a URL the daemon refuses.
+    if let Some((name, repo, checkout)) = known {
+        return super::new_session::request_for_registered(&name, &repo, checkout.as_deref());
     }
     Ok(NewSessionRequest {
         register: Some(NewProject {

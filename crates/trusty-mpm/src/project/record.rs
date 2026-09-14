@@ -29,10 +29,16 @@ pub struct Project {
     /// What: must be non-empty; upsert is keyed on this field.
     pub name: String,
 
-    /// Full repository URL (e.g. `https://github.com/owner/trusty-tools`).
+    /// Full repository URL (e.g. `https://github.com/owner/trusty-tools`), or
+    /// the absolute path of a checkout registered directly.
     ///
-    /// Why: the session spawner needs the URL to clone a workspace; the registry
-    /// provides it so callers do not have to supply it on every `session_new`.
+    /// Why: this is the project's IDENTITY — what rows are labelled by, what a
+    /// session's own `repo_url` is matched against, and what a clone would be
+    /// made from. Since ADR-0055 it is NOT what a session spawn receives: the
+    /// daemon clones nothing and takes only a directory that already exists, so
+    /// a caller that passes this field's URL to `session_new` is refused
+    /// (#7887). Ask [`local_checkout_for`](crate::project::local_checkout_for)
+    /// for that directory instead.
     pub repo_url: String,
 
     /// The project's default branch (e.g. `main` or `develop`).

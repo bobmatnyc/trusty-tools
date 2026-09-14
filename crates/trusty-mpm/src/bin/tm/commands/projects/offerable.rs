@@ -39,6 +39,15 @@ const TEMP_PREFIXES: [&str; 3] = ["/tmp", "/private/tmp", "/var/folders"];
 /// is always offerable. A local path is offerable only when it is outside every
 /// temp directory, carries no `scratchpad` segment, still exists, and sits in a
 /// git checkout.
+///
+/// #7887: this deliberately does NOT judge a URL row by the managed checkout
+/// [`local_checkout_for`](trusty_mpm::project::local_checkout_for) derives for
+/// it. A registered project that is not cloned yet is still a project the
+/// operator meant to work in, and the picker now answers that case where it can
+/// be acted on — by naming the expected path and the `git clone` that creates
+/// it (`request_for_registered`). Hiding the row instead would push the same
+/// operator into the free-text clone path, which re-registers the project and
+/// overwrites the optional fields the stored record already holds.
 /// Test: `offerable_keeps_url_projects`, `offerable_drops_a_temp_scratchpad`,
 /// `offerable_drops_a_path_that_is_gone`, `offerable_keeps_a_real_checkout`.
 pub(crate) fn is_offerable_project(project: &Project) -> bool {

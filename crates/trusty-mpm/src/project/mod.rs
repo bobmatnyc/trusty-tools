@@ -42,7 +42,8 @@ pub use record::{Project, derive_name_from_url};
 pub use registry::ProjectRegistry;
 pub use resolver::{
     DISAMBIGUATION_FLOOR, KEYWORD_COLLECTION_FLOOR, ProjectFleet, ProjectMatch, ProjectResolution,
-    ResolutionReason, ResolverError, fleet_by_project, resolve_project, resolve_session_project,
+    ResolutionReason, ResolverError, fleet_by_project, local_checkout_for, resolve_project,
+    resolve_session_project,
 };
 pub use store::ProjectStoreError;
 pub use worktree_adoption::{
