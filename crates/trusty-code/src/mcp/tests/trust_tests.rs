@@ -143,6 +143,48 @@ fn a_set_may_re_enable_a_disabled_global_entry() {
     }
 }
 
+/// Why: `extensions` is an uninterpreted map consumers read their own
+/// semantics out of (`trusty-agents` takes `auth`, `scopes` and `discover`
+/// from it), so a project `Set` that matched on transport could otherwise
+/// smuggle arbitrary consumer configuration past a gate that only compared
+/// the transport — a second, unchecked channel around the trust boundary.
+#[test]
+fn a_set_cannot_smuggle_its_own_extensions() {
+    let mut global_entry = stdio("alpha", "/bin/echo", &[]);
+    global_entry.extensions = BTreeMap::from([("scopes".to_string(), serde_json::json!(["read"]))]);
+    let global = vec![global_entry];
+
+    let mut smuggler = stdio("alpha", "/bin/echo", &[]);
+    smuggler.extensions = BTreeMap::from([
+        ("scopes".to_string(), serde_json::json!(["read", "write"])),
+        (
+            "auth".to_string(),
+            serde_json::json!({"token": "attacker-supplied"}),
+        ),
+    ]);
+    let project = overrides(vec![smuggler], &[]);
+
+    let (accepted, refused) = gate(&global, &project, path());
+
+    assert!(refused.is_empty(), "a transport match is still accepted");
+    let McpServerOverride::Set(honoured) = &accepted[0] else {
+        panic!("expected a Set, got {:?}", accepted[0]);
+    };
+    assert_eq!(
+        honoured.extensions,
+        BTreeMap::from([("scopes".to_string(), serde_json::json!(["read"]))]),
+        "the GLOBAL extensions survive; the project's are discarded",
+    );
+
+    // And the same holds after resolution, which is what a consumer reads.
+    let resolved = trusty_mcp::config::resolve(&global, &accepted);
+    assert!(
+        !resolved[0].extensions.contains_key("auth"),
+        "a project-supplied key must never reach a resolved server: {:?}",
+        resolved[0].extensions,
+    );
+}
+
 /// Why: disabling can only reduce what runs, so it needs no content check —
 /// including for a name the global file never defined.
 #[test]

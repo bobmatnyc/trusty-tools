@@ -59,6 +59,20 @@ pub struct Connected {
 /// `super::tests::spawn_tests::a_missing_binary_is_refused_with_a_reason`,
 /// `mcp_loader_e2e::spawn_failure_isolates_the_healthy_server`.
 pub async fn connect(server: &McpServerConfig) -> Result<Connected, String> {
+    connect_within(server, HANDSHAKE_TIMEOUT).await
+}
+
+/// [`connect`] with the startup bound supplied.
+///
+/// Why: a test that proves the per-server bound is real — that a hung server
+/// costs one timeout, not one per sibling — cannot afford to wait
+/// [`HANDSHAKE_TIMEOUT`] to do it. Injecting the bound keeps the proof to a
+/// second or two without weakening what production uses.
+/// Test: `mcp_loader_e2e::a_hung_server_does_not_serialise_its_siblings`.
+pub async fn connect_within(
+    server: &McpServerConfig,
+    budget: Duration,
+) -> Result<Connected, String> {
     let McpTransport::Stdio { command, args, env } = &server.transport else {
         return Err(super::REMOTE_UNSUPPORTED.to_string());
     };
@@ -69,7 +83,7 @@ pub async fn connect(server: &McpServerConfig) -> Result<Connected, String> {
         .await
         .map_err(|e| format!("could not start {command:?}: {e}"))?;
 
-    let tools = match timeout(HANDSHAKE_TIMEOUT, handshake(&mut client)).await {
+    let tools = match timeout(budget, handshake(&mut client)).await {
         Ok(Ok(tools)) => tools,
         Ok(Err(reason)) => return Err(reason),
         // Dropping `client` here kills the child (`kill_on_drop` plus its own
@@ -77,7 +91,7 @@ pub async fn connect(server: &McpServerConfig) -> Result<Connected, String> {
         Err(_) => {
             return Err(format!(
                 "did not finish the MCP handshake within {}s",
-                HANDSHAKE_TIMEOUT.as_secs()
+                budget.as_secs()
             ));
         }
     };

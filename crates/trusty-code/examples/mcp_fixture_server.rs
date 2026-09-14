@@ -11,7 +11,14 @@
 //! `tools/list` (two tools) and `tools/call`; ignores notifications, which
 //! carry no `id`. `echo` returns its `message` argument; `echo_env` returns
 //! `$TCODE_FIXTURE_TOKEN`, which is how the e2e test proves a configured `env`
-//! actually reaches the child.
+//! actually reaches the child. With [`HANG_VAR`] set it reads its input and
+//! answers NOTHING, which is the wedged server the concurrency test needs —
+//! a server that fails fast would prove nothing about the per-server bound.
+//!
+//! Run the e2e through `cargo test -p trusty-code`, never
+//! `cargo test --test mcp_loader_e2e`: an explicit `--test` selector builds
+//! that target alone and NOT the examples, so the suite silently runs against
+//! whatever copy of this file was compiled last.
 //!
 //! Test: `crates/trusty-code/tests/mcp_loader_e2e.rs`.
 
@@ -22,7 +29,21 @@ use serde_json::{Value, json};
 /// The env var `echo_env` reports, so the test can prove `env` overlay works.
 const TOKEN_VAR: &str = "TCODE_FIXTURE_TOKEN";
 
+/// Set this to make the fixture accept input and never reply.
+const HANG_VAR: &str = "TCODE_FIXTURE_HANG";
+
 fn main() {
+    if std::env::var_os(HANG_VAR).is_some() {
+        // Stay alive and silent until the parent kills us: `is_alive()` must
+        // stay true, so exiting would exercise the respawn path instead.
+        for line in std::io::stdin().lock().lines() {
+            if line.is_err() {
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(300));
+        return;
+    }
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     for line in stdin.lock().lines() {

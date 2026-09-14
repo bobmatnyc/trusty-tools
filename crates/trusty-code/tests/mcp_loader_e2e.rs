@@ -11,6 +11,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -53,6 +54,21 @@ fn global_config(dir: &std::path::Path, servers: &[(&str, &str)]) -> PathBuf {
             "[[servers]]\nname = {name:?}\n[servers.transport]\ntype = \"stdio\"\ncommand = {command:?}\n[servers.transport.env]\nTCODE_FIXTURE_TOKEN = \"fixture-token-5428\"\n\n"
         ));
     }
+    let path = dir.join("servers.toml");
+    std::fs::write(&path, text).expect("writing the global fixture");
+    path
+}
+
+/// A global `servers.toml` whose FIRST server is a fixture wedged on
+/// `initialize` and whose second is a healthy one.
+fn hung_then_healthy(dir: &std::path::Path) -> PathBuf {
+    let binary = fixture_binary();
+    let text = format!(
+        "[[servers]]\nname = \"wedged\"\n[servers.transport]\ntype = \"stdio\"\ncommand = {binary:?}\n\
+         [servers.transport.env]\nTCODE_FIXTURE_HANG = \"1\"\n\n\
+         [[servers]]\nname = \"fixture\"\n[servers.transport]\ntype = \"stdio\"\ncommand = {binary:?}\n\
+         [servers.transport.env]\nTCODE_FIXTURE_TOKEN = \"fixture-token-5428\"\n"
+    );
     let path = dir.join("servers.toml");
     std::fs::write(&path, text).expect("writing the global fixture");
     path
@@ -159,6 +175,58 @@ async fn spawn_failure_isolates_the_healthy_server() {
         .dispatch("mcp__fixture__echo", json!({"message": "still here"}))
         .await;
     assert_eq!(result.content(), "still here");
+}
+
+/// Why: the per-server startup bound is only worth having if the servers are
+/// attempted CONCURRENTLY. Connected in sequence, N wedged connectors would
+/// cost N × the bound before the agent loop starts, so the worst case grew
+/// with the operator's config. Two servers, the first wedged on `initialize`:
+/// the whole load must cost about ONE budget, and the healthy sibling — second
+/// in config order — must still register and dispatch.
+#[tokio::test]
+async fn a_hung_server_does_not_serialise_its_siblings() {
+    let home = tempdir().expect("tempdir");
+    let project = tempdir().expect("tempdir");
+    let global = hung_then_healthy(home.path());
+    let budget = Duration::from_millis(1_500);
+
+    let started = Instant::now();
+    let set = McpToolSet::load_within(&global, project.path(), budget).await;
+    let elapsed = started.elapsed();
+
+    let mut registry = ToolRegistry::new();
+    let diagnostics = register_configured_tools(&mut registry, &set);
+
+    assert!(
+        elapsed < budget * 2,
+        "two servers, one wedged: the load took {elapsed:?}, which is at least \
+         two budgets of {budget:?} — the connections are running in sequence",
+    );
+    assert!(
+        elapsed >= budget,
+        "the wedged server must actually have been waited out: {elapsed:?}",
+    );
+
+    // Config order survives the concurrency.
+    assert_eq!(diagnostics.statuses[0].name, "wedged");
+    assert_eq!(diagnostics.statuses[1].name, "fixture");
+    assert!(!diagnostics.statuses[0].usable);
+    assert!(
+        diagnostics.statuses[0]
+            .detail
+            .as_deref()
+            .is_some_and(|d| d.contains("handshake")),
+        "the wedged server reports the timeout: {:?}",
+        diagnostics.statuses[0],
+    );
+    assert!(diagnostics.statuses[1].usable);
+    assert_eq!(
+        registry
+            .dispatch("mcp__fixture__echo", json!({"message": "unblocked"}))
+            .await
+            .content(),
+        "unblocked",
+    );
 }
 
 /// Why: `ToolRegistry::register` overwrites a duplicate outside a debug build,

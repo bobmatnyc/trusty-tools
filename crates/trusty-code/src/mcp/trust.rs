@@ -10,12 +10,22 @@
 //! What: the project tier may say WHICH of the operator's globally configured
 //! servers this project uses, never WHAT a server runs. A `Disable` always
 //! passes — switching a connector off can only reduce what runs. A `Set` passes
-//! only when it is content-equivalent to a global entry of the same name: the
-//! identical command, args and env for stdio, the identical url and headers for
-//! a remote entry. Name-only matching is NOT sufficient; that would let a
-//! project keep a trusted name and swap the command behind it, which is the
-//! whole attack. Anything else is refused as an [`McpIssue`] whose remedy names
-//! the global file — the operator's own file, which they alone write.
+//! only when it is content-equivalent to a global entry of the same name.
+//! "Content-equivalent" is exactly [`transport_equivalent`]: the identical
+//! command, args and env for stdio, the identical url and headers for a remote
+//! entry. Name-only matching is NOT sufficient; that would let a project keep a
+//! trusted name and swap the command behind it, which is the whole attack.
+//! Anything else is refused as an [`McpIssue`] whose remedy names the global
+//! file — the operator's own file, which they alone write.
+//!
+//! An accepted `Set` contributes exactly TWO things: its `name` (which matched)
+//! and its `enabled` flag. `transport` is byte-identical by construction, and
+//! `extensions` is DISCARDED and replaced with the global entry's — see
+//! [`gate`]. `extensions` is an uninterpreted `serde_json` map every consumer
+//! reads its own semantics out of (`trusty-agents` reads `auth`, `scopes` and
+//! `discover` from it), so letting a repo-tracked file write it would hand that
+//! file a second, unchecked channel into consumer behaviour — the same trust
+//! boundary the transport comparison draws, walked around.
 //!
 //! // #5428: trust-by-content per the #7422/#3033 ruling.
 //!
@@ -93,6 +103,9 @@ pub fn transport_equivalent(project: &McpTransport, global: &McpTransport) -> bo
 /// is refused with an [`McpIssue`] and a `tracing::warn!`. `project_path` names
 /// the file in the finding and is never read here.
 ///
+/// An accepted `Set` is emitted with the GLOBAL entry's `extensions`, not its
+/// own: only `name` and `enabled` cross the boundary. See the module doc.
+///
 /// Disables are emitted BEFORE sets, matching
 /// `trusty_agents::assistants::mcp::McpOverrides::as_overrides`, so a name in
 /// both lists resolves as the more specific `Set` under the resolver's
@@ -101,6 +114,7 @@ pub fn transport_equivalent(project: &McpTransport, global: &McpTransport) -> bo
 /// `super::tests::trust_tests::a_set_with_a_new_command_is_refused`,
 /// `super::tests::trust_tests::a_set_naming_no_global_server_is_refused`,
 /// `super::tests::trust_tests::a_set_may_re_enable_a_disabled_global_entry`,
+/// `super::tests::trust_tests::a_set_cannot_smuggle_its_own_extensions`,
 /// `super::tests::trust_tests::a_disable_always_passes`.
 pub fn gate(
     global: &[McpServerConfig],
@@ -131,7 +145,12 @@ pub fn gate(
             ));
             continue;
         }
-        accepted.push(McpServerOverride::Set(server.clone()));
+        // #5428: extensions never cross the trust boundary. `transport` is
+        // already byte-identical, so this keeps the project's `name` and
+        // `enabled` and nothing else it wrote.
+        let mut honoured = server.clone();
+        honoured.extensions = matching.extensions.clone();
+        accepted.push(McpServerOverride::Set(honoured));
     }
 
     (accepted, refused)

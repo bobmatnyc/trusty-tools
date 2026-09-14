@@ -170,6 +170,26 @@ impl McpToolSet {
     /// Test: `tests::set_tests::a_failed_server_does_not_stop_the_others`,
     /// `mcp_loader_e2e::spawn_failure_isolates_the_healthy_server`.
     pub async fn load_at(global_path: &Path, project_root: &Path) -> Self {
+        Self::load_within(global_path, project_root, spawn::HANDSHAKE_TIMEOUT).await
+    }
+
+    /// [`McpToolSet::load_at`] with the per-server startup bound supplied.
+    ///
+    /// Why: `budget` is per SERVER, and the servers are connected CONCURRENTLY
+    /// — sequentially, N wedged connectors would cost N × the bound at task
+    /// startup, so the worst case grew with the operator's config. Injecting
+    /// the bound is what lets a test prove that in a second or two instead of
+    /// waiting out two real timeouts.
+    /// What: `futures_util::future::join_all` preserves its input's order, so
+    /// the results are applied in CONFIG order and `statuses`/`tools` stay
+    /// deterministic regardless of which server answered first.
+    /// Test: `mcp_loader_e2e::a_hung_server_does_not_serialise_its_siblings`,
+    /// `tests::set_tests::a_failed_server_does_not_stop_the_others`.
+    pub async fn load_within(
+        global_path: &Path,
+        project_root: &Path,
+        budget: std::time::Duration,
+    ) -> Self {
         let resolved = config::resolve_at(global_path, project_root);
         let mut set = Self {
             tools: Vec::new(),
@@ -179,11 +199,22 @@ impl McpToolSet {
                 tools: Vec::new(),
             },
         };
-        for (index, server) in resolved.servers.iter().enumerate() {
-            if !set.diagnostics.statuses[index].usable {
-                continue;
-            }
-            match spawn::connect(server).await {
+
+        let attempts: Vec<(usize, &trusty_mcp::config::McpServerConfig)> = resolved
+            .servers
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| set.diagnostics.statuses[*index].usable)
+            .collect();
+        let outcomes = futures_util::future::join_all(
+            attempts
+                .iter()
+                .map(|(_, server)| spawn::connect_within(server, budget)),
+        )
+        .await;
+
+        for ((index, server), outcome) in attempts.into_iter().zip(outcomes) {
+            match outcome {
                 Ok(connected) => set.absorb(&server.name, connected),
                 Err(reason) => {
                     tracing::warn!(
