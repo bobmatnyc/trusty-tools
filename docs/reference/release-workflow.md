@@ -75,6 +75,18 @@ e.g. `trusty-mcp-core-v0.2.0`. The version comes from the crate's `Cargo.toml`.
    trusty-common 0.46.1 and 0.46.3 in one week. Full rationale and the
    `--check-only`/full-mode split:
    [`.claude/skills/cargo-publish/SKILL.md`, "Step 2b"](../../.claude/skills/cargo-publish/SKILL.md#step-2b-pre-tag-gate-mandatory-issue-6508).
+
+   🔴 **A third standard pre-merge non-pass, alongside `merged-main` FAIL and
+   `tag-parity TAG-MISSING` SKIP: `prepublish-gate` FAIL.** On an unmerged
+   release branch `.github/workflows/pre-publish.yml` has not been dispatched
+   at the branch tip yet, so CHECK 8 reports `NO 'Pre-publish gate' run gated
+   <sha>` for every crate — expected, not a real failure. Resolve it by
+   dispatching the workflow at the branch tip before trusting the check:
+   `gh workflow run pre-publish.yml --ref <branch> -f sha=$(git rev-parse
+   HEAD)`, then wait for it, then re-run `--check-only`. Do this as the first
+   step of phase 1, not after the first red `--check-only` run — evidence:
+   identical `prepublish-gate` FAIL across all 7 crates on branch
+   `chore/release-trusty-mpm-2026-09-13` at `3951537e2` (2026-09-13).
 4c. Releasing `trusty-audit`? Run `scripts/refresh-engagement-pins.sh` first and
    commit the result, so `crates/trusty-audit/templates/engagement.template.toml`
    pins the sibling versions this train ships rather than the previous ones —

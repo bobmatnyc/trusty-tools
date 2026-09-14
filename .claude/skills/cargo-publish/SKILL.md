@@ -110,6 +110,24 @@ parity, Step 5 below) is the one exception: a `TAG-MISSING` finding here is
 the expected pre-tag state, not a failure — `--check-only` reports it as
 `[SKIP]` and does not block on it. Only tag once this run passes clean.
 
+🔴 **On an unmerged release branch, expect `prepublish-gate` FAIL too, for the
+same reason `merged-main` fails and `tag-parity` reports `TAG-MISSING`.**
+`.github/workflows/pre-publish.yml` has not run at the branch tip yet, so
+CHECK 8 reports no gating run found. Dispatch it first, before the first
+`--check-only` run of the session:
+
+```bash
+gh workflow run pre-publish.yml --ref <branch> -f sha=$(git rev-parse HEAD)
+```
+
+Wait for that run to conclude, then run `--check-only`. Full rationale:
+[docs/reference/release-workflow.md, Step 4b](../../../docs/reference/release-workflow.md#release-steps).
+
+`scripts/check-tag-publish-parity.sh` itself has no `--check-only` flag (only
+`--vcs-info`, `--repo`, `--no-fetch`) — its plain form is safe to run pre-tag;
+`preflight-publish.sh --check-only` is what supplies the `TAG-MISSING`
+pass-through, not a flag on the parity script.
+
 The full (non-`--check-only`) run in Step 5 below is the POST-TAG gate and
 mechanically enforces this ordering: it refuses to certify a run — failing
 the same way any other check does, printing the exact `--check-only` command
