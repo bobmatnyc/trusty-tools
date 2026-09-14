@@ -692,6 +692,12 @@ edit` after the PR exists, best-effort: a failure warns, and a PR with no
 `Refs #N` or a diff no crate owns prints the line naming what was skipped. A
 workstream is a **label**, never a milestone.
 
+Each of these steps retries once before it gives up. If a field is still
+missing after the retry, `tm pr open` exits 3 (`EXIT_PARTIAL`, #7869) rather
+than 0 — the PR itself was created, and the printed line names its number,
+URL, and the field(s) still missing, so finish them with `gh pr edit` instead
+of treating the run as failed.
+
 ```bash
 gh label create trusty-mpm \
   --description "Created/managed by a trusty-mpm session" --color 8250df \
