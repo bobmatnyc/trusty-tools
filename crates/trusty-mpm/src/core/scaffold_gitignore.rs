@@ -36,12 +36,15 @@
 //! `preserves_unrelated_existing_content`, `noop_when_not_a_git_repo`,
 //! `appends_newline_when_existing_file_lacks_trailing_newline`.
 
+use std::collections::HashSet;
 use std::io::Write as _;
 use std::path::Path;
 
-/// First line of the managed block — its presence is the sole idempotency
-/// check (a repeat call skips entirely once this line exists anywhere in the
-/// file).
+use crate::core::agent_manifest::{ManifestError, atomic_write};
+
+/// First line of the managed block — its presence anywhere in the file is what
+/// routes a repeat call into [`refresh_block`] instead of appending a second
+/// block.
 pub const SCAFFOLD_GITIGNORE_BEGIN: &str =
     "# >>> trusty-mpm harness scaffolding (auto-managed by tm, issue #3427) >>>";
 
@@ -73,15 +76,26 @@ pub const SCAFFOLD_GITIGNORE_END: &str = "# <<< trusty-mpm harness scaffolding <
 /// `git status` instead. The settings files themselves stay absent from this
 /// list, exactly as the "Important Note" above requires: only the harness's own
 /// lock artifact is ignored, never the config it guards.
-/// What: trailing-slash directory patterns, the one stash FILE, and the two lock
-/// sidecars — so only the harness-owned subtrees and artifacts are ignored, not
-/// sibling config.
+/// #7932: `.claude/skills/*` is the glob form on purpose. A trailing-slash
+/// DIRECTORY pattern stops git descending into the directory at all, so a
+/// project that tracks one skill and re-includes it below the block
+/// (`!/.claude/skills/cargo-commands/`, PR #7916) has a dead negation — the
+/// tracked file goes ignored the moment the block is regenerated. The glob
+/// ignores each child instead, which leaves the negation reachable. It applies
+/// only to `skills`: `agents` and `output-styles` have no tracked children in
+/// this repo (`git ls-files .claude`), so they stay in the cheaper directory
+/// form until one does.
+/// What: trailing-slash directory patterns, the one skills glob, the one stash
+/// FILE, and the two lock sidecars — so only the harness-owned subtrees and
+/// artifacts are ignored, not sibling config.
 /// Test: `writes_block_to_fresh_gitignore`,
 /// `block_covers_session_output_but_not_project_config`,
-/// `lock_entries_match_the_settings_lock_sidecar`.
+/// `lock_entries_match_the_settings_lock_sidecar`,
+/// `a_tracked_skill_survives_a_refresh_of_the_block`.
 pub const SCAFFOLD_IGNORED_PATHS: &[&str] = &[
     ".claude/agents/",
-    ".claude/skills/",
+    // #7932: glob, never the directory form — see the constant's doc.
+    ".claude/skills/*",
     ".claude/output-styles/",
     ".claude/settings.json.lock",
     ".claude/settings.local.json.lock",
@@ -105,9 +119,14 @@ pub const SCAFFOLD_IGNORED_PATHS: &[&str] = &[
 /// body is missing a managed path is now re-rendered in place, which is what
 /// carries the two `settings*.json.lock` entries to the projects that already
 /// have a block.
+///
+/// #7875: the rendered block omits any managed path the project already spells
+/// outside the block, so a launch against a project that hand-added one of them
+/// converges instead of appending a duplicate every time.
 /// Test: `writes_block_to_fresh_gitignore`, `idempotent_on_repeat_call`,
 /// `preserves_unrelated_existing_content`, `noop_when_not_a_git_repo`,
-/// `an_existing_block_gains_newly_managed_paths`.
+/// `an_existing_block_gains_newly_managed_paths`,
+/// `this_repos_committed_block_matches_the_generator`.
 pub fn ensure_scaffold_gitignored(project_dir: &Path) -> std::io::Result<bool> {
     if !project_dir.join(".git").exists() {
         return Ok(false);
@@ -132,7 +151,9 @@ pub fn ensure_scaffold_gitignored(project_dir: &Path) -> std::io::Result<bool> {
     if !existing.is_empty() {
         block.push('\n');
     }
-    block.push_str(&render_block());
+    // #7875: rendered against the file it is about to join, so an entry the
+    // project already spells outside the block is not appended a second time.
+    block.push_str(&render_block_for(&existing));
 
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -147,22 +168,78 @@ pub fn ensure_scaffold_gitignored(project_dir: &Path) -> std::io::Result<bool> {
     Ok(true)
 }
 
-/// The managed block exactly as it is written: begin, every managed path, end.
+/// Inclusive line-index range of the managed block within `lines`, if present.
 ///
-/// What: newline-terminated throughout, including the end marker, so a caller
-/// can append it or splice it between two slices of an existing file.
-/// Test: `writes_block_to_fresh_gitignore`.
-fn render_block() -> String {
-    let mut block = String::new();
-    block.push_str(SCAFFOLD_GITIGNORE_BEGIN);
-    block.push('\n');
-    for path in SCAFFOLD_IGNORED_PATHS {
-        block.push_str(path);
-        block.push('\n');
+/// What: the begin marker's first occurrence, and the first end marker at or
+/// after it. `None` when either marker is missing.
+/// Test: `an_existing_block_gains_newly_managed_paths`,
+/// `a_block_with_no_end_marker_is_left_alone`.
+fn block_range(lines: &[&str]) -> Option<(usize, usize)> {
+    let begin = lines.iter().position(|l| *l == SCAFFOLD_GITIGNORE_BEGIN)?;
+    let end = lines[begin..]
+        .iter()
+        .position(|l| *l == SCAFFOLD_GITIGNORE_END)
+        .map(|offset| begin + offset)?;
+    Some((begin, end))
+}
+
+/// The rule a `.gitignore` line expresses, normalized for comparison (#7875).
+///
+/// Why: the block must not re-add an entry the project already spells
+/// elsewhere in the file. `/.claude/settings.json.lock` (added by hand in PR
+/// #7860) and the block's `.claude/settings.json.lock` are the same rule —
+/// only the anchoring slash differs — and without this the block appended a
+/// duplicate on every launch.
+/// What: trims, then rejects blanks, comments, and negations, and strips one
+/// leading `/`. A negation is the OPPOSITE of a rule, so it can never count as
+/// coverage — that is what keeps `!/.claude/skills/cargo-commands/` from
+/// suppressing a managed path.
+/// Test: `an_entry_spelled_outside_the_block_is_not_duplicated`,
+/// `a_negation_outside_the_block_is_not_treated_as_coverage`.
+fn normalized_rule(line: &str) -> Option<&str> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
+        return None;
     }
-    block.push_str(SCAFFOLD_GITIGNORE_END);
-    block.push('\n');
-    block
+    Some(line.strip_prefix('/').unwrap_or(line))
+}
+
+/// The managed block as it must read inside `existing`: begin, every managed
+/// path the rest of the file does not already carry, end.
+///
+/// Why (#7875): rendering the block is file-dependent, not constant — an entry
+/// the project already spells outside the block is omitted rather than
+/// duplicated. Rendering and the idempotency check therefore share this one
+/// function: what a refresh would write IS what it compares against.
+/// What: newline-terminated throughout, including the end marker, so a caller
+/// can append it or splice it between two slices of an existing file. Only
+/// lines OUTSIDE the current block count as coverage; the block's own entries
+/// would otherwise erase themselves.
+/// Test: `writes_block_to_fresh_gitignore`,
+/// `an_entry_spelled_outside_the_block_is_not_duplicated`.
+fn render_block_for(existing: &str) -> String {
+    let lines: Vec<&str> = existing.lines().collect();
+    let block = block_range(&lines);
+    let covered: HashSet<&str> = lines
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| block.is_none_or(|(begin, end)| *i < begin || *i > end))
+        .filter_map(|(_, line)| normalized_rule(line))
+        .collect();
+
+    let mut rendered = String::new();
+    rendered.push_str(SCAFFOLD_GITIGNORE_BEGIN);
+    rendered.push('\n');
+    for path in SCAFFOLD_IGNORED_PATHS {
+        if covered.contains(path) {
+            continue;
+        }
+        rendered.push_str(path);
+        rendered.push('\n');
+    }
+    rendered.push_str(SCAFFOLD_GITIGNORE_END);
+    rendered.push('\n');
+    rendered
 }
 
 /// Re-render an already-installed block that is missing a managed path (#7762).
@@ -178,18 +255,26 @@ fn render_block() -> String {
 /// preserved deliberately rather than incidentally. A block whose END marker was
 /// hand-deleted is left alone: rewriting it would have to guess where the
 /// operator's own lines resume.
+///
+/// #7875: the check is now "does the block already read exactly as
+/// [`render_block_for`] would write it", not "does it contain every managed
+/// path". The old form could not see an entry the project spells outside the
+/// block, so it re-added a duplicate on every launch and never converged.
+///
+/// #7440-class hazard: the rewrite publishes through the shared
+/// [`atomic_write`] (stage to a sibling temp file, then rename), so a failed
+/// write leaves the operator's `.gitignore` byte-for-byte intact and returns
+/// `Err` — never a truncated file, and never `Ok`.
 /// Test: `an_existing_block_gains_newly_managed_paths`,
-/// `idempotent_on_repeat_call`, `a_block_with_no_end_marker_is_left_alone`.
+/// `idempotent_on_repeat_call`, `a_block_with_no_end_marker_is_left_alone`,
+/// `an_entry_spelled_outside_the_block_is_not_duplicated`,
+/// `a_failed_write_leaves_the_gitignore_intact_and_reports_the_error`.
 fn refresh_block(gitignore_path: &Path, existing: &str) -> std::io::Result<bool> {
     let lines: Vec<&str> = existing.lines().collect();
-    let Some(begin) = lines.iter().position(|l| *l == SCAFFOLD_GITIGNORE_BEGIN) else {
+    if !lines.contains(&SCAFFOLD_GITIGNORE_BEGIN) {
         return Ok(false);
-    };
-    let Some(end) = lines[begin..]
-        .iter()
-        .position(|l| *l == SCAFFOLD_GITIGNORE_END)
-        .map(|offset| begin + offset)
-    else {
+    }
+    let Some((begin, end)) = block_range(&lines) else {
         tracing::warn!(
             path = %gitignore_path.display(),
             "tm scaffolding block has no end marker — leaving it as the operator edited it"
@@ -197,11 +282,12 @@ fn refresh_block(gitignore_path: &Path, existing: &str) -> std::io::Result<bool>
         return Ok(false);
     };
 
-    let current = &lines[begin..=end];
-    if SCAFFOLD_IGNORED_PATHS
+    let desired = render_block_for(existing);
+    let current: String = lines[begin..=end]
         .iter()
-        .all(|managed| current.iter().any(|line| line.trim() == *managed))
-    {
+        .flat_map(|line| [*line, "\n"])
+        .collect();
+    if current == desired {
         return Ok(false);
     }
 
@@ -210,7 +296,7 @@ fn refresh_block(gitignore_path: &Path, existing: &str) -> std::io::Result<bool>
         rebuilt.push_str(line);
         rebuilt.push('\n');
     }
-    rebuilt.push_str(&render_block());
+    rebuilt.push_str(&desired);
     for line in &lines[end + 1..] {
         rebuilt.push_str(line);
         rebuilt.push('\n');
@@ -218,7 +304,10 @@ fn refresh_block(gitignore_path: &Path, existing: &str) -> std::io::Result<bool>
     if !existing.ends_with('\n') {
         rebuilt.pop();
     }
-    std::fs::write(gitignore_path, rebuilt)?;
+    atomic_write(gitignore_path, &rebuilt).map_err(|e| match e {
+        ManifestError::Io(io) => io,
+        other => std::io::Error::other(other.to_string()),
+    })?;
 
     tracing::info!(
         path = %gitignore_path.display(),
@@ -228,227 +317,5 @@ fn refresh_block(gitignore_path: &Path, existing: &str) -> std::io::Result<bool>
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn init_git_repo(dir: &Path) {
-        std::fs::create_dir_all(dir.join(".git")).unwrap();
-    }
-
-    #[test]
-    fn writes_block_to_fresh_gitignore() {
-        let tmp = crate::test_support::hermetic_temp_dir();
-        init_git_repo(tmp.path());
-
-        let wrote = ensure_scaffold_gitignored(tmp.path()).unwrap();
-        assert!(wrote, "first call must write the block");
-
-        let content = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
-        assert!(content.contains(SCAFFOLD_GITIGNORE_BEGIN));
-        assert!(content.contains(SCAFFOLD_GITIGNORE_END));
-        for path in SCAFFOLD_IGNORED_PATHS {
-            assert!(
-                content.contains(path),
-                "missing {path} in written .gitignore:\n{content}"
-            );
-        }
-        // Never blanket-ignore `.claude/` itself — settings.json / .mcp.json
-        // must remain trackable.
-        assert!(!content.lines().any(|l| l.trim() == ".claude/"));
-    }
-
-    #[test]
-    fn block_covers_session_output_but_not_project_config() {
-        // #4832: `tm` writes per-session output into `.trusty-mpm/` on every
-        // launch, so the block must name it — but must NOT swallow the
-        // operator-authored `framework/manifest.toml` or `config.toml`.
-        let tmp = crate::test_support::hermetic_temp_dir();
-        init_git_repo(tmp.path());
-        ensure_scaffold_gitignored(tmp.path()).unwrap();
-        let content = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
-
-        for covered in [
-            ".trusty-mpm/sessions/",
-            ".trusty-mpm/logs/",
-            ".trusty-mpm/last-instructions.md",
-        ] {
-            assert!(
-                content.lines().any(|l| l.trim() == covered),
-                "missing {covered} in:\n{content}"
-            );
-        }
-        for spared in [
-            ".trusty-mpm/",
-            ".trusty-mpm/framework/",
-            ".trusty-mpm/config.toml",
-            // #5207: the committed project config MUST stay trackable — being
-            // reviewable in a PR is the entire reason it exists. Scaffolding an
-            // ignore rule over it would silently defeat the feature.
-            crate::core::project_config::PROJECT_CONFIG_FILE,
-        ] {
-            assert!(
-                !content.lines().any(|l| l.trim() == spared),
-                "{spared} is operator config and must stay trackable"
-            );
-        }
-    }
-
-    #[test]
-    fn idempotent_on_repeat_call() {
-        let tmp = crate::test_support::hermetic_temp_dir();
-        init_git_repo(tmp.path());
-
-        assert!(ensure_scaffold_gitignored(tmp.path()).unwrap());
-        let first = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
-
-        // A second (and third) call must be a no-op — no duplicated block.
-        assert!(!ensure_scaffold_gitignored(tmp.path()).unwrap());
-        assert!(!ensure_scaffold_gitignored(tmp.path()).unwrap());
-        let second = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
-
-        assert_eq!(first, second, "repeat calls must not modify the file");
-        assert_eq!(
-            second.matches(SCAFFOLD_GITIGNORE_BEGIN).count(),
-            1,
-            "the begin marker must appear exactly once"
-        );
-    }
-
-    /// The two lock entries are spelled by `settings_lock`, not by hand (#7762).
-    ///
-    /// Why: the sidecar name is decided in `settings_lock::lock_sidecar` and
-    /// written here as a literal. This is what stops the two drifting — if the
-    /// sidecar suffix ever changes, this fails instead of the operator's
-    /// `git status` quietly growing an untracked file.
-    #[test]
-    fn lock_entries_match_the_settings_lock_sidecar() {
-        for settings in [".claude/settings.json", ".claude/settings.local.json"] {
-            let sidecar = crate::core::settings_lock::lock_sidecar(Path::new(settings));
-            let expected = sidecar.to_str().expect("a UTF-8 fixture path");
-            assert!(
-                SCAFFOLD_IGNORED_PATHS.contains(&expected),
-                "{expected} must be in SCAFFOLD_IGNORED_PATHS: {SCAFFOLD_IGNORED_PATHS:?}"
-            );
-        }
-        // The guarded files themselves stay trackable — only the lock artifact
-        // is ignored (issue #3427's "Important Note").
-        for spared in [".claude/settings.json", ".claude/settings.local.json"] {
-            assert!(
-                !SCAFFOLD_IGNORED_PATHS.contains(&spared),
-                "{spared} is project config and must stay trackable"
-            );
-        }
-    }
-
-    /// A project scaffolded before #7762 gains the new entries on the next pass.
-    ///
-    /// Why: the begin marker alone used to be the whole idempotency check, so an
-    /// existing block never gained an entry added later — the fix would have
-    /// reached only projects that had never run tm.
-    #[test]
-    fn an_existing_block_gains_newly_managed_paths() {
-        let tmp = crate::test_support::hermetic_temp_dir();
-        init_git_repo(tmp.path());
-        let gitignore_path = tmp.path().join(".gitignore");
-        // A pre-#7762 block: the markers plus the paths managed at that time.
-        std::fs::write(
-            &gitignore_path,
-            format!(
-                "node_modules/\n\n{SCAFFOLD_GITIGNORE_BEGIN}\n\
-                 .claude/agents/\n.claude/skills/\n.claude/output-styles/\n\
-                 {SCAFFOLD_GITIGNORE_END}\ncustom-tail/\n"
-            ),
-        )
-        .unwrap();
-
-        let refreshed = ensure_scaffold_gitignored(tmp.path()).unwrap();
-
-        assert!(refreshed, "a stale block must be refreshed");
-        let content = std::fs::read_to_string(&gitignore_path).unwrap();
-        for managed in SCAFFOLD_IGNORED_PATHS {
-            assert!(
-                content.lines().any(|l| l.trim() == *managed),
-                "missing {managed} after the refresh:\n{content}"
-            );
-        }
-        assert_eq!(
-            content.matches(SCAFFOLD_GITIGNORE_BEGIN).count(),
-            1,
-            "the refresh must replace the block, not add a second one"
-        );
-        assert!(
-            content.starts_with("node_modules/\n"),
-            "content before the block must survive:\n{content}"
-        );
-        assert!(
-            content.ends_with("custom-tail/\n"),
-            "content after the block must survive:\n{content}"
-        );
-        // And the refresh is itself idempotent.
-        assert!(!ensure_scaffold_gitignored(tmp.path()).unwrap());
-    }
-
-    /// A block whose end marker was hand-deleted is not rewritten.
-    ///
-    /// Why: the refresh needs both markers to know where the managed lines stop.
-    /// Guessing would delete whatever the operator wrote below the block.
-    #[test]
-    fn a_block_with_no_end_marker_is_left_alone() {
-        let tmp = crate::test_support::hermetic_temp_dir();
-        init_git_repo(tmp.path());
-        let gitignore_path = tmp.path().join(".gitignore");
-        let mangled = format!("{SCAFFOLD_GITIGNORE_BEGIN}\n.claude/agents/\nmine/\n");
-        std::fs::write(&gitignore_path, &mangled).unwrap();
-
-        let changed = ensure_scaffold_gitignored(tmp.path()).unwrap();
-
-        assert!(!changed);
-        assert_eq!(
-            std::fs::read_to_string(&gitignore_path).unwrap(),
-            mangled,
-            "an operator-edited block must be left byte-for-byte alone"
-        );
-    }
-
-    #[test]
-    fn preserves_unrelated_existing_content() {
-        let tmp = crate::test_support::hermetic_temp_dir();
-        init_git_repo(tmp.path());
-        let gitignore_path = tmp.path().join(".gitignore");
-        std::fs::write(&gitignore_path, "node_modules/\ntarget/\n").unwrap();
-
-        ensure_scaffold_gitignored(tmp.path()).unwrap();
-
-        let content = std::fs::read_to_string(&gitignore_path).unwrap();
-        assert!(content.starts_with("node_modules/\ntarget/\n"));
-        assert!(content.contains(SCAFFOLD_GITIGNORE_BEGIN));
-    }
-
-    #[test]
-    fn appends_newline_when_existing_file_lacks_trailing_newline() {
-        let tmp = crate::test_support::hermetic_temp_dir();
-        init_git_repo(tmp.path());
-        let gitignore_path = tmp.path().join(".gitignore");
-        // Deliberately no trailing newline.
-        std::fs::write(&gitignore_path, "node_modules/").unwrap();
-
-        ensure_scaffold_gitignored(tmp.path()).unwrap();
-
-        let content = std::fs::read_to_string(&gitignore_path).unwrap();
-        assert!(content.starts_with("node_modules/\n"));
-        assert!(
-            !content.contains("node_modules/#"),
-            "must not glue lines together"
-        );
-    }
-
-    #[test]
-    fn noop_when_not_a_git_repo() {
-        let tmp = crate::test_support::hermetic_temp_dir();
-        // No `.git` created.
-
-        let wrote = ensure_scaffold_gitignored(tmp.path()).unwrap();
-        assert!(!wrote, "must not write when project_dir is not a git repo");
-        assert!(!tmp.path().join(".gitignore").exists());
-    }
-}
+#[path = "scaffold_gitignore_tests.rs"]
+mod tests;
