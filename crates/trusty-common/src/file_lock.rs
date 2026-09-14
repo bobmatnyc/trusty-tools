@@ -30,12 +30,16 @@
 //! - **Never fail open.** A lock that cannot be created or acquired — including
 //!   one whose acquisition times out — is an `Err`; the closure never runs.
 //!   Proceeding unlocked is the lost-update bug this module exists to remove.
-//! - **Bounded, never indefinite.** Acquisition retries until
-//!   [`DEFAULT_LOCK_TIMEOUT`] (or the caller's own bound) and then fails with
-//!   an [`std::io::ErrorKind::TimedOut`] error wrapping a [`LockTimeout`]. A
-//!   holder that is wedged rather than dead — SIGSTOP'd, stopped in a debugger,
-//!   blocked on a network-mounted `$HOME` — therefore costs the waiter a
-//!   bounded delay and a diagnosable error instead of a silent hang (#7762).
+//! - **Bounded, never indefinite — for local contention.** Acquisition retries
+//!   until [`DEFAULT_LOCK_TIMEOUT`] (or the caller's own bound) and then fails
+//!   with an [`std::io::ErrorKind::TimedOut`] error wrapping a [`LockTimeout`].
+//!   A holder that is wedged rather than dead — SIGSTOP'd, stopped in a
+//!   debugger — therefore costs the waiter a bounded delay and a diagnosable
+//!   error instead of a silent hang (#7762). The bound is enforced BETWEEN
+//!   `try_write` attempts, not inside one: a `$HOME` wedged on a stalled
+//!   network filesystem can leave a single `flock(2)` call blocked past the
+//!   timeout, and the deadline is never reached because the loop never gets
+//!   control back.
 //! - **Diagnostic pid in the sidecar.** The holder writes its pid into the
 //!   sidecar after acquiring, which is the sidecar's only content and the only
 //!   thing a waiter reads out of it. It is best-effort: it goes stale on
@@ -159,7 +163,10 @@ pub fn with_exclusive_lock<R>(path: &Path, f: impl FnOnce() -> R) -> std::io::Re
 /// `timeout` elapses, records the acquiring pid in the sidecar, runs `f`, and
 /// releases the lock by RAII. One attempt always happens, so a zero `timeout`
 /// is a single try. On expiry the return is an [`std::io::ErrorKind::TimedOut`]
-/// error wrapping [`LockTimeout`] and `f` is never run.
+/// error wrapping [`LockTimeout`] and `f` is never run. The bound covers the
+/// gap BETWEEN `try_write` calls, not the inside of one: on a wedged network
+/// filesystem, a single `try_write` can block in `flock(2)` past `timeout`,
+/// and this function does not observe the deadline until that call returns.
 /// Test: `with_exclusive_lock_timeout_errors_while_another_descriptor_holds_it`,
 /// `with_exclusive_lock_timeout_reports_unknown_pid_for_a_garbage_sidecar`,
 /// `with_exclusive_lock_timeout_names_the_pid_of_a_holding_process`,
@@ -215,7 +222,11 @@ pub fn with_exclusive_lock_timeout<R>(
 /// locks, not these.
 /// What: truncate-and-rewrite under the lock we already hold, so the pid is the
 /// sidecar's whole content. Failures are swallowed: the pid is diagnostic, and
-/// an unwritable sidecar must not undo an acquisition that succeeded.
+/// an unwritable sidecar must not undo an acquisition that succeeded. A
+/// `set_len(0)` that succeeds followed by a rewind or write that fails leaves
+/// the sidecar empty rather than restoring its prior content; a later
+/// [`read_holder_pid`] then reports "holder pid unknown" exactly as it would
+/// for a sidecar that was never written.
 /// Test: `with_exclusive_lock_records_the_acquiring_pid`,
 /// `with_exclusive_lock_acquires_over_a_garbage_sidecar`.
 fn record_holder_pid(lock_file: &mut File) {
@@ -230,7 +241,10 @@ fn record_holder_pid(lock_file: &mut File) {
 /// Why: read on the failure path only, where any answer is better than none and
 /// no answer must still be an error.
 /// What: parses the sidecar's whole trimmed content as a pid. Missing, empty,
-/// non-UTF-8 and unparsable content all read as `None`.
+/// non-UTF-8 and unparsable content all read as `None`. This read is not
+/// synchronised with [`record_holder_pid`]'s truncate-then-write: a waiter can
+/// land in the gap between them, so `None` here also covers a live holder
+/// caught mid-write, not only an empty or garbage sidecar.
 /// Test: `with_exclusive_lock_timeout_reports_unknown_pid_for_a_garbage_sidecar`.
 fn read_holder_pid(lock: &Path) -> Option<u32> {
     std::fs::read_to_string(lock).ok()?.trim().parse().ok()
