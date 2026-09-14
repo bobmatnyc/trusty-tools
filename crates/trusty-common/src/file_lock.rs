@@ -56,6 +56,8 @@
 //! [`with_exclusive_lock`]: crate::file_lock::with_exclusive_lock
 //! [`with_exclusive_lock_timeout`]: crate::file_lock::with_exclusive_lock_timeout
 //! [`lock_path`]: crate::file_lock::lock_path
+//! [`DEFAULT_LOCK_TIMEOUT`]: crate::file_lock::DEFAULT_LOCK_TIMEOUT
+//! [`LockTimeout`]: crate::file_lock::LockTimeout
 
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, Write};
