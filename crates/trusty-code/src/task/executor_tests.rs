@@ -284,6 +284,7 @@ async fn project_tool_factory_threads_parity_mode_into_edit_tool() {
         project: project.path().to_path_buf(),
         mode: crate::mode::HarnessMode::Parity,
         skill_resolver: None,
+        mcp: tokio::sync::OnceCell::new(),
     };
     let agent = crate::agents::AgentConfig::default();
     let ctx = crate::tools::RunContext {
@@ -325,6 +326,7 @@ async fn engineer_registry_reads_embedded_agent_skill_pointers() {
         project: project.path().to_path_buf(),
         mode: crate::mode::HarnessMode::DailyDriver,
         skill_resolver: None,
+        mcp: tokio::sync::OnceCell::new(),
     };
     let registry = factory.build(&agent, &RunContext::default()).await;
     for (relative, content) in REFERENCED_SKILL_FILES {
@@ -377,6 +379,7 @@ async fn engineer_registry_includes_use_skill_when_catalog_present() {
         project: project.path().to_path_buf(),
         mode: crate::mode::HarnessMode::DailyDriver,
         skill_resolver: Some(resolver),
+        mcp: tokio::sync::OnceCell::new(),
     };
     let registry = with_resolver
         .build(
@@ -393,6 +396,7 @@ async fn engineer_registry_includes_use_skill_when_catalog_present() {
         project: project.path().to_path_buf(),
         mode: crate::mode::HarnessMode::DailyDriver,
         skill_resolver: None,
+        mcp: tokio::sync::OnceCell::new(),
     };
     let registry = without_resolver
         .build(

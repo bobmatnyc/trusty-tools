@@ -510,6 +510,7 @@ fn build_engineer_runner(
         skill_resolver: skills_catalog
             .as_ref()
             .map(|(_, resolver)| Arc::clone(resolver)),
+        mcp: tokio::sync::OnceCell::new(),
     });
 
     let mut runner = InProcessAgentRunner::new(engineer_llm, factory, params.agents_dir.clone())
@@ -557,6 +558,12 @@ fn build_engineer_runner(
 struct ProjectToolFactory {
     project: PathBuf,
     skill_resolver: Option<Arc<dyn SkillResolver>>,
+    /// #5428: the operator's configured MCP servers, spawned at most ONCE per
+    /// run and shared by every delegation's registry. A `OnceCell` rather than
+    /// an eager field because the load is async and this factory is built from
+    /// a sync helper; the first `build` pays for it, before the agent loop, and
+    /// no turn ever does.
+    mcp: tokio::sync::OnceCell<crate::mcp::McpToolSet>,
 }
 
 #[async_trait]
@@ -588,6 +595,15 @@ impl RegistryFactory for ProjectToolFactory {
         // runs through `task::executor`, which gates this on `HarnessMode`), so
         // registration is unconditional here.
         reg.register(Arc::new(TrustySearchTool::new(&self.project)));
+        // #5428: every MCP server the operator configured, as
+        // `mcp__<server>__<tool>`. The set is loaded once per run; a broken
+        // config or an unstartable server is reported here and costs only
+        // itself.
+        let mcp = self
+            .mcp
+            .get_or_init(|| crate::mcp::McpToolSet::load(&self.project))
+            .await;
+        crate::mcp::register_configured_tools(&mut reg, mcp).log();
         reg.register(Arc::new(BashTool::new(
             Some(self.project.clone()),
             Duration::from_secs(ENGINEER_BASH_TIMEOUT_SECS),

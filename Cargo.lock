@@ -11563,7 +11563,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-code"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11586,6 +11586,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-stream",
+ "toml 0.8.23",
  "tower",
  "tracing",
  "tracing-appender",
