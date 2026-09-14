@@ -483,6 +483,19 @@ pub mod prompt;
 /// Test: `jsonrpc::error::tests::*`, `jsonrpc::router::tests::*`.
 pub mod jsonrpc;
 
+/// The MCP servers this run is configured with, loaded and live (#5428).
+///
+/// Why: before this, `tcode` could reach exactly one MCP server — the
+/// hard-coded `search_code` tool. Every other connector in the file
+/// `trusty-agents` already reads (`~/.trusty-tools/mcp/servers.toml`) was
+/// invisible here.
+/// What: `McpToolSet::load` resolves the global and project tiers, gates the
+/// untrusted project tier by content, spawns each enabled stdio server in
+/// isolation, and exposes each advertised tool as `mcp__<server>__<tool>`;
+/// `register_configured_tools` puts them in a `ToolRegistry`.
+/// Test: `mcp::tests`, `crates/trusty-code/tests/mcp_loader_e2e.rs`.
+pub mod mcp;
+
 /// `tcode serve` daemon: STDIO + HTTP JSON-RPC transports + proof-of-life
 /// methods.
 ///

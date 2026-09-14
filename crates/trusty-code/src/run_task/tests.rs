@@ -2016,6 +2016,7 @@ async fn use_skill_absent_from_engineer_when_no_skills() {
     let factory = super::ProjectToolFactory {
         project: project.path().to_path_buf(),
         skill_resolver: None,
+        mcp: tokio::sync::OnceCell::new(),
     };
 
     let registry = factory
@@ -2045,6 +2046,7 @@ async fn engineer_registry_reads_embedded_agent_skill_pointers() {
     let factory = super::ProjectToolFactory {
         project: project.path().to_path_buf(),
         skill_resolver: None,
+        mcp: tokio::sync::OnceCell::new(),
     };
     let registry = factory.build(&agent, &RunContext::default()).await;
     for (relative, content) in REFERENCED_SKILL_FILES {

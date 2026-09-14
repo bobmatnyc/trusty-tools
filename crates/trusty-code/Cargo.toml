@@ -22,7 +22,13 @@ name = "trusty-code"
 # reads that key instead of `tools:`, which stays a pub(crate) projection — no
 # public item signature changed. `scripts/check-pr-version-bump.sh` requires
 # the bump in the same PR (#4421).
-version = "0.6.1"
+#
+# 0.6.2 (#5428): patch bump. Adds the `mcp` module (`McpToolSet`,
+# `register_configured_tools`, and the config/trust/spawn/tool submodules) and
+# enables `trusty-mcp/config`. Purely ADDITIVE — no existing public item
+# changed shape, and the two `ProjectToolFactory` structs that gained a field
+# are private — so Cargo's 0.x rule puts it in PATCH.
+version = "0.6.2"
 edition = "2024"
 rust-version.workspace = true
 # license.workspace resolves to "MIT"; LICENSE is kept in-crate for correctness.
@@ -134,7 +140,16 @@ globset = { workspace = true }
 # `crate-config` (#5203): supplies `workspace_layout::workspace_root`, the one
 # resolver the project picker shares with trusty-mpm. serde_yaml + thiserror are
 # already in this crate's dependency graph, so it adds no new transitive deps.
-trusty-mcp = { workspace = true }  # JSON-RPC / MCP primitives (ADR-0040, #5803)
+# #5428: `config` adds the ONE MCP-server configuration authority
+# (`McpServerConfig`, the shared `servers.toml`, the layered resolver) that
+# `crate::mcp` reads — the same file trusty-agents already reads, per
+# ADR-0060 decision 2. The feature is non-default upstream so a wire-only
+# consumer pays for neither `toml` nor `thiserror`; tcode needs both.
+trusty-mcp = { workspace = true, features = ["config"] }  # JSON-RPC / MCP primitives (ADR-0040, #5803)
+# #5428: `crate::mcp::config` parses `<project>/.trusty-code/mcp.toml`, the
+# project override tier. `toml` is already in this crate's graph through
+# `trusty-mcp/config`, so this adds no new transitive dependency.
+toml = { workspace = true }
 # `daemon-token` (#5439) supplies BOTH halves of the loopback credential: the
 # `0600` token file (`serve::http::run_http` writes it, `tui_client` reads it)
 # and — because `axum-server` is on here too — `server::bearer_auth`, the

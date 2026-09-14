@@ -648,6 +648,7 @@ fn build_engineer_runner(
         project: work_root.to_path_buf(),
         mode: params.mode,
         skill_resolver,
+        mcp: tokio::sync::OnceCell::new(),
     });
 
     let mut runner = InProcessAgentRunner::new(engineer_llm, factory, params.agents_dir.clone())
@@ -752,6 +753,10 @@ struct ProjectToolFactory {
     /// never discovers skills). Mirrors `run_task::ProjectToolFactory`'s
     /// `skill_resolver` field, which PR #2942 wired up on the legacy path.
     skill_resolver: Option<Arc<dyn SkillResolver>>,
+    /// #5428: the operator's configured MCP servers, spawned at most ONCE per
+    /// run and shared by every delegation's registry. Mirrors
+    /// `run_task::ProjectToolFactory`'s field, which is private to that module.
+    mcp: tokio::sync::OnceCell<crate::mcp::McpToolSet>,
 }
 
 #[async_trait]
@@ -786,6 +791,15 @@ impl RegistryFactory for ProjectToolFactory {
         // on the delegating run's resolved `HarnessMode`.
         if self.mode == HarnessMode::DailyDriver {
             reg.register(Arc::new(TrustySearchTool::new(&self.project)));
+            // #5428: the operator's configured MCP servers. DailyDriver ONLY,
+            // for the same reason `search_code` is — Parity must keep a
+            // byte-identical tool surface for benchmark fairness, and a
+            // machine's MCP config is not part of that surface.
+            let mcp = self
+                .mcp
+                .get_or_init(|| crate::mcp::McpToolSet::load(&self.project))
+                .await;
+            crate::mcp::register_configured_tools(&mut reg, mcp).log();
         }
         reg.register(Arc::new(BashTool::new(
             Some(self.project.clone()),
