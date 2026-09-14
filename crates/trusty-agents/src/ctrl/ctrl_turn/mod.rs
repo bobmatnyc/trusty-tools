@@ -140,10 +140,24 @@ pub(crate) async fn build_ctrl_turn_system_prompt(
     use crate::tools::traits::SkillResolver;
     let skill_resolver = crate::tools::skill_loader::FsSkillResolver::from_defaults();
     let mut injected_skills: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // #7881: the server-owned assistant skill floor. `ctrl.toml` declares
+    // `role = "assistant"` (#3812), so this whole prompt is assistant-kind and
+    // both injection loops below are bounded by it.
+    let skill_reachable = |name: &str| {
+        crate::agents::skill_floor::skill_is_reachable(
+            &agent_cfg.agent.role,
+            agent_cfg.skills.allow.as_deref(),
+            name,
+        )
+    };
     if let Some(skills) = &agent_cfg.system_prompt.skills
         && !skills.is_empty()
     {
         for s in skills {
+            if !skill_reachable(s) {
+                tracing::warn!(skill = %s, "ctrl skill is off the assistant floor; refused");
+                continue;
+            }
             if let Some(text) = skill_resolver.resolve(s) {
                 builder = builder.add_skill(format!("# Skill: {s}\n\n{text}"));
                 injected_skills.insert(s.clone());
@@ -160,6 +174,14 @@ pub(crate) async fn build_ctrl_turn_system_prompt(
         let dynamic_skills = skill_reg.search(user_input, 3);
         for s in dynamic_skills {
             if injected_skills.contains(&s) {
+                continue;
+            }
+            // #7881: the BM25 lane is the widest one — it matches the USER'S OWN
+            // WORDING against every discovered skill, so before the floor a
+            // message mentioning "rust" or "tests" pulled a coding skill into an
+            // assistant's prompt with nothing in the product deciding it.
+            if !skill_reachable(&s) {
+                tracing::debug!(skill = %s, "ctrl: dynamic skill is off the assistant floor; refused");
                 continue;
             }
             if let Some(text) = skill_resolver.resolve(&s) {

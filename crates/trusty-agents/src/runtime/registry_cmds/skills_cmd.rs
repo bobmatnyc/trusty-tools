@@ -272,20 +272,81 @@ pub(crate) async fn run_skills_subcommand(args: &[String]) -> Result<()> {
             Ok(())
         }
         "sources" => run_skills_sources_subcommand().await,
+        "effective" => {
+            let Some(agent) = args.get(1) else {
+                bail!("usage: tagent skills effective <agent>");
+            };
+            run_skills_effective_subcommand(agent).await
+        }
         other => {
             // #366: Surface a "did you mean?" hint for typos like
             // `skills sourcs` -> `skills sources`.
-            let known = &["list", "sources"];
+            let known = &["list", "sources", "effective"];
             if let Some(s) = cli::did_you_mean(other, known, 2) {
                 eprintln!("tagent skills: unknown subcommand '{other}'. Did you mean '{s}'?");
             } else {
                 eprintln!(
-                    "tagent skills: unknown subcommand '{other}'. Try: list [--tag <tag>] | sources"
+                    "tagent skills: unknown subcommand '{other}'. Try: list [--tag <tag>] | \
+                     sources | effective <agent>"
                 );
             }
             bail!("unknown skills subcommand: {other}");
         }
     }
+}
+
+/// Print one agent's EFFECTIVE skill set (`tagent skills effective <agent>`)
+/// (#7881).
+///
+/// Why: after #7881 an agent's reachable skills are no longer just what its
+/// TOML names — they are the server-owned floor
+/// (`agents::skill_floor::ASSISTANT_REACHABLE_SKILLS`) intersected with its own
+/// `[skills].allow`. Without a read surface, the only way to learn what an
+/// assistant may actually load is to read the constant and the merged
+/// `extends` chain by hand, which is exactly how a config surface and an
+/// enforcement point drift apart.
+/// What: resolves the agent through `AgentConfig::by_name_async` (so the
+/// `extends` chain is merged, i.e. what is actually enforced) and prints its
+/// role, whether the floor binds it, its declared `[system_prompt].skills`
+/// with a reachable/REFUSED marker per entry, and the effective set from
+/// `reachable_skills`. Reads only; changes nothing.
+/// Test: exercised by `cargo run -p trusty-agents -- skills effective
+/// cto-assistant`; the underlying set logic is unit-tested in
+/// `agents::skill_floor::skill_floor_tests`.
+async fn run_skills_effective_subcommand(agent: &str) -> Result<()> {
+    let cfg = agents::AgentConfig::by_name_async(agent)
+        .await
+        .with_context(|| format!("failed to load agent config for '{agent}'"))?;
+    let configured = cfg.skills.allow.as_deref();
+    let bound = crate::agents::skill_floor::role_is_assistant_kind_or_unknown(Some(
+        cfg.agent.role.as_str(),
+    ));
+    println!("Agent:  {} (role: {})", cfg.agent.name, cfg.agent.role);
+    println!(
+        "Floor:  {} ({} names)",
+        if bound {
+            "BOUND — assistant kind"
+        } else {
+            "not bound — non-assistant role"
+        },
+        crate::agents::skill_floor::ASSISTANT_REACHABLE_SKILLS.len()
+    );
+    match configured {
+        Some(list) => println!("[skills].allow: {} entry/entries declared", list.len()),
+        None => println!("[skills].allow: absent — the whole floor applies"),
+    }
+    let effective = crate::agents::skill_floor::reachable_skills(configured);
+    println!("Effective skills ({}):", effective.len());
+    for name in &effective {
+        println!("  {name}");
+    }
+    let declared = cfg.system_prompt.skills.clone().unwrap_or_default();
+    println!("Declared [system_prompt].skills ({}):", declared.len());
+    for name in &declared {
+        let ok = crate::agents::skill_floor::skill_is_reachable(&cfg.agent.role, configured, name);
+        println!("  {name}  [{}]", if ok { "reachable" } else { "REFUSED" });
+    }
+    Ok(())
 }
 
 /// Print configured skill sources (`trusty-agents skills sources`) (#172).

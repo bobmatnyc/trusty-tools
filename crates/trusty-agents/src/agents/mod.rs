@@ -35,6 +35,10 @@ pub mod permissions;
 pub mod persona;
 pub mod prompt_builder;
 pub mod registry;
+// #7881: the server-owned skill floor for assistant-kind agents — the skill
+// counterpart of `delegation`'s sub-agent floor, and `pub(crate)` for the same
+// reason: an enforcement primitive, not public surface.
+pub(crate) mod skill_floor;
 
 #[cfg(test)]
 pub(crate) mod tests;

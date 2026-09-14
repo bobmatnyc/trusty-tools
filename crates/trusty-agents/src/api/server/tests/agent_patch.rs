@@ -1036,3 +1036,159 @@ async fn patch_agent_subagent_whitelist_accepts_an_empty_list() {
         "an explicit empty list must persist as an empty array, not be omitted"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #7881 — the SKILLS floor on the same write path.
+// ---------------------------------------------------------------------------
+//
+// `skills_allow` shipped with the `tools_allow` posture: the caller-supplied
+// array was inserted verbatim, so a GUI or API write could hand an assistant
+// ANY skill name at all — every coding skill in the operator's
+// `~/.claude/skills/` library included. These four pin the floor.
+
+/// A `[skills].allow` write that NARROWS the floor is persisted.
+///
+/// Why: the refusal test below would pass against an endpoint that rejected
+/// every skills write. This is the non-vacuity half.
+/// What: two floor members round-trip into `[skills].allow`, normalized.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn patch_agent_writes_a_narrowed_skills_allow() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_package(tmp.path(), "izzie", PACKAGE_AGENT_TOML, "Original.\n");
+
+    let resp = patch_agent_at(
+        &[tmp.path().to_path_buf()],
+        "izzie",
+        PatchAgentRequest {
+            skills_allow: Some(vec!["tm-ticketing".to_string(), "TM-Workflow".to_string()]),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let raw = std::fs::read_to_string(tmp.path().join("izzie").join("agent.toml")).unwrap();
+    let doc: toml::Value = toml::from_str(&raw).expect("still valid TOML");
+    assert_eq!(
+        doc["skills"]["allow"],
+        toml::Value::Array(vec![
+            toml::Value::String("tm-ticketing".to_string()),
+            toml::Value::String("tm-workflow".to_string()),
+        ])
+    );
+}
+
+/// THE #7881 regression: a `[skills].allow` write may NOT widen an assistant's
+/// reachable skill set past the server-owned floor.
+///
+/// Why: this test FAILS on `origin/main`, where the request below is accepted
+/// `200` and `test-driven-development` + `rust-idiomatic` are persisted verbatim
+/// — a coding skill made reachable by an assistant through an unvalidated write.
+/// What: a mixed list (one legal, two coding) is refused `400`, both offenders
+/// are named back, and the file on disk is byte-identical — no partial write.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn patch_agent_rejects_a_skills_allow_that_widens_past_the_floor() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_package(tmp.path(), "izzie", PACKAGE_AGENT_TOML, "Original.\n");
+    let before = std::fs::read_to_string(tmp.path().join("izzie").join("agent.toml")).unwrap();
+
+    let resp = patch_agent_at(
+        &[tmp.path().to_path_buf()],
+        "izzie",
+        PatchAgentRequest {
+            skills_allow: Some(vec![
+                "tm-ticketing".to_string(),
+                "test-driven-development".to_string(),
+                "rust-idiomatic".to_string(),
+            ]),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let bytes = axum::body::to_bytes(resp.into_body(), 8 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let err = body["error"].as_str().unwrap();
+    assert!(err.contains("test-driven-development"), "{err}");
+    assert!(err.contains("rust-idiomatic"), "{err}");
+    assert!(err.contains("narrow"), "{err}");
+    assert_eq!(body["field"], "skills.allow");
+
+    let after = std::fs::read_to_string(tmp.path().join("izzie").join("agent.toml")).unwrap();
+    assert_eq!(
+        before, after,
+        "a refused write must leave the file byte-identical — no partial application"
+    );
+}
+
+/// Fail-Open Check: an agent whose `[agent].role` cannot be read is bound by
+/// the floor, not exempted from it.
+///
+/// Why: the floor lookup reads `role` out of the document being edited. If an
+/// absent or non-string role answered "not an assistant", a hand-edited (or
+/// truncated) file would be the way around the gate — the floor would default
+/// to everything for exactly the input it understands least.
+/// What: a fixture with NO `role` key refuses a widening write.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn patch_agent_skills_allow_floor_binds_an_agent_with_no_readable_role() {
+    const NO_ROLE: &str = "[agent]\nname = \"izzie\"\nmodel = \"anthropic/claude-sonnet-4-6\"\n\
+                           description = \"No role declared\"\n";
+    let tmp = tempfile::tempdir().unwrap();
+    write_package(tmp.path(), "izzie", NO_ROLE, "Original.\n");
+
+    let resp = patch_agent_at(
+        &[tmp.path().to_path_buf()],
+        "izzie",
+        PatchAgentRequest {
+            skills_allow: Some(vec!["test-driven-development".to_string()]),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "an unreadable role must fail closed onto the floor"
+    );
+}
+
+/// A declared WORKER role is outside the rule and writes through unchanged.
+///
+/// Why: the floor is the assistant kind's ceiling. Narrowing a coding
+/// sub-agent's skill grants would be a different, unratified decision, and
+/// silently applying it here would break every engineer/QA agent's skill
+/// configuration as a side effect of an assistant change.
+/// What: an `engineer`-role package accepts a coding skill.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn patch_agent_skills_allow_is_unbound_for_a_worker_role() {
+    const WORKER: &str = "[agent]\nname = \"engineer\"\nrole = \"engineer\"\n\
+                          model = \"anthropic/claude-sonnet-4-6\"\ndescription = \"Worker\"\n";
+    let tmp = tempfile::tempdir().unwrap();
+    write_package(tmp.path(), "engineer", WORKER, "Original.\n");
+
+    let resp = patch_agent_at(
+        &[tmp.path().to_path_buf()],
+        "engineer",
+        PatchAgentRequest {
+            skills_allow: Some(vec!["test-driven-development".to_string()]),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let raw = std::fs::read_to_string(tmp.path().join("engineer").join("agent.toml")).unwrap();
+    let doc: toml::Value = toml::from_str(&raw).expect("still valid TOML");
+    assert_eq!(
+        doc["skills"]["allow"],
+        toml::Value::Array(vec![toml::Value::String(
+            "test-driven-development".to_string()
+        )])
+    );
+}
