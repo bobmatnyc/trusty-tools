@@ -6,6 +6,10 @@
 //! assistant message, and appends the `## Prompt feedback` section — if there
 //! is one — to the ledger.
 //!
+//! It also measures a stopping SUBAGENT's report against the BASE-AGENT word
+//! cap (owner ruling 2026-09-14) and warns on an overrun — see
+//! [`warn_over_cap_report`]. Warn-only: nothing here rewrites or blocks.
+//!
 //! Registered ONLY when the flag is on, by
 //! [`prompt_feedback_hooks`](trusty_mpm::core::prompt_self_improvement), so a
 //! project with the feature off pays nothing: no matcher in its
@@ -40,6 +44,32 @@ use trusty_mpm::core::prompt_feedback::{FeedbackRow, PM_AGENT_TYPE, UNKNOWN_SUBA
 /// What: 2 MiB, ample for one turn's content blocks.
 /// Test: `reads_the_final_message_from_the_tail_of_a_large_transcript`.
 const TRANSCRIPT_TAIL_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Hand-back word cap for a subagent report that names no failure.
+///
+/// Why: owner ruling 2026-09-14 (token savings) put a number on BASE-AGENT's
+/// "verbosity scales with what went wrong". A qualitative rule cannot be
+/// measured, so nothing ever told an operator which agent overruns it.
+/// What: 300 prose words, the same number BASE-AGENT.md states.
+/// Test: `an_over_cap_clean_report_warns_and_records_the_row`.
+const CLEAN_REPORT_WORD_CAP: usize = 300;
+
+/// Hand-back word cap for a report that names a failure.
+///
+/// What: 600 prose words — a failing run legitimately owes more explanation.
+/// Test: `a_failure_report_is_measured_against_the_higher_cap`.
+const FAILURE_REPORT_WORD_CAP: usize = 600;
+
+/// Prose markers that put a report on [`FAILURE_REPORT_WORD_CAP`].
+///
+/// Why: the hook cannot know whether the run failed, so it reads the report's
+/// own words. Matched against PROSE ONLY — every passing `cargo test` block
+/// contains `0 failed`, so scanning fenced output would put every report on
+/// the higher cap. Ties go to the HIGHER cap: a warn-only measurement that
+/// cries wolf gets ignored, which costs more than a missed warning.
+/// What: lowercase substrings, scanned case-insensitively.
+/// Test: `a_failure_report_is_measured_against_the_higher_cap`.
+const FAILURE_MARKERS: [&str; 4] = ["needs attention", "failed", "failure", "blocked"];
 
 /// Run the capture. Always exits 0.
 ///
@@ -76,9 +106,11 @@ fn read_stdin_payload() -> Option<Value> {
 /// directory. Naming the root is what lets the tests below assert the write on
 /// a tempdir without a PROCESS-GLOBAL `$HOME` mutation — which this binary's
 /// `env_isolation_tests.rs` ratchet forbids outright for a new file.
-/// What: returns whether a row was appended. `false` for every fail-open arm:
-/// no payload, no transcript path, an unreadable transcript, no
-/// `## Prompt feedback` section, or a ledger that would not take the write.
+/// What: returns whether a `## Prompt feedback` row was appended. `false` for
+/// every fail-open arm: no payload, no transcript path, an unreadable
+/// transcript, no `## Prompt feedback` section, or a ledger that would not take
+/// the write. A report-length row from [`warn_over_cap_report`] is a separate,
+/// independent append and does NOT change this return value.
 /// Test: the inline suite below.
 pub(crate) fn capture_into(framework_root: &Path, payload: Option<&Value>) -> bool {
     let Some(payload) = payload else {
@@ -99,6 +131,8 @@ pub(crate) fn capture_into(framework_root: &Path, payload: Option<&Value>) -> bo
         return false;
     };
 
+    warn_over_cap_report(framework_root, payload, &message);
+
     let Some(feedback) = trusty_mpm::core::prompt_feedback::extract_feedback(&message) else {
         // The overwhelmingly common case for a turn that simply did not emit
         // the section. Not a warning — it is not a failure.
@@ -106,7 +140,18 @@ pub(crate) fn capture_into(framework_root: &Path, payload: Option<&Value>) -> bo
         return false;
     };
 
-    let row = FeedbackRow {
+    trusty_mpm::core::prompt_feedback::append_row(framework_root, &row_for(payload, feedback))
+}
+
+/// Build one ledger row for `payload` carrying `feedback`.
+///
+/// Why: both writers — the `## Prompt feedback` capture and the report-length
+/// observation below — book their row against the same session, agent type and
+/// prompt digest, so the shape is derived once rather than spelled twice.
+/// Test: via `a_stop_payload_writes_a_pm_row` and
+/// `an_over_cap_clean_report_warns_and_records_the_row`.
+fn row_for(payload: &Value, feedback: String) -> FeedbackRow {
+    FeedbackRow {
         ts: chrono::Utc::now().to_rfc3339(),
         session_id: payload
             .get("session_id")
@@ -115,8 +160,100 @@ pub(crate) fn capture_into(framework_root: &Path, payload: Option<&Value>) -> bo
         agent_type: agent_type_for(payload).to_string(),
         prompt_digest: prompt_digest(payload),
         feedback,
+    }
+}
+
+/// Measure a stopping subagent's report against its cap; warn when over.
+///
+/// Why: BASE-AGENT.md caps a hand-back report at [`CLEAN_REPORT_WORD_CAP`]
+/// words clean, [`FAILURE_REPORT_WORD_CAP`] with failures (owner ruling
+/// 2026-09-14, token savings). Nothing measured compliance, so an agent that
+/// wrote 2,000 words of narration cost the operator that context every run
+/// with no signal. This is MEASUREMENT ONLY — no shipped mechanism rewrites a
+/// subagent's output at `SubagentStop`, and truncating a report the PM has
+/// already read would change nothing.
+///
+/// 🔴 WARN-ONLY, FAIL-OPEN. It never blocks, never rewrites, never returns an
+/// error, and its caller exits 0 regardless — a `SubagentStop` hook that fails
+/// is surfaced to the operator as a broken session, and a length observation
+/// can never be worth that. A malformed payload reaches neither this function
+/// nor a warning: `capture_into` has already returned.
+/// What: skips a plain `Stop` (the PM's own turn is not a hand-back report),
+/// counts the prose words outside fenced blocks, and on an overrun writes one
+/// line to stderr and appends the same line to the prompt-feedback ledger —
+/// the observation store this hook already writes.
+/// Test: `an_over_cap_clean_report_warns_and_records_the_row`,
+/// `a_fenced_block_does_not_count_toward_the_report_cap`,
+/// `a_failure_report_is_measured_against_the_higher_cap`,
+/// `a_malformed_payload_produces_no_length_warning`.
+fn warn_over_cap_report(framework_root: &Path, payload: &Value, message: &str) {
+    // A `Stop` is the main session ending, not an agent handing back.
+    if payload.get("hook_event_name").and_then(Value::as_str) == Some("Stop") {
+        return;
+    }
+    let Some(warning) = over_cap_warning(agent_type_for(payload), message) else {
+        return;
     };
-    trusty_mpm::core::prompt_feedback::append_row(framework_root, &row)
+    // `eprintln!`, not `tracing::warn!`: `tm hook` installs no subscriber
+    // (`tracing_setup::wants_cli_diagnostics` does not cover it), so a
+    // `tracing` event here would reach no one.
+    eprintln!("{warning}");
+    trusty_mpm::core::prompt_feedback::append_row(framework_root, &row_for(payload, warning));
+}
+
+/// The one-line overrun warning for `message`, or `None` when it is within cap.
+///
+/// What: names `agent_type`, the prose word count, and the cap that applied —
+/// the three facts an operator needs to act without opening the transcript.
+/// Test: `an_over_cap_clean_report_warns_and_records_the_row`.
+fn over_cap_warning(agent_type: &str, message: &str) -> Option<String> {
+    let prose = prose_outside_fences(message);
+    let words = prose.split_whitespace().count();
+    let cap = applicable_cap(&prose);
+    (words > cap).then(|| {
+        format!(
+            "report-length: `{agent_type}` handed back {words} prose words, over the \
+             {cap}-word cap (owner ruling 2026-09-14); fenced output is not counted"
+        )
+    })
+}
+
+/// The lines of `message` that lie outside fenced code blocks.
+///
+/// Why: raw gate output is the evidence an agent owes and is explicitly
+/// exempt from the cap, so counting it would penalise the reports that comply.
+/// What: joins every line outside a ``` fence. An UNTERMINATED fence swallows
+/// the rest of the message, which undercounts — the safe direction for a
+/// warn-only measurement.
+/// Test: `a_fenced_block_does_not_count_toward_the_report_cap`.
+fn prose_outside_fences(message: &str) -> String {
+    let mut inside = false;
+    let mut prose = String::new();
+    for line in message.lines() {
+        if line.trim_start().starts_with("```") {
+            inside = !inside;
+            continue;
+        }
+        if !inside {
+            prose.push_str(line);
+            prose.push('\n');
+        }
+    }
+    prose
+}
+
+/// Which cap `prose` is measured against.
+///
+/// What: [`FAILURE_REPORT_WORD_CAP`] when any [`FAILURE_MARKERS`] entry appears
+/// case-insensitively, else [`CLEAN_REPORT_WORD_CAP`].
+/// Test: `a_failure_report_is_measured_against_the_higher_cap`.
+fn applicable_cap(prose: &str) -> usize {
+    let lowered = prose.to_lowercase();
+    if FAILURE_MARKERS.iter().any(|m| lowered.contains(m)) {
+        FAILURE_REPORT_WORD_CAP
+    } else {
+        CLEAN_REPORT_WORD_CAP
+    }
 }
 
 /// Which agent type this event's row is booked under (#7702).
