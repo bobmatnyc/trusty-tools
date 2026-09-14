@@ -391,7 +391,8 @@ fn project_mpm_agent(default_name: &str, meta: AgentMetadata, body: String) -> A
         rbac: crate::agents::RbacConfig::default(),
         workstreams: crate::agents::WorkstreamContextConfig::default(),
         adapter,
-        listeners: Vec::new(),
+        legacy_listeners: Vec::new(),
+        channels: Vec::new(),
         stores: crate::stores::StoresConfig::default(),
         // Dependency list, NOT a permission grant: see this function's doc.
         skills: crate::agents::SkillsConfig::default(),

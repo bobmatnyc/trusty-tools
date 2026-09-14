@@ -13,6 +13,10 @@
 //! [`credentials`] resolves a binding's `credential_ref` to a
 //! [`trusty_common::credentials::Secret`]; [`status`] holds the per-binding
 //! dispatch-failure counter the assistant's channel view reads.
+//! [`model::Channel`] is the ONE type a listener and a channel binding both
+//! collapse into (#7609); [`migrate`] drains the legacy `[[listeners]]` tables
+//! into it and [`resolve_channels`] states which of two bindings on the same
+//! destination wins.
 //! [`ChannelAdapter::addresses`] is how a binding claims an inbound event —
 //! equality on a destination id for Slack and Telegram, a sender or label match
 //! for Gmail (#7427).
@@ -25,13 +29,20 @@
 // #7427: adapter model for two-way channel connectors (epic #7425 item b).
 pub(crate) mod credentials;
 mod gworkspace;
+// #7609: listeners and channel bindings are one type now — the model, its
+// storage migrations, and the global-vs-assistant precedence rule.
+pub mod migrate;
+pub mod model;
 mod registry;
+pub mod resolve;
 mod slack;
 pub(crate) mod status;
 mod telegram;
 
 pub(crate) use credentials::{resolve_credential, validate_credential_ref};
+pub use model::{Channel, ChannelScope};
 pub(crate) use registry::{adapter, providers_json, require_adapter};
+pub use resolve::resolve_channels;
 // #7427 (PR 2): the Telegram long-poll loop resolves its bot token through the
 // same reference a binding names, so `crate::telegram` never reads the
 // environment itself.

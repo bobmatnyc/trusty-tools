@@ -21,7 +21,7 @@
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-fn default_poll_interval_secs() -> u64 {
+pub(crate) fn default_poll_interval_secs() -> u64 {
     // DOC-54 §7.3.1: history-poll fallback default (2-5 min band); 180s
     // sits in the middle, quota-conscious without being sluggish for a demo.
     180
@@ -50,7 +50,7 @@ pub const MIN_POLL_INTERVAL_SECS: u64 = 15;
 /// more conservatively than the operator typed."
 /// Test: `listener_config_clamps_poll_interval_below_floor`,
 /// `listener_config_leaves_poll_interval_above_floor_untouched`.
-fn deserialize_clamped_poll_interval<'de, D>(deserializer: D) -> Result<u64, D::Error>
+pub(crate) fn deserialize_clamped_poll_interval<'de, D>(deserializer: D) -> Result<u64, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -67,7 +67,7 @@ where
     }
 }
 
-fn default_transport() -> String {
+pub(crate) fn default_transport() -> String {
     "history-poll".to_string()
 }
 

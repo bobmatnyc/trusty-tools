@@ -567,7 +567,22 @@ pub async fn serve_with_config(cfg: ApiConfig) -> Result<()> {
     let listener_project_path =
         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let global_config = crate::mcp::config::GlobalConfig::load().await;
-    crate::listeners::poll::spawn_listeners(global_config.listeners, listener_project_path.clone());
+    // #7609: the derived view, projected out of `[[channels]]`.
+    crate::listeners::poll::spawn_listeners(
+        global_config.listeners(),
+        listener_project_path.clone(),
+    );
+
+    // #7609: the per-assistant half of the listeners->channels merge. Runs
+    // once per process, here because this is the only startup path that
+    // already holds the global channels a binding resolves its provider from.
+    // Detached, NEVER awaited — same reason as the docs index above: the sweep
+    // writes under a blocking advisory lock with no timeout, and a held lock
+    // would otherwise stall the bind below (see `spawn_assistant_migration`).
+    crate::channels::migrate::spawn_assistant_migration(
+        crate::agents::agents_dir_candidates(),
+        global_config.channels.clone(),
+    );
 
     // #6537: same fire-and-forget pattern as the listeners above — a
     // config problem is logged and the drain alone is skipped, never a

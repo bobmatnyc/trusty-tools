@@ -283,7 +283,8 @@ pub(super) fn event_inputs(
                 .iter()
                 .any(|b| catalog::slack_source(b).as_ref() == Some(source))
         } else {
-            context.config.listeners.iter().any(|b| {
+            // #7609: the derived view.
+            context.config.listeners().iter().any(|b| {
                 crate::listeners::wake::binding_matches_event(b, &event)
                     && context.listeners.iter().any(|l| {
                         l.filter.matches_labels(&event.labels)

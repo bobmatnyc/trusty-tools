@@ -309,7 +309,8 @@ async fn listeners_section_defaults_empty() {
     // predates this field) must still parse, with an empty list.
     let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let cfg = GlobalConfig::from_toml_str("").expect("empty config parses");
-    assert!(cfg.listeners.is_empty());
+    assert!(cfg.listeners().is_empty());
+    assert!(cfg.channels.is_empty());
 }
 
 #[tokio::test]
@@ -320,7 +321,7 @@ async fn listeners_section_round_trips() {
         std::env::set_var("HOME", &home);
     }
     let mut cfg = GlobalConfig::default();
-    cfg.listeners
+    cfg.legacy_listeners
         .push(crate::listeners::config::ListenerConfig {
             name: "gmail-personal".to_string(),
             connector: "gmail".to_string(),
@@ -334,18 +335,92 @@ async fn listeners_section_round_trips() {
         });
     cfg.save().await.expect("save should succeed");
     let reloaded = GlobalConfig::load().await;
-    assert_eq!(reloaded.listeners.len(), 1);
-    assert_eq!(reloaded.listeners[0].name, "gmail-personal");
+    // #7609: the legacy table is still on disk and still answers through the
+    // derived view, which is the whole promise of the deprecated alias.
+    let listeners = reloaded.listeners();
+    assert_eq!(listeners.len(), 1);
+    assert_eq!(listeners[0].name, "gmail-personal");
+    assert_eq!(listeners[0].identity.as_deref(), Some("bob-personal"));
+    assert!(!listeners[0].enabled, "round-trips disabled-by-default");
+    assert_eq!(listeners[0].filter.label_ids, vec!["INBOX".to_string()]);
+}
+
+/// The live `~/.trusty-agents/config.toml` listener, reproduced as a fixture.
+const LEGACY_LISTENERS_CONFIG: &str = r#"
+[[listeners]]
+name = "gmail-personal"
+connector = "gmail"
+identity = "bob-personal"
+enabled = true
+poll_interval_secs = 60
+filter = { label_ids = ["INBOX"] }
+"#;
+
+/// The same file AFTER the one-shot migration: both tables, one id.
+const MIGRATED_CONFIG: &str = r#"
+[[listeners]]
+name = "gmail-personal"
+connector = "gmail"
+identity = "bob-personal"
+enabled = true
+poll_interval_secs = 60
+filter = { label_ids = ["INBOX"] }
+
+[[channels]]
+id = "gmail-personal"
+name = "gmail-personal"
+provider = "gmail"
+enabled = true
+poll_interval_secs = 60
+credential_ref = "gmail/bob-personal"
+
+[channels.ingest_filter]
+label_ids = ["INBOX"]
+"#;
+
+#[test]
+fn a_legacy_listeners_table_is_absorbed_into_channels() {
+    // #7609: the deprecated alias keeps working with no on-disk migration.
+    let cfg = GlobalConfig::from_toml_str(LEGACY_LISTENERS_CONFIG).expect("legacy config parses");
+    assert_eq!(cfg.channels.len(), 1, "the legacy entry became a channel");
+    assert_eq!(cfg.channels[0].scope, crate::channels::ChannelScope::Global);
+    assert_eq!(cfg.channels[0].provider, "gmail");
     assert_eq!(
-        reloaded.listeners[0].identity.as_deref(),
-        Some("bob-personal")
+        cfg.channels[0].credential_ref.as_deref(),
+        Some("gmail/bob-personal")
     );
-    assert!(
-        !reloaded.listeners[0].enabled,
-        "round-trips disabled-by-default"
+
+    let listeners = cfg.listeners();
+    assert_eq!(listeners.len(), 1);
+    assert_eq!(listeners[0].name, "gmail-personal");
+    assert_eq!(listeners[0].connector, "gmail");
+    assert_eq!(listeners[0].identity.as_deref(), Some("bob-personal"));
+    assert!(listeners[0].enabled);
+    assert_eq!(listeners[0].poll_interval_secs, 60);
+    assert_eq!(listeners[0].filter.label_ids, vec!["INBOX".to_string()]);
+    assert_eq!(
+        listeners[0].transport, "history-poll",
+        "the transport default survives the projection"
     );
     assert_eq!(
-        reloaded.listeners[0].filter.label_ids,
-        vec!["INBOX".to_string()]
+        listeners, cfg.legacy_listeners,
+        "the derived view must equal the legacy table field for field"
     );
+}
+
+#[test]
+fn an_already_migrated_listener_is_not_absorbed_twice() {
+    // #7609: the channel wins, and nothing is duplicated however many times
+    // the migrated file is re-read.
+    let cfg = GlobalConfig::from_toml_str(MIGRATED_CONFIG).expect("a migrated config parses");
+    assert_eq!(cfg.channels.len(), 1, "no duplicate entry");
+    assert_eq!(cfg.listeners().len(), 1);
+    assert_eq!(cfg.listeners(), cfg.legacy_listeners);
+}
+
+#[test]
+fn a_config_with_no_listeners_derives_no_channels() {
+    let cfg = GlobalConfig::from_toml_str("").expect("empty config parses");
+    assert!(cfg.channels.is_empty());
+    assert!(cfg.listeners().is_empty());
 }

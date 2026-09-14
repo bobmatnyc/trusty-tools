@@ -63,7 +63,9 @@ pub(crate) async fn listener(event: &StoredEvent) {
     for id in crate::assistants::discover_instances(&dirs) {
         let result = async {
             let context = Context::load(id.as_str()).await?;
-            let source = context.config.listeners.iter().find_map(|binding| {
+            // #7609: the derived view.
+            let bindings = context.config.listeners();
+            let source = bindings.iter().find_map(|binding| {
                 if !crate::listeners::wake::binding_matches_event(binding, event) {
                     return None;
                 }

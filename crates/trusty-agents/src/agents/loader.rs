@@ -43,6 +43,53 @@ fn validate_agent_name(name: &str) -> Result<()> {
 }
 
 impl AgentConfig {
+    /// This assistant's channel bindings, projected out of `channels`.
+    ///
+    /// Why (#7609): `[[listeners]]` and a channel binding are one concept now,
+    /// so there is one list in memory. This is the derived view every existing
+    /// consumer reads — `crate::listeners::wake`, the knowledge pipeline, the
+    /// listener API — and it answers exactly what the removed `listeners`
+    /// field held, so no wake decision changed.
+    /// What: every `Assistant`-scope channel as an `AgentListenerBinding`, in
+    /// stored order.
+    /// Test: `an_agent_toml_listeners_table_is_absorbed_into_channels`.
+    pub fn listeners(&self) -> Vec<crate::listeners::config::AgentListenerBinding> {
+        crate::channels::model::project(
+            &self.channels,
+            crate::channels::ChannelScope::Assistant,
+            crate::channels::Channel::to_agent_binding,
+        )
+    }
+
+    /// Fold any legacy `[[listeners]]` binding into `channels`, in memory.
+    ///
+    /// Why (#7609): parsing an `agent.toml` must never have a side effect on
+    /// disk — this runs on listing, dispatch and inheritance paths, not only
+    /// on writes. Persisting the result is a separate one-shot
+    /// ([`crate::channels::migrate::migrate_agent_channels_if_absent`]).
+    /// What: scope is set from this file's location, then each legacy binding
+    /// with no channel of the same `id` is appended with an EMPTY provider —
+    /// the binding names a global channel and this parse cannot see one.
+    /// Warns once per process.
+    /// Test: `an_agent_toml_listeners_table_is_absorbed_into_channels`,
+    /// `an_agent_channel_is_not_absorbed_twice`.
+    pub(crate) fn absorb_legacy_listeners(&mut self) {
+        for channel in &mut self.channels {
+            channel.scope = crate::channels::ChannelScope::Assistant;
+        }
+        if self.legacy_listeners.is_empty() {
+            return;
+        }
+        crate::channels::migrate::warn_agent_listeners_deprecated();
+        for binding in self.legacy_listeners.clone() {
+            if self.channels.iter().any(|c| c.id == binding.name) {
+                continue;
+            }
+            self.channels
+                .push(crate::channels::Channel::from_agent_binding(binding, ""));
+        }
+    }
+
     /// Load an AgentConfig from a TOML file path.
     ///
     /// Why: Centralizes file-read + parse error handling so callers get one
@@ -629,6 +676,9 @@ impl AgentConfig {
     pub(super) fn from_toml_str(raw: &str, path: &Path) -> Result<Self> {
         let mut cfg: AgentConfig = toml::from_str(raw)
             .with_context(|| format!("failed to parse agent TOML {}", path.display()))?;
+        // #7609: the deprecated `[[listeners]]` table keeps working — folded
+        // into `channels` here so every caller of this parse sees one list.
+        cfg.absorb_legacy_listeners();
         Self::validate_llm_required_for_root(&cfg, path)?;
         // #367: Substitute runtime context variables in the system prompt at
         // load time so every downstream consumer (prompt_builder, claude-code

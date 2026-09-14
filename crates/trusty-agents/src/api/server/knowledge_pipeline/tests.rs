@@ -228,11 +228,15 @@ async fn catalogue_never_promotes_registration_or_disabled_channels_to_sources()
         toml::from_str("name='mail'\nconnector='gmail'\nenabled=true\nidentity='fixture-account'")
             .unwrap(),
     );
+    // #7609: an assistant's bindings live on `channels` now.
     ctx.config
-        .listeners
-        .push(toml::from_str("name='mail'\nenabled=false").unwrap());
+        .channels
+        .push(crate::channels::Channel::from_agent_binding(
+            toml::from_str("name='mail'\nenabled=false").unwrap(),
+            "gmail",
+        ));
     assert!(ctx.sources(&BTreeMap::new()).unwrap().is_empty());
-    ctx.config.listeners[0].enabled = true;
+    ctx.config.channels[0].enabled = true;
     let before = ctx.sources(&BTreeMap::new()).unwrap();
     assert_eq!(before.len(), 1);
     ctx.listeners[0].identity = Some("changed-account".into());
