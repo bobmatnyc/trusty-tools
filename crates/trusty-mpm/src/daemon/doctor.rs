@@ -234,11 +234,18 @@ use doctor_log_drain::check_log_drain;
 mod doctor_legacy_overrides;
 use doctor_legacy_overrides::check_legacy_overrides;
 
-// #7616: the fold's decline was reported only as a one-time daemon-log warning,
-// so a missing 💸 segment had no explanation on any surface an operator reads.
-#[path = "doctor_instruction_compression.rs"]
-mod doctor_instruction_compression;
-use doctor_instruction_compression::check_instruction_compression;
+// #7616: the fold's decline was reported only as a one-time daemon-log line, so
+// nothing an operator reads said whether the instruction fold saves anything.
+#[path = "doctor_instruction_fold.rs"]
+mod doctor_instruction_fold;
+use doctor_instruction_fold::check_instruction_fold;
+
+// #7867: what the 💸 segment actually measures — tool-output compression, from
+// the segment's own ledger rows. The row above answers about a different
+// measurement that used to share the word "compression".
+#[path = "doctor_tool_output_compression.rs"]
+mod doctor_tool_output_compression;
+use doctor_tool_output_compression::check_tool_output_compression;
 
 // #7617: whether the 💸 segment is wired at all — the settings tiers, the
 // readability of its two inputs, and the render rule. Three disappearances had
@@ -399,7 +406,7 @@ use doctor_sidecars::{check_memory, check_search};
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_fifty_two_checks`,
+/// Test: `run_doctor_produces_fifty_three_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -523,12 +530,17 @@ pub(crate) async fn run_doctor_with_claims(
         // PM, so this Fails loudly and names the CLAUDE.md migration.
         check_legacy_overrides(project_dir),
         // #7616: states whether the instruction fold is saving anything for this
-        // project, so "no 💸 segment" stops being the only evidence.
-        check_instruction_compression(project_dir),
+        // project, so a daemon-log line stops being the only evidence.
+        check_instruction_fold(project_dir),
+        // #7867: and this one states what the 💸 segment itself measures — the
+        // `compress` and `divert` rows on the ledger it folds. The row above
+        // answers a different question that used to share the word
+        // "compression".
+        check_tool_output_compression(&paths.root),
         // #7617: and this one reports whether the 💸 segment can render AT ALL —
         // the `statusLine` entry in each tier, whether the ledger and the
         // per-session record store are readable, and whether the render rule
-        // produces a figure. `instruction_compression` above answers whether
+        // produces a figure. `tool_output_compression` above answers whether
         // there is anything to show; this answers whether it could be shown.
         check_statusline(project_dir, &paths.root),
         agent_skills,
@@ -726,7 +738,7 @@ pub async fn run_doctor_for_manager(
 /// and resolves the managed Claude config dir, then calls
 /// [`doctor_auto_memory::check_auto_memory`].
 /// Test: the three verdicts are covered directly in `doctor_auto_memory_tests`;
-/// this wiring is covered by `run_doctor_produces_fifty_two_checks`.
+/// this wiring is covered by `run_doctor_produces_fifty_three_checks`.
 async fn auto_memory_row(
     project_dir: Option<&Path>,
     home: &Path,

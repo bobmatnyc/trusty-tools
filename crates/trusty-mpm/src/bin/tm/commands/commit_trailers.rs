@@ -15,7 +15,7 @@
 //! | Trailer | Source |
 //! |---|---|
 //! | `Tokens-In` / `Tokens-Out` | the session transcript, folded and deduped by message id |
-//! | `Savings` | `usage/savings.jsonl`, folded for this session, as the `💸` segment's percent |
+//! | `Savings` | `usage/savings.jsonl`, folded for this session across EVERY technique — the commit records what the session saved in total, where the `💸` segment folds per-call tool-output compression only (#7867) |
 //! | `Model` | `usage/session-model/<session_id>`, written by the statusline render |
 //!
 //! Any value with no source is omitted rather than rendered as a zero. The

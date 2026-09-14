@@ -566,9 +566,9 @@ pub fn count_markers(root: &Path) -> std::io::Result<usize> {
 /// per minute under EVERY byte pair present, this session's genuine
 /// `26810 29172` pair included, so no per-file rule separates a test marker
 /// from a real one. What makes moving all of them safe instead is what the
-/// marker IS — a warn-once cache read by
-/// [`crate::core::savings_sidecar::warn_no_fold_once`]. Losing one costs a
-/// single repeated warning on the next launch of that project and nothing
+/// marker IS — a log-once cache read by
+/// [`crate::core::savings_sidecar::log_no_fold_once`]. Losing one costs a
+/// single repeated `debug!` line on the next launch of that project and nothing
 /// else.
 /// What: renames `usage/no-fold-warned` to
 /// `usage/no-fold-warned.quarantine-<stamp>`, one atomic operation that keeps

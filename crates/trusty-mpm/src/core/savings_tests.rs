@@ -698,3 +698,136 @@ fn row_presence_distinguishes_a_different_basis() {
         RowPresence::Absent
     );
 }
+
+/// Why (#7867): the `💸` segment's figure is per-call tool-output compression,
+/// so which techniques count is a contract, not an implementation detail — a
+/// third per-call producer joins this list, and the launch-time instruction
+/// fold never does.
+/// Test: itself.
+#[test]
+fn the_per_call_techniques_are_compress_and_divert() {
+    assert_eq!(PER_CALL_TECHNIQUES, [TECHNIQUE_COMPRESS, TECHNIQUE_DIVERT]);
+    assert!(is_per_call_technique(TECHNIQUE_COMPRESS));
+    assert!(is_per_call_technique(TECHNIQUE_DIVERT));
+    assert!(!is_per_call_technique(TECHNIQUE_INSTRUCTION_COMPRESSION));
+}
+
+/// Why (#7867): the filter is what keeps a launch-time measurement out of a
+/// per-call figure. A fold that still counted it would leave the segment moving
+/// for a reason no tool call caused.
+/// Test: itself.
+#[test]
+fn fold_session_per_call_ignores_an_instruction_compression_row() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let ledger = savings_log_in(dir.path());
+    append_row(&ledger, &row("sess-a", 5_000, 0.05)).expect("append");
+
+    assert_eq!(
+        fold_session(&ledger, "sess-a").rows,
+        1,
+        "the row is on the ledger"
+    );
+    assert!(
+        fold_session_per_call(&ledger, "sess-a").is_zero(),
+        "an instruction-compression row must not reach the segment's fold"
+    );
+}
+
+/// Why (#7867): both per-call producers feed the segment, and each row is a
+/// separate real saving — neither is deduplicated.
+/// Test: itself.
+#[test]
+fn fold_session_per_call_sums_compress_and_divert() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let ledger = savings_log_in(dir.path());
+    let mut compress = row("sess-a", 1_000, 0.01);
+    compress.technique = TECHNIQUE_COMPRESS.to_string();
+    let mut divert = row("sess-a", 3_000, 0.03);
+    divert.technique = TECHNIQUE_DIVERT.to_string();
+    append_row(&ledger, &compress).expect("append");
+    append_row(&ledger, &divert).expect("append");
+    append_row(&ledger, &row("sess-a", 5_000, 0.05)).expect("append");
+
+    let total = fold_session_per_call(&ledger, "sess-a");
+    assert_eq!(total.rows, 2);
+    assert_eq!(total.tokens_saved, 4_000);
+}
+
+/// Why (#7867): the average beside the segment's figure must average the same
+/// measurement. A session holding only instruction-fold rows has no per-call
+/// percentage at all, so it contributes no entry rather than a zero that would
+/// drag the mean down.
+/// Test: itself.
+#[test]
+fn fold_sessions_per_call_drops_a_session_with_only_instruction_rows() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let ledger = savings_log_in(dir.path());
+    let mut compress = row("sess-a", 1_000, 0.01);
+    compress.technique = TECHNIQUE_COMPRESS.to_string();
+    append_row(&ledger, &compress).expect("append");
+    append_row(&ledger, &row("sess-b", 5_000, 0.05)).expect("append");
+
+    let by_session = fold_sessions_per_call(&ledger);
+    assert_eq!(by_session.len(), 1);
+    assert_eq!(by_session["sess-a"].tokens_saved, 1_000);
+}
+
+/// Why (#7867): `tm doctor`'s `tool_output_compression` row reports when the
+/// last compression landed, which is the reading that tells an operator the
+/// pipeline is live rather than merely historic.
+/// Test: itself.
+#[test]
+fn try_fold_per_call_reports_the_last_timestamp() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut first = row("sess-a", 1_000, 0.01);
+    first.technique = TECHNIQUE_COMPRESS.to_string();
+    first.ts = "2026-09-14T10:00:00Z".to_string();
+    let mut last = row("sess-a", 2_000, 0.02);
+    last.technique = TECHNIQUE_DIVERT.to_string();
+    last.ts = "2026-09-14T11:00:00Z".to_string();
+    let mut later_instruction = row("sess-a", 9_000, 0.09);
+    later_instruction.ts = "2026-09-14T12:00:00Z".to_string();
+    let ledger = ledger_with(
+        &dir,
+        &[
+            &serde_json::to_string(&first).expect("serialize"),
+            &serde_json::to_string(&last).expect("serialize"),
+            &serde_json::to_string(&later_instruction).expect("serialize"),
+        ],
+    );
+
+    let fold = try_fold_per_call(&ledger).expect("a readable ledger");
+    assert_eq!(fold.total.rows, 2);
+    assert_eq!(fold.last_ts.as_deref(), Some("2026-09-14T11:00:00Z"));
+}
+
+/// Why (#7867, Fail-Open Check): an unreadable ledger reaching the doctor as a
+/// zero would state that nothing was compressed when nothing was read.
+/// Test: itself.
+#[test]
+#[cfg(unix)]
+fn try_fold_per_call_errors_on_an_unreadable_ledger() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let ledger = ledger_with(&dir, &["{}"]);
+    std::fs::set_permissions(&ledger, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+
+    let outcome = try_fold_per_call(&ledger);
+
+    std::fs::set_permissions(&ledger, std::fs::Permissions::from_mode(0o644)).expect("restore");
+    let message = outcome.expect_err("an unreadable ledger must not fold to zero");
+    assert!(!message.is_empty(), "the error text must reach the caller");
+}
+
+/// Why (#7867): a ledger no producer has written yet is the ordinary state on a
+/// fresh install, and must read differently from one that cannot be read.
+/// Test: itself.
+#[test]
+fn try_fold_per_call_of_a_missing_ledger_is_an_empty_ok() {
+    let dir = tempfile::tempdir().expect("temp dir");
+
+    let fold = try_fold_per_call(&savings_log_in(dir.path())).expect("absent is not an error");
+    assert_eq!(fold.total.rows, 0);
+    assert_eq!(fold.last_ts, None);
+}

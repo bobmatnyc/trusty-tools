@@ -104,8 +104,12 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "The project carries none of the five RETIRED `.trusty-mpm/` instruction override files. They are no longer read, so a leftover one means the project's instructions are not reaching the PM — migrate the content to `CLAUDE.md` named sections (issue #4286).",
     ),
     (
-        "instruction_compression",
-        "How much the compose-time instruction fold saved this project, measured from its most recently compiled PM prompt: `Ok` with both byte counts and the percentage when the prompt came out smaller than the instruction bodies it was built from, `Warn` naming INACTIVE and both counts when it did not. Before this check the decline was a one-time daemon-log warning, so a missing `💸` statusline segment was the operator's only evidence that instruction compression was doing nothing (issue #7616).",
+        "instruction_fold",
+        "How much the compose-time instruction fold saved this project, measured from its most recently compiled PM prompt: `Ok` with both byte counts and the percentage when the prompt came out smaller than the instruction bodies it was built from, `Warn` naming INACTIVE and both counts when it did not. Before this check the decline was a daemon-log line only, so nothing an operator reads said whether the fold was doing anything (issue #7616). Named `instruction_compression` until issue #7867 reserved \"compression\" for tool-output compression; this row claims nothing about the `💸` segment, which measures that instead.",
+    ),
+    (
+        "tool_output_compression",
+        "What tool-output compression has saved, folded from the same ledger rows the `💸` statusline segment renders — `compress` (a `tm compress` run, rtk or native) and `divert` (a bulk read answered by a cheap worker), both credited per tool call. `Ok` naming the row count, the tokens and estimated bytes saved and the last row's timestamp; `Warn` when no such row exists yet; `Warn` naming the IO error when the ledger exists and cannot be read, since an unreadable ledger is not an empty one. Never `Fail`. Read-only (issue #7867).",
     ),
     (
         "statusline",

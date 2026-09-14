@@ -1330,7 +1330,9 @@ async fn doctor_endpoint_returns_report() {
         "legacy_sources",
         "legacy_overrides",
         // #7616: the instruction fold's measured saving, or INACTIVE.
-        "instruction_compression",
+        "instruction_fold",
+        // #7867: the `compress`/`divert` rows the 💸 segment folds.
+        "tool_output_compression",
         // #7617: whether the 💸 segment can render at all.
         "statusline",
         "agent_skills",

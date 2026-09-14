@@ -72,9 +72,9 @@
 //! `a_failed_append_leaves_the_row_staged_for_the_next_hook`,
 //! `two_racing_claims_append_exactly_one_row`,
 //! `two_compiled_prompts_stage_to_different_files`,
-//! `the_no_fold_warning_fires_once_per_project`,
-//! `the_no_fold_warning_fires_again_when_the_byte_pair_moves`,
-//! `the_no_fold_warning_is_emitted_at_warn_level`,
+//! `the_no_fold_note_fires_once_per_project`,
+//! `the_no_fold_note_fires_again_when_the_byte_pair_moves`,
+//! `the_no_fold_note_is_emitted_at_debug_level`,
 //! `a_staged_row_remembers_its_compiled_prompt` — plus the #7411 suite in
 //! `savings_sidecar_sweep_tests.rs`:
 //! `a_stranded_row_for_another_project_is_adopted_rather_than_stranded`,
@@ -648,38 +648,39 @@ pub fn emit_staged_row_for_session_in(root: &Path, cwd: &Path, claude_session_id
         })
 }
 
-/// Where the "nothing folded" warning marker for `project_dir` lives.
+/// Where the "nothing folded" marker for `project_dir` lives.
 ///
-/// What: `<root>/usage/no-fold-warned/<digest>`.
-/// Test: `the_no_fold_warning_fires_once_per_project`,
+/// What: `<root>/usage/no-fold-warned/<digest>`. The directory keeps its name
+/// after #7867 demoted the line it stamps to `debug!`: renaming it would strand
+/// every marker already on disk and re-log each project once.
+/// Test: `the_no_fold_note_fires_once_per_project`,
 /// `the_repair_sweeps_the_directory_the_producer_writes`.
 pub(crate) fn no_fold_marker_path(root: &Path, project_dir: &Path) -> PathBuf {
     keyed_path(root, NO_FOLD_WARNED_DIR, project_dir, "")
 }
 
-/// Warn — once per project — that the compiled prompt was not smaller than the
-/// sources that fed it, so no savings row can be written.
+/// Note — once per project — that the compiled prompt was not smaller than the
+/// sources that fed it, so no instruction-fold row is written.
 ///
-/// Why (#7245, narrowed by #7617): this decline is why a project that overrides
-/// no instruction section contributes zero instruction-compression savings, and
-/// at `debug!` it was invisible — an operator read a flat `💸` figure with
-/// nothing anywhere saying why. It cannot log on every launch either: the
-/// condition is permanent for such a project, and a warning that repeats every
-/// session is one an operator learns to skip. So it names both byte counts and
-/// the reason once, and repeats only when the numbers move. The message scopes
-/// its claim to this technique — since #7617 the statusline also folds `divert`
-/// and `compress` rows, falls back to a linked sibling session, and renders
-/// `💸—` as an explicit empty state, so the segment renders either way.
+/// Why (#7867): this decline used to be a per-launch `warn!` that named the `💸`
+/// segment and advised a CLAUDE.md section override. Since the owner's
+/// 2026-09-14 ruling the segment measures tool-output compression only, so the
+/// decline has nothing to do with it, and a WARN on every launch was an
+/// operator-facing alarm for an ordinary state: a project that overrides no
+/// bundled section legitimately folds nothing. It is a `debug!` line now,
+/// recording only what was measured. `tm doctor`'s `instruction_fold` row is
+/// the surface that reports this state to an operator.
 /// What: compares the `<source> <compiled>` pair against the marker file for
-/// `project_dir`; when it differs (or no marker exists) emits one `warn!` and
-/// records the pair. Returns whether it warned. A marker that cannot be written
-/// still warns — an operator seeing the message twice is strictly better than
-/// never seeing it.
-/// Test: `the_no_fold_warning_fires_once_per_project`,
-/// `the_no_fold_warning_fires_again_when_the_byte_pair_moves`,
-/// `the_no_fold_warning_is_emitted_at_warn_level`,
-/// `the_no_fold_warning_claims_no_segment_wide_absence`.
-pub fn warn_no_fold_once(
+/// `project_dir`; when it differs (or no marker exists) emits one `debug!` and
+/// records the pair. Returns whether it logged. The stamp survives the
+/// demotion because a line repeated on every launch of every project is noise
+/// even at `debug!`, where the operator reading a log is debugging something
+/// else.
+/// Test: `the_no_fold_note_fires_once_per_project`,
+/// `the_no_fold_note_fires_again_when_the_byte_pair_moves`,
+/// `the_no_fold_note_is_emitted_at_debug_level`,
+/// `the_no_fold_note_names_neither_the_segment_nor_an_override`.
+pub fn log_no_fold_once(
     root: &Path,
     project_dir: &Path,
     source_bytes: usize,
@@ -690,17 +691,14 @@ pub fn warn_no_fold_once(
     if std::fs::read_to_string(&path).is_ok_and(|seen| seen.trim() == stamp) {
         return false;
     }
-    // #7671: scoped to this technique — #7617 made the segment render regardless.
-    tracing::warn!(
+    // #7867: states the measurement and nothing else — no segment claim, no
+    // override advice.
+    tracing::debug!(
         project = %project_dir.display(),
         source_bytes,
         compiled_bytes,
         "the compiled prompt is not smaller than the instruction sources it was \
-         built from, so no instruction-compression savings row is written and \
-         this project contributes nothing to the 💸 statusline segment under \
-         that technique; add a CLAUDE.md section override to fold a bundled \
-         section away, because only an override folds one; divert and compress \
-         savings still count, and the segment still renders"
+         built from, so no instruction-fold savings row is written"
     );
     let _ = (|| -> Option<()> {
         std::fs::create_dir_all(path.parent()?).ok()?;

@@ -432,7 +432,7 @@ fn an_absent_path_still_matches_the_recorded_spelling_of_itself() {
 }
 
 #[tokio::test]
-async fn run_doctor_produces_fifty_two_checks() {
+async fn run_doctor_produces_fifty_three_checks() {
     // Issue #2158 added the `deployment` probe (nine → ten); issue #2246
     // adds `oauth_token` (ten → eleven); issue #2876 adds `skill_staleness`
     // and `legacy_sources` (eleven → thirteen); DOC-42 / issue #2889 adds
@@ -467,7 +467,9 @@ async fn run_doctor_produces_fifty_two_checks() {
     // `instruction_compression` (forty-eight → forty-nine); issue #7617 adds
     // `statusline` (forty-nine → fifty); issue #7685 adds `auto_memory`
     // (fifty → fifty-one); issue #7673 adds `ancestor_claude_md` (fifty-one →
-    // fifty-two).
+    // fifty-two); issue #7867 renames `instruction_compression` to
+    // `instruction_fold` and adds `tool_output_compression` (fifty-two →
+    // fifty-three).
     //
     // The test NAME had drifted four additions behind the tally above by the
     // time #6586 landed — it still read `thirty_two`. Renaming it is part of
@@ -499,9 +501,12 @@ async fn run_doctor_produces_fifty_two_checks() {
         "legacy_sources",
         "legacy_overrides",
         // #7616: whether the instruction fold saved this project anything, or
-        // is inactive — the state a missing 💸 segment used to be the only
-        // evidence of.
-        "instruction_compression",
+        // is inactive — the state a daemon-log line used to be the only
+        // evidence of. Named `instruction_fold` since #7867.
+        "instruction_fold",
+        // #7867: what the 💸 segment itself measures — the `compress` and
+        // `divert` rows it folds, and when the last one landed.
+        "tool_output_compression",
         // #7617: whether the 💸 segment can render at all — the `statusLine`
         // entry in each settings tier, its two inputs' readability, and the
         // render rule itself.

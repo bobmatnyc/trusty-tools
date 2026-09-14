@@ -3,10 +3,10 @@
 //! Why: both files exist to survive a process boundary, so the properties worth
 //! asserting are the ones a single-process implementation would get wrong — a
 //! staged row that emits twice, a hook that writes a row nobody staged, and a
-//! decline warning that repeats on every launch until an operator stops reading
+//! decline line that repeats on every launch until an operator stops reading
 //! it.
-//! What: drives the staging, claiming and warning functions against temp
-//! directories, with the warning's level and text read back off a real
+//! What: drives the staging, claiming and decline-logging functions against
+//! temp directories, with the decline's level and text read back off a real
 //! subscriber rather than assumed.
 //! Test: this file.
 
@@ -263,45 +263,45 @@ fn a_staged_row_remembers_its_compiled_prompt() {
 }
 
 /// Why (#7245): the decline is permanent for a project that overrides no
-/// instruction section, so a warning on every launch is one an operator stops
-/// reading. It has to be visible once and then quiet.
+/// instruction section, so a line on every launch is one an operator stops
+/// reading. It is logged once and then quiet.
 /// Test: itself.
 #[test]
-fn the_no_fold_warning_fires_once_per_project() {
+fn the_no_fold_note_fires_once_per_project() {
     let root = tempfile::tempdir().expect("temp root");
     let project = root.path().join("project");
 
     assert!(
-        warn_no_fold_once(root.path(), &project, 26_741, 29_074),
-        "the first decline must warn"
+        log_no_fold_once(root.path(), &project, 26_741, 29_074),
+        "the first decline must log"
     );
     assert!(
-        !warn_no_fold_once(root.path(), &project, 26_741, 29_074),
+        !log_no_fold_once(root.path(), &project, 26_741, 29_074),
         "a second compile with the same figures must stay quiet"
     );
 }
 
-/// Why (#7245): an operator who edits `CLAUDE.md` and still sees no segment
-/// needs the new figures, not silence left over from the old ones.
+/// Why (#7245): a project whose instruction sources changed produced a new
+/// measurement, and the stamp must not suppress it.
 /// Test: itself.
 #[test]
-fn the_no_fold_warning_fires_again_when_the_byte_pair_moves() {
+fn the_no_fold_note_fires_again_when_the_byte_pair_moves() {
     let root = tempfile::tempdir().expect("temp root");
     let project = root.path().join("project");
 
-    assert!(warn_no_fold_once(root.path(), &project, 26_741, 29_074));
+    assert!(log_no_fold_once(root.path(), &project, 26_741, 29_074));
     assert!(
-        warn_no_fold_once(root.path(), &project, 26_741, 28_000),
-        "a changed byte pair must warn again"
+        log_no_fold_once(root.path(), &project, 26_741, 28_000),
+        "a changed byte pair must log again"
     );
 }
 
 /// Collects a subscriber's output so a test can read back what was logged.
 ///
-/// Why: `warn_no_fold_once`'s contract is the LEVEL as much as the count — at
-/// `debug!` (where #7209 left it) the decline was invisible, which is the defect
-/// #7245 names. Asserting the return value alone would not catch a regression to
-/// `debug!`.
+/// Why: `log_no_fold_once`'s contract is the LEVEL as much as the count — since
+/// #7867 this decline is an ordinary state and must NOT reach an operator's WARN
+/// stream. Asserting the return value alone would not catch a regression to
+/// `warn!`.
 /// What: an `io::Write` over a shared buffer, and the `MakeWriter` that hands it
 /// to `tracing_subscriber::fmt`.
 #[derive(Clone, Default)]
@@ -326,82 +326,100 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
     }
 }
 
-/// Why (#7245): the whole point of the second arm of this fix is that an
-/// operator can SEE why the segment is absent. A `debug!` they never enable is
-/// not seeing it, and two identical warnings per project is the noise the marker
-/// exists to prevent.
+/// Why (#7867): a project that overrides no bundled section folds nothing, and
+/// that is the ordinary state rather than a fault — the ruling demotes this line
+/// out of the operator's WARN stream. A subscriber capped at WARN must therefore
+/// capture nothing at all, and the same run at DEBUG must still carry one line
+/// with both byte counts.
+/// What: runs the decline twice under each level and reads the captured text
+/// back off a real subscriber.
 /// Test: itself.
 #[test]
-fn the_no_fold_warning_is_emitted_at_warn_level() {
+fn the_no_fold_note_is_emitted_at_debug_level() {
     let root = tempfile::tempdir().expect("temp root");
     let project = root.path().join("project");
-    let capture = CaptureWriter::default();
 
+    let at_warn = CaptureWriter::default();
     let subscriber = tracing_subscriber::fmt()
-        .with_writer(capture.clone())
+        .with_writer(at_warn.clone())
         .with_max_level(tracing::Level::WARN)
         .with_ansi(false)
         .finish();
     tracing::subscriber::with_default(subscriber, || {
-        warn_no_fold_once(root.path(), &project, 26_741, 29_074);
-        warn_no_fold_once(root.path(), &project, 26_741, 29_074);
+        log_no_fold_once(root.path(), &project, 26_741, 29_074);
+    });
+    let warned = String::from_utf8(at_warn.0.lock().expect("capture lock").clone())
+        .expect("the captured log must be utf-8");
+    assert!(
+        warned.is_empty(),
+        "the decline must not reach an operator's WARN stream: {warned}"
+    );
+
+    let at_debug = CaptureWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(at_debug.clone())
+        .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        log_no_fold_once(root.path(), &project, 26_741, 28_000);
+        log_no_fold_once(root.path(), &project, 26_741, 28_000);
     });
 
-    let logged = String::from_utf8(capture.0.lock().expect("capture lock").clone())
+    let logged = String::from_utf8(at_debug.0.lock().expect("capture lock").clone())
         .expect("the captured log must be utf-8");
     assert_eq!(
         logged
             .matches("not smaller than the instruction sources")
             .count(),
         1,
-        "two compiles must produce exactly one warning: {logged}"
+        "two compiles must produce exactly one line: {logged}"
     );
     assert!(
-        logged.contains("26741") && logged.contains("29074"),
-        "the warning must name both byte counts: {logged}"
+        logged.contains("26741") && logged.contains("28000"),
+        "the line must name both byte counts: {logged}"
     );
 }
 
-/// Why (#7617): the warning's first wording told an operator the `💸` segment
-/// "stays absent" for this project. Since #7617 the statusline folds `divert`
-/// and `compress` rows beside instruction-compression, falls back to a linked
-/// sibling session, and renders `💸—` as an explicit empty state — so the
-/// segment renders and the claim is false. A decline here zeroes ONE technique's
-/// contribution, never the segment, and an operator who reads the wider claim
-/// stops looking for the savings they do have.
-/// What: captures the warning and rejects any word that asserts the segment is
-/// gone, then pins the two facts that replaced it — the scope (this project) and
-/// the remedy (a CLAUDE.md section override).
+/// Why (#7867): the line used to tell an operator this project "contributes
+/// nothing to the 💸 statusline segment" and to advise a CLAUDE.md section
+/// override. The segment measures tool-output compression now, so the first
+/// half is about a surface this decline no longer touches and the second half
+/// prescribes an edit for a figure it would not move.
+/// What: captures the line at DEBUG and rejects both the segment reference and
+/// the override advice, then pins what remains — the measurement itself.
 /// Test: itself.
 #[test]
-fn the_no_fold_warning_claims_no_segment_wide_absence() {
+fn the_no_fold_note_names_neither_the_segment_nor_an_override() {
     let root = tempfile::tempdir().expect("temp root");
     let project = root.path().join("project");
     let capture = CaptureWriter::default();
 
     let subscriber = tracing_subscriber::fmt()
         .with_writer(capture.clone())
-        .with_max_level(tracing::Level::WARN)
+        .with_max_level(tracing::Level::DEBUG)
         .with_ansi(false)
         .finish();
     tracing::subscriber::with_default(subscriber, || {
-        warn_no_fold_once(root.path(), &project, 26_741, 29_074);
+        log_no_fold_once(root.path(), &project, 26_741, 29_074);
     });
 
     let logged = String::from_utf8(capture.0.lock().expect("capture lock").clone())
         .expect("the captured log must be utf-8");
-    for banned in ["stays absent", "absent", "hidden", "no 💸", "never renders"] {
+    for banned in [
+        "\u{1f4b8}",
+        "statusline segment",
+        "CLAUDE.md",
+        "override",
+        "divert",
+    ] {
         assert!(
             !logged.contains(banned),
-            "the warning must not claim the segment is gone, but says {banned:?}: {logged}"
+            "the line must state only the measurement, but says {banned:?}: {logged}"
         );
     }
     assert!(
-        logged.contains("this project"),
-        "the warning must scope the decline to this project: {logged}"
-    );
-    assert!(
-        logged.contains("CLAUDE.md section override"),
-        "the warning must name the override that would fold a section away: {logged}"
+        logged.contains("no instruction-fold savings row is written"),
+        "the line must still say what it declined to write: {logged}"
     );
 }
