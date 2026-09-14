@@ -239,6 +239,12 @@ pub(super) async fn dispatch_index_tool(
                 // the query string.
                 query.push(("after", after.to_string()));
             }
+            // #7677: one-call outline read for a file or directory. The daemon
+            // filters before paging, so `total` and `next_cursor` describe the
+            // scoped set.
+            if let Some(prefix) = args.get("path_prefix").and_then(Value::as_str) {
+                query.push(("path_prefix", prefix.to_string()));
+            }
             // #4715: index-scoped like its `index_status` neighbour — a
             // never-indexed pin gets the same not-ready answer here.
             Some(

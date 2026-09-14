@@ -221,6 +221,10 @@ pub struct ChunksParams {
     /// strictly after this id in ascending key order; `offset` is ignored.
     #[serde(default)]
     pub after: Option<String>,
+    /// #7677: restrict the enumeration to chunks under this path prefix,
+    /// matched at a path-segment boundary. Absent means the whole corpus.
+    #[serde(default)]
+    pub path_prefix: Option<String>,
 }
 
 fn default_chunks_limit() -> usize {
@@ -304,6 +308,9 @@ pub(crate) async fn index_chunks_report(
         return Err((status, body.0));
     }
     let limit = params.limit.min(MAX_CHUNKS_LIMIT);
+    // #7677: the indexer normalizes the prefix against its own `root_path`, so
+    // the handler forwards the caller's string verbatim.
+    let scope = params.path_prefix.as_deref();
     let indexer = handle.indexer.read().await;
 
     // Cursor mode (issue #1325): opt-in by sending the `after` param at all —
@@ -321,17 +328,19 @@ pub(crate) async fn index_chunks_report(
             Some(cursor)
         };
         let (total, chunks, next_cursor) = indexer
-            .enumerate_chunks_after(after, limit)
+            .enumerate_chunks_after_under(after, limit, scope)
             .await
             .map_err(|e| corpus_read_failure_report(&index_id.0, &e))?;
-        return Ok(serde_json::json!({
+        let mut body = serde_json::json!({
             "index_id": index_id.0,
             "total": total,
             "offset": params.offset,
             "limit": limit,
             "chunks": chunks,
             "next_cursor": next_cursor,
-        }));
+        });
+        echo_path_prefix(&mut body, scope);
+        return Ok(body);
     }
 
     // Offset mode (issue #54): retained verbatim for back-compat. `next_cursor`
@@ -340,17 +349,34 @@ pub(crate) async fn index_chunks_report(
     // drop or duplicate rows). Clients wanting fast deep pagination should use
     // the cursor mode from the start (`after=`).
     let (total, chunks) = indexer
-        .enumerate_chunks(params.offset, limit)
+        .enumerate_chunks_under(params.offset, limit, scope)
         .await
         .map_err(|e| corpus_read_failure_report(&index_id.0, &e))?;
-    Ok(serde_json::json!({
+    let mut body = serde_json::json!({
         "index_id": index_id.0,
         "total": total,
         "offset": params.offset,
         "limit": limit,
         "chunks": chunks,
         "next_cursor": serde_json::Value::Null,
-    }))
+    });
+    echo_path_prefix(&mut body, scope);
+    Ok(body)
+}
+
+/// Echo an ACTIVE `path_prefix` back into a `chunks` body (#7677).
+///
+/// Why: a client must be able to tell a scoped `total` from a whole-corpus one.
+/// What: inserts the key only when the filter is set, so an unfiltered
+/// response is byte-identical to the pre-#7677 shape.
+/// Test: `chunks_endpoint_without_path_prefix_keeps_the_legacy_body`.
+fn echo_path_prefix(body: &mut serde_json::Value, scope: Option<&str>) {
+    if let (Some(prefix), Some(map)) = (scope, body.as_object_mut()) {
+        map.insert(
+            "path_prefix".into(),
+            serde_json::Value::String(prefix.to_string()),
+        );
+    }
 }
 
 /// Grep a single index's files and append hits into `out`, honouring the

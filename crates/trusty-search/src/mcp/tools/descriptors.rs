@@ -50,7 +50,8 @@ pub fn tool_descriptors() -> Value {
                     "branch_boost":     { "type": "number" },
                     "branch":           { "type": "string" },
                     "path_prefix":      { "type": "string", "description": "Restrict results to chunks whose file path starts with this prefix, applied before top_k truncation (issue #3401)." },
-                    "repos":            { "type": "array", "items": { "type": "string" }, "description": "Restrict results to chunks whose file path names one of these repos as a path segment (issue #3401)." }
+                    "repos":            { "type": "array", "items": { "type": "string" }, "description": "Restrict results to chunks whose file path names one of these repos as a path segment (issue #3401)." },
+                    "compact":          { "type": "boolean", "default": false, "description": "Return only `path`, `start_line`, `end_line`, `compact_snippet`, `score`, and `match_reason` per hit. Drops `content` and the KG/ranking metadata, halving the tokens a hit costs (issue #7676). Use it for symbol lookups, where you read the file afterwards anyway." }
                 },
                 "examples": [
                     { "index_id": "trusty-tools", "query": "apply_archive_downrank" },
@@ -120,7 +121,8 @@ pub fn tool_descriptors() -> Value {
                     "serial":           { "type": "boolean", "default": false, "description": "Legacy fan-out only (issue #2845): force per-index searches to run one at a time instead of the bounded-concurrency default. Safety valve for memory/CPU-constrained hosts." },
                     "max_fanout_concurrency": { "type": "integer", "description": "Legacy fan-out only (issue #2845): cap how many per-index searches run concurrently for this call, overriding the daemon default. Ignored when `serial` is true." },
                     "path_prefix":      { "type": "string", "description": "Restrict results to chunks whose file path starts with this prefix, applied before top_k truncation (issue #3401)." },
-                    "repos":            { "type": "array", "items": { "type": "string" }, "description": "Restrict results to chunks whose file path names one of these repos as a path segment (issue #3401)." }
+                    "repos":            { "type": "array", "items": { "type": "string" }, "description": "Restrict results to chunks whose file path names one of these repos as a path segment (issue #3401)." },
+                    "compact":          { "type": "boolean", "default": false, "description": "Return only `path`, `start_line`, `end_line`, `compact_snippet`, `score`, and `match_reason` per hit, plus `index_id` on the fan-out path. Drops `content` and the KG/ranking metadata, halving the tokens a hit costs (issue #7676). It overrides `full_content`, which asks for the opposite." }
                 },
                 "examples": [
                     { "index_id": "trusty-tools", "query": "AuthValidator that handles refresh tokens" },
@@ -171,6 +173,11 @@ pub fn tool_descriptors() -> Value {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "Restrict results to chunks whose file path names one of these repos as a path segment. Same pre-truncation guarantee as `path_prefix` (issue #3401)."
+                    },
+                    "compact": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Return only `path`, `start_line`, `end_line`, `compact_snippet`, `score`, and `match_reason` per hit. Drops `content` (the snippet already carries it), `id` and `file` (both derivable from `path` and the line range), and the KG/ranking metadata. Cuts a hit to roughly half its tokens (issue #7676). Use it whenever you want to locate code and then read the file; leave it off when you need full chunk bodies or the call graph in the response."
                     }
                 }
             }
@@ -303,7 +310,9 @@ pub fn tool_descriptors() -> Value {
                             deep/bulk enumeration. Pass the response's `next_cursor` back as \
                             `after` to fetch the next page in O(page) time (an indexed seek) \
                             instead of the O(offset) scan that times out on large indexes. \
-                            `next_cursor` is null once the corpus is exhausted.",
+                            `next_cursor` is null once the corpus is exhausted. \
+                            Pass `path_prefix` to enumerate one file or directory in a \
+                            single call, with no seed cursor (issue #7677).",
             "inputSchema": {
                 "type": "object",
                 "required": ["index_id"],
@@ -311,7 +320,8 @@ pub fn tool_descriptors() -> Value {
                     "index_id": { "type": "string" },
                     "offset":   { "type": "integer", "default": 0 },
                     "limit":    { "type": "integer", "default": 100 },
-                    "after":    { "type": "string", "description": "Forward cursor (a chunk id, typically the previous page's next_cursor). When set, offset is ignored." }
+                    "after":    { "type": "string", "description": "Forward cursor (a chunk id, typically the previous page's next_cursor). When set, offset is ignored." },
+                    "path_prefix": { "type": "string", "description": "Enumerate only the chunks under this path prefix, matched at a path-segment boundary (\"foo\" will not also match a sibling \"foobar\" directory). Accepts a root-relative path or the absolute form a search hit's `file` carries. The filter runs before paging, so `total` and `next_cursor` describe the scoped set. Use it to read one file's outline in a single call instead of seeding a cursor from a search hit (issue #7677)." }
                 }
             }
         },
