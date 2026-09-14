@@ -320,6 +320,86 @@ async fn register_and_remove_session() {
     assert_eq!(err.status(), StatusCode::NOT_FOUND);
 }
 
+/// Register one legacy-registry record under `tmux_name`, in the shape #7834
+/// reproduced: `status: Starting`, no managed `state`/`slot`/`source_id`.
+///
+/// Why: an in-place `tm session start --dir <dir>` against a clone whose remote
+/// is not GitHub lands here, not in the managed store — that is the record
+/// stop-by-name has to resolve.
+/// Test: `remove_session_by_name_removes_legacy_registry_record`,
+/// `remove_session_by_id_still_removes_legacy_registry_record`.
+fn register_legacy_record(state: &DaemonState, tmux_name: &str) -> SessionId {
+    let id = SessionId::new();
+    let mut session = Session::new(id, "/tmp/p", ControlModel::Tmux, None);
+    session.status = SessionStatus::Starting;
+    session.tmux_name = tmux_name.to_string();
+    state.register_session(session);
+    id
+}
+
+#[tokio::test]
+async fn remove_session_by_name_removes_legacy_registry_record() {
+    // #7834: `session info <name>` resolved the friendly name while DELETE
+    // parsed the path segment strictly as a UUID and returned 400. Stop-by-name
+    // must resolve the legacy record AND run the teardown against the RESOLVED
+    // record's `tmux_name` — asserted here through the managed-store reconcile,
+    // the one teardown step observable without a live tmux server.
+    let ws = std::path::PathBuf::from("/tmp/test-ws-7834-stop-by-name");
+    let (state, managed_id, tmux_name) = make_state_with_active_managed(ws).await;
+    let id = register_legacy_record(&state, &tmux_name);
+
+    let Json(body) = remove_session(State(Arc::clone(&state)), Path(tmux_name.clone()))
+        .await
+        .expect("stop by friendly name must resolve a legacy-registry record");
+
+    assert_eq!(
+        body.removed, tmux_name,
+        "the response echoes what was asked"
+    );
+    assert!(
+        state.session(id).is_none(),
+        "the legacy registry entry must be gone after stop-by-name"
+    );
+    let mgr = state.session_manager().await;
+    let record = mgr.get(&managed_id).await.expect("managed record readable");
+    assert_eq!(
+        record.state,
+        crate::session_manager::ManagedSessionState::Decommissioned,
+        "teardown must run against the resolved record's tmux_name"
+    );
+}
+
+#[tokio::test]
+async fn remove_session_by_id_still_removes_legacy_registry_record() {
+    // The #7834 workaround (stop by uuid) keeps working — name resolution is
+    // additive, not a replacement for the UUID form.
+    let (state, _dir) = hermetic_shared();
+    let id = register_legacy_record(&state, "tm-verify-clone");
+
+    let Json(body) = remove_session(State(Arc::clone(&state)), Path(id.0.to_string()))
+        .await
+        .expect("stop by uuid must still remove a legacy-registry record");
+
+    assert_eq!(body.removed, id.0.to_string());
+    assert!(state.session(id).is_none(), "the entry must be gone");
+}
+
+#[tokio::test]
+async fn remove_session_unknown_name_is_404() {
+    // A name that matches nothing is a 404 naming the session, never the 400
+    // #7834 reported — "not found" and "malformed" are different answers.
+    let (state, _dir) = hermetic_shared();
+    let err = remove_session(State(state), Path("tm-no-such-session".to_string()))
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.status(), StatusCode::NOT_FOUND);
+    assert!(
+        err.to_string().contains("tm-no-such-session"),
+        "the refusal must name the session: {err}"
+    );
+}
+
 #[tokio::test]
 async fn get_session_returns_session() {
     // `GET /sessions/{id}` resolves a single session by id and returns its
