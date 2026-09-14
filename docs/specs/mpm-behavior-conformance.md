@@ -247,27 +247,44 @@ rust-engineer composes base-agent→base-engineer" observation).
 
 ### BHV-05 — Autonomous provisioning + lifecycle
 
-**What it does:** Provisions an mpm-owned, isolated workspace from
+> **Superseded mechanism, 2026-09-13.** This row's "Implementing code" and
+> "Observable verification" evidence below described the removed
+> `WorkspaceProvisioner`, which cloned `repo_url` into an mpm-owned isolated
+> workspace per session. [ADR-0055](../adr/0055-trusty-mpm-stops-creating-worktrees-the-sentinel-becomes-authoritative.md)
+> removed that path: `session_new` now hard-errors on a non-local `repo_url`
+> (`crate::core::local_repo_url::require_local_repo_url`), and provisioning for
+> a local checkout runs through `daemon::managed_routes::inproject`'s own
+> `ensure_base_clone` / `create_session_worktree` — a base clone plus a
+> per-session `git worktree` under `.claude/worktrees/`, sentineled by
+> `.trusty-mpm-worktree` (ADR-0020, extended to authoritative coverage by
+> ADR-0055 decision C). The prose below is retained as a historical evidence
+> snapshot; do not treat the cited tests or code paths as current.
+
+**What it does (historical):** Provisions an mpm-owned, isolated workspace from
 `(repo_url, ref, task)`, runs `prepare_session` inside it, spawns/observes/
 resumes/decommissions the managed tmux session, and reconciles session state
 on daemon restart — the G0 "operator manages nothing" behavior.
 
 **Canonical source:** [DOC-17 §1](./harness-runner-vision.md#1-north-star-the-guiding-principle)
 (G0 north-star); [SESSION_MANAGER_MVP.md §6](../trusty-mpm/spec/SESSION_MANAGER_MVP.md#6-workspace-provisioner)
-(Workspace Provisioner) and [§9](../trusty-mpm/spec/SESSION_MANAGER_MVP.md#9-session-lifecycle--naming)
+(Workspace Provisioner, superseded — see banner) and [§9](../trusty-mpm/spec/SESSION_MANAGER_MVP.md#9-session-lifecycle--naming)
 (Session Lifecycle & Naming).
 
-**Implementing code:**
-- `crates/trusty-mpm/src/provisioner/workspace.rs` — `WorkspaceProvisioner`,
-  isolation under `~/.trusty-mpm/workspaces/<project>/<session-id>/`.
+**Implementing code (historical; see banner for the current path):**
+- ~~`crates/trusty-mpm/src/provisioner/workspace.rs` — `WorkspaceProvisioner`,
+  isolation under `~/.trusty-mpm/workspaces/<project>/<session-id>/`~~ — removed
+  by ADR-0055; the module now holds only the `GitBackend` trait seam
+  `content::catalog_sync` uses for framework-catalog cloning.
 - `crates/trusty-mpm/src/session_manager/` — `SessionManager` (naming
-  convention, spawn/send/stop/resume/decommission/prune, `reconcile_on_boot`).
+  convention, spawn/send/stop/resume/decommission/prune, `reconcile_on_boot`)
+  — still current.
 - `crates/trusty-mpm/src/core/manifest.rs` (`core::manifest::resolve`) —
   the HR-2 **manifest-driven provisioning precedence**
   (project override > user config > catalog manifest > compiled-in default),
-  consumed by `prepare_session_inner` via `HarnessPlan::from_manifest`.
+  consumed by `prepare_session_inner` via `HarnessPlan::from_manifest` —
+  still current.
 
-**Observable verification:**
+**Observable verification (historical, at time of this pass):**
 ```
 cargo test -p trusty-mpm --lib -- provisioner:: session_manager::
 cargo test -p trusty-mpm --lib -- manifest
@@ -276,6 +293,8 @@ cargo test -p trusty-mpm --lib -- manifest
 the MVP spec's test strategy) — including `provisioner_isolation_path`,
 `provisioner_path_not_in_existing_project`, `manager_naming_convention`,
 `manager_reconcile_gone_tmux_yields_stopped`, and the prune/decommission suite.
+None of the `provisioner_*` tests exist post-ADR-0055; `session_manager::`
+naming/reconcile coverage continues under the current in-project path.
 61/61 pass for `manifest`, including `resolve_project_wins`,
 `resolve_user_over_catalog`, and `resolve_catalog_over_default` — these three
 tests are the direct confirmation that HR-2's precedence order is implemented,
@@ -284,18 +303,18 @@ tests are the direct confirmation that HR-2's precedence order is implemented,
 into `prepare_session_inner` and unit-verified).
 
 **What was NOT run this pass:** a full live end-to-end smoke test — the
-complete tmux spawn/observe/resume/decommission workflow. The crate includes
-a live-provisioning smoke test (`#[ignore]`-tagged `live_provision_real_repo`
-at `crates/trusty-mpm/tests/session_manager_mvp.rs:580`), which exercises
-workspace isolation and git/repo provisioning, but does not run the complete
-session lifecycle (that is, BHV-05's full spec is aspirational and not yet
-exercised end-to-end). Everything above is unit/fake-backend level.
+complete tmux spawn/observe/resume/decommission workflow. The crate included
+a live-provisioning smoke test (`#[ignore]`-tagged `live_provision_real_repo`),
+which exercised workspace isolation and git/repo provisioning, but did not run
+the complete session lifecycle. That test and its file
+(`crates/trusty-mpm/tests/session_manager_mvp.rs`) no longer exist post-ADR-0055;
+the current in-project path's live coverage is `ensure_base_clone_emits_cloning_repo_only_on_fresh_clone`
+in `daemon::managed_routes::inproject::tests`.
 
-**Status:** PARTIALLY-IMPLEMENTED — unit-verified with fake backends (workspace
-isolation, naming, reconciliation, manifest precedence all pass); the
-live-tmux/live-git E2E path is spec'd (with an explicit `#[ignore]` smoke test
-already in the tree) but was not executed in this pass. Do not read
-"unit-verified" as "live-verified."
+**Status:** SUPERSEDED for the workspace-provisioning half (ADR-0055); the
+session-lifecycle half (naming, reconciliation, manifest precedence) remains
+current under the in-project provisioning path. Do not read this row's
+historical "unit-verified" evidence as describing current code.
 
 ---
 

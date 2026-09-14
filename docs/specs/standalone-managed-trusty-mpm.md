@@ -12,8 +12,12 @@ DOC-22 — Multi-Repo Session Routing (`docs/specs/multi-repo-session-routing.md
 registry and NL→repo resolver that this driver's alias model aligns with); DOC-23 — Learned-Autonomy
 Auto-Answer (`docs/specs/learned-autonomy-auto-answer.md`, the autonomy tier the **session manager**
 — the durable tmux fleet daemon, **not** `tm` itself — uses when it drives a tm-managed project).
-**Cross-ref:** the workspace provisioner (`crates/trusty-mpm/src/provisioner/workspace.rs`,
-`WorkspaceProvisioner::provision` / `provision_in`); session launch + per-workspace settings
+**Cross-ref:** `load`'s clone/refresh path (`crates/trusty-mpm/src/core/standalone/load.rs`,
+`load_alias`, shelling out to `git clone --depth 1` / `git pull --ff-only` directly —
+[ADR-0055](../adr/0055-trusty-mpm-stops-creating-worktrees-the-sentinel-becomes-authoritative.md)
+removed the `WorkspaceProvisioner::provision`/`provision_in` path this section once named, and
+`load_alias` never routed through the session-worktree provisioner that ADR removed); session
+launch + per-workspace settings
 (`crates/trusty-mpm/src/core/session_launch/mod.rs`, `prepare_session`;
 `crates/trusty-mpm/src/core/session_launch/settings.rs`, `inject_trusty_memory_mcp` /
 `inject_trusty_search_mcp` / `write_output_style` / `write_project_hooks` /
@@ -67,7 +71,8 @@ hooks/skills-slash-commands/MCPs, reached via a required custom `CLAUDE_CONFIG_D
 invariant, the attended `tm run` contract, and the IDE-attach contract.
 
 **Out of scope** (consumed, not re-specified): the session lifecycle and `SessionRecord` (DOC-14);
-the provisioner clone mechanics (`WorkspaceProvisioner`); the harness runner (DOC-17); the NL→repo
+`load`'s own clone/refresh mechanics (`core::standalone::load::load_alias`, direct `git`
+shell-outs — [ADR-0055](../adr/0055-trusty-mpm-stops-creating-worktrees-the-sentinel-becomes-authoritative.md)); the harness runner (DOC-17); the NL→repo
 resolver and multi-project Telegram UX (DOC-22); the autonomy tiers and decision adjudication
 (DOC-23); the trusty-memory / trusty-search / trusty-review daemons themselves (wired, not
 implemented here).
@@ -219,15 +224,17 @@ project. Making it idempotent (clone-once, refresh-many) lets it double as "brin
 date with the current framework" without a separate first-run/Nth-run code path, and lets `run`
 call it unconditionally (§SPEC-STANDALONE-MPM-05). The stable alias-keyed directory (not a
 session-scoped temp dir) is what makes IDE attach (§SPEC-STANDALONE-MPM-06) and persistent daily
-work possible. It reuses `WorkspaceProvisioner::provision_in` (caller-supplied project dir) rather
-than the session-scoped `provision` so the directory is durable.
+work possible. It clones or fast-forward-pulls directly with the `git` binary into the
+alias-keyed `repo/` dir it owns, rather than sharing the session-scoped provisioner
+[ADR-0055](../adr/0055-trusty-mpm-stops-creating-worktrees-the-sentinel-becomes-authoritative.md)
+removed — `load` never depended on that path and is unaffected by its removal.
 
 #### Implementing Modules
 
 | Module | Role |
 |--------|------|
-| `tm::commands::load` (new) | Orchestrates resolve → clone/fetch → config generation; idempotent. |
-| `provisioner::workspace::WorkspaceProvisioner::provision_in` | Clones into the caller-supplied stable project dir. |
+| `tm::commands::load` (`standalone.rs::load_cmd`) | Orchestrates resolve → clone/fetch → config generation; idempotent. |
+| `core::standalone::load::load_alias` | Clones (`git clone --depth 1`) or fast-forward-pulls into the caller-supplied stable project dir. |
 | `core::session_launch::prepare_session` (managed-mode variant) | Generates the project-local config under `repo/` + `.trusty-mpm/` metadata; resolves the tm-global `CLAUDE_CONFIG_DIR` for `run`. |
 
 ---
@@ -788,7 +795,8 @@ session-manager spec) — `tm run` itself stays attended-only.
 - [DOC-17 — Harness Runner Vision](./harness-runner-vision.md) — autonomous-operation north-star, provisioner seam.
 - [DOC-22 — Multi-Repo Session Routing](./multi-repo-session-routing.md) — named-project registry, NL→repo resolver (alias alignment).
 - [DOC-23 — Learned-Autonomy Auto-Answer](./learned-autonomy-auto-answer.md) — the autonomy tier the **session manager** (Layer 2) uses to drive tm-managed projects; **not** a `tm` flag.
-- `crates/trusty-mpm/src/provisioner/workspace.rs` — `WorkspaceProvisioner::provision` / `provision_in`.
+- [ADR-0055 — Trusty-mpm stops creating worktrees; the sentinel becomes authoritative](../adr/0055-trusty-mpm-stops-creating-worktrees-the-sentinel-becomes-authoritative.md) — removed the session-scoped `WorkspaceProvisioner::provision`/`provision_in` path this spec once cited; `load_alias` never used it and is unaffected.
+- `crates/trusty-mpm/src/core/standalone/load.rs` — `load_alias`, the current clone/refresh mechanics (direct `git` shell-outs).
 - `crates/trusty-mpm/src/core/session_launch/mod.rs` — `prepare_session` (the global/local write hot path).
 - `crates/trusty-mpm/src/core/session_launch/settings.rs` — `inject_trusty_memory_mcp`, `inject_trusty_search_mcp`, `write_output_style`, `write_project_hooks`, `preseed_workspace_trust_home`, `remove_global_trusty_memory_hooks`, `deploy_output_style`.
 - `crates/trusty-mpm/src/core/agent_deployer.rs` — `deploy_agents_filtered` (global agent deploy site).

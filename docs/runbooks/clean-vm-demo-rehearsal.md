@@ -1,6 +1,10 @@
 # Clean-VM Demo Rehearsal Runbook — trusty-mpm 1.0.1 + trusty-installer 0.4.7
 
-> **ADR-0055 (#6000):** `tm sessions new` no longer accepts a remote URL — trusty-mpm clones no repository and creates no worktree for a session. Clone the repository yourself first, then pass the resulting local path. Every `tm sessions new https://…` line below needs that two-step treatment before it will run.
+> **[ADR-0055](../adr/0055-trusty-mpm-stops-creating-worktrees-the-sentinel-becomes-authoritative.md)
+> (#6000):** trusty-mpm no longer clones a remote `repo_url` or creates a worktree
+> on `tm sessions new`'s behalf. `tm sessions new` takes an ABSOLUTE path to an
+> EXISTING local git checkout with a GitHub remote instead of a URL — Step 6
+> below clones the throwaway repo locally first, then passes that path.
 
 **Duration:** ~10 minutes  
 **Target:** Fresh macOS Apple Silicon VM with NO Claude Code, NO tmux, NO ~/.trusty-tools  
@@ -140,23 +144,28 @@ tm doctor
 
 ---
 
-## Step 6: Create a New Session with Demo Task (Clone + Configure + Tmux in One Command)
+## Step 6: Create a New Session with Demo Task (Local-Checkout Provisioning in One Command)
 
 **Choose a throwaway test repo** (create or use an existing non-critical repo; e.g., a fork of this project or a dummy repo).
 
+**Clone it locally first** ([ADR-0055](../adr/0055-trusty-mpm-stops-creating-worktrees-the-sentinel-becomes-authoritative.md) — `tm sessions new` reads the GitHub remote off an existing local checkout, it no longer clones a URL itself):
+```bash
+git clone https://github.com/<your-github-user>/<throwaway-repo>.git ~/demo-repos/<throwaway-repo>
+```
+
 **Command:**
 ```bash
-tm sessions new https://github.com/<your-github-user>/<throwaway-repo>.git --task "Add a demo README section explaining the new feature"
+tm sessions new ~/demo-repos/<throwaway-repo> --task "Add a demo README section explaining the new feature"
 ```
 
 **Note:** If the target repository's default branch is NOT `main` (e.g., `master`, `develop`), add `--git-ref <branch-name>` to the command to check out the correct branch:
 ```bash
-tm sessions new https://github.com/<your-github-user>/<throwaway-repo>.git --git-ref master --task "Add a demo README section explaining the new feature"
+tm sessions new ~/demo-repos/<throwaway-repo> --git-ref master --task "Add a demo README section explaining the new feature"
 ```
 
 **Expected:**
-- `tm` clones the repo into `.trusty-mpm-projects/<your-github-user>/<throwaway-repo>/`.
-- `.trusty-tools` skeleton and `.trusty-mpm/` directories are created inside the cloned repo.
+- `tm` reads the GitHub remote off `~/demo-repos/<throwaway-repo>` and clones/reuses a base checkout under `.trusty-mpm-projects/<your-github-user>/<throwaway-repo>/`.
+- `.trusty-tools` skeleton and `.trusty-mpm/` directories are created inside the provisioned worktree.
 - A new tmux session is created (check: `tmux list-sessions` → should show a session named after your repo).
 - Session is NOT attached yet; your current shell remains in the original prompt.
 - Git worktree for the session is checked out and ready.
@@ -328,7 +337,7 @@ Map each success criterion back to the four unsafe-on-live-machine objectives:
 - [ ] Both tools were listed in the progress checklist as "Installing" and completed.
 
 ### 3. Full tm Workflow: Sessions + Tmux + Pause + Resume + PR
-- [ ] `tm sessions new <repo>` creates a tmux session and clones the repo.
+- [ ] `tm sessions new <local-checkout-path>` creates a tmux session and provisions a worktree (ADR-0055: reads the GitHub remote off the local checkout you pass — pass a path, not a URL).
 - [ ] `tm sessions stop` pauses the session and writes a snapshot.
 - [ ] `tm sessions resume` restores the session state (branch, uncommitted changes visible).
 - [ ] `tm sessions attach` re-enters the tmux session.

@@ -9,6 +9,20 @@
 > **Companion docs:** [PRD.md](./PRD.md) · [ARCHITECTURE.md](./ARCHITECTURE.md) ·
 > [Gap Analysis](../research/trustympm-gap-analysis-decision-2026-06-05.md)
 
+> **Partially superseded, 2026-09-13 (#7065).** This MVP spec's central
+> provisioning design — `WorkspaceProvisioner` cloning `repo_url` into an
+> mpm-owned `~/.trusty-mpm/workspaces/<project>/<session>/` directory, and the
+> `tm sessions new --repo <url> --ref <ref> --task "<desc>"` CLI grammar built
+> on it (§6, and its mentions throughout §2–§5, §13) — no longer exists.
+> [ADR-0055](../../adr/0055-trusty-mpm-stops-creating-worktrees-the-sentinel-becomes-authoritative.md)
+> removed it: `session_new` now hard-errors on a non-local `repo_url`, and a
+> session's workspace comes from `daemon::managed_routes::inproject`'s base
+> clone + per-session `git worktree` under `.claude/worktrees/` instead. See
+> the §6 banner for the current mechanism and [DOC-31](../../specs/system-project-agents-skills.md)
+> for its current spec coverage. `session_manager/`, `runtime/`, and
+> `activity/` (§3) remain accurate design records of code that shipped and is
+> still in use.
+
 ---
 
 ## Changelog (v1 → v2)
@@ -204,6 +218,12 @@ substrate/caller boundary.
 └──────────────────────────────────────────────────────────────────┘
 ```
 
+> **Superseded box, 2026-09-13.** The `provisioner/` box above (`WorkspaceProvisioner`,
+> `PreparedWorkspace`, and the `~/.trusty-mpm/workspaces/<proj>/<session>/` `cwd`
+> it fed the tmux panes) no longer exists — see the §6 banner and
+> [ADR-0055](../../adr/0055-trusty-mpm-stops-creating-worktrees-the-sentinel-becomes-authoritative.md).
+> `session_manager/`, `runtime/`, and `activity/` remain current.
+
 ### 3.2 Module boundaries
 
 New and extended code under `crates/trusty-mpm/src/`:
@@ -223,9 +243,13 @@ src/
 │   ├── mod.rs             (re-exports; ~40 SLOC)
 │   ├── cache.rs           (ActivityCache: hash + verdict + cost tally; ~100 SLOC)
 │   └── monitor.rs         (ActivityMonitor: capture → hash → LLM; ~180 SLOC)
-├── provisioner/           (NEW — workspace isolation)
-│   ├── mod.rs             (re-exports; ~40 SLOC)
-│   └── workspace.rs       (WorkspaceProvisioner: clone/pull + prepare_session; ~200 SLOC)
+├── provisioner/           (NEW at spec time — WorkspaceProvisioner removed by
+│   │                       ADR-0055; module now holds only the GitBackend
+│   │                       trait seam catalog_sync clones the framework
+│   │                       catalog with)
+│   ├── mod.rs             (re-exports)
+│   └── workspace.rs       (GitBackend trait, RealGitBackend, FakeGitBackend —
+│                           see the §6 banner for the removed WorkspaceProvisioner)
 ├── content/               (NEW — claude-mpm catalog sync)
 │   ├── mod.rs             (re-exports; ~40 SLOC)
 │   └── catalog_sync.rs    (CatalogSync: fetch/cache from claude-mpm repo; ~200 SLOC)
@@ -234,7 +258,9 @@ src/
 ```
 
 All files stay under the 500-SLOC production cap. Existing modules (`session_manager`,
-`runtime`, `activity`) are reused as-is.
+`runtime`, `activity`) are reused as-is. The `provisioner/` module's original
+`workspace.rs` responsibility (clone/pull + `prepare_session`) is superseded —
+see the §6 banner.
 
 ### 3.3 Harness-Agnostic Design Principles
 
@@ -440,6 +466,21 @@ Once an answer is injected, the substrate clears `pending_decision` and
 ---
 
 ## 6. Workspace Provisioner
+
+> **Superseded, 2026-09-13.** This section specifies `WorkspaceProvisioner` —
+> clone `repo_url` into an mpm-owned `~/.trusty-mpm/workspaces/<project>/<session-id>/`
+> directory per session. [ADR-0055](../../adr/0055-trusty-mpm-stops-creating-worktrees-the-sentinel-becomes-authoritative.md)
+> removed that type and its clone path entirely; `session_new` now hard-errors
+> on a non-local `repo_url` (`core::local_repo_url::require_local_repo_url`).
+> The section is kept as a historical design record rather than deleted; it
+> describes no code that exists today. The mechanism that provisions a session
+> workspace now is `daemon::managed_routes::inproject`'s own
+> `ensure_base_clone` / `create_session_worktree` — a base clone plus a
+> per-session `git worktree` under `.claude/worktrees/`, requiring an existing
+> local checkout with a GitHub remote, sentineled by `.trusty-mpm-worktree`
+> (ADR-0020, extended to authoritative coverage by ADR-0055 decision C). It is
+> not documented in this file; see [DOC-31](../../specs/system-project-agents-skills.md)
+> §1.1 for the current spawn-path description.
 
 ### 6.1 Problem
 
@@ -927,10 +968,15 @@ The smallest independently demoable slice:
     - `FakeLlmProvider` returns a fixed `ActivityVerdict` and records call count,
       enabling the cache-hit test in criterion 8.
 
-14. One `#[ignore]` smoke test (`test_live_session_e2e`) provisions a real workspace
-    from a public repo, creates a real tmux session, runs `echo hello`, captures it,
-    calls the real activity monitor, and asserts verdict state is `idle` or `working`.
-    Requires: `tmux` installed, `OPENROUTER_API_KEY` set, network access.
+14. **Superseded, 2026-09-13** — this criterion described a smoke test
+    (`test_live_session_e2e`) that provisioned a real workspace from a public
+    repo via the removed `WorkspaceProvisioner` (§6 banner,
+    [ADR-0055](../../adr/0055-trusty-mpm-stops-creating-worktrees-the-sentinel-becomes-authoritative.md)).
+    The test and the clone-from-URL path it exercised no longer exist. The
+    equivalent live coverage for the current in-project provisioning path is
+    `ensure_base_clone_emits_cloning_repo_only_on_fresh_clone` in
+    `daemon::managed_routes::inproject::tests`, which requires an existing
+    local checkout with a GitHub remote rather than a bare public-repo URL.
 
 ---
 
