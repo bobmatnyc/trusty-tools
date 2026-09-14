@@ -18,6 +18,51 @@ use crate::core::entity::EntityType;
 
 use super::{build_compact_snippet, raw_to_code_chunk, CodeChunk, CodeIndexer};
 
+/// A resolved `path_prefix` filter for corpus enumeration (#7677).
+///
+/// Why: both `list_chunks` pagination modes need the identical "is this chunk
+/// under the prefix?" test, and both must resolve an absolute prefix and a
+/// pre-#402 absolute `RawChunk::file` to the root-relative form the comparison
+/// is defined on. One type owns that resolution so the two modes cannot drift.
+/// What: `None` prefix retains everything. Otherwise the prefix is normalized
+/// against `root_path` via the same helper `search`'s `path_prefix` uses, and
+/// each candidate is matched by `path_match::matches_file` — segment-boundary
+/// matching, so `"foo"` rejects a sibling `"foobar/"`.
+/// Test: `list_chunks_path_prefix_rejects_a_sibling_prefix`.
+struct PrefixScope {
+    /// Root-relative prefix, or `None` for "retain everything".
+    prefix: Option<String>,
+    /// `root_path` as a string, for stripping an absolute candidate.
+    root: String,
+}
+
+impl PrefixScope {
+    fn new(path_prefix: Option<&str>, root_path: &std::path::Path) -> Self {
+        Self {
+            prefix: path_prefix.map(|p| super::search::path_filter::normalize_prefix(p, root_path)),
+            root: root_path.to_string_lossy().into_owned(),
+        }
+    }
+
+    /// Collect the chunks this scope admits, in iteration order.
+    fn retain<'a>(&self, chunks: impl Iterator<Item = &'a RawChunk>) -> Vec<&'a RawChunk> {
+        let Some(prefix) = self.prefix.as_deref() else {
+            return chunks.collect();
+        };
+        chunks
+            .filter(|c| {
+                // Pre-#402 chunks stored an absolute `file`; the prefix is
+                // compared root-relative, so both forms resolve here.
+                let candidate = match c.file.strip_prefix(self.root.as_str()) {
+                    Some(rest) => rest.trim_start_matches('/'),
+                    None => c.file.as_str(),
+                };
+                crate::core::store::path_match::matches_file(candidate, Some(prefix), &[])
+            })
+            .collect()
+    }
+}
+
 impl CodeIndexer {
     /// Find a chunk whose `file` ends with `file_suffix` and (optionally) whose
     /// `function_name` equals `function`. When `function` is `None`, returns
@@ -149,6 +194,31 @@ impl CodeIndexer {
         offset: usize,
         limit: usize,
     ) -> Result<(usize, Vec<CodeChunk>)> {
+        self.enumerate_chunks_under(offset, limit, None).await
+    }
+
+    /// [`Self::enumerate_chunks`], optionally scoped to one `path_prefix`.
+    ///
+    /// Why (#7677): `list_chunks` could not answer "the chunks of file X" in
+    /// one call — a caller had to seed a cursor from a prior search hit and
+    /// page until it drifted out of the file. A prefix makes the enumeration
+    /// itself the outline read.
+    /// What: filters the corpus by `path_prefix` BEFORE ordering and slicing,
+    /// so `total`, `offset`, and `limit` all describe the FILTERED set. The
+    /// prefix is normalized against `root_path` and matched at a path-segment
+    /// boundary, so `"foo"` does not also match a sibling `"foobar/"`. A `None`
+    /// prefix is the unfiltered whole-corpus page, byte-identical to before.
+    /// Test: `list_chunks_path_prefix_scopes_the_page` and
+    /// `list_chunks_path_prefix_rejects_a_sibling_prefix`.
+    ///
+    /// Errors when the in-memory map is not a view of the corpus — see the
+    /// guard below.
+    pub async fn enumerate_chunks_under(
+        &self,
+        offset: usize,
+        limit: usize,
+        path_prefix: Option<&str>,
+    ) -> Result<(usize, Vec<CodeChunk>)> {
         // #6043: the map this page is sliced from is a CACHE, not the corpus.
         // `ensure_chunks_loaded` waits on a bounded budget (default 9s) and
         // returns whether or not the detached rehydrate committed, and the
@@ -162,12 +232,14 @@ impl CodeIndexer {
         // The wait, the retry budget, and the refusal are shared with
         // `raw_chunks_snapshot` — see [`Self::ensure_corpus_view_is_current`].
         self.ensure_corpus_view_is_current().await?;
+        let root = self.root_path.clone();
+        let scope = PrefixScope::new(path_prefix, &root);
         let chunks = self.chunks.read().await;
-        let total = chunks.len();
+        let mut ordered = scope.retain(chunks.values());
+        let total = ordered.len();
         if limit == 0 || offset >= total {
             return Ok((total, Vec::new()));
         }
-        let mut ordered: Vec<&RawChunk> = chunks.values().collect();
         ordered.sort_by(|a, b| {
             a.file
                 .cmp(&b.file)
@@ -175,7 +247,6 @@ impl CodeIndexer {
                 .then(a.end_line.cmp(&b.end_line))
         });
         let end = (offset + limit).min(total);
-        let root = self.root_path.clone();
         let page: Vec<CodeChunk> = ordered[offset..end]
             .iter()
             .map(|raw| raw_to_code_chunk(raw, 0.0, "enumerate", None, &root))
@@ -287,6 +358,61 @@ impl CodeIndexer {
             return Ok((total, Vec::new(), None));
         }
         let mut ordered: Vec<&RawChunk> = chunks.values().collect();
+        ordered.sort_by(|a, b| a.id.cmp(&b.id));
+        let start = match after {
+            Some(cursor) => ordered.partition_point(|r| r.id.as_str() <= cursor),
+            None => 0,
+        };
+        let end = (start + limit).min(ordered.len());
+        let slice = &ordered[start..end];
+        let next_cursor = if slice.len() == limit {
+            slice.last().map(|r| r.id.clone())
+        } else {
+            None
+        };
+        let page: Vec<CodeChunk> = slice
+            .iter()
+            .map(|raw| raw_to_code_chunk(raw, 0.0, "enumerate", None, &root))
+            .collect();
+        Ok((total, page, next_cursor))
+    }
+
+    /// [`Self::enumerate_chunks_after`], optionally scoped to one
+    /// `path_prefix` (#7677).
+    ///
+    /// Why: a cursor walk must page within the filtered set, and `total` /
+    /// `next_cursor` must describe that set — otherwise a client reading
+    /// "107223 chunks" for a one-file scope cannot tell when it is done.
+    /// What: with no prefix this IS [`Self::enumerate_chunks_after`], redb seek
+    /// included. With a prefix it scans the corpus view, filters, and
+    /// reproduces the cursor semantics over the same ascending-`id` total order
+    /// the durable path uses. The durable seek is deliberately not used in the
+    /// filtered case: `CorpusStore::chunks_after` returns `limit` UNFILTERED
+    /// rows, so a post-hoc filter would return short pages and a `total` for
+    /// the whole corpus. A prefix scopes to one file or directory, so the scan
+    /// it replaces the seek with is bounded by corpus size once per page, not
+    /// per row returned.
+    /// Test: `list_chunks_path_prefix_cursor_pages_within_the_scope`.
+    ///
+    /// Errors when the in-memory map is not a view of the corpus (#6043).
+    pub async fn enumerate_chunks_after_under(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+        path_prefix: Option<&str>,
+    ) -> Result<(usize, Vec<CodeChunk>, Option<String>)> {
+        if path_prefix.is_none() {
+            return self.enumerate_chunks_after(after, limit).await;
+        }
+        self.ensure_corpus_view_is_current().await?;
+        let root = self.root_path.clone();
+        let scope = PrefixScope::new(path_prefix, &root);
+        let chunks = self.chunks.read().await;
+        let mut ordered = scope.retain(chunks.values());
+        let total = ordered.len();
+        if limit == 0 || total == 0 {
+            return Ok((total, Vec::new(), None));
+        }
         ordered.sort_by(|a, b| a.id.cmp(&b.id));
         let start = match after {
             Some(cursor) => ordered.partition_point(|r| r.id.as_str() <= cursor),

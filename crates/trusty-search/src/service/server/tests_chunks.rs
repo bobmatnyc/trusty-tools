@@ -88,6 +88,7 @@ async fn chunks_endpoint_cursor_pages_full_coverage() {
                 offset: 0,
                 limit: 2,
                 after: after.clone(),
+                path_prefix: None,
             },
         )
         .await;
@@ -119,6 +120,7 @@ async fn chunks_endpoint_offset_back_compat() {
             offset: 0,
             limit: 2,
             after: None,
+            path_prefix: None,
         },
     )
     .await;
@@ -138,6 +140,7 @@ async fn chunks_endpoint_offset_back_compat() {
             offset: 2,
             limit: 2,
             after: None,
+            path_prefix: None,
         },
     )
     .await;
@@ -156,9 +159,77 @@ async fn chunks_endpoint_unknown_index_is_404() {
             offset: 0,
             limit: 10,
             after: Some("a:1:1".to_string()),
+            path_prefix: None,
         }),
     )
     .await
     .expect_err("unknown index must 404");
     assert_eq!(err.0, axum::http::StatusCode::NOT_FOUND);
+}
+
+/// #7677: with no `path_prefix` the body carries exactly the pre-#7677 keys —
+/// the echo must not appear, or an existing client sees a new field.
+#[tokio::test]
+async fn chunks_endpoint_without_path_prefix_keeps_the_legacy_body() {
+    let (state, name) = state_with_chunks(&["a:1:1", "b:1:1"]).await;
+    let body = call_chunks(
+        &state,
+        &name,
+        ChunksParams {
+            offset: 0,
+            limit: 10,
+            after: None,
+            path_prefix: None,
+        },
+    )
+    .await;
+    let keys: Vec<&String> = body.as_object().expect("object body").keys().collect();
+    assert_eq!(
+        keys,
+        vec![
+            "chunks",
+            "index_id",
+            "limit",
+            "next_cursor",
+            "offset",
+            "total"
+        ],
+        "an unfiltered page must keep the legacy body shape"
+    );
+}
+
+/// #7677: an ACTIVE `path_prefix` is echoed, so a client can tell a scoped
+/// `total` from a whole-corpus one.
+#[tokio::test]
+async fn chunks_endpoint_echoes_an_active_path_prefix() {
+    let (state, name) = state_with_chunks(&["a:1:1", "b:1:1"]).await;
+    let body = call_chunks(
+        &state,
+        &name,
+        ChunksParams {
+            offset: 0,
+            limit: 10,
+            after: None,
+            path_prefix: Some("src".to_string()),
+        },
+    )
+    .await;
+    assert_eq!(body["path_prefix"], "src");
+    // Every planted chunk lives in `src/lib.rs`, so the scope holds them all.
+    assert_eq!(body["total"], 2);
+    let body = call_chunks(
+        &state,
+        &name,
+        ChunksParams {
+            offset: 0,
+            limit: 10,
+            after: None,
+            path_prefix: Some("srcfoo".to_string()),
+        },
+    )
+    .await;
+    assert_eq!(
+        body["total"], 0,
+        "`srcfoo` is a sibling prefix, not a parent of `src/lib.rs`"
+    );
 }

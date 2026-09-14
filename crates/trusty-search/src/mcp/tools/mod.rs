@@ -16,6 +16,9 @@
 //!   `upgrade`
 //! - [`health`]      — the `search_health` report (#5264): which daemon
 //!   answered, and whether it can serve this project
+//! - [`compact`]     — the `compact` field mode (#7676): drop the hit fields a
+//!   caller did not ask for, so an envelope that was 48-72% metadata is not
+//!   charged to the caller's context
 //! - [`descriptors`] — static `tool_descriptors()` for `tools/list`
 //! - [`not_ready`]   — the `INDEX_NOT_READY` contract (issue #4715): a daemon
 //!   404 on the index this session ADVERTISED means "not built yet", which is
@@ -40,6 +43,7 @@ use serde_json::Value;
 // etc.) working.
 pub use trusty_mcp::{error_codes, initialize_response, JsonRpcError, Request, Response};
 
+pub(crate) mod compact;
 pub(crate) mod descriptors;
 pub(crate) mod health;
 pub(crate) mod http;
@@ -377,6 +381,9 @@ impl McpServer {
 
 #[cfg(test)]
 mod tests;
+// #7676: the compact field mode — what a hit's JSON carries, and what it drops.
+#[cfg(test)]
+mod tests_compact;
 #[cfg(test)]
 mod tests_lane;
 // Issue #138: tools/list completeness and per-lane dispatch validation.

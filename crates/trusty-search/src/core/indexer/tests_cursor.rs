@@ -249,3 +249,116 @@ async fn enumerate_chunks_waits_out_a_rehydrate_that_outlasts_one_budget() {
     assert_eq!(total, warm_total, "the whole corpus is back");
     assert_eq!(page.len(), warm_total, "and the page carries it");
 }
+
+// #7677 — `path_prefix` scoping for `list_chunks`.
+// ----------------------------------------------------------------
+
+/// `raw`, but placed in a named file so a prefix filter has something to bite.
+fn raw_in(id: &str, file: &str) -> RawChunk {
+    RawChunk {
+        file: file.to_string(),
+        ..raw(id)
+    }
+}
+
+/// A corpus with a `foo/` scope, a `foobar/` sibling that must not be mistaken
+/// for it, and an unrelated `other/`.
+async fn scoped_corpus(name: &str) -> CodeIndexer {
+    let idx = CodeIndexer::new(name, "/tmp/scope-test");
+    for (id, file) in [
+        ("foo/a.rs:1:1", "foo/a.rs"),
+        ("foo/b.rs:1:1", "foo/b.rs"),
+        ("foobar/c.rs:1:1", "foobar/c.rs"),
+        ("other/d.rs:1:1", "other/d.rs"),
+    ] {
+        idx.add_chunk(raw_in(id, file)).await.unwrap();
+    }
+    idx
+}
+
+/// Offset mode: `path_prefix` scopes the page AND `total`, so a client can
+/// enumerate one directory in a single call without a seed cursor.
+#[tokio::test]
+async fn list_chunks_path_prefix_scopes_the_page() {
+    let idx = scoped_corpus("scope-offset").await;
+
+    let (total, page) = idx
+        .enumerate_chunks_under(0, 100, Some("foo"))
+        .await
+        .unwrap();
+    assert_eq!(total, 2, "`total` describes the scoped set, not the corpus");
+    let files: Vec<&str> = page.iter().filter_map(|c| c.path.as_deref()).collect();
+    assert_eq!(files, vec!["foo/a.rs", "foo/b.rs"]);
+
+    // Paging still works inside the filtered set.
+    let (total, page) = idx.enumerate_chunks_under(1, 1, Some("foo")).await.unwrap();
+    assert_eq!(total, 2);
+    assert_eq!(page.len(), 1);
+    assert_eq!(page[0].path.as_deref(), Some("foo/b.rs"));
+
+    // No prefix is the unfiltered whole-corpus page, exactly as before.
+    let (total, page) = idx.enumerate_chunks(0, 100).await.unwrap();
+    assert_eq!(total, 4);
+    assert_eq!(page.len(), 4);
+}
+
+/// The prefix matches at a path-segment boundary: `foo` must not drag in the
+/// sibling directory `foobar/`.
+#[tokio::test]
+async fn list_chunks_path_prefix_rejects_a_sibling_prefix() {
+    let idx = scoped_corpus("scope-sibling").await;
+
+    let (_, page) = idx
+        .enumerate_chunks_under(0, 100, Some("foo"))
+        .await
+        .unwrap();
+    assert!(
+        !page
+            .iter()
+            .any(|c| c.path.as_deref() == Some("foobar/c.rs")),
+        "`foo` must not match the sibling directory `foobar/`; got {:?}",
+        page.iter().map(|c| c.path.clone()).collect::<Vec<_>>()
+    );
+
+    // `foobar` selects its own directory and nothing from `foo/`.
+    let (total, page) = idx
+        .enumerate_chunks_under(0, 100, Some("foobar"))
+        .await
+        .unwrap();
+    assert_eq!(total, 1);
+    assert_eq!(page[0].path.as_deref(), Some("foobar/c.rs"));
+
+    // An absolute prefix, the form a search hit's `file` carries, resolves to
+    // the same scope.
+    let (total, _) = idx
+        .enumerate_chunks_under(0, 100, Some("/tmp/scope-test/foo"))
+        .await
+        .unwrap();
+    assert_eq!(total, 2, "an absolute prefix normalizes against root_path");
+}
+
+/// Cursor mode: `total` and `next_cursor` describe the scoped set, so a walk
+/// over one directory terminates when that directory is exhausted.
+#[tokio::test]
+async fn list_chunks_path_prefix_cursor_pages_within_the_scope() {
+    let idx = scoped_corpus("scope-cursor").await;
+
+    let mut seen: Vec<String> = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut pages = 0;
+    loop {
+        let (total, page, next) = idx
+            .enumerate_chunks_after_under(cursor.as_deref(), 1, Some("foo"))
+            .await
+            .unwrap();
+        assert_eq!(total, 2, "`total` is the scoped count on every page");
+        seen.extend(page.iter().map(|c| c.id.clone()));
+        pages += 1;
+        match next {
+            Some(c) => cursor = Some(c),
+            None => break,
+        }
+        assert!(pages < 10, "a scoped cursor walk must terminate");
+    }
+    assert_eq!(seen, vec!["foo/a.rs:1:1", "foo/b.rs:1:1"]);
+}

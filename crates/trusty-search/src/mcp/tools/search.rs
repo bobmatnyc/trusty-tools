@@ -15,6 +15,7 @@
 use serde_json::Value;
 
 use super::{
+    compact,
     types::{require_str, DispatchError},
     McpServer,
 };
@@ -56,10 +57,16 @@ pub(super) async fn dispatch_search_tool(
                 Err(e) => return Some(Err(e)),
             };
             let top_k = args.get("top_k").and_then(Value::as_u64).unwrap_or(10);
-            let full_content = args
-                .get("full_content")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
+            // #7676: compact mode drops `content` outright, so asking for the
+            // full chunk alongside it is a contradiction — compact wins, and
+            // the fan-out's `compact: !full_content` then guarantees the
+            // `compact_snippet` that replaces it.
+            let want_compact = compact::wants_compact(args);
+            let full_content = !want_compact
+                && args
+                    .get("full_content")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
             let mut body = serde_json::json!({
                 "query": query,
                 "top_k": top_k,
@@ -82,7 +89,14 @@ pub(super) async fn dispatch_search_tool(
             if let Some(repos) = args.get("repos") {
                 body["repos"] = repos.clone();
             }
-            Some(server.post("/search", &body).await)
+            let mut resp = match server.post("/search", &body).await {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            if want_compact {
+                compact::apply(&mut resp);
+            }
+            Some(Ok(resp))
         }
         "search" => {
             // Default `index_id` to the session's pinned index when omitted
@@ -99,7 +113,7 @@ pub(super) async fn dispatch_search_tool(
             // Accept the spec form `{query: string, top_k?: int}` and
             // also a pre-built `{query: object}` body for callers that
             // need to pass advanced search parameters directly.
-            let body = match args.get("query") {
+            let mut body = match args.get("query") {
                 Some(v @ Value::Object(_)) => v.clone(),
                 Some(Value::String(text)) => {
                     let mut b = serde_json::json!({ "text": text });
@@ -149,9 +163,17 @@ pub(super) async fn dispatch_search_tool(
                     )))
                 }
             };
+            // #7676: compact hits need the snippet that replaces `content`,
+            // so pin the daemon's own compact flag on. A `{query: object}`
+            // caller that set `compact: false` is overridden, not obeyed —
+            // the tool-level flag is the one the caller just asked for.
+            let want_compact = compact::wants_compact(args);
+            if want_compact {
+                body["compact"] = Value::Bool(true);
+            }
             // Issue #4715: scoped POST so a 404 on the session's advertised
             // index surfaces as INDEX_NOT_READY, not "unknown index".
-            let resp = match server
+            let mut resp = match server
                 .post_scoped(
                     &format!("/indexes/{index_id}/search"),
                     &body,
@@ -183,6 +205,9 @@ pub(super) async fn dispatch_search_tool(
                 query = %crate::truncate_at_char_boundary(query_text, 80),
                 "search"
             );
+            if want_compact {
+                compact::apply(&mut resp);
+            }
             Some(Ok(resp))
         }
         "search_similar" => {
@@ -347,8 +372,14 @@ impl McpServer {
         if let Some(repos) = args.get("repos") {
             body["repos"] = repos.clone();
         }
+        // #7676: same contract as the `search` arm — pin the daemon's compact
+        // flag so `compact_snippet` is present before `content` is dropped.
+        let want_compact = compact::wants_compact(args);
+        if want_compact {
+            body["compact"] = Value::Bool(true);
+        }
 
-        let resp = self
+        let mut resp = self
             .post_scoped(
                 &format!("/indexes/{index_id}/search"),
                 &body,
@@ -376,6 +407,9 @@ impl McpServer {
             query = %crate::truncate_at_char_boundary(query_text, 80),
             "search"
         );
+        if want_compact {
+            compact::apply(&mut resp);
+        }
         Ok(resp)
     }
 }

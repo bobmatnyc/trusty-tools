@@ -73,16 +73,32 @@ pub(crate) fn is_active(query: &SearchQuery) -> bool {
 /// through unchanged — the latter simply won't match anything, which is
 /// correct (the caller named a path outside this index).
 pub(crate) fn normalized_path_prefix(query: &SearchQuery, root_path: &Path) -> Option<String> {
-    query.path_prefix.as_deref().map(|prefix| {
-        if !prefix.starts_with('/') {
-            return prefix.to_string();
-        }
-        let root = root_path.to_string_lossy();
-        match prefix.strip_prefix(root.as_ref()) {
-            Some(rest) => rest.trim_start_matches('/').to_string(),
-            None => prefix.to_string(),
-        }
-    })
+    query
+        .path_prefix
+        .as_deref()
+        .map(|prefix| normalize_prefix(prefix, root_path))
+}
+
+/// The same normalization for a caller that holds a bare prefix string rather
+/// than a [`SearchQuery`].
+///
+/// Why (#7677): `list_chunks` takes `path_prefix` as a query parameter, so it
+/// never builds a `SearchQuery`. Both surfaces must resolve an absolute prefix
+/// the same way or the two tools would disagree about what `path_prefix` means.
+/// What: strips `root_path` (and any leading `/`) from an absolute prefix that
+/// falls under the root; returns a relative prefix, or an absolute one outside
+/// the root, unchanged.
+/// Test: `test_path_prefix_matches_and_rejects` covers the matching rules;
+/// `list_chunks_path_prefix_scopes_the_page` covers the `list_chunks` caller.
+pub(crate) fn normalize_prefix(prefix: &str, root_path: &Path) -> String {
+    if !prefix.starts_with('/') {
+        return prefix.to_string();
+    }
+    let root = root_path.to_string_lossy();
+    match prefix.strip_prefix(root.as_ref()) {
+        Some(rest) => rest.trim_start_matches('/').to_string(),
+        None => prefix.to_string(),
+    }
 }
 
 /// Test whether `candidate` — a CHUNK ID — satisfies the filter described by

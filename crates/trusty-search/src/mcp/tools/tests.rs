@@ -391,9 +391,21 @@ pub(super) async fn spawn_mock_daemon(
         Json(s.search_response.clone())
     }
 
+    // #7676: the global fan-out endpoint answers with the same body, so a
+    // `search_all` call with no index can be exercised through this harness.
+    async fn global_search_handler_mock(
+        State(s): State<MockState>,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        s.captured_paths.lock().await.push("/search".to_string());
+        s.captured_bodies.lock().await.push(body);
+        Json(s.search_response.clone())
+    }
+
     let app = Router::new()
         .route("/indexes/{id}/status", get(status_handler))
         .route("/indexes/{id}/search", post(search_handler_mock))
+        .route("/search", post(global_search_handler_mock))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
