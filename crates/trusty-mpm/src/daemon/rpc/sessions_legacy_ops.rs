@@ -251,27 +251,39 @@ pub fn get_session(state: &Arc<DaemonState>, id: &str) -> Result<Session, Daemon
 /// kill and the managed-store reconcile are logged and swallowed — on BOTH
 /// transports, because they are swallowed here rather than in either handler.
 ///
+/// Why `key` rather than a UUID: `stop` accepts the friendly `tm-<adj>-<noun>`
+/// name the daemon prints on start, exactly as pause / resume / command /
+/// output do (#7834).
+///
 /// # Errors
 ///
-/// [`DaemonError::InvalidRequest`] for a malformed id,
-/// [`DaemonError::SessionNotFound`] for an unknown one.
+/// [`DaemonError::SessionNotFound`] when neither the UUID nor the friendly name
+/// resolves.
 ///
-/// Test: `parity_sessions_delete_agrees_across_transports`, `full_user_cycle`.
+/// Test: `remove_session_by_name_removes_legacy_registry_record`,
+/// `remove_session_by_id_still_removes_legacy_registry_record`,
+/// `remove_session_unknown_name_is_404`,
+/// `parity_sessions_delete_agrees_across_transports`.
 pub async fn remove_session(
     state: &Arc<DaemonState>,
-    id: &str,
+    key: &str,
 ) -> Result<RemoveSessionResponse, DaemonError> {
-    let session = parse_id(id)?;
+    // #7834: resolve by UUID *or* `tmux_name` — a legacy-registry record's name
+    // used to fail `parse_id` here and surface as a 400 while `session info`
+    // resolved the same name.
+    let target = SessionService::new(state).resolve(key)?;
     let removed = state
-        .remove_session(session)
-        .ok_or_else(|| DaemonError::SessionNotFound { id: id.to_string() })?;
+        .remove_session(target.id)
+        .ok_or_else(|| DaemonError::SessionNotFound {
+            id: key.to_string(),
+        })?;
 
     let tmux_name = removed.tmux_name.clone();
     TmuxService::kill_best_effort(&tmux_name);
     reconcile_managed_store_on_delete(state, &tmux_name).await;
 
     Ok(RemoveSessionResponse {
-        removed: id.to_string(),
+        removed: key.to_string(),
     })
 }
 

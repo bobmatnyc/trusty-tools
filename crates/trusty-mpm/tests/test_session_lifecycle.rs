@@ -350,8 +350,8 @@ async fn full_user_cycle() {
     );
     let created: Value = created.json().await.expect("create body");
     let name = created["name"].as_str().expect("name present").to_string();
-    // The friendly name resolves pause/command/output; `DELETE /sessions/{id}`
-    // resolves strictly by UUID, so keep the id for the stop step.
+    // The friendly name resolves pause/command/output, and since #7834 the
+    // stop step too; the id is kept so this test still covers the UUID form.
     let id = created["id"].as_str().expect("id present").to_string();
     assert!(!id.is_empty());
 

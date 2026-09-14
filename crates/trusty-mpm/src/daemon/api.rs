@@ -688,7 +688,9 @@ pub async fn get_session(
 /// registry entry leaks a live managed (`tm-*`/`tmpm-*`) tmux session on every call (the
 /// `full_user_cycle` leak this closes, epic #1452, #1454). Every session is
 /// owned by exactly one Session object; deleting it kills the tmux host too.
-/// What: parses the UUID, removes the legacy registry entry (404 if absent),
+/// What: resolves `id` as a UUID *or* a friendly `tmux_name` (#7834 — the
+/// name-only form used to 400 here while `session info` resolved it), removes
+/// the legacy registry entry (404 if neither form resolves),
 /// then best-effort kills the tmux session by the entry's `tmux_name` and
 /// reconciles the SessionManager store by decommissioning any managed record
 /// that shares that exact `tmux_name`. Both teardown steps are best-effort:
@@ -696,16 +698,17 @@ pub async fn get_session(
 /// (to stderr via `tracing` — never stdout, which carries MCP framing) and does
 /// NOT fail the HTTP response. The registry removal having succeeded is the
 /// contract the caller relies on.
-/// Test: `full_user_cycle` asserts the tmux session is gone after DELETE when
-/// tmux is available; `remove_session_kills_tmux_host` covers the kill call.
+/// Test: `remove_session_by_name_removes_legacy_registry_record`,
+/// `remove_session_unknown_name_is_404` — `full_user_cycle` asserts the tmux
+/// session is gone after DELETE when tmux is available.
 #[utoipa::path(
     delete,
     path = "/sessions/{id}",
     tag = "sessions",
-    params(("id" = String, Path, description = "Session UUID")),
+    params(("id" = String, Path, description = "Session UUID or friendly tmux name")),
     responses(
         (status = 200, description = "Session removed and tmux host killed"),
-        (status = 404, description = "No session with that id"),
+        (status = 404, description = "No session with that id or name"),
     )
 )]
 pub async fn remove_session(
