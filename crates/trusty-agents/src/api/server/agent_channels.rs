@@ -570,6 +570,12 @@ mod tests {
     }
 }
 
+// #7609: the byte-for-byte guarantee `Binding::event_types` rests on, in its
+// own file because this one is at the 500-SLOC cap.
+#[cfg(test)]
+#[path = "agent_channels/round_trip_tests.rs"]
+mod round_trip_tests;
+
 #[cfg(test)]
 mod stale_send_tests {
     use super::*;

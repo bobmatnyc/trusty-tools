@@ -576,17 +576,13 @@ pub async fn serve_with_config(cfg: ApiConfig) -> Result<()> {
     // #7609: the per-assistant half of the listeners->channels merge. Runs
     // once per process, here because this is the only startup path that
     // already holds the global channels a binding resolves its provider from.
-    // Awaited rather than detached so anything it reports is in the log before
-    // the server answers a channel request.
-    let assistant_dirs = crate::agents::agents_dir_candidates();
-    let assistant_globals = global_config.channels.clone();
-    if let Err(e) = tokio::task::spawn_blocking(move || {
-        crate::channels::migrate::migrate_assistant_channels(&assistant_dirs, &assistant_globals)
-    })
-    .await
-    {
-        tracing::warn!(error = %e, "channel migration: assistant sweep task failed");
-    }
+    // Detached, NEVER awaited — same reason as the docs index above: the sweep
+    // writes under a blocking advisory lock with no timeout, and a held lock
+    // would otherwise stall the bind below (see `spawn_assistant_migration`).
+    crate::channels::migrate::spawn_assistant_migration(
+        crate::agents::agents_dir_candidates(),
+        global_config.channels.clone(),
+    );
 
     // #6537: same fire-and-forget pattern as the listeners above — a
     // config problem is logged and the drain alone is skipped, never a

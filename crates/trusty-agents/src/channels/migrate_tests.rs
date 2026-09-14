@@ -298,6 +298,71 @@ fn an_existing_channels_file_is_left_alone() {
     assert_eq!(std::fs::read_to_string(&channels).expect("read back"), "[]");
 }
 
+/// A discoverable Assistant instance carrying the live izzie binding.
+fn assistant_instance_manifest() -> String {
+    let head = r#"
+[agent]
+name = "izzie"
+role = "assistant"
+extends = "assistant"
+model = ""
+description = ""
+
+[llm]
+temperature = 0.0
+max_tokens = 1024
+
+[system_prompt]
+content = "x"
+"#;
+    format!("{head}{LIVE_AGENT_TOML}")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_assistant_sweep_never_blocks_its_caller() {
+    // #7609 (critic HIGH, same shape as trusty-mpm #7965): the API server
+    // spawns this sweep and then binds its TCP listener. The sweep writes
+    // under a BLOCKING advisory lock with no timeout, so if it were awaited a
+    // held lock would stall the bind indefinitely.
+    let dir = tempfile::tempdir().expect("tempdir");
+    write(dir.path(), "izzie.toml", &assistant_instance_manifest());
+    let channels = dir.path().join("izzie.channels.json");
+
+    // Take the very lock the sweep's write needs, and hold it.
+    let (took, holding) = std::sync::mpsc::channel::<()>();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let held_path = channels.clone();
+    let holder = std::thread::spawn(move || {
+        crate::state_writer::atomic_update(&held_path, move |_existing| {
+            took.send(()).ok();
+            released.recv().ok();
+            Ok(None)
+        })
+    });
+    holding.recv().expect("the holder took the lock");
+
+    let started = std::time::Instant::now();
+    spawn_assistant_migration(vec![dir.path().to_path_buf()], vec![storable_global()]);
+
+    // The caller's next await on the startup path is its TCP bind.
+    let listener = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        tokio::net::TcpListener::bind("127.0.0.1:0"),
+    )
+    .await
+    .expect("the sweep must not hold the caller for a second")
+    .expect("bind");
+    assert!(listener.local_addr().is_ok(), "the server bound its port");
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    assert!(
+        !channels.exists(),
+        "the sweep is still blocked on the held lock, which is the point"
+    );
+
+    release.send(()).ok();
+    holder.join().expect("holder thread").expect("lock cycle");
+}
+
 #[test]
 fn the_sweep_skips_an_assistant_with_no_manifest() {
     let dir = tempfile::tempdir().expect("tempdir");

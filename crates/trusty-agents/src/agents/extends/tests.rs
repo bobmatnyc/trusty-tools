@@ -1445,3 +1445,32 @@ delegate_allowed = ["ticketing-agent"]
         "the in-process whitelist must union base-first"
     );
 }
+
+#[test]
+fn extends_unions_channels_by_id() {
+    // #7609: `channels` inherits exactly as `[[listeners]]` did — a new id is
+    // appended, a matching id is REPLACED in place by the child's entry.
+    use crate::agents::extends::union_channels_by_id;
+    use crate::channels::Channel;
+    fn channel(id: &str, target: &str) -> Channel {
+        Channel {
+            id: id.into(),
+            name: id.into(),
+            provider: "slack".into(),
+            target: target.into(),
+            ..Channel::default()
+        }
+    }
+    let base = vec![channel("mail", "D1"), channel("chat", "D2")];
+    let child = vec![channel("mail", "MOVED"), channel("pager", "D3")];
+    let merged = union_channels_by_id(base, child);
+    assert_eq!(
+        merged.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+        vec!["mail", "chat", "pager"],
+        "base order is preserved and a new id is appended"
+    );
+    assert_eq!(
+        merged[0].target, "MOVED",
+        "the child's entry replaces the base's in place"
+    );
+}

@@ -49,12 +49,6 @@ pub enum ChannelMigrationError {
         #[source]
         source: std::io::Error,
     },
-    #[error("{path}: `[[channels]]` could not be rendered ({source}); nothing was migrated")]
-    Render {
-        path: String,
-        #[source]
-        source: toml::ser::Error,
-    },
     #[error("{path}: the migrated channels could not be encoded ({source}); nothing was migrated")]
     Encode {
         path: String,
@@ -168,8 +162,10 @@ fn read_key<T: serde::de::DeserializeOwned>(
 /// What: returns `Ok(None)` when the file is absent, when `[[channels]]` is
 /// already present, or when `[[listeners]]` declares nothing. Otherwise
 /// appends the rendered `[[channels]]` array at end of file through
-/// [`crate::state_writer::atomic_update`], re-reading the absence guard inside
-/// the lock, and leaves `[[listeners]]` in place.
+/// [`crate::state_writer::atomic_update`] and leaves `[[listeners]]` in place.
+/// The unlocked read only decides whether there is work to do and reports a
+/// malformed table by key; what is written is derived again from the LOCKED
+/// bytes, so neither table can change between the decision and the write.
 /// Test: `a_global_listener_migrates_once_and_never_again`,
 /// `migration_leaves_the_legacy_listeners_table_intact`,
 /// `a_malformed_channels_table_is_reported_and_writes_nothing`.
@@ -186,30 +182,31 @@ pub fn migrate_global_if_absent(
             });
         }
     };
-    let Some(channels) = global_channels_to_write(&raw, path)? else {
+    // The unlocked read decides only whether there is work AND reports a
+    // malformed table with its key; the bytes it produces are discarded. What
+    // actually gets written is derived again from the LOCKED bytes below, so a
+    // `[[listeners]]` edit that lands between the two reads cannot be written
+    // over (critic, #7609).
+    if global_channels_to_write(&raw, path)?.is_none() {
         return Ok(None);
-    };
-    let rendered = toml::to_string_pretty(&ChannelsDocument {
-        channels: &channels,
-    })
-    .map_err(|source| ChannelMigrationError::Render {
-        path: path.display().to_string(),
-        source,
-    })?;
-    let report = ChannelMigrationReport {
-        channels: channels.iter().map(|c| c.id.clone()).collect(),
-    };
-    let wrote = crate::state_writer::atomic_update(path, move |existing| {
-        // #7609: re-read the guard under the lock — another process may have
-        // added `[[channels]]` between the read above and this write.
+    }
+    let mut moved: Vec<String> = Vec::new();
+    let wrote = crate::state_writer::atomic_update(path, |existing| {
         let Some(bytes) = existing else {
             return Ok(None);
         };
         let current = String::from_utf8_lossy(bytes).into_owned();
-        let table: toml::Table = toml::from_str(&current)?;
-        if table.contains_key("channels") {
+        // #7609: the whole decision is re-taken under the lock — whether
+        // `[[channels]]` has appeared, and what `[[listeners]]` now says.
+        let Some(channels) =
+            global_channels_to_write(&current, path).map_err(anyhow::Error::new)?
+        else {
             return Ok(None);
-        }
+        };
+        let rendered = toml::to_string_pretty(&ChannelsDocument {
+            channels: &channels,
+        })?;
+        moved = channels.iter().map(|c| c.id.clone()).collect();
         let mut out = current;
         if !out.ends_with('\n') {
             out.push('\n');
@@ -222,7 +219,7 @@ pub fn migrate_global_if_absent(
         path: path.display().to_string(),
         source,
     })?;
-    Ok(wrote.then_some(report))
+    Ok(wrote.then_some(ChannelMigrationReport { channels: moved }))
 }
 
 /// The channels a global migration would write, or `None` when it must not.
@@ -303,6 +300,32 @@ pub fn migrate_agent_channels_if_absent(
         source,
     })?;
     Ok(wrote.then_some(report))
+}
+
+/// Start the assistant sweep detached, off the caller's critical path.
+///
+/// Why: the sweep publishes each assistant's channels file through
+/// [`crate::state_writer::atomic_update`], which takes a BLOCKING `fs4`
+/// advisory lock with no timeout. Awaiting it on the API server's startup path
+/// lets one held lock — or simply a large roster — stall the TCP bind, the
+/// same defect shape as trusty-mpm #7965. Nothing on the request path reads
+/// the sweep's result, so it is fire-and-forget like the docs index and the
+/// log drain beside it in `api::server::routes`, and its report reaches the
+/// log when it finishes.
+/// What: returns IMMEDIATELY. Requires a tokio runtime.
+/// Test: `the_assistant_sweep_never_blocks_its_caller`.
+pub fn spawn_assistant_migration(dirs: Vec<std::path::PathBuf>, globals: Vec<Channel>) {
+    tokio::task::spawn(async move {
+        match tokio::task::spawn_blocking(move || migrate_assistant_channels(&dirs, &globals)).await
+        {
+            Ok(reports) if !reports.is_empty() => tracing::info!(
+                assistants = reports.len(),
+                "channel migration: the assistant sweep finished (#7609)",
+            ),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "channel migration: assistant sweep task failed"),
+        }
+    });
 }
 
 /// Seed every discovered assistant's channels file from its `agent.toml`.
