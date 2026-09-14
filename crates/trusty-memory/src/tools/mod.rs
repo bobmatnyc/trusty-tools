@@ -28,6 +28,9 @@
 //! - `wing_rename(palace, wing, new_label)`         -> WingSummary
 
 pub mod bm25;
+// #7493: the serialized-response byte ceiling every result-returning tool
+// folds to, applied once in `dispatch_tool`.
+mod byte_cap;
 mod chat_assets;
 pub mod chat_definitions;
 pub mod chat_ops;
@@ -108,16 +111,29 @@ use wing_ops::{handle_wing_create, handle_wing_list, handle_wing_rename};
 /// underlying failure.
 /// Test: `dispatch_palace_create_persists`, `dispatch_remember_then_recall`,
 /// `dispatch_kg_assert_then_query`, `dispatch_unknown_tool_errors`.
+///
+/// #7493: the serialized-response byte ceiling is enforced HERE, after the
+/// handler and before the caller, so a result-returning tool cannot ship
+/// unbounded by forgetting to fold its own body. [`byte_cap::apply`] is a
+/// no-op for every uncapped tool; a measurement failure propagates as a tool
+/// error rather than returning an unmeasured body.
 pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<Value> {
     // #6424: a successful recall, remember or note is what the console's Last
     // Used column means by "used". The args are cloned only for those four
     // tools, since the dispatch below consumes them.
     let stamp_args = USE_STAMPING_TOOLS.contains(&name).then(|| args.clone());
+    // #7493: the fold reads `max_bytes`/`full` off the caller's arguments,
+    // which the dispatch below also consumes.
+    let cap_args = byte_cap::is_capped(name).then(|| args.clone());
     let result = dispatch_tool_inner(state, name, args).await;
     if let (Ok(_), Some(args)) = (&result, &stamp_args) {
         stamp_palace_use(state, args, name);
     }
-    result
+    let mut value = result?;
+    if let Some(args) = cap_args {
+        byte_cap::apply(name, &args, &mut value)?;
+    }
+    Ok(value)
 }
 
 /// The tools whose success counts as using a palace (#6424).
@@ -253,3 +269,7 @@ async fn dispatch_tool_inner(state: &AppState, name: &str, args: Value) -> Resul
 
 #[cfg(test)]
 mod tests;
+// #7493: the serialized-response byte ceiling, its truncation notice, and the
+// descriptor/router consistency the enforcement table owns.
+#[cfg(test)]
+mod byte_cap_tests;

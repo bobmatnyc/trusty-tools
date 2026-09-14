@@ -495,5 +495,10 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
     // see `embed_audit_definitions`.
     tools.extend(embed_audit_tool_definitions(has_default));
     tools.push(metrics);
+    // #7493: every result-returning tool advertises the `max_bytes` / `full`
+    // knobs the dispatcher honours, from the same table the fold reads — a
+    // tool cannot advertise a knob it does not honour, or honour one it never
+    // advertised. Applied after the splices so a spliced group is covered too.
+    super::byte_cap::annotate_capped_tools(&mut result["tools"]);
     result
 }
