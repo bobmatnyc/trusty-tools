@@ -65,6 +65,20 @@ cross workflow files, so every OTHER push-to-main workflow is watched by
 workflow means adding its `name:` to that list —
 `scripts/check-red-main-coverage.sh` fails the `changes` job until you do.
 
+## A `pull_request` run examines the merge commit, not the branch
+
+🔴 **`pull_request`-triggered CI builds `refs/pull/N/merge`** — the PR head
+merged with the CURRENT `main` tip, refreshed on every push to either side —
+never the branch content alone. A local gate run against your branch proves
+the branch; it does not prove what CI actually examines. Merge (or rebase
+onto) `origin/main` before trusting a local green against a CI red, and expect
+a failure whose cause lives in neither the branch nor its merge-base: it can
+be a regression landed on `main` after your merge-base, in a crate your PR
+never touched. Measured case: `./scripts/check_rustdoc_links.sh` reported 0
+broken locally at `1f732b6d5`, while CI's `Rustdoc intra-doc links` job on the
+same SHA reported 2 broken, both introduced on `main` by #7603 after the PR's
+merge-base, in `trusty-mpm`'s `guided.rs`.
+
 ## Merge states, and what each one means
 
 - 🟡 **A `BEHIND` branch merges fine** — use `gh pr merge --squash
