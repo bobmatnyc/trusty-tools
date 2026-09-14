@@ -37,6 +37,16 @@
 //! bound, so `super::framework::StackDetection::truncated` covers every
 //! resource cap either discovery path applies. The byte budget is not one of
 //! them — an unaffordable read is the same absence as an unreadable file.
+//!
+//! #7809: fail-closed-with-a-flag is correct for an in-process boolean OR over
+//! one detection call, but it is not enough once a caller PERSISTS the answer
+//! — e.g. writing a negative `skillOverrides` entry from a "marker absent"
+//! result. A caller that writes persisted state from this module's output
+//! must carry [`WorkspaceProbe::truncated`] alongside the boolean rather than
+//! collapsing it away, so a later read can tell "genuinely absent" apart from
+//! "budget exhausted, unknown" instead of baking a false negative into stored
+//! state. This module already returns that state; applying it at every
+//! persisted-write call site is tracked separately (#7781).
 //! Test: `crates/trusty-mpm/src/core/manifest/workspace_tests.rs`.
 
 use std::cell::Cell;

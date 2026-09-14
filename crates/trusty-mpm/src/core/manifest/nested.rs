@@ -35,6 +35,14 @@
 //! ([`SKIP_DIR_NAMES`]), every dot-directory (`.git`, `.claude/worktrees`,
 //! `.venv`, a nested `.trusty-mpm`), and every plain directory name the root
 //! `.gitignore` lists.
+//!
+//! #7809: [`NestedProbe::truncated`] and [`NestedProbe::depth_limited`] are
+//! correct as an in-process boolean OR for one detection call, but a caller
+//! that PERSISTS this walk's answer — e.g. a negative `skillOverrides` entry
+//! for a stack this walk did not find — must carry the truncation state
+//! alongside the boolean rather than dropping it, or budget exhaustion is
+//! written to disk as an indistinguishable "genuinely absent". Applying that
+//! at the `skillOverrides` write site is tracked separately (#7781).
 //! Test: `crates/trusty-mpm/src/core/manifest/nested_tests.rs`.
 
 use std::collections::BTreeSet;

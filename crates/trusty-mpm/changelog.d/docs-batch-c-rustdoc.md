@@ -1,0 +1,4 @@
+Documentation
+- `tm doctor`'s `legacy_sources` warning now scopes "safe to delete" to `~/.trusty-mpm/claude-config` only and names the live siblings under the same parent — `usage/`, `session-manager/`, `statusline/` — so a reader does not delete the savings ledger or session store while acting on the advice (Refs #7610).
+- `session_launch::resolve_palace_slug`'s doc comment now states that the operator's `TRUSTY_MEMORY_PALACE` env var outranks both the explicit `git_remote` argument and the workspace's own `origin` fallback, and that a test targeting either derivation path must clear `TRUSTY_MEMORY_PALACE` first (Refs #7712).
+- The stack-detection module docs in `core::manifest::workspace` and `core::manifest::nested` now state that a caller persisting a bounded probe's result must carry its truncation state alongside the boolean, so budget exhaustion is never baked into stored state as an indistinguishable "genuinely absent" (Refs #7809).
