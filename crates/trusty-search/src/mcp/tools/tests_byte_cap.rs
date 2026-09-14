@@ -11,7 +11,7 @@
 
 use serde_json::Value;
 
-use super::byte_cap::{measure, DEFAULT_MAX_BYTES, HARD_MAX_BYTES};
+use super::byte_cap::{capped_tool_names, measure, DEFAULT_MAX_BYTES, HARD_MAX_BYTES};
 use super::tests::req;
 use super::{tool_descriptors, McpServer};
 
@@ -419,20 +419,15 @@ async fn an_under_cap_response_is_untouched_apart_from_the_flag() {
 }
 
 /// Every capped tool advertises the two knobs it honours.
+///
+/// Iterates the enforcement table itself, so a tool added there but missing
+/// from `tools/list` fails here rather than shipping an unadvertised knob.
 #[test]
 fn every_capped_tool_advertises_max_bytes_and_full() {
     let defs = tool_descriptors();
     let tools = defs.as_array().expect("descriptor array");
-    for name in [
-        "search",
-        "search_lexical",
-        "search_semantic",
-        "search_kg",
-        "search_all",
-        "list_chunks",
-        "grep",
-        "get_call_chain",
-    ] {
+    assert_eq!(capped_tool_names().len(), 8, "the capped roster changed");
+    for name in capped_tool_names() {
         let tool = tools
             .iter()
             .find(|t| t["name"] == name)
@@ -456,6 +451,113 @@ fn every_capped_tool_advertises_max_bytes_and_full() {
     assert!(health["inputSchema"]["properties"]
         .get("max_bytes")
         .is_none());
+}
+
+/// Every capped tool is a name the router actually claims.
+///
+/// The descriptor half above catches a table entry missing from `tools/list`;
+/// this catches one the dispatcher would answer `unknown tool` for, which is
+/// the same drift arriving from the other side.
+#[tokio::test]
+async fn every_capped_tool_is_routed_by_the_dispatcher() {
+    // No daemon behind it: an arg or transport error is fine, METHOD_NOT_FOUND
+    // is not — that is the router disowning the name.
+    let server = McpServer::new("http://127.0.0.1:1");
+    for name in capped_tool_names() {
+        let resp = server
+            .dispatch(req(name, serde_json::json!({ "index_id": "demo" })))
+            .await;
+        let code = resp.error.as_ref().map(|e| e.code);
+        assert_ne!(
+            code,
+            Some(super::error_codes::METHOD_NOT_FOUND),
+            "{name} is capped but the router does not claim it"
+        );
+    }
+}
+
+/// An oversized FIRST hit among many says so, instead of claiming the
+/// response fits a ceiling it is over.
+#[tokio::test]
+async fn an_oversized_first_hit_among_many_reports_honestly() {
+    let server = search_daemon(10).await;
+    let (payload, len) = call(
+        &server,
+        "search",
+        serde_json::json!({ "index_id": "demo", "query": "handler", "max_bytes": 64 }),
+    )
+    .await;
+
+    assert_eq!(payload["results"].as_array().map(Vec::len), Some(1));
+    assert!(len > 64, "the returned hit really is over the ceiling");
+    assert_eq!(payload["meta"]["truncated"], true);
+    assert_eq!(payload["meta"]["returned"], 1);
+    assert_eq!(payload["meta"]["withheld"], 9);
+    let notice = payload["meta"]["truncation_notice"]
+        .as_str()
+        .expect("a truncation notice");
+    assert!(
+        notice.contains("exceeds the 64-byte ceiling"),
+        "the notice must not claim the response fits: {notice}"
+    );
+    assert!(
+        !notice.contains("to keep this response under"),
+        "the folded wording is false here: {notice}"
+    );
+}
+
+/// A `full` that is not a boolean is rejected, exactly like `max_bytes`.
+#[tokio::test]
+async fn a_non_boolean_full_is_rejected() {
+    let server = search_daemon(10).await;
+    let msg = call_err(
+        &server,
+        "search",
+        serde_json::json!({ "index_id": "demo", "query": "handler", "full": "true" }),
+    )
+    .await;
+    assert!(msg.contains("full must be a boolean"), "{msg}");
+}
+
+/// The three tools that carried no `meta` before this branch gain exactly one
+/// key under the cap, and nothing else.
+#[tokio::test]
+async fn under_cap_tools_without_a_meta_block_gain_only_the_flag() {
+    let base = spawn_mock(
+        Value::Null,
+        chunks_body(2),
+        grep_body(2),
+        "fn handler(req: Request) -> Response\n".to_string(),
+    )
+    .await;
+    let server = McpServer::new(base);
+
+    for (tool, args) in [
+        (
+            "list_chunks",
+            serde_json::json!({ "index_id": "demo", "limit": 2 }),
+        ),
+        (
+            "grep",
+            serde_json::json!({ "index_id": "demo", "pattern": "handler" }),
+        ),
+        (
+            "get_call_chain",
+            serde_json::json!({ "index_id": "demo", "entry_point": "handler" }),
+        ),
+    ] {
+        let (payload, len) = call(&server, tool, args).await;
+        assert!(len < DEFAULT_MAX_BYTES, "{tool}: fixture must fit the cap");
+        let meta = payload["meta"]
+            .as_object()
+            .unwrap_or_else(|| panic!("{tool} must carry a meta object"));
+        assert_eq!(
+            meta.keys().collect::<Vec<_>>(),
+            vec!["truncated"],
+            "{tool}: the flag is the only key the cap adds"
+        );
+        assert_eq!(meta["truncated"], false, "{tool}");
+    }
 }
 
 /// A measurement that cannot be taken is an error, never a licence to return

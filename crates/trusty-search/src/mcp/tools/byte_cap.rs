@@ -137,6 +137,15 @@ fn capped_tool(tool: &str) -> Option<&'static CappedTool> {
     CAPPED_TOOLS.iter().find(|t| t.name == tool)
 }
 
+/// Every capped tool's name, so a test never restates the list (#7493).
+///
+/// A hardcoded copy in a test passes while the table and the router disagree,
+/// which is the drift the test exists to catch.
+#[cfg(test)]
+pub(super) fn capped_tool_names() -> Vec<&'static str> {
+    CAPPED_TOOLS.iter().map(|t| t.name).collect()
+}
+
 /// Measure a value's serialized size, in bytes.
 ///
 /// Why: the ceiling is enforced against the bytes the caller actually
@@ -188,7 +197,18 @@ impl Bounds {
                 }
             },
         };
-        let full = args.get("full").and_then(Value::as_bool).unwrap_or(false);
+        // #7493: same treatment as `max_bytes` above. Coercing `"true"` to
+        // `false` would silently re-impose a ceiling the caller just disabled.
+        let full = match args.get("full") {
+            None | Some(Value::Null) => false,
+            Some(Value::Bool(b)) => *b,
+            Some(other) => {
+                return Err(DispatchError::InvalidParams(format!(
+                    "full must be a boolean (true returns every item with no byte \
+                     ceiling); got {other}"
+                )))
+            }
+        };
         Ok(Self {
             ceiling: requested.unwrap_or(DEFAULT_MAX_BYTES).min(HARD_MAX_BYTES),
             // `full` removes the ceiling, so there is no clamp to report.
@@ -211,9 +231,25 @@ struct Fold<'a> {
     cursor_mode: bool,
 }
 
+/// How a candidate response relates to the ceiling.
+///
+/// #7493: `Oversized` is not "the tail was dropped" — it is "not even the
+/// first item fits, and it is returned anyway". The two need different
+/// notices, because saying items "were withheld to keep this response under N
+/// bytes" about a response that is OVER N bytes is false.
+#[derive(Clone, Copy, PartialEq)]
+enum Fit {
+    /// Everything fits.
+    Whole,
+    /// A prefix of whole items fits; the tail was dropped.
+    Folded,
+    /// The first item alone exceeds the ceiling; it is returned regardless.
+    Oversized,
+}
+
 impl Fold<'_> {
     /// Build the response that keeps the first `keep` items.
-    fn candidate(&self, keep: usize, truncated: bool) -> Value {
+    fn candidate(&self, keep: usize, fit: Fit) -> Value {
         let mut map = self.base.clone();
         let withheld = self.total - keep;
         if let Some(key) = self.spec.items_key {
@@ -222,7 +258,8 @@ impl Fold<'_> {
                 self.repage(&mut map, keep);
             }
         }
-        let notice = truncated.then(|| self.notice(keep));
+        let truncated = fit != Fit::Whole;
+        let notice = truncated.then(|| self.notice(keep, fit));
         let meta = meta_entry(&mut map);
         meta.insert("truncated".into(), Value::Bool(truncated));
         if let Some(notice) = notice {
@@ -263,19 +300,27 @@ impl Fold<'_> {
     }
 
     /// The one-sentence notice `meta.truncation_notice` carries.
-    fn notice(&self, keep: usize) -> String {
+    ///
+    /// The `Oversized` wording never claims the response fits, whatever
+    /// `total` is: the item that WAS returned is itself over the ceiling.
+    fn notice(&self, keep: usize, fit: Fit) -> String {
         let (ceiling, hint) = (self.bounds.ceiling, self.spec.hint);
-        match self.total - keep {
-            0 => format!(
+        let (one, many, withheld) = (self.spec.one, self.spec.many, self.total - keep);
+        match (fit, withheld) {
+            (Fit::Oversized, 0) => format!(
                 "The single {one} exceeds the {ceiling}-byte ceiling and is returned whole \
-                 rather than as an empty result; {hint}.",
-                one = self.spec.one,
+                 rather than as an empty result; {hint}."
             ),
-            withheld => format!(
+            (Fit::Oversized, _) => format!(
+                "The first {one} alone exceeds the {ceiling}-byte ceiling and is returned \
+                 whole rather than as an empty result; the other {withheld} of {total} \
+                 {many} were dropped; {hint}.",
+                total = self.total,
+            ),
+            _ => format!(
                 "{withheld} of {total} {many} were withheld to keep this response under \
                  {ceiling} bytes; {hint}.",
                 total = self.total,
-                many = self.spec.many,
             ),
         }
     }
@@ -338,33 +383,41 @@ pub(super) fn apply(tool: &str, args: &Value, resp: &mut Value) -> Result<(), Di
     // `full: true` skips the measurement entirely — the point of the escape
     // hatch is to pay for the whole body on purpose.
     if bounds.full {
-        *resp = fold.candidate(total, false);
+        *resp = fold.candidate(total, Fit::Whole);
         return Ok(());
     }
 
-    let whole = fold.candidate(total, false);
+    let whole = fold.candidate(total, Fit::Whole);
     if measure(&whole)? <= bounds.ceiling {
         *resp = whole;
         return Ok(());
     }
-    if total <= 1 {
-        *resp = fold.candidate(total, true);
+    // An empty body is already as small as it gets; there is nothing to drop.
+    if total == 0 {
+        *resp = whole;
         return Ok(());
     }
 
     // Longest prefix that fits. Monotone in `keep`, so a binary search costs
-    // log2(n) measurements instead of one per dropped item.
-    let (mut lo, mut hi, mut best) = (1usize, total - 1, 1usize);
+    // log2(n) measurements instead of one per dropped item. `best` stays
+    // `None` until a probe actually fits — seeding it at 1 would ship an
+    // unverified first item under the "withheld to keep this response under N
+    // bytes" notice, which is false when that item is itself over N.
+    let (mut lo, mut hi, mut best) = (1usize, total.saturating_sub(1), None::<usize>);
     while lo <= hi {
         let mid = lo + (hi - lo) / 2;
-        if measure(&fold.candidate(mid, true))? <= bounds.ceiling {
-            best = mid;
+        if measure(&fold.candidate(mid, Fit::Folded))? <= bounds.ceiling {
+            best = Some(mid);
             lo = mid + 1;
         } else {
             hi = mid - 1;
         }
     }
-    *resp = fold.candidate(best, true);
+    // No prefix fit: return the first item alone, and say so honestly.
+    *resp = match best {
+        Some(keep) => fold.candidate(keep, Fit::Folded),
+        None => fold.candidate(1, Fit::Oversized),
+    };
     Ok(())
 }
 
