@@ -23,6 +23,8 @@ pub mod session_finder;
 // #6888: writer-and-reader-agree derivation of a pause's `session_id`.
 pub mod session_id;
 pub mod session_log;
+// #7830 / ADR-0062: rebuild the local session cache from `refs/tm/sessions/**`.
+pub mod session_refs;
 pub mod state;
 
 use std::path::{Path, PathBuf};

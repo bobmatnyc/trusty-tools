@@ -209,6 +209,12 @@ pub async fn session_context_catchup(
     }
 
     let config = crate::core::config::MpmConfig::load_default();
+    // #7830 / ADR-0062: rebuild the local cache from `refs/tm/sessions/**`
+    // BEFORE anything reads it, so a fresh clone resolves its snapshot through
+    // the unchanged read path.
+    if config.session_refs.enabled {
+        hydrate_session_refs(&primary).await;
+    }
     let memory_socket = trusty_common::memory_rpc::resolve_memory_socket_or_unreachable();
 
     // #5072: `absorb` sums `undatable_sessions_dropped` across projects rather
@@ -242,6 +248,47 @@ pub async fn session_context_catchup(
     let resolved = resolve_snapshot_for_caller(&primary, session_id, tmux_window);
 
     Ok(catchup_payload(merged, sessions_offset, resolved))
+}
+
+/// Rebuild `<project>/.trusty-mpm/sessions/` from its session refs (#7830).
+///
+/// Why: ADR-0062 decision 4 demotes the working-tree store to a cache and makes
+/// `refs/tm/sessions/**` the durable copy. Every reader below — the digest, the
+/// snapshot resolver, the attribution index — reads the cache, so hydrating it
+/// first is what lets the entire read path stay unchanged on a fresh clone.
+/// What: [`trusty_common::catchup::session_refs::hydrate_session_cache`] on a
+/// blocking thread (it shells out to git and fetches). Fail-open: a directory
+/// that is not a checkout, has no `origin`, or is offline logs a debug line and
+/// leaves the cache exactly as it found it — a catch-up must never fail because
+/// the remote is unreachable.
+///
+/// Only the PRIMARY project is hydrated, not every project an `all_projects`
+/// peek walks: `resolved_snapshot` — the value a resume acts on — is resolved
+/// against the primary alone, and fetching every registered project's remote
+/// would put N network round-trips on a read.
+/// Test: `catchup_hydrates_a_deleted_cache_from_the_session_ref`.
+async fn hydrate_session_refs(project_dir: &Path) {
+    let dir = project_dir.to_path_buf();
+    let hydrated = tokio::task::spawn_blocking(move || {
+        trusty_common::catchup::session_refs::hydrate_session_cache(&dir)
+    })
+    .await;
+    match hydrated {
+        Ok(Ok(outcome)) if outcome.refs_seen > 0 => {
+            tracing::debug!(
+                refs_seen = outcome.refs_seen,
+                snapshots = outcome.snapshots_written.len(),
+                log_entries = outcome.log_entries_added,
+                "session-ref hydration finished"
+            );
+        }
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => tracing::debug!(
+            project = %project_dir.display(),
+            "session-ref hydration skipped: {e}"
+        ),
+        Err(e) => tracing::warn!("session-ref hydration task failed: {e}"),
+    }
 }
 
 /// Back the `session_context_pause` MCP tool.
@@ -329,6 +376,10 @@ pub async fn session_context_pause(
     };
     let outcome = trusty_common::catchup::pause::write_pause_snapshot(&project_path, &input)
         .map_err(|e| format!("failed to write pause snapshot: {e}"))?;
+
+    // #7830 / ADR-0062: the snapshot's durable copy is one commit appended to
+    // this session's own ref. Fail-open by construction — see the helper.
+    let receipt = publish_session_ref(&project_path, session_id, &outcome).await;
 
     let mut skipped_dirty = Vec::new();
     let pruned_worktrees: Vec<String> = if prune_worktrees {
@@ -421,7 +472,57 @@ pub async fn session_context_pause(
         "pruned_worktrees": pruned_worktrees,
         "skipped_dirty_worktrees": skipped_dirty,
         "snapshot_publish": publish_json,
+        // #7830 / ADR-0062: the durable copy of this pause, as a receipt.
+        "ref_name": receipt.ref_name,
+        "ref_published": receipt.published,
+        "ref_error": receipt.error,
     }))
+}
+
+/// Append this pause to its ADR-0062 session ref, fail-open (#7830).
+///
+/// Why: the ref is the DURABLE copy of session history, but the local snapshot
+/// is the PRIMARY write — it is already on disk by the time this runs. A ref
+/// write or a push that fails must therefore not fail the pause, and must not
+/// be silent either: the receipt reaches the response and a `tracing::warn!`
+/// names the project, the ref and the error.
+/// What: reads `[session_refs].enabled` (default `true`) and runs
+/// [`crate::core::session_ref_publish::publish_receipt`] on a blocking thread —
+/// it shells out to git and touches the network. A join failure is itself a
+/// receipt, never a pause failure.
+/// Test: `a_failed_ref_publish_is_reported_and_never_fails_the_pause`,
+/// `core::session_ref_publish::tests::a_disabled_section_publishes_nothing`.
+async fn publish_session_ref(
+    project_path: &Path,
+    session_id: &str,
+    outcome: &trusty_common::catchup::pause::PauseSnapshotOutcome,
+) -> crate::core::session_ref_publish::SessionRefReceipt {
+    use crate::core::session_ref_publish::{SessionRefReceipt, SessionRefRequest, publish_receipt};
+
+    let enabled = crate::core::config::MpmConfig::load_default()
+        .session_refs
+        .enabled;
+    let repo = project_path.to_path_buf();
+    let session = session_id.to_string();
+    let snapshot = outcome.snapshot_path.clone();
+    let timestamp = outcome.timestamp;
+    tokio::task::spawn_blocking(move || {
+        publish_receipt(
+            &SessionRefRequest {
+                repo: &repo,
+                session_id: &session,
+                snapshot_path: &snapshot,
+                timestamp,
+            },
+            enabled,
+        )
+    })
+    .await
+    .unwrap_or_else(|e| SessionRefReceipt {
+        ref_name: None,
+        published: false,
+        error: Some(format!("session ref publish task failed: {e}")),
+    })
 }
 
 /// Publish a freshly written pause snapshot as a branch + PR (#7282).
@@ -1193,6 +1294,172 @@ mod tests {
         let sessions =
             crate::core::catchup::session_finder::find_paused_sessions(tmp.path()).unwrap();
         assert_eq!(sessions.len(), 1, "the written snapshot should round-trip");
+    }
+
+    /// Why: #7830 / ADR-0062 fail-open check. The local snapshot is the primary
+    /// write, so a session-ref publish that cannot reach `origin` must never
+    /// fail the pause — and must never be silent either. Before this change
+    /// there was no ref leg at all, so a caller had nothing to read.
+    /// What: a real checkout whose `origin` points at a path that does not
+    /// exist, so the ref leg fails on its first remote read. The pause still
+    /// returns `Ok`, the snapshot still round-trips through the unchanged
+    /// reader, and the response carries `ref_published: false` plus a non-empty
+    /// `ref_error`.
+    /// Test: itself.
+    #[tokio::test]
+    async fn a_failed_ref_publish_is_reported_and_never_fails_the_pause() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = tmp.path();
+        for args in [
+            vec!["init", "--initial-branch=main"],
+            vec!["config", "user.email", "pause@example.invalid"],
+            vec!["config", "user.name", "Pause Tester"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "/nonexistent/7830/no/such/remote.git",
+            ],
+        ] {
+            let out = trusty_common::git::command_in(repo)
+                .args(&args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "fixture `git {args:?}` failed");
+        }
+
+        let state = DaemonState::shared();
+        let result = session_context_pause(
+            &state,
+            repo.to_str().unwrap(),
+            Some("s-refs-fail"),
+            "Did the thing.",
+            vec![],
+            vec![],
+            vec![],
+            None,
+            false,
+        )
+        .await
+        .expect("a ref publish failure must not fail the pause");
+
+        assert!(result["snapshot_path"].as_str().unwrap().ends_with(".md"));
+        assert_eq!(
+            result["ref_published"], false,
+            "an unreachable origin cannot have published a ref: {result}"
+        );
+        let err = result["ref_error"]
+            .as_str()
+            .expect("the failure must be reported, not swallowed");
+        assert!(!err.trim().is_empty(), "{result}");
+
+        let sessions = crate::core::catchup::session_finder::find_paused_sessions(repo).unwrap();
+        assert_eq!(
+            sessions.len(),
+            1,
+            "the local snapshot is still the primary write"
+        );
+    }
+
+    /// Why: #7830 closure condition 4 / ADR-0062 decision 4 — the working-tree
+    /// store is a CACHE. Deleting it must be recoverable from the session ref
+    /// through the unchanged read path, which is exactly what a resume from a
+    /// fresh clone does.
+    /// What: pause into a real checkout with a bare `origin`, publish the ref,
+    /// delete `.trusty-mpm/sessions/` outright, hydrate, and catch up. The
+    /// resolved snapshot is the same path the pause reported.
+    ///
+    /// The ref publish and the hydration are both driven explicitly rather than
+    /// left to `[session_refs].enabled`, because that section is read from the
+    /// operator's real `~/.trusty-mpm/config.toml` — a test that depended on it
+    /// would pass or fail with the host's configuration. The one-line gate
+    /// itself is covered by `config_session_refs_*`.
+    /// Test: itself.
+    #[tokio::test]
+    async fn catchup_hydrates_a_deleted_cache_from_the_session_ref() {
+        use crate::core::session_ref_publish::{SessionRefRequest, publish_receipt};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let remote = tmp.path().join("remote.git");
+        let repo = tmp.path().join("work");
+        std::fs::create_dir_all(&repo).unwrap();
+        fn git_fixture(dir: &Path, args: &[&str]) {
+            let out = trusty_common::git::command_in(dir)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "fixture `git {}` failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        git_fixture(
+            tmp.path(),
+            &[
+                "init",
+                "--bare",
+                "--initial-branch=main",
+                remote.to_str().unwrap(),
+            ],
+        );
+        git_fixture(&repo, &["init", "--initial-branch=main"]);
+        git_fixture(&repo, &["config", "user.email", "refs@example.invalid"]);
+        git_fixture(&repo, &["config", "user.name", "Ref Tester"]);
+        git_fixture(
+            &repo,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+
+        let state = DaemonState::shared();
+        let paused = session_context_pause(
+            &state,
+            repo.to_str().unwrap(),
+            Some("s-hydrate"),
+            "Parked mid-review.",
+            vec![],
+            vec![],
+            vec![],
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        let snapshot_path = PathBuf::from(paused["snapshot_path"].as_str().unwrap());
+
+        let receipt = publish_receipt(
+            &SessionRefRequest {
+                repo: &repo,
+                session_id: "s-hydrate",
+                snapshot_path: &snapshot_path,
+                timestamp: chrono::Utc::now(),
+            },
+            true,
+        );
+        assert!(receipt.published, "{receipt:?}");
+
+        std::fs::remove_dir_all(repo.join(".trusty-mpm/sessions")).unwrap();
+        assert!(!snapshot_path.exists());
+
+        hydrate_session_refs(&repo).await;
+
+        let resumed = session_context_catchup(
+            repo.to_str().unwrap(),
+            Some("s-hydrate"),
+            None,
+            false,
+            true,
+            0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            resumed["resolved_snapshot"].as_str(),
+            Some(snapshot_path.to_string_lossy().as_ref()),
+            "the hydrated cache must resolve through the unchanged read path: {resumed}"
+        );
+        assert_eq!(resumed["resolved_via"], "session_id");
     }
 
     /// Why: #6888 — this is the whole fix, end to end at the daemon boundary. A

@@ -319,6 +319,33 @@ impl Default for HooksConfig {
     }
 }
 
+/// `[session_refs]` section — the ADR-0062 session-history ref publisher.
+///
+/// Why (#7830): a pause now appends to
+/// `refs/tm/sessions/<user-id>/<session-key>` and lease-pushes it to `origin`.
+/// That is a network write on the PM's pause path, against a remote an operator
+/// may not want machine data on, so it needs one supported off switch — the
+/// same shape [`HooksConfig`] uses. Defaulting to `true` is what makes the ADR's
+/// ruling the behaviour without every host editing a config file.
+/// What: one boolean. `false` makes both the pause publisher and the catch-up
+/// hydrator no-ops, including the `remote.origin.fetch` refspec registration, so
+/// the on-disk and on-config state is byte-identical to pre-ADR-0062 behaviour.
+/// Test: `config_session_refs_defaults_to_enabled`,
+/// `config_session_refs_can_be_disabled`,
+/// `core::session_ref_publish::tests::a_disabled_section_publishes_nothing`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionRefsConfig {
+    /// Publish each pause to its session ref and hydrate from refs on catch-up.
+    pub enabled: bool,
+}
+
+impl Default for SessionRefsConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 // ──────────────────────────────────────────────
 // Root config
 // ──────────────────────────────────────────────
@@ -429,6 +456,13 @@ pub struct MpmConfig {
     /// [`Self::load_default`] — see that module's doc for why no project layer
     /// may raise a cap that protects the machine every project shares.
     pub builders: crate::core::builders::BuildersConfig,
+
+    /// `[session_refs]` — ADR-0062 session-history refs (#7830).
+    ///
+    /// Absent section → `enabled = true`: every pause appends to its own
+    /// `refs/tm/sessions/**` ref and lease-pushes it. Set `enabled = false` to
+    /// restore the pre-ADR-0062 behaviour exactly.
+    pub session_refs: SessionRefsConfig,
 }
 
 // ──────────────────────────────────────────────
