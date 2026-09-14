@@ -26,8 +26,17 @@ extends = "assistant"
 # #3358: no `runner` — falls back to the default (Subprocess), routing off
 # the claude-code CLI onto the direct-API credential path (AnthropicDirect
 # when ANTHROPIC_API_KEY is set, else OpenRouter). See `pick_credentials()`
-# in `src/llm/credentials.rs`.
-model = "claude-sonnet-4-6"
+# in `src/llm/credentials.rs`. #7878 supersedes that ambient resolution with
+# the explicit Bedrock pin below — `pick_credentials()` never reaches Bedrock,
+# so an unpinned persona could not run on Duetto's own account.
+# #7878: Duetto Bedrock inference. `provider_id` is the enforced pin
+# (`llm::provider_pin::resolve`, fail-closed); the slug already carries the
+# `bedrock/` routing marker `adapter_for_model` matches, same shape as
+# `bedrock-engineer.toml`, so `pinned_model_slug` is a no-op here and the two
+# never disagree. `us.anthropic.…` is the cross-region inference-profile id
+# Bedrock routes by — verified ACTIVE in us-east-1 under the `cto` profile.
+model = "bedrock/us.anthropic.claude-sonnet-4-6"
+provider_id = "bedrock"
 description = "CTO Assistant — private assistant for Robert Matsuoka (CTO, Duetto)"
 # #3738 (owner decision 2026-07-23): user-facing display name is "CTO Bot"
 # (was "CTO Assistant"). Selectable named persona, never the default.
@@ -41,6 +50,15 @@ temperature = 0.3
 # #469: Bumped from the base's 1024 to 4096 to leave room for GFA reports and
 # structured org data tables which were getting truncated.
 max_tokens = 4096
+# #7878: the AWS profile/region the Bedrock client authenticates with. Declared
+# per-agent because `AWS_PROFILE` is process-global: the CLI, the API server and
+# the launchd Slack agent are three different processes, and only this field
+# reaches all three. Every dispatch path installs it via `BedrockEnvGuard` from
+# `[llm].aws_profile`/`aws_region` (`runtime::subagent_exec`,
+# `ctrl::pm_task::dispatch`). A name, never a credential — the AWS SDK resolves
+# the profile through its own chain.
+aws_profile = "cto"
+aws_region = "us-east-1"
 # OKG STORE BINDING (#3816/#3864, DOC-54 SPEC-AGENTS-04 §5.1) — the FIRST leg
 # of the stores/tools/listeners config triple: what this agent KNOWS, as
 # opposed to how it ACTS (`[tools].allow`) or REACTS (`[[listeners]]`).
@@ -143,7 +161,21 @@ allow = [
     # by `bundled_cto_assistant_pins_okg_docstore_reach` (agents/tests/loading.rs).
     "okg_ingest_docstore",
     "okg_sources",
+    # #7880: R2's Slack floor needs the grant as well as the binding — the tool
+    # reads and sends only on destinations already saved for THIS assistant
+    # (`tools::channel`, fixed to the executing agent), so the grant widens
+    # nothing beyond `agent.channels.json`.
+    "channel",
 ]
+# #7876: the projects-tree index, attached as a tier-2 corpus (#3232/#4009).
+# `[[stores]]` below still names `cto-assistant`, but the bound-store slot is
+# owned by the PROTECTED extraction index once knowledge provisioning has run
+# (`knowledge::search_binding::bound_index` returns `state.store.index_id`,
+# here `assistant-okg-…`), so `vector_search` with no `index_id` searches the
+# protected tree and never the projects tree. Attaching the id here is what
+# puts it in the tool's schema and makes it reachable by name. Enforcement is
+# deliberately left off, so this widens the schema and gates nothing.
+search_indexes = ["cto-assistant"]
 # #3938: OpenRPC scopes (#3208) for the Gmail/Tasks surface above. These are
 # NOT a delta the base can supply and they are NOT redundant with `allow`:
 # `allow` gates by tool NAME, `scopes` gates by the capability the tool's

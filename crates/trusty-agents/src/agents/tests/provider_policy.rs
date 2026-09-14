@@ -32,14 +32,17 @@ const TEST_POLICY: &str = "bedrock";
 /// Why: acceptance criterion 4 is that the mechanism covers ALL of them, not a
 /// subset. Listing them here means dropping one from the covered set fails a
 /// test rather than passing quietly.
-const CITED_UNPINNED_TEMPLATES: [&str; 7] = [
+/// #7878 removed `cto-assistant/agent.toml` (and its flat shadow) from this
+/// list: both now declare `provider_id = "bedrock"`, so they are pinned and the
+/// policy must leave them alone. The sweep above still asserts that — under the
+/// `else` arm, where a pinned template's model must come out unchanged.
+const CITED_UNPINNED_TEMPLATES: [&str; 6] = [
     "assistant/agent.toml",
     "izzie/agent.toml",
     "izzie.toml",
     "personal-assistant.toml",
     "ctrl.toml",
     "ctrl/agent.toml",
-    "cto-assistant/agent.toml",
 ];
 
 /// This crate's bundled agent-template directory.
