@@ -10,7 +10,11 @@
 //! [`DEFAULT_MAX_USAGE_PCT`]), one measurement
 //! ([`trusty_common::host_metrics::mount_for_path`], the mount holding the
 //! path — not the cross-mount aggregate, which stays healthy while one volume
-//! fills), and two decisions over them:
+//! fills), and two decisions over them. The default threshold applies only
+//! when the operator's config names no value — a local repro that wants to
+//! cross the threshold must move the MEASUREMENT (fill more of the mount),
+//! never move the default, since an explicit config value always wins over it
+//! (#7636):
 //!
 //! | Caller | Cannot measure | Why |
 //! |---|---|---|

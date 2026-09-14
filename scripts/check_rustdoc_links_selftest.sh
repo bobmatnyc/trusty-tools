@@ -62,6 +62,11 @@
 #   bash scripts/check_rustdoc_links_selftest.sh
 #   bash scripts/check_rustdoc_links_selftest.sh --gate /path/to/gate.sh
 #
+#   --gate's path MUST be a copy living inside a git checkout, never a bare
+#   scratch path: the gate itself resolves its own REPO_ROOT via
+#   `git -C "$SCRIPT_DIR" rev-parse --show-toplevel`, so a --gate path outside
+#   a checkout fails every case with `fatal: not a git repository` (#7636).
+#
 # Portability: POSIX tools only; bash 3.2 (macOS) and bash 5 (Linux CI).
 
 set -euo pipefail
