@@ -514,6 +514,68 @@ fn load_or_create_claude_md_seeds_in_a_subdirectory_of_a_git_repo() {
     assert_eq!(content, CLAUDE_MD_STUB);
 }
 
+/// FAILS BEFORE #7764: the child-repository scan ran once, several git
+/// subprocesses before the write, and the stub was then written regardless. A
+/// repository created inside that window made this exactly the ancestor
+/// `CLAUDE.md` seed #7673 refuses.
+///
+/// The prompt seam is the one point that provably runs BETWEEN the first scan
+/// and the write, so creating the child there puts it inside the real window
+/// rather than a simulated one.
+#[test]
+fn a_child_repository_created_between_the_check_and_the_write_refuses_the_seed() {
+    let tmp = crate::test_support::hermetic_temp_dir();
+    let ws = tmp.path().join("workspace");
+    fs::create_dir_all(&ws).unwrap();
+    let path = ws.join("CLAUDE.md");
+    // #7673: a fixture home, never the ambient `$HOME`.
+    let home = tmp.path().join("fixture-home");
+    let child = ws.join("packages").join("api");
+
+    let mut appears_mid_window = || {
+        fs::create_dir_all(child.join(".git")).expect("create the child repository");
+        false
+    };
+    let seam: Option<&mut dyn FnMut() -> bool> = Some(&mut appears_mid_window);
+    let err = load_or_create_claude_md_with_init(&path, Some(&home), seam)
+        .expect_err("a repository that appeared mid-window must refuse the seed");
+
+    assert!(err.to_string().contains("packages/api"), "{err}");
+    assert!(
+        !path.exists(),
+        "no CLAUDE.md may be written above a child repository"
+    );
+}
+
+/// The re-check must not refuse the seed it exists to protect: an accepted
+/// `git init` offer makes the directory a repository of its own, which is a
+/// seed site, not a workspace parent.
+#[test]
+fn an_accepted_git_init_offer_still_seeds_through_the_recheck() {
+    let tmp = crate::test_support::hermetic_temp_dir();
+    if !git_ok(tmp.path(), &["--version"]) {
+        eprintln!("#7764 test: git unavailable, skipping");
+        return;
+    }
+    let dir = tmp.path().join("new-project");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("CLAUDE.md");
+    // #7673: a fixture home, never the ambient `$HOME`.
+    let home = tmp.path().join("fixture-home");
+
+    let mut accept = || true;
+    let seam: Option<&mut dyn FnMut() -> bool> = Some(&mut accept);
+    let (content, created) = load_or_create_claude_md_with_init(&path, Some(&home), seam)
+        .expect("an accepted offer seeds the directory it just initialised");
+
+    assert!(created);
+    assert_eq!(content, CLAUDE_MD_STUB);
+    assert!(
+        dir.join(".git").is_dir(),
+        "the accepted offer must have created the repository"
+    );
+}
+
 /// A first-touch directory — the shape `tm sessions instructions --dir <dir>` is
 /// documented to accept — must still seed. The first round refused it, which is
 /// what forced the fixture workarounds this round removed.

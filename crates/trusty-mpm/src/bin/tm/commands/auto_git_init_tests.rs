@@ -2,7 +2,10 @@
 //!
 //! Why: the decision has four arms an operator can hit on their first ever
 //! `tm` run — initialize, leave alone, refuse, prerequisite error — and three
-//! of them write (or deliberately do not write) to a real directory.
+//! of them write (or deliberately do not write) to a real directory. #7749 adds
+//! two refusals to the third arm, both driven by the downward child-repository
+//! scan, and both asserted here twice: once on the pure decision with a canned
+//! scan, once end to end against a real directory.
 //! What: pure-decision tests for [`super::plan_auto_init`],
 //! [`super::stderr_means_no_repository`] and the message builders, plus
 //! driver tests that run real git against hermetic temp directories.
@@ -16,6 +19,8 @@ use super::{
     initialized_message, missing_git_error, plan_auto_init, refusal_message,
     stderr_means_no_repository,
 };
+use trusty_mpm::core::child_repo_scan::{ChildRepoScan, ScanIncomplete};
+
 use crate::test_support::hermetic_temp_dir;
 
 /// A program name no PATH entry can resolve, for the prerequisite arm.
@@ -60,6 +65,7 @@ fn plan_initializes_a_plain_directory() {
         Path::new("/Users/someone/scratch/notes"),
         Some(Path::new("/Users/someone")),
         RepoContext::Absent,
+        || ChildRepoScan::Clear,
     );
     assert_eq!(plan, AutoInitPlan::Init);
 }
@@ -70,7 +76,9 @@ fn plan_initializes_a_plain_directory() {
 fn plan_refuses_the_home_directory() {
     let home = Path::new("/Users/someone");
     assert_eq!(
-        plan_auto_init(home, Some(home), RepoContext::Absent),
+        plan_auto_init(home, Some(home), RepoContext::Absent, || {
+            ChildRepoScan::Clear
+        }),
         AutoInitPlan::Refuse(AutoInitRefusal::HomeDirectory)
     );
 }
@@ -82,7 +90,8 @@ fn plan_refuses_the_filesystem_root() {
         plan_auto_init(
             Path::new("/"),
             Some(Path::new("/Users/someone")),
-            RepoContext::Absent
+            RepoContext::Absent,
+            || ChildRepoScan::Clear
         ),
         AutoInitPlan::Refuse(AutoInitRefusal::FilesystemRoot)
     );
@@ -94,7 +103,9 @@ fn plan_refuses_the_filesystem_root() {
 fn plan_leaves_an_existing_repo_alone_even_in_the_home_directory() {
     let home = Path::new("/Users/someone");
     assert_eq!(
-        plan_auto_init(home, Some(home), RepoContext::Present),
+        plan_auto_init(home, Some(home), RepoContext::Present, || {
+            ChildRepoScan::Clear
+        }),
         AutoInitPlan::AlreadyGit
     );
 }
@@ -103,8 +114,71 @@ fn plan_leaves_an_existing_repo_alone_even_in_the_home_directory() {
 #[test]
 fn plan_initializes_when_the_home_directory_is_unknown() {
     assert_eq!(
-        plan_auto_init(Path::new("/srv/project"), None, RepoContext::Absent),
+        plan_auto_init(Path::new("/srv/project"), None, RepoContext::Absent, || {
+            ChildRepoScan::Clear
+        }),
         AutoInitPlan::Init
+    );
+}
+
+/// FAILS BEFORE #7749: a directory with a repository beneath it planned `Init`,
+/// and the `.git` that produced became an ancestor repository for that child.
+#[test]
+fn plan_refuses_a_workspace_parent() {
+    let child = PathBuf::from("/Users/someone/workspace/packages/api");
+    let plan = plan_auto_init(
+        Path::new("/Users/someone/workspace"),
+        Some(Path::new("/Users/someone")),
+        RepoContext::Absent,
+        || ChildRepoScan::Found(child.clone()),
+    );
+    assert_eq!(
+        plan,
+        AutoInitPlan::Refuse(AutoInitRefusal::WorkspaceParent(child))
+    );
+}
+
+/// Fail-Open Check: a scan that could not finish is not an absence of child
+/// repositories, so it refuses rather than initializing. FAILS BEFORE #7749,
+/// which had no downward scan to be incomplete.
+#[test]
+fn plan_refuses_an_unfinished_scan() {
+    let stop = ScanIncomplete::Unreadable {
+        path: PathBuf::from("/Users/someone/workspace/locked"),
+        error: "Permission denied (os error 13)".to_string(),
+    };
+    let plan = plan_auto_init(
+        Path::new("/Users/someone/workspace"),
+        Some(Path::new("/Users/someone")),
+        RepoContext::Absent,
+        || ChildRepoScan::Incomplete(stop.clone()),
+    );
+    assert_eq!(
+        plan,
+        AutoInitPlan::Refuse(AutoInitRefusal::ScanIncomplete(stop))
+    );
+}
+
+/// The scan is the only guard that walks the filesystem, so it must not run for
+/// a directory an earlier arm already decided — otherwise every `tm` invocation
+/// inside a repository pays for a downward walk it cannot act on.
+#[test]
+fn plan_does_not_scan_when_an_earlier_guard_already_decided() {
+    fn never() -> ChildRepoScan {
+        panic!("the downward scan must not run once an earlier guard decided");
+    }
+    let home = Path::new("/Users/someone");
+    assert_eq!(
+        plan_auto_init(home, Some(home), RepoContext::Present, never),
+        AutoInitPlan::AlreadyGit
+    );
+    assert_eq!(
+        plan_auto_init(Path::new("/"), None, RepoContext::Absent, never),
+        AutoInitPlan::Refuse(AutoInitRefusal::FilesystemRoot)
+    );
+    assert_eq!(
+        plan_auto_init(home, Some(home), RepoContext::Absent, never),
+        AutoInitPlan::Refuse(AutoInitRefusal::HomeDirectory)
     );
 }
 
@@ -147,7 +221,7 @@ fn initialized_message_names_the_directory() {
 /// A refusal states its reason, not just that it refused.
 #[test]
 fn refusal_message_names_the_home_directory() {
-    let msg = refusal_message(AutoInitRefusal::HomeDirectory, Path::new("/Users/someone"));
+    let msg = refusal_message(&AutoInitRefusal::HomeDirectory, Path::new("/Users/someone"));
     assert!(msg.contains("/Users/someone"), "{msg}");
     assert!(msg.contains("home directory"), "{msg}");
 }
@@ -155,8 +229,64 @@ fn refusal_message_names_the_home_directory() {
 /// Same for the filesystem-root arm.
 #[test]
 fn refusal_message_names_the_filesystem_root() {
-    let msg = refusal_message(AutoInitRefusal::FilesystemRoot, Path::new("/"));
+    let msg = refusal_message(&AutoInitRefusal::FilesystemRoot, Path::new("/"));
     assert!(msg.contains("filesystem root"), "{msg}");
+}
+
+/// #7749: the refusal names the child repository, so the operator can see which
+/// project a `.git` here would have been an ancestor of.
+#[test]
+fn refusal_message_names_the_child_repository() {
+    let msg = refusal_message(
+        &AutoInitRefusal::WorkspaceParent(PathBuf::from("/Users/someone/ws/api")),
+        Path::new("/Users/someone/ws"),
+    );
+    assert!(msg.contains("/Users/someone/ws/api"), "{msg}");
+    assert!(msg.contains("ancestor"), "{msg}");
+    // #7749 review: the scan arms carry the seed guard's remedy, not the
+    // site-guard trailer.
+    assert!(
+        msg.contains("run `git init` there yourself and retry"),
+        "{msg}"
+    );
+    assert!(!msg.contains("Run tm from a project directory."), "{msg}");
+}
+
+/// #7749: an unfinished scan says what stopped it, which is the only thing the
+/// operator can act on. #7749 review: and what to do about it — this arm fires
+/// for any plain directory wider than the 256-directory scan budget, where the
+/// old shared trailer ("Run tm from a project directory.") told an operator
+/// already standing in their project to go stand in it.
+#[test]
+fn refusal_message_says_what_stopped_the_scan() {
+    let msg = refusal_message(
+        &AutoInitRefusal::ScanIncomplete(ScanIncomplete::BudgetExhausted),
+        Path::new("/Users/someone/ws"),
+    );
+    assert!(msg.contains("could not rule out git repositories"), "{msg}");
+    assert!(msg.contains("the scan stopped after checking"), "{msg}");
+    assert!(
+        msg.contains(
+            "If /Users/someone/ws is a single project, run `git init` there yourself and \
+             retry; otherwise run tm from the actual project directory."
+        ),
+        "{msg}"
+    );
+    assert!(!msg.contains("Run tm from a project directory."), "{msg}");
+}
+
+/// #7749 review: the site guards keep the trailer that is right for them —
+/// nobody wants `git init` in `$HOME` or at `/`.
+#[test]
+fn refusal_message_keeps_the_site_trailer_for_home_and_root() {
+    for (refusal, dir) in [
+        (AutoInitRefusal::HomeDirectory, "/Users/someone"),
+        (AutoInitRefusal::FilesystemRoot, "/"),
+    ] {
+        let msg = refusal_message(&refusal, Path::new(dir));
+        assert!(msg.ends_with("Run tm from a project directory."), "{msg}");
+        assert!(!msg.contains("git init"), "{msg}");
+    }
 }
 
 /// The prerequisite error names `git` — this feature never installs the binary.
@@ -300,6 +430,125 @@ fn ensure_reports_a_missing_git_executable_without_writing() {
         !dir.join(".git").exists(),
         "nothing may be written when git is unavailable"
     );
+}
+
+/// FAILS BEFORE #7749: `tm launch` in a workspace parent ran `git init` there,
+/// and the `.git` became an ancestor repository for every child project. The
+/// child is at depth 2, because a direct-children-only check would miss the
+/// `packages/<name>` shape every JS monorepo produces.
+#[test]
+fn auto_init_refuses_a_workspace_parent_with_a_deep_child_repository() {
+    let tmp = hermetic_temp_dir();
+    let ws = tmp.path().join("workspace");
+    let child = ws.join("packages").join("api");
+    std::fs::create_dir_all(&child).unwrap();
+    git_ok(&child, &["init"]);
+
+    let outcome = ensure_git_repo_with(&ws, Some(tmp.path()), "git").unwrap();
+
+    assert_eq!(
+        outcome,
+        AutoInitOutcome::Refused(AutoInitRefusal::WorkspaceParent(child))
+    );
+    assert!(
+        !ws.join(".git").exists(),
+        "a workspace parent must not become a repository"
+    );
+}
+
+/// Fail-Open Check (#7749): a scan stopped by a permission error must refuse,
+/// never fall through to `git init` — an unreadable subtree is exactly where a
+/// child repository could be hiding.
+#[cfg(unix)]
+#[test]
+fn auto_init_refuses_when_the_downward_scan_cannot_finish() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = hermetic_temp_dir();
+    let ws = tmp.path().join("workspace");
+    let locked = ws.join("locked");
+    std::fs::create_dir_all(&locked).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let _restore = RestoreMode(locked.clone());
+    if std::fs::read_dir(&locked).is_ok() {
+        eprintln!("#7749 test: running with permission overrides (root?), skipping");
+        return;
+    }
+
+    let outcome = ensure_git_repo_with(&ws, Some(tmp.path()), "git").unwrap();
+
+    match outcome {
+        AutoInitOutcome::Refused(AutoInitRefusal::ScanIncomplete(ScanIncomplete::Unreadable {
+            path,
+            ..
+        })) => assert_eq!(path, locked),
+        other => panic!("an unreadable subtree must refuse the init, got {other:?}"),
+    }
+    assert!(
+        !ws.join(".git").exists(),
+        "nothing may be initialized while a child repository cannot be ruled out"
+    );
+}
+
+/// Restores a locked-down directory's mode so `TempDir::drop` can remove it.
+#[cfg(unix)]
+struct RestoreMode(PathBuf);
+
+#[cfg(unix)]
+impl Drop for RestoreMode {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+// ── What `tm launch` does after a refusal ────────────────────────────────────
+
+/// #7749 review: the route `tm launch` takes once this guard refuses, pinned
+/// as observed rather than assumed.
+///
+/// A plain directory with more than `WORKSPACE_SCAN_BUDGET` subdirectories
+/// refuses at `launch.rs:128` and nothing is initialized. The launch does NOT
+/// stop there: `git config --get remote.origin.url` outside a repository exits
+/// 1, which `get_origin_url` maps to `Ok(None)`, which `plan_for_origin` maps
+/// to `OriginPlan::LiveCheckout` — so `launch` calls `connect` on a directory
+/// that has no repository. `connect` performs no git check of its own, so the
+/// refusal printed here is the operator's only explanation of why no managed
+/// clone was made, which is why it now names the remedy.
+#[test]
+fn launch_route_after_a_scan_refusal_falls_through_to_the_live_checkout() {
+    use crate::commands::origin_plan::{OriginPlan, plan_for_origin};
+    use trusty_mpm::core::child_repo_scan::WORKSPACE_SCAN_BUDGET;
+
+    let tmp = hermetic_temp_dir();
+    let ws = tmp.path().join("wide-workspace");
+    std::fs::create_dir(&ws).unwrap();
+    for i in 0..=WORKSPACE_SCAN_BUDGET {
+        std::fs::create_dir(ws.join(format!("d{i}"))).unwrap();
+    }
+
+    // Step 1 — `launch.rs:128`: the downward scan cannot finish, so the guard
+    // refuses and writes nothing.
+    let outcome = ensure_git_repo_with(&ws, Some(tmp.path()), "git").unwrap();
+    assert_eq!(
+        outcome,
+        AutoInitOutcome::Refused(AutoInitRefusal::ScanIncomplete(
+            ScanIncomplete::BudgetExhausted
+        ))
+    );
+    assert!(!ws.join(".git").exists(), "nothing may be initialized");
+
+    // Step 2 — `launch.rs` reads the origin of a directory with no repository.
+    // This is `Ok(None)`, not an error: git-config exits 1 for a key it cannot
+    // find, and outside a repository there is no key.
+    let origin =
+        trusty_mpm::daemon::managed_routes::inproject::get_origin_url(&ws).unwrap_or_else(|e| {
+            panic!("git config outside a repository must not be an error, got: {e}")
+        });
+    assert_eq!(origin, None);
+
+    // Step 3 — that is the live-checkout plan, so the launch continues into
+    // `connect` against the un-initialized directory instead of stopping.
+    assert_eq!(plan_for_origin(origin.as_deref()), OriginPlan::LiveCheckout);
 }
 
 /// A path that is not a directory is the caller's error to report; this call
