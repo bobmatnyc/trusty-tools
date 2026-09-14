@@ -164,7 +164,7 @@ tm sessions new ~/demo-repos/<throwaway-repo> --git-ref master --task "Add a dem
 ```
 
 **Expected:**
-- `tm` reads the GitHub remote off `~/demo-repos/<throwaway-repo>` and clones/reuses a base checkout under `.trusty-mpm-projects/<your-github-user>/<throwaway-repo>/`.
+- `tm` reads the GitHub remote off `~/demo-repos/<throwaway-repo>` and clones/reuses a base checkout under `~/trusty-mpm-projects/<your-github-user>/<throwaway-repo>/`.
 - `.trusty-tools` skeleton and `.trusty-mpm/` directories are created inside the provisioned worktree.
 - A new tmux session is created (check: `tmux list-sessions` → should show a session named after your repo).
 - Session is NOT attached yet; your current shell remains in the original prompt.
@@ -190,7 +190,7 @@ tm sessions attach <SESSION-ID>
 pwd
 ```
 
-**Expected:** Shows the worktree path (e.g., `.trusty-mpm-projects/<user>/<repo>/.worktrees/<uuid>`).
+**Expected:** Shows the worktree path (e.g., `~/trusty-mpm-projects/<user>/<repo>/.worktrees/<uuid>`).
 
 ---
 

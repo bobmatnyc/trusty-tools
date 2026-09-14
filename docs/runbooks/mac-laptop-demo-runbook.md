@@ -431,7 +431,7 @@ To get the new MacBook back to pre-demo state (clean, ready for another run):
 
 ```bash
 # Delete the demo repo and session artifacts
-rm -rf ~/.trusty-mpm-projects/bobmatnyc/trusty-demo-test
+rm -rf ~/trusty-mpm-projects/bobmatnyc/trusty-demo-test
 rm -rf ~/demo-repos/trusty-demo-test    # the Step 3 local clone (ADR-0055)
 rm -rf ~/.trusty-mpm/sessions/tm-trusty-demo-test-01*
 
@@ -566,7 +566,7 @@ gh pr view 1 --web  # optional
 ### Reset
 
 ```bash
-rm -rf ~/.trusty-mpm-projects/bobmatnyc/trusty-demo-test
+rm -rf ~/trusty-mpm-projects/bobmatnyc/trusty-demo-test
 rm -rf ~/demo-repos/trusty-demo-test    # the Step 3 local clone (ADR-0055)
 rm -rf ~/.trusty-mpm/sessions/tm-trusty-demo-test-01*
 launchctl unload ~/Library/LaunchAgents/com.trusty.mpm.plist 2>/dev/null || true
