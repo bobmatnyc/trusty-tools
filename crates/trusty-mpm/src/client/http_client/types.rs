@@ -1005,6 +1005,18 @@ pub struct HealthSnapshot {
     /// Test: `health_snapshot_deserializes`.
     #[serde(default)]
     pub version: String,
+    /// The running daemon's startup build fingerprint (issue #7822).
+    ///
+    /// Why: [`Self::version`] is a release label, so two different builds of the
+    /// same version are indistinguishable through it — and a daemon that
+    /// outlives a merge is exactly that case. `tm doctor` compares this against
+    /// the fingerprint of the binary IT is running.
+    /// What: mirrors `daemon::api::types::HealthResponse::build_id`; `""` when
+    /// the responding daemon predates the field, which the staleness check
+    /// reports as "cannot tell" rather than as a match.
+    /// Test: `health_snapshot_build_id_is_empty_when_absent`.
+    #[serde(default)]
+    pub build_id: String,
     /// Whether the daemon that answered reports itself launchd-supervised
     /// (issue #2486; surfaced to `tm doctor` for #4230).
     ///

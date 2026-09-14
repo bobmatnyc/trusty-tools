@@ -65,6 +65,9 @@ pub async fn health(state: &Arc<DaemonState>) -> HealthResponse {
         // `tm doctor` can distinguish "launchd says no" from "could not ask".
         launchd_supervision: state.launchd_supervision(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
+        // #7822: the version above cannot distinguish two builds cut under the
+        // same semver, which is every daemon that outlives a merge.
+        build_id: state.build_identity(),
         // #4230: identify WHICH process answered, so `tm doctor` can compare it
         // against the PID launchd owns instead of trusting `supervised` alone.
         pid: std::process::id(),

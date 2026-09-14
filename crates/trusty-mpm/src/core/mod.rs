@@ -42,6 +42,10 @@ pub mod auto_resume;
 pub mod base_facet_index;
 pub mod binary_provenance;
 pub mod budget;
+// #7822: the build fingerprint `tm doctor` compares when two semvers agree —
+// a same-version daemon started before the installed binary was written is
+// still stale, and semver alone cannot say so.
+pub mod build_identity;
 pub mod bundle;
 // Epic #4183: the DEFAULT (bundled-fallback) PM prompt, re-sourced through
 // `instruction_package`. Byte-identical to the legacy assembly it replaces; the

@@ -155,6 +155,30 @@ async fn health_response_serializes_forced_field() {
     );
 }
 
+/// #7822: `/health` must carry a BUILD fingerprint, not only a version — two
+/// builds cut under one semver are indistinguishable through `version`, and the
+/// daemon that outlives a merge is exactly that case. Before `daemon_run`
+/// records it the value is empty, which the client reads as "cannot tell".
+#[tokio::test]
+async fn health_response_serializes_build_id_field() {
+    let state = DaemonState::shared();
+    assert_eq!(
+        state.build_identity(),
+        "",
+        "empty until daemon_run records the startup fingerprint"
+    );
+    state.set_build_identity("1757731440:74125312");
+    let Json(body) = health(State(state)).await;
+    assert_eq!(body.build_id, "1757731440:74125312");
+
+    let value = serde_json::to_value(&body).expect("HealthResponse must serialize");
+    assert_eq!(
+        value.get("build_id"),
+        Some(&serde_json::Value::String("1757731440:74125312".to_owned())),
+        "wire shape must carry `build_id`: {value}"
+    );
+}
+
 #[tokio::test]
 async fn health_response_serializes_version_field() {
     // Issue #2332: `/health` must carry this process's build version so a

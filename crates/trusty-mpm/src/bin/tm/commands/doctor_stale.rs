@@ -17,8 +17,9 @@
 //! exercised indirectly by the executor's live-daemon doctor test.
 
 use trusty_mpm::client::HealthSnapshot;
+use trusty_mpm::core::build_identity::current_exe_identity;
 use trusty_mpm::core::doctor::DoctorCheck;
-use trusty_mpm::core::version_staleness::check_daemon_version_staleness;
+use trusty_mpm::core::version_staleness::{BuildIdentity, check_daemon_version_staleness};
 
 /// Fold the daemon's `/health` version into the #2332 stale-daemon
 /// [`DoctorCheck`].
@@ -38,5 +39,18 @@ use trusty_mpm::core::version_staleness::check_daemon_version_staleness;
 /// tests; `tm_doctor_reports_the_absent_daemon_as_exactly_one_row` covers the
 /// skip.
 pub(crate) fn stale_daemon_check(snapshot: &HealthSnapshot, restart_hint: &str) -> DoctorCheck {
-    check_daemon_version_staleness(env!("CARGO_PKG_VERSION"), &snapshot.version, restart_hint)
+    // #7822: the version pair alone cleared a daemon serving pre-merge code
+    // under the same semver, so the build fingerprints decide once they agree.
+    // This process IS the installed binary, so fingerprinting `current_exe()`
+    // here is the installed side of the comparison.
+    let installed_build = current_exe_identity();
+    check_daemon_version_staleness(
+        env!("CARGO_PKG_VERSION"),
+        &snapshot.version,
+        BuildIdentity {
+            installed: installed_build.as_deref(),
+            daemon: &snapshot.build_id,
+        },
+        restart_hint,
+    )
 }

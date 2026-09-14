@@ -91,6 +91,14 @@ pub(crate) async fn run_daemon(
     // restart-race rationale and the pure decision table.
     let supervised = apply_supervision_signal(&state);
 
+    // #7822: fingerprint THIS executable now, at startup — the semver `/health`
+    // reports cannot distinguish two builds cut under the same version, and a
+    // fingerprint read later would describe whatever `cargo install` last wrote
+    // rather than the build this process is actually running.
+    state.set_build_identity(
+        trusty_mpm::core::build_identity::current_exe_identity().unwrap_or_default(),
+    );
+
     // #4230: record the opt-in so `/health` can distinguish a deliberate
     // unsupervised run from an unwanted orphan. Without it `tm doctor` would call
     // a `--force` daemon an orphan — the very escape hatch #4397's refusal

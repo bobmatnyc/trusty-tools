@@ -351,6 +351,17 @@ pub struct DaemonState {
     /// via [`Self::set_launchd_supervision`]. Empty until then.
     /// Test: `health_response_serializes_launchd_supervision_field`.
     pub(super) launchd_supervision: std::sync::RwLock<String>,
+    /// Fingerprint of the executable this daemon started from (issue #7822).
+    ///
+    /// Why: see [`crate::daemon::api::types::HealthResponse::build_id`] — the
+    /// semver `/health` already publishes cannot tell two same-version builds
+    /// apart, which is exactly the daemon that outlived a merge.
+    /// What: the [`crate::core::build_identity`] string, written once at startup
+    /// by `daemon_run::run_daemon`. Empty until then, and empty is what the
+    /// client reads as "cannot tell" — a value computed lazily at `/health` time
+    /// would describe the binary on disk, not the one this process is running.
+    /// Test: `health_response_serializes_build_id_field`.
+    pub(super) build_identity: std::sync::RwLock<String>,
     /// Layer-3 portfolio manager state (`tm manager`, epic #2109, DOC-36 §3.1).
     ///
     /// Why: DOC-36 §3.1 makes `tm manager` a daemon-owned component whose
@@ -558,6 +569,7 @@ impl DaemonState {
             supervised: std::sync::atomic::AtomicBool::new(true),
             unsupervised_forced: std::sync::atomic::AtomicBool::new(false),
             launchd_supervision: std::sync::RwLock::new(String::new()),
+            build_identity: std::sync::RwLock::new(String::new()),
             manager,
             provisioning: crate::daemon::provisioning::ProvisioningRegistry::default(),
             nudge_ledger: parking_lot::Mutex::new(crate::core::idle_nudge::NudgeLedger::new()),
@@ -638,6 +650,7 @@ impl DaemonState {
             supervised: std::sync::atomic::AtomicBool::new(true),
             unsupervised_forced: std::sync::atomic::AtomicBool::new(false),
             launchd_supervision: std::sync::RwLock::new(String::new()),
+            build_identity: std::sync::RwLock::new(String::new()),
             manager,
             provisioning: crate::daemon::provisioning::ProvisioningRegistry::default(),
             nudge_ledger: parking_lot::Mutex::new(crate::core::idle_nudge::NudgeLedger::new()),
@@ -732,6 +745,35 @@ impl DaemonState {
     /// Test: `health_response_serializes_launchd_supervision_field`.
     pub fn launchd_supervision(&self) -> String {
         self.launchd_supervision
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Record the build fingerprint of the executable this daemon started from
+    /// (issue #7822). Called once by `daemon_run::run_daemon`, at startup.
+    ///
+    /// Why: capturing it later would fingerprint the binary on disk, which after
+    /// a `cargo install` is precisely the build this process is NOT running —
+    /// the check would then clear the daemon it exists to flag.
+    /// What: stores the string; a poisoned lock is recovered from rather than
+    /// panicking a running daemon over a diagnostic field.
+    /// Test: `health_response_serializes_build_id_field`.
+    pub fn set_build_identity(&self, value: impl Into<String>) {
+        let mut slot = self
+            .build_identity
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        *slot = value.into();
+    }
+
+    /// Read the startup build fingerprint for `/health` (issue #7822).
+    ///
+    /// What: the stored fingerprint, or `""` before startup recorded one — which
+    /// `tm doctor` reports as "cannot tell", never as a match.
+    /// Test: `health_response_serializes_build_id_field`.
+    pub fn build_identity(&self) -> String {
+        self.build_identity
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
