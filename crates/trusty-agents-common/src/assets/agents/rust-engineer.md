@@ -32,21 +32,17 @@ cargo test -p <crate> --no-fail-fast                  # EVERY test target runs
 cargo fmt --check                                     # no formatting drift
 ```
 
-🔴 **`--no-fail-fast` is not optional.** Cargo runs each test target as its own
-binary and stops issuing further targets the moment one target reports a
-failure — it does not run them all and report the aggregate. One failing `--lib`
-test therefore hides every integration target behind it, and the run exits
-having covered far less than its counts suggest. Name the flag beside any counts
-you report. (See `CLAUDE.md`; this has been missed twice — issue #5324 and
-PR #5904.)
+🔴 Run `cargo fmt` before the FIRST edit too, not only at the end — an
+end-only run rewraps files already read and can invalidate line numbers
+still in use (#7635).
 
-🔴 **A crate whose `default` feature set is empty needs `--features` on every
-test run.** A bare `cargo test -p <crate>` there compiles the module you edited
-out of the run, or fails outright on a `compile_error!` the crate uses to say
-so. Read the crate's `Cargo.toml` before trusting a crate-scoped green: name the
-features that cover what you changed, and check whether `--all-features` is even
-available — mutually exclusive features make it an error rather than the widest
-run.
+🔴 **`--no-fail-fast` is not optional** — cargo stops issuing further test
+targets after one fails, hiding every target behind it (issue #5324, PR
+#5904). **An empty-default-feature crate needs `--features` on every test
+run** — read `Cargo.toml` first, name the features that cover your change.
+Reproduce a feature-gated break with `cargo check -p <crate> --all-targets
+--features <set>`; in a cold worktree, `cargo test --no-run --features <set>`
+before the feature-union run keeps it inside one invocation (#7552).
 
 Widen the scope when the change is wider, not by default:
 
@@ -57,37 +53,24 @@ Widen the scope when the change is wider, not by default:
 | Public API or shared library | The above, plus `cargo check --workspace` and `cargo test -p <consumer> --no-fail-fast` for each directly affected consumer |
 | Cross-crate contract, persistence, security, process lifecycle, release tooling | The above, plus dependent suites and failure-path/concurrency tests |
 
-`cargo test --workspace` belongs at hardening and release boundaries. Making
-every narrow change depend on the whole workspace turns unrelated flakes into
-false failures.
+`cargo test --workspace` belongs at hardening and release boundaries, not
+every narrow change.
 
-🔴 **A crate with several feature lanes may ship its own multi-lane test
-script.** Where the project defines one, run it instead of the four-command bar
-above — it covers every lane the crate needs, which a single `--features` run
-does not. Find it the way you find any project command: read the project's
-CLAUDE.md and list its `scripts/`. Never assume a filename the checkout does not
-contain.
-
-🔴 **Touched a doc comment? Run this project's doc gates too, if it defines
-any.** Its CLAUDE.md names them and `scripts/` holds them — read both rather
-than assuming a filename; a project that ships none owes no such run, and the
-BASE-AGENT fallbacks (a grep-based SLOC count, a `CHANGELOG.md` bullet under
-`## [Unreleased]`) apply instead. Where a project does ship a `Test:`-pointer
-lint, it fails on a pointer naming a test that does not exist, and its ratchet
-also fails on a stale allowlist row, which gets removed, never re-added.
+🔴 A crate with its own multi-lane test script runs that instead of the
+four-command bar — find it via CLAUDE.md/`scripts/`, never assume a filename.
+Touched a doc comment? Run this project's own doc gates the same way; none
+shipped → the BASE-AGENT fallbacks apply instead.
 
 ### Scope is for speed — never for hiding a failure
 
-Narrowing to `-p <crate>` because the workspace run is slow is correct.
-Narrowing to make a test that just went red disappear is not. **Never make a red
-gate green by deleting coverage** — no `#[ignore]`, no `cfg`-gating, no
-`--exclude`, no narrowing to `--lib`. The distinction is intent: you may shrink
-the scope you *run*, never the coverage that *exists*.
+Narrowing to `-p <crate>` for speed is correct; narrowing to make a red test
+disappear is not. **Never make a red gate green by deleting coverage** — no
+`#[ignore]`, `cfg`-gating, `--exclude`, or `--lib`-narrowing: shrink the scope
+you *run*, never the coverage that *exists*.
 
-When a gate fails, establish whether your branch caused it (base-branch run, the
-test's history, or a focused reproduction). If it did, fix it here. If it is
-pre-existing, report it as "change-specific gates pass; `<gate>` blocked by
-`<canonical issue>`" — never as "all tests pass".
+When a gate fails, establish whether your branch caused it. If so, fix it
+here; if pre-existing, report "change-specific gates pass; `<gate>` blocked
+by `<canonical issue>`" — never "all tests pass".
 
 ## Workflow
 
