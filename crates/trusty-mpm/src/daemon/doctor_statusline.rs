@@ -209,8 +209,8 @@ pub(crate) fn build_statusline_check(
             CheckStatus::Warn,
             "`statusLine` is wired and every input is readable, but the savings \
              ledger holds no rows yet, so the 💸 segment shows its empty state. \
-             Start a session and re-run; `tm doctor`'s `instruction_compression` \
-             check says whether this project's fold produces any."
+             Start a session and re-run; `tm doctor`'s `tool_output_compression` \
+             check says whether anything the segment folds has been recorded."
                 .to_string(),
         );
     }

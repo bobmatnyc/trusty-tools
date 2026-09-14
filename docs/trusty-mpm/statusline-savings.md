@@ -5,8 +5,24 @@
 trusty-mpm spends real effort *not* sending tokens: it folds several instruction
 sources into one compiled prompt, it diverts a bulk file read to a cheap worker
 and brings back a summary, and it compresses gate output before an agent reads
-it. The `💸` segment on the `tm` statusline shows what percentage of tokens
-that would otherwise have been sent, this session avoided sending.
+it.
+
+**The `💸` segment measures TOOL-OUTPUT COMPRESSION** — the last two of those
+three. It shows what percentage of the tokens this session would otherwise have
+sent, rtk- and shunt-style interception avoided sending: the `compress` rows a
+`tm compress` run writes, and the `divert` rows a bulk-read diversion writes.
+Both are credited to the tool call that produced them, and a Bash call
+compressed a moment ago moves the figure on the next render — every render
+re-reads and re-folds the ledger, with no cache between them.
+
+**The instruction fold is recorded separately and does not feed the segment**
+(owner ruling 2026-09-14, #7867). It is one comparison per session launch, of
+the compiled prompt against the corpus it was folded from — a different
+measurement on a different clock, and summing the two moved a per-call figure
+for a reason no tool call caused. Its rows stay on the ledger under the
+`instruction-compression` technique; `tm doctor`'s `instruction_fold` row is
+where you read them. `tm doctor`'s `tool_output_compression` row reports what
+the segment itself folds — rows, tokens saved, and when the last one landed.
 
 ```
 TM 1.5.18 ● | trusty-tools ⎇ main | @bobmatnyc | ✻you@example.com | Opus | ctx 41% | $12.40 | ⏳24% 📅41% | 💸34%/29%
@@ -16,8 +32,8 @@ It has one form and one absence:
 
 | Folded total | Segment |
 |---|---|
-| At least one accepted row, with a percent to report | `💸34%/29%` |
-| Nothing recorded for this session, or every accepted row predates #7179 | *the segment is not rendered at all* |
+| At least one accepted `compress`/`divert` row, with a percent to report | `💸34%/29%` |
+| Nothing recorded for this session, or every accepted row predates #7179 | `💸—` |
 
 The first figure is this session. The second is the **average across sessions**
 — the arithmetic mean of every session's own percentage on the ledger.
@@ -92,8 +108,9 @@ It is still an estimate, for the same two reasons as before:
 A rendered `0%` cannot be told apart from "nothing was saved", and it states a
 measurement that was never made. So a fold with `tokens_saved > 0` always
 reports at least `1%` — even a true sub-0.5% ratio rounds up rather than down
-— and a session with no recorded savings omits the segment entirely. If you do
-not see a `💸`, no producer has written anything for that session.
+— and a session with no recorded tool-output compression renders `💸—` instead.
+If you see that mark, no `compress` or `divert` row has been written for the
+session.
 
 Dollar figures have not gone away — they still live in the ledger's
 `cost_saved_usd` field and in `tm`'s own reporting commands. The statusline
@@ -104,12 +121,20 @@ interpret.
 ## The techniques, and what each one measures
 
 `technique` is an open string in the ledger, so a new producer needs no schema
-change. Today three producers ship.
+change. Today three producers ship — two of which the segment folds.
+
+| `technique` | Written | Feeds the `💸` segment |
+|---|---|---|
+| `compress` | per `tm compress` run | yes |
+| `divert` | per successful bulk-read diversion | yes |
+| `instruction-compression` | once per session launch | no (#7867) |
 
 ### `instruction-compression`
 
 Written once per session launch, at the point that writes
-`INSTRUCTIONS-COMPILED.md`.
+`INSTRUCTIONS-COMPILED.md`. **This row does not reach the `💸` segment** — it is
+a launch-time measurement, not what a tool call avoided sending. Read it through
+`tm doctor`'s `instruction_fold` row.
 
 - **Source set** — every instruction body the composer read for the session: the
   nine bundled section sources, plus each named-section override body it read
@@ -136,11 +161,11 @@ nothing therefore produces a compiled prompt LARGER than its sources, and
 nothing, so there is nothing to claim. The row appears when a project's
 `CLAUDE.md` genuinely replaces a bundled section with a shorter one.
 
-That decline is why the segment can be absent for a whole project rather than a
-single session, so it says so: the launch logs one `warn` naming both byte
-counts, repeated only when those counts move. Look for "not smaller than the
-instruction sources" in the launch output before treating a missing segment as a
-fault.
+That decline costs the project nothing an operator watches: the segment folds
+`compress` and `divert` only. The launch records it once per project at `debug!`
+— "not smaller than the instruction sources", with both byte counts, repeated
+only when those counts move — and `tm doctor`'s `instruction_fold` row states it
+on demand.
 
 ### `divert`
 
@@ -236,7 +261,7 @@ Model: claude-opus-4-1-20250805
 |---|---|
 | `Tokens-In` / `Tokens-Out` | the session's own Claude Code transcript, folded at commit time |
 | `Tokens-Window` | present only when the fold read a tail window rather than the whole transcript |
-| `Savings` | the ledger, folded for this session — the same percentage the `💸` segment shows |
+| `Savings` | the ledger, folded for this session across every technique — the commit records the session's total, where the `💸` segment folds `compress` and `divert` only (#7867), so the two can differ |
 | `Model` | `~/.trusty-mpm/usage/session-model/<session-id>`, written by the statusline render |
 
 A value with no source is left out rather than written as a zero, exactly as

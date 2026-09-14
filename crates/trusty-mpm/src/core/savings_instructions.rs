@@ -65,13 +65,11 @@
 //! the compiled prompt is not smaller than its sources there is nothing to
 //! record, and for a project that overrides no instruction section that is
 //! permanently true — the composer ADDS generated context and folds nothing
-//! away. That decline logged at `debug!`, so the flat figure had no explanation
-//! anywhere an operator would look. It now warns once per project through
-//! [`crate::core::savings_sidecar::warn_no_fold_once`], naming both byte counts.
-//! The decline costs this technique's contribution only, never the `💸` segment:
-//! since #7617 the statusline folds `divert` and `compress` rows beside
-//! instruction-compression, falls back to a linked sibling session, and renders
-//! `💸—` as an explicit empty state.
+//! away. #7245 raised that decline to a per-launch `warn!`; #7867 put it back
+//! at `debug!` — [`crate::core::savings_sidecar::log_no_fold_once`], naming both
+//! byte counts once per project. The decline touches the `💸` segment not at
+//! all: since #7867 that segment folds `compress` and `divert` rows only. `tm
+//! doctor`'s `instruction_fold` row is where an operator reads this state.
 //!
 //! Test: the inline suite in `savings_instructions_tests.rs` —
 //! `no_row_when_the_compiled_prompt_is_not_smaller`,
@@ -100,7 +98,7 @@ use crate::core::savings::{
     BYTES_PER_TOKEN, SavingsRow, TECHNIQUE_INSTRUCTION_COMPRESSION, claude_code_session_id, now_ts,
     savings_log_in,
 };
-use crate::core::savings_sidecar::{stage_row, warn_no_fold_once};
+use crate::core::savings_sidecar::{log_no_fold_once, stage_row};
 
 /// Append one `instruction-compression` row for a session whose compiled prompt
 /// came out smaller than the sources that fed it.
@@ -224,12 +222,11 @@ fn record_instruction_compression_to(
         );
         return;
     }
-    // #7245, narrowed by #7617: checked here, where the project root is in hand,
-    // so the decline that zeroes an override-free project's instruction-
-    // compression contribution is stated once instead of hidden at `debug!`
-    // inside the row builder.
+    // #7867: checked here, where the project root is in hand, so the decline is
+    // recorded once per project at `debug!` — an override-free project folding
+    // nothing is the ordinary state, and it feeds no operator-facing figure.
     if compiled_bytes >= source_bytes {
-        warn_no_fold_once(framework_root, &harness_root, source_bytes, compiled_bytes);
+        log_no_fold_once(framework_root, &harness_root, source_bytes, compiled_bytes);
         return;
     }
     // #7209: the statusline folds by the id Claude Code sends it, so a row keyed

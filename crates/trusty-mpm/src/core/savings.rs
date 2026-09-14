@@ -45,6 +45,16 @@
 //! `append_row_once`; `divert` and `compress` keep the unguarded [`append_row`]
 //! on purpose (see its own doc for why).
 //!
+//! **Who READS which rows (owner ruling 2026-09-14, #7867).** The `💸`
+//! statusline segment folds [`PER_CALL_TECHNIQUES`] only — `compress` and
+//! `divert`, the per-tool-call measurements — through
+//! [`fold_session_per_call`] and [`fold_sessions_per_call`].
+//! `instruction-compression` rows stay on the ledger and stay readable, but
+//! feed no part of that segment: they are one launch-time comparison of the
+//! compiled prompt against its sources, on a different clock from a figure that
+//! is supposed to move when a tool call is compressed. `tm doctor`'s
+//! `instruction_fold` row is where that measurement surfaces instead.
+//!
 //! **[`SavingsTotal::percent_saved`] denominator (owner ruling 2026-09-08,
 //! #7179).** The `💸` segment shows a whole-number percent of tokens avoided,
 //! not a dollar figure: `saved / (session actual tokens + saved)` — the
@@ -107,6 +117,29 @@ pub const TECHNIQUE_DIVERT: &str = "divert";
 /// bash and tool output.
 /// Test: `a_compress_row_carries_the_named_technique`.
 pub const TECHNIQUE_COMPRESS: &str = "compress";
+
+/// The techniques the `💸` statusline segment folds (owner ruling 2026-09-14,
+/// #7867).
+///
+/// Why: the segment reports what rtk- and shunt-style tool-output compression
+/// saves — a measurement one tool call makes about its own output, from the
+/// bytes that call did not send, recorded after every call.
+/// [`TECHNIQUE_INSTRUCTION_COMPRESSION`] is a different measurement on a
+/// different clock: one comparison per session launch, of the compiled prompt
+/// against the corpus it was folded from. Summing the two into one percent made
+/// a per-call figure move for a reason no tool call caused, and made a launch
+/// whose prompt did not shrink read as a session that compressed nothing.
+/// What: `compress` and `divert` — the two producers that append per call, with
+/// no once-per-session dedup (see the module header's producer table).
+/// Test: `the_per_call_techniques_are_compress_and_divert`.
+pub const PER_CALL_TECHNIQUES: [&str; 2] = [TECHNIQUE_COMPRESS, TECHNIQUE_DIVERT];
+
+/// Whether `technique` is one the `💸` segment folds (#7867).
+///
+/// Test: `the_per_call_techniques_are_compress_and_divert`.
+pub fn is_per_call_technique(technique: &str) -> bool {
+    PER_CALL_TECHNIQUES.contains(&technique)
+}
 
 /// The environment variable Claude Code exports carrying the session's own id.
 ///
@@ -532,6 +565,29 @@ pub fn fold_session(ledger: &Path, session_id: &str) -> SavingsTotal {
     fold(ledger, Some(session_id))
 }
 
+/// Fold `session_id`'s per-call tool-output compression rows only (#7867).
+///
+/// Why: the `💸` segment's figure is per-call tool-output compression, which
+/// [`fold_session`] cannot answer — it sums every technique, so an
+/// instruction-fold row written once at launch moved a figure that is supposed
+/// to track what tool calls saved. Filtering here, rather than dropping rows
+/// from the ledger, keeps the instruction-fold measurement recorded and
+/// readable by its own surfaces.
+/// What: [`fold_session`]'s walk, accumulating only rows whose technique passes
+/// [`is_per_call_technique`]. A missing ledger folds to zero; an unreadable one
+/// warns (see [`for_each_accepted_row`]) and folds to zero.
+/// Test: `fold_session_per_call_ignores_an_instruction_compression_row`,
+/// `fold_session_per_call_sums_compress_and_divert`.
+pub fn fold_session_per_call(ledger: &Path, session_id: &str) -> SavingsTotal {
+    let mut total = SavingsTotal::default();
+    for_each_accepted_row(ledger, Some(session_id), |row| {
+        if is_per_call_technique(&row.technique) {
+            accumulate(&mut total, row);
+        }
+    });
+    total
+}
+
 /// Does the ledger already hold an accepted `technique` row for `session_id`?
 ///
 /// Why (#7411): the hook re-derives an instruction-compression row from the
@@ -581,13 +637,88 @@ pub fn fold_sessions(ledger: &Path) -> std::collections::BTreeMap<String, Saving
     let mut by_session: std::collections::BTreeMap<String, SavingsTotal> =
         std::collections::BTreeMap::new();
     for_each_accepted_row(ledger, None, |row| {
-        let total = by_session.entry(row.session_id.clone()).or_default();
-        total.tokens_saved += row.tokens_saved as u64;
-        total.tokens_before += row.tokens_before;
-        total.cost_saved_usd += row.cost_saved_usd;
-        total.rows += 1;
+        accumulate(by_session.entry(row.session_id.clone()).or_default(), row);
     });
     by_session
+}
+
+/// [`fold_sessions`] over the per-call techniques only (#7867).
+///
+/// Why: the average beside the session's own figure must be the mean of the
+/// same measurement, or the two halves of one segment would report different
+/// things — an instruction-fold row in another session would raise the average
+/// a per-call figure is compared against.
+/// What: [`fold_sessions`]'s walk with [`is_per_call_technique`] applied. A
+/// session whose every row is filtered out contributes no entry at all, rather
+/// than an entry of zeros that would drag the mean down.
+/// Test: `fold_sessions_per_call_drops_a_session_with_only_instruction_rows`.
+pub fn fold_sessions_per_call(ledger: &Path) -> std::collections::BTreeMap<String, SavingsTotal> {
+    let mut by_session: std::collections::BTreeMap<String, SavingsTotal> =
+        std::collections::BTreeMap::new();
+    for_each_accepted_row(ledger, None, |row| {
+        if is_per_call_technique(&row.technique) {
+            accumulate(by_session.entry(row.session_id.clone()).or_default(), row);
+        }
+    });
+    by_session
+}
+
+/// The per-call fold of the whole ledger, with the last row's timestamp
+/// (#7867).
+///
+/// Why: `tm doctor`'s `tool_output_compression` check reports whether anything
+/// has been compressed yet AND when, and an unreadable ledger must reach it as
+/// an error rather than as the same zero an empty ledger produces — a silent
+/// zero there would state that nothing was compressed when nothing was read.
+/// [`fold_all`] cannot carry either fact.
+/// What: reads the ledger once; `Ok` with a zero total and no timestamp when
+/// the file does not exist, `Err` carrying the IO error's text when it exists
+/// and cannot be read, otherwise the [`is_per_call_technique`] fold plus the
+/// `ts` of the last accepted per-call row in file order.
+/// Test: `try_fold_per_call_reports_the_last_timestamp`,
+/// `try_fold_per_call_errors_on_an_unreadable_ledger`,
+/// `try_fold_per_call_of_a_missing_ledger_is_an_empty_ok`.
+pub fn try_fold_per_call(ledger: &Path) -> Result<PerCallFold, String> {
+    let text = match read_ledger_text(ledger) {
+        Ok(Some(text)) => text,
+        Ok(None) => return Ok(PerCallFold::default()),
+        Err(source) => return Err(source.to_string()),
+    };
+    let mut fold = PerCallFold::default();
+    visit_accepted_rows(ledger, &text, None, &mut |row: &SavingsRow| {
+        if is_per_call_technique(&row.technique) {
+            accumulate(&mut fold.total, row);
+            fold.last_ts = Some(row.ts.clone());
+        }
+    });
+    Ok(fold)
+}
+
+/// What [`try_fold_per_call`] read back.
+///
+/// Why: the doctor check states both "how much" and "how recently", and a
+/// rows-only total cannot answer the second.
+/// What: the folded total, and the `ts` of the last accepted per-call row —
+/// `None` when the fold accepted none.
+/// Test: `try_fold_per_call_reports_the_last_timestamp`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PerCallFold {
+    /// The per-call rows' folded total.
+    pub total: SavingsTotal,
+    /// The last accepted per-call row's RFC 3339 timestamp.
+    pub last_ts: Option<String>,
+}
+
+/// Add one accepted row into `total`.
+///
+/// Why: four folds share these four sums; a fifth that added them by hand could
+/// count a field differently.
+/// Test: `append_then_fold_round_trips`.
+fn accumulate(total: &mut SavingsTotal, row: &SavingsRow) {
+    total.tokens_saved += row.tokens_saved as u64;
+    total.tokens_before += row.tokens_before;
+    total.cost_saved_usd += row.cost_saved_usd;
+    total.rows += 1;
 }
 
 /// The mean of every session's own savings percentage (#7074).
@@ -636,12 +767,7 @@ pub fn average_percent_saved(
 /// `fold_skips_a_row_whose_cost_is_not_a_number`.
 fn fold(ledger: &Path, session_id: Option<&str>) -> SavingsTotal {
     let mut total = SavingsTotal::default();
-    for_each_accepted_row(ledger, session_id, |row| {
-        total.tokens_saved += row.tokens_saved as u64;
-        total.tokens_before += row.tokens_before;
-        total.cost_saved_usd += row.cost_saved_usd;
-        total.rows += 1;
-    });
+    for_each_accepted_row(ledger, session_id, |row| accumulate(&mut total, row));
     total
 }
 
@@ -664,12 +790,56 @@ fn for_each_accepted_row(
     session_id: Option<&str>,
     mut visit: impl FnMut(&SavingsRow),
 ) {
-    let Ok(text) = std::fs::read_to_string(ledger) else {
-        // Absent or unreadable is the ordinary state before any producer has
-        // run; it is not a fault and must not be logged as one.
-        return;
-    };
+    match read_ledger_text(ledger) {
+        Ok(Some(text)) => visit_accepted_rows(ledger, &text, session_id, &mut visit),
+        // Absent is the ordinary state before any producer has run; it is not a
+        // fault and must not be logged as one.
+        Ok(None) => {}
+        // #7867: an unreadable ledger is NOT an empty one. The fold still
+        // yields zero — the statusline is on a hot render path and has nothing
+        // better to show — but the reason reaches the log rather than being
+        // swallowed into a figure that claims nothing was saved.
+        Err(source) => tracing::warn!(
+            ledger = %ledger.display(),
+            %source,
+            "the savings ledger exists but could not be read; folding it as zero"
+        ),
+    }
+}
 
+/// Read the ledger, distinguishing "not there yet" from "cannot be read".
+///
+/// Why (#7867, Fail-Open Check): every caller treats an absent ledger as an
+/// ordinary zero, and no caller may treat a permission or IO failure as the
+/// same thing.
+/// What: `Ok(None)` for `NotFound`, `Ok(Some(text))` for a readable file, `Err`
+/// otherwise.
+/// Test: `try_fold_per_call_errors_on_an_unreadable_ledger`,
+/// `try_fold_per_call_of_a_missing_ledger_is_an_empty_ok`.
+fn read_ledger_text(ledger: &Path) -> std::io::Result<Option<String>> {
+    match std::fs::read_to_string(ledger) {
+        Ok(text) => Ok(Some(text)),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(source),
+    }
+}
+
+/// Apply the skip rules to already-read ledger text.
+///
+/// Why (#7867): [`try_fold_per_call`] needs the read and the walk separated so
+/// it can report a read failure, and both must still accept exactly the rows
+/// [`fold`] accepts.
+/// What: parses each non-blank line, applies the optional session filter and the
+/// skip rules, and calls `visit` for what survives. Each rejection emits one
+/// `warn!` naming the reason.
+/// Test: `fold_skips_a_malformed_line_and_keeps_the_valid_total`,
+/// `a_negative_row_cannot_raise_the_total`.
+fn visit_accepted_rows(
+    ledger: &Path,
+    text: &str,
+    session_id: Option<&str>,
+    visit: &mut impl FnMut(&SavingsRow),
+) {
     for (index, line) in text.lines().enumerate() {
         if line.trim().is_empty() {
             continue;

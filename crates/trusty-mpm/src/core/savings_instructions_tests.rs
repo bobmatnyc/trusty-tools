@@ -461,13 +461,13 @@ fn a_prompt_that_folds_nothing_warns_once_and_writes_no_row() {
         "a prompt that folded nothing must stage nothing either"
     );
     assert!(
-        !crate::core::savings_sidecar::warn_no_fold_once(
+        !crate::core::savings_sidecar::log_no_fold_once(
             framework_root.path(),
             project.path(),
             folded_source_bytes(project.path(), 0),
             bulky.len(),
         ),
-        "the producer must already have warned for this project and byte pair"
+        "the producer must already have logged for this project and byte pair"
     );
 }
 
@@ -733,7 +733,7 @@ fn the_no_override_fold_clears_the_prose_floor() {
 /// numbers came from a fixture rather than a real composition. A row is only
 /// evidence if the counts in it are the counts that were measured.
 /// FAILS BEFORE THIS CHANGE: no row was written at all — the producer took the
-/// `warn_no_fold_once` decline branch every time.
+/// `log_no_fold_once` decline branch every time.
 /// Test: itself.
 #[test]
 fn the_no_override_row_basis_carries_the_measured_bytes() {
