@@ -11,9 +11,8 @@
 //! for `recall_scope`, which widened to `pub(crate)` because `memory_list`
 //! shares it. Response shaping lives next door in
 //! [`super::recall_projection`].
-//! Test: `dispatch_recall_room_filter_scopes_results`,
-//! `dispatch_memory_recall_all_*` in `tools::tests`;
-//! `tests/recall_query_discrimination.rs`.
+//! Test: `dispatch_recall_room_filter_scopes_results` in `tools::tests`;
+//! `stdio_serve_recall_all_bounded`; `tests/recall_query_discrimination.rs`.
 
 use crate::{AppState, DaemonReadiness};
 use anyhow::{anyhow, Context, Result};
@@ -327,7 +326,10 @@ pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> 
 /// What: runs `recall_without_embedder` against every handle, tags each hit
 /// with its source palace id, then merges/re-sorts/truncates exactly like
 /// `recall_across_palaces` does for the vector-backed path.
-/// Test: `recall_all_falls_back_to_bm25_and_l0_l1_while_warming`.
+/// Test: `recall_degrades_to_l0_l1_when_the_embedder_is_genuinely_cold` and
+/// `recall_deep_degrades_to_l0_l1_when_the_embedder_is_genuinely_cold` cover the
+/// single-palace `recall_without_embedder` this fans out; no test drives the
+/// cross-palace fan-out through a cold embedder yet.
 async fn recall_all_without_embedder(
     state: &AppState,
     handles: &[std::sync::Arc<trusty_common::memory_core::retrieval::PalaceHandle>],
