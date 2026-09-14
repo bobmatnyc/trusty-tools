@@ -191,4 +191,31 @@ pub trait ToolEventSink: Send + Sync {
         _done: bool,
     ) {
     }
+
+    /// A delegated sub-agent's own loop is about to start (#7940).
+    ///
+    /// Why: the tool hooks above make a sub-agent's ACTIVITY observable but
+    /// say nothing about the delegation itself — a client could see an
+    /// engineer's `bash` calls arrive without ever learning that a
+    /// delegation began, who it went to, or what it was for. These three
+    /// lifecycle hooks are that missing bracket, reusing the sink the
+    /// delegated loop's construction site already holds rather than
+    /// threading the event bus (and a session id `agent_loop` must not know
+    /// about) into the runner.
+    /// What: called exactly once per `delegate_to_agent` dispatch from
+    /// `runner::in_process::InProcessAgentRunner::run_pipeline`, BEFORE the
+    /// sub-agent's loop runs, with the SAME `agent_id` that loop then stamps
+    /// on every tool/message hook of its run. Default no-op body, like the
+    /// hooks above, so every pre-existing sink impl compiles unchanged.
+    /// Test: `crate::task::sink::tests::forwards_agent_lifecycle`.
+    async fn agent_spawned(&self, _agent: &str, _agent_id: &str, _task_preview: &str) {}
+
+    /// A delegated sub-agent's loop returned normally (#7940) — see
+    /// [`Self::agent_spawned`]. `status` is a short label (`"success"`).
+    /// Exactly one of this and [`Self::agent_failed`] fires per spawn.
+    async fn agent_done(&self, _agent: &str, _agent_id: &str, _status: &str) {}
+
+    /// A delegated sub-agent's loop aborted (#7940) — see
+    /// [`Self::agent_spawned`]. `error` is the runner's error text.
+    async fn agent_failed(&self, _agent: &str, _agent_id: &str, _error: &str) {}
 }

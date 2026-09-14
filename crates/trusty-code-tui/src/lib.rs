@@ -70,10 +70,10 @@ pub mod terminal;
 pub mod text;
 pub mod widgets;
 
-pub use app::{ChatLine, ChatRole, ReplApp};
+pub use app::{ChatLine, ChatRole, Delegation, ReplApp};
 pub use commands::{BuiltIn, Forward, Route, dispatch_forward, resolve_forward, route};
 pub use engine::TuiEngine;
-pub use event::{KeyCode, KeyInput, KeyModifiers, ReplEvent, WorkstreamSummary};
+pub use event::{DelegationOutcome, KeyCode, KeyInput, KeyModifiers, ReplEvent, WorkstreamSummary};
 pub use keys::translate_key_event;
 pub use layout::draw;
 pub use model::{CommandDescriptor, CommandRouting, PickerItem, PickerRequest, StatuslineSegment};

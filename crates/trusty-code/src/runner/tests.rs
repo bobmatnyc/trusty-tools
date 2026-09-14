@@ -1022,6 +1022,7 @@ async fn with_mode_completes_a_delegated_run_in_both_modes() {
 /// `agent_loop::tests::RecordingSink` for the same pattern exercising the loop
 /// directly; this one proves the runner PROPAGATES a sink to its own
 /// internally-built `AgentLoop`).
+#[derive(Default)]
 struct RecordingSink {
     calls: Mutex<Vec<String>>,
     /// (DOC-39 AC-13) `(agent, agent_id)` pairs seen by `tool_started`, in
@@ -1031,6 +1032,11 @@ struct RecordingSink {
     /// `concurrently_delegated_same_named_agents_get_distinct_ids_under_tokio_join`
     /// read this.
     started_ids: Mutex<Vec<(String, String)>>,
+    /// (#7940) `agent_spawned`/`agent_done`/`agent_failed` calls, rendered
+    /// as `"<hook>:<agent>:<agent_id>:<detail>"` in call order — kept apart
+    /// from `calls` so every pre-existing assertion on that field's exact
+    /// format stays untouched.
+    lifecycle: Mutex<Vec<String>>,
 }
 
 #[async_trait]
@@ -1081,6 +1087,110 @@ impl ToolEventSink for RecordingSink {
             .expect("lock poisoned")
             .push(format!("error:{agent}:{tool}:{call_id}"));
     }
+
+    async fn agent_spawned(&self, agent: &str, agent_id: &str, task_preview: &str) {
+        self.lifecycle
+            .lock()
+            .expect("lock poisoned")
+            .push(format!("spawned:{agent}:{agent_id}:{task_preview}"));
+    }
+
+    async fn agent_done(&self, agent: &str, agent_id: &str, status: &str) {
+        self.lifecycle
+            .lock()
+            .expect("lock poisoned")
+            .push(format!("done:{agent}:{agent_id}:{status}"));
+    }
+
+    async fn agent_failed(&self, agent: &str, agent_id: &str, _error: &str) {
+        self.lifecycle
+            .lock()
+            .expect("lock poisoned")
+            .push(format!("failed:{agent}:{agent_id}"));
+    }
+}
+
+/// A delegation must bracket the sub-agent's loop with `agent_spawned` then
+/// `agent_done`, both carrying the SAME `agent_id` the loop stamps on its
+/// tool events (#7940).
+///
+/// Why: this is the producer half of "the TUI renders PM delegation" — the
+/// mapping and rendering are worthless if the daemon never says a delegation
+/// began. `run_pipeline` is the one site that runs once per dispatch, so the
+/// ordering and the shared id are what this pins.
+#[tokio::test]
+async fn delegation_emits_spawned_then_done_on_the_sink() {
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        tool_call_response("call-1", "mytool"),
+        stop_response("engineer done"),
+    ]));
+    let tmp = agents_dir_with(
+        "---\nname: python-engineer\nmodel: deepseek/deepseek-chat\n---\n",
+        "python-engineer",
+    );
+    let invoked = Arc::new(Mutex::new(Vec::new()));
+    let factory = Arc::new(recording_factory(vec!["mytool"], invoked));
+    let sink = Arc::new(RecordingSink::default());
+
+    let runner = InProcessAgentRunner::new(llm, factory, tmp.path().to_path_buf())
+        .with_tool_event_sink(sink.clone());
+    runner
+        .run("python-engineer", "build the thing")
+        .await
+        .expect("completes");
+
+    let lifecycle = sink.lifecycle.lock().expect("lock poisoned").clone();
+    assert_eq!(lifecycle.len(), 2, "one spawn, one close: {lifecycle:?}");
+    let spawned = lifecycle[0]
+        .strip_prefix("spawned:python-engineer:")
+        .expect("first hook must be agent_spawned for the delegated agent");
+    let (spawn_id, task) = spawned
+        .split_once(':')
+        .expect("spawned record carries an id and the task preview");
+    assert!(!spawn_id.is_empty(), "the spawn must carry its agent_id");
+    assert_eq!(task, "build the thing");
+    assert_eq!(
+        lifecycle[1],
+        format!("done:python-engineer:{spawn_id}:success")
+    );
+
+    let started_ids = sink.started_ids.lock().expect("lock poisoned").clone();
+    assert_eq!(
+        started_ids[0].1, spawn_id,
+        "the sub-agent's tool events must carry the SAME id the spawn \
+         announced, or a consumer cannot file them under that delegation"
+    );
+}
+
+/// A delegation whose loop aborts must close with `agent_failed`, not
+/// `agent_done` — a block that never says it blew up reads as a success
+/// (#7940).
+#[tokio::test]
+async fn failed_delegation_emits_agent_failed() {
+    // An empty script exhausts on the first turn, aborting the loop.
+    let llm = Arc::new(ScriptedLlm::from_json(&[]));
+    let tmp = agents_dir_with(
+        "---\nname: python-engineer\nmodel: deepseek/deepseek-chat\n---\n",
+        "python-engineer",
+    );
+    let invoked = Arc::new(Mutex::new(Vec::new()));
+    let factory = Arc::new(recording_factory(vec!["mytool"], invoked));
+    let sink = Arc::new(RecordingSink::default());
+
+    let runner = InProcessAgentRunner::new(llm, factory, tmp.path().to_path_buf())
+        .with_tool_event_sink(sink.clone());
+    runner
+        .run("python-engineer", "build the thing")
+        .await
+        .expect_err("an exhausted script must abort the loop");
+
+    let lifecycle = sink.lifecycle.lock().expect("lock poisoned").clone();
+    assert_eq!(lifecycle.len(), 2, "{lifecycle:?}");
+    assert!(lifecycle[0].starts_with("spawned:python-engineer:"));
+    assert!(
+        lifecycle[1].starts_with("failed:python-engineer:"),
+        "a failed delegation must close with agent_failed: {lifecycle:?}"
+    );
 }
 
 /// A sink attached via `with_tool_event_sink` must observe the DELEGATED
@@ -1106,10 +1216,7 @@ async fn sink_reaches_delegated_loop() {
     );
     let invoked = Arc::new(Mutex::new(Vec::new()));
     let factory = Arc::new(recording_factory(vec!["mytool"], invoked));
-    let sink = Arc::new(RecordingSink {
-        calls: Mutex::new(Vec::new()),
-        started_ids: Mutex::new(Vec::new()),
-    });
+    let sink = Arc::new(RecordingSink::default());
 
     let runner = InProcessAgentRunner::new(llm, factory, tmp.path().to_path_buf())
         .with_tool_event_sink(sink.clone());
@@ -1170,10 +1277,7 @@ async fn sequential_delegations_to_same_named_agent_get_distinct_ids() {
     );
     let invoked = Arc::new(Mutex::new(Vec::new()));
     let factory = Arc::new(recording_factory(vec!["mytool"], invoked));
-    let sink = Arc::new(RecordingSink {
-        calls: Mutex::new(Vec::new()),
-        started_ids: Mutex::new(Vec::new()),
-    });
+    let sink = Arc::new(RecordingSink::default());
 
     let runner = InProcessAgentRunner::new(llm, factory, tmp.path().to_path_buf())
         .with_tool_event_sink(sink.clone());
@@ -1290,10 +1394,7 @@ async fn concurrently_delegated_same_named_agents_get_distinct_ids_under_tokio_j
     );
     let invoked = Arc::new(Mutex::new(Vec::new()));
     let factory = Arc::new(recording_factory(vec!["mytool"], invoked));
-    let sink = Arc::new(RecordingSink {
-        calls: Mutex::new(Vec::new()),
-        started_ids: Mutex::new(Vec::new()),
-    });
+    let sink = Arc::new(RecordingSink::default());
 
     let runner = InProcessAgentRunner::new(llm, factory, tmp.path().to_path_buf())
         .with_tool_event_sink(sink.clone());

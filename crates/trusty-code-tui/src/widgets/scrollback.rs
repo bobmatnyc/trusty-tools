@@ -76,6 +76,51 @@ fn leader_spans(app: &ReplApp, body_color: Option<Color>) -> Vec<Span<'static>> 
     spans
 }
 
+/// The gutter drawn to the left of every line inside a delegated
+/// sub-agent's block (#7940).
+const DELEGATED_GUTTER: &str = "  │ ";
+
+/// Render one delegation frame or body entry (#7940).
+///
+/// Why: a delegated sub-agent's work has to read as a block, not as more
+/// top-level chat — the whole point of issue #7940 is that an operator
+/// watching `tcode tui` can see the PM hand work to an engineer. A frame
+/// line ([`ChatRole::Delegation`], the `▶ …` header and `└ …` footer) sits
+/// flush left in the delegation accent; every body line
+/// ([`ChatRole::Delegated`] — the sub-agent's streamed words and its tool
+/// notices) is prefixed with [`DELEGATED_GUTTER`] so it is visibly inside
+/// the frame.
+/// What: markdown-aware rendering (fenced code, tables) is deliberately NOT
+/// applied here — the fancy panel is a later slice of requirement R9; this
+/// is the minimal readable form. Multi-line text is split so the gutter
+/// reaches every line, not just the first.
+/// Test: `tests::build_chat_lines_frames_a_delegation_block`,
+/// `tests::build_chat_lines_gutters_every_delegated_line`.
+fn delegation_lines(entry: &crate::app::ChatLine) -> Vec<Line<'static>> {
+    let frame = entry.role == ChatRole::Delegation;
+    let style = if frame {
+        Style::default()
+            .fg(Color::Indexed(141))
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Indexed(146))
+    };
+    entry
+        .text
+        .lines()
+        .map(|raw| {
+            if frame {
+                Line::from(Span::styled(raw.to_string(), style))
+            } else {
+                Line::from(vec![
+                    Span::styled(DELEGATED_GUTTER, Style::default().fg(Color::Indexed(141))),
+                    Span::styled(raw.to_string(), style),
+                ])
+            }
+        })
+        .collect()
+}
+
 /// Build the rendered `Vec<Line>` for the chat pane.
 ///
 /// Why: extracted so layout code can compute the chat content height
@@ -239,6 +284,11 @@ pub fn build_chat_lines(app: &ReplApp, terminal_width: usize) -> Vec<Line<'stati
                     Span::styled(app.status_prefix.clone(), Style::default().fg(Color::Green)),
                     Span::raw(entry.text.clone()),
                 ]));
+            }
+            // #7940: the two roles that frame and fill a delegated
+            // sub-agent's block — see `delegation_lines`.
+            ChatRole::Delegation | ChatRole::Delegated => {
+                lines.extend(delegation_lines(entry));
             }
         }
         let is_last = idx + 1 == chat_len;
@@ -417,5 +467,53 @@ mod tests {
         assert_eq!(out[2].spans[0].content, "b");
         assert!(out[3].spans.iter().all(|s| s.content.trim().is_empty()));
         assert_eq!(out[4].spans[0].content, "c");
+    }
+
+    /// #7940: a delegation reads as a block — a flush-left header, gutter-
+    /// prefixed body, and a flush-left footer naming the outcome.
+    #[test]
+    fn build_chat_lines_frames_a_delegation_block() {
+        let mut app = app_without_banner();
+        app.chat.push(crate::app::ChatLine {
+            role: ChatRole::Delegation,
+            text: "▶ engineer — add the renderer".into(),
+        });
+        app.chat.push(crate::app::ChatLine {
+            role: ChatRole::Delegated,
+            text: "reading the spec".into(),
+        });
+        app.chat.push(crate::app::ChatLine {
+            role: ChatRole::Delegation,
+            text: "└ engineer — success".into(),
+        });
+        let lines = build_chat_lines(&app, 80);
+        let text = all_text(&lines);
+        assert!(text.contains("▶ engineer — add the renderer"), "{text}");
+        assert!(
+            text.contains(&format!("{DELEGATED_GUTTER}reading the spec")),
+            "{text}"
+        );
+        assert!(text.contains("└ engineer — success"), "{text}");
+    }
+
+    /// The gutter has to reach EVERY line of a multi-line sub-agent message,
+    /// not just the first — otherwise a wrapped answer falls out of the
+    /// block after one line.
+    #[test]
+    fn build_chat_lines_gutters_every_delegated_line() {
+        let mut app = app_without_banner();
+        app.chat.push(crate::app::ChatLine {
+            role: ChatRole::Delegated,
+            text: "one\ntwo\nthree".into(),
+        });
+        let lines = build_chat_lines(&app, 80);
+        for expected in ["one", "two", "three"] {
+            assert!(
+                lines
+                    .iter()
+                    .any(|l| line_text(l) == format!("{DELEGATED_GUTTER}{expected}")),
+                "missing gutter on {expected}"
+            );
+        }
     }
 }

@@ -438,6 +438,7 @@ fn apply_tool_invocation_renders_start_and_result_as_status() {
         &mut app,
         ReplEvent::ToolInvocation {
             id: "call-1".into(),
+            agent_id: String::new(),
             tool_name: "git.checkout".into(),
             args: serde_json::json!("main"),
             result: None,
@@ -448,6 +449,7 @@ fn apply_tool_invocation_renders_start_and_result_as_status() {
         &mut app,
         ReplEvent::ToolInvocation {
             id: "call-1".into(),
+            agent_id: String::new(),
             tool_name: "git.checkout".into(),
             args: serde_json::json!("main"),
             result: Some("switched to main".into()),
@@ -616,4 +618,248 @@ fn apply_assistant_output_refreshes_last_bash_block_on_finalize() {
         },
     );
     assert_eq!(app.last_bash_block, Some("echo hi".into()));
+}
+
+// ── #7940: delegation rendering and per-agent stream keying ───────────────
+
+/// Open a delegation block for `agent_id`/`agent` and return the app.
+fn app_with_delegation(agent_id: &str, agent: &str) -> ReplApp {
+    let mut app = ReplApp::new("demo", "u");
+    apply(
+        &mut app,
+        ReplEvent::DelegationStarted {
+            agent_id: agent_id.into(),
+            agent: agent.into(),
+            task: "do the thing".into(),
+        },
+    );
+    app
+}
+
+/// One chunk of attributed output.
+fn agent_output(agent_id: &str, turn_id: &str, chunk: &str, done: bool) -> ReplEvent {
+    ReplEvent::AgentOutput {
+        agent_id: agent_id.into(),
+        turn_id: turn_id.into(),
+        chunk: chunk.into(),
+        done,
+    }
+}
+
+/// THE regression this slice exists to close: a primary agent and a
+/// delegated sub-agent streaming inside one human turn must land in two
+/// separate bubbles, not one interleaved bubble. Driven with the two streams
+/// alternating chunk-by-chunk, which is what the unkeyed
+/// `ReplApp::streaming_idx` path produced `"pm-1sub-1 pm-2 sub-2"` from.
+#[test]
+fn agent_output_keys_concurrent_streams_separately() {
+    let mut app = ReplApp::new("demo", "u");
+    apply(&mut app, agent_output("pm-1", "turn-a", "pm-1", false));
+    apply(&mut app, agent_output("eng-1", "turn-b", "sub-1", false));
+    apply(&mut app, agent_output("pm-1", "turn-a", " pm-2", false));
+    apply(&mut app, agent_output("eng-1", "turn-b", " sub-2", false));
+
+    assert_eq!(app.chat.len(), 2, "one bubble per (agent_id, turn_id)");
+    assert_eq!(app.chat[0].text, "pm-1 pm-2");
+    assert_eq!(app.chat[1].text, "sub-1 sub-2");
+}
+
+/// Two turns from the SAME agent must also get their own bubbles — the key
+/// is the pair, not the agent id alone.
+#[test]
+fn agent_output_keys_distinct_turns_of_one_agent_separately() {
+    let mut app = ReplApp::new("demo", "u");
+    apply(&mut app, agent_output("pm-1", "turn-a", "first", false));
+    apply(&mut app, agent_output("pm-1", "turn-b", "second", false));
+    assert_eq!(app.chat.len(), 2);
+    assert_eq!(app.chat[0].text, "first");
+    assert_eq!(app.chat[1].text, "second");
+}
+
+/// `done: true` closes the bubble, drops the key, and — unlike
+/// `AssistantOutput` — never clears `busy`: one agent's turn ending is not
+/// the human turn ending.
+#[test]
+fn agent_output_finalizes_and_drops_its_key() {
+    let mut app = ReplApp::new("demo", "u");
+    app.busy = true;
+    apply(&mut app, agent_output("pm-1", "turn-a", "hello", false));
+    apply(&mut app, agent_output("pm-1", "turn-a", "", true));
+    assert!(app.agent_streams.is_empty(), "the key must be released");
+    assert!(
+        app.busy,
+        "an agent turn ending is not the human turn ending"
+    );
+    // A later delta for the same key opens a NEW bubble rather than
+    // reopening the finalized one.
+    apply(&mut app, agent_output("pm-1", "turn-a", "again", false));
+    assert_eq!(app.chat.len(), 2);
+}
+
+/// A terminal chunk for a stream this client never saw must not push a
+/// permanently blank bubble.
+#[test]
+fn agent_output_terminal_chunk_for_unknown_stream_is_dropped() {
+    let mut app = ReplApp::new("demo", "u");
+    apply(&mut app, agent_output("pm-1", "turn-a", "", true));
+    assert!(app.chat.is_empty());
+}
+
+/// Output attributed to an OPEN delegation renders inside that block;
+/// output from an unknown id is ordinary assistant output.
+#[test]
+fn agent_output_inside_a_delegation_is_delegated_role() {
+    let mut app = app_with_delegation("eng-1", "engineer");
+    apply(&mut app, agent_output("eng-1", "turn-b", "working", false));
+    apply(&mut app, agent_output("pm-1", "turn-a", "thinking", false));
+    assert_eq!(app.chat[1].role, ChatRole::Delegated);
+    assert_eq!(app.chat[2].role, ChatRole::Assistant);
+}
+
+/// An empty `agent_id` carries no attribution and must never be filed under
+/// whichever delegation happens to be open.
+#[test]
+fn agent_output_with_no_attribution_is_not_delegated() {
+    let mut app = app_with_delegation("", "engineer");
+    apply(&mut app, agent_output("", "turn-a", "unattributed", false));
+    assert_eq!(app.chat[1].role, ChatRole::Assistant);
+}
+
+#[test]
+fn delegation_started_pushes_header_and_sets_active_agent() {
+    let app = app_with_delegation("eng-1", "engineer");
+    assert_eq!(app.chat[0].role, ChatRole::Delegation);
+    assert_eq!(app.chat[0].text, "▶ engineer — do the thing");
+    assert_eq!(app.active_agent(), Some("engineer"));
+}
+
+/// A producer that announces the delegation before the sub-agent exists (no
+/// `agent_id`) and then reports the real spawn must render ONE block, with
+/// the real id adopted so later attributed events file under it.
+#[test]
+fn delegation_started_with_id_adopts_an_announced_block() {
+    let mut app = app_with_delegation("", "engineer");
+    apply(
+        &mut app,
+        ReplEvent::DelegationStarted {
+            agent_id: "eng-1".into(),
+            agent: "engineer".into(),
+            task: "do the thing".into(),
+        },
+    );
+    assert_eq!(app.chat.len(), 1, "one block, not two");
+    assert_eq!(app.delegations.len(), 1);
+    assert_eq!(app.delegations[0].agent_id, "eng-1");
+    apply(&mut app, agent_output("eng-1", "turn-b", "working", false));
+    assert_eq!(app.chat[1].role, ChatRole::Delegated);
+}
+
+/// Two concurrent delegations to the SAME agent name but distinct ids are
+/// two genuine delegations and get two blocks.
+#[test]
+fn delegation_started_twice_for_distinct_ids_opens_two_blocks() {
+    let mut app = app_with_delegation("eng-1", "engineer");
+    apply(
+        &mut app,
+        ReplEvent::DelegationStarted {
+            agent_id: "eng-2".into(),
+            agent: "engineer".into(),
+            task: "the other thing".into(),
+        },
+    );
+    assert_eq!(app.delegations.len(), 2);
+    assert_eq!(app.chat.len(), 2);
+}
+
+#[test]
+fn delegation_finished_pushes_footer_and_clears_active_agent() {
+    let mut app = app_with_delegation("eng-1", "engineer");
+    apply(
+        &mut app,
+        ReplEvent::DelegationFinished {
+            agent_id: "eng-1".into(),
+            agent: "engineer".into(),
+            outcome: DelegationOutcome::Finished("success".into()),
+        },
+    );
+    assert_eq!(app.chat[1].role, ChatRole::Delegation);
+    assert_eq!(app.chat[1].text, "└ engineer — success");
+    assert_eq!(app.active_agent(), None);
+}
+
+#[test]
+fn delegation_finished_failed_footer_carries_the_error() {
+    let mut app = app_with_delegation("eng-1", "engineer");
+    apply(
+        &mut app,
+        ReplEvent::DelegationFinished {
+            agent_id: "eng-1".into(),
+            agent: "engineer".into(),
+            outcome: DelegationOutcome::Failed("turn cap exceeded".into()),
+        },
+    );
+    assert_eq!(app.chat[1].text, "└ engineer — failed: turn cap exceeded");
+}
+
+/// A failed loop aborts mid-turn and never sends its terminal chunk;
+/// closing the block must release the key so the map stays bounded.
+#[test]
+fn delegation_finished_drops_an_unterminated_stream_key() {
+    let mut app = app_with_delegation("eng-1", "engineer");
+    apply(
+        &mut app,
+        agent_output("eng-1", "turn-b", "half a th", false),
+    );
+    assert_eq!(app.agent_streams.len(), 1);
+    apply(
+        &mut app,
+        ReplEvent::DelegationFinished {
+            agent_id: "eng-1".into(),
+            agent: "engineer".into(),
+            outcome: DelegationOutcome::Failed("boom".into()),
+        },
+    );
+    assert!(app.agent_streams.is_empty());
+}
+
+/// A delegated sub-agent's tool calls belong inside its block; the primary
+/// agent's stay top-level status lines.
+#[test]
+fn tool_invocation_attributed_to_a_delegation_is_delegated_role() {
+    let mut app = app_with_delegation("eng-1", "engineer");
+    apply(
+        &mut app,
+        ReplEvent::ToolInvocation {
+            id: "c1".into(),
+            agent_id: "eng-1".into(),
+            tool_name: "bash".into(),
+            args: serde_json::json!("cargo test"),
+            result: None,
+        },
+    );
+    apply(
+        &mut app,
+        ReplEvent::ToolInvocation {
+            id: "c2".into(),
+            agent_id: "pm-1".into(),
+            tool_name: "delegate_to_agent".into(),
+            args: serde_json::json!("{}"),
+            result: None,
+        },
+    );
+    assert_eq!(app.chat[1].role, ChatRole::Delegated);
+    assert_eq!(app.chat[1].text, "[TOOL] bash: \"cargo test\"");
+    assert_eq!(app.chat[2].role, ChatRole::Status);
+}
+
+/// `/clear` must drop the keyed-stream indices too — they index INTO `chat`,
+/// so leaving them behind would point at rows that no longer exist.
+#[test]
+fn clear_scrollback_drops_delegation_state() {
+    let mut app = app_with_delegation("eng-1", "engineer");
+    apply(&mut app, agent_output("eng-1", "turn-b", "working", false));
+    apply(&mut app, ReplEvent::ClearScrollback);
+    assert!(app.chat.is_empty());
+    assert!(app.agent_streams.is_empty());
+    assert_eq!(app.active_agent(), None);
 }

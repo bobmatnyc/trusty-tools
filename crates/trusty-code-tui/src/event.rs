@@ -138,11 +138,65 @@ pub enum ReplEvent {
     /// `fs.read` calls); the engine adapter mints this id (a UUID or a
     /// backend-supplied call id, whichever it has) and must reuse it across
     /// the start/complete pair.
+    ///
+    /// `agent_id` (#7940) is the opaque id of the agent that dispatched the
+    /// call, matching [`Self::DelegationStarted`]'s `agent_id` when the
+    /// caller is a delegated sub-agent. Empty when the engine has no
+    /// attribution to offer. It is what lets the reducer render a delegated
+    /// agent's tool calls INSIDE that agent's block rather than at the top
+    /// level beside the primary agent's own.
     ToolInvocation {
         id: String,
+        agent_id: String,
         tool_name: String,
         args: serde_json::Value,
         result: Option<String>,
+    },
+    /// A chunk of streamed output attributed to a specific agent turn
+    /// (#7940).
+    ///
+    /// Why: [`Self::AssistantOutput`] carries no attribution and the reducer
+    /// accumulates it into ONE unkeyed in-progress bubble, so a primary
+    /// agent and a delegated sub-agent streaming at the same time interleave
+    /// their words into a single chat entry. This variant carries the
+    /// `(agent_id, turn_id)` pair the reducer keys a separate bubble on, so
+    /// concurrent streams stay separate by construction.
+    /// What: `agent_id` is the opaque per-spawn agent id; `turn_id` is the
+    /// producer's own per-turn id. Append every chunk sharing one
+    /// `(agent_id, turn_id)` key in arrival order; `done: true` closes that
+    /// bubble and no further chunk for the key will arrive. Unlike
+    /// `AssistantOutput`, this variant never clears the model's `busy` flag:
+    /// one agent's turn ending is not the human turn ending.
+    AgentOutput {
+        agent_id: String,
+        turn_id: String,
+        chunk: String,
+        done: bool,
+    },
+    /// A delegated sub-agent started working on a task (#7940).
+    ///
+    /// Why: delegation is invisible in the scrollback without it — the
+    /// sub-agent's output and tool calls arrive indistinguishable from the
+    /// primary agent's. This opens a rendered block the sub-agent's activity
+    /// hangs under.
+    /// What: `agent_id` is an opaque, producer-minted id, unique per spawn
+    /// (`agent` alone cannot separate two concurrent delegations of the same
+    /// kind). It MAY be empty when the producer announces an intent to
+    /// delegate before the sub-agent exists; a later `DelegationStarted`
+    /// naming the same `agent` with a non-empty `agent_id` adopts the
+    /// already-open block rather than opening a second one. `task` is a
+    /// short human summary of what was delegated.
+    DelegationStarted {
+        agent_id: String,
+        agent: String,
+        task: String,
+    },
+    /// A delegated sub-agent's run ended (#7940) — closes the block
+    /// [`Self::DelegationStarted`] opened, keyed by the same `agent_id`.
+    DelegationFinished {
+        agent_id: String,
+        agent: String,
+        outcome: DelegationOutcome,
     },
     /// A one-line status message (e.g. "cancelled", "Switched to: izzie").
     StatusMessage(String),
@@ -189,6 +243,26 @@ pub enum ReplEvent {
     /// `subscribe_workstream_events` call attempts to reconnect (DOC-50
     /// §2.4).
     ConnectionLost { reason: String },
+}
+
+/// How a delegated sub-agent's run ended (#7940) — the payload of
+/// [`ReplEvent::DelegationFinished`].
+///
+/// Why: the block footer has to say more than "over": an engineer that
+/// finished and one that blew up look identical otherwise, which is exactly
+/// the thing an operator watching a delegation needs to see at a glance.
+/// Two variants rather than a `Result<String, String>` so the rendered
+/// vocabulary is this crate's own and no caller has to decide what the `Ok`
+/// side of a `Result` means here.
+/// What: `Finished` carries the producer's own status label (e.g.
+/// `"success"`); `Failed` carries the error text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DelegationOutcome {
+    /// The sub-agent's loop returned normally; carries the producer's status
+    /// label.
+    Finished(String),
+    /// The sub-agent's loop failed; carries the error text.
+    Failed(String),
 }
 
 /// Minimal, `crossterm`-independent representation of a single key press.
@@ -285,12 +359,14 @@ mod tests {
     fn tool_invocation_start_and_complete_share_a_correlation_id() {
         let start = ReplEvent::ToolInvocation {
             id: "call-1".to_string(),
+            agent_id: String::new(),
             tool_name: "fs.read".to_string(),
             args: serde_json::json!({"path": "a.txt"}),
             result: None,
         };
         let complete = ReplEvent::ToolInvocation {
             id: "call-1".to_string(),
+            agent_id: String::new(),
             tool_name: "fs.read".to_string(),
             args: serde_json::json!({"path": "a.txt"}),
             result: Some("contents".to_string()),

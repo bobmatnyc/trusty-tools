@@ -176,6 +176,40 @@ impl ToolEventSink for SessionToolEventSink {
             tracing::warn!(session_id = %self.session_id, agent, agent_id, turn_id, "record_agent_message_delta failed: {e}");
         }
     }
+
+    /// Forward a delegation starting to this session's event stream (#7940).
+    /// Same log-and-swallow contract as the hooks above: a vanished session
+    /// must never fault the delegation it observes.
+    /// Test: `tests::forwards_agent_lifecycle`.
+    async fn agent_spawned(&self, agent: &str, agent_id: &str, task_preview: &str) {
+        if let Err(e) =
+            self.registry
+                .record_agent_spawned(&self.session_id, agent, agent_id, task_preview)
+        {
+            tracing::warn!(session_id = %self.session_id, agent, agent_id, "record_agent_spawned failed: {e}");
+        }
+    }
+
+    /// Forward a delegation finishing normally (#7940). See
+    /// [`Self::agent_spawned`].
+    async fn agent_done(&self, agent: &str, agent_id: &str, status: &str) {
+        if let Err(e) = self
+            .registry
+            .record_agent_done(&self.session_id, agent, agent_id, status)
+        {
+            tracing::warn!(session_id = %self.session_id, agent, agent_id, "record_agent_done failed: {e}");
+        }
+    }
+
+    /// Forward a delegation aborting (#7940). See [`Self::agent_spawned`].
+    async fn agent_failed(&self, agent: &str, agent_id: &str, error: &str) {
+        if let Err(e) = self
+            .registry
+            .record_agent_failed(&self.session_id, agent, agent_id, error)
+        {
+            tracing::warn!(session_id = %self.session_id, agent, agent_id, "record_agent_failed failed: {e}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -357,6 +391,50 @@ mod tests {
         .await;
         sink.context_budget(&budget_snapshot()).await;
         sink.agent_message("pm", "pm-1", "turn-1", "x", true).await;
+        sink.agent_spawned("engineer", "eng-1", "t").await;
+        sink.agent_done("engineer", "eng-1", "success").await;
+        sink.agent_failed("engineer", "eng-1", "boom").await;
+    }
+
+    /// The three delegation-lifecycle hooks must each reach the session's
+    /// event stream as their matching event kind (#7940) — the brackets a
+    /// TUI renders a delegation block from.
+    #[tokio::test]
+    async fn forwards_agent_lifecycle() {
+        let registry = Arc::new(SessionRegistry::new());
+        let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+        let sink = SessionToolEventSink::new(Arc::clone(&registry), session.id.clone());
+        let mut events = crate::events::subscribe();
+
+        sink.agent_spawned("engineer", "eng-1", "build the thing")
+            .await;
+        let ev = next_event_for(&mut events, &session.id).await;
+        assert_eq!(ev.kind, "agent_spawned");
+        assert!(matches!(
+            ev.event,
+            crate::events::Event::AgentSpawned { agent, agent_id, task_preview, .. }
+                if agent == "engineer" && agent_id == "eng-1"
+                    && task_preview == "build the thing"
+        ));
+
+        sink.agent_done("engineer", "eng-1", "success").await;
+        let ev = next_event_for(&mut events, &session.id).await;
+        assert_eq!(ev.kind, "agent_done");
+        assert!(matches!(
+            ev.event,
+            crate::events::Event::AgentDone { agent_id, status, .. }
+                if agent_id == "eng-1" && status == "success"
+        ));
+
+        sink.agent_failed("engineer", "eng-2", "turn cap exceeded")
+            .await;
+        let ev = next_event_for(&mut events, &session.id).await;
+        assert_eq!(ev.kind, "agent_failed");
+        assert!(matches!(
+            ev.event,
+            crate::events::Event::AgentFailed { agent_id, error, .. }
+                if agent_id == "eng-2" && error == "turn cap exceeded"
+        ));
     }
 
     /// A representative budget snapshot for the sink tests.

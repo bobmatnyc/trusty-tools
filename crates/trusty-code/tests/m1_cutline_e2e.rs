@@ -116,15 +116,25 @@ use trusty_code::events::{Event, SessionEventEnvelope};
 /// turn. Against a real SSE provider the CONTENT frames multiply with the
 /// token count; the terminal frame stays exactly one, which is the invariant
 /// a consumer keys off.
+///
+/// (#7940) `agent_spawned`/`agent_done` bracket the delegated engineer's
+/// loop INSIDE the PM's `delegate_to_agent` tool call — the spawn lands
+/// after the PM's `tool_started` and before the engineer's first tool call;
+/// the close lands after the engineer's last event and before the PM's
+/// `tool_finished` unwinds the delegation. That nesting is the whole point:
+/// it is what lets a UI file every event between the two under one
+/// delegation block, so it belongs in the ordered baseline.
 const BASELINE_EVENT_KINDS: &[&str] = &[
     "session_started",
     "session_status_changed",
     "context_budget",      // PM turn 1 boundary (cadence measures before the call)
     "tool_started",        // PM: delegate_to_agent
+    "agent_spawned",       // #7940: engineer's loop opens
     "tool_started",        // engineer: bash
     "tool_finished",       // engineer: bash
     "agent_message_delta", // engineer: final text turn — content (done: false)
     "agent_message_delta", // engineer: final text turn — terminal (done: true)
+    "agent_done",          // #7940: engineer's loop closes
     "tool_finished",       // PM: delegate_to_agent
     "context_budget",      // PM turn 2 boundary
     "agent_message_delta", // PM: final text turn — content (done: false)

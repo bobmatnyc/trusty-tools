@@ -710,6 +710,69 @@ async fn record_agent_message_delta_publishes_event() {
     ));
 }
 
+/// #7940: the delegation brackets must reach the session's stream with the
+/// agent, its per-spawn id, and (for the spawn) the task preview.
+#[tokio::test]
+async fn record_agent_spawned_publishes_event() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, ProjectBinding::None);
+    let mut events = crate::events::subscribe();
+
+    registry
+        .record_agent_spawned(&session.id, "engineer", "eng-1", "build the thing")
+        .unwrap();
+
+    let envelope = next_event_for(&mut events, &session.id).await;
+    assert_eq!(envelope.kind, "agent_spawned");
+    assert!(matches!(
+        envelope.event,
+        Event::AgentSpawned { agent, agent_id, task_preview, .. }
+            if agent == "engineer" && agent_id == "eng-1"
+                && task_preview == "build the thing"
+    ));
+}
+
+/// #7940: see `record_agent_spawned_publishes_event`.
+#[tokio::test]
+async fn record_agent_done_publishes_event() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, ProjectBinding::None);
+    let mut events = crate::events::subscribe();
+
+    registry
+        .record_agent_done(&session.id, "engineer", "eng-1", "success")
+        .unwrap();
+
+    let envelope = next_event_for(&mut events, &session.id).await;
+    assert_eq!(envelope.kind, "agent_done");
+    assert!(matches!(
+        envelope.event,
+        Event::AgentDone { agent, agent_id, status, .. }
+            if agent == "engineer" && agent_id == "eng-1" && status == "success"
+    ));
+}
+
+/// #7940: see `record_agent_spawned_publishes_event`.
+#[tokio::test]
+async fn record_agent_failed_publishes_event() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, ProjectBinding::None);
+    let mut events = crate::events::subscribe();
+
+    registry
+        .record_agent_failed(&session.id, "engineer", "eng-1", "turn cap exceeded")
+        .unwrap();
+
+    let envelope = next_event_for(&mut events, &session.id).await;
+    assert_eq!(envelope.kind, "agent_failed");
+    assert!(matches!(
+        envelope.event,
+        Event::AgentFailed { agent, agent_id, error, .. }
+            if agent == "engineer" && agent_id == "eng-1"
+                && error == "turn cap exceeded"
+    ));
+}
+
 /// Every `record_*` emission-plumbing method must reject an unknown
 /// session id with `session_not_found` rather than panicking.
 #[tokio::test]

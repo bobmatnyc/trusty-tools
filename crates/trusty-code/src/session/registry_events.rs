@@ -626,6 +626,81 @@ impl SessionRegistry {
         Ok(())
     }
 
+    /// Record a delegated sub-agent's loop starting (#7940).
+    ///
+    /// Why: the opening bracket of a delegation block — see
+    /// [`crate::events::Event::AgentSpawned`] for why a client cannot infer
+    /// it from the attributed tool/message events alone.
+    /// What: errors with `session_not_found` if `id` is unknown;
+    /// `task_preview` is truncated via `crate::events::preview` so a long
+    /// delegation brief can't blow the ring buffer / wire size.
+    /// Test: `registry_tests::record_agent_spawned_publishes_event`.
+    pub fn record_agent_spawned(
+        &self,
+        id: &str,
+        agent: &str,
+        agent_id: &str,
+        task: &str,
+    ) -> Result<(), RpcError> {
+        self.ensure_exists(id)?;
+        self.record(
+            id,
+            Event::AgentSpawned {
+                session_id: id.to_string(),
+                agent: agent.to_string(),
+                agent_id: agent_id.to_string(),
+                task_preview: crate::events::preview(task, 200),
+            },
+        );
+        Ok(())
+    }
+
+    /// Record a delegated sub-agent's loop returning normally (#7940). See
+    /// [`Self::record_agent_spawned`].
+    /// Test: `registry_tests::record_agent_done_publishes_event`.
+    pub fn record_agent_done(
+        &self,
+        id: &str,
+        agent: &str,
+        agent_id: &str,
+        status: &str,
+    ) -> Result<(), RpcError> {
+        self.ensure_exists(id)?;
+        self.record(
+            id,
+            Event::AgentDone {
+                session_id: id.to_string(),
+                agent: agent.to_string(),
+                agent_id: agent_id.to_string(),
+                status: status.to_string(),
+            },
+        );
+        Ok(())
+    }
+
+    /// Record a delegated sub-agent's loop aborting (#7940). See
+    /// [`Self::record_agent_spawned`].
+    /// Test: `registry_tests::record_agent_failed_publishes_event`.
+    pub fn record_agent_failed(
+        &self,
+        id: &str,
+        agent: &str,
+        agent_id: &str,
+        error: &str,
+    ) -> Result<(), RpcError> {
+        self.ensure_exists(id)?;
+        self.record(
+            id,
+            Event::AgentFailed {
+                session_id: id.to_string(),
+                agent: agent.to_string(),
+                agent_id: agent_id.to_string(),
+                error: crate::events::preview(error, 500),
+            },
+        );
+        Ok(())
+    }
+
     /// Return `Ok(())` if `id` exists, `Err(session_not_found)` otherwise.
     ///
     /// Why: every `record_*` plumbing method needs the same existence guard

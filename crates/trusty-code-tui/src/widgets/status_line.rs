@@ -111,9 +111,15 @@ fn segment_spans(seg: &StatuslineSegment) -> Vec<Span<'static>> {
 /// a terminal backend.
 /// What: joins every segment's spans with [`SEPARATOR`]; an empty segment
 /// list renders an empty `Line` (the statusline row collapses to blank,
-/// never to placeholder text a product didn't ask for).
+/// never to placeholder text a product didn't ask for). (#7940) While a
+/// delegation is open, one further segment naming the working sub-agent is
+/// appended — derived from [`ReplApp::active_agent`] rather than pushed by
+/// the engine, so it appears and reverts with the delegation itself and no
+/// adapter has to remember to retract it.
 /// Test: `tests::build_statusline_joins_segments_with_separator`,
-/// `tests::build_statusline_empty_when_no_segments`.
+/// `tests::build_statusline_empty_when_no_segments`,
+/// `tests::build_statusline_appends_active_agent_while_delegating`,
+/// `tests::build_statusline_omits_active_agent_when_idle`.
 pub fn build_statusline(app: &ReplApp) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     for (i, seg) in app.statusline.iter().enumerate() {
@@ -124,6 +130,20 @@ pub fn build_statusline(app: &ReplApp) -> Line<'static> {
             ));
         }
         spans.extend(segment_spans(seg));
+    }
+    if let Some(agent) = app.active_agent() {
+        if !spans.is_empty() {
+            spans.push(Span::styled(
+                SEPARATOR,
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        spans.push(Span::styled(
+            format!("▶ {agent}"),
+            Style::default()
+                .fg(Color::Indexed(141))
+                .add_modifier(Modifier::BOLD),
+        ));
     }
     Line::from(spans)
 }
@@ -266,5 +286,37 @@ mod tests {
     fn build_statusline_empty_when_no_segments() {
         let app = ReplApp::new("demo", "u");
         assert_eq!(line_text(&build_statusline(&app)), "");
+    }
+
+    /// #7940: while a delegation runs, the status line names the working
+    /// sub-agent — and reverts on its own when the delegation closes, with
+    /// no engine push either way.
+    #[test]
+    fn build_statusline_appends_active_agent_while_delegating() {
+        let mut app = ReplApp::new("demo", "u");
+        app.statusline = vec![StatuslineSegment::Project("trusty-tools".into())];
+        app.delegations.push(crate::app::Delegation {
+            agent_id: "eng-1".into(),
+            agent: "engineer".into(),
+        });
+        assert_eq!(
+            line_text(&build_statusline(&app)),
+            "trusty-tools · ▶ engineer"
+        );
+        app.delegations.clear();
+        assert_eq!(line_text(&build_statusline(&app)), "trusty-tools");
+    }
+
+    /// With no engine segments at all, the active-agent chunk must not be
+    /// preceded by a dangling separator.
+    #[test]
+    fn build_statusline_omits_active_agent_when_idle() {
+        let mut app = ReplApp::new("demo", "u");
+        assert_eq!(line_text(&build_statusline(&app)), "");
+        app.delegations.push(crate::app::Delegation {
+            agent_id: "eng-1".into(),
+            agent: "engineer".into(),
+        });
+        assert_eq!(line_text(&build_statusline(&app)), "▶ engineer");
     }
 }
