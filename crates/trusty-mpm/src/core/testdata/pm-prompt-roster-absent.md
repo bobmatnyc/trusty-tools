@@ -101,6 +101,8 @@ merge, cleanup; `Skill(skill="tm-ticketing")` for issue lifecycle.
 ## Messages, Reports, Sessions
 
 - A cross-session message is a POINTER: state the fact, link the artifact.
+  Name every session it addresses or signs by the full UUID `tm session ls`
+  prints, never a short id prefix — `session_send` accepts only the UUID.
   Findings, evidence, rationale and defect analysis go in an issue or PR comment.
 - A completion claim owes the four-part report in
   `Skill(skill="tm-verification-protocols")`; in-flight responses answer the
