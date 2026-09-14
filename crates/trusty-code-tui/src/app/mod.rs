@@ -457,8 +457,9 @@ impl ReplApp {
     /// push a statusline update.
     /// What: the last entry of [`Self::delegations`]; `None` when no
     /// delegation is open.
-    /// Test: `reduce::tests::delegation_started_sets_active_agent`,
-    /// `reduce::tests::delegation_finished_clears_active_agent`.
+    /// Test: `delegation_started_pushes_header_and_sets_active_agent`,
+    /// `delegation_finished_pushes_footer_and_clears_active_agent`,
+    /// `build_statusline_appends_active_agent_while_delegating`.
     pub fn active_agent(&self) -> Option<&str> {
         self.delegations.last().map(|d| d.agent.as_str())
     }
