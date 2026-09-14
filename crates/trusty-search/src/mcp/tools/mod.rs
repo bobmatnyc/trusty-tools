@@ -19,6 +19,8 @@
 //! - [`compact`]     — the `compact` field mode (#7676): drop the hit fields a
 //!   caller did not ask for, so an envelope that was 48-72% metadata is not
 //!   charged to the caller's context
+//! - [`byte_cap`]    — the serialized-response byte ceiling (#7493): fold an
+//!   oversized result body to whole hits that fit, and say what was withheld
 //! - [`descriptors`] — static `tool_descriptors()` for `tools/list`
 //! - [`not_ready`]   — the `INDEX_NOT_READY` contract (issue #4715): a daemon
 //!   404 on the index this session ADVERTISED means "not built yet", which is
@@ -43,6 +45,7 @@ use serde_json::Value;
 // etc.) working.
 pub use trusty_mcp::{error_codes, initialize_response, JsonRpcError, Request, Response};
 
+pub(crate) mod byte_cap;
 pub(crate) mod compact;
 pub(crate) mod descriptors;
 pub(crate) mod health;
@@ -352,17 +355,32 @@ impl McpServer {
         }
     }
 
+    /// Route a tool call, then fold the result to the byte ceiling (#7493).
+    ///
+    /// Why: every result-returning tool needs the same ceiling, and applying
+    /// it at the one place each result passes through is what keeps a new tool
+    /// arm from shipping unbounded. A measurement failure propagates as a tool
+    /// error — an unmeasured body is never returned.
+    /// What: delegates to [`Self::route_tool`], then to
+    /// [`byte_cap::apply`], which is a no-op for every uncapped tool.
+    /// Test: `tests_byte_cap.rs`.
+    async fn call_tool(&self, tool: &str, args: &Value) -> Result<Value, DispatchError> {
+        let mut value = self.route_tool(tool, args).await?;
+        byte_cap::apply(tool, args, &mut value)?;
+        Ok(value)
+    }
+
     /// Route a tool name to the correct tool-group dispatcher.
     ///
     /// Why: splitting tool arms across `search`, `index`, and `misc` submodules
-    /// keeps each file under the 500-line cap; `call_tool` is the thin
-    /// router that tries each group in sequence.
+    /// keeps each file under the 500-line cap; this is the thin router that
+    /// tries each group in sequence.
     /// What: delegates to `dispatch_search_tool`, `dispatch_index_tool`, then
     /// `dispatch_misc_tool`; returns `DispatchError::UnknownTool` when no
     /// group claims the name.
     /// Test: all tool-dispatch tests in `tests.rs` and `tests_lane.rs` exercise
     /// this routing.
-    async fn call_tool(&self, tool: &str, args: &Value) -> Result<Value, DispatchError> {
+    async fn route_tool(&self, tool: &str, args: &Value) -> Result<Value, DispatchError> {
         if let Some(result) = search::dispatch_search_tool(self, tool, args).await {
             return result;
         }
@@ -384,6 +402,9 @@ mod tests;
 // #7676: the compact field mode — what a hit's JSON carries, and what it drops.
 #[cfg(test)]
 mod tests_compact;
+// #7493: the serialized-response byte ceiling and its truncation notice.
+#[cfg(test)]
+mod tests_byte_cap;
 #[cfg(test)]
 mod tests_lane;
 // Issue #138: tools/list completeness and per-lane dispatch validation.

@@ -465,6 +465,9 @@ pub fn tool_descriptors() -> Value {
     // #6317: an unpinned read tool answers an omitted index_id with a directory,
     // so the schema must let a client send the call without one.
     super::index_directory::annotate_directory_tools(&mut defs);
+    // #7493: every result-returning tool advertises the byte ceiling's two
+    // knobs, from the same list the dispatcher enforces them from.
+    super::byte_cap::annotate_capped_tools(&mut defs);
     defs
 }
 
