@@ -278,6 +278,9 @@ struct Fold<'a> {
 /// not query results — the same distinction
 /// [`super::recall_projection::apply_score_floor`] draws when it refuses to
 /// filter them.
+///
+/// Test: `identity_and_essential_hits_survive_a_cap_that_drops_l2`,
+/// `protected_hits_ship_over_the_ceiling_when_they_alone_exceed_it`.
 fn is_protected(spec: &CappedTool, item: &Value) -> bool {
     spec.protect_layers
         && item

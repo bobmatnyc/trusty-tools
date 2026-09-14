@@ -45,6 +45,14 @@ fn hit(n: usize, layer: u64) -> Value {
     })
 }
 
+/// One hit whose body alone is about 30 KB, so two of them clear the default
+/// 48 KiB ceiling between them.
+fn big_hit(n: usize, layer: u64) -> Value {
+    let mut entry = hit(n, layer);
+    entry["content"] = Value::String("x".repeat(30_000));
+    entry
+}
+
 /// A `memory_recall` body whose every hit is a droppable L2 one.
 fn recall_body(hits: usize) -> Value {
     json!({
@@ -190,6 +198,50 @@ fn identity_and_essential_hits_survive_a_cap_that_drops_l2() {
     assert!(
         layers.iter().filter(|l| **l >= 2).count() < 8,
         "no L2 hit was dropped: {layers:?}"
+    );
+}
+
+/// Protected entries are the floor the fold cannot go below, even when they
+/// alone exceed the ceiling.
+///
+/// Two 30 KB L0/L1 hits are already over the default 48 KiB, so the fold drops
+/// every droppable hit, keeps both protected ones, and says the response is
+/// OVER the ceiling rather than under it. Without the floor there would be
+/// nothing to stop the fold from answering identity-less.
+#[test]
+fn protected_hits_ship_over_the_ceiling_when_they_alone_exceed_it() {
+    let mut results = vec![big_hit(0, 0), big_hit(1, 1)];
+    results.extend((2..7).map(|n| hit(n, 2)));
+    let mut resp = json!({
+        "palace": "demo",
+        "query": "quokkas",
+        "results": results,
+        "dropped_below_floor": 0,
+    });
+
+    apply("memory_recall", &json!({}), &mut resp).expect("fold");
+
+    assert_eq!(resp["truncated"], json!(true));
+    assert_eq!(resp["returned"], json!(2));
+    assert_eq!(resp["withheld"], json!(5));
+    let ids = returned_ids(&resp, "results");
+    for protected in [big_hit(0, 0), big_hit(1, 1)] {
+        let id = protected["drawer_id"].as_str().expect("id").to_string();
+        assert!(ids.contains(&id), "protected hit was dropped: {ids:?}");
+    }
+    let size = measure(&resp).expect("measure");
+    assert!(
+        size > DEFAULT_MAX_BYTES,
+        "the fixture no longer exceeds the ceiling at {size} bytes"
+    );
+    let notice = resp["truncation_notice"].as_str().expect("notice");
+    assert!(
+        notice.contains(&format!("exceeds the {DEFAULT_MAX_BYTES}-byte ceiling")),
+        "{notice}"
+    );
+    assert!(
+        !notice.contains("to keep this response under"),
+        "an over-ceiling response must not claim to be under it: {notice}"
     );
 }
 
