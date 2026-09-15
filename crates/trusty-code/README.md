@@ -111,6 +111,24 @@ workstream, and TUI flows. `run-workflow` remains the incomplete surface.
 | `tcode paths show\|import` | Report which config root wins; import a `.claude/` catalog |
 | `tcode run-workflow <name>` | Reserved workflow runner; not yet implemented |
 
+## Credential storage
+
+`tcode` stores inference-provider API keys through `trusty-common`'s shared
+credential resolver. `trusty-code/Cargo.toml`'s `trusty-common` dependency
+does not enable the `keyring-store` feature, so the OS-keychain branch of
+`default_store()` never compiles in; every run falls straight to
+`FileKeyStore` — a `0600`-permission plaintext TOML file at
+`~/.trusty-tools/credentials.toml`, shared with every other trusty-* binary.
+A key an operator stored in the OS keychain through a different tool is
+invisible to `tcode`.
+
+There is no `tcode doctor` subcommand. Diagnose a stored key with `tcode
+config keys test <provider>`, and confirm which config root `tcode` resolved
+with `tcode paths show`.
+
+(Whether the keychain should be required repo-wide is a separate, currently
+blocked decision: epic #4570.)
+
 ## Configuration layout (`.trusty-code`)
 
 Trusty Code owns two directories. It READS from three, and WRITES to only one
