@@ -134,10 +134,33 @@ pub struct AgentConfig {
     /// any event (deny-by-default, matching `[tools].allow`'s posture).
     /// What: `Vec<AgentListenerBinding>` parsed from repeated `[[listeners]]`
     /// tables.
+    ///
+    /// DEPRECATED (#7609): the legacy spelling of a per-assistant channel,
+    /// kept parsing for one release and never dropped from disk. Read
+    /// [`AgentConfig::listeners`] instead of this field — it answers from
+    /// `channels`, which is where a migrated binding lands.
     /// Test: `crate::listeners::config` unit tests cover the binding shape;
     /// `crate::listeners::wake` tests cover matching semantics.
+    #[serde(default, rename = "listeners")]
+    pub legacy_listeners: Vec<crate::listeners::config::AgentListenerBinding>,
+
+    /// Per-assistant channels (#7609) — the merge of the listener-binding and
+    /// channel-binding models.
+    ///
+    /// Why: one concept, one list. A `[[listeners]]` binding from before the
+    /// merge is absorbed here on every parse, so the deprecated table keeps
+    /// working; the stored home of these is the assistant's
+    /// `<name>.channels.json`, which
+    /// [`crate::channels::migrate::migrate_agent_channels_if_absent`] seeds
+    /// once.
+    /// What: [`crate::channels::Channel`] with
+    /// [`crate::channels::ChannelScope::Assistant`]. A binding absorbed out of
+    /// `agent.toml` carries an EMPTY `provider`, because the provider lives on
+    /// the global channel it names and this parse holds no global config;
+    /// dispatch (slice 4) resolves it.
+    /// Test: `an_agent_toml_listeners_table_is_absorbed_into_channels`.
     #[serde(default)]
-    pub listeners: Vec<crate::listeners::config::AgentListenerBinding>,
+    pub channels: Vec<crate::channels::Channel>,
 
     /// Per-agent OKG store bindings (#3816/#3864, DOC-54 SPEC-AGENTS-04
     /// §5.1) — the FIRST leg of the stores/tools/listeners config triple.
@@ -220,6 +243,16 @@ pub struct AgentConfig {
     /// `subagents_config_parses_delegate_allowed`.
     #[serde(default)]
     pub subagents: SubagentsConfig,
+
+    /// Which keys of the per-key-merged tables this file declared (#7901).
+    ///
+    /// Why: serde fills an omitted key with its default, so `extends` could
+    /// not tell a child's own value from a default and dropped both.
+    /// What: set by `AgentConfig::from_toml_str` from the raw TOML; empty for
+    /// a config built in code. Read only by `extends::merge_extends`.
+    /// Test: `agents::extends::declared_tests::extends_child_declared_keys_win_in_every_table`.
+    #[serde(skip)]
+    pub declared: super::extends::DeclaredKeys,
 }
 
 fn default_adapter() -> Arc<dyn ModelAdapter> {

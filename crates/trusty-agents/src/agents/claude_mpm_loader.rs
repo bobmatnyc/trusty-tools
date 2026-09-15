@@ -159,8 +159,10 @@ impl ClaudeMpmAgent {
             plugins: crate::agents::AgentPluginsConfig::default(),
             rbac: crate::agents::RbacConfig::default(),
             workstreams: crate::agents::WorkstreamContextConfig::default(),
+            declared: Default::default(),
             adapter,
-            listeners: Vec::new(),
+            legacy_listeners: Vec::new(),
+            channels: Vec::new(),
             // #3816: claude-mpm agents carry no `[[stores]]` table — an
             // unbound store is a valid state (see `AgentConfig::stores`).
             stores: crate::stores::StoresConfig::default(),

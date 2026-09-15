@@ -16,6 +16,16 @@ A file is a **test/benchmark file** (3000 SLOC) when ANY match: basename exactly
 (covers `crates/*/tests/*.rs` and `src/**/tests/*.rs`); a `/benches/` path
 segment. All other tracked `.rs` files are **production**, capped at 500.
 
+**Swift sources (#7856).** Tracked `.swift` files are measured by the same gate
+and counter. The rules above apply with a `.swift` basename (`tests.swift`,
+`*_test.swift`, `*_tests.swift`) and the same `/tests/` and `/benches/`
+segments; every other `.swift` file is production, capped at 500. XCTest's
+`*Tests.swift` naming is not recognised, so such a file gets the stricter
+production cap. The 500-file scan floor still counts `.rs` files only. The first
+Swift measurement found `PaintHarness.swift` (862) and `TrustyConsoleSaver.swift`
+(629) in `crates/trusty-console/macos/saver/` over cap; #7856 split both and
+dropped their `.line-cap-allowlist.tsv` entries.
+
 🟡 Inline `#[cfg(test)] mod <name> { … }` bodies do not count (#5153) — only that
 exact shape. `#[cfg(test)] mod tests;` sibling declarations, `#[cfg(test)]` on an
 `fn`/`impl`/`use`, and `all(test, …)` / `any(test, …)` predicates are all still
@@ -25,8 +35,8 @@ counted.
 
 As of issue #610 the production cap is no longer advice: it is gated by
 `scripts/check_line_cap.sh`, wired into CI (`.github/workflows/line-cap.yml`)
-and the local pre-commit hook (`line-cap`). A new tracked production `.rs` file
-over 500 SLOC **cannot merge**; a new test/benchmark `.rs` file over 3000 SLOC
+and the local pre-commit hook (`line-cap`). A new tracked production `.rs` or
+`.swift` file over 500 SLOC **cannot merge**; a new test/benchmark file over 3000 SLOC
 **cannot merge**. Files approaching their limit are a signal to split into
 focused submodules as part of the next change that lands on them — see "When a
 Violation Gets Fixed" below for why the split rides along. When splitting, prefer:
@@ -75,6 +85,10 @@ comment matter is stripped. These are **excluded** from the count:
   open block comment is excluded
 - lines that consist entirely of a closing `*/`
 - inline `#[cfg(test)] mod <name> { … }` unit-test modules — see below
+
+Swift uses the same comment syntax (`//`, `///`, nestable `/* */`), so a
+`.swift` file is stripped by exactly these rules; the `#[cfg(test)]` exclusion
+is Rust syntax and never matches in Swift.
 
 A line that has code followed by a trailing `// comment` **still counts** — it
 has code. The counter is a pragmatic awk heuristic that errs toward leniency:
@@ -150,7 +164,9 @@ So allowlisted files may only shrink, and no new oversized file may be added.
 As the #607 sweep and per-crate refactors land, the allowlist ratchets down
 toward empty.
 
-**Run it locally:** `bash scripts/check_line_cap.sh` (exit 0 = clean). After you
+**Run it locally:** `./scripts/check_line_cap.sh` (exit 0 = clean; the script
+re-executes itself under bash, so `zsh scripts/check_line_cap.sh` works too,
+#7812). After you
 intentionally split a file (or a file otherwise drops below its budget), refresh
 the frozen budgets with `scripts/check_line_cap.sh --update` — this only *lowers*
 budgets or *removes* entries that fell ≤ their applicable cap; it **refuses** to

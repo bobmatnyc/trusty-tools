@@ -137,10 +137,30 @@ pub struct GlobalConfig {
     /// Defaults to empty so every existing `config.toml` (which predates
     /// this field) keeps parsing unchanged.
     /// What: See `crate::listeners::config::ListenerConfig`.
+    ///
+    /// DEPRECATED (#7609): this is the legacy spelling of `[[channels]]`, kept
+    /// parsing for one release and never dropped from disk. Read
+    /// [`GlobalConfig::listeners`] instead of this field — it answers from
+    /// `channels`, which is where a migrated entry lands.
     /// Test: `listeners_section_defaults_empty`,
     /// `listeners_section_round_trips`.
-    #[serde(default)]
-    pub listeners: Vec<crate::listeners::config::ListenerConfig>,
+    #[serde(default, rename = "listeners")]
+    pub legacy_listeners: Vec<crate::listeners::config::ListenerConfig>,
+
+    /// `[[channels]]` — harness-level channels (#7609), the merge of the
+    /// listener and channel-binding models.
+    ///
+    /// Why: one concept, one table. A `[[listeners]]` entry from before the
+    /// merge is absorbed into this list on every load, and persisted here once
+    /// by [`crate::channels::migrate::migrate_global_if_absent`], so an
+    /// operator never hand-edits anything to keep a listener working.
+    /// What: [`crate::channels::Channel`] with
+    /// [`crate::channels::ChannelScope::Global`]. Empty by default, so every
+    /// config that predates this field parses unchanged.
+    /// Test: `a_legacy_listeners_table_is_absorbed_into_channels`,
+    /// `listeners_section_round_trips`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub channels: Vec<crate::channels::Channel>,
 
     /// `[log_drain]` section (#6537) — periodic upload of this daemon's own
     /// log directory to object storage, mirroring trusty-mpm's `log_drain:`
@@ -158,6 +178,52 @@ pub struct GlobalConfig {
 }
 
 impl GlobalConfig {
+    /// The harness-level listeners, projected out of `channels`.
+    ///
+    /// Why (#7609): `[[listeners]]` and `[[channels]]` are one concept now, so
+    /// there is one list in memory. This is the derived view every existing
+    /// consumer reads — `crate::listeners::poll`, the listener API, the
+    /// knowledge pipeline — and it answers exactly what the removed
+    /// `listeners` field held, so nothing about polling changed.
+    /// What: every `Global`-scope channel as a `ListenerConfig`, in stored
+    /// order.
+    /// Test: `a_legacy_listeners_table_is_absorbed_into_channels`,
+    /// `listeners_section_round_trips`.
+    pub fn listeners(&self) -> Vec<crate::listeners::config::ListenerConfig> {
+        crate::channels::model::project(
+            &self.channels,
+            crate::channels::ChannelScope::Global,
+            crate::channels::Channel::to_listener_config,
+        )
+    }
+
+    /// Fold any legacy `[[listeners]]` entry into `channels`, in memory.
+    ///
+    /// Why (#7609): the on-disk migration only runs on the write path
+    /// (`load_or_create`), and `load` has no side effects by design. Absorbing
+    /// on every parse is what makes the deprecated table keep working
+    /// everywhere, whether or not this process ever wrote the file.
+    /// What: scope is set from this file's location, then each legacy listener
+    /// with no channel of the same `id` is appended. An entry the operator has
+    /// already migrated is NOT duplicated. Warns once per process.
+    /// Test: `a_legacy_listeners_table_is_absorbed_into_channels`,
+    /// `an_already_migrated_listener_is_not_absorbed_twice`.
+    fn absorb_legacy_listeners(&mut self) {
+        for channel in &mut self.channels {
+            channel.scope = crate::channels::ChannelScope::Global;
+        }
+        if self.legacy_listeners.is_empty() {
+            return;
+        }
+        crate::channels::migrate::warn_global_listeners_deprecated();
+        for listener in self.legacy_listeners.clone() {
+            if self.channels.iter().any(|c| c.id == listener.name) {
+                continue;
+            }
+            self.channels.push(crate::channels::Channel::from(listener));
+        }
+    }
+
     /// Resolve a GitHub identity for ticketing.
     ///
     /// Why: Wires the multi-identity registry into the rest of the codebase
@@ -204,18 +270,40 @@ impl GlobalConfig {
                 .with_context(|| format!("failed to write default config {}", path.display()))?;
             tracing::info!(path = %path.display(), "created default trusty-agents config");
         }
+        // #7609: the one-shot `[[listeners]]` -> `[[channels]]` drain. This is
+        // already the write path, and it runs BEFORE the read so the parsed
+        // config reflects what is now on disk.
+        let migration_target = path.clone();
+        let migrated = tokio::task::spawn_blocking(move || {
+            crate::channels::migrate::migrate_global_if_absent(&migration_target)
+        })
+        .await;
+        match migrated {
+            Ok(Ok(Some(report))) => tracing::info!(
+                path = %path.display(),
+                moved = %report.summary(),
+                "channel migration: moved [[listeners]] into [[channels]] (#7609)",
+            ),
+            Ok(Ok(None)) => {}
+            Ok(Err(e)) => tracing::warn!(error = %e, "channel migration: nothing moved"),
+            Err(e) => tracing::warn!(error = %e, "channel migration: task failed"),
+        }
         let raw = tokio::fs::read_to_string(&path)
             .await
             .with_context(|| format!("failed to read config {}", path.display()))?;
-        let cfg: Self = toml::from_str(&raw)
+        let mut cfg: Self = toml::from_str(&raw)
             .with_context(|| format!("failed to parse config {}", path.display()))?;
+        cfg.absorb_legacy_listeners();
         Ok(cfg)
     }
 
     /// Parse a config from a TOML string. Used in tests and when a custom
     /// config is provided via env var or programmatic construction.
     pub fn from_toml_str(s: &str) -> Result<Self> {
-        toml::from_str(s).context("failed to parse mcp config TOML")
+        let mut cfg: Self = toml::from_str(s).context("failed to parse mcp config TOML")?;
+        // #7609: the deprecated `[[listeners]]` table keeps working.
+        cfg.absorb_legacy_listeners();
+        Ok(cfg)
     }
 
     /// Default config used as fallback when load encounters issues. (#244, #245)
@@ -233,7 +321,12 @@ impl GlobalConfig {
     /// logs a warning and falls back to `Self::default()`.
     /// Test: `tests::load_returns_documented_defaults_when_absent`.
     fn default_config() -> Self {
-        toml::from_str(DEFAULT_CONFIG_TOML).unwrap_or_else(|e| {
+        toml::from_str::<Self>(DEFAULT_CONFIG_TOML)
+            .map(|mut cfg| {
+                cfg.absorb_legacy_listeners();
+                cfg
+            })
+            .unwrap_or_else(|e| {
             tracing::warn!(error = %e, "DEFAULT_CONFIG_TOML failed to parse; falling back to empty default");
             Self::default()
         })
@@ -268,10 +361,16 @@ impl GlobalConfig {
                 return Self::default_config();
             }
         };
-        toml::from_str(&content).unwrap_or_else(|e| {
-            tracing::warn!(error = %e, path = %path.display(), "failed to parse mcp config; using default");
-            Self::default_config()
-        })
+        toml::from_str::<Self>(&content)
+            .map(|mut cfg| {
+                // #7609: absorb the deprecated table on the read-only path too.
+                cfg.absorb_legacy_listeners();
+                cfg
+            })
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, path = %path.display(), "failed to parse mcp config; using default");
+                Self::default_config()
+            })
     }
 
     /// Persist the current state to disk. (#244)

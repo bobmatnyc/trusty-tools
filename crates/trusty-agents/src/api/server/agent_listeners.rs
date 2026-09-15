@@ -56,7 +56,8 @@ fn inherited(dirs: &[PathBuf], raw: &str) -> Result<Vec<AgentListenerBinding>, C
         ));
     }
     crate::agents::AgentConfig::by_name_in(dirs, parent)
-        .map(|cfg| cfg.listeners)
+        // #7609: the derived view, projected out of the assistant's channels.
+        .map(|cfg| cfg.listeners())
         .map_err(|e| error(StatusCode::UNPROCESSABLE_ENTITY, e))
 }
 fn effective(dirs: &[PathBuf], raw: &str) -> Result<Vec<AgentListenerBinding>, ConfigError> {
@@ -206,7 +207,8 @@ pub(crate) async fn read(name: &str) -> Result<Value, ConfigError> {
     read_at(
         &crate::agents::agents_dir_candidates(),
         name,
-        &global.listeners,
+        // #7609: the derived view, projected out of `[[channels]]`.
+        &global.listeners(),
     )
     .await
 }
@@ -215,7 +217,8 @@ pub(crate) async fn write(name: &str, update: ListenerUpdate) -> Result<Value, C
     write_at(
         &crate::agents::agents_dir_candidates(),
         name,
-        &global.listeners,
+        // #7609: the derived view, projected out of `[[channels]]`.
+        &global.listeners(),
         update,
     )
     .await

@@ -54,7 +54,58 @@ pub(crate) struct Binding {
     /// name `github`; see [`crate::channels::credentials`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_ref: Option<String>,
+    /// Normalized event types that may wake the assistant; empty = any.
+    ///
+    /// Why (#7609): a binding migrated out of `agent.toml`'s `[[listeners]]`
+    /// carries `event_types`, which this shape had nowhere to put. Absent and
+    /// empty are the same thing and the key is omitted when empty, so a
+    /// channels file written before this field round-trips byte-for-byte.
+    /// Test: `agent_channels_round_trips_an_existing_file_byte_for_byte`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub event_types: Vec<String>,
 }
+
+// #7609: `Binding` is the stored shape of an Assistant-scope
+// `crate::channels::Channel`; these two conversions are the whole of that
+// claim, so the migration and slice 5 never hand-copy the field list.
+impl From<&Binding> for crate::channels::Channel {
+    fn from(binding: &Binding) -> Self {
+        Self {
+            id: binding.id.clone(),
+            name: binding.name.clone(),
+            provider: binding.provider.clone(),
+            scope: crate::channels::ChannelScope::Assistant,
+            target: binding.target.clone(),
+            enabled: binding.enabled,
+            send_enabled: binding.send_enabled,
+            receive_enabled: binding.receive_enabled,
+            credential_ref: binding.credential_ref.clone(),
+            instructions: binding.instructions.clone(),
+            event_types: binding.event_types.clone(),
+            wake_filter: binding.filter.clone(),
+            ..crate::channels::Channel::default()
+        }
+    }
+}
+
+impl From<&crate::channels::Channel> for Binding {
+    fn from(channel: &crate::channels::Channel) -> Self {
+        Self {
+            id: channel.id.clone(),
+            name: channel.name.clone(),
+            provider: channel.provider.clone(),
+            target: channel.target.clone(),
+            enabled: channel.enabled,
+            send_enabled: channel.send_enabled,
+            receive_enabled: channel.receive_enabled,
+            filter: channel.wake_filter.clone(),
+            instructions: channel.instructions.clone(),
+            credential_ref: channel.credential_ref.clone(),
+            event_types: channel.event_types.clone(),
+        }
+    }
+}
+
 impl Binding {
     /// Reject a binding the assistant could not act on.
     ///
@@ -106,7 +157,7 @@ impl Binding {
         AgentListenerBinding {
             name: self.id.clone(),
             enabled: self.enabled,
-            event_types: vec![],
+            event_types: self.event_types.clone(),
             filter: self.filter.clone(),
             instructions: self.instructions.clone(),
         }
@@ -518,6 +569,12 @@ mod tests {
         assert!(load_at(&dirs, "../escape").await.is_err());
     }
 }
+
+// #7609: the byte-for-byte guarantee `Binding::event_types` rests on, in its
+// own file because this one is at the 500-SLOC cap.
+#[cfg(test)]
+#[path = "agent_channels/round_trip_tests.rs"]
+mod round_trip_tests;
 
 #[cfg(test)]
 mod stale_send_tests {

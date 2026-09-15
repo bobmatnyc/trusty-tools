@@ -87,9 +87,10 @@ documentation/API updates, the changelog fragment, and in-scope review fixes.
 - Do not split those artifacts into separate PRs because different agents
   produced them. The engineer's code, the QA agent's test, and the doc update for
   one outcome are one PR.
-- **One PR may close several tickets** when one coherent change satisfies them
-  (`Closes #A`, `Closes #B`). Prefer that over several coupled PRs with an
-  artificial merge order.
+- **One PR may satisfy several tickets** when one coherent change resolves
+  them (`Refs #A`, `Refs #B` — a closing keyword only where the project's
+  `CLAUDE.md` permits merge-based auto-close, see "Minimal PR Body" below).
+  Prefer that over several coupled PRs with an artificial merge order.
 - Split only when the outcomes can be reviewed, deployed, or reverted
   independently, or when risk or size makes a stack materially safer to review.
 
@@ -352,8 +353,8 @@ the branch does not still hold.
 
 **One branch and worktree per independently reviewable PR outcome** — not per
 ticket, per refactor step, or per experiment. Several related tickets may share
-one worktree when a single coherent change satisfies them (`Closes #A`,
-`Closes #B`); see "One Outcome, One PR" above for everything that outcome owes
+one worktree when a single coherent change satisfies them (`Refs #A`,
+`Refs #B`); see "One Outcome, One PR" above for everything that outcome owes
 and keeps bundled in that same worktree and PR.
 
 **Experiments stay session-local.** Promote an experiment to a branch and

@@ -3,6 +3,7 @@
 # Dual cap: production source = 500 SLOC; test/benchmark files = 3000 SLOC.
 # Test/benchmark = basename is tests.rs, ends with _test.rs or _tests.rs,
 #   or path contains /tests/ or /benches/ segment. All others = production.
+# Swift (#7856): .swift files are measured the same way; the test rules apply to a .swift basename.
 # SLOC excludes blank lines, // line comments, /// doc comments, //! inner-doc comments,
 # and /* ... */ block comments (including multi-line spans). Trailing-comment lines count.
 # SLOC also excludes inline '#[cfg(test)] mod <name> { ... }' bodies (issue #5153).

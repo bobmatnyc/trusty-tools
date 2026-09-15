@@ -543,7 +543,11 @@ pub fn generate_authority_deduped(
             ));
         }
         if let Some(model) = &agent.model {
-            out.push_str(&format!("- **Model:** {model}\n"));
+            // Label this the frontmatter default, not a routing instruction:
+            // `resolve_agent_model` (core/config.rs) ranks an explicit
+            // per-call `model=` and a `[models.agents]` config entry above
+            // it, so this value applies only when both are absent.
+            out.push_str(&format!("- **Model:** {model} (frontmatter default)\n"));
         }
         out.push('\n');
     }

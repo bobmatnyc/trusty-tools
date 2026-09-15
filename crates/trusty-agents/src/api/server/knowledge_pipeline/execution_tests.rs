@@ -192,9 +192,13 @@ async fn persisted_listener_excerpt_requires_current_admission_and_binding() {
         )
         .unwrap(),
     );
+    // #7609: an assistant's bindings live on `channels` now.
     ctx.config
-        .listeners
-        .push(toml::from_str("name='mail'\nenabled=true\n").unwrap());
+        .channels
+        .push(crate::channels::Channel::from_agent_binding(
+            toml::from_str("name='mail'\nenabled=true\n").unwrap(),
+            "gmail",
+        ));
     let source = ctx.sources(&BTreeMap::new()).unwrap().remove(0);
     let mut state = ctx.store().initialize(Utc::now(), None).unwrap();
     let event = StoredEvent {
@@ -231,7 +235,7 @@ async fn persisted_listener_excerpt_requires_current_admission_and_binding() {
         )
         .is_ok()
     );
-    ctx.config.listeners[0].enabled = false;
+    ctx.config.channels[0].enabled = false;
     assert!(
         event_inputs(&ctx, &state, &source, loaded)
             .unwrap()

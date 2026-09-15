@@ -224,11 +224,9 @@ async fn find_matching_agent(event: &StoredEvent) -> Option<(String, String)> {
         let Ok(cfg) = AgentConfig::by_name_async(&name).await else {
             continue;
         };
-        if let Some(binding) = cfg
-            .listeners
-            .iter()
-            .find(|b| binding_matches_event(b, event))
-        {
+        // #7609: the derived view, projected out of the assistant's channels.
+        let bindings = cfg.listeners();
+        if let Some(binding) = bindings.iter().find(|b| binding_matches_event(b, event)) {
             return Some((name, binding.instructions.clone()));
         }
     }

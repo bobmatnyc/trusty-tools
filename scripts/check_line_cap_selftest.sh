@@ -47,6 +47,9 @@
 # Portability: same constraints as check_line_cap.sh — POSIX tools only,
 #   bash 3.2 (macOS) and bash 5 (Linux CI) compatible.
 
+# #7812: re-run under bash when invoked as `zsh <this script>`.
+if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -121,7 +124,13 @@ FIXTURE_DIR="$SCRIPT_DIR/test-data"
 #                              fail-closed half honest: if a future edit makes
 #                              EITHER of them drop, the counter has started
 #                              trusting a balance it cannot verify.
-CASES="sloc-normal.rs	7
+#
+# Swift (issue #7856) — the same counter measures .swift files:
+# - sloc-swift-comments.swift: `//`, `///`, a block comment, a nested block
+#                              comment and a trailing `//` after code; 4 code
+#                              lines count.
+CASES="sloc-swift-comments.swift	4
+sloc-normal.rs	7
 sloc-pathglob-doc.rs	6
 sloc-real-block-comment.rs	2
 sloc-nested-block-comment.rs	1
@@ -257,6 +266,31 @@ elif [ "$inv_rc" -ne 0 ]; then
   e2e_fail=1
 else
   echo "  ok  inverse ${raw_lines} raw non-blank lines, ${counted} counted -> PASSED as required"
+fi
+rm -rf "$f"
+
+# ---- Swift (issue #7856): measured, capped, comments excluded --------------
+# One repo, two files: 600 SLOC of Swift must FAIL by name; 400 SLOC of Swift
+# padded with 200 comment lines (raw lines over the cap) must not be reported.
+f="$(new_gate_fixture)"
+mkdir -p "$f/macos"
+awk 'BEGIN { for (i = 0; i < 600; i++) printf "let big%d = %d\n", i, i }' > "$f/macos/Big.swift"
+{
+  awk 'BEGIN { for (i = 0; i < 200; i++) printf "// note %d\n", i }'
+  awk 'BEGIN { for (i = 0; i < 400; i++) printf "let small%d = %d\n", i, i }'
+} > "$f/macos/Small.swift"
+git -C "$f" add -A >/dev/null && git -C "$f" commit -qm fixture
+swift_out="$(cd "$f" && bash scripts/check_line_cap.sh 2>&1)" && swift_rc=0 || swift_rc=$?
+if [ "$swift_rc" -eq 0 ] || ! grep -q 'macos/Big.swift is 600 SLOC' <<<"$swift_out"; then
+  echo "SELF-TEST FAIL: a 600-SLOC Swift file was not reported over the cap (#7856):" >&2
+  printf '%s\n' "$swift_out" | sed 's/^/       /' >&2
+  e2e_fail=1
+elif grep -q 'Small.swift' <<<"$swift_out"; then
+  echo "SELF-TEST FAIL: a 400-SLOC Swift file with 200 comment lines was reported (#7856):" >&2
+  printf '%s\n' "$swift_out" | sed 's/^/       /' >&2
+  e2e_fail=1
+else
+  echo "  ok  Swift 600 SLOC -> FAILED by name; 400 SLOC + 200 comment lines -> not reported"
 fi
 rm -rf "$f"
 

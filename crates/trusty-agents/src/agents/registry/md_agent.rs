@@ -229,12 +229,14 @@ pub(crate) fn parse_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
         plugins: crate::agents::AgentPluginsConfig::default(),
         rbac: crate::agents::RbacConfig::default(),
         workstreams: crate::agents::WorkstreamContextConfig::default(),
+        declared: Default::default(),
         adapter,
         // Flat `.md` frontmatter has no `[[listeners]]` shape yet (#3820
         // ships the binding only for directory-package `agent.toml`, DOC-54
         // §5.3's primary format) — a `.md` overlay agent never wakes on a
         // listener event until this parser grows frontmatter support.
-        listeners: Vec::new(),
+        legacy_listeners: Vec::new(),
+        channels: Vec::new(),
         // #3816: markdown agents carry no `[[stores]]` table — an unbound
         // store is a valid state (see `AgentConfig::stores`).
         stores: crate::stores::StoresConfig::default(),

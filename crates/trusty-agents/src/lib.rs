@@ -87,10 +87,12 @@ pub mod knowledge;
 pub mod attendance;
 pub mod build_info;
 pub mod bus;
-// #7427: one `ChannelAdapter` per channel provider, behind a registry. Crate-
-// internal because the trait's methods take `api::server::agent_channels::Binding`,
-// which is `pub(crate)`.
-pub(crate) mod channels;
+// #7427: one `ChannelAdapter` per channel provider, behind a registry. The
+// adapter half stays `pub(crate)` because the trait's methods take
+// `api::server::agent_channels::Binding`, which is `pub(crate)`.
+// #7609: the merged channel model (`channels::Channel`, its migrations and the
+// precedence rule) is public, like the `listeners` module it supersedes.
+pub mod channels;
 pub mod cli;
 #[allow(dead_code)]
 pub mod compress;

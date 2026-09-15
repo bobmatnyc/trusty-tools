@@ -21,6 +21,11 @@
 
 use crate::agents::{AgentCapabilities, AgentConfig, RunnerKind};
 
+mod declared;
+pub use declared::DeclaredKeys;
+
+#[cfg(test)]
+mod declared_tests;
 #[cfg(test)]
 mod tests;
 
@@ -311,54 +316,24 @@ pub fn merge_extends(base: AgentConfig, child: AgentConfig) -> AgentConfig {
     // explicit value here). See the TODO test placeholder in `tests.rs`
     // (`extends_does_not_inherit_user_authority`) for AUTH-2/#3075 to fill in.
 
-    // --- `[llm]` temperature/max_tokens: PER-KEY child-overrides-when-declared
-    // (#3052 PR A follow-up) ---
-    //
-    // Why: these are the only two `[llm]` fields with no serde default (every
-    // OTHER `[llm]` field already has its own `#[serde(default)]`/`Option`
-    // semantics and keeps the wholesale-inherit-from-base behavior below
-    // unchanged) — so "the child didn't declare it" is representable as an
-    // unambiguous UNSET sentinel (`LlmParams::temperature_is_unset`/
-    // `max_tokens_is_unset`, NaN / u32::MAX) rather than a heuristic. A root
-    // (non-`extends`) agent can never carry the sentinel — enforced by
-    // `AgentConfig::validate_llm_required_for_root` at parse time — so by the
-    // time any base reaches this merge it already carries real values, and a
-    // child either overrides both/either or inherits them from the base.
-    // What: child value wins when NOT the sentinel, else keep the base's
-    // (already-inherited-into-`merged`) value.
-    // Test: `extends_llm_child_overrides_temperature_only`,
-    // `extends_llm_child_overrides_max_tokens_only`,
-    // `extends_llm_child_inherits_when_omitted`.
-    if !child.llm.temperature_is_unset() {
-        merged.llm.temperature = child.llm.temperature;
-    }
-    if !child.llm.max_tokens_is_unset() {
-        merged.llm.max_tokens = child.llm.max_tokens;
-    }
-
-    // --- `[llm]` aws_profile/aws_region: PER-KEY child-overrides-when-declared
-    // (#7878) ---
-    //
-    // Why: these two name the AWS account a Bedrock-pinned agent dispatches
-    // against, and the wholesale-inherit rule below made them unreachable for
-    // every `extends` overlay — the exact shape every shipped assistant uses.
-    // Pinning `cto-assistant` to Duetto's Bedrock account therefore had only
-    // two other answers, both wrong: put the profile on the shared base, where
-    // it would also capture `izzie`, or fall back to the process-global
-    // `AWS_PROFILE`, which the CLI, the API server and the launchd Slack agent
-    // each set separately. The block above ends by naming the bar for adding a
-    // field here — "a real UNSET sentinel or an explicit `Option`, not a
-    // heuristic". Both fields are already `Option<String>`, so `Some` means
-    // declared and `None` means omitted with nothing inferred.
-    // What: child value wins when `Some`, else the base's stands.
-    // Test: `extends_llm_child_overrides_aws_profile_and_region`,
-    // `extends_llm_inherits_aws_profile_when_child_omits_it`.
-    if child.llm.aws_profile.is_some() {
-        merged.llm.aws_profile = child.llm.aws_profile.clone();
-    }
-    if child.llm.aws_region.is_some() {
-        merged.llm.aws_region = child.llm.aws_region.clone();
-    }
+    // #7901: `[llm]`, `[compress]`, `[runner_config]`, `[session]`,
+    // `[plugins]`, `[rbac]` and `[workstreams]` merge per key — a key the child
+    // declared wins, an omitted key keeps the base's. The sentinel rule for
+    // `temperature`/`max_tokens` (#3052) and the `Some` rule for
+    // `aws_profile`/`aws_region` (#7878) live in `declared::merge_llm`.
+    declared::inherit_tables(
+        &mut merged,
+        declared::ChildTables {
+            declared: child.declared,
+            llm: child.llm,
+            compress: child.compress,
+            runner_config: child.runner_config,
+            session: child.session,
+            plugins: child.plugins,
+            rbac: child.rbac,
+            workstreams: child.workstreams,
+        },
+    );
 
     // #3936: computed BEFORE the `child.tools.*` partial moves below (`scopes`
     // and `search_indexes` are moved out of `child.tools` by `union_opt_vec`
@@ -475,7 +450,12 @@ pub fn merge_extends(base: AgentConfig, child: AgentConfig) -> AgentConfig {
     // that re-declares the same listener name overrides the base's filter
     // for it (matches the child-wins-on-override intent of the scalar rules
     // above), rather than appending a shadowing duplicate.
-    merged.listeners = union_listener_bindings(merged.listeners, child.listeners);
+    merged.legacy_listeners =
+        union_listener_bindings(merged.legacy_listeners, child.legacy_listeners);
+    // #7609: `channels` is the merged spelling of the same idea, so it unions
+    // by `id` exactly the way `listeners` unioned by `name` — and it is the
+    // one the derived `AgentConfig::listeners()` view reads.
+    merged.channels = union_channels_by_id(merged.channels, child.channels);
 
     // `stores` (#3816): child REPLACES rather than unions. Unlike listeners
     // and tools — where "the base's surface plus my extras" is the intent —
@@ -494,28 +474,6 @@ pub fn merge_extends(base: AgentConfig, child: AgentConfig) -> AgentConfig {
     merged.system_prompt.content =
         concat_prose(&merged.system_prompt.content, &child.system_prompt.content);
 
-    // --- Inherited-from-base-wholesale bundles ---
-    //
-    // The REST of `llm.*` (everything except `temperature`/`max_tokens` and
-    // `aws_profile`/`aws_region`, handled per-key above), plus `compress`,
-    // `runner_config`, `session`,
-    // `plugins`, and `rbac`, are NOT in the §2.5 merge table and are
-    // intentionally inherited from the base as-is (a personalization overlay
-    // refines persona/tools/name/sampling, not the base's other runtime
-    // tuning). We deliberately do NOT warn that a child's values in these
-    // bundles are "dropped": `AgentConfig` has already collapsed each field's
-    // parse-time `Option`/default, so e.g. a `.md` child ALWAYS carries
-    // `enable_prompt_caching = true` / `max_turns = 20` (the `parse_md_agent`
-    // defaults) — a difference check against the base would fire on
-    // essentially every legitimate overlay (false positives), which is worse
-    // than silence. `temperature`/`max_tokens` were the one pair where this
-    // was a live problem (#469 regression on `cto-assistant`'s tuned
-    // sampling): they are the only two `[llm]` fields with no serde default,
-    // so "the child didn't declare it" is unambiguously representable — see
-    // the per-key block above. If a future need arises to let a child
-    // override one of the REMAINING bundle fields, it should be an equally
-    // deliberate schema addition (a real UNSET sentinel or an explicit
-    // `Option`), not a heuristic.
     merged
 }
 
@@ -544,6 +502,31 @@ fn union_opt_vec(base: Option<Vec<String>>, child: Option<Vec<String>>) -> Optio
             Some(b)
         }
     }
+}
+
+/// Union two channel lists, base-first, keyed by `id`.
+///
+/// Why (#7609): the channels merge replaced `[[listeners]]` with
+/// `[[channels]]`, and inheritance has to keep the semantics it had — a child
+/// that re-declares the same channel REPLACES the base's entry in place rather
+/// than appending a shadowing duplicate. `id` is the channel's stable storage
+/// key, which is what a listener binding's `name` became.
+/// What: the same body as [`union_listener_bindings`], keyed on `id`.
+/// Test: `extends_unions_channels_by_id`,
+/// `extends_unions_listener_bindings_by_name` (`extends/tests.rs`).
+fn union_channels_by_id(
+    base: Vec<crate::channels::Channel>,
+    child: Vec<crate::channels::Channel>,
+) -> Vec<crate::channels::Channel> {
+    let mut merged = base;
+    for child_channel in child {
+        if let Some(existing) = merged.iter_mut().find(|c| c.id == child_channel.id) {
+            *existing = child_channel;
+        } else {
+            merged.push(child_channel);
+        }
+    }
+    merged
 }
 
 /// Union two `[[listeners]]` binding lists, base-first, keyed by `name` —

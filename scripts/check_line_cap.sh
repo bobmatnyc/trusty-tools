@@ -22,7 +22,14 @@
 #     - path contains a `/benches/` directory segment
 #   All other tracked `.rs` files are production files capped at 500 SLOC.
 #
-# What: scans every tracked `.rs` file (`git ls-files '*.rs'`) and enforces:
+# SWIFT (#7856): tracked `.swift` files are measured too, by the same counter —
+#   Swift comments are `//`, `///` and nestable `/* */`, the syntax pass 1
+#   strips. The same test rules apply to a `.swift` basename (`tests.swift`,
+#   `*_test.swift`, `*_tests.swift`) and to the `/tests/` and `/benches/`
+#   segments. The #4618 scan floor still counts `.rs` files only.
+#
+# What: scans every tracked `.rs` and `.swift` file
+#   (`git ls-files '*.rs' '*.swift'`) and enforces:
 #   - SLOC <= applicable cap, not allowlisted                    -> OK
 #   - SLOC >  applicable cap, not allowlisted                    -> FAIL  (new oversized file)
 #   - allowlisted, current SLOC > recorded budget                -> FAIL  (grew beyond frozen budget)
@@ -107,6 +114,10 @@
 # Portability: works on bash 3.2 (macOS system bash) and bash 5 (Linux CI).
 #   Uses POSIX tools only — `git`, `sort`, `awk`. No associative arrays,
 #   no bash-4 features, no extra dependencies.
+
+# #7812: `zsh <this script>` has no BASH_SOURCE and 1-based arrays, so re-run
+# under bash before any bash-only line. Plain POSIX, so zsh and sh parse it.
+if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
 
 set -euo pipefail
 
@@ -209,7 +220,7 @@ cap_for_path() {
   local base="${path##*/}"
   # Match test/benchmark patterns
   case "$base" in
-    tests.rs|*_test.rs|*_tests.rs)
+    tests.rs|*_test.rs|*_tests.rs|tests.swift|*_test.swift|*_tests.swift)
       echo "$TEST_CAP"; return ;;
   esac
   case "$path" in
@@ -240,7 +251,7 @@ MIN_RS_FILES=500
 if [ "$PATH_MODE" -eq 1 ]; then
   : > "$RSLIST"
   for f in "${PATHS[@]}"; do
-    case "$f" in *.rs) ;; *) continue ;; esac
+    case "$f" in *.rs|*.swift) ;; *) continue ;; esac
     if ! rel="$(resolve_repo_path "$f")"; then
       echo "FAIL: '$f' resolves outside the repository; the allowlist is keyed by" >&2
       echo "      repo-relative path, so this file cannot be judged. NOT a pass." >&2
@@ -251,8 +262,8 @@ if [ "$PATH_MODE" -eq 1 ]; then
     [ -f "$rel" ] || continue
     printf '%s\n' "$rel" >> "$RSLIST"
   done
-elif ! git ls-files '*.rs' > "$RSLIST"; then
-  echo "FAIL: TOOL ERROR — 'git ls-files *.rs' exited non-zero; the file set could" >&2
+elif ! git ls-files '*.rs' '*.swift' > "$RSLIST"; then
+  echo "FAIL: TOOL ERROR — 'git ls-files *.rs *.swift' exited non-zero; the file set could" >&2
   echo "      not be enumerated, so nothing was measured. NOT a pass (#4618)." >&2
   exit 1
 fi
@@ -264,7 +275,9 @@ while IFS= read -r f; do
   printf '%s\t%s\n' "$n" "$f"
 done < "$RSLIST" > "$CURRENT"
 
-RS_SCANNED="$(awk 'END{print NR}' "$CURRENT")"
+# #7856: the floor stays a `.rs` count; Swift is reported beside it.
+RS_SCANNED="$(awk -F'\t' '$2 ~ /\.rs$/ {n++} END{print n+0}' "$CURRENT")"
+SWIFT_SCANNED="$(awk -F'\t' '$2 ~ /\.swift$/ {n++} END{print n+0}' "$CURRENT")"
 if [ "$PATH_MODE" -eq 0 ] && [ "${RS_SCANNED:-0}" -lt "$MIN_RS_FILES" ]; then
   echo "FAIL: SCAN FLOOR — only ${RS_SCANNED} tracked .rs file(s) were measured, below" >&2
   echo "      the declared minimum of ${MIN_RS_FILES} (MIN_RS_FILES in scripts/check_line_cap.sh)." >&2
@@ -365,6 +378,7 @@ if [ "$MODE" = "update" ]; then
     echo "# Dual cap: production source = ${PROD_CAP} SLOC; test/benchmark files = ${TEST_CAP} SLOC."
     echo "# Test/benchmark = basename is tests.rs, ends with _test.rs or _tests.rs,"
     echo "#   or path contains /tests/ or /benches/ segment. All others = production."
+    echo "# Swift (#7856): .swift files are measured the same way; the test rules apply to a .swift basename."
     echo "# SLOC excludes blank lines, // line comments, /// doc comments, //! inner-doc comments,"
     echo "# and /* ... */ block comments (including multi-line spans). Trailing-comment lines count."
     echo "# SLOC also excludes inline '#[cfg(test)] mod <name> { ... }' bodies (issue #5153)."
@@ -441,7 +455,7 @@ done < "$RSLIST" > "$CAPMAP_CHK"
     # Undecidable from a subset — every allowlisted file outside the scanned
     # paths is absent for that reason alone, so the whole-tree run owns it.
     if (path_mode == 0) for (p in have) if (!(p in seen)) {
-      printf "WARN: allowlisted %s no longer exists as a tracked .rs file. Remove it from .line-cap-allowlist.tsv.\n", p
+      printf "WARN: allowlisted %s no longer exists as a tracked .rs/.swift file. Remove it from .line-cap-allowlist.tsv.\n", p
     }
     printf "@SUMMARY\t%d\t%d\n", allowlisted+0, viol+0
   }
@@ -463,9 +477,9 @@ while IFS= read -r line; do
 done < "$RESULT"
 
 if [ "$PATH_MODE" -eq 1 ]; then
-  SCOPE="$RS_SCANNED .rs path(s) given (subset scan; CI runs the whole tree)"
+  SCOPE="$RS_SCANNED .rs and $SWIFT_SCANNED .swift path(s) given (subset scan; CI runs the whole tree)"
 else
-  SCOPE="$RS_SCANNED tracked .rs file(s) (floor $MIN_RS_FILES)"
+  SCOPE="$RS_SCANNED tracked .rs file(s) (floor $MIN_RS_FILES) and $SWIFT_SCANNED tracked .swift file(s)"
 fi
 
 if [ "$violations" -gt 0 ]; then

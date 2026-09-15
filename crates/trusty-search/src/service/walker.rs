@@ -184,6 +184,31 @@ pub const SKIP_FILES: &[&str] = &[
     "go.sum",
 ];
 
+/// File extensions treated as Terraform state blobs and skipped by default.
+///
+/// Why: #7722 — a repo-wide grep for "workflow" once returned noise
+/// dominated by a large generated `.tfstate` blob rather than the relevant
+/// source lines. State files serialize resource attributes (ids, IPs,
+/// secrets-shaped strings) and carry no code-search signal.
+/// What: matched on the file's lowercased extension only, so
+/// `terraform.tfstate`, `dev.tfstate`, and `prod.tfstate` all match
+/// regardless of stem, at any directory depth. [`SKIP_TFSTATE_BACKUP_SUFFIX`]
+/// below covers the `.tfstate.backup` double-extension `terraform apply`
+/// also writes, whose extension is `backup`, not `tfstate`.
+/// Test: `test_skips_tfstate_files_at_any_depth`, `test_skips_tfstate_backup_files`,
+/// `test_does_not_skip_non_tfstate_named_files`.
+pub const SKIP_EXTS: &[&str] = &["tfstate"];
+
+/// Basename suffix for Terraform's state backup files (#7722).
+///
+/// Why: `terraform apply` writes `<name>.tfstate.backup` alongside the state
+/// file; [`SKIP_EXTS`] alone does not catch it since its extension is
+/// `backup`.
+/// What: matched as an exact basename suffix, so `terraform.tfstate.backup`
+/// and `prod.tfstate.backup` both match.
+/// Test: `test_skips_tfstate_backup_files`.
+pub const SKIP_TFSTATE_BACKUP_SUFFIX: &str = ".tfstate.backup";
+
 /// Documentation / metadata file extensions excluded by default (issue #77).
 ///
 /// Why: prose files (Markdown, reStructuredText, AsciiDoc, plain text) contain
@@ -474,6 +499,8 @@ const MIN_LINES_FOR_READABLE_JS: usize = 5;
 /// solely on the file name / extension — without reading file contents.
 ///
 /// Covers:
+/// - Lock files ([`SKIP_FILES`]) and Terraform state blobs ([`SKIP_EXTS`],
+///   [`SKIP_TFSTATE_BACKUP_SUFFIX`], #7722).
 /// - Binary / non-text extensions ([`BINARY_EXTS`]).
 /// - Minified or bundled JS/CSS (`*.min.js`, `*.min.css`, `*.bundle.js`,
 ///   `*.bundle.css`, `*.chunk.js`).
@@ -498,6 +525,12 @@ pub fn should_skip_path(path: &Path) -> bool {
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
+
+    // Terraform state blobs (#7722): matched on extension / basename suffix
+    // only, so a directory merely named "tfstate" is never affected.
+    if SKIP_EXTS.contains(&ext.as_str()) || file_name.ends_with(SKIP_TFSTATE_BACKUP_SUFFIX) {
+        return true;
+    }
 
     // Binary / non-text extensions.
     if BINARY_EXTS.iter().any(|b| *b == ext) {
@@ -1415,6 +1448,71 @@ mod tests {
         assert!(!names.contains(&"Cargo.lock".to_string()));
         assert!(!names.contains(&"package-lock.json".to_string()));
         assert!(!names.contains(&"yarn.lock".to_string()));
+    }
+
+    // --- SKIP_EXTS / Terraform state blob tests (#7722) ---
+
+    #[test]
+    fn test_skips_tfstate_files_at_any_depth() {
+        assert!(should_skip_path(Path::new("terraform.tfstate")));
+        assert!(should_skip_path(Path::new(
+            "infra/envs/prod/terraform.tfstate"
+        )));
+        // Named (non-"terraform"-stem) state files match on extension too.
+        assert!(should_skip_path(Path::new("dev.tfstate")));
+    }
+
+    #[test]
+    fn test_skips_tfstate_backup_files() {
+        assert!(should_skip_path(Path::new("terraform.tfstate.backup")));
+        assert!(should_skip_path(Path::new(
+            "infra/prod/terraform.tfstate.backup"
+        )));
+    }
+
+    #[test]
+    fn test_does_not_skip_non_tfstate_named_files() {
+        // A source file whose NAME merely contains "tfstate" must still be
+        // indexed — only the extension/suffix match triggers a skip.
+        assert!(!should_skip_path(Path::new("tfstate_manager.rs")));
+        // A directory merely named "tfstate" must not cause its contents to
+        // be skipped — should_skip_path only inspects the basename.
+        assert!(!should_skip_path(Path::new("tfstate/notes.rs")));
+    }
+
+    #[test]
+    fn test_walker_skips_tfstate_files_in_tree() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        fs::write(root.join("terraform.tfstate"), "{}").unwrap();
+        let nested = root.join("infra/envs/prod");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("terraform.tfstate"), "{}").unwrap();
+        fs::write(nested.join("terraform.tfstate.backup"), "{}").unwrap();
+        fs::write(root.join("real.rs"), "fn main() {}").unwrap();
+        // Negative case: a non-state file whose name merely resembles a
+        // state file must still be indexed.
+        fs::write(root.join("tfstate_manager.rs"), "fn manage() {}").unwrap();
+
+        let result = walk_source_files(root);
+        let names: Vec<String> = result
+            .files
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .collect();
+        assert!(names.contains(&"real.rs".to_string()));
+        assert!(names.contains(&"tfstate_manager.rs".to_string()));
+        assert!(
+            result
+                .files
+                .iter()
+                .all(|p| p.extension().and_then(|e| e.to_str()) != Some("tfstate")),
+            "no .tfstate file should have been walked"
+        );
+        assert!(
+            !names.contains(&"terraform.tfstate.backup".to_string()),
+            "terraform.tfstate.backup must be excluded"
+        );
     }
 
     // --- SKIP_DIRS new entries ---

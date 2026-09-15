@@ -13,11 +13,14 @@ or runs on Linux, and no CI job covers it (see "Not covered" below).
 
 | File | Role |
 |---|---|
-| `TrustyConsoleSaver.swift` | The `ScreenSaverView` subclass. The whole implementation. |
+| `TrustyConsoleSaver.swift` | The `ScreenSaverView` subclass: configuration, state, and the host lifecycle overrides. |
+| `TrustyConsoleSaverView+Loading.swift` | Loading, the load deadline and window wait (#7846), the web-view rebuild (#7606), and the `WKNavigationDelegate` callbacks. |
+| `TrustyConsoleSaverView+Visibility.swift` | Window visibility (#7846) and visibility recovery (#7112). |
+| `TrustyConsoleSaverView+Drawing.swift` | The bundled preview asset, the offline banner, and the wordmark fallback. |
 | `Info.plist` | Bundle plist template. `__CONSOLE_VERSION__` is replaced at build time. |
 | `Resources/ConsolePreview.png` | Static render of the dashboard's services frame — the gallery tile and the offline fallback (#6839). Generated, committed, copied into `Contents/Resources/` at build time. |
 | `LoadHarness.swift` | Bundle-load smoke test — resolves the principal class and asserts the page loads. |
-| `PaintHarness.swift` | Paint regression harness — reads the rendered bitmap in the offline, slow-daemon and preview states (#6838), and tracks the web view across a late host resize (#6871). Runs at any frame size. |
+| `PaintHarness/` | Paint regression harness — reads the rendered bitmap in the offline, slow-daemon and preview states (#6838), and tracks the web view across a late host resize (#6871). Runs at any frame size. `main.swift` is the entry point; its header names the other files. |
 
 The bundle is assembled by `scripts/build-console-saver.sh` and copied into place
 by `scripts/install-console-saver.sh`, both at the repo root.
@@ -158,7 +161,7 @@ daemon**: each mode builds its own endpoint.
 
 ```bash
 swiftc -O -swift-version 5 -o target/console-saver/harness/paintharness \
-  crates/trusty-console/macos/saver/PaintHarness.swift
+  crates/trusty-console/macos/saver/PaintHarness/*.swift
 
 for mode in offline slow preview resize stop suspend suspend-cold recreate one-failure \
             occluded occluded-failing visibility-unknown; do
@@ -432,7 +435,7 @@ remains unreproduced outside the real host; see "Not covered".
 The 1 s first-paint budget is a **machine-load** measurement, not a geometry one.
 It fails on a busy host in every mode (2.7 s at 3440×1440 with a load average of
 24 on 16 cores) because the clock spans WebKit's XPC bring-up. Report it; do not
-raise it. `firstPaintDeadline` in `PaintHarness.swift` says why it is the
+raise it. `firstPaintDeadline` in `PaintHarness/Thresholds.swift` says why it is the
 harness's weakest assertion.
 
 ### Manual verification (still owed)
