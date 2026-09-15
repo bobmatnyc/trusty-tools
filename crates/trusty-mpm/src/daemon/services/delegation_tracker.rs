@@ -300,11 +300,13 @@ fn on_task_stop(state: &DaemonState, session: SessionId, payload: &Value) -> boo
 /// the claim this call just released. The lock is what makes those two orders
 /// converge instead of one of them deciding.
 ///
-/// Scope: the shared-tree dispatch route only. The grant route's own denial is a
-/// different shape — the guard rewrites the payload there — and is not addressed
-/// here.
+/// Callers: the deny arm of both shared-tree routes. The granted-worktree route
+/// was added after the 2026-09-13 recurrence, where its denies leaked (#7487).
+/// The guard's rewrite there changes `input.isolation` and never `tool_use_id`,
+/// so this finds the record the tracker wrote from the original payload.
 /// Test: `a_late_observation_of_a_denied_dispatch_records_nothing`,
-/// `a_denied_dispatch_cancels_a_record_the_tracker_already_wrote`.
+/// `a_denied_dispatch_cancels_a_record_the_tracker_already_wrote`,
+/// `a_dispatch_the_grant_path_denies_records_no_claim_7487`.
 pub fn release_denied_dispatch(state: &DaemonState, session: SessionId, payload: &Value) -> bool {
     let Some(tool_use_id) = field(payload, "tool_use_id") else {
         return false;

@@ -423,8 +423,15 @@ async fn granted_worktree_route_reports_a_live_writer_without_claiming() {
     .await;
     assert_eq!(body.total, 1);
     assert_eq!(body.agents[0].agent, "python-engineer");
-    assert!(!body.claimed, "a denied dispatch must record nothing");
-    assert_eq!(state.delegations_for(session).len(), 1);
+    assert!(!body.claimed, "a denied dispatch must claim nothing");
+    // #7487: the deny leaves a Cancelled tombstone, never a live record.
+    let live: Vec<_> = state
+        .delegations_for(session)
+        .into_iter()
+        .filter(|d| d.status.is_live())
+        .collect();
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].agent, "python-engineer");
 }
 
 #[tokio::test]
@@ -1340,6 +1347,137 @@ async fn a_denied_dispatch_cancels_a_record_the_tracker_already_wrote() {
         next.total, 1,
         "the deny must cancel the record the tracker had already written. Got {:?}",
         next.agents
+    );
+}
+
+/// The distinct agent names a route answer reports.
+fn writer_names(body: &SharedTreeWritersResponse) -> Vec<&str> {
+    body.agents.iter().map(|a| a.agent.as_str()).collect()
+}
+
+/// 🔴 REGRESSION (#7487, recurrence 2026-09-13): a dispatch the ADR-0048 GRANT
+/// path denies records no claim either.
+///
+/// Why: the 2026-09-11 fix released a denied dispatch on the shared-tree route
+/// alone. From a main checkout the guard asks the granted-worktree route, whose
+/// deny released nothing, so the tracker's `matcher: "*"` record of the ORIGINAL
+/// unisolated payload became the next dispatch's occupant. The reported refusals
+/// read "rust-engineer, version-control" and then "documentation, rust-engineer,
+/// version-control", each naming a dispatch the guard had itself just refused.
+/// Both hook orders are driven, as in
+/// `a_grant_and_the_tracker_converge_in_either_order`.
+/// Fails on 777153e25: the second grant hears `rust-engineer` beside
+/// `version-control`.
+#[tokio::test]
+async fn a_dispatch_the_grant_path_denies_records_no_claim_7487() {
+    for tracker_first in [false, true] {
+        let (state, _dir, session) = hermetic();
+        // ADR-0056: version-control stays in the main checkout, unisolated.
+        insert(
+            &state,
+            session,
+            "version-control",
+            "/repo",
+            None,
+            Some("toolu_vc"),
+            DelegationStatus::Running,
+        );
+        let tracker_hook = || {
+            crate::daemon::services::delegation_tracker::observe(
+                &state,
+                session,
+                HookEvent::PreToolUse,
+                &unisolated_hook_payload("toolu_denied"),
+            );
+        };
+
+        if tracker_first {
+            tracker_hook();
+        }
+        let denied = granted_call(
+            &state,
+            session,
+            dispatch(
+                "/repo",
+                "rust-engineer",
+                Some("worktree"),
+                Some("toolu_denied"),
+            ),
+        )
+        .await;
+        assert!(!denied.claimed, "tracker_first={tracker_first}");
+        assert_eq!(writer_names(&denied), vec!["version-control"]);
+        if !tracker_first {
+            tracker_hook();
+        }
+
+        assert_eq!(
+            state.shared_tree_occupants(std::path::Path::new("/repo"), None),
+            vec!["version-control".to_string()],
+            "tracker_first={tracker_first}: a refused dispatch must not occupy the checkout"
+        );
+        let next = granted_call(
+            &state,
+            session,
+            dispatch(
+                "/repo",
+                "documentation",
+                Some("worktree"),
+                Some("toolu_doc"),
+            ),
+        )
+        .await;
+        assert_eq!(
+            writer_names(&next),
+            vec!["version-control"],
+            "tracker_first={tracker_first}: the next deny must name only the real occupant"
+        );
+    }
+}
+
+/// 🔴 Fail-open pin (#7487): releasing a denied grant never releases the
+/// occupant that caused the deny. That agent is still writing, and dropping its
+/// record would admit a second writer onto its HEAD.
+#[tokio::test]
+async fn a_grant_deny_keeps_the_running_occupant_counted_7487() {
+    let (state, _dir, session) = hermetic();
+    insert(
+        &state,
+        session,
+        "version-control",
+        "/repo",
+        None,
+        Some("toolu_vc"),
+        DelegationStatus::Running,
+    );
+    launch(&state, session, "toolu_vc", "agent-vc-1");
+
+    granted_call(
+        &state,
+        session,
+        dispatch(
+            "/repo",
+            "rust-engineer",
+            Some("worktree"),
+            Some("toolu_denied"),
+        ),
+    )
+    .await;
+
+    let unisolated = call(
+        &state,
+        session,
+        dispatch("/repo", "rust-engineer", None, Some("toolu_next")),
+    )
+    .await;
+    assert_eq!(writer_names(&unisolated), vec!["version-control"]);
+    assert!(!unisolated.claimed, "the live occupant must still refuse");
+    // #6797: a HEAD write never hears its own session's agents, so ask as another.
+    let other_session = SessionId(uuid::Uuid::new_v4());
+    let head_write = call(&state, other_session, commit_query("/repo")).await;
+    assert_eq!(
+        head_write.total, 1,
+        "a HEAD write in another session's view must still see the live writer"
     );
 }
 
