@@ -243,6 +243,16 @@ pub struct AgentConfig {
     /// `subagents_config_parses_delegate_allowed`.
     #[serde(default)]
     pub subagents: SubagentsConfig,
+
+    /// Which keys of the per-key-merged tables this file declared (#7901).
+    ///
+    /// Why: serde fills an omitted key with its default, so `extends` could
+    /// not tell a child's own value from a default and dropped both.
+    /// What: set by `AgentConfig::from_toml_str` from the raw TOML; empty for
+    /// a config built in code. Read only by `extends::merge_extends`.
+    /// Test: `agents::extends::declared_tests::extends_child_declared_keys_win_in_every_table`.
+    #[serde(skip)]
+    pub declared: super::extends::DeclaredKeys,
 }
 
 fn default_adapter() -> Arc<dyn ModelAdapter> {
