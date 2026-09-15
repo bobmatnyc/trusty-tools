@@ -191,6 +191,52 @@ agent's: worktree removal is PM-executed via `tm session prune-worktrees`, and
 `tm hook --pm-guard` denies an agent's `git worktree remove` (#5791). An agent
 that needs a clean tree asks the PM for one.
 
+### Disposable Clone for Revert/Bisect Experiments
+
+A dispatched agent's own throwaway checkout for a red-gate revert or bisect
+experiment is a different case from the PM's temporary worktree above: an
+agent cannot remove a worktree it makes (`tm hook --pm-guard` denies it), so
+one made for a quick experiment strands the PM with cleanup. Use a disposable
+local clone instead — an agent can `rm -rf` its own clone freely:
+
+```bash
+git clone --local . /tmp/revert-experiment-$$
+cd /tmp/revert-experiment-$$
+# … revert, run the gate, observe the pre-fix failure …
+cd - && rm -rf /tmp/revert-experiment-$$
+```
+
+Never `git worktree add` against the main checkout for this (#7628) — that
+tree is the PM's to remove, not yours.
+
+### Confirming an Edit Landed Byte-Exact
+
+After a Write/Edit call touching escape-sensitive content (a regex character
+class, a literal backslash, a numeric escape), verify byte-for-byte: `od -c
+<file>`/`xxd` over the affected region, or `git diff --stat` reporting `Bin`
+instead of a line count — that's git reclassifying the file as binary, and
+`grep` silently returning nothing reads like an output-capture bug, not
+corruption (#7229).
+
+Count control bytes with `perl`, not `grep -P` — BSD grep (the macOS
+default) lacks `-P`, and `ggrep` is not installed by default (#7731):
+
+```bash
+perl -ne '$n++ if /[\x00-\x08\x0b-\x1f\x7f]/; END{print 0+$n}' <file>
+```
+
+### Confirming a Test Runner Loads Your File Before Writing Against It
+
+A dependency existing and being importable does not mean the specific loader
+that owns a test file's extension can resolve it: `route.test.ts` routed
+through Node's type-stripping loader failed with `ERR_MODULE_NOT_FOUND` on
+`next/headers`; rewriting it as `route.test.tsx` for the `tsx` runner fixed it
+— the extension alone picked a different loader with different module
+resolution (#7732). Run a new test file empty (or with one trivial assertion)
+and confirm the runner loads it before writing the first real assertion
+against it — a wall of `Cannot find module` at that point is a loader
+mismatch, not a missing dependency.
+
 ### Stashing Work
 
 The stash stack is repo-global, not per-worktree: every worktree of a repo

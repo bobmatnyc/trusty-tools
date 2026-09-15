@@ -59,8 +59,8 @@ its actual byte (#7480).
   or `git diff --stat` reporting `Bin` instead of a line count — that's git
   reclassifying the file as binary and `grep` silently returning nothing,
   which reads like an output-capture bug, not corruption.
-- **Count control bytes with `perl`, not `grep -P`** — BSD grep lacks `-P`.
-  `perl -ne '$n++ if /[\x00-\x08\x0b-\x1f\x7f]/; END{print 0+$n}' <file>`.
+- **Count control bytes with `perl`, not `grep -P`** (BSD grep lacks `-P`).
+  Recipe: Read `{{TM_SKILLS}}/git-workflow/SKILL.md` (#7731).
 
 ## Proving a Regression Test Fails First
 
@@ -185,8 +185,8 @@ verify the build resolves clean.
   provisions the checkout only. Run install + workspace-build once
   (`pnpm install --frozen-lockfile`, `npx turbo run build --filter=<app>^...`)
   before the first gate, not every gate.
-- **Confirm the test runner loads a module before the first test** —
-  `.test.ts` under Node hit `ERR_MODULE_NOT_FOUND`; `.test.tsx` fixed it.
+- **Confirm the test runner loads a module before the first test.** Recipe:
+  Read `{{TM_SKILLS}}/git-workflow/SKILL.md` (#7732).
 
 ## No Mock Data or Silent Fallbacks
 
