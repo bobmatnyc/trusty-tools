@@ -185,6 +185,8 @@ verify the build resolves clean.
   provisions the checkout only. Run install + workspace-build once
   (`pnpm install --frozen-lockfile`, `npx turbo run build --filter=<app>^...`)
   before the first gate, not every gate.
+- **Confirm the test runner loads a module before the first test** —
+  `.test.ts` under Node hit `ERR_MODULE_NOT_FOUND`; `.test.tsx` fixed it.
 
 ## No Mock Data or Silent Fallbacks
 
