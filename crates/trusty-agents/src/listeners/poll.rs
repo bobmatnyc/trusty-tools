@@ -495,9 +495,11 @@ async fn channel_binding_claim(
     project_path: &Path,
     budget: &mut crate::api::server::agent_channels::inbound::DispatchBudget,
 ) -> crate::api::server::agent_channels::inbound::InboundOutcome {
+    // #7609: the display name comes from a remote `From:` header, so it is
+    // sanitized at construction rather than wherever it is later logged.
     let identity = crate::rbac::UserIdentity::new(
         format!("gworkspace:{}", event.listener_id),
-        event.from.clone().unwrap_or_else(|| "gworkspace".into()),
+        sanitize_identity_name(event.from.as_deref(), "gworkspace"),
         crate::rbac::ServiceTier::default(),
     );
     crate::api::server::agent_channels::inbound::receive_inbound(
@@ -510,6 +512,31 @@ async fn channel_binding_claim(
         budget,
     )
     .await
+}
+
+/// A remote `From:` display name, made safe to carry as an identity label.
+///
+/// Why (#7609): the value is whatever a sender put in their own `From:`
+/// header — a hostile one can carry newlines and ANSI escapes, which forge log
+/// lines in any consumer that writes the name out, and can be arbitrarily long.
+/// Sanitizing HERE, at the one place the value becomes a `UserIdentity`, is
+/// what makes every downstream reader safe without each of them remembering to.
+/// What: drops every control character (which includes CR, LF and the ESC that
+/// starts an ANSI sequence), trims surrounding whitespace, and caps the result
+/// at 128 characters. An absent or entirely-control-character name falls back
+/// to `fallback`, so the label is never empty.
+/// Test: `a_hostile_from_header_cannot_forge_an_identity_label`.
+fn sanitize_identity_name(from: Option<&str>, fallback: &str) -> String {
+    let cleaned: String = from
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect();
+    let trimmed: String = cleaned.trim().chars().take(128).collect();
+    if trimmed.is_empty() {
+        return fallback.to_string();
+    }
+    trimmed
 }
 
 /// Fetch a new message's headers/snippet and build its `StoredEvent`.
@@ -600,6 +627,33 @@ fn stored_event_from_message(listener_id: &str, event_id: &str, msg: &Value) -> 
 #[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
+
+    /// A hostile `From:` header cannot forge a log line or run away with the
+    /// label.
+    ///
+    /// Why (#7609): the display name is remote-controlled. Newlines forge log
+    /// records in any consumer that writes the identity out, an ESC starts an
+    /// ANSI sequence in a terminal reading those logs, and an unbounded name is
+    /// its own denial of service against them.
+    #[test]
+    fn a_hostile_from_header_cannot_forge_an_identity_label() {
+        let forged = sanitize_identity_name(
+            Some("  Alice\r\nINFO forged: granted\u{1b}[31m  "),
+            "gworkspace",
+        );
+        assert_eq!(forged, "AliceINFO forged: granted[31m");
+        assert!(!forged.chars().any(char::is_control));
+
+        let long = "a".repeat(500);
+        assert_eq!(sanitize_identity_name(Some(&long), "gworkspace").len(), 128);
+
+        // An absent or entirely-control-character name still gets a label.
+        assert_eq!(sanitize_identity_name(None, "gworkspace"), "gworkspace");
+        assert_eq!(
+            sanitize_identity_name(Some("\r\n\t"), "gworkspace"),
+            "gworkspace"
+        );
+    }
 
     /// One message, one wake path — a claimed message never also runs the
     /// `[[listeners]]` wake, and an unclaimed one always does.

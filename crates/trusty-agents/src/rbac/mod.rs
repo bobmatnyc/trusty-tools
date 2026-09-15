@@ -46,6 +46,12 @@ pub use trusty_agents_common::ServiceTier;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UserIdentity {
     pub id: String,
+    /// Human-readable label for LOGGING ONLY; never an authorization input.
+    ///
+    /// #7609: for an inbound channel event this is remote-controlled — a Gmail
+    /// wake takes it from the sender's own `From:` header — so it is sanitized
+    /// at construction (`crate::listeners::poll::sanitize_identity_name`) and
+    /// must not be given meaning beyond a label.
     pub name: String,
     pub tier: ServiceTier,
 }
