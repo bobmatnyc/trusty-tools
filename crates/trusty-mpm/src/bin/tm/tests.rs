@@ -2706,7 +2706,7 @@ fn cli_parses_pr_open() {
     assert!(!args.closes, "Closes is opt-in, never the default");
     assert!(
         !args.minimal,
-        "the seven-field contract is the default, never opt-in (#7615)"
+        "the nine-field contract is the default, never opt-in (#7615)"
     );
 }
 

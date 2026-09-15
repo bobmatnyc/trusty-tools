@@ -219,7 +219,7 @@ fn test_ownership() -> CrateOwnership {
 
 // ── body fixtures ────────────────────────────────────────────────────────
 
-/// A body satisfying all seven fields and the footer.
+/// A body satisfying all nine fields and the footer.
 fn full_body() -> String {
     let mut s = String::new();
     for f in FIELDS {
@@ -264,12 +264,12 @@ fn open_args(body_file: &str) -> PrOpenArgs {
 // ── body contract ────────────────────────────────────────────────────────
 
 #[test]
-fn body_field_table_covers_seven() {
-    assert_eq!(FIELDS.len(), 7);
+fn body_field_table_covers_nine() {
+    assert_eq!(FIELDS.len(), 9);
     let mut headings: Vec<&str> = FIELDS.iter().map(|f| f.heading()).collect();
     headings.sort_unstable();
     headings.dedup();
-    assert_eq!(headings.len(), 7, "field headings must be distinct");
+    assert_eq!(headings.len(), 9, "field headings must be distinct");
 }
 
 #[test]
@@ -278,7 +278,7 @@ fn body_accepts_a_complete_body() {
     assert!(report.missing.is_empty(), "{report:?}");
     assert!(report.empty.is_empty(), "{report:?}");
     assert!(report.footer_ok);
-    assert_eq!(report.supplied.len(), 7);
+    assert_eq!(report.supplied.len(), 9);
 }
 
 #[test]
@@ -298,13 +298,13 @@ fn body_reports_empty_section() {
     assert!(report.missing.is_empty());
 }
 
-/// #7727: the seven body headings `tm pr open` checks must be named,
+/// #7727: the nine body headings `tm pr open` checks must be named,
 /// verbatim, in every asset that tells an agent how to write a PR body —
 /// otherwise the asset drifts from the checker silently, the way it did
 /// before this test existed (three of five ticketing-audit PR-opening runs
 /// failed `tm pr open` and burned a turn on `--help` to find the headings).
 #[test]
-fn seven_body_headings_are_named_verbatim_in_the_assets() {
+fn body_headings_are_named_verbatim_in_the_assets() {
     for f in FIELDS {
         let heading = format!("## {}", f.heading());
         assert!(
@@ -323,7 +323,8 @@ fn body_accepts_alias_headings() {
     let body = format!(
         "## 1. Primary outcome\nx\n## 2. What changed\nx\n## 3. Risk / blast radius\nx\n\
          ## 4. Test evidence\nx\n## 5. Pre-existing failures\nx\n\
-         ## 6. Documentation / changelog\nx\n## 7. Review-finding disposition\nx\n\n{ATTRIBUTION_FOOTER}\n"
+         ## 6. Gates not run, and why\nnone\n## 7. Partial-red accounting\nnone\n\
+         ## 8. Documentation / changelog\nx\n## 9. Review-finding disposition\nx\n\n{ATTRIBUTION_FOOTER}\n"
     );
     let report = body::validate(&body);
     assert!(report.missing.is_empty(), "{report:?}");
@@ -638,7 +639,7 @@ fn open_argv_carries_shipped_defaults() {
     assert!(joined.contains("--label ws/tm-test-01"), "{joined}");
     assert!(joined.contains("--base main"), "{joined}");
     assert_eq!(plan.workstream_label, "ws/tm-test-01");
-    assert_eq!(plan.supplied.len(), 7);
+    assert_eq!(plan.supplied.len(), FIELDS.len());
 }
 
 #[test]
@@ -1019,7 +1020,7 @@ fn head_rev_candidates_try_the_remote_ref() {
     );
 }
 
-// ── #7615: --minimal opts out of the seven-heading contract ──────────────
+// ── #7615: --minimal opts out of the nine-heading contract ──────────────
 
 /// Why (#7615): on trusty-things#261 the PM authorized that project's own
 /// sparse Why/What/Test/Gate body and `tm pr open` refused it, naming all seven
@@ -1027,7 +1028,7 @@ fn head_rev_candidates_try_the_remote_ref() {
 /// the changelog gate as well — three gates given up to escape one.
 /// Test target: `plan` under `--minimal`.
 #[test]
-fn pr_7615_minimal_skips_the_seven_field_contract() {
+fn pr_7615_minimal_skips_the_heading_contract() {
     let mut args = open_args("/dev/null");
     args.minimal = true;
     let sparse = format!("Why: a thing.\nWhat: it does it.\n\n{ATTRIBUTION_FOOTER}\n");
@@ -1117,7 +1118,7 @@ fn pr_7574_a_missing_heading_offers_the_body_skeleton() {
 }
 
 /// Why: the skeleton is the fix for a MISSING heading and nothing else. Printing
-/// it after a footer or changelog failure would bury the real reason under seven
+/// it after a footer or changelog failure would bury the real reason under nine
 /// headings the body already has.
 #[test]
 fn pr_7574_other_failures_offer_no_skeleton() {
@@ -1146,6 +1147,146 @@ fn body_skeleton_names_every_field() {
     assert!(report.missing.is_empty(), "{report:?}");
     assert_eq!(report.empty.len(), FIELDS.len(), "{report:?}");
     assert!(report.footer_ok);
+}
+
+// ── #7336: the two disclosure fields widen the contract ──────────────────
+
+/// A `## Gates not run` / `## Partial-red accounting` pair in its minimal form.
+///
+/// #7336: the issue rules an explicit "none" valid for either, so this is the
+/// shortest body text that satisfies both.
+const MINIMAL_DISCLOSURE: &str =
+    "## Gates not run\n\nnone\n\n## Partial-red accounting\n\nnone\n\n";
+
+/// The two headings #7336 adds, in contract order.
+const NEW_HEADINGS: [&str; 2] = ["Gates not run", "Partial-red accounting"];
+
+/// [`full_body`] with the `## <heading>` section removed by text.
+///
+/// Why (#7336): dropping a section by its heading rather than by [`Field`]
+/// keeps this whole block COMPILING against a checkout whose field table
+/// predates the two fields — so the red-first run reports a failed assertion
+/// (the heading was never required) rather than an unknown-variant build error.
+fn full_body_without_heading(heading: &str) -> String {
+    full_body().replace(&format!("## {heading}\n\nsomething real.\n\n"), "")
+}
+
+/// Why (#7336): Codex's #7323 disclosed a provider gate it could not run and
+/// its #6966 itemized each still-failing target; neither disclosure had a home
+/// in the body contract, so both depended on the author volunteering them.
+/// Test target: [`body::validate`] over a complete nine-field body.
+#[test]
+fn pr_7336_a_full_body_carrying_both_fields_passes() {
+    for heading in NEW_HEADINGS {
+        assert!(
+            full_body().contains(&format!("## {heading}")),
+            "the contract must require `## {heading}`"
+        );
+    }
+    let report = body::validate(&full_body());
+    assert!(report.missing.is_empty(), "{report:?}");
+    assert!(report.empty.is_empty(), "{report:?}");
+    assert_eq!(report.supplied.len(), FIELDS.len(), "{report:?}");
+}
+
+/// Why (#7336): a required field is only required if dropping it fails, and the
+/// failure has to NAME the field — that is the whole point of the field table.
+/// Test target: [`body::validate`] and `BodyReport::failures`.
+#[test]
+fn pr_7336_a_full_body_missing_either_field_fails_naming_it() {
+    for heading in NEW_HEADINGS {
+        let failures = body::validate(&full_body_without_heading(heading)).failures();
+        assert_eq!(
+            failures.len(),
+            1,
+            "dropping `## {heading}` must fail exactly once: {failures:?}"
+        );
+        assert!(
+            failures[0].starts_with(body::MISSING_FIELD_PREFIX)
+                && failures[0].contains(&format!("`## {heading}`")),
+            "the failure must name the field: {failures:?}"
+        );
+    }
+}
+
+/// Why (#7336): "an explicit `none` is valid for either" is the ruling, and a
+/// section holding one word is exactly the shape a whitespace-only section is
+/// rejected for. This pins the difference.
+#[test]
+fn pr_7336_an_explicit_none_satisfies_both_fields() {
+    let body = full_body()
+        .replace(
+            "## Gates not run\n\nsomething real.\n",
+            "## Gates not run\n\nnone\n",
+        )
+        .replace(
+            "## Partial-red accounting\n\nsomething real.\n",
+            "## Partial-red accounting\n\nnone\n",
+        );
+    let report = body::validate(&body);
+    assert!(
+        report.missing.is_empty() && report.empty.is_empty(),
+        "{report:?}"
+    );
+}
+
+/// Why (#7336): the author who does not know `none` is valid writes an empty
+/// section and fails a second time. The missing-field line carries the hint;
+/// the seven older fields must NOT carry it, because `none` is no answer to
+/// "what changed".
+#[test]
+fn pr_7336_the_failure_line_offers_the_minimal_none_form() {
+    for heading in NEW_HEADINGS {
+        let mut failures = body::validate(&full_body_without_heading(heading)).failures();
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(failures.remove(0).contains("`none`"), "{heading}");
+    }
+    for heading in ["Outcome", "Changes", "Risk"] {
+        let mut failures = body::validate(&full_body_without_heading(heading)).failures();
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(!failures.remove(0).contains("`none`"), "{heading}");
+    }
+}
+
+/// Why (#7336): the skeleton is what a failing author pastes, so a field absent
+/// from it is a field nobody can satisfy on the second try.
+#[test]
+fn pr_7336_the_skeleton_carries_both_new_fields() {
+    let skeleton = body::skeleton();
+    for heading in ["## Gates not run", "## Partial-red accounting"] {
+        assert!(skeleton.contains(heading), "{heading} missing:\n{skeleton}");
+    }
+    // Order: after `## Baseline`, before `## Docs`.
+    let at = |h: &str| skeleton.find(h).unwrap_or(usize::MAX);
+    assert!(
+        at("## Baseline") < at("## Gates not run")
+            && at("## Gates not run") < at("## Partial-red accounting")
+            && at("## Partial-red accounting") < at("## Docs"),
+        "{skeleton}"
+    );
+}
+
+/// Why (#7336): widening the contract must not re-break #7615. `--minimal` is
+/// for a project whose own `CLAUDE.md` names a different body standard, and the
+/// two new fields are part of the standard it opts out of — a body in that
+/// project's shape still opens, with or without them.
+#[test]
+fn pr_7336_minimal_validates_with_and_without_the_new_fields() {
+    let mut args = open_args("/dev/null");
+    args.minimal = true;
+    for body in [
+        format!("Why: a thing.\nWhat: it does it.\n\n{ATTRIBUTION_FOOTER}\n"),
+        format!("Why: a thing.\n\n{MINIMAL_DISCLOSURE}{ATTRIBUTION_FOOTER}\n"),
+    ] {
+        open::plan(
+            &args,
+            &body,
+            Some("s"),
+            ChangelogVerdict::Pass,
+            &ResolvedTicketing::default(),
+        )
+        .expect("--minimal accepts another project's standard, widened or not");
+    }
 }
 
 /// Why: without `--head` the diff must still be the checkout's `HEAD`.
@@ -1913,12 +2054,12 @@ fn pr_7646_a_failed_step_is_reported_missing_never_applied() {
     );
 }
 
-/// REGRESSION (#7868): `tm pr merge` re-ran the seven-field OPEN gate, so a body
+/// REGRESSION (#7868): `tm pr merge` re-ran the nine-field OPEN gate, so a body
 /// written to the sparse prose rules (defect / evidence / resolution, no filled
 /// headings for fields the change does not touch) could not be merged by the one
 /// command that passes the reviewed body through `--body-file`. The PM merged
 /// with raw `gh pr merge` instead, losing that guarantee entirely.
-/// Red before the fix: `decide` refuses, naming seven missing body fields.
+/// Red before the fix: `decide` refuses, naming every missing body field.
 #[test]
 fn pr_7868_a_sparse_body_is_not_a_merge_refusal() {
     let sparse = format!(
@@ -1926,8 +2067,8 @@ fn pr_7868_a_sparse_body_is_not_a_merge_refusal() {
          ## Evidence\n\n`gh pr view 7639 --json milestone` returned null.\n\n\
          ## Resolution\n\nThe apply retries per field.\n\n{ATTRIBUTION_FOOTER}\n"
     );
-    // The body genuinely fails the seven-field contract — that is the point.
-    assert_eq!(body::validate(&sparse).contract_gaps().len(), 7);
+    // The body genuinely fails the nine-field contract — that is the point.
+    assert_eq!(body::validate(&sparse).contract_gaps().len(), FIELDS.len());
 
     let view = merge_view(&sparse, serde_json::json!({}));
     assert_eq!(
@@ -1938,7 +2079,7 @@ fn pr_7868_a_sparse_body_is_not_a_merge_refusal() {
 }
 
 /// #7868: the footer is still a hard refusal even on a sparse body — it is part
-/// of the landing commit message `tm pr merge` writes, unlike the seven fields.
+/// of the landing commit message `tm pr merge` writes, unlike the nine fields.
 #[test]
 fn pr_7868_a_sparse_body_without_the_footer_still_refuses() {
     let view = merge_view("## Defect\n\nsomething broke.\n", serde_json::json!({}));
@@ -2283,7 +2424,7 @@ fn merge_view(body: &str, patch: serde_json::Value) -> merge::MergeView {
 
 /// The decision `tm pr merge` would reach for this view.
 fn merge_decision(view: &merge::MergeView) -> merge::Decision {
-    // #7868: mirrors `merge::run` — the footer refuses, the seven-field gaps
+    // #7868: mirrors `merge::run` — the footer refuses, the nine-field gaps
     // are reported.
     let failures = body::validate(&view.body).merge_failures();
     merge::decide(view, &failures)

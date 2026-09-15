@@ -512,7 +512,7 @@ equivalent prose rule from memory:
 
 | Step | Command | What a nonzero exit means |
 |---|---|---|
-| Opening every PR | `tm pr open --title <t> --body-file <path> [--issue N] [--rung 1-6] [--base main] [--docs-only]` | Exit 2 names the failed check (seven-field body, footer, changelog gate) and means `gh` was never called; `--dry-run` prints the argv instead |
+| Opening every PR | `tm pr open --title <t> --body-file <path> [--issue N] [--rung 1-6] [--base main] [--docs-only]` | Exit 2 names the failed check (nine-field body, footer, changelog gate) and means `gh` was never called; `--dry-run` prints the argv instead |
 | Before `gh pr create` | `bash scripts/check_changelog_fragment.sh` | Review-gate failure if crate `src/**` changed with no fragment; `tm pr open` runs this itself before spawning `gh`, so this is only for the hand-assembled fallback |
 | Before `gh pr create` (a version was bumped) | `bash scripts/check-pr-version-bump.sh` | The version bump does not match what the PR's changes require |
 | Before evaluating any required-context gate | `bash scripts/required-checks.sh [base]` (or `gh api repos/bobmatnyc/trusty-tools/branches/main/protection --jq '.required_status_checks.contexts'`) | N/A — always read live, never hand-copied (a stale copy cost PR #5836 a merge) |

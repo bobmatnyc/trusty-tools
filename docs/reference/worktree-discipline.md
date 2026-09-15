@@ -20,7 +20,7 @@ document is detail; this is the rule.
    branch conflicts or lacks a newly required check; never merge `main` into
    the branch. A branch that is only BEHIND merges fine (#5958) and needs
    nothing.
-4. **Push and open a PR** (`tm pr open`), body per the seven-field contract;
+4. **Push and open a PR** (`tm pr open`), body per the nine-field contract;
    use `Refs #N`, never `Closes`.
 5. **Merge on green with squash** (`gh pr merge --squash --delete-branch
    --auto`); the repo's review gates still apply.

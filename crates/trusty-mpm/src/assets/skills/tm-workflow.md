@@ -557,7 +557,7 @@ existing style.
   assuming they coexist. Two writers to one file is a defect; do not invent a
   precedence rule on the fly.
 
-## Minimal PR Body (seven fields)
+## Minimal PR Body (nine fields)
 
 The `version-control` agent writes this; the PM supplies the material.
 `tm pr open` checks each field against its own heading below, verbatim
@@ -569,10 +569,10 @@ runs the changelog-fragment gate and refuses a docs-only PR without the flag.
 
 🟡 A failure naming a missing heading prints the whole skeleton verbatim, ready
 to paste and fill (#7574). On a project whose own `CLAUDE.md` names a different
-PR-body standard, `--minimal` skips these seven headings and nothing else —
+PR-body standard, `--minimal` skips these nine headings and nothing else —
 the attribution footer, the `Refs`/`Closes` rule and the changelog-fragment gate
 all still run (#7615). It is never the answer on THIS repo, whose standard these
-seven fields are.
+nine fields are.
 
 1. `## Outcome` — primary outcome and linked issue(s), with the
    `Refs owner/repo#N` link.
@@ -581,9 +581,20 @@ seven fields are.
 4. `## Tests` — test evidence at the applicable levels.
 5. `## Baseline` — baseline/pre-existing failures and their canonical issue
    (see below).
-6. `## Docs` — documentation/changelog status.
-7. `## Review` — review-finding disposition: fixed here, kept on the parent,
+6. `## Gates not run` — every gate the rung asked for that you did NOT run, and
+   why (#7336). A provider call automatic approval refused, a suite you skipped
+   for time, an `--include-ignored` run you left out.
+7. `## Partial-red accounting` — each target still failing at hand-back, with
+   its per-target rerun result (#7336). "This was not an unbroken green
+   aggregate run", itemized.
+8. `## Docs` — documentation/changelog status.
+9. `## Review` — review-finding disposition: fixed here, kept on the parent,
    or separately ticketed.
+
+🔴 **Fields 6 and 7 are answered, never omitted.** A clean run writes the single
+word `none` under each — that is a valid whole section, and it is the disclosure
+(#7336). Silence is not: `tm pr open` exits 2 naming the missing field, and the
+line it prints says `none` is valid.
 
 🔴 **Field 1 models `Refs`, not a closing keyword (#6895).** `Closes`, `Fixes`
 and `Resolves` go in only when the project's `CLAUDE.md` permits a merge to

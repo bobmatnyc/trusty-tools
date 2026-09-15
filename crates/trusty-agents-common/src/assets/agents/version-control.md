@@ -84,12 +84,16 @@ this grep is what covers the hand-assembled `gh` fallback and every later
 `gh pr edit`.
 
 🔴 **Open every PR with `tm pr open --title <title> --body-file <path> [--issue N]
-[--rung 1-6] [--base main] [--docs-only]`.** It validates the seven-field body
-contract against seven exact headings, verbatim (#7727): `## Outcome`,
-`## Changes`, `## Risk`, `## Tests`, `## Baseline`, `## Docs`, `## Review` — in
-that order, matching `tm-workflow.md`'s "Minimal PR Body (seven fields)"
-section. A body missing one of these, or holding it empty, exits 2 naming
-which field, before `gh` is ever called. It also checks the exact attribution
+[--rung 1-6] [--base main] [--docs-only]`.** It validates the nine-field body
+contract against nine exact headings, verbatim (#7727): `## Outcome`,
+`## Changes`, `## Risk`, `## Tests`, `## Baseline`, `## Gates not run`,
+`## Partial-red accounting`, `## Docs`, `## Review` — in that order, matching
+`tm-workflow.md`'s "Minimal PR Body (nine fields)" section. A body missing one
+of these, or holding it empty, exits 2 naming which field, before `gh` is ever
+called. The last two are the #7336 disclosure fields: name every gate the rung
+asked for that you did not run and why, and itemize every target still failing
+with its rerun result. A clean run writes the single word `none` under each —
+that is a valid whole section, and omitting the heading is not. It also checks the exact attribution
 footer — a missing one exits 2 without calling `gh`; `tm pr open` never
 appends it itself — and attaches the shipped
 `--assignee @me --label trusty-mpm --label ws/<session>` defaults itself — you

@@ -919,14 +919,14 @@ pub(crate) enum Command {
     /// Deterministic pull-request gates: open a PR, merge one, or check the merge queue.
     ///
     /// Why (#6653): `version-control` assembles every `gh pr create` by hand
-    /// and re-derives four mechanical judgments each time — is the seven-field
+    /// and re-derives four mechanical judgments each time — is the nine-field
     /// body complete, is the attribution footer exact, were the shipped
     /// `--assignee @me --label trusty-mpm --label ws/<session>` defaults
     /// attached, and does this diff owe a changelog fragment. The merge-queue
     /// procedure is the same shape: a fixed decision table read out of three
     /// `gh` calls, where skipping one under time pressure is the failure mode.
     /// Both are prose in `tm-workflow.md` today; neither needs a model.
-    /// What: `open` validates the body file against the seven-field contract
+    /// What: `open` validates the body file against the nine-field contract
     /// (and the changelog gate, unless `--docs-only`) and refuses with exit 2,
     /// naming the failed check, BEFORE `gh` is spawned; `queue-check` prints
     /// one `MERGEABLE` / `BLOCKED: <reason>` line per open PR on a base branch
