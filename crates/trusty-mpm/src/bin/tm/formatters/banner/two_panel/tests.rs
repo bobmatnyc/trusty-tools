@@ -1,5 +1,5 @@
 use super::*;
-use crate::formatters::info_box::{CommitLine, DaemonInfo, WelcomeData};
+use crate::formatters::info_box::{CommitLine, ConsoleInfo, DaemonInfo, WelcomeData};
 
 fn base_data() -> WelcomeData {
     WelcomeData {
@@ -9,6 +9,8 @@ fn base_data() -> WelcomeData {
         reconnecting: false,
         session_name: String::new(),
         daemon: DaemonInfo::default(),
+        // #6761: the services block gained a console row.
+        console: ConsoleInfo::default(),
         recent_commits: vec![],
         memory_status: "(not detected)".to_string(),
         search_status: "(not detected)".to_string(),
