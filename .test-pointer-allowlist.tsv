@@ -361,7 +361,6 @@ crates/trusty-mpm/src/bin/tm/cli/mod.rs	cli_parses_load_standalone
 crates/trusty-mpm/src/bin/tm/cli/mod.rs	cli_parses_path_standalone
 crates/trusty-mpm/src/bin/tm/cli/mod.rs	cli_parses_run_standalone
 crates/trusty-mpm/src/bin/tm/cli/mod.rs	cli_parses_slack_start
-crates/trusty-mpm/src/bin/tm/cli/mod.rs	cli_parses_statusline
 crates/trusty-mpm/src/bin/tm/cli/mod.rs	cli_parses_ticket_with_system
 crates/trusty-mpm/src/bin/tm/commands/auth.rs	set_token_reads_from_explicit_arg
 crates/trusty-mpm/src/bin/tm/commands/auth.rs	set_token_reads_from_stdin

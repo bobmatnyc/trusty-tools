@@ -13,7 +13,7 @@
 //   the saver source tree. `scripts/build-console-saver.sh` copies it into
 //   `Contents/Resources/`.
 // Test: `scripts/render-console-saver-preview.sh` is the entry point; the asset
-//   it produces is asserted present and drawable by `PaintHarness.swift`'s
+//   it produces is asserted present and drawable by `PaintHarness/`'s
 //   `preview` mode.
 //
 // Playwright is a devDependency of `website/`, not of the repo root, so it is

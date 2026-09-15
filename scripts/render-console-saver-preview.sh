@@ -22,7 +22,7 @@
 # point — a hand-drawn mock would drift from the dashboard it stands in for.
 #
 # Test: run it, then `bash scripts/build-console-saver.sh` and the `preview`
-# mode of `crates/trusty-console/macos/saver/PaintHarness.swift`, which fails
+# mode of `crates/trusty-console/macos/saver/PaintHarness/`, which fails
 # when the bundled asset is missing or does not decode.
 
 set -euo pipefail

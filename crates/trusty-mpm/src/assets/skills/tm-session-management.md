@@ -126,6 +126,61 @@ Manual `/tm-session resume` does **not** advance the internal watermark used
 by auto-inject-on-session-start — only the automatic injection path does.
 This is intentional: a manual catch-up is a read, not a state transition.
 
+## MCP Session-Tool Failure Diagnosis (Shared by Pause and Resume)
+
+`/tm-session-pause` and `/tm-session-resume` each call an
+`mcp__trusty-mpm__session_context_*` tool, guarded by this same diagnosis
+procedure before either skill falls back to its own substitute. Each skill's
+own entry point still issues its own mandatory `ToolSearch` load line for its
+own tool name — this section is the shared procedure both point to.
+
+**Load the schema before calling.** In harnesses with deferred MCP tool
+loading (Claude Code, when many tools are registered), the daemon always
+registers these session tools — never gated by launch mode — but the harness
+may not have fetched the schema yet, so a tool can be absent from your
+currently loaded tool list even though it is fully available. **Absence from
+that list does NOT mean the tool is unavailable** — load it with `ToolSearch`
+first, mandatory every time, before attempting the call and before
+considering any fallback. If the tool loads successfully, attempt the call —
+do not skip straight to a fallback merely because it was absent from your
+list before loading; the load may have fixed that.
+
+**Never assert a cause you have not tested.** Do not write "the trusty-mpm
+MCP server isn't connected in this session", "the daemon is down", or "the
+project isn't registered" from a hunch — each of those has a concrete,
+checkable basis (the deferred-tool-list check below for "server connected at
+all"; `tm doctor` or `mcp__trusty-mpm__project_get` for "project
+registered"), and you must actually run that check before stating the
+conclusion it supports. If all you know is that a load or a call did not
+succeed and you have not yet run the check, say exactly that and nothing
+more: *"I could not load/call `<tool>`; I have not yet determined whether the
+server is absent or its schema is merely unloaded."* An invented explanation
+is worse than no explanation — it sends whoever reads it chasing a diagnosis
+that was never actually made.
+
+**The one concrete, checkable test:** does any `mcp__trusty-mpm__*` name
+appear anywhere in your tool list — loaded *or* deferred (deferred = listed
+by a system reminder as available-via-`ToolSearch` but not yet loaded)?
+
+- **Yes** (even only deferred): the server IS registered — the tools are
+  merely unloaded. Do not claim disconnection; go back and `ToolSearch`-load
+  the specific tool instead of falling back.
+- **No** `mcp__trusty-mpm__*` name appears anywhere: "the trusty-mpm MCP
+  server does not appear to be available in this session" is a defensible
+  statement — report the concrete basis exactly that way ("no
+  `mcp__trusty-mpm__*` tools present in either the loaded or deferred tool
+  lists"), and only then fall back to the calling skill's own substitute (a
+  hand-written snapshot for pause, the CLI `tm session catchup` for resume).
+
+**Report the exact error text** `ToolSearch` or the call returned, rather
+than interpreting it, and state in your report to the user which of the two
+cases above you observed.
+
+**Never attribute a failure to "the daemon restarted."** `trusty-mpm serve
+--stdio` is a stateless proxy designed to survive a daemon restart and
+auto-reconnect transparently, so a mid-session restart is not a valid
+explanation for a tool disappearing.
+
 ## Worktree Pruning Integration
 
 Paused/resumed PM sessions are conceptually distinct from *managed*
@@ -194,9 +249,11 @@ Direct the user to pause first if they expected one.
 ## Related Skills
 
 - `/tm-session-pause` — focused action: snapshot todos/git/context, prune stale
-  worktrees, print the resume path
+  worktrees, print the resume path; its MCP-tool fallback follows "MCP
+  Session-Tool Failure Diagnosis" above
 - `/tm-session-resume` — focused action: load the latest (or selected) snapshot
-  via `tm session catchup` and restore todos/context
+  via `tm session catchup` and restore todos/context; its MCP-tool fallback
+  follows "MCP Session-Tool Failure Diagnosis" above
 - `tm-git-file-tracking` — git state reconciliation during resume
 - `tm-verification-protocols` — evidence state carried across a pause
 - `tm-delegation-patterns` — resuming mid-workflow delegations

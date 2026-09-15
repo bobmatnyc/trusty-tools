@@ -55,6 +55,8 @@ async fn gather_report_serializes_to_json_with_expected_keys() {
         // #7882: the active agent's resolved store bindings ride in the same
         // report, so `--json` consumers see a dead index without a second call.
         "stores",
+        // #7903: every other declared binding that does not resolve.
+        "unresolved_bindings",
         "agent_registry_count",
         "skills_count",
     ] {

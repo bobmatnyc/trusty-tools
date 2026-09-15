@@ -98,8 +98,23 @@ impl AgentStoreBinding {
     /// Why: A store and the index over it are usually named the same thing
     /// (`bob-kb`, `cto-assistant`); requiring both to be typed out would make
     /// the shorthand spelling unusable.
-    /// What: The declared `index` verbatim when present, else `name`.
-    /// Test: `store_binding_derives_tree_and_index_when_omitted`.
+    /// What: The declared `index` verbatim when present, else `name` —
+    /// **no trimming or case folding**. #7902's protected-index guard
+    /// (`crate::knowledge::search_binding::search_slots`) compares this
+    /// output against `ProtectedStore::index_id` with plain `==`/`!=`; that
+    /// comparison is sound only because every producer of an `index_id`
+    /// stays in this same raw, unnormalized-String canonical form (the
+    /// auto-generated digest at
+    /// `crate::knowledge::mod::KnowledgeStore::initialize`, and the
+    /// root-bound path at
+    /// `crate::api::server::knowledge_pipeline::Context::selected_store`,
+    /// which itself calls THIS function) and because trusty-search's own
+    /// `IndexId` (`trusty-search::core::registry::IndexId`) derives
+    /// `PartialEq`/`Eq` over the same plain `String` with no folding either
+    /// — two differently-cased or -spaced ids can never alias the same
+    /// physical index there. See `resolved_index_performs_no_normalization`.
+    /// Test: `store_binding_derives_tree_and_index_when_omitted`,
+    /// `resolved_index_performs_no_normalization`.
     pub fn resolved_index(&self) -> &str {
         self.index.as_deref().unwrap_or(&self.name)
     }
@@ -364,6 +379,28 @@ palace = "owner-profile"
             "tree must derive from the AGENT name, not the store name"
         );
         assert_eq!(b.resolved_index(), "bob-kb");
+    }
+
+    /// #7902 review: the #7902 protected-index guard's raw `==`/`!=`
+    /// comparison is sound only if `resolved_index()` never folds case or
+    /// trims whitespace — a normalizing form here could let a differently
+    /// spelled declaration alias the protected id. Pin the no-normalization
+    /// contract directly so a future change can't reintroduce folding
+    /// without this failing first.
+    #[test]
+    fn resolved_index_performs_no_normalization() {
+        let padded: AgentStoreBinding = toml::from_str(r#"name = "  Bob-KB  ""#).unwrap();
+        assert_eq!(
+            padded.resolved_index(),
+            "  Bob-KB  ",
+            "resolved_index must return the declared string verbatim"
+        );
+        let explicit: AgentStoreBinding = toml::from_str(
+            r#"name = "bob"
+index = "  Bob-KB  ""#,
+        )
+        .unwrap();
+        assert_eq!(explicit.resolved_index(), "  Bob-KB  ");
     }
 
     #[test]

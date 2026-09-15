@@ -9,8 +9,6 @@
 # SLOC also excludes inline '#[cfg(test)] mod <name> { ... }' bodies (issue #5153).
 # Ratchet: budgets may only DECREASE; when a file drops <= its applicable cap, remove it.
 # Regenerate with: scripts/check_line_cap.sh --update  (use --seed only to bootstrap).
-crates/trusty-console/macos/saver/PaintHarness.swift	862
-crates/trusty-console/macos/saver/TrustyConsoleSaver.swift	629
 crates/trusty-git-analytics/src/collect/collector.rs	766
 crates/trusty-mpm/src/daemon/api.rs	1176
 crates/trusty-mpm/src/daemon/managed_routes/lifecycle.rs	578

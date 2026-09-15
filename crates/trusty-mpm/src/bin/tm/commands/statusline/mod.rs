@@ -91,6 +91,39 @@ pub(crate) struct CostInfo {
     pub(crate) total_cost_usd: f64,
 }
 
+/// The stdin JSON fields that feed the `💸` savings segment (#7907).
+///
+/// Why: `tm statusline --help` did not name the fields the `💸` segment reads
+/// (#7907).
+/// What: the field path (dotted for a nested field) and why it matters, in
+/// the exact order [`render_statusline_from`] reads them: `session_id` is
+/// the ledger fold key `savings_segment_probe` reads; `context_window.total_input_tokens`
+/// is optional and feeds the session-actual-tokens denominator
+/// `compaction_segment` persists for [`compaction::session_actual_tokens_for`]
+/// to read, falling back to the ledger's own `tokens_before` sum when absent.
+/// What `statusline_help_names_every_savings_stdin_field` guarantees: it
+/// fails if `tm statusline --help`'s rendered text and this list disagree in
+/// either direction -- a field listed here missing from `--help`, or
+/// `--help` naming a field not listed here. What it does NOT guarantee: that
+/// this list matches what [`render_statusline_from`] actually reads -- the
+/// list is maintained by hand against that function, not derived from it.
+/// Test: `statusline_help_names_every_savings_stdin_field` in `tests.rs`.
+// #7907: hand-maintained against `render_statusline_from`; `--help`'s text
+// is a literal clap doc comment also kept in sync with this list by hand.
+#[cfg(test)]
+pub(crate) const SAVINGS_SEGMENT_STDIN_FIELDS: &[(&str, &str)] = &[
+    (
+        "session_id",
+        "required -- the ledger fold key `savings_segment_probe` reads",
+    ),
+    (
+        "context_window.total_input_tokens",
+        "optional -- feeds the session-actual-tokens denominator via \
+         compaction_segment; falls back to the ledger's own tokens_before \
+         sum when absent",
+    ),
+];
+
 /// Read Claude Code's `statusLine` JSON from stdin and print one compact line.
 ///
 /// Why: Claude Code's `statusLine` hook protocol is "command reads JSON from

@@ -22,9 +22,9 @@ and counter. The rules above apply with a `.swift` basename (`tests.swift`,
 segments; every other `.swift` file is production, capped at 500. XCTest's
 `*Tests.swift` naming is not recognised, so such a file gets the stricter
 production cap. The 500-file scan floor still counts `.rs` files only. The first
-Swift measurement found `crates/trusty-console/macos/saver/PaintHarness.swift`
-(862) and `TrustyConsoleSaver.swift` (629) over cap; both are grandfathered in
-`.line-cap-allowlist.tsv` and ratchet like any other entry.
+Swift measurement found `PaintHarness.swift` (862) and `TrustyConsoleSaver.swift`
+(629) in `crates/trusty-console/macos/saver/` over cap; #7856 split both and
+dropped their `.line-cap-allowlist.tsv` entries.
 
 🟡 Inline `#[cfg(test)] mod <name> { … }` bodies do not count (#5153) — only that
 exact shape. `#[cfg(test)] mod tests;` sibling declarations, `#[cfg(test)]` on an

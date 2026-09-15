@@ -11,7 +11,14 @@ A clear and concise description of what the bug is.
 
 ## Steps to Reproduce
 
-Steps to reproduce the behavior:
+**Exact reproduction command** (the literal shell/`gh`/`tm` invocation that
+triggers the bug — required):
+
+```
+paste the exact command here
+```
+
+Narrative steps, if the command alone does not capture the setup:
 1. ...
 2. ...
 3. ...

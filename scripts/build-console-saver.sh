@@ -7,8 +7,8 @@
 # `install-trusty-*-signed.sh` scripts sign flat Mach-O binaries on PATH, which
 # is a different codesign shape. This is that missing pipeline.
 #
-# What: compiles crates/trusty-console/macos/saver/TrustyConsoleSaver.swift to a
-# dylib with swiftc, assembles target/console-saver/TrustyConsole.saver from it
+# What: compiles the crates/trusty-console/macos/saver/TrustyConsoleSaver*.swift
+# sources (SAVER_SOURCES below) to a dylib with swiftc, assembles target/console-saver/TrustyConsole.saver from it
 # plus the Info.plist template (injecting the trusty-console crate version) and
 # the static preview asset the in-pane Preview and the offline fallback draw
 # (#6839), derives the two gallery-tile thumbnails from that same asset with
@@ -27,7 +27,7 @@
 #   CODESIGN_IDENTITY="Developer ID Application: …" bash scripts/build-console-saver.sh
 #
 # Test: run it, then `crates/trusty-console/macos/saver/LoadHarness.swift` and
-# `PaintHarness.swift` against the bundle it produces — see that directory's
+# `PaintHarness/` against the bundle it produces — see that directory's
 # README.md, "Smoke test" and "Paint harness".
 #
 # Idempotent: every run removes and rebuilds the bundle and the zip in place.
@@ -53,6 +53,15 @@ THUMBNAIL_HEIGHT=58
 
 MODULE_NAME="TrustyConsoleSaver"
 DEPLOYMENT_TARGET="13.0"
+
+# #7856: every source of the saver module. The view is split across extension
+# files, so a file missing from this list fails the compile.
+SAVER_SOURCES=(
+  "$SRC_DIR/TrustyConsoleSaver.swift"
+  "$SRC_DIR/TrustyConsoleSaverView+Drawing.swift"
+  "$SRC_DIR/TrustyConsoleSaverView+Loading.swift"
+  "$SRC_DIR/TrustyConsoleSaverView+Visibility.swift"
+)
 
 # #6540: the saver's CFBundleIdentifier / codesign identifier — the bundle
 # namespace, NOT a launchd label. A `.saver` is loaded by legacyScreenSaver and
@@ -108,7 +117,7 @@ for arch in $ARCHS; do
     -framework WebKit \
     -target "${arch}-apple-macosx${DEPLOYMENT_TARGET}" \
     -o "$slice" \
-    "$SRC_DIR/TrustyConsoleSaver.swift"
+    "${SAVER_SOURCES[@]}"
   SLICES+=("$slice")
 done
 
