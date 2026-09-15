@@ -861,9 +861,10 @@ async fn spawn_managed_inproject(
     // Deployment-completeness check (#2158, made non-blocking by #2172): a
     // false positive must never withhold the runtime launch. Reuses the `fw`
     // already resolved above for `prepare_inproject_session`.
-    if let Err(reason) =
-        ensure_deployment_complete(&fw, &worktree, record.repo_url.as_deref(), session_id)
-    {
+    // #7763: `reachable` is what `prepare_inproject_session` already resolved —
+    // the gate's repair reuses it instead of re-probing trusty-memory.
+    let url = record.repo_url.as_deref();
+    if let Err(reason) = ensure_deployment_complete(&fw, &worktree, url, session_id, reachable) {
         warn!(id = %session_id, "spawn_managed (inproject): deployment incomplete after auto-repair (non-blocking, launch proceeds): {reason}");
     }
 
@@ -1192,9 +1193,10 @@ pub async fn resume_managed(
     // workspace — an adopted session with no known cwd is handled separately by
     // the reconcile-on-boot fix, not here.
     let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&workspace);
-    if let Err(reason) =
-        ensure_deployment_complete(&fw, &workspace, record.repo_url.as_deref(), &record.id)
-    {
+    // #7763: a resume runs no `prepare_session*`, so it has no verdict to reuse —
+    // `None` keeps the single probe the repair pipeline makes for itself.
+    let url = record.repo_url.as_deref();
+    if let Err(reason) = ensure_deployment_complete(&fw, &workspace, url, &record.id, None) {
         warn!(id = %record.id, "resume_managed: deployment incomplete after auto-repair (non-blocking, launch proceeds): {reason}");
     }
 

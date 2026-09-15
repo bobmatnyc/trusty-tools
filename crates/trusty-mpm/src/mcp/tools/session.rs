@@ -332,7 +332,14 @@ pub(super) fn session_tools() -> Vec<Value> {
              resolves the newest snapshot THIS WINDOW paused in this project \
              instead. `resolved_via` says which answered (`session_id`, \
              `tmux_window`, or null), so do not read a window match as an exact \
-             one. Before any of that is read, the local session cache is \
+             one. `resolved_snapshot_superseded` is true when this checkout's \
+             HEAD has moved past the commit the snapshot recorded: its \
+             `in_progress` and `next_steps` may already be done, so read \
+             `commits_since_snapshot` (newest first, at most 20 of \
+             `commits_since_snapshot_total`) before re-planning any of them. It \
+             is false whenever the answer cannot be established, so false means \
+             \"not shown to be stale\", never \"proven current\". \
+             Before any of that is read, the local session cache is \
              rebuilt from THIS caller's own append-only git ref \
              `refs/tm/sessions/<user-id>/<session-key>` (ADR-0062, #7830), so a \
              resume from a fresh clone still resolves. `session_refs` reports \

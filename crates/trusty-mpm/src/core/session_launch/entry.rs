@@ -122,6 +122,31 @@ pub fn prepare_session_with_repo_url_and_exe(
     repo_url: Option<&str>,
     hook_exe: Option<&Path>,
 ) -> Result<PrepReport, PrepError> {
+    // #7763: `None` is "probe the host"; the repair path passes what the launch
+    // already resolved.
+    prepare_session_for_repair(fw, project_dir, repo_url, hook_exe, None)
+}
+
+/// [`prepare_session_with_repo_url_and_exe`] reusing a resolved reachability.
+///
+/// Why (#7763): the deployment gate re-runs this pipeline as its repair step,
+/// AFTER the same launch already probed trusty-memory once. With nothing to
+/// thread, the repair probed again, so a launch against a slow or wedged daemon
+/// paid [`PROBE_TIMEOUT`](crate::core::memory_reachable::PROBE_TIMEOUT) twice.
+/// The value is the only thing the repair needs from the launch, so a dedicated
+/// entry point carries it rather than a parameter every other caller would
+/// default (#7715).
+/// What: identical to [`prepare_session_with_repo_url_and_exe`] except
+/// `memory_reachable` replaces the live probe. `None` keeps the probe, which is
+/// what a resume — which never prepared — still passes.
+/// Test: `repair_reuses_the_reachability_the_launch_resolved`.
+pub fn prepare_session_for_repair(
+    fw: &FrameworkPaths,
+    project_dir: &Path,
+    repo_url: Option<&str>,
+    hook_exe: Option<&Path>,
+    memory_reachable: Option<bool>,
+) -> Result<PrepReport, PrepError> {
     let native = crate::core::output_style::claude_supports_native_output_style();
     prepare_session_inner(
         fw,
@@ -133,7 +158,7 @@ pub fn prepare_session_with_repo_url_and_exe(
         HostInputs {
             home: dirs::home_dir().as_deref(),
             hook_exe,
-            memory_reachable: None,
+            memory_reachable,
         },
     )
 }

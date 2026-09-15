@@ -58,6 +58,12 @@ use crate::session_manager::ManagedSessionId;
 /// tests inject a hermetic [`crate::core::paths::FrameworkPaths::under`]).
 /// `Ok(())` when the workspace is (or becomes) complete; `Err(detail)` naming
 /// every residual gap otherwise.
+///
+/// #7763: `memory_reachable` is whatever this launch's own `prepare_session*`
+/// already resolved. The repair step re-runs that preparation, so passing the
+/// resolved verdict is what keeps a slow or wedged trusty-memory from costing
+/// the launch a second `PROBE_TIMEOUT`. `None` is correct for a caller that
+/// never prepared (the resume path) and simply restores the probe.
 /// Test: `ensure_deployment_complete_noops_for_unknown_workspace`,
 /// `ensure_deployment_complete_ok_when_already_complete`,
 /// `ensure_deployment_complete_does_not_abort_when_no_carrier_reachable`
@@ -70,11 +76,18 @@ pub(super) fn ensure_deployment_complete(
     workspace: &std::path::Path,
     repo_url: Option<&str>,
     session_id: &ManagedSessionId,
+    memory_reachable: Option<bool>,
 ) -> Result<(), String> {
     if workspace == std::path::Path::new("/unknown") || !workspace.is_dir() {
         return Ok(());
     }
-    let outcome = crate::core::deploy_validate::validate_and_repair(fw, workspace, repo_url);
+    // #7763: reuse the launch's own reachability verdict rather than re-probing.
+    let outcome = crate::core::deploy_validate::validate_and_repair_reusing_memory(
+        fw,
+        workspace,
+        repo_url,
+        memory_reachable,
+    );
     // Warn-only carrier-reachability self-check (issue #2231) — see its own
     // doc comment. Runs regardless of the completeness verdict below and can
     // NEVER turn this `Ok` branch into an `Err`; it only logs.
