@@ -3,8 +3,9 @@
 //! Why: `doctor/mod.rs` carries its tests inline and sits near the 500-SLOC
 //! cap, so the #4001 probe and verdict tests live beside `checks.rs` instead.
 //! What: drives [`check_daemon_health_at`] against in-process sockets that
-//! answer at once, answer slowly inside the budget, or accept and never answer,
-//! and pins [`summarize`]'s rule that an undetermined check is not a pass.
+//! answer at once, answer slowly inside the budget, answer without a health
+//! body, or accept and never answer, and pins [`summarize`]'s rule that an
+//! undetermined check is not a pass.
 //! Test: this IS the test module.
 
 use std::path::PathBuf;
@@ -20,6 +21,8 @@ use super::{check_daemon_health_at, summarize};
 enum Reply {
     /// Answer with a healthy body after this delay.
     After(Duration),
+    /// Answer at once with this raw frame.
+    Frame(&'static str),
     /// Accept the connection and never write a byte.
     Never,
 }
@@ -41,30 +44,38 @@ async fn stand_in(reply: Reply) -> (PathBuf, tempfile::TempDir, tokio::task::Joi
             match reply {
                 Reply::Never => held.push(stream),
                 Reply::After(delay) => {
-                    tokio::spawn(async move {
-                        let mut reader = BufReader::new(stream);
-                        let mut line = String::new();
-                        if reader.read_line(&mut line).await.is_err() {
-                            return;
-                        }
-                        tokio::time::sleep(delay).await;
-                        let body = serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "id": 1,
-                            "result": {
-                                "status": "ok",
-                                "daemon_state": "ready",
-                                "worker": {"in_flight": 0, "wedged": false},
-                            },
-                        });
-                        let frame = format!("{body}\n");
-                        let _ = reader.get_mut().write_all(frame.as_bytes()).await;
+                    let body = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": {
+                            "status": "ok",
+                            "daemon_state": "ready",
+                            "worker": {"in_flight": 0, "wedged": false},
+                        },
                     });
+                    tokio::spawn(answer_once(stream, delay, body.to_string()));
+                }
+                Reply::Frame(raw) => {
+                    tokio::spawn(answer_once(stream, Duration::ZERO, raw.to_string()));
                 }
             }
         }
     });
     (socket, tmp, task)
+}
+
+/// Read one request line from `stream`, wait `delay`, then write `frame` as one line.
+async fn answer_once(stream: tokio::net::UnixStream, delay: Duration, frame: String) {
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    if reader.read_line(&mut line).await.is_err() {
+        return;
+    }
+    tokio::time::sleep(delay).await;
+    let _ = reader
+        .get_mut()
+        .write_all(format!("{frame}\n").as_bytes())
+        .await;
 }
 
 /// Probe `socket` with `budget`, failing the test if the probe itself hangs.
@@ -98,6 +109,36 @@ async fn a_socket_that_accepts_and_never_answers_is_unknown_within_the_budget() 
         !summarize(&[result]).healthy,
         "a timed-out probe must not end the run healthy"
     );
+}
+
+/// Why (issue #4001, error arms): an answer that carries no readable health
+/// body has not shown that the workers are moving, so it must never end the
+/// run green.
+/// What: stand-ins answering with a JSON-RPC error, a frame with neither
+/// `result` nor `error`, and a frame that is not JSON; asserts `Fail`,
+/// `Unknown` and `Fail`, and that none summarizes as a healthy run.
+/// Test: itself.
+#[tokio::test]
+async fn an_answer_without_a_health_body_is_never_a_healthy_run() {
+    let cases = [
+        (
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"boom"}}"#,
+            CheckStatus::Fail,
+        ),
+        (r#"{"jsonrpc":"2.0","id":1}"#, CheckStatus::Unknown),
+        ("not json", CheckStatus::Fail),
+    ];
+    for (frame, expected) in cases {
+        let (socket, _tmp, task) = stand_in(Reply::Frame(frame)).await;
+        let result = probe(&socket, Duration::from_secs(2)).await;
+        task.abort();
+
+        assert_eq!(result.status, expected, "frame {frame}: {result:?}");
+        assert!(
+            !summarize(&[result]).healthy,
+            "frame {frame} must not end the run healthy"
+        );
+    }
 }
 
 /// Why (issue #4001, no false alarm): the fix must still let a responsive

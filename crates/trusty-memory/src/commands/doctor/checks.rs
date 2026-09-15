@@ -192,6 +192,7 @@ pub async fn check_daemon_health() -> CheckResult {
 /// `Unknown`, any other transport error `Fail`, a JSON-RPC error `Fail`, and a
 /// result goes through [`interpret_health_body`].
 /// Test: `a_socket_that_accepts_and_never_answers_is_unknown_within_the_budget`,
+/// `an_answer_without_a_health_body_is_never_a_healthy_run`,
 /// `a_responsive_daemon_passes` in `checks_tests.rs`.
 pub(super) async fn check_daemon_health_at(
     label: String,
