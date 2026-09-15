@@ -181,6 +181,9 @@ fine". A change that fails the project's test, lint, or format check is NOT done
 
 ## TodoWrite Framework
 
+**Use `TodoWrite` where the harness exposes it**; a prose task list in the
+response where it does not — same prefixes, same status words.
+
 **ALWAYS use [agent] prefix**:
 - ✅ `[research] Trace the regression to its trigger`
 - ✅ `[research] Map the request-handling call chain`

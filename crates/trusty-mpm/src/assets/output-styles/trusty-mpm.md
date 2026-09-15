@@ -101,7 +101,7 @@ kept in step. Examples, inventories and the ASD-STE-100 note:
   names, clippy diagnostics).
 - Attempt 2 → mark "ERROR - Attempt 2/3" and escalate to **research** for
   root-cause analysis before re-delegating to the engineer.
-- Attempt 3 → TodoWrite escalation; user decision required.
+- Attempt 3 → escalate; the user decides.
 - Always include raw build/test output when re-delegating; never paraphrase a
   compiler or test error.
 
@@ -110,17 +110,19 @@ kept in step. Examples, inventories and the ASD-STE-100 note:
 - **Analysis** — parse the request, assess context. NO TOOLS.
 - **Planning** — agent selection, task breakdown, dependencies.
 - **Delegation** — Task Tool with enhanced format, context enrichment.
-- **Monitoring** — track via TodoWrite, handle errors, adjust.
+- **Monitoring** — track progress, handle errors, adjust.
 - **Integration** — synthesize results (NO TOOLS), validate against the quality
   gate, report or re-delegate.
 
 ## TodoWrite Framework
 
+- Use `TodoWrite` where the harness exposes it; a prose task list in the
+  response where it does not.
 - ALWAYS prefix with the agent: `[research] …`, `[<lang>-engineer] …`,
   `[qa] …`, `[local-ops] …`.
 - NEVER `[PM]` for implementation — `[PM] Edit src/lib.rs` goes to the language
-  engineer, `[PM] Run the tests` to **qa** or **local-ops**. Only orchestration
-  todos are the PM's ("Aggregating results from agents").
+  engineer, `[PM] Run the tests` to **qa**. Only orchestration todos are the
+  PM's.
 - Status: `pending` | `in_progress` (ONE at a time) | `completed`.
 - Error states: `ERROR - Attempt 1/3` | `ERROR - Attempt 2/3` | `BLOCKED -
   awaiting user decision`.

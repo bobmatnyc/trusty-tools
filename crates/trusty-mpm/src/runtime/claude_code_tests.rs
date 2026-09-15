@@ -437,7 +437,7 @@ fn spawn_command_without_token_pins_the_exact_command() {
     let expected = format!(
         "cd '/tmp/ws' && {{ export TM_MANAGED_SESSION_ID='{TEST_SESSION_ID}'; \
              {clock}env -u ANTHROPIC_API_KEY{scrub} {managed} \
-             CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 claude \
+             CLAUDE_CODE_ENABLE_TODO_TOOLS=1 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 claude \
              --setting-sources project,local --dangerously-skip-permissions{dispatch}; }}"
     );
     assert_eq!(cmd, expected, "no-token command shape must stay pinned");
@@ -570,6 +570,75 @@ fn env_bin_prefix_orders_auto_memory_before_the_config_dir() {
     assert!(
         scrub_end < auto && auto < config,
         "auto-memory must follow every -u flag and precede CLAUDE_CONFIG_DIR: {prefix}"
+    );
+}
+
+#[test]
+fn env_bin_prefix_enables_todo_tools_unconditionally() {
+    // #8066: the variable name is HARD-CODED, for the same reason the
+    // auto-memory tests hard-code theirs — deriving it from production code
+    // would let the assertion pass against an emptied constant. Unlike auto
+    // memory, no argument may switch this one off: Claude Code's model gate
+    // leaves a non-listed model with no TodoWrite at all without it. The
+    // position is pinned too, since POSIX `env` stops parsing options at the
+    // first `NAME=VALUE`.
+    for reachable in [true, false] {
+        let prefix = env_bin_prefix("claude", Some(Path::new("/tmp/cfg")), None, &[], reachable);
+        let todo = prefix
+            .find("CLAUDE_CODE_ENABLE_TODO_TOOLS=1")
+            .unwrap_or_else(|| {
+                panic!("todo tools must be enabled (reachable={reachable}): {prefix}")
+            });
+        let scrub_end = prefix
+            .rfind("-u ")
+            .expect("the scrub flags must be present in the prefix");
+        let config = prefix
+            .find("CLAUDE_CONFIG_DIR=")
+            .expect("the config dir must be present");
+        assert!(
+            scrub_end < todo && todo < config,
+            "todo tools must follow every -u flag and precede CLAUDE_CONFIG_DIR: {prefix}"
+        );
+    }
+}
+
+#[test]
+fn spawn_command_enables_todo_tools() {
+    // #8066: the whole spawn surface, not only the prefix builder — a caller
+    // that assembled the command some other way would still lose the tool.
+    let cmd = spawn_command(
+        Path::new(TEST_CWD),
+        "claude",
+        None,
+        TEST_SESSION_ID,
+        None,
+        None,
+        None,
+        &[],
+    );
+    assert!(
+        cmd.contains("CLAUDE_CODE_ENABLE_TODO_TOOLS=1"),
+        "spawn must enable Claude Code's todo tools: {cmd}"
+    );
+}
+
+#[test]
+fn resume_command_enables_todo_tools() {
+    // A resumed session is the same session; it must carry the same directive.
+    let cmd = resume_command(
+        Path::new(TEST_CWD),
+        "claude",
+        None,
+        Some("abc-123"),
+        TEST_SESSION_ID,
+        None,
+        None,
+        None,
+        &[],
+    );
+    assert!(
+        cmd.contains("CLAUDE_CODE_ENABLE_TODO_TOOLS=1"),
+        "resume must enable Claude Code's todo tools: {cmd}"
     );
 }
 
@@ -838,7 +907,7 @@ fn resume_command_without_token_pins_the_exact_command() {
     let expected = format!(
         "cd '/tmp/ws' && {{ export TM_MANAGED_SESSION_ID='{TEST_SESSION_ID}'; \
              {clock}env -u ANTHROPIC_API_KEY{scrub} {managed} \
-             CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 claude \
+             CLAUDE_CODE_ENABLE_TODO_TOOLS=1 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 claude \
              --setting-sources project,local --dangerously-skip-permissions --resume abc-123\
              {dispatch}; }}"
     );

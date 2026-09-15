@@ -1795,6 +1795,26 @@ fn the_default_output_style_stays_within_its_resident_budget() {
     );
 }
 
+#[test]
+fn output_styles_name_the_todowrite_fallback() {
+    // #2799: every bundled style used to mandate `TodoWrite` unconditionally, so
+    // a PM on a harness that does not expose it announced the gap and improvised
+    // its own tracking. The section must state the CONDITION and the fallback;
+    // pinning both halves keeps a future trim from dropping one of them.
+    for style in OUTPUT_STYLES {
+        assert!(
+            style.content.contains("where the harness exposes it"),
+            "{}: the TodoWrite section must make the tool conditional (#2799)",
+            style.id
+        );
+        assert!(
+            style.content.contains("prose task list"),
+            "{}: the TodoWrite section must name the prose fallback (#2799)",
+            style.id
+        );
+    }
+}
+
 /// The resident budget every deployed agent body is measured against.
 ///
 /// Issue #7723 (epic #7681): composed rust-engineer (BASE-AGENT +
