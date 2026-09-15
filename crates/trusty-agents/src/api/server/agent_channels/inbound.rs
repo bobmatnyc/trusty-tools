@@ -136,6 +136,15 @@ pub(crate) struct InboundOutcome {
     /// Matching bindings the budget refused, counted by
     /// [`crate::channels::status::record_rate_limited`].
     pub(crate) rate_limited: usize,
+    /// Which source selected the last assistant a channel was chosen for.
+    ///
+    /// Why (#7609): `listeners::poll` logs which inbound path a message took,
+    /// and a legacy `[[listeners]]` binding handled HERE must be named as such
+    /// so the log does not read as if the listener wake had run too. `None`
+    /// beside `claimed` means a binding owns the destination but nothing was
+    /// selected — a disabled binding, or a filter that rejected the event.
+    /// Test: `the_izzie_fixture_wakes_once_for_an_inbox_message`.
+    pub(crate) source: Option<crate::channels::dispatch::WakeSource>,
 }
 
 /// Starting the assistant turn one prepared inbound event becomes.
@@ -274,13 +283,33 @@ pub(crate) async fn receive_inbound(
     budget: &mut DispatchBudget,
 ) -> InboundOutcome {
     let dirs = crate::agents::agents_dir_candidates();
-    let Ok(names) = crate::listeners::wake::candidate_agent_names().await else {
+    let Some(names) = roster_or_warn(
+        crate::listeners::wake::candidate_agent_names().await,
+        provider,
+    ) else {
         return InboundOutcome::default();
     };
+    // #7609: the harness-wide channels, read ONCE per event — `route_to` and
+    // the overlay allowance are both properties of this list.
+    let globals = crate::mcp::config::GlobalConfig::load().await.channels;
+    for (id, unroutable) in crate::channels::dispatch::unknown_routes(&globals, &names) {
+        tracing::warn!(
+            channel = %id,
+            assistant = %unroutable,
+            "channel inbound: `route_to` names an assistant this host does not have; it wakes nobody (#7609)"
+        );
+    }
     let mut loaded = Vec::new();
     for name in names {
-        if let Ok((_, _, bindings)) = load_at(&dirs, &name).await {
-            loaded.push((name, bindings));
+        match load_at_with(&dirs, &name, &globals).await {
+            Ok((_, _, mut bindings)) => {
+                absorb_unstored_overlays(&mut bindings, &dirs, &name).await;
+                loaded.push((name, bindings));
+            }
+            Err((status, body)) => tracing::warn!(
+                assistant = %name, %status, error = %body.0,
+                "channel inbound: this assistant's channels could not be read; it claims nothing"
+            ),
         }
     }
     receive_inbound_at(
@@ -292,9 +321,109 @@ pub(crate) async fn receive_inbound(
         user,
         allowed_personas,
         budget,
+        &globals,
         &SpawnDispatch,
     )
     .await
+}
+
+/// The assistant roster, or `None` with a warning when it cannot be read.
+///
+/// Why (#7609): the enumeration failure used to be absorbed into an all-false
+/// [`InboundOutcome`] with no log at all, which is indistinguishable from "no
+/// assistant is bound to this destination" — the event was dropped and nothing
+/// said so. Splitting the decision out is what lets a test state it, because
+/// [`crate::listeners::wake::candidate_agent_names`] cannot be made to fail
+/// from outside.
+/// Test: `an_unreadable_roster_is_logged_and_claims_nothing`.
+fn roster_or_warn(names: anyhow::Result<Vec<String>>, provider: &str) -> Option<Vec<String>> {
+    match names {
+        Ok(names) => Some(names),
+        Err(e) => {
+            tracing::warn!(
+                %provider, error = %e,
+                "channel inbound: the assistant roster could not be enumerated; nothing claimed"
+            );
+            None
+        }
+    }
+}
+
+/// Add any overlay that is still only in `agent.toml` to this assistant's
+/// bindings.
+///
+/// Why (#7609): a `[[listeners]]` binding absorbed at parse time lives in
+/// `AgentConfig::channels`, not in `<name>.channels.json` — and the one-shot
+/// that would store it only runs when that file is ABSENT, so an assistant
+/// which already has a saved channel keeps its legacy binding in `agent.toml`
+/// indefinitely. The `[[listeners]]` wake read it from there; source (3) has to
+/// see exactly the same list or the deprecation window drops a live wake.
+/// What: appends every Assistant-scope channel with no destination whose `id`
+/// the stored bindings do not already carry. The stored record wins, because it
+/// is the migrated form of the same thing — which is what lets the UI DISABLE
+/// an overlay `agent.toml` still enables.
+///
+/// #7609 review: `dirs` is the caller's already-resolved candidate list rather
+/// than a second `agents_dir_candidates()` read inside the loader, so a test
+/// can point this at a fixture directory. The by-name load is synchronous, so
+/// it runs on the blocking pool.
+/// Test: `an_unreadable_agent_manifest_is_logged_and_absorbs_nothing`.
+async fn absorb_unstored_overlays(bindings: &mut Vec<Binding>, dirs: &[PathBuf], name: &str) {
+    let (dirs, agent) = (dirs.to_vec(), name.to_string());
+    let loaded = match tokio::task::spawn_blocking(move || {
+        crate::agents::AgentConfig::by_name_in(&dirs, &agent)
+    })
+    .await
+    {
+        Ok(loaded) => loaded,
+        Err(e) => Err(anyhow::Error::from(e)),
+    };
+    let Some(cfg) = manifest_or_warn(loaded, name) else {
+        return;
+    };
+    absorb_overlays(bindings, &cfg.channels);
+}
+
+/// The assistant's manifest, or `None` with a warning when it cannot be read.
+///
+/// Why (#7609 review): `let Ok(cfg) = … else { return }` was a silent
+/// fail-open. An `agent.toml` that will not parse dropped the legacy overlay,
+/// the Gmail cursor still advanced past the message, and the only log line said
+/// the event matched nothing — the same defect shape [`roster_or_warn`] was
+/// split out to fix, one function below it.
+/// Test: `an_unreadable_agent_manifest_is_logged_and_absorbs_nothing`.
+fn manifest_or_warn(
+    loaded: anyhow::Result<crate::agents::AgentConfig>,
+    name: &str,
+) -> Option<crate::agents::AgentConfig> {
+    match loaded {
+        Ok(cfg) => Some(cfg),
+        Err(e) => {
+            tracing::warn!(
+                assistant = %name, error = %e,
+                "channel inbound: this assistant's manifest could not be read; its legacy \
+                 `[[listeners]]` overlay claims nothing this event (#7609)"
+            );
+            None
+        }
+    }
+}
+
+/// Append every unstored overlay in `channels` to `bindings`.
+///
+/// What: the pure half of [`absorb_unstored_overlays`] — an Assistant-scope
+/// channel with no destination whose `id` is not already stored.
+/// Test: `an_unreadable_agent_manifest_is_logged_and_absorbs_nothing`.
+fn absorb_overlays(bindings: &mut Vec<Binding>, channels: &[crate::channels::Channel]) {
+    for channel in channels {
+        if channel.scope != crate::channels::ChannelScope::Assistant
+            || !channel.target.is_empty()
+            || bindings.iter().any(|binding| binding.id == channel.id)
+        {
+            continue;
+        }
+        bindings.push(Binding::from(channel));
+    }
 }
 
 /// [`receive_inbound`] over already-loaded bindings and an injected dispatcher.
@@ -309,8 +438,16 @@ pub(crate) async fn receive_inbound(
 /// A binding the budget refuses is counted on the binding and left alone — the
 /// event is already durably in the store, and it is still reported as `claimed`
 /// so the listener wake does not pick up what a binding owns.
+///
+/// #7609: the per-assistant choice is no longer "does one of its own bindings
+/// address this". [`crate::channels::dispatch::select_source`] picks ONE of
+/// three sources — the assistant's own channel, a global channel routing to it,
+/// or its legacy absorbed `[[listeners]]` binding — so every provider that
+/// reaches this function gets global routing on the same terms, and no
+/// assistant can be woken twice for one event.
 /// Test: `gworkspace_binding_dispatches_once_per_poll_cycle`,
-/// `a_failed_wake_prompt_leaves_the_cycle_dispatch_for_the_next_binding`.
+/// `a_failed_wake_prompt_leaves_the_cycle_dispatch_for_the_next_binding`,
+/// `a_routed_global_and_its_legacy_binding_wake_once`.
 #[allow(clippy::too_many_arguments)]
 async fn receive_inbound_at(
     loaded: &[(String, Vec<Binding>)],
@@ -321,21 +458,46 @@ async fn receive_inbound_at(
     user: &crate::rbac::UserIdentity,
     allowed_personas: Option<&[String]>,
     budget: &mut DispatchBudget,
+    globals: &[crate::channels::Channel],
     dispatcher: &dyn InboundDispatch,
 ) -> InboundOutcome {
     let mut outcome = InboundOutcome::default();
     for (name, bindings) in loaded {
-        let (bound, binding) = receive_selection(
-            bindings,
-            provider,
-            channel,
-            event,
-            allowed_personas.is_none_or(|allowed| allowed.iter().any(|v| v == name)),
+        let allowed = allowed_personas.is_none_or(|allowed| allowed.iter().any(|v| v == name));
+        let (bound, own) = receive_selection(bindings, provider, channel, event, allowed);
+        let sources = if allowed {
+            let channels: Vec<crate::channels::Channel> = bindings
+                .iter()
+                .map(crate::channels::Channel::from)
+                .collect();
+            crate::channels::dispatch::route_sources(
+                globals, &channels, name, provider, channel, event,
+            )
+        } else {
+            crate::channels::dispatch::RouteSources::default()
+        };
+        let source = crate::channels::dispatch::select_source(
+            own.is_some(),
+            sources.routed.is_some(),
+            sources.legacy.is_some(),
         );
-        outcome.claimed |= bound;
-        let Some(binding) = binding else {
+        // #7609 review: a global or overlay that ADDRESSES this event claims it
+        // even when it wakes nobody, exactly as a disabled binding does on
+        // source (1) — otherwise `poll_once` falls through to the
+        // `[[listeners]]` wake, which reads the still-enabled `agent.toml`
+        // binding and wakes anyway.
+        outcome.claimed |= bound || sources.claimed;
+        let selected = match source {
+            crate::channels::dispatch::WakeSource::AssistantChannel => own.cloned(),
+            crate::channels::dispatch::WakeSource::GlobalRouteTo => sources.routed,
+            crate::channels::dispatch::WakeSource::LegacyBinding => sources.legacy,
+            crate::channels::dispatch::WakeSource::NoWake => None,
+        };
+        let Some(binding) = selected else {
             continue;
         };
+        outcome.source = Some(source);
+        let binding = &binding;
         let wake = dispatcher
             .prepare(
                 binding,
@@ -478,10 +640,10 @@ mod receive_tests {
         // A receive-enabled gworkspace binding saves. Pre-change this is the
         // first failure: `adapter("gworkspace")` was `None`, so `validate`
         // answered "Unsupported channel provider".
-        assert!(binding.validate().is_ok());
+        assert!(binding.validate_in(&[]).is_ok());
         let mut wrong_target = binding.clone();
         wrong_target.target = "alice@example.com".into();
-        assert!(wrong_target.validate().is_err());
+        assert!(wrong_target.validate_in(&[]).is_err());
 
         // Sending is a separate permission from receiving: this binding never
         // set `send_enabled`, so `authorized` refuses a send on it.
@@ -628,6 +790,7 @@ mod receive_tests {
                     &user,
                     None,
                     &mut budget,
+                    &[],
                     &dispatcher,
                 )
                 .await,
@@ -639,7 +802,8 @@ mod receive_tests {
             InboundOutcome {
                 claimed: true,
                 dispatched: true,
-                rate_limited: 0
+                rate_limited: 0,
+                source: Some(crate::channels::dispatch::WakeSource::AssistantChannel),
             }
         );
         assert_eq!(
@@ -647,7 +811,8 @@ mod receive_tests {
             InboundOutcome {
                 claimed: true,
                 dispatched: false,
-                rate_limited: 1
+                rate_limited: 1,
+                source: Some(crate::channels::dispatch::WakeSource::AssistantChannel),
             },
             "the second message belongs to the binding but must not buy a turn"
         );
@@ -726,6 +891,7 @@ mod receive_tests {
             &user,
             None,
             &mut budget,
+            &[],
             &dispatcher,
         )
         .await;
@@ -735,7 +901,8 @@ mod receive_tests {
             InboundOutcome {
                 claimed: true,
                 dispatched: true,
-                rate_limited: 0
+                rate_limited: 0,
+                source: Some(crate::channels::dispatch::WakeSource::AssistantChannel),
             },
             "the failed prompt must not be charged to the cycle, and must not \
              rate-limit the binding behind it"
@@ -777,5 +944,471 @@ mod receive_tests {
         assert!(per_event.take());
         assert!(per_event.take());
         assert!(!per_event.is_spent());
+    }
+
+    // ---------------------------------------------------------------------
+    // #7609 slice 4: global routing, the legacy binding, and the guarantee
+    // that one event buys exactly one wake per assistant.
+    // ---------------------------------------------------------------------
+
+    use crate::channels::dispatch::WakeSource;
+    use crate::channels::{Channel, ChannelScope};
+
+    /// The live global gmail channel: account-wide, INBOX ingest,
+    /// `bob-personal`.
+    fn global_gmail(route_to: &[&str]) -> Channel {
+        Channel {
+            id: "gmail-personal".into(),
+            name: "gmail-personal".into(),
+            provider: "gmail".into(),
+            scope: ChannelScope::Global,
+            enabled: true,
+            receive_enabled: true,
+            credential_ref: Some("gmail/bob-personal".into()),
+            ingest_filter: crate::listeners::config::ListenerFilter {
+                label_ids: vec!["INBOX".into()],
+            },
+            route_to: route_to.iter().copied().map(String::from).collect(),
+            ..Channel::default()
+        }
+    }
+
+    /// Izzie's absorbed `[[listeners]]` binding, as `absorb_unstored_overlays`
+    /// hands it to the inbound loop: no destination, no provider of its own.
+    fn izzie_overlay() -> Binding {
+        serde_json::from_value(json!({
+            "id":"gmail-personal","name":"gmail-personal","provider":"","target":"",
+            "enabled":true,"receive_enabled":true,
+            "event_types":["message.received"],
+            "filter":{"from":["*"],"exclude_labels":["CATEGORY_PROMOTIONS"]}
+        }))
+        .unwrap()
+    }
+
+    fn gmail_event(labels: &[&str]) -> crate::listeners::store::StoredEvent {
+        crate::listeners::store::StoredEvent {
+            id: "gmail-personal:19abc".into(),
+            listener_id: "gmail-personal".into(),
+            provider: "gmail".into(),
+            event_type: "message.received".into(),
+            ts: "2026-09-14T00:00:00Z".into(),
+            from: Some("Alice <alice@example.com>".into()),
+            subject: Some("Dinner".into()),
+            snippet: Some("Are we still on?".into()),
+            included: true,
+            labels: labels.iter().copied().map(String::from).collect(),
+        }
+    }
+
+    fn gworkspace_identity() -> crate::rbac::UserIdentity {
+        crate::rbac::UserIdentity::new(
+            "gworkspace:gmail-personal".to_string(),
+            "Alice".to_string(),
+            crate::rbac::ServiceTier::default(),
+        )
+    }
+
+    /// One Gmail message through the whole inbound loop, with the dispatches it
+    /// produced.
+    async fn dispatches(
+        loaded: &[(String, Vec<Binding>)],
+        globals: &[Channel],
+        event: &crate::listeners::store::StoredEvent,
+    ) -> (InboundOutcome, Vec<(String, String)>) {
+        let destination = event.from.clone().unwrap_or_default();
+        dispatches_via("gworkspace", &destination, loaded, globals, event).await
+    }
+
+    /// [`dispatches`] for a provider other than Gmail — #7609 review HIGH-3
+    /// needs a Slack destination, which is not the event's `from`.
+    async fn dispatches_via(
+        provider: &str,
+        destination: &str,
+        loaded: &[(String, Vec<Binding>)],
+        globals: &[Channel],
+        event: &crate::listeners::store::StoredEvent,
+    ) -> (InboundOutcome, Vec<(String, String)>) {
+        let dispatcher = RecordingDispatch::default();
+        let mut budget = DispatchBudget::one_per_cycle();
+        let outcome = receive_inbound_at(
+            loaded,
+            provider,
+            destination,
+            event,
+            std::path::Path::new("/nonexistent"),
+            &gworkspace_identity(),
+            None,
+            &mut budget,
+            globals,
+            &dispatcher,
+        )
+        .await;
+        (outcome, dispatcher.dispatched.into_inner().unwrap())
+    }
+
+    /// The live izzie fixture, BEFORE the `route_to` backfill: an INBOX message
+    /// wakes her exactly once through the legacy binding, and a
+    /// `CATEGORY_PROMOTIONS` message wakes nobody at all.
+    ///
+    /// Why: this is the one configuration a live assistant depends on. Before
+    /// slice 4 it reached her through `listeners::wake`, because her binding
+    /// was only in `agent.toml`; it reaches her through the channel path now,
+    /// and the count on each side of that move has to be identical.
+    #[tokio::test]
+    async fn the_izzie_fixture_wakes_once_for_an_inbox_message() {
+        let loaded = vec![("fixture-izzie-legacy".to_string(), vec![izzie_overlay()])];
+        let globals = vec![global_gmail(&[])];
+
+        let (outcome, dispatched) = dispatches(&loaded, &globals, &gmail_event(&["INBOX"])).await;
+        assert_eq!(
+            outcome,
+            InboundOutcome {
+                claimed: true,
+                dispatched: true,
+                rate_limited: 0,
+                source: Some(WakeSource::LegacyBinding),
+            }
+        );
+        assert_eq!(
+            dispatched,
+            vec![(
+                "fixture-izzie-legacy".to_string(),
+                "gmail-personal".to_string()
+            )]
+        );
+
+        let (outcome, dispatched) =
+            dispatches(&loaded, &globals, &gmail_event(&["CATEGORY_PROMOTIONS"])).await;
+        assert_eq!(
+            outcome,
+            InboundOutcome {
+                claimed: true,
+                dispatched: false,
+                rate_limited: 0,
+                source: None,
+            },
+            "#7609 review: the overlay OWNS this channel, so the excluded label \
+             is answered HERE — the listener wake no longer gets a second \
+             opinion on a binding an operator may have narrowed since"
+        );
+        assert!(dispatched.is_empty(), "an excluded label must buy no turn");
+    }
+
+    /// The SAME fixture AFTER the `route_to` backfill: one wake, not two.
+    ///
+    /// Why (#7609, the (2)-excludes-(3) rule): the backfill leaves both a
+    /// global naming izzie in `route_to` AND the legacy binding it was derived
+    /// from. Letting each fire independently wakes her twice for one message —
+    /// two prompts, two model turns, against a cycle budget of one.
+    ///
+    /// What this test pins is the END of that rule: `source` is
+    /// `GlobalRouteTo`, exactly one turn is dispatched, and the overlay's own
+    /// filter still governs after the backfill. The `(routed, legacy)` pair
+    /// itself is asserted by
+    /// `a_routed_global_excludes_the_legacy_binding_for_the_same_pair`, which
+    /// is the test that fails if `route_sources` returns both candidates —
+    /// this one cannot, because `select_source` collapses that pair to one
+    /// wake regardless (#7609 review MEDIUM-1: the comment here used to claim
+    /// otherwise).
+    #[tokio::test]
+    async fn a_routed_global_and_its_legacy_binding_wake_once() {
+        let loaded = vec![("fixture-izzie-routed".to_string(), vec![izzie_overlay()])];
+        let globals = vec![global_gmail(&["fixture-izzie-routed"])];
+
+        let (outcome, dispatched) = dispatches(&loaded, &globals, &gmail_event(&["INBOX"])).await;
+        assert_eq!(
+            outcome,
+            InboundOutcome {
+                claimed: true,
+                dispatched: true,
+                rate_limited: 0,
+                source: Some(WakeSource::GlobalRouteTo),
+            },
+            "the routed global is the one source that fires"
+        );
+        assert_eq!(
+            dispatched,
+            vec![(
+                "fixture-izzie-routed".to_string(),
+                "gmail-personal".to_string()
+            )],
+            "exactly one wake: the legacy binding for the same pair must not \
+             also dispatch"
+        );
+
+        // The overlay's filter still governs after the backfill, and the pair
+        // still claims the message it refused to wake for (#7609 review).
+        let (outcome, dispatched) =
+            dispatches(&loaded, &globals, &gmail_event(&["CATEGORY_PROMOTIONS"])).await;
+        assert_eq!(
+            outcome,
+            InboundOutcome {
+                claimed: true,
+                dispatched: false,
+                rate_limited: 0,
+                source: None,
+            }
+        );
+        assert!(dispatched.is_empty());
+    }
+
+    /// `route_to` never follows a message to a provider it does not own, and a
+    /// targeted Slack binding still claims its own DM through source (1) alone.
+    #[tokio::test]
+    async fn the_cto_assistant_slack_binding_still_claims_its_dm() {
+        let dm: Binding = serde_json::from_value(json!({
+            "id":"cto-dm","name":"CTO DM","provider":"slack","target":"D0AM8GWJLFR",
+            "enabled":true,"receive_enabled":true,"credential_ref":"slack"
+        }))
+        .unwrap();
+        let loaded = vec![
+            ("fixture-cto".to_string(), vec![dm]),
+            ("fixture-izzie-dm".to_string(), vec![izzie_overlay()]),
+        ];
+        // A global gmail channel routing to izzie must not follow a Slack
+        // message anywhere.
+        let globals = vec![global_gmail(&["fixture-izzie-dm"])];
+        let event = crate::listeners::store::StoredEvent {
+            id: "slack:D0AM8GWJLFR:1".into(),
+            listener_id: "slack".into(),
+            provider: "slack".into(),
+            event_type: "message.im".into(),
+            ts: "2026-09-14T00:00:00Z".into(),
+            from: Some("Masa".into()),
+            subject: None,
+            snippet: Some("standup?".into()),
+            included: true,
+            labels: vec![],
+        };
+        let dispatcher = RecordingDispatch::default();
+        let mut budget = DispatchBudget::PerEvent;
+        let outcome = receive_inbound_at(
+            &loaded,
+            "slack",
+            "D0AM8GWJLFR",
+            &event,
+            std::path::Path::new("/nonexistent"),
+            &gworkspace_identity(),
+            None,
+            &mut budget,
+            &globals,
+            &dispatcher,
+        )
+        .await;
+        assert_eq!(outcome.source, Some(WakeSource::AssistantChannel));
+        assert_eq!(
+            dispatcher.dispatched.into_inner().unwrap(),
+            vec![("fixture-cto".to_string(), "cto-dm".to_string())],
+            "only the binding that names this DM claims it"
+        );
+    }
+
+    /// A Slack global channel, addressed by its own `target`.
+    fn slack_global(target: &str, route_to: &[&str]) -> Channel {
+        Channel {
+            id: "slack".into(),
+            name: "Team Slack".into(),
+            provider: "slack".into(),
+            scope: ChannelScope::Global,
+            target: target.into(),
+            enabled: true,
+            receive_enabled: true,
+            route_to: route_to.iter().copied().map(String::from).collect(),
+            ..Channel::default()
+        }
+    }
+
+    fn slack_event(channel: &str) -> crate::listeners::store::StoredEvent {
+        crate::listeners::store::StoredEvent {
+            id: format!("slack:{channel}:1"),
+            listener_id: "slack".into(),
+            provider: "slack".into(),
+            event_type: "message.channel".into(),
+            ts: "2026-09-14T00:00:00Z".into(),
+            from: Some("Masa".into()),
+            subject: None,
+            snippet: Some("standup?".into()),
+            included: true,
+            labels: vec![],
+        }
+    }
+
+    /// An overlay the operator DISABLED still claims the event, so nothing
+    /// wakes for it — not the channel path, and not the `[[listeners]]` wake.
+    ///
+    /// Why (#7609 review HIGH-1): `PUT /api/agents/{name}/channels` writes the
+    /// disabled overlay to `channels.json`, but `agent.toml` still carries the
+    /// enabled `[[listeners]]` binding it was absorbed from. `claimed: false`
+    /// sends the event down `WakePath::Listener`, where `wake_bound_agents`
+    /// reads that stale binding and wakes anyway — so disabling a channel in
+    /// the UI changed nothing at all.
+    ///
+    /// Pre-fix (886d4afdc) this fails on both halves with `claimed: false`:
+    /// `route_sources` returned `(None, None)` from the `enabled` gate and the
+    /// caller had no other way to learn the overlay existed.
+    #[tokio::test]
+    async fn a_disabled_overlay_claims_the_event_and_wakes_nobody() {
+        let off = || Binding {
+            enabled: false,
+            ..izzie_overlay()
+        };
+        let suppressed = InboundOutcome {
+            claimed: true,
+            dispatched: false,
+            rate_limited: 0,
+            source: None,
+        };
+        // Backfilled: the global routes to her AND she still has the overlay.
+        let loaded = vec![("fixture-izzie-off".to_string(), vec![off()])];
+        let (outcome, dispatched) = dispatches(
+            &loaded,
+            &[global_gmail(&["fixture-izzie-off"])],
+            &gmail_event(&["INBOX"]),
+        )
+        .await;
+        assert_eq!(outcome, suppressed);
+        assert!(dispatched.is_empty());
+
+        // Not yet backfilled: the legacy binding alone, disabled. This is the
+        // shape `wake_bound_agents` would otherwise pick up.
+        let (outcome, dispatched) =
+            dispatches(&loaded, &[global_gmail(&[])], &gmail_event(&["INBOX"])).await;
+        assert_eq!(outcome, suppressed);
+        assert!(dispatched.is_empty());
+    }
+
+    /// A Slack global's `route_to` follows only the destination the global
+    /// actually names.
+    ///
+    /// Why (#7609 review HIGH-3): every Slack message the bot sees arrives with
+    /// `listener_id: "slack"`, so keying the global only on that id made one
+    /// `route_to` entry a wake for EVERY channel in the workspace — the
+    /// global's own `target` was never consulted.
+    ///
+    /// Pre-fix (886d4afdc) the second half fails: `COTHER` dispatches too.
+    #[tokio::test]
+    async fn a_slack_global_routes_only_to_its_own_destination() {
+        let assistant = "fixture-slack-routed";
+        let loaded = vec![(assistant.to_string(), Vec::new())];
+        let globals = vec![slack_global("C123", &[assistant])];
+
+        let (outcome, dispatched) =
+            dispatches_via("slack", "C123", &loaded, &globals, &slack_event("C123")).await;
+        assert_eq!(outcome.source, Some(WakeSource::GlobalRouteTo));
+        assert_eq!(
+            dispatched,
+            vec![(assistant.to_string(), "slack".to_string())]
+        );
+
+        let (outcome, dispatched) =
+            dispatches_via("slack", "COTHER", &loaded, &globals, &slack_event("COTHER")).await;
+        assert_eq!(
+            outcome,
+            InboundOutcome::default(),
+            "a channel the global does not name is not this assistant's message"
+        );
+        assert!(dispatched.is_empty());
+    }
+
+    /// A send-only global wakes nobody it routes to.
+    ///
+    /// Why (#7609 review HIGH-5): `receive_enabled` is the operator saying this
+    /// channel does not deliver incoming updates. Source (1) has always checked
+    /// it; sources (2) and (3) did not, so a send-only global with `route_to`
+    /// names woke every one of them.
+    ///
+    /// Pre-fix (886d4afdc) this fails with `dispatched: true` and
+    /// `source: Some(GlobalRouteTo)`.
+    #[tokio::test]
+    async fn a_send_only_global_wakes_nobody_it_routes_to() {
+        let assistant = "fixture-izzie-send-only";
+        let global = Channel {
+            receive_enabled: false,
+            ..global_gmail(&[assistant])
+        };
+        let loaded = vec![(assistant.to_string(), vec![izzie_overlay()])];
+        let (outcome, dispatched) = dispatches(&loaded, &[global], &gmail_event(&["INBOX"])).await;
+        assert_eq!(
+            outcome,
+            InboundOutcome {
+                claimed: true,
+                dispatched: false,
+                rate_limited: 0,
+                source: None,
+            }
+        );
+        assert!(dispatched.is_empty());
+    }
+
+    /// An `agent.toml` that will not parse is LOGGED and absorbs nothing; a
+    /// healthy one still hands its legacy overlay to the inbound loop, and a
+    /// stored record of the same id wins over it.
+    ///
+    /// Why (#7609 review HIGH-2): the silent `let Ok(cfg) = … else { return }`
+    /// dropped the legacy overlay of an assistant whose manifest had a typo.
+    /// The event then matched nothing, the Gmail cursor advanced past it, and
+    /// the only log line said "no match" — a live wake lost with no signal.
+    /// The stored-record half is what makes disabling an overlay in the UI
+    /// stick while `agent.toml` still enables it.
+    #[tokio::test]
+    async fn an_unreadable_agent_manifest_is_logged_and_absorbs_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dirs = [dir.path().to_path_buf()];
+        std::fs::write(dir.path().join("fixture-broken.toml"), "[agent\nname = ")
+            .expect("fixture write");
+        std::fs::write(
+            dir.path().join("fixture-legacy.toml"),
+            "[agent]\nname = \"fixture-legacy\"\nrole = \"assistant\"\nmodel = \"\"\n\
+             description = \"\"\n\n[llm]\ntemperature = 0.0\nmax_tokens = 1024\n\n\
+             [system_prompt]\ncontent = \"x\"\n\n[[listeners]]\n\
+             name = \"gmail-personal\"\nenabled = true\n",
+        )
+        .expect("fixture write");
+
+        // The warn arm: an unreadable manifest absorbs nothing.
+        assert!(
+            manifest_or_warn(
+                crate::agents::AgentConfig::by_name_in(&dirs, "fixture-broken"),
+                "fixture-broken",
+            )
+            .is_none(),
+            "a malformed agent.toml must reach the warn arm, not a silent return"
+        );
+        let mut bindings = Vec::new();
+        absorb_unstored_overlays(&mut bindings, &dirs, "fixture-broken").await;
+        assert!(bindings.is_empty());
+
+        // The healthy arm: the legacy overlay reaches the inbound loop.
+        absorb_unstored_overlays(&mut bindings, &dirs, "fixture-legacy").await;
+        assert_eq!(
+            bindings.iter().map(|b| b.id.as_str()).collect::<Vec<_>>(),
+            vec!["gmail-personal"]
+        );
+
+        // A stored record of the same id wins — including a disabled one.
+        let mut stored = vec![Binding {
+            enabled: false,
+            ..izzie_overlay()
+        }];
+        absorb_unstored_overlays(&mut stored, &dirs, "fixture-legacy").await;
+        assert_eq!(stored.len(), 1, "the stored record is the migrated form");
+        assert!(
+            !stored[0].enabled,
+            "channels.json disabling an overlay must not be re-enabled from agent.toml"
+        );
+    }
+
+    /// A roster that cannot be enumerated is logged and claims nothing — never
+    /// silently absorbed into "no assistant is bound".
+    #[test]
+    fn an_unreadable_roster_is_logged_and_claims_nothing() {
+        assert_eq!(
+            roster_or_warn(Ok(vec!["izzie".to_string()]), "gworkspace"),
+            Some(vec!["izzie".to_string()])
+        );
+        assert_eq!(
+            roster_or_warn(Err(anyhow::anyhow!("permission denied")), "gworkspace"),
+            None
+        );
     }
 }

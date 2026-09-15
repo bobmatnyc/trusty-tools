@@ -379,7 +379,15 @@ pub(crate) async fn candidate_agent_names() -> anyhow::Result<Vec<String>> {
 /// Why: Per-connector event instructions are optional — an agent bound to a
 /// listener without a matching `events/<connector>.md` file still wakes,
 /// just without the extra connector-specific guidance.
-async fn load_connector_instructions(agent_name: &str, connector: &str) -> Option<String> {
+///
+/// #7609: `pub(crate)` because the gworkspace adapter builds the wake prompt
+/// for the same traffic now, and an envelope that dropped these would be a
+/// silent capability loss for an assistant that was already using them.
+/// Test: `gworkspace_receive_carries_the_connector_instructions_file`.
+pub(crate) async fn load_connector_instructions(
+    agent_name: &str,
+    connector: &str,
+) -> Option<String> {
     for dir in agents_dir_candidates() {
         let path = dir
             .join(agent_name)

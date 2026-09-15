@@ -299,7 +299,7 @@ mod tests {
             "credential_ref":"google-oauth",
         }))
         .unwrap();
-        assert!(binding.validate().is_err());
+        assert!(binding.validate_in(&[]).is_err());
     }
 
     #[test]
@@ -311,7 +311,7 @@ mod tests {
             "enabled":true,"send_enabled":true,"credential_ref":"slack-app",
         }))
         .unwrap();
-        assert!(binding.validate().is_ok());
+        assert!(binding.validate_in(&[]).is_ok());
         assert_eq!(
             resolve_credential(
                 binding.credential_ref.as_deref().unwrap(),

@@ -31,6 +31,24 @@ pub(crate) fn adapter(provider: &str) -> Option<&'static dyn ChannelAdapter> {
     ADAPTERS.iter().copied().find(|a| a.provider() == provider)
 }
 
+/// The adapter that serves events a channel of `provider` ingests.
+///
+/// Why (#7609): a Gmail listener's provider is its `connector` — `gmail` —
+/// while the adapter that addresses its events is `gworkspace`.
+/// `listeners::poll::channel_binding_claim` already hard-codes that one bridge
+/// at its own call site, and dispatch needs the same answer for a channel it
+/// did not write, so the mapping lives here instead of being spelled twice.
+/// What: the identity for every provider whose id already IS an adapter id; an
+/// id this build has no adapter for passes through unchanged and resolves to
+/// `None` at [`adapter`], which is what makes a missing adapter claim nothing.
+/// Test: `adapter_id_bridges_gmail_to_the_gworkspace_adapter`.
+pub(crate) fn adapter_id(provider: &str) -> &str {
+    match provider {
+        "gmail" => GworkspaceAdapter.provider(),
+        other => other,
+    }
+}
+
 /// The adapter for `provider`, or [`ChannelError::UnsupportedProvider`].
 ///
 /// Why: the operating paths (`send`, `messages`) want the same failure type as

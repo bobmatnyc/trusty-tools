@@ -16,7 +16,9 @@
 //! [`model::Channel`] is the ONE type a listener and a channel binding both
 //! collapse into (#7609); [`migrate`] drains the legacy `[[listeners]]` tables
 //! into it and [`resolve_channels`] states which of two bindings on the same
-//! destination wins.
+//! destination wins. [`dispatch`] is the inbound half of that merge: one
+//! selector, shared by every provider, that answers which ONE channel an
+//! arriving event wakes an assistant through (slice 4).
 //! [`ChannelAdapter::addresses`] is how a binding claims an inbound event —
 //! equality on a destination id for Slack and Telegram, a sender or label match
 //! for Gmail (#7427).
@@ -30,7 +32,9 @@
 pub(crate) mod credentials;
 mod gworkspace;
 // #7609: listeners and channel bindings are one type now — the model, its
-// storage migrations, and the global-vs-assistant precedence rule.
+// storage migrations, the global-vs-assistant precedence rule, and the
+// exactly-one-wake selector every inbound provider runs through (slice 4).
+pub(crate) mod dispatch;
 pub mod migrate;
 pub mod model;
 mod registry;
@@ -41,7 +45,7 @@ mod telegram;
 
 pub(crate) use credentials::{resolve_credential, validate_credential_ref};
 pub use model::{Channel, ChannelScope};
-pub(crate) use registry::{adapter, providers_json, require_adapter};
+pub(crate) use registry::{adapter, adapter_id, providers_json, require_adapter};
 pub use resolve::resolve_channels;
 // #7427 (PR 2): the Telegram long-poll loop resolves its bot token through the
 // same reference a binding names, so `crate::telegram` never reads the
