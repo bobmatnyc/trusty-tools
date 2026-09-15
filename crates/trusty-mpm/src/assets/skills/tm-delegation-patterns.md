@@ -235,7 +235,10 @@ Row three is the Fail-Open Check the instruction package already puts in
 
 This is the default routing (moved here from the instruction package by #7423,
 which keeps the one-line mapping). An explicit `model=` in an Agent call always
-wins.
+wins; omitting it is not a fallback to opus — `resolve_agent_model`
+(`core/config.rs`) ranks a per-agent `~/.trusty-mpm/config.toml` entry next,
+then the agent's own frontmatter default (what the roster's `Model:` line
+reports), then the built-in `sonnet` fallback.
 
 | Task Type | Model to pass | Examples |
 |-----------|--------------|---------|
