@@ -297,7 +297,23 @@ pub(super) fn interpret_health_body(
         .and_then(|w| w.get("in_flight"))
         .and_then(serde_json::Value::as_u64);
 
+    // #4001: a held handle lock may have no tracked holder; name it instead.
+    let stalled_lock = worker.and_then(|w| w.get("stalled_lock"));
     match wedged {
+        Some(true) if stalled_lock.is_some() => {
+            let field = |k: &str| stalled_lock.and_then(|s| s.get(k)).cloned();
+            return CheckResult::fail(
+                label,
+                format!(
+                    "{url} → {status} BUT the daemon reports a WEDGED palace: {} lock of \
+                     palace {} has been unavailable for {}s. Writes to it time out. Inspect \
+                     with a thread sample before restarting.",
+                    field("lock").unwrap_or_default(),
+                    field("palace").unwrap_or_default(),
+                    field("age_secs").unwrap_or_default()
+                ),
+            );
+        }
         Some(true) => {
             return CheckResult::fail(
                 label,

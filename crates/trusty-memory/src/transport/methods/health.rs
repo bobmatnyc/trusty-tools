@@ -252,8 +252,25 @@ pub struct WorkerHealth {
     pub oldest_age_secs: Option<u64>,
     /// True when `oldest_age_secs` exceeds
     /// [`crate::worker_liveness::wedge_threshold`] — i.e. an operation has
-    /// blown past the bound that was supposed to release it.
+    /// blown past the bound that was supposed to release it, or a palace's
+    /// handle lock has been unavailable past it (`stalled_lock`, #4001).
     pub wedged: bool,
+    /// The longest-held palace handle lock, whoever holds it (#4001). Absent
+    /// when no handle lock was found held. Reported under the threshold too, so
+    /// a long but healthy dream cycle is visible without reading as wedged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stalled_lock: Option<StalledLockHealth>,
+}
+
+/// One held palace handle lock in the `/health` payload (#4001).
+#[derive(serde::Serialize)]
+pub struct StalledLockHealth {
+    /// Palace id whose lock is held.
+    pub palace: String,
+    /// `"write"` or `"commit"`.
+    pub lock: crate::lock_stall::PalaceLock,
+    /// Seconds a writer arriving at the first sighting has waited.
+    pub age_secs: u64,
 }
 
 /// `GET /health[?probe=true]` — unauthenticated liveness probe with optional
@@ -326,10 +343,25 @@ pub async fn health(state: &AppState, query: HealthQuery) -> Result<serde_json::
     // is safe on the cheap (non-probe) path that monitors poll every second.
     let wedge_threshold = state.wedge_threshold;
     let oldest_age = state.worker_liveness.oldest_age();
+    // #4001: a dream cycle, forget or import holds the handle locks without
+    // registering above, so observe those locks directly. The sweep is rate
+    // limited and takes only short, non-async locks.
+    state.lock_stalls.sweep_if_due(
+        &state.registry,
+        crate::lock_stall::probe_interval(wedge_threshold),
+    );
+    let now = std::time::Instant::now();
+    let stalled = state.lock_stalls.oldest_stall_at(now);
+    let lock_wedged = stalled.as_ref().is_some_and(|s| s.age > wedge_threshold);
     let worker = WorkerHealth {
         in_flight: state.worker_liveness.in_flight(),
         oldest_age_secs: oldest_age.map(|d| d.as_secs()),
-        wedged: oldest_age.is_some_and(|age| age > wedge_threshold),
+        wedged: lock_wedged || oldest_age.is_some_and(|age| age > wedge_threshold),
+        stalled_lock: stalled.as_ref().map(|s| StalledLockHealth {
+            palace: s.palace.clone(),
+            lock: s.lock,
+            age_secs: s.age.as_secs(),
+        }),
     };
 
     let (status, detail) = if query.wants_deep_probe() {
@@ -349,7 +381,26 @@ pub async fn health(state: &AppState, query: HealthQuery) -> Result<serde_json::
     // no matter how cheerful the rest of the payload looks. Reported on the
     // cheap path too — #3992 was invisible precisely because nobody was
     // passing ?probe=true during the incident.
-    let (status, detail) = if worker.wedged {
+    let (status, detail) = if let Some(s) = stalled.as_ref().filter(|_| lock_wedged) {
+        // #4001: name the lock, not the gauge; its holder may be untracked.
+        tracing::warn!(
+            palace = %s.palace,
+            lock = ?s.lock,
+            age_secs = s.age.as_secs(),
+            "/health: palace handle lock held past the wedge threshold"
+        );
+        (
+            "wedged".to_string(),
+            Some(format!(
+                "palace '{}' {:?} lock has been unavailable for {}s (threshold {}s) — its \
+                 holder is not releasing it, and writers queued behind it time out",
+                s.palace,
+                s.lock,
+                s.age.as_secs(),
+                wedge_threshold.as_secs()
+            )),
+        )
+    } else if worker.wedged {
         let secs = worker.oldest_age_secs.unwrap_or_default();
         tracing::warn!(
             oldest_age_secs = secs,
@@ -365,6 +416,14 @@ pub async fn health(state: &AppState, query: HealthQuery) -> Result<serde_json::
                 worker.in_flight
             )),
         )
+    } else if let Some(reason) = state
+        .lock_stalls
+        .degraded_at(now)
+        .filter(|_| status == "ok")
+    {
+        // #4001: stall detection that cannot vouch for itself is not `ok`.
+        tracing::warn!("/health: {reason}");
+        ("degraded".to_string(), Some(reason))
     } else {
         (status, detail)
     };

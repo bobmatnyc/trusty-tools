@@ -128,6 +128,125 @@ async fn a_write_stalled_holding_the_palace_lock_reads_as_wedged() {
     assert_eq!(v["worker"]["in_flight"], 0, "got {v}");
 }
 
+/// Poll `memory.health` until `pred` holds, failing after [`SETTLE`].
+async fn wait_for_health(
+    state: &AppState,
+    what: &str,
+    pred: impl Fn(&serde_json::Value) -> bool,
+) -> serde_json::Value {
+    let started = Instant::now();
+    loop {
+        let v = health_body(state).await;
+        if pred(&v) {
+            return v;
+        }
+        assert!(
+            started.elapsed() < SETTLE,
+            "timed out after {SETTLE:?} waiting for {what}; last health: {v}"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// Spawn `n` `memory_remember` writers on `palace`, each abandoned by its
+/// client after `bound`, and assert none of them landed.
+///
+/// Why: dropping the future at the bound is what a writer's own timeout does;
+/// it releases every lock and liveness slot the writer held.
+async fn writers_give_up(state: &AppState, palace: &str, n: usize, bound: Duration) {
+    let mut writers = Vec::new();
+    for i in 0..n {
+        let s = state.clone();
+        let args = json!({"palace": palace, "text": format!("queued writer {i} records a sufficiently long fact about the handle write mutex")});
+        writers.push(tokio::spawn(async move {
+            tokio::time::timeout(bound, handle_memory_remember(&s, args)).await
+        }));
+    }
+    for w in writers {
+        let outcome = w.await.expect("writer task joins");
+        assert!(
+            !matches!(outcome, Ok(Ok(_))),
+            "no writer may land while the handle write mutex is held"
+        );
+    }
+}
+
+/// Why (issue #4001, 2026-09-13 dream-cycle shape): a dream cycle held the
+/// palace's handle write mutex, writers queued and timed out, and health said
+/// `ok`. The dream never registers with the gauge, and the writers leave it at
+/// their bound, so nothing tracked ever aged past the threshold.
+/// What: holds `handle.write_mutex` as the dream does, lets three writers queue
+/// and give up at 300 ms, asserts the gauge is empty, then polls health until
+/// it reports `wedged` naming the palace's write lock. Releasing the lock must
+/// clear the verdict.
+/// Test: this test.
+#[tokio::test]
+async fn a_dream_cycle_holding_the_handle_write_mutex_reads_as_wedged() {
+    let bound = Duration::from_millis(300);
+    let threshold = Duration::from_millis(600);
+    let (mut state, _tmp) = liveness_state(bound);
+    state.wedge_threshold = threshold;
+    let _ = dispatch_tool(&state, "palace_create", json!({"name": "dreaming"}))
+        .await
+        .expect("palace_create");
+    let handle = open_palace_handle(&state, "dreaming").expect("open palace");
+    let dream = handle.write_mutex.clone().lock_owned().await;
+
+    writers_give_up(&state, "dreaming", 3, bound).await;
+    assert_eq!(
+        state.worker_liveness.in_flight(),
+        0,
+        "every writer left at its bound; only the untracked dream holds a lock"
+    );
+
+    let v = wait_for_health(
+        &state,
+        "health to report the held handle lock as wedged",
+        |v| v["status"] == "wedged",
+    )
+    .await;
+    assert_eq!(v["worker"]["wedged"], true, "got {v}");
+    assert_eq!(v["worker"]["stalled_lock"]["palace"], "dreaming", "got {v}");
+    assert_eq!(v["worker"]["stalled_lock"]["lock"], "write", "got {v}");
+
+    drop(dream);
+    let v = wait_for_health(&state, "the verdict to clear after release", |v| {
+        v["status"] == "ok" && v["worker"].get("stalled_lock").is_none()
+    })
+    .await;
+    assert_eq!(v["worker"]["wedged"], false, "got {v}");
+}
+
+/// Why (issue #4001, no false alarm): a dream cycle legitimately runs 38-53 s
+/// under the default 120 s threshold. Holding the handle lock inside the
+/// threshold must be visible but not wedged.
+/// What: holds `handle.write_mutex` under the production-derived threshold
+/// with a writer queued, polls until health reports the held lock, and asserts
+/// `status: "ok"` and `wedged: false`.
+/// Test: this test.
+#[tokio::test]
+async fn a_handle_lock_held_inside_the_threshold_is_visible_but_not_wedged() {
+    let (state, _tmp) = liveness_state(Duration::from_millis(300));
+    assert!(state.wedge_threshold >= Duration::from_secs(120));
+    let _ = dispatch_tool(&state, "palace_create", json!({"name": "napping"}))
+        .await
+        .expect("palace_create");
+    let handle = open_palace_handle(&state, "napping").expect("open palace");
+    let dream = handle.write_mutex.clone().lock_owned().await;
+    writers_give_up(&state, "napping", 1, Duration::from_millis(300)).await;
+
+    let v = wait_for_health(&state, "health to report the held handle lock", |v| {
+        v["worker"]["stalled_lock"]["palace"] == "napping"
+    })
+    .await;
+    assert_eq!(
+        v["status"], "ok",
+        "held inside the threshold is busy, not wedged; got {v}"
+    );
+    assert_eq!(v["worker"]["wedged"], false, "got {v}");
+    drop(dream);
+}
+
 /// Why (issue #4001, no false alarm): tracking writes must not turn ordinary
 /// contention into a wedge. A writer queued behind a live holder, well inside
 /// its bound, is busy rather than stuck.

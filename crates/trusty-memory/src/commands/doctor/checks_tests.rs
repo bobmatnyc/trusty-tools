@@ -162,6 +162,30 @@ async fn a_responsive_daemon_passes() {
     }
 }
 
+/// Why (issue #4001, dream-cycle shape): a wedge caused by a held handle lock
+/// has nothing in flight, so the gauge wording would read "0s with 0 in
+/// flight". Doctor must fail and name the lock and palace instead.
+/// What: a stand-in reporting `wedged` with a `stalled_lock`; asserts `Fail`,
+/// the palace and lock in the message, and an unhealthy run.
+/// Test: itself.
+#[tokio::test]
+async fn a_wedge_from_a_held_handle_lock_fails_and_names_the_lock() {
+    let frame = r#"{"jsonrpc":"2.0","id":1,"result":{"status":"wedged","daemon_state":"ready","worker":{"in_flight":0,"wedged":true,"stalled_lock":{"palace":"trusty-tools","lock":"write","age_secs":131}}}}"#;
+    let (socket, _tmp, task) = stand_in(Reply::Frame(frame)).await;
+    let result = probe(&socket, Duration::from_secs(2)).await;
+    task.abort();
+
+    assert_eq!(result.status, CheckStatus::Fail, "{result:?}");
+    let detail = result.detail.as_deref().unwrap_or_default();
+    assert!(
+        detail.contains("\"trusty-tools\"")
+            && detail.contains("\"write\"")
+            && detail.contains("131s"),
+        "the held lock must be named: {detail}"
+    );
+    assert!(!summarize(&[result]).healthy);
+}
+
 /// Why (issue #4001): the run used to end green with exit 0 whenever nothing
 /// had `Fail`ed, so one undetermined check beside passes read as healthy.
 /// What: asserts a pass plus an unknown is not healthy, and the tally names

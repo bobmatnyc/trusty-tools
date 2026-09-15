@@ -99,6 +99,14 @@ pub(crate) fn spawn_startup_tasks(state: &AppState) {
         }
     });
 
+    // #4001: sweep palace handle locks in the background, so a lock held by an
+    // untracked holder (a dream cycle) has aged by the time doctor reads health.
+    trusty_memory::lock_stall::spawn_lock_stall_ticker(
+        std::sync::Arc::clone(&state.lock_stalls),
+        std::sync::Arc::clone(&state.registry),
+        trusty_memory::lock_stall::probe_interval(state.wedge_threshold),
+    );
+
     let bg_state = state.clone();
     tokio::spawn(async move {
         let started = std::time::Instant::now();

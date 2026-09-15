@@ -93,6 +93,8 @@ pub mod dream_scheduler;
 pub mod fd_metrics;
 pub mod idle_evict;
 pub mod worker_liveness;
+// #4001: stall detection for handle locks whose holders never register.
+pub mod lock_stall;
 // Why (issue #226): `chat` drives an LLM provider and a tool loop that only
 //      the daemon serves. Gating it behind `daemon` is what lets a library
 //      consumer linking only `MemoryMcpService` — trusty-agents — keep it out
@@ -517,6 +519,15 @@ pub struct AppState {
     /// What: defaults to [`worker_liveness::wedge_threshold`].
     /// Test: `web::tests::health_tests::health_reports_wedged_worker_pool`.
     pub wedge_threshold: std::time::Duration,
+    /// Stamps for handle locks found held (#4001).
+    ///
+    /// Why: a dream cycle, forget or import holds `PalaceHandle::write_mutex`
+    /// without registering in [`Self::worker_liveness`], so only observing the
+    /// lock itself can see it held past [`Self::wedge_threshold`].
+    /// What: a [`lock_stall::LockStallTracker`], swept by `memory.health` and by
+    /// the daemon's ticker.
+    /// Test: `tools::tests::write_liveness_tests::a_dream_cycle_holding_the_handle_write_mutex_reads_as_wedged`.
+    pub lock_stalls: Arc<lock_stall::LockStallTracker>,
     /// In-memory cache mapping palace id → `Palace.name` (issue #228).
     ///
     /// Why: every `memory_remember` / `memory_note` write used to call
@@ -738,6 +749,7 @@ impl AppState {
             pending_activity_writes: Arc::new(AtomicUsize::new(0)),
             worker_liveness: Arc::new(worker_liveness::WorkerLiveness::new()),
             wedge_threshold: worker_liveness::wedge_threshold(),
+            lock_stalls: Arc::new(lock_stall::LockStallTracker::default()),
             palace_names: Arc::new(dashmap::DashMap::new()),
             // #7106: one shared budget for every startup job that opens palaces.
             startup_gate: crate::startup_budget::StartupOpenGate::from_env(),
