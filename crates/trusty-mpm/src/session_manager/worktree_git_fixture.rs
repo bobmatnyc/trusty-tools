@@ -518,4 +518,70 @@ impl GitWorktreeFixture {
         git_ok(wt, &["add", "unpushed.txt"]);
         git_ok(wt, &["commit", "-m", "local only"]);
     }
+
+    /// Make every `git status` in this checkout and its worktrees block (#7965).
+    ///
+    /// Why: the orphan sweep's hang was a git subprocess that never answered.
+    /// A `git` shim on `PATH` would be process-global and hang every sibling test
+    /// that shells out to git, so the wedge has to be per-repository.
+    /// What: replaces `<repo>/.git/info/exclude` with a FIFO. `git status` opens
+    /// that file read-only, and opening a FIFO with no writer blocks, so every
+    /// status in the repository parks there. `rev-parse` and `worktree list` never
+    /// read it and still answer. After `release_after` a background thread keeps
+    /// opening the FIFO non-blocking for write and closing it, which hands any
+    /// parked reader EOF. Dropping the guard stops that thread.
+    /// Test: `a_wedged_git_status_neither_hangs_the_orphan_sweep_nor_delays_health`.
+    #[cfg(unix)]
+    pub(crate) fn wedge_status(&self, release_after: std::time::Duration) -> StatusWedge {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let exclude = self.repo.join(".git").join("info").join("exclude");
+        if let Some(info) = exclude.parent() {
+            std::fs::create_dir_all(info).expect("fixture: create .git/info");
+        }
+        let _ = std::fs::remove_file(&exclude);
+        let c_path = std::ffi::CString::new(exclude.as_os_str().as_bytes())
+            .expect("fixture: exclude path has no NUL");
+        // SAFETY: `c_path` is a valid NUL-terminated path that outlives the call.
+        let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) };
+        assert_eq!(rc, 0, "fixture: mkfifo: {}", std::io::Error::last_os_error());
+
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop = std::sync::Arc::clone(&done);
+        let releaser = std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                if started.elapsed() >= release_after {
+                    let _ = std::fs::OpenOptions::new()
+                        .write(true)
+                        .custom_flags(libc::O_NONBLOCK)
+                        .open(&exclude);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        });
+        StatusWedge {
+            done,
+            releaser: Some(releaser),
+        }
+    }
+}
+
+/// Guard returned by [`GitWorktreeFixture::wedge_status`]; stops the releaser on
+/// drop.
+#[cfg(unix)]
+pub(crate) struct StatusWedge {
+    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    releaser: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(unix)]
+impl Drop for StatusWedge {
+    fn drop(&mut self) {
+        self.done.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(handle) = self.releaser.take() {
+            let _ = handle.join();
+        }
+    }
 }
