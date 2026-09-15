@@ -406,7 +406,7 @@ use doctor_sidecars::{check_memory, check_search};
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_fifty_four_checks`,
+/// Test: `run_doctor_produces_fifty_five_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -623,6 +623,12 @@ pub(crate) async fn run_doctor_with_claims(
     // without this probe the condition is invisible until someone attempts a
     // mutation. Read-only; the repair is `tm repair session-store`.
     checks.push(check_session_store(&FrameworkPaths::default().root));
+    // #6556: undelivered `SubagentStop` records waiting on disk, or a spool the
+    // hook cannot write into — the one branch where a stop is dropped outright
+    // and its delegation stays Running for six hours. Read-only.
+    checks.push(crate::core::stop_spool::check_stop_spool(
+        &FrameworkPaths::default().root,
+    ));
     // A `.mcp.json` ABOVE the workspace is read by every session whose cwd is
     // beneath it — including agent scratchpads under /tmp — and nothing else
     // reports it. Read-only, and it names the provenance verdict per file so
@@ -742,7 +748,7 @@ pub async fn run_doctor_for_manager(
 /// and resolves the managed Claude config dir, then calls
 /// [`doctor_auto_memory::check_auto_memory`].
 /// Test: the three verdicts are covered directly in `doctor_auto_memory_tests`;
-/// this wiring is covered by `run_doctor_produces_fifty_four_checks`.
+/// this wiring is covered by `run_doctor_produces_fifty_five_checks`.
 async fn auto_memory_row(
     project_dir: Option<&Path>,
     home: &Path,
