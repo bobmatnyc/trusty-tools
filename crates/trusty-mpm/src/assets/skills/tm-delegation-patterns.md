@@ -164,6 +164,14 @@ context reloaded by each). These are the specific splits to collapse:
 | Agent failed 3+ times on the same issue | Re-delegate to a different agent, or escalate |
 | A named deliverable is missing | `SendMessage`: "the prompt requires <deliverable>, please create it" |
 
+## Reopening a Finished Task
+
+The Retry Protocol above assumes the agent is still failing. **Live evidence
+that reopens a task an agent already finished gets a fresh agent dispatched at
+the branch tip with the evidence, not a `SendMessage` into the finished
+agent.** Three sequential `SendMessage`s into one already-finished engineer
+pushed it past the 250K context notice mid-task.
+
 ## Structural Delegation Brief
 
 ```
