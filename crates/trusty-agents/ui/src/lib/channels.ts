@@ -1,4 +1,5 @@
 import { tmApi } from '../stores/app';
+import { withChannelWriteAuth } from './channel-auth';
 import type { ListenerFilter } from './listeners';
 // #7427: `credential_ref` names the credential a binding sends as (never a
 // value; the server resolves the name at send time), and `status` carries the
@@ -15,6 +16,8 @@ export interface ChannelConfiguration {agent:string;revision:string;bindings:Cha
 export interface ChannelMessages {available:boolean;messages:{id:string;text:string;from?:string;timestamp?:string|number}[];reason?:string;}
 const base=(agent:string)=>`/api/agents/${encodeURIComponent(agent)}/channels`;
 export const fetchChannels=(agent:string)=>tmApi<ChannelConfiguration>(base(agent));
-export const saveChannels=(agent:string,revision:string,bindings:ChannelBinding[])=>tmApi<ChannelConfiguration>(base(agent),{method:'PUT',body:JSON.stringify({revision,bindings})});
+// #7609: a channel write carries the credential from `channel-auth`; see
+// that module for why it exists and how it is obtained.
+export const saveChannels=(agent:string,revision:string,bindings:ChannelBinding[])=>withChannelWriteAuth(headers=>tmApi<ChannelConfiguration>(base(agent),{method:'PUT',headers,body:JSON.stringify({revision,bindings})}));
 export const fetchChannelMessages=(agent:string,id:string)=>tmApi<ChannelMessages>(`${base(agent)}/${encodeURIComponent(id)}/messages`);
 export const sendChannelMessage=(agent:string,id:string,text:string,revision:string)=>tmApi<{ok:boolean;message_id?:string}>(`${base(agent)}/${encodeURIComponent(id)}/send`,{method:'POST',body:JSON.stringify({text,revision})});

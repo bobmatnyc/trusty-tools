@@ -1,0 +1,2 @@
+Security
+- Inbound channel events no longer carry a remote display name into a `UserIdentity` verbatim. `UserIdentity::from_remote` drops control characters, trims and caps at 128 characters, and both the Gmail poller (`From:` header) and the Telegram router (sender profile) build their identities with it, so a hostile sender cannot forge a log record or run an ANSI sequence through any consumer that writes the identity out.

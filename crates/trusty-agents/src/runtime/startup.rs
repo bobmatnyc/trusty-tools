@@ -65,6 +65,32 @@ use crate::{
 
 use build_info::BuildInfo;
 
+/// The API credential this process was started with, if any.
+///
+/// Why (#7609): `--api-token <v>`, `--api-token=<v>`, then the
+/// `TAGENT_API_TOKEN` env var — the same precedence
+/// `runtime::mode_dispatch` applies through clap. Reading argv directly keeps
+/// this usable before clap has parsed anything, which is where
+/// `run_startup_init` sits.
+/// What: `None` when neither is set or the value is empty.
+/// Test: `a_credential_is_resolved_from_argv_then_the_environment`.
+fn resolved_api_token(raw_args: &[String]) -> Option<String> {
+    let mut iter = raw_args.iter();
+    while let Some(a) = iter.next() {
+        if a == "--api-token"
+            && let Some(v) = iter.next()
+        {
+            return Some(v.clone()).filter(|s| !s.is_empty());
+        }
+        if let Some(rest) = a.strip_prefix("--api-token=") {
+            return Some(rest.to_string()).filter(|s| !s.is_empty());
+        }
+    }
+    crate::env_compat::env_var("TAGENT_API_TOKEN", "OPEN_MPM_API_TOKEN")
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
 /// Run all side-effecting startup initialization that must happen before the
 /// top-level clap parse.
 ///
@@ -77,7 +103,9 @@ use build_info::BuildInfo;
 /// early-exit path already handled the invocation (so the caller should
 /// `return Ok(())`); returns `Ok(true)` to continue into the main dispatch.
 /// Test: Indirectly via `cargo run -p trusty-agents` and the crate's
-/// integration tests (`--version`, `--api`, normal REPL startup).
+/// integration tests (`--version`, `--api`, normal REPL startup);
+/// `a_credential_is_resolved_from_argv_then_the_environment` pins the one
+/// decision it makes that a unit test can reach.
 pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
     // Handle --version / -V before anything else (no env/tracing/etc.).
     // Why: `--version` must be cheap and side-effect-free so it's safe to
@@ -124,6 +152,17 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
             dotenvy::from_path(&project_env).ok();
         }
     }
+
+    // #7609 (critic HIGH-3, then MEDIUM-2): the channel-write gate applies to
+    // the in-process `channel` tool in EVERY process, not only `--api`.
+    // Recording it here — from the same `--api-token` / `TAGENT_API_TOKEN`
+    // resolution the serve path uses — is what lets a REPL or chat process with
+    // the credential set perform its own writes. It has to come AFTER the
+    // dotenv loads above, or a credential that lives in `.env.local` (where
+    // this project's own does) is invisible to it. `serve_with_config` records
+    // again afterwards, because only it can mint an ephemeral credential for a
+    // loopback bind.
+    crate::api::server::channel_auth::record_daemon_credential(resolved_api_token(&raw_args));
 
     // Why: External agent plugins (cto-assistant, future personas) are
     //      installed by a downstream launcher BEFORE calling `run()`. The
@@ -565,4 +604,59 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
     }
 
     Ok(true)
+}
+
+#[cfg(test)]
+mod channel_credential_tests {
+    use super::*;
+
+    /// The credential comes from argv first, then the environment.
+    ///
+    /// Why (#7609 critic HIGH-3): this resolution is what lets a REPL process
+    /// perform its own channel writes, so its precedence has to match the one
+    /// `runtime::mode_dispatch` applies through clap — a mismatch would make
+    /// the same export work for `--api` and not for a chat.
+    #[test]
+    fn a_credential_is_resolved_from_argv_then_the_environment() {
+        let _guard = crate::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::remove_var("TAGENT_API_TOKEN");
+            std::env::remove_var("OPEN_MPM_API_TOKEN");
+        }
+        let argv =
+            |args: &[&str]| -> Vec<String> { args.iter().map(|s| (*s).to_string()).collect() };
+
+        assert_eq!(resolved_api_token(&argv(&["tagent"])), None, "nothing set");
+        assert_eq!(
+            resolved_api_token(&argv(&["tagent", "--api-token", "flagged"])).as_deref(),
+            Some("flagged")
+        );
+        assert_eq!(
+            resolved_api_token(&argv(&["tagent", "--api-token=joined"])).as_deref(),
+            Some("joined")
+        );
+        assert_eq!(
+            resolved_api_token(&argv(&["tagent", "--api-token", ""])),
+            None,
+            "an empty value is no credential"
+        );
+
+        unsafe {
+            std::env::set_var("TAGENT_API_TOKEN", "from-env");
+        }
+        assert_eq!(
+            resolved_api_token(&argv(&["tagent"])).as_deref(),
+            Some("from-env")
+        );
+        assert_eq!(
+            resolved_api_token(&argv(&["tagent", "--api-token", "flagged"])).as_deref(),
+            Some("flagged"),
+            "argv wins over the environment"
+        );
+        unsafe {
+            std::env::remove_var("TAGENT_API_TOKEN");
+        }
+    }
 }

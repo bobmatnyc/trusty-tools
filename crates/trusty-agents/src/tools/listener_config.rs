@@ -1,6 +1,20 @@
-//! Self-only listener configuration. The executing assistant identity is fixed
-//! at construction; tool arguments cannot select another agent or source.
-use crate::api::server::agent_listeners::{self, ListenerUpdate};
+//! DEPRECATED (#7609): `listener_config` is the old name for the `channel`
+//! tool's assistant-scope `get`/`set`.
+//!
+//! Why: listeners and channels are one concept now, and
+//! [`crate::tools::channel::ChannelTool`] is where it lives. Deleting this name
+//! in the same release would break every self-configuration pattern that
+//! already names it — an assistant's `skills_allow`, a stored manifest, a
+//! prompt the model has learned — so the name survives ONE release as an alias
+//! that forwards, warns once per process, and is removed in slice 7.
+//! What: the schema is UNCHANGED, deliberately: forwarding must not widen the
+//! surface, so `scope` is not reachable through this name and a caller cannot
+//! edit the global list under it. Every call is translated into the merged
+//! tool's `scope=assistant` equivalent and answered by it, so the two can no
+//! longer drift.
+//! Test: `crate::tools::channel::channel_tests` — the forwarding and
+//! non-widening cases.
+use crate::tools::channel::ChannelTool;
 use crate::tools::traits::{ToolExecutor, ToolResult};
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -22,6 +36,24 @@ struct Request {
     revision: Option<String>,
     listeners: Option<Vec<crate::listeners::config::AgentListenerBinding>>,
 }
+
+/// Say once per process that this tool name is deprecated.
+///
+/// Why: same reasoning as the deprecated route aliases — an operator or a
+/// prompt author who never read a release note should learn the new name from
+/// the logs, and a per-call warning would be a flood on a chatty assistant.
+/// Test: `crate::tools::channel::channel_tests::the_listener_config_alias_forwards_to_the_channel_tool`
+/// exercises the path; the once-ness is the `Once`'s own contract.
+fn warn_once() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        tracing::warn!(
+            tool = "listener_config",
+            replacement = "channel",
+            "`listener_config` is deprecated and will be removed after this release (#7609)"
+        );
+    });
+}
 #[async_trait]
 impl ToolExecutor for ListenerConfigTool {
     fn name(&self) -> &str {
@@ -35,28 +67,32 @@ impl ToolExecutor for ListenerConfigTool {
             json!({"type":"array","maxItems":32,"items":{"type":"string","maxLength":256}});
         json!({"type":"function","function":{"name":self.name(),"description":"Read or update YOUR OWN listener filters and per-listener instructions when the user requests configuration. Cannot change another assistant, provider credentials, or harness polling. Call action=get first; action=set requires the returned revision and complete listeners array. OR within a filter, AND across filters, excluded labels win. Changes govern subsequent events without restart. Available only in normal chats, not event-triggered turns.","parameters":{"type":"object","additionalProperties":false,"required":["action"],"properties":{"action":{"type":"string","enum":["get","set"]},"revision":{"type":"string"},"listeners":{"type":"array","maxItems":32,"items":{"type":"object","additionalProperties":false,"required":["name"],"properties":{"name":{"type":"string"},"enabled":{"type":"boolean"},"event_types":strings,"instructions":{"type":"string","maxLength":8000},"filter":{"type":"object","additionalProperties":false,"properties":{"from":strings,"include_labels":strings,"exclude_labels":strings,"subject_contains":strings,"snippet_contains":strings}}}}}}}}})
     }
+    /// Translate this call into the merged tool's and let it answer.
+    ///
+    /// Why (#7609): forwarding rather than re-implementing is what makes the
+    /// alias provably identical — there is no second code path to drift.
+    /// What: parses the UNCHANGED `listener_config` argument shape (so `scope`
+    /// stays unreachable here), then calls [`ChannelTool`] with
+    /// `scope=assistant`. Argument errors are reported before the forward, in
+    /// the wording this tool always used.
+    /// Test: `crate::tools::channel::channel_tests::the_listener_config_alias_forwards_to_the_channel_tool`,
+    /// `the_alias_cannot_reach_the_global_scope`.
     async fn execute(&self, args: Value) -> ToolResult {
+        warn_once();
         let request: Request = match serde_json::from_value(args) {
             Ok(r) => r,
             Err(e) => return ToolResult::err(e.to_string()),
         };
-        let result = match request.action.as_str() {
+        let forwarded = match request.action.as_str() {
             "get" if request.revision.is_none() && request.listeners.is_none() => {
-                agent_listeners::read(&self.agent).await
+                json!({"action":"get","scope":"assistant"})
             }
             "set" => {
                 let (Some(revision), Some(listeners)) = (request.revision, request.listeners)
                 else {
                     return ToolResult::err("set requires revision and listeners from get");
                 };
-                agent_listeners::write(
-                    &self.agent,
-                    ListenerUpdate {
-                        revision,
-                        listeners,
-                    },
-                )
-                .await
+                json!({"action":"set","scope":"assistant","revision":revision,"listeners":listeners})
             }
             _ => {
                 return ToolResult::err(
@@ -64,12 +100,7 @@ impl ToolExecutor for ListenerConfigTool {
                 );
             }
         };
-        match result {
-            Ok(value) => ToolResult::ok(value.to_string()),
-            Err((status, axum::Json(value))) => {
-                ToolResult::err(format!("{status}: {}", value["error"]))
-            }
-        }
+        ChannelTool::new(&self.agent).execute(forwarded).await
     }
 }
 pub fn is_reserved_name(name: &str) -> bool {

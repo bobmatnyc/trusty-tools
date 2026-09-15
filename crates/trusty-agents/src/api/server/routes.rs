@@ -27,7 +27,6 @@ use super::agent_kg::{
     agent_kg_all_route, agent_kg_count_route, agent_kg_query_route, agent_kg_subjects_route,
 };
 use super::agent_knowledge::agent_knowledge_route;
-use super::agent_listeners::{get_listeners, put_listeners};
 use super::agent_patch::{get_agent_persona_route, get_agent_route, patch_agent_route};
 use super::agent_permissions::agent_permissions_route;
 use super::agent_skills::agent_skills_route;
@@ -35,12 +34,14 @@ use super::agent_stores::agent_stores_route;
 use super::agent_subagents::agent_subagents_route;
 use super::auth::{ApiClientConfig, ApiConfig, AuthState, auth_middleware};
 use super::cancel::cancel_task;
+use super::channel_auth::ChannelWriteAuth;
 use super::chat_history::agent_chat_history_route;
 use super::costs::get_costs;
 use super::ctrl_sessions::{
     attach_ctrl_session_handler, create_ctrl_session_handler, get_ctrl_session_handler,
     list_ctrl_sessions_handler, terminate_ctrl_session_handler,
 };
+use super::deprecated_aliases::{get_listeners_alias, put_listeners_alias};
 use super::event_tickets::EventStreamAuth;
 use super::events_sse::{events_handler, mint_event_ticket};
 use super::handlers::{
@@ -121,8 +122,58 @@ pub fn build_router_with_origins(
     token: Option<String>,
     self_origins: SelfOrigins,
 ) -> Router {
+    // #7609: no minted credential here. Only `serve_with_config` knows the
+    // resolved bind, and only a LOOPBACK bind may mint one.
+    build_router_with_channel_credential(state, token, self_origins, None)
+}
+
+/// [`build_router_with_origins`] with an explicit MINTED channel credential.
+///
+/// Why (#7609, critic HIGH-4 then round-3 CRITICAL): the UI this daemon serves
+/// must be able to save a channel without being handed the operator's own API
+/// token — on a tokenless daemon there is no such token at all, and on a
+/// tokened one disclosing it would hand the whole API to anyone who can read
+/// `/api/config`. `serve_with_config` mints a per-boot credential for a
+/// LOOPBACK bind and passes it here. It authorizes channel writes and nothing
+/// else, and it is the ONLY credential this router discloses or publishes.
+/// What: `minted` is accepted by `channel_auth::ChannelWriter` ALONGSIDE
+/// `token`, and is what `GET /api/config` returns to a same-origin caller.
+/// Both `None` refuses every channel write.
+/// Test: `super::tests::global_channels` — the tokenless-refusal, minted-write,
+/// wrong-credential and non-disclosure cases.
+pub fn build_router_with_channel_credential(
+    state: AppState,
+    token: Option<String>,
+    self_origins: SelfOrigins,
+    minted: Option<String>,
+) -> Router {
     let auth_required = token.is_some();
-    let config_route = get(move || async move { Json(ApiClientConfig { auth_required }) });
+    // #7609 critic HIGH-4: the served UI learns the channel-write credential
+    // here. `config_route` is the pre-auth bootstrap probe, which is exactly
+    // why it is the right transport — the UI has no other way to obtain one —
+    // and it is why ONLY the minted credential may appear (critic round 3,
+    // CRITICAL): `auth_middleware` exempts this route, so whatever it returns is
+    // readable by any caller that can reach the port. `minted` is `None` for a
+    // non-loopback bind, so such a daemon discloses nothing at all. The
+    // disclosure is narrowed once more by `Origin`: the value is present only
+    // for a caller whose origin this daemon would serve its own UI to
+    // (`same_origin_ok` below), and the router-wide CORS layer is the
+    // SAME-ORIGIN variant (`with_guarded_middleware_same_origin_cors`, applied
+    // after every route below), so a cross-origin page's `fetch` never gets to
+    // READ this response body at all — `same_origin_cors` reflects
+    // `Access-Control-Allow-Origin` only for a loopback / local-webview / self
+    // origin, and the browser withholds the body without it.
+    let disclosed = minted.clone();
+    let config_origins = self_origins.clone();
+    let config_route = get(move |headers: axum::http::HeaderMap| async move {
+        let origin = headers
+            .get(axum::http::header::ORIGIN)
+            .and_then(|v| v.to_str().ok());
+        Json(ApiClientConfig {
+            auth_required,
+            channel_write_token: disclosed.filter(|_| same_origin_ok(origin, &config_origins)),
+        })
+    });
 
     let mut router = Router::new()
         .route(
@@ -158,9 +209,19 @@ pub fn build_router_with_origins(
             "/api/agents/{name}/channels/{id}/messages",
             get(super::agent_channels::messages_route),
         )
+        // #7609 slice 5: the harness-wide channel list. The PUT takes the
+        // channel-write gate (`channel_auth::ChannelWriter`) like its
+        // per-assistant sibling; the GET is open to any caller the router
+        // admits.
+        .route(
+            "/api/channels",
+            get(super::global_channels::get_route).put(super::global_channels::put_route),
+        )
+        // #7609 slice 5: DEPRECATED — forwards to the channel handlers, sets a
+        // `Deprecation` header, and is removed in slice 7.
         .route(
             "/api/agents/{name}/listeners",
-            get(get_listeners).put(put_listeners),
+            get(get_listeners_alias).put(put_listeners_alias),
         )
         .route("/api/project-tools", get(get_project_tools))
         .route(
@@ -449,6 +510,15 @@ pub fn build_router_with_origins(
     // stream is gated whether or not an operator token is configured.
     router = router.layer(Extension(EventStreamAuth::new(token.clone())));
 
+    // #7609: whether a bearer credential was configured is what the
+    // channel-write gate decides on, so it travels with the router rather than
+    // as a process global — two routers in one process (a test, a re-bind) each
+    // answer for themselves.
+    router = router.layer(Extension(ChannelWriteAuth {
+        operator: token.clone(),
+        minted,
+    }));
+
     if let Some(tok) = token {
         let auth_state = AuthState { token: tok };
         router = router.layer(middleware::from_fn_with_state(auth_state, auth_middleware));
@@ -467,6 +537,27 @@ pub fn build_router_with_origins(
     // operator's browser read all of it from `127.0.0.1`. The write guard did
     // not help, because it is method-gated and reads are GET.
     with_guarded_middleware_same_origin_cors(router, self_origins)
+}
+
+/// Whether `origin` is one this daemon would serve its own UI to.
+///
+/// Why (#7609): the channel-write credential is disclosed on the otherwise
+/// unauthenticated `/api/config`, so the disclosure needs the same-origin test
+/// the CORS layer applies — and `GET` is not covered by the method-gated write
+/// guard, so it is applied explicitly here.
+/// What: an ABSENT `Origin` is same-origin. A browser omits it on a same-origin
+/// `GET`, and a server-side caller (the console proxy, `curl`) sends none; both
+/// are already inside the trust boundary the loopback bind draws. Otherwise the
+/// origin must be loopback, a local webview, or this daemon's own resolved bind
+/// — the three `trusty_common::server` admits.
+/// Test: `the_channel_credential_is_withheld_from_a_foreign_origin`.
+fn same_origin_ok(origin: Option<&str>, self_origins: &SelfOrigins) -> bool {
+    let Some(origin) = origin else {
+        return true;
+    };
+    trusty_common::server::origin_is_loopback(origin)
+        || trusty_common::server::origin_is_local_webview(origin)
+        || trusty_common::server::origin_matches_self(origin, self_origins)
 }
 
 /// Serve the HTTP API and embedded web UI on `127.0.0.1:<port>` until killed.
@@ -643,7 +734,25 @@ pub async fn serve_with_config(cfg: ApiConfig) -> Result<()> {
     // drops them.
     let resolved = listener.local_addr().unwrap_or(addr);
     let self_origins = SelfOrigins::from_bind_addrs(&[resolved]);
-    let app = build_router_with_origins(state, cfg.token.clone(), self_origins);
+
+    // #7609 (critic round 3): a LOOPBACK daemon mints a per-boot channel-write
+    // credential — whether or not an operator token is configured — so the
+    // Channels tab it serves can save without being handed the operator's own
+    // secret. A non-loopback bind mints nothing, and therefore discloses and
+    // publishes nothing; its channel writes take the operator token, which
+    // `ChannelWriter` accepts and no route ever hands out.
+    let minted = super::channel_auth::minted_credential(cfg.bind);
+    if minted.is_some() {
+        tracing::info!(
+            "minted an ephemeral channel-write credential for this boot; the served UI reads it \
+             from /api/config (#7609)"
+        );
+    }
+    // The in-process `channel` tool needs only to know that SOME credential
+    // exists; the operator's is preferred so a REPL and this daemon agree.
+    super::channel_auth::record_daemon_credential(cfg.token.clone().or_else(|| minted.clone()));
+
+    let app = build_router_with_channel_credential(state, cfg.token.clone(), self_origins, minted);
 
     // #3331: publish the bound address via the standard `http_addr` discovery
     // file so the trusty-console reverse proxy (and the connector poller) can
@@ -669,9 +778,15 @@ pub async fn serve_with_config(cfg: ApiConfig) -> Result<()> {
         eprintln!("[trusty-agents] API token authentication: enabled");
     }
 
-    let serve_result = axum::serve(listener, app)
-        .with_graceful_shutdown(trusty_common::shutdown_signal())
-        .await;
+    // #7609: `into_make_service_with_connect_info` is what puts the peer
+    // address in the request extensions, so the channel-write audit line can
+    // name the caller instead of logging `unknown`.
+    let serve_result = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(trusty_common::shutdown_signal())
+    .await;
 
     // Remove the discovery file so stale clients fail fast instead of proxying
     // to a dead port.

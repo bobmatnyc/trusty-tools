@@ -495,10 +495,12 @@ async fn channel_binding_claim(
     project_path: &Path,
     budget: &mut crate::api::server::agent_channels::inbound::DispatchBudget,
 ) -> crate::api::server::agent_channels::inbound::InboundOutcome {
-    let identity = crate::rbac::UserIdentity::new(
+    // #7609: the display name comes from a remote `From:` header, so it is
+    // sanitized at construction rather than wherever it is later logged.
+    let identity = crate::rbac::UserIdentity::from_remote(
         format!("gworkspace:{}", event.listener_id),
-        event.from.clone().unwrap_or_else(|| "gworkspace".into()),
-        crate::rbac::ServiceTier::default(),
+        event.from.as_deref(),
+        "gworkspace",
     );
     crate::api::server::agent_channels::inbound::receive_inbound(
         "gworkspace",

@@ -17,6 +17,9 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The longest display name an identity keeps; see [`UserIdentity::from_remote`].
+pub const MAX_IDENTITY_NAME_CHARS: usize = 128;
+
 /// Access tier assigned to a `UserIdentity`.
 ///
 /// Why: Re-exported from `trusty-agents-common` (which had to own the type so
@@ -46,6 +49,13 @@ pub use trusty_agents_common::ServiceTier;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UserIdentity {
     pub id: String,
+    /// Human-readable label for LOGGING ONLY; never an authorization input.
+    ///
+    /// #7609: for an inbound channel event this is remote-controlled — a Gmail
+    /// wake takes it from the sender's own `From:` header, a Telegram one from
+    /// the sender's profile — so every such caller builds the identity with
+    /// [`UserIdentity::from_remote`], which sanitizes it, and the value must not
+    /// be given meaning beyond a log label.
     pub name: String,
     pub tier: ServiceTier,
 }
@@ -73,6 +83,44 @@ impl UserIdentity {
             id: id.into(),
             name: name.into(),
             tier,
+        }
+    }
+
+    /// Construct an identity whose display name came from a REMOTE party.
+    ///
+    /// Why (#7609): the label is whatever a sender put in their own `From:`
+    /// header or Telegram profile. A hostile one can carry newlines and ANSI
+    /// escapes, which forge log lines in any consumer that writes the name out,
+    /// and can be arbitrarily long. Sanitizing in the CONSTRUCTOR is what makes
+    /// every inbound provider safe by reaching for an identity, rather than by
+    /// each of them remembering to call a helper — the Gmail poller did and the
+    /// Telegram router did not (critic MEDIUM-3).
+    /// What: drops every control character (which includes CR, LF and the ESC
+    /// that starts an ANSI sequence), trims surrounding whitespace, and caps the
+    /// result at [`MAX_IDENTITY_NAME_CHARS`]. An absent or
+    /// entirely-control-character name falls back to `fallback`, so the label is
+    /// never empty. The tier is [`ServiceTier::default`]: a remote party never
+    /// names its own privilege.
+    /// Test: `a_hostile_display_name_cannot_forge_an_identity_label`.
+    pub fn from_remote(id: impl Into<String>, name: Option<&str>, fallback: &str) -> Self {
+        let cleaned: String = name
+            .unwrap_or_default()
+            .chars()
+            .filter(|c| !c.is_control())
+            .collect();
+        let trimmed: String = cleaned
+            .trim()
+            .chars()
+            .take(MAX_IDENTITY_NAME_CHARS)
+            .collect();
+        Self {
+            id: id.into(),
+            name: if trimmed.is_empty() {
+                fallback.to_string()
+            } else {
+                trimmed
+            },
+            tier: ServiceTier::default(),
         }
     }
 
@@ -133,6 +181,46 @@ mod tests {
         assert_eq!(s, "\"read_only\"");
         let r: ServiceTier = serde_json::from_str("\"analytics\"").unwrap();
         assert_eq!(r, ServiceTier::Analytics);
+    }
+
+    /// A hostile display name cannot forge a log line or run away with the
+    /// label.
+    ///
+    /// Why (#7609): the value is remote-controlled — a Gmail sender's `From:`
+    /// header, a Telegram profile. Newlines forge log records in any consumer
+    /// that writes the identity out, an ESC starts an ANSI sequence in a
+    /// terminal reading those logs, and an unbounded name is its own denial of
+    /// service against them.
+    #[test]
+    fn a_hostile_display_name_cannot_forge_an_identity_label() {
+        let forged = UserIdentity::from_remote(
+            "gworkspace:mail",
+            Some("  Alice\r\nINFO forged: granted\u{1b}[31m  "),
+            "gworkspace",
+        );
+        assert_eq!(forged.name, "AliceINFO forged: granted[31m");
+        assert!(!forged.name.chars().any(char::is_control));
+        assert_eq!(forged.id, "gworkspace:mail");
+        assert_eq!(forged.tier, ServiceTier::default());
+
+        let long = "a".repeat(500);
+        assert_eq!(
+            UserIdentity::from_remote("x", Some(&long), "fallback")
+                .name
+                .chars()
+                .count(),
+            MAX_IDENTITY_NAME_CHARS
+        );
+
+        // An absent or entirely-control-character name still gets a label.
+        assert_eq!(
+            UserIdentity::from_remote("x", None, "telegram").name,
+            "telegram"
+        );
+        assert_eq!(
+            UserIdentity::from_remote("x", Some("\r\n\t"), "telegram").name,
+            "telegram"
+        );
     }
 
     #[test]

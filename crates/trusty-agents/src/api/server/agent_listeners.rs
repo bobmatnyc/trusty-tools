@@ -1,7 +1,7 @@
 //! Revision-aware listener bindings shared by the operator API and self-only tool.
 use super::{agent_patch::resolve_agent_paths, agent_stores::is_valid_agent_name};
 use crate::listeners::config::{AgentListenerBinding, ListenerConfig};
-use axum::{Json, extract::Path as AxumPath, http::StatusCode};
+use axum::{Json, http::StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -223,17 +223,34 @@ pub(crate) async fn write(name: &str, update: ListenerUpdate) -> Result<Value, C
     )
     .await
 }
-pub(super) async fn get_listeners(
-    AxumPath(name): AxumPath<String>,
-) -> Result<Json<Value>, ConfigError> {
-    read(&name).await.map(Json)
+/// Replace one assistant's wake filters from a MODEL TURN, under the channel
+/// write gate.
+///
+/// Why (#7609): the merged `channel` tool's `set` action reaches this write,
+/// and a model-driven change to which events wake an assistant is the same
+/// class of change the HTTP channel routes are gated on — `instructions` reach
+/// the wake prompt as TRUSTED text. The deprecated
+/// `PUT /api/agents/{name}/listeners` route takes the same gate, through
+/// `ChannelWriter`; see `super::deprecated_aliases::put_listeners_alias`.
+/// What: 401 when this daemon serves no authenticated API; otherwise [`write`].
+/// Test: `crate::tools::channel::channel_tests::the_tool_refuses_a_write_on_a_tokenless_daemon`.
+pub(crate) async fn write_from_turn(
+    name: &str,
+    update: ListenerUpdate,
+) -> Result<Value, ConfigError> {
+    if !super::channel_auth::daemon_token_configured() {
+        return Err(error(
+            StatusCode::UNAUTHORIZED,
+            super::channel_auth::tool_refusal(),
+        ));
+    }
+    write(name, update).await
 }
-pub(super) async fn put_listeners(
-    AxumPath(name): AxumPath<String>,
-    Json(update): Json<ListenerUpdate>,
-) -> Result<Json<Value>, ConfigError> {
-    write(&name, update).await.map(Json)
-}
+
+// #7609: the two axum handlers that used to live here are gone. The listener
+// routes are now deprecated aliases that forward through
+// `super::deprecated_aliases` into `super::agent_channels`, which is the
+// surviving implementation; `read` and `write` above are what both reach.
 #[cfg(test)]
 mod tests {
     use super::*;
