@@ -303,8 +303,18 @@ impl ChannelAdapter for GworkspaceAdapter {
         event: InboundEvent<'_>,
     ) -> Result<Option<WakePrompt>, ChannelError> {
         let e = event.event;
-        let prompt =
-            crate::listeners::wake::build_wake_prompt(e, None, Some(&binding.instructions));
+        // #7609: a Gmail wake reaches this adapter through the legacy
+        // `[[listeners]]` binding now, not only through a targeted channel
+        // binding, so it must carry the SAME `events/<connector>.md`
+        // instructions `listeners::wake` loaded before slice 4 moved that
+        // traffic here — otherwise the envelope quietly loses them.
+        let connector =
+            crate::listeners::wake::load_connector_instructions(event.agent, &e.provider).await;
+        let prompt = crate::listeners::wake::build_wake_prompt(
+            e,
+            connector.as_deref(),
+            Some(&binding.instructions),
+        );
         let metadata = json!({
             "kind":"trusty.listener-event","version":1,
             "listener":binding.name,"binding":binding.id,
@@ -541,6 +551,48 @@ mod tests {
         assert_eq!(metadata["binding"], json!("family"));
         assert_eq!(metadata["gmail_message_id"], json!("19abc"));
         assert_eq!(metadata["from"], json!("Alice <alice@example.com>"));
+    }
+
+    /// The wake prompt carries the assistant's `events/<connector>.md` file.
+    ///
+    /// Why (#7609): slice 4 moves izzie's Gmail wake off `listeners::wake` and
+    /// onto this adapter. `wake_bound_agents` loaded those instructions; if
+    /// this did not, an assistant already relying on them would lose them with
+    /// nothing in the logs to say so.
+    ///
+    /// The lock is held because the lookup resolves `$HOME`'s agents tier.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn gworkspace_receive_carries_the_connector_instructions_file() {
+        let _guard = crate::test_env::lock_home();
+        let tmp = tempfile::tempdir().unwrap();
+        let events = tmp
+            .path()
+            .join(".trusty-agents/agents/fixture-connector/events");
+        std::fs::create_dir_all(&events).unwrap();
+        std::fs::write(events.join("gmail.md"), "Escalate anything from Legal.").unwrap();
+        // SAFETY: this test holds `HOME_LOCK` for the whole mutation.
+        unsafe {
+            std::env::set_var("HOME", tmp.path());
+        }
+
+        let event = gmail_event("Alice <alice@example.com>", &["INBOX"]);
+        let wake = GworkspaceAdapter
+            .receive(
+                &binding_with("from:alice@example.com"),
+                InboundEvent {
+                    agent: "fixture-connector",
+                    event: &event,
+                },
+            )
+            .await
+            .unwrap()
+            .expect("an addressed Gmail message earns a wake");
+        assert!(
+            wake.prompt.contains("Escalate anything from Legal."),
+            "the connector instructions must survive the move to this adapter: {}",
+            wake.prompt
+        );
     }
 
     /// A turn woken on one binding cannot reply into another binding's thread.

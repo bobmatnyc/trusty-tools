@@ -149,27 +149,50 @@ async fn save_cursor(listener_name: &str, cursor: &Cursor) -> Result<()> {
 /// server process, never a one-shot CLI invocation.
 /// What: Fire-and-forget `tokio::task::spawn` per listener, mirroring the
 /// existing background-docs-index-build pattern in `api/server/routes.rs`.
-pub fn spawn_listeners(listeners: Vec<ListenerConfig>, project_path: PathBuf) {
-    for cfg in listeners {
-        if !cfg.enabled {
-            tracing::debug!(listener = %cfg.name, "listener disabled; skipping");
+///
+/// #7609: takes the merged [`crate::channels::Channel`] list and decides from
+/// the CHANNEL — every enabled Global gmail channel polls, whether or not it
+/// names anyone in `route_to`, because ingest and wake are separate stages and
+/// `route_to` governs only the second. The poll loop itself still reads the
+/// [`ListenerConfig`] projection, which is lossless for every field it uses.
+/// Test: `an_enabled_global_channel_polls_with_or_without_route_to`.
+pub fn spawn_listeners(channels: Vec<crate::channels::Channel>, project_path: PathBuf) {
+    for cfg in pollable_listeners(&channels) {
+        let project_path = project_path.clone();
+        tracing::info!(listener = %cfg.name, interval_secs = cfg.poll_interval_secs, "starting gmail listener poll loop");
+        tokio::task::spawn(run_gmail_poll_loop(cfg, project_path));
+    }
+}
+
+/// The channels [`spawn_listeners`] starts a poller for, as listener configs.
+///
+/// Why: split out so the selection rule is testable without spawning a task or
+/// reaching Gmail.
+/// What: Global scope, `enabled`, provider `gmail`. Anything else is logged and
+/// skipped — `google-calendar` is a documented-but-unimplemented connector
+/// (DOC-54 §7.5), and an Assistant-scope channel is not the harness's to poll.
+/// Test: `an_enabled_global_channel_polls_with_or_without_route_to`.
+fn pollable_listeners(channels: &[crate::channels::Channel]) -> Vec<ListenerConfig> {
+    let mut pollable = Vec::new();
+    for channel in channels {
+        if channel.scope != crate::channels::ChannelScope::Global {
             continue;
         }
-        match cfg.connector.as_str() {
-            "gmail" => {
-                let project_path = project_path.clone();
-                tracing::info!(listener = %cfg.name, interval_secs = cfg.poll_interval_secs, "starting gmail listener poll loop");
-                tokio::task::spawn(run_gmail_poll_loop(cfg, project_path));
-            }
-            other => {
-                tracing::warn!(
-                    listener = %cfg.name,
-                    connector = %other,
-                    "listener connector not yet implemented; skipping (deferred — see PR body)"
-                );
-            }
+        if !channel.enabled {
+            tracing::debug!(listener = %channel.id, "listener disabled; skipping");
+            continue;
+        }
+        if channel.provider == "gmail" {
+            pollable.push(channel.to_listener_config());
+        } else {
+            tracing::warn!(
+                listener = %channel.id,
+                connector = %channel.provider,
+                "listener connector not yet implemented; skipping (deferred — see PR body)"
+            );
         }
     }
+    pollable
 }
 
 /// Long-running poll loop for one Gmail listener. Never returns under
@@ -374,9 +397,9 @@ async fn poll_once(
                 } else {
                     crate::api::server::agent_channels::inbound::InboundOutcome::default()
                 };
-                match wake_path(included, claim.claimed) {
-                    WakePath::ChannelBinding => {
-                        tracing::info!(listener = %cfg.name, event_id = %event.id, dispatched = claim.dispatched, rate_limited = claim.rate_limited, "wake decision: claimed by a channel binding");
+                match wake_path(included, claim.claimed, claim.source) {
+                    WakePath::Channel(source) => {
+                        tracing::info!(listener = %cfg.name, event_id = %event.id, source = %source.as_str(), dispatched = claim.dispatched, rate_limited = claim.rate_limited, "wake decision: claimed on the channel path");
                     }
                     WakePath::Listener => {
                         let outcome =
@@ -415,23 +438,40 @@ async fn poll_once(
 /// wake the same assistant twice for the same mail, from two different prompts.
 /// Making the choice an enum is what makes "never both" a property a test can
 /// state rather than a reading of the `if` that used to be here.
+///
+/// #7609: the channel path now covers three sources, not one —
+/// [`crate::channels::dispatch::WakeSource`] says which, and a legacy
+/// `[[listeners]]` binding handled there must NOT also reach the listener wake
+/// below.
 /// Test: `gmail_event_takes_exactly_one_wake_path`.
 #[derive(Debug, PartialEq, Eq)]
 enum WakePath {
     /// The event type is excluded; nothing is dispatched.
     Excluded,
-    /// A saved channel binding addressed it and has already dispatched.
-    ChannelBinding,
-    /// No binding addressed it, so the `[[listeners]]` wake still applies.
+    /// A channel addressed it and the channel path has already dispatched.
+    Channel(crate::channels::dispatch::WakeSource),
+    /// No channel addressed it, so the `[[listeners]]` wake still applies.
     Listener,
 }
 
+/// The one inbound path this event took.
+///
+/// What: an excluded event type dispatches nothing however it is addressed. A
+/// source names the channel that was selected. `claimed` without a source is a
+/// channel that OWNS the destination but woke nobody — a disabled binding, a
+/// filter that rejected the event — and the listener wake still stands down,
+/// exactly as it did before this slice.
 /// Test: `gmail_event_takes_exactly_one_wake_path`.
-fn wake_path(included: bool, claimed_by_binding: bool) -> WakePath {
-    match (included, claimed_by_binding) {
-        (false, _) => WakePath::Excluded,
-        (true, true) => WakePath::ChannelBinding,
-        (true, false) => WakePath::Listener,
+fn wake_path(
+    included: bool,
+    claimed: bool,
+    source: Option<crate::channels::dispatch::WakeSource>,
+) -> WakePath {
+    match (included, claimed, source) {
+        (false, _, _) => WakePath::Excluded,
+        (true, _, Some(source)) => WakePath::Channel(source),
+        (true, true, None) => WakePath::Channel(crate::channels::dispatch::WakeSource::NoWake),
+        (true, false, None) => WakePath::Listener,
     }
 }
 
@@ -574,11 +614,70 @@ mod tests {
     /// and a debug log inline, and there was no channel path to choose against.
     #[test]
     fn gmail_event_takes_exactly_one_wake_path() {
-        assert_eq!(wake_path(true, true), WakePath::ChannelBinding);
-        assert_eq!(wake_path(true, false), WakePath::Listener);
+        use crate::channels::dispatch::WakeSource;
+        assert_eq!(
+            wake_path(true, true, None),
+            WakePath::Channel(WakeSource::NoWake),
+            "a claimed-but-unwoken destination still stands the listener down"
+        );
+        assert_eq!(wake_path(true, false, None), WakePath::Listener);
         // An excluded event type dispatches nothing, however it is addressed.
-        assert_eq!(wake_path(false, true), WakePath::Excluded);
-        assert_eq!(wake_path(false, false), WakePath::Excluded);
+        assert_eq!(wake_path(false, true, None), WakePath::Excluded);
+        assert_eq!(wake_path(false, false, None), WakePath::Excluded);
+
+        // #7609: each of the three channel sources is the channel path, and
+        // NONE of them also runs the `[[listeners]]` wake below.
+        for source in [
+            WakeSource::AssistantChannel,
+            WakeSource::GlobalRouteTo,
+            WakeSource::LegacyBinding,
+        ] {
+            assert_eq!(
+                wake_path(true, true, Some(source)),
+                WakePath::Channel(source)
+            );
+            assert_eq!(wake_path(false, true, Some(source)), WakePath::Excluded);
+        }
+    }
+
+    /// Every enabled Global gmail channel polls, `route_to` or not — and
+    /// nothing else does.
+    ///
+    /// Why (#7609): ingest is stage one and wake is stage two. A global channel
+    /// that routes to nobody must still fill the event store, or the operator
+    /// who adds `route_to` later finds an empty mailbox history.
+    #[test]
+    fn an_enabled_global_channel_polls_with_or_without_route_to() {
+        use crate::channels::{Channel, ChannelScope};
+        let gmail = |id: &str, enabled: bool, route_to: Vec<String>| Channel {
+            id: id.into(),
+            name: id.into(),
+            provider: "gmail".into(),
+            scope: ChannelScope::Global,
+            enabled,
+            route_to,
+            ..Channel::default()
+        };
+        let channels = vec![
+            gmail("routed", true, vec!["izzie".into()]),
+            gmail("unrouted", true, vec![]),
+            gmail("off", false, vec![]),
+            Channel {
+                provider: "slack".into(),
+                ..gmail("team-slack", true, vec![])
+            },
+            Channel {
+                scope: ChannelScope::Assistant,
+                ..gmail("izzie-own", true, vec![])
+            },
+        ];
+        assert_eq!(
+            pollable_listeners(&channels)
+                .iter()
+                .map(|cfg| cfg.name.clone())
+                .collect::<Vec<_>>(),
+            vec!["routed".to_string(), "unrouted".to_string()]
+        );
     }
 
     #[test]

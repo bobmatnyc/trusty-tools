@@ -118,9 +118,21 @@ impl Binding {
     /// `receive_enabled` binding is refused on a
     /// provider whose [`crate::channels::Capabilities`] say it has no inbound
     /// path.
+    ///
+    /// #7609: `globals` is the harness-wide `[[channels]]` list, because one
+    /// shape legitimately carries no destination. A `[[listeners]]` binding
+    /// absorbed out of `agent.toml` is an OVERLAY of a global channel — this
+    /// assistant's `wake_filter`, `event_types`, `instructions` and `enabled`
+    /// over the global's provider, destination and ingest filter — and it never
+    /// named a destination, so the target grammar refused it and slice 3 had to
+    /// leave it unmigrated. The destination check is skipped when
+    /// [`crate::channels::dispatch::is_overlay`] holds, which keeps an
+    /// operator-authored blank target refused with the message it always had.
     /// Test: `agent_channels_validates_provider_destination_and_permissions`,
-    /// `agent_channels_rejects_unregistered_provider`.
-    pub(crate) fn validate(&self) -> Result<(), Error> {
+    /// `agent_channels_rejects_unregistered_provider`,
+    /// `an_overlay_of_a_global_channel_validates`,
+    /// `a_blank_target_with_no_global_is_still_refused`.
+    pub(crate) fn validate_in(&self, globals: &[crate::channels::Channel]) -> Result<(), Error> {
         if !is_valid_agent_name(&self.id)
             || self.name.trim().is_empty()
             || self.name.chars().count() > 128
@@ -132,7 +144,11 @@ impl Binding {
         let Some(adapter) = crate::channels::adapter(&self.provider) else {
             return Err(bad("Unsupported channel provider"));
         };
-        if !adapter.validate_target(&self.target) {
+        // #7609: an overlay of a global channel is the one shape that may carry
+        // no destination — see `validate_in`.
+        if !crate::channels::dispatch::is_overlay(&self.name, &self.target, globals)
+            && !adapter.validate_target(&self.target)
+        {
             // #7427: gworkspace targets are `from:<address>` / `label:<id>`,
             // so the copy can no longer name only the two id-shaped providers.
             return Err(bad(
@@ -185,9 +201,29 @@ fn config_path(dirs: &[PathBuf], name: &str) -> Result<PathBuf, Error> {
         .map(|(p, _)| p.with_extension("channels.json"))
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "Assistant not found"))
 }
+/// One assistant's saved channel bindings, validated on the way in.
+///
+/// Why (#7609): the harness-wide `[[channels]]` list is now part of what makes
+/// a stored record valid — an overlay's blank target is only legitimate beside
+/// a global of the same name — so this reads it before validating. The inbound
+/// path already holds that list and uses [`load_at_with`] instead, rather than
+/// re-reading the global config once per assistant per event.
+/// Test: `agent_channels_revision_preserves_bindings_and_rejects_stale_write`.
 pub(crate) async fn load_at(
     dirs: &[PathBuf],
     name: &str,
+) -> Result<(PathBuf, String, Vec<Binding>), Error> {
+    let globals = crate::mcp::config::GlobalConfig::load().await.channels;
+    load_at_with(dirs, name, &globals).await
+}
+
+/// [`load_at`] over an already-loaded global channel list.
+///
+/// Test: `the_izzie_fixture_wakes_once_for_an_inbox_message`.
+pub(crate) async fn load_at_with(
+    dirs: &[PathBuf],
+    name: &str,
+    globals: &[crate::channels::Channel],
 ) -> Result<(PathBuf, String, Vec<Binding>), Error> {
     let path = config_path(dirs, name)?;
     let raw = match tokio::fs::read_to_string(&path).await {
@@ -197,7 +233,7 @@ pub(crate) async fn load_at(
     };
     let bindings: Vec<Binding> = serde_json::from_str(&raw).map_err(internal)?;
     for binding in &bindings {
-        binding.validate()?;
+        binding.validate_in(globals)?;
     }
     Ok((path, raw, bindings))
 }
@@ -227,7 +263,8 @@ async fn write_at(dirs: &[PathBuf], name: &str, update: Update) -> Result<(), Er
     let _process_lock = crate::knowledge::execution::mutation_guard(&manifest)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-    let (path, raw, _) = load_at(dirs, name).await?;
+    let globals = crate::mcp::config::GlobalConfig::load().await.channels;
+    let (path, raw, _) = load_at_with(dirs, name, &globals).await?;
     if revision(&raw) != update.revision {
         return Err(err(
             StatusCode::CONFLICT,
@@ -239,7 +276,8 @@ async fn write_at(dirs: &[PathBuf], name: &str, update: Update) -> Result<(), Er
     }
     let mut ids = std::collections::HashSet::new();
     for binding in &update.bindings {
-        binding.validate()?;
+        // #7609: an overlay of a global channel saves through the UI too.
+        binding.validate_in(&globals)?;
         if !ids.insert(&binding.id) {
             return Err(bad("Channel binding IDs must be unique"));
         }
@@ -453,18 +491,18 @@ mod tests {
     #[test]
     fn agent_channels_validates_provider_destination_and_permissions() {
         let mut b = binding();
-        assert!(b.validate().is_ok());
+        assert!(b.validate_in(&[]).is_ok());
         b.target = "https://host".into();
-        assert!(b.validate().is_err());
+        assert!(b.validate_in(&[]).is_err());
         b.provider = "telegram".into();
         b.target = "123".into();
         // #7427 PR 2: this used to assert `is_err()` — a Telegram binding could
         // not ask for incoming updates because the adapter said the provider
         // had no inbound path at all.
         b.receive_enabled = true;
-        assert!(b.validate().is_ok());
+        assert!(b.validate_in(&[]).is_ok());
         b.target = "C123456".into();
-        assert!(b.validate().is_err());
+        assert!(b.validate_in(&[]).is_err());
         let b = binding();
         let list = [b];
         assert!(authorized(&list, "other", true).is_err());
@@ -481,11 +519,11 @@ mod tests {
             "enabled":true,"send_enabled":true,"receive_enabled":true
         }))
         .unwrap();
-        assert!(b.validate().is_ok());
+        assert!(b.validate_in(&[]).is_ok());
         b.credential_ref = Some("telegram".into());
-        assert!(b.validate().is_ok());
+        assert!(b.validate_in(&[]).is_ok());
         b.credential_ref = Some("slack".into());
-        assert!(b.validate().is_err());
+        assert!(b.validate_in(&[]).is_err());
     }
     #[test]
     fn agent_channels_poll_credential_ref_reads_the_first_receiving_binding() {
@@ -519,7 +557,7 @@ mod tests {
         let mut b = binding();
         b.provider = "notion".into();
         b.target = "some-notion-page".into();
-        let rejection = b.validate().unwrap_err();
+        let rejection = b.validate_in(&[]).unwrap_err();
         assert_eq!(rejection.0, StatusCode::BAD_REQUEST);
         assert_eq!(
             rejection.1.0["error"],
