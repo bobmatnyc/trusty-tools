@@ -135,10 +135,13 @@ impl Fixture {
     /// Assert the detached index is quarantined, the snapshot is untouched,
     /// and the incremental persister refuses too.
     async fn assert_refused_and_untouched(&self, before: &[u8]) {
-        assert_eq!(
-            std::fs::read(&self.chunks_json).unwrap(),
-            before,
-            "#7920: a daemon that does not hold the corpus must not rewrite chunks.json"
+        let after = std::fs::read(&self.chunks_json).unwrap();
+        assert!(
+            after == before,
+            "#7920: a daemon that does not hold the corpus must not rewrite chunks.json \
+             ({} bytes before, {} bytes after)",
+            before.len(),
+            after.len()
         );
         let idx = self.indexer.read().await;
         assert!(!idx.has_corpus_store());
