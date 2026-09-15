@@ -361,6 +361,12 @@ pub struct DaemonState {
     /// what the client reads as "cannot tell".
     /// Test: `health_response_serializes_build_id_field`.
     pub(super) build_identity: std::sync::RwLock<String>,
+    /// The `/health` catalog-staleness report cache (#7968).
+    ///
+    /// Why: the walk behind the report must not run inline per request; see
+    /// [`crate::daemon::rpc::health_catalog`].
+    /// Test: `health_answers_while_the_catalog_read_is_stalled`.
+    pub(super) catalog_report: Arc<crate::daemon::rpc::health_catalog::CatalogReportCache>,
     /// Layer-3 portfolio manager state (`tm manager`, epic #2109, DOC-36 §3.1).
     ///
     /// Why: DOC-36 §3.1 makes `tm manager` a daemon-owned component whose
@@ -481,6 +487,12 @@ impl Default for DaemonState {
     }
 }
 
+/// An empty `/health` catalog-report cache with the production max age (#7968).
+fn new_catalog_report_cache() -> Arc<crate::daemon::rpc::health_catalog::CatalogReportCache> {
+    use crate::daemon::rpc::health_catalog::{CatalogReportCache, MAX_AGE};
+    Arc::new(CatalogReportCache::new(MAX_AGE))
+}
+
 impl DaemonState {
     /// Construct empty state with default thresholds.
     ///
@@ -569,6 +581,8 @@ impl DaemonState {
             unsupervised_forced: std::sync::atomic::AtomicBool::new(false),
             launchd_supervision: std::sync::RwLock::new(String::new()),
             build_identity: std::sync::RwLock::new(String::new()),
+            // #7968: empty until the first `/health` starts a walk.
+            catalog_report: new_catalog_report_cache(),
             manager,
             provisioning: crate::daemon::provisioning::ProvisioningRegistry::default(),
             nudge_ledger: parking_lot::Mutex::new(crate::core::idle_nudge::NudgeLedger::new()),
@@ -650,6 +664,8 @@ impl DaemonState {
             unsupervised_forced: std::sync::atomic::AtomicBool::new(false),
             launchd_supervision: std::sync::RwLock::new(String::new()),
             build_identity: std::sync::RwLock::new(String::new()),
+            // #7968: empty until the first `/health` starts a walk.
+            catalog_report: new_catalog_report_cache(),
             manager,
             provisioning: crate::daemon::provisioning::ProvisioningRegistry::default(),
             nudge_ledger: parking_lot::Mutex::new(crate::core::idle_nudge::NudgeLedger::new()),
@@ -658,6 +674,13 @@ impl DaemonState {
             builder_claim: parking_lot::Mutex::new(()),
             pending_stops: super::pending_stops::PendingStops::default(),
         }
+    }
+
+    /// The `/health` catalog-report cache (#7968).
+    pub(crate) fn catalog_report_cache(
+        &self,
+    ) -> &Arc<crate::daemon::rpc::health_catalog::CatalogReportCache> {
+        &self.catalog_report
     }
 
     /// The framework root directory this daemon was configured with.

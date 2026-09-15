@@ -19,6 +19,10 @@ pub mod core;
 /// handlers both call, so one route has one implementation.
 pub mod core_ops;
 
+/// #7968: the bounded-age cache `core_ops::health` serves the catalog-staleness
+/// report from, so `/health` never walks the catalog inline per request.
+pub(crate) mod health_catalog;
+
 /// Registration for the legacy session registry, hook ingestion, and the polled
 /// event feeds (#6288 slice 3). The SSE stream legs stay on HTTP until slice 6.
 pub mod sessions_legacy;

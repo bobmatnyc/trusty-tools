@@ -49,12 +49,12 @@ use crate::daemon::state::DaemonState;
 
 /// Liveness plus the HR-3 catalog-staleness signal (`GET /health`, `mpm.health`).
 ///
-/// Test: `health_reports_ok_status`, `parity_health_agrees_across_transports`.
+/// Test: `health_reports_ok_status`, `parity_health_agrees_across_transports`,
+/// `health_answers_while_the_catalog_read_is_stalled`.
 pub async fn health(state: &Arc<DaemonState>) -> HealthResponse {
-    let fw = crate::core::paths::FrameworkPaths::from_root(state.framework_root());
-    // The daemon-wide baseline uses the framework root as the "project" so only
-    // the user/catalog/default manifest layers apply (no per-project override).
-    let report = crate::core::update_check::detect_for_framework(&fw, state.framework_root());
+    // #7968: served from a bounded-age cache refreshed on the blocking pool; the
+    // catalog walk used to run inline here, on a runtime worker, per request.
+    let report = super::health_catalog::report(state).await;
     HealthResponse {
         status: "ok".to_owned(),
         catalog_stale: report.stale,
