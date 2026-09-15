@@ -424,12 +424,18 @@ async fn granted_worktree_route_reports_a_live_writer_without_claiming() {
     assert_eq!(body.total, 1);
     assert_eq!(body.agents[0].agent, "python-engineer");
     assert!(!body.claimed, "a denied dispatch must claim nothing");
-    // #7487: the deny leaves a Cancelled tombstone, never a live record.
-    let live: Vec<_> = state
-        .delegations_for(session)
-        .into_iter()
-        .filter(|d| d.status.is_live())
-        .collect();
+    // #7487: the deny leaves ONE Cancelled tombstone beside the occupant, never
+    // a live record and never a second tombstone. The total is pinned as well as
+    // the live count — an implementation that wrote a fresh Cancelled record
+    // instead of cancelling the one it found passes the live filter alone.
+    let all = state.delegations_for(session);
+    assert_eq!(all.len(), 2, "one occupant plus one tombstone: {all:?}");
+    let denied = all
+        .iter()
+        .find(|d| d.tool_use_id.as_deref() == Some("toolu_second"))
+        .expect("the denied dispatch has a record");
+    assert_eq!(denied.status, DelegationStatus::Cancelled);
+    let live: Vec<_> = all.iter().filter(|d| d.status.is_live()).collect();
     assert_eq!(live.len(), 1);
     assert_eq!(live[0].agent, "python-engineer");
 }
@@ -1478,6 +1484,87 @@ async fn a_grant_deny_keeps_the_running_occupant_counted_7487() {
     assert_eq!(
         head_write.total, 1,
         "a HEAD write in another session's view must still see the live writer"
+    );
+}
+
+/// 🔴 REGRESSION (#7487 critic round, reachable once #6556's retry lands): a
+/// deny and then an ADMISSION on the same `tool_use_id` must leave a live
+/// record, not the deny's tombstone wearing an `isolation`.
+///
+/// Why: the guard's ADR-0048 rewrite keeps the dispatch's `tool_use_id`, so the
+/// unisolated form that was denied and the granted form that runs are the same
+/// id. `record_granted_isolation` found the `Cancelled` tombstone and set only
+/// `isolation`, so a running agent was described as Ended — its builder slot
+/// free and, worse, its worktree reclaimable under it, which is #5661's shape.
+/// Fails at 9727aa358: the record reads `Cancelled` with `ended_at` set and the
+/// machine reports no builder holding a slot.
+#[tokio::test]
+async fn an_admitted_grant_revives_the_record_its_own_deny_tombstoned_7487() {
+    let (state, _dir, session) = hermetic();
+    // ADR-0056: version-control holds the main checkout, so the first grant is
+    // denied on occupancy.
+    insert(
+        &state,
+        session,
+        "version-control",
+        "/repo",
+        None,
+        Some("toolu_vc"),
+        DelegationStatus::Running,
+    );
+    let denied = granted_call(
+        &state,
+        session,
+        dispatch(
+            "/repo",
+            "rust-engineer",
+            Some("worktree"),
+            Some("toolu_same"),
+        ),
+    )
+    .await;
+    assert!(!denied.claimed, "the occupant denies the first attempt");
+
+    // The occupant finishes and the PM re-dispatches — Claude Code reuses the
+    // tool call, so the id is the one the deny just tombstoned.
+    let vc = state
+        .find_delegation(session, |d| d.tool_use_id.as_deref() == Some("toolu_vc"))
+        .expect("the occupant has a record");
+    state.terminate_delegation(vc, DelegationStatus::Completed);
+
+    let admitted = granted_call(
+        &state,
+        session,
+        dispatch(
+            "/repo",
+            "rust-engineer",
+            Some("worktree"),
+            Some("toolu_same"),
+        ),
+    )
+    .await;
+    assert!(admitted.claimed, "the freed checkout admits the grant");
+
+    let record = state
+        .delegations_for(session)
+        .into_iter()
+        .find(|d| d.tool_use_id.as_deref() == Some("toolu_same"))
+        .expect("the admitted dispatch has a record");
+    assert_eq!(
+        record.status,
+        DelegationStatus::Running,
+        "an admitted dispatch is running, whatever its own deny wrote"
+    );
+    assert!(
+        record.ended_at.is_none(),
+        "a revived record carries no end time"
+    );
+    assert_eq!(record.isolation.as_deref(), Some("worktree"));
+    let holders = state.builder_slot_holders(None);
+    assert_eq!(
+        holders.len(),
+        1,
+        "the revived builder holds its slot again: {holders:?}"
     );
 }
 

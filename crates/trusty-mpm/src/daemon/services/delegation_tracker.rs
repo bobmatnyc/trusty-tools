@@ -682,8 +682,17 @@ fn on_dispatch(state: &DaemonState, session: SessionId, payload: &Value) {
 /// exists to remove. The route that calls this re-derives the same test to
 /// decide eligibility; keeping it in the writer as well means a second caller,
 /// or a refactor of that route, cannot reach the write without it.
+///
+/// A record found in a NON-LIVE status is revived to `Running` with `ended_at`
+/// cleared (#7487 critic round). The only caller reaches this from inside
+/// [`crate::daemon::state::DaemonState::claim_shared_tree_dispatch`]'s admission
+/// arm, so the dispatch is running; a deny of the same `tool_use_id` moments
+/// earlier left a `Cancelled` tombstone, and writing `isolation` onto it without
+/// the revival described a live agent as Ended — which the reclaim reads as
+/// permission to delete its worktree (#5661).
 /// Test: `a_grant_and_the_tracker_converge_in_either_order`,
-/// `record_granted_isolation_refuses_a_non_separating_mode`.
+/// `record_granted_isolation_refuses_a_non_separating_mode`,
+/// `an_admitted_grant_revives_the_record_its_own_deny_tombstoned_7487`.
 pub fn record_granted_isolation(state: &DaemonState, session: SessionId, payload: &Value) -> bool {
     let Some(tool_use_id) = field(payload, "tool_use_id") else {
         return false;
@@ -699,7 +708,22 @@ pub fn record_granted_isolation(state: &DaemonState, session: SessionId, payload
     if let Some(id) =
         state.find_delegation(session, |d| d.tool_use_id.as_deref() == Some(tool_use_id))
     {
-        state.mutate_delegation(id, |d| d.isolation = Some(isolation.clone()));
+        state.mutate_delegation(id, |d| {
+            // #7487: this call runs only from inside
+            // `claim_shared_tree_dispatch`'s ADMISSION arm, so by the time it is
+            // reached the daemon has decided this dispatch RUNS. A record found
+            // in a non-live status is therefore a tombstone the SAME id already
+            // earned — a deny of the unisolated form that the guard then re-made
+            // as a grant — and setting only `isolation` over it left a live
+            // agent described as Ended. The reclaim reads that and can delete
+            // the worktree out from under it, which is #5661's shape.
+            if !d.status.is_live() {
+                d.status = DelegationStatus::Running;
+                d.ended_at = None;
+                d.started_at = Some(Utc::now());
+            }
+            d.isolation = Some(isolation.clone());
+        });
         return true;
     }
     on_dispatch_locked(state, session, payload);
