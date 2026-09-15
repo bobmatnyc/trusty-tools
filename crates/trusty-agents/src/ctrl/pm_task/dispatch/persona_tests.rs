@@ -794,6 +794,69 @@ fn base_assistant_scope_grants_cover_every_declared_memory_scope() {
     }
 }
 
+/// #7992: the sibling half of the test above, for the personas the base fix
+/// could not reach.
+///
+/// Why: `cto-assistant.toml` and `izzie.toml` are FLAT manifests shadowed by
+/// same-named directory packages, so `AgentConfig::by_name` never loads them
+/// while the package resolves — but the loader falls back to exactly these
+/// files when a package's `extends` chain fails
+/// (`AgentConfig::extends_shadow_fallback_in`), and the REPL / Telegram
+/// persona-dispatch paths read `<name>.toml` directly. Neither inherits the
+/// base `assistant` allowlist, so #7448's fix left `izzie.toml` still
+/// granting `memory.read`/`memory.write` with no tool behind either — a
+/// remember request on the fallback path answers "no such tool" exactly as
+/// the base did before #7448.
+/// What: loads each shadowed flat manifest BY PATH (`by_name` would resolve
+/// the package instead) and, for each memory scope its `[tools].scopes`
+/// grants, requires an allowlisted name that both survives
+/// `assistant_memory::bind` and that `assistant_memory::scope_for` maps to
+/// that scope. Same `BOUND_MEMORY_TOOLS` vocabulary as the base test above,
+/// for the same reason: a wider or narrower guess would pass or fail for the
+/// wrong reason. A manifest granting neither memory scope is skipped, so this
+/// never forces a memory grant onto a persona that wants none.
+/// Test: this test IS the coverage.
+#[test]
+fn shadowed_flat_persona_scope_grants_cover_every_declared_memory_scope() {
+    // Same set `assistant_memory::bind` keeps registered — see the base
+    // test above for why the vocabulary is `bind`'s and not a guess.
+    const BOUND_MEMORY_TOOLS: [&str; 3] = ["memory_recall", "memory_remember", "memory_write"];
+
+    let agents_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join(".trusty-agents")
+        .join("agents");
+    for name in ["izzie", "cto-assistant"] {
+        let path = agents_dir.join(format!("{name}.toml"));
+        let cfg = AgentConfig::load(&path)
+            .unwrap_or_else(|e| panic!("shadowed flat manifest '{name}.toml' parses: {e}"));
+        let allow = cfg
+            .tools
+            .allow
+            .clone()
+            .unwrap_or_else(|| panic!("'{name}.toml' declares [tools].allow"));
+        let scopes = cfg.tools.scopes.clone().unwrap_or_default();
+        let patterns: Vec<ScopePattern> = scopes.iter().cloned().map(ScopePattern::new).collect();
+
+        for scope in ["memory.read", "memory.write"] {
+            if !patterns
+                .iter()
+                .any(|p| p.matches(&Scope::new(scope.to_string())))
+            {
+                continue;
+            }
+            let covered = allow.iter().any(|tool| {
+                BOUND_MEMORY_TOOLS.contains(&tool.as_str())
+                    && crate::tools::assistant_memory::scope_for(tool) == scope
+            });
+            assert!(
+                covered,
+                "'{name}.toml' grants `{scope}` but [tools].allow names no \
+                 bound memory tool covering it (allow = {allow:?})"
+            );
+        }
+    }
+}
+
 /// #3987 the negative half: a live family/wildcard pattern is never flagged,
 /// and option B introduces no double-grant weirdness in the overlays.
 /// `izzie` ships blanket `google.*`; `cto-assistant` ships the narrow
