@@ -7,7 +7,7 @@
 //! minutes — so the resuming PM re-planned work that was already merged. The
 //! repo itself is the evidence that settles it: commits landed after the
 //! snapshot's recorded `Last commit` are work the snapshot cannot know about.
-//! What: [`assess_snapshot`] reads the resolved snapshot's `## Git Context`,
+//! What: `assess_snapshot` reads the resolved snapshot's `## Git Context`,
 //! takes the commit it recorded, and asks git what has landed since. Every
 //! failure — an unreadable snapshot, no recorded commit, a commit git no longer
 //! knows, a directory that is not a checkout — answers "not superseded", because
