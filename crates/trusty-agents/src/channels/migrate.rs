@@ -408,17 +408,23 @@ pub fn spawn_startup_migration(
         })
         .await
         {
-            Ok(report)
-                if report.global.as_ref().is_ok_and(Option::is_some)
-                    || !report.assistants.is_empty() =>
-            {
-                tracing::info!(
-                    assistants = report.assistants.len(),
-                    global = report.global.is_ok_and(|g| g.is_some()),
-                    "channel migration: the startup sweep finished (#7609)",
-                )
+            Ok(report) => {
+                // #7609 review: three states, not a bool — a `false` that
+                // covered both "nothing to drain" and "the drain failed" is
+                // exactly the ambiguity this log line exists to resolve.
+                let global = match &report.global {
+                    Ok(Some(_)) => "moved",
+                    Ok(None) => "nothing",
+                    Err(_) => "failed",
+                };
+                if global != "nothing" || !report.assistants.is_empty() {
+                    tracing::info!(
+                        assistants = report.assistants.len(),
+                        global,
+                        "channel migration: the startup sweep finished (#7609)",
+                    );
+                }
             }
-            Ok(_) => {}
             Err(e) => tracing::warn!(error = %e, "channel migration: startup sweep task failed"),
         }
     });
@@ -427,12 +433,11 @@ pub fn spawn_startup_migration(
 /// The global drain alone, for a start with no assistant roster to sweep.
 ///
 /// Why (#7609): `--api` returns early from `runtime::startup` and runs the full
-/// sweep from `api::server::routes`. Every OTHER supervised start — `--slack`,
-/// `--telegram`, `--pm` — goes through the shared runtime startup hook, which
-/// owns no assistant roster but still has to drain the global config exactly
-/// once. Detached for the same reason as the full sweep.
-/// Test: `a_daemon_start_drains_the_global_config_once` covers the drain it
-/// delegates to.
+/// sweep from `api::server::routes`. Every OTHER `tagent` start goes through
+/// the shared runtime startup hook, which owns no assistant roster but still
+/// has to drain the global config exactly once. Detached for the same reason as
+/// the full sweep.
+/// Test: `the_startup_hook_drains_the_global_config`.
 pub fn spawn_global_migration(config_path: std::path::PathBuf) {
     spawn_startup_migration(Vec::new(), Vec::new(), Some(config_path));
 }

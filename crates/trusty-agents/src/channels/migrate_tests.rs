@@ -659,6 +659,11 @@ fn a_daemon_start_drains_the_global_config_once() {
     let channels = channels_in(&config);
     assert_eq!(channels.len(), 1, "one migrated channel: {channels:?}");
     assert_eq!(channels[0].id, "gmail-personal");
+    assert_eq!(
+        globals[0].id, channels[0].id,
+        "the id survives the rewrite, so the assistant binding that named the \
+         in-memory channel still resolves against the persisted one"
+    );
     let after_first = std::fs::read_to_string(&config).expect("read back");
     assert!(
         after_first.contains("route_to = [\"izzie\"]"),
@@ -723,4 +728,45 @@ fn a_daemon_start_survives_a_malformed_global_config() {
         1,
         "the assistant half still runs after a failed drain: {report:?}"
     );
+}
+
+/// The shared runtime startup hook drains, not just the function it delegates
+/// to.
+///
+/// Why (#7609 review): `spawn_global_migration` is the wiring every non-`--api`
+/// `tagent` start depends on. Proving only `run_startup_migration` leaves the
+/// spawn, the empty assistant roster and the `Some(config_path)` argument
+/// untested — and the empty roster is the one argument shape no other test
+/// passes through the spawn.
+///
+/// Single-threaded, unlike `the_assistant_sweep_never_blocks_its_caller`: that
+/// test needs a second worker because it parks one on a held lock, this one has
+/// nothing to block on. A 2-worker runtime here made the suite's pre-existing
+/// unsynchronized-`$HOME` tests (`stores::binding::tests`,
+/// `mcp::config::tests`) fail 3 runs out of 3 by widening their race window;
+/// current-thread passed 3 of 3. See the #8064 lock-per-process-global work.
+#[tokio::test]
+async fn the_startup_hook_drains_the_global_config() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = write(dir.path(), "config.toml", LIVE_GLOBAL_CONFIG);
+
+    spawn_global_migration(config.clone());
+
+    // Poll the drain's own result rather than sleeping a fixed interval: the
+    // hook is fire-and-forget, so there is nothing to await.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let channels = loop {
+        let channels = channels_in(&config);
+        if !channels.is_empty() {
+            break channels;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the startup hook never drained: {}",
+            std::fs::read_to_string(&config).expect("read back")
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+    assert_eq!(channels.len(), 1, "one migrated channel: {channels:?}");
+    assert_eq!(channels[0].id, "gmail-personal");
 }

@@ -583,7 +583,7 @@ pub async fn serve_with_config(cfg: ApiConfig) -> Result<()> {
     // hook, so the drain cannot be left to it.
     // Detached, NEVER awaited — same reason as the docs index above: the sweep
     // writes under a blocking advisory lock with no timeout, and a held lock
-    // would otherwise stall the bind below (see `spawn_assistant_migration`).
+    // would otherwise stall the bind below (see `spawn_startup_migration`).
     // #7609 slice 4: the same sweep backfills `route_to` into `[[channels]]`,
     // so a legacy per-assistant binding stops needing the two-stage opt-in.
     // #7609 review: an unresolvable config path disables the `route_to`
