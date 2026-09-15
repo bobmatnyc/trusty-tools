@@ -916,6 +916,44 @@ fn code_critic_declared_skills_are_in_bundle() {
 }
 
 #[test]
+fn code_review_standards_flags_github_token_protected_branch_pushes_8016() {
+    // Issue #8016: `code-review-standards` had no check for a workflow
+    // granted `contents: write` that pushes to a protected branch using
+    // `GITHUB_TOKEN` — GitHub never allows the Actions identity as a
+    // restriction or ruleset bypass actor, so the workflow is unworkable no
+    // matter how green its first (nothing-to-publish) run looked.
+    assert!(
+        contains_prose_anchor(
+            CODE_REVIEW_STANDARDS,
+            "GitHub never allows the Actions identity as a restriction or \
+             ruleset bypass actor"
+        ),
+        "code-review-standards must flag a GITHUB_TOKEN push to a protected \
+         branch (#8016)"
+    );
+}
+
+#[test]
+fn code_review_standards_flags_format_interpolated_structured_payloads_7624() {
+    // Issue #7624: `code-review-standards` had no check for a test helper
+    // that builds a structured (JSON/YAML/TOML/SQL) payload by `format!`
+    // interpolating a caller-supplied value into a string literal instead of
+    // the format's own builder/serializer — the #7550 failure mode, where a
+    // caller value containing the format's escape/delimiter characters
+    // malformed the payload and the system under test answered it with a
+    // permissive default indistinguishable from a real pass.
+    assert!(
+        contains_prose_anchor(
+            CODE_REVIEW_STANDARDS,
+            "builds a JSON/YAML/TOML/SQL payload by `format!` interpolating \
+             a caller-supplied value into a string literal"
+        ),
+        "code-review-standards must flag format!-interpolated structured \
+         test payloads (#7624)"
+    );
+}
+
+#[test]
 fn code_critic_declares_batch1_skills() {
     // Issue #2903 ported the full upstream six-skill set. #4642 cuts it back to
     // the two that code-critic's own body tells it to load on turn one: the

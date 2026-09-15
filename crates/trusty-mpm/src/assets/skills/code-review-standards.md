@@ -116,6 +116,23 @@ CRITICAL or HIGH by construction: silent data loss, or a broken contract.
 5. **Review the fix harder than the bug.** A fix for this shape is the highest
    risk place for it to reappear. Never merge one on the author's own gate.
 
+## CI Push-Permission Check
+
+A workflow granted `contents: write` that pushes to a branch protected by a
+push restriction or ruleset cannot use `GITHUB_TOKEN` for that push — GitHub
+never allows the Actions identity as a restriction or ruleset bypass actor.
+Flag it as unworkable even if the workflow merged green, since a first run
+with nothing to publish never exercises the push (#8016).
+
+## Structured Test Payload Check
+
+Flag a test helper that builds a JSON/YAML/TOML/SQL payload by `format!`
+interpolating a caller-supplied value into a string literal, instead of the
+format's own builder or serializer (e.g. `serde_json::json!`). A value
+containing the format's own escape or delimiter characters malforms the
+payload, and the system under test then answers the malformed input with a
+permissive default that reads exactly like a real pass (#7550, #7624).
+
 ## Review Process
 
 1. Work the rubric top-to-bottom: CRITICAL first, then HIGH, MEDIUM, LOW.
