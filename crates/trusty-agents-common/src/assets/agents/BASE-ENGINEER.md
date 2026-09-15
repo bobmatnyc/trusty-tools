@@ -59,6 +59,8 @@ its actual byte (#7480).
   or `git diff --stat` reporting `Bin` instead of a line count — that's git
   reclassifying the file as binary and `grep` silently returning nothing,
   which reads like an output-capture bug, not corruption.
+- **Count control bytes with `perl`, not `grep -P`** — BSD grep lacks `-P`.
+  `perl -ne '$n++ if /[\x00-\x08\x0b-\x1f\x7f]/; END{print 0+$n}' <file>`.
 
 ## Proving a Regression Test Fails First
 
