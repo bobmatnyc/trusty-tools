@@ -12,7 +12,9 @@
 //! used to ALLOW globally with no audit record. Each must print a `deny`. Three
 //! controls sit beside them: a valid destructive payload still denies, a
 //! megabyte `tool_input` is judged on its content rather than on the read
-//! deadline, and a parsed payload naming no guarded operation still allows.
+//! deadline — its only denied target is its LAST argument, so only a read that
+//! consumed the whole payload reaches it — and a parsed payload naming no
+//! guarded operation still allows.
 //! Test: `cargo test -p trusty-mpm --test tm_hook_pm_guard_stdin_7975`.
 
 mod common;
@@ -289,19 +291,45 @@ fn pm_guard_still_denies_a_valid_destructive_payload() {
     assert_eq!(decision, "deny", "got: {stdout}");
 }
 
-/// A `PreToolUse` payload for `rm -rf /root` with `extra_targets` more paths.
+/// The `timeout` the pm-guard hook is registered with, mirrored from
+/// `core::session_launch::settings::pm_guard_hook_value`.
+const REGISTERED_HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Wall-clock ceiling for one megabyte guard run in this suite.
+///
+/// Why (#7975, #8078): the megabyte control used to assert a flat 8 s, which measured
+/// the host rather than the guard and flaked at 8.20–9.37 s. A debug `tm` pays
+/// a multi-second cold page-in and unoptimized rule evaluation that the release
+/// binary Claude Code execs does not, and this suite spawns its children in
+/// parallel with the rest of the crate's tests. The verdict assertions in
+/// `pm_guard_reads_a_megabyte_tool_input_and_decides_on_its_content` are the
+/// property; this is a liveness backstop, sized at six times the registered
+/// hook timeout so it still catches an order-of-magnitude regression — a
+/// quadratic scan of the payload, or a read that falls back on its deadline —
+/// without policing a budget a debug build cannot measure.
+/// Test: `pm_guard_reads_a_megabyte_tool_input_and_decides_on_its_content`.
+const MEGABYTE_RUN_CEILING: std::time::Duration =
+    std::time::Duration::from_secs(6 * REGISTERED_HOOK_TIMEOUT.as_secs());
+
+/// A `PreToolUse` payload for `rm -rf` over `extra_targets` scratch paths,
+/// ending in `/root`.
 ///
 /// Why (#7975 round 2): `/root` is denied by the ABSOLUTE destructive-delete
 /// rule (#4031), which runs before every exemption and before the per-turn
 /// file-change budget — so the verdict is a property of the command alone, and
 /// padding the argument list is the one way to grow the payload past a megabyte
 /// without changing what it asks for.
+/// What: `/root` is the LAST argument, so a guard that stopped reading early
+/// would classify a padded command with no denied target at all. #7975: that
+/// placement, not a wall clock, is what proves the whole payload was consumed.
+/// `extra_targets: 0` yields the bare `rm -rf /root` short twin.
 /// Test: `pm_guard_reads_a_megabyte_tool_input_and_decides_on_its_content`.
 fn destructive_payload(extra_targets: usize) -> String {
-    let mut command = String::from("rm -rf /root");
+    let mut command = String::from("rm -rf");
     for i in 0..extra_targets {
         command.push_str(&format!(" /tmp/scratch-{i}"));
     }
+    command.push_str(" /root");
     serde_json::json!({
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -318,7 +346,9 @@ fn pm_guard_reads_a_megabyte_tool_input_and_decides_on_its_content() {
     // what it asks for, for every tool, since the guard is registered with
     // `matcher: ""`. A megabyte `tool_input` must reach the rules intact.
     // The proof is a twin: the same command padded past a megabyte must draw
-    // the same verdict, word for word, as its short form.
+    // the same verdict, word for word, as its short form — and because the
+    // padded form's only denied target is its LAST argument, that verdict is
+    // reachable only from a read that consumed every byte.
     let short = run_with_bytes(destructive_payload(0).as_bytes());
     let (short_decision, short_reason) =
         decision_of(&short).expect("`rm -rf /root` must be denied");
@@ -338,17 +368,19 @@ fn pm_guard_reads_a_megabyte_tool_input_and_decides_on_its_content() {
     assert_eq!(decision, "deny", "got: {large}");
     assert_eq!(
         reason, short_reason,
-        "a megabyte payload must draw the same content-based verdict as its short twin"
+        "a megabyte payload must draw the same content-based verdict as its short twin, \
+         which only a read of its last argument can reach"
     );
     assert!(
         !reason.contains("stdin payload"),
         "the deny must come from the command, not from the read: {reason}"
     );
-    // Spawn, read, classify, and the audit POST to a dead port together must
-    // finish well inside the 10 s the guard hook is registered with.
+    // #7975: the verdict above is the property. This only catches a guard that
+    // has become slow by an order of magnitude — see `MEGABYTE_RUN_CEILING`.
     assert!(
-        elapsed < std::time::Duration::from_secs(8),
-        "the guard took {elapsed:?} on a {}-byte payload",
+        elapsed < MEGABYTE_RUN_CEILING,
+        "the guard took {elapsed:?} on a {}-byte payload, past the {MEGABYTE_RUN_CEILING:?} \
+         liveness backstop",
         payload.len()
     );
 }
