@@ -249,6 +249,10 @@ async fn worktree_7652_an_owner_with_no_record_is_refused() {
     .await;
     let reason = refused(&verdict(&s, &c), &s.owner);
     assert!(reason.contains("no stored session record"), "{reason}");
+    // #7652 critic round 2: `tm sessions prune` compacts tombstones, so this
+    // refusal can be permanent — it has to name the way out of it.
+    assert!(reason.contains("git worktree remove"), "{reason}");
+    assert!(reason.contains("tm sessions prune"), "{reason}");
 }
 
 /// 🔴 #7652 criterion 3: a record with no `workspace_path` is still the owner's

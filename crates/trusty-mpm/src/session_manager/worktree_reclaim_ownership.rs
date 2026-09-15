@@ -166,11 +166,14 @@ impl SessionOwners {
 ///   agent-store sentinel can still name the parent session (#7958), so that
 ///   session ending says nothing about the agent working in the tree;
 /// - the owner map was never read (an unreadable registry);
-/// - no stored record names the owner. Records are tombstoned, never dropped, so
-///   an owner with no record has no evidence of its end at all, and the
-///   sentinel stores no pid or pane that could supply one. The cost is that a
-///   tree whose owning record was lost stays unreclaimable until an operator
-///   removes it;
+/// - no stored record names the owner. The sentinel stores no pid or pane, so a
+///   record is the only thing that could evidence that session's end, and its
+///   absence evidences nothing. That absence is not always temporary:
+///   `prune_managed` COMPACTS `Decommissioned` and `Deleted` tombstones out of
+///   the store (`prune.rs`, `is_tombstone`), so after `tm sessions prune` a tree
+///   whose sentinel names a compacted session is permanently unreclaimable by
+///   this path. The escape is an operator's own `git worktree remove`, which the
+///   refusal names (#7652 critic round 2);
 /// - the record's tmux session is listed, its name is unmanaged, or the tmux
 ///   probe errored. The map already reports all three as `Live`.
 ///
@@ -219,9 +222,14 @@ pub(crate) fn session_ownership_blocks(path: &Path, owners: &SessionOwners) -> O
             "owned by session {owner}, which tmux still lists, or whose liveness the tmux probe \
              could not establish (#7652)"
         )),
+        // #7652 critic round 2: `tm sessions prune` compacts tombstones, so this
+        // can be permanent — name the escape rather than implying it will clear.
         None => Some(format!(
             "owned by session {owner}, and no stored session record names it, so nothing can \
-             show that session has ended — unrecorded is not dead (#7652, ADR-0045)"
+             show that session has ended — unrecorded is not dead. If that session's record was \
+             compacted by `tm sessions prune`, no later run will recover it: confirm nobody is \
+             working in this tree and remove it yourself with `git worktree remove` (#7652, \
+             ADR-0045)"
         )),
     }
 }
@@ -238,7 +246,13 @@ pub(crate) fn session_ownership_blocks(path: &Path, owners: &SessionOwners) -> O
 /// other claim state, and every sentinel that names an owner, is left to the
 /// other gates. The survey's `classify` and the delete loop's two re-checks all
 /// call it.
-/// Test: `worktree_7652_an_unattributed_tree_under_a_live_foreign_claim_is_refused`.
+///
+/// Reading only `ForeignNested` is why gate 2 reports that state ahead of
+/// `CallerNested` (#7652 critic round 2): when the invoking session claims the
+/// enclosing checkout too, as two sessions sharing one project do, reporting the
+/// caller's claim first left this check nothing to fire on.
+/// Test: `worktree_7652_an_unattributed_tree_under_a_live_foreign_claim_is_refused`,
+/// `worktree_7652_gate_4c_survives_a_caller_claim_on_the_same_checkout`.
 pub(crate) fn unattributed_nested_blocks(path: &Path, claim: &ClaimState) -> Option<String> {
     let ClaimState::ForeignNested { session, .. } = claim else {
         return None;

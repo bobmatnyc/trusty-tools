@@ -457,6 +457,16 @@ pub(crate) struct FreshProbes<'a> {
 /// What: `None` (the set could not be read) refuses; otherwise the fresh
 /// claim's gate-2 refusal, then [`session_ownership_blocks`], then
 /// [`unattributed_nested_blocks`].
+///
+/// Gate 4a ([`agent_ownership_blocks`]) is deliberately NOT re-asked here
+/// (#7652 critic round 2). It is asked twice already — at classification and in
+/// [`recheck_before_delete`] — and the window this guard covers is the one
+/// between that second read and `git worktree remove --force`. An agent
+/// dispatched into the tree inside that window holds git's harness lock, and
+/// `git worktree remove` refuses a locked worktree with exit 128, so the
+/// removal fails on git's own check rather than on a third sentinel read. The
+/// three gates re-asked here have no such backstop: nothing in git knows about
+/// a session's workspace claim.
 /// Test: `worktree_7652_an_owner_back_after_the_dirt_check_is_refused`.
 fn last_moment_refusal(path: &Path, claims: Option<&LiveClaims>) -> Option<String> {
     let Some(claims) = claims else {

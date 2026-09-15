@@ -125,6 +125,57 @@ fn worktree_7652_an_unattributed_tree_under_a_live_foreign_claim_is_refused() {
     }
 }
 
+/// 🔴 #7652 critic round 2: gate 4c still fires when the INVOKING session also
+/// claims the enclosing checkout.
+///
+/// Why: `merged_pr_reclaim` passes the invoking session's id, and two managed
+/// sessions in one checkout both register it as their workspace — the routine
+/// operator path, not an edge case. While `CallerNested` outranked
+/// `ForeignNested`, the caller's own claim discarded the live foreign one, gate
+/// 4c never saw a `ForeignNested` state, and an unattributed tree that
+/// `origin/main` refused at gate 2 was classified `Reclaimable` and deleted.
+/// Fails on `b174cf3cd`: the premise assertion reports `CallerNested`, the
+/// survey classifies the row reclaimable, and the re-check permits the removal.
+#[test]
+fn worktree_7652_gate_4c_survives_a_caller_claim_on_the_same_checkout() {
+    use crate::session_manager::worktree_reclaim_claim::ClaimState;
+    use crate::session_manager::worktree_registry::Admission;
+
+    let fx = GitWorktreeFixture::new();
+    let claims = LiveClaims {
+        claims: vec![
+            WorkspaceClaim::with_liveness("tm-caller-7652", &fx.repo, ClaimLiveness::Live),
+            WorkspaceClaim::with_liveness("tm-foreign-7652", &fx.repo, ClaimLiveness::Live),
+        ],
+        caller: Some("tm-caller-7652".to_string()),
+        ..LiveClaims::default()
+    };
+    // No sentinel is written, so nothing attributes this tree to anyone.
+    let wt = fx.add_worktree("caller-and-foreign-7652");
+    land(&wt);
+
+    let claim = claims.claim_state(&wt);
+    assert!(
+        matches!(claim, ClaimState::ForeignNested { .. }),
+        "premise — the caller's own claim must not hide the foreign one: {claim:?}"
+    );
+    let v = classify(
+        &wt,
+        Admission::Admitted,
+        &claim,
+        &merged(7652),
+        &inspect_dirt,
+        &no_agents,
+        &claims.owners,
+        &no_keeps(),
+    );
+    assert!(!v.is_reclaimable(), "the survey classified {v:?}");
+    let reason = recheck_before_delete(&wt, &no_keeps(), Some(&claims), &merged(7652), &no_agents)
+        .expect("the pre-delete re-check permitted the removal");
+    assert!(reason.contains("nothing attributes"), "{reason}");
+    assert!(reason.contains("tm-foreign-7652"), "{reason}");
+}
+
 /// A delegation registry that has never heard of any agent (#5661).
 ///
 /// The REFUSING answer, used as the default here for the same reason

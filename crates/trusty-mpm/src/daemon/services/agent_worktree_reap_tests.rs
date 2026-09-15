@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 use super::{ReapOutcome, is_harness_agent_worktree, reap_worktree};
 use crate::core::hook::HookEvent;
+use crate::session_manager::decommission::WorktreeRemoval;
 use crate::session_manager::worktree_git_fixture::GitWorktreeFixture;
 use crate::session_manager::worktree_ownership::write_agent_sentinel;
 
@@ -92,6 +93,39 @@ fn reap_removes_a_clean_pushed_worktree() {
 
     assert_eq!(outcome, ReapOutcome::Removed, "clean+pushed must be reaped");
     assert!(!wt.exists(), "the directory must be gone: {}", wt.display());
+}
+
+/// 🔴 #7652 critic round 2: a removal that reports success over a SURVIVING
+/// directory is reported as kept, never as removed.
+///
+/// Why: `audited_removal` logs `removed = outcome.removed() && !path.exists()`,
+/// so before this the audit line said KEPT while the reap returned `Removed` for
+/// the same event — the two records of one deletion disagreed. Fails on
+/// `b174cf3cd`, where git's zero exit alone produced `ReapOutcome::Removed`.
+///
+/// Why the mapping and not `reap_worktree`: making a real
+/// `git worktree remove --force` exit zero AND leave the directory takes a
+/// filesystem the test cannot provoke portably. The disagreement lives entirely
+/// in the mapping, so that is what is exercised.
+#[test]
+fn reap_never_reports_removed_while_the_path_survives() {
+    let fx = GitWorktreeFixture::new();
+    let wt = harness_worktree(&fx, "agent-survivor");
+
+    let outcome = super::reap_outcome_of(&wt, WorktreeRemoval::Removed);
+
+    let reason = outcome
+        .refusal()
+        .expect("a surviving directory must not be reported as removed");
+    assert!(reason.contains("still on disk"), "{reason}");
+    assert!(wt.exists(), "the fixture directory must still be there");
+
+    // The positive arm, from the same mapping: gone on disk IS removed.
+    std::fs::remove_dir_all(&wt).expect("remove the fixture directory");
+    assert_eq!(
+        super::reap_outcome_of(&wt, WorktreeRemoval::Removed),
+        ReapOutcome::Removed
+    );
 }
 
 /// An uncommitted edit is never destroyed by a reap.

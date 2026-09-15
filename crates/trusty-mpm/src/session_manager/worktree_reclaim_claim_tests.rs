@@ -399,3 +399,69 @@ fn worktree_7652_a_foreign_project_root_claim_no_longer_blocks_a_nested_worktree
         "{reason}"
     );
 }
+
+/// 🔴 #7652 critic round 2: a live FOREIGN nested claim outranks the caller's
+/// own claim on the same enclosing checkout.
+///
+/// Why: two managed sessions working one project both register that checkout as
+/// their workspace, which is this framework's routine operator shape. Reporting
+/// `CallerNested` first threw the foreign claim away, and gate 4c
+/// (`unattributed_nested_blocks`) reads only `ForeignNested` — so an
+/// unattributed tree that `origin/main` refused at gate 2 became reclaimable.
+/// Fails on `b174cf3cd`, where this returns `ClaimState::CallerNested`.
+#[test]
+fn worktree_7652_a_foreign_nested_claim_outranks_the_callers_own() {
+    let (_tmp, root) = tree();
+    let project = root.join("bobmatnyc").join("trusty-tools");
+    let worktree = project.join(".claude").join("worktrees").join("agent-ae59");
+    std::fs::create_dir_all(&worktree).expect("mkdir");
+
+    let claims = LiveClaims {
+        claims: vec![
+            WorkspaceClaim::new("tm-caller-7652", &project),
+            WorkspaceClaim::new("tm-foreign-7652", &project),
+        ],
+        caller: Some("tm-caller-7652".to_string()),
+        owners: Default::default(),
+    };
+    assert_eq!(
+        claims.claim_state(&worktree),
+        ClaimState::ForeignNested {
+            session: "tm-foreign-7652".to_string(),
+            caller: Some("tm-caller-7652".to_string()),
+        },
+        "the caller's own ancestor claim must not hide a live foreign one"
+    );
+
+    // Claim order must not decide it: the same two claims, reversed.
+    let reversed = LiveClaims {
+        claims: vec![
+            WorkspaceClaim::new("tm-foreign-7652", &project),
+            WorkspaceClaim::new("tm-caller-7652", &project),
+        ],
+        caller: Some("tm-caller-7652".to_string()),
+        owners: Default::default(),
+    };
+    assert_eq!(
+        reversed.claim_state(&worktree),
+        ClaimState::ForeignNested {
+            session: "tm-foreign-7652".to_string(),
+            caller: Some("tm-caller-7652".to_string()),
+        },
+        "precedence, not iteration order, must decide this"
+    );
+
+    // The narrowing this must NOT undo: with no foreign claim, the caller's own
+    // nested claim still permits and still reports itself as the caller's.
+    let caller_only = LiveClaims {
+        claims: vec![WorkspaceClaim::new("tm-caller-7652", &project)],
+        caller: Some("tm-caller-7652".to_string()),
+        owners: Default::default(),
+    };
+    assert_eq!(
+        caller_only.claim_state(&worktree),
+        ClaimState::CallerNested {
+            session: "tm-caller-7652".to_string()
+        }
+    );
+}

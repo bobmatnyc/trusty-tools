@@ -188,10 +188,22 @@ impl LiveClaims {
     /// [`ClaimState::ForeignNested`], which permits and leaves the candidate to
     /// the ownership, pull-request and unsaved-work gates that can actually
     /// attribute it.
+    ///
+    /// Precedence among the three permitting states is therefore
+    /// `CallerWorkspace` (which refuses), then `ForeignNested`, then
+    /// `CallerNested`, then the dead-claim note. `ForeignNested` outranks
+    /// `CallerNested` because it carries evidence `CallerNested` does not — a
+    /// live FOREIGN session over this tree — and gate 4c
+    /// ([`unattributed_nested_blocks`](super::worktree_reclaim_ownership::unattributed_nested_blocks))
+    /// reads only `ForeignNested`. Two managed sessions sharing one checkout
+    /// both claim it, so reporting the caller's own claim first discarded the
+    /// foreign one and reclaimed a tree `origin/main` refused (#7652 critic
+    /// round 2).
     /// Test: `claim_state_matches_exact_ancestor_and_descendant_paths`,
     /// `a_caller_may_not_reclaim_its_own_workspace`,
     /// `a_dead_sessions_claim_no_longer_blocks`,
-    /// `worktree_7652_a_foreign_project_root_claim_no_longer_blocks_a_nested_worktree`.
+    /// `worktree_7652_a_foreign_project_root_claim_no_longer_blocks_a_nested_worktree`,
+    /// `worktree_7652_a_foreign_nested_claim_outranks_the_callers_own`.
     pub(crate) fn claim_state(&self, path: &Path) -> ClaimState {
         let candidate_forms = path_forms(path);
         let mut caller_nested: Option<&str> = None;
@@ -237,17 +249,18 @@ impl LiveClaims {
                 session: session.to_string(),
             };
         }
-        if let Some(session) = caller_nested {
-            return ClaimState::CallerNested {
-                session: session.to_string(),
-            };
-        }
-        // #7652: reported after both caller states, which are more specific
-        // about the candidate, and before the dead-claim note, which says less.
+        // #7652 critic round 2: ahead of `caller_nested`, because a LIVE FOREIGN
+        // nested claim is evidence `CallerNested` does not carry, and gate 4c
+        // reads only `ForeignNested` — see this function's doc, last paragraph.
         if let Some(session) = foreign_nested {
             return ClaimState::ForeignNested {
                 session: session.to_string(),
                 caller: self.caller.clone(),
+            };
+        }
+        if let Some(session) = caller_nested {
+            return ClaimState::CallerNested {
+                session: session.to_string(),
             };
         }
         if discarded.is_empty() {
