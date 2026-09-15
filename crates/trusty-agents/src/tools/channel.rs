@@ -77,6 +77,12 @@ pub fn context(available: bool) -> String {
     )
 }
 
+// #7609: the merged tool's own regression suite, in its own file so
+// `channel.rs` stays inside the production SLOC cap.
+#[cfg(test)]
+#[path = "channel_tests.rs"]
+mod channel_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
