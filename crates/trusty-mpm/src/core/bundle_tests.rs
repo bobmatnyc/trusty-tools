@@ -1137,6 +1137,27 @@ fn idle_park_mitigation_2833_guidance_survives_composition() {
     );
 }
 
+/// 🔴 #8004 REGRESSION: PM Re-Engagement said `SendMessage` the same agent
+/// unconditionally. A worktree-isolated subagent's clean tree was reclaimed
+/// between turns, so the resumed agent landed in the main checkout, where
+/// ADR-0061/#5649 forbid it from committing.
+#[test]
+fn pm_re_engagement_checks_worktree_survival_before_resuming_8004() {
+    for needle in [
+        "**Check the worktree still exists first (#8004).**",
+        "`git worktree list`",
+        "re-dispatch fresh with `isolation: \"worktree\"`",
+        "never `SendMessage` into the main checkout",
+        "ADR-0061, #5649",
+    ] {
+        assert!(
+            contains_prose_anchor(TM_DELEGATION_PATTERNS, needle),
+            "tm-delegation-patterns' PM Re-Engagement section is missing the \
+             #8004 worktree-survival check: {needle:?}"
+        );
+    }
+}
+
 #[test]
 fn pm_authority_doctrine_survives_composition() {
     // Regression for the live refusal where a version-control agent treated a
@@ -1448,6 +1469,22 @@ fn output_styles_keep_claude_code_coding_instructions() {
 /// What: one substring per surviving rule, plus the #2647 rationale and the
 /// `tm-prose-style` pointer that carries the evidence.
 /// Test: `bundle_tests::output_styles_state_every_pm_prose_rule`.
+/// Does `haystack` state `anchor`, ignoring where Markdown broke the lines?
+///
+/// Why: #7709 — the prose-anchor loops matched a multi-word anchor with a plain
+/// `contains`, so a rewrap that moved the anchor's last word onto the next line
+/// failed a pin whose prose had not changed at all (found in #7683 round 2).
+/// What: collapses every run of whitespace in both sides to a single space
+/// before the substring test, so a newline and its indentation read as the
+/// single space a reflow replaced.
+/// Test: `prose_rule_anchors_survive_a_markdown_rewrap_7709`.
+fn contains_prose_anchor(haystack: &str, anchor: &str) -> bool {
+    fn collapse(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+    collapse(haystack).contains(&collapse(anchor))
+}
+
 const PROSE_RULE_ANCHORS: &[&str] = &[
     "## Communication — Write Plainly",
     "issue #2647",
@@ -1478,8 +1515,9 @@ fn output_styles_state_every_pm_prose_rule() {
     // contract is "the rule is still stated, and its evidence is one hop away".
     for style in OUTPUT_STYLES {
         for needle in PROSE_RULE_ANCHORS {
+            // #7709: whitespace-insensitive, so a rewrap is not a regression.
             assert!(
-                style.content.contains(needle),
+                contains_prose_anchor(style.content, needle),
                 "{} is missing prose rule anchor {needle:?} (#2647, #7423)",
                 style.id
             );
@@ -1493,6 +1531,56 @@ fn output_styles_state_every_pm_prose_rule() {
             style.id
         );
     }
+}
+
+/// 🔴 #7709 REGRESSION: the prose-anchor loops matched with a plain `contains`,
+/// so a Markdown rewrap that wrapped a multi-word anchor across two lines broke
+/// the pin even though the prose was unchanged (found in #7683 round 2).
+#[test]
+fn prose_rule_anchors_survive_a_markdown_rewrap_7709() {
+    /// Rewraps `text` at `words_per_line`, the way a reflow moves a phrase's
+    /// tail onto the next line — every multi-word anchor ends up split.
+    fn rewrap(text: &str, words_per_line: usize) -> String {
+        text.split_whitespace()
+            .collect::<Vec<_>>()
+            .chunks(words_per_line)
+            .map(|chunk| chunk.join(" "))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    for style in OUTPUT_STYLES {
+        let rewrapped = rewrap(style.content, 3);
+        // A reflow-broken anchor must still match…
+        for needle in PROSE_RULE_ANCHORS {
+            assert!(
+                contains_prose_anchor(&rewrapped, needle),
+                "{}: anchor {needle:?} stopped matching after a Markdown rewrap \
+                 (#7709)",
+                style.id
+            );
+        }
+        // …and the pre-fix matcher is what fails on exactly that text, so the
+        // loop above is not passing for the trivial reason that nothing broke.
+        assert!(
+            PROSE_RULE_ANCHORS
+                .iter()
+                .any(|needle| !rewrapped.contains(needle)),
+            "{}: rewrap must actually split at least one anchor, or this test \
+             proves nothing (#7709)",
+            style.id
+        );
+    }
+
+    // Normalizing whitespace must not turn the match into a tautology: an
+    // anchor the text does not state still fails, wrapped or not.
+    assert!(
+        !contains_prose_anchor(
+            "a rule that is\n  stated here",
+            "a rule that is not stated here"
+        ),
+        "whitespace normalization must not make an absent anchor match (#7709)"
+    );
 }
 
 #[test]
@@ -1669,29 +1757,218 @@ fn the_default_output_style_stays_within_its_resident_budget() {
     );
 }
 
+/// The resident budget every deployed agent body is measured against.
+///
+/// Issue #7723 (epic #7681): composed rust-engineer (BASE-AGENT +
+/// BASE-ENGINEER + rust-engineer body) measured 55,872 bytes on 2026-09-13,
+/// 19,981 tokens per turn (32% of an engineer subagent's floor, the single
+/// largest component — `docs/research/token-floor-measurement-2026-09-13.md`).
+/// The #7723 trim target was ~40,000; 42,000 leaves headroom without licensing
+/// the file to regrow back toward its pre-trim size.
+const RESIDENT_BODY_BUDGET_BYTES: usize = 42_000;
+
+/// Bodies already over [`RESIDENT_BODY_BUDGET_BYTES`] when #7825 widened the
+/// gate from rust-engineer alone to every deployed agent, each pinned at a
+/// ratchet ceiling with the issue tracking its trim.
+///
+/// Why: #7825 named four; widening the gate surfaced eight on 2026-09-15 —
+/// java, nextjs, python and svelte engineer were over too, each by under 600
+/// bytes. Raising the budget for everyone would hide them; excluding them would
+/// drop the coverage the issue asked for. A per-stem ceiling keeps each one
+/// measured and lets it shrink but never grow.
+/// What: `(stem, ceiling_bytes, tracking_issue)`. The ceiling is the measured
+/// size rounded up to the next 500 bytes, so an unrelated BASE-AGENT edit does
+/// not flip the gate while real regrowth still does. An entry whose body has
+/// fallen back under the default budget fails the gate as stale — that is how
+/// the allowlist empties itself.
+/// Test: `every_deployed_agent_composed_body_stays_within_its_resident_budget`.
+const OVER_BUDGET_BODY_BASELINES: &[(&str, usize, &str)] = &[
+    ("dotnet-engineer", 43_500, "#7825"),
+    ("elixir-engineer", 44_000, "#7825"),
+    ("java-engineer", 42_500, "#8047"),
+    ("nextjs-engineer", 43_000, "#8047"),
+    ("python-engineer", 43_000, "#8047"),
+    ("svelte-engineer", 43_000, "#8047"),
+    ("ticketing", 47_000, "#7727"),
+    ("version-control", 47_500, "#7727"),
+];
+
+/// The bundled agent assets directory the composer reads.
+fn agent_assets_dir() -> &'static std::path::Path {
+    std::path::Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR)
+}
+
+/// Every deployed (non-foundation) bundled agent stem, sorted.
+fn deployed_agent_stems() -> Vec<String> {
+    let mut stems: Vec<String> = std::fs::read_dir(agent_assets_dir())
+        .expect("bundled agent assets dir")
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("md"))
+        .filter_map(|path| {
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+        })
+        .filter(|stem| !crate::core::delegation_authority::is_foundation_file(stem))
+        .collect();
+    stems.sort();
+    stems
+}
+
+/// Per-asset byte ledger for one composed agent body, base-first.
+///
+/// Why: #7915 — the budget assertion below reported one total, so a one-line
+/// addition anywhere in the `extends:` chain turned the gate red with no
+/// pointer to which file grew. The ledger names the contributors.
+/// What: walks the same `extends:` chain [`compose_agent`] resolves and renders
+/// one `name.md = N bytes` entry per link, then the composed total and the
+/// headroom (or overrun) against `budget`.
+/// Test: `composed_body_ledger_names_every_chain_link_7915`.
+fn composed_body_ledger(stem: &str, composed_len: usize, budget: usize) -> String {
+    use crate::core::agent_builder::source_chain;
+
+    let chain = source_chain(stem, agent_assets_dir()).unwrap_or_else(|_| vec![stem.to_string()]);
+    let mut parts: Vec<String> = chain
+        .iter()
+        .map(|link| match agent_source_bytes(link) {
+            Some(bytes) => format!("{link}.md = {bytes} bytes"),
+            None => format!("{link}.md = <source not found>"),
+        })
+        .collect();
+    parts.push(format!("composed = {composed_len} bytes"));
+    parts.push(if composed_len > budget {
+        format!("OVER budget {budget} by {}", composed_len - budget)
+    } else {
+        format!("budget {budget}, {} bytes headroom", budget - composed_len)
+    });
+    parts.join("; ")
+}
+
+/// Byte size of one chain link's source file, resolved case-insensitively.
+///
+/// The composer matches `extends: base-agent` to `BASE-AGENT.md` on
+/// case-sensitive filesystems, so the ledger has to resolve the same way.
+fn agent_source_bytes(link: &str) -> Option<u64> {
+    let want = link.to_lowercase();
+    for entry in std::fs::read_dir(agent_assets_dir()).ok()?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let matches = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .is_some_and(|stem| stem.to_lowercase() == want);
+        if matches {
+            return std::fs::metadata(&path).ok().map(|m| m.len());
+        }
+    }
+    None
+}
+
 #[test]
 fn rust_engineer_composed_body_stays_within_its_resident_budget() {
-    // Issue #7723 (epic #7681): composed rust-engineer (BASE-AGENT +
-    // BASE-ENGINEER + rust-engineer body) measured 55,872 bytes on
-    // 2026-09-13, 19,981 tokens per turn (32% of an engineer subagent's
-    // floor, the single largest component — `docs/research/
-    // token-floor-measurement-2026-09-13.md`). The #7723 trim target was
-    // ~40,000; 42,000 leaves headroom without licensing the file to regrow
-    // back toward its pre-trim size.
     use crate::core::agent_builder::compose_agent;
-    use std::path::Path;
 
-    const BUDGET_BYTES: usize = 42_000;
-    let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
-    let composed = compose_agent("rust-engineer", assets_dir)
+    let composed = compose_agent("rust-engineer", agent_assets_dir())
         .expect("compose_agent(rust-engineer) must succeed");
     assert!(
-        composed.len() <= BUDGET_BYTES,
-        "composed rust-engineer is {} bytes, over the {BUDGET_BYTES}-byte \
-         resident budget (#7723) — move detail into a skill rather than \
-         growing BASE-AGENT/BASE-ENGINEER/rust-engineer.md",
-        composed.len()
+        composed.len() <= RESIDENT_BODY_BUDGET_BYTES,
+        "composed rust-engineer is over the {RESIDENT_BODY_BUDGET_BYTES}-byte \
+         resident budget (#7723) — move detail into a skill rather than growing \
+         the chain. Ledger: {}",
+        composed_body_ledger("rust-engineer", composed.len(), RESIDENT_BODY_BUDGET_BYTES)
     );
+}
+
+/// 🔴 #7915 REGRESSION: the budget assertion reported a single total with 14
+/// bytes of headroom, so any addition to BASE-AGENT.md or a bundled skill
+/// turned it red with no pointer to the file that grew.
+#[test]
+fn composed_body_ledger_names_every_chain_link_7915() {
+    use crate::core::agent_builder::{compose_agent, source_chain};
+
+    let composed = compose_agent("rust-engineer", agent_assets_dir())
+        .expect("compose_agent(rust-engineer) must succeed");
+    let ledger = composed_body_ledger("rust-engineer", composed.len(), RESIDENT_BODY_BUDGET_BYTES);
+
+    let chain = source_chain("rust-engineer", agent_assets_dir())
+        .expect("source_chain(rust-engineer) must succeed");
+    assert!(
+        chain.len() >= 3,
+        "rust-engineer must inherit through BASE-AGENT and BASE-ENGINEER, got {chain:?}"
+    );
+    for link in &chain {
+        assert!(
+            ledger.contains(&format!("{link}.md = ")),
+            "ledger must name chain link {link:?} and its byte count, got {ledger:?}"
+        );
+        assert!(
+            !ledger.contains(&format!("{link}.md = <source not found>")),
+            "ledger failed to resolve the source file for {link:?}: {ledger:?}"
+        );
+    }
+    assert!(
+        ledger.contains(&format!("composed = {} bytes", composed.len())),
+        "ledger must report the composed total: {ledger:?}"
+    );
+    assert!(
+        ledger.contains("headroom") || ledger.contains("OVER budget"),
+        "ledger must report headroom or the overrun: {ledger:?}"
+    );
+}
+
+/// 🔴 #7825 REGRESSION: the resident-body budget covered rust-engineer alone,
+/// so four other deployed bodies sat over 42,000 bytes undetected.
+#[test]
+fn every_deployed_agent_composed_body_stays_within_its_resident_budget() {
+    use crate::core::agent_builder::compose_agent;
+
+    let stems = deployed_agent_stems();
+    let mut over: Vec<String> = Vec::new();
+    let mut stale: Vec<String> = Vec::new();
+
+    for stem in &stems {
+        let composed = compose_agent(stem, agent_assets_dir())
+            .unwrap_or_else(|e| panic!("compose_agent({stem}): {e}"));
+        let baseline = OVER_BUDGET_BODY_BASELINES
+            .iter()
+            .find(|(name, _, _)| name == stem);
+        let (budget, tracker) = match baseline {
+            Some((_, ceiling, issue)) => (*ceiling, Some(*issue)),
+            None => (RESIDENT_BODY_BUDGET_BYTES, None),
+        };
+        if composed.len() > budget {
+            let ledger = composed_body_ledger(stem, composed.len(), budget);
+            over.push(match tracker {
+                Some(issue) => format!("{stem} (ratchet, {issue}): {ledger}"),
+                None => format!("{stem}: {ledger}"),
+            });
+        }
+        if tracker.is_some() && composed.len() <= RESIDENT_BODY_BUDGET_BYTES {
+            stale.push(stem.clone());
+        }
+    }
+
+    assert!(
+        over.is_empty(),
+        "composed agent bodies exceed their resident budget (#7825) — move \
+         detail into a skill rather than growing the chain: {over:#?}"
+    );
+    assert!(
+        stale.is_empty(),
+        "these bodies are back under the {RESIDENT_BODY_BUDGET_BYTES}-byte \
+         default budget — drop their OVER_BUDGET_BODY_BASELINES entries (#7825): \
+         {stale:?}"
+    );
+    for (name, _, _) in OVER_BUDGET_BODY_BASELINES {
+        assert!(
+            stems.iter().any(|stem| stem == name),
+            "OVER_BUDGET_BODY_BASELINES names {name:?}, which is not a deployed \
+             bundled agent — the entry is stale (#7825)"
+        );
+    }
 }
 
 #[test]
@@ -1733,8 +2010,9 @@ fn base_agent_prose_rules_survive_composition() {
         "**Ticket and PR bodies you draft**",
         "never whether it is said",
     ] {
+        // #7709: whitespace-insensitive, so a rewrap is not a regression.
         assert!(
-            composed.contains(needle),
+            contains_prose_anchor(&composed, needle),
             "composed agent is missing prose rule anchor {needle:?} (#7423)"
         );
     }
