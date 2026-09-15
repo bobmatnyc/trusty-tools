@@ -9,20 +9,25 @@
 //! kept the same id after the rewrite, so the upsert and the delete hit the
 //! same key and the row vanished. #7923 observed 19,639 chunks migrated and
 //! 19,544 served, on a boot whose M003 relativized 112 absolute keys.
-//! What: [`relativize_corpus_paths`] plans every rewrite against the full id
-//! set first. A rewrite onto an id another row holds is not applied: the row
-//! keeps its absolute id and is reported with a count and a reason. A rewrite
-//! that leaves the id unchanged updates `file` in place and deletes nothing.
-//! The corpus row count is verified unchanged before the live indices are
-//! refreshed; a mismatch is an error, so the schema version is not stamped.
-//! Test: `relativize::tests`.
+//! What: [`relativize_corpus_paths`] plans candidate rewrites from a load and
+//! applies them in ONE redb write transaction
+//! ([`crate::core::corpus::CorpusStore::apply_path_rewrites`]) that re-reads
+//! every row it touches. A target id held at that moment — including by a row
+//! written after the load — keeps the source row under its absolute id and is
+//! reported with a count and a reason; a source row that changed or vanished
+//! since the load is skipped; the row count is checked inside the transaction
+//! and a mismatch aborts it. No committed state exists between an insert and
+//! its remove, so a crash leaves the corpus as it was and the retry converges.
+//! Test: `relativize_preserves_every_chunk_for_m002_and_m004`,
+//! `failed_rewrite_commits_nothing_and_retry_converges`,
+//! `rows_written_after_the_load_are_never_overwritten`.
 
-use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 
 use crate::core::chunker::RawChunk;
+use crate::core::corpus::PathRewrite;
 use crate::core::registry::IndexHandle;
 
 /// Outcome of one relativization pass.
@@ -31,31 +36,30 @@ use crate::core::registry::IndexHandle;
 /// reason, not only as a log line, so callers and tests can assert it.
 /// What: `rewritten` rows moved to root-relative form; `kept_on_collision`
 /// holds the absolute ids left in place because their root-relative id was
-/// already taken; `outside_root` counts absolute files not under the root.
+/// taken; `skipped_changed` counts planned rewrites whose source row changed
+/// before the transaction; `outside_root` counts absolute files not under root.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct RelativizeReport {
     pub rewritten: usize,
     pub kept_on_collision: Vec<String>,
+    pub skipped_changed: usize,
     pub outside_root: usize,
 }
 
-/// Why the rewrite declines a colliding row; logged and documented verbatim.
+/// Why the rewrite declines a colliding row; logged verbatim.
 pub(crate) const COLLISION_REASON: &str =
     "its root-relative id is already held by another row, so rewriting it would \
      overwrite that row";
 
 #[derive(Default)]
 struct RewritePlan {
-    to_upsert: Vec<RawChunk>,
-    ids_to_delete: Vec<String>,
-    kept_on_collision: Vec<String>,
+    rewrites: Vec<PathRewrite>,
     outside_root: Vec<String>,
 }
 
-/// Decide, for every chunk, whether and how it is rewritten.
+/// Plan a rewrite for every absolute chunk under `root`; decisions about
+/// collisions are left to the transaction.
 fn plan_rewrites(chunks: Vec<RawChunk>, root: &Path) -> RewritePlan {
-    let existing: HashSet<String> = chunks.iter().map(|c| c.id.clone()).collect();
-    let mut claimed: HashSet<String> = HashSet::new();
     let mut plan = RewritePlan::default();
     for mut chunk in chunks {
         if !Path::new(&chunk.file).is_absolute() {
@@ -66,36 +70,29 @@ fn plan_rewrites(chunks: Vec<RawChunk>, root: &Path) -> RewritePlan {
             continue;
         };
         let rel_str = rel.to_string_lossy().into_owned();
-        let new_id = reconstruct_id(&chunk.id, &chunk.file, &rel_str);
-        if new_id == chunk.id {
-            // #7923: the id does not embed this file spelling. Deleting the old
-            // id here would delete the row just upserted under the same key.
-            chunk.file = rel_str;
-            plan.to_upsert.push(chunk);
-            continue;
-        }
-        if existing.contains(&new_id) || !claimed.insert(new_id.clone()) {
-            // #7923: upserting onto a held id replaced that row and then the
-            // delete below removed this one — a silent loss per collision.
-            plan.kept_on_collision.push(chunk.id);
-            continue;
-        }
-        plan.ids_to_delete
-            .push(std::mem::replace(&mut chunk.id, new_id));
-        chunk.file = rel_str;
-        plan.to_upsert.push(chunk);
+        let old_id = chunk.id.clone();
+        let old_file = std::mem::replace(&mut chunk.file, rel_str);
+        // #7923: an id that does not embed its file spelling keeps its id; the
+        // transaction rewrites `file` in place and removes nothing.
+        chunk.id = reconstruct_id(&old_id, &old_file, &chunk.file);
+        plan.rewrites.push(PathRewrite {
+            old_id,
+            old_file,
+            chunk,
+        });
     }
     plan
 }
 
 /// Rewrite absolute chunk `file`/`id` pairs under `index.root_path` to
-/// root-relative form without losing a row.
+/// root-relative form without losing or overwriting a row.
 ///
 /// Why: see the module doc; M002 (#402) and M004 (#674) both call this.
-/// What: loads the corpus, plans rewrites ([`plan_rewrites`]), logs collisions
-/// and out-of-root files with counts, upserts then deletes, verifies the row
-/// count is unchanged, and refreshes the live BM25 + chunk map. No corpus is a
-/// no-op. `label` prefixes every log line.
+/// What: loads the corpus, plans rewrites ([`plan_rewrites`]), applies them in
+/// one transaction, logs out-of-root files, collisions and skipped rows with
+/// counts, and refreshes the live BM25 + chunk map when anything was
+/// rewritten. No corpus is a no-op; a failed transaction is `Err` with nothing
+/// committed, so the schema version is not stamped. `label` prefixes logs.
 /// Test: `relativize_preserves_every_chunk_for_m002_and_m004`,
 /// `relativize_reports_collisions_and_is_idempotent`.
 pub(crate) async fn relativize_corpus_paths(
@@ -118,13 +115,11 @@ pub(crate) async fn relativize_corpus_paths(
     .await
     .with_context(|| format!("{label}: load_all_chunks task panicked"))?
     .with_context(|| format!("{label}: failed to load chunks from corpus"))?;
-    let before = all_chunks.len();
 
     let plan = plan_rewrites(all_chunks, &root_path);
-    let report = RelativizeReport {
-        rewritten: plan.to_upsert.len(),
-        kept_on_collision: plan.kept_on_collision.clone(),
+    let mut report = RelativizeReport {
         outside_root: plan.outside_root.len(),
+        ..RelativizeReport::default()
     };
     if !plan.outside_root.is_empty() {
         tracing::warn!(
@@ -135,58 +130,55 @@ pub(crate) async fn relativize_corpus_paths(
             "{label}: chunk file is absolute but not under root_path; left unchanged"
         );
     }
-    if !plan.kept_on_collision.is_empty() {
+    if plan.rewrites.is_empty() {
+        tracing::info!(index_id = %index.id, "{label}: no chunk path to rewrite");
+        return Ok(report);
+    }
+
+    let rewrites = plan.rewrites;
+    let outcome = tokio::task::spawn_blocking(move || corpus.apply_path_rewrites(&rewrites))
+        .await
+        .with_context(|| format!("{label}: rewrite task panicked"))?
+        .with_context(|| {
+            format!(
+                "{label}: path rewrite for '{}' failed; nothing was committed",
+                index.id
+            )
+        })?;
+    report.rewritten = outcome.rewritten;
+    report.kept_on_collision = outcome.kept_on_collision;
+    report.skipped_changed = outcome.skipped_changed;
+
+    if !report.kept_on_collision.is_empty() {
         tracing::warn!(
             index_id = %index.id,
-            count = plan.kept_on_collision.len(),
+            count = report.kept_on_collision.len(),
             reason = COLLISION_REASON,
-            sample = ?plan.kept_on_collision.iter().take(5).collect::<Vec<_>>(),
+            sample = ?report.kept_on_collision.iter().take(5).collect::<Vec<_>>(),
             "{label}: kept chunk(s) under their absolute id; a reindex removes the \
              stale duplicates (#7923)"
         );
     }
-    if plan.to_upsert.is_empty() {
-        tracing::info!(index_id = %index.id, "{label}: no chunk path to rewrite");
-        return Ok(report);
-    }
-    tracing::info!(
-        index_id = %index.id,
-        count = plan.to_upsert.len(),
-        "{label}: rewriting absolute chunk file paths to root-relative"
-    );
-
-    // Upsert first: a crash between the two steps leaves both rows, never none.
-    let RewritePlan {
-        to_upsert,
-        ids_to_delete,
-        ..
-    } = plan;
-    let after = tokio::task::spawn_blocking(move || -> Result<usize> {
-        corpus
-            .upsert_chunks(&to_upsert)
-            .context("upsert rewritten chunks")?;
-        corpus
-            .delete_chunks(&ids_to_delete)
-            .context("delete old absolute-keyed rows")?;
-        corpus.chunk_count()
-    })
-    .await
-    .with_context(|| format!("{label}: rewrite task panicked"))??;
-    // #7923: every planned move is one upsert plus one delete, so the count
-    // cannot change. A difference means rows were lost; do not stamp.
-    anyhow::ensure!(
-        after == before,
-        "{label}: corpus for '{}' holds {after} chunks after the path rewrite, \
-         expected {before} (#7923)",
-        index.id
-    );
-
-    let indexer = index.indexer.read().await;
-    if let Err(e) = indexer.refresh_live_indices_from_corpus().await {
-        tracing::warn!(
+    if report.skipped_changed > 0 {
+        tracing::info!(
             index_id = %index.id,
-            "{label}: live-index refresh failed ({e}) — BM25 may be stale until restart"
+            count = report.skipped_changed,
+            "{label}: skipped chunk(s) changed or removed since the load"
         );
+    }
+    if report.rewritten > 0 {
+        tracing::info!(
+            index_id = %index.id,
+            count = report.rewritten,
+            "{label}: rewrote absolute chunk file paths to root-relative"
+        );
+        let indexer = index.indexer.read().await;
+        if let Err(e) = indexer.refresh_live_indices_from_corpus().await {
+            tracing::warn!(
+                index_id = %index.id,
+                "{label}: live-index refresh failed ({e}) — BM25 may be stale until restart"
+            );
+        }
     }
     Ok(report)
 }
@@ -255,6 +247,20 @@ mod tests {
         ]
     }
 
+    fn set(items: &[&str]) -> BTreeSet<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Id set after a successful pass over [`fixture`].
+    fn expected_after() -> BTreeSet<String> {
+        set(&[
+            "/srv/apex/src/a.rs:1:3",
+            "src/a.rs:1:3",
+            "src/b.rs:1:3",
+            "legacy-c",
+        ])
+    }
+
     fn handle(dir: &Path) -> (IndexHandle, Arc<CorpusStore>) {
         let corpus = Arc::new(CorpusStore::open(&dir.join("index.redb")).expect("open corpus"));
         corpus.upsert_chunks(&fixture()).expect("seed corpus");
@@ -288,18 +294,9 @@ mod tests {
             let (handle, corpus) = handle(dir.path());
             migration.apply(&handle).await.expect("migration applies");
 
-            let expected: BTreeSet<String> = [
-                "/srv/apex/src/a.rs:1:3",
-                "src/a.rs:1:3",
-                "src/b.rs:1:3",
-                "legacy-c",
-            ]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
             let label = migration.description();
             assert_eq!(corpus.chunk_count().unwrap(), 4, "{label}: row count");
-            assert_eq!(ids(&corpus), expected, "{label}: id set");
+            assert_eq!(ids(&corpus), expected_after(), "{label}: id set");
             let rows = corpus.get_chunks(&["src/a.rs:1:3", "legacy-c"]).unwrap();
             assert_eq!(rows[0].content, "fn live() {}", "{label}: twin overwritten");
             assert_eq!(rows[1].file, "src/c.rs", "{label}: in-place file rewrite");
@@ -316,6 +313,7 @@ mod tests {
         let first = relativize_corpus_paths(&handle, "test").await.unwrap();
         assert_eq!(first.rewritten, 2);
         assert_eq!(first.kept_on_collision, vec!["/srv/apex/src/a.rs:1:3"]);
+        assert_eq!(first.skipped_changed, 0);
         assert_eq!(first.outside_root, 0);
         assert!(COLLISION_REASON.contains("already held"));
 
@@ -323,5 +321,69 @@ mod tests {
         assert_eq!(second.rewritten, 0);
         assert_eq!(second.kept_on_collision, first.kept_on_collision);
         assert_eq!(corpus.chunk_count().unwrap(), 4);
+    }
+
+    /// Error arm and crash shape: a fault after every move is staged fails the
+    /// count check, commits nothing, and a retry converges on the full result.
+    #[tokio::test]
+    async fn failed_rewrite_commits_nothing_and_retry_converges() {
+        let dir = tempfile::tempdir().unwrap();
+        let (handle, corpus) = handle(dir.path());
+        let original = ids(&corpus);
+        let plan = plan_rewrites(corpus.load_all_chunks().unwrap(), Path::new(ROOT));
+
+        let err = corpus
+            .apply_path_rewrites_with(&plan.rewrites, |table| {
+                // A row the pass did not plan to touch goes missing mid-transaction.
+                table.remove("src/a.rs:1:3").context("fault injection")?;
+                Ok(())
+            })
+            .expect_err("a changed row count must abort the transaction");
+        assert!(
+            err.to_string().contains("aborted without committing"),
+            "{err:#}"
+        );
+        assert_eq!(
+            ids(&corpus),
+            original,
+            "nothing from the failed pass commits"
+        );
+
+        relativize_corpus_paths(&handle, "retry")
+            .await
+            .expect("retry converges");
+        assert_eq!(ids(&corpus), expected_after());
+        assert_eq!(corpus.chunk_count().unwrap(), 4);
+    }
+
+    /// Rows written or removed between the load and the transaction are
+    /// neither overwritten nor reported as lost.
+    #[tokio::test]
+    async fn rows_written_after_the_load_are_never_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_handle, corpus) = handle(dir.path());
+        let plan = plan_rewrites(corpus.load_all_chunks().unwrap(), Path::new(ROOT));
+
+        // Concurrent writers land after the plan was taken.
+        corpus
+            .upsert_chunks(&[
+                chunk("src/b.rs:1:3", "src/b.rs", "fn b_live() {}"),
+                chunk("src/new.rs:1:3", "src/new.rs", "fn new() {}"),
+            ])
+            .unwrap();
+        corpus.delete_chunks(&["legacy-c".to_string()]).unwrap();
+
+        let outcome = corpus
+            .apply_path_rewrites(&plan.rewrites)
+            .expect("concurrent writes must not produce a lost-rows error");
+        assert_eq!(outcome.rewritten, 0);
+        assert_eq!(
+            outcome.kept_on_collision,
+            vec!["/srv/apex/src/a.rs:1:3", "/srv/apex/src/b.rs:1:3"]
+        );
+        assert_eq!(outcome.skipped_changed, 1);
+        assert_eq!(corpus.chunk_count().unwrap(), 5);
+        let b = corpus.get_chunks(&["src/b.rs:1:3"]).unwrap();
+        assert_eq!(b[0].content, "fn b_live() {}", "newer row overwritten");
     }
 }

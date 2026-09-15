@@ -38,6 +38,22 @@ pub struct SnapshotRestore {
     pub duplicate_ids: usize,
 }
 
+/// Fail a JSON → redb migration whose store holds fewer rows than it migrated.
+///
+/// Why (#7923): a short write that is only logged lets the runner stamp v1
+/// over an incomplete corpus, and the snapshot is never read again.
+/// What: `Err` naming the shortfall when `stored < total`, otherwise `Ok`.
+/// Test: `migrations::tests::ensure_all_migrated_rejects_a_short_write`.
+pub(super) fn ensure_all_migrated(index_id: &str, total: usize, stored: usize) -> Result<()> {
+    anyhow::ensure!(
+        stored >= total,
+        "index '{index_id}': redb holds {stored} chunks after migrating {total} — \
+         {} missing (#7923)",
+        total - stored
+    );
+    Ok(())
+}
+
 impl CodeIndexer {
     /// Snapshot the in-memory chunk corpus + entities to disk as JSON.
     ///
@@ -514,8 +530,9 @@ impl CodeIndexer {
     /// locks, writes them to the `CorpusStore` in one transaction on a blocking
     /// worker, and returns the migrated count. `Err` when no store is wired,
     /// the write fails, or redb then holds fewer rows than were migrated.
-    /// Test: `tests::test_corpus_store_migrates_from_json`,
-    /// `migrations::tests::json_migration_fails_without_a_corpus_store_and_keeps_snapshot`.
+    /// Test: `tests::branch_and_corpus::test_corpus_store_migrates_from_json`,
+    /// `migrations::tests::migrate_corpus_to_redb_without_a_store_is_an_error`,
+    /// `migrations::tests::ensure_all_migrated_rejects_a_short_write`.
     pub async fn migrate_corpus_to_redb(&self) -> Result<usize> {
         let corpus = self.corpus.clone().with_context(|| {
             format!(
@@ -546,12 +563,7 @@ impl CodeIndexer {
         .context("redb corpus migration task panicked")?
         .with_context(|| format!("index '{index_id}': redb corpus migration failed"))?;
         // #7923: the migrated count must be what redb now serves.
-        anyhow::ensure!(
-            stored >= total,
-            "index '{index_id}': redb holds {stored} chunks after migrating {total} — \
-             {} missing (#7923)",
-            total - stored
-        );
+        ensure_all_migrated(&index_id, total, stored)?;
         tracing::info!("index '{index_id}': migrated {total} chunks from chunks.json to redb");
         Ok(total)
     }

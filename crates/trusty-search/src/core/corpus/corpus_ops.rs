@@ -17,6 +17,31 @@ use super::tables::{CHUNKS_TABLE, ENTITIES_TABLE, FILE_HASHES_TABLE};
 use crate::core::chunker::RawChunk;
 use crate::core::entity::RawEntity;
 
+/// One planned absolute → root-relative rewrite (#7923).
+///
+/// Why: the decision to apply it is taken inside the write transaction, so it
+/// must carry what the row looked like when it was planned.
+/// What: the source key, the source row's `file` at planning time, and the
+/// rewritten chunk (`chunk.id == old_id` for an in-place `file` rewrite).
+#[derive(Debug, Clone)]
+pub struct PathRewrite {
+    pub old_id: String,
+    pub old_file: String,
+    pub chunk: RawChunk,
+}
+
+/// What [`CorpusStore::apply_path_rewrites`] committed (#7923).
+///
+/// Why: a declined rewrite must be visible as a count, never a silent drop.
+/// What: rows rewritten; source ids kept because their target id was held;
+/// rewrites skipped because the source row changed or vanished since planning.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct PathRewriteOutcome {
+    pub rewritten: usize,
+    pub kept_on_collision: Vec<String>,
+    pub skipped_changed: usize,
+}
+
 impl CorpusStore {
     /// Empty the `chunks` and `entities` tables in one transaction (#6581).
     ///
@@ -150,6 +175,93 @@ impl CorpusStore {
         }
         txn.commit().context("commit batch upsert txn")?;
         Ok(())
+    }
+
+    /// Apply absolute → root-relative path rewrites in one write transaction
+    /// (#7923).
+    ///
+    /// Why: the rewrite used to decide collisions from a load and then upsert
+    /// and delete in two transactions. A row written after the load was
+    /// overwritten with stale content, a crash between the two left duplicates,
+    /// and a concurrent write made a before/after count comparison report lost
+    /// rows that were not lost.
+    /// What: see [`Self::apply_path_rewrites_with`], called with a no-op hook.
+    /// Test: `migration::relativize::tests::rows_written_after_the_load_are_never_overwritten`.
+    pub fn apply_path_rewrites(&self, rewrites: &[PathRewrite]) -> Result<PathRewriteOutcome> {
+        self.apply_path_rewrites_with(rewrites, |_| Ok(()))
+    }
+
+    /// [`Self::apply_path_rewrites`] with a hook run after every move is staged
+    /// and before the row count is verified.
+    ///
+    /// Why: the count check and the abort-on-failure contract need a test that
+    /// can fault the transaction from inside; redb offers no other seam.
+    /// What: inside one write transaction, per rewrite: skip it when the source
+    /// row is gone or no longer holds `old_file` (changed since the load);
+    /// keep the source and report `old_id` when the target id is held by any
+    /// row now; otherwise insert the rewritten chunk and remove `old_id` (or
+    /// overwrite in place when the id is unchanged). Then run `before_verify`,
+    /// compare the table length with its value at the start of the
+    /// transaction, and commit only when equal. Any `Err` drops the
+    /// transaction, so nothing is committed.
+    /// Test: `migration::relativize::tests::failed_rewrite_commits_nothing_and_retry_converges`.
+    pub(crate) fn apply_path_rewrites_with<F>(
+        &self,
+        rewrites: &[PathRewrite],
+        before_verify: F,
+    ) -> Result<PathRewriteOutcome>
+    where
+        F: FnOnce(&mut redb::Table<'_, &'static str, &'static [u8]>) -> Result<()>,
+    {
+        let mut outcome = PathRewriteOutcome::default();
+        if rewrites.is_empty() {
+            return Ok(outcome);
+        }
+        let txn = self.db.begin_write().context("begin path rewrite txn")?;
+        {
+            let mut table = txn.open_table(CHUNKS_TABLE)?;
+            let before = table.len().context("count chunks before rewrite")?;
+            for rw in rewrites {
+                // #7923: decide against the rows as they are now, inside the txn.
+                let current_file = match table.get(rw.old_id.as_str())? {
+                    Some(v) => serde_json::from_slice::<RawChunk>(v.value())
+                        .ok()
+                        .map(|c| c.file),
+                    None => None,
+                };
+                if current_file.as_deref() != Some(rw.old_file.as_str()) {
+                    outcome.skipped_changed += 1;
+                    continue;
+                }
+                let moves_key = rw.chunk.id != rw.old_id;
+                if moves_key && table.get(rw.chunk.id.as_str())?.is_some() {
+                    outcome.kept_on_collision.push(rw.old_id.clone());
+                    continue;
+                }
+                let bytes = serde_json::to_vec(&rw.chunk)
+                    .with_context(|| format!("serialize chunk {}", rw.chunk.id))?;
+                table
+                    .insert(rw.chunk.id.as_str(), bytes.as_slice())
+                    .with_context(|| format!("insert chunk {}", rw.chunk.id))?;
+                if moves_key {
+                    table
+                        .remove(rw.old_id.as_str())
+                        .with_context(|| format!("remove chunk {}", rw.old_id))?;
+                }
+                outcome.rewritten += 1;
+            }
+            before_verify(&mut table)?;
+            let after = table.len().context("count chunks after rewrite")?;
+            // #7923: every move inserts one key and removes a different one. A
+            // changed count means a row would be lost — abort, commit nothing.
+            anyhow::ensure!(
+                after == before,
+                "path rewrite would change the chunk count from {before} to {after}; \
+                 aborted without committing (#7923)"
+            );
+        }
+        txn.commit().context("commit path rewrite txn")?;
+        Ok(outcome)
     }
 
     /// Return the distinct set of file paths present in the chunk corpus.

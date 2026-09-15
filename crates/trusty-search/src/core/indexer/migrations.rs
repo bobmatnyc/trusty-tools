@@ -311,4 +311,35 @@ mod tests {
         );
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
+
+    /// #7923: `migrate_corpus_to_redb` itself refuses when no store is wired,
+    /// independent of the guard `run_migration_async` applies first.
+    #[tokio::test]
+    async fn migrate_corpus_to_redb_without_a_store_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chunks.json");
+        write_snapshot(&path, &[chunk("a", "fn a() {}")]);
+        let indexer = CodeIndexer::new("no-store-direct-7923", dir.path());
+        assert_eq!(indexer.load_chunks_from_disk(&path).await.unwrap(), 1);
+
+        let err = indexer
+            .migrate_corpus_to_redb()
+            .await
+            .expect_err("no store must be an error, not a silent return");
+        assert!(
+            err.to_string().contains("no durable corpus store"),
+            "{err:#}"
+        );
+        assert_eq!(indexer.chunk_count(), 1, "the in-memory corpus stays live");
+    }
+
+    /// #7923: a store holding fewer rows than were migrated fails the step.
+    #[test]
+    fn ensure_all_migrated_rejects_a_short_write() {
+        use crate::core::indexer::persist::ensure_all_migrated;
+        assert!(ensure_all_migrated("x", 4, 4).is_ok());
+        assert!(ensure_all_migrated("x", 4, 5).is_ok());
+        let err = ensure_all_migrated("x", 4, 3).expect_err("short write");
+        assert!(err.to_string().contains("1 missing"), "{err:#}");
+    }
 }
