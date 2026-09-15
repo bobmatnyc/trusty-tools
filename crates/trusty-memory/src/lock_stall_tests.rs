@@ -158,7 +158,7 @@ async fn an_abandoned_probe_keeps_the_stamp_until_the_lock_is_seen_free() {
     let t0 = Instant::now();
     drop(
         tracker
-            .claim(key(PalaceLock::Write), t0)
+            .claim(key(PalaceLock::Write), t0, &mutex)
             .expect("first claim"),
     );
 
@@ -173,7 +173,9 @@ async fn an_abandoned_probe_keeps_the_stamp_until_the_lock_is_seen_free() {
         "`since` must stay at t0"
     );
     assert!(
-        tracker.claim(key(PalaceLock::Write), later).is_none(),
+        tracker
+            .claim(key(PalaceLock::Write), later, &mutex)
+            .is_none(),
         "the re-observe must have queued a live probe"
     );
 
@@ -195,7 +197,9 @@ async fn a_free_sighting_never_clears_a_live_probe_stamp() {
     let tracker = Arc::new(LockStallTracker::default());
     let mutex = Arc::new(tokio::sync::Mutex::new(()));
     let now = Instant::now();
-    let token = tracker.claim(key(PalaceLock::Commit), now).expect("claim");
+    let token = tracker
+        .claim(key(PalaceLock::Commit), now, &mutex)
+        .expect("claim");
     tracker.observe("p", PalaceLock::Commit, &mutex, now);
     assert!(
         tracker.oldest_stall_at(now).is_some(),
@@ -207,6 +211,65 @@ async fn a_free_sighting_never_clears_a_live_probe_stamp() {
     assert!(
         tracker.oldest_stall_at(now).is_none(),
         "unprobed stamp cleared"
+    );
+}
+
+/// Why (#4001, stamp identity): the stamp key is `(palace id, lock)`, which a
+/// reopened palace reuses. A probe still queued on the evicted handle's mutex
+/// leaves `probing` set forever, so a free sighting of the LIVE handle's lock
+/// would keep reporting a stall against a healthy palace.
+/// What: stamps a held mutex, then observes a second, free mutex under the same
+/// key — the reopened handle — and asserts nothing is stamped.
+/// Test: itself.
+#[tokio::test]
+async fn a_reopened_palace_clears_a_stamp_left_by_a_superseded_handle() {
+    let tracker = Arc::new(LockStallTracker::default());
+    let superseded = Arc::new(tokio::sync::Mutex::new(()));
+    let _held = superseded.clone().lock_owned().await;
+    let t0 = Instant::now();
+    tracker.observe("p", PalaceLock::Write, &superseded, t0);
+    assert!(
+        tracker.oldest_stall_at(t0).is_some(),
+        "the evicted handle's held lock is stamped"
+    );
+
+    // The palace is reopened: a new handle, a free lock. The probe queued on
+    // the old mutex can never acquire it, so only this sighting can clear it.
+    let reopened = Arc::new(tokio::sync::Mutex::new(()));
+    let later = t0 + Duration::from_secs(200);
+    tracker.observe("p", PalaceLock::Write, &reopened, later);
+    assert_eq!(
+        tracker.oldest_stall_at(later),
+        None,
+        "a free lock on the live handle leaves no stamp"
+    );
+}
+
+/// Why (#4001, stamp identity): if the reopened handle's lock is also held, the
+/// stamp must start from this sighting. Inheriting the superseded handle's
+/// `since` would report a fresh hold as minutes old and wedge a healthy palace.
+/// What: stamps a held mutex at `t0`, observes a second held mutex 200 s later,
+/// and asserts the reported age is measured from the second sighting.
+/// Test: itself.
+#[tokio::test]
+async fn a_reopened_palace_restamps_instead_of_inheriting_the_old_age() {
+    let tracker = Arc::new(LockStallTracker::default());
+    let superseded = Arc::new(tokio::sync::Mutex::new(()));
+    let _old = superseded.clone().lock_owned().await;
+    let t0 = Instant::now();
+    tracker.observe("p", PalaceLock::Write, &superseded, t0);
+
+    let reopened = Arc::new(tokio::sync::Mutex::new(()));
+    let _new = reopened.clone().lock_owned().await;
+    let later = t0 + Duration::from_secs(200);
+    tracker.observe("p", PalaceLock::Write, &reopened, later);
+    let stall = tracker
+        .oldest_stall_at(later + Duration::from_secs(1))
+        .expect("the live handle's held lock is stamped");
+    assert_eq!(
+        stall.age,
+        Duration::from_secs(1),
+        "the stamp must date from the live handle's sighting, not the old one"
     );
 }
 
@@ -308,4 +371,43 @@ async fn the_ticker_stamps_a_held_lock_on_an_open_palace() {
     .await;
     assert!(tracker.degraded_at(Instant::now()).is_none());
     ticker.abort();
+}
+
+/// Why (#4001): the ticker and the health path sweep the same palaces. A ticker
+/// sweep that does not record itself leaves the next health poll sweeping again
+/// immediately, doubling the work the rate limit exists to bound.
+/// What: lets the ticker sweep once, stops it, then holds a second lock and
+/// calls the health path with an hour-long interval; that sweep must be skipped
+/// because the ticker's own sweep counts against it.
+/// Test: itself.
+#[tokio::test]
+async fn a_ticker_sweep_records_itself_against_the_health_rate_limit() {
+    let (registry, handle, _tmp) = registry_with("shared");
+    let tracker = Arc::new(LockStallTracker::default());
+    let _c = handle.commit_mutex.clone().lock_owned().await;
+    let ticker = spawn_lock_stall_ticker(
+        Arc::clone(&tracker),
+        Arc::clone(&registry),
+        Duration::from_millis(10),
+    );
+    wait_for("the ticker to sweep once", || {
+        tracker.oldest_stall_at(Instant::now()).is_some()
+    })
+    .await;
+    ticker.abort();
+    assert!(
+        ticker
+            .await
+            .expect_err("the ticker was aborted")
+            .is_cancelled(),
+        "the ticker must be stopped before the health sweep below"
+    );
+
+    let _w = handle.write_mutex.clone().lock_owned().await;
+    tracker.sweep_if_due(&registry, Duration::from_secs(3600));
+    let stalls = tracker.stalls.lock().expect("not poisoned");
+    assert!(
+        !stalls.contains_key(&("shared".to_string(), PalaceLock::Write)),
+        "the health sweep must be rate limited by the ticker's own sweep: {stalls:?}"
+    );
 }

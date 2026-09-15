@@ -14,7 +14,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use super::super::{CheckResult, CheckStatus};
-use super::{check_daemon_health_at, summarize};
+use super::{check_daemon_health_at, interpret_health_body, summarize};
 
 /// How a stand-in daemon treats each request.
 #[derive(Clone, Copy)]
@@ -178,12 +178,85 @@ async fn a_wedge_from_a_held_handle_lock_fails_and_names_the_lock() {
     assert_eq!(result.status, CheckStatus::Fail, "{result:?}");
     let detail = result.detail.as_deref().unwrap_or_default();
     assert!(
-        detail.contains("\"trusty-tools\"")
-            && detail.contains("\"write\"")
-            && detail.contains("131s"),
-        "the held lock must be named: {detail}"
+        detail.contains("write lock of palace trusty-tools") && detail.contains("at least 131s"),
+        "the held lock must be named in prose, not as JSON: {detail}"
     );
     assert!(!summarize(&[result]).healthy);
+}
+
+/// Why (#4001, the detector's own failure): a stopped stall ticker makes the
+/// daemon report `degraded`, which mapped to `Warn` — and a run of passes plus
+/// a warning still exits 0. That is the #4001 symptom again, with the new
+/// detector as its cause: nothing is watching the palace locks, and doctor says
+/// the machine is fine.
+/// What: a body whose worker block reports `stall_tracking_ok: false` beside
+/// `wedged: false`; asserts `Unknown`, a message naming the tracking, and an
+/// unhealthy run (doctor exits 1).
+/// Test: itself.
+#[test]
+fn stopped_stall_tracking_is_undetermined_not_a_warning() {
+    let result = interpret_health_body(
+        "HTTP daemon".to_string(),
+        "http://x/health",
+        200,
+        Some(&serde_json::json!({
+            "status": "degraded",
+            "detail": "palace lock stall ticker has not run for 412s (interval 30000ms); a \
+                       held lock may go unnoticed between health polls (#4001)",
+            "daemon_state": "ready",
+            "worker": {"in_flight": 0, "wedged": false, "stall_tracking_ok": false},
+        })),
+    );
+    assert_eq!(result.status, CheckStatus::Unknown, "{result:?}");
+    let detail = result.detail.as_deref().unwrap_or_default();
+    assert!(
+        detail.contains("UNKNOWN") && detail.contains("stall tracking is not running"),
+        "the dead detector must be named: {detail}"
+    );
+    assert!(
+        !summarize(&[CheckResult::pass("a", "fine"), result]).healthy,
+        "a daemon that stopped watching its palace locks must not end the run green"
+    );
+}
+
+/// Why (#4001): `stalled_lock` is reported under the threshold too, so a
+/// worker-pool wedge beside a benign 3 s stamp was reported as a wedged palace
+/// — the wrong subject, the wrong age, and a thread sample aimed at a palace
+/// that is fine.
+/// What: a body wedged on the pool, carrying a sub-threshold `stalled_lock` and
+/// `wedged_reason: "pool"`; asserts the message describes the pool and never
+/// names the stamped palace.
+/// Test: itself.
+#[test]
+fn a_pool_wedge_beside_a_benign_stamp_names_the_pool() {
+    let result = interpret_health_body(
+        "HTTP daemon".to_string(),
+        "http://x/health",
+        200,
+        Some(&serde_json::json!({
+            "status": "wedged",
+            "daemon_state": "ready",
+            "worker": {
+                "in_flight": 4,
+                "oldest_age_secs": 900,
+                "wedged": true,
+                "wedged_reason": "pool",
+                "stalled_lock": {"palace": "scratch", "lock": "commit", "age_secs": 3},
+            },
+        })),
+    );
+    assert_eq!(result.status, CheckStatus::Fail, "{result:?}");
+    let detail = result.detail.as_deref().unwrap_or_default();
+    assert!(
+        detail.contains("WEDGED worker pool")
+            && detail.contains("900s")
+            && detail.contains("4 in flight"),
+        "the pool must be the subject: {detail}"
+    );
+    assert!(
+        !detail.contains("scratch"),
+        "a sub-threshold stamp is not the wedge: {detail}"
+    );
 }
 
 /// Why (issue #4001): the run used to end green with exit 0 whenever nothing
@@ -201,6 +274,34 @@ fn an_undetermined_check_is_not_a_healthy_run() {
     assert_eq!(
         summary.line,
         "1 passed, 0 warnings, 1 undetermined, 0 failed."
+    );
+}
+
+/// Why (#4001, the rule's reach): `unknown == 0` is not a health-probe rule —
+/// it covers every check. Two existing `Unknown`s now exit 1 on an otherwise
+/// clean machine: `check_tier_s_reaffirmation` against a daemon predating
+/// #4890, and `check_mcp_registrations` when `$HOME` will not resolve. That is
+/// intended, and pinned here so it is a decision rather than a surprise.
+/// What: summarizes passes beside those two non-health `Unknown`s; asserts the
+/// run is unhealthy and the tally counts both.
+/// Test: itself.
+#[test]
+fn a_non_health_undetermined_check_also_ends_the_run_unhealthy() {
+    let summary = summarize(&[
+        CheckResult::pass("daemon socket", "workers progressing"),
+        CheckResult::unknown(
+            "Tier S facts",
+            "a daemon predating #4890 does not report `affirmed_at`",
+        ),
+        CheckResult::unknown(
+            "MCP registrations",
+            "could not resolve the home directory, so no client config was read",
+        ),
+    ]);
+    assert!(!summary.healthy);
+    assert_eq!(
+        summary.line,
+        "1 passed, 0 warnings, 2 undetermined, 0 failed."
     );
 }
 

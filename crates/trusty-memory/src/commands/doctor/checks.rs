@@ -259,15 +259,20 @@ pub(super) async fn check_daemon_health_at(
 /// which is how #3992 stayed green for the length of an incident. The body now
 /// carries an observation of the worker pool, and this maps that observation
 /// to a status, keeping "observed healthy" separate from "could not determine".
-/// What: `Fail` when the daemon reports a wedged worker pool, `Warn` when it
-/// reports `degraded` or is still warming up, `Unknown` when the body is
-/// missing or unparseable (a 2xx with no readable body tells us nothing about
-/// the workers), and `Pass` only when the daemon positively reported a healthy
-/// worker pool.
+/// What: `Fail` when the daemon reports a wedge — naming the palace lock or the
+/// worker pool according to `worker.wedged_reason`, since a sub-threshold
+/// `stalled_lock` is reported beside a pool wedge. `Warn` when it reports
+/// `degraded` or is still warming up. `Unknown` when the body is missing or
+/// unparseable (a 2xx with no readable body tells us nothing about the
+/// workers), and equally when the daemon reports its own stall tracking
+/// stopped. `Pass` only when the daemon positively reported a healthy worker
+/// pool it was still watching.
 /// Test: `wedged_body_is_fail`, `warming_body_is_warn`,
 /// `indeterminate_probe_renders_as_unknown_not_pass`,
 /// `body_without_worker_block_is_unknown`, `healthy_body_is_pass`,
-/// `degraded_body_is_warn`.
+/// `degraded_body_is_warn`,
+/// `stopped_stall_tracking_is_undetermined_not_a_warning`,
+/// `a_pool_wedge_beside_a_benign_stamp_names_the_pool`.
 pub(super) fn interpret_health_body(
     label: String,
     url: &str,
@@ -298,19 +303,33 @@ pub(super) fn interpret_health_body(
         .and_then(serde_json::Value::as_u64);
 
     // #4001: a held handle lock may have no tracked holder; name it instead.
+    // `stalled_lock` is reported under the threshold too, so its presence does
+    // not mean the lock is what wedged — `wedged_reason` says which arm tripped.
     let stalled_lock = worker.and_then(|w| w.get("stalled_lock"));
+    let wedged_reason = worker
+        .and_then(|w| w.get("wedged_reason"))
+        .and_then(serde_json::Value::as_str);
+    // A daemon predating `wedged_reason` reports only the lock's presence.
+    let lock_wedge = wedged_reason.map_or_else(|| stalled_lock.is_some(), |r| r == "lock");
     match wedged {
-        Some(true) if stalled_lock.is_some() => {
-            let field = |k: &str| stalled_lock.and_then(|s| s.get(k)).cloned();
+        Some(true) if lock_wedge && stalled_lock.is_some() => {
+            let field = |k: &str| stalled_lock.and_then(|s| s.get(k));
+            let text = |k: &str| {
+                field(k)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown")
+            };
             return CheckResult::fail(
                 label,
                 format!(
                     "{url} → {status} BUT the daemon reports a WEDGED palace: {} lock of \
-                     palace {} has been unavailable for {}s. Writes to it time out. Inspect \
-                     with a thread sample before restarting.",
-                    field("lock").unwrap_or_default(),
-                    field("palace").unwrap_or_default(),
-                    field("age_secs").unwrap_or_default()
+                     palace {} has been unavailable for at least {}s. Writes to it time out. \
+                     Inspect with a thread sample before restarting.",
+                    text("lock"),
+                    text("palace"),
+                    field("age_secs")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or_default()
                 ),
             );
         }
@@ -340,6 +359,29 @@ pub(super) fn interpret_health_body(
             );
         }
         Some(false) => {}
+    }
+
+    // #4001: the `wedged: false` above is only worth what the detector behind
+    // it is worth. A daemon reporting that its stall tracking stopped has not
+    // told us the palace locks are free, and that reads as `degraded` below —
+    // a warning, which would leave the run green on the detector's own failure.
+    if worker
+        .and_then(|w| w.get("stall_tracking_ok"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(false)
+    {
+        let detail = body
+            .get("detail")
+            .and_then(|v| v.as_str())
+            .unwrap_or("no detail reported");
+        return CheckResult::unknown(
+            label,
+            format!(
+                "{url} → {status}, but the daemon's palace-lock stall tracking is not running: \
+                 {detail}. Whether a palace lock is wedged is UNKNOWN. Restart the daemon to \
+                 restore the detector."
+            ),
+        );
     }
 
     let daemon_state = body.get("daemon_state").and_then(|v| v.as_str());
@@ -388,9 +430,16 @@ pub(super) fn interpret_health_body(
 /// ended the run looking healthy. An undetermined check has not passed.
 /// What: the one-line tally, with indeterminate checks in their own column,
 /// and `healthy` true only when no check failed and none was undetermined.
-/// `Warn` still does not flip it.
+/// `Warn` still does not flip it. The rule is deliberately wider than the
+/// health probe: every `Unknown` counts, including
+/// `tier_s::check_tier_s_reaffirmation`'s against a daemon predating #4890 and
+/// `mcp_registration::check_mcp_registrations`'s when `$HOME` will not
+/// resolve. Those runs now exit 1 on an otherwise clean
+/// machine, which is the intended reading — doctor did not determine them.
 /// Test: `an_undetermined_check_is_not_a_healthy_run`,
-/// `warnings_alone_are_a_healthy_run` in `checks_tests.rs`.
+/// `warnings_alone_are_a_healthy_run`,
+/// `a_non_health_undetermined_check_also_ends_the_run_unhealthy` in
+/// `checks_tests.rs`.
 pub(super) struct DoctorSummary {
     /// "N passed, N warnings, N undetermined, N failed."
     pub(super) line: String,

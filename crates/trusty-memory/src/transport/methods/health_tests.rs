@@ -118,9 +118,49 @@ async fn health_reports_idle_worker_pool() {
     let v = body;
     assert_eq!(v["worker"]["in_flight"], 0, "idle pool; got {v:?}");
     assert_eq!(v["worker"]["wedged"], false, "idle pool; got {v:?}");
+    assert_eq!(
+        v["worker"]["stall_tracking_ok"], true,
+        "a `wedged: false` is only worth the detector behind it; got {v:?}"
+    );
     assert!(
         v["worker"].get("oldest_age_secs").is_none(),
         "an idle pool has no age to report; got {v:?}"
+    );
+    assert!(
+        v["worker"].get("wedged_reason").is_none(),
+        "nothing is wedged, so there is no reason; got {v:?}"
+    );
+}
+
+/// Why (issue #4001): a stall detector that stopped running is the fix's own
+/// fail-open. Folding it into `status: "degraded"` alone leaves a consumer no
+/// way to tell "a probe failed" from "nothing is watching the palace locks",
+/// and the second must never read as a warning.
+/// What: ages the tracker's heartbeat past its grace, then asserts the worker
+/// block reports `stall_tracking_ok: false` and the status names the ticker.
+/// Test: this test.
+#[tokio::test]
+async fn health_reports_stall_tracking_that_stopped() {
+    let state = test_state();
+    let stale = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(3600))
+        .expect("the monotonic clock has an hour of history");
+    state
+        .lock_stalls
+        .beat(stale, std::time::Duration::from_secs(30));
+
+    let v: Value = super::health::health(&state, HealthQuery::default())
+        .await
+        .expect("health answers");
+
+    assert_eq!(
+        v["worker"]["stall_tracking_ok"], false,
+        "a ticker silent for an hour cannot vouch for the locks; got {v:?}"
+    );
+    assert_eq!(v["status"], "degraded", "got {v:?}");
+    assert!(
+        v["detail"].as_str().unwrap_or_default().contains("ticker"),
+        "detail must name the dead ticker; got {v:?}"
     );
 }
 
@@ -162,6 +202,10 @@ async fn health_reports_wedged_worker_pool() {
         v["status"], "ok",
         "this is the #3992 false positive; got {v:?}"
     );
+    assert_eq!(
+        v["worker"]["wedged_reason"], "pool",
+        "no palace lock is stamped here, so the pool is the reason; got {v:?}"
+    );
     assert_eq!(v["worker"]["in_flight"], 1, "got {v:?}");
     assert!(
         v["detail"].as_str().unwrap_or_default().contains("wedged")
@@ -171,6 +215,41 @@ async fn health_reports_wedged_worker_pool() {
                 .contains("not making progress"),
         "detail must explain the wedge; got {v:?}"
     );
+}
+
+/// Why (issue #4001): a consumer cannot tell a palace-lock wedge from a
+/// worker-pool wedge by the presence of `stalled_lock`, which is reported under
+/// the threshold too. The daemon must name which arm tripped.
+/// What: stamps a held mutex a second in the past with the threshold at zero,
+/// then asserts the wedge is attributed to the lock.
+/// Test: this test.
+#[tokio::test]
+async fn health_names_the_lock_as_the_wedge_reason() {
+    let mut state = test_state();
+    state.wedge_threshold = std::time::Duration::ZERO;
+    let mutex = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    let _held = mutex.clone().lock_owned().await;
+    let since = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(1))
+        .expect("the monotonic clock has a second of history");
+    state.lock_stalls.observe(
+        "wedged-palace",
+        crate::lock_stall::PalaceLock::Write,
+        &mutex,
+        since,
+    );
+
+    let v: Value = super::health::health(&state.clone(), HealthQuery::default())
+        .await
+        .expect("health answers");
+
+    assert_eq!(v["worker"]["wedged"], true, "got {v:?}");
+    assert_eq!(
+        v["worker"]["wedged_reason"], "lock",
+        "a held palace lock, not the pool, is what wedged; got {v:?}"
+    );
+    assert_eq!(v["worker"]["stalled_lock"]["palace"], "wedged-palace");
+    assert_eq!(v["status"], "wedged", "got {v:?}");
 }
 
 /// Why (issue #4001): the wedge signal must clear on its own. If a completed
