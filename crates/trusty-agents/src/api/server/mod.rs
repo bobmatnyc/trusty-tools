@@ -59,7 +59,7 @@ pub(crate) mod assistant_settings;
 mod attachments;
 mod auth;
 // #7609: channel writes take one control the rest of this API does not —
-// a configured API token — and leave an audit line.
+// a configured or minted credential — and leave an audit line.
 pub(crate) mod channel_auth;
 // #7609: the listener routes, kept for one release as forwarding aliases.
 mod cancel;

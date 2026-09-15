@@ -6,19 +6,22 @@
 //! loopback bind as its control (#3329), which is enough for a surface that
 //! spawns work on the caller's own behalf and is not enough here.
 //!
-//! What this control DOES achieve: an off-host caller cannot write a channel
-//! (it has neither the operator token nor a credential minted for this boot); a
-//! cross-origin page in the operator's browser cannot read the minted
-//! credential, because `/api/config` withholds it from a foreign `Origin` and
-//! the same-origin CORS layer withholds the response body besides; and another
-//! UNIX user on the same host cannot read it from disk, because the published
-//! file is `0600`.
+//! What this control DOES achieve: an off-host caller cannot write a channel —
+//! it has neither the operator token nor a credential minted for this boot —
+//! and a page served from a NON-LOOPBACK origin cannot read the minted
+//! credential, because `/api/config` withholds it from such an `Origin` and the
+//! same-origin CORS layer withholds the response body besides.
 //!
-//! What it does NOT achieve, by design: a process running as the SAME user is
-//! still trusted. It can read the published file, or simply read the operator's
-//! own `.env.local`. Excluding it would need an OS-level capability this
-//! codebase does not have, and the loopback doctrine already assumes the
-//! same-user boundary everywhere else.
+//! What it does NOT achieve, and the scope is worth stating precisely: EVERY
+//! loopback origin is trusted. `routes::same_origin_ok` admits any
+//! `http://127.0.0.1:*` / `http://localhost:*`, and `same_origin_cors` reflects
+//! them, so a page the operator happens to have open on another local port —
+//! a dev server on `:5173`, say — can read the credential. That is the same
+//! same-user carve-out as the paragraph below rather than a separate gap: a
+//! process running as the operator is trusted throughout. It can read the
+//! operator's own environment just as easily. Excluding it would need an
+//! OS-level capability this codebase does not have, and the loopback doctrine
+//! already assumes the same-user boundary everywhere else.
 //! What: [`ChannelWriteAuth`] carries the two credentials a channel write may
 //! present, inserted by `routes::build_router_with_origins`. [`ChannelWriter`]
 //! is the extractor every channel write handler takes FIRST — it verifies the
@@ -38,8 +41,8 @@
 //!   then had the whole API.
 //! - The MINTED credential ([`mint_ephemeral`]) exists only on a LOOPBACK bind,
 //!   is regenerated per boot, and authorizes CHANNEL WRITES and nothing else.
-//!   It is the one the served UI reads from `/api/config` and the one published
-//!   to the `0600` file. It is minted whether or not an operator token is
+//!   It is the one the served UI reads from `/api/config`, which is the only
+//!   way it leaves the process. It is minted whether or not an operator token is
 //!   configured, so the UI never needs the operator's secret to save.
 //!
 //! One layering consequence, stated because it is easy to read the above as
@@ -174,94 +177,6 @@ pub(super) fn minted_credential(bind: std::net::IpAddr) -> Option<String> {
     bind.is_loopback().then(mint_ephemeral)
 }
 
-/// The file the channel-write credential is published to, beside `http_addr`.
-///
-/// Why NOT inside `http_addr` itself: `trusty_common::read_daemon_addr` returns
-/// that file's whole trimmed contents as an address, and
-/// `resolve_daemon_base_url` builds a URL from it — appending anything would
-/// break every existing reader. This is the same discovery DIRECTORY, resolved
-/// by the same `trusty_common::data_dir`, so a local client that already finds
-/// `http_addr` finds this beside it.
-const CREDENTIAL_FILENAME: &str = "channel_write_credential";
-
-fn credential_path() -> anyhow::Result<std::path::PathBuf> {
-    Ok(trusty_common::data_dir::resolve_data_dir("trusty-agents")?.join(CREDENTIAL_FILENAME))
-}
-
-/// Publish the MINTED channel-write credential for local, non-browser clients.
-///
-/// Why (#7609, critic HIGH-4): the served UI reads the credential from
-/// `/api/config`, but a client with no browser — the trusty-console proxy, a
-/// script, the Tauri sidecar's Rust half — has no such bootstrap. The discovery
-/// directory this daemon already writes `http_addr` into is where such a client
-/// looks for it.
-///
-/// Only a MINTED credential is ever written (critic round 3, HIGH-1). The
-/// operator's own token is long-lived; writing it here would put a secret the
-/// operator manages elsewhere onto disk, and a `SIGKILL` would leave it there
-/// with no process left to clean it up. A minted credential outliving its
-/// process authorizes nothing, because the next boot mints another.
-///
-/// What: writes `<pid>:<credential>` owner-only (`0600` at creation on unix; the
-/// directory is inside the per-user profile elsewhere). The pid prefix is what
-/// makes two daemons sharing one data directory safe (critic MEDIUM-6): the
-/// second overwrites the first's line, and each removes the file only while it
-/// still names its OWN pid, so neither deletes a credential the other is still
-/// serving. A reader splits on the first colon and uses the tail.
-/// Best-effort: a failure is logged by the caller and costs those clients the
-/// credential, never the daemon's start.
-/// Test: `a_published_credential_is_owner_only_and_pid_tagged`,
-/// `a_second_daemons_credential_is_not_removed_by_the_first`.
-pub(super) fn publish_credential(credential: &str) -> anyhow::Result<()> {
-    use std::io::Write as _;
-    let path = credential_path()?;
-    // Remove first so the mode below applies to a file this call CREATES,
-    // rather than leaving a pre-existing wider mode in place.
-    let _ = std::fs::remove_file(&path);
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let mut file = options.open(&path)?;
-    write!(file, "{}:{credential}", std::process::id())?;
-    Ok(())
-}
-
-/// Split a published line into `(pid, credential)`.
-///
-/// Why: the pid prefix is this module's format, so parsing it is defined once
-/// here rather than in every reader — including this module's own remover.
-/// What: `None` when the line carries no colon.
-/// Test: `a_published_credential_is_owner_only_and_pid_tagged`.
-pub(super) fn split_published(raw: &str) -> Option<(&str, &str)> {
-    raw.split_once(':')
-        .map(|(pid, credential)| (pid.trim(), credential.trim()))
-}
-
-/// Remove the published credential, but only while it is still THIS process's.
-///
-/// Why (critic MEDIUM-6): two daemons can share one data directory. Removing
-/// unconditionally on shutdown deleted the credential the surviving daemon was
-/// still serving, and that daemon has no way to notice.
-/// What: reads the pid prefix and removes only on a match. Best-effort; a stale
-/// file authorizes nothing, because the next boot mints another credential.
-/// Test: `a_second_daemons_credential_is_not_removed_by_the_first`.
-pub(super) fn remove_published_credential() {
-    let Ok(path) = credential_path() else {
-        return;
-    };
-    let owned_by_us = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|raw| split_published(&raw).map(|(pid, _)| pid.to_string()))
-        .is_some_and(|pid| pid == std::process::id().to_string());
-    if owned_by_us {
-        let _ = std::fs::remove_file(path);
-    }
-}
-
 /// An authorized channel writer, plus the caller identity the audit names.
 ///
 /// Why: extracting it is the gate. A handler that takes a `ChannelWriter` as
@@ -332,13 +247,13 @@ impl ChannelWriter {
     /// side of the write, and the caller identity actually available (the
     /// remote address when `ConnectInfo` is wired, `unknown` otherwise; the
     /// token is not logged, only that one was required).
-    /// Test: `crate::api::server::tests::global_channels::a_token_bearing_channel_write_is_admitted_and_audited`.
+    /// Test: `crate::api::server::tests::global_channels::a_credentialed_channel_write_is_admitted_and_audited`.
     pub(super) fn audit(
         &self,
         route: &str,
         scope: &str,
         assistant: Option<&str>,
-        before: usize,
+        before: Option<usize>,
         after: usize,
     ) {
         audit_write(route, scope, assistant, before, after, &self.remote_addr);
@@ -349,21 +264,27 @@ impl ChannelWriter {
 ///
 /// Why: the tool has no `ChannelWriter` — it never saw a request — but it owes
 /// the same record, and two `tracing::info!` sites would drift.
-/// Test: `crate::api::server::tests::global_channels::a_token_bearing_channel_write_is_admitted_and_audited`.
+/// Test: `crate::api::server::tests::global_channels::a_credentialed_channel_write_is_admitted_and_audited`,
+/// `crate::api::server::tests::global_channels::the_listener_alias_audits_an_accepted_write`.
 pub(crate) fn audit_write(
     route: &str,
     scope: &str,
     assistant: Option<&str>,
-    before: usize,
+    before: Option<usize>,
     after: usize,
     remote_addr: &str,
 ) {
+    // #7609 (critic round 3, MEDIUM-2): `before` is an Option because one
+    // caller reads it from a file that can fail to load. Rendering that failure
+    // as `0` made "the assistant had no bindings" and "we could not tell"
+    // indistinguishable in the audit record — the one artifact an operator has
+    // to reconstruct what a write changed.
     tracing::info!(
         audit = "channel-write",
         route = route,
         scope = scope,
         assistant = assistant.unwrap_or("-"),
-        channels_before = before,
+        channels_before = before.map_or_else(|| "unknown".to_string(), |n| n.to_string()),
         channels_after = after,
         token_configured = true,
         remote_addr = remote_addr,
@@ -418,92 +339,6 @@ mod tests {
             None,
             "a non-loopback bind mints nothing, whatever else is configured"
         );
-    }
-
-    /// A published credential is owner-only, pid-tagged, and goes away with the
-    /// process that wrote it.
-    ///
-    /// Why: it is a secret in a shared-machine directory, so the mode is part
-    /// of the contract, and the pid is what makes two daemons in one data
-    /// directory safe.
-    #[test]
-    fn a_published_credential_is_owner_only_and_pid_tagged() {
-        let _guard = crate::test_env::lock_home();
-        let home = tempfile::tempdir().expect("tempdir");
-        unsafe {
-            std::env::set_var("HOME", home.path());
-        }
-        publish_credential("deadbeef").expect("publish");
-        let path = credential_path().expect("path");
-        let raw = std::fs::read_to_string(&path).expect("read");
-        let (pid, credential) = split_published(&raw).expect("pid-tagged");
-        assert_eq!(pid, std::process::id().to_string());
-        assert_eq!(credential, "deadbeef");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            let mode = std::fs::metadata(&path).expect("stat").permissions().mode();
-            assert_eq!(mode & 0o777, 0o600, "owner-only");
-        }
-        // Republishing over an existing file keeps the mode and the tag.
-        publish_credential("cafe").expect("republish");
-        let raw = std::fs::read_to_string(&path).expect("read");
-        assert_eq!(split_published(&raw).map(|(_, c)| c), Some("cafe"));
-        remove_published_credential();
-        assert!(!path.exists(), "removed with the daemon that wrote it");
-    }
-
-    /// One daemon never removes another's live credential.
-    ///
-    /// Why (critic MEDIUM-6): two daemons can share one data directory. An
-    /// unconditional remove on shutdown deleted the credential the surviving
-    /// daemon was still serving, and that daemon has no way to notice.
-    #[test]
-    fn a_second_daemons_credential_is_not_removed_by_the_first() {
-        let _guard = crate::test_env::lock_home();
-        let home = tempfile::tempdir().expect("tempdir");
-        unsafe {
-            std::env::set_var("HOME", home.path());
-        }
-        let path = credential_path().expect("path");
-        std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
-        // A SECOND daemon published last; this process is the first, shutting
-        // down.
-        let other_pid = std::process::id() + 1;
-        std::fs::write(&path, format!("{other_pid}:still-live")).expect("seed");
-        remove_published_credential();
-        assert!(path.exists(), "the other daemon's credential survives");
-        assert_eq!(
-            std::fs::read_to_string(&path).expect("read"),
-            format!("{other_pid}:still-live")
-        );
-    }
-
-    /// The operator's own token never reaches the published file.
-    ///
-    /// Why (critic round 3, HIGH-1): it is long-lived and managed elsewhere, so
-    /// writing it here would put it on disk with no process left to clean it up
-    /// after a `SIGKILL`. Only a minted credential is ever published, and
-    /// `serve_with_config` passes only `minted_credential(cfg.bind)`.
-    #[test]
-    fn a_configured_token_is_never_published() {
-        let _guard = crate::test_env::lock_home();
-        let home = tempfile::tempdir().expect("tempdir");
-        unsafe {
-            std::env::set_var("HOME", home.path());
-        }
-        let operator = "operator-secret-do-not-write";
-        // The value `serve_with_config` publishes is this, and only this.
-        let published =
-            minted_credential(std::net::Ipv4Addr::LOCALHOST.into()).expect("a loopback bind mints");
-        assert_ne!(published, operator);
-        publish_credential(&published).expect("publish");
-        let raw = std::fs::read_to_string(credential_path().expect("path")).expect("read");
-        assert!(
-            !raw.contains(operator),
-            "the operator credential is not on disk: {raw}"
-        );
-        remove_published_credential();
     }
 
     /// A minted credential is 64 hex characters and never repeats.

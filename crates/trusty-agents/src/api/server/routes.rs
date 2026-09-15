@@ -751,14 +751,6 @@ pub async fn serve_with_config(cfg: ApiConfig) -> Result<()> {
     // The in-process `channel` tool needs only to know that SOME credential
     // exists; the operator's is preferred so a REPL and this daemon agree.
     super::channel_auth::record_daemon_credential(cfg.token.clone().or_else(|| minted.clone()));
-    if let Some(credential) = &minted
-        && let Err(e) = super::channel_auth::publish_credential(credential)
-    {
-        tracing::warn!(
-            ?e,
-            "could not publish the channel-write credential for local clients"
-        );
-    }
 
     let app = build_router_with_channel_credential(state, cfg.token.clone(), self_origins, minted);
 
@@ -795,9 +787,6 @@ pub async fn serve_with_config(cfg: ApiConfig) -> Result<()> {
     )
     .with_graceful_shutdown(trusty_common::shutdown_signal())
     .await;
-
-    // #7609: the credential dies with the process that minted it.
-    super::channel_auth::remove_published_credential();
 
     // Remove the discovery file so stale clients fail fast instead of proxying
     // to a dead port.
