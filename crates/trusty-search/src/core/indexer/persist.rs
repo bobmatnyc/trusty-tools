@@ -26,6 +26,18 @@ use super::{ChunkSnapshot, CodeIndexer};
 /// redb warm-boot path (`load_chunks_from_redb`) has a readable signature.
 type RestoredCorpus = (Vec<RawChunk>, Vec<(String, Vec<RawEntity>)>);
 
+/// What a `chunks.json` restore produced (#7923).
+///
+/// Why: the legacy log reported snapshot entries as restored chunks; a caller
+/// needs the distinct count and the number of entries folded by a repeated id.
+/// What: `restored` distinct chunks now in memory; `duplicate_ids` snapshot
+/// entries that repeated an earlier id.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SnapshotRestore {
+    pub restored: usize,
+    pub duplicate_ids: usize,
+}
+
 impl CodeIndexer {
     /// Snapshot the in-memory chunk corpus + entities to disk as JSON.
     ///
@@ -96,32 +108,67 @@ impl CodeIndexer {
     ///
     /// Why (issue #85): the daemon's `restore_indexes` startup hook calls
     /// this so registered indexes come back warm without re-embedding.
-    /// What: reads the JSON snapshot, repopulates `chunks` + `entities`,
-    /// runs `commit_bm25_batch` against the restored chunks to refill the
-    /// posting list, then rebuilds the symbol graph. Returns the number of
-    /// chunks restored. Missing/corrupt file → `Ok(0)` (graceful fallback).
+    /// What: thin wrapper over [`Self::restore_chunk_snapshot`] returning the
+    /// number of distinct chunks restored.
     /// Test: see `tests::test_save_chunks_roundtrip`.
     pub async fn load_chunks_from_disk(&self, path: &std::path::Path) -> Result<usize> {
+        self.restore_chunk_snapshot(path).await.map(|r| r.restored)
+    }
+
+    /// Restore a `chunks.json` snapshot and report what was restored.
+    ///
+    /// Why (#7923): the chunks.json → redb migration logged the snapshot's
+    /// entry count as "restored", while the corpus keeps one row per id, and a
+    /// corrupt snapshot returned `Ok(0)` — which let the migration stamp
+    /// schema v1 and never read the file again.
+    /// What: reads the JSON snapshot, repopulates `chunks` + `entities`,
+    /// refills BM25, then rebuilds the symbol graph. A missing file is
+    /// `Ok(SnapshotRestore::default())`; an unreadable or corrupt file is
+    /// `Err`. Entries repeating an earlier id are counted in `duplicate_ids`
+    /// and logged with a reason; the last one wins, as before.
+    /// Test: `migrations::tests::json_migration_seeds_every_unique_chunk_and_reports_duplicate_ids`,
+    /// `json_migration_fails_on_corrupt_snapshot_and_keeps_it`.
+    pub async fn restore_chunk_snapshot(&self, path: &std::path::Path) -> Result<SnapshotRestore> {
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(SnapshotRestore::default());
+            }
             Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
         };
-        let snapshot: ChunkSnapshot = match serde_json::from_slice(&bytes) {
-            Ok(s) => s,
-            Err(e) => {
+        // #7923: a corrupt snapshot is a failure, never an empty corpus.
+        let snapshot: ChunkSnapshot = serde_json::from_slice(&bytes).with_context(|| {
+            format!(
+                "chunk snapshot at {} is corrupt — refusing to treat it as empty (#7923)",
+                path.display()
+            )
+        })?;
+        // #7923: the corpus is keyed by id, so repeated ids collapse to one row.
+        let duplicate_ids = {
+            let mut seen = std::collections::HashSet::with_capacity(snapshot.chunks.len());
+            let dups: Vec<&str> = snapshot
+                .chunks
+                .iter()
+                .filter(|c| !seen.insert(c.id.as_str()))
+                .map(|c| c.id.as_str())
+                .collect();
+            if !dups.is_empty() {
                 tracing::warn!(
-                    "chunk snapshot at {} is corrupt ({e}) — starting with empty corpus",
+                    index_id = %self.index_id,
+                    count = dups.len(),
+                    sample = ?dups.iter().take(5).collect::<Vec<_>>(),
+                    "chunk snapshot {} repeats chunk ids; the corpus holds one row per \
+                     id, so the later entry replaces the earlier one (#7923)",
                     path.display()
                 );
-                return Ok(0);
             }
+            dups.len()
         };
 
         // #7920: this in-memory corpus now describes `path`, so a later write
         // back to it is a legitimate update rather than a foreign overwrite.
         self.snapshot_guard.mark_owned(path);
-        let total = snapshot.chunks.len();
+        let total = snapshot.chunks.len() - duplicate_ids;
         // Phase 1: refill BM25 from the restored corpus before publishing the
         // chunks map so concurrent reads can't observe a half-state.
         {
@@ -166,7 +213,10 @@ impl CodeIndexer {
             self.index_id,
             path.display()
         );
-        Ok(total)
+        Ok(SnapshotRestore {
+            restored: total,
+            duplicate_ids,
+        })
     }
 
     /// Restore the chunk corpus + entities from the durable redb store
@@ -457,15 +507,22 @@ impl CodeIndexer {
     /// `chunks.json` but an empty `index.redb`. After the warm-boot path reads
     /// the JSON snapshot into memory it calls this to seed redb so every
     /// subsequent restart uses the fast redb path and the JSON file becomes
-    /// inert. Best-effort: a failure is logged, not fatal — the in-memory
-    /// corpus is already live and the next reindex will populate redb anyway.
+    /// inert. #7923: a failure is returned, not only logged — a swallowed
+    /// failure let the migration runner stamp schema v1 over an empty redb, so
+    /// the snapshot was never read again.
     /// What: snapshots the current in-memory `chunks` + `entities` under read
-    /// locks and writes them to the `CorpusStore` on a blocking worker.
-    /// Test: `tests::test_corpus_store_migrates_from_json`.
-    pub async fn migrate_corpus_to_redb(&self) {
-        let Some(corpus) = self.corpus.clone() else {
-            return;
-        };
+    /// locks, writes them to the `CorpusStore` in one transaction on a blocking
+    /// worker, and returns the migrated count. `Err` when no store is wired,
+    /// the write fails, or redb then holds fewer rows than were migrated.
+    /// Test: `tests::test_corpus_store_migrates_from_json`,
+    /// `migrations::tests::json_migration_fails_without_a_corpus_store_and_keeps_snapshot`.
+    pub async fn migrate_corpus_to_redb(&self) -> Result<usize> {
+        let corpus = self.corpus.clone().with_context(|| {
+            format!(
+                "index '{}': no durable corpus store is wired — nothing to migrate into (#7923)",
+                self.index_id
+            )
+        })?;
         let chunks: Vec<RawChunk> = {
             let g = self.chunks.read().await;
             g.values().cloned().collect()
@@ -475,27 +532,28 @@ impl CodeIndexer {
             g.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
         };
         if chunks.is_empty() {
-            return;
+            return Ok(0);
         }
         let total = chunks.len();
         let index_id = self.index_id.clone();
         // Issue #29: write chunks + entities in one atomic redb transaction so
         // a crash mid-migration never leaves the two tables inconsistent.
-        let result = tokio::task::spawn_blocking(move || -> Result<()> {
-            corpus.upsert_batch(&chunks, &entities)
+        let stored = tokio::task::spawn_blocking(move || -> Result<usize> {
+            corpus.upsert_batch(&chunks, &entities)?;
+            corpus.chunk_count()
         })
-        .await;
-        match result {
-            Ok(Ok(())) => tracing::info!(
-                "index '{index_id}': migrated {total} chunks from chunks.json to redb"
-            ),
-            Ok(Err(e)) => {
-                tracing::warn!("index '{index_id}': redb corpus migration failed ({e})")
-            }
-            Err(e) => {
-                tracing::warn!("index '{index_id}': redb corpus migration task panicked ({e})")
-            }
-        }
+        .await
+        .context("redb corpus migration task panicked")?
+        .with_context(|| format!("index '{index_id}': redb corpus migration failed"))?;
+        // #7923: the migrated count must be what redb now serves.
+        anyhow::ensure!(
+            stored >= total,
+            "index '{index_id}': redb holds {stored} chunks after migrating {total} — \
+             {} missing (#7923)",
+            total - stored
+        );
+        tracing::info!("index '{index_id}': migrated {total} chunks from chunks.json to redb");
+        Ok(total)
     }
 
     /// Flush the chunk corpus durably on shutdown, picking the right backend.

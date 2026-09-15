@@ -45,6 +45,7 @@ mod ingest;
 pub(crate) mod migration_state;
 pub(crate) mod migrations;
 mod persist;
+pub use persist::SnapshotRestore;
 mod persist_hnsw;
 mod quarantine;
 mod search;

@@ -22,6 +22,8 @@ pub mod m002;
 pub mod m003;
 pub mod m004;
 pub mod m005;
+// #7923: shared, loss-free absolute → relative rewrite for M002 and M004.
+mod relativize;
 
 use std::sync::Arc;
 
