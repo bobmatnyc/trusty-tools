@@ -23,6 +23,9 @@ pub mod session_service;
 // #6556: the reader for the `SubagentStop` records a hook parked on disk when
 // this daemon was unreachable.
 pub mod stop_spool_drain;
+// #8059: the durable, cross-process half of that status — `tm doctor` runs
+// daemonless, so the in-memory timings alone reported every sweep idle.
+pub(crate) mod sweep_state_file;
 // #7965: the single background-maintenance lane both sweeps take, and the
 // last-pass timings `tm doctor` reports.
 pub(crate) mod sweep_status;

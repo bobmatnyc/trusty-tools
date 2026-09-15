@@ -71,7 +71,10 @@ pub(crate) fn enabled() -> bool {
 /// best-effort freshness and must never delay the listener coming up.
 /// Test: `spawn_if_enabled_is_a_noop_when_disabled`.
 pub(crate) fn spawn_if_enabled(state: Arc<DaemonState>) {
-    let _ = &state;
+    // #8059: the pass is recorded under this daemon's framework root so the
+    // daemonless `tm doctor` can read it; the host-state gate below is the
+    // other use of `state`.
+    let framework_root = state.framework_root().to_path_buf();
     if !enabled() {
         info!("inproject-hygiene disabled via {ENV_ENABLED}");
         return;
@@ -99,7 +102,7 @@ pub(crate) fn spawn_if_enabled(state: Arc<DaemonState>) {
             return;
         };
         let _ = tokio::task::spawn_blocking(move || {
-            let _timing = sweep_status::HYGIENE.begin();
+            let _timing = sweep_status::HYGIENE.begin(Some(&framework_root));
             super::inproject_hygiene::run_hygiene_for_all_bases(&repos_root);
         })
         .await;
