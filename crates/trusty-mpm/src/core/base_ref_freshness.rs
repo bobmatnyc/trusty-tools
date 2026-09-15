@@ -11,7 +11,9 @@
 //! wave through.
 //!
 //! What: [`check`] compares the local ref with `git ls-remote origin
-//! refs/heads/<base>`, fetches once when they disagree, and re-reads. The
+//! refs/heads/<base>`, fetches once when they disagree — unless the caller
+//! passed [`RefreshMode::CompareOnly`], which observes without writing a ref
+//! every worktree of the clone shares — and re-reads. The
 //! verdict is [`BaseFreshness`], and [`BaseFreshness::refusal`] is the whole
 //! contract for a caller: `Some(message)` means the diff base cannot be
 //! trusted, and the message names the stale sha and the remote sha.
@@ -65,6 +67,24 @@ pub enum BaseFreshness {
 /// The sha string used when the local ref does not exist at all.
 const ABSENT: &str = "absent";
 
+/// Whether [`check`] may move the local ref to close a gap.
+///
+/// Why: a fetch writes `refs/remotes/origin/<base>`, which every worktree of
+/// the clone shares — so a read-only caller (`tm pr open --dry-run`) that
+/// fetched would move the base ref under every sibling worktree mid-task. A
+/// preview must observe, never mutate.
+/// What: `FetchOnDrift` for a real run; `CompareOnly` reports the disagreement
+/// as [`BaseFreshness::Stale`] and issues nothing.
+/// Test: `compare_only_reports_stale_without_fetching`,
+/// `pr_7748_a_dry_run_compares_without_fetching`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshMode {
+    /// Fetch `origin/<base>` when the local ref disagrees with the remote.
+    FetchOnDrift,
+    /// Compare only; never write a ref.
+    CompareOnly,
+}
+
 impl BaseFreshness {
     /// Why this base must not be diffed against, if it must not.
     ///
@@ -80,9 +100,8 @@ impl BaseFreshness {
         match self {
             Self::Fresh { .. } | Self::Refreshed { .. } => None,
             Self::Stale { local, remote } => Some(format!(
-                "the local diff base is stale: it holds {local}, the remote tip is {remote}, and \
-                 the fetch did not close the gap — a three-dot diff against it would report \
-                 unrelated commits as this branch's own"
+                "the local diff base is stale: it holds {local}, the remote tip is {remote} — a \
+                 three-dot diff against it would report unrelated commits as this branch's own"
             )),
             Self::Undetermined { reason } => Some(format!(
                 "the diff base could not be verified against the remote ({reason}) — an \
@@ -116,12 +135,17 @@ pub trait BaseRefs {
 /// What: `Fresh` on agreement; otherwise one fetch and a re-read, yielding
 /// `Refreshed` or `Stale`. Any failed read is `Undetermined`; a failed FETCH is
 /// `Stale`, because the disagreement is already established fact.
+/// `CompareOnly` stops at the comparison: a disagreement is `Stale` and no ref
+/// is written (#7748 round 2).
 /// Test: `fresh_when_the_local_ref_already_matches_the_remote`,
 /// `a_stale_ref_is_refreshed_by_the_fetch`,
 /// `a_ref_that_stays_behind_refuses_and_names_both_shas`,
 /// `an_unanswerable_comparison_refuses_rather_than_passing`,
-/// `a_failed_fetch_reports_stale_rather_than_undetermined`.
-pub fn check<R: BaseRefs>(refs: &R, base: &str) -> BaseFreshness {
+/// `a_failed_fetch_reports_stale_rather_than_undetermined`,
+/// `an_unreadable_local_ref_is_undetermined`,
+/// `an_unreadable_local_ref_after_the_fetch_is_undetermined`,
+/// `compare_only_reports_stale_without_fetching`.
+pub fn check<R: BaseRefs>(refs: &R, base: &str, mode: RefreshMode) -> BaseFreshness {
     let remote = match refs.remote(base) {
         Ok(sha) if !sha.trim().is_empty() => sha.trim().to_string(),
         Ok(_) => {
@@ -137,6 +161,13 @@ pub fn check<R: BaseRefs>(refs: &R, base: &str) -> BaseFreshness {
     };
     if before == remote {
         return BaseFreshness::Fresh { sha: remote };
+    }
+    if mode == RefreshMode::CompareOnly {
+        // A preview reports the drift; moving the shared ref is the real run's.
+        return BaseFreshness::Stale {
+            local: label(&before),
+            remote,
+        };
     }
 
     if let Err(e) = refs.fetch(base) {
@@ -217,13 +248,27 @@ impl RealBaseRefs {
 impl BaseRefs for RealBaseRefs {
     fn local(&self, base: &str) -> Result<Option<String>, String> {
         let r = format!("refs/remotes/origin/{base}");
-        // An absent ref is not an error: a fresh clone of a branch that has
-        // never been fetched is the case the fetch below exists to fix.
-        match self.git(&["rev-parse", "--verify", "--quiet", &r]) {
-            Ok(sha) if sha.is_empty() => Ok(None),
-            Ok(sha) => Ok(Some(sha)),
-            Err(_) => Ok(None),
+        let args = ["rev-parse", "--verify", "--quiet", &r];
+        let out = trusty_common::git::command_in(&self.root)
+            .args(args)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .map_err(|e| format!("`git rev-parse {r}` could not be run: {e}"))?;
+        // Exit 1 with `--quiet` is git's "no such ref", which is not an error:
+        // a branch this clone has never fetched is what the fetch fixes. Any
+        // OTHER failure — no repository, a broken object store — must surface
+        // as `Undetermined`, never as an absent ref (#7748 round 2).
+        if out.status.code() == Some(1) {
+            return Ok(None);
         }
+        if !out.status.success() {
+            return Err(format!(
+                "`git rev-parse {r}` failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        Ok(if sha.is_empty() { None } else { Some(sha) })
     }
 
     fn remote(&self, base: &str) -> Result<String, String> {

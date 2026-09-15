@@ -164,6 +164,8 @@ struct FakePreflight {
     checkout_head: Option<String>,
     /// #7748: where the local `origin/<base>` stands against the remote.
     base_freshness: trusty_mpm::core::base_ref_freshness::BaseFreshness,
+    /// #7748 round 2: every write permission the probe was asked with.
+    freshness_modes: std::cell::RefCell<Vec<trusty_mpm::core::base_ref_freshness::RefreshMode>>,
 }
 
 impl FakePreflight {
@@ -181,6 +183,7 @@ impl FakePreflight {
             base_freshness: trusty_mpm::core::base_ref_freshness::BaseFreshness::Fresh {
                 sha: "aaa111".to_string(),
             },
+            freshness_modes: std::cell::RefCell::new(Vec::new()),
         }
     }
 
@@ -226,7 +229,12 @@ impl Preflight for FakePreflight {
         }
         Ok(self.changelog.clone())
     }
-    fn base_freshness(&self, _base: &str) -> trusty_mpm::core::base_ref_freshness::BaseFreshness {
+    fn base_freshness(
+        &self,
+        _base: &str,
+        mode: trusty_mpm::core::base_ref_freshness::RefreshMode,
+    ) -> trusty_mpm::core::base_ref_freshness::BaseFreshness {
+        self.freshness_modes.borrow_mut().push(mode);
         self.base_freshness.clone()
     }
     fn changed_paths(&self, _base: &str, head: &str) -> anyhow::Result<Vec<String>> {
@@ -1415,6 +1423,50 @@ fn pr_7748_a_stale_base_refuses_before_gh_is_called() {
         gh.calls().is_empty(),
         "gh must not be spawned against an unverified diff base: {:?}",
         gh.calls()
+    );
+}
+
+/// #7748 round 2: a dry run compares the base; it never fetches.
+///
+/// Why: a fetch writes `refs/remotes/origin/<base>`, which every worktree of
+/// the clone shares — a preview that moved it would change the diff base under
+/// a sibling agent mid-task. The no-fetch property itself is pinned in
+/// `compare_only_reports_stale_without_fetching`; this pins that `--dry-run`
+/// asks for that mode.
+#[test]
+fn pr_7748_a_dry_run_compares_without_fetching() {
+    let (_d, path) = scratch_body(&full_body());
+    let mut args = open_args(&path.to_string_lossy());
+    args.dry_run = true;
+    let pre = FakePreflight::ok();
+    let gh = FakeGh::new();
+    assert_eq!(
+        open::run(&gh, &args, &pre).expect("dry run succeeds"),
+        super::EXIT_OK
+    );
+    assert_eq!(
+        pre.freshness_modes.borrow().as_slice(),
+        [trusty_mpm::core::base_ref_freshness::RefreshMode::CompareOnly],
+        "a preview must ask for a compare, never a fetch"
+    );
+}
+
+/// A real run is allowed to close the gap it finds.
+#[test]
+fn pr_7748_a_real_run_may_fetch_the_base() {
+    let (_d, path) = scratch_body(&full_body());
+    let args = open_args(&path.to_string_lossy());
+    let pre = FakePreflight::ok();
+    let gh = FakeGh::new()
+        .on("label create", "")
+        .on("pr create", "https://github.com/o/r/pull/4242\n");
+    assert_eq!(
+        open::run(&gh, &args, &pre).expect("create succeeds"),
+        super::EXIT_OK
+    );
+    assert_eq!(
+        pre.freshness_modes.borrow().as_slice(),
+        [trusty_mpm::core::base_ref_freshness::RefreshMode::FetchOnDrift]
     );
 }
 
@@ -2796,7 +2848,7 @@ fn pr_7945_a_worktree_held_branch_does_not_fail_a_landed_merge() {
     );
 }
 
-/// #7945: a merge that did NOT land still fails.
+/// #7945: a merge that did NOT land still fails, even on a cleanup-shaped error.
 #[test]
 fn pr_7945_a_merge_that_did_not_land_still_fails() {
     let gh = FakeGh::new()
@@ -2808,14 +2860,117 @@ fn pr_7945_a_merge_that_did_not_land_still_fails() {
             "pr view",
             &merge_view_json(&full_body(), serde_json::json!({})),
         )
-        .on_fail("pr merge", "Pull request is not mergeable");
+        .on_fail("pr merge", WORKTREE_HELD_STDERR);
     let err = merge::run(&gh, &merge_args()).expect_err("an unmerged PR must stay an error");
-    assert!(format!("{err:#}").contains("not mergeable"), "{err:#}");
+    assert!(
+        format!("{err:#}").contains("Cannot delete branch"),
+        "{err:#}"
+    );
     assert!(
         confirmation_was_read(&gh),
         "the verdict must come from a re-read, not from the exit status alone: {:?}",
         gh.calls()
     );
+}
+
+/// #7945 round 2: only a branch-delete failure may be downgraded.
+///
+/// Why: "the PR reads MERGED" is true of a PR someone else merged an hour ago,
+/// and of one whose merge landed before an unrelated failure. Reporting either
+/// as this run's success would hide a real error behind a green exit.
+#[test]
+fn pr_7945_a_non_cleanup_failure_on_a_merged_pr_still_fails() {
+    let gh = FakeGh::new()
+        .on_exact(
+            "pr view 42 --json state,mergeCommit",
+            &serde_json::json!({"state": "MERGED", "mergeCommit": {"oid": "686f9bb03"}})
+                .to_string(),
+        )
+        .on(
+            "pr view",
+            &merge_view_json(&full_body(), serde_json::json!({})),
+        )
+        .on_fail("pr merge", "HTTP 500: something else went wrong");
+    let err = merge::run(&gh, &merge_args()).expect_err("an unrelated failure must stay an error");
+    assert!(format!("{err:#}").contains("HTTP 500"), "{err:#}");
+    assert!(
+        !confirmation_was_read(&gh),
+        "a failure that is not cleanup-shaped needs no re-read: {:?}",
+        gh.calls()
+    );
+}
+
+/// #7945 round 2: with `--no-delete-branch` a local-cleanup failure is impossible.
+#[test]
+fn pr_7945_no_delete_branch_never_downgrades_a_failure() {
+    let gh = FakeGh::new()
+        .on_exact(
+            "pr view 42 --json state,mergeCommit",
+            &serde_json::json!({"state": "MERGED"}).to_string(),
+        )
+        .on(
+            "pr view",
+            &merge_view_json(&full_body(), serde_json::json!({})),
+        )
+        .on_fail("pr merge", WORKTREE_HELD_STDERR);
+    let args = PrMergeArgs {
+        pr: 42,
+        auto: false,
+        no_delete_branch: true,
+        repo: None,
+    };
+    let err = merge::run(&gh, &args).expect_err("no delete was asked for, so none can have failed");
+    assert!(
+        format!("{err:#}").contains("Cannot delete branch"),
+        "{err:#}"
+    );
+    assert!(!confirmation_was_read(&gh), "{:?}", gh.calls());
+}
+
+/// #7945 round 2: a PR already MERGED when the run starts is refused outright.
+///
+/// Why: the downgrade below reads "MERGED" as evidence that THIS invocation's
+/// merge landed. That inference is only sound if the PR was OPEN when the run
+/// began, which is what this refusal establishes.
+#[test]
+fn pr_7945_a_pr_already_merged_at_start_is_refused() {
+    let gh = FakeGh::new().on(
+        "pr view",
+        &merge_view_json(&full_body(), serde_json::json!({"state": "MERGED"})),
+    );
+    assert_eq!(
+        merge::run(&gh, &merge_args()).expect("a refusal is not an error"),
+        super::EXIT_BLOCKED
+    );
+    assert!(
+        gh.calls()
+            .iter()
+            .all(|a| a.get(1).map(String::as_str) != Some("merge")),
+        "gh pr merge must not be called on a PR that is already merged: {:?}",
+        gh.calls()
+    );
+}
+
+/// #7945 closure condition 2: the report separates the two outcomes.
+///
+/// Why: "the reported output distinguishes merge succeeded from local branch
+/// cleanup deferred/failed" is the issue's own wording, and it is only a
+/// guarantee if a test holds the text to it.
+#[test]
+fn pr_7945_the_report_separates_the_landed_merge_from_the_deferred_cleanup() {
+    let report =
+        merge::cleanup_deferred_report(42, "feat/6808-x", " as 686f9bb03", WORKTREE_HELD_STDERR);
+    assert!(
+        report.contains("MERGE LANDED: #42 (feat/6808-x)"),
+        "{report}"
+    );
+    assert!(report.contains("686f9bb03"), "{report}");
+    assert!(report.contains("CLEANUP DEFERRED"), "{report}");
+    assert!(
+        report.contains("/repo/.claude/worktrees/agent-a2278a6f4f4ce2d01"),
+        "the worktree holding the branch must be named: {report}"
+    );
+    assert!(report.contains("tm pr cleanup 42"), "{report}");
 }
 
 /// Was the post-failure merge-state confirmation issued? (#7945)

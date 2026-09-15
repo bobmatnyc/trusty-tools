@@ -96,11 +96,20 @@ fn normalize(path: &Path) -> PathBuf {
 /// takes `--dir <path>` and no positional argument. A hint is only worth
 /// printing if pasting it works, so the command line has ONE source and a test
 /// feeds that source straight back through the parser.
-/// What: `tm project trust --dir <path>`, the path rendered as given.
+/// What: `tm project trust --dir <path>`. A path containing whitespace is
+/// single-quoted, because the hint is copied into a shell and an unquoted
+/// `/work/my project` would reach `tm` as two arguments.
 /// Test: `trust_command_hint_parses_as_the_cli_accepts_it`,
+/// `trust_command_hint_quotes_a_path_with_spaces`,
 /// `session_scope_names_the_trust_command_for_an_untrusted_opt_in`.
 pub fn trust_command_hint(project_dir: &Path) -> String {
-    format!("tm project trust --dir {}", project_dir.display())
+    let path = project_dir.display().to_string();
+    if !path.contains(char::is_whitespace) {
+        return format!("tm project trust --dir {path}");
+    }
+    // POSIX single-quoting: end the quote, emit an escaped quote, reopen.
+    let quoted = path.replace('\'', "'\\''");
+    format!("tm project trust --dir '{quoted}'")
 }
 
 /// In-memory + on-disk registry of operator-trusted project paths.

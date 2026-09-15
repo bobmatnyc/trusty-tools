@@ -86,6 +86,14 @@ pub(crate) struct MergeView {
     /// The head branch, named in the merge output.
     #[serde(default, rename = "headRefName")]
     pub(crate) head_ref_name: String,
+    /// `OPEN`, `CLOSED` or `MERGED` at the START of this invocation (#7945).
+    ///
+    /// Why: the post-failure re-read cannot tell "this command's merge landed"
+    /// from "someone merged it an hour ago" unless the opening read already
+    /// established that the PR was OPEN. Defaulted, so a payload without the
+    /// field (every pre-#7945 fixture) still parses and refuses nothing.
+    #[serde(default)]
+    pub(crate) state: String,
 }
 
 /// What [`decide`] concluded.
@@ -125,7 +133,8 @@ pub(crate) enum Decision {
 /// or reject, which is what makes `--auto` on a still-checking PR the intended
 /// path rather than a refusal.
 ///
-/// Test: `merge_valid_body_merges`, `merge_refuses_missing_footer`,
+/// Test: `pr_7945_a_pr_already_merged_at_start_is_refused`,
+/// `merge_valid_body_merges`, `merge_refuses_missing_footer`,
 /// `merge_refuses_draft`, `merge_refuses_do_not_merge_label_any_case`,
 /// `merge_refuses_changes_requested`, `merge_behind_is_not_a_refusal`,
 /// `merge_refuses_conflicting_with_update_branch_hint`,
@@ -133,6 +142,16 @@ pub(crate) enum Decision {
 /// `merge_other_merge_states_fall_through_to_gh`,
 /// `pr_7868_a_sparse_body_is_not_a_merge_refusal`.
 pub(crate) fn decide(view: &MergeView, body_failures: &[String]) -> Decision {
+    // #7945: first, because a PR that is not OPEN cannot be merged by this
+    // invocation at all — and because the post-failure re-read below treats
+    // "MERGED" as evidence that THIS run's merge landed, which is only sound
+    // when the run started against an open PR.
+    if !view.state.is_empty() && !view.state.eq_ignore_ascii_case("OPEN") {
+        return Decision::Refuse(format!(
+            "the PR is already {} — nothing to merge",
+            view.state.trim().to_uppercase()
+        ));
+    }
     if !body_failures.is_empty() {
         return Decision::Refuse(format!(
             "PR body fails the same check `tm pr open` runs: {}",
@@ -238,8 +257,10 @@ fn pr_view<R: GhRunner>(gh: &R, args: &PrMergeArgs) -> anyhow::Result<MergeView>
     let mut a = argv(&["pr", "view", &n]);
     push_repo(&mut a, args);
     a.push("--json".to_string());
+    // #7945: `state` joins the set so `decide` can refuse a PR that is not OPEN.
     a.push(
-        "number,title,body,isDraft,labels,reviewDecision,mergeStateStatus,mergeable,headRefName"
+        "number,title,body,isDraft,labels,reviewDecision,mergeStateStatus,mergeable,headRefName,\
+         state"
             .to_string(),
     );
     let stdout = gh.run(&a)?.stdout_ok(&a)?;
@@ -296,6 +317,44 @@ impl MergedState {
 /// Test: `pr_7945_a_worktree_held_branch_does_not_fail_a_landed_merge`,
 /// `pr_7945_a_merge_that_did_not_land_still_fails`,
 /// `pr_7945_an_unreadable_confirmation_still_fails`.
+/// Is this `gh pr merge` failure the local branch-delete step failing? (#7945)
+///
+/// Why: "the PR reads MERGED" is not enough on its own — a PR someone else
+/// merged an hour ago reads MERGED too, and so does one whose merge landed
+/// before a failure that has nothing to do with cleanup. The downgrade to exit
+/// 0 is only defensible for the ONE failure that happens strictly after the API
+/// merge: deleting the local branch.
+/// What: matches the two spellings `gh` and `git` produce, case-insensitively.
+/// Test: `pr_7945_a_non_cleanup_failure_on_a_merged_pr_still_fails`,
+/// `pr_7945_a_worktree_held_branch_does_not_fail_a_landed_merge`.
+fn is_branch_delete_failure(stderr: &str) -> bool {
+    let s = stderr.to_ascii_lowercase();
+    s.contains("cannot delete branch") || s.contains("failed to delete local branch")
+}
+
+/// The report a landed merge with deferred cleanup prints (#7945).
+///
+/// Why: the issue's second closure condition is that the output DISTINGUISHES
+/// "merge succeeded" from "local branch cleanup deferred". A `String` is what
+/// lets a test hold that text to it; printed straight to stderr it was
+/// unpinnable.
+/// What: two lines — what landed, and what did not, naming the `gh` stderr
+/// (which carries the worktree path) and the command that finishes the job.
+/// Test: `pr_7945_the_report_separates_the_landed_merge_from_the_deferred_cleanup`.
+pub(crate) fn cleanup_deferred_report(
+    pr: u64,
+    head: &str,
+    commit_suffix: &str,
+    stderr: &str,
+) -> String {
+    format!(
+        "MERGE LANDED: #{pr} ({head}) was squash-merged{commit_suffix}.\n\
+         CLEANUP DEFERRED: the local branch was not deleted — {}. Run `tm pr cleanup {pr}` to \
+         remove the worktree holding `{head}` and then the branch.",
+        stderr.trim()
+    )
+}
+
 fn merged_after_failure<R: GhRunner>(gh: &R, args: &PrMergeArgs) -> Option<MergedState> {
     let n = args.pr.to_string();
     let mut a = argv(&["pr", "view", &n]);
@@ -322,15 +381,18 @@ fn merged_after_failure<R: GhRunner>(gh: &R, args: &PrMergeArgs) -> Option<Merge
 /// merge is queued and GitHub applies the supplied subject and body when
 /// auto-merge fires.
 ///
-/// #7945: a non-zero `gh pr merge` is re-read through [`merged_after_failure`]
-/// before it becomes this command's failure. A merge GitHub performed exits
-/// [`EXIT_OK`] with the cleanup failure printed as a warning, because the
-/// post-merge cleanup this exit code gates (`tm pr cleanup`) is precisely what
-/// reclaims the worktree that blocked the branch delete.
+/// #7945: a non-zero `gh pr merge` exits [`EXIT_OK`] only when a branch delete
+/// was requested, the failure is [`is_branch_delete_failure`]-shaped, and
+/// [`merged_after_failure`] confirms the PR — OPEN when [`decide`] judged it —
+/// now reads MERGED. That exit code is what gates the post-merge cleanup
+/// (`tm pr cleanup`), which is precisely what reclaims the worktree that
+/// blocked the delete. Every other failure keeps the error.
 /// Test: `merge_refuses_without_calling_gh_merge`,
 /// `merge_argv_carries_squash_delete_and_body_file`,
 /// `pr_7945_a_worktree_held_branch_does_not_fail_a_landed_merge`,
-/// `pr_7945_a_merge_that_did_not_land_still_fails`.
+/// `pr_7945_a_merge_that_did_not_land_still_fails`,
+/// `pr_7945_a_non_cleanup_failure_on_a_merged_pr_still_fails`,
+/// `pr_7945_no_delete_branch_never_downgrades_a_failure`.
 pub(crate) fn run<R: GhRunner>(gh: &R, args: &PrMergeArgs) -> anyhow::Result<i32> {
     let view = pr_view(gh, args)?;
     let report = body::validate(&view.body);
@@ -372,23 +434,25 @@ pub(crate) fn run<R: GhRunner>(gh: &R, args: &PrMergeArgs) -> anyhow::Result<i32
             let out = gh.run(&a)?;
             if !out.success {
                 // #7945: `gh pr merge --delete-branch` deletes the LOCAL branch
-                // after the API merge lands, and that delete fails when a
-                // worktree holds it. Re-read the PR before deciding: a merge
-                // GitHub already performed is not this command's failure.
-                let Some(landed) = merged_after_failure(gh, args) else {
+                // AFTER the API merge lands, and that delete fails when a
+                // worktree holds it. Three conditions, all required: a delete
+                // was asked for, the failure is that delete, and the PR — OPEN
+                // when this run started — now reads MERGED.
+                let cleanup_shaped =
+                    !args.no_delete_branch && is_branch_delete_failure(&out.stderr);
+                let landed = cleanup_shaped
+                    .then(|| merged_after_failure(gh, args))
+                    .flatten();
+                let Some(landed) = landed else {
                     anyhow::bail!("`gh pr merge {}` failed: {}", args.pr, out.stderr.trim());
                 };
-                eprintln!(
-                    "tm pr merge: warning — the squash-merge LANDED{}, but `gh pr merge` exited \
-                     non-zero on local cleanup: {}",
-                    landed.commit_suffix(),
-                    out.stderr.trim()
+                let report = cleanup_deferred_report(
+                    args.pr,
+                    &view.head_ref_name,
+                    &landed.commit_suffix(),
+                    &out.stderr,
                 );
-                eprintln!(
-                    "  local branch cleanup is DEFERRED, not failed — `tm pr cleanup {}` removes \
-                     the worktree holding `{}` and then the branch",
-                    args.pr, view.head_ref_name
-                );
+                eprintln!("tm pr merge: warning — {report}");
                 println!("squash-merged #{} ({})", args.pr, view.head_ref_name);
                 return Ok(EXIT_OK);
             }

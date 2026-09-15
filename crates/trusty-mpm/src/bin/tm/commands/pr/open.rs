@@ -60,9 +60,16 @@ pub(crate) trait Preflight {
     /// read a LOCAL ref that can be hundreds of commits behind — measured twice
     /// on 2026-09-13, one stale base would have put ~1,270 unrelated paths into
     /// a scan. Verifying it here means one probe covers every diff in the run.
-    /// What: the verdict, fetched-if-needed;
+    /// What: the verdict;
     /// [`trusty_mpm::core::base_ref_freshness::BaseFreshness::refusal`] decides.
-    fn base_freshness(&self, base: &str) -> trusty_mpm::core::base_ref_freshness::BaseFreshness;
+    /// `mode` is the caller's write permission — a `--dry-run` passes
+    /// `CompareOnly`, because a fetch moves a ref every worktree of the clone
+    /// shares and a preview must not.
+    fn base_freshness(
+        &self,
+        base: &str,
+        mode: trusty_mpm::core::base_ref_freshness::RefreshMode,
+    ) -> trusty_mpm::core::base_ref_freshness::BaseFreshness;
     /// Paths `git diff --name-only origin/<base>...<head>` reports (#7274).
     ///
     /// Why: the PR's component labels are the crates these paths belong to, so
@@ -162,13 +169,18 @@ impl Preflight for RealPreflight {
         Ok(ChangelogVerdict::Fail(text.trim().to_string()))
     }
 
-    fn base_freshness(&self, base: &str) -> trusty_mpm::core::base_ref_freshness::BaseFreshness {
+    fn base_freshness(
+        &self,
+        base: &str,
+        mode: trusty_mpm::core::base_ref_freshness::RefreshMode,
+    ) -> trusty_mpm::core::base_ref_freshness::BaseFreshness {
         // #7748: rooted at the checkout, so the probe reads the same ref store
         // every diff below reads.
         match repo_root() {
             Ok(root) => trusty_mpm::core::base_ref_freshness::check(
                 &trusty_mpm::core::base_ref_freshness::RealBaseRefs::at(&root),
                 base,
+                mode,
             ),
             Err(e) => trusty_mpm::core::base_ref_freshness::BaseFreshness::Undetermined {
                 reason: format!("{e:#}"),
@@ -525,7 +537,14 @@ pub(crate) fn run<R: GhRunner, P: Preflight>(
     // #7748: every gate below, and the credential scan that precedes the push,
     // diffs `origin/<base>...<head>`. Verify that base against the remote FIRST
     // — a stale one silently widens each of those diffs.
-    if let Some(reason) = pre.base_freshness(&args.base).refusal() {
+    // A preview compares without fetching: `refs/remotes/origin/<base>` is
+    // shared by every worktree of the clone (#7748 round 2).
+    let mode = if args.dry_run {
+        trusty_mpm::core::base_ref_freshness::RefreshMode::CompareOnly
+    } else {
+        trusty_mpm::core::base_ref_freshness::RefreshMode::FetchOnDrift
+    };
+    if let Some(reason) = pre.base_freshness(&args.base, mode).refusal() {
         eprintln!(
             "tm pr open: origin/{} is not usable as a diff base; gh was not called",
             args.base

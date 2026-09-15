@@ -57,6 +57,27 @@ fn trust_command_hint_parses_as_the_cli_accepts_it() {
     }
 }
 
+/// #7757: a path with spaces is quoted, so the pasted line stays one argument.
+///
+/// Why: the hint is copied into a shell. Unquoted, `/work/my project` reaches
+/// `tm` as two arguments and fails exactly the way the positional form did.
+/// Deliberately NOT split on whitespace: that is what a shell does for the
+/// operator, and doing it here would test the opposite of the fix.
+#[test]
+fn trust_command_hint_quotes_a_path_with_spaces() {
+    let dir = "/work/my project";
+    let hint = trusty_mpm::core::project_trust::trust_command_hint(std::path::Path::new(dir));
+    assert_eq!(hint, "tm project trust --dir '/work/my project'");
+    let cli = Cli::try_parse_from(["tm", "project", "trust", "--dir", dir])
+        .expect("the shell hands the quoted path over as one argument");
+    match cli.command.unwrap() {
+        Command::Project {
+            action: ProjectAction::Trust { dir: parsed, .. },
+        } => assert_eq!(parsed.as_deref(), Some(dir)),
+        other => panic!("expected project trust, got {other:?}"),
+    }
+}
+
 #[test]
 fn cli_parses_project_trust_revoke() {
     let cli = Cli::try_parse_from(["trusty-mpm", "project", "trust", "--revoke"]).unwrap();
