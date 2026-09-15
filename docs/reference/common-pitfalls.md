@@ -128,6 +128,19 @@ then read the diff of the three
 `crates/trusty-mpm/src/core/testdata/pm-prompt-*.md` goldens and confirm it
 carries only your edit.
 
+🟡 **A module documented from both `lib.rs` and its own file resolves
+intra-doc links in the DECLARING scope, not the module's own scope** — when a
+`pub mod foo;` in `lib.rs` carries a `///` doc block AND `foo`'s own file
+carries a `//!` block, rustdoc merges the two and resolves every link in
+BOTH against the scope where `pub mod foo;` is declared. A module-relative
+link that is correct inside the module's own file (`` [`bar`](bar) ``) fails
+`scripts/check_rustdoc_links.sh` once `lib.rs` also documents the module,
+because `bar` names nothing at the crate root. Six correctly-spelled links in
+`crates/trusty-code/src/mcp/mod.rs`'s `//!` block failed this way on PR
+#7946, and rustdoc blamed `lib.rs:486` rather than the module file. Spell
+every link `crate::…` in a module documented from both places — see
+`crates/trusty-code/src/mcp/mod.rs`'s own doc block for the worked fix.
+
 🟢 **Running an `#[ignore]`d ONNX-backed embedder test without the flag** —
 these are ignored so CI stays fast; they need
 `cargo test -p <crate> -- --include-ignored` to run at all.
