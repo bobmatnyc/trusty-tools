@@ -24,7 +24,7 @@ mod entry;
 // that pin the layout reach it as `super::entry::isolated_framework_paths`.
 pub use entry::{
     prepare_isolated_session, prepare_session, prepare_session_for_managed,
-    prepare_session_with_home, prepare_session_with_memory_reachable,
+    prepare_session_for_repair, prepare_session_with_home, prepare_session_with_memory_reachable,
     prepare_session_with_repo_url, prepare_session_with_repo_url_and_exe,
     prepare_session_with_style, prepare_session_with_style_and_native,
 };

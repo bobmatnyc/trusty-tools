@@ -48,7 +48,8 @@
 //! **Who READS which rows (owner ruling 2026-09-14, #7867).** The `💸`
 //! statusline segment folds [`PER_CALL_TECHNIQUES`] only — `compress` and
 //! `divert`, the per-tool-call measurements — through
-//! [`fold_session_per_call`] and [`fold_sessions_per_call`].
+//! [`fold_session_per_call`] and, since #8063, [`session_row_percents`]
+//! ([`fold_sessions_per_call`] feeds the cross-session mean instead).
 //! `instruction-compression` rows stay on the ledger and stay readable, but
 //! feed no part of that segment: they are one launch-time comparison of the
 //! compiled prompt against its sources, on a different clock from a figure that
@@ -56,23 +57,27 @@
 //! `instruction_fold` row is where that measurement surfaces instead.
 //!
 //! **[`SavingsTotal::percent_saved`] denominator (owner ruling 2026-09-08,
-//! #7179).** The `💸` segment shows a whole-number percent of tokens avoided,
-//! not a dollar figure: `saved / (session actual tokens + saved)` — the
-//! *session share* the owner asked for. "Session actual tokens" is a
-//! cumulative counter `crate::commands::statusline::compaction` (the `tm`
-//! binary) folds across every auto-compaction reset of the `statusLine`
-//! hook's `total_input_tokens`, since that raw figure resets on every
-//! compaction and would otherwise make the percent jump non-monotonically for
-//! reasons unrelated to anything the harness saved. This module has no access
-//! to that counter (it lives in the `tm` binary crate, keyed by session id in
-//! `~/.trusty-mpm/statusline/<session_id>.json`), so `percent_saved` takes it
-//! as an `Option<u64>` argument the statusline binary supplies at render time.
-//! `None` — no compaction tick has landed yet for this session — falls back to
-//! the pre-#7179 formula, `tokens_saved / tokens_before` (each row's own
-//! pre-saving token count, folded the same way `tokens_saved` is).
+//! #7179; re-scoped by the 2026-09-15 ruling, #8063).** The method takes its
+//! denominator as an `Option<u64>` argument because this module cannot reach
+//! one of the two: "session actual tokens" is a cumulative counter
+//! `crate::commands::statusline::compaction` (the `tm` binary) folds across
+//! every auto-compaction reset of the `statusLine` hook's
+//! `total_input_tokens`, keyed by session id in
+//! `~/.trusty-mpm/statusline/<session_id>.json`, since that raw figure resets
+//! on every compaction and would otherwise make the percent jump
+//! non-monotonically for reasons unrelated to anything the harness saved.
+//!
+//! - `Some(actual)` prices a **session share**, `saved / (actual + saved)` —
+//!   what `tm commit-trailers` reports for a whole session.
+//! - `None` prices the ledger's own `tokens_saved / tokens_before` ratio, and
+//!   that is what the `💸` segment renders since #8063, once PER ROW: the badge
+//!   shows the latest row's own reduction beside the mean of this session's
+//!   rows, because a session share rounded an 18.9 % per-call reduction to a
+//!   1 % badge and so read as "the harness saves nothing".
+//!
 //! `#[serde(default)]` on `tokens_before` so a pre-#7179 row folds with
-//! `tokens_before = 0` and is excluded from that fallback denominator, rather
-//! than failing to parse.
+//! `tokens_before = 0` and is excluded from that denominator, rather than
+//! failing to parse.
 //!
 //! Everything here fails soft: a missing, unreadable, or truncated ledger folds
 //! to zero rather than erroring, because the consumer is a status bar on
@@ -266,9 +271,11 @@ impl SavingsTotal {
     /// Whole-number percent of tokens the harness avoided sending, as a share
     /// of the session (owner ruling 2026-09-08, #7179).
     ///
-    /// Why: the `💸` statusline segment renders one percentage — how much of
-    /// what this session actually spent plus what it avoided did the harness
-    /// avoid. `session_actual_tokens` is the caller-supplied cumulative token
+    /// Why: a caller renders one percentage — how much of what this session
+    /// actually spent plus what it avoided did the harness avoid. (#8063: the
+    /// `💸` segment now calls this once per ROW with `None`; `tm
+    /// commit-trailers` is what still asks for the session share.)
+    /// `session_actual_tokens` is the caller-supplied cumulative token
     /// count from `crate::commands::statusline::compaction` (see the module
     /// header for why that counter, rather than a raw `total_input_tokens`
     /// read, is what survives an auto-compaction). This method has no
@@ -739,6 +746,10 @@ fn accumulate(total: &mut SavingsTotal, row: &SavingsRow) {
 /// `average_of_one_session_is_that_sessions_percent`,
 /// `average_of_sessions_with_no_denominator_is_none`,
 /// `average_skips_corrupt_rows_and_never_reports_a_false_zero`.
+// #8063: the `💸` segment no longer folds this — its right-hand figure is now
+// the mean of THIS session's rows ([`session_row_percents`]). This cross-session
+// mean stays the ledger's answer to "how much does the harness save in general",
+// which the per-session reporting surfaces read.
 pub fn average_percent_saved(
     by_session: &std::collections::BTreeMap<String, SavingsTotal>,
     session_actual_tokens: impl Fn(&str) -> Option<u64>,
@@ -747,6 +758,58 @@ pub fn average_percent_saved(
         .iter()
         .filter_map(|(session_id, total)| total.percent_saved(session_actual_tokens(session_id)))
         .collect();
+    mean_percent(&percents)
+}
+
+/// Each accepted per-call row's OWN percent for `session_id`, in ledger order
+/// (#8063).
+///
+/// Why: owner ruling 2026-09-15 — the `💸` segment shows the latest row's
+/// figure beside the mean of this session's rows. A whole-session share turned
+/// an 18.9 % per-call reduction into a 1 % badge, so the segment read as "the
+/// harness saves nothing" while the ledger said otherwise (#8063). Neither
+/// figure exists in a session-level fold: both need one percent PER ROW, which
+/// no other reader here produces.
+/// What: [`for_each_accepted_row`] with a session filter — the same acceptance
+/// rules every other fold applies — keeping the [`is_per_call_technique`] rows
+/// (#7867) and pricing each one alone through
+/// [`SavingsTotal::percent_saved`] with no session denominator, so the figure
+/// is the row's own `tokens_saved / tokens_before` reduction. A row that
+/// predates `tokens_before` has no denominator and contributes nothing rather
+/// than a fabricated percent. Order is the ledger's append order, which is also
+/// timestamp order (every producer stamps with [`now_ts`]), so the last element
+/// is the newest row. A missing or unreadable ledger yields an empty vector.
+/// Test: `session_row_percents_are_one_per_row_in_ledger_order`,
+/// `session_row_percents_skip_a_row_with_no_before_figure`,
+/// `session_row_percents_ignore_other_sessions_and_instruction_rows`.
+pub fn session_row_percents(ledger: &Path, session_id: &str) -> Vec<u32> {
+    let mut percents = Vec::new();
+    for_each_accepted_row(ledger, Some(session_id), |row| {
+        if !is_per_call_technique(&row.technique) {
+            return;
+        }
+        let mut one_row = SavingsTotal::default();
+        accumulate(&mut one_row, row);
+        if let Some(percent) = one_row.percent_saved(None) {
+            percents.push(percent);
+        }
+    });
+    percents
+}
+
+/// The arithmetic mean of whole percents, rounded and clamped to `[1, 100]`.
+///
+/// Why: two averages share this rule — the cross-session one (#7074) and the
+/// per-row one the `💸` segment renders (#8063) — and a second hand-rolled mean
+/// could round or clamp differently, so the same rows would read as two
+/// different numbers on two surfaces.
+/// What: `None` for an empty slice, never a `0%`: an average is only ever shown
+/// beside a figure that already exists, so a false zero there would claim a
+/// measurement that was not made.
+/// Test: `mean_percent_of_nothing_is_none`,
+/// `average_percent_is_the_mean_of_each_sessions_percent`,
+/// `savings_segment_renders_the_average_beside_the_latest_row`.
+pub fn mean_percent(percents: &[u32]) -> Option<u32> {
     if percents.is_empty() {
         return None;
     }

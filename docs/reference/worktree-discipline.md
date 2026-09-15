@@ -20,7 +20,7 @@ document is detail; this is the rule.
    branch conflicts or lacks a newly required check; never merge `main` into
    the branch. A branch that is only BEHIND merges fine (#5958) and needs
    nothing.
-4. **Push and open a PR** (`tm pr open`), body per the seven-field contract;
+4. **Push and open a PR** (`tm pr open`), body per the nine-field contract;
    use `Refs #N`, never `Closes`.
 5. **Merge on green with squash** (`gh pr merge --squash --delete-branch
    --auto`); the repo's review gates still apply.
@@ -221,12 +221,12 @@ documents for regression-test reverts (#7271).
 
 `git -C <other worktree path>` is refused from inside an isolation worktree
 (ADR-0048) — not only for `diff`, for any git subcommand redirected at
-another tree. Read that tree's working-tree files directly with `cat`/`grep`
-or the Read tool; for its committed state, use `git show <sha>:<path>` from
-your OWN worktree against the other worktree's HEAD sha (found with `git show
-<sha> -- <path> > <scratchpad>/base`, then `diff -u <scratchpad>/base <other
-worktree>/<path>`) — the shared object database makes this work without
-touching the other tree at all.
+another tree.
+
+| Refused | Works instead |
+|---|---|
+| `git -C <other worktree path> diff`, or any git subcommand redirected at another tree, to read that tree's committed state | `git show <that worktree's HEAD sha>:<path> > <scratchpad>/base` from your OWN worktree, then `diff -u <scratchpad>/base <other worktree>/<path>` — the shared object database makes this work without touching the other tree at all |
+| reading that tree's uncommitted working-tree files | `cat`/`grep` or the Read tool, directly against the other worktree's path |
 
 ## `.trusty-mpm/sessions/` Is Ignored
 
@@ -293,6 +293,7 @@ substitutes as the reliable spelling rather than as a workaround for one shape.
 | Refused | Works instead |
 |---|---|
 | `bash scripts/<name>.sh`, and the same path spelled absolutely | `./scripts/<name>.sh` |
+| a bare `cargo` invocation — `cargo`, `cargo --version`, `cargo check -p <crate>`, `cargo install --path <path> --locked`, in relative-path, absolute-path, and sandbox-disabled phrasings, every one refused | write the command to a script with the Write tool, `chmod +x` it, and run it as `./name.sh` — the same substitute as `bash scripts/<name>.sh` above |
 | `awk -f <prog>`, `sed -f <prog>`, `awk -f /dev/stdin <<'AWK'` | write the program with the Write tool, run it as one plain command |
 | `python3 - <<'PY'`, `cat >> <file> <<'EOF'`, a heredoc piped into a runner | the Write tool, or Edit for a multi-hunk change |
 | `node -e` whose script path is built from a variable | a literal path |

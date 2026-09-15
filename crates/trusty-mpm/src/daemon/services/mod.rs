@@ -20,6 +20,9 @@ pub mod hook_service;
 pub mod merged_pr_reclaim;
 pub mod pairing_service;
 pub mod session_service;
+// #6556: the reader for the `SubagentStop` records a hook parked on disk when
+// this daemon was unreachable.
+pub mod stop_spool_drain;
 // #7965: the single background-maintenance lane both sweeps take, and the
 // last-pass timings `tm doctor` reports.
 pub(crate) mod sweep_status;

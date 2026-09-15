@@ -35,66 +35,62 @@ It has one form and one absence:
 | At least one accepted `compress`/`divert` row, with a percent to report | `💸34%/29%` |
 | Nothing recorded for this session, or every accepted row predates #7179 | `💸—` |
 
-The first figure is this session. The second is the **average across sessions**
-— the arithmetic mean of every session's own percentage on the ledger.
+The first figure is the **latest row** — what the most recent `compress` or
+`divert` saved on its own. The second is the **mean across this session's
+rows** (owner ruling 2026-09-15, #8063).
 
-### The average
+### Why two per-row figures
 
-One session's percentage says how that session went; it says nothing about
-whether the harness saves anything in general. The average answers that.
+Until #8063 the left figure was a whole-session share, and it read as a defect:
+the owner saw `💸1%` while `tm compress` was cutting individual tool outputs by
+~19 %. Both numbers were correct — an 18.9 % reduction on one `git diff` IS
+about 1 % of everything a long session sends — but the badge answered a
+question nobody was asking it. The 2026-09-15 ruling moves both figures to the
+row scope: what did the last interception save, and what do they save on
+average here.
 
-It is the mean of the per-session PERCENTAGES, not one ratio pooled over every
-row. That is the shape the owner ruled for on 2026-09-09: after the 2026-09-08
-ruling made the figure a percentage of tokens saved, percentages no longer sum
-into a lifetime total, but they do average cleanly — and a short session that
-avoided 60 % of its tokens counts as much as a long one that avoided 10 %.
-Three sessions at 10 %, 30 % and 50 % therefore show `💸10%/30%`, where a pooled
-ratio over the same rows would show 29 %.
-
-A session contributes only when it has a percentage of its own — the same rule
-as the per-session figure, so a session with no denominator on either path is
-skipped rather than counted as a zero that would drag the mean down. When the
-ledger holds only your session, the average equals your figure.
-
-The average needs no new file. It is folded from the same
-`~/.trusty-mpm/usage/savings.jsonl` on the same render, grouped by
-`session_id`, using the same accepted-row rules as the per-session figure — so
-the two cannot disagree about which rows count, and nothing is written to the
-usage directory to produce it.
-
-**Your session's figure gates the whole segment.** With no savings rows for
-this session you see neither number, even when other sessions on the ledger
-have plenty. An average alone would state a measurement about a session that
-was never made.
-
-### How the percent is computed
-
-The percent is a **session share**: how much of everything this session sent —
-what it actually spent, plus what the harness avoided — did the harness avoid.
+Neither number pools rows into one ratio. Each accepted row is priced alone:
 
 ```
-percent = tokens_saved / (session_actual_tokens + tokens_saved)
+row percent = round(100 × tokens_saved / tokens_before)
 ```
 
-`tokens_saved` is every accepted ledger row's `tokens_saved`, summed across the
-session. `session_actual_tokens` is a cumulative counter the `tm statusline`
-compaction tracker keeps per session, alongside the `ctx 41%` segment's own
-state, in `~/.trusty-mpm/statusline/<session_id>.json`. It exists because the
-`statusLine` hook's raw `total_input_tokens` figure resets to a small number on
-every auto-compaction — reading it directly would understate the session and
-make the percent swing for reasons that have nothing to do with anything the
-harness saved. The tracker instead folds each pre-reset reading into a running
-base the moment it detects a drop, so `session_actual_tokens` only grows,
-across any number of compactions in the session.
+`tokens_before` is that row's own pre-saving token count, so the figure is the
+reduction the producer measured for that one tool call. The left figure is the
+newest such row (the ledger is append-only, so file order is arrival order);
+the right is the arithmetic mean of all of them for this session. Three rows at
+20 %, 30 % and 40 % therefore show `💸40%/30%`, where a pooled ratio over the
+same rows would show 27 %. **With one row recorded, both figures are that
+row's** — the badge never renders half-blank.
 
-Before the first `statusLine` tick lands for a session — no compaction tracker
-state yet — the segment falls back to the ledger-only ratio this feature
-originally shipped with: `round(100 × tokens_saved / tokens_before)`, where
-`tokens_before` is each row's own pre-saving token count. That fallback
-produces the identical `💸<N>%` shape; nothing in the rendered segment
-distinguishes which formula ran.
+A row contributes only when it has a denominator of its own: a row written
+before `tokens_before` existed (#7179) is skipped rather than counted as a zero
+that would drag the mean down. Other sessions' rows reach neither figure.
 
-It is still an estimate, for the same two reasons as before:
+Neither figure needs a new file. Both are folded from the same
+`~/.trusty-mpm/usage/savings.jsonl` on the same render, filtered by
+`session_id`, using the same accepted-row rules — so the two cannot disagree
+about which rows count, and nothing is written to the usage directory to
+produce them.
+
+**A zero fold gates the whole segment.** With no savings rows for this session
+you see `💸—` and no number at all, even when other sessions on the ledger have
+plenty.
+
+### The session share, and where it still lives
+
+The session share — `tokens_saved / (session_actual_tokens + tokens_saved)`,
+the 2026-09-08 ruling on #7179 — is still computed, just not on the status bar.
+`tm commit-trailers` reports it for a whole session, where the question "how
+much of everything this session sent did we avoid" is the one being asked.
+`session_actual_tokens` is a cumulative counter the `tm statusline` compaction
+tracker keeps per session, alongside the `ctx 41%` segment's own state, in
+`~/.trusty-mpm/statusline/<session_id>.json`. It exists because the `statusLine`
+hook's raw `total_input_tokens` figure resets to a small number on every
+auto-compaction; the tracker folds each pre-reset reading into a running base
+the moment it detects a drop, so the counter only grows.
+
+The badge is still an estimate, for the same two reasons as before:
 
 - **Bytes are converted to tokens at four bytes per token.** That is the
   conventional English-prose approximation, not a tokenizer run.

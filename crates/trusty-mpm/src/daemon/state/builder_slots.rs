@@ -20,8 +20,14 @@
 //! ran. A dispatch the cap refuses never runs at all, and yet the guard's
 //! preceding shared-tree or worktree-grant claim has already recorded it as
 //! `Running` — those claim BY recording. Nothing downstream would ever close
-//! that record, so [`DaemonState::release_denied_builder_dispatch`] closes it
-//! inside the same critical section as the refusal.
+//! that record, so the refusal closes it inside the same critical section.
+//! #8012: the route passes
+//! [`delegation_tracker::release_denied_dispatch`](crate::daemon::services::delegation_tracker::release_denied_dispatch)
+//! as that closure, because the record can also be absent — a dispatch that
+//! declared its own isolation is never recorded by the shared-tree claim, and
+//! the tracker's independent hook can land after the deny. That release
+//! tombstones an absent record; [`DaemonState::release_denied_builder_dispatch`],
+//! this module's own primitive, closes only one that already exists.
 //!
 //! **Three independent releases, whichever fires first.** A `SubagentStop` or
 //! the staleness sweep moves the record out of
@@ -316,10 +322,13 @@ impl DaemonState {
     /// live one; deleting it would leave the hole open. `Cancelled`, not
     /// `Completed`: nothing ran.
     /// Returns `false` when there is no such record — the ordinary case when the
-    /// guard's own preceding claim declined to record.
-    /// Test: `a_denied_builder_releases_the_record_the_dispatch_just_claimed`,
-    /// `a_denied_builder_releases_only_its_own_record`,
-    /// `releasing_an_unknown_dispatch_is_a_no_op`.
+    /// guard's own preceding claim declined to record, and the reason #8012 moved
+    /// the route's refusal onto
+    /// [`delegation_tracker::release_denied_dispatch`](crate::daemon::services::delegation_tracker::release_denied_dispatch):
+    /// writing nothing there left the late writer free to record a live
+    /// delegation for a dispatch that never ran. This stays the state-level
+    /// primitive, for a caller holding a `tool_use_id` and no payload.
+    /// Test: `releasing_an_unknown_dispatch_is_a_no_op`.
     pub fn release_denied_builder_dispatch(
         &self,
         session: SessionId,

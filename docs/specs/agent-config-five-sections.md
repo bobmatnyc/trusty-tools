@@ -11,7 +11,11 @@ spec_refs:
     anchor: SPEC-AGENTSKILLS-01~draft
 ---
 
-# DOC-57 — Five-Section Agent Configuration: Personality / Knowledge / Skills / Listeners / Permissions
+# DOC-57 — Agent Configuration Sections: Personality / Knowledge / Skills / Sub-agents / Permissions
+
+> **Superseding note.** This document was written for five sections. #4029 added
+> **Sub-agents** and #7609 slice 6 WITHDREW **Listeners** (§6); the surviving
+> sections keep their relative order. The per-change record is in §8.4.
 
 **Status:** Draft
 **Subsystem:** trusty-agents — agent configuration model, capability declaration, permissions surface, GUI config pane
@@ -81,7 +85,7 @@ config surface (§2.2).
 | 1 | **Personality** | Who the agent *is* | `persona.md` + `[agent]` identity keys |
 | 2 | **Knowledge** | What the agent *knows* | `[[stores]]` + knowledge-classified skills + MCP knowledge endpoints |
 | 3 | **Skills** | What the agent *can do* | `[skills]` (NEW) — resolving to tools |
-| 4 | **Listeners** | What the agent *reacts to* | `[[listeners]]` |
+| 4 | ~~**Listeners**~~ | ~~What the agent *reacts to*~~ | WITHDRAWN by #7609 slice 6 — see §6 and §8.4 |
 | 5 | **Permissions** | What the agent is *allowed* to do, and on whose authority | `[permissions]` (NEW) |
 
 **Ordering is normative.** The five sections appear in the order above in every
@@ -90,6 +94,12 @@ documentation. This is the owner's stated order and it is a meaningful
 progression: identity → knowledge → capability → reactivity → constraint. It is
 *not* today's GUI order (which places Permissions before Listeners); §8.2
 specifies the reorder.
+
+**Amendment (#4029, #7609 slice 6).** The ORDER above is still normative; the
+COUNT is not. Sub-agents was inserted between Skills and Permissions (#4029) and
+Listeners was withdrawn (#7609 slice 6). Neither change swapped a surviving
+pair, so the progression this paragraph describes is intact. The shipped strip is
+Personality / Knowledge / Skills / Sub-agents / Permissions — see §8.4.
 
 ### 2.2 Section-to-surface map (NORMATIVE)
 
@@ -823,7 +833,17 @@ Agent skills may carry executable code — Python packages, binaries, or other i
 
 ---
 
-## 6. SPEC-AGENTCFG-05 — Listeners {#SPEC-AGENTCFG-05~draft}
+## 6. SPEC-AGENTCFG-05 — Listeners (WITHDRAWN) {#SPEC-AGENTCFG-05~draft}
+
+> **WITHDRAWN by #7609 slice 6.** This section is retained for history and is no
+> longer normative. `AgentConfigListeners.svelte` and `lib/listeners.ts` are
+> deleted, the panel's Listeners section with them, and the routes they used —
+> `GET`/`PUT /api/agents/{name}/listeners` — are deprecated by #7609 slice 5 and
+> removed by slice 7. Everything this section specified is now a CHANNEL:
+> per-assistant bindings in the Channels view's Assistant scope, host-wide
+> sources in its Global scope. Nothing below governs a shipped surface; the
+> replacement is §8.4's amendment and the `[[channels]]` model in
+> `crates/trusty-agents/src/channels/model.rs`.
 
 ### 6.1 Substance unchanged
 
@@ -1039,7 +1059,7 @@ All five bodies live in one 547-line component today
 | 1 | `personality` | Personality | `personality` | Personality | none |
 | 2 | `knowledge` | Knowledge | `okg` | OKG Stores | **rename + widen** (§4) |
 | 3 | `skills` | Skills | `tools` | Tools | **replace** (§5) |
-| 4 | `listeners` | Listeners | `listeners` | Listeners | position only (#3891 fills it) |
+| 4 | ~~`listeners`~~ | ~~Listeners~~ | `listeners` | Listeners | **struck** — WITHDRAWN by #7609 slice 6 (§6, §8.4) |
 | 5 | `permissions` | Permissions | `permissions` | Permissions | **reorder + re-back** (§7) |
 
 Two changes are mechanical and easy to under-estimate:
@@ -1085,6 +1105,15 @@ ui/src/components/AgentConfigListeners.svelte    + .test.ts
 ui/src/components/AgentConfigPermissions.svelte  + .test.ts
 ui/src/lib/agentConfig.ts                        (fetch wrappers, extended)
 ```
+
+**Amendment (#7609 slice 6, 2026-09-15):** `AgentConfigListeners.svelte` and its
+test are DELETED, and the panel's Listeners section with them. The editor read
+and wrote `GET`/`PUT /api/agents/{name}/listeners`, deprecated by #7609 slice 5
+and removed by slice 7; everything it configured is now a channel — per-assistant
+bindings in the Channels view's Assistant scope, host-wide sources in its Global
+scope (`ChannelsView.svelte`, `GlobalChannelsPanel.svelte`). §2.1's normative
+ORDER is unaffected: every surviving section keeps its position relative to every
+other. The section COUNT in this document's title and §2.1 is superseded.
 
 - **G-6** Two invariants must survive the split, both currently test-guarded:
   (a) **dirty tracking** — `configPaneDirty` is set by whoever owns editable

@@ -199,9 +199,15 @@ pub(super) async fn spawn_managed_on_main(
         warn!(id = %session_id, "spawn_managed (launch-on-main): set_workspace failed: {e}");
     }
 
-    if let Err(reason) =
-        ensure_deployment_complete(&fw, local_path, record.repo_url.as_deref(), session_id)
-    {
+    // #7763: hand the gate the reachability preparation resolved, so its repair
+    // step does not pay a second `PROBE_TIMEOUT` against the same daemon.
+    if let Err(reason) = ensure_deployment_complete(
+        &fw,
+        local_path,
+        record.repo_url.as_deref(),
+        session_id,
+        memory_reachable,
+    ) {
         warn!(
             id = %session_id,
             "spawn_managed (launch-on-main): deployment incomplete after auto-repair \

@@ -302,7 +302,85 @@ pub fn migrate_agent_channels_if_absent(
     Ok(wrote.then_some(report))
 }
 
-/// Start the assistant sweep detached, off the caller's critical path.
+/// What one startup sweep moved, both halves.
+///
+/// Why: the sweep is fire-and-forget, so its only other observable is the log.
+/// A test needs something to assert on besides the files' bytes — including
+/// the drain's FAILURE, which is why `global` is a `Result` the caller may
+/// ignore rather than an `Option` that reads the same for "nothing to do" and
+/// "could not be written".
+#[derive(Debug)]
+pub struct StartupMigrationReport {
+    /// The global `config.toml` drain: `Ok(None)` when there was nothing to
+    /// move or no path to move it in, `Err` when it was tried and failed.
+    pub global: Result<Option<ChannelMigrationReport>, ChannelMigrationError>,
+    /// One entry per assistant whose channels file was seeded.
+    pub assistants: Vec<(String, ChannelMigrationReport)>,
+}
+
+/// Run both halves of the one-shot channel migration, global half first.
+///
+/// Why (#7609): [`migrate_global_if_absent`] was reachable only from
+/// `GlobalConfig::load_or_create`, which only the REPL routing command calls.
+/// Every daemon entry point reads the config through `GlobalConfig::load`,
+/// which absorbs the legacy table in memory and never persists — so a
+/// supervised `tagent --api` or `tagent --slack` left `config.toml` unchanged
+/// across every restart. This is the one entry point those starts call, and it
+/// keeps the hot `load` path read-only.
+/// What: drains `config_path` FIRST, so the assistant sweep's `route_to`
+/// backfill finds the `[[channels]]` entry it appends to; then sweeps `dirs`.
+/// A drain failure is logged and does NOT stop the sweep — the in-memory
+/// absorb keeps the legacy listener working either way, so nothing here is
+/// worth failing a daemon start over. An empty `dirs` runs the global drain
+/// alone, which is what [`spawn_global_migration`] wants.
+/// Test: `a_daemon_start_drains_the_global_config_once`,
+/// `a_daemon_start_survives_a_malformed_global_config`.
+pub fn run_startup_migration(
+    config_path: Option<&Path>,
+    dirs: &[std::path::PathBuf],
+    globals: &[Channel],
+) -> StartupMigrationReport {
+    // #7609: the global drain, on the startup path at last. It runs BEFORE the
+    // sweep below so `backfill_assistant_routes` finds the `[[channels]]` entry
+    // this just wrote and can name the bound assistant in its `route_to`.
+    let global = match config_path {
+        Some(path) => drain_global(path),
+        None => Ok(None),
+    };
+    StartupMigrationReport {
+        global,
+        assistants: migrate_assistant_channels(dirs, globals, config_path),
+    }
+}
+
+/// The global drain plus its log arms, so the sweep above reads as two steps.
+///
+/// Why: a drain failure is an operator-visible problem — a read-only or
+/// hand-broken `config.toml` — that must name its path and its cause in the
+/// daemon's own log, and must then be dropped rather than propagated: the
+/// legacy in-memory absorb in `GlobalConfig::load` keeps the listener working,
+/// so refusing to start would trade a working daemon for a cosmetic one.
+/// Test: `a_daemon_start_survives_a_malformed_global_config`.
+fn drain_global(path: &Path) -> Result<Option<ChannelMigrationReport>, ChannelMigrationError> {
+    let outcome = migrate_global_if_absent(path);
+    match &outcome {
+        Ok(Some(report)) => tracing::info!(
+            path = %path.display(),
+            moved = %report.summary(),
+            "channel migration: moved [[listeners]] into [[channels]] (#7609)",
+        ),
+        Ok(None) => {}
+        Err(error) => tracing::warn!(
+            path = %path.display(),
+            %error,
+            "channel migration: the global drain wrote nothing; the daemon starts on the \
+             in-memory absorb instead (#7609)",
+        ),
+    }
+    outcome
+}
+
+/// Start the startup sweep detached, off the caller's critical path.
 ///
 /// Why: the sweep publishes each assistant's channels file through
 /// [`crate::state_writer::atomic_update`], which takes a BLOCKING `fs4`
@@ -312,20 +390,56 @@ pub fn migrate_agent_channels_if_absent(
 /// the sweep's result, so it is fire-and-forget like the docs index and the
 /// log drain beside it in `api::server::routes`, and its report reaches the
 /// log when it finishes.
-/// What: returns IMMEDIATELY. Requires a tokio runtime.
-/// Test: `the_assistant_sweep_never_blocks_its_caller`.
-pub fn spawn_assistant_migration(dirs: Vec<std::path::PathBuf>, globals: Vec<Channel>) {
+/// What: returns IMMEDIATELY. Requires a tokio runtime. `config_path` is the
+/// global `config.toml` the drain and the `route_to` backfill write (#7609);
+/// `None` runs the seeding half of the sweep with both disabled, which is what
+/// a host whose config path will not resolve gets instead of no sweep at all
+/// (#7609 review).
+/// Test: `the_assistant_sweep_never_blocks_its_caller`,
+/// `the_sweep_seeds_channels_with_no_backfill_target`.
+pub fn spawn_startup_migration(
+    dirs: Vec<std::path::PathBuf>,
+    globals: Vec<Channel>,
+    config_path: Option<std::path::PathBuf>,
+) {
     tokio::task::spawn(async move {
-        match tokio::task::spawn_blocking(move || migrate_assistant_channels(&dirs, &globals)).await
+        match tokio::task::spawn_blocking(move || {
+            run_startup_migration(config_path.as_deref(), &dirs, &globals)
+        })
+        .await
         {
-            Ok(reports) if !reports.is_empty() => tracing::info!(
-                assistants = reports.len(),
-                "channel migration: the assistant sweep finished (#7609)",
-            ),
-            Ok(_) => {}
-            Err(e) => tracing::warn!(error = %e, "channel migration: assistant sweep task failed"),
+            Ok(report) => {
+                // #7609 review: three states, not a bool — a `false` that
+                // covered both "nothing to drain" and "the drain failed" is
+                // exactly the ambiguity this log line exists to resolve.
+                let global = match &report.global {
+                    Ok(Some(_)) => "moved",
+                    Ok(None) => "nothing",
+                    Err(_) => "failed",
+                };
+                if global != "nothing" || !report.assistants.is_empty() {
+                    tracing::info!(
+                        assistants = report.assistants.len(),
+                        global,
+                        "channel migration: the startup sweep finished (#7609)",
+                    );
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "channel migration: startup sweep task failed"),
         }
     });
+}
+
+/// The global drain alone, for a start with no assistant roster to sweep.
+///
+/// Why (#7609): `--api` returns early from `runtime::startup` and runs the full
+/// sweep from `api::server::routes`. Every OTHER `tagent` start goes through
+/// the shared runtime startup hook, which owns no assistant roster but still
+/// has to drain the global config exactly once. Detached for the same reason as
+/// the full sweep.
+/// Test: `the_startup_hook_drains_the_global_config`.
+pub fn spawn_global_migration(config_path: std::path::PathBuf) {
+    spawn_startup_migration(Vec::new(), Vec::new(), Some(config_path));
 }
 
 /// Seed every discovered assistant's channels file from its `agent.toml`.
@@ -337,10 +451,22 @@ pub fn spawn_assistant_migration(dirs: Vec<std::path::PathBuf>, globals: Vec<Cha
 /// independent — a failure on one is logged and the sweep continues, because
 /// one unreadable manifest must not stop the others from migrating. Returns
 /// the reports for the assistants that moved something.
-/// Test: `the_sweep_skips_an_assistant_with_no_manifest`.
+///
+/// #7609 slice 4: the sweep ALSO backfills `route_to`. A legacy per-assistant
+/// binding for global `G` naming assistant `A` is the two-stage opt-in the
+/// owner's 2026-09-14 ruling retires, so `A` is appended to `G.route_to` and
+/// the pair moves from dispatch source (3) to source (2) with no manual edit.
+/// That runs for every discovered assistant, including one whose channels file
+/// already exists and therefore migrates nothing. `config_path` is `None` when
+/// the global config path would not resolve: the seeding half still runs, the
+/// backfill alone is skipped (#7609 review).
+/// Test: `the_sweep_skips_an_assistant_with_no_manifest`,
+/// `the_sweep_backfills_route_to_for_a_legacy_binding`,
+/// `the_sweep_seeds_channels_with_no_backfill_target`.
 pub fn migrate_assistant_channels(
     dirs: &[std::path::PathBuf],
     globals: &[Channel],
+    config_path: Option<&Path>,
 ) -> Vec<(String, ChannelMigrationReport)> {
     let mut reports = Vec::new();
     for id in crate::assistants::discover_instances(dirs) {
@@ -349,6 +475,9 @@ pub fn migrate_assistant_channels(
         else {
             continue;
         };
+        if let Some(config_path) = config_path {
+            backfill_assistant_routes(config_path, &manifest, globals, id.as_str());
+        }
         let channels_json = manifest.with_extension("channels.json");
         match migrate_agent_channels_if_absent(&manifest, &channels_json, globals) {
             Ok(Some(report)) => {
@@ -371,12 +500,177 @@ pub fn migrate_assistant_channels(
     reports
 }
 
+/// Append `assistant` to the `route_to` of every global channel its
+/// `agent.toml` declares a legacy `[[listeners]]` binding for.
+///
+/// Why (#7609 slice 4): the owner's 2026-09-14 ruling retires the two-stage
+/// opt-in — a global channel now names the assistants it fans out to. Leaving
+/// the existing pairs on the legacy source works, but only until the
+/// deprecation window closes, and asking an operator to hand-edit one entry per
+/// binding is exactly the migration burden slice 2 refused to impose.
+/// What: best-effort and idempotent. Every failure is logged and skipped;
+/// nothing here is worth failing startup over, because dispatch source (3)
+/// still handles an un-backfilled pair.
+/// Test: `the_sweep_backfills_route_to_for_a_legacy_binding`.
+fn backfill_assistant_routes(
+    config_path: &Path,
+    agent_toml: &Path,
+    globals: &[Channel],
+    assistant: &str,
+) {
+    for channel_id in legacy_binding_targets(agent_toml, globals) {
+        match backfill_route_to(config_path, &channel_id, assistant) {
+            Ok(true) => tracing::info!(
+                channel = %channel_id,
+                assistant = %assistant,
+                "channel migration: backfilled `route_to` from a legacy binding (#7609)",
+            ),
+            Ok(false) => {}
+            Err(e) => tracing::warn!(
+                channel = %channel_id,
+                assistant = %assistant,
+                error = %e,
+                "channel migration: `route_to` backfill wrote nothing",
+            ),
+        }
+    }
+}
+
+/// The global channel ids an `agent.toml`'s legacy `[[listeners]]` bindings
+/// name.
+///
+/// What: ids only, deduplicated, and only for globals this host actually
+/// declares — a binding naming a listener that does not exist backfills
+/// nothing.
+///
+/// #7609 review: each failure arm logs its path and error. A manifest that will
+/// not read or parse disables this assistant's backfill for the life of the
+/// process, and all three arms used to return an empty list with nothing said —
+/// indistinguishable from an assistant that simply declares no bindings.
+/// Test: `the_sweep_backfills_route_to_for_a_legacy_binding`.
+fn legacy_binding_targets(agent_toml: &Path, globals: &[Channel]) -> Vec<String> {
+    let warn = |stage: &str, error: &dyn std::fmt::Display| {
+        tracing::warn!(
+            path = %agent_toml.display(),
+            %stage,
+            %error,
+            "channel migration: this manifest's legacy bindings could not be read; no `route_to` \
+             backfill for it (#7609)",
+        );
+    };
+    let raw = match std::fs::read_to_string(agent_toml) {
+        Ok(raw) => raw,
+        Err(e) => {
+            warn("read", &e);
+            return Vec::new();
+        }
+    };
+    let table = match parse_table(&raw, agent_toml) {
+        Ok(table) => table,
+        Err(e) => {
+            warn("parse", &e);
+            return Vec::new();
+        }
+    };
+    let bindings = match read_key::<AgentListenerBinding>(&table, "listeners", agent_toml) {
+        Ok(Some(bindings)) => bindings,
+        Ok(None) => return Vec::new(),
+        Err(e) => {
+            warn("listeners", &e);
+            return Vec::new();
+        }
+    };
+    let mut ids: Vec<String> = bindings
+        .into_iter()
+        .map(|binding| binding.name)
+        .filter(|name| {
+            globals
+                .iter()
+                .any(|c| c.scope == ChannelScope::Global && &c.id == name)
+        })
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// Add `assistant` to one global channel's `route_to`, once.
+///
+/// Why: this is a read-modify-write of a file other processes also write, so it
+/// runs through [`crate::state_writer::atomic_update`] like every other channel
+/// write — the decision is re-taken under the lock, and a name already present
+/// writes nothing at all.
+/// What: `Ok(true)` when the file changed. `Ok(false)` when the file is absent,
+/// declares no `[[channels]]` array of tables, has no channel of that id, or
+/// already routes to `assistant`. Comments, key order and every unmodelled
+/// table survive, because `toml_edit` edits the document rather than
+/// re-serializing a parsed struct.
+/// Test: `the_route_to_backfill_is_idempotent_and_keeps_comments`.
+pub fn backfill_route_to(
+    config_path: &Path,
+    channel_id: &str,
+    assistant: &str,
+) -> Result<bool, ChannelMigrationError> {
+    crate::state_writer::atomic_update(config_path, |existing| {
+        let Some(bytes) = existing else {
+            return Ok(None);
+        };
+        let mut doc: toml_edit::DocumentMut = String::from_utf8_lossy(bytes).parse()?;
+        let Some(channels) = doc
+            .get_mut("channels")
+            .and_then(toml_edit::Item::as_array_of_tables_mut)
+        else {
+            return Ok(None);
+        };
+        let Some(table) = channels
+            .iter_mut()
+            .find(|t| t.get("id").and_then(toml_edit::Item::as_str) == Some(channel_id))
+        else {
+            return Ok(None);
+        };
+        let entry = table
+            .entry("route_to")
+            .or_insert_with(|| toml_edit::value(toml_edit::Array::new()));
+        let Some(array) = entry.as_array_mut() else {
+            // #7609 review: `route_to = "izzie"` parses but is not an array, so
+            // the backfill can never write and would otherwise report `false`
+            // forever with nothing said.
+            tracing::warn!(
+                path = %config_path.display(),
+                channel = %channel_id,
+                "channel migration: `route_to` is not an array of assistant names; this channel \
+                 cannot be backfilled until it is fixed (#7609)",
+            );
+            return Ok(None);
+        };
+        if array.iter().any(|value| value.as_str() == Some(assistant)) {
+            return Ok(None);
+        }
+        array.push(assistant);
+        Ok(Some(doc.to_string().into_bytes()))
+    })
+    .map_err(|source| ChannelMigrationError::Write {
+        path: config_path.display().to_string(),
+        source,
+    })
+}
+
 /// The subset of `bindings` that the existing channel storage would accept.
 ///
-/// Why: see [`migrate_agent_channels_if_absent`]. A migrated global listener
-/// is account-wide (empty target), which no provider adapter accepts as a
-/// destination, so those bindings stay in `agent.toml` until dispatch (slice
-/// 4) learns to read them from there.
+/// Why: `agent_channels::load_at` validates every record it reads, so writing
+/// one it would reject turns a working channel view into a 500.
+/// What: the binding's provider comes from the global channel it names, through
+/// [`super::adapter_id`] — a Gmail listener's provider is its `connector`,
+/// `gmail`, while the adapter that addresses its events is `gworkspace`. The
+/// gate is [`crate::api::server::agent_channels::Binding::validate_in`], the
+/// same check the read path applies, rather than a target check that agreed
+/// with it only by coincidence. An OVERLAY (the global is account-wide, so the
+/// binding has no destination of its own) passes that gate as of slice 4 and is
+/// now written — which is what closes slice 3's open item — and carries no
+/// `credential_ref`, because it has no destination to send to and the send
+/// credential belongs to the global.
+/// Test: `an_overlay_of_an_account_wide_global_is_now_stored`,
+/// `an_unstorable_binding_is_left_in_agent_toml`.
 fn storable_records(
     bindings: Vec<AgentListenerBinding>,
     globals: &[Channel],
@@ -394,20 +688,21 @@ fn storable_records(
             );
             continue;
         };
-        let mut channel = Channel::from_agent_binding(binding, &global.provider);
+        let mut channel = Channel::from_agent_binding(binding, super::adapter_id(&global.provider));
         channel.target = global.target.clone();
-        channel.credential_ref = global.credential_ref.clone();
-        let storable = super::adapter(&channel.provider)
-            .is_some_and(|adapter| adapter.validate_target(&channel.target));
-        if !storable {
+        if !channel.target.is_empty() {
+            channel.credential_ref = global.credential_ref.clone();
+        }
+        let record: crate::api::server::agent_channels::Binding = (&channel).into();
+        if record.validate_in(globals).is_err() {
             tracing::info!(
                 channel = %channel.id,
                 provider = %channel.provider,
-                "channel migration: no storable destination yet; left in agent.toml (#7609)"
+                "channel migration: the channel store would reject this record; left in agent.toml (#7609)"
             );
             continue;
         }
-        records.push((&channel).into());
+        records.push(record);
     }
     records
 }

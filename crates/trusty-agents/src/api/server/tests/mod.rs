@@ -31,6 +31,9 @@ mod ctrl_sessions;
 // #5052: `/api/events` stream authentication (ticket mint + redeem + CORS).
 mod event_tickets;
 mod events_sse;
+// #7609 slice 5: the global channel routes, the channel-write
+// authorization gate, and the deprecated listener route aliases.
+mod global_channels;
 mod guard;
 // #7396: the ceiling a turn-originated settings patch may never widen.
 mod grant_ceiling;

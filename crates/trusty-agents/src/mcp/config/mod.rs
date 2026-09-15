@@ -379,17 +379,24 @@ impl GlobalConfig {
     /// mutate the in-memory config and need to immediately write it back to
     /// `~/.trusty-agents/config.toml` so subsequent processes (and the next
     /// prompt build) see the change.
-    /// What: Serializes `self` to pretty TOML, writes it to a scratch file
-    /// beside the target, then renames that file onto `config_path()` —
-    /// publishing the new config in one atomic directory operation. Creates
-    /// the parent directory if absent. A failed write or rename removes the
-    /// scratch file rather than leaving it behind.
+    /// What: Serializes `self` to pretty TOML and publishes it through
+    /// [`crate::state_writer::atomic_update`], which holds the advisory lock on
+    /// `config.toml.lock` across the publish and then renames a scratch file
+    /// onto `config_path()`. Creates the parent directory if absent.
     ///
-    /// The scratch name comes from
-    /// [`trusty_agents_common::agents::manifest::temp_path`] so this writer
-    /// cannot drift from the per-process, per-attempt naming that #4409
-    /// established — a shared fixed `.tmp` name is its own corruption bug when
-    /// two writers interleave.
+    /// #8065: this used to be the ONE `config.toml` writer that took no lock —
+    /// its own tmp-then-rename was atomic for a reader but invisible to every
+    /// other writer of the same file. Since the #7609 startup drain, every
+    /// non-`--api` start writes `config.toml` at boot, so a `save()` from
+    /// `repl/commands/routing.rs` could rename over the drain's freshly
+    /// published bytes and lose the migration. Sharing the lock closes that.
+    /// Note the lock leaves a `config.toml.lock` sibling on disk, which is the
+    /// rendezvous point every other writer already uses; it is not scratch.
+    ///
+    /// `save()` still re-serializes only the fields this struct models — the
+    /// other half of #8065's report — which is why a table it does not know
+    /// about must be modelled here (see `[providers]`) and why the channel
+    /// routes edit the document with `toml_edit` instead of calling this.
     /// Test: `tests::save_and_reload_roundtrip`,
     /// `tests::save_publishes_by_rename_leaving_the_old_file_intact`,
     /// `tests::save_leaves_no_scratch_file_behind`.
@@ -401,19 +408,15 @@ impl GlobalConfig {
                 .with_context(|| format!("failed to create config dir {}", parent.display()))?;
         }
         let content = toml::to_string_pretty(self).context("failed to serialize mcp config")?;
-        // audit 2026-08-19: was a plain `tokio::fs::write`, which truncates the
-        // live config in place — a crash mid-write left a torn file.
-        let tmp = trusty_agents_common::agents::manifest::temp_path(&path);
-        if let Err(e) = tokio::fs::write(&tmp, &content).await {
-            let _ = tokio::fs::remove_file(&tmp).await;
-            return Err(anyhow::Error::new(e)
-                .context(format!("failed to write config scratch {}", tmp.display())));
-        }
-        if let Err(e) = tokio::fs::rename(&tmp, &path).await {
-            let _ = tokio::fs::remove_file(&tmp).await;
-            return Err(anyhow::Error::new(e)
-                .context(format!("failed to publish config {}", path.display())));
-        }
+        // #8065: the shared writer, so this save serializes against the startup
+        // drain and every other `config.toml` writer instead of racing them.
+        let target = path.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::state_writer::atomic_update(&target, move |_| Ok(Some(content.into_bytes())))
+        })
+        .await
+        .with_context(|| format!("config save task failed for {}", path.display()))?
+        .with_context(|| format!("failed to publish config {}", path.display()))?;
         Ok(())
     }
 

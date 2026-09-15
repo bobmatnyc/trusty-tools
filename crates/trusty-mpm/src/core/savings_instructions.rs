@@ -8,7 +8,7 @@
 //! by hand — means the figure re-derives itself when the instruction corpus
 //! changes, and it goes to zero honestly when nothing was folded.
 //!
-//! What: [`record_instruction_compression_in`], called from
+//! What: `record_instruction_compression_in_with`, called from
 //! [`crate::core::instruction_pipeline::write_compiled_prompt_recording_in`].
 //! #7514 split that off the bare write, which now records nothing, and made the
 //! ledger's root a parameter rather than a read of the process home directory —

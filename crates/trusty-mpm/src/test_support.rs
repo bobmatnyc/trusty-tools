@@ -69,6 +69,21 @@ pub(crate) mod tmux_session;
 /// Test: `tmux_session::tests::the_fixture_spawn_seam_captures_output`.
 pub(crate) use crate::core::spawn_disclaim::disclaimed_output as tmux_spawn;
 
+/// This target's spelling of the one lock `$PATH` mutation and PATH-resolved
+/// spawns share (#7996).
+///
+/// Why: [`tmux_session`] execs a bare `tmux`, which the OS resolves through
+/// `$PATH`; a concurrent `set_var("PATH", …)` in another test can tear that
+/// read. This crate's PATH mutators — `core::git_identity`,
+/// `core::gh_account_enforce`, `runtime::claude_code_tests` — already
+/// serialise on `core::trusty_tools_config::env_test_lock`, so joining that
+/// regime is a re-export rather than a second mutex. The `tm` binary has no
+/// visibility of it (`#[cfg(test)] pub(crate)`) and defines its own under this
+/// same name; the shared fixture file says `super::lock_path_env()` and
+/// compiles into both.
+/// Test: `tmux_session::tests::the_spawn_seam_takes_the_path_lock`.
+pub(crate) use crate::core::trusty_tools_config::env_test_lock as lock_path_env;
+
 /// The loopback port every dead-daemon test points at (#4306, #4415).
 ///
 /// Why this specific port, rather than one the fixture binds for itself: the

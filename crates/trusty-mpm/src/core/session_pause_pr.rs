@@ -658,7 +658,7 @@ fn slug(session_id: &str) -> String {
     }
 }
 
-/// The seven-field PR body `tm pr open` validates.
+/// The nine-field PR body `tm pr open` validates.
 fn pr_body(session_id: &str, paths: &[String]) -> String {
     let files = paths
         .iter()
@@ -676,6 +676,10 @@ fn pr_body(session_id: &str, paths: &[String]) -> String {
          Rung 1 (docs-only): no Cargo gate applies.\n\n\
          ## Baseline\n\
          No pre-existing failures relevant to this diff.\n\n\
+         ## Gates not run\n\
+         none — rung 1 runs no Cargo gate (#7336).\n\n\
+         ## Partial-red accounting\n\
+         none.\n\n\
          ## Docs\n\
          No changelog fragment owed — `.trusty-mpm/sessions/**` is not crate source.\n\n\
          ## Review\n\

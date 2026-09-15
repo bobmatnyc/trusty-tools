@@ -481,6 +481,16 @@ pub(super) async fn handle_message(
         // one function, and Slack names itself rather than being assumed.
         // One Slack message in, one turn per bound assistant out: there is no
         // poll cycle to share a dispatch allowance with (#7427).
+        //
+        // #7609: this call now also serves global `route_to` and the legacy
+        // absorbed binding, so Slack reaches an assistant on the same three
+        // terms Gmail does. What it still does NOT do, unlike
+        // `listeners::poll::poll_once`, is append this event to the
+        // `EventStore`, run the knowledge intake for a non-claimed message, or
+        // publish `Event::ListenerEventReceived` — so a Slack message is absent
+        // from the Events pane and from `recent_ids` dedup. Deliberately left
+        // open in slice 4: closing it changes storage and dedup semantics for
+        // a live gateway and needs its own test bed. Tracked on #7609.
         if crate::api::server::agent_channels::inbound::receive_inbound(
             "slack",
             &channel,

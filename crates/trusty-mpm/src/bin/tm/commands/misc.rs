@@ -73,6 +73,22 @@ pub(crate) const CATALOG_STALE_MSG: &str = "updates available (run 'tm catalog s
 pub(crate) const NON_GIT_FALLBACK_HINT: &str =
     "tm: not in a git project — run 'tm --help' for available commands";
 
+/// Hard ceiling on the #2610 idle-parking detection.
+///
+/// Why: it bounds a transcript read on the turn-end hot path, so the hook never
+/// blocks the prompt. Named at module scope since #6556 rather than inlined in
+/// [`detect_idle_parking_from_payload_in`], because it is one of the four bounds
+/// a `SubagentStop` invocation pays in series and the budget gate has to sum it.
+/// Test: `the_stop_post_budget_stays_inside_the_registered_hook_timeout`.
+pub(crate) const IDLE_PARK_DETECT_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(300);
+
+/// The turn-end event that reports a delegated subagent stopped.
+///
+/// Why (#6556): the one event whose POST is retried and parked on disk. Spelled
+/// once so the retry branch and its tests name the same string.
+pub(crate) const SUBAGENT_STOP_EVENT: &str = "SubagentStop";
+
 /// `status` subcommand — probe daemon health and list sessions.
 ///
 /// Why: the first thing an operator runs to see if the daemon is alive.
@@ -392,15 +408,13 @@ async fn detect_idle_parking_from_payload_in(
     /// Cap on transcript bytes read from the tail (256 KiB is far more than one
     /// final assistant turn, yet bounds cost on a multi-MB session transcript).
     const MAX_TRANSCRIPT_TAIL: u64 = 256 * 1024;
-    /// Hard ceiling on the whole detection so the hook never blocks the prompt.
-    const DETECT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(300);
 
     let raw = payload?.get("transcript_path")?.as_str()?;
     // #7278: screen before any read — a refused path is never opened.
     let path =
         trusty_mpm::core::session_record::contained_transcript_path(claude_config_dir?, raw)?;
     let jsonl = tokio::time::timeout(
-        DETECT_TIMEOUT,
+        IDLE_PARK_DETECT_TIMEOUT,
         read_transcript_tail(&path, MAX_TRANSCRIPT_TAIL),
     )
     .await
@@ -461,6 +475,14 @@ async fn detect_idle_parking_from_payload_in(
 /// exports `CLAUDE_CODE_SESSION_ID` into its own children only — see
 /// `trusty_mpm::core::savings_sidecar`. It appends nothing when nothing is
 /// staged, writes no stdout, and cannot fail the hook.
+/// Issue #6556 splits the delivery in two. A `SubagentStop` — the only event
+/// whose loss strands a delegation `Running` for `RUNNING_STALE_AFTER_SECS` —
+/// goes through [`super::hook_post::post_hook_with_retry`], which retries a
+/// transient failure inside the hook's registered budget, logs every attempt to
+/// stderr, and parks a permanently undelivered stop where the daemon's reap loop
+/// replays it. Every other event keeps the single fire-and-forget attempt: a lost
+/// `PreToolUse` observation costs an audit row, and retrying it would put a
+/// backoff on the hot path of every tool call.
 /// Test: `cli_parses_hook` covers parse routing; the guard branches are
 /// exercised via `hook_guard_short_circuits` and
 /// `hook_disable_env_short_circuits` in `tests_behavior_a.rs`. The rewrite
@@ -468,7 +490,9 @@ async fn detect_idle_parking_from_payload_in(
 /// tests; `hook_rewrites_plain_bash_command_on_pretooluse` and
 /// `hook_stays_silent_for_non_bash_tool_on_pretooluse` in the
 /// `tm_hook_pretooluse_rewrite` integration test exercise the stdin-driven
-/// event detection end to end through the real binary.
+/// event detection end to end through the real binary. The #6556 delivery split
+/// is covered by `a_stop_delivered_on_the_third_attempt_logs_every_one` and
+/// `a_daemon_that_never_answers_exhausts_the_attempts`.
 pub(crate) async fn hook(client: &reqwest::Client, url: &str) -> anyhow::Result<()> {
     // Guard 1: suppress inside MPM-spawned sub-agents.
     if std::env::var_os(SUB_AGENT_ENV).is_some() {
@@ -573,6 +597,20 @@ pub(crate) async fn hook(client: &reqwest::Client, url: &str) -> anyhow::Result<
         "event": event,
         "payload": payload
     });
+
+    // #6556: the one event whose loss costs more than an audit row. A lost
+    // `SubagentStop` leaves the delegation `Running` for the six hours of
+    // `RUNNING_STALE_AFTER_SECS`, holding a builder slot and a checkout, so it
+    // is retried inside the hook's budget and parked on disk when the daemon is
+    // down. Every other event keeps the single best-effort attempt below.
+    if event == SUBAGENT_STOP_EVENT {
+        let outcome = super::hook_post::post_hook_with_retry(url, &body).await;
+        super::hook_post::emit_hook_post_log(&outcome);
+        if !outcome.delivered {
+            super::hook_post::spool_undelivered_stop(&body);
+        }
+        return Ok(());
+    }
 
     // Build a hook-specific client with a tight connect timeout so a
     // pathological OS-level TCP-connect stall never eats into the 2 s

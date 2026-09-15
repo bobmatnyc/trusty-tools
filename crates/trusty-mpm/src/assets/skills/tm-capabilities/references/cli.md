@@ -84,7 +84,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `pr` — Deterministic pull-request gates: open a PR, merge one, or check the merge queue
   - `cleanup` — Reclaim everything a merged PR made obsolete: branches, worktrees, claims
   - `merge` — Squash-merge a PR with its validated body as the commit message
-  - `open` — Validate a PR body against the seven-field contract, then open the PR
+  - `open` — Validate a PR body against the nine-field contract, then open the PR
   - `queue-check` — Report, per open PR on a base branch, whether it is mergeable
 - `project` — Define and manage projects (registered working directories)
   - `info` — Show the current project's registered info and config

@@ -84,12 +84,16 @@ this grep is what covers the hand-assembled `gh` fallback and every later
 `gh pr edit`.
 
 🔴 **Open every PR with `tm pr open --title <title> --body-file <path> [--issue N]
-[--rung 1-6] [--base main] [--docs-only]`.** It validates the seven-field body
-contract against seven exact headings, verbatim (#7727): `## Outcome`,
-`## Changes`, `## Risk`, `## Tests`, `## Baseline`, `## Docs`, `## Review` — in
-that order, matching `tm-workflow.md`'s "Minimal PR Body (seven fields)"
-section. A body missing one of these, or holding it empty, exits 2 naming
-which field, before `gh` is ever called. It also checks the exact attribution
+[--rung 1-6] [--base main] [--docs-only]`.** It validates the nine-field body
+contract against nine exact headings, verbatim (#7727): `## Outcome`,
+`## Changes`, `## Risk`, `## Tests`, `## Baseline`, `## Gates not run`,
+`## Partial-red accounting`, `## Docs`, `## Review` — in that order, matching
+`tm-workflow.md`'s "Minimal PR Body (nine fields)" section. A body missing one
+of these, or holding it empty, exits 2 naming which field, before `gh` is ever
+called. The last two are the #7336 disclosure fields: name every gate the rung
+asked for that you did not run and why, and itemize every target still failing
+with its rerun result. A clean run writes the single word `none` under each —
+that is a valid whole section, and omitting the heading is not. It also checks the exact attribution
 footer — a missing one exits 2 without calling `gh`; `tm pr open` never
 appends it itself — and attaches the shipped
 `--assignee @me --label trusty-mpm --label ws/<session>` defaults itself — you
@@ -120,10 +124,13 @@ missing `Refs #N` or a docs-only diff prints the line saying which half was
 skipped. Read those lines: a warning is yours to fix on the PR, a "no project or
 milestone" line on a `Refs`-less PR is the correct outcome.
 
-🔴 **Before every push, delegate a credential scan to the `security` agent** —
-`git diff origin/main...HEAD` (three-dot, never two-dot: see Safety Rules).
-Do not push until the PM reports the scan PASS; a leaked credential in git
-history survives even a reverted commit.
+🔴 **Before every push, scan `git diff origin/main...HEAD` for credentials
+yourself** (three-dot, never two-dot: see Safety Rules). "No Subagent
+Fan-Out" forbids delegating this to `security` from inside a dispatched run;
+report the pattern set you checked. A leaked credential in git history
+survives even a reverted commit. For a high-risk branch — one touching
+secrets, auth, or credential handling — the PM dispatches `security` before
+you start, never mid-task.
 
 When scope or claims change mid-flight, edit the PR body — a stale body is a
 defect, and fixing it is yours, not ticketing's.
@@ -300,15 +307,8 @@ confirm-then-delete sequence above.
 
 ## Conventional Commits
 
-```
-feat: add user authentication service
-fix: resolve race condition in async handler
-refactor: extract validation logic to separate module
-perf: optimise database query with indexing
-test: add integration tests for payment flow
-docs: update API reference with new endpoints
-chore: remove deprecated dependencies
-```
+Format, type list, and examples: `Skill(skill="git-workflow")` —
+"Conventional Commits Format".
 
 ## Release Workflow
 

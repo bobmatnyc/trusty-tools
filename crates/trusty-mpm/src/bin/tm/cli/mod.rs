@@ -919,14 +919,14 @@ pub(crate) enum Command {
     /// Deterministic pull-request gates: open a PR, merge one, or check the merge queue.
     ///
     /// Why (#6653): `version-control` assembles every `gh pr create` by hand
-    /// and re-derives four mechanical judgments each time — is the seven-field
+    /// and re-derives four mechanical judgments each time — is the nine-field
     /// body complete, is the attribution footer exact, were the shipped
     /// `--assignee @me --label trusty-mpm --label ws/<session>` defaults
     /// attached, and does this diff owe a changelog fragment. The merge-queue
     /// procedure is the same shape: a fixed decision table read out of three
     /// `gh` calls, where skipping one under time pressure is the failure mode.
     /// Both are prose in `tm-workflow.md` today; neither needs a model.
-    /// What: `open` validates the body file against the seven-field contract
+    /// What: `open` validates the body file against the nine-field contract
     /// (and the changelog gate, unless `--docs-only`) and refuses with exit 2,
     /// naming the failed check, BEFORE `gh` is spawned; `queue-check` prints
     /// one `MERGEABLE` / `BLOCKED: <reason>` line per open PR on a base branch
@@ -1387,10 +1387,12 @@ pub(crate) enum Command {
     /// the Claude Code login, read from `.claude.json` since the stdin payload
     /// does not carry it (#6304). Stdin fields read: `session_id`,
     /// `context_window.total_input_tokens`. `session_id` is required -- it is
-    /// the `💸` segment's ledger fold key. `context_window.total_input_tokens`
-    /// is optional -- it feeds the `💸` percentage's session-actual-tokens
-    /// denominator, falling back to the ledger's own accumulated tokens when
-    /// absent. Example payload that reproduces a non-empty `💸` segment
+    /// the `💸` segment's ledger fold key, and the segment renders that
+    /// session's latest savings row over the mean of its rows (#8063).
+    /// `context_window.total_input_tokens` is optional -- it feeds the `ctx%`
+    /// compaction tracker and the session share `tm commit-trailers` reports,
+    /// and since #8063 moves no `💸` figure. Example payload that reproduces
+    /// a non-empty `💸` segment
     /// against an existing ledger (replace `<id>` with a `session_id` that
     /// already has ledger rows):
     /// `echo '{"session_id":"<id>","context_window":{"total_input_tokens":50000}}' | tm statusline`.

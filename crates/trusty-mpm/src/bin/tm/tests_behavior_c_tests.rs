@@ -2440,7 +2440,7 @@ fn daily_banner_two_panel_version_in_title_bar_not_content() {
     // What: builds WelcomeData (same shape the daily banner path uses) and checks
     // the two-panel output for the invariants that distinguish the new path.
     use crate::formatters::banner::two_panel::{render_two_panel_banner, strip_ansi};
-    use crate::formatters::info_box::{DaemonInfo, WelcomeData};
+    use crate::formatters::info_box::{ConsoleInfo, DaemonInfo, WelcomeData};
 
     colored::control::set_override(false);
     let data = WelcomeData {
@@ -2450,6 +2450,8 @@ fn daily_banner_two_panel_version_in_title_bar_not_content() {
         reconnecting: false,
         session_name: String::new(),
         daemon: DaemonInfo::default(),
+        // #6761: the services block gained a console row.
+        console: ConsoleInfo::default(),
         recent_commits: vec![],
         memory_status: "(not detected)".to_string(),
         search_status: "(not detected)".to_string(),

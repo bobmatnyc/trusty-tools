@@ -398,8 +398,26 @@ mod tests {
         let err = bound_index_for_tree(&[agents], &kdir, &kdir.join("orphan"), None).unwrap_err();
         assert!(err.contains("no agent binds"), "reason was: {err}");
     }
+    /// Why: a `root=`-style binding is resolved against the agent's own
+    /// assistant home, so this pins that a private store root still maps back
+    /// to the index it declares.
+    ///
+    /// #8062: the body derives the tree path from `$HOME` TWICE — once here
+    /// via `AssistantHome::for_instance`, and again inside `binding_for`
+    /// (`super::binding_for`, which calls `for_instance` to build
+    /// `store_root`) — while ~20 test modules swap `$HOME` under
+    /// `test_env::HOME_LOCK`. A swap landing BETWEEN the two reads makes
+    /// `same_dir` compare two different homes, and the call fails with
+    /// "refusing to feed an index that describes a different tree" for a
+    /// reason the resolution never had. Taking `HOME_LOCK` for the whole body
+    /// is the same fix #7994 applied to `trusty_client`'s socket-path test.
+    /// Test: this test IS the coverage.
     #[test]
     fn explicit_private_store_root_resolves_to_its_bound_index() {
+        // #8062: held across BOTH `$HOME` reads, not just the first.
+        let _home = crate::test_env::HOME_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let agents = tmp.path().join("agents");
         agent_dir(

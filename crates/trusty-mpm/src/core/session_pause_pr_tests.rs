@@ -624,7 +624,7 @@ fn publish_opens_the_pr_through_tm_pr_open() {
         ]
     );
 
-    // The body file `tm pr open` was handed satisfies the seven-field contract.
+    // The body file `tm pr open` was handed satisfies the nine-field contract.
     // It is read as `tm` saw it: the scratch directory is gone by now.
     let (body_path, body) = vcs.bodies.borrow()[0].clone();
     for heading in [
@@ -633,6 +633,10 @@ fn publish_opens_the_pr_through_tm_pr_open() {
         "## Risk",
         "## Tests",
         "## Baseline",
+        // #7336 widened the contract; the generated body must carry the two
+        // disclosure fields or `tm pr open` would refuse its own pause PR.
+        "## Gates not run",
+        "## Partial-red accounting",
         "## Docs",
         "## Review",
     ] {

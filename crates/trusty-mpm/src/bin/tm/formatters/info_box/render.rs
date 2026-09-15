@@ -11,7 +11,7 @@
 
 use unicode_width::UnicodeWidthStr as _;
 
-use super::{DaemonInfo, WelcomeData};
+use super::{ConsoleInfo, DaemonInfo, WelcomeData};
 // LOGO / LOGO_COLS are only used by render_welcome_panel which is test-only.
 #[cfg(test)]
 use super::{LOGO, LOGO_COLS};
@@ -64,8 +64,10 @@ pub(crate) fn render_welcome_panel(data: &WelcomeData) -> String {
 /// (`banner::two_panel`) to populate the right panel without re-implementing
 /// the row-building logic.
 /// What: returns rows in display order: header, project/workspace, optional
-/// reconnecting, optional commit section, service section, commands section.
-/// Test: covered by `render_welcome_panel` tests; `two_panel_compose_alignment`.
+/// reconnecting, optional commit section, service section (console first since
+/// #6761, then daemon, memory, search, review), commands section.
+/// Test: covered by `render_welcome_panel` tests; `two_panel_compose_alignment`;
+/// `welcome_panel_renders_the_console_row_with_its_port`.
 pub(crate) fn build_rows(data: &WelcomeData) -> Vec<String> {
     let version = env!("CARGO_PKG_VERSION");
     let workspace = super::abbreviate_home(&data.workspace);
@@ -104,6 +106,8 @@ pub(crate) fn build_rows(data: &WelcomeData) -> Vec<String> {
     // ── Services ─────────────────────────────────────────────────────────────
     rows.push(String::new());
     rows.push("services".to_string());
+    // #6761: the console is what an operator opens in a browser, so it leads.
+    rows.push(format_console_row(&data.console));
     rows.push(format_daemon_row(&data.daemon));
     rows.push(format_service_row("memory", &data.memory_status));
     rows.push(format_service_row("search", &data.search_status));
@@ -120,6 +124,32 @@ pub(crate) fn build_rows(data: &WelcomeData) -> Vec<String> {
 }
 
 // ── Row formatters ────────────────────────────────────────────────────────────
+
+/// Format the console status row.
+///
+/// Why (#6761): the operator opens the console in a browser, so this row prints
+/// the port — the one place in the block where an address is the point. It is
+/// the console's OWN port, read from its discovery record, and never the
+/// daemon's, which #6869 removed from the row below and which this row must not
+/// reintroduce under a new label.
+/// What: `"  \u{25cf} console  :7788"` when the probe answered, using the port
+/// half of [`ConsoleInfo::addr`]; `"  \u{25cb} console  offline"` when it did
+/// not, and also when the address carries no port to show — an offline row
+/// names no address at all.
+/// Test: `welcome_panel_renders_the_console_row_with_its_port`,
+/// `welcome_panel_console_row_offline_names_no_port`,
+/// `welcome_panel_never_contains_the_daemon_port`.
+fn format_console_row(console: &ConsoleInfo) -> String {
+    let port = console
+        .addr
+        .rsplit_once(':')
+        .map(|(_, port)| port)
+        .filter(|port| console.online && !port.is_empty());
+    match port {
+        Some(port) => format!("  \u{25cf} console  :{port}"),
+        None => "  \u{25cb} console  offline".to_string(),
+    }
+}
 
 /// Format the daemon status row.
 ///
@@ -252,6 +282,7 @@ mod tests {
             reconnecting: false,
             session_name: String::new(),
             daemon: offline_daemon(),
+            console: ConsoleInfo::default(),
             recent_commits: vec![],
             memory_status: "(not detected)".to_string(),
             search_status: "(not detected)".to_string(),
@@ -315,6 +346,63 @@ mod tests {
             !offline.contains("127.0.0.1") && !offline.contains("7880"),
             "offline row must name no address: {offline}"
         );
+    }
+
+    /// Why (#6761): owner ruling 2026-09-03 — the services block must show the
+    /// console and the port an operator types into a browser, not only the
+    /// daemon. The port is taken from the probed address, so a console moved
+    /// off its default is still reachable from what the banner prints.
+    /// What: renders through both the standalone panel and the production
+    /// two-panel row builder, with a non-default port so the assertion cannot
+    /// pass against a hardcoded 7788, and pins the console row ahead of the
+    /// daemon row.
+    /// Test: this is the test.
+    #[test]
+    fn welcome_panel_renders_the_console_row_with_its_port() {
+        let data = WelcomeData {
+            console: ConsoleInfo {
+                addr: "127.0.0.1:9312".to_string(),
+                online: true,
+            },
+            ..base_data()
+        };
+        let panel = render_welcome_panel(&data);
+        let rows = crate::formatters::info_box::render_info_box_rows(&data);
+        assert!(
+            panel.contains("console  :9312"),
+            "the console row must name its own port: {panel}"
+        );
+        for (label, out) in [("panel", &panel), ("two-panel rows", &rows.join("\n"))] {
+            let console_at = out.find("console").expect("console row");
+            let daemon_at = out.find("daemon").expect("daemon row");
+            assert!(
+                console_at < daemon_at,
+                "{label}: the console row renders first: {out}"
+            );
+        }
+    }
+
+    /// Why (#6761): the row is probed, so "console" must never imply "reachable".
+    /// What: the offline form carries the `○` glyph, the word `offline`, and no
+    /// address at all — including when the probe answered but the resolved
+    /// address carries no port to print.
+    /// Test: this is the test.
+    #[test]
+    fn welcome_panel_console_row_offline_names_no_port() {
+        for console in [
+            ConsoleInfo {
+                addr: "127.0.0.1:9312".to_string(),
+                online: false,
+            },
+            ConsoleInfo {
+                addr: "localhost".to_string(),
+                online: true,
+            },
+            ConsoleInfo::default(),
+        ] {
+            let row = format_console_row(&console);
+            assert_eq!(row, "  \u{25cb} console  offline", "{console:?}");
+        }
     }
 
     #[test]
@@ -558,6 +646,11 @@ mod tests {
                 addr: "127.0.0.1:7880".to_string(),
                 online: true,
                 session_count: Some(2),
+            },
+            // #6761: the services block gained a console row.
+            console: ConsoleInfo {
+                addr: "127.0.0.1:7788".to_string(),
+                online: true,
             },
             recent_commits: vec![
                 CommitLine {

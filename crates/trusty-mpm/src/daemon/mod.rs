@@ -18,6 +18,8 @@ pub mod builder_slot_routes;
 pub mod bus;
 /// Response-size bound for the `session_context_catchup` digest (#5557).
 pub mod catchup_bounds;
+/// Whether the repo has moved past the snapshot a resume would act on (#7501).
+pub mod catchup_superseded;
 pub mod claude_config;
 pub mod coordinator;
 /// Delegation query routes merged into the main router (#4480).
@@ -541,7 +543,10 @@ const REAP_INTERVAL_SECS: u64 = 60;
 /// [`DaemonState::sweep_delegations`] (#2864) — unconditionally, since bounding
 /// delegation liveness and map growth has nothing to do with tmux being
 /// discoverable, and it is here rather than on the `PreToolUse` hot path
-/// precisely because it is an O(N) pass.
+/// precisely because it is an O(N) pass. #6556: and
+/// [`services::stop_spool_drain::drain_unposted_stops`] first, so a stop a hook
+/// parked while this daemon was down resolves its delegation instead of the
+/// sweep aging the record out six hours later.
 /// Test: the reaping rule is unit-tested via `DaemonState::reap_against`;
 /// `cancel_token_stops_reap_loop_cleanly` asserts the loop exits on cancel.
 async fn reap_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::CancellationToken) {
@@ -553,6 +558,12 @@ async fn reap_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cancellati
                 break;
             }
             _ = tick.tick() => {
+                // #6556: BEFORE the sweep. A stop a hook parked on disk while
+                // this daemon was down is the truth about a delegation the
+                // sweep would otherwise leave Running for six hours; replaying
+                // it first means the sweep sees the recovered record, not the
+                // stale one it would have had to age out.
+                crate::daemon::services::stop_spool_drain::drain_unposted_stops(&state).await;
                 let sweep = state.sweep_delegations();
                 if sweep.staled > 0 || sweep.evicted > 0 {
                     info!(

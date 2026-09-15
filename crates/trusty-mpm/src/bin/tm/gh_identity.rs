@@ -252,17 +252,28 @@ mod tests {
     // `trusty_mpm::core::gh_account_enforce`'s test convention (and this
     // workspace's established fake-binary-via-PATH pattern).
 
-    // Serialises PATH mutation across the tests below — cargo runs unit
-    // tests in parallel and env vars are process-global. Mirrors the
-    // established local-`static ENV_LOCK` convention already used elsewhere
-    // in this binary (e.g. `formatters::banner::source`,
-    // `commands::managed_root`) rather than depending on the library's
-    // `#[cfg(test)]`-gated (and therefore crate-external-invisible)
-    // `env_test_lock`.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
+    // Serialises PATH mutation across the tests below — cargo runs unit tests
+    // in parallel and env vars are process-global. #7996: this used to be a
+    // module-local `static ENV_LOCK`, which serialised only these three tests
+    // while `test_support::tmux_session` execs a bare `tmux` the OS resolves
+    // through the very `$PATH` they rewrite. The binary target's one PATH
+    // regime now lives in `test_support`, where both sides can reach it.
     fn fake_gh_lock() -> std::sync::MutexGuard<'static, ()> {
-        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        crate::test_support::lock_path_env()
+    }
+
+    /// #7996, inverted into an assertion: the PATH override these tests install
+    /// and the tmux fixture's spawn seam must contend on ONE mutex, or the
+    /// fixture can still exec while `$PATH` is mid-rewrite.
+    /// Test: itself.
+    #[test]
+    fn gh_path_override_and_the_tmux_fixture_share_one_lock() {
+        let _g = fake_gh_lock();
+        assert!(
+            crate::test_support::path_env_mutex().try_lock().is_err(),
+            "`fake_gh_lock` must hold the same mutex `test_support::lock_path_env` hands \
+             the tmux fixture (#7996)"
+        );
     }
 
     #[cfg(unix)]

@@ -484,11 +484,11 @@ fn ensure_deployment_complete_noops_for_unknown_workspace() {
     // a fixed placeholder base (no I/O, no tempdir) is sufficient.
     let id = ManagedSessionId::new();
     let fw = crate::core::paths::FrameworkPaths::under("/nonexistent-fw-base-for-test");
-    let result = ensure_deployment_complete(&fw, std::path::Path::new("/unknown"), None, &id);
+    let result = ensure_deployment_complete(&fw, std::path::Path::new("/unknown"), None, &id, None);
     assert!(result.is_ok());
 
     let missing = std::path::Path::new("/this/path/does/not/exist/anywhere");
-    let result = ensure_deployment_complete(&fw, missing, None, &id);
+    let result = ensure_deployment_complete(&fw, missing, None, &id, None);
     assert!(result.is_ok());
 }
 
@@ -544,7 +544,7 @@ fn ensure_deployment_complete_ok_when_already_complete() {
     .unwrap();
 
     let id = ManagedSessionId::new();
-    let result = ensure_deployment_complete(&fw, &workspace, None, &id);
+    let result = ensure_deployment_complete(&fw, &workspace, None, &id, None);
     assert!(result.is_ok(), "expected Ok, got {result:?}");
 }
 
@@ -678,7 +678,7 @@ fn ensure_deployment_complete_does_not_abort_when_no_carrier_reachable() {
     fw.trusty_mpm_root = None;
     let id = ManagedSessionId::new();
 
-    let result = ensure_deployment_complete(&fw, &workspace, None, &id);
+    let result = ensure_deployment_complete(&fw, &workspace, None, &id, None);
 
     // Restore write permission so the TempDir can clean itself up.
     let _ = std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o755));
@@ -802,8 +802,8 @@ async fn spawn_managed_on_main_creates_record_without_worktree() {
 /// synchronously on a current-thread runtime). The count is observable when the
 /// adapter reaches its reachability read (a `claude` binary is resolvable); the
 /// source assertion covers hosts where the adapter stops earlier. Preparation's
-/// own probes, including the deployment auto-repair's re-preparation, are not
-/// the adapter's and are not counted.
+/// own probe is not the adapter's and is not counted; since #7763 the
+/// deployment auto-repair's re-preparation makes no probe of its own either.
 /// Test: itself.
 #[tokio::test]
 #[serial_test::serial]
@@ -865,6 +865,44 @@ async fn spawn_managed_on_main_hands_the_adapter_the_prepared_reachability() {
         crate::core::memory_reachable::ADAPTER_REPROBES_ON_THIS_THREAD.with(std::cell::Cell::get),
         0,
         "the adapter must reuse the reachability preparation resolved, not probe again"
+    );
+}
+
+/// Both launch gates hand their repair the reachability already resolved (#7763).
+///
+/// Why: `ensure_deployment_complete`'s repair re-runs the whole preparation
+/// pipeline, so a call site passing `None` put a second `PROBE_TIMEOUT` on every
+/// launch against a slow trusty-memory. That cost is invisible in the session
+/// that results — nothing downstream records which probe answered — so the
+/// threading is pinned where it is decided, at the call site.
+/// What: reads the two spawn call sites and asserts each forwards its own
+/// resolved value, whitespace-normalized so `cargo fmt` cannot break the match.
+/// The resume path prepares nothing and keeps `None`, which is why only the two
+/// spawn sites are asserted here.
+/// Test: itself.
+#[test]
+fn both_launch_gates_reuse_the_resolved_reachability() {
+    /// Collapse every run of whitespace to one space, so a rewrap cannot fail this.
+    fn flat(src: &str) -> String {
+        src.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    let on_main = flat(include_str!("launch_on_main.rs"));
+    assert!(
+        on_main.contains(
+            "ensure_deployment_complete( &fw, local_path, record.repo_url.as_deref(), \
+             session_id, memory_reachable, )"
+        ),
+        "launch-on-main must hand the gate the reachability preparation resolved"
+    );
+
+    let inproject = flat(include_str!("lifecycle.rs"));
+    assert!(
+        inproject.contains(
+            "let url = record.repo_url.as_deref(); if let Err(reason) = \
+             ensure_deployment_complete(&fw, &worktree, url, session_id, reachable)"
+        ),
+        "the in-project spawn must hand the gate the reachability preparation resolved"
     );
 }
 

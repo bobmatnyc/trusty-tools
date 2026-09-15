@@ -109,6 +109,31 @@ the guard will establish every precondition itself.
      returns at least one row. Ancestry is not an acceptable substitute: every
      merge on this repository is a squash merge, so a merged branch's tip is
      structurally never an ancestor of the squash commit.
+
+     Amended by #7914 — a MERGED pull request is no longer the ONLY route to
+     landing evidence. `local-only-commits` (`git rev-list --count HEAD --not
+     --remotes=origin`) answers the question this check stands in for directly,
+     and a literal zero grants on its own: every commit the worktree holds is
+     already on an `origin` ref, so the removal can destroy no history. That is
+     what admits the three shapes the original wording refused outright — a
+     worktree branched off `origin/main` and never committed to, a branch
+     fast-forwarded into a sibling that landed, and a detached-HEAD tree with no
+     branch name to search GitHub by. The guarantee is unchanged: no removal
+     without evidence the commits reached the remote. Only a zero admits, so a
+     non-zero count and a `rev-list` that could not be answered both fall
+     through to the merged-PR check unchanged — a relaxation that cannot be
+     established never grants, which is decision 6 applied in the one direction
+     available to it.
+
+     `refs/remotes/origin/*` is a LOCAL cache, so the check refreshes it with a
+     bounded `git fetch --prune origin` immediately before counting. A branch
+     deleted on GitHub by any route other than a fetch in that worktree — `gh
+     pr close --delete-branch`, the web UI, another clone — otherwise leaves a
+     ref vouching for commits the remote no longer has, and the admission would
+     destroy the only surviving copy. The bound is 3 s, below the `PreToolUse`
+     hook's own 5 s registration: a hook Claude Code kills emits no decision at
+     all, and no decision is not a deny. A refresh that fails or expires makes
+     the count unanswerable, which does not grant.
 6. Every re-check fails CLOSED. A fact the guard cannot establish denies — the
    ADR-0045 distinction between absent and undeterminable, applied to a gate
    whose ALLOW deletes a checkout. This is the opposite bias from

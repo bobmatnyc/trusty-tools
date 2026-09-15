@@ -14,7 +14,10 @@
 //! message ids against an in-memory set seeded from the durable event log,
 //! fetch each new message's summary fields, append a `StoredEvent`
 //! (unconditionally — every event is durably stored regardless of wake
-//! outcome), and hand the event to `wake::wake_bound_agents` when it's
+//! outcome) and only THEN mark the id seen (#7478 — see
+//! `mark_seen_after_durable_append`; a cycle that failed to store holds the
+//! cursor back so the window is re-listed), and hand the event to
+//! `wake::wake_bound_agents` when it's
 //! event-type-included. A cycle-local `DispatchBudget` threads through
 //! the per-event loop so at most ONE wake actually dispatches per
 //! `poll_once` call — every qualifying event after the first is rate-limited
@@ -149,27 +152,50 @@ async fn save_cursor(listener_name: &str, cursor: &Cursor) -> Result<()> {
 /// server process, never a one-shot CLI invocation.
 /// What: Fire-and-forget `tokio::task::spawn` per listener, mirroring the
 /// existing background-docs-index-build pattern in `api/server/routes.rs`.
-pub fn spawn_listeners(listeners: Vec<ListenerConfig>, project_path: PathBuf) {
-    for cfg in listeners {
-        if !cfg.enabled {
-            tracing::debug!(listener = %cfg.name, "listener disabled; skipping");
+///
+/// #7609: takes the merged [`crate::channels::Channel`] list and decides from
+/// the CHANNEL — every enabled Global gmail channel polls, whether or not it
+/// names anyone in `route_to`, because ingest and wake are separate stages and
+/// `route_to` governs only the second. The poll loop itself still reads the
+/// [`ListenerConfig`] projection, which is lossless for every field it uses.
+/// Test: `an_enabled_global_channel_polls_with_or_without_route_to`.
+pub fn spawn_listeners(channels: Vec<crate::channels::Channel>, project_path: PathBuf) {
+    for cfg in pollable_listeners(&channels) {
+        let project_path = project_path.clone();
+        tracing::info!(listener = %cfg.name, interval_secs = cfg.poll_interval_secs, "starting gmail listener poll loop");
+        tokio::task::spawn(run_gmail_poll_loop(cfg, project_path));
+    }
+}
+
+/// The channels [`spawn_listeners`] starts a poller for, as listener configs.
+///
+/// Why: split out so the selection rule is testable without spawning a task or
+/// reaching Gmail.
+/// What: Global scope, `enabled`, provider `gmail`. Anything else is logged and
+/// skipped — `google-calendar` is a documented-but-unimplemented connector
+/// (DOC-54 §7.5), and an Assistant-scope channel is not the harness's to poll.
+/// Test: `an_enabled_global_channel_polls_with_or_without_route_to`.
+fn pollable_listeners(channels: &[crate::channels::Channel]) -> Vec<ListenerConfig> {
+    let mut pollable = Vec::new();
+    for channel in channels {
+        if channel.scope != crate::channels::ChannelScope::Global {
             continue;
         }
-        match cfg.connector.as_str() {
-            "gmail" => {
-                let project_path = project_path.clone();
-                tracing::info!(listener = %cfg.name, interval_secs = cfg.poll_interval_secs, "starting gmail listener poll loop");
-                tokio::task::spawn(run_gmail_poll_loop(cfg, project_path));
-            }
-            other => {
-                tracing::warn!(
-                    listener = %cfg.name,
-                    connector = %other,
-                    "listener connector not yet implemented; skipping (deferred — see PR body)"
-                );
-            }
+        if !channel.enabled {
+            tracing::debug!(listener = %channel.id, "listener disabled; skipping");
+            continue;
+        }
+        if channel.provider == "gmail" {
+            pollable.push(channel.to_listener_config());
+        } else {
+            tracing::warn!(
+                listener = %channel.id,
+                connector = %channel.provider,
+                "listener connector not yet implemented; skipping (deferred — see PR body)"
+            );
         }
     }
+    pollable
 }
 
 /// Long-running poll loop for one Gmail listener. Never returns under
@@ -299,6 +325,11 @@ async fn poll_once(
         .map(str::to_string);
 
     let mut new_count = 0usize;
+    // #7478: set when a message in THIS cycle could not be durably stored.
+    // The cursor is then held back so the next poll re-lists the same history
+    // window — leaving the message unmarked is what lets it through the dedup
+    // gate, and holding the cursor is what makes it reappear at all.
+    let mut store_failed = false;
     // #3820 code-critic CRITICAL fix: cycle-local gate enforcing "max one
     // wake per poll cycle" — every qualifying event in THIS `poll_once` call
     // after the first is rate-limited (see `wake::gate_wake`), never
@@ -323,12 +354,13 @@ async fn poll_once(
                     continue;
                 };
                 let event_id = format!("{}:{}", cfg.name, msg_id);
+                // #7478: membership only — the marker is written after the
+                // append lands, in `mark_seen_after_durable_append` below.
                 {
-                    let mut seen = dedup.lock().await;
+                    let seen = dedup.lock().await;
                     if seen.contains(&event_id) {
                         continue;
                     }
-                    seen.insert(event_id.clone());
                 }
 
                 let event = match fetch_event_summary(client, account, &cfg.name, msg_id, &event_id)
@@ -336,17 +368,35 @@ async fn poll_once(
                 {
                     Ok(ev) => ev,
                     Err(e) => {
+                        // #7478: unmarked, so a re-listed window retries it.
+                        // The cursor still advances past a message we could
+                        // never read — a deleted one would otherwise wedge the
+                        // listener on the same window forever.
                         tracing::warn!(listener = %cfg.name, message_id = %msg_id, error = %e, "gmail listener: failed to fetch message summary; skipping");
                         continue;
                     }
                 };
 
                 if !cfg.filter.matches_labels(&event.labels) {
+                    // #7478: a filtered message has no event to lose, so the
+                    // marker is safe here and spares a re-fetch every cycle.
+                    dedup.lock().await.insert(event_id.clone());
                     continue;
                 }
 
-                if let Err(e) = EventStore::append(&event).await {
-                    tracing::warn!(listener = %cfg.name, error = %e, "gmail listener: failed to persist event");
+                // #7478: store first, mark second. The marker is the claim
+                // that this message has been dealt with, and only a landed
+                // append makes that claim true.
+                if !mark_seen_after_durable_append(
+                    dedup,
+                    &cfg.name,
+                    &event_id,
+                    EventStore::append(&event),
+                )
+                .await
+                {
+                    store_failed = true;
+                    continue;
                 }
                 new_count += 1;
 
@@ -374,9 +424,9 @@ async fn poll_once(
                 } else {
                     crate::api::server::agent_channels::inbound::InboundOutcome::default()
                 };
-                match wake_path(included, claim.claimed) {
-                    WakePath::ChannelBinding => {
-                        tracing::info!(listener = %cfg.name, event_id = %event.id, dispatched = claim.dispatched, rate_limited = claim.rate_limited, "wake decision: claimed by a channel binding");
+                match wake_path(included, claim.claimed, claim.source) {
+                    WakePath::Channel(source) => {
+                        tracing::info!(listener = %cfg.name, event_id = %event.id, source = %source.as_str(), dispatched = claim.dispatched, rate_limited = claim.rate_limited, "wake decision: claimed on the channel path");
                     }
                     WakePath::Listener => {
                         let outcome =
@@ -394,17 +444,58 @@ async fn poll_once(
         }
     }
 
-    if let Some(next_id) = next_history_id {
-        save_cursor(
-            &cfg.name,
-            &Cursor {
-                history_id: Some(next_id),
-            },
-        )
-        .await?;
+    match next_history_id {
+        // #7478: advancing past a window whose event never reached the store
+        // is what turns a transient append failure into a permanent drop —
+        // the message would never appear in a history response again.
+        Some(_) if store_failed => {
+            tracing::warn!(listener = %cfg.name, "gmail listener: holding the history cursor; an event in this cycle was not durably stored");
+        }
+        Some(next_id) => {
+            save_cursor(
+                &cfg.name,
+                &Cursor {
+                    history_id: Some(next_id),
+                },
+            )
+            .await?;
+        }
+        None => {}
     }
 
     Ok(new_count)
+}
+
+/// Mark `event_id` seen only once its event is durably stored (#7478).
+///
+/// Why: the dedup set is a claim that a message has been dealt with, and the
+/// only thing that makes that claim true is a landed
+/// [`EventStore::append`]. Inserting first — as `poll_once` did until #7478 —
+/// turned any append error into a silent, permanent drop: the marker survived,
+/// the event did not, and no later poll looked at that message again. An
+/// unstored event is data loss, so the failure arm logs at ERROR rather than
+/// downgrading it to a warning the operator never reads.
+/// What: awaits `append`; on success inserts the id and returns `true`, on
+/// failure leaves the set untouched and returns `false` so the next poll's
+/// dedup gate lets the message through. Taking the append as a future is the
+/// seam that lets a test inject a store failure with no Gmail mailbox.
+/// Test: `a_failed_append_leaves_the_message_unmarked_for_the_next_poll`.
+async fn mark_seen_after_durable_append(
+    dedup: &Mutex<HashSet<String>>,
+    listener: &str,
+    event_id: &str,
+    append: impl std::future::Future<Output = Result<()>>,
+) -> bool {
+    match append.await {
+        Ok(()) => {
+            dedup.lock().await.insert(event_id.to_string());
+            true
+        }
+        Err(e) => {
+            tracing::error!(listener = %listener, event_id = %event_id, error = %e, "gmail listener: failed to persist event; leaving it unmarked so the next poll retries it");
+            false
+        }
+    }
 }
 
 /// Which inbound path one stored event takes — exactly one, never both.
@@ -415,23 +506,40 @@ async fn poll_once(
 /// wake the same assistant twice for the same mail, from two different prompts.
 /// Making the choice an enum is what makes "never both" a property a test can
 /// state rather than a reading of the `if` that used to be here.
+///
+/// #7609: the channel path now covers three sources, not one —
+/// [`crate::channels::dispatch::WakeSource`] says which, and a legacy
+/// `[[listeners]]` binding handled there must NOT also reach the listener wake
+/// below.
 /// Test: `gmail_event_takes_exactly_one_wake_path`.
 #[derive(Debug, PartialEq, Eq)]
 enum WakePath {
     /// The event type is excluded; nothing is dispatched.
     Excluded,
-    /// A saved channel binding addressed it and has already dispatched.
-    ChannelBinding,
-    /// No binding addressed it, so the `[[listeners]]` wake still applies.
+    /// A channel addressed it and the channel path has already dispatched.
+    Channel(crate::channels::dispatch::WakeSource),
+    /// No channel addressed it, so the `[[listeners]]` wake still applies.
     Listener,
 }
 
+/// The one inbound path this event took.
+///
+/// What: an excluded event type dispatches nothing however it is addressed. A
+/// source names the channel that was selected. `claimed` without a source is a
+/// channel that OWNS the destination but woke nobody — a disabled binding, a
+/// filter that rejected the event — and the listener wake still stands down,
+/// exactly as it did before this slice.
 /// Test: `gmail_event_takes_exactly_one_wake_path`.
-fn wake_path(included: bool, claimed_by_binding: bool) -> WakePath {
-    match (included, claimed_by_binding) {
-        (false, _) => WakePath::Excluded,
-        (true, true) => WakePath::ChannelBinding,
-        (true, false) => WakePath::Listener,
+fn wake_path(
+    included: bool,
+    claimed: bool,
+    source: Option<crate::channels::dispatch::WakeSource>,
+) -> WakePath {
+    match (included, claimed, source) {
+        (false, _, _) => WakePath::Excluded,
+        (true, _, Some(source)) => WakePath::Channel(source),
+        (true, true, None) => WakePath::Channel(crate::channels::dispatch::WakeSource::NoWake),
+        (true, false, None) => WakePath::Listener,
     }
 }
 
@@ -455,10 +563,12 @@ async fn channel_binding_claim(
     project_path: &Path,
     budget: &mut crate::api::server::agent_channels::inbound::DispatchBudget,
 ) -> crate::api::server::agent_channels::inbound::InboundOutcome {
-    let identity = crate::rbac::UserIdentity::new(
+    // #7609: the display name comes from a remote `From:` header, so it is
+    // sanitized at construction rather than wherever it is later logged.
+    let identity = crate::rbac::UserIdentity::from_remote(
         format!("gworkspace:{}", event.listener_id),
-        event.from.clone().unwrap_or_else(|| "gworkspace".into()),
-        crate::rbac::ServiceTier::default(),
+        event.from.as_deref(),
+        "gworkspace",
     );
     crate::api::server::agent_channels::inbound::receive_inbound(
         "gworkspace",
@@ -574,11 +684,70 @@ mod tests {
     /// and a debug log inline, and there was no channel path to choose against.
     #[test]
     fn gmail_event_takes_exactly_one_wake_path() {
-        assert_eq!(wake_path(true, true), WakePath::ChannelBinding);
-        assert_eq!(wake_path(true, false), WakePath::Listener);
+        use crate::channels::dispatch::WakeSource;
+        assert_eq!(
+            wake_path(true, true, None),
+            WakePath::Channel(WakeSource::NoWake),
+            "a claimed-but-unwoken destination still stands the listener down"
+        );
+        assert_eq!(wake_path(true, false, None), WakePath::Listener);
         // An excluded event type dispatches nothing, however it is addressed.
-        assert_eq!(wake_path(false, true), WakePath::Excluded);
-        assert_eq!(wake_path(false, false), WakePath::Excluded);
+        assert_eq!(wake_path(false, true, None), WakePath::Excluded);
+        assert_eq!(wake_path(false, false, None), WakePath::Excluded);
+
+        // #7609: each of the three channel sources is the channel path, and
+        // NONE of them also runs the `[[listeners]]` wake below.
+        for source in [
+            WakeSource::AssistantChannel,
+            WakeSource::GlobalRouteTo,
+            WakeSource::LegacyBinding,
+        ] {
+            assert_eq!(
+                wake_path(true, true, Some(source)),
+                WakePath::Channel(source)
+            );
+            assert_eq!(wake_path(false, true, Some(source)), WakePath::Excluded);
+        }
+    }
+
+    /// Every enabled Global gmail channel polls, `route_to` or not — and
+    /// nothing else does.
+    ///
+    /// Why (#7609): ingest is stage one and wake is stage two. A global channel
+    /// that routes to nobody must still fill the event store, or the operator
+    /// who adds `route_to` later finds an empty mailbox history.
+    #[test]
+    fn an_enabled_global_channel_polls_with_or_without_route_to() {
+        use crate::channels::{Channel, ChannelScope};
+        let gmail = |id: &str, enabled: bool, route_to: Vec<String>| Channel {
+            id: id.into(),
+            name: id.into(),
+            provider: "gmail".into(),
+            scope: ChannelScope::Global,
+            enabled,
+            route_to,
+            ..Channel::default()
+        };
+        let channels = vec![
+            gmail("routed", true, vec!["izzie".into()]),
+            gmail("unrouted", true, vec![]),
+            gmail("off", false, vec![]),
+            Channel {
+                provider: "slack".into(),
+                ..gmail("team-slack", true, vec![])
+            },
+            Channel {
+                scope: ChannelScope::Assistant,
+                ..gmail("izzie-own", true, vec![])
+            },
+        ];
+        assert_eq!(
+            pollable_listeners(&channels)
+                .iter()
+                .map(|cfg| cfg.name.clone())
+                .collect::<Vec<_>>(),
+            vec!["routed".to_string(), "unrouted".to_string()]
+        );
     }
 
     #[test]
@@ -698,6 +867,45 @@ mod tests {
         assert!(
             loaded.history_id.is_none(),
             "malformed cursor file must fall back to no-cursor, not panic or propagate"
+        );
+    }
+
+    /// A failed durable append leaves the message unmarked, so the next poll
+    /// retries it instead of dropping it forever (#7478).
+    ///
+    /// Why: `poll_once` inserted the dedup marker BEFORE the fetch and the
+    /// append, so an `EventStore::append` error left a message claimed-as-seen
+    /// with nothing in the event log — a silent, unrecoverable drop. The
+    /// ordering is the whole fix, and this is it stated as a property: the
+    /// marker exists only where the event does.
+    /// Test: itself.
+    #[tokio::test]
+    async fn a_failed_append_leaves_the_message_unmarked_for_the_next_poll() {
+        let dedup: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+        let event_id = "gmail-personal:18f0cafe";
+
+        // Cycle 1: the event store is down.
+        let stored = mark_seen_after_durable_append(&dedup, "gmail-personal", event_id, async {
+            Err(anyhow::anyhow!("events.jsonl: no space left on device"))
+        })
+        .await;
+        assert!(
+            !stored,
+            "a failed append must not report the event as stored"
+        );
+        assert!(
+            !dedup.lock().await.contains(event_id),
+            "a message whose event never landed must stay unmarked, or no poll looks at it again"
+        );
+
+        // Cycle 2: the store recovers and the SAME message is retried.
+        let stored =
+            mark_seen_after_durable_append(&dedup, "gmail-personal", event_id, async { Ok(()) })
+                .await;
+        assert!(stored, "the retry must report the event as stored");
+        assert!(
+            dedup.lock().await.contains(event_id),
+            "a durably stored event must be marked, so the next cycle dedups it"
         );
     }
 

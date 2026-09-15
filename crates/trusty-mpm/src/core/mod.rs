@@ -306,7 +306,11 @@ pub mod stack_profile;
 pub mod staged_paths;
 pub mod stale_skills;
 pub mod standalone;
+// #6556: a `SubagentStop` the hook could not deliver, parked on disk where the
+// daemon's reap loop replays it — instead of the record sitting Running for the
+// six hours of `RUNNING_STALE_AFTER_SECS`.
 pub mod startup_context;
+pub mod stop_spool;
 // #7617: the one seed-or-repair rule for the `statusLine` settings entry, which
 // every tier's writer and `tm doctor --fix` go through.
 pub mod statusline_settings;

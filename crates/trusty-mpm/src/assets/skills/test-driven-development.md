@@ -243,6 +243,16 @@ admin = create_test_user(role='admin')
 guest = create_test_user(email='guest@example.com')
 ```
 
+### 5. Prop-Removal Checklist (`...rest` Spread)
+
+A prop removed from a component that forwards `...rest` keeps compiling at
+every call site still passing it — `tsc` misses it, and the value leaks onto
+the DOM as a stray attribute (#7371). When the changed component forwards
+unknown props:
+1. Grep every call site for the bare prop name, not just typed usage.
+2. Add a rendered-DOM assertion test that fails if the removed prop's
+   attribute still appears in output.
+
 ## Testing Anti-Patterns to Avoid
 
 ### ❌ Testing Implementation Details

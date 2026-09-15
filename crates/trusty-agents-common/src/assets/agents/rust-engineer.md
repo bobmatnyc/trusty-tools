@@ -32,17 +32,22 @@ cargo test -p <crate> --no-fail-fast                  # EVERY test target runs
 cargo fmt --check                                     # no formatting drift
 ```
 
-🔴 Run `cargo fmt` before the FIRST edit too, not only at the end — an
-end-only run rewraps files already read and can invalidate line numbers
-still in use (#7635).
+🔴 Run `cargo fmt` before the FIRST edit too — an end-only run rewraps files
+already read and can invalidate line numbers still in use (#7635).
+
+🔴 **Renamed/moved a test? Run `check_test_pointers.sh` right after, before
+`cargo test`** — a stale `Test:` pointer otherwise surfaces only once the
+full suite has already paid its runtime. Example: `test_foo` → `test_foo_v2`,
+call sites updated, still passes `cargo test`, but a doc pointer naming
+`test_foo` is now wrong; catch it before the suite runs.
 
 🔴 **`--no-fail-fast` is not optional** — cargo stops issuing further test
-targets after one fails, hiding every target behind it (issue #5324, PR
-#5904). **An empty-default-feature crate needs `--features` on every test
-run** — read `Cargo.toml` first, name the features that cover your change.
-Reproduce a feature-gated break with `cargo check -p <crate> --all-targets
---features <set>`; in a cold worktree, `cargo test --no-run --features <set>`
-before the feature-union run keeps it inside one invocation (#7552).
+targets after one fails, hiding every target behind it (#5324, PR #5904).
+**An empty-default-feature crate needs `--features` on every test run** —
+read `Cargo.toml` first, name the features that cover your change. Reproduce
+a feature-gated break with `cargo check -p <crate> --all-targets --features
+<set>`; in a cold worktree, `cargo test --no-run --features <set>` first
+keeps the feature-union run inside one invocation (#7552).
 
 Widen the scope when the change is wider, not by default:
 
@@ -56,17 +61,16 @@ Widen the scope when the change is wider, not by default:
 `cargo test --workspace` belongs at hardening and release boundaries, not
 every narrow change.
 
-🔴 A crate with its own multi-lane test script runs that instead of the
-four-command bar — find it via CLAUDE.md/`scripts/`, never assume a filename.
-Touched a doc comment? Run this project's own doc gates the same way; none
-shipped → the BASE-AGENT fallbacks apply instead.
+🔴 A crate with its own multi-lane test script runs that instead — find it
+via CLAUDE.md/`scripts/`, never assume a filename. Same for doc comments; no
+project gate shipped → the BASE-AGENT fallbacks apply.
 
 ### Scope is for speed — never for hiding a failure
 
 Narrowing to `-p <crate>` for speed is correct; narrowing to make a red test
-disappear is not. **Never make a red gate green by deleting coverage** — no
-`#[ignore]`, `cfg`-gating, `--exclude`, or `--lib`-narrowing: shrink the scope
-you *run*, never the coverage that *exists*.
+disappear is not — no `#[ignore]`, `cfg`-gating, `--exclude`, or
+`--lib`-narrowing: shrink the scope you *run*, never the coverage that
+*exists*.
 
 When a gate fails, establish whether your branch caused it. If so, fix it
 here; if pre-existing, report "change-specific gates pass; `<gate>` blocked

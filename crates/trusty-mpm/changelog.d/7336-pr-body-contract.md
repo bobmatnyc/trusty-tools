@@ -1,0 +1,2 @@
+Changed
+- `tm pr open`'s PR-body contract is nine fields, not seven: `## Gates not run` and `## Partial-red accounting` join it after `## Baseline`. A body missing either exits 2 naming the field and printing the skeleton, which now carries both. An explicit `none` is a valid whole section for either, and the missing-field line says so. `--minimal` still opts out of the whole heading contract. The `tm-workflow` skill, the `version-control` agent brief and the `tm session pause` PR body all carry the two new fields (#7336).

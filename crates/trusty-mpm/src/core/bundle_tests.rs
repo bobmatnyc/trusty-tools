@@ -916,6 +916,44 @@ fn code_critic_declared_skills_are_in_bundle() {
 }
 
 #[test]
+fn code_review_standards_flags_github_token_protected_branch_pushes_8016() {
+    // Issue #8016: `code-review-standards` had no check for a workflow
+    // granted `contents: write` that pushes to a protected branch using
+    // `GITHUB_TOKEN` — GitHub never allows the Actions identity as a
+    // restriction or ruleset bypass actor, so the workflow is unworkable no
+    // matter how green its first (nothing-to-publish) run looked.
+    assert!(
+        contains_prose_anchor(
+            CODE_REVIEW_STANDARDS,
+            "GitHub never allows the Actions identity as a restriction or \
+             ruleset bypass actor"
+        ),
+        "code-review-standards must flag a GITHUB_TOKEN push to a protected \
+         branch (#8016)"
+    );
+}
+
+#[test]
+fn code_review_standards_flags_format_interpolated_structured_payloads_7624() {
+    // Issue #7624: `code-review-standards` had no check for a test helper
+    // that builds a structured (JSON/YAML/TOML/SQL) payload by `format!`
+    // interpolating a caller-supplied value into a string literal instead of
+    // the format's own builder/serializer — the #7550 failure mode, where a
+    // caller value containing the format's escape/delimiter characters
+    // malformed the payload and the system under test answered it with a
+    // permissive default indistinguishable from a real pass.
+    assert!(
+        contains_prose_anchor(
+            CODE_REVIEW_STANDARDS,
+            "builds a JSON/YAML/TOML/SQL payload by `format!` interpolating \
+             a caller-supplied value into a string literal"
+        ),
+        "code-review-standards must flag format!-interpolated structured \
+         test payloads (#7624)"
+    );
+}
+
+#[test]
 fn code_critic_declares_batch1_skills() {
     // Issue #2903 ported the full upstream six-skill set. #4642 cuts it back to
     // the two that code-critic's own body tells it to load on turn one: the
@@ -1757,6 +1795,26 @@ fn the_default_output_style_stays_within_its_resident_budget() {
     );
 }
 
+#[test]
+fn output_styles_name_the_todowrite_fallback() {
+    // #2799: every bundled style used to mandate `TodoWrite` unconditionally, so
+    // a PM on a harness that does not expose it announced the gap and improvised
+    // its own tracking. The section must state the CONDITION and the fallback;
+    // pinning both halves keeps a future trim from dropping one of them.
+    for style in OUTPUT_STYLES {
+        assert!(
+            style.content.contains("where the harness exposes it"),
+            "{}: the TodoWrite section must make the tool conditional (#2799)",
+            style.id
+        );
+        assert!(
+            style.content.contains("prose task list"),
+            "{}: the TodoWrite section must name the prose fallback (#2799)",
+            style.id
+        );
+    }
+}
+
 /// The resident budget every deployed agent body is measured against.
 ///
 /// Issue #7723 (epic #7681): composed rust-engineer (BASE-AGENT +
@@ -1771,11 +1829,12 @@ const RESIDENT_BODY_BUDGET_BYTES: usize = 42_000;
 /// gate from rust-engineer alone to every deployed agent, each pinned at a
 /// ratchet ceiling with the issue tracking its trim.
 ///
-/// Why: #7825 named four; widening the gate surfaced eight on 2026-09-15 —
-/// java, nextjs, python and svelte engineer were over too, each by under 600
-/// bytes. Raising the budget for everyone would hide them; excluding them would
-/// drop the coverage the issue asked for. A per-stem ceiling keeps each one
-/// measured and lets it shrink but never grow.
+/// Why: #7825 named four; widening the gate surfaced four more on
+/// 2026-09-15 — java, nextjs, python and svelte engineer were over too, each
+/// by under 600 bytes; #8047 trimmed all four back under the default budget,
+/// so their entries are gone. Raising the budget for everyone would hide the
+/// rest; excluding them would drop the coverage the issue asked for. A
+/// per-stem ceiling keeps each one measured and lets it shrink but never grow.
 /// What: `(stem, ceiling_bytes, tracking_issue)`. The ceiling is the measured
 /// size rounded up to the next 500 bytes, so an unrelated BASE-AGENT edit does
 /// not flip the gate while real regrowth still does. An entry whose body has
@@ -1785,10 +1844,6 @@ const RESIDENT_BODY_BUDGET_BYTES: usize = 42_000;
 const OVER_BUDGET_BODY_BASELINES: &[(&str, usize, &str)] = &[
     ("dotnet-engineer", 43_500, "#7825"),
     ("elixir-engineer", 44_000, "#7825"),
-    ("java-engineer", 42_500, "#8047"),
-    ("nextjs-engineer", 43_000, "#8047"),
-    ("python-engineer", 43_000, "#8047"),
-    ("svelte-engineer", 43_000, "#8047"),
     ("ticketing", 47_000, "#7727"),
     ("version-control", 47_500, "#7727"),
 ];

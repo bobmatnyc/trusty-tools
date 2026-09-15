@@ -1264,3 +1264,138 @@ fn clearing_the_marker_leaves_every_other_file_alone() {
         "a restored marker must not become work"
     );
 }
+
+/// 🔴 #7914: the count ADR-0057's PR-less admission grants on, against real
+/// git.
+///
+/// Why: the guard's policy tests fabricate this number, so nothing else proves
+/// the query spelling answers what the admission claims it answers. All three
+/// states are walked in one fixture because the transitions are the contract:
+/// a fresh worktree is the shape an owner is told to delete, a local commit is
+/// the shape that must keep denying, and pushing it is the ff-into-a-landed-
+/// sibling shape the admission exists for.
+#[test]
+fn local_only_commits_counts_only_what_no_origin_ref_has() {
+    use crate::core::worktree_removal_facts::{GitAndGhProbe, WorktreeRemovalProbe};
+
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("landed-history");
+
+    assert_eq!(
+        GitAndGhProbe
+            .local_only_commits(&wt)
+            .expect("a fresh worktree must be countable"),
+        0,
+        "a worktree branched off a pushed tip holds no commit origin lacks"
+    );
+
+    GitWorktreeFixture::commit_unpushed(&wt);
+    assert_eq!(
+        GitAndGhProbe
+            .local_only_commits(&wt)
+            .expect("a committed worktree must be countable"),
+        1,
+        "a commit on no origin ref is exactly what must keep denying"
+    );
+
+    // A second commit, so `commit_all_and_push` has something to stage — it
+    // pushes the local-only one along with it.
+    std::fs::write(wt.join("landed.txt"), "landed\n").expect("write a file to land");
+    GitWorktreeFixture::commit_all_and_push(&wt, "land it");
+    assert_eq!(
+        GitAndGhProbe
+            .local_only_commits(&wt)
+            .expect("a pushed worktree must be countable"),
+        0,
+        "once the commits are on origin the tree is the only place for nothing"
+    );
+}
+
+/// 🔴 REGRESSION (#7914, critic round 1): a branch deleted on the remote behind
+/// this worktree's back must stop vouching for its commits.
+///
+/// Why: `--remotes=origin` reads `refs/remotes/origin/*`, a LOCAL cache. A
+/// delete performed anywhere but this worktree — `gh pr close --delete-branch`,
+/// the web UI, another clone — leaves that ref naming a commit the remote no
+/// longer has, and the admission then granted a removal of the only surviving
+/// copy. The second clone here is what makes the staleness real: nothing
+/// updates this worktree's refs, so only the refresh inside `local_only_commits`
+/// can catch it. Fails against `798a257e7`, which counts 0 and admits.
+#[test]
+fn local_only_commits_reprunes_a_branch_deleted_behind_this_worktrees_back() {
+    use crate::core::worktree_removal_facts::{GitAndGhProbe, WorktreeRemovalProbe};
+
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("deleted-upstream");
+    std::fs::write(wt.join("work.txt"), "real work\n").expect("write work");
+    GitWorktreeFixture::commit_all_and_push(&wt, "work nobody else has");
+    assert_eq!(
+        GitAndGhProbe
+            .local_only_commits(&wt)
+            .expect("a pushed worktree must be countable"),
+        0,
+        "the pushed branch vouches for the commit while it exists"
+    );
+
+    // The delete happens in a SECOND clone, so no push or fetch in `wt` can
+    // have updated its remote-tracking refs.
+    let origin = git_stdout(&wt, &["remote", "get-url", "origin"]).expect("origin url");
+    let clone = fx.repos_root.join("second-clone");
+    let (ok, stderr) = git_try(
+        &fx.repos_root,
+        &["clone", "-q", origin.trim(), clone.to_str().expect("utf8")],
+    );
+    assert!(ok, "the second clone must succeed; stderr: {stderr}");
+    let (ok, stderr) = git_try(
+        &clone,
+        &[
+            "push",
+            "-q",
+            "origin",
+            "--delete",
+            "session/deleted-upstream",
+        ],
+    );
+    assert!(ok, "the remote delete must succeed; stderr: {stderr}");
+
+    assert_eq!(
+        GitAndGhProbe
+            .local_only_commits(&wt)
+            .expect("the count must still be answerable"),
+        1,
+        "a ref the remote no longer has must stop vouching — this worktree now holds the \
+         only copy of that commit"
+    );
+}
+
+/// 🔴 #7914, critic round 1, failure path: an origin that cannot be reached
+/// makes the count UNANSWERABLE, never zero.
+///
+/// Why: the refresh is what makes the refs trustworthy, so a refresh that did
+/// not happen must not leave the stale refs granting. `Err` is what the policy
+/// reads as "this admission does not apply" — see
+/// `an_unanswerable_local_only_count_never_admits`, which pins that it then
+/// falls through to the merged-PR route rather than granting.
+#[test]
+fn local_only_commits_cannot_be_answered_when_origin_is_unreachable() {
+    use crate::core::worktree_removal_facts::{GitAndGhProbe, WorktreeRemovalProbe};
+
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("dead-origin");
+    let gone = fx.repos_root.join("no-such-remote.git");
+    let (ok, stderr) = git_try(
+        &wt,
+        &["remote", "set-url", "origin", gone.to_str().expect("utf8")],
+    );
+    assert!(
+        ok,
+        "pointing origin at nothing must succeed; stderr: {stderr}"
+    );
+
+    let answer = GitAndGhProbe.local_only_commits(&wt);
+    let err = answer.expect_err("an unreachable origin must not produce a trusted count");
+    assert!(
+        err.contains("could not be refreshed"),
+        "the failure must name the refresh, not a count: {err}"
+    );
+}

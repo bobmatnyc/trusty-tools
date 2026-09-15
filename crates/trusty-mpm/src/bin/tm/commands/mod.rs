@@ -61,6 +61,8 @@ pub(crate) mod guided_protected;
 pub(crate) mod guided_resolver;
 pub(crate) mod guided_resume;
 pub(crate) mod hook_payload;
+// #6556: the retry-plus-log delivery, and the disk park, of the SubagentStop POST.
+pub(crate) mod hook_post;
 pub(crate) mod hook_rewrite;
 // #7975: the stdin payload read that names its failure, so a guard can deny on it.
 pub(crate) mod hook_stdin;

@@ -60,6 +60,17 @@ use crate::tools::traits::ToolExecutor;
 /// hands the module-level [`dispatch`] fn to
 /// [`trusty_mcp::run_stdio_loop`], which reads stdin line-by-line and
 /// writes one JSON-RPC response line per request (notifications suppressed).
+///
+/// #7609: it also does NOT record a channel-write credential, and that is the
+/// intended safe default rather than an oversight of the same class as the two
+/// steps above. `run_startup_init` is where every other process resolves one
+/// (from `--api-token` / `TAGENT_API_TOKEN`, after the dotenv loads), and this
+/// entry point deliberately runs before it. The consequence is that the
+/// `channel` tool's `set` actions refuse with 401 under `mcp-serve`: an
+/// external MCP client is the least-trusted caller this crate has, a channel
+/// write re-points which assistant an inbound message wakes, and reads —
+/// `list`, `get`, `read` — are unaffected. An operator who wants the write here
+/// should use the HTTP API or the REPL, both of which resolve a credential.
 /// Test: exercised by the live binary smoke; the per-message logic is unit
 /// tested via [`dispatch`] directly.
 pub async fn run_mcp_serve() -> anyhow::Result<()> {

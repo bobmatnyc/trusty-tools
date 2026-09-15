@@ -124,6 +124,50 @@ impl DaemonInfo {
     }
 }
 
+// ── ConsoleInfo ───────────────────────────────────────────────────────────────
+
+/// Live state of the trusty-console gateway for banner display.
+///
+/// Why (#6761): the console is the one service in the block an operator OPENS,
+/// and it cannot be opened without its port. The daemon's port is deliberately
+/// hidden (#6869) because nothing the operator does needs it; the console's is
+/// the opposite case, so the two rows differ on purpose rather than by
+/// oversight. The port is read from the console's own discovery record rather
+/// than hardcoded, so a console moved off 7788 is still reachable from what the
+/// banner prints.
+/// What: the `host:port` [`trusty_mpm::core::discovery::console_addr`] resolves,
+/// plus the TCP-probe result for it. `Default` is the offline zero value, which
+/// is also what the renderer shows when the probe fails.
+/// Test: `welcome_panel_renders_the_console_row_with_its_port`,
+/// `welcome_panel_console_row_offline_names_no_port`.
+#[derive(Debug, Default)]
+pub(crate) struct ConsoleInfo {
+    /// The address the console is selected to serve on (e.g. `127.0.0.1:7788`).
+    pub(crate) addr: String,
+    /// True when a TCP connect to `addr` succeeded inside the probe timeout.
+    pub(crate) online: bool,
+}
+
+impl ConsoleInfo {
+    /// Resolve the console's address and probe it (≤150 ms).
+    ///
+    /// Why: the banner may never block the launch path, and the console is a
+    /// plain HTTP listener, so the same bounded [`tcp_probe`] the daemon row
+    /// uses answers "is it up?" without an HTTP round trip.
+    /// What: [`trusty_mpm::core::discovery::console_addr`] for the address —
+    /// the discovery record when one exists, its documented default otherwise —
+    /// then one TCP connect. Fail-open in the display sense: any probe failure
+    /// renders as offline, never as an error or a hang.
+    /// Test: `welcome_panel_console_row_offline_names_no_port` covers the
+    /// rendered halves; the address rule is covered by `console_addr_from_*` in
+    /// `trusty_mpm::core::discovery`.
+    pub(crate) fn from_discovery_with_probe() -> Self {
+        let addr = trusty_mpm::core::discovery::console_addr();
+        let online = tcp_probe(&addr);
+        ConsoleInfo { addr, online }
+    }
+}
+
 // ── WelcomeData ───────────────────────────────────────────────────────────────
 
 /// All data required to render the pre-launch welcome panel (pure input).
@@ -146,6 +190,8 @@ pub(crate) struct WelcomeData {
     pub(crate) session_name: String,
     /// Daemon state (address, session count, online flag).
     pub(crate) daemon: DaemonInfo,
+    /// Console gateway state (address, online flag) — #6761.
+    pub(crate) console: ConsoleInfo,
     /// Recent git commits from the project repo (empty when git is unavailable).
     pub(crate) recent_commits: Vec<CommitLine>,
     /// `detect_memory()` result: service name or `"(not detected)"`.
@@ -235,6 +281,9 @@ pub(crate) fn gather_welcome_data(
     let memory_status = super::banner::detect_memory();
     let search_status = super::banner::detect_tool("trusty-search");
     let review_status = super::banner::detect_tool("trusty-review");
+    // #6761: the console row is probed like the daemon row, and bounded the
+    // same way, so the launch path pays at most one more 150 ms connect.
+    let console = ConsoleInfo::from_discovery_with_probe();
 
     WelcomeData {
         project,
@@ -243,6 +292,7 @@ pub(crate) fn gather_welcome_data(
         reconnecting,
         session_name: session_name.to_string(),
         daemon,
+        console,
         recent_commits,
         memory_status,
         search_status,
@@ -414,6 +464,9 @@ pub(crate) fn render_info_box(
             online: daemon.online,
             session_count: daemon.session_count,
         },
+        // #6761: hermetic — this compat wrapper must not depend on whether a
+        // console happens to be listening on the machine running the tests.
+        console: ConsoleInfo::default(),
         recent_commits: vec![],
         memory_status: super::banner::detect_memory(),
         search_status: super::banner::detect_tool("trusty-search"),

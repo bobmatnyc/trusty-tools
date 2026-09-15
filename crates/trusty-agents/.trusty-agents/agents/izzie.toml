@@ -63,6 +63,21 @@ palace = "owner-profile"
 # service names) are DELIBERATELY EXCLUDED, and `delegate_to_agent` is
 # granted directly so the fallback keeps delegation working too.
 allow = [
+  # memory (#7992, follow-up to #7448): `scopes` below grants
+  # `memory.read`/`memory.write`, but until this fix this flat manifest named
+  # no tool either scope could cover — the same mismatch #7448 fixed on the
+  # base `assistant` template, which this file does NOT inherit (it is flat,
+  # not an `extends` overlay). These two are the ONLY names
+  # `assistant_memory::bind` keeps registered for an assistant persona
+  # (`memory_write` is a third, redundant alias `bind` also seeds — omitted
+  # because `memory_remember` already covers `memory.write`); any other
+  # `memory_*`/`kg_*` name (a raw `kg_assert` included) is stripped by
+  # `bind`'s retain filter before a persona sees it, so allowlisting it would
+  # grant a name the runtime never honors. See
+  # `crate::tools::assistant_memory::{bind, scope_for}`, and the base's own
+  # copy of this note in `assistant/agent.toml`.
+  "memory_recall",
+  "memory_remember",
   # delegation (PR A, epic #3052)
   "delegate_to_agent",
   # granola

@@ -118,9 +118,21 @@ impl Binding {
     /// `receive_enabled` binding is refused on a
     /// provider whose [`crate::channels::Capabilities`] say it has no inbound
     /// path.
+    ///
+    /// #7609: `globals` is the harness-wide `[[channels]]` list, because one
+    /// shape legitimately carries no destination. A `[[listeners]]` binding
+    /// absorbed out of `agent.toml` is an OVERLAY of a global channel — this
+    /// assistant's `wake_filter`, `event_types`, `instructions` and `enabled`
+    /// over the global's provider, destination and ingest filter — and it never
+    /// named a destination, so the target grammar refused it and slice 3 had to
+    /// leave it unmigrated. The destination check is skipped when
+    /// [`crate::channels::dispatch::is_overlay`] holds, which keeps an
+    /// operator-authored blank target refused with the message it always had.
     /// Test: `agent_channels_validates_provider_destination_and_permissions`,
-    /// `agent_channels_rejects_unregistered_provider`.
-    pub(crate) fn validate(&self) -> Result<(), Error> {
+    /// `agent_channels_rejects_unregistered_provider`,
+    /// `an_overlay_of_a_global_channel_validates`,
+    /// `a_blank_target_with_no_global_is_still_refused`.
+    pub(crate) fn validate_in(&self, globals: &[crate::channels::Channel]) -> Result<(), Error> {
         if !is_valid_agent_name(&self.id)
             || self.name.trim().is_empty()
             || self.name.chars().count() > 128
@@ -132,7 +144,12 @@ impl Binding {
         let Some(adapter) = crate::channels::adapter(&self.provider) else {
             return Err(bad("Unsupported channel provider"));
         };
-        if !adapter.validate_target(&self.target) {
+        // #7609: an overlay of a global channel is the one shape that may carry
+        // no destination — see `validate_in`. Keyed on `id`, which is what
+        // dispatch matches the global on (#7609 review).
+        if !crate::channels::dispatch::is_overlay(&self.id, &self.target, globals)
+            && !adapter.validate_target(&self.target)
+        {
             // #7427: gworkspace targets are `from:<address>` / `label:<id>`,
             // so the copy can no longer name only the two id-shaped providers.
             return Err(bad(
@@ -185,9 +202,39 @@ fn config_path(dirs: &[PathBuf], name: &str) -> Result<PathBuf, Error> {
         .map(|(p, _)| p.with_extension("channels.json"))
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "Assistant not found"))
 }
+/// One assistant's saved channel bindings, validated on the way in.
+///
+/// Why (#7609): the harness-wide `[[channels]]` list is now part of what makes
+/// a stored record valid — an overlay's blank target is only legitimate beside
+/// a global of the same name — so this reads it before validating. The inbound
+/// path already holds that list and uses [`load_at_with`] instead, rather than
+/// re-reading the global config once per assistant per event.
+/// Test: `agent_channels_revision_preserves_bindings_and_rejects_stale_write`.
 pub(crate) async fn load_at(
     dirs: &[PathBuf],
     name: &str,
+) -> Result<(PathBuf, String, Vec<Binding>), Error> {
+    let globals = crate::mcp::config::GlobalConfig::load().await.channels;
+    load_at_with(dirs, name, &globals).await
+}
+
+/// [`load_at`] over an already-loaded global channel list.
+///
+/// Why (#7609 review): an overlay names a global by `id`, and an operator who
+/// deletes or re-ids that global leaves the overlay unresolvable. Failing the
+/// whole read for it took the assistant off every OTHER destination too — both
+/// `read()` and `write_at()` 400, so there was no way back through the UI.
+/// What: one unresolvable overlay is DROPPED with a warning and the rest of the
+/// file loads. Every other validation failure still fails the read, so a
+/// genuinely broken file is never half-loaded; `write_at` keeps rejecting an
+/// operator-authored blank target outright. The stored file is untouched — the
+/// revision hashes its raw text — so the record survives until a client saves
+/// back the list it read.
+/// Test: `an_unresolvable_overlay_is_dropped_not_a_whole_file_rejection`.
+pub(crate) async fn load_at_with(
+    dirs: &[PathBuf],
+    name: &str,
+    globals: &[crate::channels::Channel],
 ) -> Result<(PathBuf, String, Vec<Binding>), Error> {
     let path = config_path(dirs, name)?;
     let raw = match tokio::fs::read_to_string(&path).await {
@@ -195,9 +242,21 @@ pub(crate) async fn load_at(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => "[]".into(),
         Err(e) => return Err(internal(e)),
     };
-    let bindings: Vec<Binding> = serde_json::from_str(&raw).map_err(internal)?;
-    for binding in &bindings {
-        binding.validate()?;
+    let stored: Vec<Binding> = serde_json::from_str(&raw).map_err(internal)?;
+    let mut bindings = Vec::with_capacity(stored.len());
+    for binding in stored {
+        if binding.target.is_empty()
+            && !crate::channels::dispatch::is_overlay(&binding.id, &binding.target, globals)
+        {
+            tracing::warn!(
+                assistant = %name, channel = %binding.id,
+                "channel config: this overlay names a global channel this host does not declare; \
+                 dropping the record and loading the rest (#7609)"
+            );
+            continue;
+        }
+        binding.validate_in(globals)?;
+        bindings.push(binding);
     }
     Ok((path, raw, bindings))
 }
@@ -220,14 +279,23 @@ pub(crate) async fn read(name: &str) -> Result<Value, Error> {
         json!({"agent":name,"revision":revision(&raw),"bindings":bindings,"providers":crate::channels::providers_json(),"listeners":listeners,"status":crate::channels::status::status_json(name)}),
     )
 }
-async fn write_at(dirs: &[PathBuf], name: &str, update: Update) -> Result<(), Error> {
+/// Replace one assistant's stored bindings, under compare-and-swap.
+///
+/// Why (#7609): the caller audits the write, and an audit line that cannot say
+/// how many bindings there were before is not much of a record.
+/// What: returns `(before, after)` — the stored count either side of the write.
+/// Every refusal (stale revision, invalid binding, duplicate id) writes
+/// nothing.
+/// Test: `agent_channels_revision_preserves_bindings_and_rejects_stale_write`.
+async fn write_at(dirs: &[PathBuf], name: &str, update: Update) -> Result<(usize, usize), Error> {
     let _guard = super::AGENT_CONFIG_WRITE_LOCK.lock().await;
     let (manifest, _) = resolve_agent_paths(dirs, name)
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "Assistant not found"))?;
     let _process_lock = crate::knowledge::execution::mutation_guard(&manifest)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-    let (path, raw, _) = load_at(dirs, name).await?;
+    let globals = crate::mcp::config::GlobalConfig::load().await.channels;
+    let (path, raw, stored) = load_at_with(dirs, name, &globals).await?;
     if revision(&raw) != update.revision {
         return Err(err(
             StatusCode::CONFLICT,
@@ -239,7 +307,8 @@ async fn write_at(dirs: &[PathBuf], name: &str, update: Update) -> Result<(), Er
     }
     let mut ids = std::collections::HashSet::new();
     for binding in &update.bindings {
-        binding.validate()?;
+        // #7609: an overlay of a global channel saves through the UI too.
+        binding.validate_in(&globals)?;
         if !ids.insert(&binding.id) {
             return Err(bad("Channel binding IDs must be unique"));
         }
@@ -247,7 +316,8 @@ async fn write_at(dirs: &[PathBuf], name: &str, update: Update) -> Result<(), Er
     let bytes = serde_json::to_vec_pretty(&update.bindings).map_err(internal)?;
     agent_listeners::atomic_write(&path, &bytes)
         .await
-        .map_err(internal)
+        .map_err(internal)?;
+    Ok((stored.len(), update.bindings.len()))
 }
 async fn bound(name: &str, id: &str, send: bool) -> Result<Binding, Error> {
     let (_, _, bindings) = load_at(&crate::agents::agents_dir_candidates(), name).await?;
@@ -425,12 +495,86 @@ pub(crate) async fn messages(name: &str, id: &str) -> Result<Value, Error> {
 pub(super) async fn get_route(AxumPath(name): AxumPath<String>) -> Result<Json<Value>, Error> {
     read(&name).await.map(Json)
 }
+/// `PUT /api/agents/{name}/channels` — replace one assistant's bindings.
+///
+/// Why (#7609): `writer` is the FIRST argument because extracting it IS the
+/// authorization gate — a daemon with no API token configured never reaches
+/// this body, even from loopback. See
+/// [`crate::api::server::channel_auth`] for why this one write surface is
+/// held to more than the loopback bind.
+/// What: unchanged otherwise — validate, compare-and-swap, answer with the
+/// stored view. One audit line per accepted write.
+/// Test: `a_tokenless_daemon_refuses_every_channel_write`,
+/// `agent_channels_revision_preserves_bindings_and_rejects_stale_write`.
 pub(super) async fn put_route(
+    writer: super::channel_auth::ChannelWriter,
     AxumPath(name): AxumPath<String>,
     Json(update): Json<Update>,
 ) -> Result<Json<Value>, Error> {
-    write_at(&crate::agents::agents_dir_candidates(), &name, update).await?;
+    let (before, after) = write_at(&crate::agents::agents_dir_candidates(), &name, update).await?;
+    writer.audit(
+        "PUT /api/agents/{name}/channels",
+        "assistant",
+        Some(&name),
+        Some(before),
+        after,
+    );
     read(&name).await.map(Json)
+}
+
+/// Replace one assistant's bindings from a MODEL TURN, under the same gate.
+///
+/// Why (#7609): `platform_settings`'s `settings.patch/channels` op and the
+/// `channel` tool's `set` action both write the same file the HTTP route
+/// writes, so gating the route alone would leave the model-driven path open on
+/// a daemon that refuses the operator's own browser. Neither has a request to
+/// extract a [`super::channel_auth::ChannelWriter`] from, so they take the
+/// recorded daemon fact instead.
+/// What: 401 when this daemon serves no authenticated API; otherwise validate,
+/// compare-and-swap, audit, and answer with the stored view.
+/// Test: `crate::tools::channel::channel_tests::the_tool_refuses_a_write_on_a_tokenless_daemon`.
+pub(crate) async fn write_from_turn(name: &str, update: Update) -> Result<Value, Error> {
+    if !super::channel_auth::daemon_token_configured() {
+        return Err(err(
+            StatusCode::UNAUTHORIZED,
+            &super::channel_auth::tool_refusal(),
+        ));
+    }
+    let (before, after) = write_at(&crate::agents::agents_dir_candidates(), name, update).await?;
+    super::channel_auth::audit_write(
+        "turn:channels",
+        "assistant",
+        Some(name),
+        Some(before),
+        after,
+        "in-process",
+    );
+    read(name).await
+}
+
+/// The listener half of this module, for the deprecated
+/// `PUT /api/agents/{name}/listeners` alias to forward into.
+///
+/// Why (#7609): `read` already composes `agent_listeners::read` — the listener
+/// view IS a projection of the channel view — so the alias forwards through
+/// this module rather than reaching around it into a second implementation.
+/// Test: `the_listener_alias_audits_an_accepted_write`.
+pub(super) async fn write_listeners(
+    name: &str,
+    update: agent_listeners::ListenerUpdate,
+) -> Result<(Value, Option<usize>, usize), Error> {
+    // #7609: the caller audits this write, so it needs the stored count either
+    // side of it. A read that fails does NOT fail the write — the count is
+    // audit detail and the write is already authorized — but it yields `None`
+    // rather than `0`, so the record cannot claim the assistant had no
+    // bindings when we simply could not tell (critic round 3, MEDIUM-2).
+    let before = agent_listeners::read(name)
+        .await
+        .ok()
+        .and_then(|view| view["listeners"].as_array().map(Vec::len));
+    let after = update.listeners.len();
+    let view = agent_listeners::write(name, update).await?;
+    Ok((view, before, after))
 }
 pub(super) async fn send_route(
     AxumPath((name, id)): AxumPath<(String, String)>,
@@ -453,18 +597,18 @@ mod tests {
     #[test]
     fn agent_channels_validates_provider_destination_and_permissions() {
         let mut b = binding();
-        assert!(b.validate().is_ok());
+        assert!(b.validate_in(&[]).is_ok());
         b.target = "https://host".into();
-        assert!(b.validate().is_err());
+        assert!(b.validate_in(&[]).is_err());
         b.provider = "telegram".into();
         b.target = "123".into();
         // #7427 PR 2: this used to assert `is_err()` — a Telegram binding could
         // not ask for incoming updates because the adapter said the provider
         // had no inbound path at all.
         b.receive_enabled = true;
-        assert!(b.validate().is_ok());
+        assert!(b.validate_in(&[]).is_ok());
         b.target = "C123456".into();
-        assert!(b.validate().is_err());
+        assert!(b.validate_in(&[]).is_err());
         let b = binding();
         let list = [b];
         assert!(authorized(&list, "other", true).is_err());
@@ -481,11 +625,11 @@ mod tests {
             "enabled":true,"send_enabled":true,"receive_enabled":true
         }))
         .unwrap();
-        assert!(b.validate().is_ok());
+        assert!(b.validate_in(&[]).is_ok());
         b.credential_ref = Some("telegram".into());
-        assert!(b.validate().is_ok());
+        assert!(b.validate_in(&[]).is_ok());
         b.credential_ref = Some("slack".into());
-        assert!(b.validate().is_err());
+        assert!(b.validate_in(&[]).is_err());
     }
     #[test]
     fn agent_channels_poll_credential_ref_reads_the_first_receiving_binding() {
@@ -519,7 +663,7 @@ mod tests {
         let mut b = binding();
         b.provider = "notion".into();
         b.target = "some-notion-page".into();
-        let rejection = b.validate().unwrap_err();
+        let rejection = b.validate_in(&[]).unwrap_err();
         assert_eq!(rejection.0, StatusCode::BAD_REQUEST);
         assert_eq!(
             rejection.1.0["error"],
@@ -567,6 +711,70 @@ mod tests {
             StatusCode::CONFLICT
         );
         assert!(load_at(&dirs, "../escape").await.is_err());
+    }
+
+    /// An overlay whose global this host no longer declares is DROPPED with a
+    /// warning; every other binding in the file still loads.
+    ///
+    /// Why (#7609 review HIGH-4): one unresolvable record used to fail the
+    /// whole read, so `GET`/`PUT /api/agents/{name}/channels` both 400'd and
+    /// the assistant's OTHER destinations stopped claiming inbound events —
+    /// an operator editing `config.toml` could take an assistant off every
+    /// channel it had.
+    ///
+    /// Pre-fix (886d4afdc) this fails at the `unwrap`: `load_at_with`
+    /// propagated `validate_in`'s 400 for the blank-target record.
+    #[tokio::test]
+    async fn an_unresolvable_overlay_is_dropped_not_a_whole_file_rejection() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir.path().join("fixture.toml"), "[agent]\nname='fixture'\n")
+            .await
+            .unwrap();
+        let dirs = [dir.path().to_path_buf()];
+        let stored = json!([
+            {"id":"gmail-personal","name":"gmail-personal","provider":"gworkspace","target":"",
+             "enabled":true,"receive_enabled":true},
+            {"id":"team","name":"Team","provider":"slack","target":"C123456",
+             "enabled":true,"send_enabled":true}
+        ]);
+        tokio::fs::write(dir.path().join("fixture.channels.json"), stored.to_string())
+            .await
+            .unwrap();
+
+        // No global of that id: the overlay resolves to nothing.
+        let (_, _, bindings) = load_at_with(&dirs, "fixture", &[]).await.unwrap();
+        assert_eq!(
+            bindings.iter().map(|b| b.id.as_str()).collect::<Vec<_>>(),
+            vec!["team"],
+            "the unresolvable overlay is dropped, the rest of the file loads"
+        );
+
+        // With the global declared, the overlay is a legitimate record again.
+        let globals = vec![crate::channels::Channel {
+            id: "gmail-personal".into(),
+            name: "Personal mail".into(),
+            provider: "gmail".into(),
+            scope: crate::channels::ChannelScope::Global,
+            enabled: true,
+            receive_enabled: true,
+            ..crate::channels::Channel::default()
+        }];
+        let (_, _, bindings) = load_at_with(&dirs, "fixture", &globals).await.unwrap();
+        assert_eq!(bindings.len(), 2);
+
+        // A record that is invalid for any OTHER reason still fails the read,
+        // so a genuinely broken file is not silently half-loaded.
+        tokio::fs::write(
+            dir.path().join("fixture.channels.json"),
+            json!([{"id":"team","name":"Team","provider":"notion","target":"page","enabled":true}])
+                .to_string(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            load_at_with(&dirs, "fixture", &[]).await.unwrap_err().0,
+            StatusCode::BAD_REQUEST
+        );
     }
 }
 

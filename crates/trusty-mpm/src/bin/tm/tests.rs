@@ -900,7 +900,7 @@ fn banner_title_bar_contains_version() {
     // Why: the single-box banner embeds the crate version in the title bar;
     // this ensures the version is always visible to the operator at a glance.
     use crate::formatters::banner::two_panel::{render_two_panel_banner, strip_ansi};
-    use crate::formatters::info_box::{DaemonInfo, WelcomeData};
+    use crate::formatters::info_box::{ConsoleInfo, DaemonInfo, WelcomeData};
     colored::control::set_override(false);
     let data = WelcomeData {
         project: "my-project".to_string(),
@@ -909,6 +909,8 @@ fn banner_title_bar_contains_version() {
         reconnecting: false,
         session_name: "tmpm-my-project".to_string(),
         daemon: DaemonInfo::default(),
+        // #6761: the services block gained a console row.
+        console: ConsoleInfo::default(),
         recent_commits: vec![],
         memory_status: "(not detected)".to_string(),
         search_status: "(not detected)".to_string(),
@@ -933,7 +935,7 @@ fn banner_reconnect_label_in_wide_mode() {
     // Why: the reconnect label in the wide single-box banner must say
     // "Reconnecting..." so the operator knows no new session was started.
     use crate::formatters::banner::two_panel::{render_two_panel_banner, strip_ansi};
-    use crate::formatters::info_box::{DaemonInfo, WelcomeData};
+    use crate::formatters::info_box::{ConsoleInfo, DaemonInfo, WelcomeData};
     colored::control::set_override(false);
     let data = WelcomeData {
         project: "my-project".to_string(),
@@ -942,6 +944,8 @@ fn banner_reconnect_label_in_wide_mode() {
         reconnecting: true,
         session_name: "tmpm-quiet-falcon".to_string(),
         daemon: DaemonInfo::default(),
+        // #6761: the services block gained a console row.
+        console: ConsoleInfo::default(),
         recent_commits: vec![],
         memory_status: "(not detected)".to_string(),
         search_status: "(not detected)".to_string(),
@@ -1891,9 +1895,40 @@ fn cli_parses_issue_seed_labels() {
     let cli = Cli::try_parse_from(["trusty-mpm", "issue", "seed-labels", "--dry-run"]).unwrap();
     match cli.command.unwrap() {
         Command::Issue { cmd, .. } => match cmd {
-            IssueCmd::SeedLabels { dry_run, config } => {
+            IssueCmd::SeedLabels {
+                dry_run,
+                config,
+                only,
+            } => {
                 assert!(dry_run);
                 assert!(config.is_none());
+                assert!(only.is_empty(), "an unscoped run has no filters");
+            }
+            other => panic!("expected seed-labels, got {other:?}"),
+        },
+        other => panic!("expected issue, got {other:?}"),
+    }
+}
+
+/// #7983: `--only` is repeatable, so one run can name two families.
+#[test]
+fn cli_parses_issue_seed_labels_only_filters_7983() {
+    use crate::cli::IssueCmd;
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "issue",
+        "seed-labels",
+        "--only",
+        "status:",
+        "--only",
+        "trusty-mpm",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Issue { cmd, .. } => match cmd {
+            IssueCmd::SeedLabels { only, dry_run, .. } => {
+                assert_eq!(only, vec!["status:".to_string(), "trusty-mpm".to_string()]);
+                assert!(!dry_run);
             }
             other => panic!("expected seed-labels, got {other:?}"),
         },
@@ -2252,7 +2287,7 @@ fn narrow_fallback_reconnect_box_includes_reconnecting_text() {
     // reconnecting=true; assert the label appears.
     // Test: pure string assertion via the public compositor.
     use crate::formatters::banner::two_panel::{render_two_panel_banner, strip_ansi};
-    use crate::formatters::info_box::{DaemonInfo, WelcomeData};
+    use crate::formatters::info_box::{ConsoleInfo, DaemonInfo, WelcomeData};
     colored::control::set_override(false);
     let data = WelcomeData {
         project: "my-project".to_string(),
@@ -2261,6 +2296,8 @@ fn narrow_fallback_reconnect_box_includes_reconnecting_text() {
         reconnecting: true,
         session_name: "tmpm-my-project".to_string(),
         daemon: DaemonInfo::default(),
+        // #6761: the services block gained a console row.
+        console: ConsoleInfo::default(),
         recent_commits: vec![],
         memory_status: "(not detected)".to_string(),
         search_status: "(not detected)".to_string(),
@@ -2284,7 +2321,7 @@ fn narrow_fallback_normal_box_does_not_include_reconnecting_text() {
     // Why: normal launch (reconnecting=false) narrow box must NOT show
     // "Reconnecting..." — the operator should see the launch context only.
     use crate::formatters::banner::two_panel::{render_two_panel_banner, strip_ansi};
-    use crate::formatters::info_box::{DaemonInfo, WelcomeData};
+    use crate::formatters::info_box::{ConsoleInfo, DaemonInfo, WelcomeData};
     colored::control::set_override(false);
     let data = WelcomeData {
         project: "my-project".to_string(),
@@ -2293,6 +2330,8 @@ fn narrow_fallback_normal_box_does_not_include_reconnecting_text() {
         reconnecting: false,
         session_name: String::new(),
         daemon: DaemonInfo::default(),
+        // #6761: the services block gained a console row.
+        console: ConsoleInfo::default(),
         recent_commits: vec![],
         memory_status: "(not detected)".to_string(),
         search_status: "(not detected)".to_string(),
@@ -2349,7 +2388,7 @@ fn banner_preview_no_clear_escape() {
     // clear escape. Since it writes to stdout, we verify indirectly via the
     // single-box compositor which is used for the preview path.
     use crate::formatters::banner::two_panel::{render_two_panel_banner, strip_ansi};
-    use crate::formatters::info_box::{DaemonInfo, WelcomeData};
+    use crate::formatters::info_box::{ConsoleInfo, DaemonInfo, WelcomeData};
     colored::control::set_override(false);
     let data = WelcomeData {
         project: "p".to_string(),
@@ -2358,6 +2397,8 @@ fn banner_preview_no_clear_escape() {
         reconnecting: false,
         session_name: String::new(),
         daemon: DaemonInfo::default(),
+        // #6761: the services block gained a console row.
+        console: ConsoleInfo::default(),
         recent_commits: vec![],
         memory_status: "(not detected)".to_string(),
         search_status: "(not detected)".to_string(),
@@ -2675,7 +2716,7 @@ fn cli_parses_pr_open() {
     assert!(!args.closes, "Closes is opt-in, never the default");
     assert!(
         !args.minimal,
-        "the seven-field contract is the default, never opt-in (#7615)"
+        "the nine-field contract is the default, never opt-in (#7615)"
     );
 }
 

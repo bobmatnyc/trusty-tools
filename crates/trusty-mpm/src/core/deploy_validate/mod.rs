@@ -552,20 +552,64 @@ pub fn validate_and_repair(
     validate_and_repair_with_exe(fw, workspace, repo_url, None)
 }
 
+/// [`validate_and_repair`] reusing a reachability the caller already resolved.
+///
+/// Why (#7763): the daemon's spawn gate calls this immediately after
+/// `prepare_session*` probed trusty-memory, and the repair step re-runs that
+/// same preparation. With nothing threaded, a launch against a slow or wedged
+/// daemon paid [`PROBE_TIMEOUT`](crate::core::memory_reachable::PROBE_TIMEOUT)
+/// twice — once in preparation, once in the repair.
+/// What: [`validate_and_repair`] with `memory_reachable` handed to
+/// [`crate::core::session_launch::prepare_session_for_repair`]. `None` keeps the
+/// live probe, which is what the resume path — which never prepared — passes.
+/// Test: `repair_reuses_the_reachability_the_launch_resolved`.
+pub fn validate_and_repair_reusing_memory(
+    fw: &FrameworkPaths,
+    workspace: &Path,
+    repo_url: Option<&str>,
+    memory_reachable: Option<bool>,
+) -> RepairOutcome {
+    repair_with(fw, workspace, repo_url, None, memory_reachable)
+}
+
 /// [`validate_and_repair`] with the hook binary pinned by the caller.
 ///
 /// Why (#7244): the repair pipeline writes the project's hooks, and that write
 /// refuses a build-artifact binary. A test process IS one, and a CI runner has
 /// no installed `tm`, so `HooksMissing` stayed a gap and the repair could never
 /// report complete. Pinning the path keeps the assertion about the pipeline.
-/// What: the body of [`validate_and_repair`], forwarding `hook_exe` to
-/// [`crate::core::session_launch::prepare_session_with_repo_url_and_exe`].
+/// What: [`repair_with`], forwarding `hook_exe` to
+/// [`crate::core::session_launch::prepare_session_for_repair`].
 /// Test: `repair_closes_gaps_on_incomplete_workspace`.
 pub fn validate_and_repair_with_exe(
     fw: &FrameworkPaths,
     workspace: &Path,
     repo_url: Option<&str>,
     hook_exe: Option<&Path>,
+) -> RepairOutcome {
+    // #7763: `None` is "probe the host" — the reachability-reusing entry point
+    // above is the one that threads a resolved value.
+    repair_with(fw, workspace, repo_url, hook_exe, None)
+}
+
+/// The shared body of the three `validate_and_repair*` entry points.
+///
+/// Why (#7763): the hook binary and the trusty-memory verdict are both host
+/// inputs a caller may pin, and each public wrapper pins a different subset. One
+/// body keeps them from drifting — a repair that skipped the re-probe on one
+/// entry point and not another would be invisible until a slow daemon exposed it.
+/// What: validate; return early when complete; resync in place for a
+/// hook-group-only gap; otherwise re-run the preparation pipeline through
+/// [`crate::core::session_launch::prepare_session_for_repair`] and re-validate.
+/// Test: `repair_closes_gaps_on_incomplete_workspace`,
+/// `repair_reuses_the_reachability_the_launch_resolved`,
+/// `repair_is_not_reported_when_the_pipeline_fails_fatally`.
+fn repair_with(
+    fw: &FrameworkPaths,
+    workspace: &Path,
+    repo_url: Option<&str>,
+    hook_exe: Option<&Path>,
+    memory_reachable: Option<bool>,
 ) -> RepairOutcome {
     let before = validate_workspace_with_exe(fw, hook_exe);
     if before.is_complete() {
@@ -599,8 +643,14 @@ pub fn validate_and_repair_with_exe(
         };
     }
 
-    let repair_error = match crate::core::session_launch::prepare_session_with_repo_url_and_exe(
-        fw, workspace, repo_url, hook_exe,
+    // #7763: the launch already asked whether trusty-memory answered; reuse that
+    // verdict instead of paying a second `PROBE_TIMEOUT` here.
+    let repair_error = match crate::core::session_launch::prepare_session_for_repair(
+        fw,
+        workspace,
+        repo_url,
+        hook_exe,
+        memory_reachable,
     ) {
         Ok(report) if !report.roster_errors.is_empty() => Some(report.roster_errors.join("; ")),
         Ok(_) => None,

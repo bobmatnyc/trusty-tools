@@ -2,7 +2,7 @@
 //!
 //! Why: two procedures `version-control` runs on every delivery are written
 //! down only as prose in `tm-workflow.md`, and both are mechanical. Opening a
-//! PR means checking the seven-field body contract, the exact attribution
+//! PR means checking the nine-field body contract, the exact attribution
 //! footer, the shipped `--assignee @me --label trusty-mpm --label
 //! ws/<session>` defaults, and whether the diff owes a changelog fragment —
 //! four judgments an agent re-derives each time and can silently skip.

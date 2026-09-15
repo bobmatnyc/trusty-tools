@@ -85,13 +85,25 @@ pub(super) async fn route(msg: &Message, text: &str, project_path: &Path) -> boo
     let event_type = event_type_for(&msg.chat);
     let included = crate::listeners::store::EventStore::is_event_type_included(event_type).await;
     let event = event_from(msg, text, included);
-    let identity = crate::rbac::UserIdentity::new(
+    // #7609: the display name is the sender's own profile text — sanitized at
+    // construction, like the Gmail poller's `From:` header.
+    let identity = crate::rbac::UserIdentity::from_remote(
         format!("telegram:{chat_id}"),
-        event.from.clone().unwrap_or_else(|| "telegram".into()),
-        crate::rbac::ServiceTier::default(),
+        event.from.as_deref(),
+        "telegram",
     );
     // One update in, one turn per bound assistant out: there is no poll cycle
     // to share a dispatch allowance with (#7427).
+    //
+    // #7609: this call now also serves global `route_to` and the legacy
+    // absorbed binding, so Telegram reaches an assistant on the same three
+    // terms Gmail does. What it still does NOT do, unlike
+    // `listeners::poll::poll_once`, is append this event to the `EventStore`,
+    // run the knowledge intake, or publish `Event::ListenerEventReceived` — so
+    // a Telegram update is absent from the Events pane and from `recent_ids`
+    // dedup. Deliberately left open in slice 4: closing it changes storage and
+    // dedup semantics for a live gateway and needs its own test bed. Tracked
+    // on #7609.
     let claimed = crate::api::server::agent_channels::inbound::receive_inbound(
         "telegram",
         &chat_id,

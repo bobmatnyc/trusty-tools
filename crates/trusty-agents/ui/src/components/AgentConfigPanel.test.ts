@@ -211,10 +211,6 @@ function stubApi() {
     'fetch',
     vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.includes('/listeners')) {
-        const body = { agent: 'izzie', revision: 'v1', available_listeners: [{name:'personal-mail',connector:'gmail',identity:null,enabled:true}], listeners:[] };
-        return {ok:true,status:200,json:async()=>body,text:async()=>JSON.stringify(body)} as Response;
-      }
       const json = url.includes('/persona')
         ? { content: PERSONA, editable: true }
         : url.includes('/subagents')
@@ -244,7 +240,6 @@ function stubBareApiWithFailingStores() {
     'fetch',
     vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.includes('/listeners')) return { ok:false, status:503, text:async()=>JSON.stringify({error:'Listeners unavailable'}) } as Response;
       if (url.includes('/stores')) return { ok: false, status: 503, json: async () => ({}) } as Response;
       const json = url.includes('/persona')
         ? { content: '', editable: false }
@@ -391,14 +386,12 @@ describe('AgentConfigPanel — instructions editor sizing (#3894)', () => {
   });
 });
 
-describe('AgentConfigPanel — six sections (#3932 + #4029, DOC-57 §8.2)', () => {
-  // #4029 (epic #4021, OQ-5 resolved by the owner 2026-07-26) adds Sub-agents
-  // as the sixth section. DOC-57 §2.1's ordering stays normative and stays
-  // SATISFIED: the five original sections keep their relative order exactly —
-  // Permissions is still last, Listeners still after Skills — and the new
-  // section is inserted rather than reordering any existing pair. #4182 amends
-  // the spec text.
-  it('renders exactly six tabs, the five normative ones in order (C-07.1)', async () => {
+describe('AgentConfigPanel — five sections (#3932 + #4029 - #7609, DOC-57 §8.2)', () => {
+  // #4029 added Sub-agents between Skills and Permissions; #7609 slice 6
+  // removed Listeners, whose editor wrote the deprecated listeners route.
+  // DOC-57 §2.1's ordering stays SATISFIED: every surviving section keeps its
+  // relative position, and neither change reordered a pair.
+  it('renders exactly five tabs, in the normative order, with no Listeners section (C-07.1)', async () => {
     mountPanel();
     await waitFor(() => editor() !== null);
     expect(tabLabels()).toEqual([
@@ -406,17 +399,18 @@ describe('AgentConfigPanel — six sections (#3932 + #4029, DOC-57 §8.2)', () =
       'Knowledge',
       'Skills',
       'Sub-agents',
-      'Listeners',
       'Permissions',
     ]);
-    // The normative five, with the insertion removed, must be byte-identical to
-    // DOC-57 §2.1's order — the property that would break if a future edit
-    // "made room" by moving one of them.
+    // #7609: the removed section must be gone from the strip, not merely
+    // inert — a leftover tab would hit a route slice 7 deletes.
+    expect(tabLabels()).not.toContain('Listeners');
+    // The normative order, with #4029's insertion removed, must still be
+    // DOC-57 §2.1's — the property that breaks if an edit "makes room" by
+    // moving one of them.
     expect(tabLabels().filter((l) => l !== 'Sub-agents')).toEqual([
       'Personality',
       'Knowledge',
       'Skills',
-      'Listeners',
       'Permissions',
     ]);
   });
@@ -451,10 +445,6 @@ describe('AgentConfigPanel — six sections (#3932 + #4029, DOC-57 §8.2)', () =
     expect(target.textContent).toContain('dispatch_task');
     expect(target.textContent).toContain('1 of 2 cross-product specialists granted');
 
-    tabButton('Listeners').click();
-    await waitFor(() => target.textContent?.includes('personal-mail') ?? false);
-    expect(target.textContent).toContain('This assistant has no listener bindings');
-
     tabButton('Permissions').click();
     await waitFor(() => target.textContent?.includes('agents.read') ?? false);
     expect(target.textContent).toContain('gworkspace_*');
@@ -479,7 +469,7 @@ describe('AgentConfigPanel — degraded backends (#3932, C-07.2)', () => {
     vi.unstubAllGlobals();
     stubBareApiWithFailingStores();
     mountPanel(vi.fn(), 'bare');
-    await waitFor(() => tabLabels().length === 6);
+    await waitFor(() => tabLabels().length === 5);
 
     // Personality: no editable persona.md is a stated fact, not a blank box.
     await waitFor(() => target.textContent?.includes('no editable persona.md') ?? false);
@@ -505,11 +495,6 @@ describe('AgentConfigPanel — degraded backends (#3932, C-07.2)', () => {
     await waitFor(() => target.textContent?.includes('declares no') ?? false);
     expect(target.textContent).toContain('does not mean "all"');
     expect(target.textContent).toContain('0 of 2 cross-product specialists granted');
-
-    tabButton('Listeners').click();
-    await waitFor(() => target.textContent?.includes('Listeners unavailable') ?? false);
-    // L-1: the hardcoded per-listener "not bound" badge is gone.
-    expect(target.textContent).not.toContain('not bound');
 
     tabButton('Permissions').click();
     await waitFor(() => target.textContent?.includes('No allow-list declared') ?? false);

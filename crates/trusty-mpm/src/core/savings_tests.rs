@@ -831,3 +831,81 @@ fn try_fold_per_call_of_a_missing_ledger_is_an_empty_ok() {
     assert_eq!(fold.total.rows, 0);
     assert_eq!(fold.last_ts, None);
 }
+
+/// One `compress` row with an explicit saved/before pair.
+///
+/// Why: [`row`] fixes `tokens_before` at twice `tokens_saved` (50 %), which
+/// cannot express the differing per-row percents #8063's figures are read
+/// from.
+fn compress_row(session: &str, tokens_saved: i64, tokens_before: u64) -> SavingsRow {
+    let mut built = row(session, tokens_saved, 0.01);
+    built.technique = TECHNIQUE_COMPRESS.to_string();
+    built.tokens_before = tokens_before;
+    built
+}
+
+/// Why (#8063): the `💸` segment's left figure is the newest row's own
+/// reduction, so the order these come back in IS the feature. A reader that
+/// sorted or grouped them would render some other row's percent on the left.
+/// What: three rows at 20 %, 30 % and 40 %, asserted in ledger order — note the
+/// pooled ratio over the same rows is 27 %, which appears nowhere.
+/// Test: itself.
+#[test]
+fn session_row_percents_are_one_per_row_in_ledger_order() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let ledger = savings_log_in(dir.path());
+    append_row(&ledger, &compress_row("sess-a", 12_000, 60_000)).expect("append");
+    append_row(&ledger, &compress_row("sess-a", 3_000, 10_000)).expect("append");
+    append_row(&ledger, &compress_row("sess-a", 400, 1_000)).expect("append");
+
+    assert_eq!(session_row_percents(&ledger, "sess-a"), vec![20, 30, 40]);
+    assert_eq!(
+        mean_percent(&session_row_percents(&ledger, "sess-a")),
+        Some(30)
+    );
+}
+
+/// Why (#7179, still holding under #8063): a row written before
+/// `tokens_before` existed folds it as `0`, and there is nothing to divide
+/// by. Pricing it anyway would put a fabricated figure on the status bar; it
+/// contributes no percent instead.
+/// Test: itself.
+#[test]
+fn session_row_percents_skip_a_row_with_no_before_figure() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let ledger = savings_log_in(dir.path());
+    append_row(&ledger, &compress_row("sess-a", 5_000, 0)).expect("append");
+    append_row(&ledger, &compress_row("sess-a", 3_000, 10_000)).expect("append");
+
+    assert_eq!(session_row_percents(&ledger, "sess-a"), vec![30]);
+    assert!(
+        session_row_percents(&ledger, "sess-b").is_empty(),
+        "an unknown session has no rows, and so no percents"
+    );
+}
+
+/// Why (#7867 + #8063): both figures the segment renders come from THIS
+/// session's per-call rows. Another session's row, or a launch-time
+/// instruction fold, must reach neither.
+/// Test: itself.
+#[test]
+fn session_row_percents_ignore_other_sessions_and_instruction_rows() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let ledger = savings_log_in(dir.path());
+    append_row(&ledger, &compress_row("sess-a", 3_000, 10_000)).expect("append");
+    append_row(&ledger, &compress_row("sess-b", 9_000, 10_000)).expect("append");
+    // `row` writes the instruction-compression technique (#7867).
+    append_row(&ledger, &row("sess-a", 4_000, 0.04)).expect("append");
+
+    assert_eq!(session_row_percents(&ledger, "sess-a"), vec![30]);
+}
+
+/// Why (#8063): the mean is shown only beside a figure that exists, so an
+/// empty set of percents must not average to a `0%` the operator would read
+/// as a measurement.
+/// Test: itself.
+#[test]
+fn mean_percent_of_nothing_is_none() {
+    assert_eq!(mean_percent(&[]), None);
+    assert_eq!(mean_percent(&[20, 30]), Some(25));
+}

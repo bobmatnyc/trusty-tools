@@ -58,9 +58,17 @@ pub(crate) mod assistant_settings;
 // id-addressed retrieval under `<assistant home>/attachments/<session>/`.
 mod attachments;
 mod auth;
+// #7609: channel writes take one control the rest of this API does not —
+// a configured or minted credential — and leave an audit line.
+pub(crate) mod channel_auth;
+// #7609: the listener routes, kept for one release as forwarding aliases.
 mod cancel;
+mod deprecated_aliases;
 // #7396: the grant ceiling a turn-originated settings patch may never widen.
 mod grant_ceiling;
+// #7609: `GET`/`PUT /api/channels` — the harness-wide channel list. Visible
+// crate-wide because the merged `channel` tool writes through it too.
+pub(crate) mod global_channels;
 pub(crate) mod knowledge_pipeline;
 // #4278: read back the durable `persona-{agent}` chat log so the GUI can
 // rehydrate its chat view on reload.

@@ -95,13 +95,29 @@ fn dispatch<S: TicketSystem>(
     let ticketing = resolve_ticketing(&TrustyToolsConfig::load())?;
     let lifecycle = ticketing.lifecycle_model.as_deref();
     match cmd {
-        IssueCmd::SeedLabels { config, dry_run } => {
-            let (model, _source) = load_model_with_source(config.as_deref(), lifecycle)?;
+        IssueCmd::SeedLabels {
+            config,
+            dry_run,
+            only,
+        } => {
+            let (model, source) = load_model_with_source(config.as_deref(), lifecycle)?;
             // #6914: the `ws/<session>` policy label needs the same session
             // name session launch labels with — the tmux session name.
             let session = crate::commands::tmux_attach::current_tmux_session_name();
-            let report =
-                ops::seed_labels(backend, &model, &ticketing, session.as_deref(), dry_run)?;
+            let report = ops::seed_labels(
+                backend,
+                &model,
+                &ticketing,
+                session.as_deref(),
+                dry_run,
+                &only,
+            )
+            .map_err(|e| with_source(e, &source))?;
+            // #7983: a scoped run says so, so a short created-list is never read
+            // as "the model declares nothing else".
+            if !only.is_empty() {
+                println!("scoped to --only [{}]", only.join(", "));
+            }
             print_seed_report(&report);
         }
         IssueCmd::Standard { config } => {

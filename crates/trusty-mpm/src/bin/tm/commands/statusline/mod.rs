@@ -91,16 +91,18 @@ pub(crate) struct CostInfo {
     pub(crate) total_cost_usd: f64,
 }
 
-/// The stdin JSON fields that feed the `💸` savings segment (#7907).
+/// The stdin JSON fields a verifier needs to reproduce the `💸` savings
+/// segment (#7907).
 ///
-/// Why: `tm statusline --help` did not name the fields the `💸` segment reads
-/// (#7907).
+/// Why: `tm statusline --help` did not name the fields a hand-built
+/// `statusLine` payload has to carry (#7907).
 /// What: the field path (dotted for a nested field) and why it matters, in
 /// the exact order [`render_statusline_from`] reads them: `session_id` is
-/// the ledger fold key `savings_segment_probe` reads; `context_window.total_input_tokens`
-/// is optional and feeds the session-actual-tokens denominator
-/// `compaction_segment` persists for [`compaction::session_actual_tokens_for`]
-/// to read, falling back to the ledger's own `tokens_before` sum when absent.
+/// the ledger fold key `savings_segment_probe` reads;
+/// `context_window.total_input_tokens` is optional and feeds the
+/// session-actual-tokens counter `compaction_segment` persists for
+/// [`compaction::session_actual_tokens_for`] to read — which prices `ctx%`
+/// and the commit footer, and since #8063 no longer moves either `💸` figure.
 /// What `statusline_help_names_every_savings_stdin_field` guarantees: it
 /// fails if `tm statusline --help`'s rendered text and this list disagree in
 /// either direction -- a field listed here missing from `--help`, or
@@ -118,9 +120,9 @@ pub(crate) const SAVINGS_SEGMENT_STDIN_FIELDS: &[(&str, &str)] = &[
     ),
     (
         "context_window.total_input_tokens",
-        "optional -- feeds the session-actual-tokens denominator via \
-         compaction_segment; falls back to the ledger's own tokens_before \
-         sum when absent",
+        "optional -- feeds the session-actual-tokens counter via \
+         compaction_segment, which prices ctx% and the commit footer; it \
+         moves no 💸 figure since #8063",
     ),
 ];
 

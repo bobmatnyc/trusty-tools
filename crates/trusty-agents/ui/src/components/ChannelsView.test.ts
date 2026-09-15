@@ -1,13 +1,15 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { mount, unmount, tick } from 'svelte';
 import { writable } from 'svelte/store';
-vi.mock('../stores/app', () => ({ activeAgentId:writable<string|null>('alice'),agentRoster:writable([{id:'alice',label:'Alice'},{id:'bob',label:'Bob'}]) }));
-vi.mock('../lib/channels',()=>({fetchChannels:vi.fn(),saveChannels:vi.fn(),fetchChannelMessages:vi.fn(),sendChannelMessage:vi.fn()}));
-vi.mock('../lib/listeners',()=>({fetchListeners:vi.fn(),saveListeners:vi.fn()}));
+// #7609 slice 6: the transport helpers are doubled, the pure ones
+// (`channelErrorMessage`, `isChannelConflict`) are the real thing — this file
+// asserts the view's behaviour, and re-declaring the error mapping in a mock
+// would let the two drift apart silently.
+vi.mock('../stores/app', () => ({ activeAgentId:writable<string|null>('alice'),agentRoster:writable([{id:'alice',label:'Alice'},{id:'bob',label:'Bob'}]),catalogAgents:writable([]),fetchAgentCatalog:vi.fn(),tmApi:vi.fn() }));
+vi.mock('../lib/channels',async importOriginal=>({...await importOriginal<typeof import('../lib/channels')>(),fetchChannels:vi.fn(),saveChannels:vi.fn(),fetchChannelMessages:vi.fn(),sendChannelMessage:vi.fn(),fetchGlobalChannels:vi.fn()}));
 import ChannelsView from './ChannelsView.svelte';
 import { activeAgentId } from '../stores/app';
-import { fetchChannels,saveChannels,fetchChannelMessages,sendChannelMessage,type ChannelConfiguration } from '../lib/channels';
-import { fetchListeners } from '../lib/listeners';
+import { fetchChannels,saveChannels,fetchChannelMessages,sendChannelMessage,fetchGlobalChannels,type ChannelConfiguration } from '../lib/channels';
 const filter={from:[],include_labels:[],exclude_labels:[],subject_contains:[],snippet_contains:[]};
 // #7427: telegram reports can_receive true and the listing carries gworkspace,
 // both matching the adapter registry.
@@ -17,7 +19,7 @@ async function settle(){await Promise.resolve();await tick();await Promise.resol
 function button(text:string){return [...document.querySelectorAll('button')].find(b=>b.textContent?.includes(text))!;}
 function input(selector:string,text:string){const el=document.querySelector(selector) as HTMLInputElement;el.value=text;el.dispatchEvent(new Event('input',{bubbles:true}));}
 async function render(){view=mount(ChannelsView,{target:document.body});await settle();}
-beforeEach(()=>{activeAgentId.set('alice');vi.mocked(fetchChannels).mockImplementation(async agent=>config(agent));vi.mocked(fetchChannelMessages).mockResolvedValue({available:true,messages:[]});vi.mocked(sendChannelMessage).mockResolvedValue({ok:true});vi.mocked(fetchListeners).mockResolvedValue({agent:'alice',revision:'l1',listeners:[{name:'custom-source',enabled:true,event_types:[],filter,instructions:''}],available_listeners:[{name:'custom-source',connector:'custom',identity:null,enabled:true}]});});
+beforeEach(()=>{activeAgentId.set('alice');vi.mocked(fetchChannels).mockImplementation(async agent=>config(agent));vi.mocked(fetchChannelMessages).mockResolvedValue({available:true,messages:[]});vi.mocked(sendChannelMessage).mockResolvedValue({ok:true});vi.mocked(fetchGlobalChannels).mockResolvedValue({scope:'global',revision:'g1',channels:[],providers:[]});});
 afterEach(async()=>{if(view)await unmount(view);view=undefined;document.body.innerHTML='';vi.resetAllMocks();});
 it('ignores old assistant results after a clean assistant switch',async()=>{
  let finish!:(v:ChannelConfiguration)=>void;vi.mocked(fetchChannels).mockReturnValueOnce(new Promise(resolve=>finish=resolve));await render();activeAgentId.set('bob');await settle();finish(config('alice'));await settle();expect((document.querySelector('[aria-label="Channel name"]') as HTMLInputElement).value).toBe('bob updates');expect(document.body.textContent).not.toContain('alice updates');
@@ -33,9 +35,6 @@ it('disables unsupported receiving and history, without inventing update jobs',a
 });
 it('retains channel drafts and pins requests to their assistant during an external switch',async()=>{
  await render();input('[aria-label="Channel name"]','draft for Alice');await settle();activeAgentId.set('bob');await settle();expect((document.querySelector('[aria-label="Channel name"]') as HTMLInputElement).value).toBe('draft for Alice');expect((document.querySelector('[aria-label="Channel assistant"]') as HTMLSelectElement).disabled).toBe(true);expect(fetchChannels).toHaveBeenCalledTimes(1);vi.mocked(saveChannels).mockImplementation(async(agent,_revision,bindings)=>({...config(agent),bindings,revision:'r2'}));button('Save channels').click();await settle();expect(saveChannels).toHaveBeenLastCalledWith('alice','r1',expect.any(Array));expect(fetchChannels).toHaveBeenLastCalledWith('bob');
-});
-it('keeps listener edits mounted when hidden and pins the assistant while they are dirty',async()=>{
- await render();button('Configure other update sources').click();await settle();const field=document.querySelector('[aria-label="custom-source instructions"]') as HTMLTextAreaElement;field.value='preserve this';field.dispatchEvent(new Event('input'));await settle();button('Hide other update sources').click();await settle();expect(document.querySelector('[aria-label="custom-source instructions"]')).toBe(field);activeAgentId.set('bob');await settle();expect(fetchChannels).toHaveBeenCalledTimes(1);expect(field.value).toBe('preserve this');expect((document.querySelector('[aria-label="Channel assistant"]') as HTMLSelectElement).disabled).toBe(true);button('Configure other update sources').click();await settle();expect(fetchListeners).toHaveBeenCalledTimes(1);
 });
 it('preserves unsaved edits on conflict and never sends them',async()=>{
  await render();vi.mocked(saveChannels).mockRejectedValue(new Error('409 conflict'));input('[aria-label="Channel name"]','draft');await settle();button('Save channels').click();await settle();expect((document.querySelector('[aria-label="Channel name"]') as HTMLInputElement).value).toBe('draft');expect(document.querySelector('[role="alert"]')?.textContent).toContain('Your edits are still shown');expect(sendChannelMessage).not.toHaveBeenCalled();

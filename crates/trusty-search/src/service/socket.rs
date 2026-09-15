@@ -168,6 +168,21 @@ impl<'de> Deserialize<'de> for NoParams {
     }
 }
 
+/// The basename every trusty-* daemon derives for its own socket.
+///
+/// Restated here only because [`resolve_socket_path`]'s isolated arm joins it
+/// directly; the shared arm still gets it from `trusty_common`, and
+/// `socket_path_respects_trusty_data_dir` pins the two to the same string.
+const SOCKET_FILE_NAME: &str = "trusty-search.sock";
+
+/// The environment variable that isolates one daemon instance's data.
+///
+/// The authoritative one for a second instance: `--data-dir` is stamped into it
+/// by `handle_start`, and the lockfile, port file, `http_addr`, `indexes.toml`
+/// and this socket all key off it. `TRUSTY_DATA_DIR_OVERRIDE` is trusty-common's
+/// test escape hatch and does NOT move the lockfile (#7801).
+const DATA_DIR_ENV: &str = "TRUSTY_DATA_DIR";
+
 /// The socket this daemon binds, as both it and its consumers resolve it.
 ///
 /// Why derived rather than published: `trusty_common::daemon_socket_path` is
@@ -183,8 +198,52 @@ impl<'de> Deserialize<'de> for NoParams {
 ///
 /// Test: `socket_path_is_the_product_named_socket_under_the_data_dir`.
 pub fn socket_path() -> Result<PathBuf> {
-    // #6285: the ONE data-dir entry point; never a second hand-rolled resolver.
-    trusty_common::daemon_socket_path("trusty-search")
+    // #7801: `TRUSTY_DATA_DIR` moved every other per-instance path but not this
+    // one, so a second daemon bound the PRODUCTION socket and refused to start.
+    resolve_socket_path(std::env::var_os(DATA_DIR_ENV).as_deref())
+}
+
+/// [`socket_path`] with the isolation override supplied rather than read.
+///
+/// Why: #7801 — `trusty-search start --data-dir <dir>` isolated the lockfile,
+/// the port file, `http_addr` and `indexes.toml`, but the socket still resolved
+/// through `trusty_common::resolve_data_dir`, which honours only
+/// `TRUSTY_DATA_DIR_OVERRIDE`. The second daemon therefore tried to bind the
+/// production daemon's socket and was refused with `AlreadyServing`. Taking the
+/// override as a parameter mirrors `service::daemon::resolve_daemon_dir`, so a
+/// test can compare two instances' paths without mutating process-global env.
+/// What: `<override>/trusty-search.sock` when the override is present and
+/// non-empty, otherwise the unchanged shared derivation. An empty value is
+/// treated as unset, matching `trusty_common::resolve_data_dir`'s own guard —
+/// joining a socket name onto `""` yields a relative path that would resolve
+/// against the daemon's cwd (`/` under launchd).
+///
+/// A client reaches an isolated daemon by exporting the same
+/// `TRUSTY_DATA_DIR`, or by naming the socket directly through
+/// `trusty_common::search_rpc::TRUSTY_SEARCH_SOCKET_ENV`.
+///
+/// # Errors
+///
+/// When the override is not absolute, when it cannot be created, or when the
+/// shared data directory cannot be resolved.
+///
+/// Test: `socket_path_respects_trusty_data_dir`,
+/// `two_data_dirs_yield_distinct_instance_paths`,
+/// `an_empty_data_dir_override_falls_back_to_the_shared_socket`.
+pub fn resolve_socket_path(data_dir_override: Option<&std::ffi::OsStr>) -> Result<PathBuf> {
+    let Some(dir) = data_dir_override.filter(|d| !d.is_empty()) else {
+        // #6285: the ONE data-dir entry point; never a second hand-rolled resolver.
+        return trusty_common::daemon_socket_path("trusty-search");
+    };
+    let dir = PathBuf::from(dir);
+    anyhow::ensure!(
+        dir.is_absolute(),
+        "{DATA_DIR_ENV} must be an absolute path (got: {})",
+        dir.display()
+    );
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("create {DATA_DIR_ENV} socket directory {}", dir.display()))?;
+    Ok(dir.join(SOCKET_FILE_NAME))
 }
 
 /// Map every method onto its handler.

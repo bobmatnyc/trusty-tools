@@ -1,0 +1,4 @@
+Fixed
+- #6556: the `SubagentStop` hook POST is retried with a bounded backoff inside the hook's registered timeout, every attempt and the verdict are logged to stderr, and a stop the daemon never accepts is parked on disk for the daemon's reap loop to replay — instead of being lost and leaving the delegation `Running` for six hours.
+- #6556: the `stop_spool` doctor row probes whether THIS process can write the spool — a create-and-remove, not the mode bits, which a root-owned directory passes while every stop is dropped — reports a park still inside the daemon's 60 s reap tick as `Ok` with its count instead of warning on the normal case, and the daemon's drain sweeps the temp files a hook killed mid-write leaves behind.
+- #7487: a dispatch the daemon admits revives the `Cancelled` record its own earlier deny wrote for the same `tool_use_id`, so a running agent is never described as ended with its worktree reclaimable under it.

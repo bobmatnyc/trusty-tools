@@ -702,3 +702,109 @@ async fn a_client_budget_below_this_listeners_refuses_a_response_it_serves() {
     let _ = stop.send(());
     handle.await.expect("the serve task must not panic");
 }
+
+// ------------------------------------------- data-dir isolation (#7801) ---
+
+/// Why: #7801 — `trusty-search start --data-dir <dir>` moved the lockfile, the
+/// port file, `http_addr` and `indexes.toml` under the override but left the
+/// socket resolving through `trusty_common::resolve_data_dir`, which honours
+/// only `TRUSTY_DATA_DIR_OVERRIDE`. The second daemon therefore tried to bind
+/// the production socket and was refused with `AlreadyServing`. Against the
+/// pre-fix `socket_path`, the resolved path is the shared one and this fails.
+/// Test: this function IS the test.
+#[test]
+fn socket_path_respects_trusty_data_dir() {
+    let tmp = TempDir::new().expect("a tempdir must be creatable");
+    let dir = tmp.path().to_path_buf();
+
+    let path = super::resolve_socket_path(Some(dir.as_os_str()))
+        .expect("an absolute override must resolve");
+
+    assert_eq!(
+        path,
+        dir.join("trusty-search.sock"),
+        "the socket must land under the TRUSTY_DATA_DIR override"
+    );
+    let shared = super::resolve_socket_path(None).expect("the shared path must resolve");
+    assert_ne!(
+        path, shared,
+        "an isolated instance must not bind the shared socket"
+    );
+    assert_eq!(
+        path.file_name(),
+        shared.file_name(),
+        "isolation must move the directory, never rename the socket"
+    );
+}
+
+/// Why: #7801's closure condition is that two daemons with different data dirs
+/// run side by side, which needs EVERY per-instance path to differ — the socket
+/// they bind, the lockfile the singleton check reads, and the registry they
+/// persist to. Asserting only the socket would have passed before the fix for
+/// the other two and still left the daemons colliding.
+/// Test: this function IS the test.
+#[test]
+fn two_data_dirs_yield_distinct_instance_paths() {
+    let tmp = TempDir::new().expect("a tempdir must be creatable");
+    let a = tmp.path().join("instance-a");
+    let b = tmp.path().join("instance-b");
+
+    let sock_a = super::resolve_socket_path(Some(a.as_os_str())).expect("a must resolve");
+    let sock_b = super::resolve_socket_path(Some(b.as_os_str())).expect("b must resolve");
+    assert_ne!(sock_a, sock_b, "two data dirs must bind two sockets");
+
+    // The lockfile and the registry derive from the same override, through the
+    // pure resolver `daemon_dir` and `persistence::data_dir` both delegate to.
+    let dir_a = crate::service::daemon::resolve_daemon_dir(Some(a.as_os_str()))
+        .expect("a daemon dir must resolve");
+    let dir_b = crate::service::daemon::resolve_daemon_dir(Some(b.as_os_str()))
+        .expect("b daemon dir must resolve");
+    assert_ne!(
+        dir_a.join("daemon.lock"),
+        dir_b.join("daemon.lock"),
+        "the singleton check must read two different lockfiles"
+    );
+    assert_ne!(
+        dir_a.join("indexes.toml"),
+        dir_b.join("indexes.toml"),
+        "two instances must not share one registry"
+    );
+    assert!(
+        sock_a.starts_with(&dir_a) && sock_b.starts_with(&dir_b),
+        "each instance's socket must sit beside its own lockfile: {sock_a:?} / {dir_a:?}"
+    );
+}
+
+/// Why: `var_os` reports an exported-but-empty `TRUSTY_DATA_DIR` as `Some("")`,
+/// and joining the socket name onto it yields a RELATIVE path that resolves
+/// against the daemon's cwd — `/` under launchd. Falling back matches
+/// `trusty_common::resolve_data_dir`'s own guard for the same shape.
+/// Test: this function IS the test.
+#[test]
+fn an_empty_data_dir_override_falls_back_to_the_shared_socket() {
+    let empty = std::ffi::OsString::new();
+    let path = super::resolve_socket_path(Some(empty.as_os_str()))
+        .expect("an empty override must not be fatal");
+    assert_eq!(
+        path,
+        super::resolve_socket_path(None).expect("the shared path must resolve"),
+        "an empty override must be treated as unset"
+    );
+    assert!(path.is_absolute(), "the fallback must stay absolute");
+}
+
+/// Why: a relative override would resolve against the daemon's cwd, so two
+/// invocations from different directories would bind different sockets while
+/// believing they were one instance. `handle_start` refuses the same shape for
+/// `--data-dir`; this keeps the socket from being the one path that accepts it.
+/// Test: this function IS the test.
+#[test]
+fn a_relative_data_dir_override_is_refused() {
+    let relative = std::ffi::OsString::from("relative/data-dir");
+    let err = super::resolve_socket_path(Some(relative.as_os_str()))
+        .expect_err("a relative override must be refused");
+    assert!(
+        err.to_string().contains("absolute"),
+        "the refusal must say why: {err:#}"
+    );
+}

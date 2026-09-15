@@ -202,7 +202,12 @@ pub async fn repair_delegation_route(
 /// daemon's policy call. A payload with no `cwd`, no `tool_use_id`, a
 /// non-dispatch `tool`, or no isolating `isolation` answers the query and
 /// records nothing.
-/// Test: `a_grant_and_the_tracker_converge_in_either_order` covers both the
+///
+/// A non-empty answer to an eligible grant is a deny, and it releases the
+/// denied dispatch's record exactly as the sibling route does (#7487).
+/// Test: `a_dispatch_the_grant_path_denies_records_no_claim_7487`,
+/// `a_grant_deny_keeps_the_running_occupant_counted_7487`;
+/// `a_grant_and_the_tracker_converge_in_either_order` covers both the
 /// correct-an-existing-record and the record-arrives-first halves;
 /// `a_grant_and_the_tracker_race_without_losing_the_isolation`,
 /// `granted_worktree_route_records_nothing_without_isolation_or_a_tool_use_id`,
@@ -259,6 +264,16 @@ pub fn granted_worktree_op(
             );
         },
     );
+    // #7487 (recurrence 2026-09-13): `eligible && !claimed` is the grant path's
+    // deny — `evaluate_granted_worktree` denies on any non-empty answer. The
+    // dispatch never runs, so the record the tracker writes from the ORIGINAL
+    // unisolated payload must not occupy the checkout. Same release as the
+    // sibling route; the guard's rewrite leaves `tool_use_id` unchanged.
+    if eligible && !claimed {
+        crate::daemon::services::delegation_tracker::release_denied_dispatch(
+            state, session, payload,
+        );
+    }
     Ok(writers_response(&names, claimed))
 }
 
