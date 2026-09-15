@@ -1758,13 +1758,22 @@ fn six_projects() -> Vec<Project> {
 /// `registry_list_projects` hands back `values()` in an order that varies run to
 /// run. Against the pre-#7421 `targets_from` — which mapped the input straight
 /// through — a permuted input produced a permuted row list, so this fails there.
+///
+/// #7989: uses `targets_from_with(..., stub_checkout)` rather than
+/// `targets_from`, which resolves each row's checkout through the real
+/// `local_checkout_for` — `repos_root()` → `$TRUSTY_MPM_REPOS_ROOT` /
+/// `$TRUSTY_MPM_WORKSPACE_ROOT` / config / real `$HOME`. Sibling tests in this
+/// binary `set_var` those keys, so under the parallel harness a full-bin run
+/// could race a `Target::Registered.checkout` in the middle of this
+/// comparison. The stub removes that dependence; the assertions below are
+/// unaffected since they only ever compared the label order.
 #[test]
 fn new_session_order_is_independent_of_registry_iteration_order() {
-    let forward = new_session::targets_from(&six_projects(), &[]);
+    let forward = new_session::targets_from_with(&six_projects(), &[], stub_checkout);
     let mut shuffled = six_projects();
     shuffled.reverse();
     shuffled.swap(0, 3);
-    let reversed = new_session::targets_from(&shuffled, &[]);
+    let reversed = new_session::targets_from_with(&shuffled, &[], stub_checkout);
     assert_eq!(forward, reversed, "the row order followed the input order");
     // And the order is the alphabetical one the labels spell, escape hatch last.
     assert_eq!(
@@ -1984,9 +1993,17 @@ fn grouped_projects() -> Vec<Project> {
 /// under `alpha.example.com` — between `acme` and `bobmatnyc` — while a plain
 /// alphabetical sort of the LABELS would put it second from last. That gap is
 /// what makes this fail against #7421's ordering.
+///
+/// #7989: uses `targets_from_with(..., stub_checkout)` throughout, not
+/// `targets_from` — this test compares full `Vec<Target>` equality, which
+/// includes each row's `checkout`, resolved through the real
+/// `local_checkout_for` under `targets_from`. That path reads
+/// `TRUSTY_MPM_REPOS_ROOT` / `TRUSTY_MPM_WORKSPACE_ROOT` / config / real
+/// `$HOME`, which sibling tests in this binary `set_var` — a race under the
+/// parallel harness. The stub removes that dependence.
 #[test]
 fn new_session_order_groups_by_owner_then_domain() {
-    let forward = new_session::targets_from(&grouped_projects(), &[]);
+    let forward = new_session::targets_from_with(&grouped_projects(), &[], stub_checkout);
     assert_eq!(
         new_session::row_labels(&forward),
         vec![
@@ -2010,7 +2027,7 @@ fn new_session_order_groups_by_owner_then_domain() {
     shuffled.swap(0, 4);
     shuffled.swap(1, 5);
     assert_eq!(
-        new_session::targets_from(&shuffled, &[]),
+        new_session::targets_from_with(&shuffled, &[], stub_checkout),
         forward,
         "the row order followed the input order"
     );
@@ -2018,7 +2035,7 @@ fn new_session_order_groups_by_owner_then_domain() {
     other.rotate_left(3);
     other.swap(2, 6);
     assert_eq!(
-        new_session::targets_from(&other, &[]),
+        new_session::targets_from_with(&other, &[], stub_checkout),
         forward,
         "a second shuffle produced a third order"
     );
