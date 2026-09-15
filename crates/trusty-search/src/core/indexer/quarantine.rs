@@ -98,9 +98,10 @@
 //! condition that TURNS THE SNAPSHOT WRITERS ON — which is why they need
 //! their own gate rather than inheriting this one (#4226).
 //!
-//! The invariant holds because the only producer of `corpus_open_failed ==
-//! true` (`service::persistence_loader::build_indexer_from_entry`) is exactly
-//! the path that wires NO corpus, and the only way to wire one
+//! The invariant holds because both producers of `corpus_open_failed == true`
+//! (`service::persistence_loader::build_indexer_from_entry`, and
+//! [`CodeIndexer::quarantine_detached_corpus`] after a staged swap failed to
+//! re-attach, #7920) run only when NO corpus is wired, and the only way to wire one
 //! ([`CodeIndexer::set_corpus_store`]) clears the flag in the same call.
 //!
 //! **If you add an in-process corpus reopen/retry, you will break this.** A
@@ -119,6 +120,7 @@
 use std::sync::atomic::Ordering;
 
 use super::CodeIndexer;
+use crate::core::corpus::CorpusOpenFailure;
 
 /// Emit the full ERROR diagnostic on the 1st refusal and then every Nth.
 ///
@@ -216,12 +218,27 @@ impl CodeIndexer {
     /// `quarantined_index_refuses_hnsw_snapshot_write` in
     /// `tests/quarantine_durable_writes_4226.rs`.
     pub(crate) fn refuse_durable_write(&self, op: &str, target: &str) -> bool {
-        if !self.corpus_open_failed {
+        // #7920: a corpus once wired and now absent was detached by a staged
+        // swap; the snapshot writers must not stand in for it.
+        let detached = self.corpus_ever_wired && self.corpus.is_none();
+        if !self.corpus_open_failed && !detached {
             return false;
         }
         let (refused, loud) = self.count_refusal();
         let index_id = &self.index_id;
-        if loud {
+        if loud && !self.corpus_open_failed {
+            tracing::error!(
+                index_id = %index_id,
+                op = %op,
+                target = %target,
+                refused_writes = refused,
+                "index '{index_id}': REFUSING durable snapshot write ({op} {target}) — \
+                 this index's durable redb corpus is detached (a staged reindex swap \
+                 took it out and it is not re-attached), so the in-memory corpus \
+                 describes no file this indexer holds (issue #7920). {refused} \
+                 write(s) refused so far."
+            );
+        } else if loud {
             tracing::error!(
                 index_id = %index_id,
                 op = %op,
@@ -320,6 +337,39 @@ impl CodeIndexer {
             );
         }
         true
+    }
+
+    /// Quarantine an index whose durable corpus a staged swap detached and
+    /// could not re-attach (issue #7920).
+    ///
+    /// Why: `service::reindex::corpus_swap` takes the corpus out before
+    /// promotion and on abort. When the re-open then failed (for example
+    /// `DatabaseAlreadyOpen` from another opener) the index kept no corpus and
+    /// no quarantine, so it reported healthy while the snapshot writers fell
+    /// back to `chunks.json`.
+    /// What: sets `corpus_open_failed` with `kind` and logs at ERROR. No corpus
+    /// is wired, so the module invariant holds, reads report the corpus
+    /// unavailable, and every write family refuses. A later successful
+    /// [`CodeIndexer::set_corpus_store`] lifts it like any other quarantine.
+    /// Test: `shutdown_flush_after_failed_reattach_leaves_chunks_json_byte_identical`,
+    /// `failed_promotion_reopen_quarantines_and_flush_leaves_chunks_json_byte_identical`.
+    pub(crate) fn quarantine_detached_corpus(&mut self, kind: CorpusOpenFailure, cause: &str) {
+        debug_assert!(
+            self.corpus.is_none(),
+            "index '{}': quarantine_detached_corpus called with a corpus wired (#7920)",
+            self.index_id
+        );
+        self.corpus_open_failed = true;
+        self.corpus_open_failure = Some(kind);
+        tracing::error!(
+            index_id = %self.index_id,
+            failure_kind = ?kind,
+            "index '{}': durable corpus detached by a staged reindex swap and not \
+             re-attached ({cause}) — the index is write-quarantined and reports its \
+             corpus unavailable; no snapshot is written until a successful corpus \
+             open (restart the daemon once the other opener is gone) (issue #7920)",
+            self.index_id
+        );
     }
 
     /// Lift the write quarantine after a corpus open succeeds (issue #4122).

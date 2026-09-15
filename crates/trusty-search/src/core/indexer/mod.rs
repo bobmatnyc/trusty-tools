@@ -436,6 +436,17 @@ pub struct CodeIndexer {
     /// `service::server::tests_4087`.
     pub corpus_open_failure: Option<crate::core::corpus::CorpusOpenFailure>,
 
+    /// #7920: `true` once any durable corpus has been wired on this indexer.
+    ///
+    /// Why: a staged swap takes the corpus out (`take_corpus_store`) and a
+    /// failed re-open leaves `corpus == None`, the state in which the snapshot
+    /// writers fall back to `chunks.json`. This flag separates "never had a
+    /// corpus" (a legacy JSON-only indexer) from "had one, now detached".
+    /// What: set by [`Self::set_corpus_store`] and [`Self::swap_corpus_store`];
+    /// never cleared. Read by `refuse_durable_write`.
+    /// Test: `shutdown_flush_after_failed_reattach_leaves_chunks_json_byte_identical`.
+    pub(super) corpus_ever_wired: bool,
+
     /// Issue #4122: monotonic count of writes refused because
     /// [`Self::corpus_open_failed`] was set. Issue #4226 widened it from
     /// incremental writes alone to every refused durable write.
@@ -668,6 +679,7 @@ impl CodeIndexer {
             last_rehydrate_cost_ms: Arc::new(AtomicU64::new(0)),
             corpus_open_failed: false,
             corpus_open_failure: None,
+            corpus_ever_wired: false,
             incremental_writes_refused: AtomicU64::new(0),
             hnsw_load_failed: false,
             skip_kg: false,
@@ -1011,6 +1023,8 @@ impl CodeIndexer {
     /// `tests/corpus_open_quarantine_4122.rs` covers the recovery transition.
     pub fn set_corpus_store(&mut self, corpus: Arc<crate::core::corpus::CorpusStore>) {
         self.corpus = Some(corpus);
+        // #7920: from here on, `corpus == None` means detached, not legacy.
+        self.corpus_ever_wired = true;
         self.clear_corpus_open_failure();
     }
 
@@ -1025,6 +1039,8 @@ impl CodeIndexer {
         &mut self,
         corpus: Arc<crate::core::corpus::CorpusStore>,
     ) -> Option<Arc<crate::core::corpus::CorpusStore>> {
+        // #7920: see `set_corpus_store`.
+        self.corpus_ever_wired = true;
         self.corpus.replace(corpus)
     }
 

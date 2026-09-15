@@ -10,8 +10,11 @@
 //! wrote, and refuses a write when the file on disk holds chunks AND either the
 //! in-memory corpus is empty or the path is not one this indexer owns. Every
 //! refusal is counted and returned as [`SnapshotOverwriteRefused`].
-//! Scope: only indexers with no redb corpus store write `chunks.json`, so only
-//! they reach this guard; a redb-backed index never does.
+//! Scope: `chunks.json` is written only while no redb corpus store is wired.
+//! `refuse_durable_write` runs first and refuses a write-quarantined indexer
+//! and one whose corpus a staged swap detached (#7920), so this guard sees
+//! only indexers that never held a corpus. It inspects the one path the
+//! caller names; it cannot see a snapshot at any other location.
 //! Test: `shutdown_flush_refuses_empty_corpus_over_populated_chunks_json`,
 //! `incremental_persist_refuses_empty_corpus_over_populated_chunks_json`.
 
