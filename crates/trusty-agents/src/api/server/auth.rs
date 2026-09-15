@@ -211,9 +211,18 @@ pub(super) async fn auth_middleware(
 /// to its requests. Rather than embedding the token into HTML (which would
 /// leak via view-source), we publish only a boolean flag. The token itself
 /// is provided to the user out-of-band and pasted into the UI.
-/// What: A single `auth_required` boolean serialized to JSON.
-/// Test: `config_endpoint_reports_auth_required_true`/`_false`.
+/// What: `auth_required` says whether `/api/*` needs a bearer token.
+///
+/// #7609: `channel_write_token` is the credential a channel WRITE must
+/// present, which on a tokenless loopback daemon is one this boot minted and
+/// the UI has no other way to learn. It is `None` — and omitted from the JSON —
+/// for any caller whose `Origin` this daemon would not serve its own UI to; see
+/// `routes::same_origin_ok` and `routes::build_router_with_channel_credential`.
+/// Test: `config_endpoint_reports_auth_required_true`/`_false`,
+/// `the_channel_credential_is_withheld_from_a_foreign_origin`.
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct ApiClientConfig {
     pub(super) auth_required: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) channel_write_token: Option<String>,
 }

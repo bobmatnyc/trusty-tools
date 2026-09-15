@@ -60,7 +60,7 @@ mod attachments;
 mod auth;
 // #7609: channel writes take one control the rest of this API does not —
 // a configured API token — and leave an audit line.
-mod channel_auth;
+pub(crate) mod channel_auth;
 // #7609: the listener routes, kept for one release as forwarding aliases.
 mod cancel;
 mod deprecated_aliases;

@@ -122,8 +122,55 @@ pub fn build_router_with_origins(
     token: Option<String>,
     self_origins: SelfOrigins,
 ) -> Router {
+    // #7609: with no separate channel-write credential, the operator's own
+    // token IS the credential — which is what every caller but
+    // `serve_with_config` wants.
+    let channel_credential = token.clone();
+    build_router_with_channel_credential(state, token, self_origins, channel_credential)
+}
+
+/// [`build_router_with_origins`] with an explicit channel-write credential.
+///
+/// Why (#7609, critic HIGH-4): on a tokenless loopback bind there is no
+/// operator token to authenticate a channel write against, and installing
+/// the router-wide `auth_middleware` to create one would break every other
+/// client of a historically open loopback API. `serve_with_config` mints a
+/// per-boot credential instead and passes it here; it gates channel writes and
+/// nothing else.
+/// What: `credential` is what `channel_auth::ChannelWriter` verifies and what
+/// `GET /api/config` discloses to a same-origin loopback caller. `None` refuses
+/// every channel write.
+/// Test: `super::tests::global_channels` — the tokenless-refusal, minted-write
+/// and wrong-credential cases.
+pub fn build_router_with_channel_credential(
+    state: AppState,
+    token: Option<String>,
+    self_origins: SelfOrigins,
+    channel_credential: Option<String>,
+) -> Router {
     let auth_required = token.is_some();
-    let config_route = get(move || async move { Json(ApiClientConfig { auth_required }) });
+    // #7609 critic HIGH-4: the served UI learns the channel-write credential
+    // here. `config_route` is the pre-auth bootstrap probe, which is exactly
+    // why it is the right transport — the UI has no other way to obtain one —
+    // and the disclosure is narrowed twice over. The value is present only for
+    // a caller whose `Origin` this daemon would serve its own UI to
+    // (`same_origin_ok` below), and the router-wide CORS layer is the
+    // SAME-ORIGIN variant (`with_guarded_middleware_same_origin_cors`, applied
+    // after every route below), so a cross-origin page's `fetch` never gets to
+    // READ this response body at all — `same_origin_cors` reflects
+    // `Access-Control-Allow-Origin` only for a loopback / local-webview / self
+    // origin, and the browser withholds the body without it.
+    let disclosed = channel_credential.clone();
+    let config_origins = self_origins.clone();
+    let config_route = get(move |headers: axum::http::HeaderMap| async move {
+        let origin = headers
+            .get(axum::http::header::ORIGIN)
+            .and_then(|v| v.to_str().ok());
+        Json(ApiClientConfig {
+            auth_required,
+            channel_write_token: disclosed.filter(|_| same_origin_ok(origin, &config_origins)),
+        })
+    });
 
     let mut router = Router::new()
         .route(
@@ -465,7 +512,7 @@ pub fn build_router_with_origins(
     // as a process global — two routers in one process (a test, a re-bind) each
     // answer for themselves.
     router = router.layer(Extension(ChannelWriteAuth {
-        token_configured: auth_required,
+        credential: channel_credential,
     }));
 
     if let Some(tok) = token {
@@ -486,6 +533,27 @@ pub fn build_router_with_origins(
     // operator's browser read all of it from `127.0.0.1`. The write guard did
     // not help, because it is method-gated and reads are GET.
     with_guarded_middleware_same_origin_cors(router, self_origins)
+}
+
+/// Whether `origin` is one this daemon would serve its own UI to.
+///
+/// Why (#7609): the channel-write credential is disclosed on the otherwise
+/// unauthenticated `/api/config`, so the disclosure needs the same-origin test
+/// the CORS layer applies — and `GET` is not covered by the method-gated write
+/// guard, so it is applied explicitly here.
+/// What: an ABSENT `Origin` is same-origin. A browser omits it on a same-origin
+/// `GET`, and a server-side caller (the console proxy, `curl`) sends none; both
+/// are already inside the trust boundary the loopback bind draws. Otherwise the
+/// origin must be loopback, a local webview, or this daemon's own resolved bind
+/// — the three `trusty_common::server` admits.
+/// Test: `the_channel_credential_is_withheld_from_a_foreign_origin`.
+fn same_origin_ok(origin: Option<&str>, self_origins: &SelfOrigins) -> bool {
+    let Some(origin) = origin else {
+        return true;
+    };
+    trusty_common::server::origin_is_loopback(origin)
+        || trusty_common::server::origin_is_local_webview(origin)
+        || trusty_common::server::origin_matches_self(origin, self_origins)
 }
 
 /// Serve the HTTP API and embedded web UI on `127.0.0.1:<port>` until killed.
@@ -662,7 +730,36 @@ pub async fn serve_with_config(cfg: ApiConfig) -> Result<()> {
     // drops them.
     let resolved = listener.local_addr().unwrap_or(addr);
     let self_origins = SelfOrigins::from_bind_addrs(&[resolved]);
-    let app = build_router_with_origins(state, cfg.token.clone(), self_origins);
+
+    // #7609 critic HIGH-4: a tokenless LOOPBACK daemon mints a per-boot
+    // channel-write credential so the Channels tab it serves can still save. A
+    // configured token disables minting — it is already the credential. A
+    // tokenless non-loopback bind never reaches here (refused above), so the
+    // remaining `None` is the honest answer for a bind that may not mint.
+    let channel_credential =
+        super::channel_auth::channel_write_credential(cfg.token.clone(), cfg.bind);
+    if cfg.token.is_none() && channel_credential.is_some() {
+        tracing::info!(
+            "minted an ephemeral channel-write credential for this boot; the served UI reads it \
+             from /api/config (#7609)"
+        );
+    }
+    super::channel_auth::record_daemon_credential(channel_credential.clone());
+    if let Some(credential) = &channel_credential
+        && let Err(e) = super::channel_auth::publish_credential(credential)
+    {
+        tracing::warn!(
+            ?e,
+            "could not publish the channel-write credential for local clients"
+        );
+    }
+
+    let app = build_router_with_channel_credential(
+        state,
+        cfg.token.clone(),
+        self_origins,
+        channel_credential,
+    );
 
     // #3331: publish the bound address via the standard `http_addr` discovery
     // file so the trusty-console reverse proxy (and the connector poller) can
@@ -688,11 +785,6 @@ pub async fn serve_with_config(cfg: ApiConfig) -> Result<()> {
         eprintln!("[trusty-agents] API token authentication: enabled");
     }
 
-    // #7609: the in-process `channel` tool takes the same write gate as the
-    // HTTP routes and has no request to read an extension from, so the one fact
-    // it needs is recorded here, before the listener accepts anything.
-    super::channel_auth::record_daemon_token(cfg.token.is_some());
-
     // #7609: `into_make_service_with_connect_info` is what puts the peer
     // address in the request extensions, so the channel-write audit line can
     // name the caller instead of logging `unknown`.
@@ -702,6 +794,9 @@ pub async fn serve_with_config(cfg: ApiConfig) -> Result<()> {
     )
     .with_graceful_shutdown(trusty_common::shutdown_signal())
     .await;
+
+    // #7609: the credential dies with the process that minted it.
+    super::channel_auth::remove_published_credential();
 
     // Remove the discovery file so stale clients fail fast instead of proxying
     // to a dead port.
