@@ -72,9 +72,18 @@ pub(crate) struct GlobalUpdate {
 /// deterministic for a given list because `Channel`'s field order is its
 /// declaration order.
 /// Test: `global_channels_round_trip_preserves_config_and_rejects_a_stale_revision`.
-pub(super) fn revision(channels: &[Channel]) -> String {
-    let encoded = serde_json::to_vec(channels).unwrap_or_default();
-    format!("{:x}", Sha256::digest(&encoded))
+pub(super) fn revision(channels: &[Channel]) -> Result<String, Error> {
+    // #7609 critic LOW: a serialization failure used to hash to a fixed
+    // sentinel, which would have compared EQUAL to another failure and let a
+    // compare-and-swap pass on a revision that described nothing.
+    let encoded = serde_json::to_vec(channels).map_err(|e| {
+        tracing::warn!(error = %e, "channel config: the channel list could not be encoded (#7609)");
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "The channel list could not be encoded",
+        )
+    })?;
+    Ok(format!("{:x}", Sha256::digest(&encoded)))
 }
 
 /// The global channel list as `config.toml` currently declares it.
@@ -123,13 +132,13 @@ fn config_path() -> Result<PathBuf, Error> {
 }
 
 /// The payload both routes answer with.
-fn view(channels: &[Channel]) -> Value {
-    json!({
+fn view(channels: &[Channel]) -> Result<Value, Error> {
+    Ok(json!({
         "scope": "global",
-        "revision": revision(channels),
+        "revision": revision(channels)?,
         "channels": channels,
         "providers": crate::channels::providers_json(),
-    })
+    }))
 }
 
 /// Reject a global channel the harness could not act on.
@@ -186,6 +195,28 @@ pub(super) fn validate(channel: &Channel, known_assistants: &[String]) -> Result
     }
     if let Some(reference) = &channel.credential_ref {
         validate_credential(reference, adapter)?;
+    }
+    // #7609 critic MEDIUM-4: `ingest_filter.label_ids` is passed to Gmail's
+    // `history.list`, and `transport` selects the poller. Neither was bounded,
+    // so the same 32 x 256 non-control rule `AgentListenerBinding::validate`
+    // applies to every other filter list applies here too.
+    if channel.ingest_filter.label_ids.len() > 32
+        || channel.ingest_filter.label_ids.iter().any(|label| {
+            label.trim().is_empty()
+                || label.chars().count() > 256
+                || label.chars().any(char::is_control)
+        })
+    {
+        return Err(bad(
+            "Ingest label filters allow at most 32 nonblank values of at most 256 characters without control characters",
+        ));
+    }
+    // The poller branches on no other value, so anything else is a
+    // configuration that silently never polls.
+    if channel.transport != crate::listeners::config::default_transport() {
+        return Err(bad(
+            "Unsupported channel transport; this build polls Gmail history only",
+        ));
     }
     for name in &channel.route_to {
         if !known_assistants.iter().any(|known| known == name) {
@@ -279,7 +310,9 @@ pub(super) fn persist(
         let current = crate::mcp::config::GlobalConfig::from_toml_str(&current_raw)
             .context("config.toml did not parse; nothing was written")?
             .channels;
-        if revision(&current) != expected_revision {
+        let stored_revision = revision(&current)
+            .map_err(|_| anyhow::anyhow!("the stored channel list could not be encoded"))?;
+        if stored_revision != expected_revision {
             return Ok(None);
         }
         let mut document = current_raw
@@ -350,7 +383,7 @@ async fn known_assistants() -> Result<Vec<String>, Error> {
 /// Test: `global_channels_round_trip_preserves_config_and_rejects_a_stale_revision`.
 pub(super) async fn get_route() -> Result<Json<Value>, Error> {
     let channels = load(&config_path()?).await?;
-    Ok(Json(view(&channels)))
+    view(&channels).map(Json)
 }
 
 /// `PUT /api/channels` — replace the harness-wide channel list.
@@ -396,7 +429,7 @@ pub(crate) async fn write_from_turn(update: GlobalUpdate) -> Result<Value, Error
 /// The read half, for a caller with no request of its own.
 pub(crate) async fn read_view() -> Result<Value, Error> {
     let channels = load(&config_path()?).await?;
-    Ok(view(&channels))
+    view(&channels)
 }
 
 /// Validate, swap and answer — everything both write entry points share.
@@ -431,6 +464,6 @@ async fn apply(update: GlobalUpdate) -> Result<(Value, usize, usize), Error> {
             StatusCode::CONFLICT,
             "Channel settings changed. Reload before saving.",
         )),
-        Persisted::Written { before, after } => Ok((view(&channels), before, after)),
+        Persisted::Written { before, after } => Ok((view(&channels)?, before, after)),
     }
 }

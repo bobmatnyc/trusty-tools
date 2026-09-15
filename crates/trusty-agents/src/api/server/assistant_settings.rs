@@ -288,9 +288,15 @@ pub(crate) async fn operate_at(
             response_value(super::agent_patch::patch_agent_at(dirs, name, request).await).await
         }
         ("settings.get", "listeners") => super::agent_listeners::read(name).await,
+        // #7609: a listener binding's `instructions` are spliced into the wake
+        // prompt as TRUSTED text, so writing one from a turn takes the same
+        // gate a channel write takes.
         ("settings.patch", "listeners") => {
-            super::agent_listeners::write(name, serde_json::from_value(payload).map_err(error)?)
-                .await
+            super::agent_listeners::write_from_turn(
+                name,
+                serde_json::from_value(payload).map_err(error)?,
+            )
+            .await
         }
         ("settings.get", "channels") => super::agent_channels::read(name).await,
         // #7609: a turn-originated channel write takes the same authorization

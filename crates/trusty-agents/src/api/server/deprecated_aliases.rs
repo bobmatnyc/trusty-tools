@@ -63,33 +63,36 @@ fn answer(result: Result<Value, (StatusCode, Json<Value>)>) -> Response {
     })
 }
 
-/// `GET /api/agents/{name}/listeners` — deprecated; forwards to the channel view.
+/// `GET /api/agents/{name}/listeners` — deprecated; the listener view itself.
 ///
-/// What: answers the channel view's own `listeners` member, which is what this
-/// route returned before the merge. A channel view that will not load fails the
-/// same way it fails on `/channels`.
-/// Test: `the_listeners_alias_answers_with_a_deprecation_header`.
+/// Why it reads `agent_listeners::read` rather than projecting the channel
+/// view (#7609 critic MEDIUM-5): the channel view ALSO parses
+/// `<name>.channels.json`, so routing through it turned a broken channels file
+/// into a 500 on a route that used to answer 200. The listener view is the
+/// half of the channel module this route always answered with; reaching it
+/// directly is the forward, and it preserves the pre-merge status codes
+/// exactly.
+/// Test: `the_listeners_alias_answers_with_a_deprecation_header`,
+/// `a_broken_channels_file_does_not_break_the_listener_alias`.
 pub(super) async fn get_listeners_alias(AxumPath(name): AxumPath<String>) -> Response {
     warn_once();
-    answer(
-        super::agent_channels::read(&name)
-            .await
-            .map(|view| view["listeners"].clone()),
-    )
+    answer(super::agent_listeners::read(&name).await)
 }
 
 /// `PUT /api/agents/{name}/listeners` — deprecated; forwards to the channel
-/// module's listener write.
+/// module's listener write, behind the same gate as its sibling.
 ///
-/// Why this is NOT behind the channel-write gate (#7609): the gate covers the
-/// two routes that write a channel BINDING — a destination and the assistant it
-/// wakes. This alias writes only the stage-two wake filter of a listener the
-/// operator already declared globally, which is the surface the shipped UI
-/// edits on a tokenless loopback daemon today. Gating it would break that UI in
-/// the same release that deprecates the route, for a write that cannot
-/// re-point a destination.
-/// Test: `the_listeners_alias_answers_with_a_deprecation_header`.
+/// Why it IS gated (#7609 critic HIGH-2): an earlier revision carved this route
+/// out on the reasoning that a wake filter cannot re-point a destination. That
+/// reasoning was wrong twice over. `AgentListenerBinding::instructions` is up
+/// to 8000 characters and is spliced into the wake prompt ABOVE the
+/// untrusted-data marker (`crate::listeners::wake`), so an ungated write plants
+/// TRUSTED turn instructions; and a binding that is `send_enabled` supplies a
+/// destination outright. Both are exactly what the gate exists to stop, so this
+/// route takes [`ChannelWriter`] like `PUT /api/agents/{name}/channels`.
+/// Test: `a_tokenless_daemon_refuses_every_channel_write`.
 pub(super) async fn put_listeners_alias(
+    _writer: super::channel_auth::ChannelWriter,
     AxumPath(name): AxumPath<String>,
     Json(update): Json<super::agent_listeners::ListenerUpdate>,
 ) -> Response {
