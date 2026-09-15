@@ -8,17 +8,17 @@
 
 use std::time::Duration;
 
-use super::{HYGIENE, RECLAIM, SweepStatus, lane, rows};
+use super::{HYGIENE, RECLAIM, RECLAIM_NAME, SweepStatus, lane, rows};
 use crate::core::doctor::CheckStatus;
 
 /// A completed pass records its duration and clears the running flag.
 #[test]
 fn sweep_status_records_the_last_pass_duration() {
-    static S: SweepStatus = SweepStatus::new();
+    static S: SweepStatus = SweepStatus::new("local-test-sweep");
     assert_eq!(S.last_pass(), None, "no pass has run");
     assert!(!S.is_running());
     {
-        let _guard = S.begin();
+        let _guard = S.begin(None);
         assert!(S.is_running(), "a pass in flight must be visible");
     }
     assert!(!S.is_running(), "the guard must clear the flag");
@@ -32,9 +32,9 @@ fn sweep_status_records_the_last_pass_duration() {
 /// the life of the daemon, which is worse than no row at all.
 #[test]
 fn sweep_status_guard_records_even_on_panic() {
-    static S: SweepStatus = SweepStatus::new();
+    static S: SweepStatus = SweepStatus::new("panicking-test-sweep");
     let caught = std::panic::catch_unwind(|| {
-        let _guard = S.begin();
+        let _guard = S.begin(None);
         panic!("a pass that blew up");
     });
     assert!(caught.is_err(), "the panic must have happened");
@@ -67,7 +67,8 @@ async fn the_lane_serialises_two_sweeps() {
 /// Both sweeps appear in the doctor row, each naming its own kill switch.
 #[test]
 fn sweep_rows_report_each_sweeps_switch_and_last_pass() {
-    let rows = rows();
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let rows = rows(root.path());
     assert_eq!(rows.len(), 2, "one row per sweep");
     let names: Vec<&str> = rows.iter().map(|r| r.name).collect();
     assert!(names.contains(&"worktree-reclaim"), "{names:?}");
@@ -89,10 +90,11 @@ fn sweep_rows_report_each_sweeps_switch_and_last_pass() {
 #[test]
 #[serial_test::serial]
 fn background_sweeps_row_warns_on_a_slow_pass() {
+    let root = tempfile::TempDir::new().expect("tempdir");
     // The statics are shared, so drive the real ones and release immediately.
     let check = {
-        let _reclaim = RECLAIM.begin();
-        super::check_background_sweeps()
+        let _reclaim = RECLAIM.begin(None);
+        super::check_background_sweeps(root.path())
     };
     assert_eq!(check.status, CheckStatus::Warn, "{}", check.message);
     assert!(check.message.contains("IN FLIGHT"), "{}", check.message);
@@ -115,7 +117,8 @@ fn background_sweeps_row_is_ok_when_both_sweeps_are_idle() {
         !RECLAIM.is_running() && !HYGIENE.is_running(),
         "the serial guard must give this test an idle daemon"
     );
-    let check = super::check_background_sweeps();
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let check = super::check_background_sweeps(root.path());
     assert_eq!(check.name, "background_sweeps");
     assert_eq!(check.status, CheckStatus::Ok, "{}", check.message);
     assert!(
@@ -126,6 +129,71 @@ fn background_sweeps_row_is_ok_when_both_sweeps_are_idle() {
     assert!(
         check.message.contains("worktree-reclaim") && check.message.contains("inproject-hygiene"),
         "both sweeps must appear even when idle: {}",
+        check.message
+    );
+}
+
+/// 🔴 #8059 REGRESSION: a sweep that STARTED and has not finished reads as
+/// running from a process that did not run it.
+///
+/// Why this shape: `tm doctor` runs daemonless (#6336), so the row is built in
+/// the CLI process, where `RECLAIM`'s atomics are untouched — and on 2026-09-15
+/// it reported "ON, idle, no pass yet" while the daemon's reclaim sweep had live
+/// `git`/`gh` children. The sweep state is driven DIRECTLY here, with no timing
+/// and no subprocess: the defect is about which state the row reads, not about
+/// how long a pass lasts.
+#[test]
+#[serial_test::serial]
+fn a_running_sweep_is_reported_by_a_process_that_did_not_run_it() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    // Exactly what the sweep's own guard writes when a pass begins; this
+    // process is the live writer, standing in for the daemon.
+    let marker = super::super::sweep_state_file::marker_path(root.path(), RECLAIM_NAME);
+    super::super::sweep_state_file::record_start(&marker);
+    assert!(
+        !RECLAIM.is_running(),
+        "the reader's own atomics stay untouched — that is the whole bug"
+    );
+
+    let reclaim = rows(root.path())
+        .into_iter()
+        .find(|r| r.name == RECLAIM_NAME)
+        .expect("the reclaim row exists");
+    assert!(
+        reclaim.running,
+        "a started, unfinished sweep must read as running in another process"
+    );
+
+    let check = super::check_background_sweeps(root.path());
+    assert_eq!(check.status, CheckStatus::Warn, "{}", check.message);
+    assert!(
+        check
+            .message
+            .contains("worktree-reclaim: ON, pass IN FLIGHT"),
+        "the row must name the sweep that is running: {}",
+        check.message
+    );
+}
+
+/// A row with no marker still reports this process's OWN pass.
+///
+/// Why: the fold must not become marker-only. Inside the daemon the atomics are
+/// the authoritative, syscall-free answer, and a marker that could not be
+/// written must never downgrade the daemon's own row to "idle".
+#[test]
+#[serial_test::serial]
+fn a_row_with_no_marker_still_reports_this_processs_own_pass() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let check = {
+        let _hygiene = HYGIENE.begin(None);
+        super::check_background_sweeps(root.path())
+    };
+    assert_eq!(check.status, CheckStatus::Warn, "{}", check.message);
+    assert!(
+        check
+            .message
+            .contains("inproject-hygiene: ON, pass IN FLIGHT"),
+        "the in-memory pass must still be reported: {}",
         check.message
     );
 }

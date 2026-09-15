@@ -365,7 +365,9 @@ pub(crate) async fn run_one_tick(state: &Arc<DaemonState>) {
         warn!("worktree-reclaim sweep: maintenance lane closed; pass not run");
         return;
     };
-    let _timing = super::sweep_status::RECLAIM.begin();
+    // #8059: the pass is recorded under the daemon's own framework root, so
+    // `tm doctor` — which runs in its own process — can see it in flight.
+    let _timing = super::sweep_status::RECLAIM.begin(Some(state.framework_root()));
     match reclaim(
         state,
         &configured_workspace_root(),

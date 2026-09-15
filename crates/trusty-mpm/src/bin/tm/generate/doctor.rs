@@ -210,7 +210,7 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
     ),
     (
         "background_sweeps",
-        "One line per background maintenance sweep — the merged-PR worktree reclaim and the in-project hygiene pass: the environment variable that switches it off (`TRUSTY_MPM_WORKTREE_RECLAIM`, `TRUSTY_MPM_INPROJECT_HYGIENE`), whether it is on, whether a pass is in flight, and how long the last completed pass took. Warns while a pass is running or when the last one exceeded 60 s, because that is the state that costs request latency. In-memory only — a restart reports \"no pass yet\" (issue #7965).",
+        "One line per background maintenance sweep — the merged-PR worktree reclaim and the in-project hygiene pass: the environment variable that switches it off (`TRUSTY_MPM_WORKTREE_RECLAIM`, `TRUSTY_MPM_INPROJECT_HYGIENE`), whether it is on, whether a pass is in flight, and how long the last completed pass took. Warns while a pass is running or when the last one exceeded 60 s, because that is the state that costs request latency. Read from the state each sweep updates at both edges of a pass — the daemon's own in-memory timings plus a marker under `~/.trusty-mpm/sweeps/`, because `tm doctor` runs daemonless and in-memory timings alone reported every sweep idle while one was running. A marker whose writing daemon is gone reads as idle, never as a pass stuck in flight (issues #7965, #8059).",
     ),
     (
         "binary_provenance",

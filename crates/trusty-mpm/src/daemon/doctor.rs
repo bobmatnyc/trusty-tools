@@ -613,7 +613,13 @@ pub(crate) async fn run_doctor_with_claims(
     // #7965: each background sweep's kill switch, whether a pass is in flight,
     // and how long the last one took — so an operator can SEE a sweep overrunning
     // instead of inferring it from request latency.
-    checks.push(crate::daemon::services::sweep_status::check_background_sweeps());
+    // #8059: read from the framework root, not this process's memory — doctor
+    // runs daemonless, so the sweeps' own atomics are never set here.
+    checks.push(
+        crate::daemon::services::sweep_status::check_background_sweeps(
+            &FrameworkPaths::default().root,
+        ),
+    );
     // Issue #4033: where the RUNNING binary came from, and whether that source
     // still exists. Reports UNKNOWN — never Ok — when provenance cannot be
     // determined. Read-only; never installs, moves, or deletes.
