@@ -22,12 +22,34 @@ use crate::core::entity::RawEntity;
 /// Why: the decision to apply it is taken inside the write transaction, so it
 /// must carry what the row looked like when it was planned.
 /// What: the source key, the source row's `file` at planning time, and the
-/// rewritten chunk (`chunk.id == old_id` for an in-place `file` rewrite).
+/// rewritten chunk (`chunk.id == old_id` for an in-place `file` rewrite). The
+/// planned source row is `chunk` with `old_id`/`old_file` put back.
 #[derive(Debug, Clone)]
 pub struct PathRewrite {
     pub old_id: String,
     pub old_file: String,
     pub chunk: RawChunk,
+}
+
+/// True when `current` is exactly the row `rw` was planned from (#7923).
+///
+/// Why: comparing only `file` let a row whose content was updated under the
+/// same id and path be replaced by the stale planned chunk.
+/// What: `current` with the planned `id`/`file` must serialize to the same
+/// bytes as `rw.chunk`, and its own `id`/`file` must be the planned source.
+/// `RawChunk` has no `PartialEq`, and both sides pass through the same serde
+/// derive, so the byte comparison covers every field.
+/// Test: `migration::relativize::tests::rows_updated_in_place_after_the_load_keep_their_new_content`.
+fn row_matches_plan(mut current: RawChunk, rw: &PathRewrite) -> bool {
+    if current.id != rw.old_id || current.file != rw.old_file {
+        return false;
+    }
+    current.id.clone_from(&rw.chunk.id);
+    current.file.clone_from(&rw.chunk.file);
+    match (serde_json::to_vec(&current), serde_json::to_vec(&rw.chunk)) {
+        (Ok(now), Ok(planned)) => now == planned,
+        _ => false,
+    }
 }
 
 /// What [`CorpusStore::apply_path_rewrites`] committed (#7923).
@@ -197,14 +219,16 @@ impl CorpusStore {
     /// Why: the count check and the abort-on-failure contract need a test that
     /// can fault the transaction from inside; redb offers no other seam.
     /// What: inside one write transaction, per rewrite: skip it when the source
-    /// row is gone or no longer holds `old_file` (changed since the load);
+    /// row is gone or differs in any field from the row it was planned from
+    /// (changed since the load — see [`row_matches_plan`]);
     /// keep the source and report `old_id` when the target id is held by any
     /// row now; otherwise insert the rewritten chunk and remove `old_id` (or
     /// overwrite in place when the id is unchanged). Then run `before_verify`,
     /// compare the table length with its value at the start of the
     /// transaction, and commit only when equal. Any `Err` drops the
     /// transaction, so nothing is committed.
-    /// Test: `migration::relativize::tests::failed_rewrite_commits_nothing_and_retry_converges`.
+    /// Test: `migration::relativize::tests::failed_rewrite_commits_nothing_and_retry_converges`,
+    /// `migration::relativize::tests::rows_updated_in_place_after_the_load_keep_their_new_content`.
     pub(crate) fn apply_path_rewrites_with<F>(
         &self,
         rewrites: &[PathRewrite],
@@ -223,13 +247,11 @@ impl CorpusStore {
             let before = table.len().context("count chunks before rewrite")?;
             for rw in rewrites {
                 // #7923: decide against the rows as they are now, inside the txn.
-                let current_file = match table.get(rw.old_id.as_str())? {
-                    Some(v) => serde_json::from_slice::<RawChunk>(v.value())
-                        .ok()
-                        .map(|c| c.file),
+                let current = match table.get(rw.old_id.as_str())? {
+                    Some(v) => serde_json::from_slice::<RawChunk>(v.value()).ok(),
                     None => None,
                 };
-                if current_file.as_deref() != Some(rw.old_file.as_str()) {
+                if !current.is_some_and(|c| row_matches_plan(c, rw)) {
                     outcome.skipped_changed += 1;
                     continue;
                 }

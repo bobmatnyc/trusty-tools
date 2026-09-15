@@ -14,13 +14,15 @@
 //! ([`crate::core::corpus::CorpusStore::apply_path_rewrites`]) that re-reads
 //! every row it touches. A target id held at that moment — including by a row
 //! written after the load — keeps the source row under its absolute id and is
-//! reported with a count and a reason; a source row that changed or vanished
-//! since the load is skipped; the row count is checked inside the transaction
-//! and a mismatch aborts it. No committed state exists between an insert and
-//! its remove, so a crash leaves the corpus as it was and the retry converges.
+//! reported with a count and a reason; a source row that changed in any field
+//! or vanished since the load is skipped and reported; the row count is
+//! checked inside the transaction and a mismatch aborts it. No committed state
+//! exists between an insert and its remove, so a crash leaves the corpus as it
+//! was and the retry converges.
 //! Test: `relativize_preserves_every_chunk_for_m002_and_m004`,
 //! `failed_rewrite_commits_nothing_and_retry_converges`,
-//! `rows_written_after_the_load_are_never_overwritten`.
+//! `rows_written_after_the_load_are_never_overwritten`,
+//! `rows_updated_in_place_after_the_load_keep_their_new_content`.
 
 use std::path::Path;
 
@@ -160,10 +162,13 @@ pub(crate) async fn relativize_corpus_paths(
         );
     }
     if report.skipped_changed > 0 {
-        tracing::info!(
+        // #7923: a skipped row stays under its absolute id — a degradation to
+        // report, never a silent overwrite.
+        tracing::warn!(
             index_id = %index.id,
             count = report.skipped_changed,
-            "{label}: skipped chunk(s) changed or removed since the load"
+            "{label}: skipped chunk(s) changed or removed since the load; they keep \
+             their stored id and path until a reindex (#7923)"
         );
     }
     if report.rewritten > 0 {
@@ -385,5 +390,38 @@ mod tests {
         assert_eq!(corpus.chunk_count().unwrap(), 5);
         let b = corpus.get_chunks(&["src/b.rs:1:3"]).unwrap();
         assert_eq!(b[0].content, "fn b_live() {}", "newer row overwritten");
+    }
+
+    /// A row whose content is updated under the same absolute id and `file`
+    /// after the load keeps the new content, on both the moving and the
+    /// in-place arm, and the skip is counted.
+    #[tokio::test]
+    async fn rows_updated_in_place_after_the_load_keep_their_new_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_handle, corpus) = handle(dir.path());
+        let plan = plan_rewrites(corpus.load_all_chunks().unwrap(), Path::new(ROOT));
+
+        corpus
+            .upsert_chunks(&[
+                chunk(
+                    "/srv/apex/src/b.rs:1:3",
+                    "/srv/apex/src/b.rs",
+                    "fn b_updated() {}",
+                ),
+                chunk("legacy-c", "/srv/apex/src/c.rs", "fn c_updated() {}"),
+            ])
+            .unwrap();
+
+        let outcome = corpus.apply_path_rewrites(&plan.rewrites).unwrap();
+        assert_eq!(outcome.skipped_changed, 2, "{outcome:?}");
+        assert_eq!(outcome.rewritten, 0, "{outcome:?}");
+        assert_eq!(corpus.chunk_count().unwrap(), 4);
+        let rows = corpus
+            .get_chunks(&["/srv/apex/src/b.rs:1:3", "legacy-c"])
+            .unwrap();
+        assert_eq!(rows.len(), 2, "an updated row was removed");
+        assert_eq!(rows[0].content, "fn b_updated() {}", "newer content lost");
+        assert_eq!(rows[1].content, "fn c_updated() {}", "newer content lost");
+        assert!(corpus.get_chunks(&["src/b.rs:1:3"]).unwrap().is_empty());
     }
 }
