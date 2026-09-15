@@ -90,11 +90,13 @@ use crate::core::agent::DelegationId;
 use crate::core::hook::HookEvent;
 use crate::core::session::SessionId;
 use crate::daemon::state::DaemonState;
+use crate::session_manager::decommission::WorktreeRemoval;
 use crate::session_manager::worktree_liveness::process_holding;
 use crate::session_manager::worktree_ownership::{
     AgentDelegationState, AgentWorktreeOwner, SentinelOwner, find_agent_worktree,
     is_harness_agent_worktree, read_sentinel_owner,
 };
+use crate::session_manager::worktree_removal_audit::audited_removal;
 use crate::session_manager::worktree_safety::{
     DirtyWorktreePolicy, dirt_blocks_removal, worktree_remove_command,
 };
@@ -301,21 +303,30 @@ pub(crate) fn reap_worktree(path: &Path, agent_id: &str, in_use: &[PathBuf]) -> 
     // `git worktree` honours `GIT_DIR` over `-C`, so an ambient redirect aimed
     // the removal at another repository while every gate above it examined the
     // real one — the reap reported a refusal and the directory stayed.
-    let out = worktree_remove_command(&registry_root, path).output();
-    match out {
-        Ok(o) if o.status.success() => {
+    // #7885 critic round: inside the removal audit, so this route writes the
+    // same attempt and outcome lines as every other removal route.
+    let outcome = audited_removal(
+        path,
+        &format!("agent-worktree reap: agent {agent_id} has finished with this tree"),
+        || match worktree_remove_command(&registry_root, path).output() {
+            Ok(o) if o.status.success() => WorktreeRemoval::Removed,
+            Ok(o) => WorktreeRemoval::Kept(format!(
+                "`git worktree remove --force` exited {}: {}",
+                o.status,
+                String::from_utf8_lossy(&o.stderr).trim()
+            )),
+            Err(e) => WorktreeRemoval::Kept(format!("could not run git: {e}")),
+        },
+    );
+    match outcome {
+        WorktreeRemoval::Removed => {
             tracing::info!(
                 path = %path.display(),
                 "agent-worktree reap: removed the worktree its agent has finished with (#4311)"
             );
             ReapOutcome::Removed
         }
-        Ok(o) => ReapOutcome::Refused(format!(
-            "`git worktree remove --force` exited {}: {}",
-            o.status,
-            String::from_utf8_lossy(&o.stderr).trim()
-        )),
-        Err(e) => ReapOutcome::Refused(format!("could not run git: {e}")),
+        WorktreeRemoval::Kept(reason) => ReapOutcome::Refused(reason),
     }
 }
 

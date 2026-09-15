@@ -9,10 +9,13 @@
 //! success arm of one of those paths is not an audit trail: the one that
 //! deleted these left no record at all.
 //!
-//! What: [`audited_removal`], called from
-//! [`remove_session_worktree`](super::decommission::remove_session_worktree) —
-//! the single choke point every removal route passes through, including the raw
-//! `remove_dir_all` fallback. It resolves a [`RemovalAudit`] from the path
+//! What: [`audited_removal`], called by every route that removes a worktree or
+//! a session workspace:
+//! [`remove_session_worktree`](super::decommission::remove_session_worktree),
+//! which the merged-PR reclaim, the orphan sweep and session decommission reach,
+//! including its raw `remove_dir_all` fallback; decommission's owned-workspace
+//! removal; and the agent-worktree reaper (#7885 critic round). It resolves a
+//! [`RemovalAudit`] from the path
 //! itself (resolved path, branch, owning session or agent from the
 //! `.trusty-mpm-worktree` sentinel, and the caller's reason), writes an ATTEMPT
 //! line before the removal runs, and an OUTCOME line after it returns. Both go
@@ -161,7 +164,7 @@ impl RemovalAudit {
 /// Test: `worktree_7885_a_removal_emits_one_audit_line_before_deleting`,
 /// `worktree_7885_a_refused_removal_is_never_audited_as_a_deletion`,
 /// `worktree_7885_a_completed_removal_is_audited_as_removed`.
-pub(super) fn audited_removal(
+pub(crate) fn audited_removal(
     path: &Path,
     reason: &str,
     remove: impl FnOnce() -> WorktreeRemoval,

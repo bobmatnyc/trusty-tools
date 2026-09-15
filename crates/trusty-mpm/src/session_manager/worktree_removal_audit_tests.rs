@@ -60,6 +60,46 @@ fn captured<T>(body: impl FnOnce() -> T) -> (T, Vec<String>) {
     (out, buffer.tail(64))
 }
 
+/// 🔴 #7885 critic round: the agent-worktree reaper writes the same attempt and
+/// outcome lines as every other removal route.
+///
+/// Why: the audit module claims every removal route passes through it, and the
+/// reaper called `git worktree remove --force` directly, logging only on
+/// success. Fails on `e21a6ba0b`, where the reaper writes no audit line.
+#[test]
+#[serial_test::serial]
+fn worktree_7885_the_agent_reaper_is_audited() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree_at(&fx.repo.join(".claude").join("worktrees"), "agent-7885reap");
+    std::fs::write(wt.join("landed.rs"), "// landed\n").expect("write landed file");
+    GitWorktreeFixture::commit_all_and_push(&wt, "landed");
+    GitWorktreeFixture::stamp_agent_sentinel(&wt, "agent-7885reap");
+    let (outcome, lines) = captured(|| {
+        crate::daemon::services::agent_worktree_reap::reap_worktree(&wt, "agent-7885reap", &[])
+    });
+    assert!(
+        matches!(
+            outcome,
+            crate::daemon::services::agent_worktree_reap::ReapOutcome::Removed
+        ),
+        "the fixture must be reapable. Captured: {lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("worktree-removal: attempting removal of")
+                && l.contains("agent-7885reap")
+                && l.contains("agent-worktree reap")),
+        "Captured: {lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("worktree-removal: removed") && l.contains("agent-7885reap")),
+        "Captured: {lines:#?}"
+    );
+}
+
 /// 🔴 #7885: the removal path writes the audit line BEFORE it deletes — proven
 /// by a removal git REFUSES, which deletes nothing and must still be logged.
 ///
