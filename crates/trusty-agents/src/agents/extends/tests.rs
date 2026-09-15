@@ -26,6 +26,8 @@ fn cfg(toml: &str) -> AgentConfig {
     // #7609: mirror `AgentConfig::from_toml_str`, which folds the deprecated
     // `[[listeners]]` table into `channels` on every real parse.
     parsed.absorb_legacy_listeners();
+    // #7901: mirror the per-key presence record `from_toml_str` takes.
+    parsed.declared = super::DeclaredKeys::from_toml(toml).expect("valid test agent TOML");
     parsed
 }
 

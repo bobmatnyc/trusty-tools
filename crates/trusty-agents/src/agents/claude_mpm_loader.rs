@@ -159,6 +159,7 @@ impl ClaudeMpmAgent {
             plugins: crate::agents::AgentPluginsConfig::default(),
             rbac: crate::agents::RbacConfig::default(),
             workstreams: crate::agents::WorkstreamContextConfig::default(),
+            declared: Default::default(),
             adapter,
             legacy_listeners: Vec::new(),
             channels: Vec::new(),
