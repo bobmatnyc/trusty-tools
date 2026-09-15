@@ -247,6 +247,69 @@ fn pr_view<R: GhRunner>(gh: &R, args: &PrMergeArgs) -> anyhow::Result<MergeView>
         .map_err(|e| anyhow::anyhow!("cannot parse `gh pr view {}` JSON: {e}", args.pr))
 }
 
+/// The merge state a post-failure confirmation read (#7945).
+///
+/// Why: the only question that matters after `gh pr merge` exits non-zero is
+/// whether GitHub merged the pull request anyway. `state` answers it; the
+/// merge commit is what makes the answer checkable in the output.
+/// What: the `state,mergeCommit` half of a `gh pr view --json` payload.
+/// Test: `pr_7945_a_worktree_held_branch_does_not_fail_a_landed_merge`.
+#[derive(Debug, Deserialize)]
+struct MergedState {
+    /// `OPEN`, `CLOSED` or `MERGED`.
+    #[serde(default)]
+    state: String,
+    /// The squash commit, when GitHub reports one.
+    #[serde(default, rename = "mergeCommit")]
+    merge_commit: Option<MergeCommit>,
+}
+
+/// The squash commit in a `mergeCommit` payload.
+#[derive(Debug, Deserialize)]
+struct MergeCommit {
+    /// The commit sha.
+    #[serde(default)]
+    oid: String,
+}
+
+impl MergedState {
+    /// ` as <sha>`, or the empty string when GitHub named no merge commit.
+    fn commit_suffix(&self) -> String {
+        match self.merge_commit.as_ref().map(|c| c.oid.trim()) {
+            Some(oid) if !oid.is_empty() => format!(" as {oid}"),
+            _ => String::new(),
+        }
+    }
+}
+
+/// Did the squash-merge land even though `gh pr merge` exited non-zero? (#7945)
+///
+/// Why: `--delete-branch` deletes the local branch AFTER the API merge, so a
+/// branch a worktree holds makes `gh` fail with the merge already on `main` —
+/// reported twice (PR #7943, PR #8007) as `tm pr merge` exiting 2 on a merge
+/// that had landed. Only a fresh read of the PR can tell that case from a merge
+/// that never happened.
+/// What: `Some(state)` only when the re-read succeeds, parses, and reports
+/// `MERGED`. Every other outcome — a failed read, unparseable JSON, any other
+/// state — is `None`, so an unanswerable question keeps the original failure
+/// rather than upgrading it to success.
+/// Test: `pr_7945_a_worktree_held_branch_does_not_fail_a_landed_merge`,
+/// `pr_7945_a_merge_that_did_not_land_still_fails`,
+/// `pr_7945_an_unreadable_confirmation_still_fails`.
+fn merged_after_failure<R: GhRunner>(gh: &R, args: &PrMergeArgs) -> Option<MergedState> {
+    let n = args.pr.to_string();
+    let mut a = argv(&["pr", "view", &n]);
+    push_repo(&mut a, args);
+    a.push("--json".to_string());
+    a.push("state,mergeCommit".to_string());
+    let run = gh.run(&a).ok()?;
+    if !run.success {
+        return None;
+    }
+    let state: MergedState = serde_json::from_str(&run.stdout).ok()?;
+    (state.state.eq_ignore_ascii_case("MERGED")).then_some(state)
+}
+
 /// Run `tm pr merge`.
 ///
 /// Why: the validated body only reaches `main` if the same process that
@@ -258,8 +321,16 @@ fn pr_view<R: GhRunner>(gh: &R, args: &PrMergeArgs) -> anyhow::Result<MergeView>
 /// or write the body to a temp file and merge from it. Under `--auto` the
 /// merge is queued and GitHub applies the supplied subject and body when
 /// auto-merge fires.
+///
+/// #7945: a non-zero `gh pr merge` is re-read through [`merged_after_failure`]
+/// before it becomes this command's failure. A merge GitHub performed exits
+/// [`EXIT_OK`] with the cleanup failure printed as a warning, because the
+/// post-merge cleanup this exit code gates (`tm pr cleanup`) is precisely what
+/// reclaims the worktree that blocked the branch delete.
 /// Test: `merge_refuses_without_calling_gh_merge`,
-/// `merge_argv_carries_squash_delete_and_body_file`.
+/// `merge_argv_carries_squash_delete_and_body_file`,
+/// `pr_7945_a_worktree_held_branch_does_not_fail_a_landed_merge`,
+/// `pr_7945_a_merge_that_did_not_land_still_fails`.
 pub(crate) fn run<R: GhRunner>(gh: &R, args: &PrMergeArgs) -> anyhow::Result<i32> {
     let view = pr_view(gh, args)?;
     let report = body::validate(&view.body);
@@ -300,7 +371,26 @@ pub(crate) fn run<R: GhRunner>(gh: &R, args: &PrMergeArgs) -> anyhow::Result<i32
             let a = plan(args, &view, tmp.path());
             let out = gh.run(&a)?;
             if !out.success {
-                anyhow::bail!("`gh pr merge {}` failed: {}", args.pr, out.stderr.trim());
+                // #7945: `gh pr merge --delete-branch` deletes the LOCAL branch
+                // after the API merge lands, and that delete fails when a
+                // worktree holds it. Re-read the PR before deciding: a merge
+                // GitHub already performed is not this command's failure.
+                let Some(landed) = merged_after_failure(gh, args) else {
+                    anyhow::bail!("`gh pr merge {}` failed: {}", args.pr, out.stderr.trim());
+                };
+                eprintln!(
+                    "tm pr merge: warning — the squash-merge LANDED{}, but `gh pr merge` exited \
+                     non-zero on local cleanup: {}",
+                    landed.commit_suffix(),
+                    out.stderr.trim()
+                );
+                eprintln!(
+                    "  local branch cleanup is DEFERRED, not failed — `tm pr cleanup {}` removes \
+                     the worktree holding `{}` and then the branch",
+                    args.pr, view.head_ref_name
+                );
+                println!("squash-merged #{} ({})", args.pr, view.head_ref_name);
+                return Ok(EXIT_OK);
             }
             if args.auto {
                 println!(

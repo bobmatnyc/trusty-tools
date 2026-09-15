@@ -487,6 +487,15 @@ same pane injection as `session_send` and carries the same defect.
 
 Before any `git push`, delegate a credential scan to the `security` agent.
 
+0. **Verify the base ref before anything diffs it (#7748).** Every range below
+   reads the LOCAL `refs/remotes/origin/main`, which a checkout that has not
+   fetched can carry hundreds of commits behind — twice on 2026-09-13, and one
+   of those would have scanned ~1,270 unrelated paths. Compare `git rev-parse
+   refs/remotes/origin/main` with `git ls-remote origin refs/heads/main`, and
+   `git fetch origin main` when they disagree. A comparison that cannot be made
+   (no remote, no network) refuses the scan naming both shas; it never reports
+   the scan as passed. `tm pr open` runs this same gate over its own diffs.
+
 1. **`gitleaks` is the primary check**: `gitleaks git --log-opts="origin/main...<branch>"`
    (verified working, gitleaks 8.30.1). Three-dot, same reason as below — it
    scopes the scan to commits your branch added. Caveat: a three-dot range

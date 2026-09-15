@@ -238,6 +238,9 @@ pub mod binary_reinstall;
 // #4462: whether a `--path` install source is behind `origin/main` — the one
 // global `tm` binary regresses every session at once when it is.
 pub mod install_freshness;
+// #7748: whether the local `origin/<base>` a three-dot diff is taken against is
+// the remote's tip — the pre-push credential scan's base, fail-closed.
+pub mod base_ref_freshness;
 pub mod reinstall;
 // #6958: the per-session token-savings ledger every producer appends to, and
 // the instruction/language-compression producer that writes the first row.

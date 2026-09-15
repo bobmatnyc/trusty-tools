@@ -89,6 +89,20 @@ fn normalize(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// The exact `tm project trust` invocation that grants trust to `project_dir`.
+///
+/// Why (#7757): every hint that told an operator to run `tm project trust
+/// <path>` printed a form the CLI rejects with exit 2 — `ProjectAction::Trust`
+/// takes `--dir <path>` and no positional argument. A hint is only worth
+/// printing if pasting it works, so the command line has ONE source and a test
+/// feeds that source straight back through the parser.
+/// What: `tm project trust --dir <path>`, the path rendered as given.
+/// Test: `trust_command_hint_parses_as_the_cli_accepts_it`,
+/// `session_scope_names_the_trust_command_for_an_untrusted_opt_in`.
+pub fn trust_command_hint(project_dir: &Path) -> String {
+    format!("tm project trust --dir {}", project_dir.display())
+}
+
 /// In-memory + on-disk registry of operator-trusted project paths.
 ///
 /// Why: mirrors [`super::project_aliases::ProjectAliasStore`]'s

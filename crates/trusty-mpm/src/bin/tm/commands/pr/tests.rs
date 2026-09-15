@@ -72,6 +72,24 @@ impl FakeGh {
         self
     }
 
+    /// A failing route matching the WHOLE argv (#7945).
+    ///
+    /// Why: the post-merge confirmation read is itself a `gh pr view`, so a
+    /// test of the case where only THAT read fails cannot express itself with a
+    /// substring route.
+    fn on_exact_fail(mut self, argv: &str, stderr: &str) -> Self {
+        self.routes.push((
+            RouteMatch::Exact,
+            argv.to_string(),
+            GhRun {
+                success: false,
+                stdout: String::new(),
+                stderr: stderr.to_string(),
+            },
+        ));
+        self
+    }
+
     fn on_fail(mut self, needle: &str, stderr: &str) -> Self {
         self.routes.push((
             RouteMatch::Contains,
@@ -144,6 +162,8 @@ struct FakePreflight {
     /// `changelog_gate` asked about any other head answers `HeadElsewhere`,
     /// the way `RealPreflight` does when the ref resolves elsewhere.
     checkout_head: Option<String>,
+    /// #7748: where the local `origin/<base>` stands against the remote.
+    base_freshness: trusty_mpm::core::base_ref_freshness::BaseFreshness,
 }
 
 impl FakePreflight {
@@ -157,7 +177,20 @@ impl FakePreflight {
             registry_dir: tempfile::tempdir().expect("registry tempdir"),
             diff_heads: std::cell::RefCell::new(Vec::new()),
             checkout_head: None,
+            // #7748: a current base is the ordinary case every other test wants.
+            base_freshness: trusty_mpm::core::base_ref_freshness::BaseFreshness::Fresh {
+                sha: "aaa111".to_string(),
+            },
         }
+    }
+
+    /// [`Self::ok`] whose local diff base is behind the remote (#7748).
+    fn with_stale_base(mut self) -> Self {
+        self.base_freshness = trusty_mpm::core::base_ref_freshness::BaseFreshness::Stale {
+            local: "old111".to_string(),
+            remote: "new222".to_string(),
+        };
+        self
     }
 
     /// [`Self::ok`] standing on `branch`, so `--head <branch>` is judgeable
@@ -192,6 +225,9 @@ impl Preflight for FakePreflight {
             return Ok(ChangelogVerdict::HeadElsewhere);
         }
         Ok(self.changelog.clone())
+    }
+    fn base_freshness(&self, _base: &str) -> trusty_mpm::core::base_ref_freshness::BaseFreshness {
+        self.base_freshness.clone()
     }
     fn changed_paths(&self, _base: &str, head: &str) -> anyhow::Result<Vec<String>> {
         anyhow::ensure!(!self.diff_fails, "git diff exploded");
@@ -1359,6 +1395,44 @@ fn open_failure_exits_two_without_calling_gh() {
         gh.calls().is_empty(),
         "gh must not be spawned on a failed check"
     );
+}
+
+/// #7748: a stale diff base refuses before any gate runs and before `gh`.
+///
+/// Why: the changelog gate, the component labels and the mandatory pre-push
+/// credential scan all diff `origin/<base>...<head>`. A local base ref hundreds
+/// of commits behind widens every one of them — the measured case would have
+/// put ~1,270 unrelated paths through a credential scan.
+#[test]
+fn pr_7748_a_stale_base_refuses_before_gh_is_called() {
+    let (_d, path) = scratch_body(&full_body());
+    let args = open_args(&path.to_string_lossy());
+    let gh = FakeGh::new();
+    let code = open::run(&gh, &args, &FakePreflight::ok().with_stale_base())
+        .expect("a refused check is not an error");
+    assert_eq!(code, super::EXIT_CHECK_FAILED);
+    assert!(
+        gh.calls().is_empty(),
+        "gh must not be spawned against an unverified diff base: {:?}",
+        gh.calls()
+    );
+}
+
+/// #7748 fail-closed: a base that could not be verified refuses too.
+#[test]
+fn pr_7748_an_unverifiable_base_refuses() {
+    let (_d, path) = scratch_body(&full_body());
+    let args = open_args(&path.to_string_lossy());
+    let mut pre = FakePreflight::ok();
+    pre.base_freshness = trusty_mpm::core::base_ref_freshness::BaseFreshness::Undetermined {
+        reason: "`git ls-remote origin refs/heads/main` failed: no such remote".to_string(),
+    };
+    let gh = FakeGh::new();
+    assert_eq!(
+        open::run(&gh, &args, &pre).expect("a refused check is not an error"),
+        super::EXIT_CHECK_FAILED
+    );
+    assert!(gh.calls().is_empty(), "{:?}", gh.calls());
 }
 
 #[test]
@@ -2680,4 +2754,106 @@ fn merge_errors_when_gh_merge_fails() {
         .on_fail("pr merge", "Pull request is not mergeable");
     let err = merge::run(&gh, &merge_args()).expect_err("must not swallow the failure");
     assert!(format!("{err:#}").contains("not mergeable"), "{err:#}");
+}
+
+/// The stderr `gh pr merge --delete-branch` prints when a worktree holds the
+/// head branch (#7945, the shape reported on PR #7943 and PR #8007).
+const WORKTREE_HELD_STDERR: &str = "failed to delete local branch feat/6808-x: error: Cannot \
+     delete branch 'feat/6808-x' used by worktree at \
+     '/repo/.claude/worktrees/agent-a2278a6f4f4ce2d01'";
+
+/// #7945: a cleanup failure after a landed merge is a warning, not the verdict.
+///
+/// Why: `gh pr merge --delete-branch` deletes the LOCAL branch after GitHub has
+/// already squashed, so a worktree-held branch made `tm pr merge` exit 2 on a
+/// merge that was on `main`. Exit 0 is also what lets `tm pr cleanup` run, and
+/// cleanup is what reclaims the worktree that blocked the delete.
+#[test]
+fn pr_7945_a_worktree_held_branch_does_not_fail_a_landed_merge() {
+    let gh = FakeGh::new()
+        // Registered first: the confirmation read is also a `pr view`.
+        .on_exact(
+            "pr view 42 --json state,mergeCommit",
+            &serde_json::json!({"state": "MERGED", "mergeCommit": {"oid": "686f9bb03"}})
+                .to_string(),
+        )
+        .on(
+            "pr view",
+            &merge_view_json(&full_body(), serde_json::json!({})),
+        )
+        .on_fail("pr merge", WORKTREE_HELD_STDERR);
+
+    assert_eq!(
+        merge::run(&gh, &merge_args()).expect("a landed merge is not an error"),
+        super::EXIT_OK
+    );
+    assert!(
+        gh.calls()
+            .iter()
+            .any(|a| a.join(" ") == "pr view 42 --json state,mergeCommit"),
+        "the merge outcome must be re-read before the failure is accepted: {:?}",
+        gh.calls()
+    );
+}
+
+/// #7945: a merge that did NOT land still fails.
+#[test]
+fn pr_7945_a_merge_that_did_not_land_still_fails() {
+    let gh = FakeGh::new()
+        .on_exact(
+            "pr view 42 --json state,mergeCommit",
+            &serde_json::json!({"state": "OPEN"}).to_string(),
+        )
+        .on(
+            "pr view",
+            &merge_view_json(&full_body(), serde_json::json!({})),
+        )
+        .on_fail("pr merge", "Pull request is not mergeable");
+    let err = merge::run(&gh, &merge_args()).expect_err("an unmerged PR must stay an error");
+    assert!(format!("{err:#}").contains("not mergeable"), "{err:#}");
+    assert!(
+        confirmation_was_read(&gh),
+        "the verdict must come from a re-read, not from the exit status alone: {:?}",
+        gh.calls()
+    );
+}
+
+/// Was the post-failure merge-state confirmation issued? (#7945)
+///
+/// Why: both non-landed arms assert an ERROR, which the pre-fix code also
+/// produced — from the exit status alone. Requiring the re-read is what makes
+/// them fail against that code instead of agreeing with it by accident.
+fn confirmation_was_read(gh: &FakeGh) -> bool {
+    gh.calls()
+        .iter()
+        .any(|a| a.join(" ") == "pr view 42 --json state,mergeCommit")
+}
+
+/// #7945 fail-closed: an unanswerable confirmation never reads as merged.
+///
+/// Why: the re-read is the only evidence the squash landed. A `gh` that cannot
+/// answer leaves the question open, so the failure the caller already saw
+/// stands rather than being upgraded to success.
+#[test]
+fn pr_7945_an_unreadable_confirmation_still_fails() {
+    let gh = FakeGh::new()
+        .on_exact_fail(
+            "pr view 42 --json state,mergeCommit",
+            "HTTP 502: Bad gateway",
+        )
+        .on(
+            "pr view",
+            &merge_view_json(&full_body(), serde_json::json!({})),
+        )
+        .on_fail("pr merge", WORKTREE_HELD_STDERR);
+    let err = merge::run(&gh, &merge_args()).expect_err("an unanswerable read must not pass");
+    assert!(
+        format!("{err:#}").contains("Cannot delete branch"),
+        "the original failure is what the caller sees: {err:#}"
+    );
+    assert!(
+        confirmation_was_read(&gh),
+        "the read must be ATTEMPTED; only its failure keeps the original verdict: {:?}",
+        gh.calls()
+    );
 }

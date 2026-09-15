@@ -221,7 +221,7 @@ pub struct ProjectLevelConfig {
 /// The `[session]` table: this project's MCP-server and plugin allowlists.
 ///
 /// Why: `plugins` is an ALLOWLIST, never a deny-list: an absent key denies, and
-/// the list takes effect only once `tm project trust <path>` has recorded a
+/// the list takes effect only once `tm project trust --dir <path>` has recorded a
 /// grant for the directory. `mcp_servers` was its MCP counterpart until #7892
 /// retired it — see that field's own doc.
 /// What: `plugins` names Claude Code plugins, either as the full

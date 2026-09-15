@@ -91,7 +91,7 @@ plugins = ["aws-core"]
 `<plugin>@<marketplace>` key or the bare `<plugin>` half. The list is read
 through `granted_plugins`, which resolves the project-trust store
 (`crates/trusty-mpm/src/core/project_trust.rs`) — the durable, USER-scope
-decision `tm project trust <path>` records under `~/.trusty-tools/trusty-mpm/`,
+decision `tm project trust --dir <path>` records under `~/.trusty-tools/trusty-mpm/`,
 which a repository cannot flip from inside itself (issue #3033, owner ruling
 2026-07-18). An untrusted project grants nothing, and every plugin tm can see is
 written `false`.
