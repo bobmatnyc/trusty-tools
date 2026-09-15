@@ -5,18 +5,23 @@
 //! Why: End-to-end tests need to exercise the real HTTP surface (routing,
 //! request parsing, subprocess spawning, response storage) — not just the
 //! axum router used by unit tests via `oneshot`. Centralising the
-//! "pick a free port + spawn the binary + wait for /api/health" dance keeps
+//! "spawn the binary + discover its port + wait for /api/health" dance keeps
 //! individual e2e tests trivial and avoids per-test boilerplate.
-//! What: `ApiServer::spawn()` picks a free TCP port (by binding to port 0
-//! and reading back the assignment), copies the repo-bundled `.trusty-agents/`
-//! config into a tempdir, spawns `trusty-agents --api --port <port>` with that
-//! tempdir as cwd, and polls `/api/health` until the endpoint answers (see
-//! [`READY_TIMEOUT`]) before returning. `submit_task` POSTs `/api/task`,
+//! What: `ApiServer::spawn()` launches `trusty-agents --api --port 0` so the
+//! kernel assigns the port inside the child's own `bind()` call (#7442: this
+//! leaves no separate probe-then-bind step for anything else to race),
+//! copies the repo-bundled `.trusty-agents/` config into a tempdir, then
+//! reads the actual bound port back from the child's `http_addr` discovery
+//! file (written by `api::server::routes::serve_with_config` right after it
+//! binds) before polling `/api/health` until the endpoint answers (see
+//! [`READY_TIMEOUT`]) and returning. `submit_task` POSTs `/api/task`,
 //! `wait_for_task` polls `/api/task/:id` until the response leaves `running`
 //! or a 120s timeout elapses.
-//! Test: Exercised by `tests/api_e2e.rs`.
+//! Test: Exercised by `tests/api_e2e.rs`;
+//! `assigned_port_is_never_free_after_it_is_reported` proves the port-pick
+//! race is gone by construction.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -108,13 +113,14 @@ pub struct ApiServer {
 }
 
 impl ApiServer {
-    /// Spawn `trusty-agents --api --port <free_port>` in a tempdir with the
+    /// Spawn `trusty-agents --api --port 0` in a tempdir with the
     /// repo-bundled `.trusty-agents/` config copied in, and wait for
     /// `/api/health` to return 200.
     ///
     /// Why: Tests need a real, isolated server they can hit over loopback.
-    /// What: Picks a free port via the bind-to-0 trick, copies config,
-    /// spawns the binary, drains its stdout/stderr, polls health.
+    /// What: Copies config, spawns the binary with `--port 0` so the child
+    /// itself picks the port (#7442), drains its stdout/stderr, reads the
+    /// assigned port back from its `http_addr` discovery file, polls health.
     /// Test: Implicit — every e2e test calls this.
     pub async fn spawn() -> Result<Self> {
         let root = tempfile::tempdir().context("create tempdir")?;
@@ -124,16 +130,23 @@ impl ApiServer {
         // required, not optional.
         let home = tempfile::tempdir().context("create isolated HOME tempdir")?;
 
-        let port = pick_free_port().context("pick free port")?;
+        let data_dir = home.path().join("data");
         let binary = PathBuf::from(env!("CARGO_BIN_EXE_tagent"));
 
+        // #7442: `--port 0` hands port assignment to the kernel inside the
+        // child's own `TcpListener::bind` (see `api::server::routes::
+        // serve_with_config`) instead of this fixture probing a number and
+        // handing it to a second, independent bind — the gap between those
+        // two binds was the TOCTOU. The actual port is read back below from
+        // the `http_addr` discovery file the child writes right after it
+        // binds.
         let mut child = Command::new(&binary)
             .current_dir(root.path())
             .env("HOME", home.path())
             .env("TAGENT_PROJECT_DIR", root.path())
             .env("TAGENT_CONFIG_DIR", &dst_cfg)
             .env("TAGENT_ASSISTANTS_DIR", home.path().join("assistants"))
-            .env("TRUSTY_DATA_DIR_OVERRIDE", home.path().join("data"))
+            .env("TRUSTY_DATA_DIR_OVERRIDE", &data_dir)
             .env(
                 "TRUSTY_MEMORY_SOCKET",
                 home.path().join("unavailable-memory.sock"),
@@ -142,7 +155,7 @@ impl ApiServer {
             .env_remove("OPEN_MPM_CONFIG_DIR")
             .arg("--api")
             .arg("--port")
-            .arg(port.to_string())
+            .arg("0")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -162,6 +175,16 @@ impl ApiServer {
             spawn_drain(err, Arc::clone(&stderr_buf));
         }
 
+        let http_addr_path = data_dir.join("trusty-agents").join("http_addr");
+        let port = wait_for_assigned_port(
+            &mut child,
+            &http_addr_path,
+            READY_TIMEOUT,
+            &stdout_buf,
+            &stderr_buf,
+        )
+        .await?;
+
         let base_url = format!("http://127.0.0.1:{port}");
         let mut server = Self {
             _root: root,
@@ -179,11 +202,7 @@ impl ApiServer {
 
     /// Snapshot of everything the child has printed so far, both streams.
     fn captured_output(&self) -> String {
-        format!(
-            "{}{}",
-            render_stream("stdout", &self.stdout_buf),
-            render_stream("stderr", &self.stderr_buf)
-        )
+        render_captured(&self.stdout_buf, &self.stderr_buf)
     }
 
     /// Base URL of the running server, e.g. `http://127.0.0.1:54321`.
@@ -438,20 +457,74 @@ fn render_stream(label: &str, sink: &Arc<Mutex<Vec<u8>>>) -> String {
     )
 }
 
-/// Bind a TCP listener on `127.0.0.1:0`, read the assigned port, and drop
-/// the listener. The port is then likely free for a follow-on bind in the
-/// child process.
+/// Render both captured child streams as one string — shared by
+/// [`ApiServer::captured_output`] and [`wait_for_assigned_port`], neither of
+/// which has a full `&ApiServer` to call the other's method through before
+/// the port (or the health check) is known. See [`render_stream`] for the
+/// per-stream, empty-vs-content shape.
+fn render_captured(stdout_buf: &Arc<Mutex<Vec<u8>>>, stderr_buf: &Arc<Mutex<Vec<u8>>>) -> String {
+    format!(
+        "{}{}",
+        render_stream("stdout", stdout_buf),
+        render_stream("stderr", stderr_buf)
+    )
+}
+
+/// Poll the child's `http_addr` discovery file (written by
+/// `api::server::routes::serve_with_config` right after it binds) until it
+/// appears, then parse the OS-assigned port back out of it.
 ///
-/// Why: There's a small race window between dropping the listener and the
-/// child binding, but in practice this is the standard test pattern (used
-/// by countless Rust HTTP test harnesses) and far simpler than adding the
-/// `portpicker` crate. We avoid the `49152..65535` random-pick approach
-/// because it can collide with already-bound ports.
-fn pick_free_port() -> Result<u16> {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-    let port = listener.local_addr()?.port();
-    drop(listener);
-    Ok(port)
+/// Why (#7442): replaces the retired `pick_free_port`, which bound port 0,
+/// read the number back, and then DROPPED the listener before handing the
+/// bare number to a second, independent bind in the child — the drop-then-
+/// rebind gap was a real TOCTOU window in which anything else (another test,
+/// another process) could steal the exact same port number before the child
+/// claimed it, surfacing as `Address already in use (os error 48)` under
+/// load. Reading the port back from the child's OWN still-live listener
+/// removes the window by construction: the number is never handed out
+/// before something is already bound to it, and nothing drops that listener
+/// until the server shuts down.
+/// What: polls every [`READY_POLL_INTERVAL`] for `path` to exist and parse
+/// as `host:port`; mirrors [`ApiServer::wait_for_health`] in reporting a
+/// child that exited early via `try_wait` immediately, rather than waiting
+/// out the full `timeout`.
+/// Test: `assigned_port_is_never_free_after_it_is_reported`.
+async fn wait_for_assigned_port(
+    child: &mut Child,
+    path: &Path,
+    timeout: Duration,
+    stdout_buf: &Arc<Mutex<Vec<u8>>>,
+    stderr_buf: &Arc<Mutex<Vec<u8>>>,
+) -> Result<u16> {
+    let start = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().context("poll api server child")? {
+            return Err(anyhow!(
+                "api server exited with {status} before writing its http_addr \
+                 discovery file (after {:?})\n{}",
+                start.elapsed(),
+                render_captured(stdout_buf, stderr_buf)
+            ));
+        }
+        if let Ok(contents) = std::fs::read_to_string(path)
+            && let Some(port) = contents
+                .trim()
+                .rsplit(':')
+                .next()
+                .and_then(|p| p.parse::<u16>().ok())
+        {
+            return Ok(port);
+        }
+        if start.elapsed() > timeout {
+            return Err(anyhow!(
+                "api server did not write {} within {timeout:?} (child still \
+                 running)\n{}",
+                path.display(),
+                render_captured(stdout_buf, stderr_buf)
+            ));
+        }
+        tokio::time::sleep(READY_POLL_INTERVAL).await;
+    }
 }
 
 #[cfg(test)]
@@ -526,5 +599,89 @@ mod drain_tests {
             render_stream("stdout", &sink),
             "--- child stdout: empty ---\n"
         );
+    }
+}
+
+#[cfg(test)]
+mod port_toctou_tests {
+    use super::*;
+
+    /// #7442: proves the port-selection race the retired `pick_free_port`
+    /// left open is gone by construction, run N=20 times to rule out one
+    /// lucky iteration rather than trusting a single pass.
+    ///
+    /// Each iteration stands in for the real child exactly as `spawn()` uses
+    /// it: bind port 0, keep that listener alive (never drop it, matching
+    /// `serve_with_config` which serves on the same listener it bound), and
+    /// publish the port through a discovery file — then reads it back with
+    /// the production [`wait_for_assigned_port`] helper.
+    ///
+    /// The assertion that actually proves the race is gone: immediately
+    /// after the port is reported, a fresh, independent bind attempt at that
+    /// exact port MUST fail with `AddrInUse`, because the stand-in listener
+    /// above is still holding it. That is the by-construction guarantee —
+    /// the port is never handed out before something is bound to it, and
+    /// nothing frees it out from under a caller.
+    ///
+    /// How a wrong implementation fails this: the old `pick_free_port`
+    /// pattern (bind 0, read the number, DROP the listener, hand the bare
+    /// number to a second bind) leaves the number genuinely free the instant
+    /// it is reported. Reintroducing that pattern into
+    /// [`wait_for_assigned_port`]'s source — dropping `held` before writing
+    /// the discovery file — turns the `rebind.is_err()` assertion false:
+    /// the independent bind below would succeed, because nothing would still
+    /// hold the port.
+    /// Test: itself.
+    #[tokio::test]
+    async fn assigned_port_is_never_free_after_it_is_reported() {
+        for iteration in 0..20 {
+            let tmp = tempfile::tempdir().expect("tempdir for discovery file");
+            let http_addr_path = tmp.path().join("http_addr");
+
+            // Stand-in for the real child: binds 0 itself and keeps the
+            // listener alive for the rest of the iteration, exactly the
+            // order of operations `serve_with_config` uses (bind, then
+            // publish, then keep serving).
+            let held = std::net::TcpListener::bind("127.0.0.1:0").expect("bind stand-in listener");
+            let held_port = held.local_addr().expect("local_addr").port();
+            std::fs::write(&http_addr_path, format!("127.0.0.1:{held_port}"))
+                .expect("write discovery file");
+
+            // A real (harmless) child process so `wait_for_assigned_port`'s
+            // `try_wait` guard has something to poll against.
+            let mut child = Command::new("sleep")
+                .arg("5")
+                .kill_on_drop(true)
+                .spawn()
+                .expect("spawn sleep stand-in");
+            let stdout_buf = Arc::new(Mutex::new(Vec::new()));
+            let stderr_buf = Arc::new(Mutex::new(Vec::new()));
+
+            let reported = wait_for_assigned_port(
+                &mut child,
+                &http_addr_path,
+                Duration::from_secs(5),
+                &stdout_buf,
+                &stderr_buf,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("iteration {iteration}: {e}"));
+            assert_eq!(
+                reported, held_port,
+                "iteration {iteration}: reported the wrong port"
+            );
+
+            let rebind = std::net::TcpListener::bind(("127.0.0.1", reported));
+            assert!(
+                rebind.is_err(),
+                "iteration {iteration}: port {reported} was rebindable immediately \
+                 after being reported — it was not actually held, reproducing the \
+                 #7442 TOCTOU"
+            );
+
+            drop(held);
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+        }
     }
 }
