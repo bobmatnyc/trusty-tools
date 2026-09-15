@@ -1,6 +1,0 @@
-Fixed
-- Worktree reclaim gate 2 no longer lets a live session's PROJECT-ROOT workspace claim veto a worktree nested under it; only a claim on the worktree itself, or inside it, still refuses (#7652).
-- Worktree reclaim no longer deletes a session-owned worktree whose owning session is still running: a worktree whose ownership sentinel names a session is reclaimed only when that session's stored record exists and tmux, when asked, no longer lists it. A missing record, an unread session store, or a tmux probe that fails all refuse (#7652).
-- The merged-PR reclaim sweep refreshes each repository's remote-tracking refs once before judging unsaved work, so a branch whose pull request squash-merged on GitHub — including one continued on an `-r2` branch — is no longer miscounted as holding unpushed commits (#7889).
-- Every worktree removal route writes an audit line naming the path, branch, owning session or agent, and the reason before the removal is attempted, and a second line afterwards saying whether the directory was removed or kept, so a refused removal is never logged as a deletion (#7885).
-- The merged-PR reclaim pass bounds its byte-measurement phase instead of running it unbounded, which is where `tm session prune-worktrees --merged-prs` hung for minutes at near-zero CPU under host load; classification stays unbounded (#7884).
