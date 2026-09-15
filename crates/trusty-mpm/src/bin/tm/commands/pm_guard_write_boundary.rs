@@ -66,11 +66,30 @@
 //!   which a read (`sed -n '1,5p' <file>`) occupies identically.
 //! * An interpreter (`python -c`, `node -e`) carries its write inside a
 //!   program string this guard does not parse.
-//! * A target built from a shell variable or a command substitution is not
-//!   expanded.
 //!
 //! Each is a candidate for the same detector rather than a second rule; none
 //! is closed here.
+//!
+//! **What an unexpanded expansion costs, exactly (#7838).** Three leading
+//! forms ARE resolved, because this process holds their values rather than
+//! guessing them ([`expand_leading_base`]): `~` and `$HOME`/`${HOME}` against
+//! the hook's own HOME, which it shares with the shell it is judging, and
+//! `$PWD`/`${PWD}` against the `cwd` the hook is handed. Any other variable or
+//! command substitution is not resolved: nothing in this process holds the
+//! value. The allowance is therefore scoped to the one thing such an expansion
+//! actually hides, the BASE directory — [`base_directory_is_unresolvable`] —
+//! leaving exactly three gaps:
+//!
+//! * A target whose FIRST segment is an unresolvable expansion (`$SP/v1.zsh`,
+//!   `$FOO.rs`) is allowed even when it would have expanded into the checkout.
+//!   This is the bypass #7838 chose over refusing every scratchpad write.
+//! * A `~user/…` target names another account's home and is allowed unread;
+//!   so is a `~`- or `$HOME`-rooted target when HOME is unset.
+//! * An expansion in a deeper segment or in the filename is classified from
+//!   the literal segments around it, so one that expands to `..` — or to a
+//!   name carrying `/` — is judged against the wrong directory. That error
+//!   runs toward DENY, never toward a silent allow, so it costs a refusal the
+//!   operator can see and never the write ADR-0044 exists to stop.
 //!
 //! Test: `denies_*`, `allows_*` below; `pm_guard_denies_a_source_write_in_a_main_checkout`
 //! and siblings in `tests/tm_hook_pm_guard.rs` run the real binary, including
@@ -96,17 +115,52 @@ use super::pm_guard_bash::shell_write_target;
 /// Test: `denies_a_source_write_in_a_main_checkout`,
 /// `allows_documents_and_configuration`, `allows_a_write_inside_a_worktree`,
 /// `denies_a_git_output_write_in_a_main_checkout`,
-/// `allows_a_git_read_in_a_main_checkout`.
+/// `allows_a_git_read_in_a_main_checkout`,
+/// `allows_a_target_whose_base_directory_is_an_unexpanded_expansion`,
+/// `denies_an_expansion_confined_to_the_filename`,
+/// `denies_a_leading_tilde_that_resolves_into_the_checkout`,
+/// `denies_a_dollar_pwd_first_segment_that_resolves_into_the_checkout`,
+/// `denies_a_dollar_home_first_segment_that_resolves_into_the_checkout`.
 pub(crate) fn evaluate_main_checkout_write(
     tool_name: &str,
     tool_input: Option<&serde_json::Value>,
     cwd: &Path,
 ) -> Option<String> {
+    evaluate_main_checkout_write_with(tool_name, tool_input, cwd, home_dir().as_deref())
+}
+
+/// [`evaluate_main_checkout_write`] with the home directory injected.
+///
+/// Why (#7838 review, CRITICAL): the tilde arm needs a home that resolves into
+/// a fixture checkout to be tested at all, and mutating `$HOME` in-process
+/// races every sibling test in the binary — the failure #7746/#7989 fixed by
+/// adding seams rather than by locking the environment. So the ambient read
+/// happens once, in the wrapper above, and the decision itself is pure.
+/// What: identical to [`evaluate_main_checkout_write`] except that `home` is
+/// supplied. `None` for `home` is the HOME-unset case, which makes a `~`- or
+/// `$HOME`-rooted target indeterminate.
+/// Test: `denies_a_leading_tilde_that_resolves_into_the_checkout`,
+/// `denies_a_dollar_home_first_segment_that_resolves_into_the_checkout`,
+/// `allows_a_leading_tilde_when_home_is_unknown`.
+fn evaluate_main_checkout_write_with(
+    tool_name: &str,
+    tool_input: Option<&serde_json::Value>,
+    cwd: &Path,
+    home: Option<&str>,
+) -> Option<String> {
     let target = write_target(tool_name, tool_input)?;
-    if !is_source_code_path(&target) {
+    // #7838: only the part of the path that decides the BASE directory has to
+    // be literal; an expansion deeper in the path lands under a base this
+    // guard already knows.
+    let resolvable = expand_leading_base(&target, cwd, home)?;
+    if base_directory_is_unresolvable(&resolvable) {
         return None;
     }
-    let resolved = resolve_write_target(&target, cwd);
+    if !is_source_code_path(&resolvable) {
+        return None;
+    }
+    let resolved = resolve_write_target(&resolvable, cwd);
+    // The message quotes the spelling the caller used, not the expansion.
     is_main_checkout(&resolved).then(|| deny_reason(&target))
 }
 
@@ -131,6 +185,111 @@ fn write_target(tool_name: &str, tool_input: Option<&serde_json::Value>) -> Opti
     }
     let command = tool_input?.get("command")?.as_str()?;
     shell_write_target(command)
+}
+
+/// This process's home directory, read once at the ambient entry point.
+///
+/// Why: the `~` and `$HOME` arms of [`expand_leading_base`] need it, and a
+/// `PreToolUse` hook inherits HOME from the very shell whose command it is
+/// judging — unlike an arbitrary variable, the two agree by construction.
+/// What: `$HOME`, `None` when unset or blank.
+/// Test: `denies_a_leading_tilde_that_resolves_into_the_checkout` exercises the
+/// value through the injected seam.
+fn home_dir() -> Option<String> {
+    std::env::var("HOME").ok().filter(|home| !home.is_empty())
+}
+
+/// Substitute a first segment this process can compute, or refuse to guess.
+///
+/// Why (#7838 review, CRITICAL): three leading forms are NOT arbitrary
+/// variables. A `PreToolUse` hook shares the invoking shell's HOME and is
+/// handed that shell's working directory, so `~`, `$HOME` and `$PWD` each name
+/// a directory this process holds exactly. Routing them into the generic
+/// unknown-expansion arm handed a real in-checkout write an ALLOW on any
+/// machine whose checkout sits under `$HOME` — the ordinary layout — and on
+/// every `$PWD`-rooted write without exception. Only these spellings are
+/// substituted; a value guessed for any other name would be a guess, which is
+/// the thing this rule refuses to make.
+/// What: `Some(<base><rest>)` for `~`, `~/…`, and a FIRST SEGMENT spelled
+/// exactly `$PWD`, `${PWD}`, `$HOME` or `${HOME}` — `cwd` for the two `PWD`
+/// spellings, `home` for `~` and the two `HOME` spellings. `Some(target)`
+/// unchanged for every other target, which then meets
+/// [`base_directory_is_unresolvable`] as before. `None` when HOME is needed and
+/// unknown, or for the `~user/…` form, which names another account's home and
+/// is not this process's to resolve; `None` is indeterminate and the caller
+/// allows.
+/// Test: `denies_a_leading_tilde_that_resolves_into_the_checkout`,
+/// `denies_a_dollar_pwd_first_segment_that_resolves_into_the_checkout`,
+/// `denies_a_dollar_home_first_segment_that_resolves_into_the_checkout`,
+/// `allows_a_leading_tilde_when_home_is_unknown`.
+fn expand_leading_base(target: &str, cwd: &Path, home: Option<&str>) -> Option<String> {
+    if let Some(rest) = target.strip_prefix('~') {
+        if !(rest.is_empty() || rest.starts_with('/')) {
+            return None;
+        }
+        return Some(join_base(home?, rest));
+    }
+    let (first, rest) = match target.split_once('/') {
+        Some((first, rest)) => (first, format!("/{rest}")),
+        None => (target, String::new()),
+    };
+    match first {
+        "$PWD" | "${PWD}" => Some(join_base(&cwd.to_string_lossy(), &rest)),
+        "$HOME" | "${HOME}" => Some(join_base(home?, &rest)),
+        _ => Some(target.to_string()),
+    }
+}
+
+/// Glue a substituted base to the remainder of the path.
+///
+/// What: `base` with any trailing `/` dropped, then `rest`, which is either
+/// empty or already starts with `/` — so `$PWD/x` and a `cwd` of `/` yield
+/// `/x`, not `//x`.
+/// Test: `denies_a_dollar_pwd_first_segment_that_resolves_into_the_checkout`.
+fn join_base(base: &str, rest: &str) -> String {
+    format!("{}{rest}", base.trim_end_matches('/'))
+}
+
+/// Is the BASE directory of `target` hidden behind an unexpanded expansion?
+///
+/// Why (#7838, narrowed by its review): the guard runs in its own process and
+/// never sees the calling shell's variables, so `$SP/v1.zsh` reaches it
+/// verbatim, `Path::is_absolute` says false, and [`resolve_write_target`]
+/// joined it to the hook cwd — a scratchpad write denied as a source write in
+/// the checkout it merely happened to be launched from. But only the LEADING
+/// segment decides which directory the path is relative to. Testing the whole
+/// string for `$` allowed `crates/x/src/$(true)lib.rs` and
+/// `crates/$(echo x)/src/lib.rs`, both of which land in the checkout no matter
+/// what the expansion yields, and both of which this rule exists to deny.
+/// Expanding the variable from THIS process's environment is still refused: a
+/// shell variable set in the command's own shell is absent here, and one that
+/// shares a name with an inherited variable may not share its value.
+/// What: true only when the first non-empty segment of the directory component
+/// carries `$` or a backtick — the segment that fixes the base. A target with
+/// no `/` at all is its own filename, and an expansion there can still expand
+/// to contain separators, so that case is indeterminate too. Every deeper
+/// segment is left to [`is_main_checkout`], whose ancestor walk answers from
+/// the literal segments that remain.
+/// Test: `allows_a_target_whose_base_directory_is_an_unexpanded_expansion`,
+/// `denies_an_expansion_confined_to_the_filename`,
+/// `denies_an_expansion_in_a_middle_segment`.
+fn base_directory_is_unresolvable(target: &str) -> bool {
+    let Some((directory, _file)) = target.rsplit_once('/') else {
+        return names_an_expansion(target);
+    };
+    directory
+        .split('/')
+        .find(|segment| !segment.is_empty())
+        .is_some_and(names_an_expansion)
+}
+
+/// Does one path segment carry a shell expansion?
+///
+/// What: `$` (a variable or a `$(…)` substitution) or a backtick. Fail-open — a
+/// literal `$` in a real directory name costs one missed deny, never a wrong one.
+/// Test: `a_literal_target_is_not_read_as_an_expansion`.
+fn names_an_expansion(segment: &str) -> bool {
+    segment.contains('$') || segment.contains('`')
 }
 
 /// The directory a write to `target` would land in.
@@ -451,6 +610,217 @@ mod tests {
             )
             .is_some(),
             "the target decides, not the caller's directory"
+        );
+    }
+
+    // #7838: the reported shape is `$SP/v1.zsh`, the session scratchpad written
+    // through a variable. The FIRST segment is the expansion, so the base
+    // directory is unknown and none of these is evidence of a write into the
+    // checkout.
+    #[test]
+    fn allows_a_target_whose_base_directory_is_an_unexpanded_expansion() {
+        let dir = main_checkout();
+        for command in [
+            "cat <<'EOF' > $SP/v1.zsh\necho hi\nEOF",
+            "echo hi > ${SP}/v1.zsh",
+            "echo hi > $(mktemp -d)/probe.rs",
+            // No separator at all: the token can still expand to contain one.
+            "echo hi > $SCRATCH.rs",
+        ] {
+            assert_eq!(
+                evaluate_main_checkout_write("Bash", Some(&bash_input(command)), dir.path()),
+                None,
+                "`{command}` names no base directory this guard can resolve"
+            );
+        }
+        // An edit tool carries the same unresolved spelling through
+        // `file_path`, and must answer the same way.
+        assert_eq!(
+            evaluate_main_checkout_write(
+                "Write",
+                Some(&serde_json::json!({"file_path": "$SP/v1.zsh"})),
+                dir.path()
+            ),
+            None,
+        );
+    }
+
+    // #7838 review, CRITICAL: an expansion AFTER a literal directory hides
+    // nothing about WHERE the write lands — these were DENY before #7838 and
+    // the allowance must not have reached them.
+    #[test]
+    fn denies_an_expansion_confined_to_the_filename() {
+        let dir = main_checkout();
+        for command in [
+            "echo hi > crates/x/src/$(true)lib.rs",
+            "echo hi > crates/x/src/`true`lib.rs",
+        ] {
+            let reason =
+                evaluate_main_checkout_write("Bash", Some(&bash_input(command)), dir.path())
+                    .unwrap_or_else(|| {
+                        panic!("`{command}` lands in a literal in-checkout directory")
+                    });
+            assert!(reason.contains("ADR-0044"), "{reason}");
+        }
+    }
+
+    // #7838 review, CRITICAL: same for a middle segment. Whatever
+    // `$(echo trusty-mpm)` yields, the path is still relative to the hook cwd,
+    // so `is_main_checkout`'s ancestor walk answers from the literal segments.
+    #[test]
+    fn denies_an_expansion_in_a_middle_segment() {
+        let dir = main_checkout();
+        // Through an edit tool, which carries the path verbatim. The shell
+        // route is the `${PKG}` spelling below: `shell_write_target` tokenizes
+        // on whitespace, so a `$( … )` carrying a space never reaches here as
+        // one target at all — a limit of that lexer, not of this rule.
+        for input in [
+            serde_json::json!({"file_path": "crates/$(echo trusty-mpm)/src/lib.rs"}),
+            serde_json::json!({"file_path": "crates/${PKG}/src/lib.rs"}),
+        ] {
+            let reason = evaluate_main_checkout_write("Write", Some(&input), dir.path())
+                .unwrap_or_else(|| panic!("{input} is still relative to the hook cwd"));
+            assert!(reason.contains("ADR-0044"), "{reason}");
+        }
+        let command = "echo hi > crates/${PKG}/src/lib.rs";
+        let reason = evaluate_main_checkout_write("Bash", Some(&bash_input(command)), dir.path())
+            .expect("a relative path under the hook cwd is still in the checkout");
+        assert!(reason.contains("ADR-0044"), "{reason}");
+    }
+
+    // #7838 review, CRITICAL: a tilde is not an arbitrary variable — the hook
+    // shares the invoking shell's HOME. HOME is injected rather than set, so
+    // this cannot race a sibling test (#7746, #7989).
+    #[test]
+    fn denies_a_leading_tilde_that_resolves_into_the_checkout() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let checkout = home.path().join("proj");
+        std::fs::create_dir_all(checkout.join(".git")).expect("mkdir .git");
+        let elsewhere = tempfile::tempdir().expect("tempdir");
+        let home = home.path().to_string_lossy().into_owned();
+        let reason = evaluate_main_checkout_write_with(
+            "Write",
+            Some(&serde_json::json!({"file_path": "~/proj/src/lib.rs"})),
+            elsewhere.path(),
+            Some(&home),
+        )
+        .expect("a tilde path resolving into a main checkout must deny");
+        assert!(reason.contains("ADR-0044"), "{reason}");
+        // The message quotes what the caller wrote, not the expansion.
+        assert!(reason.contains("~/proj/src/lib.rs"), "{reason}");
+    }
+
+    // The fail-open half: with no HOME, and for another account's home, the
+    // tilde names a directory this process cannot compute.
+    #[test]
+    fn allows_a_leading_tilde_when_home_is_unknown() {
+        let dir = main_checkout();
+        assert_eq!(
+            evaluate_main_checkout_write_with(
+                "Write",
+                Some(&serde_json::json!({"file_path": "~/proj/src/lib.rs"})),
+                dir.path(),
+                None,
+            ),
+            None,
+            "HOME unset leaves the tilde unresolvable"
+        );
+        let cwd = dir.path();
+        assert_eq!(
+            expand_leading_base("~someone/src/lib.rs", cwd, Some("/home/me")),
+            None
+        );
+        assert_eq!(
+            expand_leading_base("$HOME/src/lib.rs", cwd, None),
+            None,
+            "HOME unset leaves `$HOME` unresolvable too"
+        );
+        assert_eq!(
+            expand_leading_base("/tmp/a~b.rs", cwd, None),
+            Some("/tmp/a~b.rs".to_string()),
+            "a tilde that is not leading is an ordinary character"
+        );
+        // Only the four exact spellings substitute; a name that merely starts
+        // with one stays in the generic unresolvable arm.
+        for target in ["$PWDX/src/lib.rs", "$HOMEDIR/src/lib.rs", "$SP/v1.zsh"] {
+            assert_eq!(
+                expand_leading_base(target, cwd, Some("/home/me")),
+                Some(target.to_string()),
+                "{target} is not one of the four resolvable spellings"
+            );
+        }
+    }
+
+    // #7838 review round 2, CRITICAL: `$PWD` is not an arbitrary variable —
+    // `cwd` is a parameter of this very function. Both routes that name a
+    // target must resolve it.
+    #[test]
+    fn denies_a_dollar_pwd_first_segment_that_resolves_into_the_checkout() {
+        let dir = main_checkout();
+        let inputs = [
+            ("Bash", bash_input("echo hi > $PWD/crates/x/src/lib.rs")),
+            (
+                "Write",
+                serde_json::json!({"file_path": "$PWD/crates/x/src/lib.rs"}),
+            ),
+            (
+                "Edit",
+                serde_json::json!({"file_path": "${PWD}/crates/x/src/lib.rs"}),
+            ),
+        ];
+        for (tool, input) in inputs {
+            let reason = evaluate_main_checkout_write_with(tool, Some(&input), dir.path(), None)
+                .unwrap_or_else(|| panic!("{tool} {input} resolves to the hook cwd"));
+            assert!(reason.contains("ADR-0044"), "{reason}");
+        }
+    }
+
+    // #7838 review round 2, CRITICAL: `$HOME` reaches the same value the `~`
+    // arm already uses, so the two spellings must answer alike.
+    #[test]
+    fn denies_a_dollar_home_first_segment_that_resolves_into_the_checkout() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let checkout = home.path().join("proj");
+        std::fs::create_dir_all(checkout.join(".git")).expect("mkdir .git");
+        let elsewhere = tempfile::tempdir().expect("tempdir");
+        let home = home.path().to_string_lossy().into_owned();
+        for spelling in ["$HOME", "${HOME}"] {
+            let target = format!("{spelling}/proj/src/lib.rs");
+            let reason = evaluate_main_checkout_write_with(
+                "Write",
+                Some(&serde_json::json!({ "file_path": target })),
+                elsewhere.path(),
+                Some(&home),
+            )
+            .unwrap_or_else(|| panic!("{target} resolves into a main checkout"));
+            assert!(reason.contains("ADR-0044"), "{reason}");
+            assert!(reason.contains(&target), "{reason}");
+        }
+    }
+
+    // The other half of #7838: the allowance is scoped to the base directory,
+    // so a literal relative path still denies exactly as it did before.
+    #[test]
+    fn a_literal_target_is_not_read_as_an_expansion() {
+        assert!(!base_directory_is_unresolvable("src/lib.rs"));
+        assert!(!base_directory_is_unresolvable("/tmp/a~b.rs"));
+        assert!(!base_directory_is_unresolvable(
+            "crates/x/src/$(true)lib.rs"
+        ));
+        assert!(!base_directory_is_unresolvable(
+            "crates/$(echo x)/src/lib.rs"
+        ));
+        assert!(base_directory_is_unresolvable("$SP/v1.zsh"));
+        assert!(base_directory_is_unresolvable("/$(echo tmp)/v1.zsh"));
+        let dir = main_checkout();
+        assert!(
+            evaluate_main_checkout_write(
+                "Write",
+                Some(&serde_json::json!({"file_path": "src/lib.rs"})),
+                dir.path()
+            )
+            .is_some(),
+            "a literal relative source path must still deny"
         );
     }
 
