@@ -396,7 +396,7 @@ pub(super) async fn get_route() -> Result<Json<Value>, Error> {
 /// client can continue from the new revision without a second round trip.
 /// Test: `global_channels_round_trip_preserves_config_and_rejects_a_stale_revision`,
 /// `a_tokenless_daemon_refuses_every_channel_write`,
-/// `a_token_bearing_channel_write_is_admitted_and_audited`.
+/// `a_credentialed_channel_write_is_admitted_and_audited`.
 pub(super) async fn put_route(
     writer: ChannelWriter,
     Json(update): Json<GlobalUpdate>,
