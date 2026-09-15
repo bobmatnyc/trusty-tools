@@ -41,6 +41,37 @@ pub(crate) mod tmux_session;
 /// re-export of the same function; see that module for why the seam exists.
 pub(crate) use trusty_mpm::core::spawn_disclaim::disclaimed_output as tmux_spawn;
 
+/// The one lock every `$PATH` mutation and every PATH-resolved spawn in THIS
+/// target takes (#7996).
+///
+/// Why: `gh_identity`'s tests prepend a fake-`gh` directory to `$PATH` with
+/// `std::env::set_var`, and [`tmux_session`]'s fixtures spawn a bare `tmux`
+/// the OS resolves through `$PATH` at exec time. `setenv` is not atomic
+/// against a concurrent `execvp` reading the same block, so an exec that
+/// straddles one of those writes finds no `tmux` — reported once as
+/// `spawn tmux new-session: No such file or directory`, and once as a
+/// `Drop`-time `kill-session` that silently never ran and left the session
+/// alive. A module-local mutex in `gh_identity` could not close it, because
+/// the other side of the race is in another module.
+/// What: one process-wide mutex; poisoning is recovered so a panicking test
+/// cannot wedge its siblings. The LIB target's `test_support` supplies the
+/// same name by re-exporting `core::trusty_tools_config::env_test_lock`,
+/// already its own single PATH regime — which is what lets the shared fixture
+/// file spell this `super::lock_path_env()` and compile into both targets.
+/// Test: `gh_identity::tests::gh_path_override_and_the_tmux_fixture_share_one_lock`.
+static PATH_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The mutex behind [`lock_path_env`], for a test that must observe contention
+/// on it rather than take it.
+pub(crate) fn path_env_mutex() -> &'static std::sync::Mutex<()> {
+    &PATH_ENV_LOCK
+}
+
+/// Hold the target's PATH regime for the caller's scope. See [`PATH_ENV_LOCK`].
+pub(crate) fn lock_path_env() -> std::sync::MutexGuard<'static, ()> {
+    PATH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Same prefix the lib's fixture uses, so its sweep reaps these too.
 const TEST_DIR_PREFIX: &str = "tm-test-";
 
