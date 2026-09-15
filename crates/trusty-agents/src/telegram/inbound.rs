@@ -85,10 +85,12 @@ pub(super) async fn route(msg: &Message, text: &str, project_path: &Path) -> boo
     let event_type = event_type_for(&msg.chat);
     let included = crate::listeners::store::EventStore::is_event_type_included(event_type).await;
     let event = event_from(msg, text, included);
-    let identity = crate::rbac::UserIdentity::new(
+    // #7609: the display name is the sender's own profile text — sanitized at
+    // construction, like the Gmail poller's `From:` header.
+    let identity = crate::rbac::UserIdentity::from_remote(
         format!("telegram:{chat_id}"),
-        event.from.clone().unwrap_or_else(|| "telegram".into()),
-        crate::rbac::ServiceTier::default(),
+        event.from.as_deref(),
+        "telegram",
     );
     // One update in, one turn per bound assistant out: there is no poll cycle
     // to share a dispatch allowance with (#7427).
