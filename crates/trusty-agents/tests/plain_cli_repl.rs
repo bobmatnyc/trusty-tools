@@ -33,10 +33,20 @@ const BIN: &str = env!("CARGO_BIN_EXE_tagent");
 /// with every other interactive mode (TUI included) — under a fully loaded
 /// `cargo test -p trusty-agents` run (thousands of unit tests plus several
 /// other subprocess-spawning integration tests competing for CPU) that
-/// startup can legitimately take tens of seconds. 120s leaves headroom for
-/// that contention while still failing (rather than hanging the suite
-/// forever) if a real regression makes the loop stop reading stdin or exit.
-const WAIT_TIMEOUT: Duration = Duration::from_secs(120);
+/// startup can legitimately take tens of seconds.
+///
+/// This is already a condition-based wait, never a fixed sleep: `recv_timeout`
+/// below blocks on a background thread's real `child.wait_with_output()`, so
+/// the happy path returns the instant the child actually exits regardless of
+/// how large this ceiling is — only a wedged child ever burns the whole
+/// budget. #7442: 120s was itself measured too tight under contention
+/// (`tagent did not exit within 120s` at 126s observed, one test over
+/// budget, not a hang — see the issue). Same reasoning as `api_server.rs`'s
+/// `READY_TIMEOUT` (#4488: 5s -> 60s for the identical "genuine load, not a
+/// hang" class of flake): doubled rather than nudged, since overshoot costs
+/// nothing here and a wedged child still fails via this same timeout, just
+/// later.
+const WAIT_TIMEOUT: Duration = Duration::from_secs(240);
 
 /// Spawn `tagent` with `extra_args`/`extra_env`, write `stdin_input`, close
 /// stdin (EOF), and return `(exit_status, stdout, stderr)` once the process
