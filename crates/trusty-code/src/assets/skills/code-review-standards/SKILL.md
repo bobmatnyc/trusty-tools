@@ -85,7 +85,9 @@ someone else to decide, never an instruction to file.
 
 1. Work the rubric top-to-bottom: CRITICAL first, then HIGH, MEDIUM, LOW.
 2. For each finding:
-   - Cite the exact file + line number.
+   - Cite the exact file + line number, plus the enclosing function or method
+     name — a fix-round agent greps `-n -A` on that name instead of reading
+     the whole file (#7239).
    - Quote the offending code snippet.
    - Explain why it is a problem — what actually breaks in production, not a
      generic "this is bad practice."
@@ -102,11 +104,11 @@ someone else to decide, never an instruction to file.
 
 ## Findings
 
-| Severity | File | Line | Issue | Fix | Disposition |
-|----------|------|------|-------|-----|-------------|
-| CRITICAL | path/to/file.ext | 42 | <one-line description> | <concrete fix> | Fix here |
-| HIGH     | path/to/file.ext | 87 | ... | ... | Parent |
-| LOW      | path/to/file.ext | 96 | ... | ... | Promote |
+| Severity | File | Line | Function | Issue | Fix | Disposition |
+|----------|------|------|----------|-------|-----|-------------|
+| CRITICAL | path/to/file.ext | 42 | `validate_token` | <one-line description> | <concrete fix> | Fix here |
+| HIGH     | path/to/file.ext | 87 | `parse_manifest` | ... | ... | Parent |
+| LOW      | path/to/file.ext | 96 | `format_label` | ... | ... | Promote |
 
 ## Required Changes (only if WARN or BLOCK)
 
@@ -145,7 +147,7 @@ correct, and complete outcome — do not manufacture findings to look thorough.
   taxonomy above.
 - Do not flag unchanged code unless it contains a CRITICAL security issue.
 - Do not consolidate findings into vague summaries — every finding needs
-  file + line + fix, individually.
+  file + line + enclosing function + fix, individually.
 - Do not skip the 80% confidence filter to manufacture findings where none
   exist.
 - Do not flag style preferences (whitespace, naming aesthetic, import order)

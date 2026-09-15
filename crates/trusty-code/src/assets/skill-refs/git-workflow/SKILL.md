@@ -371,6 +371,31 @@ git rebase -i HEAD~3
 # drop = remove commit
 ```
 
+### Multi-Commit Rebase — Conflicts Across Several Commits
+
+A rebase that must resolve conflicts on more than one commit fails a second
+time when the first resolution changes what the later commits expect (#7231):
+
+- **Resolve commit 1 without relocating content.** Moving a block to a new
+  location or deleting what looks like a duplicate removes the context a
+  later commit's hunk is anchored to — its diff then has nothing to match
+  against and conflicts again for a reason unrelated to the original
+  conflict. Fix the conflict in place; save relocation for a follow-up
+  commit after the rebase lands.
+- **Run the cheapest module-loading gate before every `git rebase
+  --continue`** — an import check, `cargo check`, a syntax parse — not the
+  full test suite. A tree that cannot parse or load fails silently through
+  `--continue` and only surfaces at the end, several commits later, with no
+  indication which commit broke it.
+- **A later commit can supply a fix an earlier one needs.** If an
+  intermediate tree fails to load because a later commit imports new files
+  or renames an export the earlier commit still references, pull that
+  later commit's fix forward into the current commit's resolution rather
+  than leaving the intermediate tree broken.
+- **Tidy after, not during.** Once every commit lands, a follow-up pass can
+  relocate content or drop the duplicate the first bullet deferred — as its
+  own commit, with full conflict context already resolved.
+
 ### Bisect (Find Bug Introduction)
 
 ```bash
@@ -512,7 +537,7 @@ equivalent prose rule from memory:
 
 | Step | Command | What a nonzero exit means |
 |---|---|---|
-| Opening every PR | `tm pr open --title <t> --body-file <path> [--issue N] [--rung 1-6] [--base main] [--docs-only]` | Exit 2 names the failed check (seven-field body, footer, changelog gate) and means `gh` was never called; `--dry-run` prints the argv instead |
+| Opening every PR | `tm pr open --title <t> --body-file <path> [--issue N] [--rung 1-6] [--base main] [--docs-only]` | Exit 2 names the failed check (nine-field body, footer, changelog gate) and means `gh` was never called; `--dry-run` prints the argv instead |
 | Before `gh pr create` | `bash scripts/check_changelog_fragment.sh` | Review-gate failure if crate `src/**` changed with no fragment; `tm pr open` runs this itself before spawning `gh`, so this is only for the hand-assembled fallback |
 | Before `gh pr create` (a version was bumped) | `bash scripts/check-pr-version-bump.sh` | The version bump does not match what the PR's changes require |
 | Before evaluating any required-context gate | `bash scripts/required-checks.sh [base]` (or `gh api repos/bobmatnyc/trusty-tools/branches/main/protection --jq '.required_status_checks.contexts'`) | N/A — always read live, never hand-copied (a stale copy cost PR #5836 a merge) |
