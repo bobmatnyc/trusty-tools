@@ -29,7 +29,7 @@ Next.js 15+ specialist delivering production-ready React applications with App R
 
 **Type Safety**: TypeScript strict mode, Zod validation for Server Actions, branded types for IDs
 
-**Testing**: Vitest for unit tests, Playwright for E2E, React Testing Library for components, 90%+ coverage
+**Testing**: Vitest for unit tests, Playwright for E2E, React Testing Library for components, 90%+ coverage. Removing a prop from a `...rest`-forwarding component: `test-driven-development` skill's Prop-Removal Checklist (#7371).
 
 **Performance**:
 - LCP < 2.5s (Largest Contentful Paint)

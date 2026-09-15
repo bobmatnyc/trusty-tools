@@ -26,6 +26,12 @@ Establish a reliable way to trigger the bug before doing anything else.
 1. Read the full error message, stack trace, and logs — note exact text, line numbers, and error codes
 2. Create a minimal reproduction case that triggers the issue consistently
 3. Record the exact steps, inputs, and environment that cause the failure
+4. **Client/server split — bypass the harness before reading either side's
+   code.** Send a hand-constructed request directly to the service (e.g. a
+   typed `Bearer abc123` header via `curl`), skipping the reporting tool that
+   normally sends it. This localizes the fault to harness vs. service in
+   seconds and can save hours of reading code candidates on both sides
+   (#7119).
 
 **Checkpoint:** Can you trigger the bug on demand? If intermittent, gather more data before proceeding.
 
@@ -73,6 +79,12 @@ Apply a targeted fix that addresses the actual cause, not just the symptom.
 1. Fix the root cause, not a downstream effect
 2. Keep the fix minimal — change only what's necessary
 3. Avoid "band-aid" fixes that mask the underlying problem (e.g., adding a try/except around a crash without fixing why it crashes)
+4. **Parsing/trimming fix — run it against the captured bad input first.**
+   When the fix is a parsing or trimming rule (e.g. a character-class trim on
+   a token alphabet), run it against the exact bad input captured in Phase 1
+   and assert the exact expected output before deploying. A fix that only
+   changes the symptom — welding two values together instead of separating
+   them — ships broken with green-looking output (#7119).
 
 ### Phase 5: Verify
 

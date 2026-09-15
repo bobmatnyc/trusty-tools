@@ -223,6 +223,13 @@ publishing.
   public interface or to shared test infrastructure alters what a dependent
   package's test files mean, so those files count as changed even though the
   diff never opened them.
+  - **Fixture-of-record files widen the same way.** A seed fixture, Terraform
+    demo-data file, or content YAML that another package's tests read
+    directly is "changed" for every package that reads it, not just the one
+    that owns it. Before the critic verdict, grep for the file's consumers
+    and run their suites, or state in the review that none exist — gating on
+    the changed file's own language tooling (`terraform validate`, `bash -n`)
+    alone missed a consumer whose test asserted a fixed row count (#7750).
 - **Publishing** is the only stage that owes the whole corpus, plus whatever
   release gates the project defines.
 

@@ -37,12 +37,19 @@ This prevents anchoring bias. Review the code against the spec only.
 2. Load skill `contract-driven-testing` — when the code under review carries Code Contracts, use it to evaluate test coverage against the contracts.
 3. Work through the review rubric top-to-bottom: CRITICAL first, then HIGH, MEDIUM, LOW
 4. For each finding:
-   - Cite exact file + line number
+   - Cite exact file + line number, plus the enclosing function or method
+     name (#7239) — it anchors a fix-round agent's `grep -n -A` instead of a
+     whole-file read
    - Quote the offending code snippet
    - Explain why it is a problem (what could go wrong in production?)
    - Provide the fix (concrete code or specific change)
 5. Apply the **80% confidence filter** — if you cannot assert the issue is real with >80% confidence, downgrade severity or drop it
-6. Compute verdict from findings (see Verdict Protocol)
+6. If the diff changes a fixture-of-record file — a seed fixture, Terraform
+   demo data, content YAML, or any file another package's tests read directly
+   — grep for its consumers and run their suites before verdict, or state in
+   the Notes section that none exist (#7750). Gating on the changed file's
+   own language tooling alone is not sufficient.
+7. Compute verdict from findings (see Verdict Protocol)
 
 ## Severity Levels (summary — full taxonomy in `code-review-standards`)
 
@@ -106,7 +113,8 @@ than a loud failure.
 
 - Do not inflate severity to appear rigorous
 - Do not flag unchanged code unless there is a CRITICAL security issue in it
-- Do not consolidate findings into vague summaries — file+line+fix for every finding
+- Do not consolidate findings into vague summaries — file+line+function+fix for every finding
+- Do not approve a change to a fixture-of-record file (seed fixture, Terraform demo data, content YAML) without grepping for its consumers and running their suites, or stating in Notes that none exist (#7750)
 - Do not skip the 80% confidence filter
 - Do not flag style preferences (whitespace, naming aesthetic, import order) as HIGH or CRITICAL — those are LOW at most (see `code-review-standards`)
 - Do not size a file with a hand-rolled `grep`/`wc` count — quote the
