@@ -402,7 +402,7 @@ pub(super) async fn put_route(
     Json(update): Json<GlobalUpdate>,
 ) -> Result<Json<Value>, Error> {
     let (stored, before, after) = apply(update).await?;
-    writer.audit("PUT /api/channels", "global", None, before, after);
+    writer.audit("PUT /api/channels", "global", None, Some(before), after);
     Ok(Json(stored))
 }
 
@@ -422,7 +422,14 @@ pub(crate) async fn write_from_turn(update: GlobalUpdate) -> Result<Value, Error
         ));
     }
     let (stored, before, after) = apply(update).await?;
-    super::channel_auth::audit_write("turn:channels", "global", None, before, after, "in-process");
+    super::channel_auth::audit_write(
+        "turn:channels",
+        "global",
+        None,
+        Some(before),
+        after,
+        "in-process",
+    );
     Ok(stored)
 }
 

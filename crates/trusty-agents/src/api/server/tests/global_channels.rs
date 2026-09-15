@@ -566,7 +566,7 @@ async fn a_credentialed_channel_write_is_admitted_and_audited() {
         captured.contains("route=\"PUT /api/channels\"")
             && captured.contains("scope=\"global\"")
             && captured.contains("assistant=\"-\"")
-            && captured.contains("channels_before=1")
+            && captured.contains("channels_before=\"1\"")
             && captured.contains("channels_after=2")
             && captured.contains("token_configured=true"),
         "the audit line names route, scope, assistant and counts:\n{captured}"
@@ -752,6 +752,97 @@ async fn a_turn_originated_listener_patch_takes_the_gate() {
     assert_eq!(refusal.0, StatusCode::UNAUTHORIZED);
 
     crate::api::server::channel_auth::record_daemon_credential(restore);
+}
+
+/// The deprecated listener alias audits an ACCEPTED write, with real counts.
+///
+/// Why (#7609 critic round 3, MEDIUM-2): the alias's success branch had no test
+/// at all — the gate's refusal was covered, the thing it lets through was not —
+/// and the count it reports comes from a read that can fail. A failure used to
+/// render as `channels_before=0`, which reads as "the assistant had no
+/// bindings" in the one record an operator has to reconstruct the change from.
+#[tokio::test]
+async fn the_listener_alias_audits_an_accepted_write() {
+    let _home_guard = crate::test_env::lock_home();
+    let (home, _config) = seed_home();
+    let agents = home.path().join(".trusty-agents/agents");
+    std::fs::create_dir_all(&agents).expect("agents dir");
+    std::fs::write(
+        agents.join("fixture.toml"),
+        "[agent]\nname='fixture'\n\n[[listeners]]\nname='gmail-personal'\n",
+    )
+    .expect("manifest");
+
+    let logs = CaptureWriter::default();
+    let log_guard = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_writer(logs.clone())
+            .with_ansi(false)
+            .finish(),
+    );
+
+    let credential = "minted-for-the-alias";
+    let app = router_with_credential(credential);
+    let view = body_json(
+        app.oneshot(get("/api/agents/fixture/listeners", Some(credential)))
+            .await
+            .expect("alias get"),
+    )
+    .await;
+    let revision = view["revision"].as_str().expect("revision").to_owned();
+    assert_eq!(
+        view["listeners"].as_array().map(Vec::len),
+        Some(1),
+        "the fixture starts with one binding"
+    );
+
+    let app = router_with_credential(credential);
+    let response = app
+        .oneshot(put(
+            "/api/agents/fixture/listeners",
+            Some(credential),
+            &json!({"revision": revision, "listeners": []}),
+        ))
+        .await
+        .expect("alias put");
+    assert_eq!(response.status(), StatusCode::OK, "the write is accepted");
+
+    let captured = logs.contents();
+    drop(log_guard);
+    assert!(
+        captured.contains("audit=\"channel-write\"")
+            && captured.contains("route=\"PUT /api/agents/{name}/listeners\"")
+            && captured.contains("assistant=\"fixture\"")
+            && captured.contains("channels_before=\"1\"")
+            && captured.contains("channels_after=0"),
+        "the alias audits its accepted write with real counts:\n{captured}"
+    );
+}
+
+/// A `before` count the audit could not read says so, rather than claiming nil.
+#[test]
+fn an_unreadable_before_count_audits_as_unknown() {
+    let logs = CaptureWriter::default();
+    let guard = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_writer(logs.clone())
+            .with_ansi(false)
+            .finish(),
+    );
+    crate::api::server::channel_auth::audit_write(
+        "turn:channels",
+        "assistant",
+        Some("fixture"),
+        None,
+        2,
+        "in-process",
+    );
+    let captured = logs.contents();
+    drop(guard);
+    assert!(
+        captured.contains("channels_before=\"unknown\"") && captured.contains("channels_after=2"),
+        "an unreadable count is distinguishable from zero:\n{captured}"
+    );
 }
 
 /// A `tracing` writer that keeps every emitted line in memory.

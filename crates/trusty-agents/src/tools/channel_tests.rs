@@ -138,6 +138,13 @@ async fn the_tool_refuses_a_write_on_a_tokenless_daemon() {
 #[tokio::test]
 async fn a_credentialed_tool_write_stores_and_audits() {
     let _guard = crate::test_env::lock_home();
+    let logs = CaptureWriter::default();
+    let log_guard = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_writer(logs.clone())
+            .with_ansi(false)
+            .finish(),
+    );
     let home = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir_all(home.path().join(".trusty-agents")).expect("config dir");
     std::fs::write(
@@ -184,6 +191,19 @@ async fn a_credentialed_tool_write_stores_and_audits() {
         "and it reached disk"
     );
 
+    // #7609 critic round 3, LOW-2: the write is audited like every other.
+    let captured = logs.contents();
+    assert!(
+        captured.contains("audit=\"channel-write\"")
+            && captured.contains("route=\"turn:channels\"")
+            && captured.contains("scope=\"global\"")
+            && captured.contains("channels_before=\"0\"")
+            && captured.contains("channels_after=1")
+            && captured.contains("remote_addr=\"in-process\""),
+        "the tool's write leaves the same record an HTTP write does:\n{captured}"
+    );
+    drop(log_guard);
+
     // A stale revision is a conflict here too, not a silent overwrite.
     let stale = tool
         .execute(json!({"action":"set","scope":"global","revision":"0000","channels":[]}))
@@ -191,4 +211,37 @@ async fn a_credentialed_tool_write_stores_and_audits() {
     assert!(stale.is_error(), "a stale revision is refused");
 
     crate::api::server::channel_auth::record_daemon_credential(restore);
+}
+
+/// A `tracing` writer that keeps every emitted line in memory.
+///
+/// Why: the audit line is the only observable of an accepted write, so the
+/// tool's write needs the formatted output rather than a mock.
+#[derive(Clone, Default)]
+struct CaptureWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl CaptureWriter {
+    fn contents(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap_or_else(|e| e.into_inner())).into_owned()
+    }
+}
+
+impl std::io::Write for CaptureWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+    type Writer = Self;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
 }
