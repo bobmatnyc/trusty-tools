@@ -94,10 +94,13 @@ stale. Advance with `tm issue transition N status:merged`. Fix PRs use
 live proof) close only from `status:tested`; a merged fix failing
 verification stays open, returning to `status:coded` only via a follow-up fix.
 
-🔴 A `code-critic`/`code-analyzer`/trusty-review finding below HIGH is fixed
-in the surfacing PR, dropped, or logged in the rollup
+🔴 A `code-critic`/`code-analyzer`/trusty-review finding below HIGH, or a
+self-improvement/post-mortem finding (the `self-improvement` label,
+`tm-postmortem` output, `report_bug`/`preview_bug_report`, or an agent's
+"Improvement recommendations" block), is fixed in the surfacing PR, dropped,
+or logged in the rollup
 ([#8021](https://github.com/bobmatnyc/trusty-tools/issues/8021)) — never a
-new issue. HIGH+ or a standalone pre-existing defect may still be filed
+new issue. HIGH+ or independently schedulable work may still be filed
 (search first).
 
 🔴 **Why/What/Test doc pattern, proportional depth:** `/// Why: <motivation>`,
