@@ -301,6 +301,30 @@ async fn a_poisoned_tracker_keeps_its_stamps_and_reports_degraded() {
     assert!(reason.contains("poisoned"), "{reason}");
 }
 
+/// Why (#4001): the poison flag is set by `guard`, so a `degraded_at` that only
+/// locked the ticker would report healthy until some other caller happened to
+/// touch the stamp table first — the health path's ordering, not the tracker's
+/// contract.
+/// What: poisons the stamp table, then calls `degraded_at` as the first read of
+/// a fresh tracker and asserts it reports the poisoning.
+/// Test: itself.
+#[test]
+fn degraded_at_sees_poison_without_a_prior_stamp_read() {
+    let tracker = Arc::new(LockStallTracker::default());
+    let poisoner = Arc::clone(&tracker);
+    let joined = std::thread::spawn(move || {
+        let _g = poisoner.stalls.lock();
+        panic!("poison the stall table");
+    })
+    .join();
+    assert!(joined.is_err(), "the poisoning thread panicked");
+
+    let reason = tracker
+        .degraded_at(Instant::now())
+        .expect("poisoning is reported on the first read");
+    assert!(reason.contains("poisoned"), "{reason}");
+}
+
 /// Why (fail-open row: ticker stops): a dead ticker leaves the first health
 /// read after a stall at age zero. That must read as degraded, not `ok`.
 /// What: beats at `t0` with a 10 ms interval; asserts no degradation inside

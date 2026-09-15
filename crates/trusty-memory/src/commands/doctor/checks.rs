@@ -265,13 +265,14 @@ pub(super) async fn check_daemon_health_at(
 /// `degraded` or is still warming up. `Unknown` when the body is missing or
 /// unparseable (a 2xx with no readable body tells us nothing about the
 /// workers), and equally when the daemon reports its own stall tracking
-/// stopped. `Pass` only when the daemon positively reported a healthy worker
-/// pool it was still watching.
+/// stopped or never had a stall detector at all. `Pass` only when the daemon
+/// positively reported a healthy worker pool it was still watching.
 /// Test: `wedged_body_is_fail`, `warming_body_is_warn`,
 /// `indeterminate_probe_renders_as_unknown_not_pass`,
 /// `body_without_worker_block_is_unknown`, `healthy_body_is_pass`,
 /// `degraded_body_is_warn`,
 /// `stopped_stall_tracking_is_undetermined_not_a_warning`,
+/// `a_daemon_with_no_stall_detector_is_undetermined_not_a_pass`,
 /// `a_pool_wedge_beside_a_benign_stamp_names_the_pool`.
 pub(super) fn interpret_health_body(
     label: String,
@@ -362,26 +363,40 @@ pub(super) fn interpret_health_body(
     }
 
     // #4001: the `wedged: false` above is only worth what the detector behind
-    // it is worth. A daemon reporting that its stall tracking stopped has not
-    // told us the palace locks are free, and that reads as `degraded` below —
-    // a warning, which would leave the run green on the detector's own failure.
-    if worker
+    // it is worth. The field is a plain bool with no `skip_serializing_if`, so
+    // absent means a daemon with no detector at all — the 2026-09-13 incident
+    // build, which reports `worker.wedged` (#3992) and so never reaches the
+    // `None` arm above. Neither state may pass.
+    match worker
         .and_then(|w| w.get("stall_tracking_ok"))
         .and_then(serde_json::Value::as_bool)
-        == Some(false)
     {
-        let detail = body
-            .get("detail")
-            .and_then(|v| v.as_str())
-            .unwrap_or("no detail reported");
-        return CheckResult::unknown(
-            label,
-            format!(
-                "{url} → {status}, but the daemon's palace-lock stall tracking is not running: \
-                 {detail}. Whether a palace lock is wedged is UNKNOWN. Restart the daemon to \
-                 restore the detector."
-            ),
-        );
+        Some(true) => {}
+        Some(false) => {
+            let detail = body
+                .get("detail")
+                .and_then(|v| v.as_str())
+                .unwrap_or("no detail reported");
+            return CheckResult::unknown(
+                label,
+                format!(
+                    "{url} → {status}, but the daemon's palace-lock stall tracking is not \
+                     running: {detail}. Whether a palace lock is wedged is UNKNOWN. Restart \
+                     the daemon to restore the detector."
+                ),
+            );
+        }
+        None => {
+            return CheckResult::unknown(
+                label,
+                format!(
+                    "{url} → {status}, but this daemon has no palace-lock stall detector \
+                     (pre-#4001 build). It reports worker-pool occupancy only, and the \
+                     2026-09-13 wedge held a lock no pool gauge could see, so whether a \
+                     palace lock is wedged is UNKNOWN. Upgrade the daemon."
+                ),
+            );
+        }
     }
 
     let daemon_state = body.get("daemon_state").and_then(|v| v.as_str());

@@ -746,7 +746,7 @@ fn healthy_body() -> serde_json::Value {
     serde_json::json!({
         "status": "ok",
         "daemon_state": "ready",
-        "worker": {"in_flight": 0, "wedged": false},
+        "worker": {"in_flight": 0, "wedged": false, "stall_tracking_ok": true},
     })
 }
 
@@ -829,7 +829,12 @@ async fn memory_warming_is_warn_not_fail() {
     let body = serde_json::json!({
         "status": "ok",
         "daemon_state": "warming",
-        "worker": {"in_flight": 1, "oldest_age_secs": 2, "wedged": false},
+        "worker": {
+            "in_flight": 1,
+            "oldest_age_secs": 2,
+            "wedged": false,
+            "stall_tracking_ok": true,
+        },
     });
     let daemon = spawn_health_listener(body, std::time::Duration::ZERO).await;
     let addr = daemon.socket().display().to_string();
@@ -902,6 +907,51 @@ async fn health_body_without_worker_block_is_unknown() {
         "no worker observation means health is undetermined: {}",
         check.message
     );
+}
+
+/// Why (issue #4001): `tm doctor` reads the same payload as `trusty-memory
+/// doctor` and must reach the same verdict. A daemon whose palace-lock stall
+/// detector stopped reports `status: degraded`, which mapped to `Warn` — a
+/// green run on the detector's own failure. A daemon predating the detector
+/// omits the field entirely while still reporting `worker.wedged`, so it never
+/// reached the pre-#4001 arm: that is the 2026-09-13 incident build reading
+/// HEALTHY.
+/// What: asserts both shapes — reported-stopped and field-absent — are
+/// `Unknown`, and that neither is `Warn` or `Ok`.
+/// Test: itself.
+#[tokio::test]
+async fn memory_without_stall_tracking_is_unknown_not_warn() {
+    let bodies = [
+        serde_json::json!({
+            "status": "degraded",
+            "detail": "palace lock stall ticker has not run for 412s (interval 30000ms)",
+            "daemon_state": "ready",
+            "worker": {"in_flight": 0, "wedged": false, "stall_tracking_ok": false},
+        }),
+        // The incident build: worker occupancy (#3992), no stall detector.
+        serde_json::json!({
+            "status": "ok",
+            "daemon_state": "ready",
+            "worker": {"in_flight": 0, "wedged": false},
+        }),
+    ];
+    for body in bodies {
+        let daemon = spawn_health_listener(body.clone(), std::time::Duration::ZERO).await;
+        let addr = daemon.socket().display().to_string();
+        let check = probe_health("memory", "trusty-memory", daemon.socket(), &addr).await;
+
+        assert_eq!(
+            check.status,
+            CheckStatus::Unknown,
+            "a daemon not watching its palace locks is undetermined, not a warning: {} ({body})",
+            check.message
+        );
+        assert!(
+            check.message.contains("stall detector is not reporting"),
+            "message must name the detector: {}",
+            check.message
+        );
+    }
 }
 
 /// Why: the aggregate verdict is what an operator actually reads. If a single

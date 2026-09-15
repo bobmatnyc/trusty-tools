@@ -640,7 +640,7 @@ mod tests {
         let r = interpret(serde_json::json!({
             "status": "ok",
             "daemon_state": "warming",
-            "worker": {"in_flight": 0, "wedged": false},
+            "worker": {"in_flight": 0, "wedged": false, "stall_tracking_ok": true},
         }));
         assert_eq!(r.status, CheckStatus::Warn);
         assert!(r.detail.as_deref().unwrap_or("").contains("WARMING"));
@@ -678,7 +678,12 @@ mod tests {
         let r = interpret(serde_json::json!({
             "status": "ok",
             "daemon_state": "ready",
-            "worker": {"in_flight": 2, "oldest_age_secs": 1, "wedged": false},
+            "worker": {
+                "in_flight": 2,
+                "oldest_age_secs": 1,
+                "wedged": false,
+                "stall_tracking_ok": true,
+            },
         }));
         assert_eq!(r.status, CheckStatus::Pass);
     }
@@ -693,7 +698,7 @@ mod tests {
             "status": "degraded",
             "detail": "store failed: disk full",
             "daemon_state": "ready",
-            "worker": {"in_flight": 0, "wedged": false},
+            "worker": {"in_flight": 0, "wedged": false, "stall_tracking_ok": true},
         }));
         assert_eq!(r.status, CheckStatus::Warn);
         assert!(r.detail.as_deref().unwrap_or("").contains("disk full"));

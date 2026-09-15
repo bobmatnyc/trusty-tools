@@ -278,10 +278,14 @@ impl LockStallTracker {
     /// Reporting nothing would make health read `ok` on a signal that is gone.
     /// What: `Some(reason)` when a started ticker has missed
     /// three beats (`TICKER_GRACE_INTERVALS`), or when tracking state was
-    /// poisoned.
+    /// poisoned. The stamp table is touched first: the poison flag is set by
+    /// [`Self::guard`], so a caller that has not read the stamps yet would
+    /// otherwise see a stale `false` and report healthy.
     /// Test: `a_ticker_that_stops_beating_reports_degraded`,
-    /// `a_poisoned_tracker_keeps_its_stamps_and_reports_degraded`.
+    /// `a_poisoned_tracker_keeps_its_stamps_and_reports_degraded`,
+    /// `degraded_at_sees_poison_without_a_prior_stamp_read`.
     pub fn degraded_at(&self, now: Instant) -> Option<String> {
+        drop(self.guard(&self.stalls));
         let beat = *self.guard(&self.ticker);
         if self.poisoned.load(Ordering::Acquire) {
             return Some(

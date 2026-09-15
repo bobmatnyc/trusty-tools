@@ -50,7 +50,11 @@ async fn stand_in(reply: Reply) -> (PathBuf, tempfile::TempDir, tokio::task::Joi
                         "result": {
                             "status": "ok",
                             "daemon_state": "ready",
-                            "worker": {"in_flight": 0, "wedged": false},
+                            "worker": {
+                                "in_flight": 0,
+                                "wedged": false,
+                                "stall_tracking_ok": true,
+                            },
                         },
                     });
                     tokio::spawn(answer_once(stream, delay, body.to_string()));
@@ -216,6 +220,39 @@ fn stopped_stall_tracking_is_undetermined_not_a_warning() {
     assert!(
         !summarize(&[CheckResult::pass("a", "fine"), result]).healthy,
         "a daemon that stopped watching its palace locks must not end the run green"
+    );
+}
+
+/// Why (#4001, the incident build): `stall_tracking_ok` is a plain bool with no
+/// `skip_serializing_if`, so its absence means a daemon with no palace-lock
+/// stall detector at all — including the 2026-09-13 build, which reports
+/// `worker.wedged` (#3992) and therefore never reaches the pre-#4001 arm. Left
+/// to fall through it reaches `status: "ok"` and passes, so the fixed doctor
+/// would have read HEALTHY against the daemon that caused #4001.
+/// What: a body carrying the #3992 worker block and nothing else; asserts
+/// `Unknown`, a message naming the missing detector, and an unhealthy run.
+/// Test: itself.
+#[test]
+fn a_daemon_with_no_stall_detector_is_undetermined_not_a_pass() {
+    let result = interpret_health_body(
+        "HTTP daemon".to_string(),
+        "http://x/health",
+        200,
+        Some(&serde_json::json!({
+            "status": "ok",
+            "daemon_state": "ready",
+            "worker": {"in_flight": 0, "oldest_age_secs": 1, "wedged": false},
+        })),
+    );
+    assert_eq!(result.status, CheckStatus::Unknown, "{result:?}");
+    let detail = result.detail.as_deref().unwrap_or_default();
+    assert!(
+        detail.contains("no palace-lock stall detector") && detail.contains("UNKNOWN"),
+        "the missing detector must be named: {detail}"
+    );
+    assert!(
+        !summarize(&[CheckResult::pass("a", "fine"), result]).healthy,
+        "the incident build must not end the run green"
     );
 }
 
