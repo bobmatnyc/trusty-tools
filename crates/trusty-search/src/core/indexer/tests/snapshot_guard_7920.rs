@@ -6,11 +6,37 @@
 //! never loaded. The #1711 guard covered `hnsw.usearch` only.
 //! What: the refusal arms (empty, foreign-partial, incremental persister), the
 //! legitimate-write arm a never-flush fix would fail, and the I/O error arm.
-//! Test: `cargo test -p trusty-search --lib snapshot_guard_7920`.
+//! Test: `shutdown_flush_refuses_empty_corpus_over_populated_chunks_json`,
+//! `chunks_added_after_load_are_persisted`.
 
 use super::*;
 use crate::core::indexer::SnapshotOverwriteRefused;
 use std::collections::HashSet;
+
+/// Puts an environment variable back the way the test found it.
+struct RestoreEnv {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl RestoreEnv {
+    fn capture(key: &'static str) -> Self {
+        Self {
+            key,
+            previous: std::env::var_os(key),
+        }
+    }
+}
+
+impl Drop for RestoreEnv {
+    fn drop(&mut self) {
+        // SAFETY: dropped inside the same #[serial] span that changed the var.
+        match self.previous.take() {
+            Some(v) => unsafe { std::env::set_var(self.key, v) },
+            None => unsafe { std::env::remove_var(self.key) },
+        }
+    }
+}
 
 /// Write a populated snapshot at `path` through a legitimate owner.
 async fn seed(path: &std::path::Path) -> HashSet<String> {
@@ -150,6 +176,8 @@ async fn snapshot_write_failure_surfaces_error_and_keeps_source() {
 #[serial_test::serial]
 async fn incremental_persist_refuses_empty_corpus_over_populated_chunks_json() {
     let data_dir = tempfile::tempdir().unwrap();
+    // Declared after `data_dir`, so the variable is restored before the dir goes.
+    let _restore = RestoreEnv::capture("TRUSTY_DATA_DIR");
     // SAFETY: #[serial] excludes every other #[serial] test for this test's span.
     unsafe { std::env::set_var("TRUSTY_DATA_DIR", data_dir.path()) };
     let index_id = "persist-7920";

@@ -10,7 +10,10 @@
 //! wrote, and refuses a write when the file on disk holds chunks AND either the
 //! in-memory corpus is empty or the path is not one this indexer owns. Every
 //! refusal is counted and returned as [`SnapshotOverwriteRefused`].
-//! Test: `core::indexer::tests::snapshot_guard_7920`.
+//! Scope: only indexers with no redb corpus store write `chunks.json`, so only
+//! they reach this guard; a redb-backed index never does.
+//! Test: `shutdown_flush_refuses_empty_corpus_over_populated_chunks_json`,
+//! `incremental_persist_refuses_empty_corpus_over_populated_chunks_json`.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
