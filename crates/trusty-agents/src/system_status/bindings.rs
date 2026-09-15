@@ -145,7 +145,8 @@ pub fn unresolved_bindings(
             BindingKind::McpServer,
             name,
             format!(
-                "assistant `{agent}` disables MCP server `{name}`, which no global server is named"
+                "assistant `{agent}`'s `[mcp] disabled` list names `{name}`, but no global MCP \
+                 server named `{name}` exists"
             ),
         );
     }
