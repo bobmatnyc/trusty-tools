@@ -1227,6 +1227,18 @@ fn a_bare_compiled_write_records_no_savings_row() {
 /// which writes its marker before any model pricing, so the assertion does not
 /// depend on whether this host's configured PM model is in the price table.
 /// Test: itself.
+///
+/// #7746: uses [`write_compiled_prompt_recording_in_with`] and a fixed
+/// zero-roster closure rather than [`write_compiled_prompt_recording_in`] and
+/// the ambient [`crate::core::savings_instructions::ambient_source_bytes`].
+/// The ambient path reads process-global `$CLAUDE_CONFIG_DIR`/`$HOME` TWICE —
+/// once here, once again inside the write's own internal recomputation — and
+/// a concurrently running `RosterTiers`-guarded test mutating either variable
+/// between those two reads could make the second `source_bytes` disagree with
+/// `sources` below, so `bulky` was no longer provably above the source set
+/// and the "folded nothing" branch this test exercises did not fire. The
+/// fixed closure removes both reads, so the two computations agree by
+/// construction instead of by luck.
 #[test]
 fn a_recording_compiled_write_reaches_the_named_framework_root() {
     let root = TempDir::new().expect("framework root");
@@ -1235,10 +1247,16 @@ fn a_recording_compiled_write_reaches_the_named_framework_root() {
     // #7616: the source set is no longer the bundled sections alone — it also
     // carries this machine's undeduped roster, so summing `SECTION_SOURCES` here
     // would undercount and the fixture would land on the folded branch instead.
-    let sources = crate::core::savings_instructions::ambient_source_bytes(project.path());
+    // #7746: the roster count itself is fixed at zero rather than read from the
+    // ambient machine-global tiers — see the fn doc above for why.
+    fn no_roster(_: &Path) -> usize {
+        0
+    }
+    let sources = crate::core::savings_instructions::source_bytes_with(project.path(), no_roster);
     let bulky = "x".repeat(sources + 1);
 
-    write_compiled_prompt_recording_in(root.path(), &dest, &bulky).expect("write succeeds");
+    write_compiled_prompt_recording_in_with(root.path(), &dest, &bulky, no_roster)
+        .expect("write succeeds");
 
     assert_eq!(fs::read_to_string(&dest).unwrap(), bulky);
     assert!(

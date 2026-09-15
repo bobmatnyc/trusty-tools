@@ -397,20 +397,52 @@ pub fn write_compiled_prompt_to(dest: &std::path::Path, prompt: &str) -> std::io
 /// already holds a [`crate::core::paths::FrameworkPaths`], so threading its root
 /// keeps a launch prepared under a temp root recording under that same root.
 /// What: the pure write, then
-/// [`crate::core::savings_instructions::record_instruction_compression_in`].
+/// [`crate::core::savings_instructions::record_instruction_compression_in_with`].
 /// Recording is best-effort by contract — a write failure returns before it, so
 /// no row can describe a prompt that never landed.
-/// Test: `a_recording_compiled_write_reaches_the_named_framework_root`.
+/// Test: covered by construction through
+/// [`write_compiled_prompt_recording_in_with`] (#7746), which
+/// `a_recording_compiled_write_reaches_the_named_framework_root` exercises
+/// directly.
 pub(crate) fn write_compiled_prompt_recording_in(
     framework_root: &std::path::Path,
     dest: &std::path::Path,
     prompt: &str,
 ) -> std::io::Result<()> {
-    write_compiled_prompt_to(dest, prompt)?;
-    crate::core::savings_instructions::record_instruction_compression_in(
+    // #7746: delegates to the seamed variant below with the ambient roster
+    // resolver, so this production entry point's observable behavior is
+    // unchanged.
+    write_compiled_prompt_recording_in_with(
         framework_root,
         dest,
         prompt,
+        crate::core::savings_instructions::ambient_roster_source_bytes,
+    )
+}
+
+/// [`write_compiled_prompt_recording_in`] with an explicit roster-byte
+/// resolver (the test seam, #7746).
+///
+/// Why: the ambient resolver reads process-global `$CLAUDE_CONFIG_DIR` and
+/// `$HOME`, which a concurrently running `RosterTiers`-guarded test mutates.
+/// Injecting the resolver removes that dependence for a caller that needs a
+/// deterministic source-byte count instead.
+/// What: the pure write, then
+/// [`crate::core::savings_instructions::record_instruction_compression_in_with`]
+/// with `roster_source` threaded through.
+/// Test: `a_recording_compiled_write_reaches_the_named_framework_root`.
+pub(crate) fn write_compiled_prompt_recording_in_with(
+    framework_root: &std::path::Path,
+    dest: &std::path::Path,
+    prompt: &str,
+    roster_source: impl FnOnce(&std::path::Path) -> usize,
+) -> std::io::Result<()> {
+    write_compiled_prompt_to(dest, prompt)?;
+    crate::core::savings_instructions::record_instruction_compression_in_with(
+        framework_root,
+        dest,
+        prompt,
+        roster_source,
     );
     Ok(())
 }

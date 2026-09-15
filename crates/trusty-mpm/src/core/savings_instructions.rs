@@ -109,22 +109,34 @@ use crate::core::savings_sidecar::{log_no_fold_once, stage_row};
 /// `record_instruction_compression` that resolved `framework_root` from the
 /// process home directory: every caller reachable from a test wrote into the
 /// operator's own ledger through it. Each launch path now resolves the ambient
-/// root once, in its own named wrapper, and passes it down.
+/// root once, in its own named wrapper, and passes it down. #7746 split the
+/// roster resolver out too: the ambient one reads process-global
+/// `$CLAUDE_CONFIG_DIR`/`$HOME`, which raced a concurrently running
+/// `RosterTiers`-guarded test mutating either variable between a caller's own
+/// read of [`ambient_source_bytes`] and this function's internal
+/// recomputation of the same number. Callers that need a deterministic count
+/// instead — today, only the regression test — supply `roster_source`
+/// directly;
+/// [`crate::core::instruction_pipeline::write_compiled_prompt_recording_in`]
+/// passes [`ambient_roster_source_bytes`], unchanged from before the split.
 /// What: reads the Claude Code session id the statusline folds by, then defers to
-/// [`record_instruction_compression_to`] against `framework_root`.
+/// [`record_instruction_compression_to`] against `framework_root`, with
+/// `roster_source` supplied by the caller.
 /// Test: `a_bare_compiled_write_records_no_savings_row`,
 /// `a_recording_compiled_write_reaches_the_named_framework_root`.
-pub(crate) fn record_instruction_compression_in(framework_root: &Path, dest: &Path, prompt: &str) {
+pub(crate) fn record_instruction_compression_in_with(
+    framework_root: &Path,
+    dest: &Path,
+    prompt: &str,
+    roster_source: impl FnOnce(&Path) -> usize,
+) {
     // #7209: the row's key is the Claude Code session id, not the directory name.
     record_instruction_compression_to(
         framework_root,
         dest,
         prompt,
         claude_code_session_id(),
-        // #7616: the roster the composer READ, resolved from this machine's
-        // agent tiers. Injected rather than read inside the measurement so the
-        // suite stays hermetic — the tiers are machine-global.
-        ambient_roster_source_bytes,
+        roster_source,
         resolve_pm_price,
     );
 }
@@ -143,7 +155,12 @@ pub(crate) fn record_instruction_compression_in(framework_root: &Path, dest: &Pa
 /// with no roster folds no roster.
 /// Test: `the_roster_dedup_counts_as_folded_source` (the arithmetic),
 /// `roster_source_bytes_are_zero_without_a_roster` (the tier seam).
-fn ambient_roster_source_bytes(project_dir: &Path) -> usize {
+///
+/// `pub(crate)` since #7746:
+/// [`crate::core::instruction_pipeline::write_compiled_prompt_recording_in`]
+/// names it as the default `roster_source` argument to
+/// [`record_instruction_compression_in_with`].
+pub(crate) fn ambient_roster_source_bytes(project_dir: &Path) -> usize {
     let dirs = crate::core::delegation_authority::deployed_agent_dirs(project_dir);
     roster_source_bytes_from(&dirs)
 }
@@ -404,7 +421,21 @@ pub(crate) fn measure_project_fold(project_dir: &Path) -> Option<(usize, usize)>
 /// roster for `project_dir`'s tiers.
 /// Test: `the_fold_measurement_reads_the_newest_compiled_prompt`.
 pub(crate) fn ambient_source_bytes(project_dir: &Path) -> usize {
-    folded_source_bytes(project_dir, ambient_roster_source_bytes(project_dir))
+    // #7746: delegates to the seamed variant below with the ambient roster
+    // resolver, so this production entry point is unchanged.
+    source_bytes_with(project_dir, ambient_roster_source_bytes)
+}
+
+/// [`ambient_source_bytes`] with an explicit roster-byte resolver (the test
+/// seam, #7746) — mirrors [`record_instruction_compression_in_with`] so a
+/// test can compute the SAME number the recording write will, with neither
+/// call depending on `$CLAUDE_CONFIG_DIR`/`$HOME`.
+/// Test: `a_recording_compiled_write_reaches_the_named_framework_root`.
+pub(crate) fn source_bytes_with(
+    project_dir: &Path,
+    roster_source: impl FnOnce(&Path) -> usize,
+) -> usize {
+    folded_source_bytes(project_dir, roster_source(project_dir))
 }
 
 /// The smallest byte count a real compiled PM prompt can have.
