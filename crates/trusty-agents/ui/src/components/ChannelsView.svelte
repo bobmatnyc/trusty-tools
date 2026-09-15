@@ -3,28 +3,35 @@
   import { Plus, RefreshCw, Trash2, ArrowUp } from 'lucide-svelte';
   import { activeAgentId, agentRoster } from '../stores/app';
   import { CONCIERGE_AGENT_ID, rosterDisplayName } from '../lib/roster';
-  import { fetchChannels, saveChannels, fetchChannelMessages, sendChannelMessage, type ChannelConfiguration, type ChannelBinding, type ChannelMessages, type ChannelProviderId } from '../lib/channels';
+  import { fetchChannels, saveChannels, fetchChannelMessages, sendChannelMessage, channelErrorMessage, isChannelConflict, type ChannelConfiguration, type ChannelBinding, type ChannelMessages, type ChannelProviderId } from '../lib/channels';
   // #7427: a gworkspace target is a correspondent or a label, so the hint text
   // cannot be one Slack-or-Telegram ternary any more.
   const targetHints:Record<ChannelProviderId,string>={slack:'Slack channel ID',telegram:'Telegram chat ID',gworkspace:'from:someone@example.com or label:INBOX'};
   const targetHint=(provider:ChannelProviderId)=>targetHints[provider]??'Destination';
-  import AgentConfigListeners from './AgentConfigListeners.svelte';
+  // #7609 slice 6: the view now has two scopes. Assistant is the per-assistant
+  // bindings this file has always edited; Global is the host-wide
+  // `[[channels]]` table, whose editor is its own component because the two
+  // share only the scope toggle. The deprecated Listeners editor is gone with
+  // `lib/listeners.ts`: everything it configured is now a channel in one of
+  // these two scopes.
+  import GlobalChannelsPanel from './GlobalChannelsPanel.svelte';
+  import AssistantRoutedChannels from './AssistantRoutedChannels.svelte';
   let configuration:ChannelConfiguration|null=null;
   let bindings:ChannelBinding[]=[];
   let loading=false, saving=false, sending=false, reading=false, error='', notice='';
   let previous:string|null|undefined=undefined, generation=0, readGeneration=0;
   let selected='', message='', inbox:ChannelMessages|null=null;
-  let showListeners=false,listenersVisited=false,listenersDirty=false,listenersSaving=false;
+  let scope:'assistant'|'global'='assistant',globalVisited=false,globalDirty=false,globalSaving=false;
   let viewAgent:string|null=null;
-  $: if(showListeners)listenersVisited=true;
-  $: protectedEdits=dirty||saving||sending||listenersDirty||listenersSaving||message.trim().length>0;
+  $: if(scope==='global')globalVisited=true;
+  $: protectedEdits=dirty||saving||sending||globalDirty||globalSaving||message.trim().length>0;
   $: dirty=configuration!==null && JSON.stringify(bindings)!==JSON.stringify(configuration.bindings);
   $: selectedBinding=configuration?.bindings.find(b=>b.id===selected);
   $: selectedProvider=configuration?.providers.find(p=>p.id===selectedBinding?.provider);
   $: if(previous!==$activeAgentId&&!protectedEdits){previous=$activeAgentId;void load($activeAgentId);}
   async function load(agent:string|null,preserveMessage=false){
     const previousSelection=preserveMessage?selected:'';
-    const token=++generation;viewAgent=agent;listenersVisited=false;listenersDirty=false;listenersSaving=false;readGeneration++;configuration=null;bindings=[];selected='';inbox=null;message=preserveMessage?message:'';error='';notice='';loading=!!agent;saving=false;sending=false;reading=false;showListeners=false;
+    const token=++generation;viewAgent=agent;readGeneration++;configuration=null;bindings=[];selected='';inbox=null;message=preserveMessage?message:'';error='';notice='';loading=!!agent;saving=false;sending=false;reading=false;
     if(!agent)return;
     try{const result=await fetchChannels(agent);if(token!==generation)return;configuration=result;bindings=structuredClone(result.bindings);if(preserveMessage){selected=result.bindings.some(binding=>binding.id===previousSelection)?previousSelection:'';if(!selected&&message.trim())notice='The previous destination is no longer available. Your unsent message is kept; choose its destination explicitly.';}else selected=result.bindings[0]?.id??'';}
     catch(e){if(token===generation)error=String(e);}
@@ -39,7 +46,11 @@
     if(!configuration||!viewAgent||saving||!dirty)return;
     const token=generation,agent=viewAgent;saving=true;error='';notice='';
     try{const result=await saveChannels(agent,configuration.revision,bindings);if(token!==generation)return;configuration=result;bindings=structuredClone(result.bindings);readGeneration++;reading=false;inbox=null;if(!result.bindings.some(b=>b.id===selected))selected=message.trim()?'':result.bindings[0]?.id??'';notice=!selected&&message.trim()?'Channels saved. The previous destination is no longer available; choose a destination for your unsent message explicitly.':'Channels saved.';}
-    catch(e){if(token===generation)error=/409|conflict/i.test(String(e))?'Settings changed elsewhere. Your edits are still shown. Reload before trying again.':String(e);}
+    // #7609 slice 6: a lost compare-and-swap keeps the edits on screen — this
+    // scope's editor is the only copy of them. Everything else reads through
+    // the shared mapper, so a missing write credential says the same sentence
+    // in both scopes and a validation refusal shows the server's own wording.
+    catch(e){if(token===generation)error=isChannelConflict(e)?'Settings changed elsewhere. Your edits are still shown. Reload before trying again.':channelErrorMessage(e);}
     finally{if(token===generation)saving=false;}
   }
   async function read(){
@@ -61,8 +72,12 @@
   const filterFields=[['from','Senders'],['include_labels','Include labels'],['exclude_labels','Exclude labels'],['subject_contains','Subject contains'],['snippet_contains','Message contains']] as const;
 </script>
 <section class="channels" aria-label="Assistant channels">
-  <header><h2>Channels</h2><select aria-label="Channel assistant" value={viewAgent??''} disabled={protectedEdits} on:change={e=>activeAgentId.set(e.currentTarget.value||null)}><option value="">Select an assistant</option>{#each $agentRoster.filter(a=>a.id!==CONCIERGE_AGENT_ID) as agent (agent.id)}<option value={agent.id}>{rosterDisplayName($agentRoster,agent.id)}</option>{/each}</select></header>
+  <header><h2>Channels</h2>
+    <div class="scope" role="group" aria-label="Channel scope"><button class:on={scope==='assistant'} aria-pressed={scope==='assistant'} on:click={()=>scope='assistant'}>Assistant</button><button class:on={scope==='global'} aria-pressed={scope==='global'} on:click={()=>scope='global'}>Global</button></div>
+    {#if scope==='assistant'}<select aria-label="Channel assistant" value={viewAgent??''} disabled={protectedEdits} on:change={e=>activeAgentId.set(e.currentTarget.value||null)}><option value="">Select an assistant</option>{#each $agentRoster.filter(a=>a.id!==CONCIERGE_AGENT_ID) as agent (agent.id)}<option value={agent.id}>{rosterDisplayName($agentRoster,agent.id)}</option>{/each}</select>{/if}</header>
   <div class="body">
+    {#if globalVisited}<div style:display={scope==='global'?'block':'none'} data-global-channels><GlobalChannelsPanel bind:dirty={globalDirty} bind:saving={globalSaving}/></div>{/if}
+    <div style:display={scope==='assistant'?'contents':'none'}>
     {#if !viewAgent}<p>Select an assistant to configure its channels.</p>{/if}
     {#if viewAgent!==$activeAgentId&&protectedEdits}<p role="status" class="muted">Finish or discard the changes for {rosterDisplayName($agentRoster,viewAgent)} before switching assistants.</p>{/if}
     {#if loading}<p role="status">Loading channels…</p>{/if}
@@ -89,16 +104,17 @@
         </article>
       {/each}
       </fieldset>
-      <div class="row"><button on:click={add} disabled={saving||sending||configuration.providers.length===0}><Plus size={14}/>Add channel</button><button class="primary" on:click={save} disabled={!dirty||saving||sending}>{saving?'Saving…':'Save channels'}</button><button on:click={()=>load(viewAgent,true)} disabled={saving||sending||listenersDirty||listenersSaving}><RefreshCw size={14}/>{dirty?'Discard changes and reload':'Reload'}</button></div>
+      <div class="row"><button on:click={add} disabled={saving||sending||configuration.providers.length===0}><Plus size={14}/>Add channel</button><button class="primary" on:click={save} disabled={!dirty||saving||sending}>{saving?'Saving…':'Save channels'}</button><button on:click={()=>load(viewAgent,true)} disabled={saving||sending}><RefreshCw size={14}/>{dirty?'Discard changes and reload':'Reload'}</button></div>
       {#if configuration.bindings.length>0||message.trim()}<section class="conversation"><h3>Channel messages</h3><div class="row"><select aria-label="Selected channel" bind:value={selected} on:change={selectChannel} disabled={sending}><option value="">Select a destination…</option>{#each configuration.bindings as binding}<option value={binding.id}>{binding.name}</option>{/each}</select><button on:click={read} disabled={reading||!selectedProvider?.configured||!selectedProvider?.can_read}>{reading?'Loading…':'Refresh messages'}</button></div>
       {#if selectedProvider&&!selectedProvider.can_read}<p class="muted">This service does not provide message history.</p>{/if}
       {#if inbox}{#if !inbox.available}<p class="muted">{inbox.reason??'Messages unavailable.'}</p>{/if}{#each inbox.messages as row (row.id)}<div class="message">{#if row.from}<strong>{row.from}</strong>{/if}<p>{row.text}</p></div>{/each}{/if}
       <div class="composer"><textarea aria-label="Channel message" bind:value={message} placeholder="Message this channel…" disabled={sending||dirty}></textarea><button aria-label="Send channel message" class="primary" on:click={send} disabled={sending||dirty||!message.trim()||!selectedBinding?.send_enabled||!selectedBinding?.enabled||!selectedProvider?.configured||!selectedProvider?.can_send}><ArrowUp size={16}/></button></div></section>{/if}
-      <button on:click={()=>showListeners=!showListeners}>{showListeners?'Hide':'Configure'} other update sources</button>
-      {#if listenersVisited&&viewAgent}<div style:display={showListeners?'block':'none'} data-channel-listeners><AgentConfigListeners agentName={viewAgent} bind:dirty={listenersDirty} bind:saving={listenersSaving}/></div>{/if}
+      <!-- #7609 slice 6: a global channel can wake this assistant without appearing above; read-only, edited in the Global scope. -->
+      {#if viewAgent}<AssistantRoutedChannels agent={viewAgent} onShowGlobal={()=>scope='global'}/>{/if}
     {/if}
+    </div>
   </div>
 </section>
 <style>
- .channels{display:flex;flex:1;min-width:0;min-height:0;flex-direction:column;color:rgb(var(--color-text-primary));font-size:13px}header{display:flex;align-items:center;gap:18px;padding:14px 20px;border-bottom:1px solid rgb(var(--color-border))}h2,h3{font-weight:600}h2{font-size:16px}.body{overflow:auto;padding:20px;min-height:0}article,.conversation{padding:16px;margin:16px 0;border:1px solid rgb(var(--color-border));border-radius:10px}fieldset{border:0;padding:0;min-width:0}.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:10px 0}.grow{flex:1}.muted{color:rgb(var(--color-text-muted));margin:8px 0}.error{color:#ba4520}label{display:block}label input[type=checkbox]{margin-right:6px}input:not([type=checkbox]),select,textarea{border:1px solid rgb(var(--color-border));border-radius:6px;padding:8px;background:rgb(var(--color-card-bg));color:inherit;max-width:100%}label input:not([type=checkbox]),label select,label textarea{display:block;width:100%;margin-top:5px}textarea{width:100%;resize:vertical}button{display:inline-flex;align-items:center;gap:6px;border:1px solid rgb(var(--color-border));border-radius:6px;padding:7px 10px}button:disabled{opacity:.45;cursor:default}.primary{background:rgb(var(--color-primary));color:white}.composer{display:flex;align-items:flex-end;gap:10px;margin-top:16px}.composer textarea{flex:1;min-width:0}.message{padding:10px 0;border-bottom:1px solid rgb(var(--color-border))}.message p{white-space:pre-wrap;overflow-wrap:anywhere}details label{margin-top:10px}summary{cursor:pointer}
+ .channels{display:flex;flex:1;min-width:0;min-height:0;flex-direction:column;color:rgb(var(--color-text-primary));font-size:13px}header{display:flex;align-items:center;gap:18px;padding:14px 20px;border-bottom:1px solid rgb(var(--color-border))}h2,h3{font-weight:600}h2{font-size:16px}.body{overflow:auto;padding:20px;min-height:0}.scope{display:flex;gap:0}.scope button{border-radius:0}.scope button:first-child{border-radius:6px 0 0 6px}.scope button:last-child{border-radius:0 6px 6px 0;margin-left:-1px}.scope button.on{background:rgb(var(--color-primary));color:white}article,.conversation{padding:16px;margin:16px 0;border:1px solid rgb(var(--color-border));border-radius:10px}fieldset{border:0;padding:0;min-width:0}.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:10px 0}.grow{flex:1}.muted{color:rgb(var(--color-text-muted));margin:8px 0}.error{color:#ba4520}label{display:block}label input[type=checkbox]{margin-right:6px}input:not([type=checkbox]),select,textarea{border:1px solid rgb(var(--color-border));border-radius:6px;padding:8px;background:rgb(var(--color-card-bg));color:inherit;max-width:100%}label input:not([type=checkbox]),label select,label textarea{display:block;width:100%;margin-top:5px}textarea{width:100%;resize:vertical}button{display:inline-flex;align-items:center;gap:6px;border:1px solid rgb(var(--color-border));border-radius:6px;padding:7px 10px}button:disabled{opacity:.45;cursor:default}.primary{background:rgb(var(--color-primary));color:white}.composer{display:flex;align-items:flex-end;gap:10px;margin-top:16px}.composer textarea{flex:1;min-width:0}.message{padding:10px 0;border-bottom:1px solid rgb(var(--color-border))}.message p{white-space:pre-wrap;overflow-wrap:anywhere}details label{margin-top:10px}summary{cursor:pointer}
 </style>

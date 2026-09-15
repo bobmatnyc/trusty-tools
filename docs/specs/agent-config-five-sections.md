@@ -1086,6 +1086,15 @@ ui/src/components/AgentConfigPermissions.svelte  + .test.ts
 ui/src/lib/agentConfig.ts                        (fetch wrappers, extended)
 ```
 
+**Amendment (#7609 slice 6, 2026-09-15):** `AgentConfigListeners.svelte` and its
+test are DELETED, and the panel's Listeners section with them. The editor read
+and wrote `GET`/`PUT /api/agents/{name}/listeners`, deprecated by #7609 slice 5
+and removed by slice 7; everything it configured is now a channel — per-assistant
+bindings in the Channels view's Assistant scope, host-wide sources in its Global
+scope (`ChannelsView.svelte`, `GlobalChannelsPanel.svelte`). §2.1's normative
+ORDER is unaffected: every surviving section keeps its position relative to every
+other. The section COUNT in this document's title and §2.1 is superseded.
+
 - **G-6** Two invariants must survive the split, both currently test-guarded:
   (a) **dirty tracking** — `configPaneDirty` is set by whoever owns editable
   state (`AgentConfigPanel.svelte:118`, cleared on destroy at :127) and every
