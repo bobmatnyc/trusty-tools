@@ -20,6 +20,14 @@ import { resetChannelWriteToken } from './channel-auth';
 
 const MINTED = 'minted-credential-abc';
 
+// The daemon's own refusal text, copied from `channel_auth.rs`'s `REFUSAL`.
+// The fixture answers with THIS rather than a convenient "401 unauthorized",
+// because the retry used to branch on the message and this string contains
+// neither token — a friendlier fixture hid the defect (critic round 3, HIGH).
+const REFUSAL =
+  'Channel writes require an API token. Start the daemon with --api-token (or ' +
+  'TAGENT_API_TOKEN); this process accepts channel reads only.';
+
 interface Recorded {
   url: string;
   method: string;
@@ -65,7 +73,7 @@ beforeEach(() => {
     }
     const status = putStatus.shift() ?? 200;
     if (status !== 200) {
-      return new Response(JSON.stringify({ error: `${status} unauthorized` }), { status });
+      return new Response(JSON.stringify({ error: REFUSAL }), { status });
     }
     return ok({ agent: 'fixture', revision: 'r2', bindings: [], listeners: [], providers: [] });
   });

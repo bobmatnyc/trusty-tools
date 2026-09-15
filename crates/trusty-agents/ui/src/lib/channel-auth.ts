@@ -61,7 +61,11 @@ export async function withChannelWriteAuth<T>(
   try {
     return await send(await channelWriteAuth());
   } catch (e) {
-    if (!/\b401\b|unauthorized/i.test(String(e))) throw e;
+    // #7609: branch on the STATUS, never on the message. The daemon's refusal
+    // reads "Channel writes require an API token…" — it contains neither "401"
+    // nor "unauthorized", so a text predicate matched nothing and the retry
+    // never ran. `tmApi` attaches `status` for exactly this.
+    if ((e as { status?: number } | null)?.status !== 401) throw e;
     resetChannelWriteToken();
     return send(await channelWriteAuth());
   }

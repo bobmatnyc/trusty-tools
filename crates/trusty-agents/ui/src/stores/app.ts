@@ -725,7 +725,11 @@ export async function tmApi<T = unknown>(
       (body && typeof body === 'object' && 'error' in body
         ? String((body as { error: unknown }).error)
         : null) ?? `${init.method ?? 'GET'} ${path} failed: ${r.status}`;
-    throw new Error(errMsg);
+    // #7609: the HTTP status travels with the error. A caller that must branch
+    // on it — `channel-auth`'s 401 retry — cannot read it out of the message:
+    // the server's own `error` string is what becomes the message, and a
+    // refusal is free to word itself however it likes.
+    throw Object.assign(new Error(errMsg), { status: r.status });
   }
   return body as T;
 }
