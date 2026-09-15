@@ -125,6 +125,8 @@ chain in a pipe" below sentinels a backgrounded gate.
   into main and reclaims merged trees, neither of which can be done from inside
   a worktree, so the guard leaves it in the checkout it was given. It still
   creates no worktree of its own.
+- **A revert/bisect experiment's throwaway checkout is a disposable
+  `git clone --local`, never `git worktree add`, against the main checkout.**
 - **Never remove a worktree — the PM runs the removal (#5791).** Cleanup after
   a merge you completed is not yours to execute. `tm hook --pm-guard` denies an
   agent's `git worktree remove`, and `rm -rf` is never the workaround. Report
