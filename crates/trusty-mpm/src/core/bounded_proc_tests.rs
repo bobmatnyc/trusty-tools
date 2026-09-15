@@ -1,12 +1,12 @@
 //! Tests for the shared kill-on-timeout subprocess runner (#7965).
 //!
-//! Why only four: the process-group kill and the hung-child reap are already
-//! covered end to end against this exact code by
-//! `run_with_timeout_kills_the_whole_process_group` and
-//! `run_with_timeout_kills_a_hung_child` in `worktree_reclaim_tests.rs`, which
-//! now reach it through the `gh` adapter. What is NEW at this layer is the
-//! return shape the adapter throws away — a non-zero exit is `Ok` here, carrying
-//! both streams — and the typed timeout the hygiene sweep branches on.
+//! What is NEW at this layer, and covered nowhere else: the return shape the
+//! `gh` adapter throws away — a non-zero exit is `Ok` here, carrying both
+//! streams — and the typed timeout the hygiene sweep branches on. The
+//! process-group kill and the pipe drain are covered here directly rather than
+//! only through `run_with_timeout_kills_the_whole_process_group` in
+//! `worktree_reclaim_tests.rs`, because this module now owns them and the `gh`
+//! adapter could be retired without taking the guarantee with it.
 
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -65,6 +65,64 @@ fn run_bounded_kills_a_hung_child() {
         "the timeout must actually fire; took {:?}",
         started.elapsed()
     );
+}
+
+/// 🔴 #6867 REGRESSION, restated at this layer: killing the child must reap its
+/// GRANDCHILDREN too.
+///
+/// Why here as well as through the `gh` adapter: the hygiene sweep's wedge is a
+/// `git fetch` whose transport helper (`ssh`, a credential helper) is a
+/// grandchild holding the same pipes. `child.kill()` signals one pid and leaves
+/// it running, reparented to launchd — which is how #6867 accumulated ~200 orphan
+/// pairs in a couple of hours. The stand-in is a shell that backgrounds a long
+/// `sleep` and then blocks: one process the runner knows about, one it does not.
+#[test]
+fn run_bounded_kills_the_whole_process_group() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let pidfile = tmp.path().join("grandchild.pid");
+    // The grandchild's fds are redirected so it does not hold the runner's
+    // stdout pipe open after its parent dies.
+    let script = format!(
+        "sleep 300 >/dev/null 2>&1 & echo $! > {}; sleep 300",
+        pidfile.display()
+    );
+    let mut cmd = Command::new("sh");
+    cmd.args(["-c", &script]);
+    let err = run_bounded(cmd, Duration::from_millis(500)).expect_err("a hung child must fail");
+    assert!(matches!(err, BoundedError::TimedOut), "{err}");
+
+    let pid: i32 = std::fs::read_to_string(&pidfile)
+        .expect("the shell must have recorded its background child's pid")
+        .trim()
+        .parse()
+        .expect("a pid");
+
+    // The grandchild is reparented on its parent's death, so a killed one is
+    // reaped promptly and `kill(pid, 0)` starts reporting ESRCH.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while alive(pid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let still_there = alive(pid);
+    if still_there {
+        // Never leave a 300-second sleep behind, whatever the verdict.
+        // SAFETY: `pid` was read from a child this test itself started.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+    assert!(
+        !still_there,
+        "the grandchild (pid {pid}) survived its parent's timeout — the process group \
+         was not killed (#6867)"
+    );
+}
+
+/// Is `pid` still a live process?
+///
+/// SAFETY: `kill(pid, 0)` sends no signal; it only probes for the process's
+/// existence and permission to signal it.
+#[cfg(unix)]
+fn alive(pid: i32) -> bool {
+    unsafe { libc::kill(pid, 0) == 0 }
 }
 
 /// A binary that is not on PATH is a spawn failure, not a timeout.

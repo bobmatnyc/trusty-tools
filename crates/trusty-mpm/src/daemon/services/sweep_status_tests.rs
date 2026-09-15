@@ -82,7 +82,12 @@ fn sweep_rows_report_each_sweeps_switch_and_last_pass() {
 }
 
 /// An in-flight pass WARNS, because that is the state that costs request latency.
+///
+/// Why `#[serial]`: the two statics and the env gates the row reads are
+/// process-global, so a sibling holding a `PassGuard` — or flipping a kill switch
+/// — would change this row under the assertion.
 #[test]
+#[serial_test::serial]
 fn background_sweeps_row_warns_on_a_slow_pass() {
     // The statics are shared, so drive the real ones and release immediately.
     let check = {
@@ -95,4 +100,32 @@ fn background_sweeps_row_warns_on_a_slow_pass() {
     // Leaving HYGIENE untouched keeps the row's second line at "no pass yet"
     // unless another test in this binary ran a real sweep.
     let _ = &HYGIENE;
+}
+
+/// With neither sweep running and no slow pass recorded, the row is `Ok`.
+///
+/// Why this inverse matters: a row that warned unconditionally would fire on every
+/// `tm doctor` run of a healthy daemon and train operators to ignore the one line
+/// that means a sweep is eating the request path. It also pins that the row is
+/// never `Unknown` — its source is this process's own atomics, always readable.
+#[test]
+#[serial_test::serial]
+fn background_sweeps_row_is_ok_when_both_sweeps_are_idle() {
+    assert!(
+        !RECLAIM.is_running() && !HYGIENE.is_running(),
+        "the serial guard must give this test an idle daemon"
+    );
+    let check = super::check_background_sweeps();
+    assert_eq!(check.name, "background_sweeps");
+    assert_eq!(check.status, CheckStatus::Ok, "{}", check.message);
+    assert!(
+        !check.message.contains("IN FLIGHT"),
+        "an idle daemon must not report a pass in flight: {}",
+        check.message
+    );
+    assert!(
+        check.message.contains("worktree-reclaim") && check.message.contains("inproject-hygiene"),
+        "both sweeps must appear even when idle: {}",
+        check.message
+    );
 }

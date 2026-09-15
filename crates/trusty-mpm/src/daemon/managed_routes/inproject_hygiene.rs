@@ -68,7 +68,7 @@ use crate::core::bounded_proc::{BoundedError, BoundedOutput, run_bounded};
 /// wedged one — which is the case #7965 caught, a blocking-pool thread parked in
 /// a child's stdout read with no bound at all. A base that hits the ceiling is
 /// abandoned and logged; the sweep moves on.
-/// Test: `hygiene_git_timeout_abandons_a_wedged_command`.
+/// Test: `a_wedged_hygiene_fetch_neither_hangs_the_sweep_nor_delays_health`.
 pub(crate) const GIT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Wall-clock ceiling for one whole sweep over every base clone (#7965).
@@ -81,6 +81,10 @@ pub(crate) const GIT_TIMEOUT: Duration = Duration::from_secs(60);
 /// sweep from becoming a permanent tax on the request path.
 /// Test: `hygiene_pass_budget_stops_the_sweep`.
 pub(crate) const PASS_BUDGET: Duration = Duration::from_secs(180);
+
+// The pointer above and the one on `run_hygiene_for_all_bases_within` name the
+// same test deliberately: the constant is only meaningful through the walk that
+// spends it.
 
 /// Skip a base clone's fetch when it was already fetched this recently (#7965).
 ///
@@ -114,7 +118,7 @@ const BASE_PAUSE: Duration = Duration::from_millis(200);
 /// transport in batch mode, run through [`run_bounded`] with [`GIT_TIMEOUT`].
 /// `Err` carries a one-line reason for a spawn failure, a timeout, or a wait
 /// failure; a non-zero EXIT is `Ok` and left for the caller to judge.
-/// Test: `hygiene_git_timeout_abandons_a_wedged_command`.
+/// Test: `a_wedged_hygiene_fetch_neither_hangs_the_sweep_nor_delays_health`.
 fn git_bounded(base_path: &Path, args: &[&str], budget: Duration) -> Result<BoundedOutput, String> {
     let mut cmd = trusty_common::git::command();
     cmd.arg("-C")
@@ -575,27 +579,6 @@ fn update_to_origin(base_path: &Path, budget: Duration) {
     }
 }
 
-/// Run hygiene for a single base clone: fetch, gated fast-forward, prune worktrees.
-///
-/// Why: each step targets a distinct failure mode — fetch syncs the remote object
-/// store; the fast-forward (when safe) brings the checkout up to the remote
-/// default branch; worktree prune cleans up working-tree entries for worktrees
-/// whose paths no longer exist (left behind by decommissioned sessions). All
-/// steps are non-fatal: a failure is logged as a warning and the next step
-/// still runs, so a transient git error does not prevent the other steps from
-/// running. Critically (#2177, #4961), the update step can never discard local
-/// work — see [`update_to_origin`].
-/// What: returns early when `.git` is absent, or when the
-/// [`HYGIENE_OPT_OUT_MARKER`] file is present (a per-repo opt-out; every step is
-/// skipped so an opted-out checkout is left entirely alone). Otherwise: (1)
-/// `git -C <base_path> fetch origin`; (2) [`update_to_origin`]; (3) `git -C
-/// <base_path> worktree prune`.
-/// Test: `run_hygiene_skips_missing_dir` (unit — directory absent → early
-/// return); `hygiene_opt_out_marker_skips_update`,
-/// `hygiene_ahead_branch_is_not_reset`, `hygiene_dirty_tree_is_not_reset`,
-/// `hygiene_clean_branch_is_fast_forwarded`, `hygiene_gitignored_file_is_not_clobbered`,
-/// `hygiene_non_default_branch_is_not_updated`,
-/// `hygiene_recovery_ref_written_before_update` (integration, real temp git repos).
 /// Whether this base clone is due a fetch, given how long ago the last one was.
 ///
 /// Why: see [`FETCH_MIN_INTERVAL`] — the fetch is the expensive step and the
@@ -605,7 +588,10 @@ fn update_to_origin(base_path: &Path, budget: Duration) {
 /// that file is missing, its mtime is unreadable, or it is older than
 /// `min_interval`. Every failure path is DUE — the pre-#7965 behaviour — so an
 /// unreadable clock can only cost a redundant fetch, never a stale base clone.
-/// Test: `hygiene_skips_a_recently_fetched_base`, `fetch_is_due_without_a_fetch_head`.
+/// Test: `fetch_is_due_without_a_fetch_head`,
+/// `fetch_is_due_on_both_sides_of_the_interval`,
+/// `fetch_is_due_when_the_mtime_is_in_the_future`,
+/// `hygiene_skips_a_recently_fetched_base`.
 fn fetch_is_due(base_path: &Path, min_interval: Duration) -> bool {
     let Ok(meta) = std::fs::metadata(base_path.join(".git").join("FETCH_HEAD")) else {
         return true;
@@ -616,9 +602,29 @@ fn fetch_is_due(base_path: &Path, min_interval: Duration) -> bool {
     SystemTime::now()
         .duration_since(modified)
         .map(|age| age >= min_interval)
+        // #7965: `duration_since` errors when `modified` is in the FUTURE — a
+        // clock skewed backwards, or an NFS mtime from a faster host. Fetch.
         .unwrap_or(true)
 }
 
+/// Run hygiene for a single base clone: fetch, gated fast-forward, prune worktrees.
+///
+/// Why: each step targets a distinct failure mode — fetch syncs the remote object
+/// store; the fast-forward (when safe) brings the checkout up to the remote
+/// default branch; worktree prune cleans up working-tree entries for worktrees
+/// whose paths no longer exist (left behind by decommissioned sessions). All
+/// steps are non-fatal: a failure is logged as a warning and the next step
+/// still runs, so a transient git error does not prevent the other steps from
+/// running. Critically (#2177, #4961), the update step can never discard local
+/// work — see [`update_to_origin`].
+/// What: delegates to [`run_hygiene_for_base_within`] with the production
+/// [`GIT_TIMEOUT`]; it is the only caller that passes that constant.
+/// Test: `run_hygiene_skips_missing_dir` (unit — directory absent → early
+/// return); `hygiene_opt_out_marker_skips_update`,
+/// `hygiene_ahead_branch_is_not_reset`, `hygiene_dirty_tree_is_not_reset`,
+/// `hygiene_clean_branch_is_fast_forwarded`, `hygiene_gitignored_file_is_not_clobbered`,
+/// `hygiene_non_default_branch_is_not_updated`,
+/// `hygiene_recovery_ref_written_before_update` (integration, real temp git repos).
 pub fn run_hygiene_for_base(base_path: &Path) -> Result<(), String> {
     run_hygiene_for_base_within(base_path, GIT_TIMEOUT)
 }
@@ -626,9 +632,16 @@ pub fn run_hygiene_for_base(base_path: &Path) -> Result<(), String> {
 /// [`run_hygiene_for_base`] with the per-command ceiling as a parameter (#7965).
 ///
 /// Why a parameter: the regression test for the bound drives a `git` that never
-/// answers, and at [`GIT_TIMEOUT`] one base would cost minutes of test time. The
-/// production entry point passes `GIT_TIMEOUT` and is the only caller that does.
-/// Test: `hygiene_git_timeout_abandons_a_wedged_command`.
+/// answers, and at [`GIT_TIMEOUT`] one base would cost minutes of test time.
+/// What: returns early when `.git` is absent, or when the
+/// [`HYGIENE_OPT_OUT_MARKER`] file is present (a per-repo opt-out; every step is
+/// skipped so an opted-out checkout is left entirely alone). Otherwise: (1) `git
+/// fetch origin`, unless [`fetch_is_due`] says a recent enough one already
+/// happened; (2) [`update_to_origin`]; (3) `git worktree prune`. Every git spawn
+/// goes through [`git_bounded`], so a child that never answers is killed at
+/// `budget` rather than waited on.
+/// Test: `a_wedged_hygiene_fetch_neither_hangs_the_sweep_nor_delays_health`
+/// (the bound), `hygiene_skips_a_recently_fetched_base` (the fetch gate).
 pub(crate) fn run_hygiene_for_base_within(
     base_path: &Path,
     budget: Duration,
@@ -702,7 +715,7 @@ pub(crate) fn run_hygiene_for_base_within(
 /// single repo failure prevents the rest from being processed.
 /// Test: `run_hygiene_for_all_bases_skips_missing_root` (unit).
 pub fn run_hygiene_for_all_bases(repos_root: &Path) {
-    run_hygiene_for_all_bases_within(repos_root, PASS_BUDGET, GIT_TIMEOUT);
+    let _skipped = run_hygiene_for_all_bases_within(repos_root, PASS_BUDGET, GIT_TIMEOUT);
 }
 
 /// [`run_hygiene_for_all_bases`] with the pass budget as a parameter (#7965).
@@ -711,16 +724,18 @@ pub fn run_hygiene_for_all_bases(repos_root: &Path) {
 /// without waiting out [`PASS_BUDGET`], and resolving it internally would make
 /// that test three minutes long.
 /// What: identical to the public entry point except the deadline. Bases reached
-/// after it are logged once and skipped; nothing is removed or modified for them,
-/// so an abandoned tail is only staleness.
+/// after it are skipped; nothing is removed or modified for them, so an abandoned
+/// tail is only staleness. Returns how many were skipped — the same number the
+/// `warn!` line carries, so a test can assert the abandonment itself rather than
+/// infer it from wall-clock time.
 /// Test: `hygiene_pass_budget_stops_the_sweep`.
 pub(crate) fn run_hygiene_for_all_bases_within(
     repos_root: &Path,
     budget: Duration,
     git_timeout: Duration,
-) {
+) -> usize {
     if !repos_root.is_dir() {
-        return;
+        return 0;
     }
 
     info!(root = %repos_root.display(), "inproject-hygiene: starting startup sweep");
@@ -731,7 +746,7 @@ pub(crate) fn run_hygiene_for_all_bases_within(
         Ok(d) => d,
         Err(e) => {
             warn!(root = %repos_root.display(), "inproject-hygiene: cannot read repos root: {e}");
-            return;
+            return 0;
         }
     };
 
@@ -777,6 +792,7 @@ pub(crate) fn run_hygiene_for_all_bases_within(
         );
     }
     info!(root = %repos_root.display(), "inproject-hygiene: startup sweep complete");
+    skipped
 }
 
 #[cfg(test)]
