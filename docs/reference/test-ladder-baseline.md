@@ -17,7 +17,7 @@ Risk labels map onto the rungs (1–2 Low, 3–4 Normal, 5–6 High).
 
 | # | Change class | Risk | PR gate, in short |
 |---|---|---|---|
-| 1 | Docs, comments, changelog fragments only | Low | Doc gates only (`check_sld.sh`, plus doc-numbers / line-cap if touched). No Cargo test by default. |
+| 1 | Docs, comments, changelog fragments only | Low | Doc gates only (`check_sld.sh`, `check_test_pointers.sh`, plus doc-numbers / line-cap if touched). No Cargo test by default. |
 | 2 | Test-only stabilization — flake fix, fixture, test harness | Low | `fmt --check` + `test -p <crate> --no-fail-fast`, with the flake re-run ~10× |
 | 3 | Localized behavior inside one crate | Normal | `fmt --check` + `check` + `clippy` + `test --no-fail-fast`, all `-p <crate>`, plus one regression test that provably failed before, plus doc gates if a doc comment changed (`check_line_cap.sh`, `check_changelog_fragment.sh`, `check_test_pointers.sh`) |
 | 4 | **Cross-crate change** — public API or shared library (`trusty-common`, `trusty-embedderd`, …) | Normal → High | Rung 3 on the library, then `check --workspace` + `test -p <consumer> --no-fail-fast` for **each direct dependent** |
@@ -47,7 +47,7 @@ was exercised.
 
 | # | Development proof | PR gate — the command to run | Hardening / release gate |
 |---|---|---|---|
-| 1 | Read the rendered file | `bash scripts/check_sld.sh` (plus `check_doc_numbers.sh` / `check_line_cap.sh` if those surfaces were touched). No Cargo test by default. | CI required checks only |
+| 1 | Read the rendered file | `bash scripts/check_sld.sh` && `bash scripts/check_test_pointers.sh` (plus `check_doc_numbers.sh` / `check_line_cap.sh` if those surfaces were touched). No Cargo test by default. | CI required checks only |
 | 2 | Fail-before / pass-after, repeated: `cargo test -p <crate> <test> -- --exact --nocapture` run ~10× | `bash scripts/check_test_pointers.sh` && `cargo fmt` && `cargo fmt --check` && `cargo test -p <crate> --no-fail-fast`; add `-- --test-threads=1` when the flake is isolation-shaped; add `RUST_LOG=warn` once, up front, for any target that spawns a binary and asserts on its stderr | `cargo test --workspace` **only** when shared test infrastructure changed |
 | 3 | One targeted regression test that provably fails before the change | `bash scripts/check_test_pointers.sh` && `cargo fmt` && `cargo fmt --check` && `cargo check -p <crate>` && `cargo clippy -p <crate> -- -D warnings` && `cargo test -p <crate> --no-fail-fast`; add `cargo doc -p <crate> --no-deps` when a doc comment changed or an import was dropped; add `RUST_LOG=warn` once, up front, for any target that spawns a binary and asserts on its stderr | Workspace gate only when release policy requires it |
 | 4 | Targeted regression plus `cargo test -p <lib>` | rung 3 for the library, then `SKIP_UI_BUILD=1 cargo check --workspace` && `cargo test -p <consumer> --no-fail-fast` for **each direct dependent**; add `bash scripts/check_agent_assets.sh` (and `--update` when a deliberately-forked tcode agent's shared source changed) for any change under `crates/trusty-agents-common/src/assets/agents/` | `cargo test --workspace` && `cargo clippy --workspace --all-targets -- -D warnings` at HARDEN/release |
@@ -147,7 +147,9 @@ you edited is behind a `#[cfg(feature = …)]` the command did not enable.
 ### Why `check_test_pointers.sh` and mutating `cargo fmt` run first
 
 `scripts/check_test_pointers.sh` catches a dangling `Test:` doc-comment
-pointer in seconds, with no build. Run it, and the mutating `cargo fmt`, before
+pointer in seconds, with no build — cheap enough to run at rung 1 too, for any
+change that edits a doc comment without touching behavior. Run it, and the
+mutating `cargo fmt`, before
 `cargo check`/`clippy`/`test` — not after — so `cargo fmt --check` CONFIRMS a
 tree the mutating pass already formatted instead of DISCOVERING formatting
 drift only after a full build/test run has already paid for itself. Same root
