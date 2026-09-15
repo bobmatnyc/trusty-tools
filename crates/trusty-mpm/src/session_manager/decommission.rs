@@ -219,7 +219,7 @@ pub(crate) fn removal_permitted(path: &Path) -> bool {
 /// Test: `remove_session_worktree_refuses_a_git_locked_worktree`,
 /// `remove_cleans_up_a_directory_no_repository_claims`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum WorktreeRemoval {
+pub(crate) enum WorktreeRemoval {
     /// The directory is gone — git removed it, it was already absent, or an
     /// unclaimed trusty-mpm-owned directory was removed directly.
     Removed,
@@ -302,7 +302,30 @@ impl WorktreeRemoval {
 /// `remove_cleans_up_an_unregistered_leftover_inside_a_repo`,
 /// `remove_still_removes_a_healthy_worktree`; integration coverage via the
 /// decommission round-trip tests that set up real git worktrees.
-pub(super) fn remove_session_worktree(path: &Path) -> WorktreeRemoval {
+/// #7885: `reason` names WHICH route asked for this removal. Every route ended
+/// here already, and each logged differently or not at all — two merged
+/// worktrees lost their tracked `crates/` subtree on 2026-09-14 and no log named
+/// either path or session, so the mechanism could not be identified even after
+/// the fact. It is a required argument rather than a defaulted one because a
+/// route that cannot say why it is deleting is the case that went unrecorded.
+pub(super) fn remove_session_worktree(path: &Path, reason: &str) -> WorktreeRemoval {
+    remove_session_worktree_guarded(path, reason, &|| None)
+}
+
+/// [`remove_session_worktree`] with one last refusal asked inside the audit
+/// window (#7652 critic round).
+///
+/// Why: the merged-PR reclaim's claim and owner answers go stale across its own
+/// dirt probe, which takes seconds on a large tree, and `--force` follows.
+/// What: `guard` runs after the ownership gate and the audit attempt line, and
+/// immediately before `git worktree remove --force`. `Some(reason)` keeps the
+/// tree, and the audit outcome line records that refusal.
+/// Test: `worktree_7652_an_owner_back_after_the_dirt_check_is_refused`.
+pub(super) fn remove_session_worktree_guarded(
+    path: &Path,
+    reason: &str,
+    guard: &dyn Fn() -> Option<String>,
+) -> WorktreeRemoval {
     if !path.exists() {
         // Already gone — either removed by a concurrent decommission or by a
         // previous partial run. Treat as success (idempotent removal).
@@ -343,6 +366,31 @@ pub(super) fn remove_session_worktree(path: &Path) -> WorktreeRemoval {
         );
     }
 
+    // #7885: audited HERE — past the ownership gate, so it describes a removal
+    // that is actually attempted, and around every destructive branch in
+    // `remove_registered_worktree`, so no route can delete unlogged.
+    // #7885 critic round: an attempt line before and an outcome line after, so
+    // a refused removal never reads as a deletion.
+    super::worktree_removal_audit::audited_removal(path, reason, || {
+        // #7652 critic round: the caller's last refusal, after the attempt line.
+        if let Some(refusal) = guard() {
+            return WorktreeRemoval::Kept(format!("refused immediately before removal: {refusal}"));
+        }
+        remove_registered_worktree(path)
+    })
+}
+
+/// Ask git to remove a worktree that already passed the ownership gate (#4207,
+/// #4732).
+///
+/// Why: split from [`remove_session_worktree`] so the removal audit wraps ONE
+/// call rather than being repeated on each of this function's five return arms
+/// (#7885).
+/// What: registry resolution, `git worktree remove --force`, and the two
+/// [`worktree_protection`]-gated fallbacks, unchanged by the split.
+/// Test: `remove_session_worktree_refuses_a_git_locked_worktree`,
+/// `worktree_7885_a_refused_removal_is_never_audited_as_a_deletion`.
+fn remove_registered_worktree(path: &Path) -> WorktreeRemoval {
     // #4207: ask git which checkout owns this worktree's registry instead of
     // guessing that it is the grandparent directory. The grandparent rule held
     // only for the two shapes it was written against; a worktree registered to
@@ -997,8 +1045,13 @@ impl SessionManager {
                         // call in spawn_blocking + tokio::time::timeout so a hung
                         // git process cannot stall the async executor indefinitely.
                         let ws_clone = ws.clone();
-                        let join =
-                            tokio::task::spawn_blocking(move || remove_session_worktree(&ws_clone));
+                        // #7885: name the route in the audit line.
+                        let join = tokio::task::spawn_blocking(move || {
+                            remove_session_worktree(
+                                &ws_clone,
+                                "session decommission: the session ended and its tree is clean",
+                            )
+                        });
                         let outcome =
                             match tokio::time::timeout(GIT_WORKTREE_REMOVE_TIMEOUT, join).await {
                                 Ok(Ok(outcome)) => outcome,
@@ -1058,12 +1111,29 @@ impl SessionManager {
                              containment guard (outside managed root or unsafe path)"
                         );
                     } else {
-                        std::fs::remove_dir_all(ws).map_err(|e| {
-                            ManagedError::Io(std::io::Error::new(
+                        // #7885 critic round: audited like every other removal
+                        // route; an I/O failure still propagates below.
+                        let mut failure: Option<std::io::Error> = None;
+                        super::worktree_removal_audit::audited_removal(
+                            ws,
+                            "session decommission: owned workspace, containment guard passed",
+                            || match std::fs::remove_dir_all(ws) {
+                                Ok(()) => WorktreeRemoval::Removed,
+                                Err(e) => {
+                                    let kept = WorktreeRemoval::Kept(format!(
+                                        "removing the workspace failed: {e}"
+                                    ));
+                                    failure = Some(e);
+                                    kept
+                                }
+                            },
+                        );
+                        if let Some(e) = failure {
+                            return Err(ManagedError::Io(std::io::Error::new(
                                 e.kind(),
                                 format!("remove workspace {:?}: {e}", ws),
-                            ))
-                        })?;
+                            )));
+                        }
                         workspace_removed = true;
                         info!(
                             id = %id,

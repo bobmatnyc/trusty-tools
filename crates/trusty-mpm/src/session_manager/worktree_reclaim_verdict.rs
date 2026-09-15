@@ -45,6 +45,14 @@ pub(crate) enum ReclaimGate {
     Removability,
     /// Gate 4 — a dispatched agent owns it.
     AgentOwnership,
+    /// Gate 4b — the ownership sentinel names a managed session that is not
+    /// provably finished (#7652).
+    ///
+    /// Why its own variant rather than [`Liveness`](Self::Liveness): gate 2
+    /// permitted this candidate, so labelling the refusal gate 2 would send an
+    /// operator to a claim set that said yes.
+    /// Test: `worktree_7652_a_live_owners_nested_worktree_is_refused`.
+    SessionOwnership,
     /// Gate 5 — the branch's pull-request state is not a merge.
     PrState,
     /// Gate 6 — the working tree holds unsaved work.
@@ -62,6 +70,7 @@ impl ReclaimGate {
             Self::Liveness => "gate 2 (liveness)",
             Self::Removability => "gate 3 (removability)",
             Self::AgentOwnership => "gate 4 (agent ownership)",
+            Self::SessionOwnership => "gate 4b (session ownership)",
             Self::PrState => "gate 5 (pull-request state)",
             Self::UnsavedWork => "gate 6 (unsaved work)",
             Self::Deadline => "the survey deadline",

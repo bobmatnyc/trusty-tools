@@ -39,10 +39,15 @@ fn claim_state_matches_exact_ancestor_and_descendant_paths() {
         "a session sitting INSIDE the candidate must protect it"
     );
 
+    // #7652: a candidate strictly INSIDE a foreign claim is no longer refused —
+    // that claim is about the project, not about this worktree. The direction
+    // that still refuses is the one above (the claim inside the candidate), and
+    // `worktree_7652_a_foreign_project_root_claim_no_longer_blocks_a_nested_worktree`
+    // owns the permitted direction's full assertion.
     let claim_outer = LiveClaims::foreign(vec![WorkspaceClaim::new("s1", &candidate)]);
     assert!(
-        claim_outer.claim_state(&inside).refusal(false).is_some(),
-        "a candidate inside a claimed path must be protected"
+        claim_outer.claim_state(&inside).refusal(false).is_none(),
+        "a project-level claim must not veto a worktree nested under it (#7652)"
     );
 
     let unrelated = LiveClaims::foreign(vec![WorkspaceClaim::new("s1", root.join("unrelated"))]);
@@ -70,6 +75,7 @@ fn claims_from_the_caller_alone_do_not_block() {
     let claims = LiveClaims {
         claims: vec![WorkspaceClaim::new("tm-client-03", &workspace)],
         caller: Some("tm-client-03".to_string()),
+        owners: Default::default(),
     };
     assert_eq!(
         claims.claim_state(&worktree),
@@ -94,6 +100,7 @@ fn a_caller_may_not_reclaim_its_own_workspace() {
     let claims = LiveClaims {
         claims: vec![WorkspaceClaim::new("tm-client-03", &workspace)],
         caller: Some("tm-client-03".to_string()),
+        owners: Default::default(),
     };
     let reason = claims
         .claim_state(&workspace)
@@ -110,7 +117,12 @@ fn a_caller_may_not_reclaim_its_own_workspace() {
     assert!(reason.contains("IS the caller"), "{reason}");
 }
 
-/// The pre-#6806 protection, kept: another live session's claim still blocks.
+/// The pre-#6806 protection, kept: another live session's claim ON THIS
+/// WORKTREE still blocks.
+///
+/// #7652 narrowed which foreign claim that is — one that COVERS the candidate,
+/// not one that merely contains it — so this fixture claims the worktree
+/// itself, which is the shape the protection is actually about.
 #[test]
 fn a_foreign_sessions_claim_still_blocks() {
     let (_tmp, root) = tree();
@@ -118,8 +130,9 @@ fn a_foreign_sessions_claim_still_blocks() {
     std::fs::create_dir_all(&worktree).expect("mkdir");
 
     let claims = LiveClaims {
-        claims: vec![WorkspaceClaim::new("tm-other-01", root.join("client"))],
+        claims: vec![WorkspaceClaim::new("tm-other-01", &worktree)],
         caller: Some("tm-client-03".to_string()),
+        owners: Default::default(),
     };
     assert!(
         claims.claim_state(&worktree).refusal(false).is_some(),
@@ -137,6 +150,7 @@ fn a_foreign_refusal_names_the_claimant_and_denies_it_is_the_caller() {
     let claims = LiveClaims {
         claims: vec![WorkspaceClaim::new("tm-other-01", &worktree)],
         caller: Some("tm-client-03".to_string()),
+        owners: Default::default(),
     };
     let reason = claims
         .claim_state(&worktree)
@@ -193,6 +207,7 @@ fn a_foreign_claim_outranks_the_callers_own() {
         let live = LiveClaims {
             claims,
             caller: Some("tm-client-03".to_string()),
+            owners: Default::default(),
         };
         let state = live.claim_state(&worktree);
         assert!(
@@ -239,6 +254,11 @@ fn a_dead_sessions_claim_no_longer_blocks() {
 
 /// 🔴 The other half of #7232: liveness narrows nothing else. A claim by a
 /// session that IS live still refuses exactly as #6806 made it.
+///
+/// #7652: the claim is on the worktree itself rather than on the project root
+/// above it, because a project-root claim is now decided by overlap — see
+/// `worktree_7652_a_foreign_project_root_claim_no_longer_blocks_a_nested_worktree`.
+/// Liveness is still what this test varies.
 #[test]
 fn a_live_foreign_sessions_claim_still_blocks() {
     let (_tmp, root) = tree();
@@ -247,7 +267,7 @@ fn a_live_foreign_sessions_claim_still_blocks() {
 
     let claims = LiveClaims::foreign(vec![WorkspaceClaim::with_liveness(
         "tm-other-01",
-        &root,
+        &worktree,
         ClaimLiveness::Live,
     )]);
     let state = claims.claim_state(&worktree);
@@ -303,5 +323,174 @@ fn the_recheck_wording_is_present_tense() {
             .contains("still claims this workspace"),
         "{:?}",
         state.refusal(false)
+    );
+}
+
+/// 🔴 #7652: a live foreign session's PROJECT-ROOT claim must not veto a
+/// worktree nested under it.
+///
+/// Why: a session's `workspace_path` is the whole project checkout, so its mere
+/// liveness refused every worktree any other session had created under that
+/// project — `.claude/worktrees/agent-ae594ecd19bcd72bb`, sitting exactly at the
+/// merged head, was refused because unrelated session `0b318c84-…` had the same
+/// project registered. A 2026-09-14 reclaim pass then lost all four candidates
+/// to the same refusal, and `--force` never reached past it. Fails on
+/// `0f2bd5134`, where every `Overlap::Nested` foreign claim returns
+/// `ClaimState::Foreign`.
+#[test]
+fn worktree_7652_a_foreign_project_root_claim_no_longer_blocks_a_nested_worktree() {
+    let (_tmp, root) = tree();
+    let project = root.join("bobmatnyc").join("trusty-tools");
+    let worktree = project.join(".claude").join("worktrees").join("agent-ae59");
+    std::fs::create_dir_all(&worktree).expect("mkdir");
+
+    let claims = LiveClaims {
+        claims: vec![WorkspaceClaim::new(
+            "0b318c84-bae9-4a50-8832-65ed61f8ab22",
+            &project,
+        )],
+        caller: Some("b175bb88-af7f-5ba5-b75d-85795d60b234".to_string()),
+        owners: Default::default(),
+    };
+    let state = claims.claim_state(&worktree);
+    assert_eq!(
+        state,
+        ClaimState::ForeignNested {
+            session: "0b318c84-bae9-4a50-8832-65ed61f8ab22".to_string(),
+            caller: Some("b175bb88-af7f-5ba5-b75d-85795d60b234".to_string()),
+        },
+        "a project-level foreign claim is not an attribution of this worktree"
+    );
+    assert_eq!(
+        state.refusal(false),
+        None,
+        "gate 2 must let the later gates decide it"
+    );
+    assert_eq!(
+        state.refusal(true),
+        None,
+        "and the pre-delete re-check must agree, or the two gates disagree"
+    );
+    let note = state
+        .note()
+        .expect("a claim that stopped vetoing must say so");
+    assert!(
+        note.contains("0b318c84-bae9-4a50-8832-65ed61f8ab22"),
+        "{note}"
+    );
+    assert!(note.contains("#7652"), "{note}");
+
+    // The guard this narrowing must NOT remove: the same foreign session
+    // claiming THE WORKTREE ITSELF still refuses, and names it.
+    let on_the_worktree = LiveClaims {
+        claims: vec![WorkspaceClaim::new(
+            "0b318c84-bae9-4a50-8832-65ed61f8ab22",
+            &worktree,
+        )],
+        caller: Some("b175bb88-af7f-5ba5-b75d-85795d60b234".to_string()),
+        owners: Default::default(),
+    };
+    let reason = on_the_worktree
+        .claim_state(&worktree)
+        .refusal(false)
+        .expect("a foreign claim ON this worktree must still refuse");
+    assert!(
+        reason.contains("0b318c84-bae9-4a50-8832-65ed61f8ab22"),
+        "{reason}"
+    );
+}
+
+/// 🔴 #7652 critic round 2: a live FOREIGN nested claim outranks the caller's
+/// own claim on the same enclosing checkout.
+///
+/// Why: two managed sessions working one project both register that checkout as
+/// their workspace, which is this framework's routine operator shape. Reporting
+/// `CallerNested` first threw the foreign claim away, and gate 4c
+/// (`unattributed_nested_blocks`) reads only `ForeignNested` — so an
+/// unattributed tree that `origin/main` refused at gate 2 became reclaimable.
+/// Fails on `b174cf3cd`, where this returns `ClaimState::CallerNested`.
+#[test]
+fn worktree_7652_a_foreign_nested_claim_outranks_the_callers_own() {
+    let (_tmp, root) = tree();
+    let project = root.join("bobmatnyc").join("trusty-tools");
+    let worktree = project.join(".claude").join("worktrees").join("agent-ae59");
+    std::fs::create_dir_all(&worktree).expect("mkdir");
+
+    let claims = LiveClaims {
+        claims: vec![
+            WorkspaceClaim::new("tm-caller-7652", &project),
+            WorkspaceClaim::new("tm-foreign-7652", &project),
+        ],
+        caller: Some("tm-caller-7652".to_string()),
+        owners: Default::default(),
+    };
+    assert_eq!(
+        claims.claim_state(&worktree),
+        ClaimState::ForeignNested {
+            session: "tm-foreign-7652".to_string(),
+            caller: Some("tm-caller-7652".to_string()),
+        },
+        "the caller's own ancestor claim must not hide a live foreign one"
+    );
+
+    // Claim order must not decide it: the same two claims, reversed.
+    let reversed = LiveClaims {
+        claims: vec![
+            WorkspaceClaim::new("tm-foreign-7652", &project),
+            WorkspaceClaim::new("tm-caller-7652", &project),
+        ],
+        caller: Some("tm-caller-7652".to_string()),
+        owners: Default::default(),
+    };
+    assert_eq!(
+        reversed.claim_state(&worktree),
+        ClaimState::ForeignNested {
+            session: "tm-foreign-7652".to_string(),
+            caller: Some("tm-caller-7652".to_string()),
+        },
+        "precedence, not iteration order, must decide this"
+    );
+
+    // The narrowing this must NOT undo: with no foreign claim, the caller's own
+    // nested claim still permits and still reports itself as the caller's.
+    let caller_only = LiveClaims {
+        claims: vec![WorkspaceClaim::new("tm-caller-7652", &project)],
+        caller: Some("tm-caller-7652".to_string()),
+        owners: Default::default(),
+    };
+    assert_eq!(
+        caller_only.claim_state(&worktree),
+        ClaimState::CallerNested {
+            session: "tm-caller-7652".to_string()
+        }
+    );
+
+    // #7652 critic round 3: the other end of the precedence chain. Every case
+    // above puts each claim on an ANCESTOR of the candidate, so `CoversWorkspace`
+    // is never reached and a reorder that also hoisted `foreign_nested` above
+    // `caller_workspace` would pass them all while turning a gate-2 REFUSAL into
+    // a permit. Here the candidate CONTAINS the caller's workspace, so the
+    // caller's claim must still win and still refuse.
+    let over_the_callers_workspace = LiveClaims {
+        claims: vec![
+            WorkspaceClaim::new("tm-foreign-7652", &project),
+            WorkspaceClaim::new("tm-caller-7652", &worktree),
+        ],
+        caller: Some("tm-caller-7652".to_string()),
+        owners: Default::default(),
+    };
+    let containing = worktree.parent().expect("the worktrees directory");
+    let state = over_the_callers_workspace.claim_state(containing);
+    assert_eq!(
+        state,
+        ClaimState::CallerWorkspace {
+            session: "tm-caller-7652".to_string()
+        },
+        "a candidate containing the caller's own workspace must not be downgraded \
+         to a permitting state by a foreign ancestor claim"
+    );
+    assert!(
+        state.refusal(false).is_some(),
+        "and that state must still refuse"
     );
 }

@@ -122,6 +122,10 @@ pub(crate) fn deny_all(path: &Path) -> RestoreMode {
     }
 }
 
+/// The tmux name behind [`GitWorktreeFixture::stamp_reclaimable_sentinel`]'s
+/// owner id (#7652). No store in any test registers it.
+const RECLAIMABLE_OWNER_TMUX: &str = "tm-fixture-reclaimable-owner";
+
 impl GitWorktreeFixture {
     /// Build a checkout on `main`, pushed to a bare remote in the same temp dir.
     ///
@@ -236,6 +240,52 @@ impl GitWorktreeFixture {
         git_ok(&self.repo, &["commit", "-m", "feat: work (#1)"]);
         git_ok(&self.repo, &["push", "origin", "main"]);
         git_ok(&self.repo, &["fetch", "--prune", "origin"]);
+    }
+
+    /// Land `wt`'s patch on the BARE REMOTE's `main` without telling this
+    /// checkout (#7889).
+    ///
+    /// Why: every other squash helper here merges inside `self.repo` and pushes,
+    /// and a push updates `refs/remotes/origin/main` as a side effect — so none
+    /// of them can produce the state #7889 is about, where the merge happened on
+    /// GitHub (under an `-r2` branch name, via `gh pr merge --squash`) and this
+    /// checkout has not fetched since. That stale ref is what gate 6 reads.
+    /// What: commits `file` in `wt` and never pushes it, then lands the SAME
+    /// patch as one commit through a SEPARATE clone of the bare remote. This
+    /// fixture's own `refs/remotes/origin/main` is untouched and stale
+    /// afterwards, which is the point.
+    /// Test: `worktree_7889_a_stale_origin_main_no_longer_spares_a_squash_merged_branch`.
+    pub(crate) fn land_on_the_remote_only(&self, wt: &Path, file: &str) {
+        let content = format!("landed content of {file}\n");
+        std::fs::write(wt.join(file), &content).expect("fixture: write file");
+        git_ok(wt, &["add", file]);
+        git_ok(wt, &["commit", "-m", "feat: parked work, continued on -r2"]);
+
+        let tmp_root = self
+            .repos_root
+            .parent()
+            .expect("fixture: repos root has a parent");
+        let remote = tmp_root.join("remote.git");
+        let scratch_name = format!("landing-{file}");
+        git_ok(
+            tmp_root,
+            &[
+                "clone",
+                remote.to_str().expect("utf8 remote"),
+                &scratch_name,
+            ],
+        );
+        let scratch = tmp_root.join(&scratch_name);
+        git_ok(&scratch, &["config", "user.email", "ci@test.invalid"]);
+        git_ok(&scratch, &["config", "user.name", "CI"]);
+        git_ok(&scratch, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(scratch.join(file), &content).expect("fixture: write landed file");
+        git_ok(&scratch, &["add", file]);
+        git_ok(
+            &scratch,
+            &["commit", "-m", "feat: squashed -r2 work (#7889)"],
+        );
+        git_ok(&scratch, &["push", "origin", "main"]);
     }
 
     /// Commit `files` as SEPARATE commits in `wt`, then squash-merge the branch
@@ -415,14 +465,17 @@ impl GitWorktreeFixture {
     /// these fixtures genuinely reclaimable, which is the only condition under
     /// which the dirty gate is load-bearing.
     /// What: writes an aged [`super::worktree_ownership::WorktreeSentinel`] for
-    /// a fresh, never-registered [`ManagedSessionId`].
+    /// a never-registered [`ManagedSessionId`], and returns it. #7652: the id is
+    /// the fixed one [`Self::reclaimable_owner_gone`] reports as ended, so a
+    /// merged-PR reclaim test can prove the owner gone without a session store.
     /// Test: `prune_orphaned_worktrees_reclaims_clean_pushed_worktree`.
-    pub(crate) fn stamp_reclaimable_sentinel(wt: &Path) {
+    pub(crate) fn stamp_reclaimable_sentinel(wt: &Path) -> ManagedSessionId {
         let aged = chrono::Utc::now()
             - super::worktree_ownership::OWNERLESS_GRACE
             - chrono::Duration::minutes(1);
+        let owner = ManagedSessionId::for_adopted_tmux_name(RECLAIMABLE_OWNER_TMUX);
         let payload = serde_json::to_vec(&super::worktree_ownership::WorktreeSentinel {
-            owner_session_id: Some(ManagedSessionId::new()),
+            owner_session_id: Some(owner),
             created_at: aged,
             agent: None,
         })
@@ -432,6 +485,18 @@ impl GitWorktreeFixture {
             payload,
         )
         .expect("fixture: write sentinel");
+        owner
+    }
+
+    /// An owner map in which [`Self::stamp_reclaimable_sentinel`]'s owner has
+    /// provably ended (#7652) — what a store read reports for a tombstoned
+    /// record whose tmux session tmux no longer lists.
+    pub(crate) fn reclaimable_owner_gone() -> super::worktree_reclaim_ownership::SessionOwners {
+        let owner = ManagedSessionId::for_adopted_tmux_name(RECLAIMABLE_OWNER_TMUX);
+        super::worktree_reclaim_ownership::SessionOwners::observed([(
+            owner.to_string(),
+            super::worktree_reclaim_claim::ClaimLiveness::SessionGone,
+        )])
     }
 
     /// Stamp `wt` with an AGENT ownership sentinel naming `agent_id` (#5661).

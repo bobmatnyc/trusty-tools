@@ -83,17 +83,28 @@ pub(crate) mod worktree_reclaim_launch;
 // #6806: gate 2's claim resolution — WHICH session claims a candidate, and
 // whether that session is the one that invoked the sweep.
 pub(crate) mod worktree_reclaim_claim;
+// #7652: gate 4 — whether the agent or session a sentinel names has ended.
+pub(crate) mod worktree_reclaim_ownership;
 // #7232: the ONE place a claim set is built from the store, so the liveness
 // probe that keeps a tombstoned record from blocking reclaim cannot be omitted
 // by a call site.
 pub(crate) mod worktree_claim_source;
+// #7652: end-to-end owner-liveness coverage, store → survey → delete loop.
+#[cfg(test)]
+#[path = "worktree_reclaim_owner_liveness_tests.rs"]
+mod worktree_reclaim_owner_liveness_tests;
 // #4732: the tri-state "does git still hold state here?" classifier that gates
 // every raw directory removal on the worktree teardown path.
 mod worktree_protection;
 // #2919: the survey and the fresh-recheck delete loop that acts on it.
 pub(crate) mod worktree_reclaim_sweep;
+// #7889: the bounded `git fetch` that makes gate 6's landing refs current, so a
+// squash-merged branch is not misread as holding unsaved work.
+pub(crate) mod worktree_landing_refresh;
 pub(crate) mod worktree_reconcile;
 pub(crate) mod worktree_registry;
+// #7885: the one audit line every removal route writes before it deletes.
+pub(crate) mod worktree_removal_audit;
 // #7196: the machine an SSH config `Host` alias names, so an aliased origin
 // resolves to a real GitHub host before it becomes a `--repo` slug.
 pub(crate) mod ssh_host_alias;

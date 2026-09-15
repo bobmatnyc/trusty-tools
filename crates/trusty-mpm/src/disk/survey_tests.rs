@@ -108,7 +108,12 @@ impl Fixed {
     fn new(pr: BranchPrState) -> Self {
         Self {
             pr,
-            claims: LiveClaims::default(),
+            // #7652: the fixture sentinel's owner has ended, so a merged, clean
+            // session-owned tree stays reclaimable.
+            claims: LiveClaims {
+                owners: GitWorktreeFixture::reclaimable_owner_gone(),
+                ..LiveClaims::default()
+            },
         }
     }
 }
@@ -440,7 +445,17 @@ fn a_reclaimable_verdict_is_always_shown_stale() {
     let mut ever_reclaimable = false;
     for (label, path, admission, claim, pr, dirt, agent) in cases {
         let agent_state = |_: &AgentWorktreeOwner| agent;
-        let verdict = classify(path, admission, claim, pr, dirt, &agent_state, &no_keeps());
+        let verdict = classify(
+            path,
+            admission,
+            claim,
+            pr,
+            dirt,
+            &agent_state,
+            // #7652: the session-owned row's owner has ended.
+            &GitWorktreeFixture::reclaimable_owner_gone(),
+            &no_keeps(),
+        );
         let facts = WorktreeFacts {
             path,
             branch: Some("feat/x"),
@@ -760,7 +775,10 @@ fn a_deadline_that_crosses_mid_inspection_yields_a_not_inspected_row() {
     };
     let agent_state = |_: &AgentWorktreeOwner| AgentDelegationState::Ended;
     let keep_list = no_keeps();
-    let claims = LiveClaims::default();
+    let claims = LiveClaims {
+        owners: GitWorktreeFixture::reclaimable_owner_gone(),
+        ..LiveClaims::default()
+    };
     let index = RefCell::new(test_index());
     let measure = |path: &Path, budget: Option<Duration>| {
         survey_run::measure(&mut index.borrow_mut(), path, budget)
@@ -830,7 +848,10 @@ fn the_survey_hands_each_measurement_only_the_time_left() {
     let pr_state = |_: &ScannedWorktree, _: Option<Duration>| pr.clone();
     let agent_state = |_: &AgentWorktreeOwner| AgentDelegationState::Ended;
     let keep_list = no_keeps();
-    let claims = LiveClaims::default();
+    let claims = LiveClaims {
+        owners: GitWorktreeFixture::reclaimable_owner_gone(),
+        ..LiveClaims::default()
+    };
     let index = RefCell::new(test_index());
     let measure = |path: &Path, budget: Option<Duration>| {
         seen.borrow_mut().push(budget);
@@ -1003,7 +1024,10 @@ fn a_project_filter_selects_only_that_project() {
     let pr = BranchPrState::Merged { pr: 1 };
     let pr_state = |_: &ScannedWorktree, _: Option<Duration>| pr.clone();
     let agent_state = |_: &AgentWorktreeOwner| AgentDelegationState::Ended;
-    let claims = LiveClaims::default();
+    let claims = LiveClaims {
+        owners: GitWorktreeFixture::reclaimable_owner_gone(),
+        ..LiveClaims::default()
+    };
     let index = RefCell::new(test_index());
     let measure = |path: &Path, budget: Option<Duration>| {
         survey_run::measure(&mut index.borrow_mut(), path, budget)
@@ -1082,7 +1106,10 @@ fn a_budgeted_survey_answers_within_its_budget() {
     };
     let agent_state = |_: &AgentWorktreeOwner| AgentDelegationState::Ended;
     let keep_list = no_keeps();
-    let claims = LiveClaims::default();
+    let claims = LiveClaims {
+        owners: GitWorktreeFixture::reclaimable_owner_gone(),
+        ..LiveClaims::default()
+    };
     let index = RefCell::new(test_index());
     let measure = |path: &Path, budget: Option<Duration>| {
         survey_run::measure(&mut index.borrow_mut(), path, budget)
@@ -1140,7 +1167,10 @@ fn the_survey_hands_each_pull_request_lookup_only_the_time_left() {
     };
     let agent_state = |_: &AgentWorktreeOwner| AgentDelegationState::Ended;
     let keep_list = no_keeps();
-    let claims = LiveClaims::default();
+    let claims = LiveClaims {
+        owners: GitWorktreeFixture::reclaimable_owner_gone(),
+        ..LiveClaims::default()
+    };
     let index = RefCell::new(test_index());
     let measure = |path: &Path, budget: Option<Duration>| {
         survey_run::measure(&mut index.borrow_mut(), path, budget)
@@ -1206,7 +1236,10 @@ fn a_survey_reports_whether_its_deadline_truncated_the_pass() {
     let pr_state = |_: &ScannedWorktree, _: Option<Duration>| pr.clone();
     let agent_state = |_: &AgentWorktreeOwner| AgentDelegationState::Ended;
     let keep_list = no_keeps();
-    let claims = LiveClaims::default();
+    let claims = LiveClaims {
+        owners: GitWorktreeFixture::reclaimable_owner_gone(),
+        ..LiveClaims::default()
+    };
     let index = RefCell::new(test_index());
     let measure = |path: &Path, budget: Option<Duration>| {
         survey_run::measure(&mut index.borrow_mut(), path, budget)

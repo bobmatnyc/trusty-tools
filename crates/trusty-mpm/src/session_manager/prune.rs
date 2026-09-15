@@ -942,7 +942,7 @@ impl SessionManager {
         // `find_orphaned_worktrees` so this method's tests stay hermetic.
         adopted: &[std::path::PathBuf],
     ) -> Result<OrphanSweepOutcome, anyhow::Error> {
-        use super::decommission::{WorktreeRemoval, remove_session_worktree};
+        use super::decommission::WorktreeRemoval;
         use super::worktree_ownership::SentinelOwner;
         use std::collections::HashSet;
 
@@ -1180,15 +1180,19 @@ impl SessionManager {
 
             info!(path = %candidate.display(), "prune-worktrees: removing orphaned worktree");
             let candidate_clone = candidate.clone();
-            let outcome =
-                tokio::task::spawn_blocking(move || remove_session_worktree(&candidate_clone))
-                    .await
-                    .unwrap_or_else(|e| {
-                        tracing::error!(
-                            "prune-worktrees: spawn_blocking panicked during removal: {e}"
-                        );
-                        WorktreeRemoval::Kept(format!("the removal task panicked: {e}"))
-                    });
+            // #7885: name the route in the audit line, so an operator reading it
+            // after the fact can tell the orphan sweep from the merged-PR pass.
+            let outcome = tokio::task::spawn_blocking(move || {
+                super::decommission::remove_session_worktree(
+                    &candidate_clone,
+                    "prune-worktrees orphan sweep: no live session claims this worktree",
+                )
+            })
+            .await
+            .unwrap_or_else(|e| {
+                tracing::error!("prune-worktrees: spawn_blocking panicked during removal: {e}");
+                WorktreeRemoval::Kept(format!("the removal task panicked: {e}"))
+            });
             // #4732: the remover now reports WHY it kept a worktree — most
             // often a deliberate refusal (a `git worktree lock`, a stale
             // pointer), which used to be indistinguishable from a silent no-op.

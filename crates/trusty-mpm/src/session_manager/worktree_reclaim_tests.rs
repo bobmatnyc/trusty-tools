@@ -22,6 +22,7 @@ use crate::session_manager::worktree_reclaim_gh::{
 };
 
 use crate::session_manager::worktree_git_fixture::{GitWorktreeFixture, deny_all};
+use crate::session_manager::worktree_ownership::{AgentDelegationState, AgentWorktreeOwner};
 use crate::session_manager::worktree_safety::inspect_dirt;
 
 /// A dirt probe that always reports CLEAN — used only where the test's subject
@@ -90,6 +91,7 @@ fn classify_no_agent(
         pr,
         probe_dirt,
         &no_agents,
+        &SessionOwners::default(),
         &KeepList::default(),
     )
 }
@@ -237,6 +239,7 @@ fn classify_allows_a_worktree_claimed_only_by_the_calling_session() {
         &merged(42),
         &clean,
         &no_agents,
+        &SessionOwners::default(),
         &KeepList::default(),
     );
     assert_eq!(
@@ -259,6 +262,7 @@ fn classify_blocks_the_callers_own_workspace() {
         &merged(42),
         &clean,
         &no_agents,
+        &SessionOwners::default(),
         &KeepList::default(),
     );
     assert!(!v.is_reclaimable());
@@ -428,6 +432,7 @@ fn classify_blocks_a_live_agents_worktree() {
         &merged(101),
         &inspect_dirt,
         &agent_live,
+        &SessionOwners::default(),
         &KeepList::default(),
     );
     assert!(!v.is_reclaimable(), "a live agent's worktree: {v:?}");
@@ -463,6 +468,7 @@ fn classify_blocks_an_agent_the_harness_still_holds_after_a_restart() {
         &merged(102),
         &inspect_dirt,
         &no_agents,
+        &SessionOwners::default(),
         &KeepList::default(),
     );
     assert!(!v.is_reclaimable(), "{v:?}");
@@ -509,6 +515,7 @@ fn classify_records_an_agent_refusal_as_its_own_verdict_kind() {
             &merged(105),
             &inspect_dirt,
             probe,
+            &SessionOwners::default(),
             &KeepList::default(),
         );
         assert!(
@@ -596,6 +603,7 @@ fn survey_lists_an_agent_held_candidate_in_exactly_one_place() {
         &merged(6508),
         &inspect_dirt,
         &agent_live,
+        &SessionOwners::default(),
         &KeepList::default(),
     );
     assert!(
@@ -692,6 +700,7 @@ fn classify_allows_a_finished_agents_merged_worktree() {
         &merged(103),
         &inspect_dirt,
         &agent_ended,
+        &SessionOwners::default(),
         &KeepList::default(),
     );
     assert_eq!(v, ReclaimVerdict::Reclaimable { pr: 103 });
@@ -718,6 +727,7 @@ fn classify_blocks_an_agent_store_worktree_with_an_unreadable_sentinel() {
         &merged(104),
         &inspect_dirt,
         &agent_ended,
+        &SessionOwners::default(),
         &KeepList::default(),
     );
     assert!(!v.is_reclaimable(), "malformed sentinel: {v:?}");
@@ -734,6 +744,7 @@ fn classify_blocks_an_agent_store_worktree_with_an_unreadable_sentinel() {
         &merged(105),
         &inspect_dirt,
         &agent_ended,
+        &SessionOwners::default(),
         &KeepList::default(),
     );
     assert!(!v.is_reclaimable(), "unreadable sentinel: {v:?}");
@@ -756,6 +767,8 @@ fn classify_leaves_a_session_owned_worktree_alone() {
         &merged(106),
         &inspect_dirt,
         &no_agents,
+        // #7652: the owner's record is tombstoned and tmux no longer lists it.
+        &GitWorktreeFixture::reclaimable_owner_gone(),
         &KeepList::default(),
     );
     assert_eq!(v, ReclaimVerdict::Reclaimable { pr: 106 });
@@ -1138,7 +1151,7 @@ fn the_remover_really_refuses_what_tm_provisioned_rejects() {
         !tm_provisioned(&path),
         "precondition: the classifier rejects this shape"
     );
-    let removed = crate::session_manager::decommission::remove_session_worktree(&path);
+    let removed = crate::session_manager::decommission::remove_session_worktree(&path, "test");
     assert!(!removed.removed(), "the remover must refuse it too");
     assert!(
         path.exists(),
@@ -1640,6 +1653,7 @@ fn classify_blocks_a_failed_lookup_and_names_the_reason() {
         },
         &clean,
         &no_agents,
+        &SessionOwners::default(),
         &KeepList::default(),
     );
     assert!(!verdict.is_reclaimable());
@@ -1771,6 +1785,7 @@ fn classify_blocks_a_keep_listed_worktree() {
         &merged(42),
         &clean,
         &no_agents,
+        &SessionOwners::default(),
         &keeps,
     );
     assert!(
@@ -1802,6 +1817,7 @@ fn classify_keep_list_outranks_a_merged_clean_worktree() {
         &merged(42),
         &clean,
         &no_agents,
+        &SessionOwners::default(),
         &KeepList::default(),
     );
     assert_eq!(
@@ -1817,10 +1833,94 @@ fn classify_keep_list_outranks_a_merged_clean_worktree() {
         &merged(42),
         &clean,
         &no_agents,
+        &SessionOwners::default(),
         &KeepList::from_patterns(&["**/worktree-2919".to_string()]),
     );
     assert!(
         !kept.is_reclaimable(),
         "a keep-list glob must outrank a merged, clean, unclaimed worktree: {kept:?}"
     );
+}
+
+/// 🔴 #7652: an owner map nobody read refuses a session-owned worktree.
+///
+/// Why: the survey falls back to an empty claim set when the store cannot be
+/// read. That fallback has to refuse at gate 4b, the same tree the test above
+/// reclaims with a read map. Fails against a version where an unread map
+/// permits.
+#[test]
+fn worktree_7652_an_unread_owner_map_refuses() {
+    let fx = GitWorktreeFixture::new();
+    let path = fx.add_worktree("session-owned-unread-7652");
+    land(&path);
+    GitWorktreeFixture::stamp_reclaimable_sentinel(&path);
+    let v = classify(
+        &path,
+        Admission::Admitted,
+        &claim(false),
+        &merged(107),
+        &inspect_dirt,
+        &no_agents,
+        &SessionOwners::default(),
+        &KeepList::default(),
+    );
+    assert!(
+        matches!(
+            v,
+            ReclaimVerdict::Blocked {
+                gate: ReclaimGate::SessionOwnership,
+                ..
+            }
+        ),
+        "{v:?}"
+    );
+    assert!(reason(&v).contains("was not read"), "{}", reason(&v));
+}
+
+/// 🔴 #7652 critic round: a harness agent-store tree whose sentinel names an
+/// ENDED session is refused while git still reports the harness's agent-lifetime
+/// lock on it.
+///
+/// Why: agent-store sentinels can still name the parent session (#7958), so the
+/// session's death says nothing about the agent working in the tree. The lock
+/// does. Gate 1 reads the lock at scan time only, so gate 4b must read it too.
+/// Fails on `e21a6ba0b`, where gate 4b judged the ended session alone.
+#[test]
+fn worktree_7652_a_held_harness_lock_outranks_an_ended_sentinel_session() {
+    let fx = GitWorktreeFixture::new();
+    let owners = GitWorktreeFixture::reclaimable_owner_gone();
+
+    let held = agent_store_worktree(&fx, "agent-7652held");
+    GitWorktreeFixture::stamp_reclaimable_sentinel(&held);
+    fx.harness_lock_worktree(&held, "agent-7652held");
+    let refusal = session_ownership_blocks(&held, &owners)
+        .expect("a held harness lock must refuse although the sentinel's session ended");
+    assert!(refusal.contains("agent-lifetime lock"), "{refusal}");
+    // Through `classify` too, with gate 1 admitting — a lock taken after the scan.
+    let v = classify(
+        &held,
+        Admission::Admitted,
+        &claim(false),
+        &merged(7652),
+        &clean,
+        &agent_ended,
+        &owners,
+        &KeepList::default(),
+    );
+    assert!(
+        matches!(
+            v,
+            ReclaimVerdict::Blocked {
+                gate: ReclaimGate::SessionOwnership,
+                ..
+            }
+        ),
+        "{v:?}"
+    );
+
+    // The over-correction guard: once the harness releases the tree, the ended
+    // session is the answer again.
+    let released = agent_store_worktree(&fx, "agent-7652released");
+    GitWorktreeFixture::stamp_reclaimable_sentinel(&released);
+    assert_eq!(session_ownership_blocks(&released, &owners), None);
 }

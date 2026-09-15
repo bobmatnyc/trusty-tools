@@ -28,6 +28,8 @@
 
 use std::path::{Path, PathBuf};
 
+use super::worktree_reclaim_ownership::SessionOwners;
+
 /// One session's claim on one workspace path (#6806).
 ///
 /// Why: a bare `PathBuf` cannot say WHOSE claim it is, which is what both
@@ -140,6 +142,12 @@ pub(crate) struct LiveClaims {
     pub claims: Vec<WorkspaceClaim>,
     /// The managed session that invoked this sweep, when it identified itself.
     pub caller: Option<String>,
+    /// Every stored record's liveness, keyed by session id (#7652).
+    ///
+    /// Gate 4's session half reads this, never `claims` — see [`SessionOwners`].
+    /// The `Default` is an UNREAD map, which refuses every session-owned
+    /// candidate, so a producer that did not read the store cannot permit one.
+    pub owners: SessionOwners,
 }
 
 impl LiveClaims {
@@ -149,6 +157,7 @@ impl LiveClaims {
         Self {
             claims,
             caller: None,
+            owners: SessionOwners::default(),
         }
     }
 
@@ -169,13 +178,37 @@ impl LiveClaims {
     /// deciding anything, so a tombstoned record's path can no longer block
     /// reclaim forever. Only [`ClaimLiveness::SessionGone`] does this, and only
     /// a probe that actually answered may set it.
+    /// #7652 narrows the foreign case by OVERLAP, for the reason #6806 narrowed
+    /// the caller case by it: a session's `workspace_path` is normally the whole
+    /// project checkout, so a foreign claim that merely CONTAINS the candidate
+    /// vetoed every worktree nested under that project for every other session —
+    /// two sessions working one project, which this framework runs routinely.
+    /// Only a foreign claim that COVERS the candidate (it IS that workspace, or
+    /// sits inside it) still refuses; a merely-nesting one becomes
+    /// [`ClaimState::ForeignNested`], which permits and leaves the candidate to
+    /// the ownership, pull-request and unsaved-work gates that can actually
+    /// attribute it.
+    ///
+    /// Precedence among the three permitting states is therefore
+    /// `CallerWorkspace` (which refuses), then `ForeignNested`, then
+    /// `CallerNested`, then the dead-claim note. `ForeignNested` outranks
+    /// `CallerNested` because it carries evidence `CallerNested` does not — a
+    /// live FOREIGN session over this tree — and gate 4c
+    /// ([`unattributed_nested_blocks`](super::worktree_reclaim_ownership::unattributed_nested_blocks))
+    /// reads only `ForeignNested`. Two managed sessions sharing one checkout
+    /// both claim it, so reporting the caller's own claim first discarded the
+    /// foreign one and reclaimed a tree `origin/main` refused (#7652 critic
+    /// round 2).
     /// Test: `claim_state_matches_exact_ancestor_and_descendant_paths`,
     /// `a_caller_may_not_reclaim_its_own_workspace`,
-    /// `a_dead_sessions_claim_no_longer_blocks`.
+    /// `a_dead_sessions_claim_no_longer_blocks`,
+    /// `worktree_7652_a_foreign_project_root_claim_no_longer_blocks_a_nested_worktree`,
+    /// `worktree_7652_a_foreign_nested_claim_outranks_the_callers_own`.
     pub(crate) fn claim_state(&self, path: &Path) -> ClaimState {
         let candidate_forms = path_forms(path);
         let mut caller_nested: Option<&str> = None;
         let mut caller_workspace: Option<&str> = None;
+        let mut foreign_nested: Option<&str> = None;
         let mut discarded: Vec<String> = Vec::new();
         for claim in &self.claims {
             let overlap = overlap_of(&candidate_forms, &claim.path);
@@ -190,12 +223,20 @@ impl LiveClaims {
             }
             let is_caller = self.caller.as_deref() == Some(claim.session.as_str());
             if !is_caller {
-                // #6806: a foreign claim is decisive — return at once so no
-                // later caller-owned claim can soften it.
-                return ClaimState::Foreign {
-                    session: claim.session.clone(),
-                    caller: self.caller.clone(),
-                };
+                // #7652: a foreign claim is decisive only when it COVERS the
+                // candidate. A project-root claim that merely nests it is
+                // recorded and the scan continues, so a caller claim that
+                // covers the candidate can still refuse below.
+                if overlap == Overlap::CoversWorkspace {
+                    // #6806: decisive — return at once so no later caller-owned
+                    // claim can soften it.
+                    return ClaimState::Foreign {
+                        session: claim.session.clone(),
+                        caller: self.caller.clone(),
+                    };
+                }
+                foreign_nested = Some(&claim.session);
+                continue;
             }
             match overlap {
                 Overlap::CoversWorkspace => caller_workspace = Some(&claim.session),
@@ -206,6 +247,15 @@ impl LiveClaims {
         if let Some(session) = caller_workspace {
             return ClaimState::CallerWorkspace {
                 session: session.to_string(),
+            };
+        }
+        // #7652 critic round 2: ahead of `caller_nested`, because a LIVE FOREIGN
+        // nested claim is evidence `CallerNested` does not carry, and gate 4c
+        // reads only `ForeignNested` — see this function's doc, last paragraph.
+        if let Some(session) = foreign_nested {
+            return ClaimState::ForeignNested {
+                session: session.to_string(),
+                caller: self.caller.clone(),
             };
         }
         if let Some(session) = caller_nested {
@@ -257,6 +307,22 @@ pub(crate) enum ClaimState {
         /// The caller's own id, when it named one.
         caller: Option<String>,
     },
+    /// A live FOREIGN session's claim CONTAINS this candidate without being it
+    /// (#7652). Permitted.
+    ///
+    /// Why: a session registers the whole project checkout as its workspace, so
+    /// this claim is evidence about the project, not about the worktree. Obeyed
+    /// as a veto it blocked every nested worktree of every project any other
+    /// live session had registered — 4 of 4 worktrees in one observed reclaim
+    /// pass, and `--force` never reached past it. Ownership of a specific
+    /// worktree is what gates 3, 4, 5 and 6 answer; gate 2 no longer guesses at
+    /// it from a path prefix.
+    ForeignNested {
+        /// The claiming session's id.
+        session: String,
+        /// The caller's own id, when it named one.
+        caller: Option<String>,
+    },
 }
 
 impl ClaimState {
@@ -278,7 +344,11 @@ impl ClaimState {
             "still claims this workspace"
         };
         match self {
-            Self::Unclaimed | Self::CallerNested { .. } | Self::DeadClaimsDiscarded { .. } => None,
+            Self::Unclaimed
+            | Self::CallerNested { .. }
+            | Self::DeadClaimsDiscarded { .. }
+            // #7652: permits — see the variant's own doc.
+            | Self::ForeignNested { .. } => None,
             Self::CallerWorkspace { session } => Some(format!(
                 "session {session} {tense}, and that session IS the caller — this path is its \
                  own workspace, not a worktree inside it, so reclaiming it would delete the \
@@ -311,12 +381,25 @@ impl ClaimState {
     /// 51786c9c… still claims this workspace" on Monday and nothing at all on
     /// Tuesday cannot tell a fix from a regression. Gate 2 logs this beside the
     /// candidate it admitted.
-    /// What: `Some(text)` only for [`Self::DeadClaimsDiscarded`], naming every
-    /// dead session whose claim was set aside; `None` for every other state,
-    /// which already speaks through [`Self::refusal`].
-    /// Test: `a_dead_sessions_claim_no_longer_blocks`.
+    /// What: `Some(text)` for [`Self::DeadClaimsDiscarded`], naming every
+    /// dead session whose claim was set aside, and for [`Self::ForeignNested`]
+    /// (#7652), naming the live session whose project-level claim no longer
+    /// vetoes; `None` for every other state, which already speaks through
+    /// [`Self::refusal`].
+    /// Test: `a_dead_sessions_claim_no_longer_blocks`,
+    /// `worktree_7652_a_foreign_project_root_claim_no_longer_blocks_a_nested_worktree`.
     pub(crate) fn note(&self) -> Option<String> {
         match self {
+            // #7652: the claim is real and the session is live — say so, or a
+            // reclaim that used to be refused looks like the gate went missing.
+            Self::ForeignNested { session, caller } => {
+                let caller = caller.as_deref().unwrap_or("no session");
+                Some(format!(
+                    "session {session} claims a workspace CONTAINING this worktree, not this \
+                     worktree itself, and the caller is {caller} — a project-level claim does \
+                     not attribute a nested worktree, so the later gates decide it (#7652)"
+                ))
+            }
             Self::DeadClaimsDiscarded { sessions } => Some(format!(
                 "discarded {} stale workspace claim(s) — session(s) {} claim this path but no \
                  live tmux session answers to them, so the claim is a tombstone, not an owner \

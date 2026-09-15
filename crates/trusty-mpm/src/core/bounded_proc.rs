@@ -160,7 +160,13 @@ fn kill_child_group(child: &mut Child) {
 /// What: spawns the child in its own process group with both pipes drained on
 /// their own threads, polls `try_wait` every 25 ms until `budget` expires, then
 /// kills the GROUP and reaps. `Ok` carries the exit status and both streams even
-/// for a non-zero exit; every `Err` means no output was produced.
+/// for a non-zero exit; every `Err` means no output was produced. Both exits that
+/// can leave a child RUNNING — the deadline and an errored `try_wait` — kill the
+/// group before returning (#7652 critic round 2). The kill on the `try_wait` arm
+/// carries no test of its own: `try_wait` fails only when `waitpid` does
+/// (`ECHILD`, a reaped or stolen child), which this crate cannot provoke without
+/// a wait seam whose only user would be that test. It is one call adjacent to the
+/// deadline arm's identical, tested call.
 /// Test: `run_bounded_captures_stdout_and_status`, `run_bounded_kills_a_hung_child`,
 /// `run_bounded_kills_the_whole_process_group`, `run_bounded_reports_a_spawn_failure`.
 pub(crate) fn run_bounded(
@@ -200,7 +206,13 @@ pub(crate) fn run_bounded(
                 return Err(BoundedError::TimedOut);
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(25)),
-            Err(e) => return Err(BoundedError::Wait(e)),
+            // #7652 critic round 2: this arm leaves the loop WITHOUT reaching
+            // the deadline, so it is the only other exit that can abandon a
+            // running child. Kill the group first, exactly as the timeout does.
+            Err(e) => {
+                kill_child_group(&mut child);
+                return Err(BoundedError::Wait(e));
+            }
         }
     }
 }

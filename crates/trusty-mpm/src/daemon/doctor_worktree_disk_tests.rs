@@ -367,16 +367,22 @@ async fn a_dead_sessions_org_level_claim_no_longer_hides_orphaned_disk() {
 /// liveness question nobody could answer must resolve toward "in use". This is
 /// the assertion that stops the fix above from being implemented as "ignore
 /// tombstones", which would discard live sessions' claims during a tmux outage.
+///
+/// #7652: the claim is on THE WORKTREE, where a foreign claim can still veto. At
+/// the org-level path the sibling above uses, the #7652 narrowing decides the
+/// candidate before liveness is consulted at all — a project-level claim is
+/// evidence about the project, not about a worktree nested under it — so the
+/// liveness question this test is about has to be asked at a path where the
+/// answer can still matter.
 #[tokio::test]
 async fn an_unobservable_tmux_still_hides_the_same_worktree() {
     let fx = GitWorktreeFixture::new();
     let wt = fx.add_worktree("doctor-7259-failclosed");
     land(&wt);
-    let org = fx.repo.parent().expect("owner dir above the checkout");
 
     let dir = TempDir::new().expect("tempdir");
     let fake = FakeTmuxDriver::new();
-    let mgr = manager_claiming(&dir, fake.clone(), "tm-bobmatnyc", org).await;
+    let mgr = manager_claiming(&dir, fake.clone(), "tm-bobmatnyc", &wt).await;
     *fake.list_sessions_should_fail.lock().unwrap() = true;
 
     let check = check_worktree_disk_with_index(

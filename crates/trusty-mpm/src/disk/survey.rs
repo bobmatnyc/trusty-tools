@@ -298,8 +298,11 @@ fn claiming_session(claim: &ClaimState) -> Option<&str> {
         // #7232: a discarded dead claim forbids nothing — the session it names
         // no longer exists, so showing the worktree as KEEP would be as wrong
         // as the `CallerNested` case above.
+        // #7652: a foreign PROJECT-level claim forbids nothing about a worktree
+        // nested inside it — the same reasoning as `CallerNested` above.
         ClaimState::Unclaimed
         | ClaimState::CallerNested { .. }
+        | ClaimState::ForeignNested { .. }
         | ClaimState::DeadClaimsDiscarded { .. } => None,
         ClaimState::CallerWorkspace { session } | ClaimState::Foreign { session, .. } => {
             Some(session)

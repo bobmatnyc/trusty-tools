@@ -340,6 +340,8 @@ fn inspect(
         &pr,
         probe_dirt,
         probes.agent_state,
+        // #7652: gate 4b's owner map travels with the claim set.
+        &probes.claims.owners,
         keep_list,
     );
     let facts = WorktreeFacts {
@@ -521,6 +523,9 @@ fn claiming_session(
         ClaimState::Unclaimed | ClaimState::DeadClaimsDiscarded { .. } => None,
         ClaimState::CallerNested { session }
         | ClaimState::CallerWorkspace { session }
+        // #7652: still shown — the panel reports WHO claims, and a project-level
+        // claimant is a real one; only the reclaim veto changed.
+        | ClaimState::ForeignNested { session, .. }
         | ClaimState::Foreign { session, .. } => Some(session.clone()),
     }
 }

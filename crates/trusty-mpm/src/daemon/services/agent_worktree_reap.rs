@@ -90,11 +90,13 @@ use crate::core::agent::DelegationId;
 use crate::core::hook::HookEvent;
 use crate::core::session::SessionId;
 use crate::daemon::state::DaemonState;
+use crate::session_manager::decommission::WorktreeRemoval;
 use crate::session_manager::worktree_liveness::process_holding;
 use crate::session_manager::worktree_ownership::{
     AgentDelegationState, AgentWorktreeOwner, SentinelOwner, find_agent_worktree,
     is_harness_agent_worktree, read_sentinel_owner,
 };
+use crate::session_manager::worktree_removal_audit::audited_removal;
 use crate::session_manager::worktree_safety::{
     DirtyWorktreePolicy, dirt_blocks_removal, worktree_remove_command,
 };
@@ -214,7 +216,8 @@ pub(crate) fn delegation_state_for_agent(
 /// 7. `git worktree remove --force` — force because a clean tree can still hold
 ///    gitignored build output that plain `remove` refuses, and because gates 5
 ///    and 6 have already established there is nothing to lose. A non-zero exit
-///    (a git-`locked` worktree exits 128) refuses.
+///    (a git-`locked` worktree exits 128) refuses, and so does a ZERO exit that
+///    left the directory on disk ([`reap_outcome_of`], #7652 critic round 2).
 ///
 /// The branch is NOT deleted. It may carry the pushed commits an open PR is
 /// built on, and removing the worktree is what this reap is for.
@@ -224,7 +227,8 @@ pub(crate) fn delegation_state_for_agent(
 /// `reap_reports_already_gone_when_the_harness_reclaimed_it`,
 /// `reap_refuses_a_worktree_a_live_process_is_standing_in`,
 /// `reap_refuses_a_path_whose_sentinel_names_another_agent`,
-/// `reap_refuses_a_path_with_no_sentinel`.
+/// `reap_refuses_a_path_with_no_sentinel`,
+/// `reap_never_reports_removed_while_the_path_survives`.
 pub(crate) fn reap_worktree(path: &Path, agent_id: &str, in_use: &[PathBuf]) -> ReapOutcome {
     if !path.exists() {
         return ReapOutcome::AlreadyGone;
@@ -301,21 +305,53 @@ pub(crate) fn reap_worktree(path: &Path, agent_id: &str, in_use: &[PathBuf]) -> 
     // `git worktree` honours `GIT_DIR` over `-C`, so an ambient redirect aimed
     // the removal at another repository while every gate above it examined the
     // real one — the reap reported a refusal and the directory stayed.
-    let out = worktree_remove_command(&registry_root, path).output();
-    match out {
-        Ok(o) if o.status.success() => {
+    // #7885 critic round: inside the removal audit, so this route writes the
+    // same attempt and outcome lines as every other removal route.
+    let outcome = audited_removal(
+        path,
+        &format!("agent-worktree reap: agent {agent_id} has finished with this tree"),
+        || match worktree_remove_command(&registry_root, path).output() {
+            Ok(o) if o.status.success() => WorktreeRemoval::Removed,
+            Ok(o) => WorktreeRemoval::Kept(format!(
+                "`git worktree remove --force` exited {}: {}",
+                o.status,
+                String::from_utf8_lossy(&o.stderr).trim()
+            )),
+            Err(e) => WorktreeRemoval::Kept(format!("could not run git: {e}")),
+        },
+    );
+    reap_outcome_of(path, outcome)
+}
+
+/// A removal's [`WorktreeRemoval`] result read against the disk (#7652 critic
+/// round 2).
+///
+/// Why: git's zero exit is not the removal. [`audited_removal`] already logs
+/// `removed = outcome.removed() && !path.exists()`, so a reported-but-present
+/// directory was audited as KEPT while [`reap_worktree`] returned
+/// [`ReapOutcome::Removed`] for it — the audit line and the caller disagreed
+/// about the same event. The merged-PR reclaim makes exactly this disk check
+/// before counting a candidate removed (`worktree_reclaim_sweep.rs`).
+/// What: `Removed` only when git succeeded AND `path` is gone; a success over a
+/// surviving directory becomes a [`ReapOutcome::Refused`] naming both facts, so
+/// the caller never records a deletion that did not happen.
+/// Test: `reap_never_reports_removed_while_the_path_survives`,
+/// `reap_removes_a_clean_pushed_worktree`.
+fn reap_outcome_of(path: &Path, outcome: WorktreeRemoval) -> ReapOutcome {
+    match outcome {
+        WorktreeRemoval::Removed if !path.exists() => {
             tracing::info!(
                 path = %path.display(),
                 "agent-worktree reap: removed the worktree its agent has finished with (#4311)"
             );
             ReapOutcome::Removed
         }
-        Ok(o) => ReapOutcome::Refused(format!(
-            "`git worktree remove --force` exited {}: {}",
-            o.status,
-            String::from_utf8_lossy(&o.stderr).trim()
+        WorktreeRemoval::Removed => ReapOutcome::Refused(format!(
+            "`git worktree remove --force` reported success but {} is still on disk — reported \
+             as kept, not removed (#7652, #7885)",
+            path.display()
         )),
-        Err(e) => ReapOutcome::Refused(format!("could not run git: {e}")),
+        WorktreeRemoval::Kept(reason) => ReapOutcome::Refused(reason),
     }
 }
 

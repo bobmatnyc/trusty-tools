@@ -439,7 +439,7 @@ fn remove_refuses_a_stale_worktree_pointer() {
     std::fs::write(wt.join("precious.txt"), "never committed\n").expect("write precious file");
     std::fs::remove_dir_all(fx.repo.join(".git").join("worktrees")).expect("drop admin dir");
 
-    let outcome = remove_session_worktree(&wt);
+    let outcome = remove_session_worktree(&wt, "test");
     assert!(
         wt.join("precious.txt").exists(),
         "a stale pointer must not cost the working tree: {outcome:?}"
@@ -458,7 +458,7 @@ fn remove_refuses_an_unreadable_git_entry() {
     std::fs::write(wt.join("precious.txt"), "never committed\n").expect("write precious file");
     let _restore = deny_all(&wt.join(".git"));
 
-    let outcome = remove_session_worktree(&wt);
+    let outcome = remove_session_worktree(&wt, "test");
     assert!(
         wt.join("precious.txt").exists(),
         "an unreadable .git must not cost the working tree: {outcome:?}"
@@ -478,7 +478,7 @@ fn remove_refuses_a_worktree_with_a_broken_git_file() {
     std::fs::write(wt.join("precious.txt"), "never committed\n").expect("write precious file");
     std::fs::write(wt.join(".git"), "gitdir: /nonexistent/xyz\n").expect("corrupt .git");
 
-    let outcome = remove_session_worktree(&wt);
+    let outcome = remove_session_worktree(&wt, "test");
     assert!(
         wt.join("precious.txt").exists(),
         "a broken .git must not cost the working tree: {outcome:?}"
@@ -503,7 +503,7 @@ fn remove_cleans_up_a_directory_no_repository_claims() {
     std::fs::create_dir_all(&leftover).expect("mkdir");
     std::fs::write(leftover.join(WORKTREE_SENTINEL_FILE), b"").expect("write sentinel");
 
-    let outcome = remove_session_worktree(&leftover);
+    let outcome = remove_session_worktree(&leftover, "test");
     assert!(outcome.removed(), "{outcome:?}");
     assert!(!leftover.exists(), "the leftover directory must be gone");
 }
@@ -520,7 +520,7 @@ fn remove_cleans_up_an_unregistered_leftover_inside_a_repo() {
     let leftover = fx.repo.join(".worktrees").join("unregistered-e2e-4732");
     std::fs::create_dir_all(&leftover).expect("mkdir");
 
-    let outcome = remove_session_worktree(&leftover);
+    let outcome = remove_session_worktree(&leftover, "test");
     assert!(outcome.removed(), "{outcome:?}");
     assert!(!leftover.exists(), "the leftover directory must be gone");
 }
@@ -532,7 +532,7 @@ fn remove_still_removes_a_healthy_worktree() {
     let fx = GitWorktreeFixture::new();
     let wt = fx.add_worktree("healthy-4732");
 
-    let outcome = remove_session_worktree(&wt);
+    let outcome = remove_session_worktree(&wt, "test");
     assert!(outcome.removed(), "{outcome:?}");
     assert!(!wt.exists(), "the worktree directory must be gone");
 

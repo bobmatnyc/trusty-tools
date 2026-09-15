@@ -37,6 +37,7 @@ use std::time::Duration;
 
 use super::manager::SessionManager;
 use super::worktree_reclaim_claim::{ClaimLiveness, LiveClaims, WorkspaceClaim};
+use super::worktree_reclaim_ownership::SessionOwners;
 
 /// Wall-clock ceiling for the tmux liveness probe this module runs (#7965).
 ///
@@ -58,17 +59,27 @@ impl SessionManager {
     /// Why: see the module doc — this is the single producer, so the liveness
     /// probe cannot be forgotten by a call site.
     /// What: one `tmux list-sessions` for the whole set, then one claim per
-    /// record that has a `workspace_path`. `caller` is the invoking managed
-    /// session id, passed straight through to [`LiveClaims::caller`].
-    /// Test: as the module doc.
+    /// record that has a `workspace_path`, and one [`LiveClaims::owners`] entry
+    /// per record whether or not it has one (#7652). `caller` is the invoking
+    /// managed session id, passed straight through to [`LiveClaims::caller`].
+    /// Test: as the module doc, plus
+    /// `worktree_7652_owners_include_a_record_with_no_workspace_path` and
+    /// `worktree_7652_an_errored_tmux_probe_is_refused`.
     pub(crate) async fn workspace_claims(&self, caller: Option<String>) -> LiveClaims {
         // #5856: `Err` means tmux could not be observed, which is not an empty
         // tmux. `None` here — from an error OR from #7965's timeout — is read by
         // `liveness_of` as "every claim stays live".
         let live_names = self.bounded_live_managed_names().await;
-        let claims = self
-            .list()
-            .await
+        let records = self.list().await;
+        // #7652: built from EVERY record. Gate 4 judges a sentinel's owner by its
+        // record, and the claim list below drops a record with no workspace.
+        let owners = SessionOwners::observed(records.iter().map(|r| {
+            (
+                r.id.to_string(),
+                liveness_of(live_names.as_ref(), &r.tmux_name),
+            )
+        }));
+        let claims = records
             .into_iter()
             .filter_map(|r| {
                 let path = r.workspace_path?;
@@ -79,7 +90,11 @@ impl SessionManager {
                 ))
             })
             .collect();
-        LiveClaims { claims, caller }
+        LiveClaims {
+            claims,
+            caller,
+            owners,
+        }
     }
 
     /// The tmux liveness probe, off the caller's thread and bounded (#7965).
