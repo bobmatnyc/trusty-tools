@@ -337,6 +337,11 @@ async fn rpc_reports_invalid_params_for_an_undecodable_payload() {
 #[tokio::test]
 async fn parity_health_agrees_across_transports() {
     let (state, _dir) = hermetic();
+    // #7968: the catalog report is cached. Warming it first means both calls
+    // read one computed report, rather than the first returning `unknown` when
+    // a slow host misses the bounded wait and the second the finished walk.
+    crate::daemon::rpc::health_catalog::report_within(&state, std::time::Duration::from_secs(30))
+        .await;
     let (status, body) = http(&state, "GET", "/health", None).await;
     assert_eq!(status, StatusCode::OK);
     let result = rpc_ok(&rpc_router(&state), "mpm.health", Value::Null).await;
