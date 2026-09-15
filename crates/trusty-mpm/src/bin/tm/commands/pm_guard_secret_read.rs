@@ -93,7 +93,7 @@
 //! commands naming no file at all. A here-document body now leaves the argv
 //! text through `pm_guard_bash::split_heredoc_bodies`, the same framing
 //! `has_file_write_redirection` has used since #5356, and an interpreter's
-//! inline program is identified by position (see [`inline_program_index`]).
+//! inline program is identified by position (see [`inline_program_indices`]).
 //! Both are then scanned as [`Scan::ProgramText`], which changes exactly one
 //! answer: an unresolvable brace shape is ordinary text rather than a secret.
 //! Every pattern and every family still applies, so `python -c 'open(".env")'`
@@ -142,7 +142,7 @@
 //! admitted as a file only by the `/` in front of it. A word list is not a path
 //! operand list: the body decides what the variable is for, and the name
 //! reaches the body as `$b`. [`for_word_list_start`] identifies the list by
-//! POSITION, the way [`pattern_argument_index`] and [`inline_program_index`]
+//! POSITION, the way [`pattern_argument_index`] and [`inline_program_indices`]
 //! identify theirs — skipping any [`LIST_INTRODUCERS`] keyword in front of it,
 //! so a header nested behind an outer `do`/`then` reads the same — and inside
 //! it [`reads_as_a_branch_name`] withdraws that one proxy.
@@ -339,6 +339,13 @@ use crate::commands::pm_guard_bash::{
     matches_only_name_substring_family, secret_pattern_overlaps, split_heredoc_bodies,
     split_shell_segments, strip_process_substitution,
 };
+// #7839, #7738, #7744: the ONE tokenizer and token classifier every Bash
+// guard asks — which token is an interpreter's PROGRAM, which word is regex
+// syntax, and how a parse failure is named.
+use crate::commands::pm_guard_bash::{
+    TokenizeError, has_regex_quantifier, program_text_indices, tokenize,
+    without_glob_metacharacters,
+};
 // #7414: the word-cutting layer moved out when the brace-literal fix pushed
 // this file over the 500-SLOC cap.
 use crate::commands::pm_guard_secret_words::{
@@ -481,6 +488,17 @@ fn denies_as_a_read_target(path: &str, scan: Scan) -> bool {
     match scan {
         Scan::Argv => is_secret_read_target(&base),
         // #7266: `{`, `{p+` and `{cmd` are syntax, not a brace alternation.
+        // #7839/#7738/#7744: nor is a `.` plus a quantifier a dotfile glob —
+        // in program text it is the regex wildcard. The word is released only
+        // when the wildcards are what earned its deny: strip them and its
+        // literal core must name nothing, so `.env.*` and `*credentials*`
+        // still refuse while `.*`, `.*?` and `.*?pen` do not.
+        Scan::ProgramText
+            if has_regex_quantifier(&base)
+                && !names_a_secret(&without_glob_metacharacters(&base)) =>
+        {
+            false
+        }
         Scan::ProgramText => expand_brace_alternatives(&base)
             .is_some_and(|candidates| candidates.iter().any(|c| names_a_secret(c))),
     }
@@ -657,12 +675,13 @@ fn pattern_argument_index(segment: &str, argv: &[String]) -> Option<usize> {
 /// `allows_a_secret_name_written_as_a_search_pattern`,
 /// `denies_an_unlexable_segment_that_names_a_secret`.
 fn secret_words_in_segment(segment: &str) -> Vec<String> {
-    let Some(argv) = shlex::split(segment) else {
+    let Ok(argv) = tokenize(segment) else {
         return secret_files_named_in(segment, Scan::Argv);
     };
     let pattern_at = pattern_argument_index(segment, &argv);
     // #7266: an interpreter's inline program is source text, not a path list.
-    let program_at = inline_program_index(&argv);
+    // #7839: so is a `sed` expression, which the shared classifier now names.
+    let program_at = inline_program_indices(&argv);
     // #7498 round 3: a text payload is prose written for a human to read.
     let text_payloads = text_payload_indices(segment, &argv);
     // #7498: the words after `in` are a loop's word LIST, and the words in a
@@ -674,7 +693,7 @@ fn secret_words_in_segment(segment: &str) -> Vec<String> {
         if Some(index) == pattern_at || text_payloads.contains(&index) {
             continue;
         }
-        let words = if Some(index) == program_at {
+        let words = if program_at.contains(&index) {
             secret_files_named_in_program_text(token)
         } else {
             secret_files_named_in(token, Scan::Argv)
@@ -714,7 +733,7 @@ const WORD_LIST_KEYWORDS: &[&str] = &["for", "select"];
 /// withdraws it, because the words are then whatever that command prints rather
 /// than the literal list written here. `None` for every other segment, so no
 /// ordinary argv reaches the narrowed shape test. The keyword is identified by
-/// POSITION, exactly as [`pattern_argument_index`] and [`inline_program_index`]
+/// POSITION, exactly as [`pattern_argument_index`] and [`inline_program_indices`]
 /// identify theirs — this adds no verb to any list.
 ///
 /// Round 13 critic MEDIUM: a header NESTED in an outer compound command keeps
@@ -1065,7 +1084,7 @@ fn push_program_text_words(text: &str, out: &mut Vec<String>) {
         // #7266: the lexed spelling and the raw spelling are both scanned —
         // neither is trusted to be the only way the shell reads the line.
         let mut spellings = vec![line.to_string()];
-        if let Some(tokens) = shlex::split(line) {
+        if let Ok(tokens) = tokenize(line) {
             spellings.extend(tokens);
         }
         for spelling in spellings {
@@ -1078,84 +1097,34 @@ fn push_program_text_words(text: &str, out: &mut Vec<String>) {
     }
 }
 
-/// Programs that take an inline PROGRAM behind [`INLINE_PROGRAM_FLAGS`].
-///
-/// Why: see [`Scan`]. Source text handed to an interpreter in argv is the
-/// second place round 5's word scan read syntax as a path.
-/// What: matched against the segment's resolved program basename. `sh`/`bash`
-/// are listed for completeness — `split_shell_segments` already re-scans a
-/// `sh -c` string as its own segment, so the inner command is still classified
-/// as argv there.
-/// Test: `allows_an_inline_program_carrying_braces`,
-/// `denies_a_secret_named_inside_an_inline_program`.
-const INLINE_PROGRAM_INTERPRETERS: &[&str] = &[
-    "python", "python3", "perl", "ruby", "node", "deno", "php", "sh", "bash", "zsh", "dash",
-];
+// #7839: the interpreter / awk / sed program-class lists moved to the
+// shared `pm_guard_bash::bash_tokens` classifier, so `sed`'s expression is
+// recognised by the same code that already recognised `awk`'s program.
 
-/// The flags whose next token is an inline program rather than a path.
-///
-/// What: `-c` (`python`, `sh`), `-e` (`perl`, `node`, `ruby`), `-r` (`php`),
-/// and the long spellings. Only the SEPARATE form is recognised; a joined
-/// `perl -e'…'` lexes as one token and keeps the argv scan, which over-refuses
-/// rather than under-refuses.
-/// Test: `denies_a_secret_named_inside_an_inline_program`.
-const INLINE_PROGRAM_FLAGS: &[&str] = &["-c", "-e", "-r", "--eval", "--command"];
-
-/// The awk-family programs whose first positional argument IS the program.
-///
-/// Test: `allows_an_awk_program_carrying_braces`.
-const AWK_PROGRAMS: &[&str] = &["awk", "gawk", "nawk", "mawk"];
-
-/// awk flags taking a SEPARATE value, so the token after them is not the
-/// program (`awk -F ';' '{…}'`, `awk -v n=1 '{…}'`).
-const AWK_VALUE_FLAGS: &[&str] = &["-v", "-F", "--assign", "--field-separator"];
-
-/// Which token of `argv`, if any, is an inline PROGRAM rather than a path.
+/// Which tokens of `argv` are an inline PROGRAM rather than a path.
 ///
 /// Why: see [`Scan`]. This is the same shape as [`pattern_argument_index`] —
-/// one token of one program class, identified by position, scanned by a rule
-/// that still screens every secret name.
-/// What: for an [`INLINE_PROGRAM_INTERPRETERS`] entry, the token after the
-/// first [`INLINE_PROGRAM_FLAGS`] spelling. For an [`AWK_PROGRAMS`] entry, the
-/// first token that is neither a flag nor an [`AWK_VALUE_FLAGS`] value —
-/// unless `-f`/`--file` supplies the program from a file, which withdraws the
-/// exemption entirely so every positional stays a path. `None` for every other
-/// program, so no ordinary file operand can reach the program-text scan.
+/// tokens of one program class, identified by position, scanned by a rule that
+/// still screens every secret name.
+/// What: a thin adapter over the shared classifier
+/// [`program_text_indices`], which owns the per-program rules — an
+/// interpreter's `-c`/`-e` value, an `awk` program, and since #7839 a `sed`
+/// expression. This function supplies only what the classifier cannot derive:
+/// where the command starts past a wrapper, and the program's basename with a
+/// process-substitution wrapper removed.
 /// Test: `allows_an_awk_program_carrying_braces`,
 /// `allows_an_inline_program_carrying_braces`,
 /// `denies_a_secret_named_inside_an_inline_program`,
-/// `denies_a_secret_operand_beside_an_inline_program`.
-fn inline_program_index(argv: &[String]) -> Option<usize> {
-    let start = strip_wrapper_prefix(argv)?;
-    let program = command_basename(argv.get(start)?);
-    let rest_start = start + 1;
-    let rest = argv.get(rest_start..)?;
-    if INLINE_PROGRAM_INTERPRETERS.contains(&program.as_str()) {
-        let at = rest
-            .iter()
-            .position(|t| INLINE_PROGRAM_FLAGS.contains(&t.as_str()))?;
-        return Some(rest_start + at + 1).filter(|i| *i < argv.len());
-    }
-    if !AWK_PROGRAMS.contains(&program.as_str()) {
-        return None;
-    }
-    if rest
-        .iter()
-        .any(|t| t == "--file" || t.starts_with("--file=") || t.starts_with("-f"))
-    {
-        return None;
-    }
-    let mut i = 0;
-    while let Some(token) = rest.get(i) {
-        if AWK_VALUE_FLAGS.contains(&token.as_str()) {
-            i += 2;
-        } else if token.len() > 1 && token.starts_with('-') {
-            i += 1;
-        } else {
-            return Some(rest_start + i);
-        }
-    }
-    None
+/// `denies_a_secret_operand_beside_an_inline_program`,
+/// `guard_7839_sed_expression_wildcard`.
+fn inline_program_indices(argv: &[String]) -> Vec<usize> {
+    let Some(start) = strip_wrapper_prefix(argv) else {
+        return Vec::new();
+    };
+    let Some(program) = argv.get(start).map(|t| command_basename(t)) else {
+        return Vec::new();
+    };
+    program_text_indices(&program, argv, start)
 }
 
 /// Every distinct word in `text` that names a secret-bearing file, in order.
@@ -1234,7 +1203,7 @@ fn segment_only_handles(segment: &str, named: &[String]) -> bool {
     if NESTED_COMMAND_MARKERS.iter().any(|m| segment.contains(m)) {
         return false;
     }
-    let Some(argv) = shlex::split(segment) else {
+    let Ok(argv) = tokenize(segment) else {
         return false;
     };
     let Some(start) = strip_wrapper_prefix(&argv) else {
@@ -1290,12 +1259,16 @@ fn git_call_reveals_content(argv: &[String], after: usize) -> bool {
 /// "cannot parse" when it does not — that second case is the fail-closed arm,
 /// so the reason says so rather than naming a program it could not resolve.
 fn describe_command(segment: &str) -> String {
-    if shlex::split(segment).is_none() {
-        return "a command this guard cannot parse".to_string();
+    // #7839 review: a parse failure is named by the shared tokenizer, so the
+    // refusal says WHICH parse problem stopped it rather than naming a program
+    // it never resolved — and it refuses rather than allowing what it could
+    // not read.
+    if let Err(error) = tokenize(segment) {
+        return error.reason().to_string();
     }
     match first_command_token(segment) {
         Some(verb) => format!("a `{verb}` command"),
-        None => "a command this guard cannot parse".to_string(),
+        None => TokenizeError::UnbalancedQuoting.reason().to_string(),
     }
 }
 
@@ -3125,17 +3098,17 @@ mod tests {
     #[test]
     fn allows_an_awk_program_carrying_braces() {
         assert_eq!(
-            inline_program_index(&["awk".into(), "{print}".into()]),
-            Some(1)
+            inline_program_indices(&["awk".into(), "{print}".into()]),
+            vec![1]
         );
         assert_eq!(
-            inline_program_index(&["awk".into(), "-F".into(), ";".into(), "{print}".into()]),
-            Some(3)
+            inline_program_indices(&["awk".into(), "-F".into(), ";".into(), "{print}".into()]),
+            vec![3]
         );
         // `-f` supplies the program from a file, so every positional is a path.
-        assert_eq!(
-            inline_program_index(&["awk".into(), "-f".into(), "p.awk".into(), ".env".into()]),
-            None
+        assert!(
+            inline_program_indices(&["awk".into(), "-f".into(), "p.awk".into(), ".env".into()])
+                .is_empty()
         );
         assert!(eval("awk -f p.awk .env").is_some());
     }
@@ -3143,16 +3116,13 @@ mod tests {
     #[test]
     fn allows_an_inline_program_carrying_braces() {
         assert_eq!(
-            inline_program_index(&["python3".into(), "-c".into(), "{}".into()]),
-            Some(2)
+            inline_program_indices(&["python3".into(), "-c".into(), "{}".into()]),
+            vec![2]
         );
         // No inline-program flag, so `script.py` stays an ordinary path operand.
-        assert_eq!(
-            inline_program_index(&["python3".into(), "script.py".into()]),
-            None
-        );
+        assert!(inline_program_indices(&["python3".into(), "script.py".into()]).is_empty());
         // Not an interpreter at all.
-        assert_eq!(inline_program_index(&["cat".into(), "{".into()]), None);
+        assert!(inline_program_indices(&["cat".into(), "{".into()]).is_empty());
     }
 
     #[test]

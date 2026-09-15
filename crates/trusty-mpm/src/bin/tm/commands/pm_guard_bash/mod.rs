@@ -45,6 +45,10 @@
 //! `has_file_write_redirection_*` in this module's `tests` submodule;
 //! `sed_awk::tests` for the sed/awk-specific safety analysis.
 
+// #7839, #7744, #7743, #7738: the ONE tokenizer and token classifier the
+// sibling rules ask, replacing the per-guard lexing and redirect/program-text
+// splitting that disagreed with the shell four different ways.
+mod bash_tokens;
 mod destructive_delete;
 // #7497: the disk-usage half of the worktree-add gate, beside the temp-root
 // half it shares a target resolver with.
@@ -68,6 +72,15 @@ pub(crate) use persistence::command_is_persistence_only;
 // #7266: the secret-read guard frames here-document bodies through the SAME
 // scan the write-redirection check uses, rather than growing a second parser.
 pub(crate) use heredoc::split_heredoc_bodies;
+// #7839, #7738, #7744: the shared classifier the secret-read guard asks which
+// argv token is an interpreter's PROGRAM, and whether a word is regex syntax.
+pub(crate) use bash_tokens::{
+    TokenizeError, has_regex_quantifier, program_text_indices, tokenize,
+    without_glob_metacharacters,
+};
+// #7743: the argv-side answer to "does this redirect token name a FILE", used
+// by the sibling secret-copy rule.
+use bash_tokens::redirect_role;
 // #7266: everything after the first export is shared with
 // `crate::commands::pm_guard_secret_read`, so a READ of a secret-bearing file
 // is screened against the same pattern list, the same brace expander and the
@@ -1107,3 +1120,9 @@ mod tests;
 // the allow case and the deny case bounding it sit side by side per issue.
 #[cfg(test)]
 mod false_positive_tests;
+
+// #7839, #7833, #7479, #7744, #7743, #7738, #7728, #7863: one row per issue
+// for the shared-tokenizer cluster, beside the still-refused controls that
+// bound every relaxation.
+#[cfg(test)]
+mod guard_tokenizer_tests;
