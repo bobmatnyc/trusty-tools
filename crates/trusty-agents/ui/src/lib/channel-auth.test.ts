@@ -3,9 +3,10 @@
 // Why: the gate is a header on one HTTP request. Mocking `tmApi` or the
 // `channel-auth` module would assert that this test's own mock was called;
 // mocking `fetch` asserts what actually leaves the page, which is the only
-// thing the daemon sees. Both write paths are covered — the Channels tab and
-// the deprecated Listeners tab — because the second was the one that 401'd
-// after the route was gated (critic HIGH-2).
+// thing the daemon sees. Both write paths are covered — the per-assistant
+// scope and, since #7609 slice 6, the global one, because a second write path
+// forgetting the gate is exactly how the deprecated Listeners route 401'd
+// after slice 5 gated it (critic HIGH-2).
 //
 // What: a fake `fetch` answers `/api/config` with a minted credential and
 // records every request, so each case can read back the `Authorization` header
@@ -14,8 +15,7 @@
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
-import { saveChannels } from './channels';
-import { saveListeners } from './listeners';
+import { saveChannels, saveGlobalChannels } from './channels';
 import { resetChannelWriteToken } from './channel-auth';
 
 const MINTED = 'minted-credential-abc';
@@ -75,7 +75,7 @@ beforeEach(() => {
     if (status !== 200) {
       return new Response(JSON.stringify({ error: REFUSAL }), { status });
     }
-    return ok({ agent: 'fixture', revision: 'r2', bindings: [], listeners: [], providers: [] });
+    return ok({ agent: 'fixture', revision: 'r2', bindings: [], channels: [], providers: [] });
   });
 });
 
@@ -96,10 +96,10 @@ describe('channel-write credential on the wire', () => {
     expect(sent?.authorization).toBe(`Bearer ${MINTED}`);
   });
 
-  test('saveListeners sends it too — the deprecated route is gated as well', async () => {
-    await saveListeners('fixture', 'r1', []);
+  test('saveGlobalChannels sends it too — the global scope is gated as well', async () => {
+    await saveGlobalChannels('r1', []);
     const sent = put();
-    expect(sent?.url).toContain('/api/agents/fixture/listeners');
+    expect(sent?.url).toMatch(/\/api\/channels$/);
     expect(sent?.authorization).toBe(`Bearer ${MINTED}`);
   });
 

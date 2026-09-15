@@ -6,8 +6,8 @@
 // credential is minted per boot and published on the unauthenticated
 // `/api/config` probe — to a same-origin caller only, so the UI the daemon
 // serves can save while a page from anywhere else cannot read the value. Its
-// own module because BOTH the Channels tab and the (deprecated) Listeners tab
-// write through the gate, and a copy in each would drift.
+// own module because BOTH channel scopes — per-assistant and, since #7609
+// slice 6, global — write through the gate, and a copy in each would drift.
 //
 // What: the probe result is cached for the page's lifetime, but ONLY on
 // success. A failed probe is never cached (critic MEDIUM-5): the daemon may

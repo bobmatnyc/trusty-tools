@@ -65,7 +65,6 @@
   import AgentConfigKnowledge from './AgentConfigKnowledge.svelte';
   import AgentConfigSkills from './AgentConfigSkills.svelte';
   import AgentConfigSubagents from './AgentConfigSubagents.svelte';
-  import AgentConfigListeners from './AgentConfigListeners.svelte';
   import AgentConfigPermissions from './AgentConfigPermissions.svelte';
 
   export let agentName: string;
@@ -106,25 +105,27 @@
    *   separate the two halves of one question with two unrelated sections.
    *
    * #4182 amends DOC-57 to document the sixth section formally; this change
-   * deliberately does not touch the spec. */
+   * deliberately does not touch the spec.
+   *
+   * #7609 slice 6 REMOVES the Listeners section. Its editor read and wrote the
+   * deprecated `GET/PUT /api/agents/{name}/listeners`, which slice 7 deletes,
+   * and everything it configured is now a channel: per-assistant bindings in
+   * the Channels view's Assistant scope, host-wide sources in its Global
+   * scope. Every remaining section keeps its position relative to every other,
+   * so §2.1's normative ORDER is intact; the section count is not, and DOC-57
+   * owes the corresponding amendment. */
   const SECTIONS = [
     ['personality', 'Personality'],
     ['knowledge', 'Knowledge'],
     ['skills', 'Skills'],
     ['subagents', 'Sub-agents'],
-    ['listeners', 'Listeners'],
     ['permissions', 'Permissions'],
   ] as const;
 
   type Tab = (typeof SECTIONS)[number][0];
   let tab: Tab = 'personality';
-  let listenersVisited = false;
   let subagentsVisited = false;
   $: if (tab === 'subagents') subagentsVisited = true;
-  let listenersDirty = false;
-  let listenersSaving = false;
-  let listenerEditor: AgentConfigListeners | undefined;
-  $: if (tab === 'listeners') listenersVisited = true;
 
   let loading = true;
   let loadError = '';
@@ -187,7 +188,7 @@
   let saveAndClosing = false;
   let seenExitIntent = get(configExitIntent);
 
-  $: configPaneDirty.set(personalityDirty || listenersDirty);
+  $: configPaneDirty.set(personalityDirty);
   $: if ($configExitIntent !== seenExitIntent) {
     seenExitIntent = $configExitIntent;
     confirmingExit = true;
@@ -198,7 +199,7 @@
   /** Exit affordances go through here, never straight to `onExit`. */
   function requestExit() {
     if (saveAndClosing) return;
-    if (personalityDirty || listenersDirty) {
+    if (personalityDirty) {
       confirmingExit = true;
       return;
     }
@@ -217,7 +218,6 @@
     try {
       saveError = '';
       if (personalityDirty) await savePersonality();
-      if (!saveError && listenersDirty && !(await listenerEditor?.save())) saveError = 'Listener settings could not be saved. Keep editing to review the error.';
       if (saveError) return;
       confirmingExit = false;
       onExit();
@@ -409,11 +409,6 @@
         <AgentConfigSubagents {agentName} data={subagents} error={subagentsError} />
       </div>
     {/if}
-    {#if listenersVisited && !loading && !loadError}
-      <div class="min-h-0 flex-1 flex-col" style:display={tab === 'listeners' ? 'flex' : 'none'}>
-        <AgentConfigListeners {agentName} bind:dirty={listenersDirty} bind:saving={listenersSaving} bind:this={listenerEditor} />
-      </div>
-    {/if}
     {#if saveError}
       <p class="mt-2 shrink-0 text-xs text-red-500 dark:text-red-400">{saveError}</p>
     {/if}
@@ -440,7 +435,7 @@
           <button
             type="button"
             class="rounded-md px-3 py-1.5 text-xs font-medium text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10"
-            disabled={saving || listenersSaving || saveAndClosing}
+            disabled={saving || saveAndClosing}
             on:click={() => (confirmingExit = false)}
           >
             Keep editing
@@ -448,7 +443,7 @@
           <button
             type="button"
             class="rounded-md border border-red-500/40 px-3 py-1.5 text-xs font-medium text-red-500 dark:text-red-400 hover:bg-red-500/10"
-            disabled={saving || listenersSaving || saveAndClosing}
+            disabled={saving || saveAndClosing}
             on:click={discardAndExit}
           >
             Discard changes
@@ -456,7 +451,7 @@
           <button
             type="button"
             class="inline-flex items-center gap-1.5 rounded-md bg-foundry-light-primary dark:bg-foundry-primary px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-foundry-light-primary/80 dark:hover:bg-foundry-primary/80 disabled:cursor-not-allowed disabled:opacity-50"
-            disabled={saving || listenersSaving || saveAndClosing}
+            disabled={saving || saveAndClosing}
             on:click={saveAndExit}
           >
             <Save class="h-3.5 w-3.5" /> {saving ? 'Saving…' : 'Save and close'}
