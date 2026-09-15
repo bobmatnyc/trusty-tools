@@ -27,7 +27,6 @@ use super::agent_kg::{
     agent_kg_all_route, agent_kg_count_route, agent_kg_query_route, agent_kg_subjects_route,
 };
 use super::agent_knowledge::agent_knowledge_route;
-use super::agent_listeners::{get_listeners, put_listeners};
 use super::agent_patch::{get_agent_persona_route, get_agent_route, patch_agent_route};
 use super::agent_permissions::agent_permissions_route;
 use super::agent_skills::agent_skills_route;
@@ -35,12 +34,14 @@ use super::agent_stores::agent_stores_route;
 use super::agent_subagents::agent_subagents_route;
 use super::auth::{ApiClientConfig, ApiConfig, AuthState, auth_middleware};
 use super::cancel::cancel_task;
+use super::channel_auth::ChannelWriteAuth;
 use super::chat_history::agent_chat_history_route;
 use super::costs::get_costs;
 use super::ctrl_sessions::{
     attach_ctrl_session_handler, create_ctrl_session_handler, get_ctrl_session_handler,
     list_ctrl_sessions_handler, terminate_ctrl_session_handler,
 };
+use super::deprecated_aliases::{get_listeners_alias, put_listeners_alias};
 use super::event_tickets::EventStreamAuth;
 use super::events_sse::{events_handler, mint_event_ticket};
 use super::handlers::{
@@ -158,9 +159,19 @@ pub fn build_router_with_origins(
             "/api/agents/{name}/channels/{id}/messages",
             get(super::agent_channels::messages_route),
         )
+        // #7609 slice 5: the harness-wide channel list. The PUT takes the
+        // channel-write gate (`channel_auth::ChannelWriter`) like its
+        // per-assistant sibling; the GET is open to any caller the router
+        // admits.
+        .route(
+            "/api/channels",
+            get(super::global_channels::get_route).put(super::global_channels::put_route),
+        )
+        // #7609 slice 5: DEPRECATED — forwards to the channel handlers, sets a
+        // `Deprecation` header, and is removed in slice 7.
         .route(
             "/api/agents/{name}/listeners",
-            get(get_listeners).put(put_listeners),
+            get(get_listeners_alias).put(put_listeners_alias),
         )
         .route("/api/project-tools", get(get_project_tools))
         .route(
@@ -449,6 +460,14 @@ pub fn build_router_with_origins(
     // stream is gated whether or not an operator token is configured.
     router = router.layer(Extension(EventStreamAuth::new(token.clone())));
 
+    // #7609: whether a bearer credential was configured is what the
+    // channel-write gate decides on, so it travels with the router rather than
+    // as a process global — two routers in one process (a test, a re-bind) each
+    // answer for themselves.
+    router = router.layer(Extension(ChannelWriteAuth {
+        token_configured: auth_required,
+    }));
+
     if let Some(tok) = token {
         let auth_state = AuthState { token: tok };
         router = router.layer(middleware::from_fn_with_state(auth_state, auth_middleware));
@@ -669,9 +688,20 @@ pub async fn serve_with_config(cfg: ApiConfig) -> Result<()> {
         eprintln!("[trusty-agents] API token authentication: enabled");
     }
 
-    let serve_result = axum::serve(listener, app)
-        .with_graceful_shutdown(trusty_common::shutdown_signal())
-        .await;
+    // #7609: the in-process `channel` tool takes the same write gate as the
+    // HTTP routes and has no request to read an extension from, so the one fact
+    // it needs is recorded here, before the listener accepts anything.
+    super::channel_auth::record_daemon_token(cfg.token.is_some());
+
+    // #7609: `into_make_service_with_connect_info` is what puts the peer
+    // address in the request extensions, so the channel-write audit line can
+    // name the caller instead of logging `unknown`.
+    let serve_result = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(trusty_common::shutdown_signal())
+    .await;
 
     // Remove the discovery file so stale clients fail fast instead of proxying
     // to a dead port.

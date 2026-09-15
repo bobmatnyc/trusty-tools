@@ -281,6 +281,105 @@ async fn the_listeners_alias_answers_with_a_deprecation_header() {
     );
 }
 
+/// A `config.toml` that will not parse is REPORTED, never read as "no channels
+/// declared".
+///
+/// Why (fail-open check, #7609): reading a broken file as an empty list would
+/// let the very next write publish that emptiness over the operator's real
+/// configuration. Both the read and the locked write path refuse instead.
+#[test]
+fn a_malformed_config_is_reported_not_read_as_empty() {
+    use super::super::global_channels::{Persisted, channels_in, persist, revision};
+
+    let refusal = channels_in("[mcp\nnot = toml").expect_err("a broken file must not parse");
+    assert_eq!(refusal.0, StatusCode::INTERNAL_SERVER_ERROR);
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "[[channels]]\nid = 5\n").expect("seed");
+    let error = persist(&path, &revision(&[]), &[]).expect_err("a broken table blocks the write");
+    assert!(
+        error.to_string().contains("nothing was written"),
+        "the refusal says nothing was written: {error}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read back"),
+        "[[channels]]\nid = 5\n",
+        "the operator's file is untouched"
+    );
+
+    // An absent file is a legitimate empty list, not a failure.
+    let absent = dir.path().join("missing.toml");
+    assert!(matches!(
+        persist(&absent, &revision(&[]), &[]).expect("absent file"),
+        Persisted::Written {
+            before: 0,
+            after: 0
+        }
+    ));
+}
+
+/// Global validation covers the provider bridge, the account-wide target, the
+/// send-with-no-destination refusal, and `route_to`.
+///
+/// Why: a migrated Gmail listener declares the CONNECTOR id `gmail` and an
+/// empty target, so validating it the way a per-assistant binding is validated
+/// would refuse every mailbox this host already polls.
+#[test]
+fn global_channel_validation_covers_provider_target_and_routes() {
+    use super::super::global_channels::validate;
+    use crate::channels::Channel;
+
+    let known = vec!["alice".to_string()];
+    let migrated = Channel {
+        id: "gmail-personal".into(),
+        name: "gmail-personal".into(),
+        provider: "gmail".into(),
+        enabled: true,
+        receive_enabled: true,
+        credential_ref: Some("gmail/bob-personal".into()),
+        ..Channel::default()
+    };
+    assert!(
+        validate(&migrated, &known).is_ok(),
+        "a migrated listener is a valid global channel"
+    );
+
+    // Account-wide means it can receive, never that it can send.
+    let mut sending = migrated.clone();
+    sending.send_enabled = true;
+    assert_eq!(
+        validate(&sending, &known).expect_err("no destination").0,
+        StatusCode::BAD_REQUEST
+    );
+
+    // A named destination is still held to the provider's grammar.
+    let mut misaddressed = migrated.clone();
+    misaddressed.target = "alice@example.com".into();
+    assert_eq!(
+        validate(&misaddressed, &known).expect_err("bad target").0,
+        StatusCode::BAD_REQUEST
+    );
+
+    // `route_to` may only name assistants this host has.
+    let mut misrouted = migrated.clone();
+    misrouted.route_to = vec!["nobody".into()];
+    assert_eq!(
+        validate(&misrouted, &known).expect_err("unknown route").0,
+        StatusCode::BAD_REQUEST
+    );
+    misrouted.route_to = vec!["alice".into()];
+    assert!(validate(&misrouted, &known).is_ok());
+
+    // An unregistered provider is refused, as on the per-assistant route.
+    let mut unsupported = migrated;
+    unsupported.provider = "notion".into();
+    assert_eq!(
+        validate(&unsupported, &known).expect_err("no adapter").0,
+        StatusCode::BAD_REQUEST
+    );
+}
+
 /// A `tracing` writer that keeps every emitted line in memory.
 ///
 /// Why: the audit line is the only observable of an accepted write, so the

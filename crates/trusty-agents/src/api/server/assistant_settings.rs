@@ -293,12 +293,15 @@ pub(crate) async fn operate_at(
                 .await
         }
         ("settings.get", "channels") => super::agent_channels::read(name).await,
-        ("settings.patch", "channels") => Ok(super::agent_channels::put_route(
-            Path(name.into()),
-            Json(serde_json::from_value(payload).map_err(error)?),
-        )
-        .await?
-        .0),
+        // #7609: a turn-originated channel write takes the same authorization
+        // gate the HTTP route takes — see `agent_channels::write_from_turn`.
+        ("settings.patch", "channels") => {
+            super::agent_channels::write_from_turn(
+                name,
+                serde_json::from_value(payload).map_err(error)?,
+            )
+            .await
+        }
         ("settings.get", "knowledge" | "projects") => {
             Ok(super::knowledge_pipeline::get(Path(name.into())).await?.0)
         }

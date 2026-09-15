@@ -291,10 +291,14 @@ async fn save_leaves_no_scratch_file_behind() {
         })
         .collect();
     names.sort();
+    // #8065: `save()` publishes through `state_writer::atomic_update`, whose
+    // advisory lock lives in a `config.toml.lock` sibling. That file is the
+    // rendezvous point every other `config.toml` writer already uses, not
+    // scratch — what must never be left behind is a `.tmp`.
     assert_eq!(
         names,
-        vec!["config.toml".to_string()],
-        "save() must leave exactly the published config, no scratch files"
+        vec!["config.toml".to_string(), "config.toml.lock".to_string()],
+        "save() must leave exactly the published config and its lock, no scratch files"
     );
 
     let reloaded = GlobalConfig::load().await;

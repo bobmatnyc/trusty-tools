@@ -1,7 +1,7 @@
 //! Revision-aware listener bindings shared by the operator API and self-only tool.
 use super::{agent_patch::resolve_agent_paths, agent_stores::is_valid_agent_name};
 use crate::listeners::config::{AgentListenerBinding, ListenerConfig};
-use axum::{Json, extract::Path as AxumPath, http::StatusCode};
+use axum::{Json, http::StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -223,17 +223,10 @@ pub(crate) async fn write(name: &str, update: ListenerUpdate) -> Result<Value, C
     )
     .await
 }
-pub(super) async fn get_listeners(
-    AxumPath(name): AxumPath<String>,
-) -> Result<Json<Value>, ConfigError> {
-    read(&name).await.map(Json)
-}
-pub(super) async fn put_listeners(
-    AxumPath(name): AxumPath<String>,
-    Json(update): Json<ListenerUpdate>,
-) -> Result<Json<Value>, ConfigError> {
-    write(&name, update).await.map(Json)
-}
+// #7609: the two axum handlers that used to live here are gone. The listener
+// routes are now deprecated aliases that forward through
+// `super::deprecated_aliases` into `super::agent_channels`, which is the
+// surviving implementation; `read` and `write` above are what both reach.
 #[cfg(test)]
 mod tests {
     use super::*;

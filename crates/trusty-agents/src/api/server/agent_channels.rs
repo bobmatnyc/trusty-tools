@@ -279,7 +279,15 @@ pub(crate) async fn read(name: &str) -> Result<Value, Error> {
         json!({"agent":name,"revision":revision(&raw),"bindings":bindings,"providers":crate::channels::providers_json(),"listeners":listeners,"status":crate::channels::status::status_json(name)}),
     )
 }
-async fn write_at(dirs: &[PathBuf], name: &str, update: Update) -> Result<(), Error> {
+/// Replace one assistant's stored bindings, under compare-and-swap.
+///
+/// Why (#7609): the caller audits the write, and an audit line that cannot say
+/// how many bindings there were before is not much of a record.
+/// What: returns `(before, after)` — the stored count either side of the write.
+/// Every refusal (stale revision, invalid binding, duplicate id) writes
+/// nothing.
+/// Test: `agent_channels_revision_preserves_bindings_and_rejects_stale_write`.
+async fn write_at(dirs: &[PathBuf], name: &str, update: Update) -> Result<(usize, usize), Error> {
     let _guard = super::AGENT_CONFIG_WRITE_LOCK.lock().await;
     let (manifest, _) = resolve_agent_paths(dirs, name)
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "Assistant not found"))?;
@@ -287,7 +295,7 @@ async fn write_at(dirs: &[PathBuf], name: &str, update: Update) -> Result<(), Er
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     let globals = crate::mcp::config::GlobalConfig::load().await.channels;
-    let (path, raw, _) = load_at_with(dirs, name, &globals).await?;
+    let (path, raw, stored) = load_at_with(dirs, name, &globals).await?;
     if revision(&raw) != update.revision {
         return Err(err(
             StatusCode::CONFLICT,
@@ -308,7 +316,8 @@ async fn write_at(dirs: &[PathBuf], name: &str, update: Update) -> Result<(), Er
     let bytes = serde_json::to_vec_pretty(&update.bindings).map_err(internal)?;
     agent_listeners::atomic_write(&path, &bytes)
         .await
-        .map_err(internal)
+        .map_err(internal)?;
+    Ok((stored.len(), update.bindings.len()))
 }
 async fn bound(name: &str, id: &str, send: bool) -> Result<Binding, Error> {
     let (_, _, bindings) = load_at(&crate::agents::agents_dir_candidates(), name).await?;
@@ -486,12 +495,75 @@ pub(crate) async fn messages(name: &str, id: &str) -> Result<Value, Error> {
 pub(super) async fn get_route(AxumPath(name): AxumPath<String>) -> Result<Json<Value>, Error> {
     read(&name).await.map(Json)
 }
+/// `PUT /api/agents/{name}/channels` — replace one assistant's bindings.
+///
+/// Why (#7609): `writer` is the FIRST argument because extracting it IS the
+/// authorization gate — a daemon with no API token configured never reaches
+/// this body, even from loopback. See
+/// [`crate::api::server::channel_auth`] for why this one write surface is
+/// held to more than the loopback bind.
+/// What: unchanged otherwise — validate, compare-and-swap, answer with the
+/// stored view. One audit line per accepted write.
+/// Test: `a_tokenless_daemon_refuses_every_channel_write`,
+/// `agent_channels_revision_preserves_bindings_and_rejects_stale_write`.
 pub(super) async fn put_route(
+    writer: super::channel_auth::ChannelWriter,
     AxumPath(name): AxumPath<String>,
     Json(update): Json<Update>,
 ) -> Result<Json<Value>, Error> {
-    write_at(&crate::agents::agents_dir_candidates(), &name, update).await?;
+    let (before, after) = write_at(&crate::agents::agents_dir_candidates(), &name, update).await?;
+    writer.audit(
+        "PUT /api/agents/{name}/channels",
+        "assistant",
+        Some(&name),
+        before,
+        after,
+    );
     read(&name).await.map(Json)
+}
+
+/// Replace one assistant's bindings from a MODEL TURN, under the same gate.
+///
+/// Why (#7609): `platform_settings`'s `settings.patch/channels` op and the
+/// `channel` tool's `set` action both write the same file the HTTP route
+/// writes, so gating the route alone would leave the model-driven path open on
+/// a daemon that refuses the operator's own browser. Neither has a request to
+/// extract a [`super::channel_auth::ChannelWriter`] from, so they take the
+/// recorded daemon fact instead.
+/// What: 401 when this daemon serves no authenticated API; otherwise validate,
+/// compare-and-swap, audit, and answer with the stored view.
+/// Test: `crate::tools::channel::channel_tests::the_tool_refuses_a_write_on_a_tokenless_daemon`.
+pub(crate) async fn write_from_turn(name: &str, update: Update) -> Result<Value, Error> {
+    if !super::channel_auth::daemon_token_configured() {
+        return Err(err(
+            StatusCode::UNAUTHORIZED,
+            &super::channel_auth::tool_refusal(),
+        ));
+    }
+    let (before, after) = write_at(&crate::agents::agents_dir_candidates(), name, update).await?;
+    super::channel_auth::audit_write(
+        "turn:channels",
+        "assistant",
+        Some(name),
+        before,
+        after,
+        "in-process",
+    );
+    read(name).await
+}
+
+/// The listener half of this module, for the deprecated
+/// `PUT /api/agents/{name}/listeners` alias to forward into.
+///
+/// Why (#7609): `read` already composes `agent_listeners::read` — the listener
+/// view IS a projection of the channel view — so the alias forwards through
+/// this module rather than reaching around it into a second implementation.
+/// Test: `the_listeners_alias_answers_with_a_deprecation_header`.
+pub(super) async fn write_listeners(
+    name: &str,
+    update: agent_listeners::ListenerUpdate,
+) -> Result<Value, Error> {
+    agent_listeners::write(name, update).await
 }
 pub(super) async fn send_route(
     AxumPath((name, id)): AxumPath<(String, String)>,
