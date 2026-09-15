@@ -293,13 +293,15 @@ async fn worktree_7652_an_errored_tmux_probe_is_refused() {
     refused(&verdict(&s, &c), &s.owner);
 }
 
-/// 🔴 #7652 criterion 3: an unreadable session store. The delete loop's claim
-/// probe returns `None`, so the survey falls back to an empty claim set — and
-/// that fallback must refuse the session-owned tree at classification, not
-/// merely at the pre-delete re-check. Fails on `76ad591ac`, whose survey
-/// reported the tree reclaimable.
+/// 🔴 #7652 criterion 3: a claim probe that cannot answer. The delete loop's
+/// probe returns `None` — the daemon's does when no tokio runtime handle is
+/// available, while `SessionManager::list` falls back to its cached records on a
+/// failed reload and never yields `None` — so the survey falls back to an empty
+/// claim set. That fallback must refuse the session-owned tree at
+/// classification, not merely at the pre-delete re-check. Fails on
+/// `76ad591ac`, whose survey reported the tree reclaimable.
 #[test]
-fn worktree_7652_an_unreadable_session_store_reclaims_nothing() {
+fn worktree_7652_an_unanswerable_claim_probe_reclaims_nothing() {
     let s = scene("owner-store-unreadable-7652");
     let branch = s.branch.clone();
     let out = reclaim_with_probes(
@@ -346,6 +348,53 @@ async fn worktree_7652_the_recheck_refuses_an_owner_that_came_back() {
             in_use_now: &|| {
                 reads.set(reads.get() + 1);
                 Some(if reads.get() == 1 {
+                    gone.clone()
+                } else {
+                    back.clone()
+                })
+            },
+            index_for: &|_: &Path| merged_index(&branch),
+        },
+        ReclaimMode::Remove,
+        &[],
+    );
+    assert!(out.removed.is_empty(), "{out:?}");
+    assert!(s.wt.exists(), "the returning owner's tree must survive");
+    assert!(
+        out.refused_at_recheck
+            .iter()
+            .any(|r| r.contains("#7652") && r.contains(&s.owner.to_string())),
+        "{:?}",
+        out.refused_at_recheck
+    );
+}
+
+/// 🔴 #7652 critic round: the claim read that decides is the one taken AFTER the
+/// pre-delete re-check's dirt probe, immediately before the removal.
+///
+/// Why: `recheck_before_delete` reads the claims before git, the harness-lock
+/// probe and `inspect_dirt`, which takes seconds on a large tree, and `--force`
+/// follows. Here the survey and the re-check both see the owner gone, and the
+/// owner is back by the third read. Fails on `e21a6ba0b`, which reads the
+/// claims twice and deletes the tree.
+#[tokio::test]
+async fn worktree_7652_an_owner_back_after_the_dirt_check_is_refused() {
+    let s = scene("owner-back-late-7652");
+    let name = "owner-back-late-7652";
+    let gone = claims(&s, name, OwnerRecord::ProjectRoot, Tmux::OwnerGone).await;
+    let back = claims(&s, name, OwnerRecord::ProjectRoot, Tmux::ListsOwner).await;
+    let reads = Cell::new(0usize);
+    let branch = s.branch.clone();
+    let out = reclaim_with_probes(
+        &s.fx.repos_root,
+        &FreshProbes {
+            launched_from: &[],
+            keep_list: &KeepList::default,
+            agent_state: &no_agents,
+            // Reads 1 and 2 are the survey's and the re-check's.
+            in_use_now: &|| {
+                reads.set(reads.get() + 1);
+                Some(if reads.get() <= 2 {
                     gone.clone()
                 } else {
                     back.clone()

@@ -14,7 +14,8 @@
 //! `origin/main`, and only a fetch puts it where the gate can see it.
 //!
 //! What: one bounded `git fetch --prune origin` per repository, run ONCE per
-//! sweep before anything is classified.
+//! destructive sweep before anything is classified. A report-only pass does not
+//! fetch, so it mutates no refs.
 //!
 //! **A failed refresh advances nothing.** Every failure arm returns `Err` and
 //! leaves the existing refs exactly as they were, which leaves gate 6 counting
@@ -26,8 +27,9 @@
 //! in `worktree_safety_tests`.
 
 use std::path::Path;
-use std::process::Stdio;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use crate::core::bounded_proc::{BoundedError, run_bounded};
 
 use super::worktree_safety::git_command;
 
@@ -42,74 +44,52 @@ use super::worktree_safety::git_command;
 /// operator's patience.
 pub(crate) const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How often a killed or exited child is re-checked.
-const POLL_INTERVAL: Duration = Duration::from_millis(25);
-
 /// Update `refs/remotes/origin/*` for the repository `dir` belongs to (#7889).
 ///
 /// Why: see this module's doc. Gate 6's landing bases are only as fresh as the
 /// last fetch, and nothing else in the reclaim path performs one.
 /// What: `git fetch --prune --quiet origin` through
 /// [`git_command`](super::worktree_safety::git_command), so no ambient
-/// `GIT_DIR` can aim it at another repository, bounded by [`FETCH_TIMEOUT`].
+/// `GIT_DIR` can aim it at another repository, bounded by [`FETCH_TIMEOUT`]
+/// through [`run_bounded`] — #7965's single bounded-child implementation, which
+/// spawns the fetch in its own process group, drains both pipes, and kills the
+/// GROUP on expiry so the transport helpers `git fetch` spawns die with it.
 /// `Ok(())` only on a zero exit; every other outcome — spawn failure, non-zero
-/// exit, timeout — is an `Err` carrying git's own first stderr line.
+/// exit, timeout, an unanswerable wait — is an `Err` naming the command and
+/// carrying git's own first stderr line.
 ///
 /// Read-only with respect to the working tree: `fetch` writes remote-tracking
 /// refs and objects, and touches no file the worktree's dirty check reads. It
 /// can therefore never turn a dirty tree into a clean one.
 /// Test: `a_refresh_updates_the_stale_landing_ref`,
-/// `a_refresh_against_a_missing_remote_fails_without_touching_the_refs`.
+/// `a_refresh_against_a_missing_remote_fails_without_touching_the_refs`; the
+/// group kill is `run_bounded_kills_the_whole_process_group`.
 pub(crate) fn refresh_landing_refs(dir: &Path) -> Result<(), String> {
     let mut cmd = git_command(dir, &["fetch", "--prune", "--quiet", "origin"]);
-    let mut child = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("`git fetch --prune origin` could not be run: {e}"))?;
-    let deadline = Instant::now() + FETCH_TIMEOUT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => return Ok(()),
-            Ok(Some(status)) => {
-                let stderr = child
-                    .stderr
-                    .take()
-                    .map(|mut pipe| {
-                        use std::io::Read;
-                        let mut buf = String::new();
-                        let _ = pipe.read_to_string(&mut buf);
-                        buf
-                    })
-                    .unwrap_or_default();
-                let first = stderr
-                    .lines()
-                    .next()
-                    .unwrap_or("no stderr")
-                    .trim()
-                    .to_string();
-                return Err(format!(
-                    "`git fetch --prune origin` failed ({status}): {first}"
-                ));
-            }
-            Ok(None) if Instant::now() >= deadline => {
-                // The fetch is optional; the sweep behind it is not. Kill it and
-                // report, rather than letting it hold the command open (#7884).
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!(
-                    "`git fetch --prune origin` did not finish within {}s and was killed",
-                    FETCH_TIMEOUT.as_secs()
-                ));
-            }
-            Ok(None) => std::thread::sleep(POLL_INTERVAL),
-            Err(e) => {
-                return Err(format!(
-                    "`git fetch --prune origin` could not be waited on: {e}"
-                ));
-            }
+    // A background fetch must never inherit a terminal to prompt on.
+    cmd.stdin(std::process::Stdio::null());
+    match run_bounded(cmd, FETCH_TIMEOUT) {
+        Ok(out) if out.status.success() => Ok(()),
+        Ok(out) => {
+            let first = out
+                .stderr
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+                .unwrap_or("no stderr");
+            Err(format!(
+                "`git fetch --prune origin` failed ({}): {first}",
+                out.status
+            ))
         }
+        // The fetch is optional; the sweep behind it is not. `run_bounded` has
+        // already killed the group by the time a timeout reaches here (#7884).
+        Err(BoundedError::TimedOut) => Err(format!(
+            "`git fetch --prune origin` did not finish within {}s and its process group was \
+             killed",
+            FETCH_TIMEOUT.as_secs()
+        )),
+        Err(e) => Err(format!("`git fetch --prune origin` {e}")),
     }
 }
 

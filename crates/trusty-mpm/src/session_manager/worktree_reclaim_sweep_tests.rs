@@ -56,6 +56,75 @@ fn no_keeps() -> KeepList {
     KeepList::default()
 }
 
+/// 🔴 #7652 critic round: an UNATTRIBUTED tree nested under a live foreign
+/// session's project-root claim is refused by the survey's classification AND
+/// by the pre-delete re-check, for every spelling of "the sentinel names
+/// nobody".
+///
+/// Why: #7652 let gate 2 permit a foreign project-root claim over a nested tree
+/// because the sentinel attributes the tree instead. An absent, empty, garbage
+/// or unreadable sentinel attributes nothing, so the live claim is the only
+/// ownership evidence left. Fails on `e21a6ba0b`, where every row classifies
+/// `Reclaimable` and the re-check agrees.
+#[test]
+fn worktree_7652_an_unattributed_tree_under_a_live_foreign_claim_is_refused() {
+    use crate::session_manager::decommission::WORKTREE_SENTINEL_FILE;
+    use crate::session_manager::worktree_reclaim_claim::ClaimState;
+    use crate::session_manager::worktree_registry::Admission;
+
+    let fx = GitWorktreeFixture::new();
+    let claims = LiveClaims {
+        claims: vec![WorkspaceClaim::with_liveness(
+            "tm-project-root-7652",
+            &fx.repo,
+            ClaimLiveness::Live,
+        )],
+        ..LiveClaims::default()
+    };
+    let valid = crate::session_manager::worktree_ownership::sentinel_payload_bytes(
+        crate::session_manager::record::ManagedSessionId::new(),
+    );
+    // (label, sentinel bytes, deny read access)
+    let rows: [(&str, Option<Vec<u8>>, bool); 4] = [
+        ("absent", None, false),
+        ("empty", Some(Vec::new()), false),
+        ("garbage", Some(b"{not json".to_vec()), false),
+        ("unreadable", Some(valid), true),
+    ];
+    for (label, bytes, deny) in rows {
+        let wt = fx.add_worktree(&format!("unattributed-{label}-7652"));
+        land(&wt);
+        let sentinel = wt.join(WORKTREE_SENTINEL_FILE);
+        if let Some(bytes) = bytes {
+            std::fs::write(&sentinel, bytes).expect("write sentinel");
+        }
+        let _restore =
+            deny.then(|| crate::session_manager::worktree_git_fixture::deny_all(&sentinel));
+        let claim = claims.claim_state(&wt);
+        assert!(
+            matches!(claim, ClaimState::ForeignNested { .. }),
+            "{label}: premise — gate 2 sees a foreign project-root claim: {claim:?}"
+        );
+        let v = classify(
+            &wt,
+            Admission::Admitted,
+            &claim,
+            &merged(7652),
+            &inspect_dirt,
+            &no_agents,
+            &claims.owners,
+            &no_keeps(),
+        );
+        assert!(!v.is_reclaimable(), "{label}: survey classified {v:?}");
+        let reason =
+            recheck_before_delete(&wt, &no_keeps(), Some(&claims), &merged(7652), &no_agents)
+                .unwrap_or_else(|| {
+                    panic!("{label}: the pre-delete re-check permitted the removal")
+                });
+        assert!(reason.contains("nothing attributes"), "{label}: {reason}");
+    }
+}
+
 /// A delegation registry that has never heard of any agent (#5661).
 ///
 /// The REFUSING answer, used as the default here for the same reason

@@ -45,7 +45,7 @@ use super::worktree_reclaim::{
     AgentStateProbe, BranchPrState, KeepList, LiveClaims, NOT_INSPECTED_REASON, PrIndex,
     ReclaimCandidate, ReclaimGate, ReclaimMode, ReclaimOutcome, ReclaimSurvey, ReclaimVerdict,
     agent_ownership_blocks, classify, measure_bytes_until, session_ownership_blocks,
-    tm_provisioned,
+    tm_provisioned, unattributed_nested_blocks,
 };
 // #7504: the worktree-launched-process gate, applied per candidate immediately
 // before its deletion alongside the five `recheck_before_delete` re-asks.
@@ -157,9 +157,6 @@ pub(crate) fn survey_with_index(
     adopted: &[PathBuf],
 ) -> ReclaimSurvey {
     let mut indexes: BTreeMap<PathBuf, PrIndex> = BTreeMap::new();
-    // #7889: which repositories have already had their landing refs refreshed
-    // this sweep. One fetch per repository, never one per worktree.
-    let mut refreshed: BTreeSet<PathBuf> = BTreeSet::new();
     let mut candidates = Vec::new();
     for scanned in scan_registered_worktrees(repos_root, adopted) {
         if budget.classify.is_some_and(|d| Instant::now() >= d) {
@@ -175,25 +172,9 @@ pub(crate) fn survey_with_index(
             });
             continue;
         }
-        // #7889: gate 6 reads `refs/remotes/*/main` to decide what has already
-        // landed, and nothing else in this path updates it — so a branch whose
-        // pull request squash-merged on GitHub still counted its commits as
-        // unpushed. Refreshed once per repository, and only on the same
-        // `per_branch_fallback` opt-in every other network call here rides, so
-        // the `tm doctor` probe's three-second budget pays for none of it.
-        // A FAILED refresh changes nothing: the stale refs stand, which counts
-        // MORE unpushed commits, which refuses.
-        if per_branch_fallback
-            && refreshed.insert(scanned.registry_root.clone())
-            && let Err(e) = refresh_landing_refs(&scanned.registry_root)
-        {
-            tracing::warn!(
-                root = %scanned.registry_root.display(),
-                "worktree-reclaim: could not refresh this repository's landing refs, so \
-                 gate 6 judges every candidate under it against possibly stale \
-                 remote-tracking refs — the refusing direction (#7889): {e}"
-            );
-        }
+        // #7889: the landing-ref refresh gate 6 depends on runs in
+        // `reclaim_with_probes`, on the destructive path only — a survey never
+        // mutates refs (#7652 critic round).
         let index = indexes
             .entry(scanned.registry_root.clone())
             .or_insert_with(|| index_for(&scanned.registry_root));
@@ -382,7 +363,8 @@ pub(crate) fn recheck_before_delete(
     // #6806: the same owner-aware resolution the survey's gate 2 applies, so
     // the re-check can neither refuse a candidate gate 2 admitted nor admit one
     // it refused.
-    if let Some(reason) = in_use_now.claim_state(path).refusal(true) {
+    let claim_now = in_use_now.claim_state(path);
+    if let Some(reason) = claim_now.refusal(true) {
         return Some(reason);
     }
     if let Err(reason) = git_still_permits(path) {
@@ -402,6 +384,10 @@ pub(crate) fn recheck_before_delete(
     // resumed in this tree during a minutes-long survey is invisible to the
     // survey's verdict, exactly as a freshly dispatched agent is.
     if let Some(reason) = session_ownership_blocks(path, &in_use_now.owners) {
+        return Some(reason);
+    }
+    // #7652 critic round: gate 4c, against the same fresh claim.
+    if let Some(reason) = unattributed_nested_blocks(path, &claim_now) {
         return Some(reason);
     }
     if !matches!(pr_now, BranchPrState::Merged { .. }) {
@@ -461,11 +447,67 @@ pub(crate) struct FreshProbes<'a> {
     pub launched_from: &'a [PathBuf],
 }
 
+/// Gates 2, 4b and 4c re-asked against a claim set read immediately before the
+/// removal (#7652 critic round).
+///
+/// Why: [`recheck_before_delete`] reads the claims before git, the harness-lock
+/// probe and [`inspect_dirt`], which takes seconds on a large tree, and
+/// `git worktree remove --force` follows. The three gates that read the claim
+/// set are the ones a session arriving in that window changes.
+/// What: `None` (the set could not be read) refuses; otherwise the fresh
+/// claim's gate-2 refusal, then [`session_ownership_blocks`], then
+/// [`unattributed_nested_blocks`].
+/// Test: `worktree_7652_an_owner_back_after_the_dirt_check_is_refused`.
+fn last_moment_refusal(path: &Path, claims: Option<&LiveClaims>) -> Option<String> {
+    let Some(claims) = claims else {
+        return Some(
+            "the live session set could not be re-read immediately before removal — refusing \
+             to delete"
+                .into(),
+        );
+    };
+    let claim = claims.claim_state(path);
+    claim
+        .refusal(true)
+        .or_else(|| session_ownership_blocks(path, &claims.owners))
+        .or_else(|| unattributed_nested_blocks(path, &claim))
+}
+
+/// Refresh the landing refs of every repository a destructive sweep will judge,
+/// once each (#7889).
+///
+/// Why: gate 6 reads `refs/remotes/*/main` to decide what has already landed,
+/// and nothing else in this path updates it — so a branch whose pull request
+/// squash-merged on GitHub still counted its commits as unpushed. Only the
+/// destructive path calls this, so a report mutates no refs (#7652 critic
+/// round). A FAILED refresh leaves the stale refs, which count MORE unpushed
+/// commits, which refuses.
+/// Test: `a_refresh_updates_the_stale_landing_ref`,
+/// `a_refresh_against_a_missing_remote_fails_without_touching_the_refs`.
+fn refresh_repositories(repos_root: &Path, adopted: &[PathBuf]) {
+    let roots: BTreeSet<PathBuf> = scan_registered_worktrees(repos_root, adopted)
+        .into_iter()
+        .map(|scanned| scanned.registry_root)
+        .collect();
+    for root in roots {
+        if let Err(e) = refresh_landing_refs(&root) {
+            tracing::warn!(
+                root = %root.display(),
+                "worktree-reclaim: could not refresh this repository's landing refs, so \
+                 gate 6 judges every candidate under it against possibly stale \
+                 remote-tracking refs — the refusing direction (#7889): {e}"
+            );
+        }
+    }
+}
+
 /// Survey, and in [`ReclaimMode::Remove`] reclaim, merged-PR worktrees (#2919).
 ///
 /// Why: see this module's staleness rule. The survey establishes candidates;
 /// nothing it computed is trusted at deletion time.
-/// What: surveys with an initial snapshot, then — in `Remove` mode only —
+/// What: in `Remove` mode refreshes each repository's landing refs first
+/// ([`refresh_repositories`]). Surveys with an initial snapshot, then — in
+/// `Remove` mode only —
 /// re-reads liveness and the pull-request index and re-runs
 /// [`recheck_before_delete`] for each candidate immediately before that
 /// candidate's own deletion. Deletion itself delegates to
@@ -498,6 +540,12 @@ pub(crate) fn reclaim_with_probes(
             (LiveClaims::default(), ReclaimMode::Report)
         }
     };
+    // #7889: only a DESTRUCTIVE pass refreshes the landing refs. Read after
+    // #7965's demotion rather than before it, so a pass demoted to `Report` by
+    // an unanswerable claim probe mutates no refs either.
+    if mode == ReclaimMode::Remove {
+        refresh_repositories(repos_root, adopted);
+    }
     let survey = survey_with_index(
         repos_root,
         &initial,
@@ -548,10 +596,10 @@ pub(crate) fn reclaim_with_probes(
         // The pull-request lookups go FIRST because they are the slow part —
         // measured 322-366 ms for a per-branch call and 1220 ms for the bulk
         // one, against a 10 s ceiling. Reading liveness before them would date
-        // the liveness snapshot by that whole interval for no reason: a session
-        // attaching during the network call would be invisible. Ordering the
-        // network work first and the liveness read last makes the snapshot
-        // single-digit milliseconds old at the moment it is judged (#2919).
+        // the re-check's snapshot by that whole interval for no reason (#2919).
+        // That snapshot is still read BEFORE the re-check's git, harness-lock
+        // and dirt probes — seconds on a large tree — so the removal below
+        // re-reads it once more, after all of them (#7652 critic round).
         let index = fresh_indexes
             .entry(candidate.registry_root.clone())
             .or_insert_with(|| (probes.index_for)(&candidate.registry_root));
@@ -589,13 +637,31 @@ pub(crate) fn reclaim_with_probes(
         // #7885: the route names itself in the audit line the remover emits
         // before it deletes — an operator reading the log after the fact could
         // not otherwise tell this pass from the orphan sweep.
-        let outcome = super::decommission::remove_session_worktree(
+        // #7652 critic round: the guard runs after that line, immediately before
+        // `git worktree remove --force`, against a claim set read right then.
+        let late_refusal: std::cell::Cell<Option<String>> = std::cell::Cell::new(None);
+        let outcome = super::decommission::remove_session_worktree_guarded(
             &path,
             &format!(
                 "merged-PR reclaim: every gate passed and the pre-delete re-check agreed \
                  ({pr_now:?})"
             ),
+            &|| {
+                let refusal = last_moment_refusal(&path, (probes.in_use_now)().as_ref());
+                late_refusal.set(refusal.clone());
+                refusal
+            },
         );
+        if let Some(reason) = late_refusal.take() {
+            tracing::warn!(
+                path = %path.display(),
+                "worktree-reclaim: the last claim re-read refused a surveyed candidate — \
+                 {reason} (#7652)"
+            );
+            out.refused_at_recheck
+                .push(format!("{}: {reason}", path.display()));
+            continue;
+        }
         if outcome.removed() && !path.exists() {
             // #7504: the AUDIT LINE. It carries path, branch, pull request and
             // bytes freed because the reclaim is now automatic: nobody typed the
