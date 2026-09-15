@@ -72,15 +72,18 @@
 //! - A delete verb hidden inside a file this module never opens is not
 //!   detected: one segment WRITES a script containing `rm -rf /` (e.g.
 //!   `python3 -c "open('/tmp/x.sh','w').write('rm -rf /')"`, or the same
-//!   payload as a heredoc body) and a later segment merely EXECUTES that file
-//!   (`bash /tmp/x.sh`) — neither segment's own tokens carry a delete verb, so
-//!   per-segment scanning ([`split_shell_segments`]) finds nothing to deny.
-//!   Pre-existing today via the one-line form above; accepted rather than
-//!   closed (owner ruling, #7190) — closing it needs cross-segment tracking
-//!   of "this path was just written, and a later segment executes it", which
-//!   this module does not attempt. A heredoc-body allowlist redesign
-//!   considered for #7190 does not add this class, only removes an
-//!   incidental catch a masked multi-line body happened to trigger.
+//!   payload as a quoted heredoc body) and a later segment merely EXECUTES
+//!   that file (`bash /tmp/x.sh`) — neither segment's own tokens carry a
+//!   delete verb, so per-segment scanning ([`split_shell_segments`]) finds
+//!   nothing to deny. This is #7190 class 3, and it is the ONLY accepted
+//!   residual for a here-document body: closing it needs cross-segment
+//!   tracking of "this path was just written, and a later segment executes
+//!   it", which this module does not attempt.
+//!   #7190 class 1 is NOT a residual and stays denied: a quoted body captured
+//!   by `$( )`, backticks, `<( )` or `>( )` is shell text again once captured
+//!   (`eval "$(cat <<'PY' … PY)"`, `source <(cat <<'PY' … PY)`), so
+//!   [`strip_quoted_heredoc_bodies`] keeps it and its deletion is refused.
+//!   See #7190.
 //!
 //! Test: `denies_filesystem_root_deletion`, `denies_repo_root_deletion`,
 //! `denies_dot_git_deletion`, `denies_worktree_root_deletion`,
@@ -174,9 +177,10 @@ fn evaluate_destructive_delete_command_in(
     let mut effective_cwd = cwd.to_path_buf();
     // #7190: a quoted here-document body is stdin data the shell neither
     // expands nor runs, so its Python/SQL/prose lines are not segments of this
-    // command. An UNQUOTED body and a body handed to a shell both stay in
-    // place — `cat <<EOF` still substitutes `$(rm -rf /)`, and `bash <<'SH'`
-    // still runs its own source.
+    // command. An UNQUOTED body, a body handed to a shell, and a body inside a
+    // `$( )`/backtick/`<( )`/`>( )` capture all stay in place — `cat <<EOF`
+    // still substitutes `$(rm -rf /)`, `bash <<'SH'` still runs its own source,
+    // and `eval "$(cat <<'PY' … PY)"` runs the captured body. See #7190.
     let command = strip_quoted_heredoc_bodies(command);
     for segment in split_shell_segments(&command) {
         let trimmed = segment.trim();

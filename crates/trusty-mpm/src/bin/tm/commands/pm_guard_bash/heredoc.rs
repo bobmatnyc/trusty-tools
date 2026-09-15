@@ -73,6 +73,9 @@ impl HeredocBodies {
     /// #6946: each body also contributes a `frames` entry, unless its operator
     /// line names a shell ([`line_runs_a_shell`]) — see
     /// [`HeredocBodies::suppresses_separator`].
+    ///
+    /// #7190 class 1: a quoted data body joins `literal_spans` only when no
+    /// capture is open through its operator line ([`names_a_capture`]).
     /// Test: `heredoc_bodies_cover_a_quoted_delimiter_body`,
     /// `heredoc_bodies_claim_nothing_when_unterminated`,
     /// `heredoc_bodies_span_two_heredocs_on_one_line`,
@@ -94,6 +97,12 @@ impl HeredocBodies {
             let operator_line = &command[start..end];
             let delimiters = delimiters_on(operator_line, start, &quotes);
             let framing = !delimiters.is_empty() && !line_runs_a_shell(operator_line);
+            // #7190 class 1: a capture opened anywhere up to the end of this
+            // line may enclose the bodies it opens. Earlier bodies are blanked
+            // first, because a body cannot open a capture around a later
+            // operator.
+            let captured =
+                !delimiters.is_empty() && names_a_capture(&blank_spans(command, &spans)[..end]);
             line += 1;
             for delimiter in delimiters {
                 let Some(body) = body_span(command, &lines, line, &delimiter) else {
@@ -106,9 +115,10 @@ impl HeredocBodies {
                         // shell is data, so no word in it is a path the
                         // command opens.
                         data_spans.push(body.span);
-                        if delimiter.quoted {
+                        if delimiter.quoted && !captured {
                             // #7190: nor can anything in it RUN — a quoted
-                            // delimiter suppresses even command substitution.
+                            // delimiter suppresses even command substitution,
+                            // and no capture hands the body back to the shell.
                             literal_spans.push(body.span);
                         }
                     }
@@ -224,14 +234,30 @@ pub(crate) fn split_heredoc_bodies(command: &str) -> (String, Vec<String>) {
 /// fail-closed arm), and the whole script had to be rewritten.
 /// What: blanks only [`HeredocBodies::literal_spans`] — a body whose delimiter
 /// carried `'`, `"` or `\`, AND whose operator line does not hand it to a shell
-/// ([`line_runs_a_shell`]). An UNQUOTED `<<EOF` body keeps every byte, because
+/// ([`line_runs_a_shell`]), AND that no command or process substitution
+/// encloses ([`names_a_capture`]) — a captured body is shell text again, and
+/// `eval`, `source`, `.` or any other consumer can run it (#7190 class 1).
+/// An UNQUOTED `<<EOF` body keeps every byte, because
 /// `$(rm -rf /)` inside one really does run; so does a `bash <<'SH'` body,
 /// because the shell reads it as source. A command with no such body is
 /// returned unchanged.
+///
+/// Invariant: only the `!quotes_balanced` arm reaches [`quoted_body_spans`].
+/// [`HeredocBodies::scan`] reports `quotes_balanced: false` from exactly one
+/// exit — its first return, taken before any line is read — so `false` means
+/// "the quote map could not be trusted, and nothing was parsed". That is the
+/// one state in which the fallback's per-line quote tracking can see a body
+/// the primary scan could not. Every other empty answer came from a
+/// trustworthy quote map: there is no quoted data body, or the scan abandoned
+/// on an unterminated delimiter, or every body sits inside a capture. None of
+/// those may be blanked, so a second scan over them could only remove a
+/// denial.
 /// Test: `strips_only_a_quoted_data_heredoc_body`,
 /// `guard_7190_quoted_heredoc_python_body`,
 /// `guard_7190_a_quoted_operator_opens_no_heredoc_body`,
-/// `guard_7190_an_abandoned_heredoc_scan_claims_no_body`.
+/// `guard_7190_an_abandoned_heredoc_scan_claims_no_body`,
+/// `guard_7190_capture_reexec_eval`, `guard_7190_capture_reexec_source`,
+/// `guard_7190_capture_reexec_dot`, `guard_7190_capture_reexec_unenumerated`.
 pub(crate) fn strip_quoted_heredoc_bodies(command: &str) -> String {
     let bodies = HeredocBodies::scan(command);
     let spans = if !bodies.literal_spans.is_empty() {
@@ -274,7 +300,8 @@ pub(crate) fn strip_quoted_heredoc_bodies(command: &str) -> String {
 /// [`QuoteScan`] over that copy gives each later line the quote state the SHELL
 /// sees — the body's own quotes are gone, and a `<<` still inside a string is
 /// still rejected. Per line, the first `<<`/`<<-` followed by a quoted word, at
-/// an unquoted offset, on a line that does not hand the body to a shell. The
+/// an unquoted offset, on a line that does not hand the body to a shell, with
+/// no capture open through the end of that line ([`names_a_capture`]). The
 /// body runs to the next line consisting solely of that word; a delimiter with
 /// no such line claims NOTHING. Only one body per line is claimed — two on one
 /// line is the primary scan's business, and it has the quote state to do it
@@ -283,7 +310,8 @@ pub(crate) fn strip_quoted_heredoc_bodies(command: &str) -> String {
 /// `strips_a_quoted_body_whose_own_quotes_do_not_balance`,
 /// `guard_7190_a_quoted_operator_opens_no_heredoc_body`,
 /// `guard_7190_a_body_after_a_closed_quoted_word_is_still_stripped`,
-/// `guard_7190_quoted_heredoc_python_body`.
+/// `guard_7190_quoted_heredoc_python_body`,
+/// `guard_7190_capture_reexec_eval`, `guard_7190_capture_reexec_source`.
 fn quoted_body_spans(command: &str) -> Vec<(usize, usize)> {
     let lines = line_spans(command);
     let mut spans = Vec::new();
@@ -300,7 +328,11 @@ fn quoted_body_spans(command: &str) -> Vec<(usize, usize)> {
         // #7190 (review round 2): the operator must be live shell syntax. A
         // `<<'PY'` inside a quoted string is argument text, and the body it
         // appears to open is the caller's real command.
-        if !quotes.is_unquoted(start + offset) || line_runs_a_shell(text) {
+        // #7190 class 1: nor may a capture enclose it — see `names_a_capture`.
+        if !quotes.is_unquoted(start + offset)
+            || line_runs_a_shell(text)
+            || names_a_capture(&working[..end])
+        {
             continue;
         }
         let Some(body) = body_span(&working, &lines, line, &delimiter) else {
@@ -364,6 +396,24 @@ fn quoted_delimiter_on(line: &str) -> Option<(usize, Delimiter)> {
         ));
     }
     None
+}
+
+/// Whether `text` opens a command or process substitution anywhere (#7190
+/// class 1).
+///
+/// Why: a capture turns a quoted body back into shell text. `eval "$(cat
+/// <<'PY' … PY)"` runs the body, and what re-executes captured text is
+/// open-ended: `eval`, `source`, `.`, `trap`, a bare `$x`, a shell under any
+/// spelling. Keying on the capture closes the class without naming a verb.
+/// What: `true` when `text` contains `$(`, a backtick, `<(` or `>(`, read with
+/// no quote state and no parenthesis counting. Quoting cannot hide an opener,
+/// because `"$(…)"` still substitutes; a stray `)` cannot close one, because
+/// nothing is counted. A false positive — `'$('` in a string, `$((1+1))` —
+/// only keeps a body un-blanked, which is the pre-#7190 deny.
+/// Test: `guard_7190_capture_reexec_eval`, `guard_7190_capture_reexec_source`,
+/// `guard_7190_capture_reexec_dot`, `guard_7190_capture_reexec_unenumerated`.
+fn names_a_capture(text: &str) -> bool {
+    text.contains("$(") || text.contains('`') || text.contains("<(") || text.contains(">(")
 }
 
 /// `command` with each of `spans` replaced by spaces, newlines kept.

@@ -481,3 +481,105 @@ fn guard_7190_a_body_after_a_closed_quoted_word_is_still_stripped() {
         );
     }
 }
+
+/// Assert every row refuses at the deletion rule: each is a quoted body that a
+/// capture turns back into shell text (#7190 class 1).
+fn capture_reexec_rows_refuse(rows: &[&str]) {
+    let allowed: Vec<&str> = rows
+        .iter()
+        .copied()
+        .filter(|command| evaluate_destructive_delete_command(command, cwd()).is_none())
+        .collect();
+    assert!(
+        allowed.is_empty(),
+        "a captured here-document body is shell text again, so its deletion must refuse; \
+         allowed: {allowed:?}"
+    );
+}
+
+/// #7190 class 1: a quoted body captured by `$( )` or backticks and handed to
+/// `eval` runs.
+///
+/// Why: a quoted delimiter stops the shell expanding the BODY, but a command
+/// substitution turns `cat`'s output — the body — back into shell text, and
+/// `eval` runs it. `origin/main` refused these because the body tokenized to
+/// `rm -rf /`; blanking the body allowed them (code-critic BLOCK; owner ruling
+/// on #7190: class 1 stays denied).
+/// What: the terminator on its own line and glued to `)`, a capture opened on
+/// the line before the operator, a backtick capture, and a body whose
+/// apostrophe sends the stripper down its fallback scan — each must refuse.
+/// A DOUBLE-quoted capture (`eval "$(cat <<'PY' … PY)"`) is pinned only as
+/// "the stripper blanks nothing": its `<<` sits inside a string, so no body is
+/// claimed, and the deletion rule reads the whole `"$(…)"` as one argument.
+/// That allow predates this branch (tm 1.5.37 allows it too) and is not a
+/// here-document blanking defect.
+/// Test: itself.
+#[test]
+fn guard_7190_capture_reexec_eval() {
+    capture_reexec_rows_refuse(&[
+        "eval $(cat <<'PY'\nrm -rf /\nPY\n)",
+        "eval $(cat <<'PY'\nrm -rf /\nPY)",
+        "eval $(\ncat <<'PY'\nrm -rf /\nPY\n)",
+        "eval `cat <<'PY'\nrm -rf /\nPY\n`",
+        "eval $(cat <<'PY'\n# the agent's step\nrm -rf /\nPY\n)",
+    ]);
+    for command in [
+        "eval \"$(cat <<'PY'\nrm -rf /\nPY\n)\"",
+        "eval \"$(cat <<'PY'\n# the agent's step\nrm -rf /\nPY\n)\"",
+    ] {
+        assert_eq!(
+            strip_quoted_heredoc_bodies(command),
+            command,
+            "a double-quoted capture must keep every byte: {command:?}"
+        );
+    }
+}
+
+/// #7190 class 1: a quoted body captured by `<( )` and handed to `source`.
+///
+/// Why: `source` reads the process substitution's output — the body — as shell
+/// source in the current shell.
+/// What: both terminator spellings, and a double-quoted delimiter whose body's
+/// apostrophe unbalances the command, so the fallback scan is the one asked.
+/// Test: itself.
+#[test]
+fn guard_7190_capture_reexec_source() {
+    capture_reexec_rows_refuse(&[
+        "source <(cat <<'PY'\nrm -rf /\nPY\n)",
+        "source <(cat <<'PY'\nrm -rf /\nPY)",
+        "source <(cat <<\"PY\"\n# don't\nrm -rf /\nPY\n)",
+    ]);
+}
+
+/// #7190 class 1: a quoted body captured by `<( )` and handed to `.`.
+///
+/// Why: `.` is `source` under its POSIX name, and a redirect from a process
+/// substitution reaches it the same way an operand does.
+/// What: both terminator spellings, plus `. /dev/stdin < <( … )`.
+/// Test: itself.
+#[test]
+fn guard_7190_capture_reexec_dot() {
+    capture_reexec_rows_refuse(&[
+        ". <(cat <<'PY'\nrm -rf /\nPY\n)",
+        ". <(cat <<'PY'\nrm -rf /\nPY)",
+        ". /dev/stdin < <(cat <<'PY'\nrm -rf /\nPY\n)",
+    ]);
+}
+
+/// #7190 class 1 is closed by the CAPTURE, not by naming what re-executes it.
+///
+/// Why: class 2 of #7190 was bypassed by a verb nobody listed. Any rule keyed
+/// on `eval`/`source`/`.` leaves every other way to run captured text open.
+/// What: three re-execution shapes that name none of those verbs — word-split
+/// execution of a captured variable (no verb at all), a backtick capture run
+/// as the command itself, and an output process substitution whose shell is
+/// spelled with quotes, so no operator-line token reads as a shell name.
+/// Test: itself.
+#[test]
+fn guard_7190_capture_reexec_unenumerated() {
+    capture_reexec_rows_refuse(&[
+        "x=$(cat <<'PY'\nrm -rf /\nPY\n)\n$x",
+        "`cat <<'PY'\nrm -rf /\nPY\n`",
+        "cat <<'PY' > >(\"ba\"sh)\nrm -rf /\nPY",
+    ]);
+}
