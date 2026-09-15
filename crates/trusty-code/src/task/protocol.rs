@@ -83,12 +83,45 @@ pub fn register(
     agents_dir: PathBuf,
     workstreams: SharedWorkstreamStore,
 ) {
+    register_with_permissions(router, registry, binding, agents_dir, workstreams, None);
+}
+
+/// [`register`] with the daemon's permission broker (#7948).
+///
+/// Why: `crate::serve::build_router` owns the one broker
+/// `session.permission.respond` answers into; every other caller (tests)
+/// keeps [`register`], whose runs are headless.
+/// What: `permissions: None` makes every `task.run` headless — an `ask`
+/// resolves at once per `TCODE_PERMISSION_MODE`. The mode is read from the
+/// daemon's environment, never from the request: the caller asking to run a
+/// task must not be able to widen its own permissions.
+/// Test: `serve::http_tests::*` (through `build_router`),
+/// `permissions::tests::protocol_tests::respond_resolves_a_pending_request`.
+pub fn register_with_permissions(
+    router: &mut Router,
+    registry: Arc<SessionRegistry>,
+    binding: ProjectBinding,
+    agents_dir: PathBuf,
+    workstreams: SharedWorkstreamStore,
+    permissions: Option<Arc<crate::permissions::PermissionBroker>>,
+) {
     router.register("task.run", move |params: Value, _ctx: ConnectionContext| {
         let registry = Arc::clone(&registry);
         let binding = binding.clone();
         let agents_dir = agents_dir.clone();
         let workstreams = workstreams.clone();
-        async move { task_run(registry, params, binding, agents_dir, workstreams).await }
+        let permissions = permissions.clone();
+        async move {
+            task_run_with_permissions(
+                registry,
+                params,
+                binding,
+                agents_dir,
+                workstreams,
+                permissions,
+            )
+            .await
+        }
     });
 }
 
@@ -222,12 +255,29 @@ struct TaskRunRequestParams {
 /// `task::protocol::tests::task_run_rejects_invalid_project`,
 /// `task::protocol::tests::task_run_session_id_with_matching_project_succeeds`,
 /// `task::protocol::tests::task_run_session_id_with_mismatched_project_is_rejected`.
+// #7948: production registers through `register_with_permissions`; this
+// headless five-argument form is what the unit tests drive.
+#[cfg(test)]
 async fn task_run(
     registry: Arc<SessionRegistry>,
     params: Value,
     binding: ProjectBinding,
     agents_dir: PathBuf,
     workstreams: SharedWorkstreamStore,
+) -> Result<Value, RpcError> {
+    task_run_with_permissions(registry, params, binding, agents_dir, workstreams, None).await
+}
+
+/// [`task_run`] with the daemon's permission broker (#7948); `None` runs
+/// headless. Called by [`register_with_permissions`].
+/// Test: `task::protocol::tests::*` (through [`task_run`]).
+async fn task_run_with_permissions(
+    registry: Arc<SessionRegistry>,
+    params: Value,
+    binding: ProjectBinding,
+    agents_dir: PathBuf,
+    workstreams: SharedWorkstreamStore,
+    permissions: Option<Arc<crate::permissions::PermissionBroker>>,
 ) -> Result<Value, RpcError> {
     let p: TaskRunRequestParams = serde_json::from_value(params)
         .map_err(|e| RpcError::invalid_params(format!("task.run: {e}")))?;
@@ -328,6 +378,11 @@ async fn task_run(
         deadline_secs: p.deadline_secs,
         // #3902: no test-only override for this production call site.
         telemetry_data_dir: None,
+        // #7948: an `ask` suspends against the daemon's broker when one is
+        // registered. The mode comes from the daemon's environment, never the
+        // request, so a caller cannot widen its own permissions.
+        permission_broker: permissions,
+        permission_mode: crate::permissions::PermissionMode::resolve(None),
     };
     spawn_task_run(registry, llm, task_params)?;
 

@@ -389,11 +389,17 @@ fn stop_response_with_model(text: &str, model: &str) -> Value {
 /// need both on disk.
 /// What: Writes both `.md` agents (engineer pinned to `engineer_model`) and
 /// returns the tempdir.
+///
+/// #7948: the PM declares a `tcode_tools:` allowlist that deliberately OMITS
+/// `delegate_to_agent`, exactly as stock `pm.md` does, so every test below runs
+/// through the gate's allowlist branch rather than past it — see
+/// `pm_delegates_through_the_tcode_tools_allowlist`. The engineer declares none,
+/// so its own tool use is unrestricted.
 fn agents_dir(engineer_model: &str) -> TempDir {
     let tmp = tempfile::tempdir().expect("agents tempdir");
     std::fs::write(
         tmp.path().join("pm.md"),
-        "---\nname: pm\nmodel: openai/gpt-4o-mini\n---\n\nYou are the PM.\n",
+        "---\nname: pm\nmodel: openai/gpt-4o-mini\ntcode_tools: [read_file, bash, finish_task]\n---\n\nYou are the PM.\n",
     )
     .expect("write pm.md");
     std::fs::write(
@@ -412,6 +418,7 @@ fn agents_dir(engineer_model: &str) -> TempDir {
 /// (#1035); `None` routes the engineer via its own config model.
 fn params(agents: &TempDir, project: &TempDir, engineer_model: Option<&str>) -> RunTaskParams {
     RunTaskParams {
+        permission_mode: crate::permissions::PermissionMode::Default,
         agent: "pm".into(),
         task: "write hello.py".into(),
         project: project.path().to_path_buf(),
@@ -476,6 +483,57 @@ async fn end_to_end_pm_delegates_to_engineer() {
     assert!(
         roles.contains(&"python-engineer"),
         "transcript must have an engineer turn: {roles:?}"
+    );
+}
+
+/// (#7948 regression) The PM's delegation survives a `tcode_tools:` allowlist
+/// that never names `delegate_to_agent`, END TO END through `execute_run_task`.
+///
+/// Why: the gate's allowlist branch denies a tool the list omits, and the
+/// harness — not the agent's author — registers `delegate_to_agent`, so stock
+/// `pm.md` would have had its own delegation refused. Until this fixture
+/// declared an allowlist, no end-to-end test entered that branch at all; the
+/// exemption was pinned only by unit tests over `PermissionGate::evaluate`.
+/// What: assert the fixture premise (the allowlist exists and omits
+/// `delegate_to_agent`), then script a delegation and assert it DISPATCHED —
+/// an engineer turn in the transcript and the engineer's file on disk, neither
+/// of which a refused `delegate_to_agent` can produce.
+/// Test: this test.
+#[tokio::test]
+async fn pm_delegates_through_the_tcode_tools_allowlist() {
+    let agents = agents_dir("deepseek/deepseek-chat");
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    let pm = crate::agents::resolve_agent(agents.path(), "pm").expect("fixture pm.md loads");
+    let allowed = pm
+        .tools
+        .as_ref()
+        .and_then(|t| t.allowed.as_ref())
+        .expect("fixture premise: the PM must declare a tcode_tools allowlist");
+    assert!(
+        !allowed.iter().any(|t| t == "delegate_to_agent"),
+        "fixture premise: the allowlist must omit delegate_to_agent, got {allowed:?}"
+    );
+
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        delegate_response("create delegated.py"),
+        write_file_response("delegated.py", "print('dispatched')"),
+        stop_response("engineer: done"),
+        stop_response("pm: task complete"),
+    ]));
+
+    let report = execute_run_task(params(&agents, &project, None), llm).await;
+
+    let roles: Vec<&str> = report.transcript.iter().map(|t| t.role.as_str()).collect();
+    assert!(
+        roles.contains(&"python-engineer"),
+        "a refused delegate_to_agent never reaches the engineer; roles: {roles:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(project.path().join("delegated.py")).ok(),
+        Some("print('dispatched')".to_string()),
+        "the delegated engineer must have actually run; diff was: {}",
+        report.diff
     );
 }
 
@@ -643,6 +701,7 @@ async fn missing_agent_config_is_config_error() {
 
     let report = execute_run_task(
         RunTaskParams {
+            permission_mode: crate::permissions::PermissionMode::Default,
             agent: "totally-not-a-real-agent".into(),
             task: "anything".into(),
             project: project.path().to_path_buf(),
@@ -683,6 +742,7 @@ async fn missing_disk_pm_config_falls_back_to_embedded_pm() {
 
     let report = execute_run_task(
         RunTaskParams {
+            permission_mode: crate::permissions::PermissionMode::Default,
             agent: "pm".into(),
             task: "anything".into(),
             project: project.path().to_path_buf(),
@@ -1118,6 +1178,7 @@ async fn repeated_llm_errors_trigger_redelegation_cap_not_pm_turn_cap() {
 #[test]
 fn assemble_report_maps_turn_cap_exceeded_with_deliverable_to_partial() {
     let params = RunTaskParams {
+        permission_mode: crate::permissions::PermissionMode::Default,
         agent: "pm".into(),
         task: "write hello.py".into(),
         project: PathBuf::from("/tmp/does-not-matter"),
@@ -1191,6 +1252,7 @@ fn assemble_report_maps_turn_cap_exceeded_with_deliverable_to_partial() {
 #[test]
 fn assemble_report_maps_retry_exhausted_with_deliverable_to_partial() {
     let params = RunTaskParams {
+        permission_mode: crate::permissions::PermissionMode::Default,
         agent: "pm".into(),
         task: "write hello.py".into(),
         project: PathBuf::from("/tmp/does-not-matter"),
@@ -1268,6 +1330,7 @@ fn assemble_report_maps_retry_exhausted_with_deliverable_to_partial() {
 #[test]
 fn assemble_report_keeps_turn_cap_exceeded_with_no_deliverable_as_run_failure() {
     let params = RunTaskParams {
+        permission_mode: crate::permissions::PermissionMode::Default,
         agent: "pm".into(),
         task: "write hello.py".into(),
         project: PathBuf::from("/tmp/does-not-matter"),
@@ -1329,6 +1392,7 @@ fn assemble_report_keeps_turn_cap_exceeded_with_no_deliverable_as_run_failure() 
 #[test]
 fn assemble_report_maps_completed_engineer_with_deliverable_to_success() {
     let params = RunTaskParams {
+        permission_mode: crate::permissions::PermissionMode::Default,
         agent: "pm".into(),
         task: "write hello.py".into(),
         project: PathBuf::from("/tmp/does-not-matter"),
@@ -1392,6 +1456,7 @@ fn assemble_report_maps_completed_engineer_with_deliverable_to_success() {
 #[test]
 fn assemble_report_maps_completed_engineer_without_deliverable_to_no_changes() {
     let params = RunTaskParams {
+        permission_mode: crate::permissions::PermissionMode::Default,
         agent: "pm".into(),
         task: "analyze the repo".into(),
         project: PathBuf::from("/tmp/does-not-matter"),

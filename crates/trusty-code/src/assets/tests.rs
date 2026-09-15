@@ -34,7 +34,8 @@ fn default_agents_parse_and_names_match() {
     );
     for agent in DEFAULT_AGENTS {
         let cfg = match agent {
-            EmbeddedAgent::Direct { name, md } => project_embedded_md(name, md),
+            EmbeddedAgent::Direct { name, md } => project_embedded_md(name, md)
+                .unwrap_or_else(|e| panic!("default agent '{name}' failed to load: {e}")),
             EmbeddedAgent::Composed { name } => project_embedded_md_with_extends(name)
                 .unwrap_or_else(|e| panic!("roster agent '{name}' failed to compose: {e}")),
         };
@@ -76,7 +77,7 @@ fn default_agents_parse_and_names_match() {
 /// Test: this test.
 #[test]
 fn default_agents_field_identical_to_retired_toml() {
-    let engineer = project_embedded_md("engineer", ENGINEER_MD);
+    let engineer = project_embedded_md("engineer", ENGINEER_MD).expect("engineer loads");
     assert_eq!(engineer.agent.name, "engineer");
     assert_eq!(engineer.agent.model, None);
     assert_eq!(engineer.llm.max_tokens, Some(8192));
@@ -99,7 +100,7 @@ fn default_agents_field_identical_to_retired_toml() {
     let engineer_toml_content = "You are a software engineer sub-agent. You implement the task you are given: read the existing code before writing new code, follow the project's established patterns and naming conventions, and prefer editing existing files over creating new ones.\n\nRules:\n- Correct, complete implementations over minimal ones. Do not sacrifice correctness for brevity.\n- Fix root causes, not symptoms.\n- Include error handling and input validation where it affects reliability.\n- Never leave dead code, commented-out blocks, or duplicate implementations of the same logic behind.\n- Write tests that cover the behavior you added or changed, then run them and report the actual (not assumed) results.\n- Never fabricate command output. If a command's output is empty or unavailable, say so rather than inventing a result.\n\nWhen you believe the task is complete, call `finish_task` with a summary of what changed and how you verified it.\n";
     assert_eq!(engineer.system_prompt.content, engineer_toml_content.trim());
 
-    let qa_agent = project_embedded_md("qa-agent", QA_AGENT_MD);
+    let qa_agent = project_embedded_md("qa-agent", QA_AGENT_MD).expect("qa-agent loads");
     assert_eq!(qa_agent.agent.name, "qa-agent");
     assert_eq!(qa_agent.agent.model, None);
     assert_eq!(qa_agent.llm.max_tokens, Some(8192));
@@ -119,7 +120,8 @@ fn default_agents_field_identical_to_retired_toml() {
     let qa_agent_toml_content = "You are a QA sub-agent. Your job is to verify that an implementation actually does what it claims, not to trust the implementer's summary.\n\nRules:\n- Run the project's real test suite and quote the raw output; never summarize a test run in your own words in place of the output.\n- Treat \"0 tests ran\" or a suspiciously small number of skipped/ignored tests as a failure to investigate, not a pass.\n- Test the entry point end-to-end (the binary starts, the CLI runs, the endpoint responds) in addition to unit-level checks.\n- Cover edge cases and error paths, not just the happy path.\n- When you find a bug, report it precisely: the failing command, the actual output, and the expected output. Do not attempt to fix production code yourself — hand findings back to the engineer.\n\nWhen your verification pass is complete, call `finish_task` with a pass/fail verdict and the evidence behind it.\n";
     assert_eq!(qa_agent.system_prompt.content, qa_agent_toml_content.trim());
 
-    let code_reviewer = project_embedded_md("code-reviewer", CODE_REVIEWER_MD);
+    let code_reviewer =
+        project_embedded_md("code-reviewer", CODE_REVIEWER_MD).expect("code-reviewer loads");
     assert_eq!(code_reviewer.agent.name, "code-reviewer");
     assert_eq!(code_reviewer.agent.model, None);
     assert_eq!(code_reviewer.llm.max_tokens, Some(8192));
@@ -418,7 +420,8 @@ fn every_embedded_agent_model_normalizes_to_a_valid_slug() {
 
     for agent in DEFAULT_AGENTS {
         let cfg = match agent {
-            EmbeddedAgent::Direct { name, md } => project_embedded_md(name, md),
+            EmbeddedAgent::Direct { name, md } => project_embedded_md(name, md)
+                .unwrap_or_else(|e| panic!("default agent '{name}' failed to load: {e}")),
             EmbeddedAgent::Composed { name } => project_embedded_md_with_extends(name)
                 .unwrap_or_else(|e| panic!("roster agent '{name}' failed to compose: {e}")),
         };
@@ -438,7 +441,7 @@ fn every_embedded_agent_model_normalizes_to_a_valid_slug() {
     // The new `pm` agent (#3437) specifically: its declared `model: sonnet`
     // must resolve, end-to-end through `resolve_model`, to a concrete slug —
     // not the bare alias — closing #3438 for the exact agent #3437 adds.
-    let pm_cfg = project_embedded_md("pm", PM_MD);
+    let pm_cfg = project_embedded_md("pm", PM_MD).expect("pm loads");
     let resolved = crate::provider::resolve_model(&pm_cfg, None);
     assert!(
         resolved.contains('/'),

@@ -235,12 +235,18 @@ async fn build_router_at(
         &mut router,
         crate::skills::protocol::SkillsCatalogState::new(binding.root()),
     );
-    crate::task::protocol::register(
+    // #7948: ONE broker for the daemon's life — `task.run` hands it to every
+    // run and `session.permission.respond` answers into it, so a waiting gate
+    // and the answering client meet on the same state.
+    let permissions = Arc::new(crate::permissions::PermissionBroker::new());
+    crate::permissions::protocol::register(&mut router, Arc::clone(&permissions));
+    crate::task::protocol::register_with_permissions(
         &mut router,
         sessions.clone(),
         binding,
         agents_dir,
         workstreams.clone(),
+        Some(permissions),
     );
     crate::workstreams::protocol::register(&mut router, workstreams.clone());
     Ok((router, sessions, workstreams))

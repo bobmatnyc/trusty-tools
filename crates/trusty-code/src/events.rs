@@ -887,6 +887,51 @@ pub enum Event {
         reason: String,
     },
 
+    /// A tool call matched an `ask` permission rule and is SUSPENDED waiting
+    /// for a client's answer (#7948).
+    ///
+    /// Why: the decision object the TUI prompt (#3422) renders. `request_id`
+    /// is the correlation key the answer comes back on
+    /// (`session.permission.respond`), not a tool call id — the call has not
+    /// happened yet.
+    /// What: `agent`/`agent_id` are the attribution pair every tool event
+    /// carries. `subject` is what the tool acts on (a bash command, file
+    /// paths joined by newlines), passed through
+    /// `crate::permissions::redact_subject` and bounded to 500 characters; it
+    /// is empty for a tool with no subject (an MCP tool). `rule` is the
+    /// matching pattern in `tool` or `tool[arg]` form.
+    /// Test: `permissions::tests::gate_tests::ask_emits_requested_then_resolved`,
+    /// `session::registry_tests::record_permission_requested_publishes_event`.
+    PermissionRequested {
+        session_id: String,
+        request_id: String,
+        agent: String,
+        agent_id: String,
+        tool: String,
+        subject: String,
+        rule: String,
+    },
+
+    /// A suspended permission request reached a decision (#7948).
+    ///
+    /// Why: the explicit close for a client's prompt, so it need not infer
+    /// the resolution from whatever tool event follows.
+    /// What: `decision` is `allow_once`, `allow_for_session`, or `deny`;
+    /// `source` is `client` (a real answer), `timeout` (no answer in time,
+    /// or the request was abandoned), or `allow_asks` (approved by
+    /// `--permission-mode allow-asks` with no preceding `PermissionRequested`).
+    /// Test: `permissions::tests::gate_tests::ask_emits_requested_then_resolved`,
+    /// `permissions::tests::gate_tests::allow_asks_mode_emits_an_audit_event`,
+    /// `session::registry_tests::record_permission_resolved_publishes_event`.
+    PermissionResolved {
+        session_id: String,
+        request_id: String,
+        agent: String,
+        agent_id: String,
+        decision: String,
+        source: String,
+    },
+
     // -- Keepalive --
     Ping,
 }
@@ -1113,7 +1158,9 @@ impl Event {
             | Event::IndexReadiness { session_id, .. }
             | Event::ContextBudget { session_id, .. }
             | Event::SessionAdded { session_id, .. }
-            | Event::SessionActivityUpdate { session_id, .. } => Some(session_id),
+            | Event::SessionActivityUpdate { session_id, .. }
+            | Event::PermissionRequested { session_id, .. }
+            | Event::PermissionResolved { session_id, .. } => Some(session_id),
             Event::WorkstreamActivationChanged { .. }
             | Event::WorkstreamStateInferred { .. }
             | Event::Ping => None,
@@ -1172,6 +1219,8 @@ impl Event {
             Event::SessionActivityUpdate { .. } => "session_activity_update",
             Event::WorkstreamActivationChanged { .. } => "workstream_activation_changed",
             Event::WorkstreamStateInferred { .. } => "workstream_state_inferred",
+            Event::PermissionRequested { .. } => "permission_requested",
+            Event::PermissionResolved { .. } => "permission_resolved",
             Event::Ping => "ping",
         }
     }

@@ -404,7 +404,11 @@ fn agent_attributed_kind(event: &Event) -> Option<&'static str> {
         | Event::AgentMessage { .. }
         | Event::AgentMessageDelta { .. }
         | Event::AgentDone { .. }
-        | Event::AgentFailed { .. } => Some(event.kind()),
+        | Event::AgentFailed { .. }
+        // (#7948) Both carry `agent`/`agent_id` so a client can route a
+        // permission prompt to the delegation that raised it.
+        | Event::PermissionRequested { .. }
+        | Event::PermissionResolved { .. } => Some(event.kind()),
         // Not agent-attributed. `AgentStarted`/`ReportGenerated` carry an
         // `agent_name`, not an `agent`, and neither has a producer on this
         // daemon's session path.
@@ -449,6 +453,14 @@ const INTENTIONALLY_IGNORED: &[(&str, &str)] = &[
     (
         "memory_recalled",
         "recall telemetry; same reason as search_performed",
+    ),
+    (
+        "permission_requested",
+        "rendered by #3422, the TUI permission prompt; #7948 ships the daemon half only",
+    ),
+    (
+        "permission_resolved",
+        "rendered by #3422 — the close half of the same prompt",
     ),
 ];
 
@@ -560,6 +572,23 @@ fn delegation_event_samples() -> Vec<Event> {
             agent: "engineer".into(),
             agent_id: "spawn-1".into(),
             error: "boom".into(),
+        },
+        Event::PermissionRequested {
+            session_id: "s-1".into(),
+            request_id: "req-1".into(),
+            agent: "engineer".into(),
+            agent_id: "spawn-1".into(),
+            tool: "bash".into(),
+            subject: "rm -rf build".into(),
+            rule: "bash[rm *]".into(),
+        },
+        Event::PermissionResolved {
+            session_id: "s-1".into(),
+            request_id: "req-1".into(),
+            agent: "engineer".into(),
+            agent_id: "spawn-1".into(),
+            decision: "deny".into(),
+            source: "client".into(),
         },
     ]
 }

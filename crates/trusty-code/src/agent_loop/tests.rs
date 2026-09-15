@@ -1241,6 +1241,9 @@ mod sink_events;
 // module so transient transport policy stays independent of unrelated tests.
 mod inference_retry;
 
+// #7948 permission-gate wiring guards (a denied call never reaches the tool).
+mod permission_gate;
+
 /// Live OpenRouter test: trivial task through the real client + a real tool.
 ///
 /// Why: End-to-end confidence that the loop drives a real model to a final

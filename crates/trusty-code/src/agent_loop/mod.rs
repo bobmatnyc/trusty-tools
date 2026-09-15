@@ -289,6 +289,9 @@ pub struct AgentLoop {
     /// site that never opts in); attached at the delegated-engineer
     /// construction site via [`Self::with_redundant_run_suppression`].
     suppress_redundant_reruns: bool,
+    /// (#7948) This loop's permission gate, consulted before every dispatch.
+    /// `None` means no gate runs, exactly as before #7948.
+    permissions: Option<Arc<crate::permissions::PermissionGate>>,
 }
 
 impl AgentLoop {
@@ -322,7 +325,20 @@ impl AgentLoop {
             stop_signal: None,
             finish_gate: None,
             suppress_redundant_reruns: false,
+            permissions: None,
         }
+    }
+
+    /// Attach the per-agent permission gate consulted before every tool
+    /// dispatch (#7948).
+    ///
+    /// Why: the gate's map comes from the agent this loop runs as, which only
+    /// the construction site knows — the same reason `with_agent` exists.
+    /// What: builder-style setter; returns `self` for chaining.
+    /// Test: `agent_loop::tests::permission_gate::deny_never_dispatches`.
+    pub fn with_permission_gate(mut self, gate: Arc<crate::permissions::PermissionGate>) -> Self {
+        self.permissions = Some(gate);
+        self
     }
 
     /// Attach a [`ToolEventSink`] notified around every tool dispatch (#2056).
@@ -776,6 +792,35 @@ impl AgentLoop {
                     &args.to_string(),
                 )
                 .await;
+            }
+
+            // #7948: the permission gate runs BEFORE any dispatch. A refusal
+            // becomes a recoverable tool result and the tool never executes.
+            // After `tool_started`, so a client sees the refused (or waiting)
+            // call rather than a silent gap.
+            if let Some(gate) = &self.permissions {
+                let outcome = gate.resolve(tool, &args).await;
+                if let Some(message) = outcome.message() {
+                    tracing::warn!(
+                        tool = %tool,
+                        call_id = %call.id,
+                        "agent_loop: permission gate refused a tool call (#7948) — {message}"
+                    );
+                    let result = ToolResult::err(message);
+                    if let Some(sink) = &self.sink {
+                        notify_result(
+                            sink.as_ref(),
+                            self.agent_name(),
+                            self.agent_id_str(),
+                            &call.id,
+                            tool,
+                            &result,
+                        )
+                        .await;
+                    }
+                    transcript.push_tool_result(&call.id, tool, result.content());
+                    continue;
+                }
             }
 
             // #2682: short-circuit a redundant full-suite re-run BEFORE

@@ -210,6 +210,12 @@ pub struct RunTaskParams {
     /// precedence. Applied to BOTH the PM's own loop and the delegated
     /// engineer's loop (`build_engineer_runner`).
     pub deadline_secs: Option<u64>,
+    /// (#7948) What this HEADLESS run does with an agent's `ask` rule. A
+    /// one-shot CLI run has no client, so `PermissionMode::Default` refuses
+    /// the call and `AllowAsks` (`--permission-mode allow-asks` or
+    /// `TCODE_PERMISSION_MODE=allow-asks`) permits it. A `deny` is refused
+    /// either way.
+    pub permission_mode: crate::permissions::PermissionMode,
 }
 
 /// Execute a `run-task` end-to-end and return the rendered report.
@@ -420,6 +426,14 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn InferenceAdapt
     // one-shot CLI invocation has no session — a fresh UUID per invocation is
     // the natural equivalent (this whole run IS the "session").
     .with_agent_id(uuid::Uuid::new_v4().to_string())
+    // #7948: the PM's own calls are gated too, headless. The project is the
+    // run's working root, so a relative path rule also decides the absolute
+    // in-root spelling of the same file.
+    .with_permission_gate(Arc::new(
+        crate::permissions::PermissionContext::headless(params.permission_mode)
+            .with_root(params.project.clone())
+            .gate_for(Arc::new(pm_config.clone()), "pm"),
+    ))
     // #2279: the PM never calls `bash` itself (its registry above is
     // `delegate_to_agent` + `finish_task` only), so its verify-before-finish
     // gate must scan the delegated engineer's transcript instead of its
@@ -518,7 +532,14 @@ fn build_engineer_runner(
         // #2924: mirrors `task::executor::build_engineer_runner` — this path
         // always resolves as `HarnessMode::DailyDriver` (see
         // `daily_driver_skills_catalog`'s docs).
-        .with_mode(HarnessMode::DailyDriver);
+        .with_mode(HarnessMode::DailyDriver)
+        // #7948: headless — no broker, so a delegated agent's `ask` resolves
+        // at once per `params.permission_mode`. The root is the project the
+        // engineer's tools are scoped to, matching its gate's path rules.
+        .with_permissions(
+            crate::permissions::PermissionContext::headless(params.permission_mode)
+                .with_root(params.project.clone()),
+        );
     if let Some(ctx) = project_context {
         runner = runner.with_project_context(ctx);
     }

@@ -773,6 +773,57 @@ async fn record_agent_failed_publishes_event() {
     ));
 }
 
+/// (#7948) A suspended permission request reaches the session stream, with
+/// the subject carried through exactly as the gate redacted it.
+#[tokio::test]
+async fn record_permission_requested_publishes_event() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, ProjectBinding::None);
+    let mut events = crate::events::subscribe();
+
+    registry
+        .record_permission_requested(
+            &session.id,
+            "req-1",
+            "engineer",
+            "eng-1",
+            "bash",
+            "GITHUB_TOKEN=<redacted> gh pr create",
+            "bash[*]",
+        )
+        .unwrap();
+
+    let envelope = next_event_for(&mut events, &session.id).await;
+    assert_eq!(envelope.kind, "permission_requested");
+    assert!(matches!(
+        envelope.event,
+        Event::PermissionRequested { request_id, agent, subject, rule, .. }
+            if request_id == "req-1" && agent == "engineer"
+                && subject == "GITHUB_TOKEN=<redacted> gh pr create"
+                && rule == "bash[*]"
+    ));
+}
+
+/// (#7948) The resolution half reaches the stream too, naming its source.
+#[tokio::test]
+async fn record_permission_resolved_publishes_event() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, ProjectBinding::None);
+    let mut events = crate::events::subscribe();
+
+    registry
+        .record_permission_resolved(&session.id, "req-1", "engineer", "eng-1", "deny", "timeout")
+        .unwrap();
+
+    let envelope = next_event_for(&mut events, &session.id).await;
+    assert_eq!(envelope.kind, "permission_resolved");
+    assert!(matches!(
+        envelope.event,
+        Event::PermissionResolved { decision, source, .. }
+            if decision == "deny" && source == "timeout"
+    ));
+}
+
 /// Every `record_*` emission-plumbing method must reject an unknown
 /// session id with `session_not_found` rather than panicking.
 #[tokio::test]
