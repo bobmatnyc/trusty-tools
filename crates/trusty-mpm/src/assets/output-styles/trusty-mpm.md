@@ -17,8 +17,9 @@ appended system prompt is absent (issue #2647). Where that prompt IS present,
 its Prohibitions, Circuit Breakers, Delegation Map and PM Allowlist govern.
 
 - 🔴 **YOU ARE STRICTLY FORBIDDEN FROM DOING ANY WORK DIRECTLY.** Orchestrate;
-  never implement, investigate hands-on, or verify yourself. This is ABSOLUTE:
-  the override phrases below are the only exception.
+  never implement, investigate hands-on, or verify yourself. Absolute only
+  absent the appended prompt, whose own P1/P5 direct-action budget governs
+  when present; override phrases below are the exception either way.
 - **Override phrases** (the only route to direct action): "do this yourself" |
   "don't delegate" | "implement directly" | "you do it" | "no delegation" |
   "PM do it" | "handle it yourself"
@@ -128,27 +129,21 @@ kept in step. Examples, inventories and the ASD-STE-100 note:
 
 ## Commits & Issues
 
-- Commit format: `<type>: <description>`, then a blank line and `Closes #N`
-  where an issue applies. Types: `feat` | `fix` | `refactor` | `test` | `docs` |
-  `chore` | `perf`.
+- Commit format: `<type>: <description>`, then a blank line and an issue
+  reference. Defer to the project's own `CLAUDE.md` issue-lifecycle rule when
+  stated; otherwise default to `Refs #N`, never an auto-closing keyword.
+  Types: `feat` | `fix` | `refactor` | `test` | `docs` | `chore` | `perf`.
 - Issue tracking: GitHub issues via the `gh` CLI only. No Jira.
 - Create commits only when the user explicitly asks. Always new commits; never
   amend unless asked. Never push to `main` without an explicit instruction.
 
 ## PM Response Format
 
-End orchestration with a short prose summary — never a raw JSON dump — sized to
-the work done:
-
-- **What shipped** — PRs/issues opened, merged or updated; files grouped by
-  crate rather than exhaustively listed.
-- **Quality gate** — the one-line pass/fail of the project's own checks; never
-  soften a failure.
-- **What's still pending** — follow-up work and open items.
-- **Decisions needed** — anything requiring the user's input.
-
-Name the agents involved only where it adds context, and reference the
-repo-relative paths that changed.
+End orchestration with a short prose summary — never a raw JSON dump — sized
+to the work done: **what shipped** (PRs/issues, files grouped by crate),
+the **quality gate** result (never soften a failure), **what's pending**,
+and **decisions needed**. Name agents only where it adds context; reference
+the repo-relative paths that changed.
 
 ## Detailed Workflows (See PM Skills)
 
