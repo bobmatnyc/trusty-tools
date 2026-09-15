@@ -189,3 +189,99 @@ async fn a_wedged_hygiene_fetch_neither_hangs_the_sweep_nor_delays_health() {
         "/health took {worst:?} while hygiene ran; budget is {HEALTH_BUDGET:?} (#7965)"
     );
 }
+
+/// The worst gap between two `/health` answers while `work` runs, plus `work`'s
+/// output.
+///
+/// Why a gap and not a call latency: on a `current_thread` runtime a task that
+/// blocks the thread stalls the prober BETWEEN calls, so timing each call alone
+/// would report a fast `/health` throughout a multi-second stall.
+/// What: polls `mpm.health` every 20 ms and reports the longest time from one
+/// answer to the next, minus that 20 ms pause.
+async fn worst_health_gap_during<F, T>(state: &Arc<DaemonState>, work: F) -> (Duration, T)
+where
+    F: std::future::Future<Output = T>,
+{
+    const PAUSE: Duration = Duration::from_millis(20);
+    let probe_state = Arc::clone(state);
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let probe_done = Arc::clone(&done);
+    let prober = tokio::spawn(async move {
+        let mut worst = Duration::ZERO;
+        let mut last = Instant::now();
+        while !probe_done.load(std::sync::atomic::Ordering::Relaxed) {
+            let _ = core_ops::health(&probe_state).await;
+            worst = worst.max(last.elapsed().saturating_sub(PAUSE));
+            tokio::time::sleep(PAUSE).await;
+            last = Instant::now() - PAUSE;
+        }
+        worst
+    });
+    let out = work.await;
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+    (prober.await.expect("the health prober must not panic"), out)
+}
+
+/// 🔴 #7965: an orphan-GC worktree pass stuck on a `git status` that never
+/// answers keeps `/health` inside the client's budget, returns once the git
+/// ceiling fires, and keeps the worktree it could not inspect.
+///
+/// Why `current_thread`: it is the sharpest form of "no git subprocess runs on a
+/// runtime worker". With one runtime thread, a git call made inline on the async
+/// task stalls every other task — the `/health` prober included — for as long as
+/// git does. Pre-fix, Phase 1.5's dirty gate ran inline, so this pass held the
+/// thread until the wedge released at 8 s, then found the worktree clean and
+/// removed it.
+///
+/// The wedge is a FIFO in place of the checkout's `.git/info/exclude` (see
+/// `GitWorktreeFixture::wedge_status`): only THIS repository's `git status`
+/// blocks, and no PATH shim leaks into sibling tests.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn a_wedged_git_status_neither_hangs_the_orphan_sweep_nor_delays_health() {
+    use crate::session_manager::worktree_git_fixture::GitWorktreeFixture;
+    use crate::session_manager::{DirtyWorktreePolicy, SessionManager};
+
+    let dir = tempfile::tempdir().expect("scratch framework root");
+    let state = Arc::new(DaemonState::with_root(dir.path().to_path_buf()));
+    let store_dir = tempfile::tempdir().expect("scratch session store");
+    let mgr = SessionManager::new(
+        store_dir.path(),
+        crate::session_manager::tests::FakeTmuxDriver::new(),
+    )
+    .await
+    .expect("manager");
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("wedged");
+    GitWorktreeFixture::stamp_reclaimable_sentinel(&wt);
+    let _wedge = fx.wedge_status(Duration::from_secs(8));
+
+    let started = Instant::now();
+    let (worst, outcome) = worst_health_gap_during(
+        &state,
+        mgr.prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip, &[]),
+    )
+    .await;
+    let elapsed = started.elapsed();
+    let outcome = outcome.expect("the pass must not error");
+
+    assert!(
+        worst < HEALTH_BUDGET,
+        "/health went {worst:?} unanswered while the orphan sweep ran; budget is \
+         {HEALTH_BUDGET:?} (#7965)"
+    );
+    assert!(
+        elapsed < Duration::from_secs(6),
+        "the git ceiling must end the pass, not the wedge's 8 s release; took {elapsed:?} (#7965)"
+    );
+    assert!(
+        wt.exists() && outcome.removed.is_empty(),
+        "a worktree whose dirty check timed out must be kept; removed {:?} (#7965)",
+        outcome.removed
+    );
+    assert!(
+        outcome.skipped_dirty.iter().any(|d| d.path == wt),
+        "the timed-out candidate must be reported as skipped, not silently dropped; got {:?}",
+        outcome.skipped_dirty
+    );
+}
