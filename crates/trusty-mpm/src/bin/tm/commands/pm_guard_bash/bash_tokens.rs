@@ -13,9 +13,11 @@
 //! years, while the argv-side parser in [`super::secret_file_copy`] had not.
 //! One classifier is what stops a sixth shape getting a sixth answer.
 //!
-//! What: [`tokenize`] is the single lexer call, and it reports a parse failure
-//! as an ERROR rather than as an empty argv — a guard that cannot tokenize
-//! must refuse, never allow (see [`TokenizeError`]). [`redirect_role`] is the
+//! What: [`tokenize`] is the lexer call for the guards #7839 migrated, and it
+//! reports a parse failure as an ERROR rather than as an empty argv — a guard
+//! that cannot tokenize must refuse, never allow (see [`TokenizeError`]).
+//! [`tokenize`]'s own doc lists the sites still to migrate.
+//! [`redirect_role`] is the
 //! single answer to "does this token name a file?". [`program_text_indices`]
 //! is the single answer to "which tokens are source text handed to an
 //! interpreter?", and it now covers `sed`'s expression alongside the
@@ -57,10 +59,18 @@ impl TokenizeError {
 
 /// Cut `segment` into the words a shell would pass as argv.
 ///
-/// Why: the one lexer call site, so a caller cannot silently substitute a
-/// laxer split and a parse failure cannot be mistaken for an empty command.
+/// Why: the lexer call site for the guards #7839 migrated — the secret-read
+/// rule and [`super::secret_file_copy`] — so neither can silently substitute a
+/// laxer split and neither can mistake a parse failure for an empty command.
 /// What: `shlex::split`, with its `None` promoted to
 /// [`TokenizeError::UnbalancedQuoting`].
+///
+/// Eleven non-test `shlex::split` sites have NOT migrated and still read a
+/// `None` as "no tokens": `destructive_delete.rs` (2), `main_checkout.rs` (2),
+/// this module's `mod.rs` (2), `persistence.rs` (1), `shell_lex.rs` (3), and
+/// `commands/hook_rewrite.rs` (1). Each owns its own fail-closed fallback
+/// today; moving them here is remaining work, not a claim this function
+/// already made.
 /// Test: `bash_tokens_reports_unbalanced_quoting`.
 pub(crate) fn tokenize(segment: &str) -> Result<Vec<String>, TokenizeError> {
     shlex::split(segment).ok_or(TokenizeError::UnbalancedQuoting)
@@ -179,11 +189,13 @@ const PROGRAM_FILE_FLAGS: &[&str] = &["-f", "--file"];
 /// every token following an [`INLINE_PROGRAM_FLAGS`] spelling. For an
 /// [`AWK_PROGRAMS`] or [`SED_PROGRAMS`] entry, every
 /// [`SED_EXPRESSION_FLAGS`] value, or — when none is present — the first
-/// operand that is neither a flag, nor a value-taking flag's value, nor the
-/// empty string BSD `sed -i ''` leaves behind. A [`PROGRAM_FILE_FLAGS`]
-/// spelling withdraws the whole answer, so every positional stays a path.
+/// operand that is neither a flag, nor a value-taking flag's value, nor (for
+/// sed alone) the empty string BSD `sed -i ''` leaves behind. A
+/// [`PROGRAM_FILE_FLAGS`] spelling withdraws the whole answer, so every
+/// positional stays a path.
 /// Test: `bash_tokens_finds_the_sed_expression`,
 /// `bash_tokens_withdraws_on_a_program_file_flag`,
+/// `guard_tokenizer_bounds_the_program_text_relaxations`,
 /// `guard_7839_sed_expression_wildcard`, `guard_7744_awk_pattern_match_rule`,
 /// `guard_7738_python_inline_regex_literal`.
 pub(crate) fn program_text_indices(program: &str, argv: &[String], start: usize) -> Vec<usize> {
@@ -229,16 +241,19 @@ fn loads_a_program_file(token: &str) -> bool {
 
 /// The offset in `rest` of the first token that is the awk/sed PROGRAM.
 ///
-/// What: skips a value-taking flag with its value, every other flag, and the
-/// empty token BSD `sed -i ''` leaves in argv — without that last skip the
-/// empty string would be read as the expression and the real one would fall
-/// back to the argv scan, which is the #7839 refusal again one token over.
+/// What: skips a value-taking flag with its value, every other flag, and — for
+/// SED only — the empty token BSD `sed -i ''` leaves in argv; without that last
+/// skip the empty string would be read as the expression and the real one would
+/// fall back to the argv scan, which is the #7839 refusal again one token over.
+/// The skip is scoped to sed because awk has no such spelling: `awk '' f` is an
+/// awk program that happens to be empty, and walking past it would exempt the
+/// operand `f` — a widening, where the sed skip is a narrowing.
 fn first_operand(rest: &[String], is_awk: bool) -> Option<usize> {
     let mut i = 0;
     while let Some(token) = rest.get(i) {
         if is_awk && AWK_VALUE_FLAGS.contains(&token.as_str()) {
             i += 2;
-        } else if token.is_empty() || (token.len() > 1 && token.starts_with('-')) {
+        } else if (!is_awk && token.is_empty()) || (token.len() > 1 && token.starts_with('-')) {
             i += 1;
         } else {
             return Some(i);
@@ -248,26 +263,31 @@ fn first_operand(rest: &[String], is_awk: bool) -> Option<usize> {
 }
 
 /// Whether `word` carries a regex QUANTIFIER — a `.` immediately followed by
-/// `*` or `?` (#7839, #7738, #7744).
+/// `*` (#7839, #7738, #7744).
 ///
 /// Why: `.*`, `.*?`, the `.*?pen` a bracket class collapses `/.*[Oo]pen/`
 /// into, and the `r.*?,` a Python raw-string prefix glues together all match
 /// the guard's secret families through its glob-OVERLAP arm — the arm that
 /// asks "could this SHELL GLOB expand onto a credential file?". Inside an
-/// interpreter's program text there is no shell glob: `.` plus a quantifier is
-/// the regex wildcard, and a real filename literal (`open('.env')`) carries no
+/// interpreter's program text there is no shell glob: `.` plus `*` is the
+/// regex wildcard, and a real filename literal (`open('.env')`) carries no
 /// quantifier at all.
-/// What: the two-byte test only. It is deliberately NOT the whole answer — the
-/// caller pairs it with [`without_glob_metacharacters`], so a word whose
-/// literal core still names a secret (`.env.*`, `*credentials*`) keeps its
-/// deny and only a word that matched through the wildcards alone is released.
+/// What: the two-byte `.*` test only. A lone `.?` is deliberately EXCLUDED —
+/// it is a working shell glob, and `normalize_bracket_classes` rewrites the
+/// dotenv glob `.[e]nv` into exactly `.?nv`, so accepting `.?` would strip
+/// that word to `.nv`, name nothing, and release a deny the shell would have
+/// expanded onto `.env`. It is also NOT the whole answer — the caller pairs it
+/// with [`without_glob_metacharacters`], so a word whose literal core still
+/// names a secret (`.env.*`, `*credentials*`) keeps its deny and only a word
+/// that matched through the wildcards alone is released.
 /// Test: `bash_tokens_reads_a_quantifier_as_regex`,
+/// `guard_tokenizer_bounds_the_program_text_relaxations`,
 /// `guard_7839_sed_expression_wildcard`, `guard_7738_python_inline_regex_literal`,
 /// `guard_7744_awk_pattern_match_rule`.
 pub(crate) fn has_regex_quantifier(word: &str) -> bool {
     word.as_bytes()
         .windows(2)
-        .any(|pair| pair[0] == b'.' && matches!(pair[1], b'*' | b'?'))
+        .any(|pair| pair[0] == b'.' && pair[1] == b'*')
 }
 
 /// `word` with every glob metacharacter removed, leaving its literal core.
@@ -340,6 +360,10 @@ mod tests {
         assert_eq!(program_text_indices("awk", &awk, 0), vec![1]);
         let inline = words("python3 -c 'import re'");
         assert_eq!(program_text_indices("python3", &inline, 0), vec![2]);
+        // The empty-token skip is sed's alone: `awk '' .env` is an empty awk
+        // PROGRAM at index 1, so the operand behind it stays a path.
+        let empty_awk = words("awk '' .env");
+        assert_eq!(program_text_indices("awk", &empty_awk, 0), vec![1]);
     }
 
     /// A `-f`/`--file` program source withdraws the answer entirely, so every
@@ -358,10 +382,13 @@ mod tests {
     /// metacharacters leaves the literal core the caller re-screens.
     #[test]
     fn bash_tokens_reads_a_quantifier_as_regex() {
-        for regex in [".*", ".*?", ".?", ".*?pen", "r.*?,", "PASSAGE.*"] {
+        for regex in [".*", ".*?", ".*?pen", "r.*?,", "PASSAGE.*"] {
             assert!(has_regex_quantifier(regex), "{regex} carries a quantifier");
         }
-        for name in [".env", ".netrc", "id_rsa", "secrets", ".", ""] {
+        // `.?nv` is what `normalize_bracket_classes` makes of the glob
+        // `.[e]nv`, which expands onto `.env` — a lone `.?` is a working shell
+        // glob, so it never releases a deny.
+        for name in [".env", ".netrc", "id_rsa", "secrets", ".", "", ".?nv", ".?"] {
             assert!(!has_regex_quantifier(name), "{name} carries none");
         }
         // The pairing: a dotenv glob carries a quantifier too, and keeps its

@@ -343,6 +343,33 @@ fn guard_tokenizer_still_refuses_a_real_secret_read_copy_and_delete() {
     );
 }
 
+/// The program-text arms bound their own relaxations at the first operand.
+///
+/// Why: two of the relaxations above are positional, and a positional rule is
+/// wrong at its edge or nowhere. The quantifier release must not fire on `.?`,
+/// which is a working shell glob rather than a regex quantifier; and the
+/// operand skips must not walk PAST a program onto the file beside it, which
+/// would exempt the operand the rule exists to screen.
+/// What: a bracket-class dotenv glob inside an inline program, an inline
+/// program whose text is itself a flag spelling, and an awk program that is
+/// the empty string — each with a real dotenv operand behind it.
+/// Test: itself.
+#[test]
+fn guard_tokenizer_bounds_the_program_text_relaxations() {
+    assert!(
+        evaluate_secret_file_read_command("python3 -c '-e' .env").is_some(),
+        "only the first inline-program value is program text; the operand is a path"
+    );
+    assert!(
+        evaluate_secret_file_read_command("awk '' .env").is_some(),
+        "an empty awk program is the program; the operand behind it is a path"
+    );
+    assert!(
+        evaluate_secret_file_read_command(r#"python3 -c "print(open('.[e]nv').read())""#).is_some(),
+        "a bracket-class dotenv glob is a glob, not a regex quantifier"
+    );
+}
+
 /// A `<<'WORD'` written inside a quoted string opens no here-document, so it
 /// hides no deletion on the lines that follow.
 ///
