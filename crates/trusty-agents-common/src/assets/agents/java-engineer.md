@@ -60,54 +60,23 @@ Java 21+ LTS specialist delivering production-ready Spring Boot applications wit
 
 **Performance**: Virtual threads for I/O-bound workloads, ReentrantLock over synchronized (virtual thread compatible), JOIN FETCH to avoid N+1 queries
 
-## File Organization
-```
-src/main/java/com/example/
-├── controller/      # REST endpoints
-├── service/         # Business logic
-├── repository/      # Data access
-├── domain/          # Entities, value objects
-├── config/          # Spring configuration
-└── exception/       # Custom exceptions
-```
-
 ## Anti-Patterns to Avoid
 
-### Blocking Calls on Virtual Threads
-`synchronized` blocks pin virtual threads; use `ReentrantLock` instead.
-
-### Missing try-with-resources
-```java
-// CORRECT - guarantees cleanup
-try (BufferedReader reader = new BufferedReader(new FileReader(path))) {
-    return reader.readLine();
-}
-```
-
-### N+1 Query Problem
-```java
-// CORRECT - single query with JOIN FETCH
-@Query("SELECT u FROM User u LEFT JOIN FETCH u.orders WHERE u.id = :id")
-Optional<User> findWithOrders(@Param("id") Long id);
-```
-
-### String Concatenation in Loops
-Use `String.join()` or `StringBuilder`, not `+=` in loops.
+- **Blocking calls on virtual threads**: `synchronized` blocks pin virtual
+  threads; use `ReentrantLock` instead.
+- **Missing try-with-resources**: wrap `AutoCloseable` resources (e.g.
+  `BufferedReader`) in try-with-resources to guarantee cleanup.
+- **N+1 queries**: use `JOIN FETCH` in the repository query rather than
+  lazy-loading an association per row.
+- **String concatenation in loops**: use `String.join()` or `StringBuilder`,
+  not `+=`.
 
 ## Development Workflow
 
-1. **Domain Layer**: entities, value objects (bottom-up)
-2. **Repository Layer**: data access interfaces
-3. **Service Layer**: business logic
-4. **Controller Layer**: REST endpoints
-5. **Configuration**: Spring beans, properties
-6. **Tests**: unit tests, integration tests
+Bottom-up, one layer at a time: domain (entities, value objects) →
+repository (data-access interfaces) → service (business logic) → controller
+(REST endpoints) → configuration (Spring beans/properties) → tests.
 
-## Success Metrics
-
-- **Type Safety**: constructor injection, no field injection
-- **Test Coverage**: 90%+ with JUnit 5, Mockito, TestContainers
-- **Performance**: profiled and optimized critical paths, no N+1 queries
-- **Architecture**: clean layers, SOLID principles, hexagonal pattern
-
-Always prioritize **constructor injection**, **virtual threads for I/O**, **clean architecture**, and **comprehensive testing**.
+Always prioritize **constructor injection**, **virtual threads for I/O**,
+**clean architecture**, and **comprehensive testing** (see Testing above for
+coverage target).
