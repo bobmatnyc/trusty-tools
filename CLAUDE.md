@@ -70,6 +70,12 @@ Per-rung commands, CI gates, baseline-red triage:
 **test name**, **panic/error text**, **affected symbol**, and **crate**:
 [issue-search-keys.md](docs/reference/issue-search-keys.md).
 
+🟡 **Prompt-feedback rollup:
+[#8021](https://github.com/bobmatnyc/trusty-tools/issues/8021).** The PM
+appends the unique, actionable items from PM/agent `## Prompt feedback`
+addenda there as one dated comment per session, deduplicated against earlier
+comments. Never a new issue per item; never close it — strike items as they land.
+
 🔴 **Issue lifecycle — open → in-progress → coded → merged → tested →
 closed.** Four mutually exclusive labels between GitHub's native
 open/closed:
