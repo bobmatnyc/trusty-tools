@@ -33,8 +33,24 @@
 //! `an_unobservable_tmux_leaves_every_claim_live` in
 //! `worktree_claim_source_tests.rs`.
 
+use std::time::Duration;
+
 use super::manager::SessionManager;
 use super::worktree_reclaim_claim::{ClaimLiveness, LiveClaims, WorkspaceClaim};
+
+/// Wall-clock ceiling for the tmux liveness probe this module runs (#7965).
+///
+/// Why: `tmux list-sessions` against a healthy server answers in single-digit
+/// milliseconds, so 3 seconds is a hundredfold headroom and still finite. The
+/// probe is a synchronous subprocess pair (`ensure_server_up`, then the list),
+/// and before #7965 an unresponsive tmux server held the calling thread for as
+/// long as it liked — on the `prune-worktrees` route that thread is a tokio
+/// WORKER, i.e. one of the handful the daemon has to answer requests with.
+/// What: on expiry the probe is treated exactly as an errored probe — see the
+/// module's Fail direction section: every claim stays LIVE and every removal is
+/// refused.
+/// Test: `a_slow_tmux_probe_is_bounded_and_leaves_every_claim_live`.
+pub(crate) const TMUX_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 impl SessionManager {
     /// Every stored workspace claim, with each one's session probed for life.
@@ -47,9 +63,9 @@ impl SessionManager {
     /// Test: as the module doc.
     pub(crate) async fn workspace_claims(&self, caller: Option<String>) -> LiveClaims {
         // #5856: `Err` means tmux could not be observed, which is not an empty
-        // tmux. `.ok()` collapses it to `None`, and `liveness_of` reads `None`
-        // as "every claim stays live".
-        let live_names = self.observed_live_managed_names().ok();
+        // tmux. `None` here — from an error OR from #7965's timeout — is read by
+        // `liveness_of` as "every claim stays live".
+        let live_names = self.bounded_live_managed_names().await;
         let claims = self
             .list()
             .await
@@ -64,6 +80,47 @@ impl SessionManager {
             })
             .collect();
         LiveClaims { claims, caller }
+    }
+
+    /// The tmux liveness probe, off the caller's thread and bounded (#7965).
+    ///
+    /// Why: [`super::SessionManager::observed_live_managed_names`] is two
+    /// synchronous subprocesses. Running it inline blocked whatever thread asked
+    /// — for the `prune-worktrees` route that is a tokio worker, and for the
+    /// automatic sweep it is a blocking-pool thread that then never finished.
+    /// Neither may depend on tmux answering.
+    /// What: hands the probe to the blocking pool and waits at most
+    /// [`TMUX_PROBE_TIMEOUT`]. `None` on ANY of error, panic or expiry — which
+    /// `liveness_of` reads as "every claim stays live", the refusing direction.
+    ///
+    /// A `spawn_blocking` task cannot be cancelled, so an expired probe keeps its
+    /// blocking thread until tmux returns. That is deliberate: the thread it no
+    /// longer holds is the CALLER's, which is the one a request needs.
+    /// Test: `a_slow_tmux_probe_is_bounded_and_leaves_every_claim_live`.
+    async fn bounded_live_managed_names(&self) -> Option<std::collections::HashSet<String>> {
+        let tmux = std::sync::Arc::clone(&self.tmux);
+        let probe =
+            tokio::task::spawn_blocking(move || super::dedup::live_managed_names_of(tmux.as_ref()));
+        match tokio::time::timeout(TMUX_PROBE_TIMEOUT, probe).await {
+            Ok(Ok(Ok(names))) => Some(names),
+            Ok(Ok(Err(e))) => {
+                tracing::warn!(
+                    "workspace claims: tmux could not be observed ({e}); claims stay live"
+                );
+                None
+            }
+            Ok(Err(e)) => {
+                tracing::warn!("workspace claims: the tmux probe panicked ({e}); claims stay live");
+                None
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "workspace claims: tmux did not answer within {}s; claims stay live (#7965)",
+                    TMUX_PROBE_TIMEOUT.as_secs()
+                );
+                None
+            }
+        }
     }
 }
 

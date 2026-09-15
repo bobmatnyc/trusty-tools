@@ -34,10 +34,9 @@
 //! the consecutive-timeout backoff — belongs to
 //! [`super::worktree_reclaim_gh_gate`].
 
-use std::io::Read;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::time::Duration;
 
 use crate::core::gh_identity::{self, GhEnv};
 use crate::core::trusty_tools_config::TrustyToolsConfig;
@@ -89,9 +88,6 @@ pub(crate) const PR_JSON_FIELDS: &str = "number,headRefName,state,isCrossReposit
 /// timeout — which resolves to a blocked candidate either way.
 /// Test: `run_with_timeout_kills_a_hung_child`.
 pub(crate) const GH_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// How long to wait for a drained pipe's contents after the child has exited.
-const PIPE_DRAIN_WAIT: Duration = Duration::from_secs(2);
 
 /// A `gh` invocation rooted at `dir` with a sanitised environment and the
 /// resolved `gh` identity applied (#2919, #6623).
@@ -275,23 +271,6 @@ pub(crate) fn resolve_daemon_gh_env(dir: &Path) -> GhEnv {
     env
 }
 
-/// Read `pipe` to EOF on its own thread, handing the text back over a channel.
-///
-/// Why: a child that fills a pipe buffer blocks forever if nobody reads it,
-/// which would defeat the timeout [`run_with_timeout`] enforces — a 400-PR JSON
-/// reply comfortably exceeds a 64 KiB pipe buffer. Both pipes are drained for
-/// that reason, and since #6561 stderr's contents are KEPT rather than sunk.
-/// Test: `run_with_timeout_reports_the_exit_code_and_stderr`.
-fn drain_pipe(mut pipe: impl Read + Send + 'static) -> std::sync::mpsc::Receiver<String> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = pipe.read_to_end(&mut buf);
-        let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
-    });
-    rx
-}
-
 /// Why one `gh` call failed, and whether it failed by HANGING (#6561, #6867).
 ///
 /// Why: `Result<String, String>` said what to print but not what to do next.
@@ -384,120 +363,43 @@ fn failure_reason(code: Option<i32>, stderr: &str) -> String {
     }
 }
 
-/// Put the child in its own process group, so a kill can reach its whole tree
-/// (#6867).
-///
-/// Why: `gh` shells out to `/usr/bin/security find-generic-password` for its
-/// token. Signalling the `gh` pid alone leaves that grandchild running,
-/// reparented to launchd, and a wedged `securityd` means it never exits — the
-/// leak this issue reports. A child that leads its own group can be signalled
-/// as a group, which reaches every descendant that has not itself called
-/// `setsid`.
-/// What: `process_group(0)`, which makes the child's pid its own process-GROUP
-/// id. A no-op off unix, where there is no such concept and the tree is
-/// bounded differently.
-///
-/// The cost is that a terminal signal no longer reaches `gh` through the
-/// foreground group — acceptable, because the only caller is a runner that
-/// promises to reap the child itself within [`GH_TIMEOUT`]. That is also why
-/// this is not pushed down into `trusty_common::gh::GhCommand`: an interactive
-/// `gh` spawned through that shared entry point SHOULD still die with its
-/// terminal, and `GhCommand` owns no kill-on-timeout runner to pair with it.
-#[cfg(unix)]
-fn isolate_process_group(cmd: &mut Command) {
-    use std::os::unix::process::CommandExt;
-    cmd.process_group(0);
-}
-
-#[cfg(not(unix))]
-fn isolate_process_group(_cmd: &mut Command) {}
-
-/// SIGKILL the timed-out child's whole process group, then reap it (#6867).
-///
-/// Why: see [`isolate_process_group`] — `child.kill()` alone is what leaked
-/// the `security` grandchildren.
-/// What: `killpg` on the child's pid, which [`isolate_process_group`] made the
-/// group id, followed by the direct kill and the `wait` that reaps the zombie.
-/// The group is signalled BEFORE the reap: once `wait` returns, the pid may be
-/// recycled and the group id would name someone else's processes.
-/// Test: `run_with_timeout_kills_the_whole_process_group`.
-#[cfg(unix)]
-fn kill_child_group(child: &mut Child) {
-    if let Ok(pgid) = libc::pid_t::try_from(child.id()) {
-        // SAFETY: `child` has not been waited on yet, so its pid is still
-        // reserved and — because the child was spawned with `process_group(0)`
-        // — names its own process group. A group with no members left returns
-        // ESRCH, which is ignored.
-        unsafe {
-            libc::killpg(pgid, libc::SIGKILL);
-        }
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
-#[cfg(not(unix))]
-fn kill_child_group(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
 /// Run `cmd`, killing its whole process group if it outlives `budget`
-/// (#2919, #6561, #6867).
+/// (#2919, #6561, #6867, #7965).
 ///
 /// Why: see [`GH_TIMEOUT`]. `Command::output()` waits indefinitely, and — as
 /// #6867 found — killing only the `gh` pid leaves its keychain grandchild
-/// behind.
-/// What: spawns the child in its own process group (see
-/// [`isolate_process_group`]) with both pipes drained on their own threads (see
-/// [`drain_pipe`]), polls `try_wait` until the budget expires, then kills the
-/// GROUP and reaps. `Ok` carries stdout; `Err` is a [`GhFailure`] carrying a
-/// one-line reason — a spawn failure, a non-zero exit with `gh`'s own first
-/// stderr line, a timeout, or a wait error — and, for the timeout alone, the
-/// `timed_out` flag the backoff counts. Every `Err` blocks reclamation.
+/// behind. #7965 moved those mechanics to
+/// [`crate::core::bounded_proc::run_bounded`], which the in-project hygiene
+/// sweep needs too; this function is now the `gh`-specific ADAPTER over it and
+/// owns only the failure taxonomy the reclaim gate branches on.
+/// What: delegates the spawn/drain/poll/kill to `run_bounded`, then maps the
+/// outcome — `Ok` carries stdout for a zero exit; a non-zero exit becomes a
+/// [`GhFailure`] carrying `gh`'s own first stderr line, and a timeout becomes
+/// one carrying the `timed_out` flag the backoff counts. Every `Err` blocks
+/// reclamation.
 /// Test: `run_with_timeout_captures_output`, `run_with_timeout_kills_a_hung_child`,
 /// `run_with_timeout_kills_the_whole_process_group`,
 /// `run_with_timeout_marks_a_timeout_as_timed_out`,
 /// `run_with_timeout_reports_the_exit_code_and_stderr`.
-pub(crate) fn run_with_timeout(mut cmd: Command, budget: Duration) -> Result<String, GhFailure> {
-    // #6867: BEFORE the spawn — a group cannot be joined retroactively.
-    isolate_process_group(&mut cmd);
-    let mut child = cmd
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| GhFailure::new(format!("`gh` could not be run: {e}")))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| GhFailure::new("`gh` exposed no stdout pipe"))
-        .map(drain_pipe)?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| GhFailure::new("`gh` exposed no stderr pipe"))
-        .map(drain_pipe)?;
-    let deadline = Instant::now() + budget;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let out = stdout.recv_timeout(PIPE_DRAIN_WAIT).unwrap_or_default();
-                if status.success() {
-                    return Ok(out);
-                }
-                let err = stderr.recv_timeout(PIPE_DRAIN_WAIT).unwrap_or_default();
-                return Err(GhFailure::new(failure_reason(status.code(), &err)));
-            }
-            Ok(None) if Instant::now() >= deadline => {
-                // #6867: the GROUP, not just the pid.
-                kill_child_group(&mut child);
-                return Err(GhFailure::timeout(format!(
-                    "`gh` did not answer within {}s and its process group was killed",
-                    budget.as_secs()
-                )));
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
-            Err(e) => return Err(GhFailure::new(format!("`gh` could not be waited on: {e}"))),
+pub(crate) fn run_with_timeout(cmd: Command, budget: Duration) -> Result<String, GhFailure> {
+    use crate::core::bounded_proc::{BoundedError, run_bounded};
+
+    match run_bounded(cmd, budget) {
+        Ok(out) if out.status.success() => Ok(out.stdout),
+        Ok(out) => Err(GhFailure::new(failure_reason(
+            out.status.code(),
+            &out.stderr,
+        ))),
+        Err(BoundedError::TimedOut) => Err(GhFailure::timeout(format!(
+            "`gh` did not answer within {}s and its process group was killed",
+            budget.as_secs()
+        ))),
+        Err(BoundedError::Spawn(e)) => Err(GhFailure::new(format!("`gh` could not be run: {e}"))),
+        Err(BoundedError::NoPipe(which)) => {
+            Err(GhFailure::new(format!("`gh` exposed no {which} pipe")))
+        }
+        Err(BoundedError::Wait(e)) => {
+            Err(GhFailure::new(format!("`gh` could not be waited on: {e}")))
         }
     }
 }

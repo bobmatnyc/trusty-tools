@@ -41,6 +41,10 @@ pub mod auto_resume;
 // `worktree_index` deliberately skips; this module is what creates it.
 pub mod base_facet_index;
 pub mod binary_provenance;
+// #7965: the one kill-on-timeout subprocess runner every background sweep uses,
+// so a wedged `git`/`gh` child can never pin a blocking-pool thread for the life
+// of the daemon.
+pub(crate) mod bounded_proc;
 pub mod budget;
 // #7822: the build fingerprint `tm doctor` compares when two semvers agree —
 // a same-version daemon started before the installed binary was written is

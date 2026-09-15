@@ -209,6 +209,10 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "Warns when more than one `git maintenance run` process is live on the host at once — the storm pattern from the originating incident (41 concurrent repacks against one shared object store). Read-only: `ps -A -o command=`, never a signal or a kill (issue #7171).",
     ),
     (
+        "background_sweeps",
+        "One line per background maintenance sweep — the merged-PR worktree reclaim and the in-project hygiene pass: the environment variable that switches it off (`TRUSTY_MPM_WORKTREE_RECLAIM`, `TRUSTY_MPM_INPROJECT_HYGIENE`), whether it is on, whether a pass is in flight, and how long the last completed pass took. Warns while a pass is running or when the last one exceeded 60 s, because that is the state that costs request latency. In-memory only — a restart reports \"no pass yet\" (issue #7965).",
+    ),
+    (
         "binary_provenance",
         "Where the RUNNING binary came from and whether that source still exists: reads cargo's own `$CARGO_HOME/.crates2.json` install ledger and compares it against the running executable. Fails when the same binary is provided by more than one install, when the running binary is OLDER than the ledger's record for that same file or the two cannot be ordered as semver, or when a `cargo install --path` source directory has been reaped (no provenance, no upgrade path). Warns for a live path/git install, which is invisible to registry update detection. Reports UNKNOWN — never `Ok` — when the ledger is unreadable, does not cover the binary (a prebuilt-installer or package-manager install), or records a version OLDER than what is running, which means the ledger no longer describes the file on disk (issue #4964). Read-only; never installs, moves, or deletes (issue #4033, ADR-0021).",
     ),

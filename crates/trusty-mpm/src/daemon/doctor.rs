@@ -406,7 +406,7 @@ use doctor_sidecars::{check_memory, check_search};
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_fifty_three_checks`,
+/// Test: `run_doctor_produces_fifty_four_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -610,6 +610,10 @@ pub(crate) async fn run_doctor_with_claims(
     // `core::git_maintenance` are the prevention half). Both read-only.
     checks.push(check_maintenance_config(repos_root));
     checks.push(check_live_maintenance_processes());
+    // #7965: each background sweep's kill switch, whether a pass is in flight,
+    // and how long the last one took — so an operator can SEE a sweep overrunning
+    // instead of inferring it from request latency.
+    checks.push(crate::daemon::services::sweep_status::check_background_sweeps());
     // Issue #4033: where the RUNNING binary came from, and whether that source
     // still exists. Reports UNKNOWN — never Ok — when provenance cannot be
     // determined. Read-only; never installs, moves, or deletes.
@@ -738,7 +742,7 @@ pub async fn run_doctor_for_manager(
 /// and resolves the managed Claude config dir, then calls
 /// [`doctor_auto_memory::check_auto_memory`].
 /// Test: the three verdicts are covered directly in `doctor_auto_memory_tests`;
-/// this wiring is covered by `run_doctor_produces_fifty_three_checks`.
+/// this wiring is covered by `run_doctor_produces_fifty_four_checks`.
 async fn auto_memory_row(
     project_dir: Option<&Path>,
     home: &Path,

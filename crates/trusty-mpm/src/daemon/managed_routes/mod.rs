@@ -37,6 +37,9 @@ pub mod front_gate;
 pub mod inproject;
 pub mod inproject_cold_start;
 pub mod inproject_hygiene;
+// #7965: the hygiene sweep's own env gate, host-state refusal and maintenance
+// lane — split out of the daemon boot sequence so the bound cannot be lost there.
+pub(crate) mod inproject_hygiene_sweep;
 mod inproject_start_point;
 mod launch_on_main;
 /// Post-send "did the relaunch actually take?" status check (#6766).

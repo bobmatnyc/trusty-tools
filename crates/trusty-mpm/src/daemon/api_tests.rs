@@ -1364,6 +1364,8 @@ async fn doctor_endpoint_returns_report() {
         // #7171: the git-maintenance-storm detection probes.
         "maintenance_config",
         "maintenance_processes",
+        // #7965: each background sweep's kill switch and last pass duration.
+        "background_sweeps",
         "binary_provenance",
         // #5007: `sessions.json` integrity — a corrupt store blocks every write.
         "session_store",

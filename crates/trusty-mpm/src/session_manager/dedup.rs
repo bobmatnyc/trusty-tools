@@ -95,18 +95,37 @@ impl SessionManager {
     /// `dedup_refuses_on_the_noop_driver_rather_than_reading_zero_as_dead`,
     /// `reconcile_refuses_to_stop_sessions_when_tmux_cannot_be_observed`.
     pub(super) fn observed_live_managed_names(&self) -> Result<HashSet<String>, ManagedError> {
-        // #5856: refuse, never assume — see this function's doc. The guard
-        // mirrors `resolve_session_name`'s (#3886): it belongs next to the
-        // `list-sessions` probe it protects, not on the callers.
-        self.tmux.ensure_server_up()?;
-        Ok(self
-            .tmux
-            .list_sessions()?
-            .into_iter()
-            .filter(|n| crate::core::names::is_managed_session_name(n))
-            .collect())
+        live_managed_names_of(self.tmux.as_ref())
     }
+}
 
+/// [`SessionManager::observed_live_managed_names`] against a bare driver.
+///
+/// Why it takes the driver rather than `&self` (#7965): the probe is two
+/// synchronous tmux subprocesses, and
+/// [`SessionManager::workspace_claims`](super::SessionManager::workspace_claims)
+/// must run it on the blocking pool under a timeout instead of on whatever thread
+/// called it. That needs an owned `Arc<dyn ManagedTmuxDriver>` and no borrow of
+/// the manager.
+/// What: the same body, unchanged — the `ensure_server_up` guard, the propagated
+/// `list_sessions` error, the managed-name filter.
+/// Test: as [`SessionManager::observed_live_managed_names`], plus
+/// `a_slow_tmux_probe_is_bounded_and_leaves_every_claim_live`.
+pub(super) fn live_managed_names_of(
+    tmux: &dyn super::ManagedTmuxDriver,
+) -> Result<HashSet<String>, ManagedError> {
+    // #5856: refuse, never assume — see `observed_live_managed_names`'s doc. The
+    // guard mirrors `resolve_session_name`'s (#3886): it belongs next to the
+    // `list-sessions` probe it protects, not on the callers.
+    tmux.ensure_server_up()?;
+    Ok(tmux
+        .list_sessions()?
+        .into_iter()
+        .filter(|n| crate::core::names::is_managed_session_name(n))
+        .collect())
+}
+
+impl SessionManager {
     /// Collapse stale duplicate session records per project (#2306).
     ///
     /// Why: see the module docs — quiesced projects with a canonical record AND
