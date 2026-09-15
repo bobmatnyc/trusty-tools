@@ -1,0 +1,4 @@
+Fixed
+
+- `tagent --help` and `tagent -h` now exit 0 and print the usage text on stdout (#7538). Clap reports a help request as an `Err`, and the top-level dispatch mapped every parse `Err` onto an `anyhow` return, so help arrived on stderr behind an `Error:` prefix with exit 1 — a script or QA harness gating on the exit code read a healthy binary as broken. A real usage error still keeps its non-zero exit.
+- The Gmail poll loop marks a message deduplicated only after its event is durably stored (#7478). The marker used to be written before the fetch and the append, so an `EventStore::append` failure left the message claimed-as-seen with nothing in the event log — a silent, permanent drop. A failed append now logs at ERROR, leaves the message unmarked, and holds the history cursor back so the next poll re-lists the same window and retries it.
