@@ -138,7 +138,9 @@ impl ToolExecutor for ChannelTool {
                             .await
                     }
                     _ => {
-                        return ToolResult::err("binding_id, text, and revision from list required");
+                        return ToolResult::err(
+                            "binding_id, text, and revision from list required",
+                        );
                     }
                 }
             }

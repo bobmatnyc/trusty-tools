@@ -1,0 +1,2 @@
+Breaking
+- Channel writes now require an API token, even from loopback. `PUT /api/channels`, `PUT /api/agents/{name}/channels`, the `channel` tool's `set` actions and the turn-originated `settings.patch/channels` op all answer 401 on a daemon started without `--api-token` (or `TAGENT_API_TOKEN`). Reads are unaffected, and the same-origin write guard is unchanged. Every accepted write emits one `channel-write` audit line naming the route, scope, assistant, the stored count either side of the write, and the caller's address.
