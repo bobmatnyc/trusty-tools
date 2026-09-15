@@ -28,6 +28,8 @@
 
 use std::path::{Path, PathBuf};
 
+use super::worktree_reclaim_ownership::SessionOwners;
+
 /// One session's claim on one workspace path (#6806).
 ///
 /// Why: a bare `PathBuf` cannot say WHOSE claim it is, which is what both
@@ -140,6 +142,12 @@ pub(crate) struct LiveClaims {
     pub claims: Vec<WorkspaceClaim>,
     /// The managed session that invoked this sweep, when it identified itself.
     pub caller: Option<String>,
+    /// Every stored record's liveness, keyed by session id (#7652).
+    ///
+    /// Gate 4's session half reads this, never `claims` — see [`SessionOwners`].
+    /// The `Default` is an UNREAD map, which refuses every session-owned
+    /// candidate, so a producer that did not read the store cannot permit one.
+    pub owners: SessionOwners,
 }
 
 impl LiveClaims {
@@ -149,6 +157,7 @@ impl LiveClaims {
         Self {
             claims,
             caller: None,
+            owners: SessionOwners::default(),
         }
     }
 

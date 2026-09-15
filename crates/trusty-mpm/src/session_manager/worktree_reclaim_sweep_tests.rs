@@ -130,6 +130,7 @@ fn recheck_permits_a_worktree_claimed_only_by_the_calling_session() {
     let claims = LiveClaims {
         claims: vec![WorkspaceClaim::new("tm-client-03", &fx.repo)],
         caller: Some("tm-client-03".to_string()),
+        owners: Default::default(),
     };
     assert_eq!(
         recheck_before_delete(&path, &no_keeps(), Some(&claims), &merged(1), &no_agents),
@@ -492,6 +493,7 @@ fn survey_reclaims_a_worktree_claimed_only_by_the_calling_session() {
     let claims = LiveClaims {
         claims: vec![WorkspaceClaim::new("tm-client-03", &fx.repo)],
         caller: Some("tm-client-03".to_string()),
+        owners: Default::default(),
     };
     let s = survey_with_index(
         &fx.repos_root,
@@ -528,6 +530,7 @@ fn survey_still_blocks_a_worktree_a_foreign_session_claims() {
     let claims = LiveClaims {
         claims: vec![WorkspaceClaim::new("tm-other-01", &path)],
         caller: Some("tm-client-03".to_string()),
+        owners: Default::default(),
     };
     let s = survey_with_index(
         &fx.repos_root,

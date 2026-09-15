@@ -1,4 +1,4 @@
-//! The one audit line every worktree removal writes before it deletes (#7885).
+//! The audit lines every worktree removal writes around its deletion (#7885).
 //!
 //! Why: on 2026-09-14 two merged worktrees — `agent-a9826013bc7683c2b` and
 //! `agent-a1afc1489a1adbf97`, both PR #7858 — lost their entire tracked
@@ -9,14 +9,21 @@
 //! success arm of one of those paths is not an audit trail: the one that
 //! deleted these left no record at all.
 //!
-//! What: [`RemovalAudit`], resolved from the path itself immediately before the
-//! first destructive call in
+//! What: [`audited_removal`], called from
 //! [`remove_session_worktree`](super::decommission::remove_session_worktree) —
 //! the single choke point every removal route passes through, including the raw
-//! `remove_dir_all` fallback. It carries the resolved path, the branch, the
-//! owning session or agent from the `.trusty-mpm-worktree` sentinel, and the
-//! caller's reason, and it goes to `tracing` at INFO, which is where prune
-//! already logs (no second sink).
+//! `remove_dir_all` fallback. It resolves a [`RemovalAudit`] from the path
+//! itself (resolved path, branch, owning session or agent from the
+//! `.trusty-mpm-worktree` sentinel, and the caller's reason), writes an ATTEMPT
+//! line before the removal runs, and an OUTCOME line after it returns. Both go
+//! to `tracing` at INFO, where prune already logs (no second sink).
+//!
+//! **Attempt, then outcome (#7885 critic round).** The single line used to read
+//! "removing …" and was written before a removal that can still be refused —
+//! a git lock, a stale pointer, a spawn failure — so a refusal read as a
+//! deletion. The attempt line stays BEFORE the removal, because a removal that
+//! dies part-way (the incident's shape) still has to be on record; the outcome
+//! line says whether the directory is actually gone.
 //!
 //! **Best-effort, and never a gate.** Every field falls back to a placeholder
 //! rather than failing, because an audit that can refuse a removal is a new
@@ -28,6 +35,7 @@ use std::path::{Path, PathBuf};
 
 use tracing::info;
 
+use super::decommission::WorktreeRemoval;
 use super::worktree_ownership::{SentinelOwner, read_sentinel_owner};
 use super::worktree_safety::git_stdout;
 
@@ -37,7 +45,7 @@ use super::worktree_safety::git_stdout;
 /// removal route is guaranteed to record the same four facts — the divergence
 /// between routes is exactly what made the observed deletion untraceable.
 /// What: the four fields #7885's closure conditions name. Built by
-/// [`Self::resolve`], rendered by [`Self::line`], emitted by [`Self::emit`].
+/// [`Self::resolve`], rendered by [`Self::line`] and [`Self::outcome_line`].
 /// Test: `worktree_7885_an_audit_names_the_path_branch_session_and_reason`,
 /// `an_audit_for_an_unreadable_path_still_names_the_path_and_reason`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,12 +97,15 @@ impl RemovalAudit {
         }
     }
 
-    /// The one line, as an operator reads it.
+    /// The ATTEMPT line, written before the removal runs.
     ///
-    /// Test: `worktree_7885_an_audit_names_the_path_branch_session_and_reason`.
+    /// #7885 critic round: worded as an attempt. It precedes a removal that can
+    /// still be refused, so "removing …" read as a completed deletion.
+    /// Test: `worktree_7885_an_audit_names_the_path_branch_session_and_reason`,
+    /// `worktree_7885_a_refused_removal_is_never_audited_as_a_deletion`.
     pub(crate) fn line(&self) -> String {
         format!(
-            "worktree-removal: removing {} (branch {}, owner {}) — {} (#7885)",
+            "worktree-removal: attempting removal of {} (branch {}, owner {}) — {} (#7885)",
             self.path.display(),
             self.branch,
             self.session,
@@ -102,27 +113,76 @@ impl RemovalAudit {
         )
     }
 
-    /// Write [`Self::line`] to `tracing` at INFO, where prune already logs.
-    pub(crate) fn emit(&self) {
-        info!(
-            path = %self.path.display(),
-            branch = %self.branch,
-            session = %self.session,
-            reason = %self.reason,
-            "{}",
-            self.line()
-        );
+    /// The OUTCOME line, written after the removal returns (#7885 critic round).
+    ///
+    /// Why: the attempt line alone over-reports deletions to anyone counting
+    /// them. This line reads `removed` only when the remover reported success
+    /// AND the directory is gone; otherwise it reads `kept` and quotes why.
+    /// What: `still_on_disk` is observed by the caller after the removal, so a
+    /// reported success that left the directory behind is not called a removal.
+    /// Test: `worktree_7885_a_refused_removal_is_never_audited_as_a_deletion`,
+    /// `worktree_7885_a_completed_removal_is_audited_as_removed`.
+    pub(super) fn outcome_line(&self, outcome: &WorktreeRemoval, still_on_disk: bool) -> String {
+        let (verb, detail) = match (outcome.reason(), still_on_disk) {
+            (None, false) => ("removed", self.reason.clone()),
+            (None, true) => (
+                "kept",
+                format!(
+                    "the remover reported success but the directory is still on disk (asked \
+                     for: {})",
+                    self.reason
+                ),
+            ),
+            (Some(why), _) => (
+                "kept",
+                format!(
+                    "the removal did not complete: {why} (asked for: {})",
+                    self.reason
+                ),
+            ),
+        };
+        format!(
+            "worktree-removal: {verb} {} (branch {}, owner {}) — {detail} (#7885)",
+            self.path.display(),
+            self.branch,
+            self.session,
+        )
     }
 }
 
-/// Resolve and emit one audit line in a single call.
+/// Run `remove` between an attempt line and an outcome line (#7885).
 ///
-/// Why: the removal path has exactly one place this belongs, and a two-step
-/// `resolve` + `emit` there invites a future edit that keeps one and drops the
-/// other.
-/// Test: `worktree_7885_a_removal_emits_one_audit_line_before_deleting`.
-pub(crate) fn audit_removal(path: &Path, reason: &str) {
-    RemovalAudit::resolve(path, reason).emit();
+/// Why: the removal path has exactly one place this belongs. Taking the removal
+/// as a closure means no future edit can write the attempt without the outcome,
+/// or read the facts after the directory they describe is gone.
+/// What: resolves [`RemovalAudit`] from `path`, logs [`RemovalAudit::line`],
+/// runs `remove`, logs [`RemovalAudit::outcome_line`] against whether `path`
+/// still exists, and returns the removal's own result unchanged.
+/// Test: `worktree_7885_a_removal_emits_one_audit_line_before_deleting`,
+/// `worktree_7885_a_refused_removal_is_never_audited_as_a_deletion`,
+/// `worktree_7885_a_completed_removal_is_audited_as_removed`.
+pub(super) fn audited_removal(
+    path: &Path,
+    reason: &str,
+    remove: impl FnOnce() -> WorktreeRemoval,
+) -> WorktreeRemoval {
+    let audit = RemovalAudit::resolve(path, reason);
+    info!(
+        path = %audit.path.display(),
+        branch = %audit.branch,
+        session = %audit.session,
+        reason = %audit.reason,
+        "{}",
+        audit.line()
+    );
+    let outcome = remove();
+    info!(
+        path = %audit.path.display(),
+        removed = outcome.removed() && !path.exists(),
+        "{}",
+        audit.outcome_line(&outcome, path.exists())
+    );
+    outcome
 }
 
 #[cfg(test)]

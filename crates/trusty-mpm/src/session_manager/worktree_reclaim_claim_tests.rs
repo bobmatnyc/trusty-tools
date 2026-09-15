@@ -75,6 +75,7 @@ fn claims_from_the_caller_alone_do_not_block() {
     let claims = LiveClaims {
         claims: vec![WorkspaceClaim::new("tm-client-03", &workspace)],
         caller: Some("tm-client-03".to_string()),
+        owners: Default::default(),
     };
     assert_eq!(
         claims.claim_state(&worktree),
@@ -99,6 +100,7 @@ fn a_caller_may_not_reclaim_its_own_workspace() {
     let claims = LiveClaims {
         claims: vec![WorkspaceClaim::new("tm-client-03", &workspace)],
         caller: Some("tm-client-03".to_string()),
+        owners: Default::default(),
     };
     let reason = claims
         .claim_state(&workspace)
@@ -130,6 +132,7 @@ fn a_foreign_sessions_claim_still_blocks() {
     let claims = LiveClaims {
         claims: vec![WorkspaceClaim::new("tm-other-01", &worktree)],
         caller: Some("tm-client-03".to_string()),
+        owners: Default::default(),
     };
     assert!(
         claims.claim_state(&worktree).refusal(false).is_some(),
@@ -147,6 +150,7 @@ fn a_foreign_refusal_names_the_claimant_and_denies_it_is_the_caller() {
     let claims = LiveClaims {
         claims: vec![WorkspaceClaim::new("tm-other-01", &worktree)],
         caller: Some("tm-client-03".to_string()),
+        owners: Default::default(),
     };
     let reason = claims
         .claim_state(&worktree)
@@ -203,6 +207,7 @@ fn a_foreign_claim_outranks_the_callers_own() {
         let live = LiveClaims {
             claims,
             caller: Some("tm-client-03".to_string()),
+            owners: Default::default(),
         };
         let state = live.claim_state(&worktree);
         assert!(
@@ -345,6 +350,7 @@ fn worktree_7652_a_foreign_project_root_claim_no_longer_blocks_a_nested_worktree
             &project,
         )],
         caller: Some("b175bb88-af7f-5ba5-b75d-85795d60b234".to_string()),
+        owners: Default::default(),
     };
     let state = claims.claim_state(&worktree);
     assert_eq!(
@@ -382,6 +388,7 @@ fn worktree_7652_a_foreign_project_root_claim_no_longer_blocks_a_nested_worktree
             &worktree,
         )],
         caller: Some("b175bb88-af7f-5ba5-b75d-85795d60b234".to_string()),
+        owners: Default::default(),
     };
     let reason = on_the_worktree
         .claim_state(&worktree)

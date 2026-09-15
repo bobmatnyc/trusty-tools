@@ -340,6 +340,8 @@ fn inspect(
         &pr,
         probe_dirt,
         probes.agent_state,
+        // #7652: gate 4b's owner map travels with the claim set.
+        &probes.claims.owners,
         keep_list,
     );
     let facts = WorktreeFacts {

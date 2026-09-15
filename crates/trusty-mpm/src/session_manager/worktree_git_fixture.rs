@@ -122,6 +122,10 @@ pub(crate) fn deny_all(path: &Path) -> RestoreMode {
     }
 }
 
+/// The tmux name behind [`GitWorktreeFixture::stamp_reclaimable_sentinel`]'s
+/// owner id (#7652). No store in any test registers it.
+const RECLAIMABLE_OWNER_TMUX: &str = "tm-fixture-reclaimable-owner";
+
 impl GitWorktreeFixture {
     /// Build a checkout on `main`, pushed to a bare remote in the same temp dir.
     ///
@@ -461,14 +465,17 @@ impl GitWorktreeFixture {
     /// these fixtures genuinely reclaimable, which is the only condition under
     /// which the dirty gate is load-bearing.
     /// What: writes an aged [`super::worktree_ownership::WorktreeSentinel`] for
-    /// a fresh, never-registered [`ManagedSessionId`].
+    /// a never-registered [`ManagedSessionId`], and returns it. #7652: the id is
+    /// the fixed one [`Self::reclaimable_owner_gone`] reports as ended, so a
+    /// merged-PR reclaim test can prove the owner gone without a session store.
     /// Test: `prune_orphaned_worktrees_reclaims_clean_pushed_worktree`.
-    pub(crate) fn stamp_reclaimable_sentinel(wt: &Path) {
+    pub(crate) fn stamp_reclaimable_sentinel(wt: &Path) -> ManagedSessionId {
         let aged = chrono::Utc::now()
             - super::worktree_ownership::OWNERLESS_GRACE
             - chrono::Duration::minutes(1);
+        let owner = ManagedSessionId::for_adopted_tmux_name(RECLAIMABLE_OWNER_TMUX);
         let payload = serde_json::to_vec(&super::worktree_ownership::WorktreeSentinel {
-            owner_session_id: Some(ManagedSessionId::new()),
+            owner_session_id: Some(owner),
             created_at: aged,
             agent: None,
         })
@@ -478,6 +485,18 @@ impl GitWorktreeFixture {
             payload,
         )
         .expect("fixture: write sentinel");
+        owner
+    }
+
+    /// An owner map in which [`Self::stamp_reclaimable_sentinel`]'s owner has
+    /// provably ended (#7652) — what a store read reports for a tombstoned
+    /// record whose tmux session tmux no longer lists.
+    pub(crate) fn reclaimable_owner_gone() -> super::worktree_reclaim_ownership::SessionOwners {
+        let owner = ManagedSessionId::for_adopted_tmux_name(RECLAIMABLE_OWNER_TMUX);
+        super::worktree_reclaim_ownership::SessionOwners::observed([(
+            owner.to_string(),
+            super::worktree_reclaim_claim::ClaimLiveness::SessionGone,
+        )])
     }
 
     /// Stamp `wt` with an AGENT ownership sentinel naming `agent_id` (#5661).

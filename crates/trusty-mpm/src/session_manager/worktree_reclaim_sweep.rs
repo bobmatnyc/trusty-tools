@@ -44,7 +44,8 @@ use super::worktree_landing_refresh::refresh_landing_refs;
 use super::worktree_reclaim::{
     AgentStateProbe, BranchPrState, KeepList, LiveClaims, NOT_INSPECTED_REASON, PrIndex,
     ReclaimCandidate, ReclaimGate, ReclaimMode, ReclaimOutcome, ReclaimSurvey, ReclaimVerdict,
-    agent_ownership_blocks, classify, measure_bytes_until, tm_provisioned,
+    agent_ownership_blocks, classify, measure_bytes_until, session_ownership_blocks,
+    tm_provisioned,
 };
 // #7504: the worktree-launched-process gate, applied per candidate immediately
 // before its deletion alongside the five `recheck_before_delete` re-asks.
@@ -221,6 +222,8 @@ pub(crate) fn survey_with_index(
             &pr,
             &inspect_dirt,
             agent_state,
+            // #7652: gate 4b's owner map rides in the claim snapshot.
+            &in_use.owners,
             keep_list,
         );
         candidates.push(ReclaimCandidate {
@@ -356,6 +359,7 @@ fn git_still_permits(path: &Path) -> Result<(), String> {
 /// `recheck_refuses_a_path_git_no_longer_lists`,
 /// `recheck_refuses_a_worktree_that_lost_its_ownership_marker`,
 /// `recheck_refuses_a_worktree_an_agent_claimed_after_the_survey`,
+/// `worktree_7652_the_recheck_refuses_an_owner_that_came_back`,
 /// `recheck_refuses_when_the_pr_is_no_longer_merged`,
 /// `recheck_refuses_a_worktree_dirtied_after_the_survey`,
 /// `recheck_permits_a_clean_merged_owned_worktree`.
@@ -392,6 +396,12 @@ pub(crate) fn recheck_before_delete(
     // survey that takes minutes is still running, and the survey's verdict knows
     // nothing about it.
     if let Some(reason) = agent_ownership_blocks(path, agent_state) {
+        return Some(reason);
+    }
+    // #7652: gate 4b, re-asked against the FRESH owner map — a session that
+    // resumed in this tree during a minutes-long survey is invisible to the
+    // survey's verdict, exactly as a freshly dispatched agent is.
+    if let Some(reason) = session_ownership_blocks(path, &in_use_now.owners) {
         return Some(reason);
     }
     if !matches!(pr_now, BranchPrState::Merged { .. }) {

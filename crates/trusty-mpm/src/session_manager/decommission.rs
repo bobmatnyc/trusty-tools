@@ -349,11 +349,27 @@ pub(super) fn remove_session_worktree(path: &Path, reason: &str) -> WorktreeRemo
         );
     }
 
-    // #7885: the audit line, HERE — past the ownership gate, so it describes a
-    // removal that is actually going to be attempted, and ahead of every
-    // destructive branch below (`git worktree remove --force` and both
-    // `remove_unclaimed_directory` call sites), so no route can delete unlogged.
-    super::worktree_removal_audit::audit_removal(path, reason);
+    // #7885: audited HERE — past the ownership gate, so it describes a removal
+    // that is actually attempted, and around every destructive branch in
+    // `remove_registered_worktree`, so no route can delete unlogged.
+    // #7885 critic round: an attempt line before and an outcome line after, so
+    // a refused removal never reads as a deletion.
+    super::worktree_removal_audit::audited_removal(path, reason, || {
+        remove_registered_worktree(path)
+    })
+}
+
+/// Ask git to remove a worktree that already passed the ownership gate (#4207,
+/// #4732).
+///
+/// Why: split from [`remove_session_worktree`] so the removal audit wraps ONE
+/// call rather than being repeated on each of this function's five return arms
+/// (#7885).
+/// What: registry resolution, `git worktree remove --force`, and the two
+/// [`worktree_protection`]-gated fallbacks, unchanged by the split.
+/// Test: `remove_session_worktree_refuses_a_git_locked_worktree`,
+/// `worktree_7885_a_refused_removal_is_never_audited_as_a_deletion`.
+fn remove_registered_worktree(path: &Path) -> WorktreeRemoval {
     // #4207: ask git which checkout owns this worktree's registry instead of
     // guessing that it is the grandparent directory. The grandparent rule held
     // only for the two shapes it was written against; a worktree registered to

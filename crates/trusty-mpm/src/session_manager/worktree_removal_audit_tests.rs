@@ -120,6 +120,81 @@ fn worktree_7885_a_removal_emits_one_audit_line_before_deleting() {
     );
 }
 
+/// Would an operator counting deletions count this line as one?
+fn reads_as_a_deletion(line: &str) -> bool {
+    line.contains("worktree-removal: removing") || line.contains("worktree-removal: removed")
+}
+
+/// 🔴 #7885 critic round: a REFUSED removal never reads as a deletion, and its
+/// attempt line is closed by a `kept` outcome line.
+///
+/// Why: the audit line is written before a removal git can still refuse. Worded
+/// "removing …" it counted this refusal as a deletion. Fails on `76ad591ac`,
+/// which writes `worktree-removal: removing …` and no outcome at all.
+#[test]
+#[serial_test::serial]
+fn worktree_7885_a_refused_removal_is_never_audited_as_a_deletion() {
+    let fx = GitWorktreeFixture::new();
+    let locked = fx.add_worktree("agent-refused-7885");
+    GitWorktreeFixture::stamp_reclaimable_sentinel(&locked);
+    fx.lock_worktree(&locked);
+
+    let (outcome, lines) = captured(|| {
+        crate::session_manager::decommission::remove_session_worktree(
+            &locked,
+            "merged-PR reclaim, every gate passed",
+        )
+    });
+    assert!(!outcome.removed(), "a git-locked worktree must be refused");
+    assert!(locked.exists(), "and left on disk");
+    let audit: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.contains("worktree-removal:"))
+        .collect();
+    assert!(!audit.is_empty(), "still audited. Captured: {lines:#?}");
+    assert!(
+        !audit.iter().any(|l| reads_as_a_deletion(l)),
+        "nothing was deleted, so no line may read as a deletion: {audit:#?}"
+    );
+    assert!(
+        audit
+            .iter()
+            .any(|l| l.contains("worktree-removal: kept") && l.contains("agent-refused-7885")),
+        "the attempt needs a kept outcome naming the path: {audit:#?}"
+    );
+}
+
+/// 🔴 #7885 critic round: the over-correction guard — a removal that happened
+/// is audited as `removed`, and not also as `kept`.
+#[test]
+#[serial_test::serial]
+fn worktree_7885_a_completed_removal_is_audited_as_removed() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("agent-removed-7885");
+    GitWorktreeFixture::stamp_reclaimable_sentinel(&wt);
+
+    let (outcome, lines) = captured(|| {
+        crate::session_manager::decommission::remove_session_worktree(
+            &wt,
+            "merged-PR reclaim, every gate passed",
+        )
+    });
+    assert!(
+        outcome.removed() && !wt.exists(),
+        "the fixture must be removed"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("worktree-removal: removed") && l.contains("agent-removed-7885")),
+        "Captured: {lines:#?}"
+    );
+    assert!(
+        !lines.iter().any(|l| l.contains("worktree-removal: kept")),
+        "Captured: {lines:#?}"
+    );
+}
+
 /// A path git cannot be asked about still produces a line — an audit that
 /// refuses is a new failure mode on a path whose job is to finish.
 #[test]
