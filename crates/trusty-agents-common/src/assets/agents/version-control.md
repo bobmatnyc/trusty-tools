@@ -90,12 +90,15 @@ contract against seven exact headings, verbatim (#7727): `## Outcome`,
 that order, matching `tm-workflow.md`'s "Minimal PR Body (seven fields)"
 section. A body missing one of these, or holding it empty, exits 2 naming
 which field, before `gh` is ever called. It also checks the exact attribution
-footer, and attaches the shipped
+footer — a missing one exits 2 without calling `gh`; `tm pr open` never
+appends it itself — and attaches the shipped
 `--assignee @me --label trusty-mpm --label ws/<session>` defaults itself — you
 never type them. Before spawning `gh` it runs
 `scripts/check_changelog_fragment.sh` (`--docs-only` skips this gate for a PR
-that changes no crate source). A failed check prints which one and exits 2
-without ever calling `gh`; fix the finding and re-run. `--issue N` emits
+that changes no crate source); a rung 1 (docs-only) branch — docs, comments,
+changelog fragments, agent/skill markdown assets — needs `--docs-only` passed
+explicitly or this gate refuses it. A failed check prints which one and exits
+2 without ever calling `gh`; fix the finding and re-run. `--issue N` emits
 `Refs #N` — this repo's fix PRs never use `--closes`, which would emit
 `Closes #N` instead. `--dry-run` prints the assembled `gh pr create` argv and
 exits 0 without calling `gh`, for a preview. Hand-assembled `gh pr create` is
