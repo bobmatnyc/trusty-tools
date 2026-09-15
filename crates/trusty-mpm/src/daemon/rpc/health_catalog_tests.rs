@@ -9,9 +9,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use super::CatalogReportCache;
+use super::{CatalogReportCache, STUCK_REFRESH_BOUND};
+// `Inner.refresh_started_at` is `tokio::time::Instant` (paused-clock aware);
+// aliased to avoid clashing with `std::time::Instant` above, which the
+// stalled-read test uses to measure genuine wall-clock latency.
 use crate::core::update_check::StalenessReport;
 use crate::daemon::state::DaemonState;
+use tokio::time::Instant as TokioInstant;
 
 /// Long enough that no test here times out waiting on its own refresh.
 const GENEROUS_WAIT: Duration = Duration::from_secs(10);
@@ -106,6 +110,69 @@ async fn a_panicking_refresh_reports_unknown_not_fresh() {
         .await;
     assert!(report.unknown, "a crashed walk is undetermined: {report:?}");
     assert!(!report.stale);
+}
+
+/// A refresh that never returns is presumed hung once outstanding longer than
+/// `STUCK_REFRESH_BOUND`; a warm cache then answers `unknown` instead of
+/// re-serving the pre-hang report forever (#7968).
+///
+/// The Fail-Open check this closes: on `c151219ae` a `compute` that blocks
+/// without panicking never clears the single-flight `refreshing` flag, so
+/// every later call keeps falling through to `previous` — the last good, now
+/// arbitrarily stale, "not stale" report — with no bound and nothing telling
+/// the caller the walk never finished. This test fails against that commit:
+/// the `after_bound` call below still returns the pre-hang report there,
+/// never `unknown`.
+///
+/// Why the hang is marked directly on `Inner` rather than via a real blocked
+/// `compute`: this module is `health_catalog`'s child, so its private state is
+/// reachable, and the bug under test lives entirely in `get`'s bound check —
+/// not in how a refresh is spawned. A genuinely blocked `spawn_blocking`
+/// thread here would out-survive the test (nothing ever signals it), and
+/// `#[tokio::test]`'s runtime teardown waits for outstanding blocking-pool
+/// work, hanging the whole binary. Marking `refreshing` directly reproduces
+/// the same state with nothing left to wait for at teardown. Uses
+/// `start_paused` and `tokio::time::advance` (no wall-clock sleeps) so a 60 s
+/// bound costs nothing real.
+#[tokio::test(start_paused = true)]
+async fn a_refresh_stuck_past_the_bound_is_reported_unknown() {
+    let cache = Arc::new(CatalogReportCache::new(Duration::from_secs(30)));
+
+    // Warm the cache with one good, non-stale report.
+    let warm = cache.get(StalenessReport::default, GENEROUS_WAIT).await;
+    assert!(
+        !warm.stale && !warm.unknown,
+        "warm-up must succeed: {warm:?}"
+    );
+
+    // Expire it, then mark a refresh outstanding without ever completing it.
+    tokio::time::advance(Duration::from_secs(31)).await;
+    {
+        let mut inner = cache.inner.lock();
+        inner.refreshing = true;
+        inner.refresh_started_at = Some(TokioInstant::now());
+    }
+    let unreachable = || -> StalenessReport {
+        unreachable!("refreshing=true must never let `get` start a second walk")
+    };
+
+    // Under the bound: still serves the pre-hang report, and does not start a
+    // second walk (single-flight held).
+    let still_warm = cache.get(unreachable, Duration::from_millis(100)).await;
+    assert!(
+        !still_warm.unknown && !still_warm.stale,
+        "a refresh outstanding under the bound still serves the pre-hang \
+         report: {still_warm:?}"
+    );
+
+    // Push the outstanding refresh's age past the stuck bound.
+    tokio::time::advance(STUCK_REFRESH_BOUND + Duration::from_secs(1)).await;
+    let after_bound = cache.get(unreachable, Duration::from_millis(100)).await;
+    assert!(
+        after_bound.unknown && !after_bound.stale,
+        "a refresh stuck past the bound must read unknown, never the \
+         pre-hang report: {after_bound:?}"
+    );
 }
 
 /// `/health` answers inside the bound, twice, while the catalog read is

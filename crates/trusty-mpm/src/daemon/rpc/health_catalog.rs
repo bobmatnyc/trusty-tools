@@ -14,15 +14,18 @@
 //! on the blocking pool (single-flight) and waits at most [`REFRESH_WAIT`] for
 //! it; past that it answers from the previous report, or `unknown` when there is
 //! none yet. A refresh that panics stores `unknown`, never a fresh-looking
-//! default.
+//! default. #7968: a refresh outstanding past [`STUCK_REFRESH_BOUND`] is
+//! presumed hung — a warm cache stops re-serving the pre-hang report and
+//! answers `unknown` instead, rather than serving it indefinitely.
 //!
 //! Test: `health_catalog_tests`.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use tokio::sync::Notify;
+use tokio::time::Instant;
 
 use crate::core::update_check::StalenessReport;
 use crate::daemon::state::DaemonState;
@@ -41,6 +44,15 @@ pub(crate) const MAX_AGE: Duration = Duration::from_secs(30);
 /// when the walk stalls.
 pub(crate) const REFRESH_WAIT: Duration = Duration::from_millis(100);
 
+/// How long an outstanding refresh may run before it is presumed hung (#7968).
+///
+/// Why 2x [`MAX_AGE`] (60 s): the walk under I/O pressure that motivated this
+/// cache measured ~5 s (see the module doc); 60 s leaves generous headroom
+/// above that worst case while still bounding a genuinely stuck read — a
+/// wedged NFS mount, a FUSE stall — to a reported `unknown` rather than an
+/// indefinitely stale "not stale" answer.
+pub(crate) const STUCK_REFRESH_BOUND: Duration = Duration::from_secs(60);
+
 /// The cache's mutable half.
 #[derive(Debug, Default)]
 struct Inner {
@@ -48,6 +60,9 @@ struct Inner {
     computed_at: Option<Instant>,
     /// True while a refresh task is outstanding — the single-flight flag.
     refreshing: bool,
+    /// When the outstanding refresh started; `None` when none is running.
+    /// #7968: the stuck-refresh bound is measured from here, not `computed_at`.
+    refresh_started_at: Option<Instant>,
 }
 
 /// Single-flight, bounded-age cache of one [`StalenessReport`] (#7968).
@@ -59,7 +74,8 @@ struct Inner {
 /// arrive.
 /// Test: `concurrent_requests_start_a_single_refresh`,
 /// `a_report_older_than_max_age_is_recomputed`,
-/// `a_panicking_refresh_reports_unknown_not_fresh`.
+/// `a_panicking_refresh_reports_unknown_not_fresh`,
+/// `a_refresh_stuck_past_the_bound_is_reported_unknown`.
 #[derive(Debug)]
 pub(crate) struct CatalogReportCache {
     inner: Mutex<Inner>,
@@ -91,10 +107,15 @@ impl CatalogReportCache {
     /// What: a fresh report returns immediately. Otherwise a refresh is started
     /// unless one is already running, and the call waits up to `wait` for it;
     /// when it does not finish in time the previous report is returned, or
-    /// `unknown` when none exists.
+    /// `unknown` when none exists. #7968: a refresh outstanding longer than
+    /// [`STUCK_REFRESH_BOUND`] is presumed hung — the call reports `unknown`
+    /// immediately instead of re-serving the pre-hang report. The hung refresh
+    /// itself keeps running (single-flight is never broken to start a second
+    /// walk); the cache recovers on its own once that task finally returns.
     /// Test: `concurrent_requests_start_a_single_refresh`,
     /// `a_report_older_than_max_age_is_recomputed`,
-    /// `health_answers_while_the_catalog_read_is_stalled`.
+    /// `health_answers_while_the_catalog_read_is_stalled`,
+    /// `a_refresh_stuck_past_the_bound_is_reported_unknown`.
     pub(crate) async fn get<F>(self: &Arc<Self>, compute: F, wait: Duration) -> StalenessReport
     where
         F: FnOnce() -> StalenessReport + Send + 'static,
@@ -108,6 +129,15 @@ impl CatalogReportCache {
                 .is_some_and(|at| at.elapsed() < self.max_age)
             {
                 return inner.report.clone().unwrap_or_else(unknown_report);
+            }
+            // #7968: never re-serve a pre-hang report once its refresh has run
+            // longer than the stuck bound — see the doc above.
+            if inner.refreshing
+                && inner
+                    .refresh_started_at
+                    .is_some_and(|at| at.elapsed() >= STUCK_REFRESH_BOUND)
+            {
+                return unknown_report();
             }
             // Registered before the lock is released, so a refresh finishing in
             // between still wakes this waiter.
@@ -134,6 +164,7 @@ impl CatalogReportCache {
         F: FnOnce() -> StalenessReport + Send + 'static,
     {
         inner.refreshing = true;
+        inner.refresh_started_at = Some(Instant::now());
         let cache = Arc::clone(self);
         tokio::spawn(async move {
             let report = match tokio::task::spawn_blocking(compute).await {
@@ -151,6 +182,9 @@ impl CatalogReportCache {
                 inner.report = Some(report);
                 inner.computed_at = Some(Instant::now());
                 inner.refreshing = false;
+                // #7968: clears even a late (past-bound) finish, so the cache
+                // recovers on its own the moment a hung walk finally returns.
+                inner.refresh_started_at = None;
             }
             cache.refreshed.notify_waiters();
         });
