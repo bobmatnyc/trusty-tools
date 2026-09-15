@@ -1378,14 +1378,27 @@ pub(crate) enum Command {
     ///
     /// Why: Claude Code's `statusLine` hook calls this command on every render
     /// cycle; this handler parses the hook JSON and emits one compact segment
-    /// string for the status bar.
+    /// string for the status bar. #7907: a verifier building a synthetic
+    /// payload by hand had no way to learn which stdin fields key the `💸`
+    /// segment's ledger lookup, so a hand-built `session_id` with no matching
+    /// ledger row rendered `💸—` with no explanation in `--help`.
     /// What: reads a JSON object from stdin and renders
     /// `TM <ver> ● | <project> ⎇ <branch> | @<gh> | ✻<account> | <model> |
-    /// ctx% | <cost> | <usage>`, then exits 0. Missing or invalid fields
-    /// degrade gracefully. `●` marks a reachable daemon; the account is the
-    /// Claude Code login, read from `.claude.json` since the stdin payload does
-    /// not carry it (#6304).
-    /// Test: `cli_parses_statusline` in `tests.rs`.
+    /// ctx% | <cost> | <usage> | <savings>`, then exits 0. Missing or invalid
+    /// fields degrade gracefully. `●` marks a reachable daemon; the account is
+    /// the Claude Code login, read from `.claude.json` since the stdin payload
+    /// does not carry it (#6304). Stdin fields read: `session_id`,
+    /// `context_window.total_input_tokens`. `session_id` is required -- it is
+    /// the `💸` segment's ledger fold key. `context_window.total_input_tokens`
+    /// is optional -- it feeds the `💸` percentage's session-actual-tokens
+    /// denominator, falling back to the ledger's own accumulated tokens when
+    /// absent. Example payload that reproduces a non-empty `💸` segment
+    /// against an existing ledger (replace `<id>` with a `session_id` that
+    /// already has ledger rows):
+    /// `echo '{"session_id":"<id>","context_window":{"total_input_tokens":50000}}' | tm statusline`.
+    /// Test: `statusline_help_names_every_savings_stdin_field` in `tests.rs`.
+    // #7907: names the stdin fields that key the 💸 segment's ledger lookup,
+    // so a verifier can build a synthetic payload from `--help` alone.
     Statusline,
 
     /// Print this session's commit-stats trailers, or splice them into a

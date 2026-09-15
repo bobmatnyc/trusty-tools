@@ -91,6 +91,44 @@ pub(crate) struct CostInfo {
     pub(crate) total_cost_usd: f64,
 }
 
+/// The stdin JSON fields that feed the `💸` savings segment (#7907).
+///
+/// Why: `tm statusline --help` documented the rendered output format but
+/// never named which stdin fields key the `💸` segment's ledger lookup, so a
+/// verifier building a synthetic `statusLine` payload by hand had no way to
+/// learn it — a hand-built payload carrying a `session_id` with no matching
+/// ledger row rendered `💸—` and nothing said why (issue #7907, surfaced
+/// verifying #7867).
+/// What: the field path (dotted for a nested field) and why it matters, in
+/// the exact order [`render_statusline_from`] reads them: `session_id` is
+/// the ledger fold key `savings_segment_probe` reads at this file's line 184;
+/// `context_window.total_input_tokens` is optional and feeds the
+/// session-actual-tokens denominator `compaction_segment` (this file's line
+/// 168) persists for [`compaction::session_actual_tokens_for`] to read,
+/// falling back to the ledger's own `tokens_before` sum when absent. This is
+/// the one list both `tm statusline --help`
+/// (`crates/trusty-mpm/src/bin/tm/cli/mod.rs`) and
+/// `statusline_help_names_every_savings_stdin_field` (`tests.rs`) check
+/// against, so the two can never drift apart silently.
+/// Test: `statusline_help_names_every_savings_stdin_field` in `tests.rs`.
+// #7907: the regression test checks `tm statusline --help`'s hand-written
+// field list against this constant, so the two cannot drift apart silently.
+// `#[cfg(test)]` since nothing at runtime reads it -- `--help`'s text is a
+// literal clap doc comment kept in sync with this list by hand.
+#[cfg(test)]
+pub(crate) const SAVINGS_SEGMENT_STDIN_FIELDS: &[(&str, &str)] = &[
+    (
+        "session_id",
+        "required -- the ledger fold key `savings_segment_probe` reads",
+    ),
+    (
+        "context_window.total_input_tokens",
+        "optional -- feeds the session-actual-tokens denominator via \
+         compaction_segment; falls back to the ledger's own tokens_before \
+         sum when absent",
+    ),
+];
+
 /// Read Claude Code's `statusLine` JSON from stdin and print one compact line.
 ///
 /// Why: Claude Code's `statusLine` hook protocol is "command reads JSON from

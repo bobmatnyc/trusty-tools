@@ -2861,3 +2861,63 @@ fn cli_parses_pr_queue_check() {
     assert_eq!(args.pr, Some(42));
     assert!(args.json);
 }
+
+/// `tm statusline --help` names every stdin JSON field the `💸` savings
+/// segment reads, and nothing it does not (#7907).
+///
+/// Why: a verifier building a synthetic `statusLine` payload by hand had no
+/// way to learn which stdin fields key the `💸` segment's ledger lookup from
+/// `--help` alone — a hand-built `session_id` with no matching ledger row
+/// rendered `💸—` and nothing said why (surfaced verifying #7867). This test
+/// fails the moment `--help`'s "Stdin fields read:" sentence and
+/// [`crate::commands::statusline::SAVINGS_SEGMENT_STDIN_FIELDS`] — the same
+/// source of truth `render_statusline_from` reads those fields from — drift
+/// apart in either direction: a field the segment reads goes missing from
+/// `--help`, or `--help` names a field the code does not read.
+/// What: extracts the field list from the `Stdin fields read: <a>, <b>.`
+/// sentence in the `statusline` subcommand's rendered long help and asserts
+/// its set (order-independent) equals `SAVINGS_SEGMENT_STDIN_FIELDS`'s field
+/// names.
+/// Test: this test.
+#[test]
+fn statusline_help_names_every_savings_stdin_field() {
+    use crate::commands::statusline::SAVINGS_SEGMENT_STDIN_FIELDS;
+    use clap::CommandFactory as _;
+
+    let mut root = Cli::command();
+    let help = root
+        .find_subcommand_mut("statusline")
+        .expect("statusline subcommand exists")
+        .render_long_help()
+        .to_string();
+
+    let marker = "Stdin fields read: ";
+    let start = help
+        .find(marker)
+        .expect("--help names the stdin fields the 💸 segment reads")
+        + marker.len();
+    let rest = &help[start..];
+    let end = rest
+        .find(". ")
+        .expect("the 'Stdin fields read:' sentence ends with '. '");
+    let sentence = &rest[..end];
+
+    let mut help_fields: Vec<&str> = sentence
+        .split(", ")
+        .map(|field| field.trim().trim_matches('`'))
+        .collect();
+    help_fields.sort_unstable();
+
+    let mut expected: Vec<&str> = SAVINGS_SEGMENT_STDIN_FIELDS
+        .iter()
+        .map(|(field, _reason)| *field)
+        .collect();
+    expected.sort_unstable();
+
+    assert_eq!(
+        help_fields, expected,
+        "`tm statusline --help`'s stdin field list must match \
+         SAVINGS_SEGMENT_STDIN_FIELDS exactly -- a field the 💸 segment reads \
+         went missing from --help, or --help names one the code does not read"
+    );
+}
