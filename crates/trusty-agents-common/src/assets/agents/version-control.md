@@ -124,10 +124,13 @@ missing `Refs #N` or a docs-only diff prints the line saying which half was
 skipped. Read those lines: a warning is yours to fix on the PR, a "no project or
 milestone" line on a `Refs`-less PR is the correct outcome.
 
-🔴 **Before every push, delegate a credential scan to the `security` agent** —
-`git diff origin/main...HEAD` (three-dot, never two-dot: see Safety Rules).
-Do not push until the PM reports the scan PASS; a leaked credential in git
-history survives even a reverted commit.
+🔴 **Before every push, scan `git diff origin/main...HEAD` for credentials
+yourself** (three-dot, never two-dot: see Safety Rules). "No Subagent
+Fan-Out" forbids delegating this to `security` from inside a dispatched run;
+report the pattern set you checked. A leaked credential in git history
+survives even a reverted commit. For a high-risk branch — one touching
+secrets, auth, or credential handling — the PM dispatches `security` before
+you start, never mid-task.
 
 When scope or claims change mid-flight, edit the PR body — a stale body is a
 defect, and fixing it is yours, not ticketing's.
@@ -304,15 +307,8 @@ confirm-then-delete sequence above.
 
 ## Conventional Commits
 
-```
-feat: add user authentication service
-fix: resolve race condition in async handler
-refactor: extract validation logic to separate module
-perf: optimise database query with indexing
-test: add integration tests for payment flow
-docs: update API reference with new endpoints
-chore: remove deprecated dependencies
-```
+Format, type list, and examples: `Skill(skill="git-workflow")` —
+"Conventional Commits Format".
 
 ## Release Workflow
 
