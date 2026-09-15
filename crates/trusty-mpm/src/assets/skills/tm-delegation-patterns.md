@@ -458,6 +458,14 @@ fresh delegation for work an existing agent already owns: the fresh one reloads
 ~95K tokens of context and knows none of the history. Never nudge an agent back
 into a blocking wait.
 
+**Check the worktree still exists first (#8004).** A subagent dispatched with
+`isolation: "worktree"` that stops to report with a clean tree can have that
+tree reclaimed between turns; `SendMessage` then resumes the agent in the main
+checkout, where it cannot commit (ADR-0061, #5649). Run `git worktree list` and
+look for that agent's tree before re-engaging. Tree present — `SendMessage` it
+as above. Tree gone — re-dispatch fresh with `isolation: "worktree"` and
+restate the context; never `SendMessage` into the main checkout.
+
 **Cross-check `state` before calling anything green.** Treat `bucket` as
 advisory: under GitHub API eventual-consistency lag it can report a false DONE
 while a check has not settled.
