@@ -297,7 +297,7 @@ const REGISTERED_HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 
 /// Wall-clock ceiling for one megabyte guard run in this suite.
 ///
-/// Why (#7975): the megabyte control used to assert a flat 8 s, which measured
+/// Why (#7975, #8078): the megabyte control used to assert a flat 8 s, which measured
 /// the host rather than the guard and flaked at 8.20–9.37 s. A debug `tm` pays
 /// a multi-second cold page-in and unoptimized rule evaluation that the release
 /// binary Claude Code execs does not, and this suite spawns its children in
