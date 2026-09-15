@@ -86,11 +86,19 @@ export const saveGlobalChannels=(revision:string,channels:GlobalChannel[])=>with
  */
 export const CHANNEL_WRITE_CREDENTIAL_MESSAGE="Channel writes need the daemon's write credential; restart the daemon or start it with --api-token";
 
-/** True when a failed write lost a compare-and-swap. */
+/**
+ * True when a failed write lost a compare-and-swap.
+ *
+ * What: status-first and status-ONLY when there is one. Running the text test
+ * alongside a known status made a 422 whose message happens to contain
+ * "conflict" — a server wording nothing constrains — reload the list and throw
+ * the operator's draft away (critic MEDIUM-1). The regex survives only for a
+ * caller, or a test double, that raises a plain `Error` carrying no status.
+ * Test: `channels.global.test.ts`.
+ */
 export function isChannelConflict(cause:unknown):boolean{
-  // The status is authoritative; the text test survives a caller (or a test
-  // double) that raises a plain `Error` with no status attached.
-  return (cause as {status?:number}|null)?.status===409||/409|conflict/i.test(String(cause));
+  const status=(cause as {status?:number}|null)?.status;
+  return typeof status==='number'?status===409:/409|conflict/i.test(String(cause));
 }
 
 /**

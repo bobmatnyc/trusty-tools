@@ -44,11 +44,14 @@ beforeEach(async () => {
   globals = [globalChannel(), globalChannel({ id: 'slack-ops', name: 'Ops room', provider: 'slack', target: 'C999', route_to: ['cto-assistant'] })];
   catalogAgents.set([{ name: 'izzie' }, { name: 'cto-assistant' }]);
   activeAgentId.set('izzie');
-  vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     if (url.endsWith('/api/config')) return new Response(JSON.stringify({ auth_required: false, channel_write_token: 'minted' }), { status: 200 });
     if (url.endsWith('/api/agents')) return new Response(JSON.stringify({ agents: [{ name: 'izzie' }, { name: 'cto-assistant' }] }), { status: 200 });
-    if (url.endsWith('/api/channels')) return new Response(JSON.stringify({ scope: 'global', revision: 'g1', channels: globals, providers: [] }), { status: 200 });
+    if (url.endsWith('/api/channels')) {
+      if (init?.method === 'PUT') globals = JSON.parse(String(init.body)).channels;
+      return new Response(JSON.stringify({ scope: 'global', revision: 'g1', channels: globals, providers: [] }), { status: 200 });
+    }
     if (url.includes('/api/agents/izzie/channels')) return new Response(JSON.stringify(assistantConfig), { status: 200 });
     return new Response('{}', { status: 404 });
   });
@@ -112,4 +115,26 @@ it('says nothing when no global channel routes here', async () => {
   await settle();
   expect(document.querySelector('[aria-label="Global channels routed here"]')).toBeNull();
   expect(document.body.textContent).toContain('Izzie standups');
+});
+
+// Before the reload token the routed-here list was whatever it was when the
+// assistant was selected, so an edit made one toggle away left it stale with no
+// way to refresh short of switching assistants (critic MEDIUM-3).
+it('refreshes the routed-here list after a Global save lands', async () => {
+  expect((document.querySelector('[aria-label="Global channels routed here"]') as HTMLElement).textContent).not.toContain('Ops room');
+
+  button('Global').click();
+  await settle();
+  const routes = document.querySelector('[aria-label="slack-ops routes to"]') as HTMLSelectElement;
+  [...routes.options].find(o => o.value === 'izzie')!.selected = true;
+  routes.dispatchEvent(new Event('change'));
+  await settle();
+  const save = [...document.querySelectorAll('[data-global-channels] button')].find(b => b.textContent?.includes('Save channels')) as HTMLButtonElement;
+  expect(save.disabled).toBe(false);
+  save.click();
+  await settle();
+
+  button('Assistant').click();
+  await settle();
+  expect((document.querySelector('[aria-label="Global channels routed here"]') as HTMLElement).textContent).toContain('Ops room');
 });

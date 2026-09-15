@@ -27,6 +27,7 @@ let revision = 'r1';
 let puts: { body: string; authorization: string | undefined }[] = [];
 let putFailures: { status: number; error: string }[] = [];
 let reads = 0;
+let catalogFails = false;
 
 // A refused write runs probe -> PUT -> 401 -> re-probe -> PUT, so the
 // microtask budget has to cover four network round trips, not one.
@@ -40,10 +41,14 @@ beforeEach(() => {
   puts = [];
   putFailures = [];
   reads = 0;
+  catalogFails = false;
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input), headers = (init?.headers ?? {}) as Record<string, string>;
     if (url.endsWith('/api/config')) return new Response(JSON.stringify({ auth_required: false, channel_write_token: 'minted' }), { status: 200 });
-    if (url.endsWith('/api/agents')) return new Response(JSON.stringify({ agents: [{ name: 'izzie' }, { name: 'cto-assistant' }] }), { status: 200 });
+    if (url.endsWith('/api/agents')) {
+      if (catalogFails) return new Response('boom', { status: 503 });
+      return new Response(JSON.stringify({ agents: [{ name: 'izzie' }, { name: 'cto-assistant' }] }), { status: 200 });
+    }
     if (init?.method === 'PUT') {
       puts.push({ body: String(init.body), authorization: headers.Authorization });
       const failure = putFailures.shift();
@@ -152,4 +157,71 @@ it("shows the server's own wording for a validation refusal", async () => {
   button('Save channels').click();
   await settle();
   expect(document.querySelector('[role="alert"]')?.textContent).toBe('unknown field `providers`');
+});
+
+// The catalog `GET /api/agents` serves is filtered to `role == "assistant" &&
+// !hidden`, while the server validates `route_to` against the UNFILTERED
+// dispatch roster. `pm` is the case that difference produces: a legal route the
+// catalog never lists. Before the union, the select offered catalog names only,
+// Svelte rebuilt `route_to` from the checked options, and `pm` was dropped from
+// the payload by an edit that had nothing to do with it (critic HIGH).
+it('keeps a route the assistant catalog does not list through an edit of the same select', async () => {
+  channels = [channel({ route_to: ['izzie', 'pm'] })];
+  await render();
+  const routes = document.querySelector('[aria-label="gmail-personal routes to"]') as HTMLSelectElement;
+  expect([...routes.options].map(o => o.value)).toEqual(['izzie', 'cto-assistant', 'pm']);
+  expect([...routes.selectedOptions].map(o => o.value)).toEqual(['izzie', 'pm']);
+  expect(document.body.textContent).toContain('not in the assistant catalog');
+
+  // Add a catalog name; the off-catalog one must ride along untouched.
+  [...routes.options].find(o => o.value === 'cto-assistant')!.selected = true;
+  routes.dispatchEvent(new Event('change'));
+  await settle();
+  button('Save channels').click();
+  await settle();
+  expect(JSON.parse(puts[0].body).channels[0].route_to).toEqual(['izzie', 'cto-assistant', 'pm']);
+});
+
+it('lets an off-catalog route be deselected and put back', async () => {
+  channels = [channel({ route_to: ['izzie', 'pm'] })];
+  await render();
+  const routes = document.querySelector('[aria-label="gmail-personal routes to"]') as HTMLSelectElement;
+  const pm = [...routes.options].find(o => o.value === 'pm')!;
+  pm.selected = false;
+  routes.dispatchEvent(new Event('change'));
+  await settle();
+  // The option survives its own deselection, or the operator could never undo it.
+  expect([...routes.options].map(o => o.value)).toContain('pm');
+  pm.selected = true;
+  routes.dispatchEvent(new Event('change'));
+  await settle();
+  expect(button('Save channels').disabled).toBe(true);
+});
+
+it('reports a catalog read failure instead of claiming there are no assistants', async () => {
+  catalogFails = true;
+  channels = [channel({ route_to: ['izzie'] })];
+  await render();
+  expect(document.body.textContent).toContain('The assistant list could not be read');
+  expect(document.body.textContent).not.toContain('No assistants are configured on this host');
+  // A stored route is still offered and still selected, so a save round-trips it.
+  const routes = document.querySelector('[aria-label="gmail-personal routes to"]') as HTMLSelectElement;
+  expect([...routes.selectedOptions].map(o => o.value)).toEqual(['izzie']);
+  // And it is not accused of being off-catalog when the catalog is simply absent.
+  expect(document.body.textContent).not.toContain('not in the assistant catalog');
+});
+
+it('raises onSaved only for a save that landed', async () => {
+  const saved = vi.fn();
+  view = mount(GlobalChannelsPanel, { target: document.body, props: { onSaved: saved } });
+  await settle();
+  putFailures.push({ status: 422, error: 'nope' });
+  box('gmail-personal enabled').click();
+  await settle();
+  button('Save channels').click();
+  await settle();
+  expect(saved).not.toHaveBeenCalled();
+  button('Save channels').click();
+  await settle();
+  expect(saved).toHaveBeenCalledTimes(1);
 });

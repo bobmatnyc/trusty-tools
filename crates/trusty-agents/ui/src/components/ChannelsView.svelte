@@ -21,10 +21,17 @@
   let loading=false, saving=false, sending=false, reading=false, error='', notice='';
   let previous:string|null|undefined=undefined, generation=0, readGeneration=0;
   let selected='', message='', inbox:ChannelMessages|null=null;
-  let scope:'assistant'|'global'='assistant',globalVisited=false,globalDirty=false,globalSaving=false;
+  let scope:'assistant'|'global'='assistant',globalVisited=false,globalDirty=false,globalSaving=false,routedReload=0;
   let viewAgent:string|null=null;
   $: if(scope==='global')globalVisited=true;
-  $: protectedEdits=dirty||saving||sending||globalDirty||globalSaving||message.trim().length>0;
+  // The Global editor stays mounted under the toggle, so its pending edit has to
+  // pin the assistant selector too — the per-assistant list would reload under
+  // it. The two are named separately because saying "finish the changes for
+  // Izzie" when the unsaved edit is a host-wide one sends the operator looking
+  // in the wrong scope (critic LOW-2).
+  $: assistantEdits=dirty||saving||sending||message.trim().length>0;
+  $: globalEdits=globalDirty||globalSaving;
+  $: protectedEdits=assistantEdits||globalEdits;
   $: dirty=configuration!==null && JSON.stringify(bindings)!==JSON.stringify(configuration.bindings);
   $: selectedBinding=configuration?.bindings.find(b=>b.id===selected);
   $: selectedProvider=configuration?.providers.find(p=>p.id===selectedBinding?.provider);
@@ -76,10 +83,10 @@
     <div class="scope" role="group" aria-label="Channel scope"><button class:on={scope==='assistant'} aria-pressed={scope==='assistant'} on:click={()=>scope='assistant'}>Assistant</button><button class:on={scope==='global'} aria-pressed={scope==='global'} on:click={()=>scope='global'}>Global</button></div>
     {#if scope==='assistant'}<select aria-label="Channel assistant" value={viewAgent??''} disabled={protectedEdits} on:change={e=>activeAgentId.set(e.currentTarget.value||null)}><option value="">Select an assistant</option>{#each $agentRoster.filter(a=>a.id!==CONCIERGE_AGENT_ID) as agent (agent.id)}<option value={agent.id}>{rosterDisplayName($agentRoster,agent.id)}</option>{/each}</select>{/if}</header>
   <div class="body">
-    {#if globalVisited}<div style:display={scope==='global'?'block':'none'} data-global-channels><GlobalChannelsPanel bind:dirty={globalDirty} bind:saving={globalSaving}/></div>{/if}
+    {#if globalVisited}<div style:display={scope==='global'?'block':'none'} data-global-channels><GlobalChannelsPanel bind:dirty={globalDirty} bind:saving={globalSaving} onSaved={()=>routedReload++}/></div>{/if}
     <div style:display={scope==='assistant'?'contents':'none'}>
     {#if !viewAgent}<p>Select an assistant to configure its channels.</p>{/if}
-    {#if viewAgent!==$activeAgentId&&protectedEdits}<p role="status" class="muted">Finish or discard the changes for {rosterDisplayName($agentRoster,viewAgent)} before switching assistants.</p>{/if}
+    {#if viewAgent!==$activeAgentId&&protectedEdits}<p role="status" class="muted">{#if assistantEdits}Finish or discard the changes for {rosterDisplayName($agentRoster,viewAgent)} before switching assistants.{:else}Finish or discard the unsaved global channel changes before switching assistants.{/if}</p>{/if}
     {#if loading}<p role="status">Loading channels…</p>{/if}
     {#if error}<p class="error" role="alert">{error}</p>{/if}
     {#if notice}<p role="status">{notice}</p>{/if}
@@ -110,7 +117,7 @@
       {#if inbox}{#if !inbox.available}<p class="muted">{inbox.reason??'Messages unavailable.'}</p>{/if}{#each inbox.messages as row (row.id)}<div class="message">{#if row.from}<strong>{row.from}</strong>{/if}<p>{row.text}</p></div>{/each}{/if}
       <div class="composer"><textarea aria-label="Channel message" bind:value={message} placeholder="Message this channel…" disabled={sending||dirty}></textarea><button aria-label="Send channel message" class="primary" on:click={send} disabled={sending||dirty||!message.trim()||!selectedBinding?.send_enabled||!selectedBinding?.enabled||!selectedProvider?.configured||!selectedProvider?.can_send}><ArrowUp size={16}/></button></div></section>{/if}
       <!-- #7609 slice 6: a global channel can wake this assistant without appearing above; read-only, edited in the Global scope. -->
-      {#if viewAgent}<AssistantRoutedChannels agent={viewAgent} onShowGlobal={()=>scope='global'}/>{/if}
+      {#if viewAgent}<AssistantRoutedChannels agent={viewAgent} reloadToken={routedReload} onShowGlobal={()=>scope='global'}/>{/if}
     {/if}
     </div>
   </div>

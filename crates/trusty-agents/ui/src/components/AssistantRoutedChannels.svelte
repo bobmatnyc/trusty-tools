@@ -9,15 +9,19 @@
    * would need a second writer against `PUT /api/channels` with its own
    * revision — two editors for one list is how a compare-and-swap starts losing
    * writes. The control hands the operator to the Global scope instead.
-   * Test: `AssistantRoutedChannels.test.ts`.
+   * Test: `ChannelsView.scope.test.ts`.
    */
   import { onDestroy } from 'svelte';
   import { fetchGlobalChannels, channelErrorMessage, type GlobalChannel } from '../lib/channels';
   export let agent: string;
   /** Switches the Channels view to its Global scope. */
   export let onShowGlobal: () => void;
-  let routed: GlobalChannel[] = [], error = '', loaded = '', generation = 0;
-  $: if (agent !== loaded) { loaded = agent; void load(agent); }
+  /** Bumped by the parent after a Global save lands. Without it the routes
+   * shown here are whatever they were when the assistant was selected, which
+   * is stale the moment the operator edits them next door (critic MEDIUM-3). */
+  export let reloadToken = 0;
+  let routed: GlobalChannel[] = [], error = '', loaded = '', seenToken = 0, generation = 0;
+  $: if (agent !== loaded || reloadToken !== seenToken) { loaded = agent; seenToken = reloadToken; void load(agent); }
   async function load(name: string) {
     const token = ++generation;
     routed = []; error = '';

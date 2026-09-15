@@ -113,4 +113,14 @@ describe('global channel writes', () => {
     expect(isChannelConflict(new Error('409 conflict'))).toBe(true);
     expect(isChannelConflict(new Error('The mailbox is unreachable'))).toBe(false);
   });
+
+  test('a validation refusal that happens to say "conflict" is not one', async () => {
+    // Nothing constrains the server's wording, and treating this as a lost
+    // compare-and-swap would reload the list over the operator's draft
+    // (critic MEDIUM-1). A known status is the whole answer.
+    putFailures.push({ status: 422, error: 'route_to conflicts with an assistant binding' });
+    const cause = await saveGlobalChannels('r1', []).catch(e => e);
+    expect(isChannelConflict(cause)).toBe(false);
+    expect(channelErrorMessage(cause)).toBe('route_to conflicts with an assistant binding');
+  });
 });
