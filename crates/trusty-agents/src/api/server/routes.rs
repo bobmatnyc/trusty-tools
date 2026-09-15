@@ -122,45 +122,48 @@ pub fn build_router_with_origins(
     token: Option<String>,
     self_origins: SelfOrigins,
 ) -> Router {
-    // #7609: with no separate channel-write credential, the operator's own
-    // token IS the credential — which is what every caller but
-    // `serve_with_config` wants.
-    let channel_credential = token.clone();
-    build_router_with_channel_credential(state, token, self_origins, channel_credential)
+    // #7609: no minted credential here. Only `serve_with_config` knows the
+    // resolved bind, and only a LOOPBACK bind may mint one.
+    build_router_with_channel_credential(state, token, self_origins, None)
 }
 
-/// [`build_router_with_origins`] with an explicit channel-write credential.
+/// [`build_router_with_origins`] with an explicit MINTED channel credential.
 ///
-/// Why (#7609, critic HIGH-4): on a tokenless loopback bind there is no
-/// operator token to authenticate a channel write against, and installing
-/// the router-wide `auth_middleware` to create one would break every other
-/// client of a historically open loopback API. `serve_with_config` mints a
-/// per-boot credential instead and passes it here; it gates channel writes and
-/// nothing else.
-/// What: `credential` is what `channel_auth::ChannelWriter` verifies and what
-/// `GET /api/config` discloses to a same-origin loopback caller. `None` refuses
-/// every channel write.
-/// Test: `super::tests::global_channels` — the tokenless-refusal, minted-write
-/// and wrong-credential cases.
+/// Why (#7609, critic HIGH-4 then round-3 CRITICAL): the UI this daemon serves
+/// must be able to save a channel without being handed the operator's own API
+/// token — on a tokenless daemon there is no such token at all, and on a
+/// tokened one disclosing it would hand the whole API to anyone who can read
+/// `/api/config`. `serve_with_config` mints a per-boot credential for a
+/// LOOPBACK bind and passes it here. It authorizes channel writes and nothing
+/// else, and it is the ONLY credential this router discloses or publishes.
+/// What: `minted` is accepted by `channel_auth::ChannelWriter` ALONGSIDE
+/// `token`, and is what `GET /api/config` returns to a same-origin caller.
+/// Both `None` refuses every channel write.
+/// Test: `super::tests::global_channels` — the tokenless-refusal, minted-write,
+/// wrong-credential and non-disclosure cases.
 pub fn build_router_with_channel_credential(
     state: AppState,
     token: Option<String>,
     self_origins: SelfOrigins,
-    channel_credential: Option<String>,
+    minted: Option<String>,
 ) -> Router {
     let auth_required = token.is_some();
     // #7609 critic HIGH-4: the served UI learns the channel-write credential
     // here. `config_route` is the pre-auth bootstrap probe, which is exactly
     // why it is the right transport — the UI has no other way to obtain one —
-    // and the disclosure is narrowed twice over. The value is present only for
-    // a caller whose `Origin` this daemon would serve its own UI to
+    // and it is why ONLY the minted credential may appear (critic round 3,
+    // CRITICAL): `auth_middleware` exempts this route, so whatever it returns is
+    // readable by any caller that can reach the port. `minted` is `None` for a
+    // non-loopback bind, so such a daemon discloses nothing at all. The
+    // disclosure is narrowed once more by `Origin`: the value is present only
+    // for a caller whose origin this daemon would serve its own UI to
     // (`same_origin_ok` below), and the router-wide CORS layer is the
     // SAME-ORIGIN variant (`with_guarded_middleware_same_origin_cors`, applied
     // after every route below), so a cross-origin page's `fetch` never gets to
     // READ this response body at all — `same_origin_cors` reflects
     // `Access-Control-Allow-Origin` only for a loopback / local-webview / self
     // origin, and the browser withholds the body without it.
-    let disclosed = channel_credential.clone();
+    let disclosed = minted.clone();
     let config_origins = self_origins.clone();
     let config_route = get(move |headers: axum::http::HeaderMap| async move {
         let origin = headers
@@ -512,7 +515,8 @@ pub fn build_router_with_channel_credential(
     // as a process global — two routers in one process (a test, a re-bind) each
     // answer for themselves.
     router = router.layer(Extension(ChannelWriteAuth {
-        credential: channel_credential,
+        operator: token.clone(),
+        minted,
     }));
 
     if let Some(tok) = token {
@@ -731,21 +735,23 @@ pub async fn serve_with_config(cfg: ApiConfig) -> Result<()> {
     let resolved = listener.local_addr().unwrap_or(addr);
     let self_origins = SelfOrigins::from_bind_addrs(&[resolved]);
 
-    // #7609 critic HIGH-4: a tokenless LOOPBACK daemon mints a per-boot
-    // channel-write credential so the Channels tab it serves can still save. A
-    // configured token disables minting — it is already the credential. A
-    // tokenless non-loopback bind never reaches here (refused above), so the
-    // remaining `None` is the honest answer for a bind that may not mint.
-    let channel_credential =
-        super::channel_auth::channel_write_credential(cfg.token.clone(), cfg.bind);
-    if cfg.token.is_none() && channel_credential.is_some() {
+    // #7609 (critic round 3): a LOOPBACK daemon mints a per-boot channel-write
+    // credential — whether or not an operator token is configured — so the
+    // Channels tab it serves can save without being handed the operator's own
+    // secret. A non-loopback bind mints nothing, and therefore discloses and
+    // publishes nothing; its channel writes take the operator token, which
+    // `ChannelWriter` accepts and no route ever hands out.
+    let minted = super::channel_auth::minted_credential(cfg.bind);
+    if minted.is_some() {
         tracing::info!(
             "minted an ephemeral channel-write credential for this boot; the served UI reads it \
              from /api/config (#7609)"
         );
     }
-    super::channel_auth::record_daemon_credential(channel_credential.clone());
-    if let Some(credential) = &channel_credential
+    // The in-process `channel` tool needs only to know that SOME credential
+    // exists; the operator's is preferred so a REPL and this daemon agree.
+    super::channel_auth::record_daemon_credential(cfg.token.clone().or_else(|| minted.clone()));
+    if let Some(credential) = &minted
         && let Err(e) = super::channel_auth::publish_credential(credential)
     {
         tracing::warn!(
@@ -754,12 +760,7 @@ pub async fn serve_with_config(cfg: ApiConfig) -> Result<()> {
         );
     }
 
-    let app = build_router_with_channel_credential(
-        state,
-        cfg.token.clone(),
-        self_origins,
-        channel_credential,
-    );
+    let app = build_router_with_channel_credential(state, cfg.token.clone(), self_origins, minted);
 
     // #3331: publish the bound address via the standard `http_addr` discovery
     // file so the trusty-console reverse proxy (and the connector poller) can

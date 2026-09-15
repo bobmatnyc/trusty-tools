@@ -4,27 +4,57 @@
 //! which destination an outbound one reaches, so whoever can write one can
 //! redirect every assistant's traffic. The rest of this API leans on the
 //! loopback bind as its control (#3329), which is enough for a surface that
-//! spawns work on the caller's own behalf and is not enough here: any process
-//! on the host — or any page the operator's browser loads that finds a way past
-//! the same-origin guard — would be able to re-point the mailbox. This module
-//! is the one extra control: a channel write requires the daemon to have been
-//! started with a bearer token, and every accepted write leaves an audit line.
-//! What: [`ChannelWriteAuth`] carries the CREDENTIAL a channel write must
-//! present, inserted by `routes::build_router_with_origins`. [`ChannelWriter`]
-//! is the extractor every channel write handler takes FIRST — it verifies that
-//! credential before the body is even parsed, and carries the caller identity
-//! the audit line names. [`daemon_credential`] answers the same question for the
-//! in-process `channel` tool, which has no request to extract from.
+//! spawns work on the caller's own behalf and is not enough here.
 //!
-//! The credential is the operator's `--api-token` when there is one. When there
-//! is not, and the bind is loopback, `serve_with_config` MINTS an ephemeral one
-//! at boot ([`mint_ephemeral`]) and hands it to the UI it serves — see
-//! `routes::config_route`. That keeps the served Channels tab working on the
-//! default tokenless daemon (critic HIGH-4) without installing the router-wide
-//! `auth_middleware`, which would have broken every other client of a
-//! historically open loopback API. A credential that is never handed out — a
-//! process that serves no API at all — refuses every write, which is the safe
-//! default.
+//! What this control DOES achieve: an off-host caller cannot write a channel
+//! (it has neither the operator token nor a credential minted for this boot); a
+//! cross-origin page in the operator's browser cannot read the minted
+//! credential, because `/api/config` withholds it from a foreign `Origin` and
+//! the same-origin CORS layer withholds the response body besides; and another
+//! UNIX user on the same host cannot read it from disk, because the published
+//! file is `0600`.
+//!
+//! What it does NOT achieve, by design: a process running as the SAME user is
+//! still trusted. It can read the published file, or simply read the operator's
+//! own `.env.local`. Excluding it would need an OS-level capability this
+//! codebase does not have, and the loopback doctrine already assumes the
+//! same-user boundary everywhere else.
+//! What: [`ChannelWriteAuth`] carries the two credentials a channel write may
+//! present, inserted by `routes::build_router_with_origins`. [`ChannelWriter`]
+//! is the extractor every channel write handler takes FIRST — it verifies the
+//! presented bearer against either, before the body is even parsed, and carries
+//! the caller identity the audit line names. [`daemon_credential`] answers the
+//! same question for the in-process `channel` tool, which has no request to
+//! extract from.
+//!
+//! TWO credentials, and the distinction is the whole security property (critic
+//! round 3, CRITICAL):
+//!
+//! - The OPERATOR token (`--api-token` / `TAGENT_API_TOKEN`) authorizes the whole
+//!   API. It is accepted on a channel write and is NEVER disclosed by any
+//!   route and NEVER written to disk. An earlier revision disclosed it on
+//!   `/api/config` — which `auth_middleware` exempts — so `curl` against a
+//!   LAN-bound daemon with no `Origin` header read the operator's token and
+//!   then had the whole API.
+//! - The MINTED credential ([`mint_ephemeral`]) exists only on a LOOPBACK bind,
+//!   is regenerated per boot, and authorizes CHANNEL WRITES and nothing else.
+//!   It is the one the served UI reads from `/api/config` and the one published
+//!   to the `0600` file. It is minted whether or not an operator token is
+//!   configured, so the UI never needs the operator's secret to save.
+//!
+//! One layering consequence, stated because it is easy to read the above as
+//! more than it is: on a daemon that DOES have an operator token,
+//! `auth_middleware` wraps every `/api/*` route from the outside, so a request
+//! carrying only the minted credential is refused before [`ChannelWriter`] ever
+//! runs. The minted credential is therefore what a TOKENLESS daemon's UI uses;
+//! on a tokened one the UI already holds the operator token for every other
+//! call and presents that. [`ChannelWriter`] accepts either regardless, which
+//! is what keeps this gate correct on its own terms rather than depending on a
+//! middleware above it.
+//! Test: `a_configured_token_is_never_disclosed_on_the_config_probe`.
+//!
+//! A router with neither refuses every write, which is the safe default for a
+//! non-loopback bind and for a process that serves no API at all.
 //!
 //! Reads are untouched: the gate is on the write handlers only, and the
 //! router-wide same-origin guard is unchanged.
@@ -44,14 +74,19 @@ use serde_json::{Value, json};
 const REFUSAL: &str = "Channel writes require an API token. Start the daemon with --api-token (or \
                        TAGENT_API_TOKEN); this process accepts channel reads only.";
 
-/// The credential THIS router requires on a channel write.
+/// The credentials THIS router accepts on a channel write.
 ///
 /// Why: a per-router value rather than a process global, so a test can build
 /// one tokenless and one token-bearing router in the same process and get a
-/// deterministic answer from each.
-#[derive(Clone, Debug)]
+/// deterministic answer from each. The two fields are NOT interchangeable —
+/// see the module doc: `minted` is disclosed and published, `operator` never
+/// is.
+#[derive(Clone, Debug, Default)]
 pub(super) struct ChannelWriteAuth {
-    pub(super) credential: Option<String>,
+    /// The operator's own API token, accepted here and never disclosed.
+    pub(super) operator: Option<String>,
+    /// This boot's channel-write credential, minted for a loopback bind.
+    pub(super) minted: Option<String>,
 }
 
 /// The credential THIS PROCESS accepts on a channel write (#7609).
@@ -121,23 +156,22 @@ pub(crate) fn tool_refusal() -> String {
     format!("401 Unauthorized: {REFUSAL}")
 }
 
-/// The credential a daemon with this configuration accepts on a channel write.
+/// This boot's minted channel-write credential, if the bind admits one.
 ///
-/// Why (#7609, critic HIGH-4): the rule is a decision, so it is a function and
-/// not three lines inside `serve_with_config` that no test can reach. A
-/// configured token IS the credential and disables minting. A tokenless
-/// LOOPBACK bind mints one per boot, because the UI the daemon serves has to be
-/// able to save and an off-host caller cannot obtain the value. A tokenless
-/// non-loopback bind gets `None` and refuses every channel write — that
-/// configuration is already refused outright by `serve_with_config`, and
-/// minting for it would hand a LAN-reachable surface a credential the operator
-/// never chose.
+/// Why (#7609, critic round 3): the rule is a decision, so it is a function and
+/// not two lines inside `serve_with_config` that no test can reach. A LOOPBACK
+/// bind mints one per boot — whether or not an operator token is configured,
+/// because the UI the daemon serves must be able to save WITHOUT being handed
+/// the operator's own secret. A non-loopback bind mints nothing: the value is
+/// disclosed on `/api/config`, and `auth_middleware` exempts that route, so a
+/// minted credential on a LAN-reachable surface would be readable by anyone who
+/// can reach the port.
+/// What: `Some` iff `bind` is loopback. The operator token is deliberately not
+/// an input — it is accepted by [`ChannelWriter`] and never disclosed, and
+/// conflating the two is precisely the defect this signature prevents.
 /// Test: `the_minting_rule_follows_the_bind`.
-pub(super) fn channel_write_credential(
-    configured: Option<String>,
-    bind: std::net::IpAddr,
-) -> Option<String> {
-    configured.or_else(|| bind.is_loopback().then(mint_ephemeral))
+pub(super) fn minted_credential(bind: std::net::IpAddr) -> Option<String> {
+    bind.is_loopback().then(mint_ephemeral)
 }
 
 /// The file the channel-write credential is published to, beside `http_addr`.
@@ -154,18 +188,30 @@ fn credential_path() -> anyhow::Result<std::path::PathBuf> {
     Ok(trusty_common::data_dir::resolve_data_dir("trusty-agents")?.join(CREDENTIAL_FILENAME))
 }
 
-/// Publish the channel-write credential for local, non-browser clients.
+/// Publish the MINTED channel-write credential for local, non-browser clients.
 ///
 /// Why (#7609, critic HIGH-4): the served UI reads the credential from
 /// `/api/config`, but a client with no browser — the trusty-console proxy, a
 /// script, the Tauri sidecar's Rust half — has no such bootstrap. The discovery
 /// directory this daemon already writes `http_addr` into is where such a client
 /// looks for it.
-/// What: writes the credential owner-only (`0600` at creation on unix; the
-/// directory is inside the per-user profile elsewhere). Best-effort: a failure
-/// is logged by the caller and costs those clients the credential, never the
-/// daemon's start.
-/// Test: `a_published_credential_is_owner_only_and_removed`.
+///
+/// Only a MINTED credential is ever written (critic round 3, HIGH-1). The
+/// operator's own token is long-lived; writing it here would put a secret the
+/// operator manages elsewhere onto disk, and a `SIGKILL` would leave it there
+/// with no process left to clean it up. A minted credential outliving its
+/// process authorizes nothing, because the next boot mints another.
+///
+/// What: writes `<pid>:<credential>` owner-only (`0600` at creation on unix; the
+/// directory is inside the per-user profile elsewhere). The pid prefix is what
+/// makes two daemons sharing one data directory safe (critic MEDIUM-6): the
+/// second overwrites the first's line, and each removes the file only while it
+/// still names its OWN pid, so neither deletes a credential the other is still
+/// serving. A reader splits on the first colon and uses the tail.
+/// Best-effort: a failure is logged by the caller and costs those clients the
+/// credential, never the daemon's start.
+/// Test: `a_published_credential_is_owner_only_and_pid_tagged`,
+/// `a_second_daemons_credential_is_not_removed_by_the_first`.
 pub(super) fn publish_credential(credential: &str) -> anyhow::Result<()> {
     use std::io::Write as _;
     let path = credential_path()?;
@@ -180,14 +226,38 @@ pub(super) fn publish_credential(credential: &str) -> anyhow::Result<()> {
         options.mode(0o600);
     }
     let mut file = options.open(&path)?;
-    file.write_all(credential.as_bytes())?;
+    write!(file, "{}:{credential}", std::process::id())?;
     Ok(())
 }
 
-/// Remove the published credential. Best-effort; a stale file is a credential
-/// that no longer authorizes anything, because the next boot mints a new one.
+/// Split a published line into `(pid, credential)`.
+///
+/// Why: the pid prefix is this module's format, so parsing it is defined once
+/// here rather than in every reader — including this module's own remover.
+/// What: `None` when the line carries no colon.
+/// Test: `a_published_credential_is_owner_only_and_pid_tagged`.
+pub(super) fn split_published(raw: &str) -> Option<(&str, &str)> {
+    raw.split_once(':')
+        .map(|(pid, credential)| (pid.trim(), credential.trim()))
+}
+
+/// Remove the published credential, but only while it is still THIS process's.
+///
+/// Why (critic MEDIUM-6): two daemons can share one data directory. Removing
+/// unconditionally on shutdown deleted the credential the surviving daemon was
+/// still serving, and that daemon has no way to notice.
+/// What: reads the pid prefix and removes only on a match. Best-effort; a stale
+/// file authorizes nothing, because the next boot mints another credential.
+/// Test: `a_second_daemons_credential_is_not_removed_by_the_first`.
 pub(super) fn remove_published_credential() {
-    if let Ok(path) = credential_path() {
+    let Ok(path) = credential_path() else {
+        return;
+    };
+    let owned_by_us = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| split_published(&raw).map(|(pid, _)| pid.to_string()))
+        .is_some_and(|pid| pid == std::process::id().to_string());
+    if owned_by_us {
         let _ = std::fs::remove_file(path);
     }
 }
@@ -212,10 +282,10 @@ where
     async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
         // #7609: channel writes redirect inbound traffic for every assistant;
         // never tokenless.
-        let expected = parts
-            .extensions
-            .get::<ChannelWriteAuth>()
-            .and_then(|auth| auth.credential.clone());
+        let auth = parts.extensions.get::<ChannelWriteAuth>().cloned();
+        let accepted: Vec<String> = auth
+            .map(|a| [a.operator, a.minted].into_iter().flatten().collect())
+            .unwrap_or_default();
         let remote_addr = parts
             .extensions
             .get::<ConnectInfo<std::net::SocketAddr>>()
@@ -229,18 +299,20 @@ where
         // The credential is verified HERE and not only by `auth_middleware`,
         // because on a tokenless loopback daemon that middleware is not
         // installed at all — the minted credential would otherwise gate nothing.
-        let authorized = match (&expected, presented) {
-            (Some(expected), Some(presented)) => {
-                super::auth::bearer_token_matches(expected, presented)
-            }
-            _ => false,
-        };
+        // EITHER credential is accepted: the operator's token authorizes the
+        // whole API and so certainly this, and the minted one authorizes exactly
+        // this and nothing else.
+        let authorized = presented.is_some_and(|presented| {
+            accepted
+                .iter()
+                .any(|expected| super::auth::bearer_token_matches(expected, presented))
+        });
         if !authorized {
             tracing::warn!(
                 audit = "channel-write-refused",
                 path = %parts.uri.path(),
                 remote_addr = %remote_addr,
-                credential_available = expected.is_some(),
+                credentials_available = accepted.len(),
                 credential_presented = presented.is_some(),
                 "refused a channel write: no matching channel-write credential (#7609)"
             );
@@ -323,37 +395,39 @@ mod tests {
         record_daemon_credential(restore);
     }
 
-    /// Minting follows the bind, and never overrides a configured credential.
+    /// Minting follows the BIND and nothing else.
+    ///
+    /// Why (critic round 3): an earlier signature took the operator token as an
+    /// input and returned it when present, which is how that token ended up
+    /// disclosed on `/api/config`. Taking only the bind makes that
+    /// unrepresentable.
     #[test]
     fn the_minting_rule_follows_the_bind() {
         let loopback = std::net::IpAddr::from(std::net::Ipv4Addr::LOCALHOST);
         let lan = std::net::IpAddr::from(std::net::Ipv4Addr::new(192, 168, 1, 10));
 
-        assert_eq!(
-            channel_write_credential(Some("operator".into()), loopback).as_deref(),
-            Some("operator"),
-            "a configured credential disables minting"
-        );
-        assert_eq!(
-            channel_write_credential(Some("operator".into()), lan).as_deref(),
-            Some("operator")
-        );
-        let minted = channel_write_credential(None, loopback).expect("loopback mints");
+        let minted = minted_credential(loopback).expect("loopback mints");
         assert_eq!(minted.len(), 64);
+        assert_ne!(
+            minted_credential(loopback).expect("again"),
+            minted,
+            "a fresh value per call"
+        );
         assert_eq!(
-            channel_write_credential(None, lan),
+            minted_credential(lan),
             None,
-            "a tokenless LAN bind mints nothing"
+            "a non-loopback bind mints nothing, whatever else is configured"
         );
     }
 
-    /// A published credential is owner-only and goes away on request.
+    /// A published credential is owner-only, pid-tagged, and goes away with the
+    /// process that wrote it.
     ///
     /// Why: it is a secret in a shared-machine directory, so the mode is part
-    /// of the contract, and a file that outlived its process would be a
-    /// credential nothing accepts.
+    /// of the contract, and the pid is what makes two daemons in one data
+    /// directory safe.
     #[test]
-    fn a_published_credential_is_owner_only_and_removed() {
+    fn a_published_credential_is_owner_only_and_pid_tagged() {
         let _guard = crate::test_env::lock_home();
         let home = tempfile::tempdir().expect("tempdir");
         unsafe {
@@ -361,18 +435,75 @@ mod tests {
         }
         publish_credential("deadbeef").expect("publish");
         let path = credential_path().expect("path");
-        assert_eq!(std::fs::read_to_string(&path).expect("read"), "deadbeef");
+        let raw = std::fs::read_to_string(&path).expect("read");
+        let (pid, credential) = split_published(&raw).expect("pid-tagged");
+        assert_eq!(pid, std::process::id().to_string());
+        assert_eq!(credential, "deadbeef");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
             let mode = std::fs::metadata(&path).expect("stat").permissions().mode();
             assert_eq!(mode & 0o777, 0o600, "owner-only");
         }
-        // Republishing over an existing file keeps the mode.
+        // Republishing over an existing file keeps the mode and the tag.
         publish_credential("cafe").expect("republish");
-        assert_eq!(std::fs::read_to_string(&path).expect("read"), "cafe");
+        let raw = std::fs::read_to_string(&path).expect("read");
+        assert_eq!(split_published(&raw).map(|(_, c)| c), Some("cafe"));
         remove_published_credential();
-        assert!(!path.exists(), "removed with the daemon");
+        assert!(!path.exists(), "removed with the daemon that wrote it");
+    }
+
+    /// One daemon never removes another's live credential.
+    ///
+    /// Why (critic MEDIUM-6): two daemons can share one data directory. An
+    /// unconditional remove on shutdown deleted the credential the surviving
+    /// daemon was still serving, and that daemon has no way to notice.
+    #[test]
+    fn a_second_daemons_credential_is_not_removed_by_the_first() {
+        let _guard = crate::test_env::lock_home();
+        let home = tempfile::tempdir().expect("tempdir");
+        unsafe {
+            std::env::set_var("HOME", home.path());
+        }
+        let path = credential_path().expect("path");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+        // A SECOND daemon published last; this process is the first, shutting
+        // down.
+        let other_pid = std::process::id() + 1;
+        std::fs::write(&path, format!("{other_pid}:still-live")).expect("seed");
+        remove_published_credential();
+        assert!(path.exists(), "the other daemon's credential survives");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            format!("{other_pid}:still-live")
+        );
+    }
+
+    /// The operator's own token never reaches the published file.
+    ///
+    /// Why (critic round 3, HIGH-1): it is long-lived and managed elsewhere, so
+    /// writing it here would put it on disk with no process left to clean it up
+    /// after a `SIGKILL`. Only a minted credential is ever published, and
+    /// `serve_with_config` passes only `minted_credential(cfg.bind)`.
+    #[test]
+    fn a_configured_token_is_never_published() {
+        let _guard = crate::test_env::lock_home();
+        let home = tempfile::tempdir().expect("tempdir");
+        unsafe {
+            std::env::set_var("HOME", home.path());
+        }
+        let operator = "operator-secret-do-not-write";
+        // The value `serve_with_config` publishes is this, and only this.
+        let published =
+            minted_credential(std::net::Ipv4Addr::LOCALHOST.into()).expect("a loopback bind mints");
+        assert_ne!(published, operator);
+        publish_credential(&published).expect("publish");
+        let raw = std::fs::read_to_string(credential_path().expect("path")).expect("read");
+        assert!(
+            !raw.contains(operator),
+            "the operator credential is not on disk: {raw}"
+        );
+        remove_published_credential();
     }
 
     /// A minted credential is 64 hex characters and never repeats.

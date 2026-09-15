@@ -213,11 +213,15 @@ pub(super) async fn auth_middleware(
 /// is provided to the user out-of-band and pasted into the UI.
 /// What: `auth_required` says whether `/api/*` needs a bearer token.
 ///
-/// #7609: `channel_write_token` is the credential a channel WRITE must
-/// present, which on a tokenless loopback daemon is one this boot minted and
-/// the UI has no other way to learn. It is `None` — and omitted from the JSON —
-/// for any caller whose `Origin` this daemon would not serve its own UI to; see
-/// `routes::same_origin_ok` and `routes::build_router_with_channel_credential`.
+/// #7609: `channel_write_token` is the MINTED channel-write credential, and
+/// only ever that. The operator's own API token is never disclosed here —
+/// this route is exempt from `auth_middleware`, so an earlier revision that
+/// returned it handed the whole API to any caller that could reach the port
+/// (critic round 3, CRITICAL). The minted value exists only on a loopback bind,
+/// authorizes channel writes and nothing else, and is `None` — omitted from the
+/// JSON — for any caller whose `Origin` this daemon would not serve its own UI
+/// to; see `routes::same_origin_ok` and
+/// `routes::build_router_with_channel_credential`.
 /// Test: `config_endpoint_reports_auth_required_true`/`_false`,
 /// `the_channel_credential_is_withheld_from_a_foreign_origin`.
 #[derive(Debug, Clone, Serialize)]
