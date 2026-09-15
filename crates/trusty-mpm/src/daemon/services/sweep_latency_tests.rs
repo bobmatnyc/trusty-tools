@@ -132,11 +132,12 @@ async fn a_wedged_liveness_probe_neither_hangs_the_sweep_nor_delays_health() {
 /// blocking-pool thread for the life of the daemon and the pass below never
 /// returned.
 ///
-/// The wedge is git's OWN `ext::` transport pointed at a long `sleep`, not a
-/// `git` shim on `PATH`: `PATH` is process-global and a sleeping `git` would hang
-/// every other test in this binary that shells out to git. Here only THIS
-/// repository's fetch blocks, and every other git command in the pass runs
-/// normally — which is also closer to the reported failure.
+/// The wedge is a remote on a non-routable RFC-1918 address, so the fetch blocks
+/// in `connect(2)` until the OS gives up (~75 s on macOS) — not a `git` shim on
+/// `PATH`, which is process-global and would hang every other test in this binary
+/// that shells out to git. Only THIS repository's fetch blocks; every other git
+/// command in the pass runs normally, which is also closer to the reported
+/// failure. Measured against the pre-fix code, the pass below took 75.4 s.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_wedged_hygiene_fetch_neither_hangs_the_sweep_nor_delays_health() {
     use crate::daemon::managed_routes::inproject_hygiene;
@@ -147,7 +148,7 @@ async fn a_wedged_hygiene_fetch_neither_hangs_the_sweep_nor_delays_health() {
     std::fs::create_dir_all(&base).expect("base clone");
     for args in [
         vec!["init", "-q"],
-        vec!["remote", "add", "origin", "ext::sleep 300"],
+        vec!["remote", "add", "origin", "git://10.255.255.1:9418/x.git"],
     ] {
         let out = trusty_common::git::command_in(&base)
             .args(&args)
