@@ -140,6 +140,10 @@ struct FakePreflight {
     registry_dir: tempfile::TempDir,
     /// #7282: every revision `changed_paths` was asked to diff against.
     diff_heads: std::cell::RefCell<Vec<String>>,
+    /// #7747: the branch name this fake's checkout stands on, if any. A
+    /// `changelog_gate` asked about any other head answers `HeadElsewhere`,
+    /// the way `RealPreflight` does when the ref resolves elsewhere.
+    checkout_head: Option<String>,
 }
 
 impl FakePreflight {
@@ -152,7 +156,15 @@ impl FakePreflight {
             diff_fails: false,
             registry_dir: tempfile::tempdir().expect("registry tempdir"),
             diff_heads: std::cell::RefCell::new(Vec::new()),
+            checkout_head: None,
         }
+    }
+
+    /// [`Self::ok`] standing on `branch`, so `--head <branch>` is judgeable
+    /// (#7747).
+    fn on_branch(mut self, branch: &str) -> Self {
+        self.checkout_head = Some(branch.to_string());
+        self
     }
 
     /// [`Self::ok`] with a diff and the ownership map to resolve it (#7274).
@@ -174,7 +186,11 @@ impl Preflight for FakePreflight {
     fn session_name(&self) -> Option<String> {
         self.session.clone()
     }
-    fn changelog_gate(&self, _base: &str) -> anyhow::Result<ChangelogVerdict> {
+    fn changelog_gate(&self, _base: &str, head: &str) -> anyhow::Result<ChangelogVerdict> {
+        // #7747: only a head this checkout stands on can be judged.
+        if head != "HEAD" && self.checkout_head.as_deref() != Some(head) {
+            return Ok(ChangelogVerdict::HeadElsewhere);
+        }
         Ok(self.changelog.clone())
     }
     fn changed_paths(&self, _base: &str, head: &str) -> anyhow::Result<Vec<String>> {
@@ -238,6 +254,7 @@ fn open_args(body_file: &str) -> PrOpenArgs {
         base: "main".to_string(),
         head: None,
         docs_only: false,
+        minimal: false,
         session: None,
         repo: None,
         dry_run: false,
@@ -868,8 +885,9 @@ fn open_head_drives_the_preflight_diff_revision() {
 /// fragment would pass it — the changelog gate silently evaluating the wrong
 /// ref (#7282 round 5, code-critic HIGH). The refusal has to name the
 /// obligation, because the caller's next move is either `--docs-only` or a real
-/// checkout of the head.
-/// Test target: `head_docs_only_conflict`, through `plan`.
+/// checkout of the head. #7747 moved the decision from the branch NAME to the
+/// gate's verdict; the refusal itself is unchanged.
+/// Test target: `head_elsewhere_refusal`, through `plan`.
 #[test]
 fn open_head_without_docs_only_is_refused() {
     let mut args = open_args("/dev/null");
@@ -878,19 +896,19 @@ fn open_head_without_docs_only_is_refused() {
         &args,
         &full_body(),
         Some("s"),
-        ChangelogVerdict::Pass,
+        ChangelogVerdict::HeadElsewhere,
         &ResolvedTicketing::default(),
     )
-    .expect_err("--head without --docs-only must not plan");
+    .expect_err("a head the gate could not judge must not plan");
 
     assert_eq!(failures.len(), 1, "{failures:?}");
     assert!(
-        failures[0].contains("--head requires --docs-only"),
-        "{failures:?}"
-    );
-    assert!(
         failures[0].contains("check_changelog_fragment.sh"),
         "the refusal must name what cannot be checked: {failures:?}"
+    );
+    assert!(
+        failures[0].contains("--docs-only"),
+        "the refusal must name the way out: {failures:?}"
     );
     assert!(
         failures[0].contains("chore/sessions-abc"),
@@ -917,7 +935,7 @@ fn open_head_without_docs_only_never_calls_gh() {
 /// Why: `--docs-only` is the one case where the gate's verdict cannot be wrong,
 /// because it is skipped — so the pair must still plan. This is the pause
 /// publisher's own invocation, and refusing it would break every pause.
-/// Test target: `head_docs_only_conflict`, permitting arm.
+/// Test target: `plan`'s `ChangelogVerdict::Skipped` arm with a `--head`.
 #[test]
 fn open_head_with_docs_only_plans() {
     let mut args = open_args("/dev/null");
@@ -933,6 +951,201 @@ fn open_head_with_docs_only_plans() {
     .expect("--head with --docs-only plans");
 
     assert_eq!(flag_value(&plan.argv, "--head"), Some("chore/sessions-abc"));
+}
+
+// ── #7747: a --head that IS the checkout opens a source PR ───────────────
+
+/// Why (#7747): `gh pr create` resolves the head through `@{push}`, which fails
+/// when the local branch name differs from the pushed remote one — a `-r4`
+/// suffix against a same-named remote branch, with the matching local name held
+/// by another worktree. `--head` is the only way past that, and requiring
+/// `--docs-only` with it forced a source PR onto a hand-assembled
+/// `gh pr create` that ran none of this command's checks. The named head IS the
+/// checkout's commit there, so the gate's `origin/<base>...HEAD` diff is the
+/// PR's own diff and the refusal had no grounds.
+/// Test target: `run`, through `changelog_gate`'s head argument.
+#[test]
+fn pr_7747_a_head_that_is_the_checkout_opens_a_source_pr() {
+    let (_d, path) = scratch_body(&full_body());
+    let mut args = open_args(&path.to_string_lossy());
+    args.head = Some("fix/b10-pr-open".to_string());
+    // No --docs-only: this is a source PR.
+    let gh = FakeGh::new()
+        .on("pr create", "https://github.com/o/r/pull/4242\n")
+        .on("pr edit", "");
+    let pre = FakePreflight::ok()
+        .on_branch("fix/b10-pr-open")
+        .with_diff(&["crates/trusty-mpm/src/lib.rs"]);
+
+    assert_eq!(
+        open::run(&gh, &args, &pre).expect("a head that is the checkout opens"),
+        0
+    );
+    let create = gh
+        .calls()
+        .into_iter()
+        .find(|c| c.join(" ").contains("pr create"))
+        .expect("gh pr create was called");
+    assert_eq!(flag_value(&create, "--head"), Some("fix/b10-pr-open"));
+}
+
+/// Why: the relaxation must not reach a head the gate genuinely cannot judge —
+/// that is the #7282 round-5 hole, where a source PR with no fragment passed a
+/// gate run against the checkout instead.
+/// Test target: `run` with a head this checkout does not stand on.
+#[test]
+fn pr_7747_a_divergent_head_is_still_refused() {
+    let (_d, path) = scratch_body(&full_body());
+    let mut args = open_args(&path.to_string_lossy());
+    args.head = Some("someone-elses-branch".to_string());
+    let gh = FakeGh::new();
+    let pre = FakePreflight::ok().on_branch("fix/b10-pr-open");
+
+    assert_eq!(
+        open::run(&gh, &args, &pre).expect("a failed check is not an error"),
+        2
+    );
+    assert!(gh.calls().is_empty(), "{:?}", gh.calls());
+}
+
+/// Why: only the pushed branch resolves when the local branch carries a
+/// different name, so `origin/<head>` has to be a candidate — that is the
+/// mismatch #7747 reported.
+#[test]
+fn head_rev_candidates_try_the_remote_ref() {
+    assert_eq!(
+        open::head_rev_candidates("fix/foo"),
+        ["fix/foo".to_string(), "origin/fix/foo".to_string()]
+    );
+}
+
+// ── #7615: --minimal opts out of the seven-heading contract ──────────────
+
+/// Why (#7615): on trusty-things#261 the PM authorized that project's own
+/// sparse Why/What/Test/Gate body and `tm pr open` refused it, naming all seven
+/// headings. The agent fell back to `gh pr create`, losing the footer check and
+/// the changelog gate as well — three gates given up to escape one.
+/// Test target: `plan` under `--minimal`.
+#[test]
+fn pr_7615_minimal_skips_the_seven_field_contract() {
+    let mut args = open_args("/dev/null");
+    args.minimal = true;
+    let sparse = format!("Why: a thing.\nWhat: it does it.\n\n{ATTRIBUTION_FOOTER}\n");
+    let plan = open::plan(
+        &args,
+        &sparse,
+        Some("s"),
+        ChangelogVerdict::Pass,
+        &ResolvedTicketing::default(),
+    )
+    .expect("--minimal accepts a body written to another project's standard");
+    assert!(plan.argv.join(" ").contains("pr create"));
+}
+
+/// Why: `--minimal` drops ONE check. The footer is the attribution the squash
+/// commit carries, and the changelog gate is the one this command exists to
+/// run — giving those up too would make the flag the fallback it replaces.
+#[test]
+fn pr_7615_minimal_still_enforces_the_footer_and_the_changelog() {
+    let mut args = open_args("/dev/null");
+    args.minimal = true;
+    let failures = open::plan(
+        &args,
+        "Why: a thing.\nWhat: no footer at all.\n",
+        Some("s"),
+        ChangelogVerdict::Fail("FAIL: crates/x has no fragment".to_string()),
+        &ResolvedTicketing::default(),
+    )
+    .expect_err("--minimal keeps the footer and changelog gates");
+
+    assert!(
+        failures.iter().any(|f| f.contains("attribution footer")),
+        "{failures:?}"
+    );
+    assert!(
+        failures
+            .iter()
+            .any(|f| f.contains("check_changelog_fragment.sh")),
+        "{failures:?}"
+    );
+    assert!(
+        !failures
+            .iter()
+            .any(|f| f.starts_with(body::MISSING_FIELD_PREFIX)),
+        "the contract half must be skipped: {failures:?}"
+    );
+}
+
+// ── #7574: a missing heading offers the skeleton ─────────────────────────
+
+/// Why (#7574): on trusty-things#253 the first `tm pr open` failed with seven
+/// named headings, the agent guessed the skeleton, and the second invocation was
+/// spent finding out whether the guess was right. The skeleton printed verbatim
+/// ends that round trip.
+/// Test target: `skeleton_hint`, over `plan`'s own failures.
+#[test]
+fn pr_7574_a_missing_heading_offers_the_body_skeleton() {
+    let args = open_args("/dev/null");
+    let failures = open::plan(
+        &args,
+        &format!("## Outcome\n\nreal.\n\n{ATTRIBUTION_FOOTER}\n"),
+        Some("s"),
+        ChangelogVerdict::Pass,
+        &ResolvedTicketing::default(),
+    )
+    .expect_err("six missing headings must fail the plan");
+
+    let skeleton = open::skeleton_hint(&failures).expect("a missing heading offers the skeleton");
+    for f in FIELDS {
+        assert!(
+            skeleton.contains(&format!("## {}\n", f.heading())),
+            "{:?} missing from the skeleton:\n{skeleton}",
+            f.heading()
+        );
+    }
+    assert!(skeleton.contains(ATTRIBUTION_FOOTER), "{skeleton}");
+    // The headings appear in contract order, so the block is paste-able as is.
+    let offsets: Vec<usize> = FIELDS
+        .iter()
+        .map(|f| {
+            skeleton
+                .find(&format!("## {}", f.heading()))
+                .unwrap_or(usize::MAX)
+        })
+        .collect();
+    assert!(offsets.windows(2).all(|w| w[0] < w[1]), "{offsets:?}");
+}
+
+/// Why: the skeleton is the fix for a MISSING heading and nothing else. Printing
+/// it after a footer or changelog failure would bury the real reason under seven
+/// headings the body already has.
+#[test]
+fn pr_7574_other_failures_offer_no_skeleton() {
+    let args = open_args("/dev/null");
+    let failures = open::plan(
+        &args,
+        &format!("{}\nafterword\n", full_body()),
+        Some("s"),
+        ChangelogVerdict::Pass,
+        &ResolvedTicketing::default(),
+    )
+    .expect_err("a trailing line after the footer must fail");
+    assert!(open::skeleton_hint(&failures).is_none(), "{failures:?}");
+}
+
+/// Why: the skeleton is derived from the field table, so a field added there
+/// must appear in it without a second edit.
+#[test]
+fn body_skeleton_names_every_field() {
+    let skeleton = body::skeleton();
+    for f in FIELDS {
+        assert!(skeleton.contains(&format!("## {}", f.heading())), "{f:?}");
+    }
+    // Pasted unfilled it fails again, naming each section that holds no content.
+    let report = body::validate(&skeleton);
+    assert!(report.missing.is_empty(), "{report:?}");
+    assert_eq!(report.empty.len(), FIELDS.len(), "{report:?}");
+    assert!(report.footer_ok);
 }
 
 /// Why: without `--head` the diff must still be the checkout's `HEAD`.

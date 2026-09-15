@@ -567,6 +567,13 @@ case-insensitively against the canonical word or a stated alias):
 🔴 A rung 1 (docs-only) branch needs `tm pr open --docs-only` explicitly — it
 runs the changelog-fragment gate and refuses a docs-only PR without the flag.
 
+🟡 A failure naming a missing heading prints the whole skeleton verbatim, ready
+to paste and fill (#7574). On a project whose own `CLAUDE.md` names a different
+PR-body standard, `--minimal` skips these seven headings and nothing else —
+the attribution footer, the `Refs`/`Closes` rule and the changelog-fragment gate
+all still run (#7615). It is never the answer on THIS repo, whose standard these
+seven fields are.
+
 1. `## Outcome` — primary outcome and linked issue(s), with the
    `Refs owner/repo#N` link.
 2. `## Changes` — what changed, and what is intentionally out of scope.

@@ -155,7 +155,7 @@ impl BodyReport {
         let mut out = Vec::new();
         for f in &self.missing {
             out.push(format!(
-                "missing required body field {} (heading `## {}`)",
+                "{MISSING_FIELD_PREFIX} {} (heading `## {}`)",
                 field_index(*f),
                 f.heading()
             ));
@@ -192,6 +192,38 @@ impl BodyReport {
             )
         })
     }
+}
+
+/// The opening words of every missing-heading failure line.
+///
+/// Why (#7574): `tm pr open` offers the paste-able skeleton only when a heading
+/// was missing, and it recognises that case from the failure line itself. One
+/// spelling keeps the message and its recogniser from drifting apart.
+/// Test: `pr_7574_a_missing_heading_offers_the_body_skeleton`.
+pub(crate) const MISSING_FIELD_PREFIX: &str = "missing required body field";
+
+/// The seven required headings as a body the caller can paste and fill.
+///
+/// Why (#7574): naming one missing heading per failure line still left the
+/// author assembling the skeleton by hand. On trusty-things#253 the agent
+/// guessed the shape and spent a second `tm pr open` invocation finding out
+/// whether the guess was right. A block already in the right shape ends that
+/// round trip.
+/// What: `## <heading>` for each of [`FIELDS`] in contract order, blank lines
+/// between, then the attribution footer — derived from the same table
+/// [`validate`] checks, so it cannot drift from it. The sections are left empty
+/// on purpose: pasting it unfilled fails the same gate again, naming each
+/// section that still holds no content.
+/// Test: `body_skeleton_names_every_field`,
+/// `pr_7574_a_missing_heading_offers_the_body_skeleton`.
+pub(crate) fn skeleton() -> String {
+    let mut out = String::new();
+    for f in FIELDS {
+        out.push_str(&format!("## {}\n\n", f.heading()));
+    }
+    out.push_str(ATTRIBUTION_FOOTER);
+    out.push('\n');
+    out
 }
 
 /// The field's 1-based position in the contract, for messages.

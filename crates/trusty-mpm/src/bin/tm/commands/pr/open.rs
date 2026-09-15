@@ -46,8 +46,13 @@ use crate::cli::PrOpenArgs;
 pub(crate) trait Preflight {
     /// The workstream session name, or `None` when it cannot be resolved.
     fn session_name(&self) -> Option<String>;
-    /// Run the changelog-fragment gate for `origin/<base>...HEAD`.
-    fn changelog_gate(&self, base: &str) -> anyhow::Result<ChangelogVerdict>;
+    /// Run the changelog-fragment gate for `origin/<base>...<head>` (#7747).
+    ///
+    /// `head` is [`diff_head`]'s answer — `HEAD` when the caller named no
+    /// `--head`. An implementation that cannot judge the named head answers
+    /// [`ChangelogVerdict::HeadElsewhere`] rather than a verdict about some
+    /// other ref.
+    fn changelog_gate(&self, base: &str, head: &str) -> anyhow::Result<ChangelogVerdict>;
     /// Paths `git diff --name-only origin/<base>...<head>` reports (#7274).
     ///
     /// Why: the PR's component labels are the crates these paths belong to, so
@@ -76,9 +81,11 @@ pub(crate) trait Preflight {
 /// Why: "the script is absent" is not the same answer as "the script passed",
 /// and reporting the first as the second would let a repo without the gate
 /// look like a repo that cleared it.
-/// What: `Pass`, `Skipped` (no such script in this repo), or `Fail` carrying
-/// the script's own output.
-/// Test: `open_reports_changelog_failure`, `open_docs_only_skips_the_changelog_gate`.
+/// What: `Pass`, `Skipped` (no such script in this repo), `Fail` carrying the
+/// script's own output, or `HeadElsewhere` — the gate declining to answer about
+/// a `--head` it cannot diff (#7747).
+/// Test: `open_reports_changelog_failure`, `open_docs_only_skips_the_changelog_gate`,
+/// `open_head_without_docs_only_is_refused`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ChangelogVerdict {
     /// The gate ran and exited 0.
@@ -87,6 +94,9 @@ pub(crate) enum ChangelogVerdict {
     Skipped,
     /// The gate ran and exited non-zero; the string is its output, trimmed.
     Fail(String),
+    /// The named `--head` is not the commit the checkout stands on, so the
+    /// gate could not judge it and did not run (#7747).
+    HeadElsewhere,
 }
 
 /// Production [`Preflight`].
@@ -113,15 +123,20 @@ impl Preflight for RealPreflight {
         trusty_mpm::core::pr_cleanup::CleanupRegistry::production()
     }
 
-    fn changelog_gate(&self, base: &str) -> anyhow::Result<ChangelogVerdict> {
+    fn changelog_gate(&self, base: &str, head: &str) -> anyhow::Result<ChangelogVerdict> {
         let root = repo_root()?;
+        // #7747: the script takes `--base` and always diffs it against the
+        // checkout's HEAD — it has no `--head` of its own. A named head that
+        // resolves to a DIFFERENT commit therefore cannot be judged here, and
+        // saying `Pass` about the checkout instead would clear a source PR
+        // against a diff it does not contain (#7282 round 5).
+        if !head_is_checkout(&root, head) {
+            return Ok(ChangelogVerdict::HeadElsewhere);
+        }
         let script = root.join("scripts/check_changelog_fragment.sh");
         if !script.exists() {
             return Ok(ChangelogVerdict::Skipped);
         }
-        // #7282: the script takes `--base` and always diffs it against the
-        // checkout's HEAD — it has no `--head` of its own, which is why
-        // `head_docs_only_conflict` refuses `--head` without `--docs-only`.
         let out = std::process::Command::new("bash")
             .arg(&script)
             .arg("--base")
@@ -179,33 +194,77 @@ fn head_branch(args: &PrOpenArgs) -> Option<&str> {
         .filter(|h| !h.is_empty())
 }
 
-/// The refusal a `--head` earns when it is not paired with `--docs-only`.
+/// The refusal a `--head` earns when the gate could not judge it.
 ///
-/// Why (#7282 round 5): `scripts/check_changelog_fragment.sh` accepts only
-/// `--base`, `--staged` and `--file`, so [`Preflight::changelog_gate`] can
-/// diff nothing but `origin/<base>...HEAD` — the CHECKOUT's HEAD. A caller who
-/// names `--head other-branch` from a checkout sitting on a different branch
-/// therefore has the fragment gate judge a diff the PR does not contain, and a
-/// source PR with no fragment passes it. Until the script can diff an explicit
-/// head, refusing the pair is the only sound answer; `--docs-only` is the one
-/// case where the gate's verdict does not matter, because it is skipped.
-/// What: `Some(message)` when a non-blank `--head` was named without
-/// `--docs-only`, else `None`.
+/// Why (#7282 round 5, relaxed by #7747): `scripts/check_changelog_fragment.sh`
+/// accepts only `--base`, `--staged` and `--file`, so
+/// [`Preflight::changelog_gate`] can diff nothing but the CHECKOUT's HEAD. That
+/// makes the gate wrong for a head standing somewhere else — but not for a head
+/// that IS the checkout's commit under another name, which is the case #7747
+/// reported: a local branch pushed under a different remote name needs `--head`
+/// only so `gh` stops resolving the head through `@{push}`. The verdict, not the
+/// branch name, decides.
+/// What: the message for [`ChangelogVerdict::HeadElsewhere`], naming the head
+/// and the caller's two ways forward.
 /// Test: `open_head_without_docs_only_is_refused`,
 /// `open_head_without_docs_only_never_calls_gh`,
-/// `open_head_with_docs_only_plans`.
-fn head_docs_only_conflict(args: &PrOpenArgs) -> Option<String> {
-    let head = head_branch(args)?;
-    if args.docs_only {
+/// `pr_7747_a_head_that_is_the_checkout_opens_a_source_pr`.
+fn head_elsewhere_refusal(args: &PrOpenArgs) -> String {
+    let head = head_branch(args).unwrap_or("HEAD");
+    format!(
+        "--head `{head}` is not the commit this checkout stands on, and \
+         scripts/check_changelog_fragment.sh takes only --base — it would judge \
+         origin/{}...HEAD, this checkout, rather than `{head}`. Check `{head}` out, \
+         or pass --docs-only if this PR changes no crate source.",
+        args.base
+    )
+}
+
+/// Does `head` name the commit the checkout's `HEAD` is on? (#7747)
+///
+/// Why: this is what decides whether the changelog gate's `origin/<base>...HEAD`
+/// diff is the PR's own diff. Resolving `origin/<head>` as well as `<head>` is
+/// what covers the reported case — a local branch whose pushed remote branch
+/// carries a different name, where only the remote ref resolves.
+/// What: true when `head` is the literal `HEAD`, or when either candidate ref
+/// resolves to the same commit as `HEAD`. An unresolvable head is false: a head
+/// this repository cannot name is one the gate cannot judge.
+/// Test: `head_rev_candidates_try_the_remote_ref`, and
+/// `pr_7747_a_head_that_is_the_checkout_opens_a_source_pr` through the seam.
+fn head_is_checkout(root: &Path, head: &str) -> bool {
+    if head == "HEAD" {
+        return true;
+    }
+    let Some(here) = resolve_commit(root, "HEAD") else {
+        return false;
+    };
+    head_rev_candidates(head)
+        .iter()
+        .any(|rev| resolve_commit(root, rev).is_some_and(|c| c == here))
+}
+
+/// The refs a `--head <name>` may mean, in resolution order (#7747).
+///
+/// What: the name as given, then `origin/<name>` — the pushed branch, which is
+/// the only one that resolves when the local branch carries a different name.
+/// Test: `head_rev_candidates_try_the_remote_ref`.
+pub(crate) fn head_rev_candidates(head: &str) -> [String; 2] {
+    [head.to_string(), format!("origin/{head}")]
+}
+
+/// The commit `rev` names in `root`, or `None` when it names none.
+fn resolve_commit(root: &Path, rev: &str) -> Option<String> {
+    let peeled = format!("{rev}^{{commit}}");
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", peeled.as_str()])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !out.status.success() {
         return None;
     }
-    Some(format!(
-        "--head requires --docs-only until the changelog gate can diff an explicit head: \
-         scripts/check_changelog_fragment.sh takes only --base, so it would judge \
-         origin/{}...HEAD — this checkout — rather than `{head}`. \
-         Run tm pr open from a checkout of `{head}` for a source PR.",
-        args.base
-    ))
+    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!sha.is_empty()).then_some(sha)
 }
 
 /// The revision the pre-flight diffs against `origin/<base>`.
@@ -291,18 +350,20 @@ impl OpenPlan {
 /// pure function of (args, body text, session name, changelog verdict) — which
 /// is what makes "each missing field exits 2" testable without a `gh` or a
 /// repository.
-/// What: in order — the `--head`/`--docs-only` pairing
-/// ([`head_docs_only_conflict`]), the body contract and footer
-/// ([`body::validate`]), the `Refs`/`Closes` rule ([`body::apply_issue_link`]),
-/// the workstream label, and the changelog gate. Returns every failure found,
-/// not just the first, so one run fixes them all. Both labels and the assignee
-/// come from `core::policy_labels` and the resolved `agents.ticketing` block
-/// (#6918), never from constants spelled here.
+/// What: in order — the body contract and footer ([`body::validate`], the
+/// contract half skipped under `--minimal`, #7615), the `Refs`/`Closes` rule
+/// ([`body::apply_issue_link`]), the workstream label, and the changelog
+/// verdict, whose [`ChangelogVerdict::HeadElsewhere`] arm is the `--head`
+/// refusal (#7747). Returns every failure found, not just the first, so one run
+/// fixes them all. Both labels and the assignee come from `core::policy_labels`
+/// and the resolved `agents.ticketing` block (#6918), never from constants
+/// spelled here.
 /// Test: `open_reports_each_missing_field`, `open_rejects_bad_footer`,
 /// `open_requires_a_session_name`, `open_reports_changelog_failure`,
 /// `open_docs_only_skips_the_changelog_gate`,
 /// `open_head_without_docs_only_is_refused`,
 /// `open_head_with_docs_only_plans`,
+/// `pr_7615_minimal_skips_the_seven_field_contract`,
 /// `open_labels_come_from_the_policy_table`,
 /// `open_assignee_comes_from_the_ticketing_block`.
 pub(crate) fn plan(
@@ -315,12 +376,15 @@ pub(crate) fn plan(
 ) -> Result<OpenPlan, Vec<String>> {
     let mut failures: Vec<String> = Vec::new();
 
-    // #7282 round 5: `--head` and the changelog gate cannot both be honoured,
-    // so the pair is refused here — before `run` reaches `gh`.
-    failures.extend(head_docs_only_conflict(args));
-
     let report = body::validate(body_text);
-    failures.extend(report.failures());
+    // #7615: `--minimal` drops the seven-heading half for a project whose own
+    // `CLAUDE.md` names a different body standard. `merge_failures` is that half
+    // removed — the footer, and nothing else.
+    if args.minimal {
+        failures.extend(report.merge_failures());
+    } else {
+        failures.extend(report.failures());
+    }
 
     let link = if args.closes {
         IssueLink::Closes
@@ -351,6 +415,9 @@ pub(crate) fn plan(
              (pass --docs-only if this PR changes no crate source):\n{output}",
             args.base
         )),
+        // #7747: the gate declined to answer about this head, so `--head` is
+        // refused here rather than opening a PR on an unjudged diff.
+        ChangelogVerdict::HeadElsewhere => failures.push(head_elsewhere_refusal(args)),
     }
 
     if !failures.is_empty() {
@@ -418,7 +485,8 @@ pub(crate) fn plan(
 /// `gh`'s own output plus the one-line list of supplied body fields; `--rung`
 /// is echoed there so the claimed test-ladder rung is visible at open time.
 /// Test: `open_dry_run_never_calls_gh`, `open_creates_and_reports`,
-/// `open_failure_exits_two_without_calling_gh`, `open_rejects_an_empty_body_file`.
+/// `open_failure_exits_two_without_calling_gh`, `open_rejects_an_empty_body_file`,
+/// `pr_7747_a_head_that_is_the_checkout_opens_a_source_pr`.
 pub(crate) fn run<R: GhRunner, P: Preflight>(
     gh: &R,
     args: &PrOpenArgs,
@@ -432,7 +500,9 @@ pub(crate) fn run<R: GhRunner, P: Preflight>(
     let changelog = if args.docs_only {
         ChangelogVerdict::Skipped
     } else {
-        pre.changelog_gate(&args.base)?
+        // #7747: the gate is asked about the branch being opened, not about
+        // whatever the checkout happens to stand on.
+        pre.changelog_gate(&args.base, diff_head(args))?
     };
 
     // #6918: a malformed `agents.ticketing` block is an error here, not a
@@ -450,6 +520,12 @@ pub(crate) fn run<R: GhRunner, P: Preflight>(
             );
             for f in &failures {
                 eprintln!("  - {f}");
+            }
+            // #7574: a missing heading is fixed by writing the skeleton, so
+            // print the skeleton rather than leaving the author to infer it.
+            if let Some(skeleton) = skeleton_hint(&failures) {
+                eprintln!("\nrequired body skeleton — paste this and fill each section:\n");
+                eprintln!("{skeleton}");
             }
             return Ok(EXIT_CHECK_FAILED);
         }
@@ -540,6 +616,25 @@ pub(crate) fn run<R: GhRunner, P: Preflight>(
         missing.join("; ")
     );
     Ok(EXIT_PARTIAL)
+}
+
+/// The paste-able body skeleton, when a check failed on a missing heading.
+///
+/// Why (#7574): `tm pr open` named each missing heading on its own line, and the
+/// agent on trusty-things#253 still had to guess the skeleton and spend a second
+/// invocation checking the guess. The skeleton is only ever the fix for a
+/// MISSING heading, so it is offered there and nowhere else — a body that failed
+/// on its footer or its changelog fragment gets no wall of headings it already
+/// has.
+/// What: [`body::skeleton`] when any failure line opens with
+/// [`body::MISSING_FIELD_PREFIX`], else `None`.
+/// Test: `pr_7574_a_missing_heading_offers_the_body_skeleton`,
+/// `pr_7574_other_failures_offer_no_skeleton`.
+pub(crate) fn skeleton_hint(failures: &[String]) -> Option<String> {
+    failures
+        .iter()
+        .any(|f| f.starts_with(body::MISSING_FIELD_PREFIX))
+        .then(body::skeleton)
 }
 
 /// The PR URL `gh pr create` printed, when its stdout carries a parsable one.
