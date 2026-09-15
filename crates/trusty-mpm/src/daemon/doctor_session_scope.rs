@@ -68,9 +68,13 @@ pub(super) fn check_session_scope(
 /// must report `Ok`. The server half no longer reads it at all (#7892).
 /// What: see [`check_session_scope`]; `trusted` replaces the store lookup for
 /// the plugin half.
+/// #7757: an untrusted project that declares `[session] plugins` also gets the
+/// remediation, spelled by [`crate::core::project_trust::trust_command_hint`]
+/// so the printed command is one the CLI parses.
 /// Test: `session_scope_warns_when_the_project_settings_lack_the_scope`,
 /// `session_scope_is_ok_once_the_settings_carry_the_scope`,
-/// `session_scope_names_each_divergent_key`.
+/// `session_scope_names_each_divergent_key`,
+/// `session_scope_names_the_trust_command_for_an_untrusted_opt_in`.
 pub(super) fn check_session_scope_with_trust(
     project_dir: Option<&Path>,
     config_dir: Option<&Path>,
@@ -116,6 +120,18 @@ pub(super) fn check_session_scope_with_trust(
         parts.push(format!(
             "plugins NOT loaded: {} — opt in with `[session] plugins = [...]`",
             plugins.join(", ")
+        ));
+    }
+    // #7757: an opt-in list the project already declares is ignored until the
+    // operator grants trust, and the remediation has to be the form the CLI
+    // parses — the earlier hint printed a positional path `tm project` rejects.
+    if !trusted
+        && !crate::core::session_mcp_scope::granted_plugins_with_trust(project, true).is_empty()
+    {
+        parts.push(format!(
+            "{} is NOT trusted, so its `[session] plugins` opt-ins are ignored — grant with `{}`",
+            project.display(),
+            crate::core::project_trust::trust_command_hint(project)
         ));
     }
     if !drift.is_empty() {
@@ -360,6 +376,69 @@ mod tests {
         assert!(
             check.message.contains("aws-core@m"),
             "the excluded plugin must be named: {}",
+            check.message
+        );
+    }
+
+    /// #7757: the untrusted-opt-in row names a command the CLI accepts.
+    ///
+    /// Why: the hint this replaces spelled a positional path (`tm project trust
+    /// <path>`), which `ProjectAction::Trust` rejects with exit 2. The parse
+    /// half is `trust_command_hint_parses_as_the_cli_accepts_it`; this half is
+    /// that the row prints the hint at all.
+    #[test]
+    fn session_scope_names_the_trust_command_for_an_untrusted_opt_in() {
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path().join("repo");
+        let cfg = tmp.path().join("cfg");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join(crate::core::project_config::PROJECT_CONFIG_FILE),
+            "[session]\nplugins = [\"aws-core\"]\n",
+        )
+        .unwrap();
+        shared_config(&cfg, &[]);
+        installed_plugins(&cfg, &["aws-core@m"]);
+
+        let check = check_session_scope_with_trust(Some(&project), Some(&cfg), false);
+
+        assert_eq!(check.status, CheckStatus::Warn, "{}", check.message);
+        assert!(
+            check
+                .message
+                .contains(&crate::core::project_trust::trust_command_hint(&project)),
+            "an untrusted opt-in must name the grant command: {}",
+            check.message
+        );
+        assert!(
+            !check
+                .message
+                .contains(&format!("tm project trust {}", project.display())),
+            "the positional form the CLI rejects must never be printed: {}",
+            check.message
+        );
+    }
+
+    /// #7757: a TRUSTED project's row carries no grant hint.
+    #[test]
+    fn session_scope_omits_the_trust_command_once_trusted() {
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path().join("repo");
+        let cfg = tmp.path().join("cfg");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join(crate::core::project_config::PROJECT_CONFIG_FILE),
+            "[session]\nplugins = [\"aws-core\"]\n",
+        )
+        .unwrap();
+        shared_config(&cfg, &[]);
+        installed_plugins(&cfg, &["aws-core@m"]);
+
+        let check = check_session_scope_with_trust(Some(&project), Some(&cfg), true);
+
+        assert!(
+            !check.message.contains("tm project trust"),
+            "a trusted project owes no grant hint: {}",
             check.message
         );
     }

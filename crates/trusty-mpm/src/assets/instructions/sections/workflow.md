@@ -60,6 +60,11 @@ update it when the work lands or blocks. Detail: `Skill(skill="tm-ticketing")`.
   mandatory before any `git push`, and blocks the push on a hit.
 - Three-dot, never two-dot: two-dot reports files deleted from `main` since your
   branch point as your own additions.
+- Verify the base ref BEFORE diffing (#7748): compare `git rev-parse
+  refs/remotes/origin/main` with `git ls-remote origin refs/heads/main`, and
+  `git fetch origin main` when they disagree. A stale base widened one measured
+  scan to ~1,270 unrelated paths; a comparison you cannot make is not a scan
+  that passed.
 - The branch protection it sits inside, and the review and changelog gates:
   `Skill(skill="tm-workflow")`.
 

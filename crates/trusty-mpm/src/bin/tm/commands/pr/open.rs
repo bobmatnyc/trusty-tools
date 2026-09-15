@@ -53,6 +53,23 @@ pub(crate) trait Preflight {
     /// [`ChangelogVerdict::HeadElsewhere`] rather than a verdict about some
     /// other ref.
     fn changelog_gate(&self, base: &str, head: &str) -> anyhow::Result<ChangelogVerdict>;
+    /// Where the local `origin/<base>` stands against the remote (#7748).
+    ///
+    /// Why: every gate below diffs `origin/<base>...<head>`, and so does the
+    /// credential scan that runs before the push this PR documents. All of them
+    /// read a LOCAL ref that can be hundreds of commits behind — measured twice
+    /// on 2026-09-13, one stale base would have put ~1,270 unrelated paths into
+    /// a scan. Verifying it here means one probe covers every diff in the run.
+    /// What: the verdict;
+    /// [`trusty_mpm::core::base_ref_freshness::BaseFreshness::refusal`] decides.
+    /// `mode` is the caller's write permission — a `--dry-run` passes
+    /// `CompareOnly`, because a fetch moves a ref every worktree of the clone
+    /// shares and a preview must not.
+    fn base_freshness(
+        &self,
+        base: &str,
+        mode: trusty_mpm::core::base_ref_freshness::RefreshMode,
+    ) -> trusty_mpm::core::base_ref_freshness::BaseFreshness;
     /// Paths `git diff --name-only origin/<base>...<head>` reports (#7274).
     ///
     /// Why: the PR's component labels are the crates these paths belong to, so
@@ -150,6 +167,25 @@ impl Preflight for RealPreflight {
         let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
         text.push_str(&String::from_utf8_lossy(&out.stderr));
         Ok(ChangelogVerdict::Fail(text.trim().to_string()))
+    }
+
+    fn base_freshness(
+        &self,
+        base: &str,
+        mode: trusty_mpm::core::base_ref_freshness::RefreshMode,
+    ) -> trusty_mpm::core::base_ref_freshness::BaseFreshness {
+        // #7748: rooted at the checkout, so the probe reads the same ref store
+        // every diff below reads.
+        match repo_root() {
+            Ok(root) => trusty_mpm::core::base_ref_freshness::check(
+                &trusty_mpm::core::base_ref_freshness::RealBaseRefs::at(&root),
+                base,
+                mode,
+            ),
+            Err(e) => trusty_mpm::core::base_ref_freshness::BaseFreshness::Undetermined {
+                reason: format!("{e:#}"),
+            },
+        }
     }
 
     fn changed_paths(&self, base: &str, head: &str) -> anyhow::Result<Vec<String>> {
@@ -484,15 +520,43 @@ pub(crate) fn plan(
 /// argv (`--dry-run`) or runs it. On success prints the PR number and URL from
 /// `gh`'s own output plus the one-line list of supplied body fields; `--rung`
 /// is echoed there so the claimed test-ladder rung is visible at open time.
+///
+/// #7748: the run starts by verifying `origin/<base>` against the remote, so no
+/// gate here — and no credential scan taken over the same range — diffs a base
+/// the checkout never fetched.
 /// Test: `open_dry_run_never_calls_gh`, `open_creates_and_reports`,
 /// `open_failure_exits_two_without_calling_gh`, `open_rejects_an_empty_body_file`,
-/// `pr_7747_a_head_that_is_the_checkout_opens_a_source_pr`.
+/// `pr_7747_a_head_that_is_the_checkout_opens_a_source_pr`,
+/// `pr_7748_a_stale_base_refuses_before_gh_is_called`.
 pub(crate) fn run<R: GhRunner, P: Preflight>(
     gh: &R,
     args: &PrOpenArgs,
     pre: &P,
 ) -> anyhow::Result<i32> {
     let body_text = read_body(&args.body_file)?;
+    // #7748: every gate below, and the credential scan that precedes the push,
+    // diffs `origin/<base>...<head>`. Verify that base against the remote FIRST
+    // — a stale one silently widens each of those diffs.
+    // A preview compares without fetching: `refs/remotes/origin/<base>` is
+    // shared by every worktree of the clone (#7748 round 2).
+    let mode = if args.dry_run {
+        trusty_mpm::core::base_ref_freshness::RefreshMode::CompareOnly
+    } else {
+        trusty_mpm::core::base_ref_freshness::RefreshMode::FetchOnDrift
+    };
+    if let Some(reason) = pre.base_freshness(&args.base, mode).refusal() {
+        eprintln!(
+            "tm pr open: origin/{} is not usable as a diff base; gh was not called",
+            args.base
+        );
+        eprintln!("  - {reason}");
+        eprintln!(
+            "  fix it with `git fetch origin {}`, then re-run — and re-run the credential scan \
+             against the refreshed base",
+            args.base
+        );
+        return Ok(EXIT_CHECK_FAILED);
+    }
     let session = match args.session.clone() {
         Some(s) => Some(s),
         None => pre.session_name(),
