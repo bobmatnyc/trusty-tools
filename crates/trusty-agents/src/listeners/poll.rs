@@ -14,7 +14,10 @@
 //! message ids against an in-memory set seeded from the durable event log,
 //! fetch each new message's summary fields, append a `StoredEvent`
 //! (unconditionally — every event is durably stored regardless of wake
-//! outcome), and hand the event to `wake::wake_bound_agents` when it's
+//! outcome) and only THEN mark the id seen (#7478 — see
+//! `mark_seen_after_durable_append`; a cycle that failed to store holds the
+//! cursor back so the window is re-listed), and hand the event to
+//! `wake::wake_bound_agents` when it's
 //! event-type-included. A cycle-local `DispatchBudget` threads through
 //! the per-event loop so at most ONE wake actually dispatches per
 //! `poll_once` call — every qualifying event after the first is rate-limited
@@ -322,6 +325,11 @@ async fn poll_once(
         .map(str::to_string);
 
     let mut new_count = 0usize;
+    // #7478: set when a message in THIS cycle could not be durably stored.
+    // The cursor is then held back so the next poll re-lists the same history
+    // window — leaving the message unmarked is what lets it through the dedup
+    // gate, and holding the cursor is what makes it reappear at all.
+    let mut store_failed = false;
     // #3820 code-critic CRITICAL fix: cycle-local gate enforcing "max one
     // wake per poll cycle" — every qualifying event in THIS `poll_once` call
     // after the first is rate-limited (see `wake::gate_wake`), never
@@ -346,12 +354,13 @@ async fn poll_once(
                     continue;
                 };
                 let event_id = format!("{}:{}", cfg.name, msg_id);
+                // #7478: membership only — the marker is written after the
+                // append lands, in `mark_seen_after_durable_append` below.
                 {
-                    let mut seen = dedup.lock().await;
+                    let seen = dedup.lock().await;
                     if seen.contains(&event_id) {
                         continue;
                     }
-                    seen.insert(event_id.clone());
                 }
 
                 let event = match fetch_event_summary(client, account, &cfg.name, msg_id, &event_id)
@@ -359,17 +368,35 @@ async fn poll_once(
                 {
                     Ok(ev) => ev,
                     Err(e) => {
+                        // #7478: unmarked, so a re-listed window retries it.
+                        // The cursor still advances past a message we could
+                        // never read — a deleted one would otherwise wedge the
+                        // listener on the same window forever.
                         tracing::warn!(listener = %cfg.name, message_id = %msg_id, error = %e, "gmail listener: failed to fetch message summary; skipping");
                         continue;
                     }
                 };
 
                 if !cfg.filter.matches_labels(&event.labels) {
+                    // #7478: a filtered message has no event to lose, so the
+                    // marker is safe here and spares a re-fetch every cycle.
+                    dedup.lock().await.insert(event_id.clone());
                     continue;
                 }
 
-                if let Err(e) = EventStore::append(&event).await {
-                    tracing::warn!(listener = %cfg.name, error = %e, "gmail listener: failed to persist event");
+                // #7478: store first, mark second. The marker is the claim
+                // that this message has been dealt with, and only a landed
+                // append makes that claim true.
+                if !mark_seen_after_durable_append(
+                    dedup,
+                    &cfg.name,
+                    &event_id,
+                    EventStore::append(&event),
+                )
+                .await
+                {
+                    store_failed = true;
+                    continue;
                 }
                 new_count += 1;
 
@@ -417,17 +444,58 @@ async fn poll_once(
         }
     }
 
-    if let Some(next_id) = next_history_id {
-        save_cursor(
-            &cfg.name,
-            &Cursor {
-                history_id: Some(next_id),
-            },
-        )
-        .await?;
+    match next_history_id {
+        // #7478: advancing past a window whose event never reached the store
+        // is what turns a transient append failure into a permanent drop —
+        // the message would never appear in a history response again.
+        Some(_) if store_failed => {
+            tracing::warn!(listener = %cfg.name, "gmail listener: holding the history cursor; an event in this cycle was not durably stored");
+        }
+        Some(next_id) => {
+            save_cursor(
+                &cfg.name,
+                &Cursor {
+                    history_id: Some(next_id),
+                },
+            )
+            .await?;
+        }
+        None => {}
     }
 
     Ok(new_count)
+}
+
+/// Mark `event_id` seen only once its event is durably stored (#7478).
+///
+/// Why: the dedup set is a claim that a message has been dealt with, and the
+/// only thing that makes that claim true is a landed
+/// [`EventStore::append`]. Inserting first — as `poll_once` did until #7478 —
+/// turned any append error into a silent, permanent drop: the marker survived,
+/// the event did not, and no later poll looked at that message again. An
+/// unstored event is data loss, so the failure arm logs at ERROR rather than
+/// downgrading it to a warning the operator never reads.
+/// What: awaits `append`; on success inserts the id and returns `true`, on
+/// failure leaves the set untouched and returns `false` so the next poll's
+/// dedup gate lets the message through. Taking the append as a future is the
+/// seam that lets a test inject a store failure with no Gmail mailbox.
+/// Test: `a_failed_append_leaves_the_message_unmarked_for_the_next_poll`.
+async fn mark_seen_after_durable_append(
+    dedup: &Mutex<HashSet<String>>,
+    listener: &str,
+    event_id: &str,
+    append: impl std::future::Future<Output = Result<()>>,
+) -> bool {
+    match append.await {
+        Ok(()) => {
+            dedup.lock().await.insert(event_id.to_string());
+            true
+        }
+        Err(e) => {
+            tracing::error!(listener = %listener, event_id = %event_id, error = %e, "gmail listener: failed to persist event; leaving it unmarked so the next poll retries it");
+            false
+        }
+    }
 }
 
 /// Which inbound path one stored event takes — exactly one, never both.
@@ -797,6 +865,45 @@ mod tests {
         assert!(
             loaded.history_id.is_none(),
             "malformed cursor file must fall back to no-cursor, not panic or propagate"
+        );
+    }
+
+    /// A failed durable append leaves the message unmarked, so the next poll
+    /// retries it instead of dropping it forever (#7478).
+    ///
+    /// Why: `poll_once` inserted the dedup marker BEFORE the fetch and the
+    /// append, so an `EventStore::append` error left a message claimed-as-seen
+    /// with nothing in the event log — a silent, unrecoverable drop. The
+    /// ordering is the whole fix, and this is it stated as a property: the
+    /// marker exists only where the event does.
+    /// Test: itself.
+    #[tokio::test]
+    async fn a_failed_append_leaves_the_message_unmarked_for_the_next_poll() {
+        let dedup: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+        let event_id = "gmail-personal:18f0cafe";
+
+        // Cycle 1: the event store is down.
+        let stored = mark_seen_after_durable_append(&dedup, "gmail-personal", event_id, async {
+            Err(anyhow::anyhow!("events.jsonl: no space left on device"))
+        })
+        .await;
+        assert!(
+            !stored,
+            "a failed append must not report the event as stored"
+        );
+        assert!(
+            !dedup.lock().await.contains(event_id),
+            "a message whose event never landed must stay unmarked, or no poll looks at it again"
+        );
+
+        // Cycle 2: the store recovers and the SAME message is retried.
+        let stored =
+            mark_seen_after_durable_append(&dedup, "gmail-personal", event_id, async { Ok(()) })
+                .await;
+        assert!(stored, "the retry must report the event as stored");
+        assert!(
+            dedup.lock().await.contains(event_id),
+            "a durably stored event must be marked, so the next cycle dedups it"
         );
     }
 

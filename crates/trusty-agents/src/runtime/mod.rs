@@ -233,6 +233,16 @@ pub async fn run() -> Result<()> {
         Ok(cli) => cli,
         Err(e) => {
             let kind = e.kind();
+            // #7538: a help request is one clap ANSWERS — it is an `Err` only
+            // because it short-circuits the parse. Falling through to the
+            // `anyhow` arm below printed the help text on stderr behind an
+            // `Error:` prefix and exited 1, so a script gating on the exit
+            // code read a healthy binary as broken. `Error::print` writes a
+            // display to stdout, where a help reader expects it.
+            if cli_def::is_help_display(kind) {
+                e.print().context("printing the clap help text")?;
+                return Ok(());
+            }
             if matches!(
                 kind,
                 clap::error::ErrorKind::InvalidSubcommand | clap::error::ErrorKind::UnknownArgument

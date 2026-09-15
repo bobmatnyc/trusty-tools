@@ -440,6 +440,25 @@ pub(super) fn should_force_plain_cli(plain_flag: bool, no_tui_env: Option<String
 /// What: Skips argv[0] (binary name) and any token starting with `--`.
 /// Joins the remainder with single spaces.
 /// Test: `argv_as_task_text_strips_flags_and_joins`.
+/// Is this clap parse outcome a help/version DISPLAY rather than a usage error?
+///
+/// Why (#7538): clap reports `--help` as an `Err`, and the top-level dispatch
+/// mapped every parse `Err` onto an `anyhow` return — so a successful help
+/// request exited 1 with its text on stderr behind `Error:`. Clap already
+/// draws the line itself (`Error::exit_code()` is 0 for exactly these kinds,
+/// 2 for a usage error); naming the predicate keeps the dispatch in
+/// [`super::run`] readable and gives the rule one test.
+/// What: true for `DisplayHelp` (`--help`, `-h`) and `DisplayVersion`, false
+/// for every usage error — an unknown flag or subcommand keeps its non-zero
+/// exit.
+/// Test: `help_flags_are_a_zero_exit_display_not_an_error`.
+pub(super) fn is_help_display(kind: clap::error::ErrorKind) -> bool {
+    matches!(
+        kind,
+        clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+    )
+}
+
 pub(super) fn argv_as_task_text(args: &[String]) -> String {
     args.iter()
         .skip(1)
@@ -487,6 +506,40 @@ mod tests {
             !paragraph.contains("HTTP"),
             "the search daemon serves no HTTP; help said: {paragraph}"
         );
+    }
+
+    /// `--help` and `-h` are a zero-exit display, not a usage error (#7538).
+    ///
+    /// Why: `tagent --help` printed the full help and exited 1, so scripts and
+    /// QA harnesses gating on the exit code called a healthy binary broken.
+    /// The classification is the whole content of the fix, so it is what this
+    /// pins; `tests/help_exit_code.rs` proves the built binary's exit status.
+    #[test]
+    fn help_flags_are_a_zero_exit_display_not_an_error() {
+        use clap::Parser;
+        use clap::error::ErrorKind;
+
+        for flag in ["--help", "-h"] {
+            let err = super::Cli::try_parse_from(["tagent", flag])
+                .expect_err("clap reports a help request as an Err");
+            assert_eq!(err.kind(), ErrorKind::DisplayHelp, "{flag}");
+            assert_eq!(err.exit_code(), 0, "clap itself calls {flag} a success");
+            assert!(
+                super::is_help_display(err.kind()),
+                "{flag} must be dispatched as a success, not an anyhow error"
+            );
+        }
+
+        // `trailing_var_arg` + `allow_hyphen_values` mean an unknown flag is
+        // captured as free text, so the usage error this contrasts against is
+        // a bad VALUE for a known flag.
+        let err = super::Cli::try_parse_from(["tagent", "--port", "not-a-number"])
+            .expect_err("a non-numeric --port is a usage error");
+        assert!(
+            !super::is_help_display(err.kind()),
+            "a usage error must keep its non-zero exit"
+        );
+        assert_ne!(err.exit_code(), 0);
     }
 
     #[test]
