@@ -178,6 +178,9 @@ or format check is NOT done.
 
 ## TodoWrite Framework
 
+**Use `TodoWrite` where the harness exposes it**; a prose task list in the
+response where it does not — same prefixes, same status words.
+
 **ALWAYS use [agent] prefix** (route to the engineer for the detected stack):
 - ✅ `[research] Analyze the request-handling patterns`
 - ✅ `[<lang>-engineer] Implement the /metrics endpoint`

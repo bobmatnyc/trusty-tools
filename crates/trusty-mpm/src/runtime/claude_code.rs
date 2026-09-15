@@ -179,9 +179,15 @@ fn cd_and_group(cwd: &Path, body: &str) -> String {
 /// FALLBACK, so with trusty-memory down a session that also lost auto memory
 /// would have no memory at all. The caller resolves the flag, exactly as it
 /// resolves `gh_env` — this builder stays a pure function of its arguments.
-/// What: `env -u ANTHROPIC_API_KEY <-u marker…> CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN="${…-1}" CLAUDE_CODE_DISABLE_MOUSE="${…-1}" [CLAUDE_CODE_DISABLE_AUTO_MEMORY=1] [CLAUDE_CONFIG_DIR='<dir>'] [CLAUDE_CODE_OAUTH_TOKEN='<token>'] <claude_bin>`
+/// (7) Issue #8066: the line always assigns `CLAUDE_CODE_ENABLE_TODO_TOOLS=1`.
+/// Claude Code 2.1.260 gates `TodoWrite` and the `TaskCreate` family to a fixed
+/// model list, so a managed session on any model outside it gets neither tool
+/// family and the PM loses progress tracking. Unlike auto memory this one is
+/// unconditional: nothing about the host decides it, and the instruction-asset
+/// fallback (#2799) covers only the case where the binary ignores the variable.
+/// What: `env -u ANTHROPIC_API_KEY <-u marker…> CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN="${…-1}" CLAUDE_CODE_DISABLE_MOUSE="${…-1}" CLAUDE_CODE_ENABLE_TODO_TOOLS=1 [CLAUDE_CODE_DISABLE_AUTO_MEMORY=1] [CLAUDE_CONFIG_DIR='<dir>'] [CLAUDE_CODE_OAUTH_TOKEN='<token>'] <claude_bin>`
 /// — each bracketed assignment appears only when its value is `Some`; the two
-/// managed-default operands are unconditional. The
+/// managed-default operands and the todo-tools switch are unconditional. The
 /// `-u NAME` option MUST precede any
 /// `NAME=VALUE` assignment per POSIX `env` grammar (`env [OPTION]...
 /// [NAME=VALUE]... [COMMAND]...`); putting an assignment before `-u` makes
@@ -207,7 +213,9 @@ fn cd_and_group(cwd: &Path, body: &str) -> String {
 /// `env_bin_prefix_orders_auto_memory_before_the_config_dir`,
 /// `env_bin_prefix_keeps_auto_memory_when_trusty_memory_is_unreachable`,
 /// `spawn_command_keeps_auto_memory_when_trusty_memory_is_unreachable`,
-/// `resume_command_keeps_auto_memory_when_trusty_memory_is_unreachable`.
+/// `resume_command_keeps_auto_memory_when_trusty_memory_is_unreachable`,
+/// `env_bin_prefix_enables_todo_tools_unconditionally`,
+/// `spawn_command_enables_todo_tools`, `resume_command_enables_todo_tools`.
 ///
 /// `GH_TOKEN`/`GH_USER` (issue #3025) are deliberately NOT assignments on
 /// this prefix — see [`claude_code_gh_env::gh_env_source_prefix`], applied
@@ -229,6 +237,12 @@ pub(crate) fn env_bin_prefix(
     // exports.
     assignments.push(' ');
     assignments.push_str(&crate::core::alt_screen::managed_shell_assignments());
+    // #8066: Claude Code 2.1.260+ gates TodoWrite and the TaskCreate family to a
+    // fixed model list, so a managed session on any other model (Fable 5.1, say)
+    // has no progress-tracking tool at all unless this variable is set.
+    // Unconditional — no caller input decides it, and the instruction-asset
+    // fallback (#2799) covers only a binary that ignores the variable.
+    assignments.push_str(" CLAUDE_CODE_ENABLE_TODO_TOOLS=1");
     // #7685: Claude Code auto-memory (`MEMORY.md`) is a FALLBACK — trusty-memory
     // is the memory, so the switch goes in only when trusty-memory answered
     // (owner ruling 2026-09-12). Per Claude Code's docs the env var also wins
