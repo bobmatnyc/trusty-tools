@@ -930,6 +930,85 @@ fn tool_invocation_attributed_to_a_delegation_is_delegated_role() {
     assert_eq!(name(2), Some("delegate_to_agent"));
 }
 
+/// A delegated call whose completion arrives after its block closed still
+/// fills the card it opened inside that block (#4596, #7940).
+#[test]
+fn tool_invocation_completion_after_delegation_closes_fills_the_delegated_card() {
+    let mut app = app_with_delegation("eng-1", "engineer");
+    apply(
+        &mut app,
+        ReplEvent::ToolInvocation {
+            id: "c1".into(),
+            agent_id: "eng-1".into(),
+            tool_name: "bash".into(),
+            args: serde_json::json!("cargo test"),
+            result: None,
+        },
+    );
+    apply(
+        &mut app,
+        ReplEvent::DelegationFinished {
+            agent_id: "eng-1".into(),
+            agent: "engineer".into(),
+            outcome: DelegationOutcome::Finished("success".into()),
+        },
+    );
+    apply(
+        &mut app,
+        ReplEvent::ToolInvocation {
+            id: "c1".into(),
+            agent_id: "eng-1".into(),
+            tool_name: "bash".into(),
+            args: serde_json::Value::Null,
+            result: Some("ok".into()),
+        },
+    );
+    let cards: Vec<usize> = (0..app.chat.len())
+        .filter(|&i| app.chat[i].tool.as_ref().is_some_and(|c| c.id == "c1"))
+        .collect();
+    assert_eq!(cards, vec![1], "exactly one card for c1: {:?}", app.chat);
+    assert_eq!(app.chat[1].role, ChatRole::Delegated);
+    let card = app.chat[1].tool.as_ref().expect("a card");
+    assert_eq!(card.result.as_deref(), Some("ok"));
+    assert_eq!(card.args, serde_json::json!("cargo test"));
+    assert!(app.tool_cards.is_empty());
+}
+
+/// A repeated start for a call whose card is still open changes nothing —
+/// no second entry, no re-keying, and the first start's args survive.
+#[test]
+fn tool_invocation_repeated_start_for_an_open_card_is_a_noop() {
+    let mut app = ReplApp::new("demo", "u");
+    apply(
+        &mut app,
+        ReplEvent::ToolInvocation {
+            id: "c1".into(),
+            agent_id: String::new(),
+            tool_name: "bash".into(),
+            args: serde_json::json!("cargo test"),
+            result: None,
+        },
+    );
+    let chat_len = app.chat.len();
+    let tool_cards = app.tool_cards.clone();
+    let args = app.chat[0].tool.as_ref().expect("a card").args.clone();
+    apply(
+        &mut app,
+        ReplEvent::ToolInvocation {
+            id: "c1".into(),
+            agent_id: String::new(),
+            tool_name: "bash".into(),
+            args: serde_json::json!("cargo build"),
+            result: None,
+        },
+    );
+    assert_eq!(app.chat.len(), chat_len);
+    assert_eq!(app.tool_cards, tool_cards);
+    let card = app.chat[0].tool.as_ref().expect("a card");
+    assert_eq!(card.args, args);
+    assert_eq!(card.result, None);
+}
+
 /// `/clear` must drop the keyed-stream indices too — they index INTO `chat`,
 /// so leaving them behind would point at rows that no longer exist.
 #[test]
