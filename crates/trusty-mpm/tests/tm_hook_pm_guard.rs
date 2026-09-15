@@ -468,11 +468,10 @@ fn pm_guard_allows_git_status_and_task() {
 }
 
 #[test]
-fn pm_guard_fails_open_on_malformed_input() {
-    // Malformed / empty stdin must degrade to ALLOW (no output), never block.
-    assert_eq!(run_pm_guard("not json at all", &[]).trim(), "");
-    assert_eq!(run_pm_guard("", &[]).trim(), "");
-    // A well-formed object with no tool_name also fails open.
+fn pm_guard_allows_a_parsed_payload_without_tool_name() {
+    // A well-formed object with no tool_name names nothing to guard: ALLOW.
+    // #7975: empty or malformed stdin DENIES instead — see
+    // `tests/tm_hook_pm_guard_stdin_7975.rs`.
     assert_eq!(
         run_pm_guard(r#"{"hook_event_name":"PreToolUse"}"#, &[]).trim(),
         ""
@@ -2308,9 +2307,10 @@ fn main_checkout_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
 ///
 /// Why: #7550. `command` and `cwd` used to be interpolated straight into a raw
 /// JSON string literal, so a command carrying a `"` or a `\` produced broken
-/// JSON — and `run_pm_guard` answers a malformed payload with empty stdout,
-/// which reads exactly like an ALLOW. A test written to assert a DENY would
-/// have PASSED its `assert_eq!(stdout, "")` twin and silently proved nothing.
+/// JSON — and `run_pm_guard` then answered a malformed payload with empty
+/// stdout, which read exactly like an ALLOW (#7975 has since made it deny). A
+/// test written to assert a DENY would have PASSED its `assert_eq!(stdout, "")`
+/// twin and silently proved nothing.
 /// Serialising the two fields is what makes an unparseable payload
 /// unreachable.
 /// What: `serde_json::json!` builds the object, then `extra_fields` — a
@@ -2340,8 +2340,8 @@ fn bash_payload_at(command: &str, cwd: &std::path::Path, extra_fields: &str) -> 
 /// #7550: a command carrying a literal `"` reaches the guard intact.
 ///
 /// Why: the pre-fix helper produced unparseable JSON for this command, and the
-/// guard answers unparseable input with empty stdout — indistinguishable from
-/// an allow. The assertion is therefore on the PAYLOAD as well as the verdict:
+/// guard then answered unparseable input with empty stdout — indistinguishable
+/// from an allow (#7975 has since made it deny). The assertion is therefore on the PAYLOAD as well as the verdict:
 /// a payload that does not round-trip is the defect, whatever the guard then
 /// says about it.
 #[test]

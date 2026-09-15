@@ -774,8 +774,8 @@ fn write_project_hooks_locked(
 /// no-op under Claude Code's minimal `PATH`, leaving the guard un-fired.
 /// What: returns the `PreToolUse` handler-group array with `matcher: ""` (fires
 /// for every tool) invoking `<abs-path> hook --pm-guard` with a short timeout.
-/// The guard itself fails open (ALLOW) on any error, so a slow/absent binary
-/// never blocks the PM.
+/// An absent binary is a non-blocking hook error, so it never blocks the PM; a
+/// stdin payload the guard cannot read denies (#7975).
 /// Test: `write_project_hooks_registers_pm_guard`.
 pub(super) fn pm_guard_hook_value() -> serde_json::Value {
     serde_json::json!([
