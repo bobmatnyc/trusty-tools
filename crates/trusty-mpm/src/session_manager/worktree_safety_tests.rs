@@ -1264,3 +1264,49 @@ fn clearing_the_marker_leaves_every_other_file_alone() {
         "a restored marker must not become work"
     );
 }
+
+/// 🔴 #7914: the count ADR-0057's PR-less admission grants on, against real
+/// git.
+///
+/// Why: the guard's policy tests fabricate this number, so nothing else proves
+/// the query spelling answers what the admission claims it answers. All three
+/// states are walked in one fixture because the transitions are the contract:
+/// a fresh worktree is the shape an owner is told to delete, a local commit is
+/// the shape that must keep denying, and pushing it is the ff-into-a-landed-
+/// sibling shape the admission exists for.
+#[test]
+fn local_only_commits_counts_only_what_no_origin_ref_has() {
+    use crate::core::worktree_removal_facts::{GitAndGhProbe, WorktreeRemovalProbe};
+
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("landed-history");
+
+    assert_eq!(
+        GitAndGhProbe
+            .local_only_commits(&wt)
+            .expect("a fresh worktree must be countable"),
+        0,
+        "a worktree branched off a pushed tip holds no commit origin lacks"
+    );
+
+    GitWorktreeFixture::commit_unpushed(&wt);
+    assert_eq!(
+        GitAndGhProbe
+            .local_only_commits(&wt)
+            .expect("a committed worktree must be countable"),
+        1,
+        "a commit on no origin ref is exactly what must keep denying"
+    );
+
+    // A second commit, so `commit_all_and_push` has something to stage — it
+    // pushes the local-only one along with it.
+    std::fs::write(wt.join("landed.txt"), "landed\n").expect("write a file to land");
+    GitWorktreeFixture::commit_all_and_push(&wt, "land it");
+    assert_eq!(
+        GitAndGhProbe
+            .local_only_commits(&wt)
+            .expect("a pushed worktree must be countable"),
+        0,
+        "once the commits are on origin the tree is the only place for nothing"
+    );
+}

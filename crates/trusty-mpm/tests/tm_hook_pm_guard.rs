@@ -1508,6 +1508,45 @@ fn pm_guard_denies_version_control_a_worktree_remove_it_cannot_prove_safe() {
     );
 }
 
+/// Run one git command in a fixture directory, with identity config pinned.
+///
+/// Why: #7914 needs a second fixture step — a commit made after the push — so
+/// the spawn moved out of the closure it used to be. Extracted rather than
+/// duplicated: two spellings of the same `-c user.name=…` prelude would drift.
+/// Test: used by `clean_pushed_worktree_fixture` and `commit_locally`.
+fn git_in_fixture(args: &[&str], cwd: &std::path::Path) {
+    let ok = std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .current_dir(cwd)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("git runs")
+        .success();
+    assert!(ok, "git {args:?} must succeed");
+}
+
+/// Commit a file in `wt` and push it nowhere (#7914).
+///
+/// Why: since #7914 a clean, fully-pushed tree is ADMITTED with no pull request
+/// in evidence, so a test that needs the guard to reach `merged-pull-request`
+/// has to give the worktree a commit no `origin` ref has. That is also the
+/// shape the admission must never fire on.
+/// Test: `pm_guard_carries_version_control_past_sole_owner_when_the_daemon_answers_empty`.
+fn commit_locally(wt: &std::path::Path) {
+    std::fs::write(wt.join("local-only.txt"), "only here").expect("write");
+    git_in_fixture(&["add", "local-only.txt"], wt);
+    git_in_fixture(&["commit", "-q", "-m", "local only"], wt);
+}
+
 /// A worktree that passes every LOCAL ADR-0057 re-check: a real git repository
 /// under `.claude/worktrees/`, clean, with an upstream it is level with.
 ///
@@ -1521,25 +1560,7 @@ fn clean_pushed_worktree_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
     let remote = dir.path().join("origin.git");
     let wt = dir.path().join("repo/.claude/worktrees/agent-merged");
     std::fs::create_dir_all(&wt).expect("mkdir worktree");
-    let run = |args: &[&str], cwd: &std::path::Path| {
-        let ok = std::process::Command::new("git")
-            .args([
-                "-c",
-                "user.name=test",
-                "-c",
-                "user.email=test@example.com",
-                "-c",
-                "commit.gpgsign=false",
-            ])
-            .args(args)
-            .current_dir(cwd)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .expect("git runs")
-            .success();
-        assert!(ok, "git {args:?} must succeed");
-    };
+    let run = git_in_fixture;
     let remote_arg = remote.to_str().expect("utf8");
     run(
         &["init", "--bare", "-q", "-b", "main", remote_arg],
@@ -1609,8 +1630,12 @@ fn pm_guard_carries_version_control_past_sole_owner_when_the_daemon_answers_empt
     // next check and this fixture has no GitHub repository behind it, so the
     // removal is still refused — but by that check, which is the proof
     // `sole-owner` passed.
+    // #7914: the commit is what keeps that proof available. Without it the tree
+    // holds nothing no `origin` ref has, the admission grants, and there is no
+    // later deny to read `sole-owner`'s verdict off.
     let url = spawn_writers_mock(r#"{"agents":[],"total":0}"#);
     let (_dir, wt) = clean_pushed_worktree_fixture();
+    commit_locally(&wt);
     let reason = deny_reason_of(&run_pm_guard_at(
         &version_control_removal_payload(&wt),
         &url,
@@ -1619,6 +1644,29 @@ fn pm_guard_carries_version_control_past_sole_owner_when_the_daemon_answers_empt
     assert!(
         reason.contains("merged-pull-request") && !reason.contains("sole-owner"),
         "an answered empty owner set must pass sole-owner and stop at the PR check, got: {reason}"
+    );
+}
+
+/// 🔴 REGRESSION (#7914), end to end: the binary itself grants a removal on a
+/// clean worktree whose every commit is on `origin`, with no pull request
+/// anywhere.
+///
+/// Why: gate 5 admitted exactly one proof that the commits reached the remote,
+/// so an owner's explicit "delete this abandoned tree" had no sanctioned route.
+/// This fixture is the observed shape — a real worktree under
+/// `.claude/worktrees/`, clean, level with its upstream, behind no GitHub
+/// repository at all. Before #7914 it denied at `merged-pull-request`; the
+/// sibling test above is the same fixture plus one local commit, and still
+/// denies, so this pair pins both sides of the admission in the real binary.
+#[test]
+fn pm_guard_allows_version_control_a_clean_tree_whose_commits_are_all_on_origin() {
+    let url = spawn_writers_mock(r#"{"agents":[],"total":0}"#);
+    let (_dir, wt) = clean_pushed_worktree_fixture();
+    let stdout = run_pm_guard_at(&version_control_removal_payload(&wt), &url, &wt);
+    assert!(
+        stdout.trim().is_empty(),
+        "a tree that is the only place for nothing must be removable with no pull \
+         request in evidence; the guard printed: {stdout}"
     );
 }
 

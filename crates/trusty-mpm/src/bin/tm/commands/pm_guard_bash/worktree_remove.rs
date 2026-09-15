@@ -53,7 +53,9 @@
 //! `denies_worktree_remove_from_version_control_when_the_owner_query_fails`,
 //! `denies_worktree_remove_when_agent_type_claims_version_control_without_agent_id`,
 //! `denies_a_removal_whose_path_carries_an_unexpanded_variable`,
-//! `denies_a_removal_whose_dash_c_carries_an_unexpanded_variable`
+//! `denies_a_removal_whose_dash_c_carries_an_unexpanded_variable`,
+//! `a_clean_tree_whose_commits_are_all_on_origin_needs_no_pull_request` (#7914),
+//! `a_commit_no_origin_ref_has_still_denies_without_a_merged_pr`
 //! below; `pm_guard_denies_worktree_remove_from_native_subagent` and
 //! `pm_guard_allows_worktree_remove_from_pm` run the binary end to end in
 //! `tests/tm_hook_pm_guard.rs`.
@@ -289,8 +291,8 @@ fn removal_target_path(tail: &[String], base: &Path) -> Option<(String, PathBuf)
 mod tests {
     use super::*;
     use crate::commands::pm_guard_bash::worktree_remove_rechecks::{
-        CHECK_CLEAN_TREE, CHECK_MERGED_PULL_REQUEST, CHECK_SOLE_OWNER, CHECK_UNPUSHED_COMMITS,
-        evaluate_removal_rechecks,
+        CHECK_CLEAN_TREE, CHECK_LOCAL_ONLY_COMMITS, CHECK_MERGED_PULL_REQUEST, CHECK_SOLE_OWNER,
+        CHECK_UNPUSHED_COMMITS, evaluate_removal_rechecks,
     };
     use trusty_mpm::core::worktree_removal_facts::{
         MergedPrLookup, UpstreamComparison, WorktreeRemovalProbe,
@@ -350,6 +352,10 @@ mod tests {
         merged_related: Option<Result<MergedPrLookup, String>>,
         /// #7275: whether merging this tree into its base would change nothing.
         noop_merge: Result<bool, String>,
+        /// #7914: commits reachable from HEAD that no `origin` ref has. One by
+        /// default, so every pre-#7914 test still reaches the merged-PR route
+        /// it was written for — the admission only ever fires on a zero.
+        local_only: Result<usize, String>,
         /// #7275 round 2: the base ref the merge-tree question was asked
         /// against, so a test can prove it came from the pull request.
         asked_base: std::cell::RefCell<Option<String>>,
@@ -381,6 +387,9 @@ mod tests {
                 // upstream is never asked this; a false default keeps the
                 // merged-PR arm the only thing granting here.
                 noop_merge: Ok(false),
+                // #7914: not zero — a fixture that admitted here would stop
+                // exercising the merged-PR route these tests exist for.
+                local_only: Ok(1),
                 asked_base: std::cell::RefCell::new(None),
             }
         }
@@ -417,6 +426,9 @@ mod tests {
         }
         fn branch(&self, _dir: &Path) -> Result<String, String> {
             self.branch.clone()
+        }
+        fn local_only_commits(&self, _dir: &Path) -> Result<usize, String> {
+            self.local_only.clone()
         }
         fn merged_pull_requests(
             &self,
@@ -948,6 +960,124 @@ mod tests {
             .expect("unsaved work must deny removal");
         assert!(reason.contains(CHECK_CLEAN_TREE), "{reason}");
         assert!(reason.contains('4'), "{reason}");
+    }
+
+    /// A tree whose every commit is already on `origin`, with no pull request
+    /// anywhere — the #7914 shape.
+    fn no_pr_fully_landed() -> FakeProbe {
+        FakeProbe {
+            branch: Ok("fix/7965-sweep-stall-salvage".to_string()),
+            merged: Ok(lookup(0)),
+            merged_related: None,
+            // Not a route to a grant: content-equivalence alone stays denied
+            // (#7275 round 2), so only the local-only count can admit here.
+            noop_merge: Ok(false),
+            local_only: Ok(0),
+            ..FakeProbe::upstream_deleted()
+        }
+    }
+
+    /// 🔴 REGRESSION (#7914): a clean worktree holding no commit any `origin`
+    /// ref lacks is removable with no pull request in evidence at all.
+    ///
+    /// Why: gate 5 accepted exactly one proof that the commits reached GitHub,
+    /// and a branch that never carried a pull request could not produce it —
+    /// so an owner's explicit "delete this abandoned tree" had no sanctioned
+    /// route from inside a session, on either removal path. The observed shape
+    /// is a worktree branched off `origin/main` and never committed to. Fails
+    /// on `04c59c7d4`, where this denies with `merged-pull-request`.
+    #[test]
+    fn a_clean_tree_whose_commits_are_all_on_origin_needs_no_pull_request() {
+        assert_eq!(
+            evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &no_pr_fully_landed()),
+            None,
+            "a tree that is the only place for nothing cannot lose anything to a removal"
+        );
+    }
+
+    /// #7914: a detached HEAD has no branch to look a pull request up by, so
+    /// gate 5 could never answer for an install worktree. The admission is
+    /// asked before the branch lookup, which is what makes it reachable.
+    #[test]
+    fn a_detached_head_holding_no_local_only_commit_is_reclaimable() {
+        let probe = FakeProbe {
+            branch: Err("HEAD is detached — the worktree has no branch to look a \
+                         pull request up by"
+                .to_string()),
+            ..no_pr_fully_landed()
+        };
+        assert_eq!(
+            evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe),
+            None,
+            "a detached HEAD whose commits are all on origin holds nothing to lose"
+        );
+    }
+
+    /// 🔴 #7914: the admission is a zero, never a "roughly clean". One commit
+    /// no `origin` ref has denies exactly as before — this is the #7275 round-2
+    /// hole, which must stay shut.
+    #[test]
+    fn a_commit_no_origin_ref_has_still_denies_without_a_merged_pr() {
+        let probe = FakeProbe {
+            local_only: Ok(1),
+            // The round-2 input verbatim: an empty merge, no pull request.
+            noop_merge: Ok(true),
+            ..no_pr_fully_landed()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("a commit that exists only here must deny removal");
+        assert!(reason.contains(CHECK_MERGED_PULL_REQUEST), "{reason}");
+        assert!(reason.contains(CHECK_LOCAL_ONLY_COMMITS), "{reason}");
+        assert!(
+            reason.contains("only place they exist"),
+            "the deny must name the work at risk: {reason}"
+        );
+    }
+
+    /// 🔴 #7914: the admission did not become a bypass — `clean-tree` still
+    /// runs first, so unsaved work denies however landed the history is.
+    #[test]
+    fn a_dirty_tree_denies_even_when_no_commit_is_local_only() {
+        let probe = FakeProbe {
+            dirty: Ok(2),
+            ..no_pr_fully_landed()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("unsaved work must deny removal");
+        assert!(reason.contains(CHECK_CLEAN_TREE), "{reason}");
+        assert!(reason.contains('2'), "{reason}");
+    }
+
+    /// 🔴 #7914: `sole-owner` still runs first too. A tree another live agent
+    /// holds is refused whether or not its commits are all on a remote — the
+    /// 2026-09-15 recurrence removed a live agent's clean tree.
+    #[test]
+    fn a_live_owner_denies_even_when_no_commit_is_local_only() {
+        let owners = ["agent-a5fc62fa0f4e5ba3d".to_string()];
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&owners), &no_pr_fully_landed())
+            .expect("a live owner must deny removal");
+        assert!(reason.contains(CHECK_SOLE_OWNER), "{reason}");
+        assert!(reason.contains("agent-a5fc62fa0f4e5ba3d"), "{reason}");
+    }
+
+    /// 🔴 #7914, failure path: the admission fails CLOSED in the only direction
+    /// available to a relaxation — a `rev-list` that could not be answered does
+    /// not admit, and the deny quotes git's own words rather than reading the
+    /// unanswered question as a zero.
+    #[test]
+    fn an_unanswerable_local_only_count_never_admits() {
+        let probe = FakeProbe {
+            local_only: Err("`git rev-list` exited 128: not a git repository".to_string()),
+            ..no_pr_fully_landed()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("an unestablished admission must never grant");
+        assert!(reason.contains(CHECK_MERGED_PULL_REQUEST), "{reason}");
+        assert!(reason.contains("exited 128"), "{reason}");
+        assert!(
+            reason.contains("could not be established"),
+            "the deny must separate an unanswerable count from a real commit: {reason}"
+        );
     }
 
     #[test]

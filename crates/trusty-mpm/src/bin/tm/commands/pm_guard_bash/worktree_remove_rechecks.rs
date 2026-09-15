@@ -1,4 +1,4 @@
-//! The four re-checks that gate `version-control`'s `git worktree remove`
+//! The re-checks that gate `version-control`'s `git worktree remove`
 //! ([ADR-0057](../../../../../../../docs/adr/0057-version-control-owns-worktree-removal.md)).
 //!
 //! Why: ADR-0057 turns #5791's blanket deny into a grant for one agent name,
@@ -9,7 +9,7 @@
 //! directory the command names — and folding both into one file would put the
 //! 500-SLOC production cap in reach of the next addition to either.
 //!
-//! What: [`evaluate_removal_rechecks`] runs the four checks in cost order and
+//! What: [`evaluate_removal_rechecks`] runs the subprocess-backed checks in cost order and
 //! returns `Some(reason)` naming the first that did not pass. The scope check
 //! (`e`) is not here: it is lexical, needs no subprocess, and runs in
 //! `worktree_remove` before this module is reached, so an out-of-scope target
@@ -48,6 +48,24 @@
 //! itself or for its round-stripped sibling, and the merge-tree question is
 //! asked only afterwards, against that pull request's own base.
 //!
+//! **A tree that holds no commit of its own needs no pull request (#7914).**
+//! Requiring a MERGED pull request left three shapes with no removal route at
+//! all: a worktree created off `origin/main` and never committed to, a branch
+//! fast-forwarded into a sibling that landed, and a detached-HEAD tree whose
+//! `branch` lookup cannot even produce a name to search by. None of them can
+//! lose anything to a removal, because every commit they hold is on an `origin`
+//! ref already. [`evaluate_removal_rechecks`] therefore asks
+//! [`WorktreeRemovalProbe::local_only_commits`] once the two ownership gates
+//! have passed, and grants on a literal zero.
+//!
+//! That admission is a RELAXATION, so it inherits the fail-closed rule in the
+//! opposite direction: only `Ok(0)` admits. A non-zero count and an `Err` both
+//! fall through to the merged-PR route unchanged, which is why an unanswerable
+//! `rev-list` cannot cost a removal that a merged pull request would still have
+//! granted. It also does not reopen the #7275 round-2 hole: the never-pushed
+//! branch holding one empty commit holds a commit no `origin` ref has, so it
+//! counts one and still denies.
+//!
 //! Test: `allows_worktree_remove_from_version_control_on_clean_merged_unowned_tree`,
 //! `denies_worktree_remove_from_version_control_when_tree_dirty`,
 //! `denies_worktree_remove_from_version_control_when_commits_are_unpushed`,
@@ -61,7 +79,13 @@
 //! `an_empty_merge_tree_without_any_merged_pr_still_denies`,
 //! `a_round_sibling_whose_related_pr_merged_is_reclaimable`,
 //! `a_related_merged_pr_with_a_non_empty_merge_tree_denies_with_the_residue`,
-//! `the_merge_tree_is_judged_against_the_merged_prs_own_base`
+//! `the_merge_tree_is_judged_against_the_merged_prs_own_base`,
+//! `a_clean_tree_whose_commits_are_all_on_origin_needs_no_pull_request`,
+//! `a_detached_head_holding_no_local_only_commit_is_reclaimable`,
+//! `a_commit_no_origin_ref_has_still_denies_without_a_merged_pr`,
+//! `a_dirty_tree_denies_even_when_no_commit_is_local_only`,
+//! `a_live_owner_denies_even_when_no_commit_is_local_only`,
+//! `an_unanswerable_local_only_count_never_admits`
 //! in `super::worktree_remove`.
 
 use std::path::Path;
@@ -86,6 +110,10 @@ pub(crate) const CHECK_UNPUSHED_COMMITS: &str = "unpushed-commits";
 pub(crate) const CHECK_SOLE_OWNER: &str = "sole-owner";
 /// See [`CHECK_WORKTREE_SCOPE`].
 pub(crate) const CHECK_MERGED_PULL_REQUEST: &str = "merged-pull-request";
+/// The #7914 admission's name — quoted in the merged-PR deny when it did NOT
+/// apply, so a refusal says which of the two routes to landing evidence failed.
+/// It is never a `check` slug in its own right: it can only grant.
+pub(crate) const CHECK_LOCAL_ONLY_COMMITS: &str = "local-only-commits";
 /// See [`CHECK_WORKTREE_SCOPE`] — the identity half, checked in
 /// [`super::worktree_remove`] before any of these run.
 pub(crate) const CHECK_DISPATCH_IDENTITY: &str = "dispatch-identity";
@@ -112,7 +140,7 @@ pub(crate) fn recheck_deny(check: &str, target: &Path, detail: &str) -> String {
     )
 }
 
-/// Run the four subprocess-backed re-checks against `target`.
+/// Run the subprocess-backed re-checks against `target`.
 ///
 /// Why: the whole safety case for ADR-0057. Each answer comes from git, GitHub
 /// or the daemon rather than from the calling agent, which is what makes the
@@ -124,7 +152,9 @@ pub(crate) fn recheck_deny(check: &str, target: &Path, detail: &str) -> String {
 /// round trip. #7232: `unpushed-commits` answering
 /// [`UpstreamComparison::NoUpstream`] does NOT return; it is carried to the
 /// merged-PR check, which then has to supply the evidence the missing upstream
-/// cannot.
+/// cannot. #7914: between the daemon answer and that network call sits the
+/// second route to landing evidence — a tree holding no commit any `origin` ref
+/// lacks grants there and never reaches GitHub at all.
 ///
 /// `live_owners` is passed in rather than queried here because the daemon call
 /// is async and this policy is not; the caller makes it over the same
@@ -207,9 +237,25 @@ pub(crate) fn evaluate_removal_rechecks(
         }
     }
 
+    // #7914: the admission for a tree GitHub never saw a pull request for.
+    // Asked AFTER both ownership gates — a live owner and unsaved work still
+    // decide first — and BEFORE the branch lookup, so a detached HEAD, which
+    // cannot produce a name to search GitHub by, reaches it at all.
+    let local_only = probe.local_only_commits(target);
+    if local_only.as_ref().is_ok_and(|n| *n == 0) {
+        return None;
+    }
+    let local_only_note = local_only_note(&local_only);
+
     let branch = match probe.branch(target) {
         Ok(b) => b,
-        Err(e) => return Some(recheck_deny(CHECK_MERGED_PULL_REQUEST, target, &e)),
+        Err(e) => {
+            return Some(recheck_deny(
+                CHECK_MERGED_PULL_REQUEST,
+                target,
+                &format!("{e}.{local_only_note}"),
+            ));
+        }
     };
     // #7232: when there is no upstream, a MERGED pull request is the ONLY
     // evidence the tree's commits reached the remote, so the deny says so
@@ -223,7 +269,14 @@ pub(crate) fn evaluate_removal_rechecks(
     } else {
         String::new()
     };
-    let landed = match landing_evidence(target, &branch, probe, &no_upstream_note) {
+    // #7914: both notes ride on the same deny — "no pull request" is only half
+    // the refusal once a second route to landing evidence exists.
+    let landed = match landing_evidence(
+        target,
+        &branch,
+        probe,
+        &format!("{no_upstream_note}{local_only_note}"),
+    ) {
         Ok(l) => l,
         Err(deny) => return Some(deny),
     };
@@ -238,6 +291,33 @@ pub(crate) fn evaluate_removal_rechecks(
         return None;
     }
     residue_deny(target, &branch, &landed, upstream, probe)
+}
+
+/// Say why the #7914 admission did not apply, for the deny that follows it.
+///
+/// Why: with two routes to landing evidence, a refusal that names only the
+/// missing pull request tells the agent half the story — and the other half is
+/// the actionable one, because it names the commits that have to reach a remote
+/// before this tree can go. Called only after `Ok(0)` has been ruled out, so
+/// neither arm can describe a tree that was admitted.
+/// What: a leading-space sentence appended to the merged-PR deny. The `Err` arm
+/// quotes git's own failure, since an unanswerable count and a real local commit
+/// call for different next steps.
+/// Test: `a_commit_no_origin_ref_has_still_denies_without_a_merged_pr`,
+/// `an_unanswerable_local_only_count_never_admits`.
+fn local_only_note(local_only: &Result<usize, String>) -> String {
+    match local_only {
+        Ok(n) => format!(
+            " ADR-0057's `{CHECK_LOCAL_ONLY_COMMITS}` admission does not apply either: {n} \
+             commit(s) reachable from HEAD are on no `origin` remote-tracking ref, so this \
+             worktree is the only place they exist. Push the branch, or open and land a pull \
+             request for it."
+        ),
+        Err(e) => format!(
+            " ADR-0057's `{CHECK_LOCAL_ONLY_COMMITS}` admission could not be established \
+             either — {e} — and a fact the guard cannot establish never grants."
+        ),
+    }
 }
 
 /// A MERGED pull request that vouches for this worktree, and the base it merged
@@ -261,7 +341,9 @@ fn landing_evidence(
     target: &Path,
     branch: &str,
     probe: &dyn WorktreeRemovalProbe,
-    no_upstream_note: &str,
+    // #7914: no longer the #7232 upstream sentence alone — the caller appends
+    // why the local-only-commits admission did not apply too.
+    notes: &str,
 ) -> Result<Landed, String> {
     // #7232: the branch is named in every failure here. A failed lookup used to
     // quote only the probe's error, so a deny an operator had to act on did not
@@ -295,7 +377,7 @@ fn landing_evidence(
              relationship to the squash commit, and a branch that was never pushed merges into \
              its base as a no-op exactly the way a landed one does. Open a pull request for \
              this branch, or reclaim the tree with `tm session prune-worktrees --merged-prs \
-             --force`.{no_upstream_note}",
+             --force`.{notes}",
             repo = own.repo,
             also = if stem == branch {
                 String::new()
