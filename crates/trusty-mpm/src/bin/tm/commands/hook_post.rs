@@ -21,6 +21,7 @@
 //!
 //! Test: `hook_post_tests.rs`.
 
+use std::path::Path;
 use std::time::Duration;
 
 /// Log prefix every line in this module carries.
@@ -256,16 +257,35 @@ pub(crate) fn emit_hook_post_log(outcome: &HookPostOutcome) {
 /// operator-visible surface for a spool that is unwritable or at its cap is the
 /// `stop_spool` `tm doctor` row
 /// ([`trusty_mpm::core::stop_spool::check_stop_spool`]).
-/// Test: `tm_hook_subagent_stop_spool_6556.rs` drives this through the binary;
-/// the write itself by `core::stop_spool`'s suite.
+/// Test: `a_parked_stop_lands_where_the_daemon_drains_it`,
+/// `an_unusable_root_reports_the_stop_as_lost` — both through
+/// [`spool_undelivered_stop_under`], which carries everything this function does
+/// except the `$HOME` lookup.
 pub(crate) fn spool_undelivered_stop(body: &serde_json::Value) {
     let root = trusty_mpm::core::paths::FrameworkPaths::default().root;
-    match trusty_mpm::core::stop_spool::record_unposted_stop(&root, body) {
-        Some(path) => eprintln!(
+    eprintln!("{}", spool_undelivered_stop_under(&root, body));
+}
+
+/// Park an undelivered stop under `root` and say what happened.
+///
+/// Why: [`spool_undelivered_stop`] resolves its root from the process-global
+/// `$HOME`, which a test can only reach by mutating it. The write and its two
+/// verdicts are the part worth pinning, so they take the root explicitly — the
+/// `_under` split `FrameworkPaths::under` exists for (critic MEDIUM on PR
+/// #8052, which found the `Test:` pointer here naming a file that never existed).
+/// What: writes `body` through
+/// [`trusty_mpm::core::stop_spool::record_unposted_stop`] and returns the single
+/// operator line for whichever arm ran. Never fails: a hook must not die on a
+/// bookkeeping write.
+/// Test: `a_parked_stop_lands_where_the_daemon_drains_it`,
+/// `an_unusable_root_reports_the_stop_as_lost`.
+pub(crate) fn spool_undelivered_stop_under(root: &Path, body: &serde_json::Value) -> String {
+    match trusty_mpm::core::stop_spool::record_unposted_stop(root, body) {
+        Some(path) => format!(
             "{HOOK_POST_LOG_PREFIX} parked at {} — the daemon replays it on its next reap tick",
             path.display()
         ),
-        None => eprintln!(
+        None => format!(
             "{HOOK_POST_LOG_PREFIX} could not park the stop under {} — this delegation will \
              stay Running until the staleness sweep",
             root.display()

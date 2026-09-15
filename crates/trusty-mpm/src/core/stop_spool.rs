@@ -47,6 +47,19 @@ pub const UNPOSTED_STOPS_DIR: &str = "unposted-stops";
 /// Test: `a_full_spool_refuses_further_records`.
 pub const MAX_UNPOSTED_STOPS: usize = 256;
 
+/// How long a parked record may wait before anything calls it a problem.
+///
+/// Why: the daemon drains the spool from its reap loop, which ticks every 60 s
+/// (`daemon::REAP_INTERVAL_SECS`), so a record written seconds ago is inside the
+/// NORMAL park-to-tick window and warning on it trains an operator to ignore the
+/// row (critic LOW on PR #8052). Two ticks is the first age at which a drain has
+/// provably not happened. The same window bounds [`sweep_stale_temp_files`]: a
+/// temp file older than two ticks cannot belong to a live writer, which finishes
+/// in milliseconds. Spelled here rather than derived from the daemon constant
+/// because `core` compiles without the `daemon` feature.
+/// Test: `a_record_inside_the_drain_window_is_an_ok_row`, `parked_records_warn`.
+pub const SPOOL_DRAIN_GRACE_SECS: u64 = 120;
+
 /// Where undelivered stop records live under `root`.
 ///
 /// Test: `the_spool_directory_is_under_the_framework_root`.
@@ -160,6 +173,78 @@ pub fn discard_unposted_stop(path: &Path) -> bool {
     }
 }
 
+/// Remove the temp files a killed writer left behind.
+///
+/// Why: [`record_unposted_stop`] writes temp-then-rename, so a SIGKILL between
+/// the two leaves a `.tmpXXXXXX` file that no reader parses, no drain discards
+/// and [`count_records`] does not see — litter that only accumulates (critic LOW
+/// on PR #8052).
+/// What: removes every non-record file directly under the spool older than
+/// [`SPOOL_DRAIN_GRACE_SECS`], returning how many it removed. A `.json` record is
+/// never touched, and neither is a temp file young enough to belong to a writer
+/// still running. Called from the daemon's drain, which is the one process that
+/// visits the directory on a schedule.
+/// Test: `stale_temp_litter_is_swept`, `a_fresh_temp_file_survives_the_sweep`.
+pub fn sweep_stale_temp_files(root: &Path) -> usize {
+    let dir = unposted_stops_dir(root);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return 0;
+    };
+    let grace = std::time::Duration::from_secs(SPOOL_DRAIN_GRACE_SECS);
+    entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| !is_record(p))
+        .filter(|p| file_age(p).is_some_and(|age| age >= grace))
+        .filter(|p| std::fs::remove_file(p).is_ok())
+        .count()
+}
+
+/// How long ago `path` was last modified.
+///
+/// What: `None` when the file is gone, or when its modified time is in the
+/// future — an unusable answer either way, and every caller treats it as "no
+/// evidence this is stale".
+fn file_age(path: &Path) -> Option<std::time::Duration> {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()?
+        .elapsed()
+        .ok()
+}
+
+/// How long the oldest record in `dir` has been waiting.
+///
+/// What: the largest modified-time age across the `.json` records, or `None`
+/// when the directory holds none the filesystem can date.
+/// Test: `a_record_inside_the_drain_window_is_an_ok_row`.
+fn oldest_record_age(dir: &Path) -> Option<std::time::Duration> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| is_record(p))
+        .filter_map(|p| file_age(&p))
+        .max()
+}
+
+/// Can THIS process write into `dir`?
+///
+/// Why: `Permissions::readonly()` is `mode & 0o222 == 0` on Unix — it asks
+/// whether ANYBODY may write, not whether we may (critic MEDIUM on PR #8052). A
+/// spool whose owner bits deny write while its group/other bits grant it (the
+/// shape a root-owned 0755 directory has for every other process), and a full
+/// filesystem, both answered "writable", so the row went green while every stop
+/// was being dropped.
+/// What: creates and drops a temp file through the same call
+/// [`record_unposted_stop`] uses, so the probe fails on exactly what the writer
+/// fails on — permissions, `ENOSPC`, a read-only mount. Costs one create plus one
+/// unlink per doctor run, and leaves nothing behind.
+/// Test: `an_unwritable_spool_warns_even_when_the_mode_bits_look_writable`.
+fn spool_is_writable(dir: &Path) -> bool {
+    tempfile::NamedTempFile::new_in(dir).is_ok()
+}
+
 /// `tm doctor` row for the undelivered-stop spool (#6556).
 ///
 /// Why: the lossy branch — a spool that cannot be written or is at
@@ -167,57 +252,70 @@ pub fn discard_unposted_stop(path: &Path) -> bool {
 /// only alarm was a stderr line on an exit-0 hook, which Claude Code does not
 /// surface (critic MEDIUM on PR #8052). A doctor row is the surface an operator
 /// actually reads.
-/// What: `Ok` when the directory is absent or empty — nothing parked is the
-/// healthy state. `Warn` when records are waiting (the daemon has not drained
-/// them, so something is wrong with the reap loop) or when the directory exists
-/// but cannot be written. Read-only; it creates nothing.
-/// Test: `an_empty_spool_is_an_ok_row`, `parked_records_warn`,
-/// `a_saturated_spool_names_the_cap`.
+/// What: `Ok` when the directory is absent, empty, or holding only records
+/// younger than [`SPOOL_DRAIN_GRACE_SECS`] — a park waiting out the reap tick is
+/// the mechanism working, not a fault, and the count still names it. `Warn`
+/// unconditionally when the spool cannot be written or sits at
+/// [`MAX_UNPOSTED_STOPS`] (both drop stops outright), and for a record that has
+/// outlived two reap ticks without being drained. Creates and removes one temp
+/// file to probe writability; leaves nothing behind.
+/// Test: `an_empty_spool_is_an_ok_row`, `a_record_inside_the_drain_window_is_an_ok_row`,
+/// `parked_records_warn`, `a_saturated_spool_names_the_cap`,
+/// `an_unwritable_spool_warns_even_when_the_mode_bits_look_writable`.
 #[must_use]
 pub fn check_stop_spool(root: &Path) -> crate::core::doctor::DoctorCheck {
     use crate::core::doctor::{CheckStatus, DoctorCheck};
 
     let dir = unposted_stops_dir(root);
-    if !dir.exists() {
-        return DoctorCheck::new(
+    let empty = || {
+        DoctorCheck::new(
             "stop_spool",
             CheckStatus::Ok,
             format!("no undelivered SubagentStop records ({})", dir.display()),
-        );
+        )
+    };
+    if !dir.exists() {
+        return empty();
     }
     let parked = count_records(&dir);
-    let writable = std::fs::metadata(&dir).is_ok_and(|m| !m.permissions().readonly());
-    let (status, detail) = match (parked, writable) {
-        (0, true) => (
+    let warn = |detail: String| DoctorCheck::new("stop_spool", CheckStatus::Warn, detail);
+    if !spool_is_writable(&dir) {
+        return warn(format!(
+            "the undelivered-stop spool {} is not writable by this process ({parked} record(s) \
+             present) — a stop the daemon refuses is LOST, and its delegation stays Running for \
+             six hours",
+            dir.display()
+        ));
+    }
+    if parked >= MAX_UNPOSTED_STOPS {
+        return warn(format!(
+            "{parked} undelivered SubagentStop record(s) at the {MAX_UNPOSTED_STOPS} cap in {} — \
+             further stops are DROPPED; the daemon's reap loop is not draining them",
+            dir.display()
+        ));
+    }
+    if parked == 0 {
+        return empty();
+    }
+    let waited = oldest_record_age(&dir).unwrap_or_default();
+    if waited < std::time::Duration::from_secs(SPOOL_DRAIN_GRACE_SECS) {
+        return DoctorCheck::new(
+            "stop_spool",
             CheckStatus::Ok,
-            format!("no undelivered SubagentStop records ({})", dir.display()),
-        ),
-        (n, true) if n >= MAX_UNPOSTED_STOPS => (
-            CheckStatus::Warn,
             format!(
-                "{n} undelivered SubagentStop record(s) at the {MAX_UNPOSTED_STOPS} cap in {} — \
-                 further stops are DROPPED; the daemon's reap loop is not draining them",
-                dir.display()
+                "{parked} undelivered SubagentStop record(s) parked in {}, the oldest {}s ago — \
+                 inside the daemon's 60 s reap tick",
+                dir.display(),
+                waited.as_secs()
             ),
-        ),
-        (n, true) => (
-            CheckStatus::Warn,
-            format!(
-                "{n} undelivered SubagentStop record(s) waiting in {} — the daemon's reap loop \
-                 should drain them within 60 s",
-                dir.display()
-            ),
-        ),
-        (n, false) => (
-            CheckStatus::Warn,
-            format!(
-                "the undelivered-stop spool {} is not writable ({n} record(s) present) — a stop \
-                 the daemon refuses is LOST, and its delegation stays Running for six hours",
-                dir.display()
-            ),
-        ),
-    };
-    DoctorCheck::new("stop_spool", status, detail)
+        );
+    }
+    warn(format!(
+        "{parked} undelivered SubagentStop record(s) waiting in {}, the oldest {}s ago — past two \
+         reap ticks, so the daemon's drain is not running",
+        dir.display(),
+        waited.as_secs()
+    ))
 }
 
 #[cfg(test)]
@@ -231,6 +329,17 @@ mod stop_spool_tests {
             "event": "SubagentStop",
             "payload": {"agent_id": agent},
         })
+    }
+
+    /// Age `path` by `secs`, so a test can cross a threshold without sleeping.
+    fn backdate(path: &Path, secs: u64) {
+        let when = std::time::SystemTime::now() - std::time::Duration::from_secs(secs);
+        let file = std::fs::File::options()
+            .write(true)
+            .open(path)
+            .expect("open for set_times");
+        file.set_times(std::fs::FileTimes::new().set_modified(when))
+            .expect("backdate");
     }
 
     #[test]
@@ -314,13 +423,105 @@ mod stop_spool_tests {
         assert_eq!(check_stop_spool(dir.path()).status, CheckStatus::Ok);
     }
 
+    /// A park the daemon has not reached yet is the mechanism working.
+    ///
+    /// Why (critic LOW on PR #8052): every park spends up to 60 s waiting for
+    /// the reap tick, so warning on arrival made the row red for the normal
+    /// case and trained an operator to ignore it. The count is still reported —
+    /// the row says how many are parked, it just does not call it a fault.
     #[test]
-    fn parked_records_warn() {
+    fn a_record_inside_the_drain_window_is_an_ok_row() {
         let dir = tempfile::tempdir().expect("temp dir");
         record_unposted_stop(dir.path(), &body("agent-1")).expect("recorded");
         let row = check_stop_spool(dir.path());
-        assert_eq!(row.status, CheckStatus::Warn);
+        assert_eq!(row.status, CheckStatus::Ok, "{}", row.message);
         assert!(row.message.contains("1 undelivered"), "{}", row.message);
+    }
+
+    /// Past two reap ticks the drain has provably not run, which IS the fault.
+    #[test]
+    fn parked_records_warn() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let written = record_unposted_stop(dir.path(), &body("agent-1")).expect("recorded");
+        backdate(&written, SPOOL_DRAIN_GRACE_SECS + 5);
+        let row = check_stop_spool(dir.path());
+        assert_eq!(row.status, CheckStatus::Warn, "{}", row.message);
+        assert!(row.message.contains("1 undelivered"), "{}", row.message);
+    }
+
+    /// 🔴 REGRESSION (critic MEDIUM on PR #8052): the row must ask whether THIS
+    /// process can write the spool, not whether the mode bits grant write to
+    /// anybody.
+    ///
+    /// Why: the old probe was `!metadata.permissions().readonly()`, which on
+    /// Unix is `mode & 0o222 != 0`. A spool whose OWNER bits deny write while
+    /// its group/other bits grant it reads back "writable" under that test —
+    /// the same split a root-owned 0755 spool has for every non-root process,
+    /// where the row returned Ok with 0 records while every stop was dropped.
+    /// 0o522 reproduces it without a second uid: we own the directory, so only
+    /// the owner bits (`r-x`) apply to us, and `mode & 0o222` is still 0o022.
+    /// Fails at 11e0032d4, which reads Ok here.
+    #[cfg(unix)]
+    #[test]
+    fn an_unwritable_spool_warns_even_when_the_mode_bits_look_writable() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        if nix_running_as_root() {
+            return; // root bypasses the mode bits this case is built from.
+        }
+        let dir = tempfile::tempdir().expect("temp dir");
+        let spool = unposted_stops_dir(dir.path());
+        std::fs::create_dir_all(&spool).expect("dir");
+        std::fs::set_permissions(&spool, std::fs::Permissions::from_mode(0o522)).expect("chmod");
+
+        let row = check_stop_spool(dir.path());
+
+        // Restore before asserting, so a failure still leaves a removable dir.
+        std::fs::set_permissions(&spool, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        assert_eq!(row.status, CheckStatus::Warn, "{}", row.message);
+        assert!(row.message.contains("not writable"), "{}", row.message);
+    }
+
+    /// Whether this process would bypass the mode bits the test above needs.
+    #[cfg(unix)]
+    fn nix_running_as_root() -> bool {
+        // SAFETY: `geteuid` takes no arguments, reads a process property and
+        // cannot fail.
+        unsafe { libc::geteuid() == 0 }
+    }
+
+    /// 🔴 A SIGKILL between the temp write and the rename leaves a file nothing
+    /// else in this module counts, parses or removes (critic LOW on PR #8052).
+    #[test]
+    fn stale_temp_litter_is_swept() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let spool = unposted_stops_dir(dir.path());
+        std::fs::create_dir_all(&spool).expect("dir");
+        let litter = spool.join(".tmpAbCdEf");
+        std::fs::write(&litter, "half a record").expect("write");
+        backdate(&litter, SPOOL_DRAIN_GRACE_SECS + 5);
+        let kept = record_unposted_stop(dir.path(), &body("agent-1")).expect("recorded");
+        backdate(&kept, SPOOL_DRAIN_GRACE_SECS + 5);
+
+        assert_eq!(sweep_stale_temp_files(dir.path()), 1);
+
+        assert!(!litter.exists(), "the litter is gone");
+        assert!(kept.exists(), "a record is never swept, however old");
+    }
+
+    /// The other half of the sweep: a temp file young enough to belong to a
+    /// writer still running must survive, or the sweep races the write it is
+    /// cleaning up after.
+    #[test]
+    fn a_fresh_temp_file_survives_the_sweep() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let spool = unposted_stops_dir(dir.path());
+        std::fs::create_dir_all(&spool).expect("dir");
+        let in_flight = spool.join(".tmpZzZzZz");
+        std::fs::write(&in_flight, "being written now").expect("write");
+
+        assert_eq!(sweep_stale_temp_files(dir.path()), 0);
+        assert!(in_flight.exists());
     }
 
     #[test]

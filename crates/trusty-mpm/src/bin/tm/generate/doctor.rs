@@ -222,7 +222,7 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
     ),
     (
         "stop_spool",
-        "Undelivered `SubagentStop` records parked under `~/.trusty-mpm/unposted-stops/`. A stop the hook cannot POST is written there so the daemon's reap loop can replay it instead of the delegation sitting `Running` for the six hours of `RUNNING_STALE_AFTER_SECS`. `Ok` when nothing is parked — the drain runs every 60 s, so a record still present means it is not draining. Warns with the count when records are waiting, names the cap when the spool is saturated (further stops are DROPPED), and warns when the directory is not writable, which is the one branch where a stop is lost outright. Read-only; it creates nothing (issue #6556).",
+        "Undelivered `SubagentStop` records parked under `~/.trusty-mpm/unposted-stops/`. A stop the hook cannot POST is written there so the daemon's reap loop can replay it instead of the delegation sitting `Running` for the six hours of `RUNNING_STALE_AFTER_SECS`. `Ok` when nothing is parked, and equally when every record is younger than 120 s — the drain runs on the reap loop's 60 s tick, so a fresh park is the mechanism working and the row reports the count without calling it a fault. Warns with the count and the oldest record's age once that age passes two ticks, which is the first point a drain has provably not run; names the cap when the spool is saturated (further stops are DROPPED); and warns when the spool is not writable BY THIS PROCESS — probed by creating and removing one temp file, not by reading the mode bits, which say only whether somebody may write — the one branch where a stop is lost outright. Creates nothing that outlives the check (issue #6556).",
     ),
     (
         "stray_mcp_json",

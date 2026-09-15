@@ -52,9 +52,18 @@ use crate::daemon::state::DaemonState;
 /// `a_parked_non_stop_event_is_discarded_unreplayed`,
 /// `a_replay_cannot_reassert_an_idle_parking_nudge`,
 /// `a_corrupt_record_is_discarded_rather_than_wedging_the_drain`,
-/// `an_empty_spool_drains_nothing`.
+/// `an_empty_spool_drains_nothing`, `the_drain_sweeps_temp_litter_before_replaying`.
 pub async fn drain_unposted_stops(state: &Arc<DaemonState>) -> usize {
     let root = state.framework_root().to_path_buf();
+    // Before the read, and before the empty-spool return: a tree holding only
+    // litter still needs it swept (critic LOW on PR #8052).
+    let swept = stop_spool::sweep_stale_temp_files(&root);
+    if swept > 0 {
+        tracing::warn!(
+            "stop-spool: swept {swept} temp file(s) a killed hook left mid-write, older than the \
+             drain window (#6556)"
+        );
+    }
     let parked = stop_spool::read_unposted_stops(&root);
     if parked.is_empty() {
         return 0;
@@ -282,5 +291,29 @@ mod stop_spool_drain_tests {
     async fn an_empty_spool_drains_nothing() {
         let (state, _dir, _session) = hermetic();
         assert_eq!(drain_unposted_stops(&state).await, 0);
+    }
+
+    /// A spool holding ONLY a killed writer's temp file still gets swept — the
+    /// sweep runs before the "nothing parked" return, or litter in an otherwise
+    /// empty spool would never be reached (critic LOW on PR #8052).
+    #[tokio::test]
+    async fn the_drain_sweeps_temp_litter_before_replaying() {
+        let (state, dir, _session) = hermetic();
+        let root = FrameworkPaths::under(dir.path()).root;
+        let spool = stop_spool::unposted_stops_dir(&root);
+        std::fs::create_dir_all(&spool).expect("dir");
+        let litter = spool.join(".tmpKilled");
+        std::fs::write(&litter, "half a record").expect("write");
+        let aged = std::time::SystemTime::now()
+            - std::time::Duration::from_secs(stop_spool::SPOOL_DRAIN_GRACE_SECS + 5);
+        std::fs::File::options()
+            .write(true)
+            .open(&litter)
+            .expect("open")
+            .set_times(std::fs::FileTimes::new().set_modified(aged))
+            .expect("backdate");
+
+        assert_eq!(drain_unposted_stops(&state).await, 0);
+        assert!(!litter.exists(), "the drain swept the litter");
     }
 }

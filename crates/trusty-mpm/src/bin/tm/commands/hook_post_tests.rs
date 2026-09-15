@@ -248,10 +248,67 @@ fn the_attempt_bounds_fit_inside_the_budget() {
     let backoffs: std::time::Duration =
         (1..HOOK_POST_ATTEMPTS).map(|n| HOOK_POST_BACKOFF * n).sum();
     let nominal = HOOK_POST_ATTEMPT_TIMEOUT * HOOK_POST_ATTEMPTS + backoffs;
+    // Not `BUDGET + one attempt` (critic LOW on PR #8052): that slack admits a
+    // per-attempt timeout the budget truncates, which is the exact arrangement
+    // the 680 ms figure was chosen to avoid — and it let the constant drift
+    // without failing here.
     assert!(
-        nominal <= HOOK_POST_BUDGET + HOOK_POST_ATTEMPT_TIMEOUT,
-        "nominal worst case {nominal:?} overruns the {HOOK_POST_BUDGET:?} budget by more than \
-         one attempt, so the budget would routinely truncate the retry"
+        nominal <= HOOK_POST_BUDGET,
+        "nominal worst case {nominal:?} overruns the {HOOK_POST_BUDGET:?} budget, so the budget \
+         would truncate the third attempt while the log claimed it was made"
     );
     assert!(HOOK_POST_CONNECT_TIMEOUT <= HOOK_POST_ATTEMPT_TIMEOUT);
+}
+
+/// 🔴 The park's last resort: an undelivered stop has to land in the directory
+/// the daemon's drain reads, under the same envelope a live POST carries.
+///
+/// Why (critic MEDIUM on PR #8052): this function's `Test:` pointer named a file
+/// that did not exist, so the one branch standing between a failed POST and a
+/// six-hour leak had no coverage at all. The drain reads
+/// `<root>/unposted-stops/`, so the assertion is made through
+/// `read_unposted_stops` — the drain's own reader — rather than against a path
+/// this test spells itself.
+#[test]
+fn a_parked_stop_lands_where_the_daemon_drains_it() {
+    let home = tempfile::tempdir().expect("temp dir");
+    let root = trusty_mpm::core::paths::FrameworkPaths::under(home.path()).root;
+
+    let line = spool_undelivered_stop_under(&root, &stop_body());
+
+    let parked = trusty_mpm::core::stop_spool::read_unposted_stops(&root);
+    assert_eq!(
+        parked.len(),
+        1,
+        "one record, not a directory of them: {line}"
+    );
+    assert_eq!(
+        parked[0].1.as_ref(),
+        Some(&stop_body()),
+        "the replayed body must be the POST body verbatim"
+    );
+    assert!(
+        line.contains("parked at"),
+        "the line names the park: {line}"
+    );
+}
+
+/// The lossy arm: a root the write cannot use reports the stop as LOST rather
+/// than claiming a park that never happened — the string an operator greps for,
+/// and the state the `stop_spool` doctor row exists to surface.
+#[test]
+fn an_unusable_root_reports_the_stop_as_lost() {
+    let home = tempfile::tempdir().expect("temp dir");
+    // A regular FILE where the root has to be a directory: `create_dir_all`
+    // fails on every platform, with no mode-bit games.
+    let root = home.path().join("root-is-a-file");
+    std::fs::write(&root, "not a directory").expect("write");
+
+    let line = spool_undelivered_stop_under(&root, &stop_body());
+
+    assert!(line.contains("could not park"), "{line}");
+    assert!(
+        trusty_mpm::core::stop_spool::read_unposted_stops(&root).is_empty(),
+        "nothing was written, and the line must not claim otherwise"
+    );
 }
