@@ -37,6 +37,7 @@ on:
     branches: [main]
     paths:
       - "**/*.rs"
+      - "**/*.sh"
       - ".test-pointer-allowlist.tsv"
       - "scripts/check_test_pointers.sh"
       - "scripts/check_scan_floor_selftest.sh"

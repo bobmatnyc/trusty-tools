@@ -961,6 +961,10 @@ assert_eq "the gate itself"           "true"  "$(pointer_inputs_of 'scripts/chec
 assert_eq "the scan-floor selftest"   "true"  "$(pointer_inputs_of 'scripts/check_scan_floor_selftest.sh')"
 assert_eq "this classifier"           "true"  "$(pointer_inputs_of 'scripts/detect-pointer-lint-inputs.sh')"
 assert_eq "the workflow wiring"       "true"  "$(pointer_inputs_of '.github/workflows/test-pointers.yml')"
+# #7439: shell scripts carry `# Test:` pointers the gate now lints, so a
+# shell-only diff must run it — anywhere in the tree, not only under scripts/.
+assert_eq "an unrelated shell script" "true"  "$(pointer_inputs_of 'scripts/assemble-changelog.sh')"
+assert_eq "a crate-owned shell script" "true" "$(pointer_inputs_of 'crates/trusty-agents/tests/harness/run_regression.sh')"
 assert_eq "documentation"             "false" "$(pointer_inputs_of 'docs/adr/0001-example.md')"
 assert_eq "website"                   "false" "$(pointer_inputs_of 'website/src/routes/+page.svelte')"
 assert_eq "an unrelated workflow"     "false" "$(pointer_inputs_of '.github/workflows/ci.yml')"

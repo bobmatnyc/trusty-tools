@@ -133,6 +133,14 @@ jobs:
       - name: Bump-mode selftest (a mid-PR bump must not eat fragments)
         run: bash scripts/bump_version_selftest.sh
 
+      # Assembler-gate selftest (#7439). The gate two steps below cited this
+      # file for months while it did not exist, so its failing AND passing
+      # branches were never exercised — which is how the #7359 pipefail bug
+      # (a PR deleting a CHANGELOG.md killed the gate with no output) shipped.
+      # Runs before the gate, mirroring line-cap.yml's selftest-then-gate order.
+      - name: Assembler-gate selftest (deletion passes, hand-written section fails)
+        run: bash scripts/check-pr-changelog-assembled-selftest.sh
+
       # #4688: diff against the base branch AS IT IS NOW, not the frozen
       # `base.sha` snapshot. checkout leaves refs/remotes/origin/<base> at
       # whatever it fetched; re-fetching pins it to the live tip so the merge

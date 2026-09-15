@@ -23,14 +23,16 @@
 #   The lint reads exactly four kinds of input, so those are the four rules:
 #     **/*.rs                              both the `/// Test:` pointers and the
 #                                          `fn <name>(` definitions they cite
+#     **/*.sh                              the `# Test:` pointers shell scripts
+#                                          carry and the files those pointers
+#                                          cite (#7439) — and, as of that
+#                                          widening, the gate itself, its
+#                                          scan-floor proof, and this classifier,
+#                                          each of which used to need its own
+#                                          rule and is now subsumed by this one
 #     .test-pointer-allowlist.tsv          the grandfathered set, whose entries
 #                                          FAIL once they stop dangling
-#     scripts/check_test_pointers.sh       the gate itself
-#     scripts/check_scan_floor_selftest.sh the gate's scan-floor proof
-#     .github/workflows/test-pointers.yml  the wiring that runs both
-#     scripts/detect-pointer-lint-inputs.sh  this classifier — a change to the
-#                                          decision must be checked by the gate
-#                                          it decides for
+#     .github/workflows/test-pointers.yml  the wiring that runs the gate
 #
 #   DO NOT substitute scripts/detect-docs-only.sh for this. That helper answers
 #   "is this Cargo-inert", and it deliberately classifies
@@ -61,10 +63,11 @@ set -euo pipefail
 is_lint_input() {
   case "$1" in
     *.rs) return 0 ;;
+    # #7439: shell `# Test:` pointers are linted too. This also subsumes the
+    # gate, its scan-floor selftest, and this classifier — they were separate
+    # arms until the widening, and listing them again now would be dead code.
+    *.sh) return 0 ;;
     .test-pointer-allowlist.tsv) return 0 ;;
-    scripts/check_test_pointers.sh) return 0 ;;
-    scripts/check_scan_floor_selftest.sh) return 0 ;;
-    scripts/detect-pointer-lint-inputs.sh) return 0 ;;
     .github/workflows/test-pointers.yml) return 0 ;;
   esac
   return 1
