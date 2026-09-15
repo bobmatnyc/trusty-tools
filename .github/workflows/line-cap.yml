@@ -35,9 +35,21 @@ jobs:
   line-cap:
     name: 500-line file-size cap
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # 10, not 5: the zsh install below can take a minute on a slow mirror.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
+
+      # #7812: the gates re-exec under bash when invoked via zsh. This proves
+      # bash and zsh reach one verdict for check_line_cap.sh,
+      # check_changelog_fragment.sh and check_test_pointers.sh. zsh is not on
+      # the hosted runner image, so it is installed first; the selftest fails,
+      # never skips, without it.
+      - name: Install zsh for the gate-shells selftest
+        run: bash scripts/ci-apt-install.sh zsh
+
+      - name: Gate-shells selftest (bash and zsh give one verdict)
+        run: bash scripts/check_gate_shells_selftest.sh
 
       # Gate on the SLOC counter's own regression fixtures (issue #2563) so a
       # future edit to scripts/lib/sloc_awk.sh that reintroduces a counting

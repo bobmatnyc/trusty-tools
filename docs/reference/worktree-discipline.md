@@ -271,6 +271,9 @@ substitutes as the reliable spelling rather than as a workaround for one shape.
 
 This repo's docs spell every gate `bash scripts/<name>.sh`, so the first row
 above applies to the whole test ladder, not only to the line-cap check.
+`check_line_cap.sh`, `check_changelog_fragment.sh` and `check_test_pointers.sh`
+re-execute themselves under bash, so `./scripts/<name>.sh` and
+`zsh scripts/<name>.sh` both reach the bash verdict (#7812).
 
 ### Shell constructs
 

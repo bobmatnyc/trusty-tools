@@ -72,7 +72,17 @@
 #   if none is found) — citing a whole test MODULE (e.g.
 #   `` `ctrl::tests::pm_task_tests` ``) is an established convention in this
 #   codebase, just as valid as citing a single `fn`. No match = a dangling
-#   pointer, reported as `file:line: cites <name> (crate <dir>)`.
+#   pointer, reported as `file:line: cites <name> (crate <dir>)`. The name
+#   cache reads the same tracked-plus-untracked file set as the citing corpus
+#   (`git grep --untracked`, #7804), so a new test module needs no `git add`.
+#
+#   PROSE POINTERS (#7710): an annotation whose leading run holds no backtick
+#   span at all ("Test: covered by `foo_test` below.") has every identifier-path
+#   backtick span in its prose classified the same way, and each candidate is
+#   resolved against EVERY identifier on a non-comment line of the crate — not
+#   only fn/mod names, because prose also names fields and helpers. A prose
+#   citation naming nothing that exists anywhere in the crate's code is
+#   reported as a dangling prose pointer.
 #
 # PRECISION LIMITS (documented per issue #2458, "pragmatic grep is
 #   acceptable"; blind spots closed by issue #3581):
@@ -160,6 +170,10 @@
 #
 # Portability: bash 3.2 (macOS) and bash 5 (Linux CI); POSIX tools + git only.
 
+# #7812: `zsh <this script>` has no BASH_SOURCE and 1-based arrays, so re-run
+# under bash before any bash-only line. Plain POSIX, so zsh and sh parse it.
+if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
+
 set -euo pipefail
 
 SCRIPT_PATH="${BASH_SOURCE[0]}"
@@ -232,7 +246,7 @@ function strip(line,    s) {
 # out of any brace set. Matched on its FINAL `::`-separated segment;
 # de-duplicated within the annotation it came from, exactly as the shell loop
 # this replaced de-duplicated on KIND:name.
-function classify_one(f, ln, nm,    parts, k, final, kind, key) {
+function classify_one(f, ln, nm, prose,    parts, k, final, kind, key) {
   k = split(nm, parts, "::")
   final = parts[k]
   if (final == "") return
@@ -241,6 +255,9 @@ function classify_one(f, ln, nm,    parts, k, final, kind, key) {
   else return
   # Anything else is not a candidate shape at all (bare module/type ref,
   # CamelCase, no underscore) — deliberately skipped, not an error.
+  # #7710: a prose citation resolves against the crate identifier set, not the
+  # fn/mod set, so it carries its own kind (PNAME / PGLOB).
+  if (prose) { kind = "P" kind; needed_ids[cur_crate] = 1 }
   key = kind ":" final
   if (key in seen) return
   seen[key] = 1
@@ -285,7 +302,29 @@ function emit(f, ln, nm,    ob, cb, prefix, inner, k, mem, i, m) {
   }
 }
 
-function parse_block(f, ln, blob,    s, n, i, c, j, rest, depth, cc, jj, errflag) {
+# #7710: an annotation whose leading run holds NO backtick span is a pointer
+# written as prose — "Test: covered by `foo_bar_test` in the sibling file." The
+# leading-run parser stops at the first prose word, so such a pointer used to
+# produce zero citations and pass with nothing checked. Every backtick span in
+# that prose shaped like an identifier path (identifier, `::` and `*` characters
+# only) goes through classify_one as a PROSE citation. Prose also names fields,
+# locals and std calls, so a prose citation resolves when its final segment is
+# ANY identifier in the non-comment code of the crate (RESOLVE_AWK), not only a
+# fn/mod. An unterminated backtick in prose ends the fallback without an error:
+# the hard parse error covers the leading run, and the leading run is empty.
+function prose_fallback(f, ln, s,    rest, a, b, span) {
+  rest = s
+  while ((a = index(rest, "`")) > 0) {
+    rest = substr(rest, a + 1)
+    b = index(rest, "`")
+    if (b == 0) return
+    span = substr(rest, 1, b - 1)
+    rest = substr(rest, b + 1)
+    if (span ~ /^[A-Za-z_][A-Za-z0-9_]*(::[A-Za-z_*][A-Za-z0-9_*]*)*$/) classify_one(f, ln, span, 1)
+  }
+}
+
+function parse_block(f, ln, blob,    s, n, i, c, j, rest, depth, cc, jj, errflag, nspan) {
   if (ln == "") return
   split("", seen)
   s = blob
@@ -293,6 +332,7 @@ function parse_block(f, ln, blob,    s, n, i, c, j, rest, depth, cc, jj, errflag
   n = length(s)
   i = 1
   errflag = 0
+  nspan = 0
   while (i <= n) {
     c = substr(s, i, 1)
     if (c == "`") {
@@ -303,6 +343,7 @@ function parse_block(f, ln, blob,    s, n, i, c, j, rest, depth, cc, jj, errflag
         break
       }
       emit(f, ln, substr(s, i + 1, j - 1))
+      nspan++
       i = i + 1 + j
     } else if (c == " " || c == "\t" || c == "," || c == ";" || c == "&") {
       i++
@@ -353,6 +394,7 @@ function parse_block(f, ln, blob,    s, n, i, c, j, rest, depth, cc, jj, errflag
       else { break }
     }
   }
+  if (!errflag && nspan == 0) prose_fallback(f, ln, substr(s, i))
 }
 
 function scan_file(f,    line, nr, content, handled) {
@@ -406,6 +448,7 @@ BEGIN {
   }
   close(MAP)
   for (c in needed) print c > CRATESF
+  for (c in needed_ids) print c > IDCRATESF
 }
 '
 
@@ -484,11 +527,38 @@ build_crate_caches() {
     [ -n "$crate" ] || continue
     crate_cache_file "$crate"
     if [ ! -f "$CRATE_CACHE_FILE" ]; then
-      git grep -ohE '(fn|mod)[[:space:]]+[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*[(<{;]' -- "${crate}/*.rs" 2>/dev/null \
+      # #7804: `--untracked` reads the same file set the citing corpus does
+      # (tracked plus untracked-but-not-ignored). Tracked-only meant a new,
+      # not-yet-added test module's own `fn`s were missing here, so every
+      # pointer naming them read as dangling until `git add`.
+      git grep --untracked -ohE '(fn|mod)[[:space:]]+[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*[(<{;]' -- "${crate}/*.rs" 2>/dev/null \
         | sed -E -e 's/^(fn|mod)[[:space:]]+//' -e 's/[[:space:]]*[(<{;]$//' \
         | sort -u > "$CRATE_CACHE_FILE" || : > "$CRATE_CACHE_FILE"
     fi
     printf '%s\t%s\n' "$crate" "$CRATE_CACHE_FILE" >> "$cachemap_out"
+  done < "$crates_in"
+}
+
+# build_crate_id_caches: #7710. For each crate root in file $1 (the crates owning
+# at least one PROSE citation), write the sorted set of every identifier-shaped
+# word on a non-comment line of the crate's .rs files, and append a
+# `<crate-root><TAB><cache-path>` row to file $2. Doc and `//` comment lines are
+# dropped first, so the citing annotation cannot resolve itself. Same file set
+# as the fn/mod cache (#7804).
+build_crate_id_caches() {
+  local crates_in="$1" cachemap_out="$2" crate ids
+  : > "$cachemap_out"
+  while IFS= read -r crate; do
+    [ -n "$crate" ] || continue
+    crate_cache_file "$crate"
+    ids="${CRATE_CACHE_FILE%.fns}.ids"
+    if [ ! -f "$ids" ]; then
+      git grep --untracked -h -e '' -- "${crate}/*.rs" 2>/dev/null \
+        | grep -v '^[[:space:]]*//' \
+        | grep -oE '[A-Za-z_][A-Za-z0-9_]*' \
+        | sort -u > "$ids" || : > "$ids"
+    fi
+    printf '%s\t%s\n' "$crate" "$ids" >> "$cachemap_out"
   done < "$crates_in"
 }
 
@@ -524,20 +594,22 @@ build_crate_caches() {
 #   resolved, not silently dropped the way the pre-fix parser dropped it.
 # ---------------------------------------------------------------------------
 RESOLVE_AWK='
-function load(c,    nm) {
-  if (c in loaded) return
-  loaded[c] = 1
-  ncount[c] = 0
-  if (!(c in cachefile)) return
-  while ((getline nm < cachefile[c]) > 0) {
+# A cache key is the crate root, or the crate root plus SUBSEP "ids" for the
+# #7710 identifier set; both live in the same arrays.
+function load(key, file,    nm) {
+  if (key in loaded) return
+  loaded[key] = 1
+  ncount[key] = 0
+  if (file == "") return
+  while ((getline nm < file) > 0) {
     if (nm == "") continue
-    names[c, nm] = 1
-    nlist[c, ++ncount[c]] = nm
+    names[key, nm] = 1
+    nlist[key, ++ncount[key]] = nm
   }
-  close(cachefile[c])
+  close(file)
 }
 
-function glob_hit(c, pat,    re, i) {
+function glob_hit(key, pat,    re, i) {
   re = globre[pat]
   if (re == "") {
     re = pat
@@ -545,7 +617,7 @@ function glob_hit(c, pat,    re, i) {
     re = "^" re "$"
     globre[pat] = re
   }
-  for (i = 1; i <= ncount[c]; i++) if (nlist[c, i] ~ re) return 1
+  for (i = 1; i <= ncount[key]; i++) if (nlist[key, i] ~ re) return 1
   return 0
 }
 
@@ -563,14 +635,28 @@ BEGIN {
     cachefile[substr(ml, 1, t - 1)] = substr(ml, t + 1)
   }
   close(CACHEMAP)
+  while ((getline ml < IDCACHEMAP) > 0) {
+    t = index(ml, "\t")
+    if (t == 0) continue
+    idfile[substr(ml, 1, t - 1)] = substr(ml, t + 1)
+  }
+  close(IDCACHEMAP)
 }
 
 $1 != "" {
   c = crate_of[$1]
-  load(c)
-  if ($3 == "GLOB") ok = glob_hit(c, $4)
-  else ok = ((c SUBSEP $4) in names)
-  if (!ok) print ($1 "\t" $2 "\t" $4 "\t" c)
+  if ($3 == "PNAME" || $3 == "PGLOB") {
+    key = c SUBSEP "ids"
+    load(key, idfile[c])
+    tag = "\tprose"
+  } else {
+    key = c
+    load(key, cachefile[c])
+    tag = ""
+  }
+  if ($3 == "GLOB" || $3 == "PGLOB") ok = glob_hit(key, $4)
+  else ok = ((key SUBSEP $4) in names)
+  if (!ok) print ($1 "\t" $2 "\t" $4 "\t" c tag)
 }
 '
 
@@ -632,7 +718,7 @@ scan() {
   CRATE_FN_CACHE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tpfncache.XXXXXX")"
 
   local allowlist=".test-pointer-allowlist.tsv"
-  local raw rslist cratemap crates cachemap
+  local raw rslist cratemap crates cachemap idcrates idcachemap
   raw="$(mktemp "${TMPDIR:-/tmp}/tpraw.XXXXXX")"
   : > "$raw"
 
@@ -678,15 +764,20 @@ scan() {
   # It is now three passes with a bounded fork count: one awk over the whole
   # corpus, one `git grep` per CITED crate, one awk over the citation rows.
   crates="$(mktemp "${TMPDIR:-/tmp}/tpcrates.XXXXXX")"
+  idcrates="$(mktemp "${TMPDIR:-/tmp}/tpidcrates.XXXXXX")"
   : > "$crates"
+  : > "$idcrates"
   awk -v MAP="$cratemap" -v CHECKED="$checked_out" -v ERRF="$err_out" \
-      -v CRATESF="$crates" "$SCAN_AWK" < /dev/null
+      -v CRATESF="$crates" -v IDCRATESF="$idcrates" "$SCAN_AWK" < /dev/null
 
   cachemap="$(mktemp "${TMPDIR:-/tmp}/tpcachemap.XXXXXX")"
+  idcachemap="$(mktemp "${TMPDIR:-/tmp}/tpidcachemap.XXXXXX")"
   build_crate_caches "$crates" "$cachemap"
+  build_crate_id_caches "$idcrates" "$idcachemap"
 
-  awk -v MAP="$cratemap" -v CACHEMAP="$cachemap" "$RESOLVE_AWK" "$checked_out" > "$raw"
-  rm -f "$cratemap" "$crates" "$cachemap"
+  awk -v MAP="$cratemap" -v CACHEMAP="$cachemap" -v IDCACHEMAP="$idcachemap" \
+      "$RESOLVE_AWK" "$checked_out" > "$raw"
+  rm -f "$cratemap" "$crates" "$cachemap" "$idcrates" "$idcachemap"
 
   if [ -f "$allowlist" ]; then
     # Build the (path, name) allowlist key set once.
@@ -791,6 +882,17 @@ pub fn untested_by_design() {}
 /// Test: Used as the `field_name` field of `Widget` in `tests::hint_*`.
 pub fn field_style_reference() {}
 
+/// Why: gives the prose annotations above real identifiers to resolve to
+/// (#7710 resolves a prose span against any identifier, not only fn/mod).
+pub struct Widget {
+    pub field_name: u32,
+}
+
+/// Why: see `Widget`.
+pub fn widget_count() -> u32 {
+    0
+}
+
 /// Test: Covered via the `field_style_reference` tool's graceful-error test
 /// today; a populated-index test is future work.
 pub fn self_referential_prose() {}
@@ -893,10 +995,32 @@ pub fn brace_set_nested_is_unrecognised() {}
 /// crates/trusty-review/src/report/analyze_endpoints.rs:20.
 pub fn brace_set_member_wrapped_mid_identifier() {}
 
+/// Test: covered by `prose_cited_real_test` in the tests module below.
+///
+/// issue #7710: a pointer written as prose, with no backtick span in its
+/// leading run. It must be resolved, and this one resolves.
+pub fn prose_pointer_resolves() {}
+
+/// Test: see `prose_cited_missing_test` for the coverage.
+///
+/// issue #7710: the same prose shape naming a test that exists nowhere in the
+/// crate. Pre-fix it produced zero citations and passed unchecked.
+pub fn prose_pointer_dangling() {}
+
 #[cfg(test)]
 mod tests {
     #[test]
     fn real_test_exists() {
+        assert!(true);
+    }
+
+    #[test]
+    fn prose_cited_real_test() {
+        assert!(true);
+    }
+
+    #[test]
+    fn hint_shows_path() {
         assert!(true);
     }
 
@@ -936,6 +1060,18 @@ EOF
 pub fn added_but_not_yet_staged() {}
 EOF
 
+  # #7804: an untracked TEST MODULE that defines and cites its own test. Its fn
+  # must reach the name cache before `git add`, or the pointer reads as dangling.
+  cat > "$tmp/crates/fixture/src/untracked_module_tests.rs" <<'EOF'
+/// Why: fixture for the #7804 untracked-definition case.
+/// What: nothing.
+/// Test: `untracked_module_real_test`.
+pub fn defined_beside_an_untracked_test() {}
+
+#[test]
+fn untracked_module_real_test() {}
+EOF
+
   local viol stale err checked rc
   viol="$(mktemp "${TMPDIR:-/tmp}/tpself.viol.XXXXXX")"
   stale="$(mktemp "${TMPDIR:-/tmp}/tpself.stale.XXXXXX")"
@@ -969,10 +1105,24 @@ EOF
   # that shipped broken: module citations only ever passed via the
   # allowlist, never verified for real).
   # ...plus untracked_file_dangling_test, cited by an UNTRACKED file (#5798),
-  # and brace_member_missing_test, the dangling member of a brace set (#6678) —
-  # eight in total.
-  if [ "$(wc -l < "$viol" | tr -d ' ')" != "8" ]; then
-    echo "self-test FAIL: expected exactly 8 violations, got:" >&2
+  # and brace_member_missing_test, the dangling member of a brace set (#6678),
+  # and prose_cited_missing_test, a dangling prose pointer (#7710) — nine in
+  # total. untracked_module_real_test (#7804) and prose_cited_real_test (#7710)
+  # must resolve.
+  if [ "$(wc -l < "$viol" | tr -d ' ')" != "9" ]; then
+    echo "self-test FAIL: expected exactly 9 violations, got:" >&2
+    cat "$viol" >&2
+    ok=0
+  elif ! grep -q "prose_cited_missing_test" "$viol"; then
+    echo "self-test FAIL: the dangling prose pointer was not reported — prose Test: pointers are skipped again (issue #7710), got:" >&2
+    cat "$viol" >&2
+    ok=0
+  elif grep -q "untracked_module_real_test" "$viol" || ! grep -q "untracked_module_real_test" "$checked"; then
+    echo "self-test FAIL: a pointer to a test defined in an UNTRACKED module was not resolved — the name cache is tracked-only again (issue #7804), got:" >&2
+    cat "$viol" >&2
+    ok=0
+  elif grep -q "prose_cited_real_test" "$viol" || ! grep -q "prose_cited_real_test" "$checked"; then
+    echo "self-test FAIL: a resolvable prose pointer was flagged or never checked (issue #7710), got:" >&2
     cat "$viol" >&2
     ok=0
   elif ! grep -q "brace_member_missing_test" "$viol"; then
@@ -1084,7 +1234,7 @@ EOF
   rm -f "$viol2" "$stale2" "$err2"
 
   if [ "$ok" -eq 1 ]; then
-    echo "check_test_pointers self-test: OK (valid pointer passes, dangling pointer caught, module citations resolve, prose-only/module-ref citations ignored, glob citations resolved by pattern match, brace sets expand per member, an unrecognised brace shape fails closed, parenthetical asides no longer break multi-citation scanning, unterminated backticks fail loudly, allowlist ratchet suppresses/prunes correctly by (path,name))."
+    echo "check_test_pointers self-test: OK (valid pointer passes, dangling pointer caught, module citations resolve, prose-only/module-ref citations ignored, glob citations resolved by pattern match, brace sets expand per member, an unrecognised brace shape fails closed, parenthetical asides no longer break multi-citation scanning, unterminated backticks fail loudly, prose pointers resolved, untracked test modules define names, allowlist ratchet suppresses/prunes correctly by (path,name))."
     return 0
   fi
   return 1
@@ -1224,9 +1374,14 @@ fi
 # ----- check mode -----
 violations=0
 if [ -s "$VIOL" ]; then
-  while IFS=$'\t' read -r p l n c; do
+  while IFS=$'\t' read -r p l n c k; do
     [ -n "$p" ] || continue
-    echo "FAIL: ${p}:${l}: Test: pointer cites \`${n}\` — no \`fn ${n}(\` or \`mod ${n}\` found in crate \`${c}\`." >&2
+    if [ "$k" = "prose" ]; then
+      # #7710: a prose citation resolves against any identifier, so say so.
+      echo "FAIL: ${p}:${l}: Test: prose pointer cites \`${n}\` — no identifier \`${n}\` appears in the non-comment code of crate \`${c}\`." >&2
+    else
+      echo "FAIL: ${p}:${l}: Test: pointer cites \`${n}\` — no \`fn ${n}(\` or \`mod ${n}\` found in crate \`${c}\`." >&2
+    fi
     violations=$((violations + 1))
   done < "$VIOL"
 fi
