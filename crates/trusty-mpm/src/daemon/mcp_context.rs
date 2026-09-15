@@ -31,6 +31,7 @@ use crate::core::catchup::resolve::{
 };
 use crate::core::catchup::{CatchupOptions, generate_catchup_json};
 use crate::daemon::catchup_bounds::{CATCHUP_BUDGET_BYTES, bound_catchup};
+use crate::daemon::catchup_superseded::{SnapshotFreshness, assess_snapshot};
 use crate::daemon::state::DaemonState;
 
 /// The session id to use for a caller that named none.
@@ -80,15 +81,23 @@ fn derive_caller_session_id(tmux_window: Option<&str>) -> Option<String> {
 /// snapshot), so a caller can tell an exact match from the window fallback
 /// instead of reading both as ownership. `watermark_advanced` is always `false`
 /// by construction — no path in this module calls `save_catchup_state`.
+///
+/// #7501: three more keys say whether the resolved snapshot has been overtaken
+/// — `resolved_snapshot_superseded`, `commits_since_snapshot` and
+/// `commits_since_snapshot_total`. A snapshot's `next_steps` can go stale within
+/// minutes of the pause, and a PM reading them as current re-plans work that
+/// already merged; the commits since are the evidence that settles which.
 /// Test: `catchup_payload_carries_the_undatable_drop_count`,
 /// `session_context_catchup_returns_expected_shape`,
 /// `catchup_payload_bounds_an_oversized_store`,
-/// `catchup_payload_announces_what_it_withheld`.
+/// `catchup_payload_announces_what_it_withheld`,
+/// `catchup_payload_reports_a_superseded_snapshot`.
 fn catchup_payload(
     merged: trusty_common::catchup::CatchupJson,
     sessions_offset: usize,
     resolved: Option<ResolvedSnapshot>,
     session_refs: HydrationReceipt,
+    freshness: SnapshotFreshness,
 ) -> Value {
     let (snapshot, via) = match resolved {
         Some(r) => (Some(r.path.display().to_string()), Some(r.via.as_str())),
@@ -112,6 +121,11 @@ fn catchup_payload(
         "truncation_notice": page.truncation_notice(),
         "resolved_snapshot": snapshot,
         "resolved_via": via,
+        // #7501: a snapshot the repo has moved past describes work that may
+        // already be finished — the commits since are what says which.
+        "resolved_snapshot_superseded": freshness.superseded,
+        "commits_since_snapshot": freshness.commits_since,
+        "commits_since_snapshot_total": freshness.total_since,
         "undatable_sessions_dropped": undatable_sessions_dropped,
         "watermark_advanced": false,
         // #7830 review: hydration used to fail into `tracing::debug!`, below
@@ -205,6 +219,12 @@ struct HydrationReceipt {
 /// page; `sessions_next_offset` names the one that follows, so `full` still
 /// delivers every snapshot in history, one readable page at a time, rather than
 /// one unreadable response. The CLI digest is again unchanged.
+///
+/// #7501: `resolved_snapshot_superseded` says whether `project_dir`'s `HEAD` has
+/// moved past the commit the snapshot recorded, with `commits_since_snapshot`
+/// naming what landed. It is `false` whenever the answer cannot be established
+/// — no snapshot, no recorded commit, a commit git no longer resolves — because
+/// a wrong `true` tells a PM to discard state it still needs.
 /// Test: `session_context_catchup_missing_project_dir_errors`,
 /// `session_context_catchup_returns_expected_shape`,
 /// `session_context_catchup_never_resolves_another_sessions_snapshot`,
@@ -293,11 +313,20 @@ pub async fn session_context_catchup(
     // mints a new harness session id inside the same tmux window.
     let resolved = resolve_snapshot_for_caller(&primary, session_id, tmux_window);
 
+    // #7501: a snapshot whose recorded commit the checkout has moved past
+    // describes a plan that may already be done. Fail-open — see
+    // `catchup_superseded`.
+    let freshness = resolved
+        .as_ref()
+        .map(|r| assess_snapshot(&primary, &r.path))
+        .unwrap_or_default();
+
     Ok(catchup_payload(
         merged,
         sessions_offset,
         resolved,
         session_refs,
+        freshness,
     ))
 }
 
@@ -930,7 +959,13 @@ mod tests {
             PathBuf::from("/tmp/snap.md"),
             crate::core::catchup::resolve::ResolutionPath::TmuxWindow,
         );
-        let body = catchup_payload(merged, 0, Some(resolved), HydrationReceipt::default());
+        let body = catchup_payload(
+            merged,
+            0,
+            Some(resolved),
+            HydrationReceipt::default(),
+            SnapshotFreshness::default(),
+        );
         assert_eq!(
             body["undatable_sessions_dropped"], 4,
             "the withheld count must reach the wire: {body}"
@@ -941,6 +976,50 @@ mod tests {
             "a fallback must never be presented as an exact match: {body}"
         );
         assert_eq!(body["watermark_advanced"], false);
+        assert_eq!(
+            body["resolved_snapshot_superseded"], false,
+            "#7501: a snapshot nothing has moved past is not superseded: {body}"
+        );
+    }
+
+    /// THE #7501 REGRESSION TEST — the verdict must reach the wire.
+    ///
+    /// Why: the staleness verdict is only useful if the PM sees it. Computing it
+    /// and dropping it on the floor in `catchup_payload` would leave the suite
+    /// green while the resuming PM went on re-planning merged work — the same
+    /// fail-open shape `undatable_sessions_dropped` above exists to prevent.
+    /// What: a non-default freshness verdict appears on the response body, with
+    /// its listed commits and its uncapped total.
+    /// Test: itself.
+    #[test]
+    fn catchup_payload_reports_a_superseded_snapshot() {
+        let resolved = ResolvedSnapshot::new(
+            PathBuf::from("/tmp/snap.md"),
+            crate::core::catchup::resolve::ResolutionPath::SessionId,
+        );
+        let freshness = SnapshotFreshness {
+            superseded: true,
+            commits_since: vec!["abc1234 the work that already landed".to_string()],
+            total_since: 7,
+        };
+
+        let body = catchup_payload(
+            trusty_common::catchup::CatchupJson::default(),
+            0,
+            Some(resolved),
+            HydrationReceipt::default(),
+            freshness,
+        );
+
+        assert_eq!(body["resolved_snapshot_superseded"], true, "{body}");
+        assert_eq!(
+            body["commits_since_snapshot"][0], "abc1234 the work that already landed",
+            "the PM needs WHAT landed, not only that something did: {body}"
+        );
+        assert_eq!(
+            body["commits_since_snapshot_total"], 7,
+            "a capped list must never read as the complete one: {body}"
+        );
     }
 
     /// Why: #5272, end to end through the MCP tool the report came from.
@@ -1623,7 +1702,13 @@ mod tests {
             .expect("an unreachable origin must be reported, not swallowed");
         assert!(!error.trim().is_empty(), "{receipt:?}");
 
-        let body = catchup_payload(Default::default(), 0, None, receipt);
+        let body = catchup_payload(
+            Default::default(),
+            0,
+            None,
+            receipt,
+            SnapshotFreshness::default(),
+        );
         assert_eq!(body["session_refs"]["hydrated"], false, "{body}");
         assert_eq!(body["session_refs"]["refs_seen"], 0, "{body}");
         assert_eq!(body["session_refs"]["own_ref_found"], false, "{body}");

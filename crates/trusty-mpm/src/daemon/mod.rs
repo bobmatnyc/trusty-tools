@@ -18,6 +18,8 @@ pub mod builder_slot_routes;
 pub mod bus;
 /// Response-size bound for the `session_context_catchup` digest (#5557).
 pub mod catchup_bounds;
+/// Whether the repo has moved past the snapshot a resume would act on (#7501).
+pub mod catchup_superseded;
 pub mod claude_config;
 pub mod coordinator;
 /// Delegation query routes merged into the main router (#4480).

@@ -651,6 +651,79 @@ fn a_stray_project_tier_bundled_skill_does_not_satisfy_completeness() {
     );
 }
 
+/// Repair an unprovisioned workspace with `memory_reachable` pinned, and report
+/// the `autoMemoryEnabled` key the preparation left in the project settings.
+///
+/// Why (#7763): the threaded verdict has exactly one observable effect —
+/// `prepare_session_inner` writes `autoMemoryEnabled: !memory_reachable`. Reading
+/// that key back is what distinguishes a repair that reused the launch's answer
+/// from one that re-probed the host and wrote the probe's answer instead.
+/// What: the `repair_closes_gaps_on_incomplete_workspace` fixture (framework
+/// SOURCE roster seeded, workspace `.claude/` empty) repaired through
+/// [`super::validate_and_repair_reusing_memory`]. The caller owns the `$HOME`
+/// override and the `#[serial_test::serial]` attribute.
+/// Test: `repair_reuses_the_reachability_the_launch_resolved`.
+fn repaired_auto_memory_key(base: &Path, memory_reachable: bool) -> serde_json::Value {
+    let workspace = base.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let mut fw = FrameworkPaths::for_managed_project(base, &workspace);
+    fw.trusty_mpm_root = None;
+    seed_agent_source(&fw, &["engineer"]);
+    seed_skill_source(&fw, &["tm-doctor"]);
+    assert!(
+        !validate_workspace(&fw).is_complete(),
+        "fixture must start incomplete so the repair pipeline runs"
+    );
+
+    super::validate_and_repair_reusing_memory(&fw, &workspace, None, Some(memory_reachable));
+
+    let settings = workspace.join(".claude").join("settings.json");
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    value["autoMemoryEnabled"].clone()
+}
+
+/// THE #7763 REGRESSION TEST — fails on the pre-fix code.
+///
+/// Why: the daemon's spawn gate runs this repair right after the same launch
+/// probed trusty-memory, and the repair re-ran the whole preparation pipeline
+/// with nothing threaded — so it probed again and a slow or wedged daemon cost
+/// the launch two `PROBE_TIMEOUT` budgets. Before the fix the repair ignored the
+/// pinned verdict entirely, so BOTH runs below wrote whatever the host's own
+/// probe said and the two results were equal on every host.
+/// What: repairs two identical fixtures, one pinned reachable and one pinned
+/// unreachable, and asserts each wrote the auto-memory key its own verdict
+/// implies.
+/// Test: itself.
+#[test]
+#[serial_test::serial]
+fn repair_reuses_the_reachability_the_launch_resolved() {
+    // #3965: `#[serial]` + `$HOME` override — see `HomeGuard` above.
+    let fake_home = TempDir::new().unwrap();
+    let _home_guard = {
+        let prior = std::env::var("HOME").ok();
+        // SAFETY: serialized via `#[serial_test::serial]`.
+        unsafe { std::env::set_var("HOME", fake_home.path()) };
+        HomeGuard(prior)
+    };
+    let reachable_base = TempDir::new().unwrap();
+    let unreachable_base = TempDir::new().unwrap();
+
+    let reachable = repaired_auto_memory_key(reachable_base.path(), true);
+    let unreachable = repaired_auto_memory_key(unreachable_base.path(), false);
+
+    assert_eq!(
+        reachable,
+        serde_json::json!(false),
+        "a repair told trusty-memory is up must turn the auto-memory fallback OFF"
+    );
+    assert_eq!(
+        unreachable,
+        serde_json::json!(true),
+        "a repair told trusty-memory is down must leave the auto-memory fallback ON"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // #7849 — toggle-driven project hook groups.
 // ---------------------------------------------------------------------------
