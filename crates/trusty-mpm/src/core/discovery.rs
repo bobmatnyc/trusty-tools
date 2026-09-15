@@ -365,6 +365,19 @@ pub async fn resolve_daemon_url_for_cli(
 ///       `resolve_via_gateway_explicit_override_equal_to_default_still_wins`,
 ///       `resolve_via_gateway_uses_gateway_when_probe_succeeds`,
 ///       `resolve_via_gateway_falls_back_to_direct_on_probe_failure`.
+/// Ceiling on the console-gateway `/health` probe every `tm` command pays.
+///
+/// Why: named because `main.rs` resolves the daemon URL through this probe
+/// before dispatching ANY command, so it is a fixed prefix on every
+/// invocation's wall clock — including `tm hook --pm-guard`, whose registered
+/// command carries no `--url` and therefore always reaches the probe. #7975
+/// sizes the guard's own budgets against it.
+/// What: 500 ms, the client-level bound on the dedicated probe client below.
+/// Test: `guard_read_budget_leaves_the_audit_post_inside_the_hook_timeout`
+/// (in the `tm` binary) is what fails if this is raised past the guard's
+/// headroom.
+pub const GATEWAY_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
 pub async fn resolve_daemon_url_via_gateway(
     client: &reqwest::Client,
     explicit: Option<&str>,
@@ -458,11 +471,12 @@ async fn resolve_daemon_url_via_gateway_inner(
     //    no timeout at all), its bound (10s) is tuned for the local daemon,
     //    not this console-gateway hop. A slow or unreachable console must
     //    NEVER stall every `tm` command for up to 10 seconds — the gateway
-    //    probe must fail fast (500ms) and fall through to the direct path.
+    //    probe must fail fast ([`GATEWAY_PROBE_TIMEOUT`]) and fall through to
+    //    the direct path.
     //    The per-request `.timeout()` in `probe_url` provides a second line of
     //    defense; the client-level timeout here is the primary guarantee.
     let probe_client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_millis(500))
+        .timeout(GATEWAY_PROBE_TIMEOUT)
         .build()
         // Client::builder().timeout(...).build() is infallible without custom
         // TLS or certificate configuration — both are absent here.

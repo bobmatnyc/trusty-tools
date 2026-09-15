@@ -47,10 +47,16 @@ pub(crate) const HOOK_STDIN_TIMEOUT: Duration = Duration::from_millis(500);
 /// advisory budget would put every tool call behind a bound a PR #1968 review
 /// already called tight at 200 ms, with a megabyte-scale `tool_input` (a large
 /// `Write` `content`) to cross the pipe inside it.
-/// What: 5 s. With [`crate::commands::pm_guard::AUDIT_POST_TIMEOUT`] (2 s), the
-/// worst case a deny can spend is 7 s of the 10 s `REGISTERED_HOOK_TIMEOUT`
-/// Claude Code is told to allow — 3 s of headroom.
+/// What: 5 s. A deny's worst case is three bounds, not two. `main.rs` resolves
+/// the daemon URL through
+/// [`trusty_mpm::core::discovery::GATEWAY_PROBE_TIMEOUT`] (500 ms) BEFORE
+/// dispatching, and the registered guard command carries no `--url`
+/// (`build_tree::PM_GUARD_SUFFIX`), so that probe is a fixed prefix on every
+/// invocation. 500 ms + 5 s + [`crate::commands::pm_guard::AUDIT_POST_TIMEOUT`]
+/// (2 s) = 7.5 s of the 10 s `REGISTERED_HOOK_TIMEOUT` Claude Code is told to
+/// allow, leaving 2.5 s for exec and classification.
 /// Test: `guard_read_budget_leaves_the_audit_post_inside_the_hook_timeout`,
+/// which sums all three so lowering any one of them trips the gate;
 /// `read_hook_stdin_reads_a_slow_megabyte_inside_the_guard_budget`.
 pub(crate) const PM_GUARD_STDIN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -261,8 +267,12 @@ pub(crate) async fn read_stdin_payload_or_deny(url: &str) -> serde_json::Value {
 /// allow-path back.
 /// What: returns the payload's `tool_name` when
 /// [`unclassifiable_payload_detail`] passes it. Otherwise audits the deny with
-/// the payload's `session_id` (readable even here) and no tool name, prints the
-/// deny carrying [`unclassifiable_payload_deny_reason`], and exits 0.
+/// every field still readable — the `session_id`, and the `tool_name` itself on
+/// the `tool_input` arm, where only the input was malformed — prints the deny
+/// carrying [`unclassifiable_payload_deny_reason`], and exits 0. The audit
+/// record is the only alarm this path raises, so it names what it can (round 2,
+/// code-critic MEDIUM); a non-string `tool_name` leaves that field empty
+/// because there is nothing to name.
 /// Test: `pm_guard_denies_a_payload_whose_tool_name_is_not_a_string`,
 /// `pm_guard_denies_a_bash_payload_with_no_tool_input`,
 /// `pm_guard_allows_a_parsed_payload_naming_no_guarded_operation`.
@@ -270,11 +280,12 @@ pub(crate) async fn guarded_tool_name_or_deny<'a>(
     url: &str,
     payload: &'a serde_json::Value,
 ) -> &'a str {
+    let tool_name = payload
+        .get("tool_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
     let Some(detail) = unclassifiable_payload_detail(payload) else {
-        return payload
-            .get("tool_name")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
+        return tool_name;
     };
     let session_id = payload
         .get("session_id")
@@ -283,7 +294,7 @@ pub(crate) async fn guarded_tool_name_or_deny<'a>(
     audit_then_deny_and_exit(
         url,
         session_id,
-        "",
+        tool_name,
         unclassifiable_payload_deny_reason(detail),
     )
     .await
