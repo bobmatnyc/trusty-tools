@@ -37,6 +37,11 @@ pub const REFERENCED_SKILL_FILES: &[(&str, &str)] = &[
         "condition-based-waiting/SKILL.md",
         include_str!("../assets/skill-refs/condition-based-waiting/SKILL.md"),
     ),
+    // #8010: BASE-AGENT's revert/bisect rule points here (#7628).
+    (
+        "git-workflow/SKILL.md",
+        include_str!("../assets/skill-refs/git-workflow/SKILL.md"),
+    ),
     (
         "self-improvement-loop/SKILL.md",
         include_str!("../assets/skill-refs/self-improvement-loop/SKILL.md"),
@@ -157,7 +162,7 @@ mod tests {
     #[test]
     fn embedded_skill_ref_matches_exact_entries_only() {
         let hit = Path::new("self-improvement-loop/SKILL.md");
-        assert_eq!(embedded_skill_ref(hit), Some(REFERENCED_SKILL_FILES[1].1));
+        assert_eq!(embedded_skill_ref(hit), Some(REFERENCED_SKILL_FILES[2].1));
         for miss in [
             "self-improvement-loop",
             "x/../self-improvement-loop/SKILL.md",
