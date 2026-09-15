@@ -79,6 +79,20 @@ pub fn render_text(report: &SystemStatusReport) -> String {
         }
     }
 
+    // #7903: every declared binding that does not resolve prints as ERROR.
+    out.push_str("\nUnresolved bindings:\n");
+    if report.unresolved_bindings.is_empty() {
+        out.push_str("  (none)\n");
+    }
+    for b in &report.unresolved_bindings {
+        out.push_str(&format!(
+            "  {:<20} ERROR  {}: {}\n",
+            b.name,
+            b.kind.label(),
+            b.error
+        ));
+    }
+
     out.push_str("\nCredentials (names/tiers only — no values):\n");
     for c in &report.credentials {
         out.push_str(&format!("  {:<12} {}\n", c.provider, c.status));
@@ -230,6 +244,7 @@ mod tests {
                 status: "not configured".into(),
             }],
             stores: Vec::new(),
+            unresolved_bindings: Vec::new(),
             agent_registry_count: 46,
             skills_count: 12,
         }
