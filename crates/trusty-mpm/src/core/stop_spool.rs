@@ -1,13 +1,20 @@
 //! On-disk record of a `SubagentStop` the hook could not deliver (#6556).
 //!
 //! Why: `tm hook` is the only process that ever learns a subagent stopped, and
-//! it learns it once. When the daemon is down or wedged, every POST attempt
-//! fails and the stop is gone — the delegation stays `Running` until the
-//! six-hour `RUNNING_STALE_AFTER_SECS` sweep, holding a builder slot and a
-//! checkout the whole time. Retrying inside the hook's five-second budget
-//! covers a blip; it cannot cover a daemon that is down. So the hook writes the
-//! undelivered stop where the reclaim can find it, and the daemon's own reap
-//! loop replays it on its next tick.
+//! it learns it once. When the daemon cannot answer, every POST attempt fails
+//! and the stop is gone — the delegation stays `Running` until the six-hour
+//! `RUNNING_STALE_AFTER_SECS` sweep, holding a builder slot and a checkout the
+//! whole time. Retrying inside the hook's five-second budget covers a blip; the
+//! park covers the longer outage. So the hook writes the undelivered stop where
+//! the reclaim can find it, and the daemon's own reap loop replays it.
+//!
+//! **The case this recovers is a WEDGED-BUT-ALIVE daemon, not one that is down**
+//! (critic MEDIUM on PR #8052). Delegations live in memory only, so a daemon
+//! that restarts loses the very records a replay would terminalize, and
+//! `stop_spool_drain::replay_target` correctly discards a stop no live record
+//! answers. A park therefore buys back the minutes a daemon spends unable to
+//! serve `POST /hooks` while keeping its map — a saturated request queue, a
+//! blocked lock — which is the window the six-hour leak was actually opening in.
 //!
 //! What: one JSON file per undelivered stop under
 //! `<framework-root>/unposted-stops/`, holding the exact `POST /hooks` body the
@@ -153,9 +160,70 @@ pub fn discard_unposted_stop(path: &Path) -> bool {
     }
 }
 
+/// `tm doctor` row for the undelivered-stop spool (#6556).
+///
+/// Why: the lossy branch — a spool that cannot be written or is at
+/// [`MAX_UNPOSTED_STOPS`] — is the one place a stop is dropped outright, and its
+/// only alarm was a stderr line on an exit-0 hook, which Claude Code does not
+/// surface (critic MEDIUM on PR #8052). A doctor row is the surface an operator
+/// actually reads.
+/// What: `Ok` when the directory is absent or empty — nothing parked is the
+/// healthy state. `Warn` when records are waiting (the daemon has not drained
+/// them, so something is wrong with the reap loop) or when the directory exists
+/// but cannot be written. Read-only; it creates nothing.
+/// Test: `an_empty_spool_is_an_ok_row`, `parked_records_warn`,
+/// `a_saturated_spool_names_the_cap`.
+#[must_use]
+pub fn check_stop_spool(root: &Path) -> crate::core::doctor::DoctorCheck {
+    use crate::core::doctor::{CheckStatus, DoctorCheck};
+
+    let dir = unposted_stops_dir(root);
+    if !dir.exists() {
+        return DoctorCheck::new(
+            "stop_spool",
+            CheckStatus::Ok,
+            format!("no undelivered SubagentStop records ({})", dir.display()),
+        );
+    }
+    let parked = count_records(&dir);
+    let writable = std::fs::metadata(&dir).is_ok_and(|m| !m.permissions().readonly());
+    let (status, detail) = match (parked, writable) {
+        (0, true) => (
+            CheckStatus::Ok,
+            format!("no undelivered SubagentStop records ({})", dir.display()),
+        ),
+        (n, true) if n >= MAX_UNPOSTED_STOPS => (
+            CheckStatus::Warn,
+            format!(
+                "{n} undelivered SubagentStop record(s) at the {MAX_UNPOSTED_STOPS} cap in {} — \
+                 further stops are DROPPED; the daemon's reap loop is not draining them",
+                dir.display()
+            ),
+        ),
+        (n, true) => (
+            CheckStatus::Warn,
+            format!(
+                "{n} undelivered SubagentStop record(s) waiting in {} — the daemon's reap loop \
+                 should drain them within 60 s",
+                dir.display()
+            ),
+        ),
+        (n, false) => (
+            CheckStatus::Warn,
+            format!(
+                "the undelivered-stop spool {} is not writable ({n} record(s) present) — a stop \
+                 the daemon refuses is LOST, and its delegation stays Running for six hours",
+                dir.display()
+            ),
+        ),
+    };
+    DoctorCheck::new("stop_spool", status, detail)
+}
+
 #[cfg(test)]
 mod stop_spool_tests {
     use super::*;
+    use crate::core::doctor::CheckStatus;
 
     fn body(agent: &str) -> serde_json::Value {
         serde_json::json!({
@@ -236,6 +304,36 @@ mod stop_spool_tests {
             discard_unposted_stop(&written),
             "an already-absent record is success — it no longer replays"
         );
+    }
+
+    #[test]
+    fn an_empty_spool_is_an_ok_row() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        assert_eq!(check_stop_spool(dir.path()).status, CheckStatus::Ok);
+        std::fs::create_dir_all(unposted_stops_dir(dir.path())).expect("dir");
+        assert_eq!(check_stop_spool(dir.path()).status, CheckStatus::Ok);
+    }
+
+    #[test]
+    fn parked_records_warn() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        record_unposted_stop(dir.path(), &body("agent-1")).expect("recorded");
+        let row = check_stop_spool(dir.path());
+        assert_eq!(row.status, CheckStatus::Warn);
+        assert!(row.message.contains("1 undelivered"), "{}", row.message);
+    }
+
+    #[test]
+    fn a_saturated_spool_names_the_cap() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let spool = unposted_stops_dir(dir.path());
+        std::fs::create_dir_all(&spool).expect("dir");
+        for n in 0..MAX_UNPOSTED_STOPS {
+            std::fs::write(spool.join(format!("{n:05}-0-0.json")), "{}").expect("write");
+        }
+        let row = check_stop_spool(dir.path());
+        assert_eq!(row.status, CheckStatus::Warn);
+        assert!(row.message.contains("DROPPED"), "{}", row.message);
     }
 
     #[test]

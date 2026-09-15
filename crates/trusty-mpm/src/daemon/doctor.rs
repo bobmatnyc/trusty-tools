@@ -623,6 +623,12 @@ pub(crate) async fn run_doctor_with_claims(
     // without this probe the condition is invisible until someone attempts a
     // mutation. Read-only; the repair is `tm repair session-store`.
     checks.push(check_session_store(&FrameworkPaths::default().root));
+    // #6556: undelivered `SubagentStop` records waiting on disk, or a spool the
+    // hook cannot write into — the one branch where a stop is dropped outright
+    // and its delegation stays Running for six hours. Read-only.
+    checks.push(crate::core::stop_spool::check_stop_spool(
+        &FrameworkPaths::default().root,
+    ));
     // A `.mcp.json` ABOVE the workspace is read by every session whose cwd is
     // beneath it — including agent scratchpads under /tmp — and nothing else
     // reports it. Read-only, and it names the provenance verdict per file so

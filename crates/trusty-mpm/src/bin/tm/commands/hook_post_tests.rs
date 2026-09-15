@@ -215,17 +215,28 @@ async fn an_unreachable_daemon_retries_and_reports_undelivered() {
 /// a lost stop, the very defect being fixed.
 #[test]
 fn the_stop_post_budget_stays_inside_the_registered_hook_timeout() {
+    let registered =
+        registered_subagent_stop_timeout().expect("the SubagentStop group carries a timeout");
     let worst_case = trusty_mpm::core::discovery::GATEWAY_PROBE_TIMEOUT
         + crate::commands::hook_stdin::HOOK_STDIN_TIMEOUT
         + crate::commands::misc::IDLE_PARK_DETECT_TIMEOUT
         + HOOK_POST_BUDGET;
-    let headroom = REGISTERED_SUBAGENT_STOP_TIMEOUT
-        .checked_sub(worst_case)
-        .unwrap_or_default();
+    let headroom = registered.checked_sub(worst_case).unwrap_or_default();
     assert!(
         headroom >= std::time::Duration::from_secs(1),
-        "worst case {worst_case:?} of the registered {REGISTERED_SUBAGENT_STOP_TIMEOUT:?} leaves \
-         only {headroom:?} for exec, the spool write and teardown"
+        "worst case {worst_case:?} of the registered {registered:?} leaves only {headroom:?} for \
+         exec, the spool write and teardown"
+    );
+}
+
+/// The reader itself, so a shape change in the hook block fails HERE rather
+/// than silently turning the budget gate above into a no-op.
+#[test]
+fn the_registered_subagent_stop_timeout_is_readable() {
+    assert_eq!(
+        registered_subagent_stop_timeout(),
+        Some(std::time::Duration::from_secs(5)),
+        "the SubagentStop hook is registered with a 5 s timeout"
     );
 }
 

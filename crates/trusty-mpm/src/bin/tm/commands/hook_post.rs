@@ -40,8 +40,11 @@ pub(crate) const HOOK_POST_CONNECT_TIMEOUT: Duration = Duration::from_millis(500
 /// single-shot 2 s total of the pre-#6556 client is too long for one of them. A
 /// daemon that is up answers `POST /hooks` in single-digit milliseconds — it is
 /// an in-memory `DashMap` write — so 800 ms is a wide margin over a healthy
-/// answer and a fast verdict on an unhealthy one.
-pub(crate) const HOOK_POST_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(800);
+/// answer and a fast verdict on an unhealthy one. 680 ms rather than a round
+/// 800: three of those plus the two backoffs is 2490 ms, so all three attempts
+/// FIT inside [`HOOK_POST_BUDGET`] instead of the third being truncated by it
+/// while the log claimed three (critic LOW on PR #8052).
+pub(crate) const HOOK_POST_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(680);
 
 /// How many times the stop POST is attempted before it is parked on disk.
 ///
@@ -75,14 +78,29 @@ pub(crate) const HOOK_POST_BUDGET: Duration = Duration::from_millis(2500);
 /// seconds.
 ///
 /// Why (#6556): the retry budget above is only safe relative to this number, so
-/// it is named rather than left implicit — the same treatment #7975 gave the
-/// PM-guard budgets. Mirrored, not imported: the production value is the literal
-/// in `core::standalone::hooks::mpm_hook_additions_with_exe`, and the drift is
-/// closed by test rather than by a second production constant.
-/// Test: `the_stop_post_budget_stays_inside_the_registered_hook_timeout`;
-/// the registered value itself by `test_mpm_hook_additions_has_six_events`.
+/// the budget gate has to know it. It is READ from
+/// [`trusty_mpm::core::standalone::hooks::mpm_hook_additions_with_exe`] rather
+/// than mirrored as a literal (critic MEDIUM on PR #8052): a mirrored copy makes
+/// the gate assert its own assumption, so lowering the registered timeout would
+/// pass here and kill the hook in production.
+/// What: the `SubagentStop` group's `timeout`, in seconds, or `None` when the
+/// block cannot be built on this host (no resolvable installed binary).
+/// Test: `the_stop_post_budget_stays_inside_the_registered_hook_timeout`,
+/// `the_registered_subagent_stop_timeout_is_readable`.
 #[cfg(test)]
-pub(crate) const REGISTERED_SUBAGENT_STOP_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) fn registered_subagent_stop_timeout() -> Option<Duration> {
+    let exe = std::path::Path::new("/usr/local/bin/tm");
+    let block = trusty_mpm::core::standalone::hooks::mpm_hook_additions_with_exe(Some(exe)).ok()?;
+    let secs = block
+        .get("hooks")?
+        .get("SubagentStop")?
+        .get(0)?
+        .get("hooks")?
+        .get(0)?
+        .get("timeout")?
+        .as_u64()?;
+    Some(Duration::from_secs(secs))
+}
 
 /// What one stop POST did, and what to tell the operator about it.
 ///
@@ -169,8 +187,12 @@ async fn attempt_loop(url: &str, body: &serde_json::Value, outcome: &mut HookPos
         if attempt > 1 {
             tokio::time::sleep(HOOK_POST_BACKOFF * (attempt - 1)).await;
         }
+        // Stamped AFTER the request returns, never before (critic LOW on PR
+        // #8052): if the budget cancels this future mid-await the count must not
+        // claim an attempt whose result nobody saw.
+        let result = client.post(&endpoint).json(body).send().await;
         outcome.attempts = attempt;
-        match client.post(&endpoint).json(body).send().await {
+        match result {
             Ok(resp) if resp.status().is_success() => {
                 outcome.delivered = true;
                 outcome.lines.push(format!(
@@ -229,8 +251,11 @@ pub(crate) fn emit_hook_post_log(outcome: &HookPostOutcome) {
 /// waits out `RUNNING_STALE_AFTER_SECS`.
 /// What: writes `body` through
 /// [`trusty_mpm::core::stop_spool::record_unposted_stop`] under the framework
-/// root, and prints what happened either way — a spool write that fails is the
-/// last place the stop existed, so it is never silent.
+/// root, and prints what happened either way. The stderr line is a breadcrumb,
+/// not the alarm: Claude Code does not surface an exit-0 hook's stderr, so the
+/// operator-visible surface for a spool that is unwritable or at its cap is the
+/// `stop_spool` `tm doctor` row
+/// ([`trusty_mpm::core::stop_spool::check_stop_spool`]).
 /// Test: `tm_hook_subagent_stop_spool_6556.rs` drives this through the binary;
 /// the write itself by `core::stop_spool`'s suite.
 pub(crate) fn spool_undelivered_stop(body: &serde_json::Value) {

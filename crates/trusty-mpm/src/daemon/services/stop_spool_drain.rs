@@ -21,6 +21,7 @@
 
 use std::sync::Arc;
 
+use crate::core::session::SessionId;
 use crate::core::stop_spool;
 use crate::daemon::api::HookPost;
 use crate::daemon::state::DaemonState;
@@ -32,7 +33,23 @@ use crate::daemon::state::DaemonState;
 /// each body as a [`HookPost`], and ingests it. Returns how many were replayed
 /// successfully. Unparsable and refused records are discarded too, and counted
 /// separately only in the log — the caller's number is "stops recovered".
+///
+/// **A replay only ever terminalizes an EXACT `agent_id` match** (critic HIGH on
+/// PR #8052). Reached through `ingest_hook`, a stop whose id no record carries
+/// falls into
+/// [`reconcile_by_agent_type`](crate::daemon::services::delegation_tracker), which
+/// stales the single live record of the same `agent_type` that never learned an
+/// id. That inference is sound for a stop arriving live; it is NOT sound for a
+/// replay, because the delegation map is in-memory and the spool outlives the
+/// process that wrote it — so after a restart EVERY replayed stop takes that
+/// fallback, and a resumed session that re-dispatched the same agent type inside
+/// the ≤60 s before the first reap tick has a LIVE agent's record terminalized
+/// (#5661's shape). [`replay_target`] is therefore checked first and a record
+/// with no live, exactly-matching `agent_id` is discarded unreplayed.
 /// Test: `a_parked_stop_terminalizes_its_delegation`,
+/// `a_replay_whose_agent_id_matches_nothing_never_stales_a_sibling`,
+/// `a_parked_non_stop_event_is_discarded_unreplayed`,
+/// `a_replay_cannot_reassert_an_idle_parking_nudge`,
 /// `a_corrupt_record_is_discarded_rather_than_wedging_the_drain`,
 /// `an_empty_spool_drains_nothing`.
 pub async fn drain_unposted_stops(state: &Arc<DaemonState>) -> usize {
@@ -44,7 +61,10 @@ pub async fn drain_unposted_stops(state: &Arc<DaemonState>) -> usize {
     let mut replayed = 0usize;
     let mut discarded = 0usize;
     for (path, body) in parked {
-        match body.and_then(|v| serde_json::from_value::<HookPost>(v).ok()) {
+        match body
+            .and_then(|v| serde_json::from_value::<HookPost>(v).ok())
+            .and_then(|post| replay_target(state, post))
+        {
             Some(post) => {
                 match crate::daemon::rpc::sessions_legacy_ops::ingest_hook(state, post).await {
                     Ok(_) => replayed += 1,
@@ -62,8 +82,9 @@ pub async fn drain_unposted_stops(state: &Arc<DaemonState>) -> usize {
                 discarded += 1;
                 tracing::warn!(
                     record = %path.display(),
-                    "stop-spool: a parked SubagentStop is not a readable hook body; discarding \
-                     it (#6556)"
+                    "stop-spool: a parked record is not a replayable SubagentStop — unreadable, \
+                     not a stop, or naming an agent_id no live record carries; discarding it \
+                     rather than letting it stale a sibling by agent_type (#6556)"
                 );
             }
         }
@@ -76,12 +97,40 @@ pub async fn drain_unposted_stops(state: &Arc<DaemonState>) -> usize {
     replayed
 }
 
+/// Accept `post` for replay, or refuse it.
+///
+/// Why: the three ways a parked body must not reach `ingest_hook`. The
+/// `agent_id` rule is the one that matters — see [`drain_unposted_stops`].
+/// What: `Some(post)` only when the event is `SubagentStop`, the payload names
+/// an `agent_id`, and THIS daemon holds a live delegation in `post.session_id`
+/// carrying exactly that id. The returned post has `payload.idle_parking`
+/// stripped: that flag spawns the #2610 auto-nudge, and a nudge minutes or a
+/// restart late is aimed at a turn that has already ended.
+/// Test: `a_replay_whose_agent_id_matches_nothing_never_stales_a_sibling`,
+/// `a_parked_non_stop_event_is_discarded_unreplayed`,
+/// `a_replay_cannot_reassert_an_idle_parking_nudge`.
+fn replay_target(state: &Arc<DaemonState>, mut post: HookPost) -> Option<HookPost> {
+    if post.event != crate::core::hook::HookEvent::SubagentStop {
+        return None;
+    }
+    let agent_id = post.payload.get("agent_id")?.as_str()?.to_string();
+    let session = uuid::Uuid::parse_str(&post.session_id)
+        .ok()
+        .map(SessionId)?;
+    state.find_delegation(session, |d| {
+        d.agent_id.as_deref() == Some(agent_id.as_str()) && !d.status.is_terminal()
+    })?;
+    if let Some(obj) = post.payload.as_object_mut() {
+        obj.remove("idle_parking");
+    }
+    Some(post)
+}
+
 #[cfg(test)]
 mod stop_spool_drain_tests {
     use super::*;
     use crate::core::agent::{Delegation, DelegationStatus};
     use crate::core::paths::FrameworkPaths;
-    use crate::core::session::SessionId;
 
     /// A hermetic daemon whose framework root is a temp dir, plus one session.
     fn hermetic() -> (Arc<DaemonState>, tempfile::TempDir, SessionId) {
@@ -130,6 +179,83 @@ mod stop_spool_drain_tests {
         assert!(
             stop_spool::read_unposted_stops(&root).is_empty(),
             "a replayed record must not replay again"
+        );
+    }
+
+    /// 🔴 REGRESSION (critic HIGH on PR #8052): a replay whose `agent_id` no
+    /// live record carries must terminalize NOTHING.
+    ///
+    /// Why: delegations are in-memory, so the restart the spool exists across
+    /// wipes every record. Replayed through `ingest_hook`, such a stop falls into
+    /// `reconcile_by_agent_type`, which stales the one live record of the same
+    /// `agent_type` with no id — and a resumed session re-dispatching that agent
+    /// type inside the ≤60 s before the first reap tick has a LIVE agent
+    /// terminalized under it (#5661's shape).
+    /// Fails at cf471c0c9: the sibling reads `Stale` and the drain reports 1.
+    #[tokio::test]
+    async fn a_replay_whose_agent_id_matches_nothing_never_stales_a_sibling() {
+        let (state, dir, session) = hermetic();
+        // The restart-equivalent state: a live record of the SAME agent_type
+        // that never learned an id — exactly what the fallback matches on.
+        let mut sibling =
+            Delegation::observed(session, "rust-engineer", "task", Some("toolu_new".into()));
+        sibling.status = DelegationStatus::Running;
+        state.upsert_delegation(sibling);
+        let root = FrameworkPaths::under(dir.path()).root;
+        let mut body = parked_body(session, "agent-gone");
+        body["payload"]["agent_type"] = serde_json::json!("rust-engineer");
+        stop_spool::record_unposted_stop(&root, &body).expect("parked");
+
+        assert_eq!(
+            drain_unposted_stops(&state).await,
+            0,
+            "a stop no live record answers is not a recovery"
+        );
+
+        let records = state.delegations_for(session);
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].status,
+            DelegationStatus::Running,
+            "the newly dispatched sibling must be untouched"
+        );
+        assert!(stop_spool::read_unposted_stops(&root).is_empty());
+    }
+
+    /// The spool carries stops. Anything else reaching `ingest_hook` from disk
+    /// would re-run a whole hook pipeline — auto-registration, the overseer —
+    /// against a payload from another process lifetime.
+    #[tokio::test]
+    async fn a_parked_non_stop_event_is_discarded_unreplayed() {
+        let (state, dir, session) = hermetic();
+        running(&state, session, "agent-1");
+        let root = FrameworkPaths::under(dir.path()).root;
+        let mut body = parked_body(session, "agent-1");
+        body["event"] = serde_json::json!("PreToolUse");
+        stop_spool::record_unposted_stop(&root, &body).expect("parked");
+
+        assert_eq!(drain_unposted_stops(&state).await, 0);
+        assert!(
+            state.delegations_for(session)[0].status.is_live(),
+            "a non-stop event changes nothing"
+        );
+    }
+
+    /// The #2610 auto-nudge fires on `payload.idle_parking`. A nudge aimed at a
+    /// turn that ended a restart ago is noise, so the flag is stripped on replay.
+    #[tokio::test]
+    async fn a_replay_cannot_reassert_an_idle_parking_nudge() {
+        let (state, _dir, session) = hermetic();
+        running(&state, session, "agent-1");
+        let mut body = parked_body(session, "agent-1");
+        body["payload"]["idle_parking"] = serde_json::json!(true);
+        let post: HookPost = serde_json::from_value(body).expect("a hook body");
+
+        let accepted = replay_target(&state, post).expect("an exact id match replays");
+        assert!(
+            accepted.payload.get("idle_parking").is_none(),
+            "the nudge flag does not survive the park: {:?}",
+            accepted.payload
         );
     }
 
