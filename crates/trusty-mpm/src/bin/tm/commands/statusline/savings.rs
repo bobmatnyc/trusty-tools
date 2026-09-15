@@ -1,35 +1,34 @@
 //! The `💸` estimated-savings segment for `tm statusline` (#6958, percent
-//! form since #7179, per-session average beside it since #7074).
+//! form since #7179, two figures since #7074, latest-over-mean since #8063).
 //!
 //! Why: the owner asked to see what the harness saves by not sending tokens —
 //! since the 2026-09-14 ruling (#7867) that is TOOL-OUTPUT COMPRESSION
 //! specifically: what rtk- and shunt-style interception saves on a tool call,
 //! credited to that call and visible on the next render. The status bar is
 //! where the operator already looks for the session's cost, so the saving
-//! belongs beside it. #7179 replaced the
-//! dollar/token figure with a percentage, then the owner ruled the percentage
-//! itself must be a *session share* — `saved / (session actual tokens +
-//! saved)` — rather than a ratio scoped only to the ledger's own rows: "how
-//! much of everything this session sent did we avoid" is the number that
-//! actually answers "how much are we saving", where a ledger-only ratio only
-//! answers it for the subset of tokens a savings technique happened to touch.
-//! #7074 then added the average, because one session's percentage says nothing
-//! about whether the harness is saving anything in general.
+//! belongs beside it. #7179 replaced the dollar/token figure with a
+//! percentage, and #7074 put a second percentage beside it.
+//!
+//! The 2026-09-15 ruling (#8063) settled WHICH two: a session share reported
+//! ~1 % for a `git diff` the compressor had just cut by 18.9 %, so the badge
+//! read as "the harness saves nothing" while the ledger said otherwise. The
+//! left figure is now the LATEST row's own reduction — what the last tool call
+//! saved — and the right is the mean across this session's rows. Both are
+//! per-row figures, so the two halves measure the same thing and one row shows
+//! the same number twice.
 //!
 //! What: folds `~/.trusty-mpm/usage/savings.jsonl` for the current session
 //! across [`trusty_mpm::core::savings::PER_CALL_TECHNIQUES`] — `compress` and
-//! `divert` — reads that session's cumulative actual-token count from
-//! [`compaction::session_actual_tokens_for`] (the same per-session store
-//! `compaction.rs` already keys by `session_id` — no third store), folds the
-//! same ledger once more grouped by session for the average, and renders one
+//! `divert` — prices each accepted row on its own `tokens_before`
+//! ([`trusty_mpm::core::savings::session_row_percents`]), and renders one
 //! segment:
 //!
 //! | Fold | Renders |
 //! |---|---|
-//! | `tokens_saved > 0`, a percent denominator, and other sessions on the ledger | `💸34%/29%` |
-//! | the same, but the ledger holds only this session | `💸34%/34%` |
-//! | zero fold for this session id, but a sibling id on the same managed session has rows (#7617) | that sibling's figure |
-//! | zero fold across every sibling, or no denominator at all (every row predates #7179 and no compaction tick has landed) | `💸—` |
+//! | rows whose newest saved 34 %, averaging 29 % | `💸34%/29%` |
+//! | one row, saving 34 % | `💸34%/34%` |
+//! | zero fold for this session id, but a sibling id on the same managed session has rows (#7617) | that sibling's figures |
+//! | zero fold across every sibling, or no denominator at all (every row predates #7179's `tokens_before`) | `💸—` |
 //!
 //! #7617 replaced "nothing at all" in that last row with an explicit empty
 //! state. The segment had gone dark twice, and the second time was not a defect
@@ -39,11 +38,12 @@
 //! genuinely-zero session were the same picture, so nothing anywhere said which
 //! had happened.
 //!
-//! The average is the arithmetic mean of each session's OWN percentage
-//! ([`average_percent_saved`]), which is the shape the owner ruled for on
-//! 2026-09-09: percentages do not sum into a lifetime total but do average
-//! cleanly. Both figures are derived at read time from the one ledger — this
-//! segment writes nothing, and adds no accumulator file of its own.
+//! The mean is the arithmetic mean of each ROW's own percentage
+//! ([`mean_percent`]), which keeps the 2026-09-09 shape — percentages do not
+//! sum into a total but do average cleanly — at the row scope #8063 moved the
+//! whole segment to. Both figures are derived at read time from the one
+//! ledger: this segment writes nothing, and adds no accumulator file of its
+//! own.
 //!
 //! **`0%` is unreachable by construction**, the same way `$0.00` was before
 //! #7179: [`SavingsTotal::is_zero`] gates the whole segment, so a fold with
@@ -59,7 +59,8 @@
 //! Test: `savings_segment_renders_a_percent`,
 //! `an_instruction_compression_row_alone_renders_the_empty_state`,
 //! `one_compress_row_moves_the_segment`,
-//! `savings_segment_renders_the_average_beside_the_session_figure`,
+//! `savings_segment_renders_the_average_beside_the_latest_row`,
+//! `savings_segment_renders_the_latest_row_not_the_session_total`,
 //! `savings_segment_is_absent_on_a_zero_fold`,
 //! `savings_segment_never_renders_zero_percent`,
 //! `rendering_writes_nothing_under_the_usage_directory`.
@@ -67,65 +68,46 @@
 use std::path::{Path, PathBuf};
 
 use trusty_mpm::core::savings::{
-    SavingsTotal, average_percent_saved, fold_session_per_call, fold_sessions_per_call,
-    savings_log_in,
+    SavingsTotal, fold_session_per_call, mean_percent, savings_log_in, session_row_percents,
 };
-
-use super::compaction;
 
 /// Fold the ledger for `session_id` and render the segment, or omit it.
 ///
 /// Why: the probe half is separated from [`render_savings_segment`] so the
-/// render rules are unit-testable against hand-built totals, with no filesystem
-/// and no resolved framework root.
+/// render rules are unit-testable against hand-built figures, with no
+/// filesystem and no resolved framework root.
 /// What: resolves the ledger under the operator's framework root — the same
 /// `--root` / `TRUSTY_MPM_ROOT` / XDG-config / `~/.trusty-mpm` chain every other
-/// `tm` command honours — folds it for this session and for every session, and
-/// renders. Each session's actual-token count comes from
-/// [`compaction::session_actual_tokens_for`] (#7179), which is why the lookup
-/// is passed as a closure rather than a single reading: the average needs one
-/// per session, not this session's applied to all of them. An empty
-/// `session_id` (Claude Code sends one only once the session has an id) omits
-/// the segment without touching the disk.
+/// `tm` command honours — folds this session's per-call rows from it, and
+/// renders. An empty `session_id` (Claude Code sends one only once the session
+/// has an id) omits the segment without touching the disk.
 /// Test: `savings_segment_probe_is_absent_without_a_session_id`,
 /// `savings_segment_reads_the_ledger_under_an_explicit_root`.
 pub(crate) fn savings_segment_probe(session_id: &str) -> Option<String> {
     let root = savings_root()?;
     // #7617: the siblings come from the framework root too, so a restart's new
     // session id still folds the managed session's earlier rows.
-    savings_segment_at_in(
-        &root,
-        &savings_log_in(&root),
-        session_id,
-        compaction::session_actual_tokens_for,
-    )
+    savings_segment_at_in(&root, &savings_log_in(&root), session_id)
 }
 
 /// [`savings_segment_probe`] against an explicit ledger path.
 ///
 /// Why: makes the missing-ledger and populated-ledger branches assertable end
-/// to end from a temp directory, with no environment mutation. Taking the
-/// actual-tokens lookup as a parameter (rather than reading the compaction
-/// state files itself) keeps this function's own I/O to the one ledger path its
-/// tests already control.
-/// What: folds `ledger` for `session_id`, folds it again grouped by session for
-/// the average (#7074), and renders. `actual_tokens` answers, per session id,
-/// that session's cumulative actual-token count, or `None` when no compaction
-/// tick has landed for it yet (#7179).
+/// to end from a temp directory, with no environment mutation. Keeping this
+/// function's own I/O to the one ledger path its tests already control is what
+/// lets them assert the rendered string, not just the fold.
+/// What: folds `ledger` for `session_id` and renders that session's per-row
+/// percents (#8063).
 /// Test: `savings_segment_is_absent_when_the_ledger_is_missing`,
 /// `savings_segment_reads_the_ledger_under_an_explicit_root`,
-/// `savings_segment_renders_the_average_beside_the_session_figure`.
+/// `savings_segment_renders_the_latest_row_not_the_session_total`.
 // #7617: production now goes through `savings_segment_at_in`, which also needs
 // the framework root for the link store. This ledger-only form is kept for the
 // tests that predate the link store and assert on the fold alone.
 #[cfg(test)]
-pub(crate) fn savings_segment_at(
-    ledger: &Path,
-    session_id: &str,
-    actual_tokens: impl Fn(&str) -> Option<u64>,
-) -> Option<String> {
+pub(crate) fn savings_segment_at(ledger: &Path, session_id: &str) -> Option<String> {
     // No root means no link store; the fold is this session's rows alone.
-    savings_segment_at_in(Path::new(""), ledger, session_id, actual_tokens)
+    savings_segment_at_in(Path::new(""), ledger, session_id)
 }
 
 /// `savings_segment_at` with the framework root supplied for the link store.
@@ -145,8 +127,8 @@ pub(crate) fn savings_segment_at(
 /// What: folds `session_id`'s per-call rows (#7867 —
 /// [`trusty_mpm::core::savings::fold_session_per_call`]); on a zero, folds each sibling
 /// ([`trusty_mpm::core::session_links::linked_claude_ids`]) and takes the first
-/// that has rows; on a zero after that, returns [`EMPTY_STATE`]. The average is
-/// still computed across every session on the ledger, unchanged.
+/// that has rows; on a zero after that, returns [`EMPTY_STATE`]. Both rendered
+/// figures then come from the folded id's own rows (#8063).
 ///
 /// FAIL-OPEN: an absent or unreadable ledger, an absent link store, and an
 /// unlinked session all fold to zero and render [`EMPTY_STATE`] — a mark that
@@ -161,7 +143,6 @@ pub(crate) fn savings_segment_at_in(
     framework_root: &Path,
     ledger: &Path,
     session_id: &str,
-    actual_tokens: impl Fn(&str) -> Option<u64>,
 ) -> Option<String> {
     let mut folded_id = session_id.to_string();
     // #7867: per-call techniques only — an instruction-fold row is a launch-time
@@ -189,8 +170,7 @@ pub(crate) fn savings_segment_at_in(
         // from a zero. Never a `0%` — that would be a claim.
         return Some(EMPTY_STATE.to_string());
     }
-    let average = average_percent_saved(&fold_sessions_per_call(ledger), &actual_tokens);
-    render_savings_segment(&total, actual_tokens(&folded_id), average)
+    render_savings_segment(&total, &session_row_percents(ledger, &folded_id))
         .or_else(|| Some(EMPTY_STATE.to_string()))
 }
 
@@ -342,36 +322,33 @@ fn savings_root() -> Option<PathBuf> {
         .map(|paths| paths.root)
 }
 
-/// Render a folded total as the segment text, or `None` to omit it.
+/// Render this session's per-row percents as the segment text, or `None` to
+/// omit it.
 ///
 /// Why: this is the rule the whole segment exists to get right — never a false
 /// `0%`, never a fabricated figure.
-/// What: `💸<N>%` from [`SavingsTotal::percent_saved`] against
-/// `session_actual_tokens` (#7179's session-share denominator, or its
-/// pre-ruling `tokens_before` fallback on `None`), followed by `/<M>%`
-/// when an average exists (#7074, slash form since the owner's 2026-09-10
-/// ruling). `None` on [`SavingsTotal::is_zero`] or when
-/// that method itself returns `None` (no denominator on either path) — and in
-/// that case the average is not rendered on its own, because a session with no
-/// figure of its own shows neither (criterion 3).
+/// What: `💸<latest>%/<mean>%`, where `row_percents` is this session's accepted
+/// per-call rows in ledger order ([`session_row_percents`]): the last element
+/// is the newest row's own reduction, and [`mean_percent`] averages all of
+/// them. One row renders its figure on both sides. `None` on
+/// [`SavingsTotal::is_zero`] — nothing was saved — and `None` on an empty
+/// slice, which is a fold whose every row predates `tokens_before` and so has
+/// no denominator to divide by; the mean is never rendered alone, because a
+/// session with no figure of its own shows neither.
 /// Test: `savings_segment_renders_a_percent`,
-/// `savings_segment_renders_the_average_beside_the_session_figure`,
+/// `savings_segment_renders_the_average_beside_the_latest_row`,
+/// `savings_segment_renders_the_latest_row_not_the_session_total`,
 /// `savings_segment_is_absent_on_a_zero_fold`,
 /// `savings_segment_never_renders_zero_percent`.
-pub(crate) fn render_savings_segment(
-    total: &SavingsTotal,
-    session_actual_tokens: Option<u64>,
-    average_percent: Option<u32>,
-) -> Option<String> {
+pub(crate) fn render_savings_segment(total: &SavingsTotal, row_percents: &[u32]) -> Option<String> {
     if total.is_zero() {
         return None;
     }
-    let pct = total.percent_saved(session_actual_tokens)?;
-    Some(match average_percent {
-        // Owner ruling 2026-09-10: session percent, slash, average percent.
-        Some(avg) => format!("\u{1f4b8}{pct}%/{avg}%"),
-        None => format!("\u{1f4b8}{pct}%"),
-    })
+    // #8063: latest row first, then the mean of this session's rows — a
+    // session-share left number rounded a real per-call reduction to 1%.
+    let latest = row_percents.last()?;
+    let average = mean_percent(row_percents)?;
+    Some(format!("\u{1f4b8}{latest}%/{average}%"))
 }
 
 // #7867: the suite moved to its own file when the per-call fold's regression

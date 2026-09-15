@@ -70,7 +70,7 @@ fn an_instruction_compression_row_alone_renders_the_empty_state() {
     );
 
     assert_eq!(
-        savings_segment_at(&ledger, "sess-1", |_| None).as_deref(),
+        savings_segment_at(&ledger, "sess-1").as_deref(),
         Some(EMPTY_STATE),
         "an instruction-fold row is not a tool-output compression measurement"
     );
@@ -94,57 +94,88 @@ fn one_compress_row_moves_the_segment() {
         60_000,
     );
     assert_eq!(
-        savings_segment_at(&ledger, "sess-1", |_| None).as_deref(),
+        savings_segment_at(&ledger, "sess-1").as_deref(),
         Some(EMPTY_STATE)
     );
 
     write_row(&ledger, "sess-1", 12_000, 60_000);
 
     assert_eq!(
-        savings_segment_at(&ledger, "sess-1", |_| None).as_deref(),
+        savings_segment_at(&ledger, "sess-1").as_deref(),
         Some("\u{1f4b8}20%/20%"),
         "the compress row must be visible on the next render"
     );
 }
 
-/// Why (#7179): with no actual-tokens reading supplied, the segment falls
-/// back to the pre-ruling ledger-only formula — pinned here so a
-/// regression in the fallback path is caught independently of the
-/// session-share path below.
+/// Why (#8063): a session with one recorded row renders that row's own
+/// reduction on both sides — the badge never goes half-blank, and the two
+/// halves agree when there is only one measurement to report.
 /// Test: itself.
 #[test]
 fn savings_segment_renders_a_percent() {
     assert_eq!(
-        render_savings_segment(&total(1, 3), None, None).as_deref(),
-        Some("\u{1f4b8}33%")
+        render_savings_segment(&total(1, 3), &[33]).as_deref(),
+        Some("\u{1f4b8}33%/33%")
     );
     assert_eq!(
-        render_savings_segment(&total(5_000, 20_000), None, None).as_deref(),
-        Some("\u{1f4b8}25%")
-    );
-}
-
-/// Why (#7074): the average renders beside the session's own figure, not
-/// instead of it. A render that dropped either half would still look like a
-/// savings segment.
-/// Test: itself.
-#[test]
-fn savings_segment_renders_the_average_beside_the_session_figure() {
-    assert_eq!(
-        render_savings_segment(&total(5_000, 20_000), None, Some(29)).as_deref(),
-        Some("\u{1f4b8}25%/29%")
+        render_savings_segment(&total(5_000, 20_000), &[25]).as_deref(),
+        Some("\u{1f4b8}25%/25%")
     );
 }
 
-/// Why (#7179, owner ruling): once a compaction tick has landed for this
-/// session, the segment must use the session-share denominator —
-/// `saved / (actual + saved)` — even when `tokens_before` disagrees.
+/// Why (#7074, re-scoped by #8063): the mean renders beside the latest row's
+/// figure, not instead of it. A render that dropped either half would still
+/// look like a savings segment.
 /// Test: itself.
 #[test]
-fn savings_segment_uses_the_session_actual_denominator_when_available() {
+fn savings_segment_renders_the_average_beside_the_latest_row() {
     assert_eq!(
-        render_savings_segment(&total(40_000, 999_999), Some(160_000), None).as_deref(),
-        Some("\u{1f4b8}20%")
+        render_savings_segment(&total(5_000, 20_000), &[25, 29, 33]).as_deref(),
+        Some("\u{1f4b8}33%/29%"),
+        "the newest row is the left figure; the mean of all three is the right"
+    );
+}
+
+/// The reported defect, at the renderer (#8063).
+///
+/// Why: the owner read `💸1%` while `tm compress` was cutting individual tool
+/// outputs by ~19 %, because the left figure was a whole-session share. The
+/// owner's 2026-09-15 ruling makes it the LATEST row's own reduction. Two rows
+/// whose session total differs from both of them is what tells the two rules
+/// apart: the session total here is 21 % (15_000 / 70_000) and appears
+/// nowhere in the rendered segment.
+/// Test: itself, plus
+/// `savings_segment_renders_the_latest_row_not_the_session_total` end to end.
+#[test]
+fn render_uses_the_latest_row_not_the_session_total() {
+    assert_eq!(
+        render_savings_segment(&total(15_000, 70_000), &[20, 30]).as_deref(),
+        Some("\u{1f4b8}30%/25%"),
+        "21% — the session total — must not appear on either side"
+    );
+}
+
+/// The reported defect, end to end (#8063).
+///
+/// Why: the renderer test above is fed hand-built percents, so it cannot catch
+/// a fold that hands the renderer the wrong ones. This one starts at the
+/// ledger: two `compress` rows for one session, 20 % then 30 %, whose pooled
+/// session ratio is 21 %. Against the pre-#8063 fold this rendered
+/// `💸21%/21%`.
+/// What: appends both rows in order and asserts the rendered segment carries
+/// the newest row's 30 % on the left and the mean 25 % on the right.
+/// Test: itself.
+#[test]
+fn savings_segment_renders_the_latest_row_not_the_session_total() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let ledger = savings_log_in(dir.path());
+    write_row(&ledger, "sess-1", 12_000, 60_000); // 20 %
+    write_row(&ledger, "sess-1", 3_000, 10_000); // 30 %, and the newest
+
+    assert_eq!(
+        savings_segment_at(&ledger, "sess-1").as_deref(),
+        Some("\u{1f4b8}30%/25%"),
+        "the newest row's 30% must be the left figure, not the 21% session total"
     );
 }
 
@@ -153,10 +184,7 @@ fn savings_segment_uses_the_session_actual_denominator_when_available() {
 /// Test: itself.
 #[test]
 fn savings_segment_is_absent_on_a_zero_fold() {
-    assert_eq!(
-        render_savings_segment(&SavingsTotal::default(), None, None),
-        None
-    );
+    assert_eq!(render_savings_segment(&SavingsTotal::default(), &[]), None);
     assert_eq!(
         render_savings_segment(
             &SavingsTotal {
@@ -165,18 +193,17 @@ fn savings_segment_is_absent_on_a_zero_fold() {
                 cost_saved_usd: 0.0,
                 rows: 3,
             },
-            None,
-            Some(40),
+            &[40],
         ),
         None,
-        "an average must never render on its own"
+        "a zero fold renders nothing, whatever percents are in hand"
     );
 }
 
-/// Why (#7179): a fold with `tokens_saved > 0` but no denominator on
-/// either path (no actual-tokens reading, and every accepted row predates
-/// #7179's `tokens_before`) must omit the segment, not fabricate a percent
-/// against nothing.
+/// Why (#7179): a fold with `tokens_saved > 0` whose every accepted row
+/// predates #7179's `tokens_before` has no denominator to divide by — it
+/// yields no row percent at all — and must omit the segment rather than
+/// fabricate one against nothing.
 /// Test: itself.
 #[test]
 fn savings_segment_is_absent_without_a_percent_denominator() {
@@ -188,27 +215,28 @@ fn savings_segment_is_absent_without_a_percent_denominator() {
                 cost_saved_usd: 0.01,
                 rows: 1,
             },
-            None,
-            None,
+            &[],
         ),
         None
     );
 }
 
 /// Why (#7179): the one output this segment may never produce, asserted
-/// directly rather than inferred from the format test. A naive
-/// implementation that let the ratio exceed 1.0 (a mixed old/new ledger,
-/// see [`SavingsTotal::percent_saved`]) would print `💸0%` on the wrong
-/// side or a percent above 100 without the clamp this pins.
+/// from the ledger rather than inferred from the format test. A sub-0.5 %
+/// row must round UP to the smallest displayable percent, on both sides
+/// since #8063 — a rendered `0%` would state a measurement that was never
+/// made.
 /// Test: itself.
 #[test]
 fn savings_segment_never_renders_zero_percent() {
-    for (tokens_saved, tokens_before) in [(1_u64, 200), (12_000, 12_000_100), (5, 1_000)] {
-        let rendered = render_savings_segment(&total(tokens_saved, tokens_before), None, None)
-            .unwrap_or_default();
-        assert_ne!(
-            rendered, "\u{1f4b8}0%",
-            "the segment must never render 0% while tokens_saved > 0 \
+    for (tokens_saved, tokens_before) in [(1_i64, 200_u64), (12_000, 12_000_100), (5, 1_000)] {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let ledger = savings_log_in(dir.path());
+        write_row(&ledger, "sess-1", tokens_saved, tokens_before);
+        assert_eq!(
+            savings_segment_at(&ledger, "sess-1").as_deref(),
+            Some("\u{1f4b8}1%/1%"),
+            "a tiny but real saving rounds up to 1%, never down to 0% \
              (tokens_saved={tokens_saved}, tokens_before={tokens_before})"
         );
     }
@@ -224,7 +252,7 @@ fn savings_segment_is_absent_when_the_ledger_is_missing() {
     let dir = tempfile::tempdir().expect("temp dir");
     let ledger = dir.path().join("usage").join("savings.jsonl");
     assert_eq!(
-        savings_segment_at(&ledger, "sess-1", |_| None).as_deref(),
+        savings_segment_at(&ledger, "sess-1").as_deref(),
         Some(EMPTY_STATE)
     );
 }
@@ -241,15 +269,15 @@ fn savings_segment_is_absent_on_an_empty_ledger() {
     std::fs::create_dir_all(ledger.parent().expect("parent")).expect("mkdir");
     std::fs::write(&ledger, "").expect("write empty ledger");
     assert_eq!(
-        savings_segment_at(&ledger, "sess-1", |_| None).as_deref(),
+        savings_segment_at(&ledger, "sess-1").as_deref(),
         Some(EMPTY_STATE)
     );
 }
 
 /// Why: proves the whole path — append a row, fold it back for that session
-/// id, and render — without touching the operator's real root. With one
-/// session on the ledger the average is that session's own figure
-/// (#7074, acceptance criterion a).
+/// id, and render — without touching the operator's real root. With one row
+/// recorded, the mean IS that row's figure, so both sides read the same
+/// (#8063).
 /// Test: itself.
 #[test]
 fn savings_segment_reads_the_ledger_under_an_explicit_root() {
@@ -257,13 +285,13 @@ fn savings_segment_reads_the_ledger_under_an_explicit_root() {
     let ledger = savings_log_in(dir.path());
     write_row(&ledger, "sess-1", 12_000, 60_000);
     assert_eq!(
-        savings_segment_at(&ledger, "sess-1", |_| None).as_deref(),
+        savings_segment_at(&ledger, "sess-1").as_deref(),
         Some("\u{1f4b8}20%/20%")
     );
     // A different session's bar reads no FIGURE from the same file — and
     // says so explicitly rather than vanishing (#7617).
     assert_eq!(
-        savings_segment_at(&ledger, "sess-2", |_| None).as_deref(),
+        savings_segment_at(&ledger, "sess-2").as_deref(),
         Some(EMPTY_STATE)
     );
 }
@@ -285,7 +313,7 @@ fn savings_segment_folds_a_sibling_session_id() {
     trusty_mpm::core::session_links::record_link(dir.path(), "managed-1", "claude-new");
 
     assert_eq!(
-        savings_segment_at_in(dir.path(), &ledger, "claude-new", |_| None).as_deref(),
+        savings_segment_at_in(dir.path(), &ledger, "claude-new").as_deref(),
         Some("\u{1f4b8}20%/20%"),
         "a restart's new id must fold its managed session's earlier rows"
     );
@@ -305,9 +333,9 @@ fn savings_segment_prefers_this_sessions_own_rows() {
     trusty_mpm::core::session_links::record_link(dir.path(), "managed-1", "claude-new");
 
     assert_eq!(
-        savings_segment_at_in(dir.path(), &ledger, "claude-new", |_| None).as_deref(),
-        Some("\u{1f4b8}50%/35%"),
-        "this session's own 50% must win over the sibling's 20%"
+        savings_segment_at_in(dir.path(), &ledger, "claude-new").as_deref(),
+        Some("\u{1f4b8}50%/50%"),
+        "this session's own 50% must win over the sibling's 20%, on both sides"
     );
 }
 
@@ -324,7 +352,7 @@ fn savings_segment_renders_the_empty_state_on_a_zero_fold() {
 
     for id in ["never-seen", ""] {
         assert_eq!(
-            savings_segment_at_in(dir.path(), &ledger, id, |_| None).as_deref(),
+            savings_segment_at_in(dir.path(), &ledger, id).as_deref(),
             Some(EMPTY_STATE),
             "session id {id:?} must render the explicit empty state"
         );
@@ -335,21 +363,25 @@ fn savings_segment_renders_the_empty_state_on_a_zero_fold() {
     );
 }
 
-/// Why (#7074, acceptance criterion a): three sessions on one ledger, and
-/// the rendered average is their arithmetic mean — 10, 30 and 50 average to
-/// 30, while a pooled ratio over the same rows would render 29.
+/// Why (#8063): the mean is scoped to THIS session's rows. The 2026-09-15
+/// ruling reads "the average across all savings rows recorded in this
+/// session", so another session's 90 % must not raise a bar the operator
+/// reads as their own. Three sessions on one ledger, and only sess-a's two
+/// rows reach sess-a's bar — 10 and 30 average to 20, with the newer 30 on
+/// the left.
 /// Test: itself.
 #[test]
-fn savings_segment_averages_across_every_session_on_the_ledger() {
+fn savings_segment_averages_this_sessions_own_rows() {
     let dir = tempfile::tempdir().expect("temp dir");
     let ledger = savings_log_in(dir.path());
     write_row(&ledger, "sess-a", 100, 1_000); // 10 %
-    write_row(&ledger, "sess-b", 3_000, 10_000); // 30 %
-    write_row(&ledger, "sess-c", 500, 1_000); // 50 %
+    write_row(&ledger, "sess-b", 900, 1_000); // 90 %, another session
+    write_row(&ledger, "sess-a", 3_000, 10_000); // 30 %, and sess-a's newest
 
     assert_eq!(
-        savings_segment_at(&ledger, "sess-a", |_| None).as_deref(),
-        Some("\u{1f4b8}10%/30%")
+        savings_segment_at(&ledger, "sess-a").as_deref(),
+        Some("\u{1f4b8}30%/20%"),
+        "sess-b's 90% must reach neither figure"
     );
 }
 
@@ -382,7 +414,7 @@ fn rendering_writes_nothing_under_the_usage_directory() {
 
     let before = listing(&usage_dir);
     assert!(
-        savings_segment_at(&ledger, "sess-a", |_| None).is_some(),
+        savings_segment_at(&ledger, "sess-a").is_some(),
         "the fixture must render, or this test proves nothing"
     );
     assert_eq!(
