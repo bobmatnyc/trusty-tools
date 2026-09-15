@@ -464,4 +464,33 @@ fn worktree_7652_a_foreign_nested_claim_outranks_the_callers_own() {
             session: "tm-caller-7652".to_string()
         }
     );
+
+    // #7652 critic round 3: the other end of the precedence chain. Every case
+    // above puts each claim on an ANCESTOR of the candidate, so `CoversWorkspace`
+    // is never reached and a reorder that also hoisted `foreign_nested` above
+    // `caller_workspace` would pass them all while turning a gate-2 REFUSAL into
+    // a permit. Here the candidate CONTAINS the caller's workspace, so the
+    // caller's claim must still win and still refuse.
+    let over_the_callers_workspace = LiveClaims {
+        claims: vec![
+            WorkspaceClaim::new("tm-foreign-7652", &project),
+            WorkspaceClaim::new("tm-caller-7652", &worktree),
+        ],
+        caller: Some("tm-caller-7652".to_string()),
+        owners: Default::default(),
+    };
+    let containing = worktree.parent().expect("the worktrees directory");
+    let state = over_the_callers_workspace.claim_state(containing);
+    assert_eq!(
+        state,
+        ClaimState::CallerWorkspace {
+            session: "tm-caller-7652".to_string()
+        },
+        "a candidate containing the caller's own workspace must not be downgraded \
+         to a permitting state by a foreign ancestor claim"
+    );
+    assert!(
+        state.refusal(false).is_some(),
+        "and that state must still refuse"
+    );
 }
