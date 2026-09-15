@@ -65,19 +65,6 @@ use crate::{
 
 use build_info::BuildInfo;
 
-/// Run all side-effecting startup initialization that must happen before the
-/// top-level clap parse.
-///
-/// Why: `run()` previously inlined ~320 lines of bootstrapping (env loading,
-/// tracing, early-exit dispatch for `--version`/`--api`/`--search-service`,
-/// state-dir creation, build-counter bump, chat-logger, run-id, migrations,
-/// worktree/project/process cleanup, and the message bus). Extracting it keeps
-/// `run()` readable and the file under the 500-line cap.
-/// What: Performs the bootstrap in argv order. Returns `Ok(false)` when an
-/// early-exit path already handled the invocation (so the caller should
-/// `return Ok(())`); returns `Ok(true)` to continue into the main dispatch.
-/// Test: Indirectly via `cargo run -p trusty-agents` and the crate's
-/// integration tests (`--version`, `--api`, normal REPL startup).
 /// The API credential this process was started with, if any.
 ///
 /// Why (#7609): `--api-token <v>`, `--api-token=<v>`, then the
@@ -104,6 +91,21 @@ fn resolved_api_token(raw_args: &[String]) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// Run all side-effecting startup initialization that must happen before the
+/// top-level clap parse.
+///
+/// Why: `run()` previously inlined ~320 lines of bootstrapping (env loading,
+/// tracing, early-exit dispatch for `--version`/`--api`/`--search-service`,
+/// state-dir creation, build-counter bump, chat-logger, run-id, migrations,
+/// worktree/project/process cleanup, and the message bus). Extracting it keeps
+/// `run()` readable and the file under the 500-line cap.
+/// What: Performs the bootstrap in argv order. Returns `Ok(false)` when an
+/// early-exit path already handled the invocation (so the caller should
+/// `return Ok(())`); returns `Ok(true)` to continue into the main dispatch.
+/// Test: Indirectly via `cargo run -p trusty-agents` and the crate's
+/// integration tests (`--version`, `--api`, normal REPL startup);
+/// `a_credential_is_resolved_from_argv_then_the_environment` pins the one
+/// decision it makes that a unit test can reach.
 pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
     // Handle --version / -V before anything else (no env/tracing/etc.).
     // Why: `--version` must be cheap and side-effect-free so it's safe to
@@ -123,14 +125,6 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
         println!("{}", build_info::version_string());
         return Ok(false);
     }
-
-    // #7609 (critic HIGH-3): the channel-write gate applies to the in-process
-    // `channel` tool in EVERY process, not only `--api`. Recording it here —
-    // from the same `--api-token` / `TAGENT_API_TOKEN` resolution the serve path
-    // uses — is what lets a REPL or chat process with the credential exported
-    // perform its own writes. `serve_with_config` records again afterwards,
-    // because only it can mint an ephemeral credential for a loopback bind.
-    crate::api::server::channel_auth::record_daemon_credential(resolved_api_token(&raw_args));
 
     // Load env and init tracing first so everything downstream has logs/keys.
     //
@@ -158,6 +152,17 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
             dotenvy::from_path(&project_env).ok();
         }
     }
+
+    // #7609 (critic HIGH-3, then MEDIUM-2): the channel-write gate applies to
+    // the in-process `channel` tool in EVERY process, not only `--api`.
+    // Recording it here — from the same `--api-token` / `TAGENT_API_TOKEN`
+    // resolution the serve path uses — is what lets a REPL or chat process with
+    // the credential set perform its own writes. It has to come AFTER the
+    // dotenv loads above, or a credential that lives in `.env.local` (where
+    // this project's own does) is invisible to it. `serve_with_config` records
+    // again afterwards, because only it can mint an ephemeral credential for a
+    // loopback bind.
+    crate::api::server::channel_auth::record_daemon_credential(resolved_api_token(&raw_args));
 
     // Why: External agent plugins (cto-assistant, future personas) are
     //      installed by a downstream launcher BEFORE calling `run()`. The

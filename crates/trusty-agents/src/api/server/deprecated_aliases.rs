@@ -92,10 +92,24 @@ pub(super) async fn get_listeners_alias(AxumPath(name): AxumPath<String>) -> Res
 /// route takes [`ChannelWriter`] like `PUT /api/agents/{name}/channels`.
 /// Test: `a_tokenless_daemon_refuses_every_channel_write`.
 pub(super) async fn put_listeners_alias(
-    _writer: super::channel_auth::ChannelWriter,
+    writer: super::channel_auth::ChannelWriter,
     AxumPath(name): AxumPath<String>,
     Json(update): Json<super::agent_listeners::ListenerUpdate>,
 ) -> Response {
     warn_once();
-    answer(super::agent_channels::write_listeners(&name, update).await)
+    // #7609 critic MEDIUM-1: an accepted write on this route left no record at
+    // all, which is the one thing every sibling of the gate does.
+    match super::agent_channels::write_listeners(&name, update).await {
+        Ok((view, before, after)) => {
+            writer.audit(
+                "PUT /api/agents/{name}/listeners",
+                "assistant",
+                Some(&name),
+                before,
+                after,
+            );
+            answer(Ok(view))
+        }
+        Err(e) => answer(Err(e)),
+    }
 }

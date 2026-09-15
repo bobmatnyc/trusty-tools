@@ -228,9 +228,10 @@ pub(crate) async fn write(name: &str, update: ListenerUpdate) -> Result<Value, C
 ///
 /// Why (#7609): the merged `channel` tool's `set` action reaches this write,
 /// and a model-driven change to which events wake an assistant is the same
-/// class of change the HTTP channel routes are gated on. The deprecated
-/// `PUT /api/agents/{name}/listeners` route is deliberately NOT gated — see
-/// `super::deprecated_aliases::put_listeners_alias` for why.
+/// class of change the HTTP channel routes are gated on — `instructions` reach
+/// the wake prompt as TRUSTED text. The deprecated
+/// `PUT /api/agents/{name}/listeners` route takes the same gate, through
+/// `ChannelWriter`; see `super::deprecated_aliases::put_listeners_alias`.
 /// What: 401 when this daemon serves no authenticated API; otherwise [`write`].
 /// Test: `crate::tools::channel::channel_tests::the_tool_refuses_a_write_on_a_tokenless_daemon`.
 pub(crate) async fn write_from_turn(

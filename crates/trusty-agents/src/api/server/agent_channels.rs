@@ -562,8 +562,19 @@ pub(crate) async fn write_from_turn(name: &str, update: Update) -> Result<Value,
 pub(super) async fn write_listeners(
     name: &str,
     update: agent_listeners::ListenerUpdate,
-) -> Result<Value, Error> {
-    agent_listeners::write(name, update).await
+) -> Result<(Value, usize, usize), Error> {
+    // #7609 critic MEDIUM-1: the caller audits this write, so it needs the
+    // stored count either side of it. A `before` this read cannot produce is
+    // reported as zero rather than failing the write — the count is audit
+    // detail, and the write itself has already been authorized.
+    let before = agent_listeners::read(name)
+        .await
+        .ok()
+        .and_then(|view| view["listeners"].as_array().map(Vec::len))
+        .unwrap_or_default();
+    let after = update.listeners.len();
+    let view = agent_listeners::write(name, update).await?;
+    Ok((view, before, after))
 }
 pub(super) async fn send_route(
     AxumPath((name, id)): AxumPath<(String, String)>,
