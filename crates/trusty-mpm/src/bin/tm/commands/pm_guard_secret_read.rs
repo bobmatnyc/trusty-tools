@@ -93,7 +93,7 @@
 //! commands naming no file at all. A here-document body now leaves the argv
 //! text through `pm_guard_bash::split_heredoc_bodies`, the same framing
 //! `has_file_write_redirection` has used since #5356, and an interpreter's
-//! inline program is identified by position (see [`inline_program_index`]).
+//! inline program is identified by position (see [`inline_program_indices`]).
 //! Both are then scanned as [`Scan::ProgramText`], which changes exactly one
 //! answer: an unresolvable brace shape is ordinary text rather than a secret.
 //! Every pattern and every family still applies, so `python -c 'open(".env")'`
@@ -142,7 +142,7 @@
 //! admitted as a file only by the `/` in front of it. A word list is not a path
 //! operand list: the body decides what the variable is for, and the name
 //! reaches the body as `$b`. [`for_word_list_start`] identifies the list by
-//! POSITION, the way [`pattern_argument_index`] and [`inline_program_index`]
+//! POSITION, the way [`pattern_argument_index`] and [`inline_program_indices`]
 //! identify theirs — skipping any [`LIST_INTRODUCERS`] keyword in front of it,
 //! so a header nested behind an outer `do`/`then` reads the same — and inside
 //! it [`reads_as_a_branch_name`] withdraws that one proxy.
@@ -733,7 +733,7 @@ const WORD_LIST_KEYWORDS: &[&str] = &["for", "select"];
 /// withdraws it, because the words are then whatever that command prints rather
 /// than the literal list written here. `None` for every other segment, so no
 /// ordinary argv reaches the narrowed shape test. The keyword is identified by
-/// POSITION, exactly as [`pattern_argument_index`] and [`inline_program_index`]
+/// POSITION, exactly as [`pattern_argument_index`] and [`inline_program_indices`]
 /// identify theirs — this adds no verb to any list.
 ///
 /// Round 13 critic MEDIUM: a header NESTED in an outer compound command keeps
