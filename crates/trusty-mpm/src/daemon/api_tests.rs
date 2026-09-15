@@ -1369,6 +1369,9 @@ async fn doctor_endpoint_returns_report() {
         "binary_provenance",
         // #5007: `sessions.json` integrity — a corrupt store blocks every write.
         "session_store",
+        // #6556: undelivered SubagentStop records waiting on disk, or a spool
+        // the hook cannot write into.
+        "stop_spool",
         "stray_mcp_json",
         // #7422: what this project's sessions will NOT load, and where to opt in.
         "session_scope",

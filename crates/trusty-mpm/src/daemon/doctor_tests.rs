@@ -469,7 +469,8 @@ async fn run_doctor_produces_fifty_four_checks() {
     // (fifty → fifty-one); issue #7673 adds `ancestor_claude_md` (fifty-one →
     // fifty-two); issue #7867 renames `instruction_compression` to
     // `instruction_fold` and adds `tool_output_compression` (fifty-two →
-    // fifty-three).
+    // fifty-three); issue #6556 adds `stop_spool` (fifty-four →
+    // fifty-five).
     //
     // The test NAME had drifted four additions behind the tally above by the
     // time #6586 landed — it still read `thirty_two`. Renaming it is part of
@@ -547,6 +548,9 @@ async fn run_doctor_produces_fifty_four_checks() {
         "binary_provenance",
         // #5007: `sessions.json` integrity — a corrupt store blocks every write.
         "session_store",
+        // #6556: undelivered SubagentStop records waiting on disk, or a spool
+        // the hook cannot write into.
+        "stop_spool",
         "stray_mcp_json",
         // #7422: what this project's sessions will NOT load, and where to opt in.
         "session_scope",

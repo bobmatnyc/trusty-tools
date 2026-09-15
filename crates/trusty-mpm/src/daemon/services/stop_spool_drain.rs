@@ -1,13 +1,14 @@
 //! Replay the `SubagentStop` records a hook could not deliver (#6556).
 //!
 //! Why: the hook is the only process that ever learns a subagent stopped, and it
-//! learns it once. When this daemon was down, every attempt that hook made
-//! failed and it parked the stop in
-//! [`crate::core::stop_spool`] instead of losing it. Without a reader that park
-//! is a write-only file: the delegation still sits `Running` until the six-hour
-//! `RUNNING_STALE_AFTER_SECS` sweep, holding a builder slot and a checkout. This
-//! is that reader, and the reap loop is where it runs — the same loop that owns
-//! the staleness sweep this fix exists to beat.
+//! learns it once. When this daemon could not answer, every attempt that hook
+//! made failed and it parked the stop in [`crate::core::stop_spool`] instead of
+//! losing it. Without a reader that park is a write-only file: the delegation
+//! still sits `Running` until the six-hour `RUNNING_STALE_AFTER_SECS` sweep,
+//! holding a builder slot and a checkout. This is that reader, and the reap loop
+//! is where it runs — the same loop that owns the staleness sweep this fix
+//! exists to beat. The recoverable case is a WEDGED-BUT-ALIVE daemon; see the
+//! [`crate::core::stop_spool`] header for why a restart is not one.
 //!
 //! What: [`drain_unposted_stops`] replays each parked body through the same
 //! [`crate::daemon::rpc::sessions_legacy_ops::ingest_hook`] a live POST would
