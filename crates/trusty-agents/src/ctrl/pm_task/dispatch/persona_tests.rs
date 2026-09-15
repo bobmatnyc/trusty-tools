@@ -731,6 +731,69 @@ fn base_assistant_scope_grants_cover_every_allowlisted_gworkspace_tool() {
     }
 }
 
+/// #7448: a live smoke test found the base assistant granting `memory.read`/
+/// `memory.write` in `[tools].scopes` while `[tools].allow` named no tool
+/// either scope could cover — a chat turn asking it to remember a fact
+/// answered "no such tool".
+///
+/// Why: `assistant_memory::bind` is the ONLY source of a memory tool an
+/// assistant persona ever sees — it strips every OTHER `memory_*`/`kg_*`
+/// name from the registry before a persona is dispatched (see `bind`'s doc
+/// comment, #7396/#7443), keeping exactly `memory_recall`, `memory_remember`
+/// and `memory_write` registered. A scope/allow-list agreement check that
+/// used a wider or a narrower vocabulary would pass or fail for the wrong
+/// reason, so this test uses `bind`'s own registered set, not a guess.
+/// What: resolves the shipped base template through the real loader and, for
+/// each of `memory.read`/`memory.write`, requires an allowlisted name that
+/// both (a) survives `bind` and (b) `assistant_memory::scope_for` maps to
+/// that scope. Mirrors the reachability half of
+/// `base_assistant_scope_grants_cover_every_allowlisted_gworkspace_tool`
+/// above, scoped to the memory namespace instead of gworkspace.
+/// Test: this test IS the coverage.
+#[test]
+fn base_assistant_scope_grants_cover_every_declared_memory_scope() {
+    let agents_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join(".trusty-agents")
+        .join("agents");
+    let cfg = AgentConfig::by_name_in(&[agents_dir], "assistant")
+        .expect("bundled assistant template resolves");
+    let allow = cfg
+        .tools
+        .allow
+        .clone()
+        .expect("the base assistant declares [tools].allow");
+    let scopes = cfg
+        .tools
+        .scopes
+        .clone()
+        .expect("the base assistant declares [tools].scopes");
+    let patterns: Vec<ScopePattern> = scopes.iter().cloned().map(ScopePattern::new).collect();
+
+    // The fixed set `assistant_memory::bind` keeps registered for an
+    // assistant persona — any other `memory_*`/`kg_*` name (a raw
+    // `kg_assert` included) is retained-filtered out before dispatch, so
+    // allowlisting it would grant a name the runtime never honors.
+    const BOUND_MEMORY_TOOLS: [&str; 3] = ["memory_recall", "memory_remember", "memory_write"];
+
+    for scope in ["memory.read", "memory.write"] {
+        assert!(
+            patterns
+                .iter()
+                .any(|p| p.matches(&Scope::new(scope.to_string()))),
+            "test fixture assumption broken: the base no longer grants `{scope}`"
+        );
+        let covered = allow.iter().any(|name| {
+            BOUND_MEMORY_TOOLS.contains(&name.as_str())
+                && crate::tools::assistant_memory::scope_for(name) == scope
+        });
+        assert!(
+            covered,
+            "the base assistant grants `{scope}` but [tools].allow names no \
+             bound memory tool covering it (allow = {allow:?})"
+        );
+    }
+}
+
 /// #3987 the negative half: a live family/wildcard pattern is never flagged,
 /// and option B introduces no double-grant weirdness in the overlays.
 /// `izzie` ships blanket `google.*`; `cto-assistant` ships the narrow
