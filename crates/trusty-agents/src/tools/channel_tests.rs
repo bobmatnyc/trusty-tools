@@ -129,3 +129,66 @@ async fn the_tool_refuses_a_write_on_a_tokenless_daemon() {
         read.content()
     );
 }
+
+/// With a credential recorded, a tool write actually runs and is audited.
+///
+/// Why (#7609 critic MEDIUM-1): every other tool test stops at the gate, so
+/// `write_from_turn`'s body — validation, compare-and-swap, the audit line —
+/// was never executed by a test at all.
+#[tokio::test]
+async fn a_credentialed_tool_write_stores_and_audits() {
+    let _guard = crate::test_env::lock_home();
+    let home = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(home.path().join(".trusty-agents")).expect("config dir");
+    std::fs::write(
+        home.path().join(".trusty-agents/config.toml"),
+        "[mcp]\ninject_for_roles = [\"ctrl\"]\n",
+    )
+    .expect("seed");
+    unsafe {
+        std::env::set_var("HOME", home.path());
+    }
+    let restore = crate::api::server::channel_auth::daemon_credential();
+    crate::api::server::channel_auth::record_daemon_credential(Some("recorded".into()));
+
+    let tool = ChannelTool::new("fixture");
+    let listed = tool
+        .execute(json!({"action":"list","scope":"global"}))
+        .await;
+    let view: serde_json::Value =
+        serde_json::from_str(listed.content()).expect("the global view is JSON");
+    let revision = view["revision"].as_str().expect("revision").to_owned();
+
+    let written = tool
+        .execute(json!({
+            "action":"set","scope":"global","revision":revision,
+            "channels":[{"id":"team","name":"Team","provider":"slack","target":"C123456",
+                         "enabled":true,"send_enabled":true}]
+        }))
+        .await;
+    assert!(!written.is_error(), "the write runs: {}", written.content());
+    let stored: serde_json::Value =
+        serde_json::from_str(written.content()).expect("the stored view is JSON");
+    assert_eq!(
+        stored["channels"]
+            .as_array()
+            .and_then(|c| c.first())
+            .map(|c| c["id"].clone()),
+        Some(json!("team")),
+        "the tool's write is what the file now holds"
+    );
+    assert!(
+        std::fs::read_to_string(home.path().join(".trusty-agents/config.toml"))
+            .expect("read back")
+            .contains("[[channels]]"),
+        "and it reached disk"
+    );
+
+    // A stale revision is a conflict here too, not a silent overwrite.
+    let stale = tool
+        .execute(json!({"action":"set","scope":"global","revision":"0000","channels":[]}))
+        .await;
+    assert!(stale.is_error(), "a stale revision is refused");
+
+    crate::api::server::channel_auth::record_daemon_credential(restore);
+}

@@ -78,6 +78,17 @@ async fn body_json(response: axum::response::Response) -> Value {
     serde_json::from_slice(&bytes).unwrap_or(Value::Null)
 }
 
+/// The router `serve_with_config` builds for a tokenless loopback daemon that
+/// minted `credential`.
+fn router_with_credential(credential: &str) -> axum::Router {
+    crate::api::server::routes::build_router_with_channel_credential(
+        AppState::default(),
+        None,
+        trusty_common::server::SelfOrigins::default(),
+        Some(credential.to_string()),
+    )
+}
+
 fn slack_channel() -> Value {
     json!({
         "id": "team",
@@ -186,6 +197,28 @@ async fn a_tokenless_daemon_refuses_every_channel_write() {
         "tokenless PUT /api/agents/{{name}}/channels"
     );
 
+    // #7609 critic HIGH-2: the deprecated listener alias writes `instructions`
+    // that reach the wake prompt as TRUSTED text, so it takes the same gate.
+    let listeners = json!({"revision": "0000", "listeners": []});
+    let app = build_router(AppState::default());
+    let response = app
+        .oneshot(put("/api/agents/fixture/listeners", None, &listeners))
+        .await
+        .expect("alias put");
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "tokenless PUT /api/agents/{{name}}/listeners"
+    );
+
+    // A WRONG credential is refused just as a missing one is.
+    let app = build_router_with_config(AppState::default(), Some(TOKEN.into()));
+    let response = app
+        .oneshot(put("/api/channels", Some("not-the-token"), &body))
+        .await
+        .expect("wrong credential");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "wrong bearer");
+
     // Reads are unchanged by the gate.
     let app = build_router(AppState::default());
     let response = app
@@ -195,13 +228,165 @@ async fn a_tokenless_daemon_refuses_every_channel_write() {
     assert_eq!(response.status(), StatusCode::OK, "reads stay open");
 }
 
+/// A tokenless LOOPBACK daemon mints a credential, discloses it on
+/// `/api/config`, and accepts the write the served UI then makes.
+///
+/// Why (#7609 critic HIGH-4): `tagent --api` defaults tokenless and no sidecar
+/// spawn passes `--api-token`, so without this the Channels tab the daemon
+/// itself serves would 401 on Save. This drives the exact composition
+/// `serve_with_config` builds — the minting rule is asserted separately in
+/// `channel_auth::tests::the_minting_rule_follows_the_bind`.
+#[tokio::test]
+async fn a_minted_credential_lets_the_served_ui_save() {
+    let _home_guard = crate::test_env::lock_home();
+    let (_home, _config) = seed_home();
+    let minted = crate::api::server::channel_auth::channel_write_credential(
+        None,
+        std::net::Ipv4Addr::LOCALHOST.into(),
+    )
+    .expect("a loopback bind mints");
+
+    // The served UI's bootstrap probe hands it over.
+    let app = router_with_credential(&minted);
+    let config = body_json(app.oneshot(get("/api/config", None)).await.expect("config")).await;
+    assert_eq!(config["auth_required"], json!(false), "no operator token");
+    assert_eq!(
+        config["channel_write_token"].as_str(),
+        Some(minted.as_str()),
+        "the UI learns the credential it must present"
+    );
+
+    // And the write it makes with that credential is admitted.
+    let app = router_with_credential(&minted);
+    let view = body_json(app.oneshot(get("/api/channels", None)).await.expect("get")).await;
+    let revision = view["revision"].as_str().expect("revision").to_owned();
+    let mut channels = view["channels"].clone();
+    channels
+        .as_array_mut()
+        .expect("array")
+        .push(slack_channel());
+    let app = router_with_credential(&minted);
+    let response = app
+        .oneshot(put(
+            "/api/channels",
+            Some(&minted),
+            &json!({"revision": revision, "channels": channels}),
+        ))
+        .await
+        .expect("put");
+    assert_eq!(response.status(), StatusCode::OK, "the served UI can save");
+
+    // A caller without it is still refused.
+    let app = router_with_credential(&minted);
+    let response = app
+        .oneshot(put(
+            "/api/channels",
+            None,
+            &json!({"revision": "0000", "channels": []}),
+        ))
+        .await
+        .expect("no credential");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// The minted credential is withheld from an origin this daemon would not
+/// serve its own UI to.
+///
+/// Why: `/api/config` is the pre-auth bootstrap probe, so the disclosure is
+/// narrowed by the same same-origin test the CORS layer applies — belt and
+/// braces with that layer, which already withholds the response BODY from a
+/// cross-origin page by refusing to reflect its origin.
+#[tokio::test]
+async fn the_channel_credential_is_withheld_from_a_foreign_origin() {
+    let _home_guard = crate::test_env::lock_home();
+    let (_home, _config) = seed_home();
+    let minted = "c0ffee".to_string();
+
+    let foreign = Request::builder()
+        .method(Method::GET)
+        .uri("/api/config")
+        .header(header::ORIGIN, "https://evil.example.com")
+        .body(Body::empty())
+        .expect("request");
+    let config = body_json(
+        router_with_credential(&minted)
+            .oneshot(foreign)
+            .await
+            .expect("config"),
+    )
+    .await;
+    assert!(
+        config.get("channel_write_token").is_none(),
+        "a foreign origin learns nothing: {config}"
+    );
+
+    let same = Request::builder()
+        .method(Method::GET)
+        .uri("/api/config")
+        .header(header::ORIGIN, "http://127.0.0.1:8080")
+        .body(Body::empty())
+        .expect("request");
+    let config = body_json(
+        router_with_credential(&minted)
+            .oneshot(same)
+            .await
+            .expect("config"),
+    )
+    .await;
+    assert_eq!(config["channel_write_token"].as_str(), Some("c0ffee"));
+}
+
+/// A broken `<name>.channels.json` does not break the listener alias.
+///
+/// Why (#7609 critic MEDIUM-5): an earlier revision routed the alias `GET`
+/// through the channel view, which also parses the channels file — turning a
+/// previously-200 listeners read into a 500 for a file this route never needed.
+#[tokio::test]
+async fn a_broken_channels_file_does_not_break_the_listener_alias() {
+    let _home_guard = crate::test_env::lock_home();
+    let (home, _config) = seed_home();
+    let agents = home.path().join(".trusty-agents/agents");
+    std::fs::create_dir_all(&agents).expect("agents dir");
+    std::fs::write(agents.join("fixture.toml"), "[agent]\nname='fixture'\n").expect("manifest");
+    // A provider with no adapter: `agent_channels::load_at` refuses this file.
+    std::fs::write(
+        agents.join("fixture.channels.json"),
+        r#"[{"id":"team","name":"Team","provider":"notion","target":"page","enabled":true}]"#,
+    )
+    .expect("channels");
+
+    let app = build_router(AppState::default());
+    let response = app
+        .oneshot(get("/api/agents/fixture/listeners", None))
+        .await
+        .expect("alias get");
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "the listener view does not depend on the channels file"
+    );
+    let body = body_json(response).await;
+    assert!(
+        body.get("listeners").is_some() && body.get("revision").is_some(),
+        "the pre-merge body shape: {body}"
+    );
+
+    // The channel view still reports the broken file, as it always did.
+    let app = build_router(AppState::default());
+    let response = app
+        .oneshot(get("/api/agents/fixture/channels", None))
+        .await
+        .expect("channels get");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
 /// An accepted channel write emits exactly one audit line naming the route,
 /// the scope and the binding counts either side of it.
 ///
 /// Pre-change (`origin/main`) this fails at the status assertion: the route
 /// does not exist, so nothing is written and nothing is logged.
 #[tokio::test]
-async fn a_token_bearing_channel_write_is_admitted_and_audited() {
+async fn a_credentialed_channel_write_is_admitted_and_audited() {
     let _home_guard = crate::test_env::lock_home();
     let (_home, _config) = seed_home();
     let logs = CaptureWriter::default();
@@ -238,6 +423,7 @@ async fn a_token_bearing_channel_write_is_admitted_and_audited() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let captured = logs.contents();
+    drop(_log_guard);
     assert!(
         captured.contains("audit=\"channel-write\""),
         "one audit line per accepted write:\n{captured}"
@@ -245,10 +431,39 @@ async fn a_token_bearing_channel_write_is_admitted_and_audited() {
     assert!(
         captured.contains("route=\"PUT /api/channels\"")
             && captured.contains("scope=\"global\"")
+            && captured.contains("assistant=\"-\"")
             && captured.contains("channels_before=1")
             && captured.contains("channels_after=2")
             && captured.contains("token_configured=true"),
-        "the audit line names route, scope, counts and caller identity:\n{captured}"
+        "the audit line names route, scope, assistant and counts:\n{captured}"
+    );
+    // #7609 critic MEDIUM-2: `oneshot` carries no `ConnectInfo`, so the caller
+    // address is genuinely unknown here and the line says so rather than
+    // omitting the field. `serve_with_config` wires
+    // `into_make_service_with_connect_info`, which is what fills it in a real
+    // daemon.
+    assert!(
+        captured.contains("remote_addr=\"unknown\""),
+        "the address field is present and honest off the wire:\n{captured}"
+    );
+
+    // #7609: the revision the write answers with survives the TOML round trip,
+    // so a client can continue from it without re-reading.
+    let answered = body_json(response).await["revision"]
+        .as_str()
+        .expect("revision")
+        .to_owned();
+    let app = build_router_with_config(AppState::default(), Some(TOKEN.into()));
+    let reread = body_json(
+        app.oneshot(get("/api/channels", Some(TOKEN)))
+            .await
+            .expect("re-get"),
+    )
+    .await;
+    assert_eq!(
+        reread["revision"].as_str(),
+        Some(answered.as_str()),
+        "the revision is stable across the TOML round trip"
     );
 }
 
@@ -297,7 +512,8 @@ fn a_malformed_config_is_reported_not_read_as_empty() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("config.toml");
     std::fs::write(&path, "[[channels]]\nid = 5\n").expect("seed");
-    let error = persist(&path, &revision(&[]), &[]).expect_err("a broken table blocks the write");
+    let empty = revision(&[]).expect("an empty list encodes");
+    let error = persist(&path, &empty, &[]).expect_err("a broken table blocks the write");
     assert!(
         error.to_string().contains("nothing was written"),
         "the refusal says nothing was written: {error}"
@@ -311,7 +527,7 @@ fn a_malformed_config_is_reported_not_read_as_empty() {
     // An absent file is a legitimate empty list, not a failure.
     let absent = dir.path().join("missing.toml");
     assert!(matches!(
-        persist(&absent, &revision(&[]), &[]).expect("absent file"),
+        persist(&absent, &empty, &[]).expect("absent file"),
         Persisted::Written {
             before: 0,
             after: 0
@@ -378,6 +594,30 @@ fn global_channel_validation_covers_provider_target_and_routes() {
         validate(&unsupported, &known).expect_err("no adapter").0,
         StatusCode::BAD_REQUEST
     );
+}
+
+/// A turn-originated listener patch is refused when this process holds no
+/// channel-write credential.
+///
+/// Why (#7609 critic HIGH-1): `settings.patch/listeners` writes the same
+/// `instructions` the gated alias writes, from a model turn, and sat three
+/// lines above the arm that was already gated.
+#[tokio::test]
+async fn a_turn_originated_listener_patch_takes_the_gate() {
+    let _home_guard = crate::test_env::lock_home();
+    let (_home, _config) = seed_home();
+    let restore = crate::api::server::channel_auth::daemon_credential();
+    crate::api::server::channel_auth::record_daemon_credential(None);
+
+    let refusal = crate::api::server::agent_listeners::write_from_turn(
+        "fixture",
+        serde_json::from_value(json!({"revision": "0000", "listeners": []})).expect("update"),
+    )
+    .await
+    .expect_err("a process with no credential refuses");
+    assert_eq!(refusal.0, StatusCode::UNAUTHORIZED);
+
+    crate::api::server::channel_auth::record_daemon_credential(restore);
 }
 
 /// A `tracing` writer that keeps every emitted line in memory.
