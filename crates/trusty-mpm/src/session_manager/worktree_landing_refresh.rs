@@ -85,8 +85,12 @@ pub(crate) fn refresh_landing_refs(dir: &Path) -> Result<(), String> {
 /// `super::worktree_safety_tests`.
 pub(crate) fn refresh_landing_refs_within(dir: &Path, timeout: Duration) -> Result<(), String> {
     let mut cmd = git_command(dir, &["fetch", "--prune", "--quiet", "origin"]);
-    // A background fetch must never inherit a terminal to prompt on.
+    // A background fetch must never inherit a terminal to prompt on. Git's
+    // credential prompt opens /dev/tty directly, so a null stdin is not
+    // enough; the env var is what every other network spawn here sets.
+    // #7914: a stale credential helper would otherwise burn the whole bound.
     cmd.stdin(std::process::Stdio::null());
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
     match run_bounded(cmd, timeout) {
         Ok(out) if out.status.success() => Ok(()),
         Ok(out) => {
