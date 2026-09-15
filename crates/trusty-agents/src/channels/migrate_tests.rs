@@ -398,7 +398,7 @@ async fn the_assistant_sweep_never_blocks_its_caller() {
     holding.recv().expect("the holder took the lock");
 
     let started = std::time::Instant::now();
-    spawn_assistant_migration(
+    spawn_startup_migration(
         vec![dir.path().to_path_buf()],
         vec![storable_global()],
         Some(dir.path().join("config.toml")),
@@ -616,4 +616,111 @@ fn the_route_to_backfill_is_idempotent_and_keeps_comments() {
     // A channel id this file does not declare writes nothing at all.
     assert!(!backfill_route_to(&config, "absent", "izzie").expect("succeeds"));
     assert_eq!(std::fs::read_to_string(&config).expect("read back"), second);
+}
+
+/// The global channels a daemon holds in memory for `LIVE_GLOBAL_CONFIG`.
+///
+/// Why: `api::server::routes` passes exactly what `GlobalConfig::load` parsed,
+/// so deriving the fixture the same way keeps the legacy in-memory absorb
+/// (#7609 requirement 4) inside the regression rather than beside it.
+fn globals_as_a_daemon_loads_them(raw: &str) -> Vec<Channel> {
+    crate::mcp::config::GlobalConfig::from_toml_str(raw)
+        .expect("the fixture config parses")
+        .channels
+}
+
+/// A daemon start — not the REPL — drains the global config, exactly once.
+///
+/// Why (#7609): `migrate_global_if_absent` was reachable only from
+/// `GlobalConfig::load_or_create`, and only the REPL routing command calls
+/// that. A supervised `tagent --api` / `tagent --slack` absorbed the legacy
+/// `[[listeners]]` table in memory and left `config.toml` byte-identical across
+/// every restart, so the `route_to` backfill had no `[[channels]]` entry to
+/// append the bound assistant to.
+#[test]
+fn a_daemon_start_drains_the_global_config_once() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = write(dir.path(), "config.toml", LIVE_GLOBAL_CONFIG);
+    write(dir.path(), "izzie.toml", &assistant_instance_manifest());
+    let globals = globals_as_a_daemon_loads_them(LIVE_GLOBAL_CONFIG);
+    assert_eq!(
+        globals.len(),
+        1,
+        "the in-memory absorb still yields the legacy listener: {globals:?}"
+    );
+
+    let first = run_startup_migration(Some(&config), &[dir.path().to_path_buf()], &globals);
+
+    let moved = first
+        .global
+        .expect("the drain must not fail")
+        .expect("the first start must drain the legacy table");
+    assert_eq!(moved.channels, vec!["gmail-personal".to_string()]);
+    let channels = channels_in(&config);
+    assert_eq!(channels.len(), 1, "one migrated channel: {channels:?}");
+    assert_eq!(channels[0].id, "gmail-personal");
+    let after_first = std::fs::read_to_string(&config).expect("read back");
+    assert!(
+        after_first.contains("route_to = [\"izzie\"]"),
+        "the drain must run before the sweep so the backfill has a channel to \
+         name the bound assistant in: {after_first}"
+    );
+
+    // A second supervised start of the same daemon.
+    let second = run_startup_migration(Some(&config), &[dir.path().to_path_buf()], &globals);
+
+    assert!(
+        second
+            .global
+            .expect("the second drain must not fail")
+            .is_none(),
+        "a second start must drain nothing"
+    );
+    assert_eq!(
+        channels_in(&config).len(),
+        1,
+        "a second start must not append a duplicate [[channels]] entry"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&config).expect("read back"),
+        after_first,
+        "a second start must not touch the file at all"
+    );
+}
+
+/// A global config the drain cannot write still starts the daemon.
+///
+/// Why (#7609): the drain runs on the startup path of a supervised process. A
+/// read-only or hand-broken `config.toml` is an operator problem to log, never
+/// a reason to refuse to boot — and it must not take the assistant half of the
+/// sweep down with it.
+#[test]
+fn a_daemon_start_survives_a_malformed_global_config() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // `[[channels]]` is present but its `id` is not a string, so the drain
+    // reports a parse error instead of reading it as "already migrated".
+    let body = "[[channels]]\nid = 42\n";
+    let config = write(dir.path(), "config.toml", body);
+    write(dir.path(), "izzie.toml", &assistant_instance_manifest());
+    let globals = vec![account_wide_gmail_global()];
+
+    let report = run_startup_migration(Some(&config), &[dir.path().to_path_buf()], &globals);
+
+    match &report.global {
+        Err(ChannelMigrationError::Parse { key, path, .. }) => {
+            assert_eq!(*key, "channels");
+            assert!(path.contains("config.toml"), "the path is named: {path}");
+        }
+        other => panic!("the drain must REPORT the failure, not swallow it: {other:?}"),
+    }
+    assert_eq!(
+        std::fs::read_to_string(&config).expect("read back"),
+        body,
+        "a failed drain leaves the operator's file untouched"
+    );
+    assert_eq!(
+        report.assistants.len(),
+        1,
+        "the assistant half still runs after a failed drain: {report:?}"
+    );
 }

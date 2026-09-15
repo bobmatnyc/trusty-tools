@@ -575,9 +575,12 @@ pub async fn serve_with_config(cfg: ApiConfig) -> Result<()> {
         listener_project_path.clone(),
     );
 
-    // #7609: the per-assistant half of the listeners->channels merge. Runs
-    // once per process, here because this is the only startup path that
-    // already holds the global channels a binding resolves its provider from.
+    // #7609: BOTH halves of the listeners->channels merge, global first so the
+    // `route_to` backfill below finds the `[[channels]]` entry the drain just
+    // wrote. Runs once per process, here because this is the only startup path
+    // that already holds the global channels a binding resolves its provider
+    // from — `--api` returns from `runtime::startup` before that file's shared
+    // hook, so the drain cannot be left to it.
     // Detached, NEVER awaited — same reason as the docs index above: the sweep
     // writes under a blocking advisory lock with no timeout, and a held lock
     // would otherwise stall the bind below (see `spawn_assistant_migration`).
@@ -598,7 +601,7 @@ pub async fn serve_with_config(cfg: ApiConfig) -> Result<()> {
             None
         }
     };
-    crate::channels::migrate::spawn_assistant_migration(
+    crate::channels::migrate::spawn_startup_migration(
         crate::agents::agents_dir_candidates(),
         global_config.channels.clone(),
         backfill_target,

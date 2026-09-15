@@ -302,7 +302,85 @@ pub fn migrate_agent_channels_if_absent(
     Ok(wrote.then_some(report))
 }
 
-/// Start the assistant sweep detached, off the caller's critical path.
+/// What one startup sweep moved, both halves.
+///
+/// Why: the sweep is fire-and-forget, so its only other observable is the log.
+/// A test needs something to assert on besides the files' bytes — including
+/// the drain's FAILURE, which is why `global` is a `Result` the caller may
+/// ignore rather than an `Option` that reads the same for "nothing to do" and
+/// "could not be written".
+#[derive(Debug)]
+pub struct StartupMigrationReport {
+    /// The global `config.toml` drain: `Ok(None)` when there was nothing to
+    /// move or no path to move it in, `Err` when it was tried and failed.
+    pub global: Result<Option<ChannelMigrationReport>, ChannelMigrationError>,
+    /// One entry per assistant whose channels file was seeded.
+    pub assistants: Vec<(String, ChannelMigrationReport)>,
+}
+
+/// Run both halves of the one-shot channel migration, global half first.
+///
+/// Why (#7609): [`migrate_global_if_absent`] was reachable only from
+/// `GlobalConfig::load_or_create`, which only the REPL routing command calls.
+/// Every daemon entry point reads the config through `GlobalConfig::load`,
+/// which absorbs the legacy table in memory and never persists — so a
+/// supervised `tagent --api` or `tagent --slack` left `config.toml` unchanged
+/// across every restart. This is the one entry point those starts call, and it
+/// keeps the hot `load` path read-only.
+/// What: drains `config_path` FIRST, so the assistant sweep's `route_to`
+/// backfill finds the `[[channels]]` entry it appends to; then sweeps `dirs`.
+/// A drain failure is logged and does NOT stop the sweep — the in-memory
+/// absorb keeps the legacy listener working either way, so nothing here is
+/// worth failing a daemon start over. An empty `dirs` runs the global drain
+/// alone, which is what [`spawn_global_migration`] wants.
+/// Test: `a_daemon_start_drains_the_global_config_once`,
+/// `a_daemon_start_survives_a_malformed_global_config`.
+pub fn run_startup_migration(
+    config_path: Option<&Path>,
+    dirs: &[std::path::PathBuf],
+    globals: &[Channel],
+) -> StartupMigrationReport {
+    // #7609: the global drain, on the startup path at last. It runs BEFORE the
+    // sweep below so `backfill_assistant_routes` finds the `[[channels]]` entry
+    // this just wrote and can name the bound assistant in its `route_to`.
+    let global = match config_path {
+        Some(path) => drain_global(path),
+        None => Ok(None),
+    };
+    StartupMigrationReport {
+        global,
+        assistants: migrate_assistant_channels(dirs, globals, config_path),
+    }
+}
+
+/// The global drain plus its log arms, so the sweep above reads as two steps.
+///
+/// Why: a drain failure is an operator-visible problem — a read-only or
+/// hand-broken `config.toml` — that must name its path and its cause in the
+/// daemon's own log, and must then be dropped rather than propagated: the
+/// legacy in-memory absorb in `GlobalConfig::load` keeps the listener working,
+/// so refusing to start would trade a working daemon for a cosmetic one.
+/// Test: `a_daemon_start_survives_a_malformed_global_config`.
+fn drain_global(path: &Path) -> Result<Option<ChannelMigrationReport>, ChannelMigrationError> {
+    let outcome = migrate_global_if_absent(path);
+    match &outcome {
+        Ok(Some(report)) => tracing::info!(
+            path = %path.display(),
+            moved = %report.summary(),
+            "channel migration: moved [[listeners]] into [[channels]] (#7609)",
+        ),
+        Ok(None) => {}
+        Err(error) => tracing::warn!(
+            path = %path.display(),
+            %error,
+            "channel migration: the global drain wrote nothing; the daemon starts on the \
+             in-memory absorb instead (#7609)",
+        ),
+    }
+    outcome
+}
+
+/// Start the startup sweep detached, off the caller's critical path.
 ///
 /// Why: the sweep publishes each assistant's channels file through
 /// [`crate::state_writer::atomic_update`], which takes a BLOCKING `fs4`
@@ -313,31 +391,50 @@ pub fn migrate_agent_channels_if_absent(
 /// log drain beside it in `api::server::routes`, and its report reaches the
 /// log when it finishes.
 /// What: returns IMMEDIATELY. Requires a tokio runtime. `config_path` is the
-/// global `config.toml` the `route_to` backfill edits (#7609 slice 4); `None`
-/// runs the seeding half of the sweep with the backfill disabled, which is what
+/// global `config.toml` the drain and the `route_to` backfill write (#7609);
+/// `None` runs the seeding half of the sweep with both disabled, which is what
 /// a host whose config path will not resolve gets instead of no sweep at all
 /// (#7609 review).
 /// Test: `the_assistant_sweep_never_blocks_its_caller`,
 /// `the_sweep_seeds_channels_with_no_backfill_target`.
-pub fn spawn_assistant_migration(
+pub fn spawn_startup_migration(
     dirs: Vec<std::path::PathBuf>,
     globals: Vec<Channel>,
     config_path: Option<std::path::PathBuf>,
 ) {
     tokio::task::spawn(async move {
         match tokio::task::spawn_blocking(move || {
-            migrate_assistant_channels(&dirs, &globals, config_path.as_deref())
+            run_startup_migration(config_path.as_deref(), &dirs, &globals)
         })
         .await
         {
-            Ok(reports) if !reports.is_empty() => tracing::info!(
-                assistants = reports.len(),
-                "channel migration: the assistant sweep finished (#7609)",
-            ),
+            Ok(report)
+                if report.global.as_ref().is_ok_and(Option::is_some)
+                    || !report.assistants.is_empty() =>
+            {
+                tracing::info!(
+                    assistants = report.assistants.len(),
+                    global = report.global.is_ok_and(|g| g.is_some()),
+                    "channel migration: the startup sweep finished (#7609)",
+                )
+            }
             Ok(_) => {}
-            Err(e) => tracing::warn!(error = %e, "channel migration: assistant sweep task failed"),
+            Err(e) => tracing::warn!(error = %e, "channel migration: startup sweep task failed"),
         }
     });
+}
+
+/// The global drain alone, for a start with no assistant roster to sweep.
+///
+/// Why (#7609): `--api` returns early from `runtime::startup` and runs the full
+/// sweep from `api::server::routes`. Every OTHER supervised start — `--slack`,
+/// `--telegram`, `--pm` — goes through the shared runtime startup hook, which
+/// owns no assistant roster but still has to drain the global config exactly
+/// once. Detached for the same reason as the full sweep.
+/// Test: `a_daemon_start_drains_the_global_config_once` covers the drain it
+/// delegates to.
+pub fn spawn_global_migration(config_path: std::path::PathBuf) {
+    spawn_startup_migration(Vec::new(), Vec::new(), Some(config_path));
 }
 
 /// Seed every discovered assistant's channels file from its `agent.toml`.

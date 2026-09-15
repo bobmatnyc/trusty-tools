@@ -459,6 +459,22 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
         }
     }
 
+    // #7609: drain the legacy `[[listeners]]` table into `[[channels]]` once
+    // per process. `GlobalConfig::load` (just above, and on every other daemon
+    // path) absorbs that table in MEMORY only, so before this hook a supervised
+    // `--slack` / `--telegram` / `--pm` start never rewrote the file. `--api`
+    // returned above and runs the same drain with its assistant sweep from
+    // `api::server::routes`. Detached and idempotent; a write failure is logged
+    // there and never fails this start.
+    match mcp::config::GlobalConfig::config_path() {
+        Ok(path) => crate::channels::migrate::spawn_global_migration(path),
+        Err(error) => tracing::warn!(
+            %error,
+            "channel migration: the global config path could not be resolved; the startup drain \
+             is skipped (#7609)"
+        ),
+    }
+
     // Ensure every process and its subprocesses share a single run_id.
     // Sub-agents inherit this env var when spawned, so all sessions within a
     // PM/workflow invocation land in the same `sessions/<run_id>/` directory.
