@@ -70,13 +70,24 @@
 //! worktree created off `origin/main` and never committed to, a branch
 //! fast-forwarded into a sibling that landed, a detached-HEAD install tree.
 //! [`WorktreeRemovalProbe::local_only_commits`] asks the underlying question
-//! directly, and answering it costs no network call. It is a RELAXATION, so
-//! the policy admits only on a literal zero; an `Err` and a non-zero count
-//! both leave the merged-PR route to decide.
+//! directly. It is a RELAXATION, so the policy admits only on a literal zero;
+//! an `Err` and a non-zero count both leave the merged-PR route to decide.
+//!
+//! **A remote-tracking ref is a cache, and a cache is refreshed before it is
+//! trusted (#7914, critic round 1).** `--remotes=origin` reads local refs, and
+//! a branch deleted on GitHub by any route other than a fetch in this worktree
+//! — `gh pr close --delete-branch`, the web UI, a second clone — leaves
+//! `refs/remotes/origin/<branch>` naming a commit the remote no longer has.
+//! The stale ref then vouched for the only surviving copy of that work, and
+//! the admission destroyed it. A bounded `git fetch --prune origin` now runs
+//! immediately before the count, under a timeout below the `PreToolUse` hook's
+//! own, and a refresh that fails makes the count unanswerable.
 //!
 //! Test: `merged_pull_request_argv_asks_github_for_the_branch`,
 //! `detached_head_is_not_a_branch`,
-//! `local_only_commits_counts_only_what_no_origin_ref_has` in
+//! `local_only_commits_counts_only_what_no_origin_ref_has`,
+//! `local_only_commits_reprunes_a_branch_deleted_behind_this_worktrees_back`,
+//! `local_only_commits_cannot_be_answered_when_origin_is_unreachable` in
 //! `crate::session_manager::worktree_safety_tests`,
 //! `the_harness_ownership_marker_alone_leaves_the_tree_clean`,
 //! `a_real_untracked_file_beside_the_marker_still_counts`,
@@ -87,6 +98,7 @@
 
 use std::path::Path;
 
+use crate::session_manager::worktree_landing_refresh::refresh_landing_refs_within;
 use crate::session_manager::worktree_reclaim_gh::{
     GH_TIMEOUT, gh_pr_list_command, resolve_daemon_gh_env,
 };
@@ -182,6 +194,21 @@ const DETACHED_HEAD: &str = "HEAD";
 const LOCAL_ONLY_COMMITS_ARGS: &[&str] =
     &["rev-list", "--count", "HEAD", "--not", "--remotes=origin"];
 
+/// How long the admission's `git fetch --prune` may run (#7914, critic round 1).
+///
+/// Why: the fetch happens inside the `PreToolUse` hook, which
+/// [`crate::core::standalone::hooks::mpm_hook_additions_with_exe`] registers
+/// with a 5-second timeout. A hook Claude Code kills emits no decision at all,
+/// and no decision is not a deny — so this bound must leave the guard time to
+/// print one, rather than matching the reclaim sweep's 30 s. Three seconds is
+/// roughly twice a warm incremental fetch over the network (measured 1.28 s
+/// against github.com on this repository, 2026-09-15), and expiring costs only
+/// the admission: the count becomes unanswerable, which falls through to the
+/// merged-PR route.
+/// Test: `local_only_commits_cannot_be_answered_when_origin_is_unreachable` in
+/// `crate::session_manager::worktree_safety_tests`.
+const ADMISSION_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// How HEAD compares to its upstream branch, when it still has one (#7232).
 ///
 /// Why: "2 commits are unpushed" and "there is no upstream to compare against"
@@ -247,7 +274,16 @@ pub trait WorktreeRemovalProbe {
     /// removing the directory can destroy no history; any higher count means
     /// this worktree is the only place some commit exists. `Err` means git
     /// could not be asked, which never admits — see the module doc.
-    /// Test: `local_only_commits_counts_only_what_no_origin_ref_has` in
+    ///
+    /// **The refs are refreshed before they are trusted (#7914, critic round
+    /// 1).** `refs/remotes/origin/*` is a local cache, and a branch deleted on
+    /// GitHub by any route other than a fetch in this worktree leaves it
+    /// naming a commit the remote no longer has — the implementation therefore
+    /// runs a bounded `git fetch --prune origin` first, and a refresh that
+    /// fails makes the count unanswerable rather than trusted.
+    /// Test: `local_only_commits_counts_only_what_no_origin_ref_has`,
+    /// `local_only_commits_reprunes_a_branch_deleted_behind_this_worktrees_back`,
+    /// `local_only_commits_cannot_be_answered_when_origin_is_unreachable` in
     /// `crate::session_manager::worktree_safety_tests`;
     /// `a_clean_tree_whose_commits_are_all_on_origin_needs_no_pull_request` in
     /// `bin/tm/commands/pm_guard_bash/worktree_remove`.
@@ -330,8 +366,21 @@ impl WorktreeRemovalProbe for GitAndGhProbe {
     }
 
     fn local_only_commits(&self, dir: &Path) -> Result<usize, String> {
-        // #7914: one rev-list, no network. An unparsable count is an `Err`
-        // rather than a zero, because zero is the only answer that admits.
+        // #7914 critic round 1: `--remotes=origin` reads the LOCAL
+        // `refs/remotes/origin/*` cache, which goes stale the moment a branch
+        // is deleted on GitHub by any route that is not a fetch in THIS
+        // worktree — `gh pr close --delete-branch`, the web UI, another clone.
+        // The stale ref kept vouching for commits the remote no longer had, so
+        // the admission granted and destroyed the only surviving copy. Refresh
+        // first, and let a failed refresh make the count unanswerable.
+        refresh_landing_refs_within(dir, ADMISSION_FETCH_TIMEOUT).map_err(|e| {
+            format!(
+                "`origin` could not be refreshed, so the remote-tracking refs cannot be trusted \
+                 to vouch for this worktree's commits: {e}"
+            )
+        })?;
+        // An unparsable count is an `Err` rather than a zero, because zero is
+        // the only answer that admits.
         let out = git_stdout(dir, LOCAL_ONLY_COMMITS_ARGS)?;
         out.trim().parse::<usize>().map_err(|e| {
             format!(

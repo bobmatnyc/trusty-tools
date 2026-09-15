@@ -65,10 +65,29 @@ pub(crate) const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 /// `a_refresh_against_a_missing_remote_fails_without_touching_the_refs`; the
 /// group kill is `run_bounded_kills_the_whole_process_group`.
 pub(crate) fn refresh_landing_refs(dir: &Path) -> Result<(), String> {
+    refresh_landing_refs_within(dir, FETCH_TIMEOUT)
+}
+
+/// [`refresh_landing_refs`] under a caller-chosen bound (#7914).
+///
+/// Why: the ADR-0057 removal guard needs the same refresh, but it runs inside a
+/// `PreToolUse` hook registered with a 5 s timeout
+/// (`core::standalone::hooks::mpm_hook_additions_with_exe`). A hook Claude Code
+/// kills emits no decision at all, which is the fail-OPEN direction on a gate
+/// whose job is to refuse — so that caller's bound has to sit below the hook's,
+/// not at the sweep's 30 s. Parameterised rather than re-spelled, so both
+/// callers keep the hardened `git_command` spawn and the process-group kill.
+/// What: as [`refresh_landing_refs`], with `timeout` in place of
+/// [`FETCH_TIMEOUT`].
+/// Test: `a_refresh_updates_the_stale_landing_ref`,
+/// `local_only_commits_reprunes_a_branch_deleted_behind_this_worktrees_back`
+/// and `local_only_commits_cannot_be_answered_when_origin_is_unreachable` in
+/// `super::worktree_safety_tests`.
+pub(crate) fn refresh_landing_refs_within(dir: &Path, timeout: Duration) -> Result<(), String> {
     let mut cmd = git_command(dir, &["fetch", "--prune", "--quiet", "origin"]);
     // A background fetch must never inherit a terminal to prompt on.
     cmd.stdin(std::process::Stdio::null());
-    match run_bounded(cmd, FETCH_TIMEOUT) {
+    match run_bounded(cmd, timeout) {
         Ok(out) if out.status.success() => Ok(()),
         Ok(out) => {
             let first = out
@@ -87,7 +106,7 @@ pub(crate) fn refresh_landing_refs(dir: &Path) -> Result<(), String> {
         Err(BoundedError::TimedOut) => Err(format!(
             "`git fetch --prune origin` did not finish within {}s and its process group was \
              killed",
-            FETCH_TIMEOUT.as_secs()
+            timeout.as_secs()
         )),
         Err(e) => Err(format!("`git fetch --prune origin` {e}")),
     }

@@ -64,7 +64,9 @@
 //! `rev-list` cannot cost a removal that a merged pull request would still have
 //! granted. It also does not reopen the #7275 round-2 hole: the never-pushed
 //! branch holding one empty commit holds a commit no `origin` ref has, so it
-//! counts one and still denies.
+//! counts one and still denies. The probe refreshes `origin` before it counts
+//! (critic round 1), so a branch deleted on GitHub behind this worktree's back
+//! stops vouching for its own commits.
 //!
 //! Test: `allows_worktree_remove_from_version_control_on_clean_merged_unowned_tree`,
 //! `denies_worktree_remove_from_version_control_when_tree_dirty`,

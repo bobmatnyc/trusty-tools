@@ -124,6 +124,16 @@ the guard will establish every precondition itself.
      through to the merged-PR check unchanged — a relaxation that cannot be
      established never grants, which is decision 6 applied in the one direction
      available to it.
+
+     `refs/remotes/origin/*` is a LOCAL cache, so the check refreshes it with a
+     bounded `git fetch --prune origin` immediately before counting. A branch
+     deleted on GitHub by any route other than a fetch in that worktree — `gh
+     pr close --delete-branch`, the web UI, another clone — otherwise leaves a
+     ref vouching for commits the remote no longer has, and the admission would
+     destroy the only surviving copy. The bound is 3 s, below the `PreToolUse`
+     hook's own 5 s registration: a hook Claude Code kills emits no decision at
+     all, and no decision is not a deny. A refresh that fails or expires makes
+     the count unanswerable, which does not grant.
 6. Every re-check fails CLOSED. A fact the guard cannot establish denies — the
    ADR-0045 distinction between absent and undeterminable, applied to a gate
    whose ALLOW deletes a checkout. This is the opposite bias from
