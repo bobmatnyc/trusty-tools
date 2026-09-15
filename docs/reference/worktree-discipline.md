@@ -62,6 +62,37 @@ main checkout — see [ADR-0036](../adr/0036-all-worktrees-are-siblings-under-cl
 for where that worktree lives. The rules below are what remains a matter of
 discipline rather than mechanical enforcement.
 
+## The ADR-0049 Commit Guard's Two Constraints on a Main-Checkout Commit
+
+`tm hook --pm-guard` classifies a `git commit` aimed at a main checkout by what
+is staged ([ADR-0049](../adr/0049-docs-commits-are-permitted-in-a-main-checkout.md)).
+Before it reads the staged set, two constraints on the command itself decide
+whether the read even applies — verified against the guard source below.
+
+- **The `-C`/`cd` target directory must be a literal path.** The guard reads
+  the command text; it never launches a shell to expand a variable. `git
+  commit -C $WT` denies with its own "could not resolve the target" reason
+  even when `$WT` would expand to the checkout root, because the token never
+  expands in the text the guard reads —
+  `unresolved_target` fails closed on any surviving `$NAME` token or `~`
+  path component
+  (`crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/path_tokens.rs:240-255`),
+  and `evaluate_main_checkout_commit_command_in` checks it before the staged
+  set is even read
+  (`crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/main_checkout.rs:307-314`).
+  Spell the directory out: `git -C /abs/path/.claude/worktrees/<name> commit
+  …`.
+- **`git commit` must be the only git-mutating segment in the Bash call.** One
+  index read authorizes exactly one commit, and only when nothing between the
+  read and the commit can restage —
+  `command_is_a_lone_commit` accepts a `cd` segment or the one `commit`
+  segment and rejects everything else
+  (`crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/main_checkout.rs:355-371`,
+  checked at `main_checkout.rs:319-321`). `git add -A && git commit -m docs`
+  denies because it restages between the read and the commit; `git commit -m
+  docs && git add -A && git commit -a -m src` denies because there are two
+  commits. Stage in one Bash call, commit alone in the next.
+
 ## Why Worktree Discipline Matters
 
 The monorepo consolidates the trusty-* packages in a single workspace. A single `git stash`
