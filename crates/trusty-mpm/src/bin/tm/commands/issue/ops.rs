@@ -34,8 +34,57 @@ pub(crate) struct SeedReport {
     pub(crate) dry_run: bool,
     /// `true` when no session name was known, so the `ws/<session>` policy
     /// label was left out of the seed (#6914). The caller says so in its
-    /// output rather than letting the omission pass silently.
+    /// output rather than letting the omission pass silently. Always `false`
+    /// for a scoped run (#7983): a run that asked for one family makes no
+    /// claim about the policy set it never tried to seed.
     pub(crate) workstream_skipped: bool,
+}
+
+/// Whether `name` is selected by one `--only` filter (#7983).
+///
+/// Why: the two shapes the issue asks for — one label by name, or one family —
+/// need to be distinguishable without a second flag, and a bare prefix match
+/// would silently widen `unicorn` into every `unicorn:*` label.
+/// What: a filter ending in a family separator (`:` or `/`) matches by prefix;
+/// any other filter matches the label name exactly.
+/// Test: `ops_seed_only_scopes_to_one_family_7983`,
+/// `ops_seed_only_matches_a_single_label_by_name_7983`.
+fn filter_matches(name: &str, filter: &str) -> bool {
+    if filter.ends_with(':') || filter.ends_with('/') {
+        name.starts_with(filter)
+    } else {
+        name == filter
+    }
+}
+
+/// Narrow the desired set to the labels the `--only` filters name (#7983).
+///
+/// Why: `seed-labels` created 18 repo-wide labels for an agent that needed one
+/// lifecycle family. Scoping is the fix; a filter that selects nothing is a
+/// typo, and creating zero labels would read as success.
+/// What: returns `desired` unchanged when `only` is empty; otherwise keeps the
+/// labels matching any filter and errors on the first filter that matched
+/// nothing, naming the available label names.
+/// Test: `ops_seed_only_scopes_to_one_family_7983`,
+/// `ops_seed_only_rejects_a_filter_that_matches_nothing_7983`.
+fn apply_only_filters(desired: Vec<RepoLabel>, only: &[String]) -> anyhow::Result<Vec<RepoLabel>> {
+    if only.is_empty() {
+        return Ok(desired);
+    }
+    for filter in only {
+        if !desired.iter().any(|l| filter_matches(&l.name, filter)) {
+            let available: Vec<&str> = desired.iter().map(|l| l.name.as_str()).collect();
+            anyhow::bail!(
+                "--only `{filter}` matches no label this model would seed; \
+                 available: [{}]",
+                available.join(", ")
+            );
+        }
+    }
+    Ok(desired
+        .into_iter()
+        .filter(|l| only.iter().any(|f| filter_matches(&l.name, f)))
+        .collect())
 }
 
 /// Outcome of a `transition` (for printing + assertion).
@@ -121,12 +170,21 @@ fn desired_labels(
 /// (RFC §5.1) — seeding never rewrites what a project already styled. Records
 /// `workstream_skipped` when `session_name` is `None`, so the caller can say
 /// the `ws/<session>` label was left out. Returns a [`SeedReport`].
+///
+/// #7983: an empty `only` is the whole set — every label the model and the
+/// policy table declare. A non-empty `only` narrows it through
+/// [`apply_only_filters`] before the create-missing pass, and then
+/// `workstream_skipped` is `false` whatever the session name is: a run that
+/// asked for one family makes no claim about a policy set it never attempted.
 /// Test: `ops_seed_creates_only_missing`, `ops_seed_dry_run_creates_nothing`,
 /// `ops_seed_idempotent_when_all_present`, `ops_seed_includes_policy_labels`,
 /// `ops_seed_without_session_skips_workstream_label`,
 /// `ops_seed_leaves_present_policy_labels_untouched`,
 /// `ops_seed_includes_configured_extra_labels`,
-/// `ops_seed_absent_block_matches_builtin_output`.
+/// `ops_seed_absent_block_matches_builtin_output`,
+/// `ops_seed_only_scopes_to_one_family_7983`,
+/// `ops_seed_only_matches_a_single_label_by_name_7983`,
+/// `ops_seed_only_rejects_a_filter_that_matches_nothing_7983`.
 pub(crate) fn seed_labels<S: TicketSystem>(
     sys: &S,
     model: &StateModel,
@@ -135,17 +193,23 @@ pub(crate) fn seed_labels<S: TicketSystem>(
     ticketing: &ResolvedTicketing,
     session_name: Option<&str>,
     dry_run: bool,
+    // #7983: `--only` filters; empty means the whole set, as before.
+    only: &[String],
 ) -> anyhow::Result<SeedReport> {
+    // #7983: resolve and narrow the set BEFORE the repo read, so a typo'd
+    // filter costs no `gh` call.
+    let desired = apply_only_filters(desired_labels(model, ticketing, session_name), only)?;
+
     let existing = sys.list_repo_labels()?;
     let existing_names: std::collections::BTreeSet<&str> =
         existing.iter().map(|l| l.name.as_str()).collect();
 
     let mut report = SeedReport {
         dry_run,
-        workstream_skipped: session_name.is_none_or(|n| n.trim().is_empty()),
+        workstream_skipped: only.is_empty() && session_name.is_none_or(|n| n.trim().is_empty()),
         ..Default::default()
     };
-    for label in desired_labels(model, ticketing, session_name) {
+    for label in desired {
         if existing_names.contains(label.name.as_str()) {
             report.already_present.push(label.name.clone());
             continue;

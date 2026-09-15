@@ -30,6 +30,11 @@ pub(crate) enum IssueCmd {
         /// Print what would be created without creating anything.
         #[arg(long)]
         dry_run: bool,
+        /// Seed only these labels (#7983). Repeatable. A value ending in `:` or
+        /// `/` selects that family (`status:`, `ws/`); any other value is an
+        /// exact label name. A value matching nothing is an error.
+        #[arg(long, value_name = "NAME_OR_FAMILY")]
+        only: Vec<String>,
     },
     /// Move an issue to `<to-state>`, validating the edge against the model.
     Transition {

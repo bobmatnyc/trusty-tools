@@ -1891,9 +1891,40 @@ fn cli_parses_issue_seed_labels() {
     let cli = Cli::try_parse_from(["trusty-mpm", "issue", "seed-labels", "--dry-run"]).unwrap();
     match cli.command.unwrap() {
         Command::Issue { cmd, .. } => match cmd {
-            IssueCmd::SeedLabels { dry_run, config } => {
+            IssueCmd::SeedLabels {
+                dry_run,
+                config,
+                only,
+            } => {
                 assert!(dry_run);
                 assert!(config.is_none());
+                assert!(only.is_empty(), "an unscoped run has no filters");
+            }
+            other => panic!("expected seed-labels, got {other:?}"),
+        },
+        other => panic!("expected issue, got {other:?}"),
+    }
+}
+
+/// #7983: `--only` is repeatable, so one run can name two families.
+#[test]
+fn cli_parses_issue_seed_labels_only_filters_7983() {
+    use crate::cli::IssueCmd;
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "issue",
+        "seed-labels",
+        "--only",
+        "status:",
+        "--only",
+        "trusty-mpm",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Issue { cmd, .. } => match cmd {
+            IssueCmd::SeedLabels { only, dry_run, .. } => {
+                assert_eq!(only, vec!["status:".to_string(), "trusty-mpm".to_string()]);
+                assert!(!dry_run);
             }
             other => panic!("expected seed-labels, got {other:?}"),
         },
