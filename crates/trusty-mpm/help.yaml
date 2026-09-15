@@ -183,6 +183,7 @@ commands:
     examples:
       - cmd: trusty-mpm issue seed-labels
       - cmd: trusty-mpm issue seed-labels --dry-run
+      - cmd: trusty-mpm issue seed-labels --only "status:"
       - cmd: trusty-mpm issue transition 1232 approved --note "approved by reviewer"
       - cmd: trusty-mpm issue current 1232
       - cmd: trusty-mpm issue states
@@ -200,6 +201,8 @@ commands:
             description: Explicit path to an issue-state YAML (overrides discovery)
           - name: dry-run
             description: Print what would be created without creating anything
+          - name: only
+            description: "Seed only these labels (repeatable); a value ending in : or / selects that family"
       transition:
         description: Move an issue to a target state, validating the edge against the model
         args: [issue, to_state]

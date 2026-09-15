@@ -46,6 +46,11 @@ const EXPECTED_EDGES: &[(&str, &str)] = &[
     ("status:coded", "status:merged"),
     ("status:merged", "status:tested"),
     ("status:tested", "closed"),
+    // #7647: closing early — every one of these requires `--note`.
+    ("status:coded", "closed"),
+    ("status:merged", "closed"),
+    ("status:in-progress", "closed"),
+    ("open", "closed"),
     // Backward: live verification failed and a fix PR is open.
     ("status:merged", "status:coded"),
     // Release a claim, and reopen from anywhere.
@@ -102,11 +107,13 @@ fn project_model_declares_exactly_the_documented_edges() {
 fn project_model_rejects_skipping_a_rung() {
     let m = project_model();
     let sm = StateMachine::new(&m);
-    // Every non-adjacent forward move is absent from the graph.
+    // Every non-adjacent forward move is absent from the graph. `closed` is the
+    // exception since #7647 — it is reachable from every open state, always
+    // with evidence, so the skip rule is asserted on the labelled rungs only.
     assert!(!sm.transition_allowed(Some("open"), "status:coded"));
+    assert!(!sm.transition_allowed(Some("open"), "status:merged"));
     assert!(!sm.transition_allowed(Some("status:in-progress"), "status:merged"));
     assert!(!sm.transition_allowed(Some("status:coded"), "status:tested"));
-    assert!(!sm.transition_allowed(Some("status:merged"), "closed"));
 }
 
 /// Owner ruling 2026-09-07: a merged issue whose live verification failed and
@@ -131,7 +138,10 @@ fn project_model_allows_merged_back_to_coded_for_a_followup_fix() {
     assert!(!sm.transition_allowed(Some("status:coded"), "status:in-progress"));
     let mut targets = sm.allowed_targets_from(Some("status:merged"));
     targets.sort_unstable();
-    assert_eq!(targets, vec!["open", "status:coded", "status:tested"]);
+    assert_eq!(
+        targets,
+        vec!["closed", "open", "status:coded", "status:tested"]
+    );
 }
 
 #[test]
@@ -338,6 +348,81 @@ fn project_close_requires_evidence_and_then_closes() {
     );
 }
 
+/// #7647: `closed` is reachable from every open state, and never without
+/// evidence.
+///
+/// Before the edges existed, `tm issue transition <n> closed` was refused from
+/// anything but `status:tested`, so CLAUDE.md's rung 1-3 close-at-merge rule and
+/// every administrative fold fell back to a bare `gh issue close` — no audit
+/// comment, and the stale `status:*` label left on the issue.
+#[test]
+fn project_close_reaches_every_open_state_and_always_needs_a_note_7647() {
+    let m = project_model();
+    let sm = StateMachine::new(&m);
+    for from in [
+        "open",
+        "status:in-progress",
+        "status:coded",
+        "status:merged",
+        "status:tested",
+    ] {
+        assert!(
+            sm.transition_allowed(Some(from), "closed"),
+            "{from} → closed must be a legal edge"
+        );
+        assert!(
+            sm.requires_note(Some(from), "closed"),
+            "{from} → closed must refuse without --note"
+        );
+    }
+}
+
+/// #7647: the rung 1-3 close-at-merge path, end to end through a fake `gh`.
+///
+/// The note is the PR and squash SHA rather than a live run, but it is still
+/// mandatory, and the close still drops the state label and comments first.
+#[test]
+fn project_close_from_coded_refuses_without_evidence_then_closes_7647() {
+    let m = project_model();
+
+    // No --note: refused before any mutation.
+    let gh = FakeGh::new(vec![ok_out(&issue_json(1234, &["status:coded"]))]);
+    let sys = GhTicketSystem::new(gh);
+    let err = ops::transition(&sys, &m, 1234, "closed", None)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("requires evidence"), "got: {err}");
+    assert_eq!(sys.runner().calls().len(), 1, "read only");
+
+    // With --note: label dropped, evidence commented, issue closed.
+    let gh = FakeGh::new(vec![ok_out(&issue_json(1234, &["status:coded"]))]);
+    let sys = GhTicketSystem::new(gh);
+    ops::transition(&sys, &m, 1234, "closed", Some("PR #8050 squash abc1234"))
+        .expect("close at merge with evidence");
+    let verbs: Vec<String> = sys
+        .runner()
+        .calls()
+        .iter()
+        .filter_map(|c| c.get(2).cloned())
+        .collect();
+    assert_eq!(
+        verbs,
+        vec!["view", "edit", "comment", "close"],
+        "got {verbs:?}"
+    );
+    let edit = sys
+        .runner()
+        .calls()
+        .into_iter()
+        .find(|c| c.get(2).map(String::as_str) == Some("edit"))
+        .expect("edit call");
+    assert!(
+        edit.windows(2)
+            .any(|w| w[0] == "--remove-label" && w[1] == "status:coded"),
+        "the stale lifecycle label must come off, got {edit:?}"
+    );
+}
+
 #[test]
 fn project_release_a_claim_removes_the_label_without_closing() {
     let m = project_model();
@@ -375,7 +460,7 @@ fn project_seed_labels_skips_the_labelless_states() {
     let m = project_model();
     let gh = FakeGh::new(vec![ok_out("[]")]);
     let sys = GhTicketSystem::new(gh);
-    let report = ops::seed_labels(&sys, &m, &ResolvedTicketing::default(), None, true)
+    let report = ops::seed_labels(&sys, &m, &ResolvedTicketing::default(), None, true, &[])
         .expect("seed dry-run");
     assert_eq!(
         report.created,
@@ -409,6 +494,7 @@ fn project_seed_labels_covers_the_whole_harness_label_set() {
         &ResolvedTicketing::default(),
         Some("tm-tcode-01"),
         true,
+        &[],
     )
     .expect("seed dry-run");
     assert_eq!(

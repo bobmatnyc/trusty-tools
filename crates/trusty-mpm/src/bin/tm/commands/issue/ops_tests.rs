@@ -145,6 +145,7 @@ fn ops_seed_creates_only_missing() {
         &ResolvedTicketing::default(),
         Some(SESSION),
         false,
+        &[],
     )
     .expect("seed");
 
@@ -181,6 +182,7 @@ fn ops_seed_includes_policy_labels() {
         &ResolvedTicketing::default(),
         Some(SESSION),
         false,
+        &[],
     )
     .expect("seed");
 
@@ -214,7 +216,7 @@ fn ops_seed_includes_configured_extra_labels() {
         "CLI surface",
     )]);
     let sys = FakeSystem::new(issue_with_labels(1, &[]));
-    let report = seed_labels(&sys, &m, &ticketing, Some(SESSION), false).expect("seed");
+    let report = seed_labels(&sys, &m, &ticketing, Some(SESSION), false, &[]).expect("seed");
 
     let created = create_names(&sys);
     assert!(
@@ -237,7 +239,7 @@ fn ops_seed_absent_block_matches_builtin_output() {
     let m = model();
     for session in [None, Some(SESSION)] {
         let sys = FakeSystem::new(issue_with_labels(1, &[]));
-        let report = seed_labels(&sys, &m, &ResolvedTicketing::default(), session, false)
+        let report = seed_labels(&sys, &m, &ResolvedTicketing::default(), session, false, &[])
             .expect("seed with the default standard");
 
         // The built-in expectation, assembled without touching the config path.
@@ -263,7 +265,8 @@ fn ops_seed_absent_block_matches_builtin_output() {
 fn ops_seed_without_session_skips_workstream_label() {
     let m = model();
     let sys = FakeSystem::new(issue_with_labels(1, &[]));
-    let report = seed_labels(&sys, &m, &ResolvedTicketing::default(), None, false).expect("seed");
+    let report =
+        seed_labels(&sys, &m, &ResolvedTicketing::default(), None, false, &[]).expect("seed");
 
     let created = create_names(&sys);
     assert!(created.contains(&"trusty-mpm".to_string()));
@@ -293,6 +296,7 @@ fn ops_seed_leaves_present_policy_labels_untouched() {
         &ResolvedTicketing::default(),
         Some(SESSION),
         false,
+        &[],
     )
     .expect("seed");
 
@@ -311,8 +315,15 @@ fn ops_seed_leaves_present_policy_labels_untouched() {
 fn ops_seed_dry_run_creates_nothing() {
     let m = model();
     let sys = FakeSystem::new(issue_with_labels(1, &[]));
-    let report = seed_labels(&sys, &m, &ResolvedTicketing::default(), Some(SESSION), true)
-        .expect("seed dry");
+    let report = seed_labels(
+        &sys,
+        &m,
+        &ResolvedTicketing::default(),
+        Some(SESSION),
+        true,
+        &[],
+    )
+    .expect("seed dry");
     assert!(report.dry_run);
     // Everything reported as created (would-be), but ZERO create calls.
     assert!(!report.created.is_empty());
@@ -352,6 +363,7 @@ fn ops_seed_idempotent_when_all_present() {
         &ResolvedTicketing::default(),
         Some(SESSION),
         false,
+        &[],
     )
     .expect("seed");
     assert!(
@@ -423,8 +435,15 @@ fn ops_seed_reads_past_the_default_label_page() {
     repo_labels.extend(desired.iter().cloned());
 
     let sys = crate::commands::ticket::system::GhTicketSystem::new(PagedGhRunner { repo_labels });
-    let report = seed_labels(&sys, &m, &ResolvedTicketing::default(), Some(SESSION), true)
-        .expect("seed reads the whole label set");
+    let report = seed_labels(
+        &sys,
+        &m,
+        &ResolvedTicketing::default(),
+        Some(SESSION),
+        true,
+        &[],
+    )
+    .expect("seed reads the whole label set");
 
     assert!(
         report.created.is_empty(),
@@ -451,11 +470,110 @@ fn ops_seed_errors_when_the_label_page_is_full() {
         .collect();
 
     let sys = crate::commands::ticket::system::GhTicketSystem::new(PagedGhRunner { repo_labels });
-    let err = seed_labels(&sys, &m, &ResolvedTicketing::default(), Some(SESSION), true)
-        .expect_err("a full page must not pass as a complete label set");
+    let err = seed_labels(
+        &sys,
+        &m,
+        &ResolvedTicketing::default(),
+        Some(SESSION),
+        true,
+        &[],
+    )
+    .expect_err("a full page must not pass as a complete label set");
     assert!(
         err.to_string().contains("truncated"),
         "error must name the truncation; got {err}"
+    );
+}
+
+// ---- seed-labels --only (#7983) -------------------------------------------
+
+/// #7983: an agent that needed one lifecycle family got 18 repo-wide labels —
+/// `blast:*`, `T2`-`T4`, `approval:level-*`, `ws/<session>` and the rest.
+/// `--only unicorn:` seeds that family and nothing else.
+#[test]
+fn ops_seed_only_scopes_to_one_family_7983() {
+    let m = model();
+    let sys = FakeSystem::new(issue_with_labels(1, &[]));
+    let only = vec!["unicorn:".to_string()];
+    let report = seed_labels(
+        &sys,
+        &m,
+        &ResolvedTicketing::default(),
+        Some(SESSION),
+        false,
+        &only,
+    )
+    .expect("scoped seed");
+
+    let created = create_names(&sys);
+    assert!(!created.is_empty(), "the family must still be seeded");
+    assert!(
+        created.iter().all(|n| n.starts_with("unicorn:")),
+        "only the named family may be created; got {created:?}"
+    );
+    for unwanted in ["blast:high", "approval:level-1", "trusty-mpm", "unicorn"] {
+        assert!(
+            !created.contains(&unwanted.to_string()),
+            "`{unwanted}` is outside the scope; got {created:?}"
+        );
+    }
+    assert!(
+        !created.iter().any(|n| n.starts_with("ws/")),
+        "the workstream label is outside the scope; got {created:?}"
+    );
+    assert_eq!(created, report.created, "report must match the calls made");
+    assert!(
+        !report.workstream_skipped,
+        "a scoped run makes no claim about the policy set it never attempted"
+    );
+}
+
+/// #7983: a filter with no family separator is an exact name, so `unicorn`
+/// seeds the base label alone and not the `unicorn:*` family.
+#[test]
+fn ops_seed_only_matches_a_single_label_by_name_7983() {
+    let m = model();
+    let sys = FakeSystem::new(issue_with_labels(1, &[]));
+    let only = vec!["unicorn".to_string()];
+    seed_labels(
+        &sys,
+        &m,
+        &ResolvedTicketing::default(),
+        Some(SESSION),
+        false,
+        &only,
+    )
+    .expect("scoped seed");
+    assert_eq!(create_names(&sys), vec!["unicorn".to_string()]);
+}
+
+/// #7983: a filter that selects nothing is a typo. Creating zero labels and
+/// exiting 0 would read as a completed seed, so it errors — before any `gh`
+/// call — and names what the model would have seeded.
+#[test]
+fn ops_seed_only_rejects_a_filter_that_matches_nothing_7983() {
+    let m = model();
+    let sys = FakeSystem::new(issue_with_labels(1, &[]));
+    let only = vec!["unicorn:".to_string(), "nope:".to_string()];
+    let err = seed_labels(
+        &sys,
+        &m,
+        &ResolvedTicketing::default(),
+        Some(SESSION),
+        false,
+        &only,
+    )
+    .expect_err("an unmatched filter must not pass as a scoped seed");
+    let text = err.to_string();
+    assert!(text.contains("nope:"), "must name the filter; got {text}");
+    assert!(
+        text.contains("available:"),
+        "must list what is seedable; got {text}"
+    );
+    assert!(
+        sys.calls().is_empty(),
+        "a typo'd filter must cost no gh call; got {:?}",
+        sys.calls()
     );
 }
 
