@@ -62,8 +62,9 @@ tm issue repair 1234             # an issue that already carries two status: lab
 states you may move to), and performs the add and the remove as ONE
 `gh issue edit`, so two `status:` labels can never be observed on one issue. The
 `status:tested → closed` edge is declared `requires_note`, which is CLAUDE.md's
-"an issue closes only from `status:tested`, with live verification evidence"
-made mechanical.
+rung 4–6 rule — "closes only from `status:tested`, with live verification
+evidence" — made mechanical; a rung 1–3 fix closes straight from
+`status:coded` instead, with the same `--note` requirement.
 
 Two limits worth knowing. `tm issue current` and `tm issue transition` both read
 the issue through the shared ticket backend, which refuses a CLOSED issue — so
