@@ -145,8 +145,9 @@ impl Binding {
             return Err(bad("Unsupported channel provider"));
         };
         // #7609: an overlay of a global channel is the one shape that may carry
-        // no destination — see `validate_in`.
-        if !crate::channels::dispatch::is_overlay(&self.name, &self.target, globals)
+        // no destination — see `validate_in`. Keyed on `id`, which is what
+        // dispatch matches the global on (#7609 review).
+        if !crate::channels::dispatch::is_overlay(&self.id, &self.target, globals)
             && !adapter.validate_target(&self.target)
         {
             // #7427: gworkspace targets are `from:<address>` / `label:<id>`,
@@ -219,7 +220,17 @@ pub(crate) async fn load_at(
 
 /// [`load_at`] over an already-loaded global channel list.
 ///
-/// Test: `the_izzie_fixture_wakes_once_for_an_inbox_message`.
+/// Why (#7609 review): an overlay names a global by `id`, and an operator who
+/// deletes or re-ids that global leaves the overlay unresolvable. Failing the
+/// whole read for it took the assistant off every OTHER destination too — both
+/// `read()` and `write_at()` 400, so there was no way back through the UI.
+/// What: one unresolvable overlay is DROPPED with a warning and the rest of the
+/// file loads. Every other validation failure still fails the read, so a
+/// genuinely broken file is never half-loaded; `write_at` keeps rejecting an
+/// operator-authored blank target outright. The stored file is untouched — the
+/// revision hashes its raw text — so the record survives until a client saves
+/// back the list it read.
+/// Test: `an_unresolvable_overlay_is_dropped_not_a_whole_file_rejection`.
 pub(crate) async fn load_at_with(
     dirs: &[PathBuf],
     name: &str,
@@ -231,9 +242,21 @@ pub(crate) async fn load_at_with(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => "[]".into(),
         Err(e) => return Err(internal(e)),
     };
-    let bindings: Vec<Binding> = serde_json::from_str(&raw).map_err(internal)?;
-    for binding in &bindings {
+    let stored: Vec<Binding> = serde_json::from_str(&raw).map_err(internal)?;
+    let mut bindings = Vec::with_capacity(stored.len());
+    for binding in stored {
+        if binding.target.is_empty()
+            && !crate::channels::dispatch::is_overlay(&binding.id, &binding.target, globals)
+        {
+            tracing::warn!(
+                assistant = %name, channel = %binding.id,
+                "channel config: this overlay names a global channel this host does not declare; \
+                 dropping the record and loading the rest (#7609)"
+            );
+            continue;
+        }
         binding.validate_in(globals)?;
+        bindings.push(binding);
     }
     Ok((path, raw, bindings))
 }
@@ -605,6 +628,70 @@ mod tests {
             StatusCode::CONFLICT
         );
         assert!(load_at(&dirs, "../escape").await.is_err());
+    }
+
+    /// An overlay whose global this host no longer declares is DROPPED with a
+    /// warning; every other binding in the file still loads.
+    ///
+    /// Why (#7609 review HIGH-4): one unresolvable record used to fail the
+    /// whole read, so `GET`/`PUT /api/agents/{name}/channels` both 400'd and
+    /// the assistant's OTHER destinations stopped claiming inbound events —
+    /// an operator editing `config.toml` could take an assistant off every
+    /// channel it had.
+    ///
+    /// Pre-fix (886d4afdc) this fails at the `unwrap`: `load_at_with`
+    /// propagated `validate_in`'s 400 for the blank-target record.
+    #[tokio::test]
+    async fn an_unresolvable_overlay_is_dropped_not_a_whole_file_rejection() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir.path().join("fixture.toml"), "[agent]\nname='fixture'\n")
+            .await
+            .unwrap();
+        let dirs = [dir.path().to_path_buf()];
+        let stored = json!([
+            {"id":"gmail-personal","name":"gmail-personal","provider":"gworkspace","target":"",
+             "enabled":true,"receive_enabled":true},
+            {"id":"team","name":"Team","provider":"slack","target":"C123456",
+             "enabled":true,"send_enabled":true}
+        ]);
+        tokio::fs::write(dir.path().join("fixture.channels.json"), stored.to_string())
+            .await
+            .unwrap();
+
+        // No global of that id: the overlay resolves to nothing.
+        let (_, _, bindings) = load_at_with(&dirs, "fixture", &[]).await.unwrap();
+        assert_eq!(
+            bindings.iter().map(|b| b.id.as_str()).collect::<Vec<_>>(),
+            vec!["team"],
+            "the unresolvable overlay is dropped, the rest of the file loads"
+        );
+
+        // With the global declared, the overlay is a legitimate record again.
+        let globals = vec![crate::channels::Channel {
+            id: "gmail-personal".into(),
+            name: "Personal mail".into(),
+            provider: "gmail".into(),
+            scope: crate::channels::ChannelScope::Global,
+            enabled: true,
+            receive_enabled: true,
+            ..crate::channels::Channel::default()
+        }];
+        let (_, _, bindings) = load_at_with(&dirs, "fixture", &globals).await.unwrap();
+        assert_eq!(bindings.len(), 2);
+
+        // A record that is invalid for any OTHER reason still fails the read,
+        // so a genuinely broken file is not silently half-loaded.
+        tokio::fs::write(
+            dir.path().join("fixture.channels.json"),
+            json!([{"id":"team","name":"Team","provider":"notion","target":"page","enabled":true}])
+                .to_string(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            load_at_with(&dirs, "fixture", &[]).await.unwrap_err().0,
+            StatusCode::BAD_REQUEST
+        );
     }
 }
 

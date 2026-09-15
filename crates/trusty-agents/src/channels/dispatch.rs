@@ -87,17 +87,23 @@ pub(crate) fn select_source(assistant: bool, routed: bool, legacy: bool) -> Wake
 /// `agent.toml`. Accepting ANY blank target instead would let an operator save
 /// a channel that can never address anything, the exact failure the target
 /// grammar exists to prevent. The allowance is therefore conditioned on a
-/// global of the same `name` actually existing.
-/// What: `name` and `target` are the candidate's; `globals` is the harness-wide
-/// `[[channels]]` list. An empty `name` is never an overlay.
+/// global of the same `id` actually existing.
+/// What: `id` and `target` are the candidate's; `globals` is the harness-wide
+/// `[[channels]]` list. An empty `id` is never an overlay.
+///
+/// #7609 review: keyed on `id` — the SAME key [`global_for`] dispatches on —
+/// not the display `name`. Renaming a global in `config.toml` otherwise made
+/// every overlay of it unstorable and, because `load_at` validates on read,
+/// 400'd the assistant's whole channels file.
 /// Test: `an_overlay_of_a_global_channel_validates`,
-/// `a_blank_target_with_no_global_is_still_refused`.
-pub(crate) fn is_overlay(name: &str, target: &str, globals: &[Channel]) -> bool {
+/// `a_blank_target_with_no_global_is_still_refused`,
+/// `an_overlay_resolves_by_the_global_id_not_its_display_name`.
+pub(crate) fn is_overlay(id: &str, target: &str, globals: &[Channel]) -> bool {
     target.is_empty()
-        && !name.is_empty()
+        && !id.is_empty()
         && globals
             .iter()
-            .any(|global| global.scope == ChannelScope::Global && global.name == name)
+            .any(|global| global.scope == ChannelScope::Global && global.id == id)
 }
 
 /// The global channel an event's listener belongs to.
@@ -135,7 +141,13 @@ fn effective(global: Option<&Channel>, overlay: Option<&Channel>) -> Option<Chan
     channel.credential_ref = None;
     channel.provider = super::adapter_id(&channel.provider).to_string();
     if let Some(overlay) = overlay {
-        channel.enabled = overlay.enabled;
+        // #7609 review: both switches are ANDed, never overwritten. The global
+        // says whether this channel delivers incoming updates AT ALL; the
+        // overlay says whether they wake THIS assistant. Overwriting let an
+        // enabled overlay resurrect a disabled or send-only global, and
+        // ignoring the overlay made unticking it in the UI do nothing.
+        channel.enabled &= overlay.enabled;
+        channel.receive_enabled &= overlay.receive_enabled;
         channel.event_types = overlay.event_types.clone();
         channel.wake_filter = overlay.wake_filter.clone();
         channel.instructions = overlay.instructions.clone();
@@ -153,35 +165,88 @@ fn wakes(channel: &Channel, event: &StoredEvent) -> bool {
     crate::listeners::wake::binding_matches_event(&channel.to_agent_binding(), event)
 }
 
+/// What sources (2) and (3) made of one assistant and one event.
+///
+/// Why (#7609 review): `(Option<Binding>, Option<Binding>)` could not say
+/// "this channel owns the event but wakes nobody" — the state a DISABLED or
+/// filter-narrowed overlay is in. Both candidates `None` then read as "no
+/// channel addresses this", the event fell through to
+/// `listeners::wake::wake_bound_agents`, and that woke the assistant off the
+/// still-enabled `agent.toml` binding. Disabling a channel in the UI changed
+/// nothing.
+/// What: `claimed` is the same flag [`super::super::api::server::agent_channels::inbound`]
+/// computes for source (1) — set by ADDRESSING the event, before the
+/// `enabled`/`receive_enabled`/filter gates decide whether it also wakes. At
+/// most one of `routed`/`legacy` is ever `Some`.
+/// Test: `a_disabled_overlay_claims_the_event_and_wakes_nobody`.
+#[derive(Debug, Default)]
+pub(crate) struct RouteSources {
+    /// A global or overlay addresses this event, whether or not it wakes.
+    pub(crate) claimed: bool,
+    /// (2) A global channel whose `route_to` names the assistant.
+    pub(crate) routed: Option<Binding>,
+    /// (3) The legacy absorbed `[[listeners]]` binding.
+    pub(crate) legacy: Option<Binding>,
+}
+
+/// Whether the merged channel is about the destination this event arrived on.
+///
+/// Why (#7609 review): Slack stamps every message with `listener_id: "slack"`
+/// and Telegram with `"telegram"`, so keying a global only on that id made one
+/// `route_to` entry a wake for EVERY conversation the bot can see — the
+/// global's own `target` was never consulted. Gmail hid the gap, because an
+/// account-wide listener legitimately carries no target.
+/// What: a global for a different provider is not this event's channel at all.
+/// An empty `target` is account-wide and addresses everything the provider
+/// ingests; a non-empty one is put to the adapter, the same
+/// [`super::ChannelAdapter::addresses`] call source (1) makes.
+/// Test: `a_slack_global_routes_only_to_its_own_destination`.
+fn addresses(channel: &Channel, provider: &str, destination: &str, event: &StoredEvent) -> bool {
+    if channel.provider != provider {
+        return false;
+    }
+    channel.target.is_empty()
+        || super::adapter(&channel.provider)
+            .is_some_and(|adapter| adapter.addresses(&channel.target, destination, event))
+}
+
 /// The (2) and (3) candidates for one assistant and one event.
 ///
 /// Why: these are the two sources that can describe one configuration, so they
 /// are decided together rather than by two independent scans that could both
 /// answer yes.
-/// What: returns `(routed, legacy)`, AT MOST ONE of which is `Some`. The
-/// assistant appearing in the global's `route_to` is exactly what moves the
-/// pair from (3) to (2), which is the owner's 2026-09-14 option-A rule stated
-/// once. A candidate whose merged channel is disabled, whose filter rejects the
-/// event, or whose provider this build carries no adapter for claims NOTHING —
-/// the event stays on whatever path it was already taking.
+/// What: AT MOST ONE of `routed`/`legacy` is `Some`. The assistant appearing in
+/// the global's `route_to` is exactly what moves the pair from (3) to (2),
+/// which is the owner's 2026-09-14 option-A rule stated once. `provider` and
+/// `destination` are the inbound event's, and a channel that does not
+/// [`addresses`] them claims nothing — the event is not its message. A channel
+/// whose provider this build carries no adapter for also claims nothing, so it
+/// stays on whatever path it was already taking. Past those two, the pair is
+/// CLAIMED; `enabled`, `receive_enabled` and the wake filter then decide only
+/// whether it also produces a candidate.
 /// Test: `a_routed_global_wakes_the_named_assistant`,
 /// `a_legacy_overlay_wakes_without_route_to`,
 /// `a_routed_global_excludes_the_legacy_binding_for_the_same_pair`,
 /// `an_overlay_filter_narrows_the_global_it_covers`,
-/// `an_unknown_provider_claims_nothing`.
+/// `an_unknown_provider_claims_nothing`,
+/// `a_disabled_overlay_claims_the_event_and_wakes_nobody`,
+/// `a_slack_global_routes_only_to_its_own_destination`,
+/// `a_send_only_global_wakes_nobody_it_routes_to`.
 pub(crate) fn route_sources(
     globals: &[Channel],
     own: &[Channel],
     assistant: &str,
+    provider: &str,
+    destination: &str,
     event: &StoredEvent,
-) -> (Option<Binding>, Option<Binding>) {
+) -> RouteSources {
     let global = global_for(globals, event);
     let overlay = own
         .iter()
         .find(|channel| channel.target.is_empty() && channel.id == event.listener_id);
     let routed = global.is_some_and(|global| global.route_to.iter().any(|name| name == assistant));
     if !routed && overlay.is_none() {
-        return (None, None);
+        return RouteSources::default();
     }
     let Some(channel) = effective(global, overlay) else {
         tracing::warn!(
@@ -189,17 +254,27 @@ pub(crate) fn route_sources(
             listener = %event.listener_id,
             "channel dispatch: this channel's provider has no adapter; claiming nothing (#7609)"
         );
-        return (None, None);
+        return RouteSources::default();
     };
-    if !channel.enabled || !wakes(&channel, event) {
-        return (None, None);
+    if !addresses(&channel, provider, destination, event) {
+        return RouteSources::default();
+    }
+    // #7609 review: claimed BEFORE the gates below, so a disabled or narrowed
+    // overlay suppresses the legacy wake instead of falling through to it.
+    let mut sources = RouteSources {
+        claimed: true,
+        ..RouteSources::default()
+    };
+    if !channel.enabled || !channel.receive_enabled || !wakes(&channel, event) {
+        return sources;
     }
     let binding = Binding::from(&channel);
     if routed {
-        (Some(binding), None)
+        sources.routed = Some(binding);
     } else {
-        (None, Some(binding))
+        sources.legacy = Some(binding);
     }
+    sources
 }
 
 /// `route_to` entries naming an assistant this host does not have.

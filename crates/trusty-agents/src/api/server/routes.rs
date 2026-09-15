@@ -583,13 +583,26 @@ pub async fn serve_with_config(cfg: ApiConfig) -> Result<()> {
     // would otherwise stall the bind below (see `spawn_assistant_migration`).
     // #7609 slice 4: the same sweep backfills `route_to` into `[[channels]]`,
     // so a legacy per-assistant binding stops needing the two-stage opt-in.
-    if let Ok(config_path) = crate::mcp::config::GlobalConfig::config_path() {
-        crate::channels::migrate::spawn_assistant_migration(
-            crate::agents::agents_dir_candidates(),
-            global_config.channels.clone(),
-            config_path,
-        );
-    }
+    // #7609 review: an unresolvable config path disables the `route_to`
+    // backfill ONLY. Skipping the whole sweep for it — as `if let Ok(..)` did —
+    // silently retired a migration that was unconditional before slice 4, so no
+    // assistant's channels file was ever seeded on such a host.
+    let backfill_target = match crate::mcp::config::GlobalConfig::config_path() {
+        Ok(path) => Some(path),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "channel migration: the global config path could not be resolved; the assistant \
+                 sweep runs with the `route_to` backfill disabled (#7609)"
+            );
+            None
+        }
+    };
+    crate::channels::migrate::spawn_assistant_migration(
+        crate::agents::agents_dir_candidates(),
+        global_config.channels.clone(),
+        backfill_target,
+    );
 
     // #6537: same fire-and-forget pattern as the listeners above — a
     // config problem is logged and the drain alone is skipped, never a

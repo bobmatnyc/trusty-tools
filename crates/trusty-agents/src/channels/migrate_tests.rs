@@ -401,7 +401,7 @@ async fn the_assistant_sweep_never_blocks_its_caller() {
     spawn_assistant_migration(
         vec![dir.path().to_path_buf()],
         vec![storable_global()],
-        dir.path().join("config.toml"),
+        Some(dir.path().join("config.toml")),
     );
 
     // The caller's next await on the startup path is its TCP bind.
@@ -428,8 +428,12 @@ fn the_sweep_skips_an_assistant_with_no_manifest() {
     let dir = tempfile::tempdir().expect("tempdir");
     let dirs = vec![dir.path().to_path_buf()];
     assert!(
-        migrate_assistant_channels(&dirs, &[storable_global()], &dir.path().join("config.toml"))
-            .is_empty(),
+        migrate_assistant_channels(
+            &dirs,
+            &[storable_global()],
+            Some(&dir.path().join("config.toml"))
+        )
+        .is_empty(),
         "an empty assistants directory migrates nothing"
     );
 }
@@ -546,7 +550,7 @@ fn the_sweep_backfills_route_to_for_a_legacy_binding() {
     );
     let globals = vec![account_wide_gmail_global()];
 
-    migrate_assistant_channels(&[dir.path().to_path_buf()], &globals, &config);
+    migrate_assistant_channels(&[dir.path().to_path_buf()], &globals, Some(&config));
 
     let raw = std::fs::read_to_string(&config).expect("read back");
     assert!(
@@ -554,6 +558,28 @@ fn the_sweep_backfills_route_to_for_a_legacy_binding() {
         "the sweep must name the assistant in route_to: {raw}"
     );
     assert!(raw.starts_with("# keep me"), "comments survive: {raw}");
+}
+
+/// With no backfill target the sweep still SEEDS every assistant's channels
+/// file; only the `route_to` half is skipped.
+///
+/// Why (#7609 review MEDIUM-2): `if let Ok(config_path)` in
+/// `api::server::routes` skipped the whole sweep when the global config path
+/// would not resolve, silently retiring a migration that was unconditional
+/// before slice 4.
+#[test]
+fn the_sweep_seeds_channels_with_no_backfill_target() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write(dir.path(), "izzie.toml", &assistant_instance_manifest());
+    let globals = vec![account_wide_gmail_global()];
+
+    let reports = migrate_assistant_channels(&[dir.path().to_path_buf()], &globals, None);
+
+    assert_eq!(reports.len(), 1, "the seeding half still runs: {reports:?}");
+    assert!(
+        dir.path().join("izzie.channels.json").exists(),
+        "the assistant's channels file is seeded with no config path to backfill"
+    );
 }
 
 /// The backfill writes once and never again, and it edits the document rather

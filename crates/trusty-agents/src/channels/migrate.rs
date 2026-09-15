@@ -313,16 +313,20 @@ pub fn migrate_agent_channels_if_absent(
 /// log drain beside it in `api::server::routes`, and its report reaches the
 /// log when it finishes.
 /// What: returns IMMEDIATELY. Requires a tokio runtime. `config_path` is the
-/// global `config.toml` the `route_to` backfill edits (#7609 slice 4).
-/// Test: `the_assistant_sweep_never_blocks_its_caller`.
+/// global `config.toml` the `route_to` backfill edits (#7609 slice 4); `None`
+/// runs the seeding half of the sweep with the backfill disabled, which is what
+/// a host whose config path will not resolve gets instead of no sweep at all
+/// (#7609 review).
+/// Test: `the_assistant_sweep_never_blocks_its_caller`,
+/// `the_sweep_seeds_channels_with_no_backfill_target`.
 pub fn spawn_assistant_migration(
     dirs: Vec<std::path::PathBuf>,
     globals: Vec<Channel>,
-    config_path: std::path::PathBuf,
+    config_path: Option<std::path::PathBuf>,
 ) {
     tokio::task::spawn(async move {
         match tokio::task::spawn_blocking(move || {
-            migrate_assistant_channels(&dirs, &globals, &config_path)
+            migrate_assistant_channels(&dirs, &globals, config_path.as_deref())
         })
         .await
         {
@@ -351,13 +355,16 @@ pub fn spawn_assistant_migration(
 /// owner's 2026-09-14 ruling retires, so `A` is appended to `G.route_to` and
 /// the pair moves from dispatch source (3) to source (2) with no manual edit.
 /// That runs for every discovered assistant, including one whose channels file
-/// already exists and therefore migrates nothing.
+/// already exists and therefore migrates nothing. `config_path` is `None` when
+/// the global config path would not resolve: the seeding half still runs, the
+/// backfill alone is skipped (#7609 review).
 /// Test: `the_sweep_skips_an_assistant_with_no_manifest`,
-/// `the_sweep_backfills_route_to_for_a_legacy_binding`.
+/// `the_sweep_backfills_route_to_for_a_legacy_binding`,
+/// `the_sweep_seeds_channels_with_no_backfill_target`.
 pub fn migrate_assistant_channels(
     dirs: &[std::path::PathBuf],
     globals: &[Channel],
-    config_path: &Path,
+    config_path: Option<&Path>,
 ) -> Vec<(String, ChannelMigrationReport)> {
     let mut reports = Vec::new();
     for id in crate::assistants::discover_instances(dirs) {
@@ -366,7 +373,9 @@ pub fn migrate_assistant_channels(
         else {
             continue;
         };
-        backfill_assistant_routes(config_path, &manifest, globals, id.as_str());
+        if let Some(config_path) = config_path {
+            backfill_assistant_routes(config_path, &manifest, globals, id.as_str());
+        }
         let channels_json = manifest.with_extension("channels.json");
         match migrate_agent_channels_if_absent(&manifest, &channels_json, globals) {
             Ok(Some(report)) => {
@@ -431,16 +440,43 @@ fn backfill_assistant_routes(
 /// What: ids only, deduplicated, and only for globals this host actually
 /// declares — a binding naming a listener that does not exist backfills
 /// nothing.
+///
+/// #7609 review: each failure arm logs its path and error. A manifest that will
+/// not read or parse disables this assistant's backfill for the life of the
+/// process, and all three arms used to return an empty list with nothing said —
+/// indistinguishable from an assistant that simply declares no bindings.
+/// Test: `the_sweep_backfills_route_to_for_a_legacy_binding`.
 fn legacy_binding_targets(agent_toml: &Path, globals: &[Channel]) -> Vec<String> {
-    let Ok(raw) = std::fs::read_to_string(agent_toml) else {
-        return Vec::new();
+    let warn = |stage: &str, error: &dyn std::fmt::Display| {
+        tracing::warn!(
+            path = %agent_toml.display(),
+            %stage,
+            %error,
+            "channel migration: this manifest's legacy bindings could not be read; no `route_to` \
+             backfill for it (#7609)",
+        );
     };
-    let Ok(table) = parse_table(&raw, agent_toml) else {
-        return Vec::new();
+    let raw = match std::fs::read_to_string(agent_toml) {
+        Ok(raw) => raw,
+        Err(e) => {
+            warn("read", &e);
+            return Vec::new();
+        }
     };
-    let Ok(Some(bindings)) = read_key::<AgentListenerBinding>(&table, "listeners", agent_toml)
-    else {
-        return Vec::new();
+    let table = match parse_table(&raw, agent_toml) {
+        Ok(table) => table,
+        Err(e) => {
+            warn("parse", &e);
+            return Vec::new();
+        }
+    };
+    let bindings = match read_key::<AgentListenerBinding>(&table, "listeners", agent_toml) {
+        Ok(Some(bindings)) => bindings,
+        Ok(None) => return Vec::new(),
+        Err(e) => {
+            warn("listeners", &e);
+            return Vec::new();
+        }
     };
     let mut ids: Vec<String> = bindings
         .into_iter()
@@ -494,6 +530,15 @@ pub fn backfill_route_to(
             .entry("route_to")
             .or_insert_with(|| toml_edit::value(toml_edit::Array::new()));
         let Some(array) = entry.as_array_mut() else {
+            // #7609 review: `route_to = "izzie"` parses but is not an array, so
+            // the backfill can never write and would otherwise report `false`
+            // forever with nothing said.
+            tracing::warn!(
+                path = %config_path.display(),
+                channel = %channel_id,
+                "channel migration: `route_to` is not an array of assistant names; this channel \
+                 cannot be backfilled until it is fixed (#7609)",
+            );
             return Ok(None);
         };
         if array.iter().any(|value| value.as_str() == Some(assistant)) {
