@@ -22,7 +22,7 @@
 //! - [`phase_map`] / [`progress_state`] — ticker/event-loop shared state (internal)
 //! - [`verify`] — post-`--force` health check (internal)
 //! - [`registration`] — `RegisterFilters`, `register_index_with_daemon{,_filtered}`,
-//!   `fetch_chunk_count`
+//!   `register_index_reporting_collision`, `fetch_chunk_count`
 //!
 //! Test: `cargo test -p trusty-search` — every reindex-driven integration test
 //! continues to pass; the refactor is purely structural.
@@ -55,6 +55,6 @@ pub use file_ops::{add_path, index_single_file};
 pub use options::{ReindexOptions, ReindexOutcome};
 #[allow(unused_imports)]
 pub use registration::{
-    fetch_chunk_count, register_index_with_daemon, register_index_with_daemon_filtered,
-    RegisterFilters,
+    fetch_chunk_count, register_index_reporting_collision, register_index_with_daemon,
+    register_index_with_daemon_filtered, RegisterFilters, RegisterOutcome,
 };

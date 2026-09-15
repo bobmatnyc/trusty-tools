@@ -22,8 +22,8 @@
 
 use super::daemon_utils::daemon_base_url;
 use super::reindex_engine::{
-    register_index_with_daemon, register_index_with_daemon_filtered, run_reindex_force_opts,
-    run_reindex_opts, RegisterFilters,
+    register_index_reporting_collision, run_reindex_force_opts, run_reindex_opts, RegisterFilters,
+    RegisterOutcome,
 };
 use crate::core::project_config::{ProjectConfig, PROJECT_CONFIG_FILENAME};
 use crate::core::repo_config::{language_to_exts, IndexConfig, RepoConfig, CONFIG_FILENAME};
@@ -353,9 +353,68 @@ async fn index_one(
     .await
 }
 
+/// Which index one `trusty-search index` run goes on to reindex.
+///
+/// Why: #7758 needs "the id the daemon actually holds" to be a value the call
+/// site reads, not a branch buried in the middle of an async function that
+/// cannot be unit-tested without a live daemon.
+/// What: the two reachable shapes — the requested id registered, or the root's
+/// existing owner adopted under `--force`.
+/// Test: `force_adopts_the_index_that_already_owns_the_root`.
+#[derive(Debug, PartialEq, Eq)]
+enum ReindexTarget {
+    /// The requested id is registered; `created` is `false` for a re-register.
+    Registered { created: bool },
+    /// #7758: the root already belonged to `existing_id`, and `--force`
+    /// reindexes that index rather than failing on the registration 409.
+    Adopted { existing_id: String },
+}
+
+/// Turn a registration answer into the reindex this run should perform.
+///
+/// Why: #7758 — `trusty-search index <root> --force` on a root already
+/// registered under a different id aborted with
+/// `daemon returned 409 Conflict for POST /indexes`, while the flag's own
+/// `--help` promises "force a full reindex even if the index already has
+/// chunks". The daemon must keep refusing the registration (two indexes cannot
+/// share one `.redb` corpus — #2336, #3993), so the flag is honoured here: the
+/// reindex targets the index that owns the tree.
+/// What: `Registered` passes through; `RootOwnedBy` becomes `Adopted` under
+/// `--force` and re-raises the daemon's own refusal without it, so the
+/// no-`--force` behaviour is byte-identical to before. `Unreachable` is the
+/// start-the-daemon error.
+/// Test: `force_adopts_the_index_that_already_owns_the_root`,
+/// `without_force_a_root_collision_still_raises_the_daemon_refusal`,
+/// `a_plain_registration_is_never_adopted`.
+fn resolve_reindex_target(outcome: RegisterOutcome, force: bool) -> Result<ReindexTarget> {
+    match outcome {
+        RegisterOutcome::Registered { created } => Ok(ReindexTarget::Registered { created }),
+        RegisterOutcome::Unreachable => anyhow::bail!(
+            "Daemon not reachable at {}. Start it with `trusty-search start`.",
+            daemon_base_url(),
+        ),
+        RegisterOutcome::RootOwnedBy {
+            existing_id,
+            refusal,
+        } => {
+            // #7758: without --force this is the refusal the CLI always raised.
+            anyhow::ensure!(force, "{refusal}");
+            Ok(ReindexTarget::Adopted { existing_id })
+        }
+    }
+}
+
 /// Filter-aware version of `index_one`. The yaml multi-index path uses this
 /// to forward per-index `paths`/`exclude`/`languages`/`domain_terms` to the
 /// daemon.
+///
+/// Why the collision arm: #7758 — `--force` was consumed only by the reindex
+/// call at the bottom, so a root already registered under a DIFFERENT id died
+/// on the registration 409 and never reached it, contradicting the flag's own
+/// `--help`. With `--force` the reindex now runs against the id that owns the
+/// root; without it the refusal is unchanged.
+/// Test: `force_adopts_the_index_that_already_owns_the_root`,
+/// `without_force_a_root_collision_still_raises_the_daemon_refusal`.
 async fn index_one_with_filters(
     index_name: &str,
     project_path: &std::path::Path,
@@ -363,41 +422,38 @@ async fn index_one_with_filters(
     timeout: Option<u64>,
     filters: &RegisterFilters,
 ) -> Result<()> {
-    // Issue #109, Phase 1: `lexical_only` must always go through the
-    // filter-aware register call so the daemon receives the opt-in field.
-    // Issue #923: `!filters.defer_embed` (opt-out) likewise forces the
-    // filtered path so the daemon receives `defer_embed: false`.
-    let result = if filters.include_paths.is_empty()
-        && filters.exclude_globs.is_empty()
-        && filters.extensions.is_empty()
-        && filters.domain_terms.is_empty()
-        && !filters.lexical_only
-        && filters.defer_embed
-    {
-        register_index_with_daemon(index_name, project_path).await
-    } else {
-        register_index_with_daemon_filtered(index_name, project_path, filters).await
+    // #7758: one register call for every shape. The empty-filters fast path
+    // this replaced called `register_index_with_daemon`, which substitutes
+    // DEFAULT filters — so `--no-kg` alone (every other field empty) had its
+    // `skip_kg: true` dropped on the wire, silently undoing #313. Passing
+    // `filters` through builds the identical body when they ARE default.
+    let outcome = register_index_reporting_collision(index_name, project_path, filters).await?;
+    let target = resolve_reindex_target(outcome, force)?;
+    let reindex_id = match &target {
+        ReindexTarget::Registered { .. } => index_name.to_string(),
+        ReindexTarget::Adopted { existing_id } => existing_id.clone(),
     };
-    let (created, daemon_reachable) = result?;
-    if !daemon_reachable {
-        anyhow::bail!(
-            "Daemon not reachable at {}. Start it with `trusty-search start`.",
-            daemon_base_url(),
-        );
-    }
 
-    if created {
-        println!(
+    match &target {
+        ReindexTarget::Registered { created: true } => println!(
             "{} '{}' registered at {}",
             "✓".green(),
-            index_name.bold(),
+            reindex_id.bold(),
             project_path.display()
-        );
+        ),
+        ReindexTarget::Registered { created: false } => {}
+        ReindexTarget::Adopted { existing_id } => println!(
+            "{} {} is already indexed as '{}'; --force reindexes that index",
+            "→".cyan(),
+            project_path.display(),
+            existing_id.bold(),
+        ),
     }
 
     // Best-effort config mirror — failed YAML write must not undo a successful
-    // daemon registration.
-    persist_collection_to_global_config(index_name, project_path, filters);
+    // daemon registration. Keyed on the id the daemon actually holds, so the
+    // collision arm does not record a registration that was refused.
+    persist_collection_to_global_config(&reindex_id, project_path, filters);
 
     // None → 120 s progress-aware stall window; Some(n) → hard cap (0 = ∞).
     let (timeout_secs, timeout_explicit) = match timeout {
@@ -405,9 +461,9 @@ async fn index_one_with_filters(
         None => (0, false),
     };
     if force {
-        run_reindex_force_opts(index_name, project_path, timeout_secs, timeout_explicit).await?;
+        run_reindex_force_opts(&reindex_id, project_path, timeout_secs, timeout_explicit).await?;
     } else {
-        run_reindex_opts(index_name, project_path, timeout_secs, timeout_explicit).await?;
+        run_reindex_opts(&reindex_id, project_path, timeout_secs, timeout_explicit).await?;
     }
     Ok(())
 }
@@ -625,5 +681,68 @@ mod tests {
         assert!(resolve_excludes(Vec::new(), None).is_empty());
         let c = cfg(Some("foo"), None, None);
         assert!(resolve_excludes(Vec::new(), Some(&c)).is_empty());
+    }
+
+    // ── resolve_reindex_target (#7758) ─────────────────────────────────────
+
+    fn root_owned_by(id: &str) -> RegisterOutcome {
+        RegisterOutcome::RootOwnedBy {
+            existing_id: id.to_string(),
+            refusal: "daemon returned 409 Conflict for POST /indexes".to_string(),
+        }
+    }
+
+    /// #7758 regression: `index <root> --force` on a root already registered
+    /// under another id must reindex THAT index. Before the fix the 409 was
+    /// collapsed into a bail inside `register_index_with_daemon_filtered` and
+    /// `--force` never reached the reindex at all, contradicting its `--help`
+    /// ("force a full reindex even if the index already has chunks").
+    /// Test: this function IS the test.
+    #[test]
+    fn force_adopts_the_index_that_already_owns_the_root() {
+        let got = resolve_reindex_target(root_owned_by("trusty-tools-checkout"), true)
+            .expect("--force must not fail on a root collision");
+        assert_eq!(
+            got,
+            ReindexTarget::Adopted {
+                existing_id: "trusty-tools-checkout".to_string()
+            },
+            "--force must reindex the index that owns the root"
+        );
+    }
+
+    /// The other half of the #7758 ruling: WITHOUT `--force`, nothing changes.
+    /// The daemon's own refusal is re-raised verbatim, so a caller that was
+    /// parsing it still sees the same text.
+    /// Test: this function IS the test.
+    #[test]
+    fn without_force_a_root_collision_still_raises_the_daemon_refusal() {
+        let err = resolve_reindex_target(root_owned_by("trusty-tools-checkout"), false)
+            .expect_err("a root collision without --force must still fail");
+        assert_eq!(
+            err.to_string(),
+            "daemon returned 409 Conflict for POST /indexes",
+            "the pre-#7758 refusal must be unchanged"
+        );
+    }
+
+    /// Adoption is reachable ONLY from a root collision — a plain registration
+    /// keeps the requested id whether or not `--force` was passed. Without
+    /// this, "reindex whatever the daemon names" could silently retarget an
+    /// ordinary run.
+    /// Test: this function IS the test.
+    #[test]
+    fn a_plain_registration_is_never_adopted() {
+        for force in [false, true] {
+            for created in [false, true] {
+                let got = resolve_reindex_target(RegisterOutcome::Registered { created }, force)
+                    .expect("a successful registration must resolve");
+                assert_eq!(
+                    got,
+                    ReindexTarget::Registered { created },
+                    "force={force} created={created} must not adopt another id"
+                );
+            }
+        }
     }
 }
