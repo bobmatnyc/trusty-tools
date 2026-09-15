@@ -70,23 +70,38 @@ Per-rung commands, CI gates, baseline-red triage:
 **test name**, **panic/error text**, **affected symbol**, and **crate**:
 [issue-search-keys.md](docs/reference/issue-search-keys.md).
 
-🔴 **Issue lifecycle — open → in-progress → coded → merged → tested →
-closed.** Four mutually exclusive labels between GitHub's native
-open/closed:
+🟡 **Prompt-feedback rollup:
+[#8021](https://github.com/bobmatnyc/trusty-tools/issues/8021).** The PM
+appends the unique, actionable items from PM/agent `## Prompt feedback`
+addenda there as one dated comment per session, deduplicated against earlier
+comments. Never a new issue per item; never close it — strike items as they land.
+
+🔴 **Issue lifecycle — open → in-progress → coded → merged → tested → closed.**
+Four mutually exclusive labels between GitHub's native open/closed:
 
 | Label | Meaning |
 |---|---|
 | `status:in-progress` | A session/agent has claimed it and is actively working it |
 | `status:coded` | Implementation pushed on a branch; PR not yet merged |
-| `status:merged` | PR merged to main; live verification pending |
+| `status:merged` | PR merged to main; rung 4–6 fixes await live verification |
 | `status:tested` | Verified live (installed binary / real run); eligible to close |
 
 Claim goes on at dispatch, named session + date; reclaim only if provably
 stale. Advance with `tm issue transition N status:merged`. Fix PRs use
-`Refs #N`, **never** `Closes #N`. Closes only from `status:tested` via
-`tm issue transition N closed --note "<evidence>"` (refuses without a note);
-a merged fix failing live verification stays open; it returns to
-`status:coded` only when a follow-up fix PR is filed.
+`Refs #N`, **never** `Closes #N`. Rung 1–3 closes at merge:
+`tm issue transition N closed --note "PR #M squash <sha>"`, skipping
+`status:merged`/`status:tested`. Rung 4–6 (CLI/daemon/hook fixes needing
+live proof) close only from `status:tested`; a merged fix failing
+verification stays open, returning to `status:coded` only via a follow-up fix.
+
+🔴 A `code-critic`/`code-analyzer`/trusty-review finding below HIGH, or a
+self-improvement/post-mortem finding (the `self-improvement` label,
+`tm-postmortem` output, `report_bug`/`preview_bug_report`, or an agent's
+"Improvement recommendations" block), is fixed in the surfacing PR, dropped,
+or logged in the rollup
+([#8021](https://github.com/bobmatnyc/trusty-tools/issues/8021)) — never a
+new issue. HIGH+ or independently schedulable work may still be filed
+(search first).
 
 🔴 **Why/What/Test doc pattern, proportional depth:** `/// Why: <motivation>`,
 `/// What: <mechanics>`, `/// Test: <where coverage lives>`. Full pattern for

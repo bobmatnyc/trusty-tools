@@ -564,6 +564,9 @@ The `version-control` agent writes this; the PM supplies the material.
 (`#7727` — every heading must be an ATX `## ` line, one to six `#`s, matched
 case-insensitively against the canonical word or a stated alias):
 
+🔴 A rung 1 (docs-only) branch needs `tm pr open --docs-only` explicitly — it
+runs the changelog-fragment gate and refuses a docs-only PR without the flag.
+
 1. `## Outcome` — primary outcome and linked issue(s), with the
    `Refs owner/repo#N` link.
 2. `## Changes` — what changed, and what is intentionally out of scope.
