@@ -390,6 +390,7 @@ fn project_mpm_agent(default_name: &str, meta: AgentMetadata, body: String) -> A
         plugins: crate::agents::AgentPluginsConfig::default(),
         rbac: crate::agents::RbacConfig::default(),
         workstreams: crate::agents::WorkstreamContextConfig::default(),
+        declared: Default::default(),
         adapter,
         legacy_listeners: Vec::new(),
         channels: Vec::new(),

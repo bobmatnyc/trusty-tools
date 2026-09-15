@@ -104,6 +104,7 @@ fn test_agent_config(name: &str, model: &str, system_prompt: &str) -> AgentConfi
         plugins: crate::agents::AgentPluginsConfig::default(),
         rbac: crate::agents::RbacConfig::default(),
         workstreams: crate::agents::WorkstreamContextConfig::default(),
+        declared: Default::default(),
         adapter: Arc::new(crate::llm::adapter::GenericAdapter),
         legacy_listeners: Vec::new(),
         channels: Vec::new(),

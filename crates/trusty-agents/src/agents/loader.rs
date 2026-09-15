@@ -679,6 +679,10 @@ impl AgentConfig {
         // #7609: the deprecated `[[listeners]]` table keeps working — folded
         // into `channels` here so every caller of this parse sees one list.
         cfg.absorb_legacy_listeners();
+        // #7901: record which inherited-table keys this file declared, so
+        // `extends` can let a child's own value win instead of dropping it.
+        cfg.declared = crate::agents::extends::DeclaredKeys::from_toml(raw)
+            .with_context(|| format!("failed to parse agent TOML {}", path.display()))?;
         Self::validate_llm_required_for_root(&cfg, path)?;
         // #367: Substitute runtime context variables in the system prompt at
         // load time so every downstream consumer (prompt_builder, claude-code
