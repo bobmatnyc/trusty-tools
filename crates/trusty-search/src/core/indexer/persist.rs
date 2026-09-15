@@ -39,9 +39,13 @@ impl CodeIndexer {
     /// is still written so the on-disk file accurately reflects state — EXCEPT
     /// on a write-quarantined index, where "empty" means "the corpus never
     /// opened", not "the corpus is empty" (issue #4226; see the guard below).
+    /// #7920: a populated file is replaced only when this indexer loaded or
+    /// wrote it and holds at least one chunk; otherwise the write returns
+    /// [`super::SnapshotOverwriteRefused`] and the file is left untouched.
     /// Test: see `tests::test_save_chunks_roundtrip`, and
     /// `quarantined_shutdown_flush_does_not_destroy_chunks_json` in
-    /// `tests/quarantine_durable_writes_4226.rs` for the quarantine guard.
+    /// `tests/quarantine_durable_writes_4226.rs` for the quarantine guard;
+    /// `tests::snapshot_guard_7920` for the overwrite guard.
     pub async fn save_chunks_to_disk(&self, path: &std::path::Path) -> Result<()> {
         // #4226: a write-quarantined index's in-memory corpus is empty because
         // the durable corpus never opened — writing it out would replace the
@@ -69,6 +73,10 @@ impl CodeIndexer {
             chunks: chunks_vec,
             entities: entities_vec,
         };
+        // #7920: refuse an empty or foreign corpus over a populated snapshot —
+        // the shutdown flush resolves `path` at shutdown, not at load.
+        self.snapshot_guard
+            .check_overwrite(&self.index_id, path, snapshot.chunks.len())?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create parent of {}", path.display()))?;
@@ -77,6 +85,7 @@ impl CodeIndexer {
         let bytes = serde_json::to_vec(&snapshot).context("serialize chunk corpus snapshot")?;
         std::fs::write(&tmp, &bytes).with_context(|| format!("write {}", tmp.display()))?;
         std::fs::rename(&tmp, path).with_context(|| format!("rename to {}", path.display()))?;
+        self.snapshot_guard.mark_owned(path);
         Ok(())
     }
 
@@ -109,6 +118,9 @@ impl CodeIndexer {
             }
         };
 
+        // #7920: this in-memory corpus now describes `path`, so a later write
+        // back to it is a legitimate update rather than a foreign overwrite.
+        self.snapshot_guard.mark_owned(path);
         let total = snapshot.chunks.len();
         // Phase 1: refill BM25 from the restored corpus before publishing the
         // chunks map so concurrent reads can't observe a half-state.

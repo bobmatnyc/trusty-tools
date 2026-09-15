@@ -107,3 +107,4 @@ mod exact_match_perf;
 mod path_filter_search;
 mod persistence_and_search;
 mod ranking_and_modes;
+mod snapshot_guard_7920;

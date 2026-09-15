@@ -48,6 +48,9 @@ mod persist;
 mod persist_hnsw;
 mod quarantine;
 mod search;
+// #7920: chunks.json empty/foreign-over-populated overwrite guard.
+pub(crate) mod snapshot_guard;
+pub use snapshot_guard::SnapshotOverwriteRefused;
 pub mod typeahead;
 mod types;
 
@@ -543,6 +546,11 @@ pub struct CodeIndexer {
     /// per instance by [`Self::with_chunk_cap`].
     /// Test: `core::indexer::tests::chunk_cap` (every test in that module).
     chunk_cap: usize,
+
+    /// #7920: which `chunks.json` paths this indexer loaded or wrote, and how
+    /// many snapshot overwrites it refused. `Arc` so the detached incremental
+    /// persister applies the same guard as the shutdown flush.
+    pub(super) snapshot_guard: Arc<snapshot_guard::SnapshotGuard>,
 }
 
 /// Coalescing state for `spawn_incremental_persist`.
@@ -665,6 +673,7 @@ impl CodeIndexer {
             skip_vector: false,
             // #6369: resolve the cap once here, not on every insert.
             chunk_cap: max_chunks_per_index(),
+            snapshot_guard: Arc::new(snapshot_guard::SnapshotGuard::default()),
         }
     }
 
