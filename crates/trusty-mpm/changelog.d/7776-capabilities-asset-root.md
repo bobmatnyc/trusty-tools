@@ -1,0 +1,2 @@
+Fixed
+- `tm generate capabilities` and `--check` now read and write the `crates/trusty-mpm/src/assets/skills/` of the checkout they run in, found by walking up from the current directory, instead of the checkout the binary was built from. An installed `tm` no longer false-reports drift inside a worktree or writes into a different worktree. Outside any trusty-tools checkout both modes refuse with an error naming what they looked for (#7776).

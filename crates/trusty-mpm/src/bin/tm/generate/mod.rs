@@ -12,7 +12,8 @@
 //! exactly the same generation logic and can never disagree about what
 //! "up to date" means.
 //! What: [`generate`] builds the full [`GeneratedSet`] (7 files); [`write`](crate::generate::write)
-//! writes it to `crates/trusty-mpm/src/assets/skills/`; [`diff`] compares it
+//! writes it to the invoking checkout's `crates/trusty-mpm/src/assets/skills/`
+//! ([`resolve_skills_asset_dir`]); [`diff`] compares it
 //! against the committed copies without writing; [`run_capabilities`] is the
 //! `tm generate capabilities[--check]` CLI entry point.
 //! Test: `generated_set_has_seven_entries`, `generated_set_is_deterministic`,
@@ -68,21 +69,45 @@ pub(crate) fn generate() -> GeneratedSet {
     set
 }
 
-/// The compile-time source asset root: `crates/trusty-mpm/src/assets/skills/`.
+/// Asset directory, relative to a trusty-tools checkout root.
+const SKILLS_ASSET_REL: &str = "crates/trusty-mpm/src/assets/skills";
+
+/// Resolve the skills asset directory of the trusty-tools checkout that
+/// contains `start`.
 ///
-/// Why: `tm generate capabilities` is a dev-time-only subcommand — it always
-/// runs from a checkout of this repo, so anchoring on
-/// `CARGO_MANIFEST_DIR` (fixed at compile time to this package's root) is
-/// correct and avoids any dependency on the runtime working directory.
-fn skills_asset_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("src/assets/skills")
+/// Why: an installed `tm` is routinely built from a worktree, so the
+/// compile-time `CARGO_MANIFEST_DIR` names the build checkout, not the one
+/// the command runs in. Anchoring on it made `--check` false-report drift and
+/// made the write path dirty an unrelated, finished worktree (#7776).
+/// What: walks `start` and its ancestors; the nearest directory holding both
+/// `Cargo.toml` and `crates/trusty-mpm/src/assets/skills/` is the checkout
+/// root, and its asset directory is returned. Nearest wins, so a worktree
+/// under `.claude/worktrees/` resolves to itself, not the enclosing main
+/// checkout. With no match it errors naming what it looked for; it never
+/// falls back to the build path, for writes or for `--check`.
+/// Test: `resolves_nearest_checkout_from_nested_subdirectory`,
+/// `errors_outside_any_checkout`.
+pub(crate) fn resolve_skills_asset_dir(start: &Path) -> anyhow::Result<PathBuf> {
+    // #7776: resolve from the invocation's checkout, never env!("CARGO_MANIFEST_DIR").
+    start
+        .ancestors()
+        .find(|dir| dir.join("Cargo.toml").is_file() && dir.join(SKILLS_ASSET_REL).is_dir())
+        .map(|root| root.join(SKILLS_ASSET_REL))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no trusty-tools checkout found at or above {}: looked for a directory \
+                 containing both Cargo.toml and {SKILLS_ASSET_REL}/. Run `tm generate \
+                 capabilities` from inside a trusty-tools checkout or worktree.",
+                start.display()
+            )
+        })
 }
 
 /// Write every generated file to disk under `root`.
 ///
 /// Why: the non-`--check` path — regenerating and committing the output is
 /// how a maintainer picks up a new CLI command, MCP tool, agent, or skill.
-/// `root` is injected (rather than hard-coding [`skills_asset_dir`]) so tests
+/// `root` is injected (rather than hard-coding [`resolve_skills_asset_dir`]) so tests
 /// can point this at a temp directory instead of mutating the real committed
 /// assets on every `cargo test` run.
 /// What: creates parent directories as needed (the `references/` subtree
@@ -128,14 +153,19 @@ pub(crate) fn diff(set: &GeneratedSet, root: &Path) -> Vec<String> {
 /// Why: `commands::generate::generate` (the thin CLI handler) delegates here
 /// so the generation engine stays independently unit-testable without
 /// clap/anyhow plumbing in every submodule.
-/// What: without `check`, writes the freshly generated set and reports the
-/// file count. With `check`, diffs instead of writing and returns an error
-/// (non-zero exit) listing every drifted file when the set is not clean.
+/// What: resolves the asset directory from the current working directory's
+/// checkout ([`resolve_skills_asset_dir`]) and errors outside one. Without
+/// `check`, writes the freshly generated set and reports the file count. With
+/// `check`, diffs instead of writing and returns an error (non-zero exit)
+/// listing every drifted file when the set is not clean.
 /// Test: exercised end-to-end by `scripts/check_capabilities.sh` against the
-/// committed output; unit coverage is per-submodule + [`diff`]/[`write`](crate::generate::write).
+/// committed output; unit coverage is per-submodule, [`diff`], [`write`](crate::generate::write),
+/// and [`resolve_skills_asset_dir`].
 pub(crate) fn run_capabilities(check: bool) -> anyhow::Result<()> {
     let set = generate();
-    let root = skills_asset_dir();
+    let cwd = std::env::current_dir()
+        .map_err(|e| anyhow::anyhow!("cannot read the current directory: {e}"))?;
+    let root = resolve_skills_asset_dir(&cwd)?;
     if check {
         let drifted = diff(&set, &root);
         if drifted.is_empty() {
@@ -160,8 +190,9 @@ pub(crate) fn run_capabilities(check: bool) -> anyhow::Result<()> {
     } else {
         write(&set, &root)?;
         println!(
-            "tm-capabilities: wrote {} generated files under crates/trusty-mpm/src/assets/skills/tm-capabilities*",
-            set.len()
+            "tm-capabilities: wrote {} generated files under {}/tm-capabilities*",
+            set.len(),
+            root.display()
         );
         Ok(())
     }
@@ -220,6 +251,51 @@ mod tests {
         let drifted = diff(&set, tmp.path());
         assert_eq!(drifted.len(), 1);
         assert!(drifted[0].contains("content differs"), "{drifted:?}");
+    }
+
+    /// Lay out a minimal checkout root under `root`: `Cargo.toml` plus the
+    /// skills asset directory.
+    fn fake_checkout(root: &Path) {
+        std::fs::create_dir_all(root.join(SKILLS_ASSET_REL)).expect("asset dir");
+        std::fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("Cargo.toml");
+    }
+
+    #[test]
+    fn resolves_nearest_checkout_from_nested_subdirectory() {
+        // #7776: a worktree nested inside a main checkout, started from a
+        // subdirectory of the worktree, resolves to the worktree's assets.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let main = tmp.path().join("trusty-tools");
+        let worktree = main.join(".claude/worktrees/agent-x");
+        fake_checkout(&main);
+        fake_checkout(&worktree);
+        let start = worktree.join("crates/trusty-mpm/src");
+
+        let resolved = resolve_skills_asset_dir(&start).expect("inside a checkout");
+
+        assert_eq!(resolved, worktree.join(SKILLS_ASSET_REL));
+        assert_ne!(
+            resolved,
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/assets/skills")
+        );
+        assert_eq!(
+            resolve_skills_asset_dir(&main.join("crates")).expect("main checkout"),
+            main.join(SKILLS_ASSET_REL)
+        );
+    }
+
+    #[test]
+    fn errors_outside_any_checkout() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let start = tmp.path().join("not/a/checkout");
+        std::fs::create_dir_all(&start).expect("dirs");
+
+        let err = resolve_skills_asset_dir(&start)
+            .expect_err("no checkout above a bare temp dir")
+            .to_string();
+
+        assert!(err.contains("no trusty-tools checkout found"), "{err}");
+        assert!(err.contains(SKILLS_ASSET_REL), "{err}");
     }
 
     #[test]
