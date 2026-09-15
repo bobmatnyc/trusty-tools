@@ -1378,10 +1378,8 @@ pub(crate) enum Command {
     ///
     /// Why: Claude Code's `statusLine` hook calls this command on every render
     /// cycle; this handler parses the hook JSON and emits one compact segment
-    /// string for the status bar. #7907: a verifier building a synthetic
-    /// payload by hand had no way to learn which stdin fields key the `💸`
-    /// segment's ledger lookup, so a hand-built `session_id` with no matching
-    /// ledger row rendered `💸—` with no explanation in `--help`.
+    /// string for the status bar. `--help` also names the stdin fields the
+    /// `💸` segment reads (#7907).
     /// What: reads a JSON object from stdin and renders
     /// `TM <ver> ● | <project> ⎇ <branch> | @<gh> | ✻<account> | <model> |
     /// ctx% | <cost> | <usage> | <savings>`, then exits 0. Missing or invalid

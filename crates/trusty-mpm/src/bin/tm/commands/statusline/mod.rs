@@ -93,28 +93,23 @@ pub(crate) struct CostInfo {
 
 /// The stdin JSON fields that feed the `💸` savings segment (#7907).
 ///
-/// Why: `tm statusline --help` documented the rendered output format but
-/// never named which stdin fields key the `💸` segment's ledger lookup, so a
-/// verifier building a synthetic `statusLine` payload by hand had no way to
-/// learn it — a hand-built payload carrying a `session_id` with no matching
-/// ledger row rendered `💸—` and nothing said why (issue #7907, surfaced
-/// verifying #7867).
+/// Why: `tm statusline --help` did not name the fields the `💸` segment reads
+/// (#7907).
 /// What: the field path (dotted for a nested field) and why it matters, in
 /// the exact order [`render_statusline_from`] reads them: `session_id` is
-/// the ledger fold key `savings_segment_probe` reads at this file's line 184;
-/// `context_window.total_input_tokens` is optional and feeds the
-/// session-actual-tokens denominator `compaction_segment` (this file's line
-/// 168) persists for [`compaction::session_actual_tokens_for`] to read,
-/// falling back to the ledger's own `tokens_before` sum when absent. This is
-/// the one list both `tm statusline --help`
-/// (`crates/trusty-mpm/src/bin/tm/cli/mod.rs`) and
-/// `statusline_help_names_every_savings_stdin_field` (`tests.rs`) check
-/// against, so the two can never drift apart silently.
+/// the ledger fold key `savings_segment_probe` reads; `context_window.total_input_tokens`
+/// is optional and feeds the session-actual-tokens denominator
+/// `compaction_segment` persists for [`compaction::session_actual_tokens_for`]
+/// to read, falling back to the ledger's own `tokens_before` sum when absent.
+/// What `statusline_help_names_every_savings_stdin_field` guarantees: it
+/// fails if `tm statusline --help`'s rendered text and this list disagree in
+/// either direction -- a field listed here missing from `--help`, or
+/// `--help` naming a field not listed here. What it does NOT guarantee: that
+/// this list matches what [`render_statusline_from`] actually reads -- the
+/// list is maintained by hand against that function, not derived from it.
 /// Test: `statusline_help_names_every_savings_stdin_field` in `tests.rs`.
-// #7907: the regression test checks `tm statusline --help`'s hand-written
-// field list against this constant, so the two cannot drift apart silently.
-// `#[cfg(test)]` since nothing at runtime reads it -- `--help`'s text is a
-// literal clap doc comment kept in sync with this list by hand.
+// #7907: hand-maintained against `render_statusline_from`; `--help`'s text
+// is a literal clap doc comment also kept in sync with this list by hand.
 #[cfg(test)]
 pub(crate) const SAVINGS_SEGMENT_STDIN_FIELDS: &[(&str, &str)] = &[
     (
