@@ -2,7 +2,7 @@
 //!
 //! Why: the four checks this runs are all mechanical, all written down in
 //! `tm-workflow.md`, and all currently the agent's to remember: the
-//! seven-field body contract, the exact attribution footer, the shipped
+//! nine-field body contract, the exact attribution footer, the shipped
 //! `--assignee @me --label trusty-mpm --label ws/<session>` defaults, and the
 //! changelog fragment the diff owes. Each failure is cheap to catch here and
 //! expensive to catch later — a thin body reaches the review gate, a missing
@@ -363,7 +363,7 @@ impl OpenPlan {
 /// `open_docs_only_skips_the_changelog_gate`,
 /// `open_head_without_docs_only_is_refused`,
 /// `open_head_with_docs_only_plans`,
-/// `pr_7615_minimal_skips_the_seven_field_contract`,
+/// `pr_7615_minimal_skips_the_heading_contract`,
 /// `open_labels_come_from_the_policy_table`,
 /// `open_assignee_comes_from_the_ticketing_block`.
 pub(crate) fn plan(
@@ -377,7 +377,7 @@ pub(crate) fn plan(
     let mut failures: Vec<String> = Vec::new();
 
     let report = body::validate(body_text);
-    // #7615: `--minimal` drops the seven-heading half for a project whose own
+    // #7615: `--minimal` drops the nine-heading half for a project whose own
     // `CLAUDE.md` names a different body standard. `merge_failures` is that half
     // removed — the footer, and nothing else.
     if args.minimal {

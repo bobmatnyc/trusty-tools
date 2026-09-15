@@ -1,8 +1,8 @@
 //! The PR-body contract `tm pr open` enforces before spawning `gh` (#6653).
 //!
-//! Why: `tm-workflow.md`'s "Minimal PR Body (seven fields)" section is the
+//! Why: `tm-workflow.md`'s "Minimal PR Body (nine fields)" section is the
 //! repo's PR-body standard, and it is enforced today only by a reviewer
-//! noticing a thin body after the PR is already open. Its seven numbered
+//! noticing a thin body after the PR is already open. Its nine numbered
 //! fields are, verbatim from that section:
 //!
 //!   1. Primary outcome and linked issue(s), with the `Refs owner/repo#N` link.
@@ -10,15 +10,17 @@
 //!   3. Risk / blast radius.
 //!   4. Test evidence at the applicable levels.
 //!   5. Baseline/pre-existing failures and their canonical issue.
-//!   6. Documentation/changelog status.
-//!   7. Review-finding disposition: fixed here, kept on the parent, or
+//!   6. Gates not run, and why (#7336).
+//!   7. Partial-red accounting (#7336).
+//!   8. Documentation/changelog status.
+//!   9. Review-finding disposition: fixed here, kept on the parent, or
 //!      separately ticketed.
 //!
 //! The same section fixes the attribution footer
 //! (`🤖🤖🤖 Generated with trusty-mpm — …`) as the body's exact ending. Both
 //! are string-shaped facts about a file, so both are checkable.
 //!
-//! What: [`Field`] names the seven, [`validate`] reports which are missing or
+//! What: [`Field`] names the nine, [`validate`] reports which are missing or
 //! empty and whether the body ends with the attribution block — the footer,
 //! optionally followed by the harness's session link (#7297) — and
 //! [`apply_issue_link`] resolves this repo's `Refs #N` / `Closes #N` rule
@@ -31,15 +33,15 @@
 // the same text the setting produces.
 pub(crate) use trusty_mpm::core::attribution::ATTRIBUTION_FOOTER;
 
-/// One of the seven required PR-body fields.
+/// One of the nine required PR-body fields.
 ///
 /// Why: naming each field lets a failure report say WHICH one is missing
 /// rather than "the body is incomplete", which is the whole point of moving
 /// this off the reviewer.
-/// What: the seven fields of `tm-workflow.md`'s "Minimal PR Body" section, in
+/// What: the nine fields of `tm-workflow.md`'s "Minimal PR Body" section, in
 /// its own order. [`Field::heading`] is the canonical heading; the aliases in
 /// [`Field::matches`] accept the wordings a human body actually uses.
-/// Test: `body_field_table_covers_seven`, `body_accepts_alias_headings`.
+/// Test: `body_field_table_covers_nine`, `body_accepts_alias_headings`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Field {
     /// 1. Primary outcome and linked issue(s).
@@ -52,19 +54,25 @@ pub(crate) enum Field {
     Tests,
     /// 5. Baseline/pre-existing failures and their canonical issue.
     Baseline,
-    /// 6. Documentation/changelog status.
+    /// 6. Gates the ladder asked for that were not run, and why (#7336).
+    GatesNotRun,
+    /// 7. Partial-red accounting: each still-failing target (#7336).
+    PartialRed,
+    /// 8. Documentation/changelog status.
     Docs,
-    /// 7. Review-finding disposition.
+    /// 9. Review-finding disposition.
     Review,
 }
 
-/// The seven fields, in `tm-workflow.md`'s own order.
-pub(crate) const FIELDS: [Field; 7] = [
+/// The nine fields, in `tm-workflow.md`'s own order.
+pub(crate) const FIELDS: [Field; 9] = [
     Field::Outcome,
     Field::Changes,
     Field::Risk,
     Field::Tests,
     Field::Baseline,
+    Field::GatesNotRun,
+    Field::PartialRed,
     Field::Docs,
     Field::Review,
 ];
@@ -78,9 +86,25 @@ impl Field {
             Self::Risk => "Risk",
             Self::Tests => "Tests",
             Self::Baseline => "Baseline",
+            Self::GatesNotRun => "Gates not run",
+            Self::PartialRed => "Partial-red accounting",
             Self::Docs => "Docs",
             Self::Review => "Review",
         }
+    }
+
+    /// May this field's whole section be the single word `none`?
+    ///
+    /// Why (#7336): the two disclosure fields are answered by most PRs with
+    /// "nothing was skipped" and "nothing is still red". An author who does not
+    /// know that is an empty section away from a second failed `tm pr open`, so
+    /// the missing-field line says it rather than leaving it to the skill.
+    /// What: true for [`Self::GatesNotRun`] and [`Self::PartialRed`], false for
+    /// the seven that predate them — `none` is not an answer to "what changed".
+    /// Test: `pr_7336_the_failure_line_offers_the_minimal_none_form`,
+    /// `pr_7336_an_explicit_none_satisfies_both_fields`.
+    fn accepts_none(self) -> bool {
+        matches!(self, Self::GatesNotRun | Self::PartialRed)
     }
 
     /// Accepted heading phrases, lowercase, matched as substrings.
@@ -97,6 +121,8 @@ impl Field {
             Self::Risk => &["risk", "blast radius"],
             Self::Tests => &["tests", "test evidence", "testing", "test plan"],
             Self::Baseline => &["baseline", "pre-existing", "preexisting"],
+            Self::GatesNotRun => &["gates not run", "gates skipped", "skipped gates"],
+            Self::PartialRed => &["partial-red", "partial red"],
             Self::Docs => &["docs", "documentation", "changelog"],
             Self::Review => &["review"],
         }
@@ -130,7 +156,7 @@ pub(crate) struct BodyReport {
 impl BodyReport {
     /// The failed checks, one human line each. Empty means the body is good.
     ///
-    /// This is the OPEN gate: the seven-field contract and the footer together.
+    /// This is the OPEN gate: the nine-field contract and the footer together.
     /// Test: `body_reports_each_missing_field`, `body_reports_empty_section`.
     pub(crate) fn failures(&self) -> Vec<String> {
         let mut out = self.contract_gaps();
@@ -138,7 +164,7 @@ impl BodyReport {
         out
     }
 
-    /// The seven-field contract's gaps alone — no footer verdict.
+    /// The nine-field contract's gaps alone — no footer verdict.
     ///
     /// Why (#7868): the contract is a gate on a body the author can still
     /// cheaply rewrite, which is true at open time and false at merge time.
@@ -154,8 +180,11 @@ impl BodyReport {
     pub(crate) fn contract_gaps(&self) -> Vec<String> {
         let mut out = Vec::new();
         for f in &self.missing {
+            // #7336: the two disclosure fields are usually answered `none`, so
+            // the line that names one also names its shortest valid content.
+            let hint = if f.accepts_none() { NONE_HINT } else { "" };
             out.push(format!(
-                "{MISSING_FIELD_PREFIX} {} (heading `## {}`)",
+                "{MISSING_FIELD_PREFIX} {} (heading `## {}`){hint}",
                 field_index(*f),
                 f.heading()
             ));
@@ -174,7 +203,7 @@ impl BodyReport {
     ///
     /// Why (#7868): the footer is part of the landing commit message this
     /// command writes, so a body missing it would put an unattributed commit on
-    /// `main` — that is the merge's own contract, unlike the seven fields.
+    /// `main` — that is the merge's own contract, unlike the nine fields.
     /// What: [`Self::footer_failure`] as a list, so the caller's shape is the
     /// same as [`Self::failures`]'.
     /// Test: `merge_refuses_missing_footer`,
@@ -202,7 +231,12 @@ impl BodyReport {
 /// Test: `pr_7574_a_missing_heading_offers_the_body_skeleton`.
 pub(crate) const MISSING_FIELD_PREFIX: &str = "missing required body field";
 
-/// The seven required headings as a body the caller can paste and fill.
+/// What a missing [`Field::accepts_none`] field's failure line adds (#7336).
+///
+/// Test: `pr_7336_the_failure_line_offers_the_minimal_none_form`.
+const NONE_HINT: &str = " — an explicit `none` is a valid whole section";
+
+/// The nine required headings as a body the caller can paste and fill.
 ///
 /// Why (#7574): naming one missing heading per failure line still left the
 /// author assembling the skeleton by hand. On trusty-things#253 the agent
@@ -215,7 +249,8 @@ pub(crate) const MISSING_FIELD_PREFIX: &str = "missing required body field";
 /// on purpose: pasting it unfilled fails the same gate again, naming each
 /// section that still holds no content.
 /// Test: `body_skeleton_names_every_field`,
-/// `pr_7574_a_missing_heading_offers_the_body_skeleton`.
+/// `pr_7574_a_missing_heading_offers_the_body_skeleton`,
+/// `pr_7336_the_skeleton_carries_both_new_fields`.
 pub(crate) fn skeleton() -> String {
     let mut out = String::new();
     for f in FIELDS {
@@ -275,7 +310,7 @@ fn heading_text(line: &str) -> Option<String> {
     Some(cleaned)
 }
 
-/// Check `body` against the seven-field contract and the footer rule.
+/// Check `body` against the nine-field contract and the footer rule.
 ///
 /// Why: this is the gate `tm pr open` runs before spawning `gh`, so a thin
 /// body is caught by the author rather than by the review gate after the PR
@@ -341,7 +376,7 @@ pub(crate) fn validate(body: &str) -> BodyReport {
 /// end a PR body with the footer, a blank line, then this link. The validator
 /// required the footer to be the LAST non-blank line, so a session that
 /// followed its own instructions could not open a PR with `tm pr open` and fell
-/// back to `gh pr create` — which skips the seven-field gate entirely.
+/// back to `gh pr create` — which skips the nine-field gate entirely.
 /// What: the URL prefix, matched with or without the `Claude-Session:` label
 /// the commit-message form of the same block uses.
 /// Test: `footer_accepts_the_trailing_session_link`,

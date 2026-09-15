@@ -1,7 +1,7 @@
 //! `tm pr` — deterministic pull-request open and merge-queue gates.
 //!
 //! Why: `version-control` opens every PR by hand-assembling `gh pr create`,
-//! and re-derives four separate judgments each time — is the seven-field body
+//! and re-derives four separate judgments each time — is the nine-field body
 //! complete, is the attribution footer exact, were the shipped labels and
 //! assignee attached, does this diff owe a changelog fragment. Each of those
 //! is a mechanical check the agent currently performs from prose in
@@ -28,7 +28,7 @@ use std::path::PathBuf;
 /// `cli_parses_pr_queue_check` in `tests.rs`.
 #[derive(Debug, clap::Subcommand)]
 pub(crate) enum PrCmd {
-    /// Validate a PR body against the seven-field contract, then open the PR.
+    /// Validate a PR body against the nine-field contract, then open the PR.
     Open(PrOpenArgs),
     /// Squash-merge a PR with its validated body as the commit message.
     #[command(long_about = MERGE_LONG_ABOUT)]
@@ -80,7 +80,7 @@ mutating command.";
 const MERGE_LONG_ABOUT: &str = "\
 Squash-merge a PR with its validated body as the landing commit message.
 
-Reads the PR, re-validates its body with the same seven-field-and-footer check \
+Reads the PR, re-validates its body with the same nine-field-and-footer check \
 `tm pr open` runs, then merges with `--squash --delete-branch --subject \
 \"<title> (#<n>)\" --body-file <tmp>`, so the validated body IS the squash \
 commit message rather than a concatenation of the branch's raw commit messages.
@@ -115,7 +115,7 @@ pub(crate) struct PrOpenArgs {
     #[arg(long)]
     pub(crate) title: String,
 
-    /// Path to the PR body (Markdown), checked against the seven-field contract.
+    /// Path to the PR body (Markdown), checked against the nine-field contract.
     #[arg(long = "body-file")]
     pub(crate) body_file: PathBuf,
 
@@ -154,10 +154,10 @@ pub(crate) struct PrOpenArgs {
     #[arg(long = "docs-only")]
     pub(crate) docs_only: bool,
 
-    /// Skip the seven-heading body contract; the footer and changelog gates
+    /// Skip the nine-heading body contract; the footer and changelog gates
     /// still run.
     ///
-    /// Why (#7615): the seven headings are THIS repo's PR-body standard, and
+    /// Why (#7615): the nine headings are THIS repo's PR-body standard, and
     /// `tm pr open` is used against projects whose `CLAUDE.md` names a
     /// different one. With no opt-out, such a project's PR fell back to a
     /// hand-assembled `gh pr create`, which skips the attribution-footer and
@@ -165,7 +165,7 @@ pub(crate) struct PrOpenArgs {
     /// What: drops the missing/empty-heading half of the body report. The
     /// footer check, the `Refs`/`Closes` rule, the workstream label and the
     /// changelog fragment gate are unaffected.
-    /// Test: `pr_7615_minimal_skips_the_seven_field_contract`,
+    /// Test: `pr_7615_minimal_skips_the_heading_contract`,
     /// `pr_7615_minimal_still_enforces_the_footer_and_the_changelog`,
     /// `cli_parses_pr_open_minimal`.
     #[arg(long)]

@@ -1,7 +1,7 @@
 //! `tm pr merge` — squash-merge with the validated PR body as the landing
 //! commit message (#6808).
 //!
-//! Why: `tm pr open` validates the seven-field body and the exact attribution
+//! Why: `tm pr open` validates the nine-field body and the exact attribution
 //! footer, but the documented merge path `gh pr merge --squash --delete-branch
 //! --auto` lets GitHub assemble the squash commit from the branch's raw commit
 //! messages, so the body that was validated never becomes the landing commit.
@@ -13,7 +13,7 @@
 //! What: [`run`] reads the PR once
 //! (`gh pr view <n> --json
 //! number,title,body,isDraft,labels,reviewDecision,mergeStateStatus,mergeable,headRefName`),
-//! re-validates the body with [`body::validate`] — reporting the seven-field
+//! re-validates the body with [`body::validate`] — reporting the nine-field
 //! gaps and refusing only on a missing attribution footer, which is the half
 //! that belongs to the commit message this command writes (#7868) — and either
 //! refuses with one line and no `gh pr merge` call, or merges
@@ -111,7 +111,7 @@ pub(crate) enum Decision {
 /// `body_failures` is [`body::BodyReport::merge_failures`] — the attribution
 /// footer alone (#7868). The footer IS part of the landing commit message this
 /// command writes, so a body missing it would put an unattributed commit on
-/// `main`; the seven-field contract is not, and is reported by [`run`] instead.
+/// `main`; the nine-field contract is not, and is reported by [`run`] instead.
 ///
 /// A conflict is `mergeable == CONFLICTING` or `mergeStateStatus == DIRTY`;
 /// the two are separate GraphQL enums and `CONFLICTING` never appears in
@@ -264,7 +264,7 @@ pub(crate) fn run<R: GhRunner>(gh: &R, args: &PrMergeArgs) -> anyhow::Result<i32
     let view = pr_view(gh, args)?;
     let report = body::validate(&view.body);
 
-    // #7868: the seven-field contract is the OPEN gate. Re-running it here made
+    // #7868: the nine-field contract is the OPEN gate. Re-running it here made
     // a body written to the sparse prose rules unmergeable by the one command
     // that passes the reviewed body through `--body-file`, so the operator fell
     // back to raw `gh pr merge` and lost that guarantee. The gaps are reported;
@@ -272,7 +272,7 @@ pub(crate) fn run<R: GhRunner>(gh: &R, args: &PrMergeArgs) -> anyhow::Result<i32
     let gaps = report.contract_gaps();
     if !gaps.is_empty() {
         eprintln!(
-            "tm pr merge: #{}: the body does not fill every field of the seven-field contract — \
+            "tm pr merge: #{}: the body does not fill every field of the nine-field contract — \
              reported, not a refusal (#7868):",
             args.pr
         );
