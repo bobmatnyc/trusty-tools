@@ -27,6 +27,35 @@ fn dirty_policy_defaults_to_skip() {
     );
 }
 
+/// 🔴 #7965: a git call that outlives the ceiling reads as DIRTY, never clean.
+///
+/// Why: the wedge releases after 5 s with the checkout still clean, so an
+/// unbounded `git status` waits it out and reports CLEAN — the verdict that let
+/// the pre-fix sweep remove a worktree it could not inspect in time.
+#[cfg(unix)]
+#[test]
+fn inspect_dirt_treats_a_timed_out_git_call_as_dirty() {
+    use std::time::{Duration, Instant};
+
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("wedged");
+    let _wedge = fx.wedge_status(Duration::from_secs(5));
+
+    let started = Instant::now();
+    let dirt = crate::session_manager::git_ceiling::with_git_ceiling(
+        Duration::from_millis(500),
+        || inspect_dirt(&wt),
+    );
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "the ceiling must end the check, not the wedge's 5 s release; took {elapsed:?}"
+    );
+    let dirt = dirt.expect("a dirty check whose git call timed out must report dirty");
+    assert!(dirt.reason.contains("dirty-check failed"), "{}", dirt.reason);
+}
+
 /// Baseline: a worktree with no local edits, whose HEAD is already on a
 /// remote-tracking ref, is PROVABLY clean — the guard must return `None` so
 /// reclamation still works. Without this the guard would be a permanent leak.

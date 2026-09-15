@@ -55,6 +55,8 @@ pub mod task_inject;
 pub mod workspace_guard;
 // #6497: the explicit ownership transfer for a tree whose owner is provably
 // dead — the compliant alternative to rebuilding the branch by hand.
+// #7965: the per-thread wall-clock ceiling every worktree-safety git call runs under.
+pub(crate) mod git_ceiling;
 pub(crate) mod worktree_adopt;
 // #4311: the OS-level "is a process standing in here?" gate — the one removal
 // check that does not read a registry trusty-mpm or git wrote.

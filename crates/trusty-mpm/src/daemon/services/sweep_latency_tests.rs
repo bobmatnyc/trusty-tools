@@ -197,7 +197,8 @@ async fn a_wedged_hygiene_fetch_neither_hangs_the_sweep_nor_delays_health() {
 /// blocks the thread stalls the prober BETWEEN calls, so timing each call alone
 /// would report a fast `/health` throughout a multi-second stall.
 /// What: polls `mpm.health` every 20 ms and reports the longest time from one
-/// answer to the next, minus that 20 ms pause.
+/// answer to the next, minus that 20 ms pause. The clock runs from answer to
+/// answer, so a stall that lands during the pause is counted too (#7965).
 async fn worst_health_gap_during<F, T>(state: &Arc<DaemonState>, work: F) -> (Duration, T)
 where
     F: std::future::Future<Output = T>,
@@ -208,12 +209,13 @@ where
     let probe_done = Arc::clone(&done);
     let prober = tokio::spawn(async move {
         let mut worst = Duration::ZERO;
-        let mut last = Instant::now();
+        let mut last_answer = Instant::now();
         while !probe_done.load(std::sync::atomic::Ordering::Relaxed) {
             let _ = core_ops::health(&probe_state).await;
-            worst = worst.max(last.elapsed().saturating_sub(PAUSE));
+            let answered = Instant::now();
+            worst = worst.max((answered - last_answer).saturating_sub(PAUSE));
+            last_answer = answered;
             tokio::time::sleep(PAUSE).await;
-            last = Instant::now() - PAUSE;
         }
         worst
     });

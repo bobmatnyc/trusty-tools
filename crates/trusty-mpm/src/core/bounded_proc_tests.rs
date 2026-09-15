@@ -11,7 +11,40 @@
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use super::{BoundedError, run_bounded};
+use super::{BoundedError, run_bounded, run_bounded_with_input};
+
+/// The input variant hands its bytes to the child's stdin and closes it (#7965).
+///
+/// Why: `git patch-id` reads its patch from stdin; a stdin that is never closed
+/// would leave it waiting for more and turn every call into a timeout.
+#[test]
+fn run_bounded_with_input_feeds_stdin() {
+    let mut cmd = Command::new("sh");
+    cmd.args(["-c", "wc -c"]);
+    let out = run_bounded_with_input(cmd, Some(b"hello".to_vec()), Duration::from_secs(5))
+        .expect("a child reading its input must answer");
+    assert!(out.status.success(), "{:?}", out.status);
+    assert_eq!(out.stdout.trim(), "5");
+}
+
+/// A child that never reads its input still times out (#7965).
+///
+/// Why: 1 MiB is larger than any pipe buffer, so writing it on the caller's
+/// thread would block that thread forever and the budget would never be checked.
+#[test]
+fn run_bounded_with_input_times_out_a_child_that_never_reads() {
+    let mut cmd = Command::new("sleep");
+    cmd.arg("30");
+    let started = Instant::now();
+    let err = run_bounded_with_input(cmd, Some(vec![b'x'; 1 << 20]), Duration::from_millis(300))
+        .expect_err("a child that never reads must time out");
+    assert!(matches!(err, BoundedError::TimedOut), "{err}");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "the timeout must fire despite the unread input; took {:?}",
+        started.elapsed()
+    );
+}
 
 /// A command that exits non-zero is `Ok` here, with both streams captured.
 ///

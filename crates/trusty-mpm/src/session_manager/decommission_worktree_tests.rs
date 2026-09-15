@@ -16,6 +16,43 @@ use super::manager::SessionManager;
 use super::record::{ManagedSessionId, ManagedSessionState};
 use super::tests::FakeTmuxDriver;
 
+/// 🔴 #7965: a `git worktree remove --force` that outlives its ceiling is
+/// killed and the worktree is KEPT.
+///
+/// Why: the removal is the one git call in the sweep that can legitimately run
+/// for minutes, so it has its own ceiling. A killed removal may have deleted
+/// part of the tree while git still registers it, so it must never fall through
+/// to the leftover-directory cleanup. The wedge is a FIFO at the worktree's
+/// `locked` file: the removal blocks reading the lock reason, and after release
+/// git refuses a locked worktree — so an unbounded removal also keeps it, but
+/// only after waiting out the wedge. Elapsed time is the discriminator.
+#[cfg(unix)]
+#[test]
+fn remove_session_worktree_keeps_a_worktree_whose_removal_times_out() {
+    use std::time::{Duration, Instant};
+
+    let fx = super::worktree_git_fixture::GitWorktreeFixture::new();
+    let wt = fx.add_worktree("slow-removal");
+    let _wedge = fx.wedge_worktree_lock(&wt, Duration::from_secs(5));
+
+    let started = Instant::now();
+    let outcome =
+        super::decommission::remove_session_worktree_within(&wt, Duration::from_millis(500));
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "the removal ceiling must end the call, not the wedge's 5 s release; took {elapsed:?}"
+    );
+    assert!(!outcome.removed(), "a timed-out removal must keep the worktree");
+    assert!(
+        outcome.reason().is_some_and(|r| r.contains("did not finish")),
+        "the kept reason must name the timeout; got {:?}",
+        outcome.reason()
+    );
+    assert!(wt.exists(), "the worktree must still be on disk");
+}
+
 /// `decommission` on an in-project (`workspace_owned = false`) session whose
 /// workspace is a REAL `git worktree` removes the worktree directory from
 /// disk AND prunes the git worktree metadata + branch ref from the base clone

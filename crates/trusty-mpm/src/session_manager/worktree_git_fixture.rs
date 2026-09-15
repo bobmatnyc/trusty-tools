@@ -532,52 +532,87 @@ impl GitWorktreeFixture {
     /// parked reader EOF. Dropping the guard stops that thread.
     /// Test: `a_wedged_git_status_neither_hangs_the_orphan_sweep_nor_delays_health`.
     #[cfg(unix)]
-    pub(crate) fn wedge_status(&self, release_after: std::time::Duration) -> StatusWedge {
-        use std::os::unix::ffi::OsStrExt;
-        use std::os::unix::fs::OpenOptionsExt;
+    pub(crate) fn wedge_status(&self, release_after: std::time::Duration) -> GitWedge {
+        wedge_with_fifo(
+            self.repo.join(".git").join("info").join("exclude"),
+            release_after,
+        )
+    }
 
-        let exclude = self.repo.join(".git").join("info").join("exclude");
-        if let Some(info) = exclude.parent() {
-            std::fs::create_dir_all(info).expect("fixture: create .git/info");
-        }
-        let _ = std::fs::remove_file(&exclude);
-        let c_path = std::ffi::CString::new(exclude.as_os_str().as_bytes())
-            .expect("fixture: exclude path has no NUL");
-        // SAFETY: `c_path` is a valid NUL-terminated path that outlives the call.
-        let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) };
-        assert_eq!(rc, 0, "fixture: mkfifo: {}", std::io::Error::last_os_error());
-
-        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let stop = std::sync::Arc::clone(&done);
-        let releaser = std::thread::spawn(move || {
-            let started = std::time::Instant::now();
-            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                if started.elapsed() >= release_after {
-                    let _ = std::fs::OpenOptions::new()
-                        .write(true)
-                        .custom_flags(libc::O_NONBLOCK)
-                        .open(&exclude);
-                }
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-        });
-        StatusWedge {
-            done,
-            releaser: Some(releaser),
-        }
+    /// Make `git worktree list` and `git worktree remove` block on `wt` (#7965).
+    ///
+    /// Why: both read a worktree's lock reason from
+    /// `<common-dir>/worktrees/<id>/locked`, so a FIFO there parks them while
+    /// `rev-parse` and `status` still answer. That is what lets a test time out
+    /// the registry cross-check or the removal alone.
+    /// What: resolves `wt`'s admin directory with `git rev-parse --git-dir` and
+    /// puts the FIFO at `locked`. Once released, the empty lock file reads as a
+    /// lock with no reason.
+    /// Test: `git_worktree_list_agrees_false_when_the_listing_times_out`,
+    /// `remove_session_worktree_keeps_a_worktree_whose_removal_times_out`.
+    #[cfg(unix)]
+    pub(crate) fn wedge_worktree_lock(
+        &self,
+        wt: &Path,
+        release_after: std::time::Duration,
+    ) -> GitWedge {
+        let admin = git_stdout_ok(wt, &["rev-parse", "--path-format=absolute", "--git-dir"]);
+        wedge_with_fifo(PathBuf::from(admin.trim()).join("locked"), release_after)
     }
 }
 
-/// Guard returned by [`GitWorktreeFixture::wedge_status`]; stops the releaser on
-/// drop.
+/// Replace `file` with a FIFO that blocks every reader until `release_after`.
+///
+/// What: opening a FIFO with no writer blocks, so every git read of `file` parks
+/// there. After `release_after` a background thread keeps opening the FIFO
+/// non-blocking for write and closing it, which hands any parked reader EOF.
+/// Dropping the guard stops that thread.
+/// Test: through [`GitWorktreeFixture::wedge_status`] and
+/// [`GitWorktreeFixture::wedge_worktree_lock`].
 #[cfg(unix)]
-pub(crate) struct StatusWedge {
+fn wedge_with_fifo(file: PathBuf, release_after: std::time::Duration) -> GitWedge {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent).expect("fixture: create the FIFO's directory");
+    }
+    let _ = std::fs::remove_file(&file);
+    let c_path =
+        std::ffi::CString::new(file.as_os_str().as_bytes()).expect("fixture: path has no NUL");
+    // SAFETY: `c_path` is a valid NUL-terminated path that outlives the call.
+    let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) };
+    assert_eq!(rc, 0, "fixture: mkfifo: {}", std::io::Error::last_os_error());
+
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop = std::sync::Arc::clone(&done);
+    let releaser = std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+            if started.elapsed() >= release_after {
+                let _ = std::fs::OpenOptions::new()
+                    .write(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(&file);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    });
+    GitWedge {
+        done,
+        releaser: Some(releaser),
+    }
+}
+
+/// Guard returned by the fixture's FIFO wedges; stops the releaser on drop.
+#[cfg(unix)]
+pub(crate) struct GitWedge {
     done: std::sync::Arc<std::sync::atomic::AtomicBool>,
     releaser: Option<std::thread::JoinHandle<()>>,
 }
 
 #[cfg(unix)]
-impl Drop for StatusWedge {
+impl Drop for GitWedge {
     fn drop(&mut self) {
         self.done.store(true, std::sync::atomic::Ordering::Relaxed);
         if let Some(handle) = self.releaser.take() {

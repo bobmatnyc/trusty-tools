@@ -703,6 +703,35 @@ fn git_worktree_list_agrees_false_for_untracked_dir() {
     );
 }
 
+/// 🔴 #7965: a `git worktree list` that outlives the ceiling does NOT agree.
+///
+/// Why: "git could not be run" still agrees, because this check is a safety net
+/// on top of the sentinel gate. A TIMEOUT is different: git is there and wedged,
+/// so nothing about the path is known. After the wedge releases, the listing
+/// names the worktree (as locked), so an unbounded probe waits 5 s and agrees.
+#[cfg(unix)]
+#[test]
+fn git_worktree_list_agrees_false_when_the_listing_times_out() {
+    use std::time::{Duration, Instant};
+
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("wedged-listing");
+    let _wedge = fx.wedge_worktree_lock(&wt, Duration::from_secs(5));
+
+    let started = Instant::now();
+    let agrees = crate::session_manager::git_ceiling::with_git_ceiling(
+        Duration::from_millis(500),
+        || git_worktree_list_agrees(&wt),
+    );
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "the ceiling must end the probe, not the wedge's 5 s release; took {elapsed:?}"
+    );
+    assert!(!agrees, "a timed-out worktree listing must keep the candidate");
+}
+
 /// THE #4207 regression test for the ownership half of the slice: a worktree
 /// physically inside `<repo>/.base/.worktrees/` but REGISTERED to the parent
 /// repo `<repo>` must be recognised as a real worktree.

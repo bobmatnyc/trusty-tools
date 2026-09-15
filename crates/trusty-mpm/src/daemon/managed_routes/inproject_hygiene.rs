@@ -58,18 +58,9 @@ use std::time::{Duration, Instant, SystemTime};
 
 use tracing::{info, warn};
 
-use crate::core::bounded_proc::{BoundedError, BoundedOutput, run_bounded};
-
-/// Wall-clock ceiling for any single `git` invocation in this sweep (#7965).
-///
-/// Why 60 seconds: every step but the fetch is a local git read that answers in
-/// milliseconds, and the fetch is the only one that legitimately touches the
-/// network. 60 s is generous for a cold fetch on a slow link and FINITE for a
-/// wedged one — which is the case #7965 caught, a blocking-pool thread parked in
-/// a child's stdout read with no bound at all. A base that hits the ceiling is
-/// abandoned and logged; the sweep moves on.
-/// Test: `a_wedged_hygiene_fetch_neither_hangs_the_sweep_nor_delays_health`.
-pub(crate) const GIT_TIMEOUT: Duration = Duration::from_secs(60);
+// #7965: `GIT_TIMEOUT` moved to `bounded_proc` so the orphan-GC worktree sweep
+// shares this sweep's ceiling. A base that hits it is abandoned and logged.
+use crate::core::bounded_proc::{BoundedError, BoundedOutput, GIT_TIMEOUT, run_bounded};
 
 /// Wall-clock ceiling for one whole sweep over every base clone (#7965).
 ///

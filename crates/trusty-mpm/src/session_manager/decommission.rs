@@ -303,6 +303,15 @@ impl WorktreeRemoval {
 /// `remove_still_removes_a_healthy_worktree`; integration coverage via the
 /// decommission round-trip tests that set up real git worktrees.
 pub(super) fn remove_session_worktree(path: &Path) -> WorktreeRemoval {
+    remove_session_worktree_within(path, std::time::Duration::from_secs(15 * 60))
+}
+
+/// RED STUB — replaced by the bounded removal in the next commit (#7965).
+pub(super) fn remove_session_worktree_within(
+    path: &Path,
+    remove_budget: std::time::Duration,
+) -> WorktreeRemoval {
+    let _ = remove_budget;
     if !path.exists() {
         // Already gone — either removed by a concurrent decommission or by a
         // previous partial run. Treat as success (idempotent removal).
