@@ -132,6 +132,32 @@ use crate::text::{strip_interior_blank_lines, trim_surrounding_blank_lines};
 pub struct ChatLine {
     pub role: ChatRole,
     pub text: String,
+    /// The tool call this entry renders as a card, if any (#4596). When
+    /// `Some`, the scrollback draws the card and ignores `text`; `role` still
+    /// places it — [`ChatRole::Status`] at top level, [`ChatRole::Delegated`]
+    /// inside a delegation block.
+    pub tool: Option<ToolCard>,
+}
+
+/// One tool call and its result, rendered as a single scrollback card
+/// (#4596).
+///
+/// Why: [`crate::event::ReplEvent::ToolInvocation`] arrives twice per call
+/// (start, then completion) sharing an `id`. Holding both halves in one value
+/// lets the reducer fill in one card instead of pushing two entries.
+/// What: `result` is `None` while the call is in flight. `args` keeps the
+/// start event's payload, because a completion event may carry `Null` args.
+/// Test: `reduce::tests::tool_invocation_result_merges_into_its_call_card`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolCard {
+    /// The engine-minted call id shared by the start and completion events.
+    pub id: String,
+    /// The invoked tool's name.
+    pub tool_name: String,
+    /// The call's arguments, as the start event carried them.
+    pub args: serde_json::Value,
+    /// The tool's output; `None` while the call is still running.
+    pub result: Option<String>,
 }
 
 /// Source/role of a chat line — drives the leader glyph and color chosen by
@@ -148,8 +174,8 @@ pub enum ChatRole {
     Assistant,
     /// An error response (rendered in the scrollback's error color).
     Error,
-    /// An informational status line (e.g. "Connection lost", a tool
-    /// invocation notice).
+    /// An informational status line (e.g. "Connection lost"), or a
+    /// top-level tool card when the entry carries [`ChatLine::tool`].
     Status,
     /// The header or footer line framing one delegated sub-agent's block
     /// (#7940). Rendered flush-left with its own glyph so the block's start
@@ -269,6 +295,10 @@ pub struct ReplApp {
     /// [`crate::event::ReplEvent::AssistantOutput`] uses — precisely so two
     /// agents streaming at once cannot land in one bubble.
     pub agent_streams: HashMap<(String, String), usize>,
+    /// Index into `chat` of the card for each in-flight tool call, keyed by
+    /// the call's `id` (#4596). Inserted when a call starts; removed when its
+    /// result lands in that card.
+    pub tool_cards: HashMap<String, usize>,
     /// Engine-supplied statusline segments, most recently pushed via
     /// [`crate::event::ReplEvent::StatuslineUpdate`].
     pub statusline: Vec<StatuslineSegment>,
@@ -352,6 +382,7 @@ impl ReplApp {
             streaming_idx: None,
             delegations: Vec::new(),
             agent_streams: HashMap::new(),
+            tool_cards: HashMap::new(),
             statusline: Vec::new(),
             active_workstream: None,
             quit: false,
@@ -368,6 +399,7 @@ impl ReplApp {
         self.chat.push(ChatLine {
             role: ChatRole::User,
             text: text.into(),
+            tool: None,
         });
         self.scroll_offset = 0;
     }
@@ -392,6 +424,7 @@ impl ReplApp {
         self.chat.push(ChatLine {
             role,
             text: collapsed,
+            tool: None,
         });
         self.scroll_offset = 0;
         self.update_last_bash_block();
@@ -431,6 +464,7 @@ impl ReplApp {
         self.chat.push(ChatLine {
             role: ChatRole::Status,
             text: text.into(),
+            tool: None,
         });
         self.scroll_offset = 0;
     }
@@ -445,6 +479,8 @@ impl ReplApp {
         // (or out-of-range) row.
         self.agent_streams.clear();
         self.delegations.clear();
+        // #4596: same for the tool-call index map.
+        self.tool_cards.clear();
         self.scroll_offset = 0;
     }
 

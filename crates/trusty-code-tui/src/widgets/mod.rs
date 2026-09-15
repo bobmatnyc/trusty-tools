@@ -12,7 +12,8 @@
 //! (startup splash, from `banner.rs`), and [`status_line`] (the engine-
 //! supplied statusline, new in this slice — tagent's `status.rs` equivalent
 //! is NOT ported, since it hardcodes an OpenRouter cost formula the shared
-//! crate must never contain; see DOC-50 §3.2 and Q9).
+//! crate must never contain; see DOC-50 §3.2 and Q9). [`tool_card`] renders
+//! one tool call and its result as a scrollback card (#4596).
 //!
 //! # Spec References
 //! - [`SPEC-TTUI-03~draft`](docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-03~draft) — §3.1 module layout (`widgets/`).
@@ -22,3 +23,4 @@ pub mod banner;
 pub mod input_composer;
 pub mod scrollback;
 pub mod status_line;
+pub mod tool_card;
