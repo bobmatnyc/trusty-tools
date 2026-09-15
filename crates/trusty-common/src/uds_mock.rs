@@ -14,7 +14,11 @@
 //! rather than through production discovery. The handler answers a `result`
 //! value directly, or an [`RpcError`] to make the daemon refuse.
 //!
-//! This is a `#[cfg(test)]` module, so it never ships.
+//! This is a `#[cfg(test)]` module, so it never ships. [`BlockingMockDaemon`]
+//! and [`spawn_blocking_at`] are further gated on `search-index` (#7765):
+//! they exist only for `search_index`'s synchronous rigs, so under
+//! `memory-rpc` alone (which pulls in this module via `uds` but not
+//! `search-index`) they would otherwise be unconstructed dead code.
 //!
 //! Test: every caller — `search_rpc::tests` and `search_index::tests`.
 
@@ -133,12 +137,19 @@ where
 /// stretch. Giving the daemon its own thread keeps the rig exactly the shape the
 /// retired `TcpListener` fixtures had.
 /// What: dropping it stops the accept loop and joins the thread.
+// #7765: every caller (`search_index_tests`, `search_index_confirm`,
+// `search_index_reconcile`) lives behind the `search-index` feature, so
+// without it this type is unconstructed dead code under `--features
+// memory-rpc` alone — `memory-rpc` pulls in `uds` (and this whole module)
+// but not `search-index`.
+#[cfg(feature = "search-index")]
 pub struct BlockingMockDaemon {
     socket: PathBuf,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
+#[cfg(feature = "search-index")]
 impl BlockingMockDaemon {
     /// The path a client under test should dial.
     pub fn socket(&self) -> &Path {
@@ -146,6 +157,7 @@ impl BlockingMockDaemon {
     }
 }
 
+#[cfg(feature = "search-index")]
 impl Drop for BlockingMockDaemon {
     fn drop(&mut self) {
         if let Some(tx) = self.shutdown.take() {
@@ -166,6 +178,8 @@ impl Drop for BlockingMockDaemon {
 ///
 /// When the runtime cannot be built or the socket cannot be bound — test-only
 /// failures with no recovery.
+// #7765: see the struct's own note above — same feature gate, same reason.
+#[cfg(feature = "search-index")]
 pub fn spawn_blocking_at<F>(socket: PathBuf, handler: F) -> BlockingMockDaemon
 where
     F: Fn(&str, Value) -> MockFuture + Send + Sync + 'static,
