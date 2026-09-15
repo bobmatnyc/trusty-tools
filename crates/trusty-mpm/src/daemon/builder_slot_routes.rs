@@ -156,12 +156,16 @@ pub async fn builder_slot_route(
 ///
 /// A refusal that IS eligible releases the record the guard's preceding
 /// shared-tree or worktree-grant claim wrote for this same dispatch — see
-/// [`DaemonState::claim_builder_slot`].
+/// [`DaemonState::claim_builder_slot`]. #8012: that release goes through
+/// [`crate::daemon::services::delegation_tracker::release_denied_dispatch`], so
+/// a refusal whose record has not arrived yet leaves the `Cancelled` tombstone
+/// the late writer then finds, instead of writing nothing.
 /// Test: `builder_slot_route_claims_a_free_slot`,
 /// `builder_slot_route_denies_over_the_cap_and_names_the_holders`,
 /// `builder_slot_route_claims_nothing_for_a_non_builder`,
 /// `builder_slot_route_claims_nothing_without_a_tool_use_id`,
 /// `a_denied_builder_releases_the_record_the_dispatch_just_claimed`,
+/// `a_denied_builder_tombstones_a_record_that_lands_after_the_deny_8012`,
 /// `a_payload_with_no_tool_use_id_is_ineligible_not_full`.
 pub fn builder_slot_op(
     state: &Arc<DaemonState>,
@@ -196,8 +200,15 @@ pub fn builder_slot_op(
         // shared-tree or worktree-grant claim already recorded this dispatch as
         // Running. Nothing downstream will ever close that record, because a
         // `PreToolUse` deny means the tool never runs.
+        //
+        // #8012: through the tracker's `release_denied_dispatch`, the same call
+        // both sibling deny paths make — it TOMBSTONES a record that has not
+        // landed yet, where `DaemonState::release_denied_builder_dispatch` can
+        // only close one that already exists.
         |s| {
-            s.release_denied_builder_dispatch(session, exclude);
+            crate::daemon::services::delegation_tracker::release_denied_dispatch(
+                s, session, payload,
+            );
         },
     );
     Ok(BuilderSlotResponse {
@@ -457,6 +468,84 @@ mod tests {
                 claimed,
                 "granted={granted}: the re-issued dispatch must be admitted, \
                  but #4480 named {occupants:?}"
+            );
+        }
+    }
+
+    /// #8012, and the half the round above did not close. The refusal can only
+    /// release a record that EXISTS, and at both of the guard's builder-cap deny
+    /// exits it can be absent: the shared-tree claim declines to record a
+    /// dispatch that already declares its own isolation (`blocked_by_shared_tree`
+    /// is false for it, which is every ADR-0048 worktree dispatch), a grant
+    /// against an older daemon 404s and records nothing, and the tracker's own
+    /// `matcher: "*"` hook is an independent process that can land after this
+    /// one. A record arriving then is `Running` for a dispatch that never ran: it
+    /// holds one of the machine's slots for the 45 minutes of
+    /// `BUILDER_LEASE_TTL_SECS`, and an unisolated one occupies the checkout for
+    /// the six hours of `RUNNING_STALE_AFTER_SECS` as well.
+    ///
+    /// Both sibling deny paths already tombstone through
+    /// `delegation_tracker::release_denied_dispatch` (#7487); this one did not.
+    ///
+    /// Fails before #8012: the late record is live, the machine counts three
+    /// builders against a cap of two, and the unisolated arm's retry is refused
+    /// by #4480.
+    #[test]
+    fn a_denied_builder_tombstones_a_record_that_lands_after_the_deny_8012() {
+        // The two exits' dispatch shapes: the grant/`isolation` arm is the
+        // Rewrite exit, the bare one is the InPlace exit and the fall-through.
+        for isolation in [None, Some("worktree")] {
+            let (state, _dir, session) = hermetic();
+            insert_builder(&state, session, "rust-engineer");
+            insert_builder(&state, session, "local-ops");
+
+            let mut req = dispatch("python-engineer", Some("toolu_LATE"));
+            if let Some(mode) = isolation {
+                req.payload["input"]["isolation"] = Value::String(mode.to_string());
+            }
+            let payload = req.payload.clone();
+            assert!(
+                state
+                    .find_delegation(session, |d| d.tool_use_id.as_deref() == Some("toolu_LATE"))
+                    .is_none(),
+                "premise ({isolation:?}): nothing has recorded this dispatch yet"
+            );
+
+            let body =
+                builder_slot_op(&state, &session.0.to_string(), req, 2).expect("route succeeds");
+            assert!(!body.claimed, "{isolation:?}: the machine is full");
+
+            // The tracker's own `PreToolUse` observation, losing the race.
+            crate::daemon::services::delegation_tracker::observe(
+                &state,
+                session,
+                HookEvent::PreToolUse,
+                &payload,
+            );
+
+            let id = state
+                .find_delegation(session, |d| d.tool_use_id.as_deref() == Some("toolu_LATE"))
+                .expect("the tombstone or the late record carries the id");
+            let record = state
+                .all_delegations()
+                .into_iter()
+                .find(|d| d.id == id)
+                .expect("delegation");
+            assert!(
+                !record.status.is_live(),
+                "{isolation:?}: a denied dispatch must not end up live: {:?}",
+                record.status
+            );
+            assert_eq!(
+                state.builder_slot_holders(None).len(),
+                2,
+                "{isolation:?}: the denied dispatch must hold no builder slot"
+            );
+            assert!(
+                state
+                    .shared_tree_occupants(std::path::Path::new("/repo"), Some("toolu_RETRY"))
+                    .is_empty(),
+                "{isolation:?}: the denied dispatch still occupies the checkout"
             );
         }
     }
