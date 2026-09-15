@@ -216,7 +216,8 @@ impl CodeIndexer {
     /// DEBUG in between — then returns `true`.
     /// Test: `quarantined_shutdown_flush_does_not_destroy_chunks_json` and
     /// `quarantined_index_refuses_hnsw_snapshot_write` in
-    /// `tests/quarantine_durable_writes_4226.rs`.
+    /// `tests/quarantine_durable_writes_4226.rs`; the detach predicate alone:
+    /// `snapshot_writers_refuse_between_take_and_reattach`.
     pub(crate) fn refuse_durable_write(&self, op: &str, target: &str) -> bool {
         // #7920: a corpus once wired and now absent was detached by a staged
         // swap; the snapshot writers must not stand in for it.

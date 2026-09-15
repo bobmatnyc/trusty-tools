@@ -4,9 +4,11 @@
 //! Why: when another opener holds the corpus file, the re-open after a staged
 //! swap fails and the indexer was left with no corpus and no quarantine — the
 //! state in which both snapshot writers fall back to `chunks.json`.
-//! What: the abort error arm, the promotion error arm, and the owning arm.
+//! What: the abort error arm, the promotion error arm, the detached window
+//! before either arm runs, and the owning arm.
 //! Test: `shutdown_flush_after_failed_reattach_leaves_chunks_json_byte_identical`,
 //! `failed_promotion_reopen_quarantines_and_flush_leaves_chunks_json_byte_identical`,
+//! `snapshot_writers_refuse_between_take_and_reattach`,
 //! `owning_daemon_reattaches_and_shutdown_flush_persists`.
 
 use std::path::PathBuf;
@@ -203,6 +205,43 @@ async fn failed_promotion_reopen_quarantines_and_flush_leaves_chunks_json_byte_i
 
     fx.assert_refused_and_untouched(&before).await;
     drop(other_opener);
+}
+
+/// Detached window: after `take_corpus_store` and before any re-attach or
+/// quarantine, both snapshot writers refuse on the detach alone.
+#[tokio::test]
+#[serial_test::serial]
+async fn snapshot_writers_refuse_between_take_and_reattach() {
+    let fx = fixture("take-window-7920").await;
+    let _env = RestoreDataDir::set(fx.data_dir.path());
+    let before = std::fs::read(&fx.chunks_json).unwrap();
+
+    let taken = fx.indexer.write().await.take_corpus_store();
+    assert!(taken.is_some(), "test setup: a corpus must be wired");
+    let idx = fx.indexer.read().await;
+    assert!(
+        !idx.corpus_open_failed,
+        "test setup: no quarantine may stand in for the detach predicate"
+    );
+
+    idx.flush_corpus_to_disk(&fx.chunks_json).await.unwrap();
+    idx.force_incremental_persist();
+
+    let after = std::fs::read(&fx.chunks_json).unwrap();
+    assert!(
+        after == before,
+        "#7920: a flush in the detached window rewrote chunks.json \
+         ({} bytes before, {} bytes after)",
+        before.len(),
+        after.len()
+    );
+    assert_eq!(
+        idx.refused_incremental_writes(),
+        2,
+        "the flush and the incremental persist must both be refused"
+    );
+    drop(idx);
+    drop(taken);
 }
 
 /// Owning arm: the re-attach succeeds and the flush lands in redb as before.
