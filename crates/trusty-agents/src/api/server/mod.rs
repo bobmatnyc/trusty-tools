@@ -66,8 +66,9 @@ mod cancel;
 mod deprecated_aliases;
 // #7396: the grant ceiling a turn-originated settings patch may never widen.
 mod grant_ceiling;
-// #7609: `GET`/`PUT /api/channels` — the harness-wide channel list.
-mod global_channels;
+// #7609: `GET`/`PUT /api/channels` — the harness-wide channel list. Visible
+// crate-wide because the merged `channel` tool writes through it too.
+pub(crate) mod global_channels;
 pub(crate) mod knowledge_pipeline;
 // #4278: read back the durable `persona-{agent}` chat log so the GUI can
 // rehydrate its chat view on reload.

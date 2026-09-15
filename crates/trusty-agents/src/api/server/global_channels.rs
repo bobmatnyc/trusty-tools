@@ -57,7 +57,7 @@ const MAX_CHANNELS: usize = 32;
 /// client read.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct GlobalUpdate {
+pub(crate) struct GlobalUpdate {
     revision: String,
     channels: Vec<Channel>,
 }
@@ -368,6 +368,43 @@ pub(super) async fn put_route(
     writer: ChannelWriter,
     Json(update): Json<GlobalUpdate>,
 ) -> Result<Json<Value>, Error> {
+    let (stored, before, after) = apply(update).await?;
+    writer.audit("PUT /api/channels", "global", None, before, after);
+    Ok(Json(stored))
+}
+
+/// Replace the global list from a MODEL TURN, under the same gate.
+///
+/// Why (#7609): the merged `channel` tool's `set` action writes the same table
+/// this route writes, and has no request to extract a [`ChannelWriter`] from.
+/// See `super::agent_channels::write_from_turn` for the per-assistant twin.
+/// What: 401 when this daemon serves no authenticated API; otherwise the same
+/// validate → compare-and-swap → audit sequence.
+/// Test: `crate::tools::channel::channel_tests::the_tool_refuses_a_write_on_a_tokenless_daemon`.
+pub(crate) async fn write_from_turn(update: GlobalUpdate) -> Result<Value, Error> {
+    if !super::channel_auth::daemon_token_configured() {
+        return Err(err(
+            StatusCode::UNAUTHORIZED,
+            &super::channel_auth::tool_refusal(),
+        ));
+    }
+    let (stored, before, after) = apply(update).await?;
+    super::channel_auth::audit_write("turn:channels", "global", None, before, after, "in-process");
+    Ok(stored)
+}
+
+/// The read half, for a caller with no request of its own.
+pub(crate) async fn read_view() -> Result<Value, Error> {
+    let channels = load(&config_path()?).await?;
+    Ok(view(&channels))
+}
+
+/// Validate, swap and answer — everything both write entry points share.
+///
+/// What: `(stored view, count before, count after)`. A stale revision is a 409
+/// and writes nothing; an unreadable roster, an unparseable file and a failed
+/// publish are each a 500 that writes nothing.
+async fn apply(update: GlobalUpdate) -> Result<(Value, usize, usize), Error> {
     let known = known_assistants().await?;
     validate_all(&update.channels, &known)?;
     let path = config_path()?;
@@ -394,9 +431,6 @@ pub(super) async fn put_route(
             StatusCode::CONFLICT,
             "Channel settings changed. Reload before saving.",
         )),
-        Persisted::Written { before, after } => {
-            writer.audit("PUT /api/channels", "global", None, before, after);
-            Ok(Json(view(&channels)))
-        }
+        Persisted::Written { before, after } => Ok((view(&channels), before, after)),
     }
 }

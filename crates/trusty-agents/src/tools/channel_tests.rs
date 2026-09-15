@@ -88,3 +88,44 @@ async fn the_alias_cannot_reach_the_global_scope() {
         "`scope` is not part of the deprecated tool's schema"
     );
 }
+
+/// Every write action is refused on a daemon with no API token configured.
+///
+/// Why (#7609): a model-driven channel write can re-point which assistant an
+/// inbound message wakes, so it takes the same gate the HTTP routes take. The
+/// recorded fact is `false` until `serve_with_config` says otherwise, which is
+/// what a test binary, a REPL process and a tokenless daemon all are.
+#[tokio::test]
+async fn the_tool_refuses_a_write_on_a_tokenless_daemon() {
+    // Serialized against the one other test that moves this flag.
+    let _guard = crate::test_env::lock_home();
+    let tool = ChannelTool::new("no-such-assistant-7609");
+
+    let assistant = tool
+        .execute(json!({"action":"set","scope":"assistant","revision":"0000","listeners":[]}))
+        .await;
+    assert!(
+        assistant.content().contains("401 Unauthorized"),
+        "assistant-scope set is gated: {}",
+        assistant.content()
+    );
+
+    let global = tool
+        .execute(json!({"action":"set","scope":"global","revision":"0000","channels":[]}))
+        .await;
+    assert!(
+        global.content().contains("401 Unauthorized"),
+        "global-scope set is gated: {}",
+        global.content()
+    );
+
+    // Reads are not gated — this one fails for the ordinary reason instead.
+    let read = tool
+        .execute(json!({"action":"get","scope":"assistant"}))
+        .await;
+    assert!(
+        !read.content().contains("401 Unauthorized"),
+        "reads stay open: {}",
+        read.content()
+    );
+}

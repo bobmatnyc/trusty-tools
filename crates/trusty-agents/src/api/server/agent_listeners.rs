@@ -223,6 +223,29 @@ pub(crate) async fn write(name: &str, update: ListenerUpdate) -> Result<Value, C
     )
     .await
 }
+/// Replace one assistant's wake filters from a MODEL TURN, under the channel
+/// write gate.
+///
+/// Why (#7609): the merged `channel` tool's `set` action reaches this write,
+/// and a model-driven change to which events wake an assistant is the same
+/// class of change the HTTP channel routes are gated on. The deprecated
+/// `PUT /api/agents/{name}/listeners` route is deliberately NOT gated — see
+/// `super::deprecated_aliases::put_listeners_alias` for why.
+/// What: 401 when this daemon serves no authenticated API; otherwise [`write`].
+/// Test: `crate::tools::channel::channel_tests::the_tool_refuses_a_write_on_a_tokenless_daemon`.
+pub(crate) async fn write_from_turn(
+    name: &str,
+    update: ListenerUpdate,
+) -> Result<Value, ConfigError> {
+    if !super::channel_auth::daemon_token_configured() {
+        return Err(error(
+            StatusCode::UNAUTHORIZED,
+            super::channel_auth::tool_refusal(),
+        ));
+    }
+    write(name, update).await
+}
+
 // #7609: the two axum handlers that used to live here are gone. The listener
 // routes are now deprecated aliases that forward through
 // `super::deprecated_aliases` into `super::agent_channels`, which is the
