@@ -78,7 +78,8 @@ pub struct BindingTargets<'a> {
 /// matching no global server; assistant-tier MCP servers that are enabled but
 /// unusable.
 /// Test: `reports_every_unresolved_binding_of_every_kind`,
-/// `a_fully_resolved_config_reports_nothing`.
+/// `a_fully_resolved_config_reports_nothing`,
+/// `global_tier_mcp_status_is_excluded_with_reason`.
 pub fn unresolved_bindings(
     agent: &str,
     cfg: &AgentConfig,
@@ -148,6 +149,17 @@ pub fn unresolved_bindings(
             ),
         );
     }
+    // #7903 review: `McpTier::Global` is filtered out deliberately, not an
+    // oversight. `grade()` (`crate::mcp::shared::resolve`) tiers a server
+    // `Assistant` only when THIS agent's own `[mcp]` table names it (an
+    // override or a `disabled` entry); a `Global`-tier status is inherited
+    // unchanged from the shared `servers.toml` this agent never declared.
+    // Reporting it here would misattribute a shared config problem as this
+    // agent's own dangling binding, and every assistant sharing that server
+    // would report the identical entry. Its health is already surfaced,
+    // scoped to the whole harness rather than one agent, on the same report's
+    // `SystemStatusReport::mcp_servers` (`system_status::mcp_server_status`).
+    // Test: `global_tier_mcp_status_is_excluded_with_reason`.
     for status in targets
         .mcp_statuses
         .iter()

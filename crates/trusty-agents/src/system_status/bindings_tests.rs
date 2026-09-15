@@ -117,6 +117,43 @@ fn reports_every_unresolved_binding_of_every_kind() {
         found.iter().all(|b| b.error.contains("fixture")),
         "{found:#?}"
     );
+    assert!(
+        !identities(&found).contains(&(BindingKind::McpServer, "global-broken".to_string())),
+        "a Global-tier server's own brokenness is not this agent's dangling binding \
+         (see bindings.rs's citation on the mcp_statuses filter); it surfaces on \
+         SystemStatusReport::mcp_servers instead: {found:#?}"
+    );
+}
+
+/// #7903 review: an unusable `McpTier::Global` server must be excluded from
+/// `unresolved_bindings` for a stated reason, not merely absent because
+/// nothing asserts it either way. This isolates that exclusion from the
+/// six-binding fixture above so the two never drift.
+#[test]
+fn global_tier_mcp_status_is_excluded_with_reason() {
+    let cfg = agent();
+    let stores = [store(None)];
+    let catalogue = ["present-index".to_string(), "ghost-index".to_string()];
+    let listeners = ["gmail-personal".to_string(), "ghost-listener".to_string()];
+    let global = ["real-mcp".to_string(), "global-broken".to_string()];
+    let disabled = ["real-mcp".to_string()];
+    let statuses = [server("global-broken", McpTier::Global, false)];
+    let targets = BindingTargets {
+        stores: &stores,
+        search_binding_error: None,
+        search_indexes: Some(&catalogue),
+        global_listeners: Some(&listeners),
+        mcp_global: &global,
+        mcp_disabled: &disabled,
+        mcp_statuses: &statuses,
+    };
+
+    assert_eq!(
+        unresolved_bindings("fixture", &cfg, &targets),
+        Vec::new(),
+        "a Global-tier server this agent never declared is not the agent's own \
+         dangling binding; its health belongs to SystemStatusReport::mcp_servers"
+    );
 }
 
 /// The same declarations, all satisfied, report nothing.
