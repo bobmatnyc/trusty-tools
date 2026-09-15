@@ -211,13 +211,24 @@ async fn a_tokenless_daemon_refuses_every_channel_write() {
         "tokenless PUT /api/agents/{{name}}/listeners"
     );
 
-    // A WRONG credential is refused just as a missing one is.
-    let app = build_router_with_config(AppState::default(), Some(TOKEN.into()));
-    let response = app
-        .oneshot(put("/api/channels", Some("not-the-token"), &body))
-        .await
-        .expect("wrong credential");
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "wrong bearer");
+    // A WRONG credential is refused just as a missing one is, on every write
+    // route the gate covers (critic round 3, LOW).
+    for (uri, payload) in [
+        ("/api/channels", &body),
+        ("/api/agents/fixture/channels", &per_assistant),
+        ("/api/agents/fixture/listeners", &listeners),
+    ] {
+        let app = build_router_with_config(AppState::default(), Some(TOKEN.into()));
+        let response = app
+            .oneshot(put(uri, Some("not-the-token"), payload))
+            .await
+            .expect("wrong credential");
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "a wrong bearer is refused on {uri}"
+        );
+    }
 
     // Reads are unchanged by the gate.
     let app = build_router(AppState::default());
@@ -240,11 +251,9 @@ async fn a_tokenless_daemon_refuses_every_channel_write() {
 async fn a_minted_credential_lets_the_served_ui_save() {
     let _home_guard = crate::test_env::lock_home();
     let (_home, _config) = seed_home();
-    let minted = crate::api::server::channel_auth::channel_write_credential(
-        None,
-        std::net::Ipv4Addr::LOCALHOST.into(),
-    )
-    .expect("a loopback bind mints");
+    let minted =
+        crate::api::server::channel_auth::minted_credential(std::net::Ipv4Addr::LOCALHOST.into())
+            .expect("a loopback bind mints");
 
     // The served UI's bootstrap probe hands it over.
     let app = router_with_credential(&minted);
@@ -287,6 +296,131 @@ async fn a_minted_credential_lets_the_served_ui_save() {
         .await
         .expect("no credential");
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// A daemon with a CONFIGURED token never discloses it.
+///
+/// Why (#7609 critic round 3, CRITICAL): `/api/config` is exempt from
+/// `auth_middleware`, and an earlier revision returned the operator's own API
+/// token there whenever no `Origin` header was present — so
+/// `curl http://<lan-bind>:port/api/config` handed an unauthenticated,
+/// off-host caller the credential for the WHOLE API. Two things fix it, and
+/// this pins both: only a MINTED credential is ever disclosed, and a
+/// non-loopback bind mints none.
+///
+/// Pre-fix (9751c0164) this fails at the first assertion: the body carried
+/// `channel_write_token` equal to the operator token.
+#[tokio::test]
+async fn a_configured_token_is_never_disclosed_on_the_config_probe() {
+    let _home_guard = crate::test_env::lock_home();
+    let (_home, _config) = seed_home();
+
+    // A NON-LOOPBACK, tokened daemon mints nothing, so it discloses nothing —
+    // to an unauthenticated caller sending no `Origin`, which is `curl`.
+    let lan: std::net::IpAddr = std::net::Ipv4Addr::new(192, 168, 1, 10).into();
+    assert_eq!(
+        crate::api::server::channel_auth::minted_credential(lan),
+        None,
+        "a LAN bind mints nothing to disclose"
+    );
+    let app = crate::api::server::routes::build_router_with_channel_credential(
+        AppState::default(),
+        Some(TOKEN.into()),
+        trusty_common::server::SelfOrigins::default(),
+        crate::api::server::channel_auth::minted_credential(lan),
+    );
+    let config = body_json(app.oneshot(get("/api/config", None)).await.expect("config")).await;
+    assert!(
+        config.get("channel_write_token").is_none(),
+        "no credential is disclosed at all: {config}"
+    );
+    assert_eq!(config["auth_required"], json!(true));
+    assert!(
+        !config.to_string().contains(TOKEN),
+        "and the operator credential appears nowhere in the body: {config}"
+    );
+
+    // A LOOPBACK tokened daemon discloses ONLY the minted credential, never the
+    // operator's — the served UI can save without holding the operator's secret.
+    let minted =
+        crate::api::server::channel_auth::minted_credential(std::net::Ipv4Addr::LOCALHOST.into())
+            .expect("a loopback bind mints");
+    let app = crate::api::server::routes::build_router_with_channel_credential(
+        AppState::default(),
+        Some(TOKEN.into()),
+        trusty_common::server::SelfOrigins::default(),
+        Some(minted.clone()),
+    );
+    let config = body_json(app.oneshot(get("/api/config", None)).await.expect("config")).await;
+    assert_eq!(
+        config["channel_write_token"].as_str(),
+        Some(minted.as_str())
+    );
+    assert!(
+        !config.to_string().contains(TOKEN),
+        "the operator credential still appears nowhere: {config}"
+    );
+
+    // And the operator's own credential is still accepted on a write.
+    //
+    // The MINTED one is not sufficient on a TOKENED daemon, and that is the
+    // layering rather than a gap: `auth_middleware` wraps every `/api/*` route
+    // from the outside when a token is configured, so a request carrying only
+    // the minted credential is refused before `ChannelWriter` runs. The minted
+    // credential is what a TOKENLESS daemon's UI uses; on a tokened daemon the
+    // UI already holds the operator token for every other call and presents that.
+    // `ChannelWriter` accepts either, which is what keeps the gate honest if
+    // the middleware layering ever changes.
+    for (credential, expected) in [
+        (TOKEN, StatusCode::OK),
+        (minted.as_str(), StatusCode::UNAUTHORIZED),
+    ] {
+        let app = crate::api::server::routes::build_router_with_channel_credential(
+            AppState::default(),
+            Some(TOKEN.into()),
+            trusty_common::server::SelfOrigins::default(),
+            Some(minted.clone()),
+        );
+        let view = body_json(
+            app.oneshot(get("/api/channels", Some(TOKEN)))
+                .await
+                .expect("get"),
+        )
+        .await;
+        let revision = view["revision"].as_str().expect("revision").to_owned();
+        let app = crate::api::server::routes::build_router_with_channel_credential(
+            AppState::default(),
+            Some(TOKEN.into()),
+            trusty_common::server::SelfOrigins::default(),
+            Some(minted.clone()),
+        );
+        let response = app
+            .oneshot(put(
+                "/api/channels",
+                Some(credential),
+                &json!({"revision": revision, "channels": view["channels"].clone()}),
+            ))
+            .await
+            .expect("put");
+        assert_eq!(response.status(), expected);
+    }
+
+    // `ChannelWriter` itself accepts the minted credential: with no operator
+    // token in play there is no middleware in front of it, and it admits the
+    // write.
+    let app = router_with_credential(&minted);
+    let view = body_json(app.oneshot(get("/api/channels", None)).await.expect("get")).await;
+    let revision = view["revision"].as_str().expect("revision").to_owned();
+    let app = router_with_credential(&minted);
+    let response = app
+        .oneshot(put(
+            "/api/channels",
+            Some(&minted),
+            &json!({"revision": revision, "channels": view["channels"].clone()}),
+        ))
+        .await
+        .expect("put");
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 /// The minted credential is withheld from an origin this daemon would not
