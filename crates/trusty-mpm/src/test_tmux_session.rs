@@ -95,7 +95,15 @@ fn tmux_output(tmux_bin: &str, args: &[&str]) -> std::io::Result<std::process::O
 /// `.args(args).output()` — stdin from `/dev/null`, stdout and stderr captured
 /// — plus the macOS disclaim attribute. Everything this file observes about a
 /// tmux run is therefore unchanged by the routing.
+///
+/// #7996: the exec resolves a bare `tmux` through `$PATH`, so it holds the
+/// target's one PATH lock (`super::lock_path_env`, see each `test_support`)
+/// for the duration of the spawn. This is the single seam every tmux
+/// invocation in this file passes through, `Drop`'s best-effort
+/// `kill-session` included — which is the call the race was observed to eat.
+/// Test: [`tests::the_spawn_seam_takes_the_path_lock`].
 fn tmux_output_owned(tmux_bin: &str, args: &[String]) -> std::io::Result<std::process::Output> {
+    let _path_env = super::lock_path_env();
     super::tmux_spawn(tmux_bin, args)
 }
 
@@ -672,6 +680,23 @@ mod tests {
             "a raw process spawn is back in this fixture — the tmux server it forks takes \
              its TCC responsible process from the signed parent and macOS prompts the \
              operator once per test run (#7060). Route it through `tmux_output` instead."
+        );
+    }
+
+    /// #7996, asserted against this file's own source for the same reason
+    /// [`no_raw_process_spawn_survives_in_this_fixture`] is: the property is
+    /// "every tmux exec in this file holds the PATH lock", and the one seam
+    /// that could stop holding it is a single-line deletion no runtime call
+    /// would notice — the race it closes needs a concurrent `set_var("PATH")`
+    /// to land inside the exec.
+    #[test]
+    fn the_spawn_seam_takes_the_path_lock() {
+        let src = include_str!("test_tmux_session.rs");
+        assert!(
+            src.contains("let _path_env = super::lock_path_env();"),
+            "`tmux_output_owned` must hold the target's PATH lock across the exec — a bare \
+             `tmux` is resolved through `$PATH`, and a concurrent `set_var` tears that read \
+             (#7996)"
         );
     }
 

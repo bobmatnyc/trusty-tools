@@ -54,8 +54,9 @@ mod tests {
     ///
     /// Why: the issue-#1217 derivation reads `TRUSTY_MEMORY_PALACE`; tests must
     /// pin it deterministically without leaking state into sibling tests. Pair
-    /// every use with `#[serial_test::serial]` so no other thread reads the env
-    /// concurrently (cargo runs test fns across OS threads in one process).
+    /// every use with BOTH `#[serial_test::serial]` and [`palace_env_lock`] so
+    /// no other thread reads or writes the env concurrently (cargo runs test
+    /// fns across OS threads in one process).
     /// What: `set` installs a value, `clear` removes it; both capture the prior
     /// value and restore it in `Drop`.
     /// Test: exercised by `cwd_palace_slug_at_env_override_wins` and the
@@ -92,6 +93,26 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Take the crate-wide env lock every OTHER `TRUSTY_MEMORY_PALACE` mutator
+    /// already serialises on (#7995).
+    ///
+    /// Why: `#[serial_test::serial]` guards this module's tests against each
+    /// other, but `commands::inbox_check` and `commands::prompt_context` clear
+    /// the same variable under `commands::env_test_lock` and take no
+    /// `#[serial]`. Two disjoint locks over one process-global variable is no
+    /// lock at all: a `remove_var` there landed between this module's `set_var`
+    /// and its assertion, and `cwd_palace_slug_at_env_override_wins` read the
+    /// directory-derived slug instead of the override. Acquiring BOTH makes
+    /// the variable one regime; the nesting cannot deadlock, because
+    /// `#[serial]` is taken by the attribute wrapper before any test body runs,
+    /// so no caller can ever acquire the two in the opposite order.
+    /// What: `blocking_lock` because these are plain `#[test]` fns with no
+    /// tokio runtime on the thread — the guard is simply held for the body.
+    /// Test: every `#[serial]` test in this module.
+    fn palace_env_lock() -> tokio::sync::MutexGuard<'static, ()> {
+        crate::commands::env_test_lock().blocking_lock()
     }
 
     /// Test-only builder for a `CreatorInfo`. Tests don't care which writer
@@ -224,6 +245,7 @@ mod tests {
         // git toplevel via the parent/dir slug — and must NOT take the nested
         // sub-directory name. (With an origin remote it would use owner/repo;
         // that path is covered by `cwd_palace_slug_at_uses_git_owner_repo`.)
+        let _env = palace_env_lock();
         let _guard = EnvGuard::clear(crate::palace_id_derive::PALACE_OVERRIDE_ENV);
         let tmp = tempfile::tempdir().expect("tempdir");
         // Init a fake repo (no remote) so the test is hermetic.
@@ -253,6 +275,7 @@ mod tests {
         // Issue #1217: a non-git directory derives `parent-leaf`, not just the
         // bare leaf basename. The tempdir's own basename is random, so assert
         // the slug ends with `-my-project` and is not the bare leaf.
+        let _env = palace_env_lock();
         let _guard = EnvGuard::clear(crate::palace_id_derive::PALACE_OVERRIDE_ENV);
         let tmp = tempfile::tempdir().expect("tempdir");
         let dir = tmp.path().join("my-project");
@@ -269,10 +292,14 @@ mod tests {
     /// source (issue #1217 precedence level 1).
     /// What: set the env var, call `cwd_palace_slug_at` from a plain dir, assert
     /// the slugified override is returned regardless of the directory name.
-    /// Test: itself (serialised against other env-mutating tests via the var).
+    /// Test: itself. #7995: serialised on BOTH `#[serial]` and
+    /// [`palace_env_lock`] — the `commands` suite clears this same variable
+    /// under the latter alone, and that `remove_var` used to land between the
+    /// `set_var` below and the assertion.
     #[serial_test::serial]
     #[test]
     fn cwd_palace_slug_at_env_override_wins() {
+        let _env = palace_env_lock();
         let _guard = EnvGuard::set(crate::palace_id_derive::PALACE_OVERRIDE_ENV, "My Override");
         let tmp = tempfile::tempdir().expect("tempdir");
         let dir = tmp.path().join("some-dir");
@@ -292,6 +319,7 @@ mod tests {
     #[serial_test::serial]
     #[test]
     fn cwd_palace_slug_at_uses_git_owner_repo() {
+        let _env = palace_env_lock();
         let _guard = EnvGuard::clear(crate::palace_id_derive::PALACE_OVERRIDE_ENV);
         // Skip when `git` is unavailable on PATH.
         if std::process::Command::new("git")
@@ -342,6 +370,7 @@ mod tests {
     #[test]
     fn cwd_palace_slug_at_prefers_pin_file() {
         use crate::project_root::{write_project_pin, ProjectPin};
+        let _env = palace_env_lock();
         let _guard = EnvGuard::clear(crate::palace_id_derive::PALACE_OVERRIDE_ENV);
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("actual-dir");
@@ -368,6 +397,7 @@ mod tests {
     #[test]
     fn cwd_palace_slug_at_reads_pin_from_subdir() {
         use crate::project_root::{write_project_pin, ProjectPin};
+        let _env = palace_env_lock();
         let _guard = EnvGuard::clear(crate::palace_id_derive::PALACE_OVERRIDE_ENV);
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("my-repo");
@@ -393,6 +423,7 @@ mod tests {
     #[test]
     fn cwd_palace_slug_at_pin_read_does_not_create_pin_file() {
         use crate::project_root::{read_project_pin, PIN_FILE_REL};
+        let _env = palace_env_lock();
         let _guard = EnvGuard::clear(crate::palace_id_derive::PALACE_OVERRIDE_ENV);
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("no-pin-project");

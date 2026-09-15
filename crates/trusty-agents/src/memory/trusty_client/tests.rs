@@ -62,9 +62,17 @@ async fn auto_detect_falls_back_to_local() {
 /// literal left to drift. What can still go wrong is the client and the daemon
 /// deriving DIFFERENT paths, which this pins by asserting the client's answer
 /// against `trusty_memory::socket_path`, the daemon's own call.
+///
+/// #7994: both calls derive their answer from `$HOME`, and `mcp::config`'s
+/// tests swap `$HOME` under `test_env::HOME_LOCK`. Reading it twice without
+/// that lock lets a swap land BETWEEN the two reads, so the assertion compares
+/// two different homes and fails for a reason the derivation never had.
 /// Test: This test.
 #[test]
 fn default_trusty_socket_is_the_derived_daemon_path() {
+    let _home = crate::test_env::HOME_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let expected = trusty_memory::socket_path().expect("the daemon resolves its own socket");
     assert_eq!(default_trusty_socket(), expected);
 }
