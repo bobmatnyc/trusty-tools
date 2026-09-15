@@ -453,3 +453,190 @@ fn embedder_ready_fires_for_in_process_embedder() {
         "needs_embedder_init must be false on subsequent batches"
     );
 }
+
+// ── register_index_reporting_collision, on the wire (#7758) ──────────────
+
+/// Serve `POST /indexes` with one fixed status and body, and point
+/// `daemon_base_url()` at it.
+///
+/// Why: the #7758 decision reads a field that exists only in the daemon's 409
+/// BODY, and the pre-fix code discarded the body after reading the status. A
+/// test that stubs the outcome would not have caught that; this drives the real
+/// reqwest call against a real listener.
+/// What: binds an axum listener on an ephemeral port and seeds
+/// `$TRUSTY_DATA_DIR/http_addr` with its address, which is what
+/// `DaemonAddrLayout::TRUSTY_SEARCH` resolves first. The caller owns the
+/// `TempDir` and must clear `TRUSTY_DATA_DIR` afterwards.
+async fn seed_conflict_daemon(
+    data_dir: &std::path::Path,
+    status: axum::http::StatusCode,
+    body: serde_json::Value,
+) {
+    use axum::extract::State;
+    use axum::routing::post;
+    use axum::{Json, Router};
+    use std::sync::Arc;
+
+    type Canned = Arc<(axum::http::StatusCode, serde_json::Value)>;
+
+    async fn create(State(s): State<Canned>) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+        (s.0, Json(s.1.clone()))
+    }
+
+    let app = Router::new()
+        .route("/indexes", post(create))
+        .with_state(Arc::new((status, body)) as Canned);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("an ephemeral port must be bindable");
+    let addr = listener
+        .local_addr()
+        .expect("a bound listener must have an address");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    std::fs::write(data_dir.join("http_addr"), addr.to_string()).expect("seed http_addr");
+}
+
+/// #7758 regression: a `409` naming the index that already owns this root must
+/// come back as [`RegisterOutcome::RootOwnedBy`] carrying that id, not as a
+/// bail. Before the fix this arm read only `resp.status()` and raised
+/// `daemon returned 409 Conflict for POST /indexes`, so `index --force` had
+/// nothing to act on and aborted — the whole bug.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_root_owned_by_another_index_is_reported_not_bailed() {
+    let tmp = tempfile::tempdir().expect("a tempdir must be creatable");
+    // SAFETY: `#[serial]` keeps every other TRUSTY_DATA_DIR mutator out.
+    unsafe { std::env::set_var("TRUSTY_DATA_DIR", tmp.path()) };
+    seed_conflict_daemon(
+        tmp.path(),
+        axum::http::StatusCode::CONFLICT,
+        serde_json::json!({
+            "error": "root_path is already registered to index 'owner'",
+            "existing_id": "owner",
+        }),
+    )
+    .await;
+
+    let got = register_index_reporting_collision(
+        "requested",
+        std::path::Path::new("/repos/requested"),
+        &RegisterFilters::default(),
+    )
+    .await;
+
+    unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
+
+    match got.expect("a root collision must be reported, not bailed") {
+        RegisterOutcome::RootOwnedBy {
+            existing_id,
+            refusal,
+        } => {
+            assert_eq!(existing_id, "owner", "the owning id must be carried out");
+            assert!(
+                refusal.contains("409"),
+                "the historical refusal must be preserved for the no-force path: {refusal}"
+            );
+        }
+        other => panic!("expected RootOwnedBy, got {other:?}"),
+    }
+}
+
+/// The same-id-different-root refusal is also a `409`, but it carries no
+/// `existing_id` — there is no other index to reindex, so it must stay a bail
+/// rather than become a silently-adopted target.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_conflict_without_an_existing_id_still_bails() {
+    let tmp = tempfile::tempdir().expect("a tempdir must be creatable");
+    unsafe { std::env::set_var("TRUSTY_DATA_DIR", tmp.path()) };
+    seed_conflict_daemon(
+        tmp.path(),
+        axum::http::StatusCode::CONFLICT,
+        serde_json::json!({ "error": "index 'requested' is registered at /elsewhere" }),
+    )
+    .await;
+
+    let got = register_index_reporting_collision(
+        "requested",
+        std::path::Path::new("/repos/requested"),
+        &RegisterFilters::default(),
+    )
+    .await;
+
+    unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
+
+    let err = got.expect_err("a 409 with no existing_id must still fail");
+    assert_eq!(
+        err.to_string(),
+        "daemon returned 409 Conflict for POST /indexes",
+        "the historical refusal must be unchanged"
+    );
+}
+
+/// `register_index_with_daemon_filtered` is the arm every caller that has no
+/// `--force` to honour still uses — `init`, `discover`, `convert`, `migrate`.
+/// A root collision must reach them exactly as it did before #7758.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn the_legacy_register_wrapper_still_bails_on_a_root_collision() {
+    let tmp = tempfile::tempdir().expect("a tempdir must be creatable");
+    unsafe { std::env::set_var("TRUSTY_DATA_DIR", tmp.path()) };
+    seed_conflict_daemon(
+        tmp.path(),
+        axum::http::StatusCode::CONFLICT,
+        serde_json::json!({ "error": "collision", "existing_id": "owner" }),
+    )
+    .await;
+
+    let got = register_index_with_daemon_filtered(
+        "requested",
+        std::path::Path::new("/repos/requested"),
+        &RegisterFilters::default(),
+    )
+    .await;
+
+    unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
+
+    let err = got.expect_err("the legacy wrapper must keep bailing");
+    assert_eq!(
+        err.to_string(),
+        "daemon returned 409 Conflict for POST /indexes",
+        "the pre-#7758 refusal must be unchanged"
+    );
+}
+
+/// A plain `200` must still report whether the daemon created the index —
+/// the collision arm must not have changed the ordinary path.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_successful_registration_reports_created() {
+    let tmp = tempfile::tempdir().expect("a tempdir must be creatable");
+    unsafe { std::env::set_var("TRUSTY_DATA_DIR", tmp.path()) };
+    seed_conflict_daemon(
+        tmp.path(),
+        axum::http::StatusCode::OK,
+        serde_json::json!({ "id": "requested", "created": true }),
+    )
+    .await;
+
+    let got = register_index_reporting_collision(
+        "requested",
+        std::path::Path::new("/repos/requested"),
+        &RegisterFilters::default(),
+    )
+    .await;
+
+    unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
+
+    assert_eq!(
+        got.expect("a 200 must not fail"),
+        RegisterOutcome::Registered { created: true },
+        "a successful registration must report `created`"
+    );
+}
