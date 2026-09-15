@@ -52,36 +52,16 @@ Direct database/API access in async Server Components, no client-side loading st
 Progressive enhancement, Zod schemas for validation, revalidation strategies, optimistic updates on client.
 
 ### Pattern 3: Partial Prerendering (PPR)
-```typescript
-// Enable in next.config.js:
-const nextConfig = { experimental: { ppr: true } }
-
-export default function Dashboard() {
-  return (
-    <div>
-      <Header />           {/* Static — pre-rendered at build time */}
-      <Suspense fallback={<UserSkeleton />}>
-        <UserProfile />    {/* Dynamic — streams at request time */}
-      </Suspense>
-      <Suspense fallback={<StatsSkeleton />}>
-        <DashboardStats />
-      </Suspense>
-    </div>
-  )
-}
-```
+Enable `experimental.ppr` in `next.config.js`; static shell components (e.g.
+a header) render at build time, dynamic ones (e.g. a user profile) each wrap
+in their own `<Suspense>` boundary and stream at request time.
 
 ### Pattern 4: Granular Suspense Boundaries
 Wrap each async component in its own Suspense boundary so fast content renders immediately and slow content streams in without blocking others.
 
 ### Pattern 5: Parallel Data Fetching
-```typescript
-// Use Promise.all — eliminates sequential waterfall
-async function Dashboard() {
-  const [user, posts] = await Promise.all([fetchUser(), fetchPosts()])
-  return <Dashboard user={user} posts={posts} />
-}
-```
+`await Promise.all([fetchUser(), fetchPosts()])`, not two sequential
+`await`s — a sequential fetch chain becomes a request waterfall.
 
 ## Anti-Patterns to Avoid
 
@@ -93,30 +73,15 @@ async function Dashboard() {
 
 ## Development Workflow
 
-1. **Start with Server Components**: default to server, add 'use client' only when needed
-2. **Define Data Requirements**: fetch in Server Components, pass as props
-3. **Add Suspense Boundaries**: streaming loading states for async operations
-4. **Implement Server Actions**: type-safe mutations with Zod validation
-5. **Optimize Images/Fonts**: use Next.js components for automatic optimization
-6. **Add Metadata**: SEO via generateMetadata export
-7. **Performance Testing**: Lighthouse CI, Core Web Vitals monitoring
+Default to Server Components; add `'use client'` only where interactivity
+needs it. Fetch data server-side and pass as props, add Suspense boundaries
+for streaming, validate Server Actions with Zod, optimize images/fonts with
+Next.js components, add metadata via `generateMetadata`, then verify with
+Lighthouse CI against the Performance targets above.
 
 ## Route Group Architecture
-```
-src/app/
-  (app)/          # Authenticated — full app shell
-    layout.tsx
-    profile/
-  (public)/       # Public — optimized for SSR/SSG
-    layout.tsx
-    search/
-```
-
-## Success Metrics
-
-- **Type Safety**: 95%+ type coverage, Zod validation on all boundaries
-- **Performance**: Core Web Vitals pass (LCP < 2.5s, FID < 100ms, CLS < 0.1)
-- **Test Coverage**: 90%+ with Vitest + Playwright
-- **Bundle Size**: monitored and optimized with bundle analyzer
+Group routes by access tier under `src/app/` — e.g. `(app)/` for the
+authenticated shell, `(public)/` for SSR/SSG-optimized pages — each with its
+own `layout.tsx`.
 
 Always prioritize **Server Components first**, **progressive enhancement**, **Core Web Vitals**.

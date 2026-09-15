@@ -1809,11 +1809,12 @@ const RESIDENT_BODY_BUDGET_BYTES: usize = 42_000;
 /// gate from rust-engineer alone to every deployed agent, each pinned at a
 /// ratchet ceiling with the issue tracking its trim.
 ///
-/// Why: #7825 named four; widening the gate surfaced eight on 2026-09-15 —
-/// java, nextjs, python and svelte engineer were over too, each by under 600
-/// bytes. Raising the budget for everyone would hide them; excluding them would
-/// drop the coverage the issue asked for. A per-stem ceiling keeps each one
-/// measured and lets it shrink but never grow.
+/// Why: #7825 named four; widening the gate surfaced four more on
+/// 2026-09-15 — java, nextjs, python and svelte engineer were over too, each
+/// by under 600 bytes; #8047 trimmed all four back under the default budget,
+/// so their entries are gone. Raising the budget for everyone would hide the
+/// rest; excluding them would drop the coverage the issue asked for. A
+/// per-stem ceiling keeps each one measured and lets it shrink but never grow.
 /// What: `(stem, ceiling_bytes, tracking_issue)`. The ceiling is the measured
 /// size rounded up to the next 500 bytes, so an unrelated BASE-AGENT edit does
 /// not flip the gate while real regrowth still does. An entry whose body has
@@ -1823,10 +1824,6 @@ const RESIDENT_BODY_BUDGET_BYTES: usize = 42_000;
 const OVER_BUDGET_BODY_BASELINES: &[(&str, usize, &str)] = &[
     ("dotnet-engineer", 43_500, "#7825"),
     ("elixir-engineer", 44_000, "#7825"),
-    ("java-engineer", 42_500, "#8047"),
-    ("nextjs-engineer", 43_000, "#8047"),
-    ("python-engineer", 43_000, "#8047"),
-    ("svelte-engineer", 43_000, "#8047"),
     ("ticketing", 47_000, "#7727"),
     ("version-control", 47_500, "#7727"),
 ];

@@ -15,18 +15,15 @@ Modern Svelte 5 specialist delivering production-ready web applications with Run
 ## Core Expertise — Svelte 5 (PRIMARY)
 
 **Runes API — Modern Reactive State:**
-- **$state()**: fine-grained reactive state management with automatic dependency tracking
-- **$derived()**: computed values with automatic updates based on dependencies
-- **$effect()**: side effects with automatic cleanup and batching, replaces onMount for effects
-- **$props()**: type-safe component props with destructuring support
-- **$bindable()**: two-way binding with parent components, replaces bind:prop
-- **$inspect()**: development-time reactive debugging tool
+- **$state()**: fine-grained reactive state with automatic dependency tracking
+- **$derived()**: computed values that auto-update on dependency change
+- **$effect()**: side effects with automatic cleanup/batching, replaces onMount
+- **$props()**: type-safe, destructurable component props
+- **$bindable()**: two-way binding with the parent, replaces `bind:prop`
+- **$inspect()**: dev-time reactive debugging
 
-**When to Use Svelte 5 Runes:**
-- ALL new projects (default choice for 2025)
-- TypeScript-first projects needing strong type inference
-- Complex state management with computed values
-- Any project starting after Svelte 5 stable release
+**When to Use Svelte 5 Runes:** the default for every new project, especially
+TypeScript-first codebases and complex computed-value state.
 
 ## Svelte 5 Best Practices
 
@@ -37,9 +34,8 @@ Modern Svelte 5 specialist delivering production-ready web applications with Run
 - Custom stores with Runes for global state
 
 **Component API:**
-- `$props()` for type-safe props; destructure directly: `let { name, age } = $props()`
-- `$bindable()` for two-way binding
-- Provide defaults: `let { theme = 'light' } = $props()`
+- `$props()`: destructure directly, e.g. `let { name, age } = $props()`
+- `$bindable()` for two-way binding; default via `let { theme = 'light' } = $props()`
 
 **Migration from Svelte 4:**
 | Svelte 4 Pattern | Svelte 5 Equivalent |
@@ -54,55 +50,31 @@ Modern Svelte 5 specialist delivering production-ready web applications with Run
 ### Pattern 1: Svelte 5 Runes Component
 ```svelte
 <script lang="ts">
-  let { user, onUpdate }: { user: User; onUpdate: (u: User) => void } = $props()
+  let { user }: { user: User } = $props()
   let count = $state(0)
   let doubled = $derived(count * 2)
-  let userName = $derived(user.firstName + ' ' + user.lastName)
-
   $effect(() => {
     console.log(`Count changed to ${count}`)
     return () => console.log('Cleanup')
   })
 </script>
-
-<div>
-  <h1>Welcome, {userName}</h1>
-  <p>Count: {count}, Doubled: {doubled}</p>
-  <button onclick={() => count++}>Increment</button>
-</div>
+<button onclick={() => count++}>{count} / {doubled}</button>
 ```
 
 ### Pattern 2: Svelte 5 Custom Store
-```typescript
-// lib/stores/counter.svelte.ts
-function createCounter(initialValue = 0) {
-  let count = $state(initialValue);
-  let doubled = $derived(count * 2);
-  return {
-    get count() { return count; },
-    get doubled() { return doubled; },
-    increment: () => count++,
-    reset: () => count = initialValue
-  };
-}
-export const counter = createCounter();
-```
+A `.svelte.ts` module wraps `$state`/`$derived` in a factory function and
+exposes them as `get` accessors plus mutator methods — never a raw exported
+`let`, which breaks reactivity outside the declaring module.
 
 ### Pattern 3: SvelteKit Page with Load
-```typescript
-// +page.server.ts
-export const load = async ({ params }) => {
-  const product = await fetchProduct(params.id);
-  return { product };
-}
-```
+`+page.server.ts` exports an async `load({ params })` that fetches by the
+route param and returns the data as props to the page component.
 
 ### Pattern 4: SvelteKit Framework
-- **File-based routing**: +page.svelte, +layout.svelte, +error.svelte
-- **Load functions**: +page.js (universal), +page.server.js (server-only)
-- **Form actions**: progressive enhancement with +page.server.js actions
-- **Hooks**: handle, handleError, handleFetch for request interception
-- **Adapters**: deployment to Vercel, Node, static hosts, Cloudflare
+File-based routing (`+page.svelte`, `+layout.svelte`, `+error.svelte`);
+`+page.js` (universal) vs `+page.server.js` (server-only) load functions;
+progressive-enhancement form actions; `handle`/`handleError`/`handleFetch`
+hooks; adapters for Vercel, Node, static hosts, Cloudflare.
 
 ## Quality Standards
 
@@ -118,6 +90,5 @@ export const load = async ({ params }) => {
 **Accessibility**: semantic HTML and ARIA attributes, a11y warnings enabled, keyboard navigation
 
 ## Integration Points
-- With TypeScript Engineer: type patterns, build tools
-- With QA (web-qa): testing strategies, accessibility validation
-- With DevOps: build optimization, adapter configuration
+TypeScript Engineer on type patterns/build tools, QA (web-qa) on
+testing/accessibility, DevOps on build optimization and adapters.
