@@ -38,9 +38,25 @@ pub fn bound_index(name: &str, stores: &StoresConfig) -> anyhow::Result<Option<S
 /// id; a declared store naming the protected index id is an error. With no
 /// legacy binding the first binding must still name the protected root and
 /// index, or the call errors.
+///
+/// Both `!=`/`==` checks below (the alias guard at line ~72 and the retarget
+/// guard at line ~88) compare raw `String`s with no case-folding or
+/// trimming on either side — safe only because every producer of an
+/// `index_id` stays in that same unnormalized canonical form:
+/// [`AgentStoreBinding::resolved_index`] (`crate::stores::config`, the
+/// identity function `self.index.as_deref().unwrap_or(&self.name)`), the
+/// digest-generated id at `KnowledgeStore::initialize`
+/// (`crate::knowledge::mod`, `format!("assistant-okg-{digest}")`, lowercase
+/// hex), and the root-bound id at `Context::selected_store`
+/// (`crate::api::server::knowledge_pipeline`, `binding.resolved_index()` —
+/// the same function). trusty-search's own `IndexId` mirrors this: a plain
+/// `String` newtype with a derived `PartialEq`/`Eq` and no folding, so two
+/// differently-spelled ids can never resolve to the same physical index
+/// downstream either — see `resolved_index_performs_no_normalization`.
 /// Test: `declared_store_index_holds_the_default_slot_after_provisioning`,
 /// `a_declared_store_cannot_name_the_protected_index`,
-/// `retargeting_the_protected_binding_is_refused`.
+/// `retargeting_the_protected_binding_is_refused`,
+/// `resolved_index_performs_no_normalization` (`crate::stores::config`).
 pub fn search_slots(name: &str, stores: &StoresConfig) -> anyhow::Result<SearchSlots> {
     let home = AssistantHome::under(
         crate::assistants::assistants_root()?,
