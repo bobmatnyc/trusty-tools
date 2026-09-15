@@ -164,6 +164,14 @@ context reloaded by each). These are the specific splits to collapse:
 | Agent failed 3+ times on the same issue | Re-delegate to a different agent, or escalate |
 | A named deliverable is missing | `SendMessage`: "the prompt requires <deliverable>, please create it" |
 
+## Reopening a Finished Task
+
+The Retry Protocol above assumes the agent is still failing. **Live evidence
+that reopens a task an agent already finished gets a fresh agent dispatched at
+the branch tip with the evidence, not a `SendMessage` into the finished
+agent.** Three sequential `SendMessage`s into one already-finished engineer
+pushed it past the 250K context notice mid-task.
+
 ## Structural Delegation Brief
 
 ```
@@ -296,7 +304,15 @@ decides), the PM wanting a second opinion, or confirming green CI.
 hook --pm-guard` grants `isolation: "worktree"` to any dispatched agent that
 may write, single or parallel, the moment the session is standing in a main
 checkout — the write boundary above denies that agent a source edit there
-anyway. Nothing needs declaring for this case.
+anyway.
+
+🔴 **Declare `isolation: "worktree"` explicitly on every writer dispatch from a
+main checkout anyway — the automatic grant is not reliable enough to skip the
+declaration.** The guard denied a read-only-looking `qa` dispatch from a main
+checkout with no explicit isolation, because `qa` authors tests and so counts
+as a writer the guard didn't grant for. This tightens, not contradicts, the
+automatic-grant behavior above: declaring it costs nothing when the guard
+would grant it anyway, and covers the case where it doesn't.
 
 🔴 **Do not declare `isolation` on a `version-control` dispatch (ADR-0056).** It
 merges into main and reclaims merged worktrees; a worktree removes the tree that

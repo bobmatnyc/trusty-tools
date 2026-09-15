@@ -478,17 +478,33 @@ same pane injection as `session_send` and carries the same defect.
 
 ## Git Security Review (Mandatory Before Push)
 
-Before any `git push`, delegate a credential scan to the `security` agent:
+Before any `git push`, delegate a credential scan to the `security` agent.
 
-1. `git diff origin/main...HEAD` — the diff about to be pushed. Three-dot,
-   because it diffs from the merge base and shows only what YOUR branch changed.
-   Two-dot compares the two commits, so files DELETED from `main` since your
-   branch point come back as your additions: a measured run reported 19 hits
-   that were another PR's deletions where three-dot reported zero across 36
-   files. A scan people learn to wave through is where a real secret hides.
-2. `security` scans it for API keys, passwords, private keys, and tokens, and
-   returns either clean or the list of blocked items.
-3. **Block the push if secrets are detected.** A leaked credential in git history
+1. **`gitleaks` is the primary check**: `gitleaks git --log-opts="origin/main...<branch>"`
+   (verified working, gitleaks 8.30.1). Three-dot, same reason as below — it
+   scopes the scan to commits your branch added. Caveat: a three-dot range
+   passed to `git log`/`--log-opts` is symmetric-difference, not merge-base-to-HEAD
+   — it can also surface commits that only exist on `main`'s side. Treat any
+   hit outside your own commits as a false positive to confirm, not a block.
+2. `git diff origin/main...HEAD` is a **secondary** signal — the diff about to
+   be pushed. Three-dot, because it diffs from the merge base and shows only
+   what YOUR branch changed. Two-dot compares the two commits, so files DELETED
+   from `main` since your branch point come back as your additions: a measured
+   run reported 19 hits that were another PR's deletions where three-dot
+   reported zero across 36 files. A scan people learn to wave through is where
+   a real secret hides.
+3. **`detect-secrets` run against paths, not diff text, is a silent no-op on a
+   branch that isn't checked out** — it scans the working tree on disk, so a
+   scan invoked against a branch other than the one currently checked out finds
+   nothing and reports clean regardless of content.
+4. **The sandbox refuses any path containing the word "secrets"** — a
+   `detect-secrets` invocation naming its own tool or config path can trip this
+   and abort before it scans anything. Route the scan through `gitleaks`
+   instead when that happens.
+5. `security` scans the gitleaks output and the diff for API keys, passwords,
+   private keys, and tokens, and returns either clean or the list of blocked
+   items.
+6. **Block the push if secrets are detected.** A leaked credential in git history
    survives the commit being reverted.
 
 ## Branch Protection

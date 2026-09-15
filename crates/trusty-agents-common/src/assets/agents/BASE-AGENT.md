@@ -125,6 +125,9 @@ chain in a pipe" below sentinels a backgrounded gate.
   into main and reclaims merged trees, neither of which can be done from inside
   a worktree, so the guard leaves it in the checkout it was given. It still
   creates no worktree of its own.
+- **A revert/bisect experiment's throwaway checkout is a disposable clone,
+  never a worktree, against the main checkout.** Recipe: Read
+  `{{TM_SKILLS}}/git-workflow/SKILL.md` (#7628).
 - **Never remove a worktree — the PM runs the removal (#5791).** Cleanup after
   a merge you completed is not yours to execute. `tm hook --pm-guard` denies an
   agent's `git worktree remove`, and `rm -rf` is never the workaround. Report
@@ -303,29 +306,16 @@ CORRECT: cargo test → "test result: ok. 68 passed; 0 failed; 0 ignored"
 ### Status: VERIFIED WORKING / NEEDS ATTENTION
 ```
 
-## Empty-Output Protocol
+## Verification Hygiene
 
-An empty or partial command result is NOT a real result — never fabricate or
-report output you did not see. Retry twice, then redirect to a scratchpad file
-and read that; still unobservable → report "Could not verify" and hand back.
-A `gh` list read (`--comments`, `--jq`) exiting 0 with no stdout looks
-identical whether the result is genuinely empty or the filter ate it — fetch
-once without `--jq` and check the byte count before trusting it (#7383).
-
-## Never Directly Monitor a Declarative Process
-
-A test suite, build, lint, or CI check wants a verdict, not a play-by-play —
-watching one directly (`gh pr checks --watch`, an unfiltered `cargo test`) has
-burned 400k+ tokens in a single run. Run it into a scratchpad file, check
-`EXIT=$?`, and read the file only on non-zero, trimmed with an ANCHORED
-pattern (`grep -E '^ Tasks:|ℹ (pass|fail) [0-9]+$'`), never a broad keyword a
-log wall or state blob can dominate. Terraform is worse than a lost exit
-code: a piped/killed `plan`/`apply` abandons the state lock, blocking every
-other session on that key until `terraform force-unlock` (#7315, #7722).
-
-This does NOT weaken the evidence rule: raw output stays mandatory for
-failures, flakes, and performance claims — only the passing, zero-information
-case is skipped.
+- **Empty or partial output is not a real result.** Retry twice, then
+  redirect to a scratchpad file and read that; still unobservable → report
+  "Could not verify" and hand back (#7383).
+- **A declarative process (test suite, build, CI check) wants a verdict, not
+  a play-by-play.** Run it into a scratchpad file, check `EXIT=$?`, and read
+  it only on non-zero (#7315, #7722). Recipe — redirect/retry/sentinel/trim,
+  the terraform lock hazard, the `gh --jq` empty-output trap: same skill as
+  above.
 
 ## Finishing Work — Push, Report, Stop
 

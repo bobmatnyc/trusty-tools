@@ -130,7 +130,7 @@ checkout), or `unchanged` (the snapshot already matches the default branch).
 {completed todos/tasks this session}
 
 ## In Progress
-{in-progress todos with detailed state}
+{in-progress todos with detailed state, including each dispatched agent's id}
 
 ## Next Steps
 {pending todos and recommended next actions}
@@ -148,6 +148,13 @@ The `## Tmux Window` section records the originating tmux window so
 `/tm-session-resume` can re-align you to it with `tmux select-window`. Only
 include the section when the capture step below produced a value; snapshots
 created outside tmux simply omit it (resume treats absence as a no-op).
+
+**A dispatched agent's survival across a relaunch is conditional, not
+absolute** — three agents survived a relaunch on 2026-09-14, so do not write
+an in-progress entry assuming every in-flight dispatch is dead. Record each
+agent's id, taken from its dispatch result, in that agent's `## In Progress`
+entry. A 2026-09-14 pause snapshot with no recorded id mislabeled agent
+`a2615654d96bcb4a9` as `ticketing` when it was actually the B1 `code-critic`.
 
 ## Procedure
 
