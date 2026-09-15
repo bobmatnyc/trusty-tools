@@ -49,7 +49,11 @@ enum OnDisk {
     /// Missing or zero bytes — nothing to destroy.
     Empty,
     Chunks(usize),
-    /// Present but not a readable snapshot; treated as populated.
+    /// Present but not a readable snapshot; treated as populated. #7923 already
+    /// ruled on this shape for the read side — a corrupt snapshot is a failure,
+    /// never an empty corpus — and bytes this process cannot parse are bytes it
+    /// must not destroy. The owning writer is unaffected: `check_overwrite`
+    /// returns before it reads the file.
     Unreadable(u64),
 }
 
@@ -114,9 +118,20 @@ impl SnapshotGuard {
     /// one chunk, or when the file holds nothing. Otherwise counts the refusal,
     /// logs it at ERROR, and returns [`SnapshotOverwriteRefused`]. Reads the
     /// file only on the refusal-candidate path.
+    ///
+    /// The read and the caller's rename are not atomic, which narrows the #7920
+    /// window rather than closing it. What passes through the remaining window
+    /// is bounded: an empty or foreign corpus is refused whenever the file holds
+    /// anything, so reaching the write means the file held nothing at the read,
+    /// and the only writers of that path are this indexer's own two call sites
+    /// — which write the same corpus — plus a second daemon, which the PID
+    /// lockfile excludes. Closing it outright needs an exclusive lock spanning
+    /// read-decide-write, on a path written only while no redb corpus is wired.
+    ///
     /// Test: `shutdown_flush_refuses_empty_corpus_over_populated_chunks_json`,
     /// `shutdown_flush_refuses_foreign_partial_corpus`,
-    /// `chunks_added_after_load_are_persisted`.
+    /// `chunks_added_after_load_are_persisted`,
+    /// `corrupt_snapshot_does_not_block_the_owning_writer`.
     pub(crate) fn check_overwrite(
         &self,
         index_id: &str,

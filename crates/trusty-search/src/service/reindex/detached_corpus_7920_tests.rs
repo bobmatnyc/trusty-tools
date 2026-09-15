@@ -5,10 +5,11 @@
 //! swap fails and the indexer was left with no corpus and no quarantine — the
 //! state in which both snapshot writers fall back to `chunks.json`.
 //! What: the abort error arm, the promotion error arm, the detached window
-//! before either arm runs, and the owning arm.
+//! before either arm runs, the re-attach race, and the owning arm.
 //! Test: `shutdown_flush_after_failed_reattach_leaves_chunks_json_byte_identical`,
 //! `failed_promotion_reopen_quarantines_and_flush_leaves_chunks_json_byte_identical`,
 //! `snapshot_writers_refuse_between_take_and_reattach`,
+//! `quarantine_is_refused_when_a_corpus_was_re_attached_first`,
 //! `owning_daemon_reattaches_and_shutdown_flush_persists`.
 
 use std::path::PathBuf;
@@ -242,6 +243,42 @@ async fn snapshot_writers_refuse_between_take_and_reattach() {
     );
     drop(idx);
     drop(taken);
+}
+
+/// Race arm: a corpus re-attached between the release and the quarantine call
+/// must leave the index healthy, not quarantined-with-a-corpus.
+#[tokio::test]
+#[serial_test::serial]
+async fn quarantine_is_refused_when_a_corpus_was_re_attached_first() {
+    let fx = fixture("reattach-race-7920").await;
+    let _env = RestoreDataDir::set(fx.data_dir.path());
+    assert!(
+        fx.indexer.read().await.has_corpus_store(),
+        "test setup: a corpus must be wired"
+    );
+
+    fx.indexer.write().await.quarantine_detached_corpus(
+        CorpusOpenFailure::Contention,
+        "a concurrent set_corpus_store re-attached the corpus first",
+    );
+
+    let idx = fx.indexer.read().await;
+    assert!(
+        idx.has_corpus_store(),
+        "#7920: the wired corpus must survive the refused quarantine"
+    );
+    assert!(
+        !idx.corpus_open_failed,
+        "#7920: quarantining a wired corpus breaks the invariant that makes the \
+         ungated bulk-reindex path safe"
+    );
+    assert_eq!(idx.corpus_open_failure, None);
+    idx.force_incremental_persist();
+    assert_eq!(
+        idx.refused_incremental_writes(),
+        0,
+        "a healthy index must not refuse writes"
+    );
 }
 
 /// Owning arm: the re-attach succeeds and the flush lands in redb as before.

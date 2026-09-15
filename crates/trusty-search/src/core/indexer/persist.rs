@@ -183,6 +183,12 @@ impl CodeIndexer {
 
         // #7920: this in-memory corpus now describes `path`, so a later write
         // back to it is a legitimate update rather than a foreign overwrite.
+        // The mark precedes the publish phases below and stays correct there:
+        // it is process-local (never durable), nothing after it can fail, and a
+        // writer racing the publish reads a chunk count that only ever moves
+        // from the pre-restore value to the full restored one — each phase
+        // publishes under one write lock — so it is refused on the empty-corpus
+        // arm rather than writing a partial snapshot.
         self.snapshot_guard.mark_owned(path);
         let total = snapshot.chunks.len() - duplicate_ids;
         // Phase 1: refill BM25 from the restored corpus before publishing the

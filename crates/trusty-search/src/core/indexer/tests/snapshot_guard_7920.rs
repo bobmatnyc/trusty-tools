@@ -139,6 +139,37 @@ async fn chunks_added_after_load_are_persisted() {
     assert_eq!(owner.refused_snapshot_overwrites(), 0);
 }
 
+/// An unparseable file on disk must not block the writer that owns the path.
+///
+/// Why: `OnDisk::Unreadable` is refused like a populated snapshot, so the
+/// question is whether a corrupt file can wedge the write path shut. It cannot
+/// on the owning path — `check_overwrite` returns before it ever reads the
+/// file when the indexer owns the path and holds a chunk.
+#[tokio::test]
+async fn corrupt_snapshot_does_not_block_the_owning_writer() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("chunks.json");
+    let mut expected = seed(&path).await;
+
+    let owner = make_indexer();
+    assert_eq!(owner.load_chunks_from_disk(&path).await.unwrap(), 3);
+    // The file rots under the owner: truncated JSON, not a snapshot any more.
+    std::fs::write(&path, b"{\"version\":1,\"chunks\":[{\"id\":").unwrap();
+    owner
+        .add_chunk(raw("d", "src/d.rs", "fn fresh() {}"))
+        .await
+        .unwrap();
+
+    owner
+        .flush_corpus_to_disk(&path)
+        .await
+        .expect("the owning writer must not be blocked by an unreadable file");
+    expected.insert("d".to_string());
+
+    assert_eq!(snapshot_ids(&path), expected, "exact id set after flush");
+    assert_eq!(owner.refused_snapshot_overwrites(), 0);
+}
+
 /// Error arm: a failed write surfaces as `Err` and leaves the source intact.
 #[tokio::test]
 async fn snapshot_write_failure_surfaces_error_and_keeps_source() {

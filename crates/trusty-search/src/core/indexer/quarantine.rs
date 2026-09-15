@@ -103,6 +103,9 @@
 //! [`CodeIndexer::quarantine_detached_corpus`] after a staged swap failed to
 //! re-attach, #7920) run only when NO corpus is wired, and the only way to wire one
 //! ([`CodeIndexer::set_corpus_store`]) clears the flag in the same call.
+//! `quarantine_detached_corpus` enforces its half at runtime, in release builds
+//! too, because its callers release the corpus under a different lock
+//! acquisition than the one they quarantine under.
 //!
 //! **If you add an in-process corpus reopen/retry, you will break this.** A
 //! retry that wires a corpus without clearing the flag — or that sets the flag
@@ -352,14 +355,31 @@ impl CodeIndexer {
     /// is wired, so the module invariant holds, reads report the corpus
     /// unavailable, and every write family refuses. A later successful
     /// [`CodeIndexer::set_corpus_store`] lifts it like any other quarantine.
+    /// A caller that reaches this WITH a corpus wired is refused and logged
+    /// rather than quarantined: each call site releases the corpus under a
+    /// different lock acquisition than this one, so a concurrent
+    /// [`CodeIndexer::set_corpus_store`] can attach a working corpus in
+    /// between. Quarantining then would leave `corpus_open_failed` set beside a
+    /// wired corpus — the one state the module invariant above forbids, and one
+    /// no later `set_corpus_store` would clear. A `debug_assert!` alone left
+    /// that unchecked in release builds.
     /// Test: `shutdown_flush_after_failed_reattach_leaves_chunks_json_byte_identical`,
-    /// `failed_promotion_reopen_quarantines_and_flush_leaves_chunks_json_byte_identical`.
+    /// `failed_promotion_reopen_quarantines_and_flush_leaves_chunks_json_byte_identical`,
+    /// `quarantine_is_refused_when_a_corpus_was_re_attached_first`.
     pub(crate) fn quarantine_detached_corpus(&mut self, kind: CorpusOpenFailure, cause: &str) {
-        debug_assert!(
-            self.corpus.is_none(),
-            "index '{}': quarantine_detached_corpus called with a corpus wired (#7920)",
-            self.index_id
-        );
+        if self.corpus.is_some() {
+            tracing::error!(
+                index_id = %self.index_id,
+                failure_kind = ?kind,
+                "index '{}': quarantine_detached_corpus called with a corpus wired \
+                 ({cause}) — a corpus was re-attached between the release and this \
+                 call, so the index is NOT quarantined; quarantining a wired corpus \
+                 would break the invariant that makes the ungated bulk-reindex path \
+                 safe (issue #7920)",
+                self.index_id
+            );
+            return;
+        }
         self.corpus_open_failed = true;
         self.corpus_open_failure = Some(kind);
         tracing::error!(
