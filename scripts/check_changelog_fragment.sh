@@ -146,9 +146,10 @@
 #   default run, which stays the gate CI enforces:
 #
 #     --staged       attribute the INDEX plus untracked-but-not-ignored files
-#                    instead of `<base>..HEAD`, against HEAD. Same attribution,
-#                    same evidence rules, same exit codes; the scan floor becomes
-#                    "at least one staged or untracked path".
+#                    against the merge base with <base> (#7634), so commits
+#                    already on the branch count as they will post-commit. Same
+#                    attribution, same evidence rules, same exit codes; the scan
+#                    floor becomes "at least one staged or untracked path".
 #     --file <path>  validate ONE fragment's placement, category line and body
 #                    with no git diff at all. The content check is delegated to
 #                    `assemble-changelog.sh --fragment`, which is the same
@@ -209,7 +210,8 @@
 #   bash scripts/check_changelog_fragment.sh --staged         # before committing
 #   bash scripts/check_changelog_fragment.sh --file <path>    # one fragment only
 #
-#   --staged, --file and --base are mutually exclusive; passing two is exit 2.
+#   --staged and --file are mutually exclusive, and --file takes no --base;
+#   either conflict is exit 2. --staged honours --base (#7634).
 #
 # Exit: 0 when every crate with source changes has evidence (or is exempt);
 #   non-zero with a per-crate summary on stderr when one does not. --file exits
@@ -242,6 +244,10 @@
 #
 # Portability: bash 3.2 (macOS system bash) and bash 5 (Linux CI). POSIX tools
 #   only — `git`, `grep`, `sed`, `sort`.
+
+# #7812: `zsh <this script>` has no BASH_SOURCE and 1-based arrays, so re-run
+# under bash before any bash-only line. Plain POSIX, so zsh and sh parse it.
+if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
 
 set -euo pipefail
 
@@ -290,7 +296,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     -h | --help)
       # Through the author-mode notes — keep this range in step with the header.
-      sed -n '2,162p' "$0" >&2
+      sed -n '2,163p' "$0" >&2
       exit 0
       ;;
     *)
@@ -309,10 +315,9 @@ if [[ "$MODE_FLAGS" -gt 1 ]]; then
   echo "ERROR: --staged and --file are different questions; pass one" >&2
   exit 2
 fi
-if [[ "$MODE_FLAGS" -eq 1 && "$BASE_EXPLICIT" -eq 1 ]]; then
-  echo "ERROR: --base names a base ref, which neither --staged nor --file reads." >&2
-  echo "       --staged compares the index against HEAD; --file reads no git" >&2
-  echo "       history at all. Pass --base or an author mode, not both." >&2
+if [[ "$MODE" == "file" && "$BASE_EXPLICIT" -eq 1 ]]; then
+  echo "ERROR: --base names a base ref, which --file does not read: it reads no" >&2
+  echo "       git history at all. Pass --base or --file, not both." >&2
   exit 2
 fi
 
@@ -388,16 +393,15 @@ if [[ "$MODE" == "file" ]]; then
   exit 1
 fi
 
-if [[ "$MODE" == "staged" ]]; then
-  # The index is compared against HEAD, so HEAD is what every later rev probe
-  # (the transitional assembler probe, crate attribution, the release-window
-  # base changelog) reads. A repo with no commits has no HEAD; the empty tree
-  # is the only honest base there and every probe accepts a tree-ish.
-  if git rev-parse --verify --quiet HEAD >/dev/null; then
-    MERGE_BASE="$(git rev-parse HEAD)"
-  else
-    MERGE_BASE="$(git hash-object -t tree /dev/null)"
-  fi
+# #7634: --staged compares the index against the SAME merge base the default run
+# uses, not against HEAD. Against HEAD, every commit already on the branch was
+# invisible: a fragment committed first and a source change staged second
+# failed as unrecorded, while the default run passed the identical tree. The
+# mode exists to predict that default verdict before the commit, so it must diff
+# from where the default run will. A repo with no commits has no HEAD; the empty
+# tree is the only honest base there and every probe accepts a tree-ish.
+if [[ "$MODE" == "staged" ]] && ! git rev-parse --verify --quiet HEAD >/dev/null; then
+  MERGE_BASE="$(git hash-object -t tree /dev/null)"
 elif ! MERGE_BASE="$(git merge-base "$BASE" HEAD 2>/dev/null)"; then
   echo "ERROR: cannot find a merge base between '$BASE' and HEAD." >&2
   echo "       Fetch the base ref first (CI must check out with fetch-depth: 0):" >&2
@@ -430,9 +434,8 @@ fi
 #   - BASE differs from HEAD^1: passing the merge ref's own base parent by SHA
 #     is exact, not stale, and stays allowed.
 #
-# --staged reads no base ref at all, so there is no base to be stale (#6947).
-if [[ "$MODE" != "staged" ]] &&
-  [[ "$BASE_IS_REF" -eq 0 ]] &&
+# --staged reads the same base since #7634, so the same refusal applies to it.
+if [[ "$BASE_IS_REF" -eq 0 ]] &&
   git rev-parse --verify --quiet 'HEAD^2' >/dev/null &&
   git merge-base --is-ancestor "$BASE" 'HEAD^1' &&
   [[ "$(git rev-parse "$BASE")" != "$(git rev-parse 'HEAD^1')" ]]; then
@@ -457,7 +460,8 @@ fi
 # check counted `git rm crates/X/changelog.d/*.md` as a record while destroying
 # the one that existed.
 #
-# #6947 --staged takes the same two views of the INDEX against HEAD, then adds
+# #6947 --staged takes the same two views of the INDEX against the merge base
+# (#7634), then adds
 # every untracked-but-not-ignored path to both. An untracked path exists and was
 # not deleted, so it belongs in each view; and a fragment the author wrote but
 # has not `git add`-ed yet is exactly the evidence this mode exists to see.
@@ -485,7 +489,7 @@ if [[ "${CHANGED_COUNT:-0}" -lt 1 ]]; then
     # The floor is the same rule with the same exit code; only what counts as a
     # scanned path differs (#6947). A clean index with no untracked file means
     # the author has written nothing yet, not that the tree is recorded.
-    echo "FAIL: SCAN FLOOR — the index against HEAD plus untracked files lists 0" >&2
+    echo "FAIL: SCAN FLOOR — the index against the merge base ${MERGE_BASE:0:10} plus untracked files lists 0" >&2
     echo "      path(s). Nothing was examined, so this run could not have failed." >&2
     echo "      Write the change (and its fragment) first, or stage it: git add -A" >&2
     echo "      A gate that scans nothing is not a passing gate (issue #4618)." >&2

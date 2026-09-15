@@ -154,6 +154,13 @@ drift only after a full build/test run has already paid for itself. Same root
 cause across #7671, #7674, #7678, #7688: `fmt --check` failing at the end of a
 gate chain that had already run the expensive steps.
 
+The lint reads untracked-but-not-ignored `.rs` files for both the citations and
+the `fn`/`mod` names they resolve against (#7804), so a new test module needs no
+`git add` before its pointers resolve. A pointer written as prose ("Test:
+covered by `foo_test` below") is checked too (#7710): its backtick spans resolve
+against every identifier in the crate's non-comment code, and one naming
+nothing there is reported as a dangling prose pointer.
+
 ### A stderr-asserting test needs `RUST_LOG=warn` to match CI
 
 `.github/workflows/ci.yml` exports `RUST_LOG=warn` workspace-wide; a local

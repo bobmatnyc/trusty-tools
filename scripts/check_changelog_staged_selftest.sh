@@ -48,6 +48,13 @@
 #                                     its ordinary summary with no mode label —
 #                                     the CI verdict is byte-for-byte what it
 #                                     was.
+#     staged-fragment-committed-earlier-ok, staged-committed-src-no-fragment-
+#     fails, staged-fully-committed-branch-ok
+#                                     #7634: commits already on the branch are
+#                                     part of what --staged examines, in both
+#                                     directions — an earlier fragment is a
+#                                     record, an earlier bare source change is
+#                                     still an omission.
 #
 #   --file cases:
 #     file-valid-fragment             exit 0.
@@ -86,6 +93,9 @@
 #
 # Portability: bash 3.2 (macOS system bash) and bash 5 (Linux CI). POSIX tools
 #   only. Same constraints as the script under test.
+
+# #7812: re-run under bash when invoked as `zsh <this script>`.
+if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
 
 set -euo pipefail
 
@@ -200,9 +210,11 @@ assert_gate() {
 # reset_tree: a fresh `work` branch at the fixture commit with no staged,
 # unstaged or untracked change, so each case starts from the same place.
 reset_tree() {
-  g checkout -q -B work "$BASE_SHA"
+  # Discard first: a case that left a staged change behind (#7634's cases
+  # commit on `work`, then stage more) makes the checkout refuse.
   g reset -q --hard
   g clean -qfd
+  g checkout -q -B work "$BASE_SHA"
 }
 
 # ===========================================================================
@@ -266,7 +278,7 @@ assert_gate staged-docs-only-exempt 0 \
 #    untracked: a run that examined nothing is not a passing run.
 reset_tree
 assert_gate staged-empty-index-scan-floor 1 \
-  'SCAN FLOOR — the index against HEAD plus untracked files lists 0' \
+  'SCAN FLOOR — the index against the merge base [0-9a-f]+ plus untracked files lists 0' \
   '' \
   --staged
 
@@ -327,6 +339,48 @@ printf 'pub fn v() -> u32 { 1 }\n' >"$REPO/crates/fresh/src/lib.rs"
 assert_gate staged-untracked-crate-not-a-deletion 1 \
   'FAIL fresh: crates/fresh/src/\*\* changed with no changelog record' \
   'UNATTRIBUTED SOURCE' \
+  --staged
+
+# 12. THE #7634 DEFECT. A fragment committed earlier on the branch records a
+#     source change staged later. Pre-fix --staged diffed the index against
+#     HEAD, could not see the committed fragment, and failed a tree the default
+#     run passes once committed.
+reset_tree
+printf 'pub fn v() -> u32 { 7 }\n' >"$REPO/crates/demo/src/lib.rs"
+write_valid_fragment "$REPO/crates/demo/changelog.d/7634-first-commit.md"
+g add -A
+g commit -qm "source change with its fragment"
+printf 'pub fn v() -> u32 { 8 }\n' >"$REPO/crates/demo/src/lib.rs"
+g add -A
+assert_gate staged-fragment-committed-earlier-ok 0 \
+  'OK   demo: changelog.d fragment present and valid' \
+  'FAIL' \
+  --staged
+
+# 13. The same blind spot in the other direction passed a real omission: a
+#     source change committed with no fragment, then a docs change staged.
+#     Pre-fix --staged saw only the docs path and reported docs-only — OK.
+reset_tree
+printf 'pub fn v() -> u32 { 9 }\n' >"$REPO/crates/demo/src/lib.rs"
+g add -A
+g commit -qm "source change, no fragment"
+printf '# Docs\n\nlater\n' >"$REPO/docs/notes.md"
+g add -A
+assert_gate staged-committed-src-no-fragment-fails 1 \
+  'FAIL demo: crates/demo/src/\*\* changed with no changelog record' \
+  'no crate source changed' \
+  --staged
+
+# 14. A fully committed branch gets the default run's verdict, not SCAN FLOOR:
+#     its commits are part of what --staged examines.
+reset_tree
+printf 'pub fn v() -> u32 { 10 }\n' >"$REPO/crates/demo/src/lib.rs"
+write_valid_fragment "$REPO/crates/demo/changelog.d/7634-committed.md"
+g add -A
+g commit -qm "committed branch"
+assert_gate staged-fully-committed-branch-ok 0 \
+  'OK   demo: changelog.d fragment present and valid' \
+  'SCAN FLOOR' \
   --staged
 
 # ===========================================================================
@@ -405,13 +459,15 @@ assert_gate usage-two-modes-refused 2 \
   '' \
   --staged --file "$FRAG_DIR/valid.md"
 
-assert_gate usage-staged-with-base-refused 2 \
-  'neither --staged nor --file reads' \
-  '' \
+# #7634: --staged reads the base, so --base is an argument it takes. A clean
+# tree then reaches the scan floor rather than a usage error.
+assert_gate usage-staged-with-base-accepted 1 \
+  'SCAN FLOOR' \
+  'does not read' \
   --staged --base main
 
 assert_gate usage-file-with-base-refused 2 \
-  'neither --staged nor --file reads' \
+  'which --file does not read' \
   '' \
   --file "$FRAG_DIR/valid.md" --base main
 

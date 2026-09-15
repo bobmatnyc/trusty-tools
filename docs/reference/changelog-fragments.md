@@ -59,7 +59,7 @@ was written. Two flags answer earlier (#6947):
 # one fragment: placement, category line and body — no git diff at all
 bash scripts/check_changelog_fragment.sh --file crates/<crate>/changelog.d/<n>-<slug>.md
 
-# the whole change: the index plus untracked files, attributed as the gate does
+# the whole change: branch commits, index and untracked files, attributed as the gate does
 bash scripts/check_changelog_fragment.sh --staged
 ```
 
@@ -74,6 +74,14 @@ crate's `CHANGELOG.md` and `changelog.d/`, so an unstaged edit still counts as
 evidence. Since #7435 it resolves the crate-dissolution exemption against the
 INDEX rather than `HEAD`, so a staged `git rm` of a whole crate is exempt in
 this mode too. Run the default gate after committing.
+
+Since #7634 `--staged` diffs the index against the same merge base the default
+run uses (`--base`, else `CHANGELOG_GATE_BASE`, else `origin/main`), not against
+`HEAD`. A fragment committed earlier on the branch therefore counts as the
+record for a source change staged later, and a source change committed earlier
+without a fragment still fails. On a fully committed branch it returns the
+default run's verdict instead of `SCAN FLOOR`. Both scripts re-execute under
+bash, so `zsh scripts/<name>.sh` runs them as well (#7812).
 
 ## Preview the Pending Set
 
@@ -190,19 +198,11 @@ production file still owes a fragment: the file itself is a production path
 under that rule, even though `check_line_cap.sh` excludes that exact block from
 the SLOC count (#5153). Same input, two different rulings, by design.
 
-### A revert-only change cannot use `--staged`
-
-`--staged` clears a crate whose fragment for the reverted change is still in
-the working tree or index. It cannot clear a crate whose earlier-in-branch
-fragment was already committed and is now being reverted — that fragment has
-nothing left staged to find. Commit the revert, then run the default
-(post-commit) gate instead of reaching for `--staged` a second time.
-
 ### Two gates that need a real commit, not the working tree
 
 - `check_changelog_fragment.sh` diffs `origin/main..HEAD`, so the default run
   sees nothing until the change is committed. Before committing, use `--staged`
-  (the index plus untracked files) or `--file <path>` (#6947); run the default
+  (branch commits, index and untracked files) or `--file <path>` (#6947); run the default
   gate after committing. `check_line_cap.sh` reads tracked `git ls-files`, so a
   new file needs `git add` first too.
 - `scripts/check-pr-version-bump.sh` is the second post-commit gate on the same
