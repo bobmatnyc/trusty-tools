@@ -84,6 +84,13 @@
 #   citation naming nothing that exists anywhere in the crate's code is
 #   reported as a dangling prose pointer.
 #
+#   SHELL POINTERS (#7439): every tracked-or-untracked `.sh` file is scanned the
+#   same way, for a `#` comment line whose stripped content starts with `Test:`.
+#   A shell annotation cites a FILE (a self-test script, a fixture, a workflow),
+#   never a `fn` name, so those citations are resolved as PATHS — see
+#   SHELL_SCAN_AWK for the exact token rules. A citation naming a file that
+#   exists nowhere in the repo is reported as a dangling shell pointer.
+#
 # PRECISION LIMITS (documented per issue #2458, "pragmatic grep is
 #   acceptable"; blind spots closed by issue #3581):
 #   - citations must be backtick-quoted (this codebase's universal doc
@@ -680,6 +687,186 @@ is_excluded_path() {
 }
 
 # ---------------------------------------------------------------------------
+# SHELL_SCAN_AWK — the shell half of the lint (#7439).
+#
+# Why: `scripts/*.sh` carries the same `# Test:` header pointer the Rust
+#   convention requires, and nothing checked it.
+#   `scripts/check-pr-changelog-assembled.sh` cited a
+#   `check-pr-changelog-assembled-selftest.sh` that never existed, so the
+#   self-test it named never ran and the pipefail bug fixed in #7359 shipped
+#   unnoticed. A pointer nothing verifies is a pointer that rots.
+#
+# What: for every `#` comment line whose stripped content starts with the
+#   literal `Test:` — plus its continuation lines, terminated by a blank
+#   comment line, a horizontal rule, a new `Why:`/`What:`/`Usage:`-style tag,
+#   or the end of the comment block — every whitespace-separated token ending
+#   in a source suffix (`.sh .rs .py .mjs .yml .yaml .toml .tsv .swift`) is a
+#   citation, after surrounding backticks/quotes/brackets and trailing
+#   punctuation are trimmed. A citation RESOLVES when it names a real file:
+#   repo-relative (a leading `./` stripped), relative to the citing script own
+#   directory, or by BASENAME anywhere in the corpus. Anything left is a
+#   dangling shell pointer.
+#
+#   Two token shapes are skipped rather than resolved, because neither is a
+#   claim about a file this repo ships:
+#     - an ABSOLUTE path. `--gate /path/to/gate.sh` in
+#       check_rustdoc_links_selftest.sh usage block is a placeholder for the
+#       caller own scratch copy.
+#     - a token starting with `-`. Either a CLI flag, or this repo
+#       suffix-elision shorthand for a list of sibling fixtures
+#       (`sloc-cfg-test-string-braces.rs, -glob-comment.rs, ...` in
+#       scripts/lib/sloc_awk.sh).
+#   The basename fallback is the same leans-lenient bias the Rust half
+#   documents: a cited file that MOVED between directories still resolves,
+#   while a cited file that exists nowhere — the rot this gate exists to catch
+#   — is still reported. Trimming uses `index()` over a character set rather
+#   than a bracket-expression regex, because escaping `]` and `[` inside an ERE
+#   bracket expression is not portable across the awks this repo runs on.
+#
+#   HEREDOC BODIES ARE SKIPPED. A `# Test:` line inside a `<<EOF` body is
+#   fixture text a script WRITES, not an annotation about the script itself —
+#   this very file's `--self-test` emits fixture scripts whose pointers are
+#   dangling on purpose. Linting them would grade fiction, exactly as
+#   EXCLUDE_PREFIXES says of the synthetic search corpus. The opener is read
+#   from a non-comment line (`<<`, `<<-`, quoted or bare, `<<<` herestrings
+#   removed first) and everything up to the delimiter line is skipped.
+#   Annotations are NOT restricted to the file header. Roughly a sixth of the
+#   129 shell citations measured when this landed sit above a function mid-file
+#   (assemble-changelog.sh, check_semver.sh and preflight-publish.sh each carry
+#   several), so a header-only scan would drop real coverage.
+#
+# Test: `check_test_pointers.sh --self-test` builds fixture shell scripts
+#   covering a resolvable citation, a basename-only citation, a dangling one,
+#   and each skipped shape.
+# ---------------------------------------------------------------------------
+SHELL_SCAN_AWK='
+function resolves(dir, t,    k, seg) {
+  if (t in have) return 1
+  if ((dir "/" t) in have) return 1
+  k = split(t, seg, "/")
+  if (seg[k] in base) return 1
+  return 0
+}
+
+function flush(path, dir, ln, text,    n, toks, i, t) {
+  if (text == "") return
+  n = split(text, toks, /[ \t]+/)
+  for (i = 1; i <= n; i++) {
+    t = toks[i]
+    while (t != "" && index("`(\"[<", substr(t, 1, 1)) > 0) t = substr(t, 2)
+    while (t != "" && index("`)\"]>,;:.", substr(t, length(t), 1)) > 0) {
+      t = substr(t, 1, length(t) - 1)
+    }
+    if (t !~ /\.(sh|rs|py|mjs|ya?ml|toml|tsv|swift)$/) continue
+    if (substr(t, 1, 1) == "/") continue
+    if (substr(t, 1, 1) == "-") continue
+    sub(/^\.\//, "", t)
+    if ((path SUBSEP ln SUBSEP t) in seen) continue
+    seen[path SUBSEP ln SUBSEP t] = 1
+    print (path "\t" ln "\t" t) > CHECKEDF
+    if (!resolves(dir, t)) print (path "\t" ln "\t" t "\t" dir "\tshell") > VIOLF
+  }
+}
+
+function heredoc_delim(line,    s, d) {
+  s = line
+  gsub(/<<</, " ", s)
+  if (!match(s, /<<-?[ \t]*[^ \t;|&<>()]+/)) return ""
+  d = substr(s, RSTART, RLENGTH)
+  sub(/^<<-?[ \t]*/, "", d)
+  while (d != "" && (substr(d, 1, 1) == SQ || substr(d, 1, 1) == "\"")) d = substr(d, 2)
+  while (d != "" && (substr(d, length(d), 1) == SQ || substr(d, length(d), 1) == "\"")) {
+    d = substr(d, 1, length(d) - 1)
+  }
+  if (d !~ /^[A-Za-z_][A-Za-z0-9_]*$/) return ""
+  return d
+}
+
+function scan_one(path,    dir, ln, line, s, text, start, hd) {
+  dir = path
+  if (dir ~ /\//) sub(/\/[^\/]*$/, "", dir)
+  else dir = "."
+  ln = 0
+  text = ""
+  start = 0
+  hd = ""
+  while ((getline line < path) > 0) {
+    ln++
+    if (hd != "") {
+      s = line
+      sub(/^[ \t]*/, "", s)
+      sub(/[ \t]*$/, "", s)
+      if (s == hd) hd = ""
+      continue
+    }
+    if (line !~ /^[ \t]*#/) {
+      flush(path, dir, start, text)
+      text = ""
+      hd = heredoc_delim(line)
+      continue
+    }
+    s = line
+    sub(/^[ \t]*#[ \t]?/, "", s)
+    if (s ~ /^Test:/) { flush(path, dir, start, text); start = ln; text = s; continue }
+    if (text == "") continue
+    if (s ~ /^[ \t]*$/ || s ~ /^[-=]+[ \t]*$/) { flush(path, dir, start, text); text = ""; continue }
+    if (s ~ /^(Why|What|Test|Usage|Exit|Portability|Scope|Note|Env|Input|Inputs|Output|Outputs|Arguments|Options|Modes):/) {
+      flush(path, dir, start, text)
+      text = ""
+      continue
+    }
+    text = text " " s
+  }
+  close(path)
+  flush(path, dir, start, text)
+}
+
+BEGIN {
+  while ((getline p < ALL) > 0) {
+    if (p == "") continue
+    have[p] = 1
+    n = split(p, seg, "/")
+    base[seg[n]] = 1
+  }
+  close(ALL)
+  while ((getline f < SHLIST) > 0) if (f != "") scan_one(f)
+  close(SHLIST)
+  close(VIOLF)
+  close(CHECKEDF)
+}
+'
+
+# ---------------------------------------------------------------------------
+# scan_shell: run SHELL_SCAN_AWK over the repo rooted at cwd. Appends
+# violation rows ("<path>\t<line>\t<cited>\t<dir>\tshell") to $1 and one row
+# per RESOLVED-or-not citation to $2, so the caller can floor-check the shell
+# corpus the way #4618 floors the Rust one. Both files must already exist:
+# awk's `>` creates a file only on its first write, so a clean tree would
+# otherwise leave them absent.
+# ---------------------------------------------------------------------------
+scan_shell() {
+  local viol_out="$1" checked_out="$2" allfiles shlist
+  allfiles="$(mktemp "${TMPDIR:-/tmp}/tpall.XXXXXX")"
+  shlist="$(mktemp "${TMPDIR:-/tmp}/tpshlist.XXXXXX")"
+
+  # #4618, same reasoning as the .rs enumeration below: a failing `git ls-files`
+  # must be observable, never an empty stream that reads as "0 dangling".
+  if ! git ls-files --cached --others --exclude-standard > "$allfiles" ||
+    ! git ls-files --cached --others --exclude-standard -- '*.sh' > "$shlist"; then
+    echo "FAIL: TOOL ERROR — 'git ls-files' exited non-zero enumerating the shell corpus;" >&2
+    echo "      nothing was scanned. This is NOT a pass (issue #4618)." >&2
+    rm -f "$allfiles" "$shlist"
+    exit 1
+  fi
+
+  # SQ carries the single-quote character into awk: SHELL_SCAN_AWK is itself a
+  # single-quoted shell string, so it cannot contain one literally.
+  awk -v ALL="$allfiles" -v SHLIST="$shlist" -v VIOLF="$viol_out" \
+    -v CHECKEDF="$checked_out" -v SQ="'" "$SHELL_SCAN_AWK" < /dev/null
+  rm -f "$allfiles" "$shlist"
+}
+
+# ---------------------------------------------------------------------------
 # scan: run the full lint over the git repo rooted at cwd. Writes violation
 # lines ("<path>\t<line>\t<name>\t<crate>", line kept only for the FAIL
 # message's file:line pointer) to the file named by $1, stale-allowlist-entry
@@ -710,10 +897,12 @@ is_excluded_path() {
 # ---------------------------------------------------------------------------
 scan() {
   local viol_out="$1" stale_out="$2" err_out="$3" checked_out="$4"
+  local shell_checked_out="$5"
   : > "$viol_out"
   : > "$stale_out"
   : > "$err_out"
   : > "$checked_out"
+  : > "$shell_checked_out"
 
   CRATE_FN_CACHE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tpfncache.XXXXXX")"
 
@@ -778,6 +967,16 @@ scan() {
   awk -v MAP="$cratemap" -v CACHEMAP="$cachemap" -v IDCACHEMAP="$idcachemap" \
       "$RESOLVE_AWK" "$checked_out" > "$raw"
   rm -f "$cratemap" "$crates" "$cachemap" "$idcrates" "$idcachemap"
+
+  # #7439: the shell half joins the SAME raw stream, so the (path, name)
+  # allowlist below suppresses a grandfathered shell pointer exactly as it
+  # suppresses a Rust one, and the check-mode reporter reads one file.
+  local shraw
+  shraw="$(mktemp "${TMPDIR:-/tmp}/tpshraw.XXXXXX")"
+  : > "$shraw"
+  scan_shell "$shraw" "$shell_checked_out"
+  cat "$shraw" >> "$raw"
+  rm -f "$shraw"
 
   if [ -f "$allowlist" ]; then
     # Build the (path, name) allowlist key set once.
@@ -1072,12 +1271,66 @@ pub fn defined_beside_an_untracked_test() {}
 fn untracked_module_real_test() {}
 EOF
 
-  local viol stale err checked rc
+  # --- #7439 shell-pointer fixtures --------------------------------------
+  # fixture_gate.sh cites, in one annotation: a resolvable repo-relative path,
+  # the same path with a leading `./`, a BASENAME-only citation of a file that
+  # lives in another directory, an ABSOLUTE placeholder, and a `-`-elided
+  # sibling fixture. Only the first three are claims about a repo file, so the
+  # annotation must produce zero violations. Its `Why:` block then cites a
+  # nonexistent script, which must NOT be reported — proof the annotation
+  # terminates at the next tag instead of swallowing the rest of the header.
+  mkdir -p "$tmp/scripts" "$tmp/fixtures"
+  cat > "$tmp/scripts/fixture_gate.sh" <<'EOF'
+#!/usr/bin/env bash
+#
+# Test: scripts/fixture_gate_selftest.sh drives it; ./scripts/fixture_gate.sh
+#   is the gate itself; fixture_helper.sh lives elsewhere and is found by
+#   basename; `bash scripts/fixture_gate_selftest.sh --gate /path/to/copy.sh`
+#   names a scratch copy, and -elided-sibling.rs is a suffix elision.
+#
+# Why: shell_never_cited_after_tag.sh appears AFTER the Test: block ends, so it
+#   is not a citation at all.
+echo gate
+EOF
+  cat > "$tmp/scripts/fixture_gate_selftest.sh" <<'EOF'
+#!/usr/bin/env bash
+# Test: this IS the test.
+echo selftest
+EOF
+  cat > "$tmp/fixtures/fixture_helper.sh" <<'EOF'
+#!/usr/bin/env bash
+echo helper
+EOF
+  # The dangling case: the exact #7439 shape — a gate naming a self-test that
+  # was never written. Nothing in the fixture repo has this basename.
+  cat > "$tmp/scripts/fixture_dangling.sh" <<'EOF'
+#!/usr/bin/env bash
+#
+# Test: scripts/fixture_missing_selftest.sh builds synthetic repos and asserts
+#   both outcomes.
+echo dangling
+EOF
+
+  # A heredoc body is fixture text the script WRITES, never an annotation about
+  # the script itself — this file's own fixtures above are exactly that shape,
+  # and linting them made the gate report its own self-test data as dangling.
+  cat > "$tmp/scripts/fixture_emitter.sh" <<'SHFIX'
+#!/usr/bin/env bash
+#
+# Test: scripts/fixture_gate_selftest.sh also covers the emitter.
+cat > /dev/null <<'EOF'
+# Test: scripts/heredoc_body_never_linted.sh is fixture text, not a pointer.
+EOF
+echo emitted
+SHFIX
+
+  local viol stale err checked shchecked
   viol="$(mktemp "${TMPDIR:-/tmp}/tpself.viol.XXXXXX")"
   stale="$(mktemp "${TMPDIR:-/tmp}/tpself.stale.XXXXXX")"
   err="$(mktemp "${TMPDIR:-/tmp}/tpself.err.XXXXXX")"
   checked="$(mktemp "${TMPDIR:-/tmp}/tpself.checked.XXXXXX")"
-  ( cd "$tmp" && scan "$viol" "$stale" "$err" "$checked" )
+  shchecked="$(mktemp "${TMPDIR:-/tmp}/tpself.shchecked.XXXXXX")"
+  ( cd "$tmp" && scan "$viol" "$stale" "$err" "$checked" "$shchecked" )
 
   # #4618: the fixture cites real names, so a scan that resolved ZERO citations
   # means the scanner stopped working — the same vacuous-pass shape this
@@ -1109,9 +1362,27 @@ EOF
   # and prose_cited_missing_test, a dangling prose pointer (#7710) — nine in
   # total. untracked_module_real_test (#7804) and prose_cited_real_test (#7710)
   # must resolve.
-  if [ "$(wc -l < "$viol" | tr -d ' ')" != "9" ]; then
-    echo "self-test FAIL: expected exactly 9 violations, got:" >&2
+  # ...plus fixture_missing_selftest.sh, the dangling SHELL pointer (#7439) —
+  # ten in total.
+  if [ "$(wc -l < "$viol" | tr -d ' ')" != "10" ]; then
+    echo "self-test FAIL: expected exactly 10 violations, got:" >&2
     cat "$viol" >&2
+    ok=0
+  elif ! grep -q "fixture_missing_selftest.sh" "$viol"; then
+    echo "self-test FAIL: the dangling SHELL Test: pointer was not reported — shell scripts are unlinted again (issue #7439), got:" >&2
+    cat "$viol" >&2
+    ok=0
+  elif grep -qE 'fixture_gate_selftest\.sh|fixture_helper\.sh|copy\.sh|elided-sibling\.rs|shell_never_cited_after_tag\.sh' "$viol"; then
+    echo "self-test FAIL: a resolvable, absolute, elided, or post-annotation shell token was flagged dangling (issue #7439), got:" >&2
+    cat "$viol" >&2
+    ok=0
+  elif grep -q "heredoc_body_never_linted.sh" "$viol" || grep -q "heredoc_body_never_linted.sh" "$shchecked"; then
+    echo "self-test FAIL: a Test: line inside a heredoc BODY was linted — that is fixture text a script writes, not its own annotation (issue #7439), got:" >&2
+    cat "$viol" >&2
+    ok=0
+  elif [ "$(wc -l < "$shchecked" | tr -d ' ')" != "5" ]; then
+    echo "self-test FAIL: expected exactly 5 resolved shell citations (repo-relative, ./-prefixed, basename-only, the emitter's own pointer, and the dangling one), got:" >&2
+    cat "$shchecked" >&2
     ok=0
   elif ! grep -q "prose_cited_missing_test" "$viol"; then
     echo "self-test FAIL: the dangling prose pointer was not reported — prose Test: pointers are skipped again (issue #7710), got:" >&2
@@ -1176,7 +1447,7 @@ EOF
     cat "$err" >&2
     ok=0
   fi
-  rm -f "$viol" "$stale" "$err"
+  rm -f "$viol" "$stale" "$err" "$checked" "$shchecked"
 
   # --- allowlist ratchet: both properties, keyed on (path, name) only -----
   # 1. A still-genuinely-dangling citation that IS allowlisted must be
@@ -1195,12 +1466,13 @@ EOF
     printf 'crates/fixture/src/lib.rs\tphantom_fixed_pointer\n'
   } > "$allowlist_path"
 
-  local viol2 stale2 err2 checked2
+  local viol2 stale2 err2 checked2 shchecked2
   viol2="$(mktemp "${TMPDIR:-/tmp}/tpself.viol2.XXXXXX")"
   stale2="$(mktemp "${TMPDIR:-/tmp}/tpself.stale2.XXXXXX")"
   err2="$(mktemp "${TMPDIR:-/tmp}/tpself.err2.XXXXXX")"
   checked2="$(mktemp "${TMPDIR:-/tmp}/tpself.checked2.XXXXXX")"
-  ( cd "$tmp" && scan "$viol2" "$stale2" "$err2" "$checked2" )
+  shchecked2="$(mktemp "${TMPDIR:-/tmp}/tpself.shchecked2.XXXXXX")"
+  ( cd "$tmp" && scan "$viol2" "$stale2" "$err2" "$checked2" "$shchecked2" )
 
   if grep -q "dangling_test_missing" "$viol2"; then
     echo "self-test FAIL: dangling_test_missing is allowlisted but was still reported as a violation:" >&2
@@ -1231,10 +1503,10 @@ EOF
       ok=0
     fi
   fi
-  rm -f "$viol2" "$stale2" "$err2"
+  rm -f "$viol2" "$stale2" "$err2" "$checked2" "$shchecked2"
 
   if [ "$ok" -eq 1 ]; then
-    echo "check_test_pointers self-test: OK (valid pointer passes, dangling pointer caught, module citations resolve, prose-only/module-ref citations ignored, glob citations resolved by pattern match, brace sets expand per member, an unrecognised brace shape fails closed, parenthetical asides no longer break multi-citation scanning, unterminated backticks fail loudly, prose pointers resolved, untracked test modules define names, allowlist ratchet suppresses/prunes correctly by (path,name))."
+    echo "check_test_pointers self-test: OK (valid pointer passes, dangling pointer caught, module citations resolve, prose-only/module-ref citations ignored, glob citations resolved by pattern match, brace sets expand per member, an unrecognised brace shape fails closed, parenthetical asides no longer break multi-citation scanning, unterminated backticks fail loudly, prose pointers resolved, untracked test modules define names, shell Test: pointers resolved as file paths, allowlist ratchet suppresses/prunes correctly by (path,name))."
     return 0
   fi
   return 1
@@ -1274,9 +1546,10 @@ VIOL="$(mktemp "${TMPDIR:-/tmp}/tpviol.XXXXXX")"
 STALE="$(mktemp "${TMPDIR:-/tmp}/tpstale.XXXXXX")"
 ERR="$(mktemp "${TMPDIR:-/tmp}/tperr.XXXXXX")"
 CHECKED="$(mktemp "${TMPDIR:-/tmp}/tpchecked.XXXXXX")"
-trap 'rm -f "$VIOL" "$STALE" "$ERR" "$CHECKED"' EXIT
+SHCHECKED="$(mktemp "${TMPDIR:-/tmp}/tpshchecked.XXXXXX")"
+trap 'rm -f "$VIOL" "$STALE" "$ERR" "$CHECKED" "$SHCHECKED"' EXIT
 
-scan "$VIOL" "$STALE" "$ERR" "$CHECKED"
+scan "$VIOL" "$STALE" "$ERR" "$CHECKED" "$SHCHECKED"
 
 # #4618: the scan floor. "0 dangling pointers" is the expected steady state, so
 # it cannot distinguish a healthy scan from one that resolved no citations at
@@ -1301,6 +1574,21 @@ if [ "${CITATIONS_CHECKED:-0}" -lt "$MIN_CITATIONS" ]; then
   echo "      declared minimum of ${MIN_CITATIONS} (MIN_CITATIONS in scripts/check_test_pointers.sh)." >&2
   echo "      A gate that resolves nothing reports '0 dangling pointers' and cannot" >&2
   echo "      fail; that is a broken scan, not a clean tree (issue #4618)." >&2
+  exit 1
+fi
+
+# #7439: the shell half gets its own floor, for the same #4618 reason. A shell
+# corpus that silently collapses to nothing reports "0 dangling pointers" and
+# cannot fail. 60 is ~46% of the 129 shell citations this gate reports on a
+# clean tree — above what a collapse to a single directory would resolve, below
+# what ordinary consolidation could plausibly cost in one PR.
+MIN_SHELL_CITATIONS=60
+SHELL_CITATIONS_CHECKED="$(awk 'END{print NR}' "$SHCHECKED")"
+if [ "${SHELL_CITATIONS_CHECKED:-0}" -lt "$MIN_SHELL_CITATIONS" ]; then
+  echo "FAIL: SCAN FLOOR — only ${SHELL_CITATIONS_CHECKED} shell Test: citation(s) were resolved," >&2
+  echo "      below the declared minimum of ${MIN_SHELL_CITATIONS} (MIN_SHELL_CITATIONS in" >&2
+  echo "      scripts/check_test_pointers.sh). A gate that resolves nothing cannot fail;" >&2
+  echo "      that is a broken scan, not a clean tree (issues #4618, #7439)." >&2
   exit 1
 fi
 
@@ -1379,6 +1667,9 @@ if [ -s "$VIOL" ]; then
     if [ "$k" = "prose" ]; then
       # #7710: a prose citation resolves against any identifier, so say so.
       echo "FAIL: ${p}:${l}: Test: prose pointer cites \`${n}\` — no identifier \`${n}\` appears in the non-comment code of crate \`${c}\`." >&2
+    elif [ "$k" = "shell" ]; then
+      # #7439: a shell pointer cites a FILE, so say which lookups were tried.
+      echo "FAIL: ${p}:${l}: Test: pointer cites \`${n}\` — no such file (looked repo-relative, under \`${c}/\`, and by basename)." >&2
     else
       echo "FAIL: ${p}:${l}: Test: pointer cites \`${n}\` — no \`fn ${n}(\` or \`mod ${n}\` found in crate \`${c}\`." >&2
     fi
@@ -1401,5 +1692,5 @@ if [ "$total" -gt 0 ]; then
   exit 1
 fi
 
-echo "test-pointers: resolved ${CITATIONS_CHECKED} Test: citation(s) (floor ${MIN_CITATIONS}) — 0 dangling pointers — OK."
+echo "test-pointers: resolved ${CITATIONS_CHECKED} Rust (floor ${MIN_CITATIONS}) and ${SHELL_CITATIONS_CHECKED} shell (floor ${MIN_SHELL_CITATIONS}) Test: citation(s) — 0 dangling pointers — OK."
 exit 0
