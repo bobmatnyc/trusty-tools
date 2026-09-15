@@ -1501,6 +1501,17 @@ fn write_project_hooks_registers_pm_guard() {
         !cmd.starts_with("trusty-memory"),
         "the guard group must be the tm guard, not a trusty-memory hook: {cmd}"
     );
+    // #7975: the guard's stdin-read and audit-POST budgets
+    // (`commands::hook_stdin::PM_GUARD_STDIN_TIMEOUT` plus
+    // `commands::pm_guard::AUDIT_POST_TIMEOUT`, 7 s together) are chosen to fit
+    // inside this number. Lowering it here without lowering them there would
+    // let Claude Code cancel a deny mid-flight, and a cancelled PreToolUse hook
+    // does not block the call.
+    assert_eq!(
+        guard["hooks"][0]["timeout"],
+        serde_json::json!(10),
+        "the guard's registered timeout must stay above its read + audit budget"
+    );
 }
 
 #[test]

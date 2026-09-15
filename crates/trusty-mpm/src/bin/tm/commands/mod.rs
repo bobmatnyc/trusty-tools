@@ -62,6 +62,8 @@ pub(crate) mod guided_resolver;
 pub(crate) mod guided_resume;
 pub(crate) mod hook_payload;
 pub(crate) mod hook_rewrite;
+// #7975: the stdin payload read that names its failure, so a guard can deny on it.
+pub(crate) mod hook_stdin;
 pub(crate) mod hooks;
 pub(crate) mod install;
 // #4605: the unmanaged-bundled-skill reporter and `--reconcile-skills` path,

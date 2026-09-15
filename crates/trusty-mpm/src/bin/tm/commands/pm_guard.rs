@@ -28,9 +28,10 @@
 //! direct edit tool ONLY when it targets a *source-code* file (path-based —
 //! issue #2604), denies the forbidden Bash verbs, and allows everything else —
 //! including single-file writes to PM-owned orchestration state
-//! (`.trusty-mpm/**`, the memory palace, `TASK.md`), docs, and config. Every
-//! error path (malformed stdin, missing fields) fails **open** — ALLOW — so a
-//! broken hook never wedges the PM. **Opt-in deny-by-default (issue #2231):**
+//! (`.trusty-mpm/**`, the memory palace, `TASK.md`), docs, and config. A
+//! payload that parses but lacks a field fails **open** — ALLOW — so a broken
+//! hook never wedges the PM; a stdin payload that does not read or parse at all
+//! DENIES (#7975). **Opt-in deny-by-default (issue #2231):**
 //! the sub-agent exemption is narrowed, ONLY when
 //! [`pm_guard_deny_by_default::deny_by_default_enabled`] is truthy, so a
 //! delegated dispatch of an [`evaluate_tool`]-guarded tool is denied when
@@ -206,7 +207,8 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::commands::misc::{DISABLE_HOOKS_ENV, SUB_AGENT_ENV, read_stdin_hook_payload};
+use crate::commands::hook_stdin::read_stdin_payload_or_deny;
+use crate::commands::misc::{DISABLE_HOOKS_ENV, SUB_AGENT_ENV};
 use crate::commands::pm_guard_bash::{
     CommitVerdict, DispatchIdentity, SHELL_EDIT_REASON, WorktreeRemoveVerdict,
     docs_commit_deny_reason, evaluate_bash_command, evaluate_destructive_delete_command,
@@ -310,18 +312,27 @@ const SOURCE_CODE_EXTENSIONS: &[&str] = &[
 /// different: that marker is stamped automatically by a spawn helper, not
 /// operator-decided per call, so it is checked LATER — after the worktree-tmp
 /// guard has already had a chance to fire (issue #3977; PR #3978 round 2) —
-/// and exempts everything else, matching the pre-#3977 behavior. Any missing/
-/// malformed input degrades to ALLOW rather than wedging the PM. The decision
+/// and exempts everything else, matching the pre-#3977 behavior. A parsed
+/// payload missing a field degrades to ALLOW rather than wedging the PM. A stdin
+/// payload that is empty, unreadable, still open at the read deadline, or not a
+/// JSON object DENIES (#7975): Claude Code always sends `PreToolUse` one, so its
+/// absence says nothing about whether the call is safe. The decision
 /// is computed purely from the static tool classification — never a daemon
 /// call — so a down daemon can never hard-block a tool call.
-/// What: returns `Ok(())` (ALLOW, no stdout) for every short-circuit, a payload
-/// with no `tool_name`, or an [`evaluate_tool`] verdict of ALLOW. On DENY it
+/// What: returns `Ok(())` (ALLOW, no stdout) for every short-circuit or an
+/// [`evaluate_tool`] verdict of ALLOW. On DENY it
 /// fires a best-effort audit POST to `<url>/hooks` (tight timeout, result
 /// ignored — audit only, never gating) and prints the
 /// `hookSpecificOutput.permissionDecision = "deny"` JSON to stdout, then
-/// returns. `url` is used only for the audit POST.
+/// returns. An unreadable payload, or one naming no classifiable tool call,
+/// denies and EXITS the process instead of returning — via
+/// `hook_stdin::read_stdin_payload_or_deny` and
+/// `hook_stdin::guarded_tool_name_or_deny`. `url` is used only for the audit
+/// POST.
 /// Test: env short-circuits + fail-open + deny/allow are covered end to end in
-/// `tests/tm_hook_pm_guard.rs`; the pure policy is covered by this module's
+/// `tests/tm_hook_pm_guard.rs`; the unreadable-payload deny in
+/// `pm_guard_denies_an_empty_stdin_payload` and its siblings
+/// (`tests/tm_hook_pm_guard_stdin_7975.rs`); the pure policy by this module's
 /// unit tests.
 pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
     // Guard 2: universal opt-out for CI / build shells that can't edit
@@ -353,14 +364,13 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Fail-open: no stdin payload at all → ALLOW.
-    let Some(payload) = read_stdin_hook_payload().await else {
-        return Ok(());
-    };
-    // Fail-open: a payload with no `tool_name` we can classify → ALLOW.
-    let Some(tool_name) = payload.get("tool_name").and_then(|v| v.as_str()) else {
-        return Ok(());
-    };
+    // #7975: fail CLOSED. The guard runs on `PreToolUse` only, where Claude Code
+    // always sends a JSON object on stdin, so a payload that did not read or
+    // parse is a delivery fault, never "nothing to guard".
+    let payload = read_stdin_payload_or_deny(url).await;
+    // #7975 round 2: and a parsed payload that names no classifiable tool call
+    // is the same fault one step later — it also denies, never allows silently.
+    let tool_name = crate::commands::hook_stdin::guarded_tool_name_or_deny(url, &payload).await;
     let tool_input = payload.get("tool_input");
     let session_id = payload
         .get("session_id")
@@ -1258,7 +1268,15 @@ async fn emit_builder_cap_or(
     }
 }
 
-async fn audit_denied_tool(url: &str, session_id: &str, tool_name: &str, reason: &str) {
+/// The ceiling [`audit_denied_tool`] can spend before a deny reaches stdout.
+///
+/// Why (#7975): named so `hook_stdin::PM_GUARD_STDIN_TIMEOUT` can be chosen
+/// against it — read budget plus this must clear the registered hook timeout.
+/// Test: `guard_read_budget_leaves_the_audit_post_inside_the_hook_timeout`.
+pub(crate) const AUDIT_POST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Best-effort audit POST for a denied tool call; never gates the decision.
+pub(crate) async fn audit_denied_tool(url: &str, session_id: &str, tool_name: &str, reason: &str) {
     let cwd = std::env::current_dir()
         .ok()
         .and_then(|p| p.to_str().map(str::to_owned))
@@ -1275,7 +1293,7 @@ async fn audit_denied_tool(url: &str, session_id: &str, tool_name: &str, reason:
     });
     let Ok(client) = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_millis(500))
-        .timeout(std::time::Duration::from_secs(2))
+        .timeout(AUDIT_POST_TIMEOUT)
         .build()
     else {
         return;

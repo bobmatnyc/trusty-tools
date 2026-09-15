@@ -251,72 +251,34 @@ pub(crate) async fn health(url: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Best-effort read of Claude Code's hook stdin JSON payload.
+/// Best-effort read of Claude Code's hook stdin JSON payload, for a hook whose
+/// result gates no tool call.
 ///
-/// Why (issue #1956): Claude Code delivers the full hook payload — including
-/// `hook_event_name`/`session_id`/`tool_name`/`tool_input`/`tool_response` —
-/// on the hook process's stdin, but `hook()` historically never read it (see
-/// `docs/specs/tool-output-interception-seam.md` §Problem). Reading it is a
-/// prerequisite for both the `PreToolUse` Bash rewrite (Option 0) and richer
-/// daemon observability. Bounded by a short timeout rather than reading to
-/// EOF unconditionally: Claude Code always closes stdin promptly after
-/// writing the payload, but a hook must never risk blocking the user's
-/// prompt if some future caller leaves stdin open.
-/// What: Reads up to `HOOK_STDIN_TIMEOUT` worth of stdin, then attempts a
-/// JSON parse. Returns `None` on timeout, an I/O error, empty input, or a
-/// parse failure — every case degrades to "no stdin payload" rather than
-/// erroring the hook — but unlike the original implementation, the timeout/
-/// I/O-error/parse-failure branches are no longer collapsed into a single
-/// unlabelled `_ => None` arm: each now emits a `tracing::debug!` line
-/// distinguishing *which* case fired (trusty-review finding, PR #1968 —
-/// silently identical handling made a broken pipe indistinguishable from a
-/// legitimate empty payload when debugging a hook that unexpectedly never
-/// rewrites). These are `debug`-level and best-effort only: `hook()` has no
-/// registered tracing subscriber by default (see `commands::compress`'s doc
-/// comment for why `main()` only initializes one for `Daemon`/`Supervisor`),
-/// so in normal operation these are no-ops; they become visible when a
-/// subscriber is present (e.g. `RUST_LOG=debug` in a context that installs
-/// one) without adding any latency or behavior change to the hot path.
-/// `HOOK_STDIN_TIMEOUT` is 500 ms (widened from an initial 200 ms per a
-/// trusty-review finding, PR #1968, that flagged 200 ms as tight on a
-/// heavily loaded host) — still a small fraction of the 2-second total
-/// budget the caller's daemon POST uses, so the "never block the user's
-/// prompt" guarantee is unaffected while giving a slower `stdin` write from
-/// Claude Code more room before this degrades to a silent no-rewrite.
-/// Test: `hook_guard_short_circuits`/`hook_disable_env_short_circuits`
-/// exercise the guard branches that skip this entirely.
-/// `hook_rewrites_plain_bash_command_on_pretooluse` (in the
+/// Why (issue #1956): Claude Code delivers the full hook payload —
+/// `hook_event_name`/`session_id`/`tool_name`/`tool_input`/`tool_response` — on
+/// the hook's stdin, and `hook()` needs it for the `PreToolUse` Bash rewrite and
+/// daemon observability. Both degrade to a no-op without a payload, so an
+/// `Option` is enough there. #7975: a hook whose decision gates a tool call must
+/// not use this — `None` cannot tell a failed read from an absent payload — and
+/// uses [`crate::commands::hook_stdin::read_stdin_hook_payload_strict`] instead.
+/// What: that strict read, bounded by
+/// [`crate::commands::hook_stdin::HOOK_STDIN_TIMEOUT`] — the 500 ms advisory
+/// budget, kept here because a missed read costs this caller a no-op, not a
+/// denied tool call — with the failure logged at `debug` so each kind stays
+/// distinguishable (PR #1968 review) and mapped to `None`. `hook()` installs no
+/// tracing subscriber by default, so the log costs nothing on the hot path.
+/// Test: `read_hook_stdin_reports_a_read_error` and its siblings cover every
+/// failure arm; `hook_rewrites_plain_bash_command_on_pretooluse` (in the
 /// `tm_hook_pretooluse_rewrite` integration test) confirms the field names
-/// consumed from this payload (`hook_event_name`, `tool_name`,
-/// `tool_input.command`) against the live Claude Code hooks reference
-/// (<https://code.claude.com/docs/en/hooks>, confirmed 2026-07-03) — see
-/// `commands::hook_rewrite` module docs for the citation on the response
-/// shape.
+/// consumed from this payload against the live Claude Code hooks reference
+/// (<https://code.claude.com/docs/en/hooks>, confirmed 2026-07-03).
 pub(crate) async fn read_stdin_hook_payload() -> Option<serde_json::Value> {
-    use tokio::io::AsyncReadExt;
+    use crate::commands::hook_stdin::{HOOK_STDIN_TIMEOUT, read_stdin_hook_payload_strict};
 
-    const HOOK_STDIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
-
-    let mut buf = String::new();
-    let read = tokio::time::timeout(
-        HOOK_STDIN_TIMEOUT,
-        tokio::io::stdin().read_to_string(&mut buf),
-    )
-    .await;
-    match read {
-        Ok(Ok(_)) if !buf.trim().is_empty() => serde_json::from_str(&buf)
-            .inspect_err(|e| tracing::debug!("hook stdin payload was not valid JSON: {e}"))
-            .ok(),
-        Ok(Ok(_)) => None, // empty stdin — a legitimate no-payload case, not a failure.
-        Ok(Err(e)) => {
-            tracing::debug!("hook stdin read error: {e}");
-            None
-        }
-        Err(_) => {
-            tracing::debug!("hook stdin read timed out after {HOOK_STDIN_TIMEOUT:?}");
-            None
-        }
-    }
+    read_stdin_hook_payload_strict(HOOK_STDIN_TIMEOUT)
+        .await
+        .inspect_err(|e| tracing::debug!("hook stdin payload unavailable: {e}"))
+        .ok()
 }
 
 /// Best-effort, bounded read of the last `max_bytes` of a transcript file.
