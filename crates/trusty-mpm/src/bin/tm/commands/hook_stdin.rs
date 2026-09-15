@@ -13,10 +13,12 @@
 //!
 //! What: [`read_hook_stdin`] reads a bounded reader and returns the parsed JSON
 //! object or a [`HookStdinError`] naming the failure.
-//! [`read_stdin_hook_payload_strict`] applies it to the process stdin.
-//! [`unreadable_payload_deny_reason`] is the deny text the guard prints.
-//! Callers whose result gates nothing keep the `Option` view in
-//! `misc::read_stdin_hook_payload`.
+//! [`read_stdin_hook_payload_strict`] applies it to the process stdin under a
+//! caller-chosen budget — [`HOOK_STDIN_TIMEOUT`] for an advisory hook,
+//! [`PM_GUARD_STDIN_TIMEOUT`] for the guard, whose read now gates the call.
+//! [`unreadable_payload_deny_reason`] and [`unclassifiable_payload_deny_reason`]
+//! are the deny texts the guard prints. Callers whose result gates nothing keep
+//! the `Option` view in `misc::read_stdin_hook_payload`.
 //!
 //! Test: `hook_stdin_tests.rs`; end to end through the binary in
 //! `tests/tm_hook_pm_guard_stdin_7975.rs`.
@@ -25,13 +27,45 @@ use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-/// How long a hook waits for Claude Code to finish writing and close stdin.
+/// How long an ADVISORY hook waits for Claude Code to close stdin.
 ///
 /// Why: a hook must never block the user's prompt if a caller leaves stdin
 /// open. 500 ms was widened from 200 ms after a PR #1968 review found 200 ms
-/// tight on a loaded host; it stays well inside the guard's 10-second hook
-/// timeout.
+/// tight on a loaded host. A read that misses this budget costs an advisory
+/// caller only a skipped rewrite or a missing observability field, so the tight
+/// bound is the right trade there. #7975: the guard, whose read DENIES on
+/// failure, uses [`PM_GUARD_STDIN_TIMEOUT`] instead.
+/// Test: `hook_stdin_only_the_advisory_read_uses_the_short_budget`.
 pub(crate) const HOOK_STDIN_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// How long `tm hook --pm-guard` waits for Claude Code to close stdin.
+///
+/// Why (#7975 round 2): the guard's read fails CLOSED, so a read that misses
+/// its budget no longer costs a no-op — it DENIES a legitimate tool call, and
+/// the guard is registered with `matcher: ""`, which fires for every tool
+/// (`core::session_launch::settings::pm_guard_hook_value`). Reusing the 500 ms
+/// advisory budget would put every tool call behind a bound a PR #1968 review
+/// already called tight at 200 ms, with a megabyte-scale `tool_input` (a large
+/// `Write` `content`) to cross the pipe inside it.
+/// What: 5 s. With [`crate::commands::pm_guard::AUDIT_POST_TIMEOUT`] (2 s), the
+/// worst case a deny can spend is 7 s of the 10 s `REGISTERED_HOOK_TIMEOUT`
+/// Claude Code is told to allow — 3 s of headroom.
+/// Test: `guard_read_budget_leaves_the_audit_post_inside_the_hook_timeout`,
+/// `read_hook_stdin_reads_a_slow_megabyte_inside_the_guard_budget`.
+pub(crate) const PM_GUARD_STDIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The `timeout` Claude Code is told to allow the guard hook, in seconds.
+///
+/// Why (#7975 round 2): the read and audit budgets above are only safe relative
+/// to this number, so it is named rather than left implicit. Mirrored, not
+/// imported: `core::session_launch::settings` is a private module of the
+/// library and unreachable from this binary.
+/// Test-only: the production side is the literal in `pm_guard_hook_value`, and
+/// duplicating it here would be the way the two drift.
+/// Test: `guard_read_budget_leaves_the_audit_post_inside_the_hook_timeout`;
+/// the registered value itself by `write_project_hooks_registers_pm_guard`.
+#[cfg(test)]
+pub(crate) const REGISTERED_HOOK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Why a hook's stdin payload could not be used.
 ///
@@ -98,13 +132,18 @@ pub(crate) async fn read_hook_stdin<R: AsyncRead + Unpin>(
     Ok(value)
 }
 
-/// [`read_hook_stdin`] over the process stdin with [`HOOK_STDIN_TIMEOUT`].
+/// [`read_hook_stdin`] over the process stdin, under `timeout`.
 ///
-/// Why (#7975): the entry point for a hook whose decision gates a tool call.
+/// Why (#7975): the entry point every hook reads its payload through. The
+/// budget is the caller's because it follows what a missed read costs: the
+/// guard denies the call ([`PM_GUARD_STDIN_TIMEOUT`]), an advisory hook only
+/// skips work ([`HOOK_STDIN_TIMEOUT`]).
 /// What: see [`read_hook_stdin`].
 /// Test: `tests/tm_hook_pm_guard_stdin_7975.rs`.
-pub(crate) async fn read_stdin_hook_payload_strict() -> Result<serde_json::Value, HookStdinError> {
-    read_hook_stdin(tokio::io::stdin(), HOOK_STDIN_TIMEOUT).await
+pub(crate) async fn read_stdin_hook_payload_strict(
+    timeout: Duration,
+) -> Result<serde_json::Value, HookStdinError> {
+    read_hook_stdin(tokio::io::stdin(), timeout).await
 }
 
 /// The `permissionDecisionReason` for a tool call whose payload failed to read.
@@ -118,6 +157,46 @@ pub(crate) fn unreadable_payload_deny_reason(err: &HookStdinError) -> String {
         "tm hook --pm-guard could not use this tool call's stdin payload ({err}), so it \
          cannot tell whether the call is permitted and denies it (#7975). Retry the call; \
          a repeat means the hook is not receiving Claude Code's PreToolUse JSON."
+    )
+}
+
+/// Why a parsed payload does not describe a tool call the guard can classify.
+///
+/// Why (#7975 round 2): the guard's rules all read `tool_name` and
+/// `tool_input`; a payload carrying neither in the documented shape is a
+/// delivery fault, and the deny reason says which field is wrong.
+/// What: `None` when `payload` carries a string `tool_name` and an object
+/// `tool_input`; otherwise the field-naming detail.
+/// Test: `unclassifiable_payload_detail_names_the_bad_field`.
+fn unclassifiable_payload_detail(payload: &serde_json::Value) -> Option<&'static str> {
+    if !payload
+        .get("tool_name")
+        .is_some_and(serde_json::Value::is_string)
+    {
+        return Some("`tool_name` is missing or is not a string");
+    }
+    if !payload
+        .get("tool_input")
+        .is_some_and(serde_json::Value::is_object)
+    {
+        return Some("`tool_input` is missing or is not an object");
+    }
+    None
+}
+
+/// The `permissionDecisionReason` for a payload the guard cannot classify.
+///
+/// Why (#7975 round 2): the agent sees only this text, so it names the bad
+/// field and why an unclassifiable payload cannot be allowed through.
+/// What: one sentence naming `detail`, the deny, and the issue.
+/// Test: `unclassifiable_payload_deny_reason_names_the_failure`.
+pub(crate) fn unclassifiable_payload_deny_reason(detail: &str) -> String {
+    format!(
+        "tm hook --pm-guard cannot classify this tool call: {detail}. Claude Code sends every \
+         PreToolUse hook a string `tool_name` and an object `tool_input`, so a payload missing \
+         either is a delivery fault, not a call with nothing to guard — allowing it would skip \
+         every rule the guard enforces, so it denies (#7975). Retry the call; a repeat means the \
+         hook is not receiving Claude Code's PreToolUse JSON."
     )
 }
 
@@ -153,20 +232,83 @@ fn exit_after_decision() -> ! {
 /// `pm_guard_denies_a_stdin_read_error`,
 /// `pm_guard_denies_truncated_or_non_object_json`,
 /// `pm_guard_denies_a_stdin_that_stays_open_past_the_read_timeout`,
+/// `pm_guard_reads_a_megabyte_tool_input_and_decides_on_its_content`,
 /// `pm_guard_allows_a_parsed_payload_naming_no_guarded_operation`.
 pub(crate) async fn read_stdin_payload_or_deny(url: &str) -> serde_json::Value {
-    match read_stdin_hook_payload_strict().await {
+    match read_stdin_hook_payload_strict(PM_GUARD_STDIN_TIMEOUT).await {
         Ok(payload) => payload,
+        // Neither session nor tool name could be read, so the audit carries
+        // neither.
         Err(err) => {
-            let reason = unreadable_payload_deny_reason(&err);
-            crate::commands::pm_guard::audit_denied_tool(url, "", "", &reason).await;
-            println!(
-                "{}",
-                crate::commands::pm_guard_response::build_pretooluse_deny_response(&reason)
-            );
-            exit_after_decision()
+            audit_then_deny_and_exit(url, "", "", unreadable_payload_deny_reason(&err)).await
         }
     }
+}
+
+/// The guarded `tool_name`, or a printed deny and process exit.
+///
+/// Why (#7975 round 2, code-critic MEDIUM): the guard used to ALLOW, silently
+/// and with no audit record, any payload whose `tool_name` was not a string —
+/// and to classify a `Bash` payload with no `tool_input` against an empty
+/// command, which every rule allows. Both are global bypasses of the ABSOLUTE
+/// rules this module exists to enforce, reached through the exact delivery
+/// fault the rest of #7975 fails closed on. Claude Code documents `tool_name`
+/// and `tool_input` as always present on `PreToolUse`
+/// (<https://code.claude.com/docs/en/hooks>, "PreToolUse input"), the same
+/// premise the unreadable-payload deny rests on, so the same answer follows:
+/// deny. `hook_event_name` is deliberately not consulted — the guard is
+/// registered on `PreToolUse` only, and reading it could only add an
+/// allow-path back.
+/// What: returns the payload's `tool_name` when
+/// [`unclassifiable_payload_detail`] passes it. Otherwise audits the deny with
+/// the payload's `session_id` (readable even here) and no tool name, prints the
+/// deny carrying [`unclassifiable_payload_deny_reason`], and exits 0.
+/// Test: `pm_guard_denies_a_payload_whose_tool_name_is_not_a_string`,
+/// `pm_guard_denies_a_bash_payload_with_no_tool_input`,
+/// `pm_guard_allows_a_parsed_payload_naming_no_guarded_operation`.
+pub(crate) async fn guarded_tool_name_or_deny<'a>(
+    url: &str,
+    payload: &'a serde_json::Value,
+) -> &'a str {
+    let Some(detail) = unclassifiable_payload_detail(payload) else {
+        return payload
+            .get("tool_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+    };
+    let session_id = payload
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    audit_then_deny_and_exit(
+        url,
+        session_id,
+        "",
+        unclassifiable_payload_deny_reason(detail),
+    )
+    .await
+}
+
+/// Audit `reason`, print its deny, and end the process without returning.
+///
+/// Why (#7975): the two fail-closed paths above differ only in what they can
+/// name, and both must outlive a stdin that never closes — see
+/// [`exit_after_decision`].
+/// What: best-effort audit POST, then the `permissionDecision: "deny"` object
+/// on stdout, then exit 0.
+/// Test: covered through its two callers' tests.
+async fn audit_then_deny_and_exit(
+    url: &str,
+    session_id: &str,
+    tool_name: &str,
+    reason: String,
+) -> ! {
+    crate::commands::pm_guard::audit_denied_tool(url, session_id, tool_name, &reason).await;
+    println!(
+        "{}",
+        crate::commands::pm_guard_response::build_pretooluse_deny_response(&reason)
+    );
+    exit_after_decision()
 }
 
 #[cfg(test)]

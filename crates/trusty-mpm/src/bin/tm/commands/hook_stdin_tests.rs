@@ -97,3 +97,134 @@ fn unreadable_payload_deny_reason_names_the_failure() {
         assert!(reason.contains(&err.to_string()), "{reason}");
     }
 }
+
+/// A reader that hands out `total` bytes in `chunks` slices, sleeping `gap`
+/// between them, standing in for a loaded host's slow pipe writer.
+///
+/// Why (#7975 round 2): the guard-budget widening has to be provable without
+/// depending on the host actually being loaded. A writer that spans the 500 ms
+/// advisory budget but not the 5 s guard budget makes the difference
+/// deterministic.
+fn slow_reader(total: usize, chunks: usize, gap: Duration) -> impl tokio::io::AsyncRead + Unpin {
+    let (mut writer, reader) = tokio::io::duplex(64 * 1024);
+    let body = "x".repeat(total);
+    tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        let payload = format!(r#"{{"tool_name":"Write","tool_input":{{"content":"{body}"}}}}"#);
+        let bytes = payload.into_bytes();
+        let step = bytes.len().div_ceil(chunks);
+        for chunk in bytes.chunks(step) {
+            if writer.write_all(chunk).await.is_err() {
+                return;
+            }
+            tokio::time::sleep(gap).await;
+        }
+        let _ = writer.shutdown().await;
+    });
+    reader
+}
+
+#[tokio::test]
+async fn read_hook_stdin_reads_a_slow_megabyte_inside_the_guard_budget() {
+    // 1 MiB of `tool_input` spread over ~1.2 s: past the 500 ms advisory
+    // budget, well inside the 5 s guard budget. The guard must decide on the
+    // payload's content, never on the deadline.
+    const MEGABYTE: usize = 1024 * 1024;
+    let gap = Duration::from_millis(100);
+    let started = std::time::Instant::now();
+    let payload = read_hook_stdin(slow_reader(MEGABYTE, 12, gap), PM_GUARD_STDIN_TIMEOUT)
+        .await
+        .expect("a slow megabyte must read inside the guard budget");
+    let elapsed = started.elapsed();
+    assert_eq!(payload["tool_name"], "Write");
+    assert!(
+        payload["tool_input"]["content"].as_str().unwrap().len() >= MEGABYTE,
+        "the whole tool_input must survive the read"
+    );
+    assert!(
+        elapsed > HOOK_STDIN_TIMEOUT,
+        "the fixture must outlast the advisory budget to be worth anything: {elapsed:?}"
+    );
+
+    // Red-first proof for the widening: the same payload under the old 500 ms
+    // constant times out, which under #7975's fail-closed read is a DENY.
+    let result = read_hook_stdin(slow_reader(MEGABYTE, 12, gap), HOOK_STDIN_TIMEOUT).await;
+    assert!(
+        matches!(result, Err(HookStdinError::TimedOut(d)) if d == HOOK_STDIN_TIMEOUT),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn hook_stdin_only_the_advisory_read_uses_the_short_budget() {
+    // The two budgets must stay distinct, and the advisory one must stay the
+    // shorter: a hook that only skips work can afford to give up sooner than
+    // one that denies the call.
+    assert!(HOOK_STDIN_TIMEOUT < PM_GUARD_STDIN_TIMEOUT);
+    assert_eq!(HOOK_STDIN_TIMEOUT, Duration::from_millis(500));
+}
+
+#[test]
+fn guard_read_budget_leaves_the_audit_post_inside_the_hook_timeout() {
+    // A deny's worst case is the full read budget plus the audit POST ceiling.
+    // It must clear the `timeout` the guard hook is registered with, or the
+    // deny is cancelled and the call proceeds unguarded.
+    let worst_case = PM_GUARD_STDIN_TIMEOUT + crate::commands::pm_guard::AUDIT_POST_TIMEOUT;
+    assert!(
+        worst_case < REGISTERED_HOOK_TIMEOUT,
+        "{worst_case:?} must fit inside {REGISTERED_HOOK_TIMEOUT:?}"
+    );
+}
+
+#[test]
+fn unclassifiable_payload_detail_names_the_bad_field() {
+    for (case, payload) in [
+        (
+            "no tool_name",
+            serde_json::json!({"hook_event_name": "PreToolUse"}),
+        ),
+        ("numeric tool_name", serde_json::json!({"tool_name": 42})),
+        ("null tool_name", serde_json::json!({"tool_name": null})),
+    ] {
+        let detail = unclassifiable_payload_detail(&payload);
+        assert_eq!(
+            detail,
+            Some("`tool_name` is missing or is not a string"),
+            "{case}"
+        );
+    }
+    for (case, payload) in [
+        ("no tool_input", serde_json::json!({"tool_name": "Bash"})),
+        (
+            "string tool_input",
+            serde_json::json!({"tool_name": "Bash", "tool_input": "rm -rf /"}),
+        ),
+    ] {
+        let detail = unclassifiable_payload_detail(&payload);
+        assert_eq!(
+            detail,
+            Some("`tool_input` is missing or is not an object"),
+            "{case}"
+        );
+    }
+    assert_eq!(
+        unclassifiable_payload_detail(&serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {},
+        })),
+        None,
+        "an empty tool_input object is the documented shape for a no-argument tool"
+    );
+}
+
+#[test]
+fn unclassifiable_payload_deny_reason_names_the_failure() {
+    for detail in [
+        "`tool_name` is missing or is not a string",
+        "`tool_input` is missing or is not an object",
+    ] {
+        let reason = unclassifiable_payload_deny_reason(detail);
+        assert!(reason.contains(detail), "{reason}");
+        assert!(reason.contains("#7975"), "{reason}");
+    }
+}

@@ -1,2 +1,4 @@
 Fixed
 - `tm hook --pm-guard` now denies a tool call whose stdin payload is empty, unreadable, still open after the read timeout, not valid JSON, or not a JSON object. It used to allow those calls. The deny reason names the failure (#7975).
+- The guard also denies a payload that parsed but names no tool call it can classify — a `tool_name` that is missing or not a string, or a `tool_input` that is missing or not an object. Those used to be allowed silently, with no audit record, skipping every rule the guard enforces (#7975).
+- The guard now waits up to 5 seconds for Claude Code to finish writing its stdin payload, rather than the 500 ms the advisory hooks use. A large `tool_input`, or a loaded host, no longer risks a denied tool call on the read deadline. Advisory hooks (`tm hook`, `tm hook --divert-check`), where a slow read costs only a skipped rewrite, keep the 500 ms budget (#7975).

@@ -468,14 +468,14 @@ fn pm_guard_allows_git_status_and_task() {
 }
 
 #[test]
-fn pm_guard_allows_a_parsed_payload_without_tool_name() {
-    // A well-formed object with no tool_name names nothing to guard: ALLOW.
-    // #7975: empty or malformed stdin DENIES instead — see
-    // `tests/tm_hook_pm_guard_stdin_7975.rs`.
-    assert_eq!(
-        run_pm_guard(r#"{"hook_event_name":"PreToolUse"}"#, &[]).trim(),
-        ""
-    );
+fn pm_guard_denies_a_parsed_payload_without_tool_name() {
+    // #7975 round 2 (code-critic MEDIUM): this used to ALLOW, on the reading
+    // that a payload with no tool_name "names nothing to guard". It names a
+    // DELIVERY FAULT — Claude Code sends every PreToolUse hook a string
+    // `tool_name` and an object `tool_input` — and allowing it skipped every
+    // ABSOLUTE rule with no audit record. Deny, like every other unusable
+    // payload. Full coverage: `tests/tm_hook_pm_guard_stdin_7975.rs`.
+    assert_denied(&run_pm_guard(r#"{"hook_event_name":"PreToolUse"}"#, &[]));
 }
 
 #[test]

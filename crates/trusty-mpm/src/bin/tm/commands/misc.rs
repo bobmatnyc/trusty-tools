@@ -261,17 +261,21 @@ pub(crate) async fn health(url: &str) -> anyhow::Result<()> {
 /// `Option` is enough there. #7975: a hook whose decision gates a tool call must
 /// not use this — `None` cannot tell a failed read from an absent payload — and
 /// uses [`crate::commands::hook_stdin::read_stdin_hook_payload_strict`] instead.
-/// What: that strict read, bounded by `hook_stdin::HOOK_STDIN_TIMEOUT`, with the
-/// failure logged at `debug` so each kind stays distinguishable (PR #1968
-/// review) and mapped to `None`. `hook()` installs no tracing subscriber by
-/// default, so the log costs nothing on the hot path.
+/// What: that strict read, bounded by
+/// [`crate::commands::hook_stdin::HOOK_STDIN_TIMEOUT`] — the 500 ms advisory
+/// budget, kept here because a missed read costs this caller a no-op, not a
+/// denied tool call — with the failure logged at `debug` so each kind stays
+/// distinguishable (PR #1968 review) and mapped to `None`. `hook()` installs no
+/// tracing subscriber by default, so the log costs nothing on the hot path.
 /// Test: `read_hook_stdin_reports_a_read_error` and its siblings cover every
 /// failure arm; `hook_rewrites_plain_bash_command_on_pretooluse` (in the
 /// `tm_hook_pretooluse_rewrite` integration test) confirms the field names
 /// consumed from this payload against the live Claude Code hooks reference
 /// (<https://code.claude.com/docs/en/hooks>, confirmed 2026-07-03).
 pub(crate) async fn read_stdin_hook_payload() -> Option<serde_json::Value> {
-    crate::commands::hook_stdin::read_stdin_hook_payload_strict()
+    use crate::commands::hook_stdin::{HOOK_STDIN_TIMEOUT, read_stdin_hook_payload_strict};
+
+    read_stdin_hook_payload_strict(HOOK_STDIN_TIMEOUT)
         .await
         .inspect_err(|e| tracing::debug!("hook stdin payload unavailable: {e}"))
         .ok()

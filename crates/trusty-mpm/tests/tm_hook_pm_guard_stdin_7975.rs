@@ -7,9 +7,12 @@
 //! stdin, so an unreadable payload is never a legitimate "nothing to guard".
 //! What: drives the real binary with an empty stdin, a stdin whose read returns
 //! `Err`, truncated or non-object JSON, and a stdin held open past the read
-//! timeout. Each must print a `deny`. Two controls sit beside them: a valid
-//! destructive payload still denies, and a parsed payload naming no guarded
-//! operation still allows.
+//! timeout. Round 2 adds the payloads that PARSED but name no classifiable tool
+//! call — a non-string `tool_name`, a `Bash` call with no `tool_input` — which
+//! used to ALLOW globally with no audit record. Each must print a `deny`. Three
+//! controls sit beside them: a valid destructive payload still denies, a
+//! megabyte `tool_input` is judged on its content rather than on the read
+//! deadline, and a parsed payload naming no guarded operation still allows.
 //! Test: `cargo test -p trusty-mpm --test tm_hook_pm_guard_stdin_7975`.
 
 mod common;
@@ -169,8 +172,10 @@ fn pm_guard_denies_a_stdin_that_stays_open_past_the_read_timeout() {
         let _ = child_stdout.read_to_string(&mut out);
         let _ = tx.send(out);
     });
-    // Well past the 500 ms read deadline, well short of the 10 s hook timeout.
-    let stdout = rx.recv_timeout(std::time::Duration::from_secs(8));
+    // Well past the 5 s guard read deadline (`PM_GUARD_STDIN_TIMEOUT`, widened
+    // from the 500 ms advisory budget in round 2), short of the 10 s hook
+    // timeout Claude Code is told to allow.
+    let stdout = rx.recv_timeout(std::time::Duration::from_secs(9));
     // Close stdin only now, so a guard that waits for EOF is still released.
     drop(stdin);
     let status = child.wait().expect("wait for the guard");
@@ -190,6 +195,118 @@ fn pm_guard_still_denies_a_valid_destructive_payload() {
     let stdout = run_with_bytes(payload.as_bytes());
     let (decision, _) = decision_of(&stdout).expect("`rm -rf /` must be denied");
     assert_eq!(decision, "deny", "got: {stdout}");
+}
+
+/// A `PreToolUse` payload for `rm -rf /root` with `extra_targets` more paths.
+///
+/// Why (#7975 round 2): `/root` is denied by the ABSOLUTE destructive-delete
+/// rule (#4031), which runs before every exemption and before the per-turn
+/// file-change budget — so the verdict is a property of the command alone, and
+/// padding the argument list is the one way to grow the payload past a megabyte
+/// without changing what it asks for.
+/// Test: `pm_guard_reads_a_megabyte_tool_input_and_decides_on_its_content`.
+fn destructive_payload(extra_targets: usize) -> String {
+    let mut command = String::from("rm -rf /root");
+    for i in 0..extra_targets {
+        command.push_str(&format!(" /tmp/scratch-{i}"));
+    }
+    serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": command},
+    })
+    .to_string()
+}
+
+#[test]
+fn pm_guard_reads_a_megabyte_tool_input_and_decides_on_its_content() {
+    // Round 2, code-critic HIGH: the fail-closed read reused the 500 ms
+    // ADVISORY budget, so a payload that is merely large — or a host that is
+    // merely loaded — would have been denied on the DEADLINE rather than on
+    // what it asks for, for every tool, since the guard is registered with
+    // `matcher: ""`. A megabyte `tool_input` must reach the rules intact.
+    // The proof is a twin: the same command padded past a megabyte must draw
+    // the same verdict, word for word, as its short form.
+    let short = run_with_bytes(destructive_payload(0).as_bytes());
+    let (short_decision, short_reason) =
+        decision_of(&short).expect("`rm -rf /root` must be denied");
+    assert_eq!(short_decision, "deny", "got: {short}");
+
+    let payload = destructive_payload(120_000);
+    assert!(
+        payload.len() > 1024 * 1024,
+        "the padded payload must exceed a megabyte, is {} bytes",
+        payload.len()
+    );
+    let started = std::time::Instant::now();
+    let large = run_with_bytes(payload.as_bytes());
+    let elapsed = started.elapsed();
+
+    let (decision, reason) = decision_of(&large).expect("a megabyte payload must still be judged");
+    assert_eq!(decision, "deny", "got: {large}");
+    assert_eq!(
+        reason, short_reason,
+        "a megabyte payload must draw the same content-based verdict as its short twin"
+    );
+    assert!(
+        !reason.contains("stdin payload"),
+        "the deny must come from the command, not from the read: {reason}"
+    );
+    // Spawn, read, classify, and the audit POST to a dead port together must
+    // finish well inside the 10 s the guard hook is registered with.
+    assert!(
+        elapsed < std::time::Duration::from_secs(8),
+        "the guard took {elapsed:?} on a {}-byte payload",
+        payload.len()
+    );
+}
+
+#[test]
+fn pm_guard_denies_a_payload_whose_tool_name_is_not_a_string() {
+    // Round 2, code-critic MEDIUM: a `tool_name` the guard cannot read used to
+    // ALLOW globally, with no audit record, bypassing every ABSOLUTE rule.
+    for (case, payload) in [
+        (
+            "numeric tool_name",
+            r#"{"hook_event_name":"PreToolUse","tool_name":42}"#,
+        ),
+        ("absent tool_name", r#"{"hook_event_name":"PreToolUse"}"#),
+        (
+            "null tool_name",
+            r#"{"hook_event_name":"PreToolUse","tool_name":null,"tool_input":{}}"#,
+        ),
+    ] {
+        let stdout = run_with_bytes(payload.as_bytes());
+        let Some((decision, reason)) = decision_of(&stdout) else {
+            panic!("{case}: an unclassifiable payload must DENY, but the guard allowed");
+        };
+        assert_eq!(decision, "deny", "{case}: got {stdout}");
+        assert!(reason.contains("`tool_name`"), "{case}: got {reason}");
+    }
+}
+
+#[test]
+fn pm_guard_denies_a_bash_payload_with_no_tool_input() {
+    // Same finding, the other half: `tool_name: "Bash"` with no `tool_input`
+    // classified against an empty command, which every Bash rule allows — a
+    // global ALLOW reached through a delivery fault.
+    for (case, payload) in [
+        (
+            "absent tool_input",
+            r#"{"hook_event_name":"PreToolUse","tool_name":"Bash"}"#,
+        ),
+        (
+            "string tool_input",
+            r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":"rm -rf /"}"#,
+        ),
+    ] {
+        let stdout = run_with_bytes(payload.as_bytes());
+        let Some((decision, reason)) = decision_of(&stdout) else {
+            panic!("{case}: a Bash payload with no tool_input must DENY, but the guard allowed");
+        };
+        assert_eq!(decision, "deny", "{case}: got {stdout}");
+        assert!(reason.contains("`tool_input`"), "{case}: got {reason}");
+    }
 }
 
 #[test]
