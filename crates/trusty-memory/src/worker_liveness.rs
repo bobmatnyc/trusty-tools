@@ -38,24 +38,46 @@ const FREE: u64 = 0;
 /// wedged.
 ///
 /// Why: this must sit ABOVE every legitimately-bounded wait, or healthy load
-/// would read as a wedge. The longest such bound on the palace open path is
+/// would read as a wedge. Two such bounds are tracked: the palace open queue,
 /// `memory_core::timeouts::open_queue_timeout()` (default 60 s, issue #3992),
-/// after which `open_palace` gives up and returns an error. Doubling it means
-/// any operation still outstanding has already blown through the bound that
-/// was supposed to release it — which is precisely the #3992 signature, where
-/// a `memory_remember` ran ~1800 s. Env-overridable so an operator running a
-/// deliberately long `open_queue_timeout` can move the wedge line with it.
+/// and a writer queued on the palace write lock, `write_lock_timeout()`
+/// (default 60 s), tracked since #4001. Doubling the larger means any operation
+/// still outstanding has already blown through the bound that was supposed to
+/// release it — the #3992 signature, where a `memory_remember` ran ~1800 s.
+/// Env-overridable so an operator running a deliberately long bound can move
+/// the wedge line with it.
 /// What: `TRUSTY_WEDGE_THRESHOLD_SECS` if set and parseable, else
-/// `2 × open_queue_timeout()`.
-/// Test: `wedge_threshold_exceeds_the_open_queue_bound`.
+/// `2 × max(open_queue_timeout(), write_lock_timeout())`.
+/// Test: `wedge_threshold_exceeds_the_open_queue_bound`,
+/// `wedge_threshold_doubles_the_larger_wait_bound`.
 pub fn wedge_threshold() -> Duration {
-    if let Some(secs) = std::env::var("TRUSTY_WEDGE_THRESHOLD_SECS")
+    let override_secs = std::env::var("TRUSTY_WEDGE_THRESHOLD_SECS")
         .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-    {
-        return Duration::from_secs(secs);
+        .and_then(|v| v.parse::<u64>().ok());
+    derive_wedge_threshold(
+        override_secs,
+        trusty_common::memory_core::timeouts::open_queue_timeout(),
+        trusty_common::memory_core::timeouts::write_lock_timeout(),
+    )
+}
+
+/// [`wedge_threshold`] with its inputs supplied (#4001).
+///
+/// Why: both bounds are process-wide env reads, so a test cannot vary them
+/// without racing its siblings. A raised `TRUSTY_WRITE_LOCK_TIMEOUT_SECS` must
+/// move the line, or a writer legitimately queued past the old line would read
+/// as wedged.
+/// What: the override in seconds when present, else twice the larger bound.
+/// Test: `wedge_threshold_doubles_the_larger_wait_bound`.
+pub(crate) fn derive_wedge_threshold(
+    override_secs: Option<u64>,
+    open_queue: Duration,
+    write_lock: Duration,
+) -> Duration {
+    match override_secs {
+        Some(secs) => Duration::from_secs(secs),
+        None => open_queue.max(write_lock) * 2,
     }
-    trusty_common::memory_core::timeouts::open_queue_timeout() * 2
 }
 
 /// Tracks how long the oldest in-flight palace operation has been running.

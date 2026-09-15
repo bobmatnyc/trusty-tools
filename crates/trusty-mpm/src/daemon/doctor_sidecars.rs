@@ -224,10 +224,12 @@ pub(super) async fn probe_health(
 /// own worker occupancy, that observation wins over our inference.
 /// What: `Fail` on a reported wedge, `Warn` while warming or degraded,
 /// `Unknown` when no worker block is present (an older daemon, or an
-/// unreadable body — we cannot claim health we did not observe), `Ok`
+/// unreadable body — we cannot claim health we did not observe) and equally
+/// when the daemon's palace-lock stall detector is stopped or absent, `Ok`
 /// otherwise.
 /// Test: `memory_wedged_worker_pool_is_not_ok`, `memory_warming_is_warn_not_fail`,
-/// `health_body_without_worker_block_is_unknown`.
+/// `health_body_without_worker_block_is_unknown`,
+/// `memory_without_stall_tracking_is_unknown_not_warn`.
 fn interpret_health(
     check: &str,
     service: &str,
@@ -281,6 +283,31 @@ fn interpret_health(
             );
         }
         Some(false) => {}
+    }
+
+    // #4001: `wedged: false` is worth exactly what the detector behind it is
+    // worth. A daemon whose palace-lock stall tracking stopped reports
+    // `degraded` below, which reads as a warning and leaves the run green on
+    // the detector's own failure; a daemon with no detector at all omits the
+    // field (a plain bool, never skipped) while still reporting `wedged`
+    // (#3992), so it never reaches the `None` arm above. Neither is `Ok`.
+    if worker
+        .and_then(|w| w.get("stall_tracking_ok"))
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
+        let detail = body
+            .get("detail")
+            .and_then(|v| v.as_str())
+            .unwrap_or("this daemon predates the palace-lock stall detector (#4001)");
+        return DoctorCheck::new(
+            check,
+            CheckStatus::Unknown,
+            format!(
+                "{service} at {addr} is reachable but its palace-lock stall detector is not \
+                 reporting: {detail} — whether a palace lock is wedged is UNKNOWN"
+            ),
+        );
     }
 
     // Issue #4005 explicitly calls out post-restart warm-up: it is a normal

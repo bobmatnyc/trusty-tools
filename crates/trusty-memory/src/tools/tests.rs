@@ -569,6 +569,8 @@ mod palace_index_tests;
 // Owner ruling 2026-09-14: creator-tag hiding and the `min_score` floor.
 mod recall_projection_tests;
 mod write_budget_tests;
+// #4001: a write stalled on the palace lock must reach `memory.health`.
+mod write_liveness_tests;
 
 /// Why: #4776 — `kg_list_subjects` is the discovery read that makes `kg_query`
 /// usable without already knowing a subject, so the contract that matters is

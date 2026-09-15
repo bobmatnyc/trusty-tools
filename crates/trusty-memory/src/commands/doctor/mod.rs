@@ -254,8 +254,10 @@ pub async fn handle_doctor_fix_palaces(suggest_fix: bool) -> Result<()> {
 /// Why: a single command for operators to triage daemon health without
 /// having to remember four separate diagnostic incantations.
 /// What: runs each check, prints the ✅/❌ line, and exits 0 (all pass) or
-/// 1 (any `Fail`). `Warn` results print but do not flip the exit code.
-/// Test: orchestrator is process-level; per-check helpers are unit-tested.
+/// 1 (any `Fail` or `Unknown`, #4001). `Warn` results print but do not flip the
+/// exit code.
+/// Test: orchestrator is process-level; the verdict is `checks::summarize`'s,
+/// unit-tested in `checks_tests.rs`.
 pub async fn handle_doctor() -> Result<()> {
     println!("{} Running trusty-memory diagnostics…\n", "·".dimmed());
 
@@ -301,35 +303,16 @@ pub async fn handle_doctor() -> Result<()> {
         r.print();
     }
 
-    let failed = results
-        .iter()
-        .filter(|r| r.status == CheckStatus::Fail)
-        .count();
-    let passed = results
-        .iter()
-        .filter(|r| r.status == CheckStatus::Pass)
-        .count();
-    let warned = results
-        .iter()
-        .filter(|r| r.status == CheckStatus::Warn)
-        .count();
-    let unknown = results
-        .iter()
-        .filter(|r| r.status == CheckStatus::Unknown)
-        .count();
-
-    // Issue #4005: indeterminate checks are reported in their own column
-    // rather than being folded into `passed`. Folding them in is what let a
-    // probe that learned nothing contribute to a healthy-looking tally.
-    let summary =
-        format!("{passed} passed, {warned} warnings, {unknown} undetermined, {failed} failed.");
+    // #4005 gave indeterminate checks their own column; #4001 stops them
+    // ending the run green, since a timed-out probe has not passed.
+    let summary = checks::summarize(&results);
 
     println!();
-    if failed == 0 {
-        println!("{} {summary}", "✓".green());
+    if summary.healthy {
+        println!("{} {}", "✓".green(), summary.line);
         Ok(())
     } else {
-        eprintln!("{} {summary}", "✗".red());
+        eprintln!("{} {}", "✗".red(), summary.line);
         std::process::exit(1);
     }
 }
@@ -657,7 +640,7 @@ mod tests {
         let r = interpret(serde_json::json!({
             "status": "ok",
             "daemon_state": "warming",
-            "worker": {"in_flight": 0, "wedged": false},
+            "worker": {"in_flight": 0, "wedged": false, "stall_tracking_ok": true},
         }));
         assert_eq!(r.status, CheckStatus::Warn);
         assert!(r.detail.as_deref().unwrap_or("").contains("WARMING"));
@@ -695,7 +678,12 @@ mod tests {
         let r = interpret(serde_json::json!({
             "status": "ok",
             "daemon_state": "ready",
-            "worker": {"in_flight": 2, "oldest_age_secs": 1, "wedged": false},
+            "worker": {
+                "in_flight": 2,
+                "oldest_age_secs": 1,
+                "wedged": false,
+                "stall_tracking_ok": true,
+            },
         }));
         assert_eq!(r.status, CheckStatus::Pass);
     }
@@ -710,7 +698,7 @@ mod tests {
             "status": "degraded",
             "detail": "store failed: disk full",
             "daemon_state": "ready",
-            "worker": {"in_flight": 0, "wedged": false},
+            "worker": {"in_flight": 0, "wedged": false, "stall_tracking_ok": true},
         }));
         assert_eq!(r.status, CheckStatus::Warn);
         assert!(r.detail.as_deref().unwrap_or("").contains("disk full"));
