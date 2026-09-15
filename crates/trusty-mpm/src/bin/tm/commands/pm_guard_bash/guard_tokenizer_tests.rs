@@ -1,9 +1,9 @@
 //! Per-issue regression rows for the shared Bash tokenizer (#7839, #7833,
-//! #7479, #7744, #7743, #7738, #7728, #7863, #7190).
+//! #7479, #7744, #7743, #7738, #7728, #7863).
 //!
-//! Why: nine issues reported the same root cause in nine spellings — a guard
+//! Why: eight issues reported the same root cause in eight spellings — a guard
 //! reading shell metacharacters as literal filenames or as executable code.
-//! Five of them reproduce here and are fixed by [`super::bash_tokens`]; two
+//! Four of them reproduce here and are fixed by [`super::bash_tokens`]; two
 //! were already closed by an earlier round and are PINNED so the fix cannot
 //! regress them; two turn out not to originate in this guard at all, and their
 //! rows record that finding rather than a change. Keeping one row per issue,
@@ -11,7 +11,9 @@
 //! reader able to tell which of those three things happened.
 //! What: one test per issue named `guard_<issue>_<slug>`, plus the
 //! still-refused controls that bound every relaxation and the tokenizer's own
-//! fail-closed error arm.
+//! fail-closed error arm. The here-document rows at the end name no issue:
+//! they pin denials this guard already gives, as the bound on any future
+//! attempt to stop reading a quoted body as code (#7190, still open).
 //! Test: itself.
 //!
 //! This file is classified as a test file (3000-SLOC cap) by its
@@ -22,7 +24,7 @@ use std::path::Path;
 use super::bash_tokens::{TokenizeError, tokenize};
 use super::{
     evaluate_bash_command, evaluate_destructive_delete_command, evaluate_secret_file_copy_command,
-    strip_quoted_heredoc_bodies, unclassifiable_command,
+    unclassifiable_command,
 };
 use crate::commands::pm_guard_secret_read::evaluate_secret_file_read_command;
 
@@ -85,9 +87,8 @@ fn guard_7839_sed_expression_wildcard() {
 ///
 /// Why: PINNED, not fixed here — #7266 round 9 lifted a data here-document's
 /// body out of the argv text, which closed this shape before the issue was
-/// worked. The row exists so the #7190 body-stripping change below cannot
-/// reintroduce it from the other direction, and so the next reader can see
-/// the issue was verified rather than skipped.
+/// worked. The row exists so the next reader can see the issue was verified
+/// rather than skipped.
 /// What: the issue's shape — a heredoc writing a Python script whose body
 /// carries an f-string `word:` literal — must allow; a body naming a real
 /// dotenv file must still refuse.
@@ -286,47 +287,6 @@ fn guard_7863_three_dot_git_diff_range() {
     }
 }
 
-/// #7190: the destructive-deletion guard read a quoted here-document's body as
-/// executable code.
-///
-/// Why: a `<<'PY'` body is stdin data — the shell performs no expansion and no
-/// substitution on it — so nothing written there ever runs. The guard split it
-/// into segments anyway, and a Python line whose tokens happened to include a
-/// bare delete verb reached #4031's fail-closed arm, refusing a script that
-/// deletes nothing.
-/// What: the issue's shape must allow; an UNQUOTED body, which really does
-/// substitute, and a body handed to a shell, which really is source, must both
-/// still refuse.
-/// Test: itself.
-#[test]
-fn guard_7190_quoted_heredoc_python_body() {
-    for command in [
-        // The reported shape: a Python body whose apostrophe unbalances the
-        // command's quotes, so the body's own lines reached the classifier.
-        "python3 - <<'PY'\n# the agent's cleanup step\nverb = \"rm\"\n         pathlib.Path('out.txt').write_text(verb)\nPY",
-        "python3 - <<'PY'\n# it isn't a real deletion\nunlink\nPY",
-        "cat > /tmp/scratch/clean.py <<\"PY\"\n# don't run this\nrmdir\nPY",
-    ] {
-        assert_eq!(
-            evaluate_destructive_delete_command(command, cwd()),
-            None,
-            "a quoted here-document body runs nothing: {command}"
-        );
-    }
-    assert!(
-        evaluate_destructive_delete_command("bash <<'SH'\nrm -rf /\nSH", cwd()).is_some(),
-        "a body handed to a shell IS source and must still refuse"
-    );
-    assert!(
-        evaluate_destructive_delete_command("cat <<EOF\nrm -rf /\nEOF", cwd()).is_some(),
-        "an unquoted body is expanded by the shell and must still refuse"
-    );
-    assert!(
-        evaluate_destructive_delete_command("rm -rf /", cwd()).is_some(),
-        "the plain deletion must still refuse"
-    );
-}
-
 /// The tokenizer never allows a command because it could not read it.
 ///
 /// Why: the fail-open direction is the one that matters. A guard that treats
@@ -383,33 +343,25 @@ fn guard_tokenizer_still_refuses_a_real_secret_read_copy_and_delete() {
     );
 }
 
-/// #7190 review round 2: a quoted string that merely NAMES a here-document
-/// operator opens no body, so it hides no deletion.
+/// A `<<'WORD'` written inside a quoted string opens no here-document, so it
+/// hides no deletion on the lines that follow.
 ///
-/// Why: the fallback scan #7190 added to recover a body whose own quotes do not
-/// balance searched the raw bytes for `<<'WORD'` with no quote state at all,
-/// and it ran whenever the primary scan claimed nothing — including the
-/// ordinary case where the primary scan read every quote correctly. A `<<'PY'`
-/// written inside a double-quoted argument was therefore read as a real
-/// operator, and every line up to the next one reading `PY` was blanked before
-/// the deletion rule scanned it. `rm -rf /` between the two was allowed.
+/// Why: a proposed relaxation that stops reading a quoted body as code has to
+/// find the body first, and a scan without quote state reads `echo "use
+/// <<'PY'"` as a real operator — blanking every line up to the next `PY`,
+/// including a live `rm -rf /` between them. This guard denies all three rows
+/// today; the row exists so a future attempt at #7190 cannot turn one into an
+/// allow.
 /// What: three shapes, each a fake operator inside a string wrapping a real
-/// deletion — the reported double-quoted outer string, a single-quoted outer
-/// string with a `<<"WORD"` delimiter, and the same fake operator behind a
-/// genuine quoted body whose apostrophe unbalances the command, which is the
-/// one state that still arms the fallback. Each must leave the command
-/// byte-identical through the stripper and refuse at the deletion rule.
+/// deletion — a double-quoted outer string, a single-quoted outer string with a
+/// `<<"WORD"` delimiter, and the same fake operator behind a genuine quoted
+/// body whose apostrophe unbalances the command's quotes.
 /// Test: itself.
 #[test]
-fn guard_7190_a_quoted_operator_opens_no_heredoc_body() {
+fn guard_a_heredoc_operator_inside_a_string_hides_no_deletion() {
     for command in [
-        // The reported shape.
         "echo \"note: use <<'PY' syntax\"\nrm -rf /\nPY",
-        // Outer string single-quoted, fake delimiter double-quoted.
         "echo 'note: use <<\"PY\" syntax'\nrm -rf /\nPY",
-        // A real `<<'PY'` body ahead of it leaves the command's quotes
-        // unbalanced, so the fallback runs — and must still reject the fake
-        // operator that follows.
         "python3 - <<'PY'\n# don't\nPY\necho \"use <<'ZZ' here\"\nrm -rf /\nZZ",
     ] {
         assert!(
@@ -417,74 +369,48 @@ fn guard_7190_a_quoted_operator_opens_no_heredoc_body() {
             "a `<<'WORD'` inside a string opens no body: {command}"
         );
     }
-    for command in [
-        "echo \"note: use <<'PY' syntax\"\nrm -rf /\nPY",
-        "echo 'note: use <<\"PY\" syntax'\nrm -rf /\nPY",
-    ] {
-        assert_eq!(
-            strip_quoted_heredoc_bodies(command),
-            command,
-            "no body was opened, so no byte may be blanked: {command}"
-        );
-    }
 }
 
-/// #7190 review round 2: a here-document scan that ABANDONED claims nothing,
-/// rather than handing the command to the weaker fallback.
+/// A quoted here-document body that a capture hands back to the shell is shell
+/// text again, and its deletion is refused.
 ///
-/// Why: [`super::heredoc::HeredocBodies::scan`] gives up on the whole command
-/// when a delimiter has no terminator line, and that empty result is
-/// indistinguishable from "no here-document here". The fallback used to run on
-/// both, so an unparsable command — the one case the guard must fail closed on
-/// — got its lines blanked by a scan with no quote state.
-/// What: a valid quoted body followed by an unterminated `<<EOF`. The deletion
-/// inside the first body is not stripped, so the command refuses.
+/// Why: a quoted delimiter stops the shell expanding the BODY, but `$( )`, a
+/// backtick, `<( )` or `>( )` turns `cat`'s output — the body — back into shell
+/// text that `eval`, `source`, `.`, a bare `$x` or any unenumerated consumer
+/// runs. This guard refuses every row because the body tokenizes to `rm -rf /`;
+/// an attempt at #7190 that blanks the body allows them, which is why the rows
+/// are pinned here rather than left to the issue (owner ruling, 2026-09-15).
+/// What: one row per re-execution shape — `eval` with the terminator on its own
+/// line and glued to `)`, a capture opened on the line before the operator, a
+/// backtick capture, a body whose apostrophe unbalances the command's quotes,
+/// `source <( )` and `. <( )` in both terminator spellings, `. /dev/stdin <
+/// <( )`, word-split execution of a captured variable, a backtick capture run
+/// as the command itself, and an output process substitution whose shell is
+/// spelled with quotes.
+///
+/// A DOUBLE-quoted capture (`eval "$(cat <<'PY' … PY)"`) is deliberately absent:
+/// the deletion rule reads the whole `"$(…)"` as one argument and allows it,
+/// both here and in released `tm` builds. That is its own defect, not a
+/// here-document one.
 /// Test: itself.
 #[test]
-fn guard_7190_an_abandoned_heredoc_scan_claims_no_body() {
-    let command = "cat <<'PY'\nrm -rf /\nPY\ncat <<EOF\nno terminator";
-    assert_eq!(
-        strip_quoted_heredoc_bodies(command),
-        command,
-        "an abandoned scan may not blank anything"
-    );
-    assert!(
-        evaluate_destructive_delete_command(command, cwd()).is_some(),
-        "a command this guard cannot parse must refuse"
-    );
-}
-
-/// #7190 stays fixed: a genuine quoted body is still stripped, including one
-/// opened after a closed quoted argument on the same line.
-///
-/// Why: the round-2 fix adds quote state to the fallback scan. An operator that
-/// follows a quoted word which CLOSES is live syntax, and rejecting it would
-/// re-open #7190 for every `cat "some file" <<'PY'`.
-/// What: both rows must allow — the first is claimed by the primary scan, the
-/// second only by the fallback, since the body's apostrophe unbalances the
-/// command's quotes.
-/// Test: itself.
-#[test]
-fn guard_7190_a_body_after_a_closed_quoted_word_is_still_stripped() {
-    for command in [
-        "cat \"my notes.txt\" <<'PY'\nrm -rf /\nPY",
-        "cat \"my notes.txt\" <<'PY'\n# don't delete\nrm -rf /\nPY",
-    ] {
-        assert!(
-            !strip_quoted_heredoc_bodies(command).contains("rm -rf"),
-            "a real quoted body must still be blanked: {command}"
-        );
-        assert_eq!(
-            evaluate_destructive_delete_command(command, cwd()),
-            None,
-            "a quoted here-document body runs nothing: {command}"
-        );
-    }
-}
-
-/// Assert every row refuses at the deletion rule: each is a quoted body that a
-/// capture turns back into shell text (#7190 class 1).
-fn capture_reexec_rows_refuse(rows: &[&str]) {
+fn guard_a_captured_heredoc_body_deletion_still_refuses() {
+    let rows = [
+        "eval $(cat <<'PY'\nrm -rf /\nPY\n)",
+        "eval $(cat <<'PY'\nrm -rf /\nPY)",
+        "eval $(\ncat <<'PY'\nrm -rf /\nPY\n)",
+        "eval `cat <<'PY'\nrm -rf /\nPY\n`",
+        "eval $(cat <<'PY'\n# the agent's step\nrm -rf /\nPY\n)",
+        "source <(cat <<'PY'\nrm -rf /\nPY\n)",
+        "source <(cat <<'PY'\nrm -rf /\nPY)",
+        "source <(cat <<\"PY\"\n# don't\nrm -rf /\nPY\n)",
+        ". <(cat <<'PY'\nrm -rf /\nPY\n)",
+        ". <(cat <<'PY'\nrm -rf /\nPY)",
+        ". /dev/stdin < <(cat <<'PY'\nrm -rf /\nPY\n)",
+        "x=$(cat <<'PY'\nrm -rf /\nPY\n)\n$x",
+        "`cat <<'PY'\nrm -rf /\nPY\n`",
+        "cat <<'PY' > >(\"ba\"sh)\nrm -rf /\nPY",
+    ];
     let allowed: Vec<&str> = rows
         .iter()
         .copied()
@@ -495,91 +421,4 @@ fn capture_reexec_rows_refuse(rows: &[&str]) {
         "a captured here-document body is shell text again, so its deletion must refuse; \
          allowed: {allowed:?}"
     );
-}
-
-/// #7190 class 1: a quoted body captured by `$( )` or backticks and handed to
-/// `eval` runs.
-///
-/// Why: a quoted delimiter stops the shell expanding the BODY, but a command
-/// substitution turns `cat`'s output — the body — back into shell text, and
-/// `eval` runs it. `origin/main` refused these because the body tokenized to
-/// `rm -rf /`; blanking the body allowed them (code-critic BLOCK; owner ruling
-/// on #7190: class 1 stays denied).
-/// What: the terminator on its own line and glued to `)`, a capture opened on
-/// the line before the operator, a backtick capture, and a body whose
-/// apostrophe sends the stripper down its fallback scan — each must refuse.
-/// A DOUBLE-quoted capture (`eval "$(cat <<'PY' … PY)"`) is pinned only as
-/// "the stripper blanks nothing": its `<<` sits inside a string, so no body is
-/// claimed, and the deletion rule reads the whole `"$(…)"` as one argument.
-/// That allow predates this branch (tm 1.5.37 allows it too) and is not a
-/// here-document blanking defect.
-/// Test: itself.
-#[test]
-fn guard_7190_capture_reexec_eval() {
-    capture_reexec_rows_refuse(&[
-        "eval $(cat <<'PY'\nrm -rf /\nPY\n)",
-        "eval $(cat <<'PY'\nrm -rf /\nPY)",
-        "eval $(\ncat <<'PY'\nrm -rf /\nPY\n)",
-        "eval `cat <<'PY'\nrm -rf /\nPY\n`",
-        "eval $(cat <<'PY'\n# the agent's step\nrm -rf /\nPY\n)",
-    ]);
-    for command in [
-        "eval \"$(cat <<'PY'\nrm -rf /\nPY\n)\"",
-        "eval \"$(cat <<'PY'\n# the agent's step\nrm -rf /\nPY\n)\"",
-    ] {
-        assert_eq!(
-            strip_quoted_heredoc_bodies(command),
-            command,
-            "a double-quoted capture must keep every byte: {command:?}"
-        );
-    }
-}
-
-/// #7190 class 1: a quoted body captured by `<( )` and handed to `source`.
-///
-/// Why: `source` reads the process substitution's output — the body — as shell
-/// source in the current shell.
-/// What: both terminator spellings, and a double-quoted delimiter whose body's
-/// apostrophe unbalances the command, so the fallback scan is the one asked.
-/// Test: itself.
-#[test]
-fn guard_7190_capture_reexec_source() {
-    capture_reexec_rows_refuse(&[
-        "source <(cat <<'PY'\nrm -rf /\nPY\n)",
-        "source <(cat <<'PY'\nrm -rf /\nPY)",
-        "source <(cat <<\"PY\"\n# don't\nrm -rf /\nPY\n)",
-    ]);
-}
-
-/// #7190 class 1: a quoted body captured by `<( )` and handed to `.`.
-///
-/// Why: `.` is `source` under its POSIX name, and a redirect from a process
-/// substitution reaches it the same way an operand does.
-/// What: both terminator spellings, plus `. /dev/stdin < <( … )`.
-/// Test: itself.
-#[test]
-fn guard_7190_capture_reexec_dot() {
-    capture_reexec_rows_refuse(&[
-        ". <(cat <<'PY'\nrm -rf /\nPY\n)",
-        ". <(cat <<'PY'\nrm -rf /\nPY)",
-        ". /dev/stdin < <(cat <<'PY'\nrm -rf /\nPY\n)",
-    ]);
-}
-
-/// #7190 class 1 is closed by the CAPTURE, not by naming what re-executes it.
-///
-/// Why: class 2 of #7190 was bypassed by a verb nobody listed. Any rule keyed
-/// on `eval`/`source`/`.` leaves every other way to run captured text open.
-/// What: three re-execution shapes that name none of those verbs — word-split
-/// execution of a captured variable (no verb at all), a backtick capture run
-/// as the command itself, and an output process substitution whose shell is
-/// spelled with quotes, so no operator-line token reads as a shell name.
-/// Test: itself.
-#[test]
-fn guard_7190_capture_reexec_unenumerated() {
-    capture_reexec_rows_refuse(&[
-        "x=$(cat <<'PY'\nrm -rf /\nPY\n)\n$x",
-        "`cat <<'PY'\nrm -rf /\nPY\n`",
-        "cat <<'PY' > >(\"ba\"sh)\nrm -rf /\nPY",
-    ]);
 }

@@ -28,9 +28,6 @@ struct Delimiter {
     word: String,
     /// `<<-` lets the terminator line be indented with tabs.
     strip_tabs: bool,
-    /// `<<'PY'` / `<<"PY"` — the shell performs NO expansion on this body, so
-    /// nothing in it can run (#7190).
-    quoted: bool,
 }
 
 /// Byte ranges of a command's here-document bodies.
@@ -50,14 +47,6 @@ pub(super) struct HeredocBodies {
     spans: Vec<(usize, usize)>,
     frames: Vec<(usize, usize)>,
     data_spans: Vec<(usize, usize)>,
-    /// #7190: the subset of `data_spans` whose delimiter was QUOTED, so the
-    /// shell performs no expansion on the body and nothing in it can run.
-    literal_spans: Vec<(usize, usize)>,
-    /// #7190: whether the whole-command [`QuoteScan`] closed every quote it
-    /// opened. `false` is the ONE condition under which an empty span set
-    /// means "this scan could not see", rather than "there was nothing to
-    /// see" — see [`strip_quoted_heredoc_bodies`].
-    quotes_balanced: bool,
 }
 
 impl HeredocBodies {
@@ -73,9 +62,6 @@ impl HeredocBodies {
     /// #6946: each body also contributes a `frames` entry, unless its operator
     /// line names a shell ([`line_runs_a_shell`]) — see
     /// [`HeredocBodies::suppresses_separator`].
-    ///
-    /// #7190 class 1: a quoted data body joins `literal_spans` only when no
-    /// capture is open through its operator line ([`names_a_capture`]).
     /// Test: `heredoc_bodies_cover_a_quoted_delimiter_body`,
     /// `heredoc_bodies_claim_nothing_when_unterminated`,
     /// `heredoc_bodies_span_two_heredocs_on_one_line`,
@@ -84,29 +70,22 @@ impl HeredocBodies {
     pub(super) fn scan(command: &str) -> Self {
         let quotes = QuoteScan::new(command);
         if !quotes.balanced {
-            return Self::empty(false);
+            return Self::empty();
         }
         let lines = line_spans(command);
         let mut spans = Vec::new();
         let mut frames = Vec::new();
         let mut data_spans = Vec::new();
-        let mut literal_spans = Vec::new();
         let mut line = 0;
         while line < lines.len() {
             let (start, end) = lines[line];
             let operator_line = &command[start..end];
             let delimiters = delimiters_on(operator_line, start, &quotes);
             let framing = !delimiters.is_empty() && !line_runs_a_shell(operator_line);
-            // #7190 class 1: a capture opened anywhere up to the end of this
-            // line may enclose the bodies it opens. Earlier bodies are blanked
-            // first, because a body cannot open a capture around a later
-            // operator.
-            let captured =
-                !delimiters.is_empty() && names_a_capture(&blank_spans(command, &spans)[..end]);
             line += 1;
             for delimiter in delimiters {
                 let Some(body) = body_span(command, &lines, line, &delimiter) else {
-                    return Self::empty(true);
+                    return Self::empty();
                 };
                 if body.span.0 < body.span.1 {
                     spans.push(body.span);
@@ -115,12 +94,6 @@ impl HeredocBodies {
                         // shell is data, so no word in it is a path the
                         // command opens.
                         data_spans.push(body.span);
-                        if delimiter.quoted && !captured {
-                            // #7190: nor can anything in it RUN — a quoted
-                            // delimiter suppresses even command substitution,
-                            // and no capture hands the body back to the shell.
-                            literal_spans.push(body.span);
-                        }
                     }
                 }
                 if framing {
@@ -135,23 +108,15 @@ impl HeredocBodies {
             spans,
             frames,
             data_spans,
-            literal_spans,
-            quotes_balanced: true,
         }
     }
 
     /// The no-confidence result: every byte stays live shell syntax.
-    ///
-    /// `quotes_balanced` records WHICH no-confidence this is — an untrustworthy
-    /// quote map (`false`) or a scan that read the quotes fine and abandoned on
-    /// an unterminated delimiter (`true`).
-    fn empty(quotes_balanced: bool) -> Self {
+    fn empty() -> Self {
         Self {
             spans: Vec::new(),
             frames: Vec::new(),
             data_spans: Vec::new(),
-            literal_spans: Vec::new(),
-            quotes_balanced,
         }
     }
 
@@ -214,228 +179,25 @@ pub(crate) fn split_heredoc_bodies(command: &str) -> (String, Vec<String>) {
     if bodies.data_spans.is_empty() {
         return (command.to_string(), Vec::new());
     }
-    let texts = bodies
-        .data_spans
-        .iter()
-        .map(|&(start, end)| command[start..end].to_string())
-        .collect();
-    (blank_spans(command, &bodies.data_spans), texts)
-}
-
-/// `command` with every QUOTED here-document body blanked out (#7190).
-///
-/// Why: the destructive-deletion guard classifies a command's segments, and a
-/// `python3 - <<'PY'` body arrives as segments of Python. A body behind a
-/// quoted delimiter is data the shell never expands and never runs — it
-/// performs no parameter expansion and no command substitution on it — so a
-/// `rm`, an `unlink` or a `find` written there deletes nothing. Live, a Python
-/// body whose only shell-visible feature was an apostrophe and the word `rm`
-/// was refused as a deletion whose target the guard could not resolve (#4031's
-/// fail-closed arm), and the whole script had to be rewritten.
-/// What: blanks only [`HeredocBodies::literal_spans`] — a body whose delimiter
-/// carried `'`, `"` or `\`, AND whose operator line does not hand it to a shell
-/// ([`line_runs_a_shell`]), AND that no command or process substitution
-/// encloses ([`names_a_capture`]) — a captured body is shell text again, and
-/// `eval`, `source`, `.` or any other consumer can run it (#7190 class 1).
-/// An UNQUOTED `<<EOF` body keeps every byte, because
-/// `$(rm -rf /)` inside one really does run; so does a `bash <<'SH'` body,
-/// because the shell reads it as source. A command with no such body is
-/// returned unchanged.
-///
-/// Invariant: only the `!quotes_balanced` arm reaches [`quoted_body_spans`].
-/// [`HeredocBodies::scan`] reports `quotes_balanced: false` from exactly one
-/// exit — its first return, taken before any line is read — so `false` means
-/// "the quote map could not be trusted, and nothing was parsed". That is the
-/// one state in which the fallback's per-line quote tracking can see a body
-/// the primary scan could not. Every other empty answer came from a
-/// trustworthy quote map: there is no quoted data body, or the scan abandoned
-/// on an unterminated delimiter, or every body sits inside a capture. None of
-/// those may be blanked, so a second scan over them could only remove a
-/// denial.
-/// Test: `strips_only_a_quoted_data_heredoc_body`,
-/// `guard_7190_quoted_heredoc_python_body`,
-/// `guard_7190_a_quoted_operator_opens_no_heredoc_body`,
-/// `guard_7190_an_abandoned_heredoc_scan_claims_no_body`,
-/// `guard_7190_capture_reexec_eval`, `guard_7190_capture_reexec_source`,
-/// `guard_7190_capture_reexec_dot`, `guard_7190_capture_reexec_unenumerated`.
-pub(crate) fn strip_quoted_heredoc_bodies(command: &str) -> String {
-    let bodies = HeredocBodies::scan(command);
-    let spans = if !bodies.literal_spans.is_empty() {
-        bodies.literal_spans
-    } else if bodies.quotes_balanced {
-        // #7190 (review round 2): a balanced quote map is trustworthy by
-        // construction, so the primary scan's empty answer is the final one.
-        // The fallback used to run on `literal_spans.is_empty()` alone, which
-        // is also true in the ordinary no-here-document case — and its weaker
-        // scan then claimed a `<<'PY'` written INSIDE a quoted string, blanking
-        // the real `rm -rf` line that followed it before the deletion rule ever
-        // read it. An abandoned scan (a delimiter with no terminator line)
-        // lands here too and claims nothing, which is the fail-closed side.
-        Vec::new()
-    } else {
-        // #7190: the primary scan abandons everything when the WHOLE command's
-        // quotes do not balance — and a literal body routinely unbalances them,
-        // which is the very reason its delimiter was quoted. An apostrophe in a
-        // Python comment was enough to lose the body and refuse the script.
-        quoted_body_spans(command)
-    };
-    if spans.is_empty() {
-        return command.to_string();
-    }
-    blank_spans(command, &spans)
-}
-
-/// Quoted here-document bodies located with a quote scan the BODIES cannot
-/// poison (#7190).
-///
-/// Why: [`HeredocBodies::scan`] needs `QuoteScan` to tell a real `<<` operator
-/// from an arithmetic `$((1 << 3))` and from one inside a string, and it fails
-/// closed when the command's quotes do not balance — which a literal body
-/// routinely does, since its apostrophes are data the shell never reads as
-/// quotes. Dropping quote awareness altogether was the wrong answer: a
-/// `<<'PY'` written inside a double-quoted argument is argument text, and
-/// claiming its "body" blanked the real deletion on the next line.
-/// What: the same line walk, against a copy of the command with each body
-/// blanked as it is claimed. Blanking preserves every byte offset, so a fresh
-/// [`QuoteScan`] over that copy gives each later line the quote state the SHELL
-/// sees — the body's own quotes are gone, and a `<<` still inside a string is
-/// still rejected. Per line, the first `<<`/`<<-` followed by a quoted word, at
-/// an unquoted offset, on a line that does not hand the body to a shell, with
-/// no capture open through the end of that line ([`names_a_capture`]). The
-/// body runs to the next line consisting solely of that word; a delimiter with
-/// no such line claims NOTHING. Only one body per line is claimed — two on one
-/// line is the primary scan's business, and it has the quote state to do it
-/// right.
-/// Test: `strips_only_a_quoted_data_heredoc_body`,
-/// `strips_a_quoted_body_whose_own_quotes_do_not_balance`,
-/// `guard_7190_a_quoted_operator_opens_no_heredoc_body`,
-/// `guard_7190_a_body_after_a_closed_quoted_word_is_still_stripped`,
-/// `guard_7190_quoted_heredoc_python_body`,
-/// `guard_7190_capture_reexec_eval`, `guard_7190_capture_reexec_source`.
-fn quoted_body_spans(command: &str) -> Vec<(usize, usize)> {
-    let lines = line_spans(command);
-    let mut spans = Vec::new();
-    let mut working = command.to_string();
-    let mut quotes = QuoteScan::new(&working);
-    let mut line = 0;
-    while line < lines.len() {
-        let (start, end) = lines[line];
-        let text = &working[start..end];
-        line += 1;
-        let Some((offset, delimiter)) = quoted_delimiter_on(text) else {
-            continue;
-        };
-        // #7190 (review round 2): the operator must be live shell syntax. A
-        // `<<'PY'` inside a quoted string is argument text, and the body it
-        // appears to open is the caller's real command.
-        // #7190 class 1: nor may a capture enclose it — see `names_a_capture`.
-        if !quotes.is_unquoted(start + offset)
-            || line_runs_a_shell(text)
-            || names_a_capture(&working[..end])
-        {
-            continue;
-        }
-        let Some(body) = body_span(&working, &lines, line, &delimiter) else {
-            continue;
-        };
-        if body.span.0 < body.span.1 {
-            spans.push(body.span);
-            // The body is data, not quoting: blanking it before the next line's
-            // quote state is read is what makes this scan trustworthy where the
-            // primary one was not.
-            working = blank_spans(&working, &[body.span]);
-            quotes = QuoteScan::new(&working);
-        }
-        line = body.next_line;
-    }
-    spans
-}
-
-/// The QUOTED here-document delimiter a line opens, and the byte offset of its
-/// `<<` within the line (#7190).
-///
-/// What: the first `<<` (not `<<<`) whose word is wrapped in `'` or `"`, with
-/// the `<<-` tab-stripping form honoured. An unquoted `<<WORD` is deliberately
-/// not recognised here — its body IS expanded, so it must keep every byte. The
-/// offset lets the caller ask whether that `<<` is quoted; this function makes
-/// no such judgement itself.
-/// Test: see [`quoted_body_spans`].
-fn quoted_delimiter_on(line: &str) -> Option<(usize, Delimiter)> {
-    let bytes = line.as_bytes();
-    let mut i = 0;
-    while i + 2 < bytes.len() {
-        if bytes[i] != b'<' || bytes[i + 1] != b'<' || bytes[i + 2] == b'<' {
-            i += 1;
-            continue;
-        }
-        let mut j = i + 2;
-        let strip_tabs = bytes.get(j) == Some(&b'-');
-        if strip_tabs {
-            j += 1;
-        }
-        while matches!(bytes.get(j), Some(b' ' | b'\t')) {
-            j += 1;
-        }
-        let Some(&quote) = bytes.get(j).filter(|b| matches!(b, b'\'' | b'"')) else {
-            i = j.max(i + 2);
-            continue;
-        };
-        let word_start = j + 1;
-        let close = bytes[word_start..].iter().position(|b| *b == quote)?;
-        let word = line[word_start..word_start + close].to_string();
-        if word.is_empty() {
-            return None;
-        }
-        return Some((
-            i,
-            Delimiter {
-                word,
-                strip_tabs,
-                quoted: true,
-            },
-        ));
-    }
-    None
-}
-
-/// Whether `text` opens a command or process substitution anywhere (#7190
-/// class 1).
-///
-/// Why: a capture turns a quoted body back into shell text. `eval "$(cat
-/// <<'PY' … PY)"` runs the body, and what re-executes captured text is
-/// open-ended: `eval`, `source`, `.`, `trap`, a bare `$x`, a shell under any
-/// spelling. Keying on the capture closes the class without naming a verb.
-/// What: `true` when `text` contains `$(`, a backtick, `<(` or `>(`, read with
-/// no quote state and no parenthesis counting. Quoting cannot hide an opener,
-/// because `"$(…)"` still substitutes; a stray `)` cannot close one, because
-/// nothing is counted. A false positive — `'$('` in a string, `$((1+1))` —
-/// only keeps a body un-blanked, which is the pre-#7190 deny.
-/// Test: `guard_7190_capture_reexec_eval`, `guard_7190_capture_reexec_source`,
-/// `guard_7190_capture_reexec_dot`, `guard_7190_capture_reexec_unenumerated`.
-fn names_a_capture(text: &str) -> bool {
-    text.contains("$(") || text.contains('`') || text.contains("<(") || text.contains(">(")
-}
-
-/// `command` with each of `spans` replaced by spaces, newlines kept.
-///
-/// What: one space per BYTE so every offset, every line break and the whole
-/// segment structure outside the spans survive unchanged.
-fn blank_spans(command: &str, spans: &[(usize, usize)]) -> String {
-    let mut out = String::with_capacity(command.len());
+    let mut argv_text = String::with_capacity(command.len());
+    let mut texts = Vec::with_capacity(bodies.data_spans.len());
     let mut cursor = 0;
-    for &(start, end) in spans {
-        out.push_str(&command[cursor..start]);
-        for c in command[start..end].chars() {
+    for &(start, end) in &bodies.data_spans {
+        argv_text.push_str(&command[cursor..start]);
+        let body = &command[start..end];
+        for c in body.chars() {
             if c == '\n' {
-                out.push('\n');
+                argv_text.push('\n');
             } else {
-                out.extend(std::iter::repeat_n(' ', c.len_utf8()));
+                // Space per BYTE keeps offsets identical to `command`.
+                argv_text.extend(std::iter::repeat_n(' ', c.len_utf8()));
             }
         }
+        texts.push(body.to_string());
         cursor = end;
     }
-    out.push_str(&command[cursor..]);
-    out
+    argv_text.push_str(&command[cursor..]);
+    (argv_text, texts)
 }
 
 /// Whether a here-document operator line hands its body to a shell.
@@ -508,19 +270,12 @@ fn delimiters_on(line: &str, offset: usize, quotes: &QuoteScan) -> Vec<Delimiter
         while j < bytes.len() && !is_word_break(bytes[j]) {
             j += 1;
         }
-        let raw = &line[word_start..j];
-        // #7190: a delimiter carrying ANY quote makes the body literal data.
-        let quoted = raw.contains(['\'', '"', '\\']);
-        let word: String = raw
+        let word: String = line[word_start..j]
             .chars()
             .filter(|c| !matches!(c, '\'' | '"' | '\\'))
             .collect();
         if !word.is_empty() {
-            found.push(Delimiter {
-                word,
-                strip_tabs,
-                quoted,
-            });
+            found.push(Delimiter { word, strip_tabs });
         }
         i = j.max(i + 2);
     }
@@ -578,66 +333,6 @@ fn body_span(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Only a QUOTED data body is blanked; an unquoted one and a shell's own
-    /// body keep every byte (#7190).
-    ///
-    /// Why: a quoted delimiter suppresses parameter expansion and command
-    /// substitution, so nothing in the body can run. An unquoted `<<EOF` body
-    /// still substitutes `$(…)`, and a body whose operator line names a shell
-    /// IS source — blanking either would hide a real deletion.
-    /// Test: itself.
-    /// A quoted body whose OWN quotes do not balance is still claimed (#7190).
-    ///
-    /// Why: an apostrophe in a Python comment unbalances the whole command, and
-    /// the primary scan fails closed on that — which lost exactly the bodies
-    /// the quoted delimiter exists to protect.
-    /// Test: itself.
-    #[test]
-    fn strips_a_quoted_body_whose_own_quotes_do_not_balance() {
-        let command = "python3 - <<'PY'\n# the agent's cleanup step\nverb = \"rm\"\nPY";
-        let stripped = strip_quoted_heredoc_bodies(command);
-        assert!(stripped.starts_with("python3 - <<'PY'"));
-        assert!(!stripped.contains("rm"));
-        assert!(!stripped.contains("agent"));
-        assert_eq!(stripped.lines().count(), command.lines().count());
-        // An UNTERMINATED here-document claims nothing, as the primary scan does.
-        let open = "python3 - <<'PY'\n# the agent's step\nverb = \"rm\"";
-        assert_eq!(strip_quoted_heredoc_bodies(open), open);
-        // An unquoted delimiter is expanded, so it keeps every byte even when
-        // the command's own quotes do not balance.
-        let unquoted = "cat <<EOF\n# the agent's step\nrm -rf /\nEOF";
-        assert_eq!(strip_quoted_heredoc_bodies(unquoted), unquoted);
-        // A shell's own body is source, quoted delimiter or not.
-        let shell = "bash <<'SH'\n# the agent's step\nrm -rf /\nSH";
-        assert_eq!(strip_quoted_heredoc_bodies(shell), shell);
-    }
-
-    #[test]
-    fn strips_only_a_quoted_data_heredoc_body() {
-        let quoted = "python3 - <<'PY'\nop = \"rm\"\nPY";
-        let stripped = strip_quoted_heredoc_bodies(quoted);
-        assert!(stripped.starts_with("python3 - <<'PY'"));
-        assert!(!stripped.contains("rm"));
-        assert!(stripped.ends_with("PY"));
-        // Line structure survives, so byte offsets and segment cuts do too.
-        assert_eq!(stripped.lines().count(), quoted.lines().count());
-
-        let double_quoted = "cat > out.py <<\"PY\"\nunlink\nPY";
-        assert!(!strip_quoted_heredoc_bodies(double_quoted).contains("unlink"));
-
-        for live in [
-            "cat <<EOF\nrm -rf /\nEOF",
-            "bash <<'SH'\nrm -rf /\nSH",
-            "ls -la",
-        ] {
-            assert_eq!(
-                strip_quoted_heredoc_bodies(live),
-                live,
-                "an expanded or shell-run body must keep every byte: {live}"
-            );
-        }
-    }
 
     /// The body of a `<<'PY'` script — the #5356 reproduction — is claimed.
     #[test]

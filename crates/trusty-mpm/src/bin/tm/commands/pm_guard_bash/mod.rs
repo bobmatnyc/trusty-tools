@@ -72,9 +72,6 @@ pub(crate) use persistence::command_is_persistence_only;
 // #7266: the secret-read guard frames here-document bodies through the SAME
 // scan the write-redirection check uses, rather than growing a second parser.
 pub(crate) use heredoc::split_heredoc_bodies;
-// #7190: a quoted here-document body is data the shell never expands and never
-// runs, so the destructive-deletion rule reads the command without it.
-use heredoc::strip_quoted_heredoc_bodies;
 // #7839, #7738, #7744: the shared classifier the secret-read guard asks which
 // argv token is an interpreter's PROGRAM, and whether a word is regex syntax.
 pub(crate) use bash_tokens::{
@@ -1124,8 +1121,8 @@ mod tests;
 #[cfg(test)]
 mod false_positive_tests;
 
-// #7839, #7833, #7479, #7744, #7743, #7738, #7728, #7863, #7190: one row per
-// issue for the shared-tokenizer cluster, beside the still-refused controls
-// that bound every relaxation.
+// #7839, #7833, #7479, #7744, #7743, #7738, #7728, #7863: one row per issue
+// for the shared-tokenizer cluster, beside the still-refused controls that
+// bound every relaxation.
 #[cfg(test)]
 mod guard_tokenizer_tests;

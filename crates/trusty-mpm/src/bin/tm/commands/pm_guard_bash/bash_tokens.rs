@@ -1,5 +1,5 @@
 //! The ONE tokenizer and token classifier every Bash guard in this tree asks
-//! (#7839, #7833, #7744, #7743, #7738, #7190).
+//! (#7839, #7833, #7744, #7743, #7738).
 //!
 //! Why: each guard answered the same three questions about a command's bytes
 //! its own way — where do words end, which word names a FILE a redirect

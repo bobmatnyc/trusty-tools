@@ -72,18 +72,15 @@
 //! - A delete verb hidden inside a file this module never opens is not
 //!   detected: one segment WRITES a script containing `rm -rf /` (e.g.
 //!   `python3 -c "open('/tmp/x.sh','w').write('rm -rf /')"`, or the same
-//!   payload as a quoted heredoc body) and a later segment merely EXECUTES
-//!   that file (`bash /tmp/x.sh`) — neither segment's own tokens carry a
-//!   delete verb, so per-segment scanning ([`split_shell_segments`]) finds
-//!   nothing to deny. This is #7190 class 3, and it is the ONLY accepted
-//!   residual for a here-document body: closing it needs cross-segment
-//!   tracking of "this path was just written, and a later segment executes
-//!   it", which this module does not attempt.
-//!   #7190 class 1 is NOT a residual and stays denied: a quoted body captured
-//!   by `$( )`, backticks, `<( )` or `>( )` is shell text again once captured
-//!   (`eval "$(cat <<'PY' … PY)"`, `source <(cat <<'PY' … PY)`), so
-//!   [`strip_quoted_heredoc_bodies`] keeps it and its deletion is refused.
-//!   See #7190.
+//!   payload as a heredoc body) and a later segment merely EXECUTES that file
+//!   (`bash /tmp/x.sh`) — neither segment's own tokens carry a delete verb, so
+//!   per-segment scanning ([`split_shell_segments`]) finds nothing to deny.
+//!   Pre-existing today via the one-line form above; accepted rather than
+//!   closed (owner ruling, #7190) — closing it needs cross-segment tracking
+//!   of "this path was just written, and a later segment executes it", which
+//!   this module does not attempt. A heredoc-body allowlist redesign
+//!   considered for #7190 does not add this class, only removes an
+//!   incidental catch a masked multi-line body happened to trigger.
 //!
 //! Test: `denies_filesystem_root_deletion`, `denies_repo_root_deletion`,
 //! `denies_dot_git_deletion`, `denies_worktree_root_deletion`,
@@ -101,9 +98,7 @@ use std::path::{Component, Path};
 
 use trusty_mpm::core::project_aliases::main_checkout_root;
 
-use super::{
-    PathEnv, resolve_target_path, split_shell_segments, strip_quoted_heredoc_bodies, tokenize,
-};
+use super::{PathEnv, resolve_target_path, split_shell_segments};
 use crate::commands::hook_rewrite::first_command_token;
 
 /// Deny reason for `rm`/`rmdir`/`unlink`/`find -delete` targeting a
@@ -175,14 +170,7 @@ fn evaluate_destructive_delete_command_in(
     env: &PathEnv,
 ) -> Option<&'static str> {
     let mut effective_cwd = cwd.to_path_buf();
-    // #7190: a quoted here-document body is stdin data the shell neither
-    // expands nor runs, so its Python/SQL/prose lines are not segments of this
-    // command. An UNQUOTED body, a body handed to a shell, and a body inside a
-    // `$( )`/backtick/`<( )`/`>( )` capture all stay in place — `cat <<EOF`
-    // still substitutes `$(rm -rf /)`, `bash <<'SH'` still runs its own source,
-    // and `eval "$(cat <<'PY' … PY)"` runs the captured body. See #7190.
-    let command = strip_quoted_heredoc_bodies(command);
-    for segment in split_shell_segments(&command) {
+    for segment in split_shell_segments(command) {
         let trimmed = segment.trim();
         if trimmed.is_empty() {
             continue;
@@ -196,14 +184,14 @@ fn evaluate_destructive_delete_command_in(
         // detection was, since a missed `cd` only leaves `effective_cwd`
         // stale rather than letting a delete verb through unclassified.
         if first_command_token(trimmed).as_deref() == Some("cd") {
-            if let Ok(argv) = tokenize(trimmed)
+            if let Some(argv) = shlex::split(trimmed)
                 && let Some(dest) = argv.get(1)
             {
                 effective_cwd = resolve_target_path(dest, &effective_cwd, env);
             }
             continue;
         }
-        let Ok(argv) = tokenize(trimmed) else {
+        let Some(argv) = shlex::split(trimmed) else {
             // Unbalanced quotes — cannot tokenize this segment at all. Fail
             // CLOSED (item 2) only when the raw text plausibly names one of
             // the delete verbs as a whole word; an unparseable segment with
