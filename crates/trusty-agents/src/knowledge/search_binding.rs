@@ -43,8 +43,8 @@ pub fn bound_index(name: &str, stores: &StoresConfig) -> anyhow::Result<Option<S
 /// guard at line ~88) compare raw `String`s with no case-folding or
 /// trimming on either side — safe only because every producer of an
 /// `index_id` stays in that same unnormalized canonical form:
-/// [`AgentStoreBinding::resolved_index`] (`crate::stores::config`, the
-/// identity function `self.index.as_deref().unwrap_or(&self.name)`), the
+/// [`AgentStoreBinding::resolved_index`](crate::stores::AgentStoreBinding::resolved_index)
+/// (the identity function `self.index.as_deref().unwrap_or(&self.name)`), the
 /// digest-generated id at `KnowledgeStore::initialize`
 /// (`crate::knowledge::mod`, `format!("assistant-okg-{digest}")`, lowercase
 /// hex), and the root-bound id at `Context::selected_store`
