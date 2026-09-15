@@ -7,11 +7,12 @@
 //! reads the `.trusty-mpm-worktree` OWNERSHIP SENTINEL and asks whether the party
 //! it names is still working. The sentinel names one of two kinds of owner, so
 //! the gate has two halves: [`agent_ownership_blocks`] for a dispatched agent
-//! and [`session_ownership_blocks`] for a managed session.
+//! and [`session_ownership_blocks`] for a managed session. A third check,
+//! [`unattributed_nested_blocks`], covers the sentinel that names nobody.
 //!
 //! # Fail direction
 //!
-//! Both halves permit only on POSITIVE evidence that the owner has ended.
+//! Every check permits only on POSITIVE evidence that the owner has ended.
 //! Silence, an unread store and an unobservable probe all refuse (ADR-0045).
 //! Test: `worktree_reclaim_tests`, `worktree_reclaim_owner_liveness_tests`.
 
@@ -22,7 +23,7 @@ use super::worktree_ownership::{
     AgentDelegationState, AgentWorktreeOwner, SentinelOwner, is_harness_agent_worktree,
     read_sentinel_owner,
 };
-use super::worktree_reclaim_claim::ClaimLiveness;
+use super::worktree_reclaim_claim::{ClaimLiveness, ClaimState};
 use super::worktree_registry::{HarnessLockState, harness_lock_state};
 
 /// Resolves the delegation registry's answer for the agent a sentinel names.
@@ -160,6 +161,10 @@ impl SessionOwners {
 /// the record carrying a `workspace_path`, so a record without one is judged the
 /// same way. Every other answer refuses:
 ///
+/// - the tree is in the harness agent store and git reports the harness's
+///   agent-lifetime lock held, or cannot be asked (#7652 critic round). An
+///   agent-store sentinel can still name the parent session (#7958), so that
+///   session ending says nothing about the agent working in the tree;
 /// - the owner map was never read (an unreadable registry);
 /// - no stored record names the owner. Records are tombstoned, never dropped, so
 ///   an owner with no record has no evidence of its end at all, and the
@@ -174,12 +179,34 @@ impl SessionOwners {
 /// `worktree_7652_a_dead_owners_nested_worktree_is_reclaimed`,
 /// `worktree_7652_an_owner_with_no_record_is_refused`,
 /// `worktree_7652_an_errored_tmux_probe_is_refused`,
-/// `worktree_7652_an_unreadable_session_store_reclaims_nothing`,
-/// `worktree_7652_an_unread_owner_map_refuses`.
+/// `worktree_7652_an_unanswerable_claim_probe_reclaims_nothing`,
+/// `worktree_7652_an_unread_owner_map_refuses`,
+/// `worktree_7652_a_held_harness_lock_outranks_an_ended_sentinel_session`.
 pub(crate) fn session_ownership_blocks(path: &Path, owners: &SessionOwners) -> Option<String> {
     let SentinelOwner::Known(owner, _) = read_sentinel_owner(path) else {
         return None;
     };
+    // #7652 critic round: in the agent store the harness lock outranks the
+    // sentinel's session — see this function's doc, first refusal.
+    if is_harness_agent_worktree(path) {
+        match harness_lock_state(path) {
+            HarnessLockState::Released => {}
+            HarnessLockState::Held => {
+                return Some(format!(
+                    "sentinel names session {owner}, but this tree is in the harness agent store \
+                     and git still reports the harness's agent-lifetime lock on it — an agent is \
+                     still working here, whatever that session's state (#7652, #6561)"
+                ));
+            }
+            HarnessLockState::Undeterminable => {
+                return Some(format!(
+                    "sentinel names session {owner}, this tree is in the harness agent store, and \
+                     git could not be asked whether the harness still holds it — undeterminable, \
+                     not absent (#7652, #6561, ADR-0045)"
+                ));
+            }
+        }
+    }
     let Some(by_id) = &owners.by_id else {
         return Some(format!(
             "owned by session {owner}, and the session store was not read, so nothing can show \
@@ -196,5 +223,32 @@ pub(crate) fn session_ownership_blocks(path: &Path, owners: &SessionOwners) -> O
             "owned by session {owner}, and no stored session record names it, so nothing can \
              show that session has ended — unrecorded is not dead (#7652, ADR-0045)"
         )),
+    }
+}
+
+/// Why an UNATTRIBUTED tree nested under a live foreign session's claim may not
+/// be reclaimed, or `None` when this check does not apply (#7652 critic round).
+///
+/// Why: gate 2 permits a live foreign project-root claim over a nested tree
+/// ([`ClaimState::ForeignNested`]) because the sentinel attributes the tree
+/// instead. A sentinel that is absent, empty, malformed or unreadable
+/// attributes nothing, so the live claim is the only ownership evidence left.
+/// Before #7652, gate 2 refused this tree.
+/// What: refuses exactly `ForeignNested` × [`SentinelOwner::Unknown`]. Every
+/// other claim state, and every sentinel that names an owner, is left to the
+/// other gates. The survey's `classify` and the delete loop's two re-checks all
+/// call it.
+/// Test: `worktree_7652_an_unattributed_tree_under_a_live_foreign_claim_is_refused`.
+pub(crate) fn unattributed_nested_blocks(path: &Path, claim: &ClaimState) -> Option<String> {
+    let ClaimState::ForeignNested { session, .. } = claim else {
+        return None;
+    };
+    match read_sentinel_owner(path) {
+        SentinelOwner::Unknown => Some(format!(
+            "session {session} claims a workspace containing this worktree, and the ownership \
+             sentinel is absent, empty, malformed or unreadable, so nothing attributes the tree \
+             to anyone else — the live claim stands (#7652, ADR-0045)"
+        )),
+        SentinelOwner::Known(..) | SentinelOwner::Agent(..) => None,
     }
 }

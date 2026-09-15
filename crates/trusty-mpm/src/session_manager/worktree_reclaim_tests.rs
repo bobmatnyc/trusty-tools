@@ -1876,3 +1876,51 @@ fn worktree_7652_an_unread_owner_map_refuses() {
     );
     assert!(reason(&v).contains("was not read"), "{}", reason(&v));
 }
+
+/// 🔴 #7652 critic round: a harness agent-store tree whose sentinel names an
+/// ENDED session is refused while git still reports the harness's agent-lifetime
+/// lock on it.
+///
+/// Why: agent-store sentinels can still name the parent session (#7958), so the
+/// session's death says nothing about the agent working in the tree. The lock
+/// does. Gate 1 reads the lock at scan time only, so gate 4b must read it too.
+/// Fails on `e21a6ba0b`, where gate 4b judged the ended session alone.
+#[test]
+fn worktree_7652_a_held_harness_lock_outranks_an_ended_sentinel_session() {
+    let fx = GitWorktreeFixture::new();
+    let owners = GitWorktreeFixture::reclaimable_owner_gone();
+
+    let held = agent_store_worktree(&fx, "agent-7652held");
+    GitWorktreeFixture::stamp_reclaimable_sentinel(&held);
+    fx.harness_lock_worktree(&held, "agent-7652held");
+    let refusal = session_ownership_blocks(&held, &owners)
+        .expect("a held harness lock must refuse although the sentinel's session ended");
+    assert!(refusal.contains("agent-lifetime lock"), "{refusal}");
+    // Through `classify` too, with gate 1 admitting — a lock taken after the scan.
+    let v = classify(
+        &held,
+        Admission::Admitted,
+        &claim(false),
+        &merged(7652),
+        &clean,
+        &agent_ended,
+        &owners,
+        &KeepList::default(),
+    );
+    assert!(
+        matches!(
+            v,
+            ReclaimVerdict::Blocked {
+                gate: ReclaimGate::SessionOwnership,
+                ..
+            }
+        ),
+        "{v:?}"
+    );
+
+    // The over-correction guard: once the harness releases the tree, the ended
+    // session is the answer again.
+    let released = agent_store_worktree(&fx, "agent-7652released");
+    GitWorktreeFixture::stamp_reclaimable_sentinel(&released);
+    assert_eq!(session_ownership_blocks(&released, &owners), None);
+}

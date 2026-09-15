@@ -62,6 +62,7 @@ pub(crate) use super::worktree_reclaim_claim::{
 // door for the SLOC cap; re-exported so every call site stays unchanged.
 pub(crate) use super::worktree_reclaim_ownership::{
     AgentStateProbe, SessionOwners, agent_ownership_blocks, session_ownership_blocks,
+    unattributed_nested_blocks,
 };
 
 /// How many pull requests one `gh pr list` call retrieves (#2919).
@@ -670,6 +671,10 @@ pub(crate) const NOT_INSPECTED_REASON: &str = "survey deadline reached before in
 ///    `owners`. Gate 2 permits a live foreign session's project-root claim
 ///    over a nested worktree, so the sentinel is what attributes that tree; it
 ///    permits only an owner the store's tmux probe proves gone.
+///
+///    **4c. Unattributed nested tree** (#7652 critic round) —
+///    [`unattributed_nested_blocks`]: a sentinel that names nobody leaves the
+///    live foreign claim gate 2 permitted standing.
 /// 5. **Landing evidence** — only [`BranchPrState::Merged`] proceeds.
 /// 6. **Unsaved work** — `probe_dirt` is a closure rather than a precomputed
 ///    `Option` on purpose: passing the value would let a caller reach this gate
@@ -769,6 +774,12 @@ pub(crate) fn classify(
     // project-root claim, so the sentinel's session owner must be proven gone.
     if let Some(reason) = session_ownership_blocks(path, owners) {
         return ReclaimVerdict::blocked(ReclaimGate::SessionOwnership, reason);
+    }
+    // Gate 4c (#7652 critic round): gate 2 permitted a live foreign claim over
+    // this tree because the sentinel attributes it; a sentinel that names nobody
+    // leaves that claim standing. See `unattributed_nested_blocks`.
+    if let Some(reason) = unattributed_nested_blocks(path, claim) {
+        return ReclaimVerdict::blocked(ReclaimGate::Liveness, reason);
     }
     // Gate 5 (#2919): the merged PR is the landing evidence DOC-52 §3.4 makes
     // the reclamation trigger. Everything else — including "we could not find
