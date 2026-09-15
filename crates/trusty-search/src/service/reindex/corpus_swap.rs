@@ -21,6 +21,7 @@
 //! `incremental_reindex_carryover_failure_aborts` in `service::reindex::tests`;
 //! the adopt path in `service::reindex::resume_tests`.
 
+use crate::core::corpus::CorpusOpenFailure;
 use crate::core::registry::{IndexHandle, IndexId};
 use anyhow::Context;
 use std::path::{Path, PathBuf};
@@ -561,9 +562,11 @@ async fn clear_checkpoint_on_released_file(tmp_path: &Path, index_id: &IndexId) 
 /// indexer, dropping its last `Arc` — redb keeps the file mapped while any
 /// handle is alive, so the handle MUST be dropped before the rename), renames
 /// `index.redb.tmp` → `index.redb` via [`rename_staging_over_live`], re-opens a
-/// `CorpusStore` on the swapped-in file, and installs it on the indexer. Any
-/// failure leaves the previous live corpus in place and logs at `warn` — a
-/// botched swap must not crash the daemon.
+/// `CorpusStore` on the swapped-in file, and installs it on the indexer. A
+/// path-resolution failure leaves the staging store attached and logs at
+/// `warn`. A rename or re-open failure after the release leaves no corpus
+/// attached, so it quarantines the index (#7920) — a botched swap must not
+/// crash the daemon, and must not leave the snapshot writers unguarded.
 ///
 /// #7004: returns `true` only when the promoted corpus is INSTALLED on the
 /// indexer. Every failure arm below returns `false`, which is what gates the
@@ -644,10 +647,10 @@ pub(super) async fn commit_staged_corpus_swap(
             true
         }
         Err(e) => {
-            tracing::warn!(
-                "force reindex: atomic corpus swap failed for '{}' ({e}) — \
-                 previous corpus preserved; in-memory state is the rebuilt one",
-                index_id.0
+            // #7920: the staging store was released above; nothing is attached.
+            handle.indexer.write().await.quarantine_detached_corpus(
+                CorpusOpenFailure::classify(&e),
+                &format!("atomic corpus swap failed: {e:#}"),
             );
             false
         }
@@ -702,7 +705,10 @@ async fn rename_staging_over_live(
 /// What: takes the staging store out of the indexer, drops its `Arc`, deletes
 /// `index.redb.tmp`, then re-opens and re-installs the live `index.redb` store
 /// so the indexer's durable corpus points back at the untouched original.
-/// Test: `incremental_reindex_carryover_failure_aborts`.
+/// When the live path is unresolvable or the re-open fails, no corpus is
+/// attached, so the index is quarantined (#7920).
+/// Test: `incremental_reindex_carryover_failure_aborts`,
+/// `shutdown_flush_after_failed_reattach_leaves_chunks_json_byte_identical`.
 pub(super) async fn abort_staged_corpus_swap(
     handle: &IndexHandle,
     index_id: &IndexId,
@@ -781,10 +787,14 @@ pub(super) async fn abort_staged_corpus_swap(
                 index_id.0
             );
         }
-        Ok(None) => {}
-        Err(e) => tracing::warn!(
-            "force reindex: could not restore the original corpus for '{}' after abort ({e})",
-            index_id.0
+        // #7920: the staging store was taken above and nothing is attached.
+        Ok(None) => handle.indexer.write().await.quarantine_detached_corpus(
+            CorpusOpenFailure::Unclassified,
+            "the live corpus path is unresolvable",
+        ),
+        Err(e) => handle.indexer.write().await.quarantine_detached_corpus(
+            CorpusOpenFailure::classify(&e),
+            &format!("could not restore the original corpus after abort: {e:#}"),
         ),
     }
 }
@@ -792,3 +802,7 @@ pub(super) async fn abort_staged_corpus_swap(
 #[cfg(test)]
 #[path = "corpus_swap_schema_tests.rs"]
 mod schema_tests;
+
+#[cfg(test)]
+#[path = "detached_corpus_7920_tests.rs"]
+mod detached_corpus_7920_tests;

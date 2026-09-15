@@ -465,6 +465,7 @@ impl CodeIndexer {
         // background task. `false` (no corpus store) keeps the legacy JSON
         // behaviour for test / BM25-only indexers.
         let persist_chunks_json = self.corpus.is_none();
+        let snapshot_guard = self.snapshot_guard.clone();
         tokio::spawn(async move {
             // Issue #403: route HNSW path to colocated or legacy storage.
             let is_colocated = crate::service::colocated_storage::has_colocated_storage(&root_path);
@@ -590,9 +591,20 @@ impl CodeIndexer {
                     let tmp = chunks_path.with_extension("json.tmp");
                     let chunks_path_inner = chunks_path.clone();
                     let index_id_inner = index_id.clone();
+                    let guard = snapshot_guard.clone();
                     // Serialize + write on a blocking worker so we don't pin a
                     // runtime worker for hundreds of ms on large corpora.
                     let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+                        // #7920: the same refusal the shutdown flush applies —
+                        // never replace a populated snapshot with an empty or
+                        // foreign corpus.
+                        guard
+                            .check_overwrite(
+                                &index_id_inner,
+                                &chunks_path_inner,
+                                snapshot.chunks.len(),
+                            )
+                            .map_err(std::io::Error::other)?;
                         let bytes = match serde_json::to_vec(&snapshot) {
                             Ok(b) => b,
                             Err(e) => {
@@ -605,6 +617,7 @@ impl CodeIndexer {
                         };
                         std::fs::write(&tmp, &bytes)?;
                         std::fs::rename(&tmp, &chunks_path_inner)?;
+                        guard.mark_owned(&chunks_path_inner);
                         Ok(())
                     })
                     .await;

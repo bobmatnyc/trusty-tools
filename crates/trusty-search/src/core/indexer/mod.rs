@@ -45,9 +45,13 @@ mod ingest;
 pub(crate) mod migration_state;
 pub(crate) mod migrations;
 mod persist;
+pub use persist::SnapshotRestore;
 mod persist_hnsw;
 mod quarantine;
 mod search;
+// #7920: chunks.json empty/foreign-over-populated overwrite guard.
+pub(crate) mod snapshot_guard;
+pub use snapshot_guard::SnapshotOverwriteRefused;
 pub mod typeahead;
 mod types;
 
@@ -432,6 +436,17 @@ pub struct CodeIndexer {
     /// `service::server::tests_4087`.
     pub corpus_open_failure: Option<crate::core::corpus::CorpusOpenFailure>,
 
+    /// #7920: `true` once any durable corpus has been wired on this indexer.
+    ///
+    /// Why: a staged swap takes the corpus out (`take_corpus_store`) and a
+    /// failed re-open leaves `corpus == None`, the state in which the snapshot
+    /// writers fall back to `chunks.json`. This flag separates "never had a
+    /// corpus" (a legacy JSON-only indexer) from "had one, now detached".
+    /// What: set by [`Self::set_corpus_store`] and [`Self::swap_corpus_store`];
+    /// never cleared. Read by `refuse_durable_write`.
+    /// Test: `shutdown_flush_after_failed_reattach_leaves_chunks_json_byte_identical`.
+    pub(super) corpus_ever_wired: bool,
+
     /// Issue #4122: monotonic count of writes refused because
     /// [`Self::corpus_open_failed`] was set. Issue #4226 widened it from
     /// incremental writes alone to every refused durable write.
@@ -543,6 +558,11 @@ pub struct CodeIndexer {
     /// per instance by [`Self::with_chunk_cap`].
     /// Test: `core::indexer::tests::chunk_cap` (every test in that module).
     chunk_cap: usize,
+
+    /// #7920: which `chunks.json` paths this indexer loaded or wrote, and how
+    /// many snapshot overwrites it refused. `Arc` so the detached incremental
+    /// persister applies the same guard as the shutdown flush.
+    pub(super) snapshot_guard: Arc<snapshot_guard::SnapshotGuard>,
 }
 
 /// Coalescing state for `spawn_incremental_persist`.
@@ -659,12 +679,14 @@ impl CodeIndexer {
             last_rehydrate_cost_ms: Arc::new(AtomicU64::new(0)),
             corpus_open_failed: false,
             corpus_open_failure: None,
+            corpus_ever_wired: false,
             incremental_writes_refused: AtomicU64::new(0),
             hnsw_load_failed: false,
             skip_kg: false,
             skip_vector: false,
             // #6369: resolve the cap once here, not on every insert.
             chunk_cap: max_chunks_per_index(),
+            snapshot_guard: Arc::new(snapshot_guard::SnapshotGuard::default()),
         }
     }
 
@@ -1001,6 +1023,8 @@ impl CodeIndexer {
     /// `tests/corpus_open_quarantine_4122.rs` covers the recovery transition.
     pub fn set_corpus_store(&mut self, corpus: Arc<crate::core::corpus::CorpusStore>) {
         self.corpus = Some(corpus);
+        // #7920: from here on, `corpus == None` means detached, not legacy.
+        self.corpus_ever_wired = true;
         self.clear_corpus_open_failure();
     }
 
@@ -1015,6 +1039,8 @@ impl CodeIndexer {
         &mut self,
         corpus: Arc<crate::core::corpus::CorpusStore>,
     ) -> Option<Arc<crate::core::corpus::CorpusStore>> {
+        // #7920: see `set_corpus_store`.
+        self.corpus_ever_wired = true;
         self.corpus.replace(corpus)
     }
 

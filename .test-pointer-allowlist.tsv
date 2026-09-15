@@ -779,13 +779,7 @@ crates/trusty-search/src/core/indexer/typeahead.rs	typeahead_returns_expected_fi
 crates/trusty-search/src/core/indexer/typeahead.rs	typeahead_returns_hits
 crates/trusty-search/src/core/indexer/types.rs	retain_files_filters_chunks_and_entities
 crates/trusty-search/src/core/migration/m001.rs	test_m001_idempotency_no_corpus
-crates/trusty-search/src/core/migration/m002.rs	test_m002_idempotency
-crates/trusty-search/src/core/migration/m002.rs	test_m002_reconstruct_id
-crates/trusty-search/src/core/migration/m002.rs	test_m002_rewrite_logic
 crates/trusty-search/src/core/migration/m003.rs	test_m003_apply_idempotent_when_already_relative
-crates/trusty-search/src/core/migration/m004.rs	test_m004_all_relative_is_noop
-crates/trusty-search/src/core/migration/m004.rs	test_m004_idempotency
-crates/trusty-search/src/core/migration/m004.rs	test_m004_reconstruct_id
 crates/trusty-search/src/core/migration/mod.rs	test_current_schema_version_matches_registry
 crates/trusty-search/src/core/migration/mod.rs	test_run_migrations_applies_in_sequence
 crates/trusty-search/src/core/migration/mod.rs	test_run_migrations_idempotent_after_crash

@@ -10,39 +10,30 @@
 //! so updating `root_path` in `indexes.toml` is sufficient to relocate the
 //! index without a full re-index.
 //!
-//! What: `apply` loads all chunks from the durable corpus, identifies those
-//! whose `file` is absolute and shares the index `root_path` as a prefix,
-//! rewrites `file` (and reconstructs `id`) to be root-relative, and upserts
-//! the modified chunks back. The old absolute-keyed rows are deleted
-//! transactionally in the same write pass. Idempotency is guaranteed by the
-//! pre-check: if a chunk's `file` is already relative (i.e. not absolute) it
-//! is left unchanged. Chunks whose absolute path does NOT share the
-//! `root_path` prefix (unusual, defensive path) are also left unchanged and
-//! logged at `warn`.
+//! What: `apply` delegates to
+//! [`super::relativize::relativize_corpus_paths`], shared with M004. That pass
+//! rewrites every absolute `file` under `root_path` and its id, keeps a row
+//! whose relative id is already taken (reported, #7923), and verifies the row
+//! count is unchanged. Already-relative chunks are left unchanged, which makes
+//! a second `apply` a no-op.
 //!
-//! Test: `m002::tests` covers the path rewrite logic, idempotency (second
-//! `apply` is a no-op), and the no-corpus fast path.
+//! Test: `m002::tests` covers the version contract and the no-corpus fast
+//! path; `relativize::tests` covers the rewrite and its #7923 loss shapes.
 
-use std::path::Path;
-
-use anyhow::{Context, Result};
 use async_trait::async_trait;
 
 use crate::core::registry::IndexHandle;
 
+use super::relativize::relativize_corpus_paths;
 use super::Migration;
-
-// ── M002 struct ───────────────────────────────────────────────────────────────
 
 /// Migration M002: rewrite absolute `file` paths in the chunk corpus to be
 /// relative to the index `root_path` (issue #402, phase 1).
 ///
 /// Why: see module-level doc.
-/// What: loads all chunks, rewrites absolute-path `file`/`id` fields to
-/// root-relative, upserts rewritten chunks, and deletes the old absolute-keyed
-/// rows in the redb corpus.
-/// Test: `test_m002_from_target_version`, `test_m002_rewrite_logic`,
-///       `test_m002_idempotency`, `test_m002_apply_no_corpus_is_ok`.
+/// What: runs the shared relativization pass under the `M002` label.
+/// Test: `test_m002_from_target_version`, `test_m002_apply_no_corpus_is_ok`,
+/// `relativize::tests::relativize_preserves_every_chunk_for_m002_and_m004`.
 pub struct M002AbsoluteToRelativePaths;
 
 #[async_trait]
@@ -65,166 +56,20 @@ impl Migration for M002AbsoluteToRelativePaths {
     /// Apply M002 to `index`.
     ///
     /// Why: see module-level doc.
-    /// What:
-    /// 1. Clone corpus Arc and root_path under a brief read lock.
-    /// 2. Load all chunks (blocking I/O, `spawn_blocking`).
-    /// 3. For each chunk whose `file` is absolute and starts with `root_path`,
-    ///    compute the root-relative file path and the reconstructed chunk id.
-    /// 4. Upsert rewritten chunks into redb (new relative-keyed rows).
-    /// 5. Delete the old absolute-keyed rows from redb.
-    /// Returns `Ok(())` when no rewrite is needed (already relative or no
-    /// corpus).
-    /// Test: `test_m002_apply_no_corpus_is_ok`.
+    /// What: delegates to `relativize_corpus_paths`; an `Err` (including a
+    /// changed row count, #7923) leaves the schema version unstamped.
+    /// Test: `relativize_preserves_every_chunk_for_m002_and_m004`.
     async fn apply(&self, index: &IndexHandle) -> Result<(), anyhow::Error> {
-        // ── Step 1: clone corpus Arc + root_path under a brief read lock ──
-        let (corpus, root_path) = {
-            let indexer = index.indexer.read().await;
-            let corpus = indexer.corpus_store();
-            let root = index.root_path.clone();
-            (corpus, root)
-        };
-
-        let Some(corpus) = corpus else {
-            // BM25-only or test index with no durable corpus — no-op.
-            tracing::debug!(
-                index_id = %index.id,
-                "M002: no durable corpus, skipping"
-            );
-            return Ok(());
-        };
-
-        // ── Step 2: load all chunks (blocking I/O) ─────────────────────────
-        let all_chunks = tokio::task::spawn_blocking({
-            let corpus = std::sync::Arc::clone(&corpus);
-            move || corpus.load_all_chunks()
-        })
-        .await
-        .context("M002: load_all_chunks task panicked")?
-        .context("M002: failed to load chunks from corpus")?;
-
-        // ── Step 3: identify chunks needing rewrite ────────────────────────
-        let mut to_upsert = Vec::new();
-        let mut ids_to_delete: Vec<String> = Vec::new();
-
-        for mut chunk in all_chunks {
-            if !Path::new(&chunk.file).is_absolute() {
-                // Already relative — idempotency: leave unchanged.
-                continue;
-            }
-            // Try to strip the root_path prefix.
-            let old_file = chunk.file.clone();
-            let old_id = chunk.id.clone();
-            match Path::new(&old_file).strip_prefix(&root_path) {
-                Ok(rel) => {
-                    let rel_str = rel.to_string_lossy().into_owned();
-                    // Reconstruct id: replace the leading absolute file prefix
-                    // with the relative path. Chunk id format is
-                    // `"{file}:{start}:{end}"` — split on the first ':' that
-                    // follows the file segment.
-                    let new_id = reconstruct_id(&old_id, &old_file, &rel_str);
-                    chunk.file = rel_str;
-                    chunk.id = new_id;
-                    ids_to_delete.push(old_id);
-                    to_upsert.push(chunk);
-                }
-                Err(_) => {
-                    // Absolute path but not under root_path — defensive: log
-                    // and leave unchanged so we don't corrupt a cross-root index.
-                    tracing::warn!(
-                        index_id = %index.id,
-                        file = %old_file,
-                        root = %root_path.display(),
-                        "M002: chunk file is absolute but not under root_path; skipping"
-                    );
-                }
-            }
-        }
-
-        if to_upsert.is_empty() {
-            tracing::info!(
-                index_id = %index.id,
-                "M002: all chunk paths already relative, nothing to do"
-            );
-            return Ok(());
-        }
-
-        tracing::info!(
-            index_id = %index.id,
-            count = to_upsert.len(),
-            "M002: rewriting absolute chunk file paths to root-relative"
-        );
-
-        // ── Step 4 & 5: upsert rewritten chunks then delete old rows ───────
-        // Upsert first so a crash between steps leaves both old + new rows
-        // (double entries) which are safe at query time (the relative row wins
-        // in any post-M002 search path); deleting only on success of upsert
-        // ensures we never lose data.
-        let upsert_corpus = std::sync::Arc::clone(&corpus);
-        let chunks_to_upsert = to_upsert;
-        tokio::task::spawn_blocking(move || upsert_corpus.upsert_chunks(&chunks_to_upsert))
-            .await
-            .context("M002: upsert task panicked")?
-            .context("M002: failed to upsert rewritten chunks")?;
-
-        let delete_corpus = std::sync::Arc::clone(&corpus);
-        tokio::task::spawn_blocking(move || delete_corpus.delete_chunks(&ids_to_delete))
-            .await
-            .context("M002: delete task panicked")?
-            .context("M002: failed to delete old absolute-keyed chunk rows")?;
-
-        // ── Step 6: sync the live BM25 + in-memory chunks map ─────────────
-        // The in-memory BM25 index was populated at warm-boot from the OLD
-        // absolute-path chunk IDs. Now that redb holds relative-path IDs, any
-        // search that calls `fetch_chunks_for_ids` with an absolute ID will find
-        // nothing. Refresh both live structures from the updated corpus so
-        // searches use the correct (relative) IDs immediately.
-        {
-            let indexer = index.indexer.read().await;
-            if let Err(e) = indexer.refresh_live_indices_from_corpus().await {
-                tracing::warn!(
-                    index_id = %index.id,
-                    "M002: live-index refresh failed ({e}) — \
-                     BM25 may be stale until next daemon restart"
-                );
-            }
-        }
-
-        tracing::info!(
-            index_id = %index.id,
-            "M002: path rewrite complete (redb + live BM25 + chunks map synced)"
-        );
-
-        Ok(())
+        // #7923: the former inline rewrite lost a row per id collision.
+        relativize_corpus_paths(index, "M002").await.map(|_| ())
     }
 }
-
-// ── Helper ────────────────────────────────────────────────────────────────────
-
-/// Reconstruct the chunk `id` by replacing the absolute `old_file` prefix with
-/// `rel_file`.
-///
-/// Why: chunk `id` encodes the file path: `"{file}:{start}:{end}"`. When the
-/// file part changes from absolute to relative, the `id` key in redb must
-/// change too (it is the primary key for the CHUNKS_TABLE). We swap the file
-/// prefix rather than re-parsing `start`/`end` so malformed ids are preserved
-/// as-is (best-effort migration should never panic).
-/// What: if `old_id` starts with `old_file`, replace the `old_file` prefix
-/// with `rel_file`; otherwise return `old_id` unchanged.
-/// Test: `test_m002_reconstruct_id` in `m002::tests`.
-fn reconstruct_id(old_id: &str, old_file: &str, rel_file: &str) -> String {
-    if let Some(suffix) = old_id.strip_prefix(old_file) {
-        format!("{rel_file}{suffix}")
-    } else {
-        // Unexpected format — leave unchanged.
-        old_id.to_string()
-    }
-}
-
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::migration::relativize::reconstruct_id;
+    use std::path::Path;
 
     /// Why: validates the version contract that `run_migrations` depends on.
     /// What: `source_version` must be 1, `target_version` must be 2.
@@ -260,7 +105,6 @@ mod tests {
     /// Why: validates the `reconstruct_id` helper correctly swaps the file
     /// prefix in a standard chunk id.
     /// What: `"{abs_file}:{start}:{end}"` → `"{rel_file}:{start}:{end}"`.
-    /// Test: assert the reconstructed id matches expectations.
     #[test]
     fn test_m002_reconstruct_id_standard() {
         let old_file = "/Users/alice/proj/src/lib.rs";
@@ -279,7 +123,7 @@ mod tests {
         assert_eq!(result, old_id);
     }
 
-    /// Why: validates the path-rewrite logic used inside `apply` without
+    /// Why: validates the path-rewrite logic used inside the pass without
     /// spinning up a real redb corpus — strip_prefix on PathBuf.
     #[test]
     fn test_m002_rewrite_logic_strip_prefix() {
@@ -290,7 +134,7 @@ mod tests {
     }
 
     /// Why: validates that a path that does NOT share the root prefix causes
-    /// `strip_prefix` to return `Err` — the migration's defensive branch.
+    /// `strip_prefix` to return `Err` — the pass's defensive branch.
     #[test]
     fn test_m002_rewrite_logic_non_root_path_errors() {
         let root = Path::new("/Users/alice/proj");

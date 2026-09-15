@@ -345,7 +345,7 @@ async fn test_corpus_store_migrates_from_json() {
     let idx = make_indexer_with_corpus(&redb_path);
     let n = idx.load_chunks_from_disk(&json_path).await.unwrap();
     assert_eq!(n, 2);
-    idx.migrate_corpus_to_redb().await;
+    assert_eq!(idx.migrate_corpus_to_redb().await.expect("migrate"), 2);
     drop(idx);
 
     // The redb corpus must now hold the migrated chunks, so a subsequent

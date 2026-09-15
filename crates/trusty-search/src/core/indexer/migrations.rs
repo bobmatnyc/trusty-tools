@@ -59,7 +59,9 @@ pub const TRUSTY_SEARCH_SCHEMA_TARGET: SchemaVersion = SchemaVersion(1);
 /// graph as a side effect) and then seeds redb via
 /// [`CodeIndexer::migrate_corpus_to_redb`]. A missing or empty JSON file is
 /// the genuine first-boot case and yields `Ok(())` — the stamp still moves
-/// to v1 so subsequent boots skip this step entirely.
+/// to v1 so subsequent boots skip this step entirely. #7923: a corrupt
+/// snapshot, no wired corpus store, or a failed or short redb write yields
+/// `Err`, so the stamp stays put and the next boot retries.
 /// Test: end-to-end coverage lives in
 /// `service::persistence_loader`-driven integration tests; the runner-skip
 /// semantics are unit-tested in `trusty-common::migrations`.
@@ -115,23 +117,39 @@ impl Migration<CodeIndexer> for JsonCorpusToRedbMigration {
 /// (`block_in_place` for the multi-threaded path, off-thread runtime for
 /// the current-thread path) can share one implementation.
 /// What: returns `Ok(())` on success (including the "no JSON file" fresh
-/// install case) and propagates `Err` from the underlying chunk loader.
-/// Test: covered indirectly via the persistence_loader integration tests.
+/// install case). #7923: returns `Err` — so the runner does not stamp v1 and
+/// the next boot retries — when no corpus store is wired, the snapshot is
+/// unreadable or corrupt, or the redb write fails or comes up short. The
+/// snapshot file is never modified.
+/// Test: `tests::json_migration_seeds_every_unique_chunk_and_reports_duplicate_ids`,
+/// `json_migration_fails_on_corrupt_snapshot_and_keeps_it`,
+/// `json_migration_fails_without_a_corpus_store_and_keeps_snapshot`.
 async fn run_migration_async(indexer: &CodeIndexer, chunks_path: &std::path::Path) -> Result<()> {
-    // Step 1: read the JSON snapshot into memory (best-effort).
-    // `load_chunks_from_disk` returns 0 (and `Ok`) for missing / corrupt
-    // files — both are the fresh-install case.
-    let restored = indexer.load_chunks_from_disk(chunks_path).await?;
-    if restored == 0 {
+    // #7923: "success" with no store to seed stamped v1, so the snapshot was
+    // never read again once the store did open.
+    anyhow::ensure!(
+        indexer.has_corpus_store(),
+        "index '{}': no durable corpus store is wired (corpus_open_failed={}) — \
+         leaving {} for a later boot (#7923)",
+        indexer.index_id,
+        indexer.corpus_open_failed,
+        chunks_path.display()
+    );
+    // Step 1: read the JSON snapshot. Missing → nothing to do; corrupt → Err.
+    let loaded = indexer.restore_chunk_snapshot(chunks_path).await?;
+    if loaded.restored == 0 {
         return Ok(());
     }
     tracing::info!(
-        "migrations: '{}' loaded {restored} chunks from legacy {} — seeding redb",
+        "migrations: '{}' loaded {} chunks from legacy {} ({} duplicate-id entries \
+         folded) — seeding redb",
         indexer.index_id,
-        chunks_path.display()
+        loaded.restored,
+        chunks_path.display(),
+        loaded.duplicate_ids
     );
-    // Step 2: seed redb from the now-live in-memory corpus.
-    indexer.migrate_corpus_to_redb().await;
+    // Step 2: seed redb; a failed or short write fails the step (#7923).
+    indexer.migrate_corpus_to_redb().await?;
     Ok(())
 }
 
@@ -167,4 +185,161 @@ fn run_migration_off_thread(indexer: &CodeIndexer, chunks_path: &std::path::Path
             Err(_) => Err(anyhow::anyhow!("migration worker thread panicked")),
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::chunker::{ChunkType, RawChunk};
+    use crate::core::corpus::CorpusStore;
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+
+    fn chunk(id: &str, content: &str) -> RawChunk {
+        RawChunk {
+            id: id.to_string(),
+            file: format!("src/{id}.rs"),
+            start_line: 1,
+            end_line: 2,
+            content: content.to_string(),
+            function_name: None,
+            language: Some("rust".to_string()),
+            chunk_type: ChunkType::Code,
+            calls: Vec::new(),
+            inherits_from: Vec::new(),
+            chunk_depth: 0,
+            parent_chunk_id: None,
+            child_chunk_ids: Vec::new(),
+            nlp_keywords: Vec::new(),
+            nlp_code_refs: Vec::new(),
+            virtual_terms: Vec::new(),
+        }
+    }
+
+    fn write_snapshot(path: &std::path::Path, chunks: &[RawChunk]) {
+        let json = serde_json::json!({ "version": 1, "chunks": chunks, "entities": [] });
+        std::fs::write(path, serde_json::to_vec(&json).unwrap()).unwrap();
+    }
+
+    fn indexer_with_corpus(dir: &std::path::Path) -> (CodeIndexer, Arc<CorpusStore>) {
+        let corpus = Arc::new(CorpusStore::open(&dir.join("index.redb")).unwrap());
+        let mut indexer = CodeIndexer::new("json-7923", dir);
+        indexer.set_corpus_store(Arc::clone(&corpus));
+        (indexer, corpus)
+    }
+
+    /// #7923: every distinct chunk lands in redb, asserted by count and id set;
+    /// a repeated id is reported, not folded away silently.
+    #[tokio::test]
+    async fn json_migration_seeds_every_unique_chunk_and_reports_duplicate_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chunks.json");
+        let chunks = [
+            chunk("a", "fn a() {}"),
+            chunk("b", "fn b() {}"),
+            chunk("c", "fn c() {}"),
+            chunk("d", "fn d() {}"),
+            chunk("a", "fn a_again() {}"),
+        ];
+        write_snapshot(&path, &chunks);
+        let before = std::fs::read(&path).unwrap();
+
+        let (indexer, corpus) = indexer_with_corpus(dir.path());
+        run_migration_async(&indexer, &path)
+            .await
+            .expect("migration");
+
+        let ids: BTreeSet<String> = corpus
+            .load_all_chunks()
+            .unwrap()
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        let expected: BTreeSet<String> =
+            ["a", "b", "c", "d"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(corpus.chunk_count().unwrap(), 4);
+        assert_eq!(ids, expected);
+        assert_eq!(std::fs::read(&path).unwrap(), before, "snapshot untouched");
+
+        let probe = CodeIndexer::new("probe-7923", dir.path());
+        let report = probe.restore_chunk_snapshot(&path).await.unwrap();
+        assert_eq!(
+            report,
+            crate::core::indexer::SnapshotRestore {
+                restored: 4,
+                duplicate_ids: 1
+            }
+        );
+    }
+
+    /// Error arm: a corrupt snapshot fails the step (no v1 stamp) and survives.
+    #[tokio::test]
+    async fn json_migration_fails_on_corrupt_snapshot_and_keeps_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chunks.json");
+        std::fs::write(&path, br#"{"version":1,"chunks":[{"id":"#).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let (indexer, corpus) = indexer_with_corpus(dir.path());
+        let result = run_migration_async(&indexer, &path).await;
+        assert!(
+            result.is_err(),
+            "#7923: a corrupt snapshot must not report success"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(corpus.chunk_count().unwrap(), 0);
+    }
+
+    /// Error arm: with no store to seed, the step fails instead of stamping v1.
+    #[tokio::test]
+    async fn json_migration_fails_without_a_corpus_store_and_keeps_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chunks.json");
+        write_snapshot(&path, &[chunk("a", "fn a() {}")]);
+        let before = std::fs::read(&path).unwrap();
+
+        let indexer = CodeIndexer::new("no-corpus-7923", dir.path());
+        let result = run_migration_async(&indexer, &path).await;
+        assert!(
+            result.is_err(),
+            "#7923: no corpus store must not report success"
+        );
+        assert_eq!(
+            indexer.chunk_count(),
+            0,
+            "nothing loaded into a store-less index"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    /// #7923: `migrate_corpus_to_redb` itself refuses when no store is wired,
+    /// independent of the guard `run_migration_async` applies first.
+    #[tokio::test]
+    async fn migrate_corpus_to_redb_without_a_store_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chunks.json");
+        write_snapshot(&path, &[chunk("a", "fn a() {}")]);
+        let indexer = CodeIndexer::new("no-store-direct-7923", dir.path());
+        assert_eq!(indexer.load_chunks_from_disk(&path).await.unwrap(), 1);
+
+        let err = indexer
+            .migrate_corpus_to_redb()
+            .await
+            .expect_err("no store must be an error, not a silent return");
+        assert!(
+            err.to_string().contains("no durable corpus store"),
+            "{err:#}"
+        );
+        assert_eq!(indexer.chunk_count(), 1, "the in-memory corpus stays live");
+    }
+
+    /// #7923: a store holding fewer rows than were migrated fails the step.
+    #[test]
+    fn ensure_all_migrated_rejects_a_short_write() {
+        use crate::core::indexer::persist::ensure_all_migrated;
+        assert!(ensure_all_migrated("x", 4, 4).is_ok());
+        assert!(ensure_all_migrated("x", 4, 5).is_ok());
+        let err = ensure_all_migrated("x", 4, 3).expect_err("short write");
+        assert!(err.to_string().contains("1 missing"), "{err:#}");
+    }
 }

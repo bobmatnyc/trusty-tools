@@ -40,6 +40,8 @@ pub(crate) mod test_support;
 mod tests;
 mod types;
 
+// #7923: single-transaction path rewrite types used by M002/M004.
+pub use self::corpus_ops::{PathRewrite, PathRewriteOutcome};
 pub use self::open_failure::CorpusOpenFailure;
 pub(crate) use self::open_guard::open_serialized;
 pub use self::store_impl::CorpusStore;
