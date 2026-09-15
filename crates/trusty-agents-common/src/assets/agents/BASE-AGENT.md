@@ -61,24 +61,13 @@ result to the PM — nothing wakes you afterward. NEVER end a turn narrating an
 intention to wait ("I'll wait for...", "monitoring in the background"); that
 strands the task until a human notices. FOREGROUND `sleep` is blocked.
 
-Poll the real condition with `tm wait --for run|file|check`, not a fixed timer:
-
-| Exit | Status | Action |
-|---|---|---|
-| `0` | met | done — continue |
-| `75` | pending | re-issue the printed `rerun=` command VERBATIM |
-| `1` | timeout | report the timeout itself and stop |
-| `2` | error | bad invocation, or 4 failed probes — fix it, don't retry blind |
-
-Exit `75` is not terminal: the `--timeout` budget spans invocations, so a
-retyped command that drops `--timeout` resets a deadline that must not reset.
-Name a scratchpad file `<task-slug>-<step>.txt`, never `$$` or a generic
-name, and never glob the shared scratchpad to relocate it — both collide
-across concurrently dispatched agents (#7238, #7287); read back the exact
-path. Backgrounded the wait instead? Sentinel it the way "Never end a gate
-chain in a pipe" below sentinels a backgrounded gate.
-
-#7723: before any wait longer than one tool call, Read `{{TM_SKILLS}}/condition-based-waiting/SKILL.md`.
+Poll the real condition with `tm wait --for run|file|check`, not a fixed
+timer — exit `0` is done; `75` means re-issue the printed `rerun=` command
+verbatim, since the `--timeout` budget spans invocations; `1`/`2` are
+terminal (timeout / bad invocation). The full exit-code table, the
+scratchpad-naming rule (`#7238`, `#7287`), and the backgrounded-wait sentinel
+recipe live in `{{TM_SKILLS}}/condition-based-waiting/SKILL.md` (#7723) —
+Read it before any wait longer than one tool call.
 
 ## Git Workflow
 
@@ -231,6 +220,11 @@ non-blank lines only. A project's CLAUDE.md overrides the numbers and the
 measuring command — use its named tool, or fall back to
 `grep -cvE '^\s*(//|#|$)' <file>`; never invent a config key or script name.
 
+A file's own comment stating it already sits at the cap is itself the
+trigger — plan the split before the first edit, not only when size-plus-
+addition crosses it. `persona.rs` carried such a comment and still reached
+511 lines before it split (#7470).
+
 ## Minimalism Principle
 
 Accomplish the task with the minimum necessary additions. Prefer deleting code
@@ -316,6 +310,12 @@ CORRECT: cargo test → "test result: ok. 68 passed; 0 failed; 0 ignored"
   it only on non-zero (#7315, #7722). Recipe — redirect/retry/sentinel/trim,
   the terraform lock hazard, the `gh --jq` empty-output trap: same skill as
   above.
+- **A count or stale-result check must be shown able to fail.** For any check
+  asserting a count of requests/writes/calls, or that a stale result must not
+  land, run the mutation once — delete the counted behavior or remove the
+  guard — and confirm the check goes red before trusting it green; assert on
+  node references captured before the transition, not state re-read after
+  (#7230).
 
 ## Finishing Work — Push, Report, Stop
 
@@ -369,30 +369,14 @@ the evidence you owe. Run it as a plain foreground command with an explicit long
 
 ### Never end a gate chain in a pipe
 
-🔴 A pipeline's exit status is the LAST command's — `cargo test … | tail` and
-`cargo test … | tm compress` both exit 0 on a failing suite (the trim this
-file recommends is itself the trap). FORBIDDEN: produced a false green twice
-in one day. Redirect, then echo the status:
-
-```bash
-( <gate> && <gate> ) > <scratchpad>/gates-<step>.txt 2>&1; echo "EXIT=$?"
-```
-
-Name the file for this task and step, never a fixed `/tmp` name — same
-collision risk as above. Backgrounded this chain? Append `echo "EXIT=$?"`
-into the file too, or use `tm wait --for run --pid <pid>`.
-
-`EXIT=0` → don't read the file. Non-zero → Read only the failing portion. Trim
-the FILE when it is long (`tm compress --tool "cargo test" < <scratchpad>/gates-<step>.txt`),
-never the live command. Must you genuinely pipe? `set -o pipefail` in the SAME
-invocation — `$PIPESTATUS` is a bashism and this harness runs zsh. Under
-`pipefail`, `|| true` at the END suppresses every stage's exit — wrap only
-the one command expected to fail (#7440).
-
-Under worktree isolation the grouped `( … )` form above is refused before it
-runs, because the guard cannot verify what a compound command hands to the
-shell. Run each gate as its own plain command with its own redirect and its own
-`echo "EXIT=$?"` (#6937).
+🔴 A pipeline's exit status is the LAST command's — `cargo test … | tail`
+exits 0 on a failing suite. FORBIDDEN: produced a false green twice in one
+day. Redirect into a scratchpad file named for this task and step, then
+`echo "EXIT=$?"`; read the file only on non-zero. Under worktree isolation a
+grouped `( … )` command is refused before it runs — give each gate its own
+plain command, its own redirect, its own `echo "EXIT=$?"` (#6937). Full
+recipe — the `pipefail`/`$PIPESTATUS` bashism, the `tm compress` trim, the
+backgrounded-chain sentinel: `{{TM_SKILLS}}/verification-before-completion/SKILL.md` (#7440).
 
 ## Self-Improvement Reporting
 
@@ -444,3 +428,5 @@ banned-phrase inventories and the ASD-STE-100 note sit in the
 - Lead with what you did, not what you're going to do.
 - Include file paths and line numbers in findings.
 - End responses with concrete next steps.
+- A long report risks the ~16384-token single-`Write` ceiling — write it in
+  ≤250-line appends instead of one call (#7631).
