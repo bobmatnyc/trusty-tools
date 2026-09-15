@@ -1785,10 +1785,10 @@ const RESIDENT_BODY_BUDGET_BYTES: usize = 42_000;
 const OVER_BUDGET_BODY_BASELINES: &[(&str, usize, &str)] = &[
     ("dotnet-engineer", 43_500, "#7825"),
     ("elixir-engineer", 44_000, "#7825"),
-    ("java-engineer", 42_500, "#7825"),
-    ("nextjs-engineer", 43_000, "#7825"),
-    ("python-engineer", 43_000, "#7825"),
-    ("svelte-engineer", 43_000, "#7825"),
+    ("java-engineer", 42_500, "#8047"),
+    ("nextjs-engineer", 43_000, "#8047"),
+    ("python-engineer", 43_000, "#8047"),
+    ("svelte-engineer", 43_000, "#8047"),
     ("ticketing", 47_000, "#7727"),
     ("version-control", 47_500, "#7727"),
 ];
