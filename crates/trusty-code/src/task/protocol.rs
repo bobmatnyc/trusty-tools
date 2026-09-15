@@ -41,7 +41,7 @@ use super::mock_llm::build_llm_client;
 /// is omitted (#3437).
 ///
 /// Why: #3437 — every GUI-initiated run omits `agent_name` (no agent-roster
-/// endpoint exists yet for the GUI to pick from), so [`task_run`]'s default
+/// endpoint exists yet for the GUI to pick from), so `task_run`'s default
 /// MUST resolve against a real agent in every resolution tier (disk then
 /// embedded, see `agents::resolve_agent`) or 100% of daemon-default runs fail
 /// agent resolution before a single turn executes — exactly the failure mode
@@ -75,7 +75,7 @@ pub const DEFAULT_TASK_RUN_AGENT_NAME: &str = "pm";
 /// (explicit `workstream_id` param, or DOC-48 §4.2's ambient
 /// active-workstream default) through it, or enforces §4.1's immutability
 /// rule against an EXISTING session's persisted binding — see
-/// [`task_run`]'s docs.
+/// `task_run`'s docs.
 pub fn register(
     router: &mut Router,
     registry: Arc<SessionRegistry>,
