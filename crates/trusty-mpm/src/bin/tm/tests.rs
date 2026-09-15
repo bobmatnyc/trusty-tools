@@ -2673,6 +2673,36 @@ fn cli_parses_pr_open() {
     assert!(args.docs_only);
     assert!(args.dry_run);
     assert!(!args.closes, "Closes is opt-in, never the default");
+    assert!(
+        !args.minimal,
+        "the seven-field contract is the default, never opt-in (#7615)"
+    );
+}
+
+/// `tm pr open --minimal` parses, so a project with its own PR-body standard
+/// has a flag to reach for instead of a hand-assembled `gh pr create` (#7615).
+#[test]
+fn cli_parses_pr_open_minimal() {
+    use crate::cli::PrCmd;
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "pr",
+        "open",
+        "--title",
+        "fix(x): a thing",
+        "--body-file",
+        "/tmp/body.md",
+        "--minimal",
+    ])
+    .unwrap();
+    let Some(Command::Pr {
+        cmd: PrCmd::Open(args),
+    }) = cli.command
+    else {
+        panic!("expected pr open");
+    };
+    assert!(args.minimal);
+    assert!(!args.docs_only, "--minimal is not --docs-only");
 }
 
 /// `tm pr merge <n>` parses its number and its three switches (#6808).

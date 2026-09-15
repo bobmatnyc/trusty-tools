@@ -135,25 +135,41 @@ pub(crate) struct PrOpenArgs {
     #[arg(long, default_value = "main")]
     pub(crate) base: String,
 
-    /// Head branch to open FROM; requires --docs-only. Defaults to the
-    /// checkout's current branch.
+    /// Head branch to open FROM. Defaults to the checkout's current branch.
     ///
     /// Why (#7282): `gh pr create` infers the head from the checkout's current
     /// branch, so a caller that built its branch with git plumbing — the
     /// session-pause publisher does exactly that — had `gh` read `main` and
     /// abort with "you must first push the current branch to a remote, or use
     /// the --head flag". Naming the head makes the caller's checkout state
-    /// irrelevant. `--docs-only` is required with it because the changelog gate
-    /// can only diff the CHECKOUT's HEAD, so a source PR opened this way would
-    /// clear the gate against a diff it does not contain (#7282 round 5). The
-    /// pairing is enforced in `commands::pr::open::head_docs_only_conflict`,
-    /// which names the obligation instead of a bare clap message.
+    /// irrelevant. A head that is NOT the checkout's own commit still requires
+    /// `--docs-only`, because the changelog gate can diff only the checkout's
+    /// HEAD; the rule is enforced in `commands::pr::open` against the resolved
+    /// commit rather than the branch NAME, so a local branch pushed under a
+    /// different remote name opens a source PR (#7747).
     #[arg(long)]
     pub(crate) head: Option<String>,
 
     /// Skip the changelog-fragment gate — docs-only / CI-only PRs may.
     #[arg(long = "docs-only")]
     pub(crate) docs_only: bool,
+
+    /// Skip the seven-heading body contract; the footer and changelog gates
+    /// still run.
+    ///
+    /// Why (#7615): the seven headings are THIS repo's PR-body standard, and
+    /// `tm pr open` is used against projects whose `CLAUDE.md` names a
+    /// different one. With no opt-out, such a project's PR fell back to a
+    /// hand-assembled `gh pr create`, which skips the attribution-footer and
+    /// changelog checks too — losing three gates to escape one.
+    /// What: drops the missing/empty-heading half of the body report. The
+    /// footer check, the `Refs`/`Closes` rule, the workstream label and the
+    /// changelog fragment gate are unaffected.
+    /// Test: `pr_7615_minimal_skips_the_seven_field_contract`,
+    /// `pr_7615_minimal_still_enforces_the_footer_and_the_changelog`,
+    /// `cli_parses_pr_open_minimal`.
+    #[arg(long)]
+    pub(crate) minimal: bool,
 
     /// Workstream label source. Defaults to `$TM_SESSION_NAME`, else tmux.
     #[arg(long)]
