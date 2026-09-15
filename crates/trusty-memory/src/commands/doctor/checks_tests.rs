@@ -1,0 +1,153 @@
+//! Tests for the daemon-health probe seam and the run verdict (issue #4001).
+//!
+//! Why: `doctor/mod.rs` carries its tests inline and sits near the 500-SLOC
+//! cap, so the #4001 probe and verdict tests live beside `checks.rs` instead.
+//! What: drives [`check_daemon_health_at`] against in-process sockets that
+//! answer at once, answer slowly inside the budget, or accept and never answer,
+//! and pins [`summarize`]'s rule that an undetermined check is not a pass.
+//! Test: this IS the test module.
+
+use std::path::PathBuf;
+use std::time::Duration;
+
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+use super::super::{CheckResult, CheckStatus};
+use super::{check_daemon_health_at, summarize};
+
+/// How a stand-in daemon treats each request.
+#[derive(Clone, Copy)]
+enum Reply {
+    /// Answer with a healthy body after this delay.
+    After(Duration),
+    /// Accept the connection and never write a byte.
+    Never,
+}
+
+/// Serve `reply` on a hardened socket under a fresh temp dir.
+///
+/// Why: the probe dials through `connect_hardened`, which refuses a socket that
+/// is not `0600` in a `0700` directory, so a bare `UnixListener` would test the
+/// refusal arm instead of the one named. Nothing here touches a live daemon.
+/// What: returns the socket path, the temp dir that owns it, and the accept
+/// task, which the caller aborts.
+async fn stand_in(reply: Reply) -> (PathBuf, tempfile::TempDir, tokio::task::JoinHandle<()>) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let socket = tmp.path().join("sockets").join("stand-in.sock");
+    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind hardened socket");
+    let task = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            match reply {
+                Reply::Never => held.push(stream),
+                Reply::After(delay) => {
+                    tokio::spawn(async move {
+                        let mut reader = BufReader::new(stream);
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).await.is_err() {
+                            return;
+                        }
+                        tokio::time::sleep(delay).await;
+                        let body = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": 1,
+                            "result": {
+                                "status": "ok",
+                                "daemon_state": "ready",
+                                "worker": {"in_flight": 0, "wedged": false},
+                            },
+                        });
+                        let frame = format!("{body}\n");
+                        let _ = reader.get_mut().write_all(frame.as_bytes()).await;
+                    });
+                }
+            }
+        }
+    });
+    (socket, tmp, task)
+}
+
+/// Probe `socket` with `budget`, failing the test if the probe itself hangs.
+async fn probe(socket: &std::path::Path, budget: Duration) -> CheckResult {
+    tokio::time::timeout(
+        budget + Duration::from_secs(5),
+        check_daemon_health_at("daemon socket".to_string(), socket, budget),
+    )
+    .await
+    .expect("the probe must finish within its own budget")
+}
+
+/// Why (issue #4001, error arm): a daemon wedged hard enough to accept a
+/// connection and never answer must neither hang the doctor nor read as a pass.
+/// What: a stand-in that holds every connection silently, probed with a 200 ms
+/// budget; asserts `Unknown` and a message naming the timeout.
+/// Test: itself.
+#[tokio::test]
+async fn a_socket_that_accepts_and_never_answers_is_unknown_within_the_budget() {
+    let (socket, _tmp, task) = stand_in(Reply::Never).await;
+    let result = probe(&socket, Duration::from_millis(200)).await;
+    task.abort();
+
+    assert_eq!(result.status, CheckStatus::Unknown, "{result:?}");
+    let detail = result.detail.as_deref().unwrap_or_default();
+    assert!(
+        detail.contains("did not answer") && detail.contains("could not be determined"),
+        "the timeout must be named, not dressed as a verdict: {detail}"
+    );
+    assert!(
+        !summarize(&[result]).healthy,
+        "a timed-out probe must not end the run healthy"
+    );
+}
+
+/// Why (issue #4001, no false alarm): the fix must still let a responsive
+/// daemon pass, including one that is slow but answers inside the budget.
+/// What: stand-ins answering at once and after 300 ms, probed with a 2 s
+/// budget; both must be `Pass` and a healthy run.
+/// Test: itself.
+#[tokio::test]
+async fn a_responsive_daemon_passes() {
+    for delay in [Duration::ZERO, Duration::from_millis(300)] {
+        let (socket, _tmp, task) = stand_in(Reply::After(delay)).await;
+        let result = probe(&socket, Duration::from_secs(2)).await;
+        task.abort();
+
+        assert_eq!(
+            result.status,
+            CheckStatus::Pass,
+            "a daemon answering after {delay:?} must pass: {result:?}"
+        );
+        assert!(summarize(&[result]).healthy, "delay {delay:?}");
+    }
+}
+
+/// Why (issue #4001): the run used to end green with exit 0 whenever nothing
+/// had `Fail`ed, so one undetermined check beside passes read as healthy.
+/// What: asserts a pass plus an unknown is not healthy, and the tally names
+/// the undetermined column.
+/// Test: itself.
+#[test]
+fn an_undetermined_check_is_not_a_healthy_run() {
+    let summary = summarize(&[
+        CheckResult::pass("a", "fine"),
+        CheckResult::unknown("daemon socket", "did not answer"),
+    ]);
+    assert!(!summary.healthy);
+    assert_eq!(
+        summary.line,
+        "1 passed, 0 warnings, 1 undetermined, 0 failed."
+    );
+}
+
+/// Why: `Warn` has never flipped the exit code, and #4001 must not start.
+/// What: asserts passes plus a warning is still a healthy run.
+/// Test: itself.
+#[test]
+fn warnings_alone_are_a_healthy_run() {
+    let summary = summarize(&[
+        CheckResult::pass("a", "fine"),
+        CheckResult::warn("b", "minor"),
+    ]);
+    assert!(summary.healthy);
+    assert!(!summarize(&[CheckResult::fail("c", "broken")]).healthy);
+}

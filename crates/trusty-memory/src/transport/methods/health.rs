@@ -241,7 +241,9 @@ pub struct UnopenablePalace {
 /// Test: `health_reports_idle_worker_pool`, `health_reports_wedged_worker_pool`.
 #[derive(serde::Serialize)]
 pub struct WorkerHealth {
-    /// Operations currently inside the palace open path.
+    /// Palace opens and budgeted writes currently in flight. A write counts
+    /// from the start of its wait for the palace write lock until it releases
+    /// the lock (#4001).
     pub in_flight: usize,
     /// Seconds the oldest outstanding operation has been running. Absent when
     /// nothing is in flight — an idle pool has no age to report, and reporting

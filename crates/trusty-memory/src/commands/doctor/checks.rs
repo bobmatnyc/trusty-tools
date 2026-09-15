@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::CheckResult;
+use super::{CheckResult, CheckStatus};
 
 /// Per-request budget for the `/health` probe.
 ///
@@ -179,7 +179,25 @@ pub async fn check_daemon_health() -> CheckResult {
             )
         }
     };
+    check_daemon_health_at(label, &socket, PROBE_TIMEOUT).await
+}
 
+/// [`check_daemon_health`] against an explicit socket and budget (#4001).
+///
+/// Why: the resolver reads this host's data directory, so a test could reach
+/// the probe only by mutating process-wide env. This seam lets an in-process
+/// socket that accepts and never answers prove the timeout arm stays bounded
+/// and never reads as a pass, without touching a live daemon.
+/// What: one framed `memory.health` call bounded by `timeout`. A timeout is
+/// `Unknown`, any other transport error `Fail`, a JSON-RPC error `Fail`, and a
+/// result goes through [`interpret_health_body`].
+/// Test: `a_socket_that_accepts_and_never_answers_is_unknown_within_the_budget`,
+/// `a_responsive_daemon_passes` in `checks_tests.rs`.
+pub(super) async fn check_daemon_health_at(
+    label: String,
+    socket: &Path,
+    timeout: Duration,
+) -> CheckResult {
     let request = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -188,18 +206,18 @@ pub async fn check_daemon_health() -> CheckResult {
     });
 
     let response: trusty_common::uds::server::RpcResponse =
-        match trusty_common::uds::send_framed_request(&socket, &request, PROBE_TIMEOUT).await {
+        match trusty_common::uds::send_framed_request(socket, &request, timeout).await {
             Ok(response) => response,
             Err(trusty_common::uds::UdsRpcError::Timeout { .. }) => {
                 return CheckResult::unknown(
                     label,
                     format!(
-                        "{} did not answer {} within {}s. The connection was not refused, so \
-                         the daemon may be alive and slow — health could not be determined. \
-                         Re-run when load subsides rather than restarting anything.",
+                        "{} did not answer {} within {timeout:?}. The connection was not \
+                         refused, so the daemon may be alive and slow, or wedged — health \
+                         could not be determined. Re-run when load subsides rather than \
+                         restarting anything.",
                         socket.display(),
                         crate::transport::uds::METHOD_HEALTH,
-                        PROBE_TIMEOUT.as_secs(),
                     ),
                 );
             }
@@ -344,6 +362,42 @@ pub(super) fn interpret_health_body(
         format!("{url} → {status}, workers progressing{occupancy}"),
     )
 }
+
+/// The overall `trusty-memory doctor` verdict (issue #4001).
+///
+/// Why: a health probe that times out yields `Unknown` (#4005), and the run
+/// used to print a green check mark and exit 0 whenever nothing had `Fail`ed.
+/// A daemon wedged hard enough that `memory.health` never answered therefore
+/// ended the run looking healthy. An undetermined check has not passed.
+/// What: the one-line tally, with indeterminate checks in their own column,
+/// and `healthy` true only when no check failed and none was undetermined.
+/// `Warn` still does not flip it.
+/// Test: `an_undetermined_check_is_not_a_healthy_run`,
+/// `warnings_alone_are_a_healthy_run` in `checks_tests.rs`.
+pub(super) struct DoctorSummary {
+    /// "N passed, N warnings, N undetermined, N failed."
+    pub(super) line: String,
+    /// Whether the run may end green with exit 0.
+    pub(super) healthy: bool,
+}
+
+/// Tally `results` into a [`DoctorSummary`]. See its docs for the rule.
+pub(super) fn summarize(results: &[CheckResult]) -> DoctorSummary {
+    let count = |status: CheckStatus| results.iter().filter(|r| r.status == status).count();
+    let (passed, warned) = (count(CheckStatus::Pass), count(CheckStatus::Warn));
+    let (unknown, failed) = (count(CheckStatus::Unknown), count(CheckStatus::Fail));
+    DoctorSummary {
+        line: format!(
+            "{passed} passed, {warned} warnings, {unknown} undetermined, {failed} failed."
+        ),
+        // #4001: a timed-out probe must never map to a healthy run.
+        healthy: failed == 0 && unknown == 0,
+    }
+}
+
+#[cfg(test)]
+#[path = "checks_tests.rs"]
+mod checks_tests;
 
 /// Scan the data directory for stray `*.lock` files left over from a
 /// crashed daemon.

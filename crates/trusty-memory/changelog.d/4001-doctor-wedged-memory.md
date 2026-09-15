@@ -1,0 +1,5 @@
+Fixed
+
+- **`memory.health` now sees a write stalled on a palace write lock.** On 2026-09-13 a `memory_remember` held the `trusty-tools` palace lock and never finished. Later writers timed out after 60 s while health reported `ok` with 0 in flight, so both `tm doctor` and `trusty-memory doctor` read HEALTHY. `memory_remember`, `memory_note` and `task_add` now count in `worker.in_flight` from the start of their lock wait until they release the lock, so a stalled holder turns `status` to `wedged` once it passes the wedge threshold ([#4001](https://github.com/bobmatnyc/trusty-tools/issues/4001))
+- The wedge threshold is now twice the larger of `open_queue_timeout` and `write_lock_timeout`, so raising `TRUSTY_WRITE_LOCK_TIMEOUT_SECS` cannot make a writer queued inside its bound read as wedged ([#4001](https://github.com/bobmatnyc/trusty-tools/issues/4001))
+- `trusty-memory doctor` no longer ends a run green with exit 0 when a check is undetermined. A health probe that times out against a daemon that accepts the connection but never answers now makes the run exit 1 ([#4001](https://github.com/bobmatnyc/trusty-tools/issues/4001))

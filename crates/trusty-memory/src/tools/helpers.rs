@@ -331,12 +331,14 @@ pub(crate) fn room_label(room: &RoomType) -> Option<String> {
 /// doctors) observe that work has stopped moving. The guard is RAII, so the
 /// `?` on the line below releases it just as reliably as the success path.
 /// What: unchanged behaviour, plus a [`crate::worker_liveness`] registration
-/// held for the duration of the open.
+/// held for the duration of the open. Writes register once for their whole
+/// duration in [`begin_budgeted_write`] instead.
 /// Test: `worker_liveness::tests`, `web::tests::health_tests`.
 pub(crate) fn open_palace_handle(
     state: &AppState,
     palace_id: &str,
 ) -> Result<std::sync::Arc<trusty_common::memory_core::PalaceHandle>> {
+    let _tracked = state.worker_liveness.track();
     open_palace_handle_within(state, palace_id, OpBudget::start(state.write_op_budget))
 }
 
@@ -351,16 +353,17 @@ pub(crate) fn open_palace_handle(
 /// callers pass their in-flight budget here so this leg spends only the
 /// remainder.
 /// What: identical to [`open_palace_handle`] except the open-queue wait is
-/// clamped by `budget`; the liveness guard and error context are unchanged.
-/// Read paths keep calling [`open_palace_handle`], which stamps a full budget
-/// and therefore behaves exactly as before.
-/// Test: `tools::tests::write_budget_tests`.
+/// clamped by `budget` and it registers no liveness guard of its own. Every
+/// caller runs inside [`begin_budgeted_write`], whose [`WriteGuard`] already
+/// counts the write once. Read paths keep calling [`open_palace_handle`], which
+/// stamps a full budget and therefore behaves exactly as before.
+/// Test: `tools::tests::write_budget_tests`, `tools::tests::write_liveness_tests`.
 pub(crate) fn open_palace_handle_within(
     state: &AppState,
     palace_id: &str,
     budget: OpBudget,
 ) -> Result<std::sync::Arc<trusty_common::memory_core::PalaceHandle>> {
-    let _tracked = state.worker_liveness.track();
+    // #4001: untracked here so one write is not counted twice in `in_flight`.
     let pid = PalaceId::new(palace_id);
     state
         .registry
@@ -377,27 +380,56 @@ pub(crate) fn open_palace_handle_within(
 /// Routing them through one helper is what guarantees the budget is stamped
 /// before the first wait — a per-handler copy is exactly how one of them would
 /// later drift back to the additive shape.
-/// What: stamps an [`OpBudget`] of [`AppState::write_op_budget`], waits at most
+/// What: stamps an [`OpBudget`] of [`AppState::write_op_budget`], registers the
+/// write with [`crate::worker_liveness`], waits at most
 /// `min(write_lock_timeout(), budget)` for the palace's write mutex, and
 /// returns the budget so the caller can pass its remainder to
-/// [`open_palace_handle_within`]. `tool` prefixes the error so the caller sees
-/// which handler gave up.
-/// Test: `tools::tests::write_budget_tests`.
+/// [`open_palace_handle_within`]. The registration lives inside the returned
+/// [`WriteGuard`], so the write counts from the start of its wait until the
+/// lock is released. `tool` prefixes the error so the caller sees which
+/// handler gave up.
+/// Test: `tools::tests::write_budget_tests`, `tools::tests::write_liveness_tests`.
 pub(crate) async fn begin_budgeted_write<'a>(
-    state: &AppState,
+    state: &'a AppState,
     write_lock: &'a std::sync::Arc<tokio::sync::Mutex<()>>,
     palace_id: &str,
     tool: &str,
-) -> Result<(tokio::sync::MutexGuard<'a, ()>, OpBudget)> {
+) -> Result<(WriteGuard<'a>, OpBudget)> {
     let budget = OpBudget::start(state.write_op_budget);
-    let guard = timeouts::lock_with_timeout(
+    // #4001: register before the wait so a queued writer is visible, and hold
+    // the registration until the lock is released so a stalled holder is too.
+    let tracked = state.worker_liveness.track();
+    let lock = timeouts::lock_with_timeout(
         write_lock,
         budget.leg(timeouts::write_lock_timeout()),
         palace_id,
     )
     .await
     .map_err(|e| anyhow::anyhow!("{tool}: {e:#}"))?;
-    Ok((guard, budget))
+    Ok((
+        WriteGuard {
+            _lock: lock,
+            _tracked: tracked,
+        },
+        budget,
+    ))
+}
+
+/// A held palace write lock plus the write's liveness registration (#4001).
+///
+/// Why: on 2026-09-13 a writer held this lock and never finished, while
+/// `memory.health` reported `ok` with 0 in flight. Queued writers give up at
+/// their bound, which sits below the wedge threshold, so only the holder's age
+/// can trip it. Binding the registration to the lock guard is what keeps the
+/// holder visible, and it means neither can be dropped without the other.
+/// A write that holds the lock past the threshold reads as wedged even if it
+/// later finishes: every writer queued behind it has already failed.
+/// What: the `tokio` lock guard and a [`crate::worker_liveness::WorkGuard`];
+/// both release on drop.
+/// Test: `tools::tests::write_liveness_tests`.
+pub(crate) struct WriteGuard<'a> {
+    _lock: tokio::sync::MutexGuard<'a, ()>,
+    _tracked: crate::worker_liveness::WorkGuard<'a>,
 }
 
 /// Run deterministic KG extraction over a freshly-written drawer and assert

@@ -138,6 +138,30 @@ fn wedge_threshold_exceeds_the_open_queue_bound() {
     );
 }
 
+/// Why (issue #4001): writers queued on the palace write lock are tracked now,
+/// and they wait up to `write_lock_timeout()`. If the line followed only the
+/// open-queue bound, raising `TRUSTY_WRITE_LOCK_TIMEOUT_SECS` would make a
+/// writer legitimately queued inside its bound read as wedged.
+/// What: drives the pure derivation with each bound in turn as the larger, and
+/// checks the operator override still wins outright.
+/// Test: itself.
+#[test]
+fn wedge_threshold_doubles_the_larger_wait_bound() {
+    let short = Duration::from_secs(60);
+    let long = Duration::from_secs(300);
+    assert_eq!(
+        derive_wedge_threshold(None, short, long),
+        long * 2,
+        "a raised write-lock bound must move the wedge line"
+    );
+    assert_eq!(derive_wedge_threshold(None, long, short), long * 2);
+    assert_eq!(
+        derive_wedge_threshold(Some(7), long, long),
+        Duration::from_secs(7),
+        "the operator override is taken verbatim"
+    );
+}
+
 #[test]
 fn overflow_is_counted_when_slots_exhausted() {
     let t = WorkerLiveness::new();
