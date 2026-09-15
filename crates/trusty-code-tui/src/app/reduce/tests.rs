@@ -431,8 +431,12 @@ fn apply_assistant_output_finalizes_as_error_role() {
     assert_eq!(app.chat[0].role, ChatRole::Error);
 }
 
+/// #4596: a call's start opens one card and its completion (same `id`, `Null`
+/// args, as trusty-code sends it) fills that card instead of pushing a second
+/// entry.
 #[test]
-fn apply_tool_invocation_renders_start_and_result_as_status() {
+fn tool_invocation_result_merges_into_its_call_card() {
+    use crate::app::{ChatRole, ToolCard};
     let mut app = ReplApp::new("demo", "u");
     apply(
         &mut app,
@@ -444,18 +448,53 @@ fn apply_tool_invocation_renders_start_and_result_as_status() {
             result: None,
         },
     );
-    assert_eq!(app.chat[0].text, "[TOOL] git.checkout: \"main\"");
+    assert_eq!(app.chat.len(), 1);
+    assert_eq!(app.chat[0].role, ChatRole::Status);
+    assert_eq!(app.tool_cards.get("call-1"), Some(&0));
     apply(
         &mut app,
         ReplEvent::ToolInvocation {
             id: "call-1".into(),
             agent_id: String::new(),
             tool_name: "git.checkout".into(),
-            args: serde_json::json!("main"),
+            args: serde_json::Value::Null,
             result: Some("switched to main".into()),
         },
     );
-    assert_eq!(app.chat[1].text, "[RESULT] switched to main");
+    assert_eq!(app.chat.len(), 1, "one card, not two entries");
+    assert_eq!(
+        app.chat[0].tool,
+        Some(ToolCard {
+            id: "call-1".into(),
+            tool_name: "git.checkout".into(),
+            args: serde_json::json!("main"),
+            result: Some("switched to main".into()),
+        })
+    );
+    assert!(
+        app.tool_cards.is_empty(),
+        "a completed call releases its key"
+    );
+}
+
+/// A completion for a call this client never saw start (a TUI attached
+/// mid-call) still shows, as its own completed card.
+#[test]
+fn tool_invocation_result_without_a_start_opens_its_own_card() {
+    let mut app = ReplApp::new("demo", "u");
+    apply(
+        &mut app,
+        ReplEvent::ToolInvocation {
+            id: "call-9".into(),
+            agent_id: String::new(),
+            tool_name: "bash".into(),
+            args: serde_json::Value::Null,
+            result: Some("done".into()),
+        },
+    );
+    let card = app.chat[0].tool.as_ref().expect("a card");
+    assert_eq!(card.result.as_deref(), Some("done"));
+    assert!(app.tool_cards.is_empty());
 }
 
 #[test]
@@ -859,8 +898,8 @@ fn delegation_finished_drops_an_unterminated_stream_key() {
     assert!(app.agent_streams.is_empty());
 }
 
-/// A delegated sub-agent's tool calls belong inside its block; the primary
-/// agent's stay top-level status lines.
+/// A delegated sub-agent's tool cards belong inside its block; the primary
+/// agent's stay top-level (#7940, #4596).
 #[test]
 fn tool_invocation_attributed_to_a_delegation_is_delegated_role() {
     let mut app = app_with_delegation("eng-1", "engineer");
@@ -884,9 +923,90 @@ fn tool_invocation_attributed_to_a_delegation_is_delegated_role() {
             result: None,
         },
     );
+    let name = |i: usize| app.chat[i].tool.as_ref().map(|c| c.tool_name.as_str());
     assert_eq!(app.chat[1].role, ChatRole::Delegated);
-    assert_eq!(app.chat[1].text, "[TOOL] bash: \"cargo test\"");
+    assert_eq!(name(1), Some("bash"));
     assert_eq!(app.chat[2].role, ChatRole::Status);
+    assert_eq!(name(2), Some("delegate_to_agent"));
+}
+
+/// A delegated call whose completion arrives after its block closed still
+/// fills the card it opened inside that block (#4596, #7940).
+#[test]
+fn tool_invocation_completion_after_delegation_closes_fills_the_delegated_card() {
+    let mut app = app_with_delegation("eng-1", "engineer");
+    apply(
+        &mut app,
+        ReplEvent::ToolInvocation {
+            id: "c1".into(),
+            agent_id: "eng-1".into(),
+            tool_name: "bash".into(),
+            args: serde_json::json!("cargo test"),
+            result: None,
+        },
+    );
+    apply(
+        &mut app,
+        ReplEvent::DelegationFinished {
+            agent_id: "eng-1".into(),
+            agent: "engineer".into(),
+            outcome: DelegationOutcome::Finished("success".into()),
+        },
+    );
+    apply(
+        &mut app,
+        ReplEvent::ToolInvocation {
+            id: "c1".into(),
+            agent_id: "eng-1".into(),
+            tool_name: "bash".into(),
+            args: serde_json::Value::Null,
+            result: Some("ok".into()),
+        },
+    );
+    let cards: Vec<usize> = (0..app.chat.len())
+        .filter(|&i| app.chat[i].tool.as_ref().is_some_and(|c| c.id == "c1"))
+        .collect();
+    assert_eq!(cards, vec![1], "exactly one card for c1: {:?}", app.chat);
+    assert_eq!(app.chat[1].role, ChatRole::Delegated);
+    let card = app.chat[1].tool.as_ref().expect("a card");
+    assert_eq!(card.result.as_deref(), Some("ok"));
+    assert_eq!(card.args, serde_json::json!("cargo test"));
+    assert!(app.tool_cards.is_empty());
+}
+
+/// A repeated start for a call whose card is still open changes nothing —
+/// no second entry, no re-keying, and the first start's args survive.
+#[test]
+fn tool_invocation_repeated_start_for_an_open_card_is_a_noop() {
+    let mut app = ReplApp::new("demo", "u");
+    apply(
+        &mut app,
+        ReplEvent::ToolInvocation {
+            id: "c1".into(),
+            agent_id: String::new(),
+            tool_name: "bash".into(),
+            args: serde_json::json!("cargo test"),
+            result: None,
+        },
+    );
+    let chat_len = app.chat.len();
+    let tool_cards = app.tool_cards.clone();
+    let args = app.chat[0].tool.as_ref().expect("a card").args.clone();
+    apply(
+        &mut app,
+        ReplEvent::ToolInvocation {
+            id: "c1".into(),
+            agent_id: String::new(),
+            tool_name: "bash".into(),
+            args: serde_json::json!("cargo build"),
+            result: None,
+        },
+    );
+    assert_eq!(app.chat.len(), chat_len);
+    assert_eq!(app.tool_cards, tool_cards);
+    let card = app.chat[0].tool.as_ref().expect("a card");
+    assert_eq!(card.args, args);
+    assert_eq!(card.result, None);
 }
 
 /// `/clear` must drop the keyed-stream indices too — they index INTO `chat`,
@@ -895,8 +1015,19 @@ fn tool_invocation_attributed_to_a_delegation_is_delegated_role() {
 fn clear_scrollback_drops_delegation_state() {
     let mut app = app_with_delegation("eng-1", "engineer");
     apply(&mut app, agent_output("eng-1", "turn-b", "working", false));
+    apply(
+        &mut app,
+        ReplEvent::ToolInvocation {
+            id: "c1".into(),
+            agent_id: "eng-1".into(),
+            tool_name: "bash".into(),
+            args: serde_json::json!("cargo test"),
+            result: None,
+        },
+    );
     apply(&mut app, ReplEvent::ClearScrollback);
     assert!(app.chat.is_empty());
     assert!(app.agent_streams.is_empty());
+    assert!(app.tool_cards.is_empty());
     assert_eq!(app.active_agent(), None);
 }

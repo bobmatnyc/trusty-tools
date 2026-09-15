@@ -33,7 +33,7 @@
 //! # Spec References
 //! - [`SPEC-TTUI-05~draft`](docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-05~draft) — Slice 5 deliverable (§5, Slice 5): line-editor keymap + Ctrl-C daemon cancel.
 
-use super::{ChatLine, ChatRole, Delegation, ReplApp};
+use super::{ChatLine, ChatRole, Delegation, ReplApp, ToolCard};
 use crate::event::{DelegationOutcome, KeyCode, KeyInput, ReplEvent};
 use crate::text::{strip_interior_blank_lines, trim_surrounding_blank_lines};
 
@@ -84,23 +84,19 @@ pub fn apply(app: &mut ReplApp, ev: ReplEvent) {
             is_error,
         } => apply_assistant_output(app, chunk, done, is_error),
         ReplEvent::ToolInvocation {
-            id: _,
+            id,
             agent_id,
             tool_name,
             args,
             result,
         } => {
-            let text = match result {
-                None => format!("[TOOL] {tool_name}: {args}"),
-                Some(r) => format!("[RESULT] {r}"),
+            let card = ToolCard {
+                id,
+                tool_name,
+                args,
+                result,
             };
-            // #7940: a delegated sub-agent's tool calls belong inside its own
-            // block, not interleaved with the primary agent's at top level.
-            if is_delegated(app, &agent_id) {
-                push_delegated(app, ChatRole::Delegated, text);
-            } else {
-                app.push_status(text);
-            }
+            apply_tool_invocation(app, card, &agent_id);
         }
         ReplEvent::AgentOutput {
             agent_id,
@@ -175,6 +171,7 @@ fn apply_assistant_output(app: &mut ReplApp, chunk: String, done: bool, is_error
             app.chat.push(ChatLine {
                 role: ChatRole::Assistant,
                 text: chunk,
+                tool: None,
             });
             app.streaming_idx = Some(app.chat.len() - 1);
         }
@@ -208,8 +205,58 @@ fn is_delegated(app: &ReplApp, agent_id: &str) -> bool {
 /// Push one line into the scrollback with `role`, pinning the view to the
 /// newest content (#7940).
 fn push_delegated(app: &mut ReplApp, role: ChatRole, text: String) {
-    app.chat.push(ChatLine { role, text });
+    app.chat.push(ChatLine {
+        role,
+        text,
+        tool: None,
+    });
     app.scroll_offset = 0;
+}
+
+/// File one half of a tool call — its start or its completion — into that
+/// call's card (#4596).
+///
+/// Why: a call and its result arrive as two `ToolInvocation` events sharing
+/// `id`. Pushing each as its own line split one call across two scrollback
+/// entries.
+/// What: a completion whose `id` names an open card fills that card's
+/// `result` in place and releases the key; a repeated start for an open card
+/// is a no-op. Anything else opens a new card, keyed by `id` while it runs.
+/// Placement is decided once, when the card opens: [`ChatRole::Delegated`]
+/// inside an open delegation block (#7940), [`ChatRole::Status`] otherwise.
+/// An empty `id` never correlates. The completion's own `args` are dropped,
+/// since producers send `Null` there.
+/// Test: [`tests::tool_invocation_result_merges_into_its_call_card`],
+/// [`tests::tool_invocation_result_without_a_start_opens_its_own_card`],
+/// [`tests::tool_invocation_attributed_to_a_delegation_is_delegated_role`].
+fn apply_tool_invocation(app: &mut ReplApp, card: ToolCard, agent_id: &str) {
+    app.scroll_offset = 0;
+    if !card.id.is_empty()
+        && let Some(&idx) = app.tool_cards.get(&card.id)
+        && let Some(open) = app.chat.get_mut(idx).and_then(|e| e.tool.as_mut())
+        && open.id == card.id
+    {
+        if card.result.is_some() {
+            open.result = card.result;
+            app.tool_cards.remove(&card.id);
+        }
+        return;
+    }
+    if card.id.is_empty() || card.result.is_some() {
+        app.tool_cards.remove(&card.id);
+    } else {
+        app.tool_cards.insert(card.id.clone(), app.chat.len());
+    }
+    let role = if is_delegated(app, agent_id) {
+        ChatRole::Delegated
+    } else {
+        ChatRole::Status
+    };
+    app.chat.push(ChatLine {
+        role,
+        text: String::new(),
+        tool: Some(card),
+    });
 }
 
 /// Accumulate one attributed output chunk into the bubble for its
@@ -255,6 +302,7 @@ fn apply_agent_output(
             app.chat.push(ChatLine {
                 role,
                 text: String::new(),
+                tool: None,
             });
             let idx = app.chat.len() - 1;
             app.agent_streams.insert(key.clone(), idx);

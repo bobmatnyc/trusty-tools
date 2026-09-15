@@ -31,6 +31,7 @@ use crate::render::markdown::{
     parse_md_table_cells, render_markdown_table,
 };
 use crate::widgets::banner::banner_lines;
+use crate::widgets::tool_card::tool_card_lines;
 
 /// Drop runs of 2+ consecutive whitespace-only `Line`s, keeping at most one.
 ///
@@ -78,7 +79,13 @@ fn leader_spans(app: &ReplApp, body_color: Option<Color>) -> Vec<Span<'static>> 
 
 /// The gutter drawn to the left of every line inside a delegated
 /// sub-agent's block (#7940).
-const DELEGATED_GUTTER: &str = "  │ ";
+pub(crate) const DELEGATED_GUTTER: &str = "  │ ";
+
+/// [`DELEGATED_GUTTER`] styled in the delegation accent — shared by
+/// delegated text and delegated tool cards (#4596).
+pub(crate) fn delegated_gutter_span() -> Span<'static> {
+    Span::styled(DELEGATED_GUTTER, Style::default().fg(Color::Indexed(141)))
+}
 
 /// Render one delegation frame or body entry (#7940).
 ///
@@ -113,7 +120,7 @@ fn delegation_lines(entry: &crate::app::ChatLine) -> Vec<Line<'static>> {
                 Line::from(Span::styled(raw.to_string(), style))
             } else {
                 Line::from(vec![
-                    Span::styled(DELEGATED_GUTTER, Style::default().fg(Color::Indexed(141))),
+                    delegated_gutter_span(),
                     Span::styled(raw.to_string(), style),
                 ])
             }
@@ -141,8 +148,16 @@ pub fn build_chat_lines(app: &ReplApp, terminal_width: usize) -> Vec<Line<'stati
         lines.push(Line::from(""));
     }
 
-    let chat_len = app.chat.len();
     for (idx, entry) in app.chat.iter().enumerate() {
+        if idx > 0 {
+            lines.push(Line::from(""));
+        }
+        // #4596: a tool call renders as a card; its role only says whether
+        // the card sits inside a delegation block.
+        if let Some(card) = &entry.tool {
+            lines.extend(tool_card_lines(card, entry.role == ChatRole::Delegated));
+            continue;
+        }
         match entry.role {
             ChatRole::User => {
                 let mut iter = entry.text.lines();
@@ -290,10 +305,6 @@ pub fn build_chat_lines(app: &ReplApp, terminal_width: usize) -> Vec<Line<'stati
             ChatRole::Delegation | ChatRole::Delegated => {
                 lines.extend(delegation_lines(entry));
             }
-        }
-        let is_last = idx + 1 == chat_len;
-        if !is_last {
-            lines.push(Line::from(""));
         }
     }
 
@@ -477,14 +488,17 @@ mod tests {
         app.chat.push(crate::app::ChatLine {
             role: ChatRole::Delegation,
             text: "▶ engineer — add the renderer".into(),
+            tool: None,
         });
         app.chat.push(crate::app::ChatLine {
             role: ChatRole::Delegated,
             text: "reading the spec".into(),
+            tool: None,
         });
         app.chat.push(crate::app::ChatLine {
             role: ChatRole::Delegation,
             text: "└ engineer — success".into(),
+            tool: None,
         });
         let lines = build_chat_lines(&app, 80);
         let text = all_text(&lines);
@@ -505,6 +519,7 @@ mod tests {
         app.chat.push(crate::app::ChatLine {
             role: ChatRole::Delegated,
             text: "one\ntwo\nthree".into(),
+            tool: None,
         });
         let lines = build_chat_lines(&app, 80);
         for expected in ["one", "two", "three"] {
