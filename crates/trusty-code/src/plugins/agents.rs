@@ -140,6 +140,9 @@ pub(crate) fn load_plugin_agent(
 
     let body = extract_body(&raw);
     let mut cfg = project_to_agent_config(agent_name, meta, body);
+    // #7948: a plugin agent gets the same grammar and fail-closed rejection
+    // a disk agent does; the error names the file an operator must fix.
+    cfg.permissions = crate::permissions::parse_permissions(&path.display().to_string(), &raw)?;
     cfg.agent.name = namespaced;
     Ok(cfg)
 }

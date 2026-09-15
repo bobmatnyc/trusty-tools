@@ -75,7 +75,14 @@ pub fn load_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
     let metadata = agent_metadata_from_str(&composed);
     let body = extract_body(&composed);
 
-    Ok(project_to_agent_config(name, metadata, body))
+    let mut config = project_to_agent_config(name, metadata, body);
+    // #7948: parse the file's OWN bytes — `compose_agent` does not re-emit
+    // `permissions:`, so a block is not inherited through `extends:`. A
+    // malformed block fails the load; it never degrades to "no permissions".
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("failed to read agent file {}: {e}", path.display()))?;
+    config.permissions = crate::permissions::parse_permissions(&path.display().to_string(), &raw)?;
+    Ok(config)
 }
 
 /// Project an embedded (in-memory, no source directory) `.md` agent document
@@ -95,13 +102,21 @@ pub fn load_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
 /// What: parses `raw`'s frontmatter and body directly (no `compose_agent`
 /// call), then delegates to [`project_to_agent_config`]. `default_name` is
 /// used only when `raw`'s frontmatter carries no `name:` field, mirroring
-/// `load_md_agent`'s file-stem fallback.
+/// `load_md_agent`'s file-stem fallback. `raw`'s own `permissions:` block is
+/// parsed exactly as [`load_md_agent`] parses a file's; a malformed block is
+/// an `Err`, never "no permissions".
 /// Test: `assets::tests::default_agents_field_identical_to_retired_toml`,
-/// `assets::tests::default_agents_parse_and_names_match`.
-pub(crate) fn project_embedded_md(default_name: &str, raw: &str) -> AgentConfig {
+/// `assets::tests::default_agents_parse_and_names_match`,
+/// `embedded_permissions_block_projects_onto_agent_config`,
+/// `malformed_embedded_permissions_block_fails_the_load`.
+pub(crate) fn project_embedded_md(default_name: &str, raw: &str) -> anyhow::Result<AgentConfig> {
     let metadata = agent_metadata_from_str(raw);
     let body = extract_body(raw);
-    project_to_agent_config(default_name, metadata, body)
+    let mut config = project_to_agent_config(default_name, metadata, body);
+    // #7948: a bundled agent's block is enforced like a disk agent's.
+    config.permissions =
+        crate::permissions::parse_permissions(&format!("embedded agent '{default_name}'"), raw)?;
+    Ok(config)
 }
 
 /// Project an embedded tm-catalog agent onto tcode's [`AgentConfig`],
@@ -154,8 +169,30 @@ pub fn project_embedded_md_with_extends_at(
     name: &str,
     skill_refs_root: &Path,
 ) -> anyhow::Result<AgentConfig> {
-    let sources =
-        build_in_memory_source_map(crate::assets::EMBEDDED_TM_AGENT_SOURCES.iter().copied());
+    project_in_memory_catalog(
+        name,
+        crate::assets::EMBEDDED_TM_AGENT_SOURCES,
+        skill_refs_root,
+    )
+}
+
+/// [`project_embedded_md_with_extends_at`] over a supplied
+/// `(filename, markdown)` catalog.
+///
+/// Why (#7948): no bundled catalog agent declares `permissions:` today, so a
+/// test needs its own catalog to prove a block is enforced and not inherited.
+/// What: composes `name` against `entries`, resolves skill refs, and projects
+/// the result. It then parses the `permissions:` block from `name`'s OWN
+/// catalog entry, never the composed document, so a block is not inherited
+/// through `extends:`. A malformed block is an `Err`.
+/// Test: `embedded_extends_permissions_block_projects_onto_agent_config`,
+/// `malformed_embedded_extends_permissions_block_fails_the_load`.
+fn project_in_memory_catalog(
+    name: &str,
+    entries: &[(&str, &str)],
+    skill_refs_root: &Path,
+) -> anyhow::Result<AgentConfig> {
+    let sources = build_in_memory_source_map(entries.iter().copied());
 
     let composed = compose_agent_in_memory(name, &sources).map_err(|e| {
         anyhow::anyhow!("failed to compose embedded tm-catalog agent '{name}': {e}")
@@ -165,7 +202,30 @@ pub fn project_embedded_md_with_extends_at(
     let metadata = agent_metadata_from_str(&composed);
     let body = extract_body(&composed);
 
-    Ok(project_to_agent_config(name, metadata, body))
+    let mut config = project_to_agent_config(name, metadata, body);
+    // #7948: the agent's own bytes, as `load_md_agent` reads the file's own.
+    let own = own_catalog_source(name, entries).ok_or_else(|| {
+        anyhow::anyhow!("embedded tm-catalog agent '{name}' composed but has no source entry")
+    })?;
+    config.permissions =
+        crate::permissions::parse_permissions(&format!("embedded tm-catalog agent '{name}'"), own)?;
+    Ok(config)
+}
+
+/// The raw markdown `entries` holds for `name`, keyed the way
+/// `InMemorySources::insert` keys it: lowercased, one `.md` suffix stripped.
+/// The last matching entry wins, as it does on insert.
+fn own_catalog_source<'a>(name: &str, entries: &[(&'a str, &'a str)]) -> Option<&'a str> {
+    fn key(s: &str) -> String {
+        let lower = s.to_lowercase();
+        lower.strip_suffix(".md").unwrap_or(&lower).to_string()
+    }
+    let wanted = key(name);
+    entries
+        .iter()
+        .rev()
+        .find(|(file, _)| key(file) == wanted)
+        .map(|(_, md)| *md)
 }
 
 /// Strip the leading YAML frontmatter block from a composed agent document.
@@ -288,6 +348,9 @@ pub(crate) fn project_to_agent_config(
             allowed: meta.tcode_tools,
         }),
         runner: None,
+        // #7948: nested YAML the flat metadata reader cannot represent; the
+        // fallible loading paths attach it from the document bytes.
+        permissions: None,
     }
 }
 
@@ -682,5 +745,134 @@ mod tests {
         )
         .expect("a relative refs dir must not drop the agent");
         assert!(cfg.system_prompt.content.contains(SKILLS_ROOT_PLACEHOLDER));
+    }
+
+    /// (#7948) A disk agent's `permissions:` block reaches `AgentConfig`.
+    ///
+    /// Why: `compose_agent` drops the key, so this proves the loader reads the
+    /// file's own bytes — the regression that would leave every map inert.
+    /// Test: this test.
+    #[test]
+    fn permissions_block_projects_onto_agent_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("solo.md");
+        std::fs::write(
+            &path,
+            "---\nname: solo\nrole: engineer\npermissions:\n  read_file: allow\n  bash:\n    \"rm *\": deny\n---\n\nBody.\n",
+        )
+        .expect("write");
+
+        let cfg = load_md_agent(&path).expect("loads");
+        assert_eq!(
+            cfg.permissions
+                .expect("the block must reach the config")
+                .len(),
+            2
+        );
+    }
+
+    /// (#7948 fail-open check) A malformed `permissions:` block FAILS the load.
+    ///
+    /// Why: fails if the error arm ever becomes a default — a map silently
+    /// degraded to "no permissions" allows every tool.
+    /// Test: this test.
+    #[test]
+    fn malformed_permissions_block_fails_the_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("broken.md");
+        std::fs::write(
+            &path,
+            "---\nname: broken\nrole: engineer\npermissions:\n  bash: allowed\n---\n\nBody.\n",
+        )
+        .expect("write");
+
+        let err = load_md_agent(&path).expect_err("a typo'd decision must fail the load");
+        let text = err.to_string();
+        assert!(text.contains("broken.md"), "must name the file: {text}");
+        assert!(text.contains("allowed"), "must quote the value: {text}");
+    }
+
+    /// A valid two-rule `permissions:` block on an agent named `solo`.
+    const PERMISSIONS_MD: &str = "---\nname: solo\nrole: engineer\npermissions:\n  read_file: allow\n  bash:\n    \"rm *\": deny\n---\n\nBody.\n";
+
+    /// A `permissions:` block with a typo'd decision word.
+    const MALFORMED_PERMISSIONS_MD: &str =
+        "---\nname: broken\nrole: engineer\npermissions:\n  bash: allowed\n---\n\nBody.\n";
+
+    /// A catalog whose `child` and `heir` both extend a base declaring its own
+    /// block; `child` declares one too, `heir` does not.
+    fn permissions_catalog(child_md: &'static str) -> [(&'static str, &'static str); 3] {
+        [
+            (
+                "BASE-FIXTURE.md",
+                "---\nname: base-fixture\nrole: engineer\npermissions:\n  bash: deny\n---\n\nBase.\n",
+            ),
+            ("child.md", child_md),
+            (
+                "heir.md",
+                "---\nname: heir\nextends: base-fixture\n---\n\nHeir.\n",
+            ),
+        ]
+    }
+
+    /// (#7948) A bundled `Direct` agent's `permissions:` block reaches
+    /// `AgentConfig`, the embedded twin of
+    /// `permissions_block_projects_onto_agent_config`.
+    /// Test: this test.
+    #[test]
+    fn embedded_permissions_block_projects_onto_agent_config() {
+        let cfg = project_embedded_md("solo", PERMISSIONS_MD).expect("loads");
+        assert_eq!(
+            cfg.permissions
+                .expect("the block must reach the config")
+                .len(),
+            2
+        );
+    }
+
+    /// (#7948) A catalog agent's OWN block reaches `AgentConfig`; a base
+    /// template's block is not inherited by an agent that declares none.
+    /// Test: this test.
+    #[test]
+    fn embedded_extends_permissions_block_projects_onto_agent_config() {
+        let catalog = permissions_catalog(
+            "---\nname: child\nextends: base-fixture\npermissions:\n  read_file: allow\n  bash:\n    \"rm *\": deny\n---\n\nChild.\n",
+        );
+        let refs = Path::new("unused-skill-refs");
+        let child = project_in_memory_catalog("child", &catalog, refs).expect("child loads");
+        assert_eq!(
+            child
+                .permissions
+                .expect("the block must reach the config")
+                .len(),
+            2
+        );
+        let heir = project_in_memory_catalog("heir", &catalog, refs).expect("heir loads");
+        assert!(heir.permissions.is_none(), "a base block is not inherited");
+    }
+
+    /// (#7948 fail-open check) A malformed block FAILS a `Direct` embedded load.
+    /// Test: this test.
+    #[test]
+    fn malformed_embedded_permissions_block_fails_the_load() {
+        let err = project_embedded_md("broken", MALFORMED_PERMISSIONS_MD)
+            .expect_err("a typo'd decision must fail the load");
+        let text = err.to_string();
+        assert!(text.contains("broken"), "must name the agent: {text}");
+        assert!(text.contains("allowed"), "must quote the value: {text}");
+    }
+
+    /// (#7948 fail-open check) A malformed block FAILS a composed embedded load.
+    /// Test: this test.
+    #[test]
+    fn malformed_embedded_extends_permissions_block_fails_the_load() {
+        let catalog = permissions_catalog(
+            "---\nname: child\nextends: base-fixture\npermissions:\n  bash: allowed\n---\n\nChild.\n",
+        );
+        let err = project_in_memory_catalog("child", &catalog, Path::new("unused-skill-refs"))
+            .expect_err("a typo'd decision must fail the load");
+        let text = err.to_string();
+        assert!(text.contains("child"), "must name the agent: {text}");
+        assert!(text.contains("allowed"), "must quote the value: {text}");
     }
 }

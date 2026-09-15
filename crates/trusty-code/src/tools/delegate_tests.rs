@@ -8,7 +8,9 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::json;
 
-use super::{DelegateToAgentTool, EngineerCompletionSignal, redelegation_hint};
+use super::{
+    DELEGATE_TO_AGENT_TOOL_NAME, DelegateToAgentTool, EngineerCompletionSignal, redelegation_hint,
+};
 use crate::agent_loop::AgentLoopError;
 use crate::llm::InferenceError;
 use crate::runner::RunnerError;
@@ -725,4 +727,15 @@ async fn delegate_refusal_logs_warn() {
         captured.iter().any(|m| m.contains("completion latch")),
         "expected a warn-level refusal log, got: {captured:?}"
     );
+}
+
+/// The wire name is the constant `permissions::gate::HARNESS_REGISTERED_TOOLS`
+/// matches on, so a rename cannot silently re-break the PM's delegation
+/// (#7948).
+#[test]
+fn delegate_tool_name_matches_the_constant() {
+    let tool = DelegateToAgentTool::new(Arc::new(RecordingRunner {
+        invoked: std::sync::Mutex::new(Vec::new()),
+    }));
+    assert_eq!(tool.name(), DELEGATE_TO_AGENT_TOOL_NAME);
 }

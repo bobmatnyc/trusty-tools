@@ -74,6 +74,7 @@ pub async fn run(
     json: bool,
     engineer_model_flag: Option<String>,
     timeout_seconds: Option<u64>,
+    permission_mode_flag: Option<String>,
 ) -> Result<()> {
     if let Err(e) = validate_agent_name(agent_name) {
         eprintln!("tcode run-task: {e}");
@@ -135,6 +136,10 @@ pub async fn run(
         agents_dir,
         engineer_model,
         deadline_secs: timeout_seconds,
+        // #7948: headless by construction; the flag wins over the env var.
+        permission_mode: trusty_code::permissions::PermissionMode::resolve(
+            permission_mode_flag.as_deref(),
+        ),
     };
 
     let report = execute_run_task(params, llm).await;

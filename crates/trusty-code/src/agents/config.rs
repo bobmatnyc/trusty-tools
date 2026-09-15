@@ -42,6 +42,21 @@ pub struct AgentConfig {
     /// Optional runner override.
     #[serde(default)]
     pub runner: Option<RunnerConfig>,
+    /// (#7948) Optional per-verb permission map from the agent's own
+    /// `permissions:` frontmatter block.
+    ///
+    /// Why: `tools.allowed` cannot say "run `git status` freely, never run
+    /// `rm`". The allowlist still runs first, so this can only narrow.
+    /// What: `None` for every agent without a `permissions:` block (every stock
+    /// bundled agent). Populated by `crate::agents::md_loader` and
+    /// `crate::plugins::agents` via `crate::permissions::parse_permissions`.
+    /// `#[serde(skip)]`: the `.md` frontmatter is the source of truth, and
+    /// compiled glob matchers have no serde form.
+    /// Test: `agents::md_loader::tests::permissions_block_projects_onto_agent_config`,
+    /// `agents::md_loader::tests::embedded_permissions_block_projects_onto_agent_config`,
+    /// `agents::md_loader::tests::embedded_extends_permissions_block_projects_onto_agent_config`.
+    #[serde(skip)]
+    pub permissions: Option<crate::permissions::PermissionMap>,
 }
 
 /// Core identity fields for an agent.

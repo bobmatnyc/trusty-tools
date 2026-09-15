@@ -165,6 +165,10 @@ pub struct InProcessAgentRunner {
     /// `assemble_system_prompt_for_mode`'s docs). `None` until
     /// `with_skills_catalog` is called, matching pre-#2069 behaviour exactly.
     skills_catalog: Option<String>,
+    /// (#7948) The session-scoped half of the permission gate. A gate is
+    /// minted per delegation in `run_pipeline` from the DELEGATED agent's own
+    /// config. `None` means no gate, exactly as before #7948.
+    permissions: Option<crate::permissions::PermissionContext>,
 }
 
 impl InProcessAgentRunner {
@@ -192,7 +196,22 @@ impl InProcessAgentRunner {
             cancel: None,
             mode: HarnessMode::default(),
             skills_catalog: None,
+            permissions: None,
         }
+    }
+
+    /// Attach the session-scoped permission context every delegated sub-agent
+    /// loop this runner drives is gated by (#7948).
+    ///
+    /// Why: this is the one production construction site for a delegated
+    /// sub-agent's `AgentLoop` (`run_task` and `task::executor` both delegate
+    /// through it), so wiring the context here gates every delegation.
+    /// What: builder-style setter. The gate itself is minted per delegation
+    /// in `run_pipeline`, because its map comes from the delegated agent.
+    /// Test: `agent_loop::tests::permission_gate::deny_never_dispatches`.
+    pub fn with_permissions(mut self, ctx: crate::permissions::PermissionContext) -> Self {
+        self.permissions = Some(ctx);
+        self
     }
 
     /// Attach a [`ToolEventSink`] every delegated sub-agent loop this runner
@@ -441,6 +460,13 @@ impl InProcessAgentRunner {
         }
         if let Some(cancel) = &self.cancel {
             agent_loop = agent_loop.with_cancel_flag(Arc::clone(cancel));
+        }
+        // #7948: minted from the DELEGATED agent's own config, so a sub-agent's
+        // `permissions:` block governs its own calls, not its delegator's.
+        if let Some(ctx) = &self.permissions {
+            agent_loop = agent_loop.with_permission_gate(Arc::new(
+                ctx.gate_for(Arc::new(agent.clone()), agent_id.clone()),
+            ));
         }
 
         // #7940: bracket the sub-agent's loop with the delegation-lifecycle

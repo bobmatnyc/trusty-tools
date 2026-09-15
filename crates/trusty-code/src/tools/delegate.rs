@@ -41,6 +41,13 @@ use crate::runner::RunnerError;
 use crate::tools::finish_task::FinishStatus;
 use crate::tools::traits::{AgentOutput, AgentRunner, ToolExecutor, ToolResult};
 
+/// The wire name of this tool, as the model calls it.
+///
+/// #7948: `permissions::gate::HARNESS_REGISTERED_TOOLS` names this tool, so the
+/// literal needs one definition both sites share.
+/// Test: `delegate_tool_name_matches_the_constant`.
+pub const DELEGATE_TO_AGENT_TOOL_NAME: &str = "delegate_to_agent";
+
 /// Detect whether an `AgentRunner` failure means the sub-agent's OWN attempt
 /// may have left partial work already on disk (turn cap, timeout,
 /// cancellation, or a retryable LLM/transport hiccup), as opposed to a hard
@@ -262,7 +269,7 @@ impl DelegateToAgentTool {
 #[async_trait]
 impl ToolExecutor for DelegateToAgentTool {
     fn name(&self) -> &str {
-        "delegate_to_agent"
+        DELEGATE_TO_AGENT_TOOL_NAME
     }
 
     fn schema(&self) -> Value {

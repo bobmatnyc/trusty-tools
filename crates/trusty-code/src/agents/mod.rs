@@ -173,12 +173,11 @@ pub fn load_all_agents(dir: &Path) -> Vec<AgentConfig> {
 /// roster agents inherit from `BASE-*` templates and must be composed
 /// in-memory first.
 /// What: For each `EmbeddedAgent::Direct { name, md }`, calls
-/// [`md_loader::project_embedded_md`] directly — infallible, same as before
-/// Slice E3 (`agent_metadata_from_str` degrades to an empty default on a
-/// malformed document rather than erroring). For each
+/// [`md_loader::project_embedded_md`] directly, which fails only on a
+/// malformed `permissions:` block (#7948). For each
 /// `EmbeddedAgent::Composed { name }`, calls
-/// [`md_loader::project_embedded_md_with_extends`], which IS fallible (an
-/// unresolvable `extends:` chain returns `Err`); a failure is logged at
+/// [`md_loader::project_embedded_md_with_extends`], which also fails on an
+/// unresolvable `extends:` chain. Either failure is logged at
 /// ERROR level and the agent is skipped rather than panicking — this should
 /// be unreachable in practice (every roster name is pinned against
 /// `EMBEDDED_TM_AGENT_SOURCES` by `assets::tests::default_agents_parse_and_names_match`),
@@ -191,22 +190,26 @@ pub fn load_all_agents(dir: &Path) -> Vec<AgentConfig> {
 pub(crate) fn load_embedded_default_agents() -> Vec<AgentConfig> {
     crate::assets::DEFAULT_AGENTS
         .iter()
-        .filter_map(|embedded| match embedded {
-            crate::assets::EmbeddedAgent::Direct { name, md } => {
-                Some(md_loader::project_embedded_md(name, md))
-            }
-            crate::assets::EmbeddedAgent::Composed { name } => {
-                match md_loader::project_embedded_md_with_extends(name) {
-                    Ok(cfg) => Some(cfg),
-                    Err(e) => {
-                        tracing::error!(
-                            "embedded roster agent '{name}' failed to compose \
-                             (build-time asset defect, not a runtime condition): {e}"
-                        );
-                        None
-                    }
+        .filter_map(|embedded| {
+            // #7948: a `Direct` agent is fallible too — a malformed
+            // `permissions:` block skips the agent rather than dropping the map.
+            let loaded = match embedded {
+                crate::assets::EmbeddedAgent::Direct { name, md } => {
+                    md_loader::project_embedded_md(name, md)
                 }
-            }
+                crate::assets::EmbeddedAgent::Composed { name } => {
+                    md_loader::project_embedded_md_with_extends(name)
+                }
+            };
+            loaded
+                .inspect_err(|e| {
+                    tracing::error!(
+                        "embedded agent '{}' failed to load \
+                         (build-time asset defect, not a runtime condition): {e}",
+                        embedded.name()
+                    );
+                })
+                .ok()
         })
         .collect()
 }
@@ -294,8 +297,9 @@ pub enum ResolveAgentError {
 /// embedded copy of the same name: a project that deliberately overrode
 /// `name` gets its own broken override surfaced, not masked. If the disk
 /// file does not exist, looks `name` up in `crate::assets::DEFAULT_AGENTS`:
-/// a `Direct` entry projects via [`md_loader::project_embedded_md`]
-/// (infallible); a `Composed` entry projects via
+/// a `Direct` entry projects via [`md_loader::project_embedded_md`], and a
+/// malformed `permissions:` block is `ResolveAgentError::Load` (#7948); a
+/// `Composed` entry projects via
 /// [`md_loader::project_embedded_md_with_extends`], and on `Err` (a
 /// build-time asset defect — see [`load_embedded_default_agents`]'s
 /// identical handling) logs `tracing::error!` and falls through to the
@@ -332,7 +336,13 @@ pub fn resolve_agent(dir: &Path, name: &str) -> Result<AgentConfig, ResolveAgent
     {
         match embedded {
             crate::assets::EmbeddedAgent::Direct { name: n, md } => {
-                return Ok(md_loader::project_embedded_md(n, md));
+                // #7948: a malformed `permissions:` block fails the load.
+                return md_loader::project_embedded_md(n, md).map_err(|source| {
+                    ResolveAgentError::Load {
+                        name: name.to_string(),
+                        source,
+                    }
+                });
             }
             crate::assets::EmbeddedAgent::Composed { name: n } => {
                 match md_loader::project_embedded_md_with_extends(n) {

@@ -205,6 +205,13 @@ enum Command {
         /// for multi-hour tasks.
         #[arg(long, value_name = "SECONDS")]
         timeout_seconds: Option<u64>,
+
+        /// What a headless `--legacy-in-process` run does with an agent's
+        /// `ask` permission rule (#7948): `default` refuses it, `allow-asks`
+        /// permits it. Falls back to `TCODE_PERMISSION_MODE`, then `default`.
+        /// A `deny` rule is refused regardless.
+        #[arg(long, value_name = "MODE")]
+        permission_mode: Option<String>,
     },
 
     /// Execute a named MPM workflow end-to-end.
@@ -512,6 +519,7 @@ async fn main() -> Result<()> {
             legacy_in_process,
             mode,
             timeout_seconds,
+            permission_mode,
         } => {
             if legacy_in_process {
                 // #4434: the in-process path (and the agent-name validation
@@ -525,6 +533,7 @@ async fn main() -> Result<()> {
                     json,
                     engineer_model,
                     timeout_seconds,
+                    permission_mode,
                 )
                 .await
             } else {

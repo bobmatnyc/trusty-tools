@@ -255,6 +255,16 @@ pub mod plugins;
 /// Test: `mode::tests::*`.
 pub mod mode;
 
+/// Per-verb glob-pattern tool permissions — `allow` / `ask` / `deny` (#7948).
+///
+/// Why: `tcode_tools:` is an exact-match allowlist and cannot express "run
+/// `git status` freely, never `rm`, ask about the rest"; the TUI permission
+/// prompt (#3422) also needs a decision object to prompt from.
+/// What: `parse_permissions`, `PermissionMap`, `PermissionGate`, the
+/// `PermissionBroker`, and `session.permission.respond`.
+/// Test: `permissions::tests::*`.
+pub mod permissions;
+
 /// Caller identity hierarchy for memory scoping.
 ///
 /// Why: Memory must be scoped according to who is calling — operator, PM, or

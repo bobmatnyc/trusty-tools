@@ -124,6 +124,12 @@ pub struct TaskRunParams {
     /// `.await`) does not fit here — injecting through this field is the
     /// only mechanism that reaches a detached background task correctly.
     pub telemetry_data_dir: Option<PathBuf>,
+    /// (#7948) The daemon-wide broker this run's `ask` rules suspend against
+    /// and `session.permission.respond` answers into. `None` makes the run
+    /// HEADLESS: an `ask` resolves at once per `permission_mode`.
+    pub permission_broker: Option<Arc<crate::permissions::PermissionBroker>>,
+    /// (#7948) What this run does with an `ask` it cannot put to a client.
+    pub permission_mode: crate::permissions::PermissionMode,
 }
 
 /// Reserve the session's execution slot and spawn the background run.
@@ -321,6 +327,23 @@ async fn run_and_record(
         }
     };
 
+    // #7948: one context per run, shared by the PM's gate and every delegated
+    // sub-agent's. `ask` is this session's slot in the broker — the state
+    // `session.permission.respond` writes into. No broker means headless.
+    let permission_ctx = crate::permissions::PermissionContext {
+        mode: params.permission_mode,
+        timeout: std::time::Duration::from_secs(crate::permissions::DEFAULT_ASK_TIMEOUT_SECS),
+        session_id: session_id.clone(),
+        ask: params
+            .permission_broker
+            .as_ref()
+            .map(|broker| broker.session(&session_id)),
+        events: Some(Arc::clone(&registry) as Arc<dyn crate::permissions::PermissionEvents>),
+        // #7948: the run's working root, so a relative path rule also decides
+        // the absolute in-root spelling `tools::fs::scoped_path` accepts.
+        root: Some(work_root.clone()),
+    };
+
     let project_context = load_project_context(&work_root);
     let pm_model = resolve_model(&pm_config, None);
     let engineer_model = resolve_engineer_model(&params);
@@ -350,6 +373,7 @@ async fn run_and_record(
         Arc::clone(&transcript),
         Arc::clone(&sink),
         Arc::clone(&cancel),
+        permission_ctx.clone(),
     );
 
     // Catch-up is already git-optional and fail-open (it degrades to `None` for
@@ -489,6 +513,11 @@ async fn run_and_record(
     // compression-telemetry JSONL record this loop's cadence/threshold
     // instrumentation emits — see `AgentLoop::with_session_id`'s docs.
     .with_session_id(session_id.clone())
+    // #7948: the PM's own calls are gated by the PM agent's `permissions:`
+    // block, under the same session-scoped context as its delegations.
+    .with_permission_gate(Arc::new(
+        permission_ctx.gate_for(Arc::new(pm_config.clone()), format!("pm-{session_id}")),
+    ))
     .with_cancel_flag(Arc::clone(&cancel))
     // #2279: mirrors `run_task::execute_run_task`'s own wiring — the PM
     // never calls `bash` itself, so its verify-before-finish gate scans the
@@ -624,6 +653,10 @@ async fn run_and_record(
 /// [`EngineerPromptContext`] bundles the two prompt strings that already
 /// travelled together, keeping this function's arity under clippy's
 /// `too_many_arguments` gate now that `work_root` is threaded in.
+// #7948: the permission context is an eighth argument; it belongs to neither
+// the prompt bundle nor the run's lifecycle handles, so bundling it would group
+// unrelated concerns only to satisfy the arity lint.
+#[allow(clippy::too_many_arguments)]
 fn build_engineer_runner(
     llm: Arc<dyn InferenceAdapter>,
     params: &TaskRunParams,
@@ -632,6 +665,7 @@ fn build_engineer_runner(
     transcript: SharedTranscript,
     sink: Arc<dyn ToolEventSink>,
     cancel: Arc<AtomicBool>,
+    permissions: crate::permissions::PermissionContext,
 ) -> Arc<dyn AgentRunner> {
     let EngineerPromptContext {
         project_context,
@@ -655,6 +689,8 @@ fn build_engineer_runner(
         .with_tool_event_sink(sink)
         .with_cancel_flag(cancel)
         .with_mode(params.mode)
+        // #7948: each delegated sub-agent is gated by its own `permissions:`.
+        .with_permissions(permissions)
         .with_timeout_secs(resolve_deadline_secs(params.deadline_secs));
     if let Some(ctx) = project_context {
         runner = runner.with_project_context(ctx);

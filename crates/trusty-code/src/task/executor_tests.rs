@@ -19,11 +19,16 @@ use crate::task::mock_llm::EchoLlmClient;
 
 /// Agents dir fixture with `pm.md` + `python-engineer.md` (mirrors
 /// `run_task::tests::agents_dir`).
+///
+/// #7948: the PM's `tcode_tools:` allowlist deliberately OMITS
+/// `delegate_to_agent`, as stock `pm.md` does, so this daemon path's tests run
+/// through the gate's allowlist branch — see
+/// `pm_delegates_through_the_tcode_tools_allowlist`.
 fn agents_dir() -> TempDir {
     let tmp = tempfile::tempdir().expect("agents tempdir");
     std::fs::write(
         tmp.path().join("pm.md"),
-        "---\nname: pm\nmodel: openai/gpt-4o-mini\n---\n\nYou are the PM.\n",
+        "---\nname: pm\nmodel: openai/gpt-4o-mini\ntcode_tools: [read_file, bash, finish_task]\n---\n\nYou are the PM.\n",
     )
     .expect("write pm.md");
     std::fs::write(
@@ -36,6 +41,8 @@ fn agents_dir() -> TempDir {
 
 fn params(agents: &TempDir, project: &TempDir, session_id: &str) -> TaskRunParams {
     TaskRunParams {
+        permission_broker: None,
+        permission_mode: crate::permissions::PermissionMode::Default,
         session_id: session_id.to_string(),
         task: "do something".to_string(),
         agent_name: "pm".to_string(),
@@ -123,6 +130,8 @@ async fn spawn_task_run_unknown_session_errors() {
 fn resolve_engineer_model_falls_back_to_embedded_when_disk_config_missing() {
     let empty_agents = tempfile::tempdir().expect("empty agents tempdir");
     let p = TaskRunParams {
+        permission_broker: None,
+        permission_mode: crate::permissions::PermissionMode::Default,
         session_id: "s".to_string(),
         task: "do something".to_string(),
         agent_name: "pm".to_string(),
@@ -451,6 +460,103 @@ fn stop_response(text: &str) -> Value {
         }],
         "usage": { "prompt_tokens": 15, "completion_tokens": 5, "total_tokens": 20 }
     })
+}
+
+/// A response in which the assistant delegates to `python-engineer` (#7948).
+fn delegate_response(task: &str) -> Value {
+    json!({
+        "id": "gen-delegate",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call-del",
+                    "type": "function",
+                    "function": {
+                        "name": "delegate_to_agent",
+                        "arguments": json!({"agent_name": "python-engineer", "task": task}).to_string()
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": { "prompt_tokens": 50, "completion_tokens": 12, "total_tokens": 62 }
+    })
+}
+
+/// A response in which the assistant calls `write_file(path, content)` (#7948).
+fn write_file_response(path: &str, content: &str) -> Value {
+    json!({
+        "id": "gen-write",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call-wf",
+                    "type": "function",
+                    "function": {
+                        "name": "write_file",
+                        "arguments": json!({"path": path, "content": content}).to_string()
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": { "prompt_tokens": 30, "completion_tokens": 8, "total_tokens": 38 }
+    })
+}
+
+/// (#7948 regression) The DAEMON path's delegation survives a `tcode_tools:`
+/// allowlist that never names `delegate_to_agent`.
+///
+/// Why: `run_and_record` wires `delegate_to_agent` into the PM's registry
+/// unconditionally, exactly as `run_task::execute_run_task` does, so the
+/// harness-registered exemption has to hold on BOTH run-task paths. The
+/// sibling proof for the one-shot CLI path is
+/// `run_task::tests::pm_delegates_through_the_tcode_tools_allowlist`.
+/// What: assert the fixture premise, then script [PM delegate, engineer
+/// write_file, engineer stop, PM stop] through the real `spawn_task_run` and
+/// assert the engineer's file landed — a refused delegation writes nothing.
+/// Test: this test.
+#[tokio::test]
+async fn pm_delegates_through_the_tcode_tools_allowlist() {
+    let registry = Arc::new(SessionRegistry::new());
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let agents = agents_dir();
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    let pm = crate::agents::resolve_agent(agents.path(), "pm").expect("fixture pm.md loads");
+    let allowed = pm
+        .tools
+        .as_ref()
+        .and_then(|t| t.allowed.as_ref())
+        .expect("fixture premise: the PM must declare a tcode_tools allowlist");
+    assert!(
+        !allowed.iter().any(|t| t == "delegate_to_agent"),
+        "fixture premise: the allowlist must omit delegate_to_agent, got {allowed:?}"
+    );
+
+    let llm: Arc<dyn InferenceAdapter> = Arc::new(ScriptedLlm::from_json(&[
+        delegate_response("create delegated.py"),
+        write_file_response("delegated.py", "print('dispatched')"),
+        stop_response("engineer: done"),
+        stop_response("pm: task complete"),
+    ]));
+    spawn_task_run(
+        Arc::clone(&registry),
+        llm,
+        params(&agents, &project, &session.id),
+    )
+    .expect("run must start");
+    wait_for_terminal(&registry, &session.id).await;
+
+    assert_eq!(
+        std::fs::read_to_string(project.path().join("delegated.py")).ok(),
+        Some("print('dispatched')".to_string()),
+        "a refused delegate_to_agent never reaches the engineer, so nothing is written"
+    );
 }
 
 /// An `InferenceAdapter` that sleeps before its Nth `chat` call, then replays a
