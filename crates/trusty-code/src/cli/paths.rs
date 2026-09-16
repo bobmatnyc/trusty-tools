@@ -198,7 +198,9 @@ pub fn import(project_root: &Path, dry_run: bool) -> Result<i32> {
         return Ok(exit_code_for(refused));
     }
 
-    let report = paths::import::apply_import(&plan);
+    // #7779: the apply re-opens each target through a pinned handle, so it needs
+    // the project root the plan was built against.
+    let report = paths::import::apply_import(project_root, &plan);
     match private_state::ensure_private_state_dir() {
         Ok(dir) => println!("\nprivate state {} (owner-only)", dir.display()),
         Err(e) => eprintln!("\nwarning: could not create the private state directory: {e}"),

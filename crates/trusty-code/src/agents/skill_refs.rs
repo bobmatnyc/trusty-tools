@@ -23,8 +23,10 @@
 
 use std::path::{Path, PathBuf};
 
-use trusty_agents_common::agents::manifest::{ManifestError, atomic_write};
 use trusty_agents_common::agents::skill_root::{SKILLS_ROOT_PLACEHOLDER, resolve_skills_root};
+
+use crate::paths::WriteTargetError;
+use crate::paths::write_dir::NativeWriteDir;
 
 /// Directory name, beneath a `.trusty-code` root, holding the referenced files.
 pub const SKILL_REFS_DIRNAME: &str = "skill-refs";
@@ -75,26 +77,41 @@ pub fn embedded_skill_ref(relative: &Path) -> Option<&'static str> {
         .map(|(_, content)| *content)
 }
 
-/// Write every [`REFERENCED_SKILL_FILES`] entry beneath `dir`.
+/// Write every [`REFERENCED_SKILL_FILES`] entry beneath a pinned `dir`.
 ///
-/// What: creates parent directories and atomically rewrites a file only when
-/// its content differs, so repeated deploys do no writes and a concurrent
-/// reader never sees a partial file. Postcondition: every entry is readable at
-/// `dir/<relative path>` with its embedded content.
-/// Test: `materialize_skill_refs_writes_readable_files`.
-pub fn materialize_skill_refs(dir: &Path) -> std::io::Result<()> {
+/// Why: this is the write #7779 caught landing in a victim directory — the old
+/// signature took a PATH, so the `create_dir_all`/`atomic_write` pair re-walked
+/// `<project>/.trusty-code/skill-refs` long after `check_native_write_target`
+/// had approved it, and followed whatever had been swapped in since.
+/// What: every entry's `<skill>/` directory is opened as a pinned child of `dir`
+/// ([`NativeWriteDir::child`]) and the file is written `openat`-relative to that
+/// handle, so the kernel resolves it against the validated inode rather than the
+/// path. A file whose content already matches is left alone, so repeated deploys
+/// do no writes; the rewrite is atomic, so a concurrent reader never sees a
+/// partial file. Postcondition: every entry is readable at
+/// `dir.path()/<relative path>` with its embedded content.
+/// Test: `materialize_skill_refs_writes_readable_files`,
+/// `agents::deploy::deploy_tests::swapped_skill_refs_dir_never_reaches_the_victim`.
+pub fn materialize_skill_refs(dir: &NativeWriteDir) -> Result<(), WriteTargetError> {
     for (relative, content) in REFERENCED_SKILL_FILES {
-        let path = dir.join(relative);
-        if std::fs::read_to_string(&path).is_ok_and(|current| current == *content) {
+        let path = Path::new(relative);
+        let (parent, name) = match (path.parent(), path.file_name().and_then(|n| n.to_str())) {
+            (Some(parent), Some(name)) => (parent, name),
+            _ => {
+                return Err(WriteTargetError::Unpinnable {
+                    path: dir.path().join(relative),
+                    detail: format!("`{relative}` is not a usable skill-ref path"),
+                });
+            }
+        };
+        let skill = dir.child(parent)?;
+        if skill
+            .read(name)?
+            .is_some_and(|current| current == content.as_bytes())
+        {
             continue;
         }
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        atomic_write(&path, content).map_err(|e| match e {
-            ManifestError::Io(io) => io,
-            other => std::io::Error::other(other),
-        })?;
+        skill.atomic_write(name, content.as_bytes())?;
     }
     Ok(())
 }
@@ -149,11 +166,12 @@ mod tests {
     #[test]
     fn materialize_skill_refs_writes_readable_files() {
         let tmp = tempfile::tempdir().unwrap();
-        materialize_skill_refs(tmp.path()).unwrap();
-        materialize_skill_refs(tmp.path()).unwrap();
+        let dir = NativeWriteDir::open(tmp.path(), Path::new(SKILL_REFS_DIRNAME)).unwrap();
+        materialize_skill_refs(&dir).unwrap();
+        materialize_skill_refs(&dir).unwrap();
         for (relative, content) in REFERENCED_SKILL_FILES {
             assert_eq!(
-                std::fs::read_to_string(tmp.path().join(relative)).unwrap(),
+                std::fs::read_to_string(dir.path().join(relative)).unwrap(),
                 *content
             );
         }

@@ -12,13 +12,12 @@
 //! `trusty_agents_common::agents::deployer::deploy_agents_filtered` — the same
 //! writer trusty-mpm's `~/.claude/agents/` deploy uses, unchanged. That
 //! deployer already takes `source_dir`/`target_dir` as plain parameters, so
-//! pointing it at `<project>/.trusty-code/agents/` needed no shared-library
-//! change. It brings the atomic write-temp-then-rename, the strict-YAML
+//! reusing it needed no shared-library change. It brings the strict-YAML
 //! validation of every composed agent, the per-agent compose-failure isolation,
 //! the `.trusty-mpm-manifest.json` ledger with a recorded checksum and
 //! [`Origin`], and the refusal to proceed on a corrupt ledger.
 //!
-//! ## Two policies this module adds on top of the shared deployer
+//! ## Three policies this module adds on top of the shared deployer
 //!
 //! **A compatibility root that currently wins is never shadowed.** `.claude/`
 //! and `.open-mpm/` remain readable discovery INPUTS (#5426), and
@@ -36,9 +35,21 @@
 //! longer matches its recorded checksum is deselected, so the deployer never
 //! composes or writes it. Pristine files still refresh, and an UNTRACKED file is
 //! left to the deployer's own adopt-or-skip branch. No deployer change was
-//! needed for either policy.
+//! needed for either policy. Since #7779 the policy covers REAL files only: a
+//! symlinked entry in the agents directory refuses the deploy instead of being
+//! read through, because the pinned handle opens every entry `O_NOFOLLOW` (the
+//! `write_dir` module header states why that is uniform rather than per-tree).
 //!
-//! Test: `agents::deploy::tests::*`,
+//! **Every write reaches the project through a pinned directory handle.** The
+//! shared deployer writes through plain paths — correct for trusty-mpm's
+//! machine-global `~/.claude/agents/`, where a symlinked `~/.claude` is a
+//! legitimate setup, and wrong for a project directory a racing writer can swap
+//! (#7779). It therefore runs against a private scratch copy, and the ledger and
+//! the files it produced are published back `openat`-relative to
+//! [`crate::paths::write_dir::NativeWriteDir`]. The project's own ledger lock is
+//! taken through that same handle, so cross-process serialisation is unchanged.
+//!
+//! Test: `agents::deploy::deploy_tests::*`,
 //! `tests/roster_deploy_e2e.rs`.
 //!
 //! [`Origin`]: trusty_agents_common::agents::manifest::Origin
@@ -51,7 +62,9 @@ use trusty_agents_common::agents::builder::AgentBuildError;
 use trusty_agents_common::agents::deployer::{DeployResult, deploy_agents_filtered};
 use trusty_agents_common::agents::manifest::{AgentManifest, MANIFEST_FILE, ManifestLoad};
 
+use crate::agents::skill_refs::SKILL_REFS_DIRNAME;
 use crate::assets::{DEFAULT_AGENTS, EMBEDDED_TM_AGENT_SOURCES, EmbeddedAgent};
+use crate::paths::write_dir::NativeWriteDir;
 use crate::paths::{self, WriteTargetError};
 
 /// The `agents` subdirectory name, shared by every configuration root.
@@ -90,6 +103,20 @@ pub enum RosterDeployError {
     /// Staging the compiled-in sources into a scratch directory failed.
     #[error("staging the embedded agent roster failed: {0}")]
     Stage(#[source] std::io::Error),
+    /// A file the deploy produced could not be read back out of the scratch
+    /// directory, so it could not be published (#7779).
+    #[error(
+        "the deployed agent roster could not be published: {name} was not readable in the \
+         scratch directory ({source}); refusing to publish, because a ledger recording a \
+         file that was never written reports a deploy that did not happen."
+    )]
+    Publish {
+        /// The scratch file that could not be read.
+        name: String,
+        /// The underlying I/O failure.
+        #[source]
+        source: std::io::Error,
+    },
     /// The shared deployer itself failed.
     #[error("deploying the embedded agent roster failed: {0}")]
     Deploy(#[source] AgentBuildError),
@@ -215,19 +242,31 @@ pub fn roster_target(project_root: &Path) -> PathBuf {
 /// What, in order:
 /// 1. Skip when `.claude/agents/` or `.open-mpm/agents/` currently wins
 ///    discovery — see this module's docs.
-/// 2. Refuse a target that is not genuinely beneath `<project>/.trusty-code/`
-///    ([`crate::paths::check_native_write_target`], symlink-safe) — the agents
-///    dir and every skill-ref file, before any write.
-/// 3. Refuse to proceed on a corrupt ledger, naming the file. Never reset it.
-/// 4. Stage every compiled-in source into a scratch directory, including the
+/// 2. PIN the agents directory with [`crate::paths::write_dir::NativeWriteDir`],
+///    which applies the unchanged ADR-0044 membership rule and then holds the
+///    directory open on a descriptor. Every write below is `openat`-relative to
+///    it, so a symlink swapped in afterwards cannot redirect one (#7779).
+/// 3. Take the project's ledger lock through the pinned handle, so concurrent
+///    `tcode` daemons still serialise on the same sidecar the shared deployer
+///    would have used. It is a blocking `LOCK_EX` held across the whole
+///    mirror/stage/compose/publish sequence — wider than the shared deployer's,
+///    which takes it around the compose only, and deliberately so: the mirror
+///    that decides "hand-edited" and the publish that acts on that decision have
+///    to see the same directory.
+/// 4. Refuse to proceed on a corrupt ledger, naming the file. Never reset it.
+/// 5. Stage every compiled-in source into a scratch directory, including the
 ///    five `BASE-*` templates so the deployer's own `extends:` composer resolves
 ///    the chains from disk exactly as it does for trusty-mpm.
-/// 5. Deploy, selecting the dispatchable roster only, and deselecting any
-///    tracked file the user has since edited.
+/// 6. PIN the skill-refs tree — after step 4, so a refused deploy leaves no
+///    empty directory behind — and materialize the roster's skill pointers.
+/// 7. Deploy into a second scratch directory seeded from the pinned handle,
+///    selecting the dispatchable roster only and deselecting any tracked file
+///    the user has since edited, then publish the result back through the handle.
 ///
 /// Test: `fresh_project_materializes_the_whole_roster`,
 /// `hand_edited_agent_survives_a_second_deploy`,
 /// `corrupt_manifest_is_reported_and_nothing_is_written`,
+/// `symlinked_roster_file_is_refused_before_any_write`,
 /// `deploy_is_skipped_when_claude_agents_dir_wins`,
 /// `base_templates_are_never_deployed`,
 /// `symlinked_skill_refs_dir_is_refused_before_any_write`,
@@ -241,13 +280,30 @@ pub fn ensure_roster_deployed(project_root: &Path) -> Result<RosterDeploy, Roste
         return Ok(RosterDeploy::Skipped(SkipReason::CompatRootWins));
     }
 
-    let target = roster_target(project_root);
-    paths::check_native_write_target(project_root, &target)?;
+    // #7779: both write targets are PINNED here, not merely checked. Opening
+    // them creates every missing component with `mkdirat`/`O_NOFOLLOW`, so the
+    // `create_dir_all` a racing writer used to beat is gone and every write
+    // below resolves against the descriptor rather than the path.
+    let agents = NativeWriteDir::open(project_root, Path::new(AGENTS_DIRNAME))?;
+    let target = agents.path().to_path_buf();
+
+    // #7779: the shared deployer serialises writers on this sidecar. It now runs
+    // against a scratch directory, so the PROJECT's lock is taken here instead —
+    // dropping it would silently unserialise two concurrent `tcode` daemons.
+    let _ledger = agents.lock_exclusive(&format!("{MANIFEST_FILE}.lock"))?;
+
+    // #7779: the deployer writes through plain paths, which is correct for
+    // trusty-mpm's machine-global `~/.claude/agents` but reopens this race on a
+    // project directory. It therefore runs against a private scratch copy of the
+    // ledger and the roster files it may read, and everything it produced is
+    // published back through the pinned handle.
+    let shadow = tempfile::tempdir().map_err(RosterDeployError::Stage)?;
+    mirror_into_scratch(&agents, shadow.path())?;
 
     // Establish ownership BEFORE staging or writing anything. The deployer makes
     // the same check under its own lock; doing it here too is what lets a
     // corrupt ledger be reported without a scratch directory ever being built.
-    let manifest = match AgentManifest::load_checked(&target) {
+    let manifest = match AgentManifest::load_checked(shadow.path()) {
         ManifestLoad::Ok(m) => m,
         ManifestLoad::Corrupt(detail) => {
             return Err(RosterDeployError::ManifestCorrupt {
@@ -257,28 +313,94 @@ pub fn ensure_roster_deployed(project_root: &Path) -> Result<RosterDeploy, Roste
         }
     };
 
-    // #7727 review: a repo can commit `skill-refs` (or one skill folder in it)
-    // as a symlink out of the project, so every skill-ref file is checked
-    // before anything at all is written.
-    let skill_refs = super::skill_refs::project_skill_refs_dir(project_root);
-    for (relative, _) in super::skill_refs::REFERENCED_SKILL_FILES {
-        paths::check_native_write_target(project_root, &skill_refs.join(relative))?;
-    }
-
     let staged = stage_embedded_sources()?;
     let roster: HashSet<&str> = DEFAULT_AGENTS.iter().map(EmbeddedAgent::name).collect();
 
+    // #7779: pinned only now. Opening a handle CREATES its directory, so pinning
+    // this one beside the agents dir left an empty `skill-refs/` behind whenever
+    // the corrupt-ledger refusal above fired — and `paths::resolve_project_entry`
+    // reads an empty readable directory as Usable.
+    let skill_refs = NativeWriteDir::open(project_root, Path::new(SKILL_REFS_DIRNAME))?;
+
     // #7727: the roster's skill pointers resolve to files this project holds.
-    super::skill_refs::materialize_skill_refs(&skill_refs).map_err(RosterDeployError::Stage)?;
-    let result = deploy_agents_filtered(staged.path(), &target, &skill_refs, |stem| {
-        roster.contains(stem) && !is_user_edited(&manifest, &target, stem)
+    super::skill_refs::materialize_skill_refs(&skill_refs)?;
+    let result = deploy_agents_filtered(staged.path(), shadow.path(), skill_refs.path(), |stem| {
+        roster.contains(stem) && !is_user_edited(&manifest, shadow.path(), stem)
     })
     .map_err(RosterDeployError::Deploy)?;
+    publish_from_scratch(&agents, shadow.path(), &result)?;
 
     Ok(RosterDeploy::Deployed {
         target,
         result: Box::new(result),
     })
+}
+
+/// Copy the ledger and every roster file the deployer may read into `scratch`.
+///
+/// Why: the deployer decides adopt / refresh / preserve by reading the target
+/// directory, so running it against an empty scratch tree would reclassify every
+/// existing file as new and overwrite a hand-edited agent.
+/// What: reads `<MANIFEST_FILE>` and `<name>.md` for every roster name through
+/// the PINNED handle — the same descriptor the publish writes back through, so
+/// the snapshot and the publish cannot disagree about which directory they mean.
+/// Absent entries are simply not copied.
+///
+/// A SYMLINKED entry refuses the whole deploy rather than being followed, which
+/// narrows this module's "a hand-edited deployed file is authoritative" policy
+/// to real files (#7779 round 2; rationale in the `write_dir` module header).
+/// Test: `agents::deploy::deploy_tests::hand_edited_agent_survives_a_second_deploy`,
+/// `agents::deploy::deploy_tests::symlinked_roster_file_is_refused_before_any_write`.
+fn mirror_into_scratch(agents: &NativeWriteDir, scratch: &Path) -> Result<(), RosterDeployError> {
+    let mut names = vec![MANIFEST_FILE.to_string()];
+    names.extend(DEFAULT_AGENTS.iter().map(|a| format!("{}.md", a.name())));
+    for name in names {
+        if let Some(bytes) = agents.read(&name)? {
+            std::fs::write(scratch.join(&name), bytes).map_err(RosterDeployError::Stage)?;
+        }
+    }
+    Ok(())
+}
+
+/// Publish what the deploy produced back through the pinned handle.
+///
+/// Why: the only writes that reach the project directory. Doing them
+/// `openat`-relative to the validated descriptor is what makes "the path
+/// validated is the path written" true for the agents directory (#7779).
+/// What: the ledger (always — an adoption changes it without rewriting a file)
+/// plus every file the deployer reported as deployed. Files it left alone are
+/// not republished, so a preserved hand-edit is not even rewritten with its own
+/// bytes. A swap detected mid-publish aborts with
+/// [`WriteTargetError::Unpinned`]; nothing was written outside the directory.
+///
+/// Every file is READ before any is written. #7779: a `continue` on an
+/// unreadable scratch file dropped that file while the ledger published its
+/// checksum anyway, so [`ensure_roster_deployed`] returned `Deployed` and
+/// [`deploy_and_log`] logged a file that is not on disk — fail-open. Reading
+/// first makes the run all-or-nothing up to the first `atomic_write`.
+/// Test: `agents::deploy::deploy_tests::fresh_project_materializes_the_whole_roster`,
+/// `agents::deploy::deploy_tests::swapped_agents_dir_never_reaches_the_victim`,
+/// `agents::deploy::deploy_tests::unreadable_scratch_file_fails_the_publish`.
+fn publish_from_scratch(
+    agents: &NativeWriteDir,
+    scratch: &Path,
+    result: &DeployResult,
+) -> Result<(), RosterDeployError> {
+    let mut names: Vec<&str> = result.deployed.iter().map(String::as_str).collect();
+    names.push(MANIFEST_FILE);
+    let mut pending = Vec::with_capacity(names.len());
+    for name in names {
+        let bytes =
+            std::fs::read(scratch.join(name)).map_err(|source| RosterDeployError::Publish {
+                name: name.to_string(),
+                source,
+            })?;
+        pending.push((name, bytes));
+    }
+    for (name, bytes) in pending {
+        agents.atomic_write(name, &bytes)?;
+    }
+    Ok(())
 }
 
 /// Run [`ensure_roster_deployed`] for a bound project and log what happened.
@@ -376,374 +498,5 @@ fn stage_embedded_sources() -> Result<tempfile::TempDir, RosterDeployError> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use trusty_agents_common::agents::manifest::Origin;
-
-    /// Every dispatchable roster name, for the count assertions below.
-    fn roster_names() -> Vec<&'static str> {
-        DEFAULT_AGENTS.iter().map(EmbeddedAgent::name).collect()
-    }
-
-    /// `.md` filenames actually present in a deployed target directory.
-    fn deployed_md_files(target: &Path) -> Vec<String> {
-        let mut names: Vec<String> = std::fs::read_dir(target)
-            .expect("read_dir on the deploy target")
-            .flatten()
-            .filter_map(|e| e.file_name().to_str().map(str::to_string))
-            .filter(|n| n.ends_with(".md"))
-            .collect();
-        names.sort();
-        names
-    }
-
-    #[test]
-    fn roster_target_is_under_the_native_config_dir() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        assert_eq!(
-            roster_target(tmp.path()),
-            tmp.path().join(".trusty-code").join(AGENTS_DIRNAME)
-        );
-    }
-
-    #[test]
-    fn staged_sources_cover_every_roster_name_and_base_template() {
-        let staged = stage_embedded_sources().expect("stage");
-        for name in roster_names() {
-            assert!(
-                staged.path().join(format!("{name}.md")).is_file(),
-                "roster agent '{name}' must have a staged source file"
-            );
-        }
-        for base in crate::assets::BASE_AGENT_NAMES {
-            let map = trusty_agents_common::agents::builder::build_source_map(staged.path());
-            assert!(
-                map.contains_key(*base),
-                "base template '{base}' must be stageable for extends resolution"
-            );
-        }
-    }
-
-    /// Assert a symlinked skill-ref location refuses the deploy, writes no
-    /// agent, and leaves the out-of-project victim byte-identical (#7727).
-    #[cfg(unix)]
-    fn assert_skill_ref_symlink_refused(project: &Path, victim: &Path, original: &str) {
-        let err = ensure_roster_deployed(project).expect_err("a symlink escape must be refused");
-        assert!(
-            matches!(
-                err,
-                RosterDeployError::WriteTarget(WriteTargetError::SymlinkEscape { .. })
-            ),
-            "expected a symlink-escape refusal, got {err:?}"
-        );
-        assert_eq!(std::fs::read_to_string(victim).expect("victim"), original);
-        assert!(
-            !roster_target(project).exists(),
-            "no agent may be written once the refusal fires"
-        );
-    }
-
-    /// #7727 review: `.trusty-code/skill-refs` committed as a symlink out of
-    /// the project.
-    #[cfg(unix)]
-    #[test]
-    fn symlinked_skill_refs_dir_is_refused_before_any_write() {
-        let project = tempfile::tempdir().expect("project");
-        let outside = tempfile::tempdir().expect("outside");
-        let victim = outside.path().join("self-improvement-loop/SKILL.md");
-        std::fs::create_dir_all(victim.parent().expect("parent")).expect("mkdir");
-        std::fs::write(&victim, "USER DATA - hand written skill").expect("victim");
-        let refs = super::super::skill_refs::project_skill_refs_dir(project.path());
-        std::fs::create_dir_all(refs.parent().expect("parent")).expect("mkdir");
-        std::os::unix::fs::symlink(outside.path(), &refs).expect("symlink");
-
-        assert_skill_ref_symlink_refused(project.path(), &victim, "USER DATA - hand written skill");
-    }
-
-    /// #7727 review: a real `skill-refs` dir whose one skill folder is a
-    /// symlink to a user's own skill.
-    #[cfg(unix)]
-    #[test]
-    fn symlinked_skill_folder_is_refused_before_any_write() {
-        let project = tempfile::tempdir().expect("project");
-        let outside = tempfile::tempdir().expect("outside");
-        let user_skill = outside.path().join("my-skill");
-        std::fs::create_dir_all(&user_skill).expect("mkdir");
-        let victim = user_skill.join("SKILL.md");
-        std::fs::write(&victim, "USER SKILL - hand written").expect("victim");
-        let refs = super::super::skill_refs::project_skill_refs_dir(project.path());
-        std::fs::create_dir_all(&refs).expect("mkdir");
-        std::os::unix::fs::symlink(&user_skill, refs.join("verification-before-completion"))
-            .expect("symlink");
-
-        assert_skill_ref_symlink_refused(project.path(), &victim, "USER SKILL - hand written");
-    }
-
-    /// #7727 review: one skill-ref file committed as a symlink to a user file.
-    #[cfg(unix)]
-    #[test]
-    fn symlinked_skill_ref_file_is_refused_before_any_write() {
-        let project = tempfile::tempdir().expect("project");
-        let outside = tempfile::tempdir().expect("outside");
-        let victim = outside.path().join("notes.md");
-        std::fs::write(&victim, "USER FILE").expect("victim");
-        let refs = super::super::skill_refs::project_skill_refs_dir(project.path());
-        let link = refs.join("condition-based-waiting/SKILL.md");
-        std::fs::create_dir_all(link.parent().expect("parent")).expect("mkdir");
-        std::os::unix::fs::symlink(&victim, &link).expect("symlink");
-
-        assert_skill_ref_symlink_refused(project.path(), &victim, "USER FILE");
-    }
-
-    #[test]
-    fn fresh_project_materializes_the_whole_roster() {
-        let project = tempfile::tempdir().expect("project tempdir");
-        let outcome = ensure_roster_deployed(project.path()).expect("deploy must succeed");
-        let RosterDeploy::Deployed { target, result } = outcome else {
-            panic!("a clean project must deploy, got: {outcome:?}");
-        };
-
-        assert!(result.failed.is_empty(), "no agent may fail: {result:?}");
-        // Asserted from the filesystem, not from the deployer's own report.
-        let on_disk = deployed_md_files(&target);
-        assert_eq!(
-            on_disk.len(),
-            roster_names().len(),
-            "every roster agent must land on disk, got: {on_disk:?}"
-        );
-        for name in roster_names() {
-            assert!(
-                target.join(format!("{name}.md")).is_file(),
-                "'{name}.md' must exist on disk after the first deploy"
-            );
-        }
-
-        // The manifest exists beside them and records framework ownership.
-        let (manifest_path, status) = roster_manifest_status(project.path());
-        assert!(manifest_path.is_file(), "the ledger must exist beside them");
-        assert_eq!(
-            status,
-            ManifestStatus::Present {
-                managed: roster_names().len()
-            }
-        );
-        assert_eq!(
-            AgentManifest::load(&target).managed["engineer.md"].origin,
-            Origin::Bundled
-        );
-    }
-
-    #[test]
-    fn base_templates_are_never_deployed() {
-        let project = tempfile::tempdir().expect("project tempdir");
-        ensure_roster_deployed(project.path()).expect("deploy");
-        for base in crate::assets::BASE_AGENT_NAMES {
-            let deployed = deployed_md_files(&roster_target(project.path()));
-            assert!(
-                !deployed
-                    .iter()
-                    .any(|n| n.to_lowercase() == format!("{base}.md")),
-                "composition base '{base}' must never be deployed as a dispatchable agent"
-            );
-        }
-    }
-
-    #[test]
-    fn second_deploy_of_an_untouched_roster_writes_nothing() {
-        let project = tempfile::tempdir().expect("project tempdir");
-        ensure_roster_deployed(project.path()).expect("first deploy");
-        let outcome = ensure_roster_deployed(project.path()).expect("second deploy");
-        let RosterDeploy::Deployed { result, .. } = outcome else {
-            panic!("second deploy must still run, got: {outcome:?}");
-        };
-        assert!(
-            result.deployed.is_empty(),
-            "an untouched roster must need no rewrite: {result:?}"
-        );
-        assert_eq!(result.unchanged.len(), roster_names().len());
-    }
-
-    #[test]
-    fn hand_edited_agent_survives_a_second_deploy() {
-        let project = tempfile::tempdir().expect("project tempdir");
-        ensure_roster_deployed(project.path()).expect("first deploy");
-        let target = roster_target(project.path());
-        let edited = target.join("engineer.md");
-
-        let hand_edit = "---\nname: engineer\nmodel: marker/hand-edited\n---\n\nMine now.\n";
-        std::fs::write(&edited, hand_edit).expect("hand-edit the deployed agent");
-
-        // Twice, to prove the preservation is stable rather than one-shot.
-        for _ in 0..2 {
-            let outcome = ensure_roster_deployed(project.path()).expect("re-deploy");
-            let RosterDeploy::Deployed { result, .. } = outcome else {
-                panic!("re-deploy must run, got: {outcome:?}");
-            };
-            assert!(
-                !result.deployed.contains(&"engineer.md".to_string())
-                    && !result.repaired.contains(&"engineer.md".to_string()),
-                "a hand-edited agent must never be rewritten: {result:?}"
-            );
-            assert_eq!(
-                std::fs::read_to_string(&edited).expect("read back"),
-                hand_edit,
-                "the hand edit must survive byte-identical"
-            );
-        }
-
-        // Its neighbours are untouched by the carve-out.
-        assert!(target.join("rust-engineer.md").is_file());
-    }
-
-    #[test]
-    fn untracked_file_is_left_to_the_deployer() {
-        let project = tempfile::tempdir().expect("project tempdir");
-        let target = roster_target(project.path());
-        std::fs::create_dir_all(&target).expect("mkdir target");
-        let squatter = "---\nname: engineer\n---\n\nProject-owned, never deployed by us.\n";
-        std::fs::write(target.join("engineer.md"), squatter).expect("write untracked file");
-
-        let outcome = ensure_roster_deployed(project.path()).expect("deploy");
-        let RosterDeploy::Deployed { result, .. } = outcome else {
-            panic!("deploy must run, got: {outcome:?}");
-        };
-        assert!(
-            result
-                .untracked_modified
-                .contains(&"engineer.md".to_string()),
-            "an untracked, differing file is the deployer's own skip branch: {result:?}"
-        );
-        assert_eq!(
-            std::fs::read_to_string(target.join("engineer.md")).expect("read back"),
-            squatter
-        );
-    }
-
-    #[test]
-    fn corrupt_manifest_is_reported_and_nothing_is_written() {
-        let project = tempfile::tempdir().expect("project tempdir");
-        let target = roster_target(project.path());
-        std::fs::create_dir_all(&target).expect("mkdir target");
-        std::fs::write(target.join(MANIFEST_FILE), b"not valid json{{{").expect("corrupt ledger");
-
-        let err = ensure_roster_deployed(project.path()).expect_err("must refuse");
-        assert!(
-            matches!(err, RosterDeployError::ManifestCorrupt { .. }),
-            "got: {err:?}"
-        );
-        assert!(
-            err.to_string().contains("refusing to deploy"),
-            "the message must say nothing was written: {err}"
-        );
-        assert!(
-            deployed_md_files(&target).is_empty(),
-            "a corrupt ledger must leave the directory untouched"
-        );
-        // And the ledger itself was never reset.
-        assert_eq!(
-            std::fs::read_to_string(target.join(MANIFEST_FILE)).expect("read back"),
-            "not valid json{{{"
-        );
-    }
-
-    #[test]
-    fn manifest_status_reports_absent_then_present() {
-        let project = tempfile::tempdir().expect("project tempdir");
-        let (path, status) = roster_manifest_status(project.path());
-        assert_eq!(status, ManifestStatus::Absent);
-        assert_eq!(status.as_str(), "absent");
-        assert!(!path.exists());
-
-        ensure_roster_deployed(project.path()).expect("deploy");
-        let (_, status) = roster_manifest_status(project.path());
-        assert_eq!(status.as_str(), "present");
-        assert!(matches!(status, ManifestStatus::Present { managed } if managed > 0));
-    }
-
-    #[test]
-    fn manifest_status_reports_corrupt() {
-        let project = tempfile::tempdir().expect("project tempdir");
-        let target = roster_target(project.path());
-        std::fs::create_dir_all(&target).expect("mkdir target");
-        std::fs::write(target.join(MANIFEST_FILE), b"{{{").expect("corrupt ledger");
-        let (_, status) = roster_manifest_status(project.path());
-        assert_eq!(status.as_str(), "corrupt");
-    }
-
-    #[test]
-    fn deploy_is_skipped_when_claude_agents_dir_wins() {
-        let project = tempfile::tempdir().expect("project tempdir");
-        let claude = project.path().join(".claude").join(AGENTS_DIRNAME);
-        std::fs::create_dir_all(&claude).expect("mkdir .claude/agents");
-        std::fs::write(
-            claude.join("engineer.md"),
-            "---\nname: engineer\n---\n\nProject catalog.\n",
-        )
-        .expect("write .claude agent");
-
-        let outcome = ensure_roster_deployed(project.path()).expect("skip is not an error");
-        assert!(
-            matches!(outcome, RosterDeploy::Skipped(SkipReason::CompatRootWins)),
-            "a winning .claude/agents/ must never be shadowed, got: {outcome:?}"
-        );
-        assert!(
-            !roster_target(project.path()).exists(),
-            "nothing may be written when the deploy is skipped"
-        );
-    }
-
-    #[test]
-    fn deploy_and_log_is_a_no_op_without_a_project() {
-        assert!(deploy_and_log(None).is_none());
-    }
-
-    #[test]
-    fn deploy_and_log_reports_a_corrupt_ledger_without_panicking() {
-        crate::test_support::begin_capture();
-
-        let project = tempfile::tempdir().expect("project tempdir");
-        let target = roster_target(project.path());
-        std::fs::create_dir_all(&target).expect("mkdir target");
-        std::fs::write(target.join(MANIFEST_FILE), b"{{{").expect("corrupt ledger");
-        assert!(
-            deploy_and_log(Some(project.path())).is_none(),
-            "a corrupt ledger must degrade to the in-memory roster, not abort"
-        );
-
-        // Degrading silently is the failure this branch exists to prevent, so
-        // the assertion is on the ERROR event itself — downgrading it to
-        // `debug!` must fail this test, not just change a log line.
-        let errors = crate::test_support::captured_at_least(tracing::Level::ERROR);
-        assert!(
-            errors
-                .iter()
-                .any(|m| m.contains("could not materialize the agent roster")),
-            "the corrupt ledger must be reported at ERROR level, got: {errors:?}"
-        );
-    }
-
-    #[test]
-    fn deployed_agents_load_back_through_the_disk_loader() {
-        let project = tempfile::tempdir().expect("project tempdir");
-        ensure_roster_deployed(project.path()).expect("deploy");
-        let loaded = crate::agents::load_all_agents(&roster_target(project.path()));
-        assert_eq!(
-            loaded.len(),
-            roster_names().len(),
-            "every deployed file must parse through the disk loader"
-        );
-        let restricted = loaded
-            .iter()
-            .find(|c| c.agent.name == "code-critic")
-            .expect("code-critic must be deployed");
-        let allowed = restricted
-            .tools
-            .as_ref()
-            .and_then(|t| t.allowed.as_ref())
-            .expect("code-critic carries a tcode-local tool allowlist");
-        assert!(
-            !allowed.contains(&"write_file".to_string()),
-            "the tcode-local read-only restriction must survive materialization: {allowed:?}"
-        );
-    }
-}
+#[path = "deploy_tests.rs"]
+mod deploy_tests;

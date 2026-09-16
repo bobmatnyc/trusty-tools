@@ -89,26 +89,42 @@ fn missing_claude_dir_yields_empty_plan() {
 /// Applying a plan creates exactly its `Copy` targets and nothing else.
 ///
 /// Why: reversibility means the report is a complete inventory — anything
-/// created but unreported could not be undone.
-/// What: applies a staged plan and asserts the on-disk `.trusty-code/` tree
-/// equals the reported `created` list, with identical file contents.
+/// created but unreported could not be undone. #7779 adds the second reason: a
+/// target landing DIRECTLY under `.trusty-code/` takes `copy_one`'s empty-parent
+/// branch, which pins the config root itself rather than a subdirectory, and
+/// `settings.json` is the only file that reaches it.
+/// What: applies a staged plan covering a nested target, a doubly-nested one and
+/// `settings.json`, then asserts the on-disk `.trusty-code/` tree equals the
+/// reported `created` list, with identical file contents.
 /// Test: this function IS the test.
 #[test]
 fn apply_creates_only_the_planned_files() {
     let tmp = tempfile::tempdir().expect("tempdir");
     write_claude(tmp.path(), "agents/pm.md", "# pm");
     write_claude(tmp.path(), "skills/demo/SKILL.md", "# demo");
+    let settings = r#"{"code_harness":{"mode":"parity"}}"#;
+    write_claude(tmp.path(), crate::paths::SETTINGS_FILENAME, settings);
 
     let plan = plan_import(tmp.path());
-    let report = apply_import(&plan);
+    let report = apply_import(tmp.path(), &plan);
 
     assert!(report.refused.is_empty(), "refused: {:?}", report.refused);
     assert_eq!(report.created, native_tree(tmp.path()));
-    assert_eq!(report.created.len(), 2);
+    assert_eq!(report.created.len(), 3);
     assert_eq!(
         std::fs::read_to_string(tmp.path().join(TRUSTY_CODE_DIRNAME).join("agents/pm.md"))
             .expect("read"),
         "# pm"
+    );
+    // The empty-parent branch: straight into `.trusty-code/`, no subdirectory.
+    assert_eq!(
+        std::fs::read_to_string(
+            tmp.path()
+                .join(TRUSTY_CODE_DIRNAME)
+                .join(crate::paths::SETTINGS_FILENAME)
+        )
+        .expect("read the imported settings"),
+        settings
     );
 }
 
@@ -122,14 +138,14 @@ fn apply_creates_only_the_planned_files() {
 fn apply_is_idempotent() {
     let tmp = tempfile::tempdir().expect("tempdir");
     write_claude(tmp.path(), "agents/pm.md", "# pm");
-    apply_import(&plan_import(tmp.path()));
+    apply_import(tmp.path(), &plan_import(tmp.path()));
 
     // Edit the imported copy: a re-import must not clobber it.
     let target = tmp.path().join(TRUSTY_CODE_DIRNAME).join("agents/pm.md");
     std::fs::write(&target, "# edited by the project owner").expect("write");
 
     let second = plan_import(tmp.path());
-    let report = apply_import(&second);
+    let report = apply_import(tmp.path(), &second);
 
     assert_eq!(second.to_copy().count(), 0);
     assert!(report.created.is_empty());
@@ -177,7 +193,7 @@ fn executable_source_is_refused() {
     std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o755)).expect("chmod");
 
     let plan = plan_import(tmp.path());
-    let report = apply_import(&plan);
+    let report = apply_import(tmp.path(), &plan);
 
     assert_eq!(plan.to_copy().count(), 0);
     assert!(report.created.is_empty());
@@ -209,7 +225,7 @@ fn symlink_escaping_claude_is_refused() {
     std::os::unix::fs::symlink(&secret, agents.join("leak.md")).expect("symlink");
 
     let plan = plan_import(tmp.path());
-    let report = apply_import(&plan);
+    let report = apply_import(tmp.path(), &plan);
 
     assert_eq!(plan.entries.len(), 1);
     assert_eq!(plan.to_copy().count(), 0);
@@ -244,7 +260,7 @@ fn secret_bearing_settings_is_refused() {
     );
 
     let plan = plan_import(tmp.path());
-    let report = apply_import(&plan);
+    let report = apply_import(tmp.path(), &plan);
 
     assert!(report.created.is_empty());
     assert_eq!(report.refused.len(), 1);
@@ -308,4 +324,48 @@ fn unreadable_subtree_is_skipped_with_a_warning() {
 
     assert_eq!(plan.to_copy().count(), 1, "the readable agent must survive");
     assert!(plan.entries[0].to.ends_with("agents/pm.md"));
+}
+
+/// #7779: a target directory swapped for a symlink between PLAN and APPLY
+/// imports nothing into the victim.
+///
+/// Why: the widest check-to-write window in the crate — an operator can sit on a
+/// `--dry-run` listing for minutes before authorising it, and the old apply
+/// re-walked the same path with `create_dir_all` plus `std::fs::copy`.
+/// What: plans an import, swaps `.trusty-code/agents` for a symlink to a victim
+/// directory, then applies. Asserts the victim receives nothing and the entry is
+/// reported as refused rather than created.
+/// Test: this function IS the test.
+#[cfg(unix)]
+#[test]
+fn swapped_target_dir_never_reaches_the_victim() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let victim = tempfile::tempdir().expect("victim");
+    write_claude(tmp.path(), "agents/pm.md", "AGENT BODY");
+    let plan = plan_import(tmp.path());
+    assert_eq!(plan.to_copy().count(), 1, "the agent must be planned");
+
+    // The plan validated `<project>/.trusty-code/agents`; swap it afterwards.
+    let agents = tmp.path().join(TRUSTY_CODE_DIRNAME).join("agents");
+    std::fs::create_dir_all(&agents).expect("mkdir");
+    std::fs::remove_dir_all(&agents).expect("remove");
+    std::os::unix::fs::symlink(victim.path(), &agents).expect("symlink");
+
+    let report = apply_import(tmp.path(), &plan);
+
+    assert!(
+        report.created.is_empty(),
+        "nothing may be reported created: {:?}",
+        report.created
+    );
+    assert_eq!(report.refused.len(), 1, "the swap must be reported");
+    let leaked: Vec<_> = std::fs::read_dir(victim.path())
+        .expect("read the victim")
+        .flatten()
+        .map(|e| e.file_name())
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "the victim must receive nothing, found {leaked:?}"
+    );
 }
