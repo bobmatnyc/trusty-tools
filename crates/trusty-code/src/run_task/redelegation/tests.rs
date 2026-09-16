@@ -103,6 +103,22 @@ fn llm_error() -> anyhow::Error {
     })
 }
 
+/// A retryable engineer failure that IS the turn cap (#8018).
+///
+/// Why: the "cause named is the cause that happened" property needs both arms;
+/// without a turn-cap fixture the tag could be hard-coded and still pass.
+/// What: `RunnerError::Loop` wrapping `AgentLoopError::TurnCapExceeded`.
+/// Test: `retry_exhaustion_names_the_turn_cap_when_the_cap_was_the_reason`.
+fn turn_cap_error() -> anyhow::Error {
+    anyhow::Error::from(RunnerError::Loop {
+        name: "python-engineer".to_string(),
+        source: AgentLoopError::TurnCapExceeded {
+            max_turns: 40,
+            partial: Box::new(AgentOutput::from_content("half-built")),
+        },
+    })
+}
+
 fn unknown_agent_error() -> anyhow::Error {
     anyhow::Error::from(RunnerError::UnknownAgent {
         name: "python-engineer".to_string(),
@@ -603,5 +619,91 @@ async fn cap_reached_message_names_the_project_path() {
     assert!(
         err.to_string().contains("/very/distinctive/project/path"),
         "error must name the project path, got: {err}"
+    );
+}
+
+/// (#8018) Retries exhausted by a PROVIDER error report that error — type and
+/// message — and never the turn cap.
+///
+/// Why: the live reproduction on tcode 0.6.2 had every delegate attempt die in
+/// under a second on the #7955 ZDR 404, yet the run's terminal status said
+/// `turn_cap_exceeded`, exit 6. The retry loop dropped `e` and returned a fresh
+/// `anyhow!` naming only attempt counts, so the one fact needed to diagnose the
+/// run never left this function. Against the pre-fix code this test fails: the
+/// message carried neither `llm_error` nor the API body.
+/// What: script `MAX_REDELEGATIONS` `AgentLoopError::Llm` failures, exhaust the
+/// budget, and assert the returned error names the LLM tag and the provider
+/// body while NOT claiming the turn cap.
+/// Test: this test.
+#[tokio::test]
+async fn retry_exhaustion_names_the_provider_error_not_the_turn_cap() {
+    let outcomes = (0..MAX_REDELEGATIONS).map(|_| Err(llm_error())).collect();
+    let inner = Arc::new(ScriptedInner::new(outcomes));
+    let signal = RedelegationCapSignal::new();
+    let runner = RedelegatingRunner::new(
+        Arc::clone(&inner) as Arc<dyn AgentRunner>,
+        signal.clone(),
+        PathBuf::from("/tmp/project"),
+    );
+
+    let err = runner
+        .run("python-engineer", "build the package")
+        .await
+        .expect_err("must fail once the retry budget is exhausted");
+    let text = err.to_string();
+
+    assert!(
+        text.contains("llm_error"),
+        "the exhaustion error must name the failure TYPE, got: {text}"
+    );
+    assert!(
+        text.contains("inference API error 500") && text.contains("bedrock hiccup"),
+        "the exhaustion error must name the provider MESSAGE, got: {text}"
+    );
+    assert!(
+        !text.contains("turn_cap_exceeded"),
+        "the turn cap was not the reason and must not be named, got: {text}"
+    );
+    assert!(
+        signal.is_retry_budget_exhausted(),
+        "the retry budget must be latched as exhausted"
+    );
+}
+
+/// (#8018) When the turn cap really WAS the reason, `turn_cap_exceeded` is what
+/// gets reported.
+///
+/// Why: the fix must not replace one hard-coded cause with another. This is the
+/// other arm: the tag has to track the caught error, so the cap keeps being
+/// named when the cap is what happened.
+/// What: script `MAX_REDELEGATIONS` `AgentLoopError::TurnCapExceeded` failures
+/// and assert the exhaustion error names the cap tag and its turn budget.
+/// Test: this test.
+#[tokio::test]
+async fn retry_exhaustion_names_the_turn_cap_when_the_cap_was_the_reason() {
+    let outcomes = (0..MAX_REDELEGATIONS)
+        .map(|_| Err(turn_cap_error()))
+        .collect();
+    let inner = Arc::new(ScriptedInner::new(outcomes));
+    let signal = RedelegationCapSignal::new();
+    let runner = RedelegatingRunner::new(
+        Arc::clone(&inner) as Arc<dyn AgentRunner>,
+        signal,
+        PathBuf::from("/tmp/project"),
+    );
+
+    let err = runner
+        .run("python-engineer", "build the package")
+        .await
+        .expect_err("must fail once the retry budget is exhausted");
+    let text = err.to_string();
+
+    assert!(
+        text.contains("turn_cap_exceeded") && text.contains("turn cap of 40"),
+        "the exhaustion error must name the turn cap and its budget, got: {text}"
+    );
+    assert!(
+        !text.contains("llm_error"),
+        "no provider error occurred and none must be named, got: {text}"
     );
 }

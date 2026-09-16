@@ -1061,3 +1061,37 @@ crates/trusty-search/src/service/server/status.rs	graph_stats_handler_returns_br
 crates/trusty-search/src/service/server/status.rs	test_graph_handler_filters
 crates/trusty-search/src/service/server/tickers.rs	status_changed
 crates/trusty-search/src/service/shutdown_flush.rs	shutdown_flush_skips_external_volume_index
+#
+# Added 2026-09-16 (issue #8006): the prose-pointer span filter added by
+# #7710 spelled its first path segment without `*`, so a prose pointer
+# naming a BARE glob ("covered by `parse_json_*`") matched nothing, emitted
+# no citation row, and left the reported citation total unmoved and the
+# pointer unchecked. A `::`-qualified glob already got through. Allowing `*`
+# in the first segment surfaced the rows below: bare globs whose pattern
+# matches no identifier in the citing crate. They are pre-existing drift the
+# gate could not see, not new regressions; most are deliberate cross-crate
+# or historical references in crate sources owned by other work, so they
+# ratchet out here.
+crates/trusty-agents/src/repl/tui/pickers.rs	inline_choice_*
+crates/trusty-analyze/src/service/handlers/deep.rs	deep_endpoint_*
+crates/trusty-git-analytics/src/collect/github/client.rs	multi_repo_constructor_*
+crates/trusty-git-analytics/src/commands/deployments/file_source.rs	parse_csv_*
+crates/trusty-git-analytics/src/commands/deployments/file_source.rs	parse_json_*
+crates/trusty-git-analytics/src/commands/deployments/mod.rs	ingest_git_tags_*
+crates/trusty-git-analytics/src/commands/incidents/file_source.rs	parse_csv_*
+crates/trusty-git-analytics/src/commands/incidents/file_source.rs	parse_json_*
+crates/trusty-git-analytics/src/commands/incidents/mod.rs	parse_datadog_value_handles_*
+crates/trusty-installer/src/commands/port_guard.rs	parse_lsof_pids_*
+crates/trusty-installer/src/commands/sign.rs	canonical_bin_dir_from_*
+crates/trusty-mpm/src/client/result.rs	execute_managed_fleet_*
+crates/trusty-mpm/src/daemon/managed_routes/mod.rs	spawn_request_runtime_*
+crates/trusty-mpm/src/daemon/tmux.rs	scrollback_option_commands_*
+crates/trusty-review/src/service/handlers.rs	review_endpoint_*
+crates/trusty-search/src/commands/index_cwd_resolve.rs	cwd_resolve_*
+crates/trusty-search/src/commands/start/embedder.rs	resolve_expected_provider_*
+crates/trusty-search/src/commands/start/embedder.rs	resolve_expected_python_provider_*
+crates/trusty-search/src/core/indexer/archive.rs	archive_downranking_*
+crates/trusty-search/src/core/indexer/docs_penalty.rs	test_doc_score_penalty_*
+crates/trusty-search/src/mcp/tools/search.rs	search_*_tool_routes_to_*_stage
+crates/trusty-search/src/service/server/files.rs	test_call_chain_handler_*
+crates/trusty-search/src/service/server/status.rs	test_graph_handler_*
