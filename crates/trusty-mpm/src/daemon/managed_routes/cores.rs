@@ -348,6 +348,33 @@ pub(crate) async fn resume_core(state: &Arc<DaemonState>, id_str: &str) -> Route
     }
 }
 
+/// The HTTP status a non-404 decommission failure reports (#7877).
+///
+/// Why: the #3764 shared-workspace guard and the #3649 worktree-owner gate both
+/// REFUSE a decommission the caller asked for while a sibling session still
+/// claims the directory. That is a conflict in the caller's request, not a
+/// server fault, but every non-404 error used to collapse into a 500 — so the
+/// CLI could not tell a legitimate refusal from a crashed daemon, and printed
+/// reqwest's bare "HTTP status server error (500 …)" instead of the guard's
+/// reason. 409 Conflict is the status the rest of this module already uses for
+/// a refused-because-of-current-state request (see `resume_core`'s
+/// `InvalidState` arm), so the socket transport's `status_to_rpc_code` already
+/// carries it.
+/// What: 409 for the two guard refusals, 500 for everything else (an I/O
+/// failure, a tmux failure, a store write) — those really are server faults.
+/// The message is the error's `Display` in both cases, unchanged.
+/// Test: `a_shared_workspace_guard_refusal_is_a_409_not_a_500`,
+/// `an_ordinary_decommission_failure_is_still_a_500`.
+fn decommission_failure_status(err: &crate::session_manager::ManagedError) -> u16 {
+    use crate::session_manager::ManagedError;
+    match err {
+        ManagedError::ForeignActiveWorkspaceClaim(..) | ManagedError::WorktreeOwnerMismatch(..) => {
+            409
+        }
+        _ => 500,
+    }
+}
+
 /// `POST /api/v1/sessions/managed/{id}/decommission` — see
 /// [`super::decommission_managed_session`].
 pub(crate) async fn decommission_core(
@@ -387,7 +414,8 @@ pub(crate) async fn decommission_core(
             })
         }
         Err(crate::session_manager::ManagedError::SessionNotFound(_)) => not_found(id_str),
-        Err(e) => RouteOutcome::text(500, e.to_string()),
+        // #7877: a guard refusal is the caller's conflict, not a server fault.
+        Err(e) => RouteOutcome::text(decommission_failure_status(&e), e.to_string()),
     }
 }
 
@@ -424,7 +452,106 @@ pub(crate) fn resume_http_response(outcome: RouteOutcome) -> axum::response::Res
 #[cfg(test)]
 mod cores_tests {
     use super::*;
-    use crate::daemon::rpc::managed::outcome::status_to_rpc_code;
+    use crate::daemon::rpc::managed::outcome::{RouteBody, status_to_rpc_code};
+    use crate::session_manager::{ManagedSessionState, SessionRecord};
+
+    /// An `Active` record claiming `workspace_path` — the #1744 collision shape.
+    fn active_record_claiming(
+        id: ManagedSessionId,
+        workspace_path: &std::path::Path,
+    ) -> SessionRecord {
+        SessionRecord {
+            id,
+            tmux_name: format!("tm-7877-{id}"),
+            cwd: workspace_path.to_path_buf(),
+            task: "task".into(),
+            state: ManagedSessionState::Active,
+            created_at: chrono::Utc::now(),
+            last_activity_at: None,
+            workspace_path: Some(workspace_path.to_path_buf()),
+            repo_url: None,
+            branch: None,
+            pending_decision: None,
+            proposed_default: None,
+            correlation: Default::default(),
+            runtime: Default::default(),
+            ephemeral: false,
+            workspace_owned: false,
+            source_id: None,
+            claude_session_id: None,
+            scrollback_path: None,
+            last_cwd: None,
+            deliverable_id: None,
+            pane_id: None,
+            injection_status: Default::default(),
+            worktree_owner: None,
+            terminal_at: None,
+            stop_cause: None,
+        }
+    }
+
+    /// The #3764 shared-workspace guard answers 409, not 500 (#7877).
+    ///
+    /// Why: the refusal is the caller's conflict — a sibling `Active` session
+    /// still claims the directory — and a 500 made it indistinguishable from a
+    /// crashed daemon, so the CLI printed reqwest's bare status line instead of
+    /// the guard's reason. This drives the REAL route body against a seeded
+    /// store, so it fails on the pre-fix `RouteOutcome::text(500, …)` arm.
+    /// Test: this function IS the test.
+    #[tokio::test]
+    async fn a_shared_workspace_guard_refusal_is_a_409_not_a_500() {
+        let data_root = crate::test_support::hermetic_temp_dir();
+        let state = Arc::new(
+            crate::daemon::state::DaemonState::with_root_isolated_managed(
+                data_root.path().to_path_buf(),
+            )
+            .await,
+        );
+        let mgr = state.session_manager().await;
+
+        let shared = data_root.path().join("shared-7877-workspace");
+        let sibling = ManagedSessionId::new();
+        let target = ManagedSessionId::new();
+        for id in [sibling, target] {
+            mgr.store
+                .write()
+                .await
+                .upsert(active_record_claiming(id, &shared))
+                .await
+                .expect("seed record");
+        }
+
+        let outcome = decommission_core(&state, &target.to_string(), false).await;
+        assert_eq!(
+            outcome.status, 409,
+            "a guard refusal must be a client-side conflict, not a server fault"
+        );
+        match &outcome.body {
+            RouteBody::Text(msg) => assert!(
+                msg.contains(&sibling.to_string()),
+                "the refusal must name the sibling that blocks it, got {msg}"
+            ),
+            other => panic!("a refusal body must be text, got {other:?}"),
+        }
+
+        // Nothing may have been mutated — the guard runs before every removal.
+        assert_eq!(
+            mgr.get(&target).await.expect("target record").state,
+            ManagedSessionState::Active
+        );
+    }
+
+    /// Every OTHER decommission failure is still a 500 (#7877 error arm).
+    ///
+    /// Why: narrowing the guard refusal to 409 must not quietly reclassify a
+    /// real server fault — an I/O or tmux failure — as a client error the CLI
+    /// would report as "your request conflicts".
+    /// Test: this function IS the test.
+    #[test]
+    fn an_ordinary_decommission_failure_is_still_a_500() {
+        let err = crate::session_manager::ManagedError::TmuxUnavailable("no tmux".into());
+        assert_eq!(decommission_failure_status(&err), 500);
+    }
 
     /// A 422 resume refusal keeps BOTH discriminants: the RPC code the socket
     /// reads, and the HTTP header the CLI reads (#6288, #2577).

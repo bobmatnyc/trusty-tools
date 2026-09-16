@@ -307,8 +307,14 @@ impl DaemonClient {
     /// tombstone summary plus `workspace_removed` / `workspace_path_was` — as a
     /// [`ManagedDecommissionOutcome`]. A 404 becomes an `Err` naming the id, so
     /// every decommission caller inherits one "missing session is a hard failure"
-    /// contract instead of restating it (#5913).
-    /// Test: `executor_decommission_reports_daemon_workspace_verdict` (real
+    /// contract instead of restating it (#5913). A 409 (#7877 — the #3764
+    /// shared-workspace guard, or the #3649 worktree-owner gate) becomes an
+    /// `Err` carrying the daemon's REASON TEXT: `error_for_status` alone throws
+    /// the body away and leaves the CLI printing "HTTP status client error (409
+    /// Conflict) for url …", which tells the operator nothing about which
+    /// sibling session blocks the teardown.
+    /// Test: `decommission_conflict_surfaces_the_guard_reason`,
+    /// `executor_decommission_reports_daemon_workspace_verdict` (real
     /// daemon round-trip), `decommission_outcome_round_trips_daemon_response`,
     /// `session_decommission_not_found_errors`;
     /// live HTTP via `tests/session_manager_mvp.rs`.
@@ -323,6 +329,15 @@ impl DaemonClient {
         // depend on which entry point issued the request.
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             anyhow::bail!("managed session '{id}' not found");
+        }
+        // #7877: a guard refusal's reason is the whole point of the response.
+        if resp.status() == reqwest::StatusCode::CONFLICT {
+            let reason = resp.text().await.unwrap_or_default();
+            let reason = reason.trim();
+            if reason.is_empty() {
+                anyhow::bail!("managed session '{id}' cannot be decommissioned right now");
+            }
+            anyhow::bail!("{reason}");
         }
         let outcome = resp
             .error_for_status()?

@@ -89,16 +89,96 @@ async fn connect_session_errors_when_daemon_unreachable() {
 /// needed to prove `spawn_managed_session` reads the response BODY (via
 /// [`super::error::response_or_body_error`]), not just the status line.
 async fn spawn_test_daemon() -> String {
+    spawn_test_daemon_with_state().await.0
+}
+
+/// [`spawn_test_daemon`], also handing back the `DaemonState` it serves (#7877).
+///
+/// Why: a refusal that depends on the store's CONTENTS cannot be provoked
+/// through the API alone — the collision needs two records seeded first.
+async fn spawn_test_daemon_with_state()
+-> (String, std::sync::Arc<crate::daemon::state::DaemonState>) {
     use std::future::IntoFuture as _;
 
     use crate::daemon::{api, state::DaemonState};
     let root = tempfile::tempdir().unwrap().keep();
     let state = std::sync::Arc::new(DaemonState::with_root_isolated_managed(root).await);
-    let router = api::router(state);
+    let router = api::router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(axum::serve(listener, router).into_future());
-    format!("http://{addr}")
+    (format!("http://{addr}"), state)
+}
+
+/// A #3764 guard refusal reaches the CLI as its REASON, over a non-500 status.
+///
+/// Why (#7877): the refusal used to be a 500 whose body `error_for_status`
+/// discarded, so `tm sessions decommission` printed "HTTP status server error
+/// (500 …)" and the operator learned neither that this was a legitimate refusal
+/// nor which sibling session caused it. Both halves of the fix are exercised
+/// here over a real socket: the daemon answers 409, and this client turns that
+/// body into the error message.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn decommission_conflict_surfaces_the_guard_reason() {
+    use crate::session_manager::{ManagedSessionId, ManagedSessionState, SessionRecord};
+
+    let (url, state) = spawn_test_daemon_with_state().await;
+    let mgr = state.session_manager().await;
+    let shared = std::path::PathBuf::from("/tmp/trusty-mpm-7877-shared-workspace");
+    let sibling = ManagedSessionId::new();
+    let target = ManagedSessionId::new();
+    for id in [sibling, target] {
+        let record = SessionRecord {
+            id,
+            tmux_name: format!("tm-7877-client-{id}"),
+            cwd: shared.clone(),
+            task: "task".into(),
+            state: ManagedSessionState::Active,
+            created_at: chrono::Utc::now(),
+            last_activity_at: None,
+            workspace_path: Some(shared.clone()),
+            repo_url: None,
+            branch: None,
+            pending_decision: None,
+            proposed_default: None,
+            correlation: Default::default(),
+            runtime: Default::default(),
+            ephemeral: false,
+            workspace_owned: false,
+            source_id: None,
+            claude_session_id: None,
+            scrollback_path: None,
+            last_cwd: None,
+            deliverable_id: None,
+            pane_id: None,
+            injection_status: Default::default(),
+            worktree_owner: None,
+            terminal_at: None,
+            stop_cause: None,
+        };
+        mgr.store
+            .write()
+            .await
+            .upsert(record)
+            .await
+            .expect("seed record");
+    }
+
+    let client = DaemonClient::new(url);
+    let err = client
+        .decommission_managed_session(&target.to_string())
+        .await
+        .expect_err("a sibling Active session claiming the same workspace must refuse");
+    let msg = err.to_string();
+    assert!(
+        msg.contains(&sibling.to_string()),
+        "the guard's reason must reach the CLI naming the blocking session, got: {msg}"
+    );
+    assert!(
+        !msg.contains("500"),
+        "a guard refusal must never look like a server fault, got: {msg}"
+    );
 }
 
 /// #2457 follow-up to #2496: a rejected spawn must surface the daemon's body
