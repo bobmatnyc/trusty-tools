@@ -12,23 +12,27 @@
 //! What: [`render_standard`] builds the report as a string (testable — its only
 //! I/O is the injected runner), [`print_standard`] writes it to stdout. It
 //! reports the resolved [`ResolvedTicketing`], the component labels
-//! `policy_labels_configured` would seed, the lifecycle labels the loaded
-//! `issue-state.yaml` declares — the two families side by side, which is the
-//! distinction the block cannot blur — and, since #7067, the live milestones
-//! and projects a new issue can be filed into.
+//! [`super::standard_components`] derives from the workspace and the live
+//! label list (#7837 — they used to be the two labels the harness seeds), the
+//! lifecycle labels the loaded `issue-state.yaml` declares — the two families
+//! side by side, which is the distinction the block cannot blur — and, since
+//! #7067, the live milestones and projects a new issue can be filed into.
 //! Test: `standard_reports_the_builtin_defaults`,
 //! `standard_reports_configured_extra_labels`,
 //! `standard_states_the_two_fixed_rules`,
 //! `standard_lists_the_model_lifecycle_labels`,
 //! `standard_reports_the_filing_targets`,
-//! `standard_still_requires_a_milestone_when_the_fetch_fails`.
+//! `standard_still_requires_a_milestone_when_the_fetch_fails`,
+//! `standard_lists_every_workspace_crate_as_a_component`.
 
 use std::fmt::Write as _;
+use std::path::Path;
 
-use trusty_mpm::core::policy_labels::{CONVENTION_LABEL, policy_labels_configured};
+use trusty_mpm::core::policy_labels::CONVENTION_LABEL;
 use trusty_mpm::core::trusty_tools_config::ResolvedTicketing;
 
 use super::config::StateModel;
+use super::standard_components::render_component_labels;
 use super::standard_live::render_filing_targets;
 use crate::commands::ticket::runner::CommandRunner;
 
@@ -36,13 +40,17 @@ use crate::commands::ticket::runner::CommandRunner;
 ///
 /// Why: the agent-facing entry point; the render is separate so a test can
 /// assert the text without capturing stdout.
+/// What: `start_dir` is the checkout whose crates are this repository's
+/// components (#7837) — the caller passes the working directory `gh` runs in,
+/// so the two halves of the report describe one repository.
 /// Test: side-effect only — see [`render_standard`]'s tests.
 pub(crate) fn print_standard(
     ticketing: &ResolvedTicketing,
     model: &StateModel,
     runner: &dyn CommandRunner,
+    start_dir: Option<&Path>,
 ) {
-    print!("{}", render_standard(ticketing, model, runner));
+    print!("{}", render_standard(ticketing, model, runner, start_dir));
 }
 
 /// Render the effective ticketing standard.
@@ -53,19 +61,22 @@ pub(crate) fn print_standard(
 /// What: the config-file location, the two rules configuration cannot relax,
 /// the resolved scalar settings, the #7067 filing requirements and the live
 /// milestones/projects that satisfy them, the component labels
-/// [`policy_labels_configured`] yields, and the lifecycle labels the loaded
-/// model declares. `session` supplies the `ws/<session>` label when known; the
-/// caller passes `None` outside tmux and the line is simply absent.
+/// [`render_component_labels`] derives from the workspace at `start_dir`
+/// (#7837), and the lifecycle labels the loaded model declares. The tmux
+/// session name supplies the `ws/<session>` label when known; outside tmux
+/// that line is simply absent.
 /// Test: `standard_reports_the_builtin_defaults`,
 /// `standard_reports_configured_extra_labels`,
 /// `standard_states_the_two_fixed_rules`,
 /// `standard_lists_the_model_lifecycle_labels`,
 /// `standard_reports_the_filing_targets`,
-/// `standard_still_requires_a_milestone_when_the_fetch_fails`.
+/// `standard_still_requires_a_milestone_when_the_fetch_fails`,
+/// `standard_lists_every_workspace_crate_as_a_component`.
 pub(crate) fn render_standard(
     ticketing: &ResolvedTicketing,
     model: &StateModel,
     runner: &dyn CommandRunner,
+    start_dir: Option<&Path>,
 ) -> String {
     let session = crate::commands::tmux_attach::current_tmux_session_name();
     let mut out = String::new();
@@ -129,15 +140,14 @@ pub(crate) fn render_standard(
 
     out.push_str(&render_filing_targets(runner));
 
-    let labels = policy_labels_configured(ticketing, session.as_deref());
-    let _ = writeln!(out, "\ncomponent labels ({}):", labels.len());
-    for label in &labels {
-        let _ = writeln!(
-            out,
-            "  {}  #{}  {}",
-            label.name, label.color, label.description
-        );
-    }
+    // #7837: the component labels are the workspace's crates cross-checked
+    // against the live label list, not the two labels the harness seeds.
+    out.push_str(&render_component_labels(
+        ticketing,
+        session.as_deref(),
+        start_dir,
+        runner,
+    ));
 
     let lifecycle: Vec<&super::config::StateLabel> = model
         .states
@@ -195,7 +205,8 @@ mod tests {
         }
     }
 
-    /// A runner that answers the milestone, owner, and project calls.
+    /// A runner that answers the milestone, owner, project, and (#7837) label
+    /// calls, in the order [`render_standard`] makes them.
     fn healthy_gh() -> FakeRunner {
         FakeRunner(RefCell::new(vec![
             out(true, "Backlog · mpm/core\n", ""),
@@ -203,6 +214,11 @@ mod tests {
             out(
                 true,
                 r#"{"projects":[{"number":3,"title":"trusty-mpm"}]}"#,
+                "",
+            ),
+            out(
+                true,
+                r#"[{"name":"trusty-mpm","color":"BFD4F2","description":"trusty-mpm platform and related work"}]"#,
                 "",
             ),
         ]))
@@ -218,7 +234,7 @@ mod tests {
 
     #[test]
     fn standard_reports_the_builtin_defaults() {
-        let text = render_standard(&ResolvedTicketing::default(), &model(), &healthy_gh());
+        let text = render_standard(&ResolvedTicketing::default(), &model(), &healthy_gh(), None);
         assert!(text.contains("default_assignee:    @me"), "{text}");
         assert!(text.contains("ensure_labels:       true"), "{text}");
         assert!(text.contains("lifecycle_model:     (discovered)"), "{text}");
@@ -229,7 +245,7 @@ mod tests {
     fn standard_states_the_two_fixed_rules() {
         // #6918: both rulings have to be visible to the agent that reads this,
         // or the config block looks like it could relax them.
-        let text = render_standard(&ResolvedTicketing::default(), &model(), &healthy_gh());
+        let text = render_standard(&ResolvedTicketing::default(), &model(), &healthy_gh(), None);
         assert!(text.contains("pr_link_keyword: Refs #N"), "{text}");
         assert!(
             text.contains("component label only, never a lifecycle label"),
@@ -246,7 +262,7 @@ mod tests {
                 "CLI surface",
             )])
             .with_default_assignee("bobmatnyc");
-        let text = render_standard(&cfg, &model(), &healthy_gh());
+        let text = render_standard(&cfg, &model(), &healthy_gh(), None);
         assert!(text.contains("area/cli  #0E8A16  CLI surface"), "{text}");
         assert!(text.contains("default_assignee:    bobmatnyc"), "{text}");
     }
@@ -254,7 +270,7 @@ mod tests {
     #[test]
     fn standard_lists_the_model_lifecycle_labels() {
         let m = model();
-        let text = render_standard(&ResolvedTicketing::default(), &m, &healthy_gh());
+        let text = render_standard(&ResolvedTicketing::default(), &m, &healthy_gh(), None);
         let first = m
             .states
             .iter()
@@ -272,7 +288,7 @@ mod tests {
         // #7067: the configured project, both requirement flags, and the live
         // milestone list have to be in one read.
         let cfg = ResolvedTicketing::default().with_default_project("trusty-mpm");
-        let text = render_standard(&cfg, &model(), &healthy_gh());
+        let text = render_standard(&cfg, &model(), &healthy_gh(), None);
         assert!(text.contains("default_project:     trusty-mpm"), "{text}");
         assert!(text.contains("milestone_required:  true"), "{text}");
         assert!(text.contains("project_required:    true"), "{text}");
@@ -285,7 +301,7 @@ mod tests {
     fn standard_still_requires_a_milestone_when_the_fetch_fails() {
         // #7067: the requirement is rendered from config, so a `gh` outage
         // cannot be read as "no milestone needed".
-        let text = render_standard(&ResolvedTicketing::default(), &model(), &broken_gh());
+        let text = render_standard(&ResolvedTicketing::default(), &model(), &broken_gh(), None);
         assert!(text.contains("milestones: unavailable ("), "{text}");
         assert!(text.contains("gh auth login required"), "{text}");
         assert!(text.contains("milestone_required:  true"), "{text}");
@@ -294,9 +310,45 @@ mod tests {
     }
 
     #[test]
+    fn standard_lists_every_workspace_crate_as_a_component() {
+        // #7837: the report named the two labels the harness seeds, so an
+        // agent reading it on a 29-crate workspace saw two components. The
+        // fixture has more crates than the seed table does.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/*\"]\n",
+        )
+        .unwrap();
+        for (dir, package) in [
+            ("trusty-mpm", "trusty-mpm"),
+            ("trusty-search", "trusty-search"),
+        ] {
+            std::fs::create_dir_all(root.join("crates").join(dir)).unwrap();
+            std::fs::write(
+                root.join("crates").join(dir).join("Cargo.toml"),
+                format!("[package]\nname = \"{package}\"\nversion = \"0.1.0\"\n"),
+            )
+            .unwrap();
+        }
+        let text = render_standard(
+            &ResolvedTicketing::default(),
+            &model(),
+            &healthy_gh(),
+            Some(root),
+        );
+        assert!(text.contains("trusty-search"), "{text}");
+        assert!(
+            text.contains("MISSING — `gh label create`"),
+            "a crate the repo has no label for is flagged: {text}"
+        );
+    }
+
+    #[test]
     fn a_disabled_requirement_still_prints() {
         let cfg = ResolvedTicketing::default().with_filing_requirements(false, false);
-        let text = render_standard(&cfg, &model(), &healthy_gh());
+        let text = render_standard(&cfg, &model(), &healthy_gh(), None);
         assert!(text.contains("milestone_required:  false"), "{text}");
         assert!(text.contains("project_required:    false"), "{text}");
         assert!(

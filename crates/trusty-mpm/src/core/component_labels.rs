@@ -31,6 +31,9 @@
 //! Every filesystem read here is bounded and fail-closed: an unreadable,
 //! oversized or malformed manifest contributes no names, leaving the seed table
 //! as the accepted set — exactly the pre-#7123 behaviour, never a wider one.
+//! That bias is wrong for a caller whose output IS the crate list, so
+//! [`workspace_crate_labels_checked`] runs the same walk and returns the
+//! failure reason instead of a silently shorter set (#7837).
 //!
 //! Test: `component_labels_tests.rs`.
 
@@ -202,6 +205,53 @@ fn workspace_crate_labels(root: &Path) -> Vec<String> {
         }
     }
     labels
+}
+
+/// Every workspace crate's GitHub label, or the reason none could be derived.
+///
+/// Why: #7837 — [`ComponentLabels::resolve`] folds every derivation failure
+/// into "the seed table", which is the right bias for an audit (a stale
+/// working directory must not fail an otherwise-compliant issue) and the wrong
+/// one for a REPORT whose whole output is the component list. `tm issue
+/// standard` printed the two seeded labels on a 29-crate workspace and read as
+/// if the workspace had two components; a report has to say it could not
+/// enumerate the crates rather than print a shorter list that looks
+/// authoritative.
+/// What: the hyphenated label of every member of the workspace rooted at or
+/// above `start_dir`, in member order, de-duplicated — the same walk
+/// [`CrateOwnership::resolve`] uses, so the two answers about one workspace
+/// cannot disagree. A GitHub label name cannot contain `_`, so only the
+/// hyphenated spelling is reported. `Err(reason)` when there is no directory,
+/// no workspace root at or above it (an unreadable or malformed root manifest
+/// lands here — it is not a root this walk can see), or a member list that
+/// names no crate.
+/// Test: `checked_labels_name_every_workspace_crate`,
+/// `checked_labels_error_without_a_workspace`,
+/// `checked_labels_error_on_a_malformed_manifest`,
+/// `checked_labels_error_with_no_directory`.
+pub fn workspace_crate_labels_checked(start_dir: Option<&Path>) -> Result<Vec<String>, String> {
+    // #7837: each arm names what failed, so `tm issue standard` can print it.
+    let dir =
+        start_dir.ok_or_else(|| "no working directory to resolve a workspace from".to_string())?;
+    let root = cargo_workspace_root(dir).ok_or_else(|| {
+        format!(
+            "no readable Cargo workspace manifest at or above {}",
+            dir.display()
+        )
+    })?;
+    let mut labels: Vec<String> = Vec::new();
+    for (_, label) in workspace_member_labels(&root) {
+        if !labels.iter().any(|existing| existing == &label) {
+            labels.push(label);
+        }
+    }
+    if labels.is_empty() {
+        return Err(format!(
+            "{} lists no workspace member with a [package] name",
+            root.join("Cargo.toml").display()
+        ));
+    }
+    Ok(labels)
 }
 
 /// The `[package] name` declared by `dir/Cargo.toml`, if any.

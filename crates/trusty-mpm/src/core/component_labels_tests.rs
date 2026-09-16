@@ -137,6 +137,63 @@ fn from_names_deduplicates() {
 }
 
 #[test]
+fn checked_labels_name_every_workspace_crate() {
+    // #7837: the reporting derivation names every member, hyphenated, and no
+    // directory segment.
+    let tmp = workspace();
+    let labels = super::workspace_crate_labels_checked(Some(tmp.path()))
+        .expect("the fixture is a workspace");
+    assert_eq!(
+        labels,
+        [
+            "trusty-audit",
+            "trusty-console",
+            "tga",
+            "trusty-mpm",
+            "trusty-review",
+            "trusty-audit-ui",
+        ],
+        "member order, hyphenated, de-duplicated"
+    );
+}
+
+#[test]
+fn checked_labels_error_without_a_workspace() {
+    // #7837: a failed derivation is a reason, never a silently shorter list.
+    let tmp = TempDir::new().unwrap();
+    let err = super::workspace_crate_labels_checked(Some(tmp.path())).unwrap_err();
+    assert!(
+        err.contains("no readable Cargo workspace manifest"),
+        "{err}"
+    );
+}
+
+#[test]
+fn checked_labels_error_on_a_malformed_manifest() {
+    let tmp = TempDir::new().unwrap();
+    fs::write(tmp.path().join("Cargo.toml"), "[workspace\nmembers = [").unwrap();
+    let err = super::workspace_crate_labels_checked(Some(tmp.path())).unwrap_err();
+    assert!(
+        err.contains("no readable Cargo workspace manifest"),
+        "{err}"
+    );
+}
+
+#[test]
+fn checked_labels_error_on_a_memberless_workspace() {
+    let tmp = TempDir::new().unwrap();
+    fs::write(tmp.path().join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
+    let err = super::workspace_crate_labels_checked(Some(tmp.path())).unwrap_err();
+    assert!(err.contains("no workspace member"), "{err}");
+}
+
+#[test]
+fn checked_labels_error_with_no_directory() {
+    let err = super::workspace_crate_labels_checked(None).unwrap_err();
+    assert!(err.contains("no working directory"), "{err}");
+}
+
+#[test]
 fn workspace_root_is_found_from_a_nested_directory() {
     let tmp = workspace();
     let found = cargo_workspace_root(&tmp.path().join("crates/trusty-audit/ui/src-tauri"))

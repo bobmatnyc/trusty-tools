@@ -24,6 +24,7 @@ pub(crate) mod config;
 pub(crate) mod ops;
 pub(crate) mod seed_ticketing;
 pub(crate) mod standard;
+pub(crate) mod standard_components;
 pub(crate) mod standard_live;
 pub(crate) mod state;
 pub(crate) mod validate;
@@ -122,7 +123,14 @@ fn dispatch<S: TicketSystem>(
         }
         IssueCmd::Standard { config } => {
             let (model, _source) = load_model_with_source(config.as_deref(), lifecycle)?;
-            standard::print_standard(&ticketing, &model, runner);
+            // #7837: the working directory `gh` runs in is also the workspace
+            // whose crates are this repository's components.
+            standard::print_standard(
+                &ticketing,
+                &model,
+                runner,
+                std::env::current_dir().ok().as_deref(),
+            );
         }
         IssueCmd::Transition {
             issue,
