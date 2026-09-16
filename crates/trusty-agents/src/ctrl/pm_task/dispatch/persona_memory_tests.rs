@@ -1147,6 +1147,101 @@ async fn tool_activity_persistence_keeps_explicit_event_origin_and_order() {
     );
 }
 
+/// Take `file`'s lock as soon as it comes free, giving up after `budget`
+/// (#8005).
+///
+/// Why: closing a descriptor does not always make a `flock` observably free at
+/// the next instruction. The lock lives on the open file DESCRIPTION, and a
+/// `fork` anywhere else in this 4000-test binary duplicates every open
+/// description into the child until `exec` closes the `O_CLOEXEC` ones — so for
+/// the width of one fork→exec window the lock outlives the parent's `close()`.
+/// CPU contention widens that window, which is the shape #8005 reported: a
+/// single `try_lock` immediately after `drop` is a timing assumption, not an
+/// assertion about the lock protocol.
+///
+/// What it does NOT give up: a lock that is never released still fails, now
+/// with the budget named instead of an `Err` the caller has to interpret.
+/// Test: `lock_within_returns_once_the_holder_releases`,
+/// `lock_within_reports_a_lock_that_is_never_released`.
+async fn lock_within(file: &std::fs::File, budget: std::time::Duration) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        if fs4::FileExt::try_lock(file).is_ok() {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!("the lock was still held after {budget:?}"));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+/// #8005: the wait returns as soon as the holder lets go, not at the deadline.
+///
+/// Why this proves the poll and not just the call: the holder is still holding
+/// when [`lock_within`] is entered, so a single `try_lock` fails here. Only a
+/// retry can succeed.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn lock_within_returns_once_the_holder_releases() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("held.lock");
+    let holder = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .unwrap();
+    fs4::FileExt::lock(&holder).unwrap();
+    let waiter = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    assert!(
+        fs4::FileExt::try_lock(&waiter).is_err(),
+        "premise broken: the holder must be holding when the wait starts"
+    );
+
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        drop(holder);
+    });
+
+    lock_within(&waiter, std::time::Duration::from_secs(5))
+        .await
+        .expect("the wait must take the lock once the holder releases");
+    fs4::FileExt::unlock(&waiter).unwrap();
+}
+
+/// #8005, the other half: the wait is BOUNDED, so a lock nobody releases is a
+/// reported failure rather than a hung test.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn lock_within_reports_a_lock_that_is_never_released() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("never-free.lock");
+    let holder = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .unwrap();
+    fs4::FileExt::lock(&holder).unwrap();
+    let waiter = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+
+    let err = lock_within(&waiter, std::time::Duration::from_millis(100))
+        .await
+        .expect_err("a lock held for the whole budget must fail");
+    assert!(err.contains("still held"), "{err}");
+}
+
 #[tokio::test]
 async fn tool_activity_persistence_lock_serializes_independent_file_handles() {
     let dir = tempfile::tempdir().unwrap();
@@ -1171,6 +1266,10 @@ async fn tool_activity_persistence_lock_serializes_independent_file_handles() {
         .unwrap();
     drop(another);
     drop(first);
-    fs4::FileExt::try_lock(&second).unwrap();
+    // #8005: wait for the CONDITION (the lock is free), never assume the close
+    // published it by the next instruction.
+    lock_within(&second, std::time::Duration::from_secs(5))
+        .await
+        .expect("dropping the holder must free the lock");
     fs4::FileExt::unlock(&second).unwrap();
 }

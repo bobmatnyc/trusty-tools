@@ -719,6 +719,47 @@ fn ops_transition_rejects_multi_state() {
     assert!(err.contains("repair"), "should hint repair, got: {err}");
 }
 
+/// #8003: asking for the state the issue already holds is a REPORTED no-op.
+///
+/// Why this shape: a self-edge is in no transition graph, so before the fix
+/// this fell through to the edge check and came back as
+/// `invalid transition queued → queued` — an error for a caller that already
+/// has what it asked for. The report must carry `no_op` so the dispatcher can
+/// say "already there" instead of "moved".
+/// Test: this function IS the test.
+#[test]
+fn ops_transition_same_state_is_a_reported_no_op() {
+    let m = model();
+    let sys = FakeSystem::new(issue_with_labels(5, &["unicorn", "unicorn:queued"]));
+    let report = transition(&sys, &m, 5, "queued", None).expect("a same-state call must succeed");
+    assert!(
+        report.no_op,
+        "the report must say nothing changed: {report:?}"
+    );
+    assert_eq!(report.from.as_deref(), Some("queued"));
+    assert_eq!(report.to, "queued");
+    assert!(!report.assignee_changed);
+}
+
+/// #8003: the no-op costs exactly one read and not one write.
+///
+/// Why separately from the report: "reports a no-op" and "wrote nothing" are
+/// two claims, and the second is the one that matters — a same-state swap would
+/// have added and removed the same label and posted an audit comment saying the
+/// issue moved from a state to itself.
+/// Test: this function IS the test.
+#[test]
+fn ops_transition_same_state_makes_no_gh_mutation() {
+    let m = model();
+    let sys = FakeSystem::new(issue_with_labels(5, &["unicorn:queued"]));
+    transition(&sys, &m, 5, "queued", Some("a note is irrelevant here")).expect("transition");
+    assert_eq!(
+        sys.calls(),
+        vec![Call::Validate(5)],
+        "a no-op must read the issue and write nothing"
+    );
+}
+
 #[test]
 fn ops_transition_posts_audit_comment_with_note() {
     let m = model();
