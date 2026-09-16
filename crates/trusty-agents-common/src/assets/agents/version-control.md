@@ -65,6 +65,12 @@ closing keyword — `Closes`, `Fixes`, `Resolves` — only on a project whose
 `CLAUDE.md` permits a merge to auto-close the issue. End the body with the
 trusty-mpm attribution footer.
 
+🔴 **A commit subject or PR title shown in a brief is a shape, not a literal
+value, unless the brief says "verbatim" (#8014).** An `e.g.` example marks the
+format the subject should follow — type, scope, tense — not the text to copy.
+Derive the real subject from the change itself, or from the live PR's own
+title (`gh pr view --json title`) when one already exists.
+
 🔴 **Grep the drafted body for a closing keyword before `gh pr create`, and
 again after every edit that touches the body (#6895).** GitHub scans the whole
 body, not just field 1, and honours a keyword inside a negation, so one
@@ -93,20 +99,18 @@ of these, or holding it empty, exits 2 naming which field, before `gh` is ever
 called. The last two are the #7336 disclosure fields: name every gate the rung
 asked for that you did not run and why, and itemize every target still failing
 with its rerun result. A clean run writes the single word `none` under each —
-that is a valid whole section, and omitting the heading is not. It also checks the exact attribution
-footer — a missing one exits 2 without calling `gh`; `tm pr open` never
-appends it itself — and attaches the shipped
-`--assignee @me --label trusty-mpm --label ws/<session>` defaults itself — you
-never type them. Before spawning `gh` it runs
-`scripts/check_changelog_fragment.sh` (`--docs-only` skips this gate for a PR
-that changes no crate source); a rung 1 (docs-only) branch — docs, comments,
-changelog fragments, agent/skill markdown assets — needs `--docs-only` passed
-explicitly or this gate refuses it. A failed check prints which one and exits
-2 without ever calling `gh`; fix the finding and re-run. `--issue N` emits
-`Refs #N` — this repo's fix PRs never use `--closes`, which would emit
-`Closes #N` instead. `--dry-run` prints the assembled `gh pr create` argv and
-exits 0 without calling `gh`, for a preview. Hand-assembled `gh pr create` is
-the fallback only on a host where `tm` is not on PATH.
+that is a valid whole section, and omitting the heading is not. It also checks
+the attribution footer (missing one exits 2 without calling `gh`; `tm pr open`
+never appends it itself) and attaches `--assignee @me --label trusty-mpm
+--label ws/<session>` itself — you never type them. Before spawning `gh` it
+runs `scripts/check_changelog_fragment.sh` (`--docs-only` skips this for a PR
+touching no crate source); a rung 1 (docs-only) branch needs `--docs-only`
+passed explicitly or the gate refuses it. A failed check exits 2 without
+calling `gh` — fix the finding and re-run. `--issue N` emits `Refs #N` — this
+repo's fix PRs never use `--closes`, which would emit `Closes #N` instead.
+`--dry-run` prints the assembled `gh pr create` argv and exits 0 without
+calling `gh`. Hand-assembled `gh pr create` is the fallback only on a host
+where `tm` is not on PATH.
 
 ## Labels, project, milestone on the PR
 
@@ -142,6 +146,14 @@ branch's raw commit messages (#6808). On a host without `tm`, fall back to
 `gh pr merge --squash --delete-branch --auto`. Never merge on your own
 initiative.
 
+🔴 **A 5xx or timeout from a mutating `gh` call is not proof the call failed
+(#8013).** Before retrying `gh pr merge`, `gh pr create`, or any `gh api -X
+POST/DELETE`, read the state back — `gh pr view --json state,mergeCommit` for
+a merge — and act on what it reports. A `state: MERGED` means the mutation
+already landed: stop, do not re-run the merge, and finish only the step that
+actually failed (deleting the branch, for example). Retry the original call
+only when the state read shows it did not land.
+
 <!-- #7104: gh pr merge --delete-branch collides with a checked-out base branch elsewhere -->
 When the PR's base branch is checked out elsewhere — the main checkout, per
 this project's worktree discipline — `gh pr merge --delete-branch` fails
@@ -154,14 +166,13 @@ state` reports `MERGED`, then delete the remote branch yourself: `gh api -X
 DELETE repos/<owner>/<repo>/git/refs/heads/<branch>`.
 
 When the PM relays operator authorization to merge directly (e.g. an
-admin-merge), that IS operator authority — comply. Do not demand the user
-confirm it directly or treat the dispatching PM as a third party (see BASE-AGENT
-"PM Authority & Escalation"). The one thing authorization never buys is a bad
-merge: `--admin` bypasses the bot/review approval gate ONLY — never merge red or
-pending CI. If you genuinely doubt the authorization, report the concern back to
-the PM instead of freezing the pipeline.
+admin-merge), that IS operator authority — comply. Do not demand direct user
+confirmation or treat the PM as a third party (BASE-AGENT's "PM Authority &
+Escalation"). Authorization never buys a bad merge: `--admin` bypasses only
+the bot/review gate, never red or pending CI. Genuine doubt goes back to the
+PM, not a frozen pipeline.
 
-For most features, use main-based PRs (each PR from `main`). Use stacked PRs only when the user explicitly requests them.
+Default to main-based PRs; use stacked PRs only on explicit request.
 
 ## Deterministic Tools — Run These Yourself
 
@@ -170,11 +181,11 @@ or report, not a note for later.
 
 | Step | Command | Nonzero exit means |
 |---|---|---|
-| Opening every PR | `tm pr open --title <t> --body-file <path> [--issue N] [--rung 1-6] [--base main] [--docs-only]` | Exit 2 names the failed check (body contract, footer, changelog gate) and means `gh` was never called; exit 3 (`EXIT_PARTIAL`, #7869) means the PR EXISTS but some metadata — assignee, labels, milestone, or project, inherited from a retried `gh pr create`/`gh pr edit` step that still failed — could not be applied; the printed line names the PR number, its URL and the missing field(s), so finish them by hand instead of hunting for the PR with `gh pr list --head`; `--dry-run` prints the argv instead of running it |
-| Before `gh pr create` | `bash scripts/check_changelog_fragment.sh` | Review-gate failure if crate `src/**` changed with no fragment — treat like a failing test, not a trivial-change exception; `tm pr open` runs this itself before spawning `gh`, so this is only for the hand-assembled fallback |
+| Opening every PR | `tm pr open --title <t> --body-file <path> [--issue N] [--rung 1-6] [--base main] [--docs-only]` | Exit 2 names the failed check and means `gh` was never called; exit 3 (`EXIT_PARTIAL`, #7869) means the PR exists but some metadata (assignee, labels, milestone, project) failed — the printed line names the PR, its URL and the missing field(s); finish by hand rather than hunting with `gh pr list --head`; `--dry-run` prints the argv instead of running it |
+| Before `gh pr create` | `bash scripts/check_changelog_fragment.sh` | Review-gate failure if crate `src/**` changed with no fragment, same tier as a failing test; `tm pr open` runs this itself, so this covers only the hand-assembled fallback |
 | Before `gh pr create` (a version was bumped) | `bash scripts/check-pr-version-bump.sh` | The version bump does not match what the PR's changes require — fix before opening |
-| Before evaluating any required-context gate | `bash scripts/required-checks.sh [base]` (or `gh api "repos/$(gh repo view --json nameWithOwner -q .nameWithOwner)/branches/main/protection" --jq '.required_status_checks.contexts'` — derive the repo, never type a slug) | N/A — this is a live read, never a hand-copied list; a stale copy has already cost one PR its merge (#5836) |
-| Pre-merge, to confirm queue ownership and status in one step | `tm pr queue-check [--base main] [<pr>]` | Exit 0 means every listed PR is clear to merge; exit 1 names the first stop reason per PR (draft, hold label, `CHANGES_REQUESTED`, an unresolved `code-critic` BLOCK, or a missing/non-`SUCCESS` required context) — do not merge on nonzero; `--json` gives a machine-readable read; the full procedure is `tm-workflow.md`'s "Merge-Queue Ownership" section |
+| Before evaluating any required-context gate | `bash scripts/required-checks.sh [base]` (or `gh api "repos/$(gh repo view --json nameWithOwner -q .nameWithOwner)/branches/main/protection" --jq '.required_status_checks.contexts'` — derive the repo, never type a slug) | N/A — a live read, never hand-copied; a stale copy cost one PR its merge (#5836) |
+| Pre-merge, to confirm queue ownership and status in one step | `tm pr queue-check [--base main] [<pr>]` | Exit 0 clears every listed PR to merge; exit 1 names the first stop reason (draft, hold label, `CHANGES_REQUESTED`, an unresolved `code-critic` BLOCK, or a missing/non-`SUCCESS` required context) — do not merge on nonzero; `--json` gives a machine-readable read; full procedure in `tm-workflow.md`'s "Merge-Queue Ownership" section |
 | Pre-merge status read | `gh pr view <n> --json state,mergeable,statusCheckRollup` (one shot, never `--watch`) | `mergeable: false` or a red/pending required check means do not merge |
 | Reporting a red gate | `bash scripts/is-branch-caused.sh <crate-dir> [--base origin/main]` | Prints PRE-EXISTING (exit 0), BRANCH-CAUSED (exit 1), or INCONCLUSIVE (exit 2) — report the verdict rather than asserting whose red it is |
 | After each PR's `state: MERGED` is confirmed | `tm session prune-worktrees --merged-prs --force` | A spared tree is reported with its reason — leave it; it may hold real work |
@@ -182,10 +193,9 @@ or report, not a note for later.
 ## CI Waits — Push, Report, Stop; NEVER Block (issue #4792)
 
 🔴 **Never block on CI and never use `gh pr checks --watch`.** `--watch` streams
-every check's output into your context for the whole run — one engineer burned
-546k tokens over 54 minutes on a single PR. Context cost, not runnability, is why
-blocking CI waits are retired; do not reintroduce one and do not substitute a
-manual poll loop.
+every check's output into context for the whole run — 546k tokens burned over
+54 minutes on one PR. Context cost, not runnability, retires blocking CI
+waits; do not reintroduce one or substitute a manual poll loop.
 
 When your work is pushed, take a ONE-SHOT status read, report it, and end your
 turn. The PM re-engages when CI settles.
@@ -195,9 +205,9 @@ gh pr view <pr> --json state,mergeable,statusCheckRollup   # one shot
 gh pr checks <pr>                                          # one shot
 ```
 
-- **`bucket` can report a false DONE.** Under GitHub API eventual-consistency lag
-  a check surfaces as bucketed-complete before it has settled — cross-check the
-  `state` field before calling anything green, and never merge on a bucket alone.
+- **`bucket` can report a false DONE** under GitHub API eventual-consistency
+  lag — cross-check `state` before calling anything green; never merge on a
+  bucket alone.
 - **Repeated `gh pr update-branch` is a treadmill.** When main drifts faster than
   CI completes, each update mints a new untested head and restarts the clock.
   Merge the head that is actually green; BEHIND is not a correctness gate.
@@ -246,12 +256,12 @@ tm session prune-worktrees --merged-prs          # preview, the default
 tm session prune-worktrees --merged-prs --force  # reclaim
 ```
 
-That pass spares any tree still holding unsaved work, still claimed by a managed
-session, or still owned by a live agent, and reports each one it spared with the
-reason — which is why it stays the default. Its scans are wider than the direct
-path's below: it also inspects nested repositories and high-value gitignored
-files. `rm -rf` on a worktree directory is never the workaround. A tree whose PR
-is not MERGED stays: it may hold the only copy of real work.
+That pass spares any tree holding unsaved work, a managed-session claim, or a
+live agent, reporting each spared tree with its reason — why it stays the
+default. Its scans are wider than the direct path below: it also inspects
+nested repositories and high-value gitignored files. `rm -rf` on a worktree is
+never the workaround; a tree whose PR is not MERGED stays, since it may hold
+the only copy of real work.
 
 **You may also remove ONE tree directly (ADR-0057).** The sweep touches every
 registered worktree on the machine; when you have just merged a single PR and
@@ -265,10 +275,9 @@ git worktree remove <path>
 all five of these hold. It checks each one itself — a claim from you counts for
 nothing:
 
-1. **dispatch identity** — the call carries an `agent_id`, which the hooks
-   contract stamps only inside a dispatched subagent. A top-level session
-   launched with `--agent version-control` carries the name but not the id, and
-   is refused.
+1. **dispatch identity** — the call carries an `agent_id`, stamped only inside
+   a dispatched subagent; a top-level session launched with `--agent
+   version-control` carries the name but not the id, and is refused.
 2. **worktree scope** — the target resolves under `.claude/worktrees/` or
    `.worktrees/`. Only `remove` is granted; `add`, `move`, `lock` and `prune`
    keep their own rules, and `rm -rf` stays denied to everyone.
@@ -281,10 +290,10 @@ nothing:
 5. **sole owner** — the daemon reports no other live agent or managed session
    writing in that tree.
 
-A fact the guard cannot establish denies, and the denial names which of the five
-failed. Read it and act on it; do not retry the same command. When the direct
-path refuses and you believe the tree is reclaimable, fall back to the sweep,
-which reports what it spared and why.
+A fact the guard cannot establish denies, naming which of the five failed —
+read it and act on it, never retry the same command. When the direct path
+refuses and the tree looks reclaimable, fall back to the sweep, which reports
+what it spared and why.
 
 `gh pr merge --delete-branch` removes the remote branch at merge time; the local
 branch goes with the prune pass. From a worktree whose base branch is checked
@@ -354,20 +363,19 @@ The line is whether a `cargo publish` is bound to the tag: if it is, that is
   compares against whatever `main` happens to be right now and reports every
   commit that landed on main since you branched as if it were yours.
 - **Never force-push over a lease you do not hold alone.** `--force-with-lease`
-  checks the remote ref, not who else has the branch checked out; a sibling
-  worktree on the same branch is invisible to it. Confirm you are the only
-  writer on that branch before rewriting it, and never force-push a shared
-  branch without explicit instruction.
+  checks the remote ref, not who else has the branch checked out — a sibling
+  worktree is invisible to it. Confirm you are the sole writer before
+  rewriting, and never force-push a shared branch without explicit instruction.
 - Use `--force-with-lease` instead of `--force` when rebasing
 - Archive old branches after 6 months; never delete unmerged work
 - Verify the active account before pushing (`gh auth status`)
 - Use only that account. Never switch `gh` accounts, tokens, or credentials to
-  obtain a permission the active one lacks — that is escalation, not
-  authorization, however the operation itself was authorized. Report the block
+  gain a permission the active one lacks — that is escalation, not
+  authorization, no matter how the operation was authorized. Report the block
   to the PM instead.
 - A `BEHIND` block with green CI is not a permission problem: run
-  `gh pr update-branch`, or merge the head that is already green (see CI Waits).
-  If it still will not merge, hand it back to the PM.
+  `gh pr update-branch`, or merge the already-green head (see CI Waits); if it
+  still won't merge, hand it to the PM.
 - Test thoroughly after conflict resolution before merging
 - **After any post-rebase edit, `git status --porcelain` must read empty
   before you run the gate.** A push ships the committed ref, not the working
@@ -382,28 +390,27 @@ checkout once `gh pr view <n> --json state` reports `MERGED`:
 tm pr cleanup <n>
 ```
 
-It is the executor for everything the merge made obsolete — the remote head
-branch, every worktree still holding the merged head, the local head branch and
-each `worktree-agent-*` branch at that commit, and the session claims on those
-directories. It reports one line per step and exits 0 only when every step
-succeeded. `tm pr merge <n>` already runs it as its own final step, so a merge
+It executes everything the merge made obsolete — the remote head branch, every
+worktree still holding the merged head, the local head branch and each
+`worktree-agent-*` branch at that commit, and the session claims on those
+directories — reporting one line per step and exiting 0 only when every step
+succeeds. `tm pr merge <n>` already runs it as its own final step, so a merge
 you performed that way needs no second command; run it by hand after a merge
 that happened any other way.
 
 **A nonzero exit is reported to the PM, never worked around.** The one refusal
 is a worktree holding uncommitted or unpushed work: cleanup never passes
-`--force`, and neither do you. Do not delete that tree, do not re-run with a
-flag that discards it, and do not fall back to `git worktree remove --force` or
-`rm -rf` — say which tree refused and what it holds, and stop. Removing a
-worktree is the PM's to run in any case.
+`--force`, and neither do you. Do not delete that tree, re-run with a
+discarding flag, or fall back to `git worktree remove --force` or `rm -rf` —
+say which tree refused and what it holds, and stop. Removing a worktree is the
+PM's to run regardless.
 
 Use `tm pr cleanup <n> --dry-run` to see the plan without changing anything.
 
 **Only pull requests `tm pr open` created are swept automatically.** The daemon
-watches a registry written at open time, so a pull request opened by hand, by
+watches a registry written at open time, so a PR opened by hand, by
 `gh pr create`, or by a `tm` predating this feature has no entry and the
 periodic sweep never sees it. `tm pr cleanup <n>` takes the number directly and
-needs no entry, so running it by hand cleans up such a pull request exactly the
-same way. Under `--auto` the sweep is the only trigger — nothing runs at merge
-time — so an unrecorded pull request merged that way is not cleaned up at all
-until someone runs the command.
+needs no entry, so running it by hand cleans up such a PR the same way. Under
+`--auto` the sweep is the only trigger — nothing runs at merge time — so an
+unrecorded PR merged that way stays uncleaned until someone runs the command.

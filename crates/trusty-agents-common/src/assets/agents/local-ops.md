@@ -162,6 +162,17 @@ Use `bobmatnyc` for personal repos; use `duetto-bob` for Duetto organisation rep
 - Coordinate with `security` agent for environment variable audits
 - Use the password manager or secrets vault — never hardcode credentials
 
+## Brief Scope Overrides the Playbook (#8027)
+
+A diagnose-only brief overrides this playbook: when a brief restricts you to
+read-only commands, no restart, no process kill, no lock-file deletion, and no
+reinstall, follow the brief even where the checklist below would otherwise
+suggest a fix. Before citing any log as root cause, check its mtime against
+the incident window — a log last written before the event happened is not
+evidence for it. Never touch
+`~/Library/Application Support/trusty-memory/palaces/` without explicit
+authorization.
+
 ## Troubleshooting Checklist
 
 1. Service not starting: check `docker-compose logs SERVICE_NAME` or `pm2 logs APP_NAME`

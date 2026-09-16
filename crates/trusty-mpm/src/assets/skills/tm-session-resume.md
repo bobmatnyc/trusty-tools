@@ -58,8 +58,10 @@ yourself as a substitute, just because it's missing from the loaded list.
 If the load or the call still fails, follow the shared diagnosis procedure in
 `/tm-session-management` ("MCP Session-Tool Failure Diagnosis"). Only once
 that procedure has established that no `mcp__trusty-mpm__*` tool is
-available, fall back to the CLI `tm session catchup` instead of hand-parsing
+available, fall back to the CLI `tm sessions catchup` instead of hand-parsing
 snapshot files yourself, since it implements the same merge/validation logic.
+Spell it **plural** — `tm session` is a deprecated alias that prints
+`warning: 'session' is deprecated; use 'sessions'` on every invocation (#2116).
 
 Resume calls the MCP tool rather than shelling out to `git log`/`git status`
 and hand-parsing snapshot files, so the merge/validation logic stays in one
@@ -161,8 +163,36 @@ knowledge of the repo state if anything looks stale.
 > read, not a state transition, so calling the tool repeatedly is always
 > safe; only the automatic injection path advances the watermark.
 
-The CLI `tm session catchup` command still works unchanged for scripted /
-non-MCP callers — the tool is additive, not a replacement.
+## CLI Fallback: `tm sessions catchup`
+
+For scripted / non-MCP callers the CLI still works, and the MCP tool is
+additive rather than a replacement. Its full surface is two flags:
+
+```bash
+tm sessions catchup                  # this project, watermarked digest
+tm sessions catchup --full           # ignore the watermark, full history
+tm sessions catchup --all-projects   # also scan machine-wide registered projects
+```
+
+**Prefer the MCP tool whenever it is reachable.** The CLI prints rendered
+markdown to stdout and has **no JSON mode and no paging**, so a project with
+many paused sessions emits one unbounded blob — 163 KB for 23 sessions in the
+run that filed #8017. The paged, machine-readable equivalents live only on
+`session_context_catchup`:
+
+| Want | MCP tool | CLI |
+|---|---|---|
+| Typed JSON | the tool's return value (schema above) | not available — rendered markdown only |
+| One page at a time | `sessions_offset: <n>`, then `sessions_next_offset` | not available |
+| Bounded output | default watermark + `truncated` / `truncation_notice` | not available |
+| Full history | `full: true` | `--full` |
+| Machine-wide scan | `all_projects: true` | `--all-projects` |
+
+So when the MCP tool is unreachable and the CLI digest is too large to read,
+narrow it at the source — resume from the newest snapshot in
+`.trusty-mpm/sessions/` named by the digest rather than re-running the CLI —
+and report that the paged read was unavailable, instead of loading the whole
+blob into context.
 
 ## Re-aligning the Tmux Window
 

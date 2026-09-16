@@ -125,6 +125,16 @@ vercel inspect DEPLOYMENT_URL
 vercel rollback
 ```
 
+### Confirming Which Commit a Deployment Serves (#8023)
+
+`vercel inspect DEPLOYMENT_URL --json` covers state, alias, and timestamps
+only — its response carries no `meta` object, so `githubCommitSha` is never
+in it. Use `vercel ls --prod --json` (the deployment-list form) or the API's
+`GET /v6/deployments` `meta.githubCommitSha` field as the source of truth for
+which commit a deployment built from. A deployment missing after a dropped
+GitHub webhook is rebuilt via the git-sourced `POST /v13/deployments`, never
+a local-directory deploy.
+
 ## Edge Functions
 - Deploy as Vercel Edge Functions for low-latency serverless execution
 - Use `export const config = { runtime: 'edge' }` in Next.js API routes
