@@ -1,0 +1,2 @@
+Fixed
+- The `gh` account-enforcement tests answer from an in-process stub (`core::gh_scoped_stub`) instead of a fake `gh` script on the process-global `PATH`. A sibling test's `PATH` restore could remove that script mid-run, the real `gh auth status` then answered over the network, and the 5 s enforcement ceiling turned into a recurring flake. The seam is compiled out of every release build; the production path is unchanged (#7059).

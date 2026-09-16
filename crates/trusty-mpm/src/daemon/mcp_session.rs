@@ -237,10 +237,21 @@ pub async fn session_activity(
 /// Send a line of text into a session's pane (`session_send` tool).
 ///
 /// Why: thin wrapper over
-/// [`crate::session_manager::SessionManager::send_input`].
+/// [`crate::session_manager::SessionManager::send_input_observed`]. #5699: the
+/// pre-fix wrapper called `send_input` and hardcoded `"sent": true`, which
+/// meant only "the two tmux subprocesses exited 0" — a long single-line
+/// message the harness collapsed into a bracketed paste and never submitted
+/// reported success just the same, and the PM on the other end proceeded
+/// believing it had been delivered. The boolean could not fail.
 /// What: parses the id, resolves the tmux name (for the confirmation), injects
-/// `text`, and returns `{ id, sent, tmux_name }`.
-/// Test: `session_send_unknown_id_errors` in the `tests` module.
+/// `text`, and returns `{ id, sent, submit_state, tmux_name }`. `submit_state`
+/// is the three-valued verdict a post-send pane read established
+/// ([`crate::session_manager::SubmitState`]); `sent` is `false` for the one
+/// state that positively proves non-delivery and keeps its pre-#5699 `true`
+/// when the pane could not be read — an unobservable pane is not evidence of
+/// failure.
+/// Test: `session_send_unknown_id_errors`,
+/// `session_send_reports_an_unsubmitted_paste` in the `tests` module.
 pub async fn session_send(
     state: &Arc<DaemonState>,
     session_id: &str,
@@ -249,10 +260,14 @@ pub async fn session_send(
     let id = parse_managed_id(session_id)?;
     let mgr = state.session_manager().await;
     let record = mgr.get(&id).await.map_err(managed_err)?;
-    mgr.send_input(&id, text).await.map_err(managed_err)?;
+    let submit = mgr
+        .send_input_observed(&id, text)
+        .await
+        .map_err(managed_err)?;
     Ok(json!({
         "id": record.id.to_string(),
-        "sent": true,
+        "sent": submit.delivered(),
+        "submit_state": submit.as_str(),
         "tmux_name": record.tmux_name,
     }))
 }
@@ -522,6 +537,107 @@ mod tests {
             mgr.get(&id).await.expect("record still tracked").state,
             crate::session_manager::ManagedSessionState::Deleted,
             "record must be marked --deleted-- after forced delete"
+        );
+    }
+
+    /// A tmux driver whose pane always shows a collapsed bracketed paste
+    /// (#5699).
+    ///
+    /// Why: `LiveTrackingTmux` captures an empty pane, which the submit probe
+    /// correctly reads as "could not tell". Proving the `sent: false` path
+    /// needs a pane that positively shows the unsubmitted buffer.
+    /// What: `LiveTrackingTmux` with `capture` answering the exact prompt line
+    /// issue #5699 recorded.
+    /// Test: `session_send_reports_an_unsubmitted_paste`.
+    struct PastedPaneTmux {
+        live: std::sync::Mutex<std::collections::HashSet<String>>,
+    }
+
+    impl crate::session_manager::ManagedTmuxDriver for PastedPaneTmux {
+        fn create_session(&self, name: &str, _workdir: &str) -> Result<(), ManagedError> {
+            self.live.lock().unwrap().insert(name.to_owned());
+            Ok(())
+        }
+
+        fn kill_session(&self, name: &str) -> Result<(), ManagedError> {
+            self.live.lock().unwrap().remove(name);
+            Ok(())
+        }
+
+        fn send_line(&self, _name: &str, _text: &str) -> Result<(), ManagedError> {
+            Ok(())
+        }
+
+        fn capture(&self, _name: &str, _lines: usize) -> Result<String, ManagedError> {
+            Ok("❯ [Pasted text #1][Pasted text #2]".to_string())
+        }
+
+        fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
+            Ok(self.live.lock().unwrap().iter().cloned().collect())
+        }
+    }
+
+    /// `session_send` must report `sent: false` when the pane proves the
+    /// message was never submitted (#5699).
+    ///
+    /// Why: this is the wire-level half of the defect — the tool's caller is a
+    /// PM coordinating another live session and acts on `sent`. Against PRE-FIX
+    /// code `sent` is the literal `true` and there is no `submit_state` key at
+    /// all, so BOTH assertions below fail. Asserting the tool still returns
+    /// `Ok` (not an error) is deliberate: the characters did reach the pane, so
+    /// this is a delivery verdict, not a dispatch failure.
+    /// Test: this function IS the test.
+    #[tokio::test]
+    async fn session_send_reports_an_unsubmitted_paste() {
+        use crate::runtime::RuntimeKind;
+
+        let root = tempfile::TempDir::new().expect("tempdir");
+        let s = Arc::new(
+            DaemonState::with_root_isolated_managed_and_driver(
+                root.path().to_path_buf(),
+                Arc::new(PastedPaneTmux {
+                    live: std::sync::Mutex::new(std::collections::HashSet::new()),
+                }),
+            )
+            .await,
+        );
+        let mgr = s.session_manager().await;
+
+        let id = ManagedSessionId::new();
+        let ws = root.path().join(format!("{id}-mcp-send"));
+        mgr.create_with_id(
+            id,
+            "mcp session_send test".to_string(),
+            Some(ws.clone()),
+            None,
+            Some(ws),
+            Some("https://example.com/r.git".to_string()),
+            Some("main".to_string()),
+            RuntimeKind::Tcode,
+            false,
+            false,
+        )
+        .await
+        .expect("seed session");
+        {
+            let mut store = mgr.store.write().await;
+            let mut r = store.get(&id).await.expect("seeded record");
+            r.state = crate::session_manager::ManagedSessionState::Active;
+            store.upsert(r).await.expect("mark active");
+        }
+
+        let value = session_send(&s, &id.to_string(), "a long coordination message")
+            .await
+            .expect("the characters reached the pane — this is a delivery verdict");
+        assert_eq!(
+            value["sent"],
+            serde_json::json!(false),
+            "pre-fix this is a hardcoded `true`: {value}"
+        );
+        assert_eq!(
+            value["submit_state"],
+            serde_json::json!("unsubmitted_paste"),
+            "pre-fix the key does not exist: {value}"
         );
     }
 

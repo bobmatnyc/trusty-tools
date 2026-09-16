@@ -197,30 +197,7 @@ pub fn ensure_gh_account_in_dir(
         Err(_) => {}
     }
 
-    // #5475: single `gh` entry point; the scoping env is `scoped_gh`'s.
-    let switch = scoped_gh(
-        [
-            "auth",
-            "switch",
-            "--hostname",
-            host,
-            "--user",
-            expected_user,
-        ],
-        &dir,
-        host,
-    )
-    .output_blocking()
-    .with_context(|| format!("failed to spawn `gh auth switch --user {expected_user}`"))?;
-    if !switch.success {
-        let stderr = &switch.stderr;
-        anyhow::bail!(
-            "`gh auth switch --user {expected_user}` failed inside {dir}: {} \
-             (is '{expected_user}' logged in under this GH_CONFIG_DIR? run \
-             `GH_CONFIG_DIR={dir} gh auth login` first)",
-            stderr.trim()
-        );
-    }
+    switch_account_scoped(&dir, host, expected_user)?;
 
     let recheck = run_gh_scoped(&dir, host, ["auth", "status"])
         .context("failed to re-verify `gh auth status` after switching")?;
@@ -263,6 +240,12 @@ pub fn ensure_gh_account_in_dir(
 /// (rather than a second, drifting implementation) — the "one implementation
 /// per shared capability" rule.
 pub(crate) fn api_login_scoped(config_dir: &str, host: &str) -> Result<String, String> {
+    // #7059: answered in-process when a test installed a stub; compiled out of
+    // every release build.
+    #[cfg(any(test, debug_assertions))]
+    if let Some(stub) = crate::core::gh_scoped_stub::installed() {
+        return stub.api_login();
+    }
     let dir = config_dir.to_string();
     let host = host.to_string();
     run_bounded(GH_ENFORCE_TIMEOUT, move || {
@@ -319,6 +302,57 @@ fn identity_divergence(status_text: &str, api_login: &str) -> Option<String> {
     parse_active_account_from_status(status_text).filter(|claimed| claimed != api_login)
 }
 
+/// Switch the account active inside `config_dir` to `expected_user`.
+///
+/// Why: extracted from [`ensure_gh_account_in_dir`] (#7059) so all three scoped
+/// `gh` invocations this module makes sit behind a named function, and the
+/// test seam is one line in each rather than an inline block in the middle of
+/// the enforcement flow. The behaviour is unchanged — same argv, same
+/// remediation text on a non-zero exit.
+/// What: `gh auth switch --hostname <host> --user <expected_user>` through
+/// [`scoped_gh`]; a spawn failure and a non-zero exit are both errors.
+/// Test: `ensure_gh_account_in_dir_self_heals_mismatch` (success),
+/// `ensure_gh_account_in_dir_switch_failure_is_err` (non-zero exit).
+fn switch_account_scoped(dir: &str, host: &str, expected_user: &str) -> anyhow::Result<()> {
+    // #7059: answered in-process when a test installed a stub; compiled out of
+    // every release build.
+    #[cfg(any(test, debug_assertions))]
+    if let Some(stub) = crate::core::gh_scoped_stub::installed() {
+        return stub.switch(expected_user).map_err(|stderr| {
+            anyhow::anyhow!(
+                "`gh auth switch --user {expected_user}` failed inside {dir}: {stderr} \
+                 (is '{expected_user}' logged in under this GH_CONFIG_DIR? run \
+                 `GH_CONFIG_DIR={dir} gh auth login` first)"
+            )
+        });
+    }
+    // #5475: single `gh` entry point; the scoping env is `scoped_gh`'s.
+    let switch = scoped_gh(
+        [
+            "auth",
+            "switch",
+            "--hostname",
+            host,
+            "--user",
+            expected_user,
+        ],
+        dir,
+        host,
+    )
+    .output_blocking()
+    .with_context(|| format!("failed to spawn `gh auth switch --user {expected_user}`"))?;
+    if !switch.success {
+        let stderr = &switch.stderr;
+        anyhow::bail!(
+            "`gh auth switch --user {expected_user}` failed inside {dir}: {} \
+             (is '{expected_user}' logged in under this GH_CONFIG_DIR? run \
+             `GH_CONFIG_DIR={dir} gh auth login` first)",
+            stderr.trim()
+        );
+    }
+    Ok(())
+}
+
 /// Run a bounded `gh` subprocess scoped to `config_dir`, with any env-token
 /// override stripped, returning the combined stdout+stderr text.
 ///
@@ -332,6 +366,13 @@ fn identity_divergence(status_text: &str, api_login: &str) -> Option<String> {
 /// this against a fake `gh` on `PATH`; `ensure_gh_account_for_project_*` cover
 /// the refusal path that never reaches it.
 fn run_gh_scoped(config_dir: &str, host: &str, args: [&'static str; 2]) -> anyhow::Result<String> {
+    // #7059: answered in-process when a test installed a stub; compiled out of
+    // every release build. `auth status` is this helper's only call site.
+    #[cfg(any(test, debug_assertions))]
+    if let Some(stub) = crate::core::gh_scoped_stub::installed() {
+        debug_assert_eq!(args, ["auth", "status"], "the stub answers `auth status`");
+        return Ok(stub.auth_status());
+    }
     let config_dir = config_dir.to_string();
     let host = host.to_string();
     run_bounded(GH_ENFORCE_TIMEOUT, move || {
@@ -854,116 +895,21 @@ github.com
         assert_eq!(configured_account_pair(None), None);
     }
 
-    // ── ensure_gh_account_in_dir against a fake `gh` on PATH (#3312) ──────
+    // ── ensure_gh_account_in_dir against an in-process `gh` stub (#3312) ──
     //
     // These prove the enforcement actually runs a verify/correct/re-verify
-    // cycle against a real subprocess, not just the pure parsers above. A
-    // fake `gh` script (stateful via a file inside the isolated config_dir)
-    // stands in for the real binary, following this workspace's established
-    // fake-binary-via-PATH test convention (see
-    // `trusty-common::update::tests::write_fake_binary`).
+    // cycle end to end, not just the pure parsers above. #7059 replaced the
+    // fake `gh` shell script on `PATH` with `core::gh_scoped_stub`: the script
+    // depended on the process-global `PATH` surviving every sibling test, and
+    // when it did not, the REAL `gh` answered and the 5 s enforcement ceiling
+    // turned into a flake. Same three invocations, no subprocess.
 
-    /// Serialises PATH/env mutation across the tests in this section so they
-    /// cannot race each other or any other test in the shared test binary.
+    use crate::core::gh_scoped_stub::GhScopedStub;
+
+    /// Serialises the ambient-token env mutation these tests do, so they
+    /// cannot race each other or any other env-mutating test in this binary.
     fn fake_gh_lock() -> std::sync::MutexGuard<'static, ()> {
         crate::core::trusty_tools_config::env_test_lock()
-    }
-
-    /// Write a fake `gh` that tracks the "active account" as a file inside
-    /// `config_dir` (mirroring how real `gh` persists active-account state
-    /// inside its config home): `auth status` reports whatever the state file
-    /// holds (or `initial` if absent); `auth switch --user X` writes `X` to
-    /// the state file and exits 0, unless `FAKE_GH_SWITCH_FAILS=1` is set in
-    /// the environment, in which case it exits 1 without writing anything.
-    ///
-    /// `api user --jq .login` (#5849) answers with the same state by default —
-    /// the honest machine, where the config dir and the credential agree.
-    /// `FAKE_GH_API_LOGIN=X` makes it answer `X` regardless, which is how the
-    /// transcript and the credential are made to DISAGREE; `FAKE_GH_API_FAILS=1`
-    /// makes it exit 1, standing in for an unreachable/unauthenticated probe;
-    /// `FAKE_GH_API_EMPTY=1` makes it exit 0 printing nothing, the blank-login
-    /// case `nonempty_stdout_blocking` must reject.
-    #[cfg(unix)]
-    fn write_fake_gh(bin_dir: &std::path::Path, initial: &str) {
-        use std::os::unix::fs::PermissionsExt;
-        let script = format!(
-            r#"#!/bin/sh
-STATE="$GH_CONFIG_DIR/.fake_active"
-if [ -f "$STATE" ]; then
-  ACTIVE=$(cat "$STATE")
-else
-  ACTIVE="{initial}"
-fi
-if [ "$1" = "api" ] && [ "$2" = "user" ]; then
-  if [ "$FAKE_GH_API_FAILS" = "1" ]; then
-    echo "fake gh: api refused" >&2
-    exit 1
-  fi
-  if [ "$FAKE_GH_API_EMPTY" = "1" ]; then
-    exit 0
-  fi
-  if [ -n "$FAKE_GH_API_LOGIN" ]; then
-    echo "$FAKE_GH_API_LOGIN"
-  else
-    echo "$ACTIVE"
-  fi
-  exit 0
-fi
-if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
-  echo "github.com"
-  echo "  - Logged in to github.com account $ACTIVE (keyring)"
-  echo "  - Active account: true"
-  exit 0
-fi
-if [ "$1" = "auth" ] && [ "$2" = "switch" ]; then
-  if [ "$FAKE_GH_SWITCH_FAILS" = "1" ]; then
-    echo "fake gh: switch refused" >&2
-    exit 1
-  fi
-  target=""
-  prev=""
-  for a in "$@"; do
-    if [ "$prev" = "--user" ]; then target="$a"; fi
-    prev="$a"
-  done
-  echo "$target" > "$STATE"
-  exit 0
-fi
-exit 1
-"#
-        );
-        let path = bin_dir.join("gh");
-        std::fs::write(&path, script).expect("write fake gh");
-        let mut perms = std::fs::metadata(&path)
-            .expect("stat fake gh")
-            .permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&path, perms).expect("chmod fake gh");
-    }
-
-    /// Prepend `dir` to `PATH`, returning the prior value to restore.
-    #[cfg(unix)]
-    fn prepend_path(dir: &std::path::Path) -> Option<String> {
-        let prior = std::env::var("PATH").ok();
-        let new_path = match &prior {
-            Some(p) => format!("{}:{p}", dir.display()),
-            None => dir.display().to_string(),
-        };
-        // SAFETY: guarded by `fake_gh_lock` in every caller.
-        unsafe { std::env::set_var("PATH", new_path) };
-        prior
-    }
-
-    /// Reset every `FAKE_GH_*` knob so one test's env cannot leak into the next.
-    #[cfg(unix)]
-    fn clear_fake_gh_env() {
-        // SAFETY: guarded by `fake_gh_lock` in every caller.
-        unsafe {
-            std::env::remove_var("FAKE_GH_SWITCH_FAILS");
-            std::env::remove_var("FAKE_GH_API_LOGIN");
-            std::env::remove_var("FAKE_GH_API_FAILS");
-            std::env::remove_var("FAKE_GH_API_EMPTY");
-        }
     }
 
     /// Remove any ambient `GH_TOKEN`/`GITHUB_TOKEN`, returning them to restore.
@@ -971,7 +917,6 @@ exit 1
     /// Since #5849 an ambient token is a REFUSAL input to
     /// [`ensure_gh_account_in_dir`], so a developer shell (or a CI job) that
     /// exports one would otherwise decide the outcome of every test below.
-    #[cfg(unix)]
     fn strip_ambient_tokens() -> Vec<(&'static str, Option<std::ffi::OsString>)> {
         GH_TOKEN_ENV_VARS
             .into_iter()
@@ -984,7 +929,6 @@ exit 1
             .collect()
     }
 
-    #[cfg(unix)]
     fn restore_ambient_tokens(prior: Vec<(&'static str, Option<std::ffi::OsString>)>) {
         for (name, value) in prior {
             // SAFETY: guarded by `fake_gh_lock` in every caller.
@@ -997,41 +941,27 @@ exit 1
         }
     }
 
-    #[cfg(unix)]
-    fn restore_path(prior: Option<String>) {
-        // SAFETY: guarded by `fake_gh_lock` in every caller.
-        unsafe {
-            match prior {
-                Some(p) => std::env::set_var("PATH", p),
-                None => std::env::remove_var("PATH"),
-            }
-        }
-    }
-
     /// Why (#3312): the exact #2081 incident shape — the isolated
     /// `config_dir` itself has the WRONG account active — must be corrected:
     /// `ensure_gh_account_in_dir` detects the mismatch, runs `gh auth switch`,
     /// and re-verifies before returning `Ok`.
     /// Test: itself.
-    #[cfg(unix)]
     #[test]
     fn ensure_gh_account_in_dir_self_heals_mismatch() {
         let _g = fake_gh_lock();
-        let bin_dir = tempfile::tempdir().expect("bin tempdir");
         let config_dir = tempfile::tempdir().expect("config tempdir");
-        write_fake_gh(bin_dir.path(), "wrong-account");
-        let prior_path = prepend_path(bin_dir.path());
+        let (stub, _stub) = GhScopedStub::logged_in_as("wrong-account").install();
         let prior_tokens = strip_ambient_tokens();
-        clear_fake_gh_env();
 
         let result = ensure_gh_account_in_dir("bobmatnyc", config_dir.path(), TEST_HOST);
 
         restore_ambient_tokens(prior_tokens);
-        restore_path(prior_path);
         assert!(result.is_ok(), "expected self-heal to succeed: {result:?}");
-        let state = std::fs::read_to_string(config_dir.path().join(".fake_active"))
-            .expect("state file written by switch");
-        assert_eq!(state.trim(), "bobmatnyc");
+        assert_eq!(
+            stub.active_account(),
+            "bobmatnyc",
+            "the switch must have taken effect"
+        );
     }
 
     /// Why (#3312): when the isolated directory has the wrong account active
@@ -1039,61 +969,45 @@ exit 1
     /// logged in under that `GH_CONFIG_DIR`), enforcement must hard-fail —
     /// never silently proceed with the wrong identity active.
     /// Test: itself.
-    #[cfg(unix)]
     #[test]
     fn ensure_gh_account_in_dir_switch_failure_is_err() {
         let _g = fake_gh_lock();
-        let bin_dir = tempfile::tempdir().expect("bin tempdir");
         let config_dir = tempfile::tempdir().expect("config tempdir");
-        write_fake_gh(bin_dir.path(), "wrong-account");
-        let prior_path = prepend_path(bin_dir.path());
+        let (_stub_handle, _stub) = GhScopedStub::logged_in_as("wrong-account")
+            .with_failing_switch()
+            .install();
         let prior_tokens = strip_ambient_tokens();
-        clear_fake_gh_env();
-        // SAFETY: guarded by fake_gh_lock; cleared below.
-        unsafe { std::env::set_var("FAKE_GH_SWITCH_FAILS", "1") };
 
         let result = ensure_gh_account_in_dir("bobmatnyc", config_dir.path(), TEST_HOST);
 
-        clear_fake_gh_env();
         restore_ambient_tokens(prior_tokens);
-        restore_path(prior_path);
         let err = result.expect_err("switch failure must be a hard error");
         assert!(err.to_string().contains("bobmatnyc"), "err: {err}");
     }
 
     /// Why (#3312): when the isolated directory's active account ALREADY
     /// matches, `ensure_gh_account_in_dir` must be a pure no-op — it must not
-    /// even attempt a switch. Proven here by making a switch attempt fail
-    /// (`FAKE_GH_SWITCH_FAILS=1`) and asserting `Ok` is still returned, which
-    /// is only possible if no switch was ever invoked.
+    /// even attempt a switch. Proven here by scripting the switch to FAIL and
+    /// asserting `Ok` is still returned, which is only possible if no switch
+    /// was ever invoked.
     /// Test: itself.
-    #[cfg(unix)]
     #[test]
     fn ensure_gh_account_in_dir_noop_when_already_active() {
         let _g = fake_gh_lock();
-        let bin_dir = tempfile::tempdir().expect("bin tempdir");
         let config_dir = tempfile::tempdir().expect("config tempdir");
-        write_fake_gh(bin_dir.path(), "bobmatnyc");
-        let prior_path = prepend_path(bin_dir.path());
+        let (stub, _stub) = GhScopedStub::logged_in_as("bobmatnyc")
+            .with_failing_switch()
+            .install();
         let prior_tokens = strip_ambient_tokens();
-        clear_fake_gh_env();
-        // SAFETY: guarded by fake_gh_lock; cleared below. A switch attempt
-        // would fail if (incorrectly) invoked, proving the no-op path.
-        unsafe { std::env::set_var("FAKE_GH_SWITCH_FAILS", "1") };
 
         let result = ensure_gh_account_in_dir("bobmatnyc", config_dir.path(), TEST_HOST);
 
-        clear_fake_gh_env();
         restore_ambient_tokens(prior_tokens);
-        restore_path(prior_path);
         assert!(
             result.is_ok(),
             "already-active must be a no-op Ok: {result:?}"
         );
-        assert!(
-            !config_dir.path().join(".fake_active").exists(),
-            "no switch should have been attempted"
-        );
+        assert_eq!(stub.active_account(), "bobmatnyc");
     }
 
     // ── the API answer, not the transcript, decides (#5849) ──────────────
@@ -1105,24 +1019,18 @@ exit 1
     /// resolves to `bobmatnyc`, and enforcement must REFUSE, naming both
     /// logins. Before this fix the same fixture returned `Ok(())`.
     /// Test: itself.
-    #[cfg(unix)]
     #[test]
     fn ensure_gh_account_in_dir_rejects_a_transcript_the_api_contradicts() {
         let _g = fake_gh_lock();
-        let bin_dir = tempfile::tempdir().expect("bin tempdir");
         let config_dir = tempfile::tempdir().expect("config tempdir");
-        write_fake_gh(bin_dir.path(), "nonexistent-user-xyz");
-        let prior_path = prepend_path(bin_dir.path());
+        let (_stub_handle, _stub) = GhScopedStub::logged_in_as("nonexistent-user-xyz")
+            .with_api_login("bobmatnyc")
+            .install();
         let prior_tokens = strip_ambient_tokens();
-        clear_fake_gh_env();
-        // SAFETY: guarded by fake_gh_lock; cleared below.
-        unsafe { std::env::set_var("FAKE_GH_API_LOGIN", "bobmatnyc") };
 
         let result = ensure_gh_account_in_dir("nonexistent-user-xyz", config_dir.path(), TEST_HOST);
 
-        clear_fake_gh_env();
         restore_ambient_tokens(prior_tokens);
-        restore_path(prior_path);
         let err = result.expect_err("a transcript the credential contradicts must not pass");
         let msg = err.to_string();
         assert!(msg.contains("bobmatnyc"), "err: {msg}");
@@ -1133,24 +1041,18 @@ exit 1
     /// which must fail CLOSED — including when the transcript looks perfect
     /// and names exactly the expected account.
     /// Test: itself.
-    #[cfg(unix)]
     #[test]
     fn ensure_gh_account_in_dir_fails_closed_when_the_api_probe_fails() {
         let _g = fake_gh_lock();
-        let bin_dir = tempfile::tempdir().expect("bin tempdir");
         let config_dir = tempfile::tempdir().expect("config tempdir");
-        write_fake_gh(bin_dir.path(), "bobmatnyc");
-        let prior_path = prepend_path(bin_dir.path());
+        let (stub, _stub) = GhScopedStub::logged_in_as("bobmatnyc")
+            .with_failing_api()
+            .install();
         let prior_tokens = strip_ambient_tokens();
-        clear_fake_gh_env();
-        // SAFETY: guarded by fake_gh_lock; cleared below.
-        unsafe { std::env::set_var("FAKE_GH_API_FAILS", "1") };
 
         let result = ensure_gh_account_in_dir("bobmatnyc", config_dir.path(), TEST_HOST);
 
-        clear_fake_gh_env();
         restore_ambient_tokens(prior_tokens);
-        restore_path(prior_path);
         let err = result.expect_err("an unverifiable identity must never pass");
         assert!(
             err.to_string().contains("could not establish"),
@@ -1158,8 +1060,9 @@ exit 1
         );
         // #5849: an unanswerable probe must not trigger a correction — a
         // network blip may not rewrite the project's config dir.
-        assert!(
-            !config_dir.path().join(".fake_active").exists(),
+        assert_eq!(
+            stub.active_account(),
+            "bobmatnyc",
             "no switch may be attempted on an unverifiable probe"
         );
     }
@@ -1168,31 +1071,26 @@ exit 1
     /// response without the field, a blank credential). A blank login is not
     /// an identity, so it must refuse rather than compare the empty string.
     /// Test: itself.
-    #[cfg(unix)]
     #[test]
     fn ensure_gh_account_in_dir_fails_closed_on_a_blank_probe_answer() {
         let _g = fake_gh_lock();
-        let bin_dir = tempfile::tempdir().expect("bin tempdir");
         let config_dir = tempfile::tempdir().expect("config tempdir");
-        write_fake_gh(bin_dir.path(), "bobmatnyc");
-        let prior_path = prepend_path(bin_dir.path());
+        let (stub, _stub) = GhScopedStub::logged_in_as("bobmatnyc")
+            .with_blank_api()
+            .install();
         let prior_tokens = strip_ambient_tokens();
-        clear_fake_gh_env();
-        // SAFETY: guarded by fake_gh_lock; cleared below.
-        unsafe { std::env::set_var("FAKE_GH_API_EMPTY", "1") };
 
         let result = ensure_gh_account_in_dir("bobmatnyc", config_dir.path(), TEST_HOST);
 
-        clear_fake_gh_env();
         restore_ambient_tokens(prior_tokens);
-        restore_path(prior_path);
         let err = result.expect_err("a blank login is not an identity");
         assert!(
             err.to_string().contains("could not establish"),
             "err: {err}"
         );
-        assert!(
-            !config_dir.path().join(".fake_active").exists(),
+        assert_eq!(
+            stub.active_account(),
+            "bobmatnyc",
             "no switch may be attempted on an unverifiable probe"
         );
     }
@@ -1204,26 +1102,20 @@ exit 1
     /// The probe would answer for the config-dir credential and the real work
     /// would run as the token's owner, so enforcement must refuse outright.
     /// Test: itself.
-    #[cfg(unix)]
     #[test]
     fn ensure_gh_account_in_dir_refuses_under_an_ambient_token() {
         let _g = fake_gh_lock();
-        let bin_dir = tempfile::tempdir().expect("bin tempdir");
         let config_dir = tempfile::tempdir().expect("config tempdir");
-        // The fake `gh` would report the expected account for BOTH probes, so
-        // only the ambient-token guard can produce a refusal here.
-        write_fake_gh(bin_dir.path(), "bobmatnyc");
-        let prior_path = prepend_path(bin_dir.path());
+        // The stub reports the expected account for BOTH probes, so only the
+        // ambient-token guard can produce a refusal here.
+        let (_stub_handle, _stub) = GhScopedStub::logged_in_as("bobmatnyc").install();
         let prior_tokens = strip_ambient_tokens();
-        clear_fake_gh_env();
         // SAFETY: guarded by fake_gh_lock; restored below.
         unsafe { std::env::set_var("GH_TOKEN", "gho_someoneelses_token") };
 
         let result = ensure_gh_account_in_dir("bobmatnyc", config_dir.path(), TEST_HOST);
 
-        clear_fake_gh_env();
         restore_ambient_tokens(prior_tokens);
-        restore_path(prior_path);
         let err = result.expect_err("an ambient token outranks the config dir");
         let msg = err.to_string();
         assert!(msg.contains("GH_TOKEN"), "err: {msg}");
@@ -1235,7 +1127,6 @@ exit 1
     /// which exits zero and hands the whitespace on. A trimmed emptiness test
     /// here would read that as absent and verify an identity `gh` is not using.
     /// Test: itself.
-    #[cfg(unix)]
     #[test]
     fn ambient_token_override_counts_a_whitespace_token() {
         let _g = fake_gh_lock();
@@ -1273,35 +1164,28 @@ exit 1
     /// Why (#5849): the API answer is authoritative in BOTH directions. A
     /// stale transcript naming the wrong account must not force a switch when
     /// the credential already authenticates as the expected user. Proven by
-    /// making a switch attempt fail: `Ok` is only reachable without one.
+    /// scripting the switch to fail: `Ok` is only reachable without one.
     /// Test: itself.
-    #[cfg(unix)]
     #[test]
     fn ensure_gh_account_in_dir_accepts_the_api_answer_over_a_stale_transcript() {
         let _g = fake_gh_lock();
-        let bin_dir = tempfile::tempdir().expect("bin tempdir");
         let config_dir = tempfile::tempdir().expect("config tempdir");
-        write_fake_gh(bin_dir.path(), "stale-account");
-        let prior_path = prepend_path(bin_dir.path());
+        let (stub, _stub) = GhScopedStub::logged_in_as("stale-account")
+            .with_api_login("bobmatnyc")
+            .with_failing_switch()
+            .install();
         let prior_tokens = strip_ambient_tokens();
-        clear_fake_gh_env();
-        // SAFETY: guarded by fake_gh_lock; cleared below.
-        unsafe {
-            std::env::set_var("FAKE_GH_API_LOGIN", "bobmatnyc");
-            std::env::set_var("FAKE_GH_SWITCH_FAILS", "1");
-        }
 
         let result = ensure_gh_account_in_dir("bobmatnyc", config_dir.path(), TEST_HOST);
 
-        clear_fake_gh_env();
         restore_ambient_tokens(prior_tokens);
-        restore_path(prior_path);
         assert!(
             result.is_ok(),
             "the credential already matches; no switch is owed: {result:?}"
         );
-        assert!(
-            !config_dir.path().join(".fake_active").exists(),
+        assert_eq!(
+            stub.active_account(),
+            "stale-account",
             "no switch should have been attempted"
         );
     }

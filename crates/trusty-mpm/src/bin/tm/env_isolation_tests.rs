@@ -73,11 +73,13 @@ const BANNED_ENV_WRITES: &[&str] = &["HOME", "CLAUDE_CONFIG_DIR"];
 /// counted in the total and never in the indirect column.
 const ENV_MUTATION_BUDGET: &[(&str, usize, usize)] = &[
     // Production: PATH manipulation around a `gh` invocation (3 sites), plus
-    // 6 TEST-ONLY sites added by #5849: the enforcement path now REFUSES under
-    // an ambient GH_TOKEN/GITHUB_TOKEN, so these tests must control that input
+    // 3 TEST-ONLY sites: the enforcement path REFUSES under an ambient
+    // GH_TOKEN/GITHUB_TOKEN (#5849), so these tests must control that input
     // instead of inheriting whatever the shell exports. Every key is a literal,
-    // so the indirect budget stays 0.
-    ("tm/gh_identity.rs", 9, 0),
+    // so the indirect budget stays 0. #7059 dropped this from 9: the scoped
+    // `gh` calls are answered by `core::gh_scoped_stub` in-process, so the
+    // tests no longer rewrite `PATH` to install a fake binary.
+    ("tm/gh_identity.rs", 6, 0),
     // Production: daemonisation chdir.
     ("tm/commands/daemon_run.rs", 2, 0),
     // Test-only: TRUSTY_MPM_ROOT / XDG_CONFIG_HOME, via this target's own

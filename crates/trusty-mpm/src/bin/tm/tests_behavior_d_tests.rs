@@ -3761,3 +3761,173 @@ fn filter_sessions_by_name_ignores_non_name_columns() {
         "the ls scope still matches task/source_id"
     );
 }
+
+// ── #6118: adoption ghosts that name no workspace at all ────────────────────
+
+/// The task text a pre-#6126 external-adopt wrote when the pane's cwd would
+/// not resolve — the only signal on the wire that separates an adoption ghost
+/// from a legacy record whose daemon omitted the workdir fields.
+const ADOPTED_GHOST_TASK: &str =
+    "adopted session (unmanaged — workspace path could not be resolved)";
+
+/// A stopped adoption-ghost row: the ghost's task marker and NO workdir
+/// coordinate at all. `workdir` overrides `workspace_path` when given.
+fn adopted_ghost_session(
+    id: &str,
+    workdir: Option<&std::path::Path>,
+    task: Option<&str>,
+) -> trusty_mpm::client::ManagedSessionSummary {
+    let mut s = ls_test_session(id, "stopped", None, None, None, task);
+    s.id = id.to_string();
+    s.workspace_path = workdir.map(|p| p.to_string_lossy().to_string());
+    s.cwd = None;
+    s.unresumable = false;
+    s
+}
+
+/// An adoption ghost naming NO workspace must auto-prune (#6118).
+///
+/// Why: this is the defect. `workspace_verified_gone` returned its
+/// `probed_any` accumulator, so a row carrying neither `workspace_path` nor
+/// `cwd` was never even probed and could never be cleared — the 66-of-102
+/// accumulation the issue reports. Against PRE-FIX code the second sighting
+/// prunes 0, because the record is unverifiable by construction rather than
+/// merely unconfirmed. Asserting the decommission call was ACTUALLY issued
+/// (not just the counter) proves the row reached the daemon.
+#[tokio::test]
+async fn auto_prune_clears_an_adopted_record_that_names_no_workspace_at_all() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let marker_path = root.path().join("seen.json");
+    let (url, captured, handle) = spawn_recording_decommission_stub().await;
+    let client = reqwest::Client::new();
+
+    let first = auto_prune_dead_records_at(
+        &client,
+        &url,
+        vec![adopted_ghost_session(
+            "ghost-1",
+            None,
+            Some(ADOPTED_GHOST_TASK),
+        )],
+        &marker_path,
+        Some(HashSet::new()),
+    )
+    .await;
+    assert_eq!(first.pruned, 0, "a first sighting must never be pruned");
+    assert_eq!(
+        first.pending, 1,
+        "pre-fix the ghost is not even a candidate"
+    );
+
+    backdate_sightings(&marker_path, 11);
+    let second = auto_prune_dead_records_at(
+        &client,
+        &url,
+        vec![adopted_ghost_session(
+            "ghost-1",
+            None,
+            Some(ADOPTED_GHOST_TASK),
+        )],
+        &marker_path,
+        Some(HashSet::new()),
+    )
+    .await;
+    assert_eq!(
+        second.pruned, 1,
+        "an adoption ghost that resolved no workspace is dead by construction (pre-fix: 0)"
+    );
+    assert_eq!(
+        captured.lock().expect("capture lock").len(),
+        1,
+        "the confirmed ghost must actually be decommissioned"
+    );
+
+    handle.abort();
+}
+
+/// An adopted record whose workspace is merely UNREACHABLE must be kept
+/// (#6118).
+///
+/// Why: this is the distinction the issue draws, and the guard on the fix.
+/// `try_exists` answers `Ok(false)` for every path on an unmounted volume, so
+/// widening "unresolvable" to mean "the probe found nothing" would tombstone a
+/// whole unplugged drive's sessions on one `tm ls`. The record here carries the
+/// SAME adoption task marker as the test above and differs only in still
+/// NAMING a directory — which must send it down the corroborated probe, where
+/// an unreachable parent keeps it.
+#[tokio::test]
+async fn auto_prune_keeps_an_adopted_record_whose_workspace_is_merely_unreachable() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let marker_path = root.path().join("seen.json");
+    let unreachable = root
+        .path()
+        .join("unmounted-volume")
+        .join("work")
+        .join("adp");
+    let (url, captured, handle) = spawn_recording_decommission_stub().await;
+    let client = reqwest::Client::new();
+
+    for round in 0..3 {
+        let outcome = auto_prune_dead_records_at(
+            &client,
+            &url,
+            vec![adopted_ghost_session(
+                "ghost-2",
+                Some(&unreachable),
+                Some(ADOPTED_GHOST_TASK),
+            )],
+            &marker_path,
+            Some(HashSet::new()),
+        )
+        .await;
+        assert_eq!(
+            outcome.pruned, 0,
+            "round {round}: a NAMED but unreachable workspace is not an unresolvable one"
+        );
+        if marker_path.exists() {
+            backdate_sightings(&marker_path, 11);
+        }
+    }
+    assert!(
+        captured.lock().expect("capture lock").is_empty(),
+        "no decommission may be issued for a workspace that is merely unreachable"
+    );
+
+    handle.abort();
+}
+
+/// A legacy record naming no workspace and carrying no adoption marker stays
+/// kept (#6118).
+///
+/// Why: PR #4725 decided deliberately that a record whose OLDER daemon simply
+/// omitted `workspace_path`/`cwd` is unverifiable, and unverifiable is not
+/// dead. The #6118 widening must not quietly reverse that — it keys on the
+/// adoption marker precisely so this row is untouched.
+#[tokio::test]
+async fn auto_prune_keeps_a_legacy_record_that_names_no_workspace_and_no_adoption() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let marker_path = root.path().join("seen.json");
+    let (url, captured, handle) = spawn_recording_decommission_stub().await;
+    let client = reqwest::Client::new();
+
+    for round in 0..3 {
+        let outcome = auto_prune_dead_records_at(
+            &client,
+            &url,
+            vec![adopted_ghost_session("legacy-1", None, None)],
+            &marker_path,
+            Some(HashSet::new()),
+        )
+        .await;
+        assert_eq!(
+            outcome.pruned, 0,
+            "round {round}: a legacy record with nothing on the wire is unverifiable, not dead"
+        );
+        if marker_path.exists() {
+            backdate_sightings(&marker_path, 11);
+        }
+    }
+    assert!(captured.lock().expect("capture lock").is_empty());
+
+    handle.abort();
+}

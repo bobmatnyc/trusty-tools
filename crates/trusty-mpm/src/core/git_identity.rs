@@ -450,9 +450,12 @@ mod tests {
 
     // ── resolve_for_config_enforced (#2081/#3312) ─────────────────────────
     //
-    // A fake `gh` on `PATH` stands in for the real binary (this workspace's
-    // established fake-binary-via-PATH test convention; mirrors
-    // `core::gh_account_enforce`'s test module).
+    // #7059: `core::gh_scoped_stub` answers the scoped `gh` calls in-process.
+    // These tests used a fake `gh` shell script on the process-global `PATH`,
+    // which a sibling test's `PATH` restore could remove mid-run — the real
+    // `gh` then answered and the 5 s enforcement ceiling turned into a flake.
+
+    use crate::core::gh_scoped_stub::GhScopedStub;
 
     fn fake_gh_lock() -> std::sync::MutexGuard<'static, ()> {
         crate::core::trusty_tools_config::env_test_lock()
@@ -468,7 +471,7 @@ mod tests {
     /// fn/block; a plain `#[test]` blockingly driving a future via
     /// `Runtime::block_on` has no such point). Using the SAME crate-wide
     /// `env_test_lock` (rather than a second, `tokio`-aware lock) is what
-    /// actually matters here: it is the one lock every other PATH-mutating
+    /// actually matters here: it is the one lock every other env-mutating
     /// test in this test binary (`core::gh_account_enforce`'s tests included)
     /// already serialises on, so this module cannot race them.
     fn block_on<F: std::future::Future>(fut: F) -> F::Output {
@@ -479,54 +482,10 @@ mod tests {
             .block_on(fut)
     }
 
-    #[cfg(unix)]
-    fn write_fake_gh(bin_dir: &std::path::Path, initial: &str, switch_fails: bool) {
-        use std::os::unix::fs::PermissionsExt;
-        let switch_exit = if switch_fails { 1 } else { 0 };
-        let script = format!(
-            r#"#!/bin/sh
-STATE="$GH_CONFIG_DIR/.fake_active"
-if [ -f "$STATE" ]; then ACTIVE=$(cat "$STATE"); else ACTIVE="{initial}"; fi
-# #5849: enforcement verifies with `gh api user`, so the fake must answer it —
-# here the honest machine, where the config dir and the credential agree.
-if [ "$1" = "api" ] && [ "$2" = "user" ]; then
-  echo "$ACTIVE"
-  exit 0
-fi
-if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
-  echo "github.com"
-  echo "  - Logged in to github.com account $ACTIVE (keyring)"
-  echo "  - Active account: true"
-  exit 0
-fi
-if [ "$1" = "auth" ] && [ "$2" = "switch" ]; then
-  if [ {switch_exit} -ne 0 ]; then exit 1; fi
-  target=""
-  prev=""
-  for a in "$@"; do
-    if [ "$prev" = "--user" ]; then target="$a"; fi
-    prev="$a"
-  done
-  echo "$target" > "$STATE"
-  exit 0
-fi
-exit 1
-"#
-        );
-        let path = bin_dir.join("gh");
-        std::fs::write(&path, script).expect("write fake gh");
-        let mut perms = std::fs::metadata(&path)
-            .expect("stat fake gh")
-            .permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&path, perms).expect("chmod fake gh");
-    }
-
     /// Remove any ambient `GH_TOKEN`/`GITHUB_TOKEN`, returning them to restore.
     ///
     /// #5849: an ambient token makes `ensure_gh_account_in_dir` refuse, so a
     /// shell or CI job that exports one would otherwise decide these outcomes.
-    #[cfg(unix)]
     fn strip_ambient_tokens() -> Vec<(&'static str, Option<std::ffi::OsString>)> {
         ["GH_TOKEN", "GITHUB_TOKEN"]
             .into_iter()
@@ -539,7 +498,6 @@ exit 1
             .collect()
     }
 
-    #[cfg(unix)]
     fn restore_ambient_tokens(prior: Vec<(&'static str, Option<std::ffi::OsString>)>) {
         for (name, value) in prior {
             // SAFETY: guarded by `fake_gh_lock` in every caller.
@@ -548,29 +506,6 @@ exit 1
                     Some(v) => std::env::set_var(name, v),
                     None => std::env::remove_var(name),
                 }
-            }
-        }
-    }
-
-    #[cfg(unix)]
-    fn prepend_path(dir: &std::path::Path) -> Option<String> {
-        let prior = std::env::var("PATH").ok();
-        let new_path = match &prior {
-            Some(p) => format!("{}:{p}", dir.display()),
-            None => dir.display().to_string(),
-        };
-        // SAFETY: guarded by `fake_gh_lock` in every caller.
-        unsafe { std::env::set_var("PATH", new_path) };
-        prior
-    }
-
-    #[cfg(unix)]
-    fn restore_path(prior: Option<String>) {
-        // SAFETY: guarded by `fake_gh_lock` in every caller.
-        unsafe {
-            match prior {
-                Some(p) => std::env::set_var("PATH", p),
-                None => std::env::remove_var("PATH"),
             }
         }
     }
@@ -593,14 +528,11 @@ exit 1
     /// spawn paths now actually enforce this rather than merely resolving an
     /// identity blind to what's active inside it.
     /// Test: itself.
-    #[cfg(unix)]
     #[test]
     fn resolve_for_config_enforced_self_heals_mismatch() {
         let _g = fake_gh_lock();
-        let bin_dir = tempfile::tempdir().expect("bin tempdir");
         let config_dir = tempfile::tempdir().expect("config tempdir");
-        write_fake_gh(bin_dir.path(), "wrong-account", false);
-        let prior_path = prepend_path(bin_dir.path());
+        let (stub, _stub) = GhScopedStub::logged_in_as("wrong-account").install();
         let prior_tokens = strip_ambient_tokens();
 
         let config = account_paired_config(config_dir.path(), "bobmatnyc");
@@ -610,11 +542,12 @@ exit 1
         ));
 
         restore_ambient_tokens(prior_tokens);
-        restore_path(prior_path);
         assert!(result.is_ok(), "expected self-heal to succeed: {result:?}");
-        let state = std::fs::read_to_string(config_dir.path().join(".fake_active"))
-            .expect("state file written by the fake gh's switch");
-        assert_eq!(state.trim(), "bobmatnyc");
+        assert_eq!(
+            stub.active_account(),
+            "bobmatnyc",
+            "the switch must have taken effect"
+        );
     }
 
     /// Why (#3312): when the switch itself fails, `resolve_for_config_enforced`
@@ -626,14 +559,13 @@ exit 1
     /// silent-wrong-account bug the issue describes. Only the NEW enforced
     /// wrapper catches it.
     /// Test: itself.
-    #[cfg(unix)]
     #[test]
     fn resolve_for_config_enforced_fails_closed_on_switch_failure() {
         let _g = fake_gh_lock();
-        let bin_dir = tempfile::tempdir().expect("bin tempdir");
         let config_dir = tempfile::tempdir().expect("config tempdir");
-        write_fake_gh(bin_dir.path(), "wrong-account", true);
-        let prior_path = prepend_path(bin_dir.path());
+        let (_stub_handle, _stub) = GhScopedStub::logged_in_as("wrong-account")
+            .with_failing_switch()
+            .install();
         let prior_tokens = strip_ambient_tokens();
 
         let config = account_paired_config(config_dir.path(), "bobmatnyc");
@@ -653,24 +585,23 @@ exit 1
         ));
 
         restore_ambient_tokens(prior_tokens);
-        restore_path(prior_path);
         let err = enforced.expect_err("mismatched account with a failed switch must be an Err");
         assert!(err.to_string().contains("bobmatnyc"), "err: {err}");
     }
 
     /// Why (#3312): a project with `config_dir` but no paired `account` (the
     /// pre-#3312, still-supported shape) must see NO enforcement — proven by
-    /// making every `gh` invocation fail and asserting resolution still
-    /// succeeds (only possible if `gh` was never invoked).
+    /// scripting every scoped `gh` answer to fail and asserting resolution
+    /// still succeeds (only possible if `gh` was never invoked).
     /// Test: itself.
-    #[cfg(unix)]
     #[test]
     fn resolve_for_config_enforced_skips_when_account_unset() {
         let _g = fake_gh_lock();
-        let bin_dir = tempfile::tempdir().expect("bin tempdir");
         let config_dir = tempfile::tempdir().expect("config tempdir");
-        write_fake_gh(bin_dir.path(), "irrelevant", true);
-        let prior_path = prepend_path(bin_dir.path());
+        let (_stub_handle, _stub) = GhScopedStub::logged_in_as("irrelevant")
+            .with_failing_api()
+            .with_failing_switch()
+            .install();
 
         let config = TrustyToolsConfig {
             github: Some(gh(&config_dir.path().display().to_string())),
@@ -681,7 +612,6 @@ exit 1
             "https://github.com/acme/widget",
         ));
 
-        restore_path(prior_path);
         assert!(
             result.is_ok(),
             "no account paired with config_dir must skip enforcement entirely: {result:?}"
