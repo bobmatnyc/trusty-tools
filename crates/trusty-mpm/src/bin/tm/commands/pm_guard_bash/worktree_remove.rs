@@ -55,7 +55,17 @@
 //! `denies_a_removal_whose_path_carries_an_unexpanded_variable`,
 //! `denies_a_removal_whose_dash_c_carries_an_unexpanded_variable`,
 //! `a_clean_tree_whose_commits_are_all_on_origin_needs_no_pull_request` (#7914),
-//! `a_commit_no_origin_ref_has_still_denies_without_a_merged_pr`
+//! `a_commit_no_origin_ref_has_still_denies_without_a_merged_pr`,
+//! `a_detached_head_that_is_a_merged_prs_own_head_is_reclaimable` (#7832),
+//! `a_detached_head_no_merged_pr_carries_still_denies`,
+//! `a_detached_head_matched_to_a_pull_request_with_another_head_denies`,
+//! `a_detached_head_matched_to_a_pull_request_with_no_head_denies`,
+//! `an_unanswerable_commit_search_denies_a_detached_head`,
+//! `an_unresolvable_head_sha_denies_a_detached_head`,
+//! `a_head_sha_matching_the_merged_prs_own_head_grants_despite_a_stale_upstream` (#7958),
+//! `a_head_that_is_not_the_merged_prs_head_still_denies_when_ahead`,
+//! `an_unanswerable_head_sha_never_grants_an_ahead_worktree`,
+//! `a_merged_pr_carrying_no_head_sha_never_grants_an_ahead_worktree`
 //! below; `pm_guard_denies_worktree_remove_from_native_subagent` and
 //! `pm_guard_allows_worktree_remove_from_pm` run the binary end to end in
 //! `tests/tm_hook_pm_guard.rs`.
@@ -356,6 +366,11 @@ mod tests {
         /// default, so every pre-#7914 test still reaches the merged-PR route
         /// it was written for — the admission only ever fires on a zero.
         local_only: Result<usize, String>,
+        /// #7832, #7958: the object id this worktree's HEAD resolves to.
+        head_sha: Result<String, String>,
+        /// #7832: the MERGED pull request opened from that exact commit, if
+        /// any. Reached only on the detached-HEAD route.
+        commit_pr: Result<MergedPrLookup, String>,
         /// #7275 round 2: the base ref the merge-tree question was asked
         /// against, so a test can prove it came from the pull request.
         asked_base: std::cell::RefCell<Option<String>>,
@@ -366,10 +381,33 @@ mod tests {
         lookup_on(count, if count == 0 { "" } else { "main" })
     }
 
-    /// A merged-PR answer that landed on a named base (#7275 round 2).
+    /// A merged-PR answer that landed on a named base (#7275 round 2), carrying
+    /// the pull request's own head commit (#7958).
     fn lookup_on(count: usize, base: &str) -> MergedPrLookup {
-        MergedPrLookup::new(count, FAKE_REPO, base)
+        MergedPrLookup::new(count, FAKE_REPO, base).with_head_sha(if count == 0 {
+            ""
+        } else {
+            MERGED_PR_HEAD
+        })
     }
+
+    /// The answer the #7832 commit search gives: `count` merged pull requests
+    /// opened from exactly this worktree's HEAD.
+    fn commit_lookup(count: usize) -> MergedPrLookup {
+        MergedPrLookup::new(count, FAKE_REPO, "").with_head_sha(if count == 0 {
+            ""
+        } else {
+            WORKTREE_HEAD
+        })
+    }
+
+    /// The commit a fixture worktree's HEAD sits on (#7832, #7958).
+    const WORKTREE_HEAD: &str = "02a83032d1f0b4c9e7a6d5c4b3a291807f6e5d4c";
+
+    /// The commit the merged pull request's head branch pointed at — a
+    /// DIFFERENT object id from [`WORKTREE_HEAD`], so a test that wants the
+    /// #7958 grant has to say so.
+    const MERGED_PR_HEAD: &str = "9c8699fe0a1b2c3d4e5f60718293a4b5c6d7e8f9";
 
     /// The repository the fake probe reports having searched (#7057).
     const FAKE_REPO: &str = "1m-consulting/adaptive-crm";
@@ -390,6 +428,13 @@ mod tests {
                 // #7914: not zero — a fixture that admitted here would stop
                 // exercising the merged-PR route these tests exist for.
                 local_only: Ok(1),
+                // #7958: NOT the merged pull request's head by default, so the
+                // head-sha grant fires only where a test asks for it and every
+                // pre-#7958 expectation stands.
+                head_sha: Ok(WORKTREE_HEAD.to_string()),
+                // #7832: no pull request was opened from this commit, for the
+                // same reason.
+                commit_pr: Ok(commit_lookup(0)),
                 asked_base: std::cell::RefCell::new(None),
             }
         }
@@ -429,6 +474,16 @@ mod tests {
         }
         fn local_only_commits(&self, _dir: &Path) -> Result<usize, String> {
             self.local_only.clone()
+        }
+        fn head_sha(&self, _dir: &Path) -> Result<String, String> {
+            self.head_sha.clone()
+        }
+        fn merged_pull_request_for_commit(
+            &self,
+            _dir: &Path,
+            _sha: &str,
+        ) -> Result<MergedPrLookup, String> {
+            self.commit_pr.clone()
         }
         fn merged_pull_requests(
             &self,
@@ -1078,6 +1133,192 @@ mod tests {
             reason.contains("could not be established"),
             "the deny must separate an unanswerable count from a real commit: {reason}"
         );
+    }
+
+    /// The #7958 shape: a clean tree whose own pull request merged THIS commit,
+    /// while `@{upstream}` still resolves and reports the branch 4 ahead.
+    fn own_pr_merged_this_head() -> FakeProbe {
+        FakeProbe {
+            unpushed: Ok(UpstreamComparison::Ahead(4)),
+            head_sha: Ok(MERGED_PR_HEAD.to_string()),
+            ..FakeProbe::reclaimable()
+        }
+    }
+
+    /// 🔴 REGRESSION (#7958): a worktree sitting on exactly the commit its own
+    /// MERGED pull request carried is removable, whatever the tracking ref says.
+    ///
+    /// Why: `gh pr merge` leaves `@{upstream}` STALE, not level, so `Ahead(4)`
+    /// is what a landed worktree reports. The `is_own && !ahead` short-circuit
+    /// therefore never fired, and `merge_into_base_is_a_noop` — asked next —
+    /// reported residue for a tree holding none. PR #7946's worktree, at head
+    /// `9c8699fe0`, was refused that way on 2026-09-14. Fails on `983b7a2ae`,
+    /// where this denies with `unpushed-commits`.
+    #[test]
+    fn a_head_sha_matching_the_merged_prs_own_head_grants_despite_a_stale_upstream() {
+        assert_eq!(
+            evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &own_pr_merged_this_head()),
+            None,
+            "a worktree whose HEAD IS the merged pull request's head holds nothing that \
+             merge did not carry"
+        );
+    }
+
+    /// 🔴 #7958: the grant is an EXACT match, not "merged and ahead". A tree
+    /// ahead of its upstream on some other commit denies exactly as before.
+    #[test]
+    fn a_head_that_is_not_the_merged_prs_head_still_denies_when_ahead() {
+        let probe = FakeProbe {
+            head_sha: Ok(WORKTREE_HEAD.to_string()),
+            ..own_pr_merged_this_head()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("work ahead of the upstream on another commit must still deny");
+        assert!(reason.contains(CHECK_UNPUSHED_COMMITS), "{reason}");
+        assert!(reason.contains("would still change files"), "{reason}");
+    }
+
+    /// 🔴 #7958, failure path: a HEAD git could not resolve proves nothing, and
+    /// a relaxation that cannot be established never grants (ADR-0045).
+    #[test]
+    fn an_unanswerable_head_sha_never_grants_an_ahead_worktree() {
+        let probe = FakeProbe {
+            head_sha: Err("`git rev-parse HEAD` exited 128: ambiguous argument".to_string()),
+            ..own_pr_merged_this_head()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("an unresolvable HEAD must never grant on the head-sha route");
+        assert!(reason.contains(CHECK_UNPUSHED_COMMITS), "{reason}");
+    }
+
+    /// 🔴 #7958, failure path: GitHub reporting a merged pull request with no
+    /// `headRefOid` leaves nothing to compare against, so the pre-#7958
+    /// decision stands rather than an empty string matching an empty string.
+    #[test]
+    fn a_merged_pr_carrying_no_head_sha_never_grants_an_ahead_worktree() {
+        let probe = FakeProbe {
+            merged: Ok(MergedPrLookup::new(1, FAKE_REPO, "main")),
+            head_sha: Ok(String::new()),
+            ..own_pr_merged_this_head()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("two unknown head commits are not a match");
+        assert!(reason.contains(CHECK_UNPUSHED_COMMITS), "{reason}");
+    }
+
+    /// The #7832 shape: a detached review checkout, clean, holding a commit no
+    /// `origin` ref has — so #7914's admission cannot rescue it — parked on the
+    /// exact head a merged pull request carried.
+    fn detached_on_a_merged_pr_head() -> FakeProbe {
+        FakeProbe {
+            branch: Err("HEAD is detached — the worktree has no branch to look a \
+                         pull request up by"
+                .to_string()),
+            commit_pr: Ok(commit_lookup(1)),
+            ..FakeProbe::upstream_deleted()
+        }
+    }
+
+    /// 🔴 REGRESSION (#7832): a detached checkout whose commit a MERGED pull
+    /// request was opened from is removable.
+    ///
+    /// Why: gate 5 resolved the pull request by branch NAME, and a detached
+    /// checkout has none — so `.claude/worktrees/review-7751` at `02a83032d`
+    /// was refused with "HEAD is detached" while PR #7794 had already merged
+    /// it, leaving a manual `rm` as the only route. #7914's admission does not
+    /// reach it: the merge deleted the branch, so the head commit is on no
+    /// `origin` ref and the local-only count is 1. Fails on `983b7a2ae`, where
+    /// this denies with `merged-pull-request`.
+    #[test]
+    fn a_detached_head_that_is_a_merged_prs_own_head_is_reclaimable() {
+        assert_eq!(
+            evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &detached_on_a_merged_pr_head()),
+            None,
+            "a commit a merged pull request was opened from is landing evidence whether or \
+             not a branch name still points at it"
+        );
+    }
+
+    /// 🔴 #7832: the commit route is evidence, not an exemption. A detached
+    /// checkout no merged pull request was opened from still denies, and the
+    /// deny names the commit that was searched for.
+    #[test]
+    fn a_detached_head_no_merged_pr_carries_still_denies() {
+        let probe = FakeProbe {
+            commit_pr: Ok(commit_lookup(0)),
+            ..detached_on_a_merged_pr_head()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("a detached commit nothing landed must deny removal");
+        assert!(reason.contains(CHECK_MERGED_PULL_REQUEST), "{reason}");
+        assert!(reason.contains(WORKTREE_HEAD), "{reason}");
+        assert!(reason.contains(FAKE_REPO), "{reason}");
+    }
+
+    /// 🔴 #7832, critic round: a count the policy cannot corroborate never
+    /// grants. GitHub's commit search returns pull requests that merely MENTION
+    /// a commit, and one row reporting `count: 1` for a head that is some OTHER
+    /// commit must deny — otherwise the whole grant rests on a filter in a
+    /// different module that this function cannot see.
+    #[test]
+    fn a_detached_head_matched_to_a_pull_request_with_another_head_denies() {
+        let probe = FakeProbe {
+            commit_pr: Ok(MergedPrLookup::new(1, FAKE_REPO, "").with_head_sha(MERGED_PR_HEAD)),
+            ..detached_on_a_merged_pr_head()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("a pull request opened from another commit is not this tree's evidence");
+        assert!(reason.contains(CHECK_MERGED_PULL_REQUEST), "{reason}");
+        assert!(reason.contains(MERGED_PR_HEAD), "{reason}");
+        assert!(
+            reason.contains("merely mentions a commit"),
+            "the deny must say why the reported pull request did not count: {reason}"
+        );
+    }
+
+    /// 🔴 #7832, critic round: the same guard with the head commit ABSENT. A
+    /// row GitHub named no `headRefOid` for leaves nothing to corroborate, so
+    /// two empty strings must not compare equal into a grant.
+    #[test]
+    fn a_detached_head_matched_to_a_pull_request_with_no_head_denies() {
+        let probe = FakeProbe {
+            commit_pr: Ok(MergedPrLookup::new(1, FAKE_REPO, "")),
+            ..detached_on_a_merged_pr_head()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("a pull request with no head commit cannot vouch for this tree");
+        assert!(reason.contains(CHECK_MERGED_PULL_REQUEST), "{reason}");
+        assert!(reason.contains("named no head commit"), "{reason}");
+    }
+
+    /// 🔴 #7832, failure path: a commit search that did not answer establishes
+    /// nothing, so it denies and quotes what GitHub's own failure said.
+    #[test]
+    fn an_unanswerable_commit_search_denies_a_detached_head() {
+        let probe = FakeProbe {
+            commit_pr: Err("`gh pr list` timed out after 10s".to_string()),
+            ..detached_on_a_merged_pr_head()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("an unanswered commit search must never grant");
+        assert!(reason.contains(CHECK_MERGED_PULL_REQUEST), "{reason}");
+        assert!(reason.contains("timed out"), "{reason}");
+    }
+
+    /// 🔴 #7832, failure path: with neither a branch nor a resolvable commit
+    /// there is nothing left to look a pull request up by, and the deny says so
+    /// rather than reading the silence as an absent pull request.
+    #[test]
+    fn an_unresolvable_head_sha_denies_a_detached_head() {
+        let probe = FakeProbe {
+            head_sha: Err("`git rev-parse HEAD` exited 128: unknown revision".to_string()),
+            ..detached_on_a_merged_pr_head()
+        };
+        let reason = evaluate_removal_rechecks(Path::new(WT), Ok(&[]), &probe)
+            .expect("an unresolvable HEAD on a detached tree must deny");
+        assert!(reason.contains(CHECK_MERGED_PULL_REQUEST), "{reason}");
+        assert!(reason.contains("unknown revision"), "{reason}");
+        assert!(reason.contains("HEAD is detached"), "{reason}");
     }
 
     #[test]

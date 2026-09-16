@@ -134,6 +134,39 @@ the guard will establish every precondition itself.
      hook's own 5 s registration: a hook Claude Code kills emits no decision at
      all, and no decision is not a deny. A refresh that fails or expires makes
      the count unanswerable, which does not grant.
+
+     Amended by #7832 — the pull request is resolved by COMMIT when there is
+     no branch name to resolve it by. `branch` fails on a detached checkout by
+     design, so this check could not run at all for a review worktree parked on
+     a merged pull request's head: `.claude/worktrees/review-7751` at
+     `02a83032d` was refused with "HEAD is detached" while PR #7794 had already
+     merged it, leaving a manual `rm` as the only route. #7914's admission does
+     not reach that shape either, because the merge deleted the branch and the
+     head commit is therefore on no `origin` ref. `gh pr list --state merged
+     --search <sha>` relates the two, and the grant requires a MERGED pull
+     request **whose own `headRefOid` IS this worktree's HEAD**. The match is
+     exact and one-directional on purpose. The reclaim sweep's ladder accepts
+     ancestry either way round because its gate 6 re-inspects whatever the merge
+     did not carry; nothing runs after THIS gate, so a pull request opened from
+     a descendant — or one that merely mentions the commit, which the search
+     also returns — is refused. A fork's row is never a match. The exact-sha
+     comparison is made twice, once in the probe and again in the policy, so the
+     grant does not rest on a filter the deciding function cannot see.
+
+     Amended by #7958 — a worktree whose HEAD is its own pull request's
+     `headRefOid` grants regardless of the `unpushed-commits` answer. `gh pr
+     merge` leaves `@{upstream}` STALE rather than level, so `Ahead(n)` is what
+     a landed worktree reports; the `merged pull request and not ahead`
+     short-circuit therefore never fired for one, and the decision fell through
+     to the merge-tree comparison, which reported residue for a tree holding
+     none. PR #7946's worktree, sitting on head `9c8699fe0`, was refused that
+     way on 2026-09-14. An exact head-sha match outranks that comparison
+     because it is the stronger evidence: the pull request merged THIS commit,
+     so there is nothing here the merge did not carry, whatever a tracking ref
+     or a moved base says. It is a relaxation, so it inherits decision 6 in the
+     one direction available: a pull request GitHub named no `headRefOid` for, a
+     HEAD git could not resolve, and any mismatch all leave the pre-#7958
+     decision standing.
 6. Every re-check fails CLOSED. A fact the guard cannot establish denies — the
    ADR-0045 distinction between absent and undeterminable, applied to a gate
    whose ALLOW deletes a checkout. This is the opposite bias from
