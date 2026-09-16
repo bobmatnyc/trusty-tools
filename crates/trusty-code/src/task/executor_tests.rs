@@ -1470,3 +1470,92 @@ async fn max_turns_override_reaches_the_pm_loop() {
         "an absent override must leave AgentLoopConfig::default()'s cap of 8"
     );
 }
+
+/// Every discovery tool name this daemon path's top-level prompt mentions.
+///
+/// Why: the two #4602 tests below assert opposite sides of one contract and
+/// must range over the same name set the assembler gates on.
+/// What: chains the two exported tool-name lists.
+/// Test: used by the two tests below.
+fn discovery_tool_names() -> Vec<&'static str> {
+    crate::prompt::FILE_DISCOVERY_TOOLS
+        .iter()
+        .chain(crate::prompt::DISCOVERY_GUIDANCE_TOOLS.iter())
+        .copied()
+        .collect()
+}
+
+/// The delegating PM — the agent `tcode tui` drives — is told to call no tool
+/// its registry lacks (#4602).
+///
+/// Why: this path registers `delegate_to_agent`/`finish_task`/the goal tools
+/// and nothing that touches the filesystem, yet its prompt used to carry the
+/// BASE `## File discovery` block; the PM obeyed it and every `list_dir`/`glob`
+/// call came back as `ToolCallExtractError::UnknownTool`, rendered in the TUI
+/// as `<name>(<invalid-arguments>)`.
+/// What: resolves the PM config this path loads, asserts `pm_prompt_tools`
+/// yields no registry for a delegating run, and asserts the prompt assembled
+/// from it names none of the discovery tools.
+/// Test: this test.
+#[tokio::test]
+async fn delegating_pm_prompt_names_no_discovery_tool() {
+    let agents = agents_dir();
+    let project = tempfile::tempdir().expect("project tempdir");
+    let p = params(&agents, &project, "s-4602-delegating");
+    let pm = crate::agents::resolve_agent(&p.agents_dir, "pm").expect("pm config resolves");
+
+    let tools = pm_prompt_tools(&p, project.path(), &pm, None).await;
+    assert!(
+        tools.is_none(),
+        "a delegating run gives the top-level agent no project tools"
+    );
+
+    let prompt = assemble_system_prompt_for_mode(p.mode, &pm, None, None, None, tools.as_deref());
+    for name in discovery_tool_names() {
+        assert!(
+            !prompt.contains(&format!("`{name}`")),
+            "the delegating PM's prompt must not name `{name}`:\n{prompt}"
+        );
+    }
+}
+
+/// A `--no-delegate` run's top-level agent DOES carry the discovery tools, and
+/// its prompt still says so (#4602).
+///
+/// Why: scoping the guidance must not silence it for the agent that can act on
+/// it — this is the other half of the contract, and it runs through the same
+/// helper, so prompt and registry cannot drift apart.
+/// What: resolves an agent with no `tcode_tools` allowlist, asserts
+/// `pm_prompt_tools` yields a registry carrying every discovery tool, and
+/// asserts the assembled prompt carries both discovery sections.
+/// Test: this test.
+#[tokio::test]
+async fn no_delegate_pm_prompt_names_its_discovery_tools() {
+    let agents = agents_dir();
+    let project = tempfile::tempdir().expect("project tempdir");
+    let p = TaskRunParams {
+        no_delegate: true,
+        agent_name: "python-engineer".to_string(),
+        ..params(&agents, &project, "s-4602-no-delegate")
+    };
+    let agent =
+        crate::agents::resolve_agent(&p.agents_dir, &p.agent_name).expect("agent config resolves");
+
+    let tools = pm_prompt_tools(&p, project.path(), &agent, None)
+        .await
+        .expect("a --no-delegate run builds the agent's own registry");
+    for name in discovery_tool_names() {
+        assert!(tools.contains(name), "registry must carry `{name}`");
+    }
+
+    let prompt =
+        assemble_system_prompt_for_mode(p.mode, &agent, None, None, None, Some(tools.as_ref()));
+    assert!(
+        prompt.contains("## File discovery"),
+        "an agent holding glob/grep/list_dir must still be told about them"
+    );
+    assert!(
+        prompt.contains("## Code discovery"),
+        "an agent holding search_code must still be told about it"
+    );
+}

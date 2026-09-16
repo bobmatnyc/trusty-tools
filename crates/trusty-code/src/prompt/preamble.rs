@@ -11,6 +11,9 @@
 //! Alongside those it carries the behavioural guidance blocks the bake-off has
 //! forced in over time (#2682 re-run suppression, #2824 deliverable
 //! completeness, …), which are equally model-agnostic and so equally BASE.
+//! It also holds [`FILE_DISCOVERY_GUIDANCE`], which used to be a BASE block
+//! but is NOT model-agnostic in the relevant sense — it names three concrete
+//! tools, so it belongs to whichever agents actually carry them (#4602).
 //! Test: `prompt::tests::base_preamble_contains_required_blocks` and
 //! `prompt::tests::base_identical_across_calls`.
 
@@ -60,15 +63,6 @@ Schema. Supply all required fields and respect declared types.
 - A tool result may report an error. When it does, recover: retry with \
 corrected arguments, choose a different tool, or explain why you cannot \
 proceed. Do not repeat the same failing call unchanged.
-
-## File discovery
-
-- To explore the project, prefer the dedicated discovery tools over shelling \
-out: `glob` finds files by pattern (e.g. `**/*.py`, `src/*.rs`), `grep` \
-searches file contents by regular expression, and `list_dir` lists a \
-directory's entries. They return structured, project-scoped results and are \
-cheaper than a shell command. Reach for the shell tool only for actions these \
-do not cover (running builds, tests, or other commands).
 
 ## Filesystem-safety contract
 
@@ -160,3 +154,27 @@ construction-time initialization must always be present.
 contains no tool call. A turn with zero tool calls is the terminal state and \
 its content is returned as the final answer. While work remains, keep emitting \
 tool calls.";
+
+/// The file-discovery block, lifted OUT of [`BASE_PREAMBLE`] (#4602).
+///
+/// Why: this block names three concrete tools — `glob`, `grep`, `list_dir` —
+/// so it is only true for an agent whose registry actually carries them. While
+/// it lived inside [`BASE_PREAMBLE`] it reached the interactive PM too, whose
+/// registry holds harness tools only; the PM then emitted `list_dir`/`glob`
+/// calls that `ToolCallExtractor::validate` rejected as
+/// `ToolCallExtractError::UnknownTool` and the TUI rendered as
+/// `<name>(<invalid-arguments>)`. Keeping it a separate constant lets
+/// [`crate::prompt::assemble_system_prompt_for_mode`] gate it on the run's
+/// registry, and keeps [`BASE_PREAMBLE`] free of any tool-specific claim.
+/// What: the verbatim text of the former `## File discovery` section, appended
+/// as its own section only when the registry carries every tool it names
+/// ([`crate::prompt::FILE_DISCOVERY_TOOLS`]).
+/// Test: `prompt::tests::discovery_guidance_never_names_an_unregistered_tool`,
+/// `prompt::tests::file_discovery_guidance_follows_the_registry`.
+pub const FILE_DISCOVERY_GUIDANCE: &str = "## File discovery\n\n\
+- To explore the project, prefer the dedicated discovery tools over shelling \
+out: `glob` finds files by pattern (e.g. `**/*.py`, `src/*.rs`), `grep` \
+searches file contents by regular expression, and `list_dir` lists a \
+directory's entries. They return structured, project-scoped results and are \
+cheaper than a shell command. Reach for the shell tool only for actions these \
+do not cover (running builds, tests, or other commands).";

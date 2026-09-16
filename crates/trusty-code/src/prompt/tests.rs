@@ -8,11 +8,17 @@
 //! [`BASE_PREAMBLE`] and [`BASE_PREAMBLE_VERSION`].
 //! Test: this file.
 
+use std::sync::Arc;
+
 use crate::agents::AgentConfig;
 use crate::mode::HarnessMode;
 use crate::prompt::{
-    BASE_PREAMBLE, BASE_PREAMBLE_VERSION, DISCOVERY_GUIDANCE, PromptAssembler,
-    assemble_system_prompt, assemble_system_prompt_for_mode,
+    BASE_PREAMBLE, BASE_PREAMBLE_VERSION, DISCOVERY_GUIDANCE, DISCOVERY_GUIDANCE_TOOLS,
+    FILE_DISCOVERY_GUIDANCE, FILE_DISCOVERY_TOOLS, PromptAssembler, assemble_system_prompt,
+    assemble_system_prompt_for_mode,
+};
+use crate::tools::{
+    FinishTaskTool, GlobTool, GrepTool, ListDirTool, ToolRegistry, TrustySearchTool,
 };
 
 /// Build an `AgentConfig` whose `system_prompt.content` is the given string.
@@ -24,6 +30,36 @@ fn config_with_prompt(content: &str) -> AgentConfig {
     let mut cfg = AgentConfig::default();
     cfg.system_prompt.content = content.to_string();
     cfg
+}
+
+/// A registry shaped like the interactive PM's — harness tools only (#4602).
+///
+/// Why: `task::executor`'s delegating path registers `delegate_to_agent`,
+/// `finish_task` and the goal tools and NOTHING that touches the filesystem;
+/// `finish_task` alone reproduces the property the prompt must respect.
+/// What: a `ToolRegistry` holding only `finish_task`.
+/// Test: `discovery_guidance_never_names_an_unregistered_tool`.
+fn pm_like_registry() -> ToolRegistry {
+    let mut reg = ToolRegistry::new();
+    reg.register(Arc::new(FinishTaskTool::new()));
+    reg
+}
+
+/// A registry shaped like the delegated engineer's — every discovery tool.
+///
+/// Why: the counterpart to [`pm_like_registry`]: the agent that DOES receive
+/// `glob`/`grep`/`list_dir`/`search_code` must still be told about them.
+/// What: a `ToolRegistry` holding the four discovery tools plus `finish_task`.
+/// Test: `discovery_guidance_never_names_an_unregistered_tool`.
+fn engineer_like_registry() -> ToolRegistry {
+    let project = std::path::Path::new(".");
+    let mut reg = ToolRegistry::new();
+    reg.register(Arc::new(GlobTool::new(project)));
+    reg.register(Arc::new(GrepTool::new(project)));
+    reg.register(Arc::new(ListDirTool::new(project)));
+    reg.register(Arc::new(TrustySearchTool::new(project)));
+    reg.register(Arc::new(FinishTaskTool::new()));
+    reg
 }
 
 /// With all four sections present, the assembled order is 1→2→3→4 (spec §2).
@@ -431,6 +467,27 @@ fn base_preamble_is_model_agnostic() {
     }
 }
 
+/// `BASE_PREAMBLE` names no discovery tool (#4602).
+///
+/// Why: BASE reaches EVERY agent, including the interactive PM whose registry
+/// holds harness tools only. A tool name here is therefore an instruction some
+/// agent cannot obey — the `## File discovery` block was exactly that, and now
+/// lives in [`FILE_DISCOVERY_GUIDANCE`], gated on the run's registry.
+/// What: asserts none of the discovery tool names appears in the preamble.
+/// Test: this test.
+#[test]
+fn base_preamble_names_no_discovery_tool() {
+    for name in FILE_DISCOVERY_TOOLS
+        .iter()
+        .chain(DISCOVERY_GUIDANCE_TOOLS.iter())
+    {
+        assert!(
+            !BASE_PREAMBLE.contains(&format!("`{name}`")),
+            "BASE_PREAMBLE must not name the registry-specific tool `{name}`"
+        );
+    }
+}
+
 /// `BASE_PREAMBLE_VERSION` is a three-component semver-shaped string (spec D5).
 ///
 /// Why: The parity report records this token; a malformed version would make
@@ -452,7 +509,10 @@ fn base_preamble_version_is_semver_shaped() {
 /// Expected FNV-1a-style fold of [`BASE_PREAMBLE`]'s bytes, folded with its
 /// byte length. Regenerate this whenever the preamble legitimately changes
 /// (see [`base_preamble_hash_tripwire`] for the contributor instructions).
-const EXPECTED_PREAMBLE_HASH: u64 = 0x7518_5b12_b59f_2f94;
+// #4602: refreshed because the `## File discovery` block left BASE for the
+// registry-gated `FILE_DISCOVERY_GUIDANCE`; `BASE_PREAMBLE_VERSION` 1.8.0 →
+// 1.9.0 in the same change.
+const EXPECTED_PREAMBLE_HASH: u64 = 0x31c4_38bc_b6cf_fb08;
 
 /// Test-time guard coupling `BASE_PREAMBLE` *content* to its version constant.
 ///
@@ -536,12 +596,16 @@ fn all_sections_present_when_supplied() {
 /// silently regress projects with no skills.
 /// What: asserts `Parity` with `skills_catalog: None` returns the exact same
 /// string as `assemble_system_prompt`, and `DailyDriver` differs only by the
-/// always-present [`DISCOVERY_GUIDANCE`] trailing section (PR A, #2689).
+/// [`DISCOVERY_GUIDANCE`] trailing section (PR A, #2689) the engineer's
+/// registry earns (#4602).
 /// Test: this test.
 #[test]
 fn assemble_system_prompt_for_mode_identical_when_no_skills() {
     let cfg = config_with_prompt("AGENT");
     let baseline = assemble_system_prompt(&cfg, Some("PROJECT"), Some("FALLBACK"));
+    // #4602: the discovery sections are registry-gated, so this baseline
+    // comparison uses a registry that earns them.
+    let tools = engineer_like_registry();
 
     let parity = assemble_system_prompt_for_mode(
         HarnessMode::Parity,
@@ -549,8 +613,13 @@ fn assemble_system_prompt_for_mode_identical_when_no_skills() {
         Some("PROJECT"),
         Some("FALLBACK"),
         None,
+        Some(&tools),
     );
-    assert_eq!(parity, baseline, "Parity must match baseline byte-for-byte");
+    assert_eq!(
+        parity,
+        format!("{baseline}\n\n---\n\n{FILE_DISCOVERY_GUIDANCE}"),
+        "Parity = baseline + file-discovery guidance"
+    );
 
     let daily = assemble_system_prompt_for_mode(
         HarnessMode::DailyDriver,
@@ -558,20 +627,123 @@ fn assemble_system_prompt_for_mode_identical_when_no_skills() {
         Some("PROJECT"),
         Some("FALLBACK"),
         None,
+        Some(&tools),
     );
     assert_eq!(
         daily,
-        format!("{baseline}\n\n---\n\n{DISCOVERY_GUIDANCE}"),
-        "DailyDriver with no skills = baseline + discovery guidance"
+        format!("{baseline}\n\n---\n\n{FILE_DISCOVERY_GUIDANCE}\n\n---\n\n{DISCOVERY_GUIDANCE}"),
+        "DailyDriver with no skills = baseline + both discovery sections"
     );
+}
+
+/// A prompt never names a discovery tool the run's registry does not carry —
+/// the #4602 regression: the interactive PM was told to call `list_dir`/`glob`
+/// while its registry held harness tools only, so every such call came back
+/// as `ToolCallExtractError::UnknownTool`.
+///
+/// Why: this is the contract the fix exists to hold, checked across every
+/// prompt the assembler can produce for a given registry — both modes, both
+/// registry shapes — rather than at one call site.
+/// What: for each (registry, mode) pair, asserts that any backtick-quoted
+/// discovery-tool name appearing in the assembled prompt is registered in that
+/// registry. The final assertion rejects a vacuous pass: the engineer registry
+/// must still see its tools named.
+/// Test: this test.
+#[test]
+fn discovery_guidance_never_names_an_unregistered_tool() {
+    let cfg = config_with_prompt("AGENT");
+    let registries = [
+        ("pm (harness tools only)", pm_like_registry()),
+        ("engineer (project tools)", engineer_like_registry()),
+    ];
+    let mut mentions = 0usize;
+
+    for (label, registry) in &registries {
+        for mode in [HarnessMode::Parity, HarnessMode::DailyDriver] {
+            let out = assemble_system_prompt_for_mode(
+                mode,
+                &cfg,
+                Some("PROJECT"),
+                Some("FALLBACK"),
+                Some("Available skills:\n- demo-skill: Does demo things"),
+                Some(registry),
+            );
+            for name in FILE_DISCOVERY_TOOLS
+                .iter()
+                .chain(DISCOVERY_GUIDANCE_TOOLS.iter())
+            {
+                if !out.contains(&format!("`{name}`")) {
+                    continue;
+                }
+                mentions += 1;
+                assert!(
+                    registry.contains(name),
+                    "{label} / {mode:?}: prompt tells the model to call `{name}`, \
+                     but that tool is not in its registry"
+                );
+            }
+        }
+    }
+
+    assert!(
+        mentions > 0,
+        "no prompt named any discovery tool — the engineer must still be told \
+         about the tools it does carry"
+    );
+}
+
+/// The file-discovery section follows the registry, not the mode (#4602).
+///
+/// Why: the engineer needs this block in BOTH modes (it long predates the
+/// DailyDriver split, having lived inside `BASE_PREAMBLE`), and the PM needs it
+/// in neither.
+/// What: asserts the engineer registry earns the section under `Parity` and
+/// `DailyDriver`, and the PM-shaped registry earns it under neither.
+/// Test: this test.
+#[test]
+fn file_discovery_guidance_follows_the_registry() {
+    let cfg = config_with_prompt("AGENT");
+    let engineer = engineer_like_registry();
+    let pm = pm_like_registry();
+
+    for mode in [HarnessMode::Parity, HarnessMode::DailyDriver] {
+        let with_tools =
+            assemble_system_prompt_for_mode(mode, &cfg, None, None, None, Some(&engineer));
+        assert!(
+            with_tools.contains(FILE_DISCOVERY_GUIDANCE),
+            "{mode:?}: an agent holding glob/grep/list_dir must be told about them"
+        );
+
+        let without_tools =
+            assemble_system_prompt_for_mode(mode, &cfg, None, None, None, Some(&pm));
+        assert!(
+            !without_tools.contains("## File discovery"),
+            "{mode:?}: an agent without those tools must not be told to use them"
+        );
+    }
+}
+
+/// An unknown registry (`tools: None`) emits no tool-naming section (#4602).
+///
+/// Why: "I do not know what this agent can call" must fail closed — naming a
+/// tool on a guess is exactly the failure #4602 reports.
+/// What: asserts neither discovery section appears when `tools` is `None`.
+/// Test: this test.
+#[test]
+fn unknown_registry_omits_every_discovery_section() {
+    let cfg = config_with_prompt("AGENT");
+    let out =
+        assemble_system_prompt_for_mode(HarnessMode::DailyDriver, &cfg, None, None, None, None);
+    assert!(!out.contains("## File discovery"));
+    assert!(!out.contains("## Code discovery"));
 }
 
 /// `HarnessMode::DailyDriver` always appends [`DISCOVERY_GUIDANCE`] as a
 /// trailing section, before any skills catalog (PR A, #2689).
 ///
 /// Why: the engineer's `search_code` tool needs the model steered toward it;
-/// the guidance is static (not project-dependent) so it is always present in
-/// DailyDriver.
+/// the guidance is static (not project-dependent) so it is present whenever the
+/// registry carries the tools it names (#4602).
 /// What: asserts the guidance appears after FALLBACK and, when a catalog is
 /// present, before the catalog.
 /// Test: this test.
@@ -579,12 +751,14 @@ fn assemble_system_prompt_for_mode_identical_when_no_skills() {
 fn daily_driver_appends_discovery_guidance() {
     let cfg = config_with_prompt("AGENT");
     let catalog = "Available skills:\n- demo-skill: Does demo things";
+    let tools = engineer_like_registry();
     let out = assemble_system_prompt_for_mode(
         HarnessMode::DailyDriver,
         &cfg,
         Some("PROJECT"),
         Some("FALLBACK"),
         Some(catalog),
+        Some(&tools),
     );
     assert!(out.contains(DISCOVERY_GUIDANCE));
     assert!(out.contains("search_code"));
@@ -609,12 +783,16 @@ fn daily_driver_appends_discovery_guidance() {
 fn parity_omits_discovery_guidance() {
     let cfg = config_with_prompt("AGENT");
     let baseline = assemble_system_prompt(&cfg, Some("PROJECT"), Some("FALLBACK"));
+    // #4602: a PM-shaped registry earns neither discovery section, so Parity
+    // still matches the plain baseline byte-for-byte here.
+    let tools = pm_like_registry();
     let out = assemble_system_prompt_for_mode(
         HarnessMode::Parity,
         &cfg,
         Some("PROJECT"),
         Some("FALLBACK"),
         Some("Available skills:\n- demo"),
+        Some(&tools),
     );
     assert_eq!(out, baseline);
     assert!(!out.contains("## Code discovery"));
@@ -640,6 +818,7 @@ fn daily_driver_appends_skills_catalog() {
         Some("PROJECT"),
         Some("FALLBACK"),
         Some(catalog),
+        Some(&engineer_like_registry()),
     );
 
     assert!(out.contains("AGENT"));
@@ -672,6 +851,8 @@ fn parity_ignores_skills_catalog() {
         Some("PROJECT"),
         Some("FALLBACK"),
         Some(catalog),
+        // #4602: a PM-shaped registry keeps Parity equal to the plain baseline.
+        Some(&pm_like_registry()),
     );
 
     assert_eq!(out, baseline);

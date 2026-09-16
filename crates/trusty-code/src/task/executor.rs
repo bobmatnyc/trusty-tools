@@ -402,6 +402,20 @@ async fn run_and_record(
     // tool — see `assemble_system_prompt_for_mode`'s docs.
     let skills_catalog = daily_driver_skills_catalog(&params, &work_root);
 
+    // #4602: resolved HERE, before the prompt is assembled, so the prompt can
+    // be scoped to the tools this run actually registers for the top-level
+    // agent — and reused below as the registry to merge, so the factory runs
+    // exactly once.
+    let pm_tools = pm_prompt_tools(
+        &params,
+        &work_root,
+        &pm_config,
+        skills_catalog
+            .as_ref()
+            .map(|(_, resolver)| Arc::clone(resolver)),
+    )
+    .await;
+
     let engineer_runner = build_engineer_runner(
         wrap_with_debug_capture(Arc::clone(&llm), ENGINEER_AGENT_NAME, debug_sink.as_ref()),
         &params,
@@ -429,6 +443,9 @@ async fn run_and_record(
         project_context.as_deref(),
         catchup_ctx.as_deref(),
         skills_catalog.as_ref().map(|(catalog, _)| catalog.as_str()),
+        // #4602: `None` on the delegating path — this PM has no filesystem
+        // tool, so its prompt must name none.
+        pm_tools.as_deref(),
     );
 
     // #2344: seed the PM's persistent conversation on this session's FIRST
@@ -505,19 +522,10 @@ async fn run_and_record(
     // #8031: with no engineer to delegate to, the named agent must carry its
     // OWN tcode tools or the run has nothing to work with. Merged AFTER the
     // harness tools above so they win the `finish_task`/`use_skill` overlap.
-    if params.no_delegate {
-        let factory = project_tool_factory(
-            &params,
-            &work_root,
-            skills_catalog
-                .as_ref()
-                .map(|(_, resolver)| Arc::clone(resolver)),
-        );
-        pm_registry.merge_missing(
-            crate::runner::agent_registry(&factory, &pm_config, &RunContext::default())
-                .await
-                .as_ref(),
-        );
+    // #4602: the SAME registry the prompt above was scoped to, so the two can
+    // never disagree about what this agent can call.
+    if let Some(tools) = &pm_tools {
+        pm_registry.merge_missing(tools);
     }
 
     let pm_llm: Arc<dyn InferenceAdapter> = Arc::new(RecordingLlmClient::new(
@@ -843,6 +851,34 @@ fn daily_driver_skills_catalog(
 /// What: binds `work_root` as the fs/bash scope, the run's `HarnessMode`, the
 /// shared skill resolver, and a fresh per-factory MCP `OnceCell`.
 /// Test: `task::executor::tests::no_delegate_run_writes_the_file_without_delegating`.
+/// The registry that scopes the top-level agent's own system prompt (#4602).
+///
+/// Why: the delegating PM's registry carries harness tools only — no `glob`,
+/// `grep`, `list_dir` or `search_code` — so a prompt naming them makes the
+/// model emit a call `ToolCallExtractor::validate` rejects as
+/// `ToolCallExtractError::UnknownTool`, which `tcode tui` renders as
+/// `<name>(<invalid-arguments>)`. Those tools reach this agent only on the
+/// `--no-delegate` branch, and resolving that branch's registry BEFORE the
+/// prompt is assembled is what lets prompt and registry agree.
+/// What: `None` when the run delegates; otherwise the named agent's own gated
+/// tcode registry, built through the same [`crate::runner::agent_registry`]
+/// helper the caller then merges, so the factory (and its one-shot MCP load)
+/// runs exactly once per run.
+/// Test: `task::executor_tests::delegating_pm_prompt_names_no_discovery_tool`,
+/// `task::executor_tests::no_delegate_pm_prompt_names_its_discovery_tools`.
+async fn pm_prompt_tools(
+    params: &TaskRunParams,
+    work_root: &Path,
+    pm_config: &AgentConfig,
+    skill_resolver: Option<Arc<dyn SkillResolver>>,
+) -> Option<Arc<ToolRegistry>> {
+    if !params.no_delegate {
+        return None;
+    }
+    let factory = project_tool_factory(params, work_root, skill_resolver);
+    Some(crate::runner::agent_registry(&factory, pm_config, &RunContext::default()).await)
+}
+
 fn project_tool_factory(
     params: &TaskRunParams,
     work_root: &Path,

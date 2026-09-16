@@ -6,6 +6,9 @@
 //! byte-identical BASE preamble, its version token, and the fixed-order
 //! assembler that merges the BASE preamble with the per-agent prompt, project
 //! `CLAUDE.md` context, and the optional per-tier fallback guidance.
+//! #4602: the tool-naming discovery sections are no longer part of that
+//! byte-identical floor — they are gated on the run's tool registry, so an
+//! agent is never instructed to call a tool it was not given.
 //! What: Re-exports [`BASE_PREAMBLE`], [`BASE_PREAMBLE_VERSION`],
 //! [`PromptAssembler`], [`assemble_system_prompt`], and (#2059)
 //! [`assemble_system_prompt_for_mode`] — the `HarnessMode`-branching entry
@@ -26,7 +29,8 @@ mod preamble;
 mod version;
 
 pub use assembler::{
-    DISCOVERY_GUIDANCE, PromptAssembler, assemble_system_prompt, assemble_system_prompt_for_mode,
+    DISCOVERY_GUIDANCE, DISCOVERY_GUIDANCE_TOOLS, FILE_DISCOVERY_TOOLS, PromptAssembler,
+    assemble_system_prompt, assemble_system_prompt_for_mode,
 };
-pub use preamble::BASE_PREAMBLE;
+pub use preamble::{BASE_PREAMBLE, FILE_DISCOVERY_GUIDANCE};
 pub use version::BASE_PREAMBLE_VERSION;
