@@ -6,6 +6,58 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.51.0] — 2026-09-16
+
+### Added
+
+- `catchup::session_refs` — the read side of ADR-0062 session-history refs
+  (refs [#7830](https://github.com/bobmatnyc/trusty-tools/issues/7830))
+  - `ensure_fetch_refspec` registers `+refs/tm/sessions/*:refs/tm/sessions/*` on
+    `remote.origin.fetch` idempotently; without it a plain clone sees no session
+    refs at all
+  - `list_session_refs` is the `git for-each-ref` aggregator over
+    `refs/tm/sessions/**`
+  - `hydrate_session_cache` rebuilds `.trusty-mpm/sessions/` from each ref's tip
+    tree, synthesizing the `sessions-log.jsonl` pause line that attributes each
+    restored snapshot, and never overwriting a file already on disk
+  - `refs/tm/sessions/**` has no server-side access control, so hydration reads
+    exactly ONE ref — the caller's own `SessionRefTarget` — rather than every
+    ref under a matching user id. A self-consistent sibling ref pushed under the
+    victim's login would otherwise be materialized, and a future-dated snapshot
+    with a matching `## Tmux Window` body wins the resume's newest-first pick
+  - within that ref, only the single `session-*.md` the commit names is written,
+    at a path that session may own; the tree is never walked and the
+    `Session-Id` trailer is never read, so a ref carrying `sessions-log.jsonl`
+    or a second blob changes nothing on disk
+  - a checkout with no `origin` is refused before any config write — adding the
+    refspec there used to create a phantom `origin` with an empty URL
+
+### Fixed
+
+- `file_lock` acquisition is bounded instead of blocking forever. A holder that
+  is wedged rather than dead — SIGSTOP'd, stopped in a debugger, blocked on a
+  network-mounted `$HOME` — used to hang every writer of the guarded file with
+  no output; acquisition now retries up to `DEFAULT_LOCK_TIMEOUT` (10s) and then
+  fails with an `io::ErrorKind::TimedOut` error wrapping the new `LockTimeout`,
+  which names the sidecar and, when the sidecar records one, the holder's pid.
+  New `with_exclusive_lock_timeout(path, timeout, f)` takes the bound from the
+  caller for non-interactive writers; `with_exclusive_lock` delegates to it at
+  the default, so no caller needs a change (#7762).
+- `cargo clippy -p trusty-common --features memory-rpc --all-targets -- -D
+  warnings` no longer fails on dead code in `uds_mock.rs`. `BlockingMockDaemon`
+  and `spawn_blocking_at` are used only by `search_index`'s synchronous test
+  rigs, which live behind the `search-index` feature; `memory-rpc` pulls in
+  the whole `uds_mock` module (via `uds`) without pulling in `search-index`,
+  so those two items were unconstructed. They now carry their own
+  `#[cfg(feature = "search-index")]` gate (#7765).
+- `file_lock`'s module doc links to `DEFAULT_LOCK_TIMEOUT` and `LockTimeout`
+  now resolve at rustdoc's default (no-feature) documentation pass. Both
+  links previously relied on ordinary intra-doc resolution, which rustdoc
+  attributes to the merged doc block at the `pub mod file_lock;` declaration
+  site rather than the module's own scope; explicit reference-link
+  definitions (matching the existing ones for `with_exclusive_lock` and
+  `lock_path`) sidestep that misattribution (#7910).
+
 ## [0.50.0] — 2026-09-13
 
 ### Added
