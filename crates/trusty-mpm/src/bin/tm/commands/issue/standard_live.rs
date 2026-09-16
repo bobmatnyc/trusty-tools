@@ -98,7 +98,10 @@ pub(crate) fn render_filing_targets(runner: &dyn CommandRunner) -> String {
 
 /// Collapse an error chain to one line so a multi-line `gh` stderr cannot
 /// break the section's shape.
-fn one_line(err: &anyhow::Error) -> String {
+///
+/// Shared with [`super::standard_components`], whose `gh label list` failure
+/// line has the same requirement (#7837).
+pub(crate) fn one_line(err: &anyhow::Error) -> String {
     err.to_string()
         .lines()
         .map(str::trim)
