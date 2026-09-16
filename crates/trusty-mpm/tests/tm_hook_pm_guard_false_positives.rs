@@ -172,9 +172,14 @@ fn pm_guard_allows_every_shape_the_harness_refused_as_unverifiable() {
     assert_allowed("find crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash -maxdepth 1 -type f");
     assert_allowed("cargo --version");
     assert_allowed("git log --oneline -5");
-    // The bound: the redirect is what makes the twin a write.
-    assert_denied("ls -la > listing.txt");
-    assert_denied("grep -rn healthz services >> notes.md");
+    // The redirect-bearing twins are deliberately NOT asserted here. Through
+    // the real binary a shell write meets `SHELL_EDIT_REASON`, which is
+    // budget-TIERED: with the fresh `HOME` this file pins, the first write of
+    // a turn is within budget and ALLOWS. Asserting a deny here would be
+    // asserting the budget's starting value rather than the classifier's
+    // answer. The bound lives where that answer is unconditional —
+    // `a_write_shaped_command_is_refused_on_all_fifty_rounds` in
+    // `false_positive_tests::harness_refusals_are_not_this_guard`.
 }
 
 /// #7477 and #7436: one command gets the same verdict across SEPARATE

@@ -152,6 +152,7 @@ use super::pm_guard_bash::shell_write_target;
 /// Test: `denies_a_source_write_in_a_main_checkout`,
 /// `allows_a_source_write_in_a_documents_only_checkout`,
 /// `denies_a_source_write_when_the_project_did_not_declare_documents_only`,
+/// `documents_only_is_not_borrowed_by_a_checkout_that_never_declared_it`,
 /// `allows_a_source_write_in_a_scratchpad_rooted_clone`,
 /// `allows_documents_and_configuration`, `allows_a_write_inside_a_worktree`,
 /// `denies_a_git_output_write_in_a_main_checkout`,
@@ -623,6 +624,77 @@ mod tests {
             });
             assert!(reason.contains("ADR-0044"), "{reason}");
         }
+    }
+
+    /// 🔴 #7905 arm 4: the three ways a declaration could be BORROWED by a
+    /// checkout that never made one.
+    ///
+    /// Why: `documents_only` is the first thing that can turn an ADR-0044 deny
+    /// into an allow on the strength of a file on disk, so the question is not
+    /// only "does a declaration grant" but "whose declaration is read". Each row
+    /// is a way of making the guard read the wrong one; each must keep the deny.
+    ///
+    /// 1. ROOT SPOOFING — the declaration sits in a SUBDIRECTORY rather than at
+    ///    the checkout root. [`documents_only_at`] is asked of the root
+    ///    [`main_checkout_root`] resolved, so a directory a write happens to
+    ///    pass through can never answer for the repository.
+    /// 2. TARGET REDIRECTION — the session stands in a declared repository and
+    ///    aims the write at an UNDECLARED one. The root comes from the resolved
+    ///    TARGET, not from `cwd`, so the repository that receives the byte is
+    ///    the one that has to have declared.
+    /// 3. BELOW-ROOT SYMLINK — a link inside the declared repository points at
+    ///    an undeclared source checkout. The ancestor walk stats through the
+    ///    link, finds the source checkout's own `.git` first, and reads that
+    ///    repository's (absent) declaration.
+    ///
+    /// Test: itself.
+    #[test]
+    fn documents_only_is_not_borrowed_by_a_checkout_that_never_declared_it() {
+        let declared = main_checkout();
+        std::fs::write(
+            declared
+                .path()
+                .join(trusty_mpm::core::project_config::PROJECT_CONFIG_FILE),
+            "documents_only = true\n",
+        )
+        .expect("write the declaration");
+        let undeclared = main_checkout();
+
+        // 1. Root spoofing: a declaration one level down answers for nothing.
+        let spoofed = undeclared.path().join("articles");
+        std::fs::create_dir(&spoofed).expect("mkdir articles");
+        std::fs::write(
+            spoofed.join(trusty_mpm::core::project_config::PROJECT_CONFIG_FILE),
+            "documents_only = true\n",
+        )
+        .expect("write the spoofed declaration");
+        let reason = evaluate_main_checkout_write(
+            "Write",
+            Some(&write_input(&spoofed.join("make-graphics.py"))),
+            undeclared.path(),
+        )
+        .expect("a subdirectory may not declare for the repository");
+        assert!(reason.contains("ADR-0044"), "{reason}");
+
+        // 2. Target redirection: declared `cwd`, undeclared target.
+        let reason = evaluate_main_checkout_write(
+            "Write",
+            Some(&write_input(&undeclared.path().join("src/lib.rs"))),
+            declared.path(),
+        )
+        .expect("the repository receiving the write is the one that must declare");
+        assert!(reason.contains("ADR-0044"), "{reason}");
+
+        // 3. Below-root symlink out of the declared repository.
+        let link = declared.path().join("vendor");
+        std::os::unix::fs::symlink(undeclared.path(), &link).expect("symlink");
+        let reason = evaluate_main_checkout_write(
+            "Write",
+            Some(&write_input(&link.join("src/lib.rs"))),
+            declared.path(),
+        )
+        .expect("a link out of the declared repository does not carry its declaration");
+        assert!(reason.contains("ADR-0044"), "{reason}");
     }
 
     #[test]
