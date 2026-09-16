@@ -25,6 +25,14 @@ const PERSONA = Array.from(
   (_, i) => `line ${i + 1}: you are a careful assistant.`,
 ).join('\n');
 
+/** The `local` half of `GET /api/models`, which `buildPicker` dereferences. */
+const LOCAL_MODEL = {
+  provider_id: 'ollama',
+  default_model: 'qwen2.5',
+  available: false,
+  reachable_today: false,
+};
+
 test.beforeEach(async ({ page }) => {
   // See smoke.spec.ts: a real EventSource keeps Chromium's network layer
   // non-idle and blocks CDP once the app reaches ready.
@@ -73,6 +81,45 @@ test.beforeEach(async ({ page }) => {
     else if (path.startsWith('/api/tasks')) json([]);
     else if (path.endsWith('/persona')) json({ content: PERSONA, editable: true });
     else if (path.endsWith('/stores')) json({ stores: [], issues: [] });
+    // #7456: the three below used to fall through to the `{}` catch-all. `{}`
+    // is not what any of them returns, and the app is entitled to the real
+    // shape: `buildPicker` reads `providers`, `groupByAgent` spreads the
+    // workstream array, and `ChatView` reads `messages`. A `{}` there threw
+    // out of the chat mount, so the takeover never appeared — which is what
+    // this whole file was failing on.
+    else if (path.startsWith('/api/models')) json({ providers: [], local: LOCAL_MODEL });
+    else if (path.startsWith('/api/workstreams')) json([]);
+    // #7456: `palace` and `session_id` are not optional on the wire — see the
+    // response builder in `src/api/server/chat_history.rs:294-303`. A stub
+    // that omits a field the server always sends is a stub that can go green
+    // on a body the app will never actually receive.
+    else if (path.endsWith('/chat-history'))
+      json({
+        available: true,
+        palace: 'test-palace',
+        session_id: `persona-${path.split('/')[3]}`,
+        messages: [],
+        start: 0,
+        total: 0,
+        has_more: false,
+        updated_at: null,
+      });
+    // #7456: `{}` here failed `request()`'s "belongs to another assistant"
+    // check, and `KnowledgeProjectSync` rendered its 33px `role="alert"` strip
+    // ABOVE the content row — asynchronously, so every measurement in this file
+    // silently depended on whether the strip had landed yet.
+    else if (path.endsWith('/knowledge/pipeline'))
+      json({
+        assistant: path.split('/')[3],
+        pipeline: null,
+        sources: [],
+        index: { connected: false, reason: 'Initialize this Assistant to provision its store' },
+        store_issue: null,
+        // Always present on the wire, even with a null pipeline — see the
+        // handler at `src/api/server/knowledge_pipeline.rs:300-305`.
+        assistant_projects_status: [],
+        extraction: {},
+      });
     else if (path.match(/^\/api\/agents\/[^/]+$/))
       json({ name: 'ctrl', display_name: 'Concierge', tools_allow: [], scopes: [] });
     else if (path.startsWith('/api/agents'))
@@ -81,9 +128,25 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
+/**
+ * Boots the app and lands on the conversation.
+ *
+ * #7456: `activeView` starts on `'assistants'` (`App.svelte:89`), the #4404
+ * landing picker — `ChatPane` (and with it the gear, the composer and the
+ * takeover) mounts only after a card is chosen. Going straight from `goto()`
+ * to the gear timed out on every spec in this file. The picker card carries
+ * `data-assistant-card="<id>"`, so the selection is made by id, not by the
+ * card's rendered label.
+ */
+async function openChat(page) {
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  await page.locator('[data-assistant-card="izzie"]').click({ timeout: 15_000 });
+  await expect(page.locator('[aria-label="Configure agent"]')).toBeVisible({ timeout: 15_000 });
+}
+
 /** Boots the app, opens the takeover, and returns the editor locator. */
 async function openTakeover(page) {
-  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  await openChat(page);
   await page.locator('[aria-label="Configure agent"]').click({ timeout: 15_000 });
   const editor = page.locator('[data-instructions-editor]');
   await expect(editor).toHaveValue(/line 400/, { timeout: 10_000 });
@@ -169,20 +232,40 @@ test.describe('agent configuration takeover (#3894)', () => {
     page,
   }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.goto('/', { waitUntil: 'domcontentloaded' });
+    await openChat(page); // #7456: the composer lives in ChatPane, past the picker.
 
     const composer = page.locator('footer textarea');
     await composer.fill('half-written thought', { timeout: 15_000 });
-    const chatBox = await page.locator('[data-chat-surface]').boundingBox();
 
     await page.locator('[aria-label="Configure agent"]').click();
     const overlay = page.locator('[data-config-takeover]');
     await expect(overlay).toBeVisible();
 
-    const overlayBox = await overlay.boundingBox();
+    // #7456: both rects are read in ONE evaluation, with the takeover already
+    // up. Sampling the chat surface BEFORE the click compared two different
+    // layout moments, so any strip that appeared or vanished above the content
+    // row in between showed up as a size mismatch (a 33px one, in the observed
+    // failure). Measuring now is not a weaker assertion: #3894's invariant is
+    // that the chat stays MOUNTED under the takeover, only `inert`, so it is
+    // still laid out and still the thing the overlay has to cover.
+    const box = await page.evaluate(() => {
+      const rect = (sel: string) => {
+        const el = document.querySelector(sel);
+        if (!el) throw new Error(`missing ${sel}`);
+        const { width, height } = el.getBoundingClientRect();
+        return { width, height };
+      };
+      return { chat: rect('[data-chat-surface]'), overlay: rect('[data-config-takeover]') };
+    });
+    // #7456: measuring both at the same instant makes them equal even if BOTH
+    // collapsed, so pin the chat surface itself against the 900px viewport
+    // first. The 80px header is the only chrome above it, so anything under
+    // half the viewport means the content area is gone, not merely covered.
+    expect(box.chat.height).toBeGreaterThan(450);
+    expect(box.chat.width).toBeGreaterThan(720);
     // Covers the chat column AND the recap rail — the whole content area.
-    expect(Math.round(overlayBox!.width)).toBe(Math.round(chatBox!.width));
-    expect(Math.round(overlayBox!.height)).toBe(Math.round(chatBox!.height));
+    expect(Math.round(box.overlay.width)).toBe(Math.round(box.chat.width));
+    expect(Math.round(box.overlay.height)).toBe(Math.round(box.chat.height));
 
     await page.keyboard.press('Escape');
     await expect(overlay).toHaveCount(0);

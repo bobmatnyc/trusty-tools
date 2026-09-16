@@ -81,8 +81,13 @@
 
   <div class="grid grid-cols-[repeat(auto-fill,minmax(15rem,1fr))] gap-3">
     {#each cards as card (card.id)}
+      <!-- #7456: the picker is the landing view, so every end-to-end spec that
+           needs the conversation has to pass through a card first. The card's
+           own id is the stable hook for that; matching on the rendered label
+           would break on any copy change. -->
       <button
         type="button"
+        data-assistant-card={card.id}
         aria-pressed={card.id === selectedCardId}
         class="flex flex-col gap-2 rounded-lg border p-4 text-left transition-colors {card.id ===
         selectedCardId

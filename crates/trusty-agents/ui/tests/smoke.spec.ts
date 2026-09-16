@@ -152,62 +152,47 @@ test.describe('Trusty Agents web UI smoke tests', () => {
   test('app reaches ready state within 8s (not stuck on connecting)', async ({ page }) => {
     // Why: The blank-screen bug manifests as the app staying on the
     // "Connecting to API server" spinner when the health probe fails silently.
-    // What: Sets up response listeners BEFORE navigating, waits for /api/health,
-    // /api/config, and /api/tasks to complete (all three requests the app makes
-    // after bootstrap), then calls page.content() to verify <nav> is rendered.
-    // All three routes are stubbed in beforeEach so responses are chunked-free
-    // and CDP stays unblocked throughout. page.content() is safe after all
-    // waitForResponse() promises resolve because no fetch is in-flight.
-    // Test: Stop the API server — health stub still returns ok (stubs bypass server),
-    // but the real readiness test is that <nav> is present; remove Sidebar rendering
-    // logic — fails; restore — passes.
-
-    // Register response listeners BEFORE navigating so we catch all requests.
-    // Use page.on('response') to avoid pattern-matching issues with waitForResponse.
-    // Track which startup endpoints the app has hit so we know when it's done.
-    const responseSeen = { health: false, config: false, tasks: false };
-    let resolveStartup: () => void;
-    const startupDone = new Promise<void>((resolve) => { resolveStartup = resolve; });
-
-    page.on('response', (resp) => {
-      const url = resp.url();
-      if (url.includes('/api/health')) responseSeen.health = true;
-      if (url.includes('/api/config')) responseSeen.config = true;
-      if (url.includes('/api/tasks'))  responseSeen.tasks  = true;
-      if (responseSeen.health && responseSeen.config && responseSeen.tasks) {
-        resolveStartup();
-      }
-    });
-
+    //
+    // #7456: this test used to infer readiness INDIRECTLY, from the set of
+    // startup endpoints the app happened to request — `/api/health`,
+    // `/api/config` and `/api/tasks` — and then from an `<nav>` substring in
+    // the rendered HTML. Both proxies decayed out from under it while the app
+    // itself stayed healthy:
+    //   * `/api/tasks` is only ever requested by `TaskHistory.svelte`, which
+    //     #3819 unrouted from the sidebar (see `Sidebar.svelte:13-15`). No
+    //     mounted component calls `list_tasks` at boot any more, so the third
+    //     flag could never flip and the race always lost — `tasks=false`.
+    //   * `<nav>` is rendered nowhere in `src/`; `Header.svelte` uses
+    //     `<header>` with a `role="tablist"` group.
+    // What: asserts the state the app actually publishes —
+    // `Header.svelte`'s `data-api-status` attribute, the machine-readable twin
+    // of the "API Ready" pill — inside the same 8s budget. No endpoint the app
+    // may stop calling stands between the assertion and `apiReady`.
+    // Test: this test itself; kill `bootstrap()`'s `apiReady = true` in
+    // `App.svelte` — fails with the attribute still reading `connecting`.
     await page.goto('/', GOTO_OPTS);
 
-    // Wait up to 8s for all three startup responses to fire (stubs return instantly,
-    // so this only times out if the app does not reach apiReady and mount TaskHistory).
+    const status = page.locator('[data-api-status]');
     try {
-      await Promise.race([startupDone, wait(8000).then(() => { throw new Error('timeout'); })]);
-    } catch {
+      await expect(status).toHaveAttribute('data-api-status', 'ready', { timeout: 8000 });
+    } catch (e) {
       const html = await page.content().catch(() => '');
       const { writeFile, mkdir } = await import('fs/promises');
       await mkdir('test-results', { recursive: true }).catch(() => {});
       await writeFile('test-results/stuck-connecting.html', html).catch(() => {});
+      const seen = await status.getAttribute('data-api-status').catch(() => null);
       throw new Error(
-        `App did not complete startup within 8s — seen: health=${responseSeen.health} ` +
-        `config=${responseSeen.config} tasks=${responseSeen.tasks}`
+        `App did not reach ready state within 8s — data-api-status=${seen ?? '<absent>'}`
       );
     }
 
-    // All in-flight fetches have resolved (stubs returned immediately).
-    // Give Svelte one tick to flush reactive updates then read the DOM.
-    await wait(100);
-    const html = await page.content();
-    if (!html.includes('<nav')) {
-      const { writeFile, mkdir } = await import('fs/promises');
-      await mkdir('test-results', { recursive: true }).catch(() => {});
-      await writeFile('test-results/stuck-connecting.html', html).catch(() => {});
-      throw new Error(
-        'App did not reach ready state (no <nav> found) after startup requests completed'
-      );
-    }
+    // Ready means the shell is mounted, not just that a flag flipped: the
+    // sidebar rail renders only in `App.svelte`'s post-spinner branch. Anchored
+    // on `data-app-sidebar` because RecapPanel, SlackMirror and
+    // KnowledgeGraphBrowser each render an `<aside>` too, and a bare `aside`
+    // locator would become a strict-mode violation the moment a second one
+    // mounts.
+    await expect(page.locator('[data-app-sidebar]')).toBeVisible();
   });
 
   test('all JS bundle assets load (no 404s)', async ({ page }) => {

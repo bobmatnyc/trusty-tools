@@ -1,9 +1,14 @@
-// Unit tests for the pure workstream→agent grouping heuristic (#3819).
-// The fetch wrappers are thin REST glue with a fail-soft (`[]` on error)
-// contract with no branching logic worth a dedicated unit test.
+// Unit tests for the pure workstream→agent grouping heuristic (#3819) and, as
+// of #7456, for `fetchWorkstreams`'s fail-soft contract — the wrapper now
+// branches on the body's shape, not only on the response status.
 
-import { describe, it, expect } from 'vitest';
-import { groupByAgent, type WorkstreamSummary } from './workstreams';
+import { afterEach, describe, it, expect, vi } from 'vitest';
+import {
+  fetchWorkstreamHistory,
+  fetchWorkstreams,
+  groupByAgent,
+  type WorkstreamSummary,
+} from './workstreams';
 
 const AGENTS = [
   { id: 'izzie', label: 'Izzie' },
@@ -47,5 +52,79 @@ describe('groupByAgent', () => {
       AGENTS,
     );
     expect(groups.map((g) => g.agentId)).toEqual(['izzie', 'cto-assistant', 'other']);
+  });
+});
+
+// #7456: a `{}` body from `GET /api/workstreams` reached `groupByAgent` through
+// an unchecked cast and threw "is not iterable" out of the sidebar's mount,
+// contradicting this wrapper's own "never surface a network error as a crash"
+// contract.
+describe('fetchWorkstreams body-shape fail-soft (#7456)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('returns the array a well-formed 200 carries', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: true, json: async () => [ws('feat-izzie-a')] })),
+    );
+    expect((await fetchWorkstreams()).map((w) => w.name)).toEqual(['feat-izzie-a']);
+  });
+
+  it('returns [] when a 200 carries a non-array body', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({}) })));
+    const rows = await fetchWorkstreams();
+    expect(rows).toEqual([]);
+    // The crash was downstream of the cast, so assert the value is groupable.
+    expect(groupByAgent(rows, AGENTS)).toEqual([]);
+  });
+
+  it('returns [] on a non-2xx response', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 503, json: async () => ({}) })));
+    expect(await fetchWorkstreams()).toEqual([]);
+  });
+
+  it('warns rather than throwing, so the smoke suite stays green', async () => {
+    const warn = vi.fn();
+    vi.stubGlobal('console', { ...console, warn });
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({}) })));
+    await fetchWorkstreams();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain('GET /api/workstreams');
+  });
+});
+
+// #7456: the sharper half of the same defect. `Sidebar.svelte`'s
+// `resumeWorkstream` gates on `history.length` and then calls `.map`, inside a
+// `try`/`finally` with no `catch` — so a truthy-`length` non-array turned a
+// click on a task row into an unhandled rejection.
+describe('fetchWorkstreamHistory body-shape fail-soft (#7456)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('returns the array a well-formed 200 carries', async () => {
+    const item = { content: 'first line\nsecond', created_at: '2026-07-24T00:00:00Z', tags: [] };
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => [item] })));
+    expect(await fetchWorkstreamHistory('feat-izzie-a')).toEqual([item]);
+  });
+
+  it('returns [] for a truthy-length non-array body', async () => {
+    // The exact shape that cleared `history.length` and then threw on `.map`.
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ length: 3 }) })));
+    const rows = await fetchWorkstreamHistory('feat-izzie-a');
+    expect(rows).toEqual([]);
+    expect(() => rows.map((h) => h.content)).not.toThrow();
+  });
+
+  it('returns [] when a 200 carries an object body', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({}) })));
+    expect(await fetchWorkstreamHistory('feat-izzie-a')).toEqual([]);
+  });
+
+  it('returns [] on a non-2xx response', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 503, json: async () => ({}) })));
+    expect(await fetchWorkstreamHistory('feat-izzie-a')).toEqual([]);
   });
 });

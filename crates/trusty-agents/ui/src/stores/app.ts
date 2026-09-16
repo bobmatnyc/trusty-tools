@@ -311,8 +311,9 @@ export const modelCatalog = writable<ModelsCatalogResponse | null>(null);
  * non-2xx response or network failure; callers (mirroring `fetchAgentCatalog`
  * call sites) catch around it so an unreachable API doesn't crash the input
  * area — the picker just falls back to showing only "Default".
- * Test: Mount the model switcher, observe a network call to `/api/models`
- * and the store populated.
+ * Test: `app.modelCatalog.test.ts` — `fetchModelCatalog (#7456)`, covering the
+ * well-formed body, a body with no `providers` array, a body with no `local`
+ * entry, and that a bad body clears a previously good catalog.
  */
 export async function fetchModelCatalog(): Promise<void> {
   const base = apiBase();
@@ -324,6 +325,17 @@ export async function fetchModelCatalog(): Promise<void> {
     throw new Error(`GET /api/models failed: ${r.status}`);
   }
   const data = (await r.json()) as ModelsCatalogResponse;
+  // #7456: a 200 carrying a body that is not a catalog used to be stored
+  // verbatim, and `buildPicker`'s `catalog.providers.filter(…)` then threw
+  // during render — which aborts the whole ChatPane mount, not just the
+  // switcher. The `null` store value already has a rendering branch
+  // (`ModelSwitcher.svelte:31` falls back to "Default" only), so rejecting a
+  // malformed body here is what makes this function's documented fallback
+  // real for a bad body as well as a bad status.
+  if (!data || !Array.isArray(data.providers) || !data.local) {
+    modelCatalog.set(null);
+    throw new Error('GET /api/models returned a body without a providers/local catalog');
+  }
   modelCatalog.set(data);
 }
 
