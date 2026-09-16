@@ -9,17 +9,27 @@
 //! compression stats helper is exercised by `compression_stats_line_*` tests;
 //! `deploy_summary_line` by `deploy_summary_line_formats_counts`.
 
-/// Render a `SessionId` newtype JSON value into a short, human id.
+/// Render a `SessionId` JSON value into a short, human id.
 ///
-/// Why: the daemon serializes `SessionId` as `{"0": "<uuid>"}`; the CLI shows
-/// only the first 8 characters so rows stay compact.
-/// What: extracts the inner UUID string and truncates it, falling back to a
-/// placeholder if the shape is unexpected.
-/// Test: covered by the `short_id_*` unit tests.
+/// Why (#7805): `SessionId` is a plain `#[derive(Serialize)]` newtype over
+/// `Uuid`, and serde writes a newtype struct TRANSPARENTLY — the daemon's wire
+/// value is the bare string `"<uuid>"`, never the `{"0": "<uuid>"}` tuple shape
+/// this helper used to be the only reader of. Every row therefore rendered the
+/// `--------` placeholder, and `tm sessions list` (and its `tm session` alias)
+/// printed `-------- Starting <path>`, which reads as a start-progress line
+/// rather than an id/status/workdir row — the misreading #7805 was filed on.
+/// What: reads the bare-string wire form first, then the `{"0": …}` object form
+/// any older producer may still emit, and truncates the uuid to its first 8
+/// characters. A value that is neither still falls back to the placeholder.
+/// Test: `short_id_reads_the_daemon_string_wire_form`,
+/// `short_id_extracts_uuid_prefix`, `short_id_truncates_to_eight_chars`,
+/// `short_id_falls_back_when_field_missing`,
+/// `short_id_falls_back_when_value_not_str`.
 pub(crate) fn short_id(value: &serde_json::Value) -> String {
+    // #7805: the string arm is the real daemon shape; the object arm is legacy.
     value
-        .get("0")
-        .and_then(|v| v.as_str())
+        .as_str()
+        .or_else(|| value.get("0").and_then(|v| v.as_str()))
         .map(|s| s.chars().take(8).collect::<String>())
         .unwrap_or_else(|| "--------".to_string())
 }

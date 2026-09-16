@@ -71,9 +71,26 @@ fn deploy_summary_line_formats_counts() {
     );
 }
 
+/// The wire form the daemon actually emits renders as a real id, not dashes.
+///
+/// Why (#7805): `GET /sessions` answers `"id":"0f1e2d3c-4b5a-…"` — serde writes
+/// the `SessionId` newtype transparently — but `short_id` read only the
+/// `{"0": …}` tuple shape, so EVERY row rendered `--------` and the list output
+/// `-------- Starting <path>` was mistaken for a session-start progress line.
+/// Test: this function IS the test; it fails on the pre-fix `short_id`.
+#[test]
+fn short_id_reads_the_daemon_string_wire_form() {
+    let value = serde_json::json!("0f1e2d3c-4b5a-4697-8a8b-9c0d1e2f3a4b");
+    assert_eq!(
+        short_id(&value),
+        "0f1e2d3c",
+        "the bare-string wire form must render its uuid prefix, never the placeholder"
+    );
+}
+
 #[test]
 fn short_id_extracts_uuid_prefix() {
-    // SessionId newtype shape `{"0": "<uuid>"}` → first 8 chars of the uuid.
+    // The legacy `{"0": "<uuid>"}` tuple shape stays readable (#7805).
     let value = serde_json::json!({"0": "abcd1234-5678-90ab-cdef-1234567890ab"});
     assert_eq!(short_id(&value), "abcd1234");
 }
@@ -87,9 +104,13 @@ fn short_id_truncates_to_eight_chars() {
 
 #[test]
 fn short_id_falls_back_when_field_missing() {
-    // Missing `0` key or a scalar value → the placeholder.
+    // Missing `0` key, or a value that is neither a string nor an object → the
+    // placeholder. #7805: a bare string is now the REAL wire form, so it is no
+    // longer a fallback case — `short_id_reads_the_daemon_string_wire_form`
+    // owns it.
     assert_eq!(short_id(&serde_json::json!({})), "--------");
-    assert_eq!(short_id(&serde_json::json!("scalar")), "--------");
+    assert_eq!(short_id(&serde_json::json!(null)), "--------");
+    assert_eq!(short_id(&serde_json::json!(42)), "--------");
 }
 
 #[test]
