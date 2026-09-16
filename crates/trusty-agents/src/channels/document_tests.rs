@@ -118,15 +118,30 @@ fn a_replaced_array_keeps_its_comment_and_place() {
     );
 }
 
-/// A list that gained an entry renders as ONE block, never split across the
-/// tables it used to sit among.
+/// A list that gained entries — and the nested filter tables `toml` renders for
+/// each one — stays ONE block, where the array already was.
+///
+/// Pre-fix this fails: the nested `[channels.*]` tables keep the positions the
+/// replacement document gave them, so they render among the operator's own
+/// tables instead of under the channel they belong to.
 #[test]
-fn a_grown_array_is_rendered_as_one_block_at_the_end() {
+fn a_grown_array_stays_one_block_where_it_was() {
     let mut document: DocumentMut = FIXTURE.parse().expect("fixture parses");
-    let rendered_array: DocumentMut =
-        "[[channels]]\nid = \"one\"\n\n[[channels]]\nid = \"two\"\n\n[[channels]]\nid = \"three\"\n"
-            .parse()
-            .expect("replacement parses");
+    let rendered_array: DocumentMut = "\
+[[channels]]
+id = \"one\"
+
+[channels.ingest_filter]
+label_ids = []
+
+[[channels]]
+id = \"two\"
+
+[channels.ingest_filter]
+label_ids = []
+"
+    .parse()
+    .expect("replacement parses");
     replace_array_of_tables(
         &mut document,
         "channels",
@@ -139,17 +154,37 @@ fn a_grown_array_is_rendered_as_one_block_at_the_end() {
             .get("channels")
             .and_then(|item| item.as_array_of_tables())
             .map(|array| array.len()),
-        Some(3),
+        Some(2),
         "{out}"
     );
-    let log_drain = out.find("[log_drain]").expect("log_drain header");
+    let listeners = out.find("[[listeners]]").expect("listeners still there");
     let first = out.find("[[channels]]").expect("first channels header");
+    let log_drain = out.find("[log_drain]").expect("log_drain header");
     assert!(
-        log_drain < first,
-        "the whole block moved to the end:\n{out}"
+        listeners < first && first < log_drain,
+        "the block stayed where the array was:\n{out}"
     );
-    assert!(
-        out[first..].find("[log_drain]").is_none(),
-        "nothing splits the block:\n{out}"
+    assert_eq!(
+        out[first..log_drain].matches("[[channels]]").count(),
+        2,
+        "both entries and their filters render in one run:\n{out}"
     );
+}
+
+/// A document that needs no repositioning renders byte for byte as it was.
+///
+/// Why: the renumber runs on every edit, so an operator's file must survive it
+/// untouched — otherwise the fix for one rewrite defect introduces another.
+#[test]
+fn a_document_that_needs_no_repositioning_is_rewritten_byte_for_byte() {
+    let mut untouched: DocumentMut = FIXTURE.parse().expect("fixture parses");
+    assert!(!remove_preserving_comments(&mut untouched, "absent"));
+    assert_eq!(untouched.to_string(), FIXTURE);
+
+    let mut once: DocumentMut = FIXTURE.parse().expect("fixture parses");
+    assert!(remove_preserving_comments(&mut once, "log_drain"));
+    let after = once.to_string();
+    let mut twice: DocumentMut = after.parse().expect("re-parses");
+    assert!(!remove_preserving_comments(&mut twice, "log_drain"));
+    assert_eq!(twice.to_string(), after, "the renumber is idempotent");
 }

@@ -5,17 +5,21 @@
 //! removed the deprecated `[[listeners]]` table with a plain
 //! `DocumentMut::remove`, and live verification found that it also deleted a
 //! seven-line comment block about `tickets-mcp`/ADR-0014 that had nothing to do
-//! with listeners. The cause is where `toml_edit` stores such a block: the
+//! with listeners. The cause is where `toml_edit` files such a block: the
 //! comment lines above a table header are that table's LEADING DECOR, so
-//! removing the table removes them too. The same applies to the header comment
-//! above `[[channels]]`, which a wholesale replacement of the array dropped,
-//! and to the array's place in the file, which the replacement moved.
-//! What: two operations, both on a parsed [`toml_edit::DocumentMut`].
-//! [`remove_preserving_comments`] salvages a removed table's leading decor onto
-//! the next table in the file (or the document trailer when it was last), and
+//! removing the table removes them too. The same write dropped the heading
+//! above `[[channels]]` and moved the array to the top of the file, because a
+//! freshly rendered array carries no `Table::position` and `toml_edit` emits a
+//! position-less table before every positioned one.
+//!
+//! What: two operations on a parsed [`toml_edit::DocumentMut`].
+//! [`remove_preserving_comments`] hands a removed table's leading decor to the
+//! next table in the file — or to the document trailer when it was last — and
 //! [`replace_array_of_tables`] re-applies the previous array's leading decor
-//! and rendered positions to its replacement. A comment written INSIDE a
-//! removed table is still lost — there is nothing left to attach it to.
+//! and pins every table of the replacement, nested ones included, to the
+//! position the array already had. Both then renumber the whole document so
+//! the pinned block lands where it belongs. A comment written INSIDE a removed
+//! table is still lost: there is nothing left to attach it to.
 //! Test: `document_tests` — the whole module.
 
 use toml_edit::{DocumentMut, Item, Table};
@@ -55,40 +59,158 @@ fn set_leading(item: &mut Item, text: String) {
     decor.set_prefix(text);
 }
 
-/// Put `salvage` above whatever decor `item` already carries, keeping one blank
-/// line between the two blocks.
-fn prepend_leading(item: &mut Item, salvage: &str) {
-    match leading(item) {
-        Some(existing) => {
-            let joined = format!("{}\n{existing}", salvage.trim_end_matches('\n'));
-            set_leading(item, joined);
+/// Every table under `table`, depth first in declaration order, as the sort key
+/// each one is to be ordered by.
+///
+/// Why the carry: a table with no position of its own belongs immediately after
+/// the last positioned table before it — that is what makes a pinned
+/// replacement block stay together rather than being emitted ahead of the whole
+/// file.
+fn sort_keys(table: &Table, carry: &mut usize, out: &mut Vec<usize>) {
+    for (_, item) in table.iter() {
+        match item {
+            Item::Table(child) => {
+                if let Some(position) = child.position() {
+                    *carry = position;
+                }
+                out.push(*carry);
+                sort_keys(child, carry, out);
+            }
+            Item::ArrayOfTables(array) => {
+                for child in array.iter() {
+                    if let Some(position) = child.position() {
+                        *carry = position;
+                    }
+                    out.push(*carry);
+                    sort_keys(child, carry, out);
+                }
+            }
+            _ => {}
         }
-        None => set_leading(item, salvage.to_string()),
     }
 }
 
-/// Every table in `table`'s subtree, nested ones included.
-///
-/// Why: `toml_edit` numbers positions across the WHOLE document, nested tables
-/// included, so a position past every existing one has to be derived from that
-/// total rather than from the root item count.
-fn table_count(table: &Table) -> usize {
-    table
-        .iter()
-        .map(|(_, item)| match item {
-            Item::Table(child) => 1 + table_count(child),
-            Item::ArrayOfTables(array) => array
-                .iter()
-                .map(|child| 1 + table_count(child))
-                .sum::<usize>(),
-            _ => 0,
-        })
-        .sum()
+/// Write `ranks` back onto the same depth-first traversal [`sort_keys`] read.
+fn apply_ranks(table: &mut Table, ranks: &[usize], next: &mut usize) {
+    for (_, item) in table.iter_mut() {
+        match item {
+            Item::Table(child) => {
+                child.set_position(ranks[*next]);
+                *next += 1;
+                apply_ranks(child, ranks, next);
+            }
+            Item::ArrayOfTables(array) => {
+                for child in array.iter_mut() {
+                    child.set_position(ranks[*next]);
+                    *next += 1;
+                    apply_ranks(child, ranks, next);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
-/// Hand `salvage` to the first root item rendered after `after`.
+/// Renumber every table in `document` densely, keeping the order it renders in.
 ///
-/// What: no item after it means the comment belonged at end of file, so it
+/// Why: `toml_edit` orders the whole document by `Table::position`, so an
+/// inserted table with no position of its own, or a gap left by a removal, has
+/// to be resolved into the sequence before rendering. Sorting by (position,
+/// traversal index) is STABLE, so a document whose tables all carry positions
+/// renumbers to exactly the order it already had — the operator's file is
+/// rewritten byte for byte, verified in
+/// `document_tests::a_document_that_needs_no_repositioning_is_rewritten_byte_for_byte`.
+fn normalize_positions(document: &mut DocumentMut) {
+    let mut keys = Vec::new();
+    let mut carry = 0;
+    sort_keys(document.as_table(), &mut carry, &mut keys);
+    let mut order: Vec<usize> = (0..keys.len()).collect();
+    order.sort_by_key(|&index| (keys[index], index));
+    let mut ranks = vec![0; keys.len()];
+    for (rank, &index) in order.iter().enumerate() {
+        ranks[index] = rank;
+    }
+    let mut next = 0;
+    apply_ranks(document.as_table_mut(), &ranks, &mut next);
+}
+
+/// Give `table` and every table beneath it the same position.
+///
+/// Why: a shared position plus the stable sort in [`normalize_positions`] is
+/// how a replacement block is placed as ONE contiguous run at the anchor,
+/// without needing free integers between the anchor and the table after it.
+fn pin(table: &mut Table, at: usize) {
+    for (_, item) in table.iter_mut() {
+        match item {
+            Item::Table(child) => {
+                child.set_position(at);
+                pin(child, at);
+            }
+            Item::ArrayOfTables(array) => {
+                for child in array.iter_mut() {
+                    child.set_position(at);
+                    pin(child, at);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The lowest position above `after`, over every table in the subtree.
+///
+/// Why nested tables count: the table rendered next after a removed one is
+/// whichever has the next position, and that is frequently a sub-table of an
+/// EARLIER root key — `[[mcp.services]]` sits between `[[listeners]]` and
+/// `[[channels]]` in the operator's own file. A root-only search hands the
+/// salvaged comment to `[[channels]]` and the file then reads as if the note
+/// were about channels.
+fn next_position_after(table: &Table, after: usize) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    let mut consider = |child: &Table| {
+        if let Some(position) = child.position()
+            && position > after
+            && best.is_none_or(|current| position < current)
+        {
+            best = Some(position);
+        }
+        if let Some(found) = next_position_after(child, after) {
+            best = Some(best.map_or(found, |current| current.min(found)));
+        }
+    };
+    for (_, item) in table.iter() {
+        match item {
+            Item::Table(child) => consider(child),
+            Item::ArrayOfTables(array) => array.iter().for_each(&mut consider),
+            _ => {}
+        }
+    }
+    best
+}
+
+/// The table rendered at `position`, anywhere in the subtree.
+fn table_at_mut(table: &mut Table, position: usize) -> Option<&mut Table> {
+    for (_, item) in table.iter_mut() {
+        let children: Vec<&mut Table> = match item {
+            Item::Table(child) => vec![child],
+            Item::ArrayOfTables(array) => array.iter_mut().collect(),
+            _ => continue,
+        };
+        for child in children {
+            if child.position() == Some(position) {
+                return Some(child);
+            }
+            if let Some(found) = table_at_mut(child, position) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+/// Hand `salvage` to the table rendered immediately after `after`.
+///
+/// What: no table after it means the comment belonged at end of file, so it
 /// becomes the document's trailer instead of being dropped. Whitespace-only
 /// salvage is discarded — there is no comment in it to save.
 fn reattach(document: &mut DocumentMut, after: Option<usize>, salvage: &str) {
@@ -98,19 +220,18 @@ fn reattach(document: &mut DocumentMut, after: Option<usize>, salvage: &str) {
     let Some(after) = after else {
         return;
     };
-    let mut next: Option<(usize, String)> = None;
-    for (key, item) in document.iter() {
-        let Some(position) = first_position(item) else {
-            continue;
-        };
-        if position > after && next.as_ref().is_none_or(|(best, _)| position < *best) {
-            next = Some((position, key.to_string()));
-        }
-    }
-    match next {
-        Some((_, key)) => {
-            if let Some(item) = document.get_mut(&key) {
-                prepend_leading(item, salvage);
+    match next_position_after(document.as_table(), after) {
+        Some(position) => {
+            if let Some(table) = table_at_mut(document.as_table_mut(), position) {
+                let existing = table
+                    .decor()
+                    .prefix()
+                    .and_then(|raw| raw.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                table
+                    .decor_mut()
+                    .set_prefix(format!("{}\n{existing}", salvage.trim_end_matches('\n')));
             }
         }
         None => {
@@ -138,6 +259,7 @@ pub(crate) fn remove_preserving_comments(document: &mut DocumentMut, key: &str) 
     let at = first_position(item);
     document.remove(key);
     reattach(document, at, &salvage);
+    normalize_positions(document);
     true
 }
 
@@ -146,41 +268,35 @@ pub(crate) fn remove_preserving_comments(document: &mut DocumentMut, key: &str) 
 /// Why: assigning a freshly rendered array drops the comment above the old
 /// header and leaves every new table position-less, which `toml_edit` renders
 /// BEFORE every positioned table — so a save silently moved `[[channels]]` to
-/// the top of the operator's file and dropped its heading.
-/// What: the previous array's leading decor is re-applied, and each replacement
-/// table takes the position of the entry it replaces. A list that GREW has no
-/// position to inherit for its new entries, so the whole array is renumbered
-/// past every existing table and renders at end of file as one contiguous
-/// block — never split across the tables it used to sit among.
+/// the top of the operator's file and dropped its heading. The nested tables
+/// `toml` renders for a channel's two filters are the same hazard one level
+/// down, which is why [`pin`] descends.
+/// What: the previous array's leading decor is re-applied and the whole
+/// replacement is pinned to the position the array already had, so an entry
+/// added or removed by this write never splits the block or moves it. An array
+/// the document did not declare before is pinned past every existing table and
+/// therefore lands at end of file.
 /// Test: `document_tests::a_replaced_array_keeps_its_comment_and_place`,
-/// `document_tests::a_grown_array_is_rendered_as_one_block_at_the_end`.
+/// `document_tests::a_grown_array_stays_one_block_where_it_was`.
 pub(crate) fn replace_array_of_tables(document: &mut DocumentMut, key: &str, mut rendered: Item) {
-    let base = table_count(document.as_table()) + 1;
-    let (previous, salvage) = match document.get(key) {
-        Some(item) => (
-            match item {
-                Item::ArrayOfTables(array) => array.iter().map(Table::position).collect(),
-                _ => Vec::new(),
-            },
-            leading(item),
-        ),
-        None => (Vec::new(), None),
-    };
+    let existing = document.get(key);
+    let anchor = existing.and_then(first_position);
+    let salvage = existing.and_then(leading);
+    // A key the document never declared has no anchor to inherit; pinning it
+    // past every real position puts it at end of file, which is where an
+    // appended table belongs.
+    let at = anchor.unwrap_or(usize::MAX);
     if let Item::ArrayOfTables(array) = &mut rendered {
-        let inherit = array.len() <= previous.len();
-        for (index, table) in array.iter_mut().enumerate() {
-            let position = if inherit {
-                previous.get(index).copied().flatten()
-            } else {
-                None
-            };
-            table.set_position(position.unwrap_or(base + index));
+        for table in array.iter_mut() {
+            table.set_position(at);
+            pin(table, at);
         }
     }
     if let Some(salvage) = salvage {
         set_leading(&mut rendered, salvage);
     }
     document[key] = rendered;
+    normalize_positions(document);
 }
 
 #[cfg(test)]

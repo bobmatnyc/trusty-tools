@@ -845,6 +845,106 @@ fn an_unreadable_before_count_audits_as_unknown() {
     );
 }
 
+/// A `config.toml` shaped like the operator's own: a comment block ABOVE the
+/// legacy `[[listeners]]` table, a second one between that table and an
+/// unrelated `[mcp.*]` table, and a heading above `[[channels]]`.
+///
+/// Why this exact shape: `toml_edit` files a comment block as the LEADING decor
+/// of whatever header follows it, so where the block sits decides which table
+/// takes it away when removed. The block above `[[listeners]]` is the one the
+/// live `PUT` deleted; the block below it belongs to `[mcp.services]` and must
+/// be equally untouched.
+const COMMENT_FIXTURE: &str = "\
+# trusty-agents global configuration
+
+[mcp]
+inject_for_roles = [\"ctrl\"]
+
+# tickets-mcp is intentionally NOT a `driver = \"direct\"` (OpenRPC) endpoint:
+# the `tickets-mcp` binary speaks MCP framing, not OpenRPC `rpc.discover`, so a
+# direct endpoint would silently fail discovery. It is wired out-of-process via
+# the repo-root `.mcp.json` stdio server instead. The former dead `tickets-mcp`
+# (and `commons-ticketing`) OpenRPC stubs were retired per ADR-0014 (native
+# Rust MCP, PR #2624).
+
+[[listeners]]
+name = \"gmail-personal\"
+connector = \"gmail\"
+identity = \"redacted-account\"
+enabled = true
+
+# the stdio services this host spawns
+[[mcp.services]]
+name = \"trusty-mpm\"
+command = \"trusty-mpm\"
+
+# the harness-wide channels
+[[channels]]
+id = \"gmail-personal\"
+name = \"gmail-personal\"
+provider = \"gmail\"
+target = \"\"
+enabled = true
+send_enabled = false
+receive_enabled = true
+";
+
+/// Every comment the global write did not put there survives it, byte for byte.
+///
+/// Why: live verification of slice 5 found `PUT /api/channels` deleting a
+/// seven-line `tickets-mcp`/ADR-0014 note that has nothing to do with channels.
+/// It sat above the `[[listeners]]` table the write removes, and `toml_edit`
+/// files a comment block as the following header's leading decor — so removing
+/// the table removed the note.
+///
+/// Pre-fix (`origin/main`) this fails on the first `tickets-mcp` line: the
+/// whole block is absent from the rewritten file, together with the heading
+/// above `[[channels]]`.
+#[test]
+fn a_global_write_keeps_a_comment_block_unrelated_to_channels() {
+    use super::super::global_channels::{Persisted, channels_in, persist, revision};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, COMMENT_FIXTURE).expect("seed");
+
+    let stored = channels_in(COMMENT_FIXTURE).expect("the fixture parses");
+    let before = revision(&stored).expect("revision");
+    let outcome = persist(&path, &before, &stored).expect("the write lands");
+    assert!(
+        matches!(outcome, Persisted::Written { .. }),
+        "the fixture's own list writes back: {outcome:?}"
+    );
+
+    let raw = std::fs::read_to_string(&path).expect("read back");
+    assert!(
+        !raw.contains("[[listeners]]"),
+        "the deprecated table is dropped by the write:\n{raw}"
+    );
+    for line in [
+        "# tickets-mcp is intentionally NOT a `driver = \"direct\"` (OpenRPC) endpoint:",
+        "# the `tickets-mcp` binary speaks MCP framing, not OpenRPC `rpc.discover`, so a",
+        "# direct endpoint would silently fail discovery. It is wired out-of-process via",
+        "# the repo-root `.mcp.json` stdio server instead. The former dead `tickets-mcp`",
+        "# (and `commons-ticketing`) OpenRPC stubs were retired per ADR-0014 (native",
+        "# Rust MCP, PR #2624).",
+        "# the stdio services this host spawns",
+        "# the harness-wide channels",
+        "# trusty-agents global configuration",
+    ] {
+        assert!(raw.contains(line), "the write dropped `{line}`:\n{raw}");
+    }
+    assert!(
+        raw.contains("[[mcp.services]]") && raw.contains("[[channels]]"),
+        "the unrelated table and the published one both survive:\n{raw}"
+    );
+    // The salvaged block keeps its place: it was above the removed table, so it
+    // belongs above whatever followed it, never appended somewhere else.
+    let note = raw.find("# tickets-mcp").expect("the note survived");
+    let services = raw.find("[[mcp.services]]").expect("services header");
+    assert!(note < services, "the note stayed in order:\n{raw}");
+}
+
 /// A `tracing` writer that keeps every emitted line in memory.
 ///
 /// Why: the audit line is the only observable of an accepted write, so the
