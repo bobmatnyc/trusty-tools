@@ -60,13 +60,19 @@ const ENGINEER_MODEL_ENV: &str = "TCODE_ENGINEER_MODEL";
 /// Bedrock depending on what's configured and what the resolved model actually
 /// needs — see #2245), runs `execute_run_task` (threading `--timeout-seconds`
 /// (#2207) through as `RunTaskParams.deadline_secs` — final flag/env/default
-/// resolution happens inside `execute_run_task` via `resolve_deadline_secs`),
+/// resolution happens inside `execute_run_task` via `resolve_deadline_secs`;
+/// and `--no-delegate` (#8031) through as `RunTaskParams.no_delegate`, which
+/// swaps `delegate_to_agent` for the named agent's own tools for this run),
 /// prints the human or JSON report, and exits with the report's `ExitCode`. A
 /// missing OpenRouter key is only a config error (exit 2) when the resolved
 /// model actually needs OpenRouter; a pure-Bedrock model needs only AWS
 /// credentials, surfaced (if absent) as a run failure from the first Bedrock call.
 /// Test: Orchestration (incl. the model swap) is covered by `run_task::tests`; the
 /// wrapper is exercised manually via `tcode run-task pm "<task>" --project <path>`.
+// #8031: the 8th argument crosses clippy's arity gate. Every argument is one
+// `Command::RunTask` clap field passed straight through, so a bundling struct
+// here would only restate the clap variant that already is that bundle.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     agent_name: &str,
     task: &str,
@@ -75,6 +81,7 @@ pub async fn run(
     engineer_model_flag: Option<String>,
     timeout_seconds: Option<u64>,
     permission_mode_flag: Option<String>,
+    no_delegate: bool,
 ) -> Result<()> {
     if let Err(e) = validate_agent_name(agent_name) {
         eprintln!("tcode run-task: {e}");
@@ -140,6 +147,9 @@ pub async fn run(
         permission_mode: trusty_code::permissions::PermissionMode::resolve(
             permission_mode_flag.as_deref(),
         ),
+        // #8031: `--no-delegate` — run the named agent alone, with its own
+        // tcode tools in place of `delegate_to_agent`.
+        no_delegate,
     };
 
     let report = execute_run_task(params, llm).await;

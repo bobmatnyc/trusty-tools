@@ -45,7 +45,7 @@ use super::tcode_exe;
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// `tcode run-task <AGENT> <TASK> [--project P] [--json] [--engineer-model M]
-/// [--mode daily-driver|parity] [--timeout-seconds N]`.
+/// [--mode daily-driver|parity] [--timeout-seconds N] [--no-delegate]`.
 ///
 /// Why/What: see module docs. Returns the process exit code the caller
 /// should use (mirrors the legacy path's `ExitCode` contract via
@@ -53,7 +53,15 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// through as `task.run`'s own `deadline_secs` param — this function does NOT
 /// resolve env/default tiers itself; `task::protocol::task_run` ->
 /// `task::executor` resolve it the same way the legacy path's
-/// `crate::provider::resolve_deadline_secs` does.
+/// `crate::provider::resolve_deadline_secs` does. `no_delegate` (#8031) is
+/// likewise passed straight through as `task.run`'s own `no_delegate` param;
+/// the daemon is what swaps `delegate_to_agent` for the named agent's own
+/// tools.
+/// Test: `cli::run_task::tests::run_params_carry_no_delegate`.
+// #8031: the 8th argument crosses clippy's arity gate. Every argument is one
+// `Command::RunTask` clap field passed straight through, so a bundling struct
+// here would only restate the clap variant that already is that bundle.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     project: &Path,
     agent: &str,
@@ -62,17 +70,19 @@ pub async fn run(
     engineer_model: Option<String>,
     mode: Option<String>,
     timeout_seconds: Option<u64>,
+    no_delegate: bool,
 ) -> Result<i32> {
     let exe = tcode_exe::resolve()?;
     let mut client = StdioRpcClient::spawn(&exe, project)?;
 
-    let run_params = json!({
-        "task_description": task,
-        "agent_name": agent,
-        "model_override": engineer_model,
-        "mode": mode,
-        "deadline_secs": timeout_seconds,
-    });
+    let run_params = build_run_params(
+        agent,
+        task,
+        engineer_model,
+        mode,
+        timeout_seconds,
+        no_delegate,
+    );
     let run_result = client.call("task.run", run_params).await?;
     let session_id = run_result
         .get("session_id")
@@ -141,4 +151,49 @@ pub async fn run(
     }
 
     Ok(exit_code_for_status(session.status).code())
+}
+
+/// Build the `task.run` request body this subcommand sends.
+///
+/// Why: extracted from [`run`] so the wire shape is assertable without
+/// spawning a daemon — [`run`] itself is only reachable through a real
+/// subprocess, which is why `no_delegate` could otherwise silently stop
+/// reaching the daemon with no test noticing (#8031).
+/// What: one JSON object; every optional value is serialised as `null` when
+/// absent, which `TaskRunRequestParams`'s `#[serde(default)]` fields accept.
+/// Test: `cli::run_task::tests::run_params_carry_no_delegate`.
+fn build_run_params(
+    agent: &str,
+    task: &str,
+    engineer_model: Option<String>,
+    mode: Option<String>,
+    timeout_seconds: Option<u64>,
+    no_delegate: bool,
+) -> serde_json::Value {
+    json!({
+        "task_description": task,
+        "agent_name": agent,
+        "model_override": engineer_model,
+        "mode": mode,
+        "deadline_secs": timeout_seconds,
+        // #8031: the daemon drops `delegate_to_agent` for this run.
+        "no_delegate": no_delegate,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_run_params;
+
+    /// `--no-delegate` reaches the `task.run` body, and its absence sends
+    /// `false` rather than omitting the key (#8031).
+    #[test]
+    fn run_params_carry_no_delegate() {
+        let on = build_run_params("engineer", "do it", None, None, None, true);
+        assert_eq!(on["no_delegate"], serde_json::json!(true));
+        assert_eq!(on["agent_name"], serde_json::json!("engineer"));
+
+        let off = build_run_params("engineer", "do it", None, None, None, false);
+        assert_eq!(off["no_delegate"], serde_json::json!(false));
+    }
 }

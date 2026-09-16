@@ -216,6 +216,26 @@ pub struct RunTaskParams {
     /// `TCODE_PERMISSION_MODE=allow-asks`) permits it. A `deny` is refused
     /// either way.
     pub permission_mode: crate::permissions::PermissionMode,
+    /// (#8031) Run the named top-level agent ALONE: `true` swaps
+    /// [`DelegateToAgentTool`] on the PM registry for that agent's own tcode
+    /// tools.
+    ///
+    /// Why: `run-task engineer <task>` still advertised `delegate_to_agent`,
+    /// and the model self-delegated read/write work instead of doing it — a
+    /// guaranteed single-agent run was not expressible. Dropping the tool
+    /// alone is not enough: `read_file`, `write_file`, `edit` and `bash` only
+    /// ever existed on the DELEGATED agent's per-delegation registry.
+    /// What: `true` skips the delegate tool and merges in the set
+    /// [`crate::runner::agent_registry`] builds for [`Self::agent`] — the SAME
+    /// `ProjectToolFactory` output, narrowed by the SAME `tools.allowed` gate,
+    /// a delegation of that agent would get; the loop's existing
+    /// `PermissionGate` (already minted from this agent's config) then decides
+    /// each call. `false` (the default every pre-#8031 caller gets) registers
+    /// the delegate tool exactly as before and merges nothing.
+    /// Test: `run_task::tests::no_delegate_run_omits_delegate_tool`,
+    /// `run_task::tests::no_delegate_run_registers_the_agents_own_tools`,
+    /// `run_task::tests::default_run_registers_delegate_tool`.
+    pub no_delegate: bool,
 }
 
 /// Execute a `run-task` end-to-end and return the rendered report.
@@ -235,10 +255,16 @@ pub struct RunTaskParams {
 /// snapshots again, and assembles a `RunReport` (diff + transcript + usage/cost +
 /// exit code). A PM-config or loop error yields a `ConfigError`/`RunFailure`
 /// report rather than a panic.
+/// (#8031) `params.no_delegate` skips the `DelegateToAgentTool` registration
+/// and merges the named agent's own tool set onto the PM registry instead, so
+/// the agent that runs alone can actually do the work.
 /// Test: `run_task::tests::end_to_end_pm_delegates_to_engineer`,
 /// `diff_reflects_engineer_file_change`, `usage_and_cost_aggregate_end_to_end`,
 /// `exit_code_reflects_run_failure`,
-/// `run_wide_ceiling_stops_the_pm_loop_and_ends_partial_promptly`.
+/// `run_wide_ceiling_stops_the_pm_loop_and_ends_partial_promptly`,
+/// `no_delegate_run_omits_delegate_tool`,
+/// `no_delegate_run_registers_the_agents_own_tools`,
+/// `default_run_registers_delegate_tool`.
 pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn InferenceAdapter>) -> RunReport {
     // Trusty-search-first discovery (PR B): at task START, best-effort/detached,
     // ensure the working project is indexed so `search`/`grep` are useful while
@@ -328,18 +354,33 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn InferenceAdapt
     // the implicit no-tool-call convention. Pre-flight validation uses the
     // agents dir.
     let mut pm_registry = ToolRegistry::new();
-    pm_registry.register(Arc::new(
-        DelegateToAgentTool::new(engineer_runner)
-            .with_config_dir(params.agents_dir.clone())
-            // (#2683) refuse a re-delegation once the engineer has completed.
-            .with_completion_signal(completion_signal.clone()),
-    ));
+    // #8031: `--no-delegate` makes this a single-agent run — the tool is never
+    // registered, so the named agent cannot hand the task to the engineer.
+    if !params.no_delegate {
+        pm_registry.register(Arc::new(
+            DelegateToAgentTool::new(engineer_runner)
+                .with_config_dir(params.agents_dir.clone())
+                // (#2683) refuse a re-delegation once the engineer has completed.
+                .with_completion_signal(completion_signal.clone()),
+        ));
+    }
     pm_registry.register(Arc::new(FinishTaskTool::new()));
     // #2924: mirrors `task::executor::run_and_record` — only the PM registers
     // `use_skill`; the delegated engineer inherits the catalog/prompt but not
     // the tool itself.
     if let Some((_, resolver)) = &skills_catalog {
         pm_registry.register(Arc::new(UseSkillTool::new(Arc::clone(resolver))));
+    }
+    // #8031: with no engineer to delegate to, the named agent must carry its
+    // OWN tcode tools or the run has nothing to work with. Merged AFTER the
+    // harness tools above so they win the `finish_task`/`use_skill` overlap.
+    if params.no_delegate {
+        let factory = project_tool_factory(&params, &skills_catalog);
+        pm_registry.merge_missing(
+            crate::runner::agent_registry(&factory, &pm_config, &RunContext::default())
+                .await
+                .as_ref(),
+        );
     }
 
     // The PM's loop uses a transcript-recording client tagged "pm".
@@ -419,7 +460,13 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn InferenceAdapt
     // reads the attribution today. Set anyway so the identity is correct the
     // moment a sink ever is attached here, rather than silently emitting
     // `UNATTRIBUTED_AGENT`.
-    .with_agent("pm")
+    // #8031: a `--no-delegate` run's tool calls are the NAMED agent's own, so
+    // they must carry its name, not the orchestrator role it is not playing.
+    .with_agent(if params.no_delegate {
+        params.agent.clone()
+    } else {
+        "pm".to_string()
+    })
     // (DOC-39 AC-13) Same reasoning as `agent`: inert today (no sink on this
     // path), set anyway so the PM has a stable identity the moment a sink is
     // ever attached. Unlike `task::executor`'s session-scoped id, this
@@ -519,13 +566,7 @@ fn build_engineer_runner(
         transcript,
     ));
 
-    let factory: Arc<dyn RegistryFactory> = Arc::new(ProjectToolFactory {
-        project: params.project.clone(),
-        skill_resolver: skills_catalog
-            .as_ref()
-            .map(|(_, resolver)| Arc::clone(resolver)),
-        mcp: tokio::sync::OnceCell::new(),
-    });
+    let factory: Arc<dyn RegistryFactory> = Arc::new(project_tool_factory(params, &skills_catalog));
 
     let mut runner = InProcessAgentRunner::new(engineer_llm, factory, params.agents_dir.clone())
         .with_timeout_secs(deadline_secs)
@@ -552,6 +593,29 @@ fn build_engineer_runner(
         redelegation_signal,
         params.project.clone(),
     ))
+}
+
+/// The project-scoped tool factory for this run.
+///
+/// Why (#8031): two call sites now need the identical factory — the delegated
+/// engineer's runner, and a `--no-delegate` run assembling the top-level
+/// agent's own tools — so its three fields are constructed in one place rather
+/// than transcribed twice.
+/// What: binds `params.project` as the fs/bash scope, the run's shared skill
+/// resolver (`None` when no catalog resolved), and a fresh per-factory MCP
+/// `OnceCell`.
+/// Test: `run_task::tests::no_delegate_run_registers_the_agents_own_tools`.
+fn project_tool_factory(
+    params: &RunTaskParams,
+    skills_catalog: &Option<(String, Arc<dyn SkillResolver>)>,
+) -> ProjectToolFactory {
+    ProjectToolFactory {
+        project: params.project.clone(),
+        skill_resolver: skills_catalog
+            .as_ref()
+            .map(|(_, resolver)| Arc::clone(resolver)),
+        mcp: tokio::sync::OnceCell::new(),
+    }
 }
 
 /// Builds the engineer's project-scoped tool registry for each delegation.

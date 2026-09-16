@@ -785,3 +785,31 @@ async fn task_run_rejected_bind_leaves_no_phantom_session() {
         "no session may exist after three rejected task.run calls"
     );
 }
+
+/// #8031: `task.run`'s `no_delegate` field defaults to `false` when omitted.
+///
+/// Why: the field is the API-side half of the `--no-delegate` flag. Without
+/// `#[serde(default)]` every existing caller's body would fail to parse, and a
+/// wrong default would silently disable delegation for every run.
+/// What: deserialises a minimal request body through the real
+/// `TaskRunRequestParams` and asserts the parsed field.
+/// Test: this test.
+#[test]
+fn task_run_params_default_no_delegate_to_false() {
+    let p: TaskRunRequestParams =
+        serde_json::from_value(json!({"task_description": "say hi"})).expect("minimal body parses");
+    assert!(!p.no_delegate, "an omitted no_delegate must parse as false");
+}
+
+/// #8031: `no_delegate: true` round-trips through `task.run`'s serde.
+///
+/// Why/What: pins the wire spelling the CLI's thin-client path sends
+/// (`cli::run_task::build_run_params`) against the field that parses it.
+/// Test: this test.
+#[test]
+fn task_run_params_parse_no_delegate_true() {
+    let p: TaskRunRequestParams =
+        serde_json::from_value(json!({"task_description": "say hi", "no_delegate": true}))
+            .expect("body with no_delegate parses");
+    assert!(p.no_delegate, "no_delegate: true must parse as true");
+}

@@ -23,3 +23,6 @@ pub use error::RunnerError;
 pub use in_process::{
     InProcessAgentRunner, InProcessRunnerConfig, RegistryFactory, agent_config_exists,
 };
+// #8031: crate-internal — the two run-task paths need the same
+// build-then-gate step for a `--no-delegate` top-level agent.
+pub(crate) use in_process::agent_registry;

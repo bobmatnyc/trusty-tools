@@ -367,8 +367,10 @@ impl InProcessAgentRunner {
         let agent = self.load_agent(agent_name)?;
 
         // Build the agent's full tool set, then gate it by `tools.allowed`.
-        let full_registry = self.registry_factory.build(&agent, ctx).await;
-        let registry = gate_registry(&full_registry, &agent);
+        // #8031: via the shared helper `--no-delegate` also calls, so a
+        // single-agent run and a delegated one can never assemble the set
+        // differently.
+        let registry = agent_registry(self.registry_factory.as_ref(), &agent, ctx).await;
 
         // Resolve the model and the per-call turn cap (RunContext wins).
         let model = resolve_model(&agent, Some(ctx));
@@ -495,6 +497,30 @@ impl InProcessAgentRunner {
         }
         outcome
     }
+}
+
+/// The tool registry one agent may actually use for one invocation.
+///
+/// Why (#8031): this is the ONE definition of "the tcode tools an agent gets" —
+/// build the factory's full set for that agent, then narrow it by the agent's
+/// own `tools.allowed`. `run_pipeline` uses it for a delegated sub-agent, and
+/// `--no-delegate` uses it to give the TOP-LEVEL agent the identical set,
+/// through the identical gate. Two independent copies of those two steps would
+/// let a single-agent run drift into a wider tool surface than a delegated run
+/// of the same agent.
+/// What: `factory.build(agent, ctx)` then [`gate_registry`]. The run-time
+/// `permissions:` map is a separate, later gate the caller attaches to the
+/// `AgentLoop` (`PermissionContext::gate_for`) — this decides only what the
+/// model is ever SHOWN.
+/// Test: `runner::tests::tools_allowed_is_enforced`,
+/// `task::executor::tests::no_delegate_run_respects_the_agents_tools_allowlist`.
+pub(crate) async fn agent_registry(
+    factory: &dyn RegistryFactory,
+    agent: &AgentConfig,
+    ctx: &RunContext,
+) -> Arc<ToolRegistry> {
+    let full = factory.build(agent, ctx).await;
+    gate_registry(&full, agent)
 }
 
 /// Narrow a full registry to the agent's `tools.allowed`, if any.

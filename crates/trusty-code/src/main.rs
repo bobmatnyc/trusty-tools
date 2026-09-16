@@ -47,6 +47,12 @@ use trusty_code::run_task::ExitCode;
 
 mod cli;
 
+// #8031: clap-surface tests live in a sibling `_tests.rs`, per the crate's
+// `protocol_tests.rs`/`executor_tests.rs` convention.
+#[cfg(test)]
+#[path = "main_tests.rs"]
+mod tests;
+
 /// tcode — per-project Claude-Code-compatible MPM orchestration harness.
 #[derive(Parser)]
 #[command(
@@ -212,6 +218,16 @@ enum Command {
         /// A `deny` rule is refused regardless.
         #[arg(long, value_name = "MODE")]
         permission_mode: Option<String>,
+
+        /// Run AGENT alone (#8031): `delegate_to_agent` is not registered, so
+        /// AGENT cannot hand the task to `python-engineer`; instead AGENT gets
+        /// its own tcode tools (`read_file`, `write_file`, `edit`, `bash`, …),
+        /// exactly the set and permission gating a delegated run of AGENT
+        /// would get. Applies to both execution paths — the default
+        /// thin-client path sends it as `task.run`'s `no_delegate` param, and
+        /// `--legacy-in-process` passes it as `RunTaskParams.no_delegate`.
+        #[arg(long)]
+        no_delegate: bool,
     },
 
     /// Execute a named MPM workflow end-to-end.
@@ -520,6 +536,7 @@ async fn main() -> Result<()> {
             mode,
             timeout_seconds,
             permission_mode,
+            no_delegate,
         } => {
             if legacy_in_process {
                 // #4434: the in-process path (and the agent-name validation
@@ -534,6 +551,8 @@ async fn main() -> Result<()> {
                     engineer_model,
                     timeout_seconds,
                     permission_mode,
+                    // #8031: single-agent run — no `delegate_to_agent`.
+                    no_delegate,
                 )
                 .await
             } else {
@@ -546,6 +565,8 @@ async fn main() -> Result<()> {
                     engineer_model,
                     mode,
                     timeout_seconds,
+                    // #8031: single-agent run — no `delegate_to_agent`.
+                    no_delegate,
                 )
                 .await
                 {
