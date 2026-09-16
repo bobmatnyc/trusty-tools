@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use crate::core::component_labels::ComponentLabels;
 use crate::core::doctor::{CheckStatus, DoctorCheck};
 use crate::core::gh_identity::GhEnv;
-use crate::core::issue_audit::{IssueAudit, audit_issue};
+use crate::core::issue_audit::{IssueAudit, PROJECT_ATTACH_HINT, audit_issue};
 use crate::core::issue_audit_gh::{AuditWindow, list_open_issues};
 use crate::core::trusty_tools_config::{TrustyToolsConfig, resolve_ticketing};
 
@@ -154,9 +154,11 @@ pub(super) fn build_issue_audit_check(probe: Result<Vec<IssueAudit>, String>) ->
         CHECK_NAME,
         CheckStatus::Warn,
         format!(
+            // #7952: the project half names the owner-scoped attach — `gh issue
+            // edit --add-project` exits 0 without attaching.
             "{} of {} open issue(s) from the last {AUDIT_WINDOW_DAYS} days violate the \
-             ticketing standard: {detail}. Fix with `gh issue edit <N> --milestone … \
-             --add-project …`, or run `tm issue audit <N>` for the detail.",
+             ticketing standard: {detail}. Fix with `gh issue edit <N> --milestone …` \
+             and `{PROJECT_ATTACH_HINT}`, or run `tm issue audit <N>` for the detail.",
             failing.len(),
             audits.len()
         ),

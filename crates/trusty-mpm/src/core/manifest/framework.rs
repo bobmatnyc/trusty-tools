@@ -39,7 +39,9 @@
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 
+use super::detect_memo::Detection;
 use super::project_lang::MarkerProbe;
 use super::schema::{
     AgentCategories, AgentSet, ContentSource, GatedAgent, HarnessManifest, SkillCategories,
@@ -434,7 +436,25 @@ pub fn agent_scope_from(categories: &AgentCategories, project_dir: &Path) -> Age
     let mut stacks = probe.detect(&categories.language);
     stacks.extend(probe.detect(&categories.framework));
     let platforms = probe.detect(&categories.platform);
+    compose_scope(categories, &stacks, &platforms)
+}
 
+/// Fold an already-detected marker result into the framework-tier [`AgentSet`].
+///
+/// Why: #7806 split composition from probing so the memoized path can compose
+/// the SAME selection from the one probe pass it also derives
+/// [`StackDetection`] from. The selection rules — and the two asymmetries
+/// [`agent_scope_from`] documents — live here, once.
+/// What: the exclusion list, from `deprecated` unconditionally, the unselected
+/// stack entries when any stack matched, and every unselected platform entry.
+/// Test: `universal_agents_deploy_with_no_markers`,
+/// `unknown_project_keeps_every_stack_engineer`,
+/// `platform_agent_absent_without_marker`.
+fn compose_scope(
+    categories: &AgentCategories,
+    stacks: &BTreeSet<String>,
+    platforms: &BTreeSet<String>,
+) -> AgentSet {
     // Declared-as-retired: excluded unconditionally, for every project.
     let mut exclude: BTreeSet<String> = categories.deprecated.iter().cloned().collect();
 
@@ -522,23 +542,48 @@ pub struct StackDetection {
 /// `truncated_detection_is_reported_to_the_caller`,
 /// `core::stack_profile::tests::detected_rust_lists_rust_engineer`.
 pub fn detected_stack_engineers(project_dir: &Path) -> StackDetection {
-    let Ok(categories) = framework_agent_categories() else {
-        return StackDetection {
+    // #7806: the memoized pass, shared with `framework_agent_scope`.
+    match detection_for(project_dir) {
+        Ok(detection) => detection.stack.clone(),
+        Err(_) => StackDetection {
             engineers: BTreeSet::new(),
             truncated: false,
             depth_limited: false,
-        };
-    };
-    let probe = MarkerProbe::new(project_dir, &categories);
-    let mut engineers = probe.detect(&categories.language);
-    engineers.extend(probe.detect(&categories.framework));
-    // #7781 round-3: both flags ride out with the set they qualify, separately —
-    // only `truncated` is a fail-closed signal.
-    StackDetection {
-        engineers,
-        truncated: probe.truncated(),
-        depth_limited: probe.depth_limited(),
+        },
     }
+}
+
+/// `project_dir`'s detection, from the memo when it is live (#7806).
+///
+/// Why: the one place the nested walk is actually paid for. Before this, the
+/// five-plus manifest resolutions in a single launch each re-walked the tree and
+/// re-read every manifest for an answer that cannot change between them.
+/// What: [`super::detect_memo::memoized`] over ONE [`MarkerProbe`] pass, folded
+/// into both views — the composed [`AgentSet`] and the [`StackDetection`] with
+/// its two scan-bound flags. An unusable bundled manifest returns `Err` and is
+/// never cached; the two callers differ only in what they do with it. See
+/// `super::detect_memo` for what invalidates an entry.
+/// Test: `stack_detection_is_memoized_per_project`,
+/// `invalidating_picks_up_a_changed_tree`.
+fn detection_for(project_dir: &Path) -> Result<Arc<Detection>, FrameworkManifestError> {
+    super::detect_memo::memoized(project_dir, || {
+        let categories = framework_agent_categories()?;
+        let probe = MarkerProbe::new(project_dir, &categories);
+        let mut engineers = probe.detect(&categories.language);
+        engineers.extend(probe.detect(&categories.framework));
+        let platforms = probe.detect(&categories.platform);
+        let scope = compose_scope(&categories, &engineers, &platforms);
+        // #7781 round-3: both flags ride out with the set they qualify,
+        // separately — only `truncated` is a fail-closed signal.
+        Ok(Detection {
+            scope,
+            stack: StackDetection {
+                engineers,
+                truncated: probe.truncated(),
+                depth_limited: probe.depth_limited(),
+            },
+        })
+    })
 }
 
 /// The framework-tier agent selection for `project_dir`.
@@ -555,12 +600,15 @@ pub fn detected_stack_engineers(project_dir: &Path) -> StackDetection {
 /// everything, each silently. It is unreachable in a valid build:
 /// `bundled_framework_manifest_is_valid` fails the test suite before merge if
 /// the asset ever stops validating.
-/// What: [`framework_agent_categories`] then [`agent_scope_from`].
+/// What: [`detection_for`]'s memoized pass, which is
+/// [`framework_agent_categories`] then the same composition [`agent_scope_from`]
+/// performs (#7806 — `ManifestSources::resolve` calls this five-plus times per
+/// launch, and only the first pays for the walk).
 /// Test: `bundled_framework_manifest_is_valid` (the guard),
 /// `framework_agent_scope_selects_universal_agents`.
 pub fn framework_agent_scope(project_dir: &Path) -> AgentSet {
-    match framework_agent_categories() {
-        Ok(categories) => agent_scope_from(&categories, project_dir),
+    match detection_for(project_dir) {
+        Ok(detection) => detection.scope.clone(),
         Err(err) => {
             tracing::error!("bundled {FRAMEWORK_MANIFEST_FILE} is unusable: {err}");
             panic!(

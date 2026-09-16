@@ -578,6 +578,11 @@ pub(super) fn prepare_session_inner(
     host: HostInputs<'_>,
 ) -> Result<PrepReport, PrepError> {
     let home = host.home;
+    // #7806: opens this launch's stack-detection scope. Every manifest
+    // resolution below — and the five-plus in the call sites it reaches — then
+    // shares ONE nested walk, while a daemon-hosted launch still re-detects a
+    // tree that changed since the last one.
+    crate::core::manifest::invalidate_stack_detection(project_dir);
     // #7685: resolved ONCE per launch, here, and returned on the `PrepReport` so
     // the runtime adapter reuses this answer instead of dialling the daemon a
     // second time.

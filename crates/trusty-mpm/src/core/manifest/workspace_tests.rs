@@ -408,6 +408,34 @@ fn budget_is_shared_across_members() {
     );
 }
 
+/// The same path is read from disk — and charged — once per budget (#7806).
+///
+/// Why: a content probe asks about one `package.json` once per needle
+/// (`"next"`, `"react"`, `"svelte"`), which tripled the shared budget spend for
+/// one file and could exhaust it before the later framework checks ran, turning
+/// a declared framework into a false absence.
+/// What: a budget sized for exactly ONE copy of the file still answers the
+/// second and third reads with the body, and the file is deleted before them so
+/// a surviving disk read would answer `None`.
+#[test]
+fn a_second_read_of_one_path_costs_no_budget() {
+    let tmp = TempDir::new().unwrap();
+    let body = r#"{"dependencies":{"svelte":"^5"}}"#;
+    write(tmp.path(), "package.json", body);
+    let path = tmp.path().join("package.json");
+
+    let budget = ProbeBudget::with_bytes(body.len() as u64);
+    assert_eq!(read_bounded(&path, &budget).as_deref(), Some(body));
+
+    fs::remove_file(&path).unwrap();
+    assert_eq!(
+        read_bounded(&path, &budget).as_deref(),
+        Some(body),
+        "the second needle is answered from the memo, not from disk"
+    );
+    assert_eq!(read_bounded(&path, &budget).as_deref(), Some(body));
+}
+
 #[test]
 fn read_bounded_rejects_a_directory() {
     let tmp = TempDir::new().unwrap();

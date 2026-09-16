@@ -64,6 +64,23 @@ pub const NO_MILESTONE_PREFIX: &str = "no-milestone:";
 /// Test: `a_missing_component_label_with_a_reason_comment_is_a_skip`.
 pub const NO_COMPONENT_LABEL_PREFIX: &str = "no-component-label:";
 
+/// The `gh` invocation that actually attaches an issue to a project (#7952).
+///
+/// Why: `gh issue edit <N> --add-project "<title>"` exits 0 and attaches
+/// NOTHING when the title does not resolve inside the scope gh derives from the
+/// repository — several projects share the title, or the project is owned by a
+/// different login. The caller reads exit 0 as success, so the miss surfaces
+/// only when this audit fails on the same issue afterwards. Naming the
+/// owner-and-number form in the remediation is what stops the silent form from
+/// being retried. `tm issue standard` prints each open project's number beside
+/// its title, so the number never has to be guessed.
+/// What: `gh project item-add <number> --owner <owner> --url <issue-url>` —
+/// owner-scoped and keyed by number, so it names exactly one project.
+/// Test: `a_missing_project_names_the_owner_scoped_attach`,
+/// `issue_audit_warning_names_the_owner_scoped_attach`.
+pub const PROJECT_ATTACH_HINT: &str =
+    "gh project item-add <number> --owner <owner> --url <issue-url>";
+
 /// A `{"title": …}` node — a milestone or a project item.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct TitleRef {
@@ -300,9 +317,11 @@ fn project_row(facts: &IssueFacts, ticketing: &ResolvedTicketing) -> AuditRow {
         // #7097: an unset requirement reports the absence rather than inventing
         // a rule the operator's config does not carry.
         if ticketing.project_required {
+            // #7952: the remediation names the owner-scoped attach, never
+            // `gh issue edit --add-project`, which exits 0 without attaching.
             (
                 Verdict::Fail,
-                "no project — `gh issue edit <N> --add-project \"<title>\"`".to_string(),
+                format!("no project — `{PROJECT_ATTACH_HINT}` (numbers: `tm issue standard`)"),
             )
         } else {
             (

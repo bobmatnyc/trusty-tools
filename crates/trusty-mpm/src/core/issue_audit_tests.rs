@@ -136,9 +136,34 @@ fn a_missing_project_fails() {
     assert!(audit.failed());
     assert_eq!(audit.failing_requirements(), vec!["project"]);
     assert!(
-        row(&audit, "project").detail.contains("--add-project"),
+        row(&audit, "project")
+            .detail
+            .contains("gh project item-add"),
         "the failure names the fix: {}",
         row(&audit, "project").detail
+    );
+}
+
+/// The project remediation names the attach that works, not the one that
+/// silently no-ops (#7952).
+///
+/// Why: `gh issue edit <N> --add-project "<title>"` exits 0 and attaches
+/// nothing when the title does not resolve in the scope gh derives from the
+/// repository, so an agent that follows the old remediation reports done and
+/// leaves the issue unattached — observed twice on #7945.
+/// What: the FAIL detail carries the owner-scoped, number-keyed form and no
+/// longer carries `--add-project` at all.
+#[test]
+fn a_missing_project_names_the_owner_scoped_attach() {
+    let json = COMPLIANT.replace(r#"[{"title": "trusty-mpm"}]"#, "[]");
+    let audit = audit_issue(&parse(&json), &standard(), &components());
+    let detail = &row(&audit, "project").detail;
+    assert!(detail.contains("gh project item-add"), "{detail}");
+    assert!(detail.contains("--owner"), "{detail}");
+    assert!(detail.contains("--url"), "{detail}");
+    assert!(
+        !detail.contains("--add-project"),
+        "the silent form must not be offered: {detail}"
     );
 }
 

@@ -769,3 +769,95 @@ fn unknown_project_keeps_every_stack_engineer() {
     );
     assert!(!deploys(&scope, "ops"));
 }
+
+// ---------------------------------------------------------------------------
+// The per-operation detection memo (#7806)
+// ---------------------------------------------------------------------------
+
+/// A second detection over an unchanged tree walks nothing and reads nothing.
+///
+/// Why: #7806 — `ManifestSources::resolve` reaches `framework_agent_scope` from
+/// five-plus call sites in one launch, and each re-ran the full nested walk plus
+/// every manifest read for an answer that cannot change between them.
+/// What: the per-key compute counter stays at 1 across a second
+/// `detected_stack_engineers` AND a `framework_agent_scope` on the same
+/// directory. The tree is DELETED between the calls, so any surviving walk or
+/// read would answer with an empty set instead of the memoized one.
+#[test]
+fn stack_detection_is_memoized_per_project() {
+    let tmp = TempDir::new().unwrap();
+    touch(tmp.path(), "Cargo.toml");
+    let dir = tmp.path().to_path_buf();
+
+    let first = detected_stack_engineers(&dir);
+    assert!(first.engineers.contains("rust-engineer"), "{first:?}");
+    assert_eq!(super::super::detect_memo::computes_for(&dir), 1);
+
+    drop(tmp);
+    let second = detected_stack_engineers(&dir);
+    assert_eq!(
+        second.engineers, first.engineers,
+        "the memo answers a vanished tree, so nothing was walked or read"
+    );
+    let scope = framework_agent_scope(&dir);
+    assert!(deploys(&scope, "rust-engineer"));
+    assert_eq!(
+        super::super::detect_memo::computes_for(&dir),
+        1,
+        "both entry points share ONE walk"
+    );
+}
+
+/// An invalidated memo re-detects the tree as it now stands.
+///
+/// Why: explicit invalidation is the ONLY thing that expires an entry (#7806),
+/// so the arm that keeps a long-lived daemon correct needs its own proof.
+/// What: a `package.json` added after the first detection is invisible until
+/// `invalidate_stack_detection`, and detected immediately after.
+#[test]
+fn invalidating_picks_up_a_changed_tree() {
+    let tmp = TempDir::new().unwrap();
+    touch(tmp.path(), "Cargo.toml");
+    let before = detected_stack_engineers(tmp.path());
+    assert!(
+        !before.engineers.contains("javascript-engineer"),
+        "{before:?}"
+    );
+
+    fs::write(tmp.path().join("package.json"), "{}").unwrap();
+    assert_eq!(
+        detected_stack_engineers(tmp.path()).engineers,
+        before.engineers,
+        "the memo holds until the operation boundary"
+    );
+
+    super::super::detect_memo::invalidate_stack_detection(tmp.path());
+    let after = detected_stack_engineers(tmp.path());
+    assert!(after.engineers.contains("javascript-engineer"), "{after:?}");
+    assert_eq!(super::super::detect_memo::computes_for(tmp.path()), 2);
+}
+
+/// Two projects get two answers.
+///
+/// Why: a memo keyed on anything coarser than the project directory would serve
+/// the first project's roster to the second — the failure mode that makes an
+/// unkeyed cache worse than no cache at all.
+/// What: a Cargo project and an npm project detected in the same process, each
+/// computed exactly once and each carrying only its own engineer.
+#[test]
+fn memo_is_keyed_by_project_dir() {
+    let rust = TempDir::new().unwrap();
+    touch(rust.path(), "Cargo.toml");
+    let js = TempDir::new().unwrap();
+    touch(js.path(), "package.json");
+
+    let rust_engineers = detected_stack_engineers(rust.path()).engineers;
+    let js_engineers = detected_stack_engineers(js.path()).engineers;
+
+    assert!(rust_engineers.contains("rust-engineer"));
+    assert!(!rust_engineers.contains("javascript-engineer"));
+    assert!(js_engineers.contains("javascript-engineer"));
+    assert!(!js_engineers.contains("rust-engineer"));
+    assert_eq!(super::super::detect_memo::computes_for(rust.path()), 1);
+    assert_eq!(super::super::detect_memo::computes_for(js.path()), 1);
+}

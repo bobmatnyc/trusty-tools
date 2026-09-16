@@ -310,13 +310,22 @@ filing in a repository; never hand-type a title it did not print.
 gh issue create --title "…" --body "…" \
   --milestone "Backlog · mpm/core" --project "trusty-mpm" \
   --label bug --label trusty-mpm
-gh issue edit 7067 --milestone "mpm 1.4" --add-project "trusty-mpm"
+gh issue edit 7067 --milestone "mpm 1.4"
+gh project item-add 25 --owner bobmatnyc --url https://github.com/…/issues/7067
 ```
 
 Installed `gh` is 2.98; `--milestone` and `--parent` are supported unchanged on
 both `issue create` and `issue edit`, and the token carries the `project`
-scope. The project flag differs by subcommand: `issue create` takes
-`--project`, `issue edit` takes `--add-project`.
+scope.
+
+🔴 **Attach a project with `gh project item-add`, never `gh issue edit
+--add-project` (#7952).** `--add-project "<title>"` exits 0 and attaches
+nothing when the title does not resolve in the scope gh derives from the
+repository — several projects share the title, or the project belongs to a
+different owner. The exit code says it worked; `gh issue view --json
+projectItems` says it did not. The owner-and-number form
+(`gh project item-add <number> --owner <owner> --url <issue-url>`) names
+exactly one project and attached first try on every observed case.
 
 **Choosing the milestone — a stated rule, in order:**
 
@@ -340,7 +349,8 @@ applies; when it does not, pick from the live list rather than guessing a title.
 ```bash
 # -L is required: gh silently caps the list at 30 without it (#7067)
 gh project list --owner <owner> -L 200 --format json  # what `tm issue standard` reads
-gh issue edit 7067 --add-project "trusty-mpm"
+# attach by number + owner — see "#7952" above for why the title form no-ops
+gh project item-add 25 --owner bobmatnyc --url https://github.com/…/issues/7067
 ```
 
 A project is a view; a milestone is a delivery slot. An issue can sit in several

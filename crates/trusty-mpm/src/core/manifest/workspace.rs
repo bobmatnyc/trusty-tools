@@ -49,7 +49,8 @@
 //! persisted-write call site is tracked separately (#7781).
 //! Test: `crates/trusty-mpm/src/core/manifest/workspace_tests.rs`.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Maximum member globs read from a single root manifest.
@@ -77,26 +78,37 @@ pub(crate) const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 /// that actually matters.
 /// What: a `Cell<u64>` of remaining bytes. [`ProbeBudget::take`] reserves an
 /// amount and reports whether it was available; once exhausted every subsequent
-/// request fails, so the walk degrades to "no further markers found".
-/// Test: `budget_exhaustion_stops_probing`, `budget_is_shared_across_members`.
+/// request fails, so the walk degrades to "no further markers found". It also
+/// carries the per-path read memo (#7806) — see [`read_bounded`].
+/// Test: `budget_exhaustion_stops_probing`, `budget_is_shared_across_members`,
+/// `a_second_read_of_one_path_costs_no_budget`.
 #[derive(Debug)]
 pub(crate) struct ProbeBudget {
     remaining: Cell<u64>,
+    /// #7806: what each path returned the first time it was read, so a second
+    /// question about the same file costs neither I/O nor budget. Bounded by
+    /// the budget itself — nothing is remembered that was not affordable to
+    /// read, so the memo cannot hold more than `remaining`'s initial value.
+    seen: RefCell<HashMap<PathBuf, Option<String>>>,
 }
 
 impl ProbeBudget {
     /// A budget of [`MAX_WORKSPACE_PROBE_BYTES`].
     pub(crate) fn new() -> Self {
-        Self {
-            remaining: Cell::new(MAX_WORKSPACE_PROBE_BYTES),
-        }
+        Self::of(MAX_WORKSPACE_PROBE_BYTES)
     }
 
     /// A budget of exactly `bytes` — for tests that need to force exhaustion.
     #[cfg(test)]
     pub(crate) fn with_bytes(bytes: u64) -> Self {
+        Self::of(bytes)
+    }
+
+    /// A budget of `bytes` with an empty read memo.
+    fn of(bytes: u64) -> Self {
         Self {
             remaining: Cell::new(bytes),
+            seen: RefCell::new(HashMap::new()),
         }
     }
 
@@ -110,6 +122,16 @@ impl ProbeBudget {
         self.remaining.set(left - bytes);
         true
     }
+
+    /// What `path` returned on an earlier [`read_bounded`], if it was asked.
+    fn recall(&self, path: &Path) -> Option<Option<String>> {
+        self.seen.borrow().get(path).cloned()
+    }
+
+    /// Record what `path` returned, so the next ask is answered from memory.
+    fn remember(&self, path: &Path, body: Option<String>) {
+        self.seen.borrow_mut().insert(path.to_path_buf(), body);
+    }
 }
 
 /// Read a file if it is regular, within [`MAX_MANIFEST_BYTES`], and affordable.
@@ -118,8 +140,26 @@ impl ProbeBudget {
 /// shared budget, and the fail-closed rule cannot drift apart.
 /// What: `None` unless `path` is a regular file no larger than
 /// [`MAX_MANIFEST_BYTES`], the budget covers its length, and it is valid UTF-8.
-/// Test: `oversized_manifest_is_not_read`, `budget_exhaustion_stops_probing`.
+///
+/// #7806: the answer — including a `None` — is remembered on `budget`, because
+/// a content probe asks about the same `package.json` once per needle
+/// (`"next"`, `"react"`, `"svelte"`), which read and charged for one file three
+/// times and could exhaust the shared budget before the later framework checks
+/// ran. The memo lives on the budget, so it is scoped to one detection call and
+/// a re-read after an invalidated memo still sees the current file.
+/// Test: `oversized_manifest_is_not_read`, `budget_exhaustion_stops_probing`,
+/// `a_second_read_of_one_path_costs_no_budget`.
 pub(crate) fn read_bounded(path: &Path, budget: &ProbeBudget) -> Option<String> {
+    if let Some(remembered) = budget.recall(path) {
+        return remembered;
+    }
+    let body = read_uncached(path, budget);
+    budget.remember(path, body.clone());
+    body
+}
+
+/// [`read_bounded`] without the memo — the actual I/O and the two bounds.
+fn read_uncached(path: &Path, budget: &ProbeBudget) -> Option<String> {
     let meta = std::fs::metadata(path).ok()?;
     if !meta.is_file() || meta.len() > MAX_MANIFEST_BYTES {
         return None;
