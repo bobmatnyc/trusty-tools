@@ -813,3 +813,81 @@ fn task_run_params_parse_no_delegate_true() {
             .expect("body with no_delegate parses");
     assert!(p.no_delegate, "no_delegate: true must parse as true");
 }
+
+// ── #8030 / #8128: `task.run`'s pm_model / max_turns fields ────────────────
+
+/// #8030: `pm_model` round-trips through `task.run`'s serde.
+///
+/// Why/What: pins the wire spelling the CLI's thin-client path sends
+/// (`cli::run_task::build_run_params`) against the field that parses it — the
+/// exact seam a rename would silently break, since no compiler check spans it.
+/// Test: this test.
+#[test]
+fn task_run_params_parse_pm_model() {
+    let p: TaskRunRequestParams = serde_json::from_value(
+        json!({"task_description": "say hi", "pm_model": "anthropic/claude-opus-5"}),
+    )
+    .expect("body with pm_model parses");
+    assert_eq!(p.pm_model.as_deref(), Some("anthropic/claude-opus-5"));
+}
+
+/// #8030: an omitted `pm_model` parses as `None`.
+///
+/// Why: every pre-#8030 caller sends a body without the field; a missing
+/// `#[serde(default)]` would turn all of them into parse errors.
+/// What: deserialises a minimal body and asserts `None`.
+/// Test: this test.
+#[test]
+fn task_run_params_default_pm_model_to_none() {
+    let p: TaskRunRequestParams =
+        serde_json::from_value(json!({"task_description": "say hi"})).expect("minimal body parses");
+    assert!(
+        p.pm_model.is_none(),
+        "an omitted pm_model must parse as None"
+    );
+}
+
+/// #8128: `max_turns` round-trips through `task.run`'s serde, and an omitted
+/// field parses as `None`.
+///
+/// Why/What: same wire-spelling seam as `pm_model` above, plus the
+/// absent-means-unchanged guarantee the turn-cap override rests on.
+/// Test: this test.
+#[test]
+fn task_run_params_parse_max_turns() {
+    let set: TaskRunRequestParams =
+        serde_json::from_value(json!({"task_description": "say hi", "max_turns": 24}))
+            .expect("body with max_turns parses");
+    assert_eq!(set.max_turns, Some(24));
+
+    let unset: TaskRunRequestParams =
+        serde_json::from_value(json!({"task_description": "say hi"})).expect("minimal body parses");
+    assert!(unset.max_turns.is_none());
+}
+
+/// #8128: `max_turns: 0` is rejected with `-32003 invalid_argument` before a
+/// session is minted.
+///
+/// Why: a zero-turn loop makes no LLM call at all and would report the empty
+/// result as a normal run. Rejecting it in the handler — rather than letting
+/// it through to `AgentLoopConfig` — is also what keeps a direct RPC caller
+/// from bypassing the CLI flag's own `value_parser` range check.
+/// What: drives the real `task_run` handler with a zero cap and asserts the
+/// error code.
+/// Test: this test.
+#[tokio::test]
+async fn task_run_rejects_zero_max_turns() {
+    let registry = Arc::new(SessionRegistry::new());
+    let agents = agents_dir();
+    let project = tempfile::tempdir().expect("project tempdir");
+    let err = task_run(
+        registry,
+        json!({"task_description": "say hi", "max_turns": 0}),
+        ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
+        agents.path().to_path_buf(),
+        crate::workstreams::test_shared_store().await,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, -32003);
+}

@@ -34,8 +34,55 @@ pub fn cost_usd(
 }
 
 /// Returns (input, output, cache_read, cache_creation) rates per token.
+///
+/// Why: `RunReport.cost_usd` is compared against Claude Code's own
+/// `total_cost_usd` in the #8127 bake-off, so the Claude 5 tiers need their
+/// real published rates rather than the 4.x substring fallback they used to
+/// land on (#8128). Cache rates are derived from the published input rate by
+/// Anthropic's documented multipliers — a read is 0.1x input and a 5-minute
+/// write is 1.25x input.
+/// What: An ordered table. The explicitly-labelled Claude 5 / Haiku 4.5 rows
+/// come FIRST because their slugs also contain the older rows' substrings
+/// (`claude-haiku-4.5` contains `haiku-4`), so a later row would shadow them.
+/// Everything below them is the pre-#8128 4.x table, unchanged.
+/// Test: `perf::tests::cost_usd_opus_5_matches_published_rates`,
+/// `perf::tests::cost_usd_sonnet_5_matches_published_rates`,
+/// `perf::tests::cost_usd_haiku_4_5_matches_published_rates`,
+/// `perf::tests::cost_usd_legacy_4x_rows_are_unchanged`.
+// #8128: list prices from the `claude-api` skill's "Current Models" table
+// (cached 2026-06-24); cache multipliers from its `shared/prompt-caching.md`
+// § Economics (read 0.1x input, 5-minute write 1.25x input).
 fn pricing_for(model: &str) -> (f64, f64, f64, f64) {
     let m = model.to_ascii_lowercase();
+    // Claude Opus 5 — $5 in, $25 out, $0.50 cache read, $6.25 cache write
+    if m.contains("opus-5") {
+        return (
+            per_million(5.0),
+            per_million(25.0),
+            per_million(0.50),
+            per_million(6.25),
+        );
+    }
+    // Claude Sonnet 5 — $2 in, $10 out, $0.20 cache read, $2.50 cache write
+    if m.contains("sonnet-5") {
+        return (
+            per_million(2.0),
+            per_million(10.0),
+            per_million(0.20),
+            per_million(2.50),
+        );
+    }
+    // Claude Haiku 4.5 — $1 in, $5 out, $0.10 cache read, $1.25 cache write.
+    // Both spellings: the OpenRouter slug (`claude-haiku-4.5`) and the
+    // Anthropic/Bedrock one (`claude-haiku-4-5`).
+    if m.contains("haiku-4.5") || m.contains("haiku-4-5") {
+        return (
+            per_million(1.0),
+            per_million(5.0),
+            per_million(0.10),
+            per_million(1.25),
+        );
+    }
     // Claude Sonnet 4.x — $3 in, $15 out, $0.30 cache read, $3.75 cache write
     if m.contains("sonnet-4") || m.contains("claude-sonnet-4") {
         return (

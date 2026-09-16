@@ -426,6 +426,8 @@ fn params(agents: &TempDir, project: &TempDir, engineer_model: Option<&str>) -> 
         engineer_model: engineer_model.map(str::to_string),
         deadline_secs: None,
         no_delegate: false,
+        pm_model: None,
+        max_turns: None,
     }
 }
 
@@ -710,6 +712,8 @@ async fn missing_agent_config_is_config_error() {
             engineer_model: None,
             deadline_secs: None,
             no_delegate: false,
+            pm_model: None,
+            max_turns: None,
         },
         llm,
     )
@@ -752,6 +756,8 @@ async fn missing_disk_pm_config_falls_back_to_embedded_pm() {
             engineer_model: None,
             deadline_secs: None,
             no_delegate: false,
+            pm_model: None,
+            max_turns: None,
         },
         llm,
     )
@@ -1189,6 +1195,8 @@ fn assemble_report_maps_turn_cap_exceeded_with_deliverable_to_partial() {
         engineer_model: None,
         deadline_secs: None,
         no_delegate: false,
+        pm_model: None,
+        max_turns: None,
     };
     let transcript: super::SharedTranscript = Arc::new(Mutex::new(Vec::new()));
 
@@ -1264,6 +1272,8 @@ fn assemble_report_maps_retry_exhausted_with_deliverable_to_partial() {
         engineer_model: None,
         deadline_secs: None,
         no_delegate: false,
+        pm_model: None,
+        max_turns: None,
     };
     let transcript: super::SharedTranscript = Arc::new(Mutex::new(Vec::new()));
 
@@ -1343,6 +1353,8 @@ fn assemble_report_keeps_turn_cap_exceeded_with_no_deliverable_as_run_failure() 
         engineer_model: None,
         deadline_secs: None,
         no_delegate: false,
+        pm_model: None,
+        max_turns: None,
     };
     let transcript: super::SharedTranscript = Arc::new(Mutex::new(Vec::new()));
 
@@ -1406,6 +1418,8 @@ fn assemble_report_maps_completed_engineer_with_deliverable_to_success() {
         engineer_model: None,
         deadline_secs: None,
         no_delegate: false,
+        pm_model: None,
+        max_turns: None,
     };
     let transcript: super::SharedTranscript = Arc::new(Mutex::new(Vec::new()));
 
@@ -1471,6 +1485,8 @@ fn assemble_report_maps_completed_engineer_without_deliverable_to_no_changes() {
         engineer_model: None,
         deadline_secs: None,
         no_delegate: false,
+        pm_model: None,
+        max_turns: None,
     };
     let transcript: super::SharedTranscript = Arc::new(Mutex::new(Vec::new()));
 
@@ -2256,4 +2272,132 @@ async fn engineer_registry_reads_embedded_agent_skill_pointers() {
         assert!(!out.is_error(), "{pointer}: {}", out.content());
         assert_eq!(out.content(), *content);
     }
+}
+
+// ── #8030 / #8128: top-level model + turn-cap overrides ─────────────────────
+
+/// A response calling a tool the PM registry does not carry, so the loop
+/// answers it with a recoverable error and takes another turn.
+///
+/// Why: the turn-cap test below needs a PM that never terminates and never
+/// spends a script entry on a delegated engineer turn — an unregistered tool
+/// name is the cheapest such turn.
+/// What: one `tool_calls` response naming a tool registered nowhere.
+/// Test: `max_turns_override_raises_the_pm_turn_cap`.
+fn unregistered_tool_response() -> Value {
+    json!({
+        "id": "gen-unknown",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call-unknown",
+                    "type": "function",
+                    "function": {
+                        "name": "definitely_not_a_registered_tool",
+                        "arguments": "{}"
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10}
+    })
+}
+
+/// `RunTaskParams.pm_model` pins the PM loop's model ahead of the agent's own
+/// front-matter `model:`, normalising a short alias on the way (#8030).
+///
+/// Why: `--engineer-model` only ever rewired the delegated runner, so the
+/// top-level agent's own calls kept reaching whatever its deployed `.md`
+/// named — the concrete failure #8030 records. This asserts at the wire: the
+/// slug the client was ASKED to use on the PM's first turn.
+/// What: `pm.md` pins `openai/gpt-4o-mini`; the run passes
+/// `pm_model: Some("opus")`; assert the first request's model is the concrete
+/// Claude 5 Opus slug, neither the alias nor the config value.
+/// Test: this test.
+#[tokio::test]
+async fn pm_model_override_pins_the_pm_loops_model() {
+    let agents = agents_dir("openai/gpt-4o-mini");
+    let project = tempfile::tempdir().expect("project tempdir");
+    let llm = Arc::new(ScriptedLlm::from_json(&[stop_response("pm: done")]));
+
+    let p = RunTaskParams {
+        pm_model: Some("opus".to_string()),
+        ..params(&agents, &project, None)
+    };
+    let _report = execute_run_task(p, llm.clone()).await;
+
+    let models = llm.models_seen();
+    assert_eq!(
+        models.first().map(String::as_str),
+        Some("anthropic/claude-opus-5"),
+        "the PM's first turn must use the pinned override, normalised; got {models:?}"
+    );
+}
+
+/// With no `pm_model`, the PM loop still uses the agent config's own model
+/// (#8030 — the override is additive).
+///
+/// Why: this is the control that makes the test above meaningful, and the
+/// guard that every pre-#8030 run keeps its behaviour byte-for-byte.
+/// What: same fixture, `pm_model: None`; assert the first request carries
+/// `pm.md`'s declared `openai/gpt-4o-mini`.
+/// Test: this test.
+#[tokio::test]
+async fn absent_pm_model_override_uses_the_agent_config_model() {
+    let agents = agents_dir("openai/gpt-4o-mini");
+    let project = tempfile::tempdir().expect("project tempdir");
+    let llm = Arc::new(ScriptedLlm::from_json(&[stop_response("pm: done")]));
+
+    let _report = execute_run_task(params(&agents, &project, None), llm.clone()).await;
+
+    let models = llm.models_seen();
+    assert_eq!(
+        models.first().map(String::as_str),
+        Some("openai/gpt-4o-mini"),
+        "an absent override must leave the agent config's model in place; got {models:?}"
+    );
+}
+
+/// `RunTaskParams.max_turns` replaces the PM loop's built-in turn cap, and its
+/// absence leaves that cap at 8 (#8128).
+///
+/// Why: the cap was `AgentLoopConfig::default()`'s 8 with no override at all,
+/// so a multi-step delivery task could not be given more turns. Counting the
+/// requests the loop actually issued is the only observation that proves the
+/// value reached `AgentLoopConfig`, and it fails loudly if the field is ever
+/// dropped from the config literal.
+/// What: scripts more never-terminating turns than either cap consumes, runs
+/// once with `max_turns: Some(3)` and once with `None`, and asserts the
+/// request counts are exactly 3 and exactly 8.
+/// Test: this test.
+#[tokio::test]
+async fn max_turns_override_raises_the_pm_turn_cap() {
+    let script: Vec<Value> = (0..12).map(|_| unregistered_tool_response()).collect();
+
+    let agents = agents_dir("openai/gpt-4o-mini");
+    let project = tempfile::tempdir().expect("project tempdir");
+    let capped = Arc::new(ScriptedLlm::from_json(&script));
+    let p = RunTaskParams {
+        max_turns: Some(3),
+        ..params(&agents, &project, None)
+    };
+    let _ = execute_run_task(p, capped.clone()).await;
+    assert_eq!(
+        capped.models_seen().len(),
+        3,
+        "the PM loop must stop after the overridden cap"
+    );
+
+    let agents = agents_dir("openai/gpt-4o-mini");
+    let project = tempfile::tempdir().expect("project tempdir");
+    let defaulted = Arc::new(ScriptedLlm::from_json(&script));
+    let _ = execute_run_task(params(&agents, &project, None), defaulted.clone()).await;
+    assert_eq!(
+        defaulted.models_seen().len(),
+        8,
+        "an absent override must leave AgentLoopConfig::default()'s cap of 8"
+    );
 }

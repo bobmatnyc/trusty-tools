@@ -56,8 +56,13 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// `crate::provider::resolve_deadline_secs` does. `no_delegate` (#8031) is
 /// likewise passed straight through as `task.run`'s own `no_delegate` param;
 /// the daemon is what swaps `delegate_to_agent` for the named agent's own
-/// tools.
-/// Test: `cli::run_task::tests::run_params_carry_no_delegate`.
+/// tools. `pm_model_flag` (#8030) and `max_turns_flag` (#8128) are the ONE
+/// exception to "passed straight through": their env tiers
+/// (`TCODE_PM_MODEL`, `TCODE_MAX_TURNS`) are resolved here, in the client
+/// process the user's environment belongs to, and sent as explicit
+/// `pm_model`/`max_turns` params.
+/// Test: `cli::run_task::tests::run_params_carry_no_delegate`,
+/// `cli::run_task::tests::run_params_carry_pm_model_and_max_turns`.
 // #8031: the 8th argument crosses clippy's arity gate. Every argument is one
 // `Command::RunTask` clap field passed straight through, so a bundling struct
 // here would only restate the clap variant that already is that bundle.
@@ -71,7 +76,17 @@ pub async fn run(
     mode: Option<String>,
     timeout_seconds: Option<u64>,
     no_delegate: bool,
+    pm_model_flag: Option<String>,
+    max_turns_flag: Option<u32>,
 ) -> Result<i32> {
+    // #8030/#8128: the env tiers are resolved HERE, in the client, not in the
+    // daemon — the daemon is a long-lived process whose environment is not
+    // this invocation's, so `TCODE_PM_MODEL`/`TCODE_MAX_TURNS` must be read
+    // where the user set them and sent over the wire as explicit params.
+    let pm_model = trusty_code::provider::resolve_pm_model_override(pm_model_flag);
+    let max_turns =
+        trusty_code::provider::resolve_max_turns(max_turns_flag).map_err(anyhow::Error::msg)?;
+
     let exe = tcode_exe::resolve()?;
     let mut client = StdioRpcClient::spawn(&exe, project)?;
 
@@ -82,6 +97,8 @@ pub async fn run(
         mode,
         timeout_seconds,
         no_delegate,
+        pm_model,
+        max_turns,
     );
     let run_result = client.call("task.run", run_params).await?;
     let session_id = run_result
@@ -162,6 +179,7 @@ pub async fn run(
 /// What: one JSON object; every optional value is serialised as `null` when
 /// absent, which `TaskRunRequestParams`'s `#[serde(default)]` fields accept.
 /// Test: `cli::run_task::tests::run_params_carry_no_delegate`.
+#[allow(clippy::too_many_arguments)]
 fn build_run_params(
     agent: &str,
     task: &str,
@@ -169,6 +187,8 @@ fn build_run_params(
     mode: Option<String>,
     timeout_seconds: Option<u64>,
     no_delegate: bool,
+    pm_model: Option<String>,
+    max_turns: Option<u32>,
 ) -> serde_json::Value {
     json!({
         "task_description": task,
@@ -178,6 +198,9 @@ fn build_run_params(
         "deadline_secs": timeout_seconds,
         // #8031: the daemon drops `delegate_to_agent` for this run.
         "no_delegate": no_delegate,
+        // #8030/#8128: already through their flag-then-env tiers in `run`.
+        "pm_model": pm_model,
+        "max_turns": max_turns,
     })
 }
 
@@ -189,11 +212,41 @@ mod tests {
     /// `false` rather than omitting the key (#8031).
     #[test]
     fn run_params_carry_no_delegate() {
-        let on = build_run_params("engineer", "do it", None, None, None, true);
+        let on = build_run_params("engineer", "do it", None, None, None, true, None, None);
         assert_eq!(on["no_delegate"], serde_json::json!(true));
         assert_eq!(on["agent_name"], serde_json::json!("engineer"));
 
-        let off = build_run_params("engineer", "do it", None, None, None, false);
+        let off = build_run_params("engineer", "do it", None, None, None, false, None, None);
         assert_eq!(off["no_delegate"], serde_json::json!(false));
+    }
+
+    /// `--pm-model` and `--max-turns` reach the `task.run` body, and their
+    /// absence sends an explicit `null` the daemon's `#[serde(default)]`
+    /// accepts (#8030, #8128).
+    ///
+    /// Why: `run` is only reachable through a real subprocess, so without
+    /// this the two params could silently stop reaching the daemon — the
+    /// exact gap `run_params_carry_no_delegate` was written to close.
+    /// What: asserts both keys present-and-typed when set, and `null` when
+    /// absent.
+    /// Test: this test.
+    #[test]
+    fn run_params_carry_pm_model_and_max_turns() {
+        let set = build_run_params(
+            "pm",
+            "do it",
+            None,
+            None,
+            None,
+            false,
+            Some("opus".to_string()),
+            Some(24),
+        );
+        assert_eq!(set["pm_model"], serde_json::json!("opus"));
+        assert_eq!(set["max_turns"], serde_json::json!(24));
+
+        let unset = build_run_params("pm", "do it", None, None, None, false, None, None);
+        assert_eq!(unset["pm_model"], serde_json::Value::Null);
+        assert_eq!(unset["max_turns"], serde_json::Value::Null);
     }
 }

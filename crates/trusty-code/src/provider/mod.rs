@@ -14,7 +14,10 @@
 //! [`resolve_deadline_secs`] precedence function plus its
 //! [`DEFAULT_RUN_DEADLINE_SECS`] constant and [`RUN_DEADLINE_ENV_VAR`] name,
 //! and (#2308) the [`resolve_context_window`] precedence function plus its
-//! [`DEFAULT_CONTEXT_WINDOW`] constant.
+//! [`DEFAULT_CONTEXT_WINDOW`] constant. (#8030/#8128) The per-run top-level
+//! overrides live here too: [`resolve_pm_model_override`] +
+//! [`resolve_model_with_override`] with [`PM_MODEL_ENV_VAR`], and
+//! [`resolve_max_turns`] with [`MAX_TURNS_ENV_VAR`].
 //! Test: submodule `tests` in each file; routing/adapter coverage in
 //! `routing.rs` and `adapter.rs`.
 //!
@@ -35,6 +38,11 @@
 //! [`RUN_DEADLINE_ENV_VAR`]: crate::provider::RUN_DEADLINE_ENV_VAR
 //! [`resolve_context_window`]: crate::provider::resolve_context_window
 //! [`DEFAULT_CONTEXT_WINDOW`]: crate::provider::DEFAULT_CONTEXT_WINDOW
+//! [`resolve_pm_model_override`]: crate::provider::resolve_pm_model_override
+//! [`resolve_model_with_override`]: crate::provider::resolve_model_with_override
+//! [`PM_MODEL_ENV_VAR`]: crate::provider::PM_MODEL_ENV_VAR
+//! [`resolve_max_turns`]: crate::provider::resolve_max_turns
+//! [`MAX_TURNS_ENV_VAR`]: crate::provider::MAX_TURNS_ENV_VAR
 
 mod adapter;
 mod atlascloud;
@@ -52,8 +60,9 @@ pub use fireworks::FireworksProvider;
 pub use openrouter::OpenRouterProvider;
 pub use routing::{
     DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, DEFAULT_MODEL, DEFAULT_RUN_DEADLINE_SECS,
-    RUN_DEADLINE_ENV_VAR, resolve_context_window, resolve_deadline_secs, resolve_max_tokens,
-    resolve_model,
+    MAX_TURNS_ENV_VAR, PM_MODEL_ENV_VAR, RUN_DEADLINE_ENV_VAR, resolve_context_window,
+    resolve_deadline_secs, resolve_max_tokens, resolve_max_turns, resolve_model,
+    resolve_model_with_override, resolve_pm_model_override,
 };
 pub use together::TogetherProvider;
 pub use traits::{Provider, ToolChoice};

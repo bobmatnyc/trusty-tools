@@ -18,13 +18,16 @@ use crate::tools::RunContext;
 /// `404 zdr-violation-by-guardrail` by any OpenRouter account with the
 /// zero-data-retention (ZDR) guardrail enabled — every unpinned `run-task`
 /// and the ignored `agent_loop_live` smoke failed identically at the first
-/// chat call. `anthropic/claude-sonnet-4.5` is the same concrete slug
-/// [`normalize_model_alias`]'s `"sonnet"` alias already resolves to and is
-/// proven live against OpenRouter elsewhere in this repo, so it carries no
-/// new provider risk.
-/// What: The OpenRouter slug for Claude Sonnet 4.5.
-/// Test: `routing::tests::resolve_model_falls_back_to_default`.
-pub const DEFAULT_MODEL: &str = "anthropic/claude-sonnet-4.5";
+/// chat call. The default tracks whatever [`normalize_model_alias`]'s
+/// `"sonnet"` alias resolves to, so an unpinned run and a `--pm-model sonnet`
+/// run always reach the same provider slug.
+/// What: The OpenRouter slug for Claude Sonnet 5.
+/// Test: `routing::tests::resolve_model_falls_back_to_default`,
+/// `routing::tests::default_model_matches_the_sonnet_alias`.
+// #8128: retargeted from `anthropic/claude-sonnet-4.5` to the Claude 5 tier
+// Claude Code itself now runs; slug read from `GET
+// https://openrouter.ai/api/v1/models`.
+pub const DEFAULT_MODEL: &str = "anthropic/claude-sonnet-5";
 
 /// Default per-turn completion token cap when `[llm].max_tokens` is unset.
 ///
@@ -123,10 +126,14 @@ pub fn resolve_deadline_secs(cli_override: Option<u64>) -> u64 {
 /// Test: `routing::tests::normalize_model_alias_maps_short_aliases`,
 /// `routing::tests::normalize_model_alias_passes_through_concrete_slugs`,
 /// `assets::tests::every_embedded_agent_model_normalizes_to_a_valid_slug`.
+// #8128: the three targets track Claude Code's CURRENT tiers (opus 5 /
+// sonnet 5 / haiku 4.5, the newest Haiku OpenRouter serves), not the 4.5
+// generation they were pinned to. Each slug was read from `GET
+// https://openrouter.ai/api/v1/models`, never composed by hand.
 fn normalize_model_alias(model: &str) -> &str {
     match model.trim().to_ascii_lowercase().as_str() {
-        "opus" => "anthropic/claude-opus-4.5",
-        "sonnet" => "anthropic/claude-sonnet-4.5",
+        "opus" => "anthropic/claude-opus-5",
+        "sonnet" => "anthropic/claude-sonnet-5",
         "haiku" => "anthropic/claude-haiku-4.5",
         _ => model,
     }
@@ -166,6 +173,124 @@ pub fn resolve_model(agent_config: &AgentConfig, run_context: Option<&RunContext
 
     // 4. Built-in default.
     DEFAULT_MODEL.to_string()
+}
+
+/// Environment variable overriding the TOP-LEVEL (PM) agent's model (#8030).
+///
+/// Why: `--engineer-model`/[`ENGINEER_MODEL_ENV_VAR`] only rewire the
+/// DELEGATED runner, so the top-level agent's own calls could be repointed
+/// only by hand-editing the deployed `.trusty-code/agents/<agent>.md` — the
+/// concrete failure #8030 records is `--engineer-model` set to a ZDR-safe
+/// slug while the PM's own calls still 404'd on the old default.
+/// What: The middle precedence tier of [`resolve_pm_model_override`], below
+/// the `--pm-model` flag and above the agent's front-matter `model:`.
+/// Test: `routing::tests::resolve_pm_model_override_env_wins_over_nothing`,
+/// `routing::tests::resolve_pm_model_override_flag_wins_over_env`.
+pub const PM_MODEL_ENV_VAR: &str = "TCODE_PM_MODEL";
+
+/// Environment variable overriding the PM loop's turn cap (#8128).
+///
+/// Why: a bake-off/parity run against Claude Code's tiers needs a turn cap
+/// bigger than [`crate::agent_loop::AgentLoopConfig`]'s built-in 8 for a
+/// multi-step delivery task, and an env var raises it for a whole invocation
+/// without a flag at every call site — the same escape-hatch precedent
+/// [`RUN_DEADLINE_ENV_VAR`] sets.
+/// What: The middle precedence tier of [`resolve_max_turns`].
+/// Test: `routing::tests::resolve_max_turns_env_wins_over_default`,
+/// `routing::tests::resolve_max_turns_rejects_zero_from_env`.
+pub const MAX_TURNS_ENV_VAR: &str = "TCODE_MAX_TURNS";
+
+/// Resolve the TOP-LEVEL (PM) agent's model override for one invocation.
+///
+/// Why (#8030): the top-level agent's model had no CLI/env override at all —
+/// `resolve_model(&pm_config, None)` went straight to the agent's front
+/// matter. This is the missing first tier, shaped exactly like the engineer's
+/// so one precedence story covers both halves of a run.
+/// What: Returns the first non-blank of (1) `cli_override` (the `--pm-model`
+/// flag or `task.run`'s `pm_model` field), (2) [`PM_MODEL_ENV_VAR`]. `None`
+/// means "no override" and leaves [`resolve_model`]'s own ladder (front
+/// matter, then [`DEFAULT_MODEL`]) untouched. The returned value is NOT
+/// normalised here — [`resolve_model_with_override`] runs it through
+/// [`normalize_model_alias`] at the point of use, so `--pm-model opus`
+/// behaves exactly like `--engineer-model opus`.
+/// Test: `routing::tests::resolve_pm_model_override_flag_wins_over_env`,
+/// `routing::tests::resolve_pm_model_override_env_wins_over_nothing`,
+/// `routing::tests::resolve_pm_model_override_blank_is_absent`.
+pub fn resolve_pm_model_override(cli_override: Option<String>) -> Option<String> {
+    if let Some(model) = cli_override.filter(|s| !s.trim().is_empty()) {
+        return Some(model);
+    }
+    std::env::var(PM_MODEL_ENV_VAR)
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+}
+
+/// Resolve a model slug with an explicit per-run override ahead of the agent
+/// config (#8030).
+///
+/// Why: every top-level call site reads `resolve_model(&cfg, None)`, and
+/// threading a synthetic [`RunContext`] through each one purely to carry a
+/// CLI flag would restate a whole tool-call context to express one string.
+/// What: `override_model`, when non-blank, wins and is passed through
+/// [`normalize_model_alias`]; otherwise this is exactly
+/// `resolve_model(agent_config, None)`.
+/// Test: `routing::tests::resolve_model_with_override_wins_over_agent_config`,
+/// `routing::tests::resolve_model_with_override_normalizes_short_alias`,
+/// `routing::tests::resolve_model_with_override_absent_matches_resolve_model`.
+pub fn resolve_model_with_override(
+    agent_config: &AgentConfig,
+    override_model: Option<&str>,
+) -> String {
+    if let Some(model) = non_empty(override_model) {
+        return normalize_model_alias(model).to_string();
+    }
+    resolve_model(agent_config, None)
+}
+
+/// Resolve the PM loop's turn-cap override for one invocation (#8128).
+///
+/// Why: `run_task`/`task::executor` never overrode
+/// [`crate::agent_loop::AgentLoopConfig`]'s `max_turns: 8`, so a multi-step
+/// delivery task could not be given more turns without a rebuild.
+/// What: Returns the first of (1) `cli_override` (`--max-turns` /
+/// `task.run`'s `max_turns`), (2) [`MAX_TURNS_ENV_VAR`] parsed as a `u32`,
+/// else `Ok(None)` — "no override", which leaves the loop's own default in
+/// place so absent behaviour is unchanged. A zero from EITHER source is an
+/// `Err`: a zero-turn loop makes no LLM call at all and would report an
+/// empty run as a normal one. An unparseable env value is treated as absent
+/// (logged at `warn`), matching [`resolve_deadline_secs`].
+/// Test: `routing::tests::resolve_max_turns_flag_wins_over_env`,
+/// `routing::tests::resolve_max_turns_env_wins_over_default`,
+/// `routing::tests::resolve_max_turns_rejects_zero_from_flag`,
+/// `routing::tests::resolve_max_turns_rejects_zero_from_env`,
+/// `routing::tests::resolve_max_turns_invalid_env_falls_back_to_default`.
+pub fn resolve_max_turns(cli_override: Option<u32>) -> Result<Option<u32>, String> {
+    if let Some(turns) = cli_override {
+        if turns == 0 {
+            return Err("--max-turns must be at least 1 (0 would run no turns at all)".to_string());
+        }
+        return Ok(Some(turns));
+    }
+
+    if let Ok(raw) = std::env::var(MAX_TURNS_ENV_VAR) {
+        match raw.trim().parse::<u32>() {
+            Ok(0) => {
+                return Err(format!(
+                    "{MAX_TURNS_ENV_VAR}=0 is invalid: the turn cap must be at least 1 \
+                     (0 would run no turns at all)"
+                ));
+            }
+            Ok(turns) => return Ok(Some(turns)),
+            Err(e) => {
+                tracing::warn!(
+                    "{MAX_TURNS_ENV_VAR}={raw:?} is not a valid u32 ({e}); \
+                     falling back to the loop's built-in turn cap"
+                );
+            }
+        }
+    }
+
+    Ok(None)
 }
 
 /// Fallback context-window size (in tokens) for a model slug this resolver
@@ -257,6 +382,15 @@ fn non_empty(value: Option<&str>) -> Option<&str> {
 /// tests (mirrors `crate::mode::MODE_ENV_LOCK`'s identical rationale).
 #[cfg(test)]
 pub(crate) static RUN_DEADLINE_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Same rationale as [`RUN_DEADLINE_ENV_LOCK`], for the two process-wide
+/// top-level-override variables ([`PM_MODEL_ENV_VAR`], [`MAX_TURNS_ENV_VAR`]).
+/// One lock covers both: no test needs them held independently, and a single
+/// lock cannot deadlock against itself the way a pair acquired in two orders
+/// could (#8030, #8128).
+#[cfg(test)]
+pub(crate) static TOP_LEVEL_OVERRIDE_ENV_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -350,17 +484,29 @@ mod tests {
     /// Test: this test.
     #[test]
     fn normalize_model_alias_maps_short_aliases() {
-        assert_eq!(normalize_model_alias("opus"), "anthropic/claude-opus-4.5");
-        assert_eq!(
-            normalize_model_alias("sonnet"),
-            "anthropic/claude-sonnet-4.5"
-        );
+        // #8128: the Claude 5 tiers, read from OpenRouter's own model list.
+        assert_eq!(normalize_model_alias("opus"), "anthropic/claude-opus-5");
+        assert_eq!(normalize_model_alias("sonnet"), "anthropic/claude-sonnet-5");
         assert_eq!(normalize_model_alias("haiku"), "anthropic/claude-haiku-4.5");
         assert_eq!(
             normalize_model_alias("  Opus  "),
-            "anthropic/claude-opus-4.5",
+            "anthropic/claude-opus-5",
             "must be case-insensitive and trim surrounding whitespace"
         );
+    }
+
+    /// [`DEFAULT_MODEL`] is the SAME slug the `"sonnet"` alias resolves to.
+    ///
+    /// Why (#8128): the default's own docs promise an unpinned run and a
+    /// `--pm-model sonnet` run reach one provider slug. Pinning that here is
+    /// what stops the two from drifting the next time a tier moves — the
+    /// exact drift #8128 found, where the alias table and the default were
+    /// both stale but only one was noticed.
+    /// What: asserts the equality directly.
+    /// Test: this test.
+    #[test]
+    fn default_model_matches_the_sonnet_alias() {
+        assert_eq!(DEFAULT_MODEL, normalize_model_alias("sonnet"));
     }
 
     /// An already-concrete slug (or any string that isn't one of the three
@@ -399,7 +545,7 @@ mod tests {
     #[test]
     fn resolve_model_normalizes_short_alias_from_agent_config() {
         let config = cfg(Some("opus"), None);
-        assert_eq!(resolve_model(&config, None), "anthropic/claude-opus-4.5");
+        assert_eq!(resolve_model(&config, None), "anthropic/claude-opus-5");
     }
 
     /// [`resolve_model`] normalizes a bare alias sourced from a per-call
@@ -419,7 +565,7 @@ mod tests {
         };
         assert_eq!(
             resolve_model(&config, Some(&ctx)),
-            "anthropic/claude-sonnet-4.5"
+            "anthropic/claude-sonnet-5"
         );
     }
 
@@ -645,6 +791,230 @@ mod tests {
     async fn resolve_deadline_secs_falls_back_to_default() {
         with_env_deadline(None, || {
             assert_eq!(resolve_deadline_secs(None), DEFAULT_RUN_DEADLINE_SECS);
+        })
+        .await;
+    }
+
+    // ── #8030 / #8128: top-level PM overrides ───────────────────────────────
+
+    /// Serializes access to one of the two top-level-override env vars for a
+    /// single test closure, restoring the prior (absent) state afterward.
+    async fn with_env_var<T>(name: &str, value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let _guard = TOP_LEVEL_OVERRIDE_ENV_LOCK.lock().await;
+        // SAFETY: test-only env mutation; serialized by the lock above.
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var(name, v),
+                None => std::env::remove_var(name),
+            }
+        }
+        let result = f();
+        unsafe {
+            std::env::remove_var(name);
+        }
+        result
+    }
+
+    /// The `--pm-model` flag wins over [`PM_MODEL_ENV_VAR`].
+    ///
+    /// Why (#8030): an operator pinning the top-level model for one run must
+    /// not be silently overridden by an exported default.
+    /// What: env set to one slug, flag to another; assert the flag.
+    /// Test: this test.
+    #[tokio::test]
+    async fn resolve_pm_model_override_flag_wins_over_env() {
+        with_env_var(PM_MODEL_ENV_VAR, Some("anthropic/claude-haiku-4.5"), || {
+            assert_eq!(
+                resolve_pm_model_override(Some("anthropic/claude-opus-5".to_string())),
+                Some("anthropic/claude-opus-5".to_string())
+            );
+        })
+        .await;
+    }
+
+    /// [`PM_MODEL_ENV_VAR`] supplies the override when no flag is given, and
+    /// its absence means "no override at all".
+    ///
+    /// Why (#8030): the env tier is what lets a bake-off runner repoint the
+    /// top-level agent for a whole invocation without a flag at every call.
+    /// What: with the var set, the value is returned; unset, `None`.
+    /// Test: this test.
+    #[tokio::test]
+    async fn resolve_pm_model_override_env_wins_over_nothing() {
+        with_env_var(PM_MODEL_ENV_VAR, Some("anthropic/claude-opus-5"), || {
+            assert_eq!(
+                resolve_pm_model_override(None),
+                Some("anthropic/claude-opus-5".to_string())
+            );
+        })
+        .await;
+        with_env_var(PM_MODEL_ENV_VAR, None, || {
+            assert_eq!(resolve_pm_model_override(None), None);
+        })
+        .await;
+    }
+
+    /// A blank flag or env value is treated as absent at both tiers.
+    ///
+    /// Why: `--pm-model ""` (or an exported empty var) must fall through to
+    /// the agent's own model, not pin an empty slug a provider would reject.
+    /// What: blank flag with a blank env → `None`; blank flag with a real env
+    /// value → the env value.
+    /// Test: this test.
+    #[tokio::test]
+    async fn resolve_pm_model_override_blank_is_absent() {
+        with_env_var(PM_MODEL_ENV_VAR, Some("  "), || {
+            assert_eq!(resolve_pm_model_override(Some("   ".to_string())), None);
+        })
+        .await;
+        with_env_var(PM_MODEL_ENV_VAR, Some("anthropic/claude-opus-5"), || {
+            assert_eq!(
+                resolve_pm_model_override(Some("".to_string())),
+                Some("anthropic/claude-opus-5".to_string())
+            );
+        })
+        .await;
+    }
+
+    /// [`resolve_model_with_override`] puts the per-run override ahead of the
+    /// agent config.
+    ///
+    /// Why (#8030): this is the whole point of the new tier — the top-level
+    /// agent's front-matter `model:` must lose to an explicit run override.
+    /// What: config pins one slug, override names another; assert the
+    /// override.
+    /// Test: this test.
+    #[test]
+    fn resolve_model_with_override_wins_over_agent_config() {
+        let config = cfg(Some("anthropic/claude-haiku-4.5"), None);
+        assert_eq!(
+            resolve_model_with_override(&config, Some("anthropic/claude-opus-5")),
+            "anthropic/claude-opus-5"
+        );
+    }
+
+    /// A short alias reaching [`resolve_model_with_override`] is normalised,
+    /// exactly as one reaching [`resolve_model`] is.
+    ///
+    /// Why (#3438/#8030): `--pm-model opus` must behave like
+    /// `--engineer-model opus`; a bare alias on the wire is the
+    /// `"opus is not a valid model ID"` 400.
+    /// What: `"opus"` resolves to the concrete Claude 5 slug.
+    /// Test: this test.
+    #[test]
+    fn resolve_model_with_override_normalizes_short_alias() {
+        let config = cfg(Some("anthropic/claude-haiku-4.5"), None);
+        assert_eq!(
+            resolve_model_with_override(&config, Some("opus")),
+            "anthropic/claude-opus-5"
+        );
+    }
+
+    /// With no override, [`resolve_model_with_override`] is exactly
+    /// [`resolve_model`] — including the blank-is-absent rule.
+    ///
+    /// Why: the new tier must be additive; every pre-#8030 call site keeps
+    /// its behaviour byte-for-byte.
+    /// What: `None` and a blank string both fall through to the config, and a
+    /// configless agent falls through to [`DEFAULT_MODEL`].
+    /// Test: this test.
+    #[test]
+    fn resolve_model_with_override_absent_matches_resolve_model() {
+        let config = cfg(Some("anthropic/claude-haiku-4.5"), None);
+        assert_eq!(
+            resolve_model_with_override(&config, None),
+            resolve_model(&config, None)
+        );
+        assert_eq!(
+            resolve_model_with_override(&config, Some("  ")),
+            "anthropic/claude-haiku-4.5"
+        );
+        assert_eq!(
+            resolve_model_with_override(&cfg(None, None), None),
+            DEFAULT_MODEL
+        );
+    }
+
+    /// The `--max-turns` flag wins over [`MAX_TURNS_ENV_VAR`].
+    ///
+    /// Why (#8128): same precedence contract every other per-run override in
+    /// this module follows.
+    /// What: env set to one cap, flag to another; assert the flag.
+    /// Test: this test.
+    #[tokio::test]
+    async fn resolve_max_turns_flag_wins_over_env() {
+        with_env_var(MAX_TURNS_ENV_VAR, Some("40"), || {
+            assert_eq!(resolve_max_turns(Some(12)), Ok(Some(12)));
+        })
+        .await;
+    }
+
+    /// [`MAX_TURNS_ENV_VAR`] supplies the cap when no flag is given, and its
+    /// absence leaves the loop's own default in place.
+    ///
+    /// Why (#8128): `None` must mean "do not override", so an absent flag
+    /// changes nothing about a run.
+    /// What: with the var set, that cap is returned; unset, `Ok(None)`.
+    /// Test: this test.
+    #[tokio::test]
+    async fn resolve_max_turns_env_wins_over_default() {
+        with_env_var(MAX_TURNS_ENV_VAR, Some("40"), || {
+            assert_eq!(resolve_max_turns(None), Ok(Some(40)));
+        })
+        .await;
+        with_env_var(MAX_TURNS_ENV_VAR, None, || {
+            assert_eq!(resolve_max_turns(None), Ok(None));
+        })
+        .await;
+    }
+
+    /// A zero flag is an error, not a run that does nothing.
+    ///
+    /// Why (#8128): a zero-turn loop makes no LLM call and would report an
+    /// empty run as a normal one — the operator must be told, not guessed at.
+    /// What: `Some(0)` returns `Err` naming the flag.
+    /// Test: this test.
+    #[tokio::test]
+    async fn resolve_max_turns_rejects_zero_from_flag() {
+        with_env_var(MAX_TURNS_ENV_VAR, None, || {
+            let err = resolve_max_turns(Some(0)).expect_err("0 must be rejected");
+            assert!(
+                err.contains("--max-turns"),
+                "the error must name the flag; got {err:?}"
+            );
+        })
+        .await;
+    }
+
+    /// A zero env value is rejected the same way as a zero flag.
+    ///
+    /// Why (#8128): the env tier must not be a back door around the flag's
+    /// own validation.
+    /// What: `TCODE_MAX_TURNS=0` returns `Err` naming the variable.
+    /// Test: this test.
+    #[tokio::test]
+    async fn resolve_max_turns_rejects_zero_from_env() {
+        with_env_var(MAX_TURNS_ENV_VAR, Some("0"), || {
+            let err = resolve_max_turns(None).expect_err("0 must be rejected");
+            assert!(
+                err.contains(MAX_TURNS_ENV_VAR),
+                "the error must name the env var; got {err:?}"
+            );
+        })
+        .await;
+    }
+
+    /// An unparseable env value falls through to "no override" rather than
+    /// erroring the whole run.
+    ///
+    /// Why: matches [`resolve_deadline_secs`]'s established degrade-gracefully
+    /// contract for a misconfigured environment.
+    /// What: a non-numeric value yields `Ok(None)`.
+    /// Test: this test.
+    #[tokio::test]
+    async fn resolve_max_turns_invalid_env_falls_back_to_default() {
+        with_env_var(MAX_TURNS_ENV_VAR, Some("not-a-number"), || {
+            assert_eq!(resolve_max_turns(None), Ok(None));
         })
         .await;
     }

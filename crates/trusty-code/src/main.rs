@@ -188,6 +188,21 @@ enum Command {
         #[arg(long, value_name = "SLUG")]
         engineer_model: Option<String>,
 
+        /// Override the TOP-LEVEL agent's own model for this run only
+        /// (#8030) — the half `--engineer-model` never covered. Falls back to
+        /// `TCODE_PM_MODEL`, then the agent's front-matter `model:`, then the
+        /// built-in default. Accepts the short `opus`/`sonnet`/`haiku`
+        /// aliases. Applies to both execution paths.
+        #[arg(long, value_name = "SLUG")]
+        pm_model: Option<String>,
+
+        /// Override the top-level loop's turn cap for this run only (#8128).
+        /// Falls back to `TCODE_MAX_TURNS`, then the loop's built-in 8. Raise
+        /// it for a multi-step delivery task. Applies to both execution
+        /// paths. Must be at least 1.
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+        max_turns: Option<u32>,
+
         /// Use the ORIGINAL in-process execution path instead of the #2060
         /// thin JSON-RPC client. See this variant's docs for why it is kept.
         #[arg(long)]
@@ -537,6 +552,9 @@ async fn main() -> Result<()> {
             timeout_seconds,
             permission_mode,
             no_delegate,
+            // #8030/#8128: both reach either execution path below.
+            pm_model,
+            max_turns,
         } => {
             if legacy_in_process {
                 // #4434: the in-process path (and the agent-name validation
@@ -553,6 +571,8 @@ async fn main() -> Result<()> {
                     permission_mode,
                     // #8031: single-agent run — no `delegate_to_agent`.
                     no_delegate,
+                    pm_model,
+                    max_turns,
                 )
                 .await
             } else {
@@ -567,6 +587,8 @@ async fn main() -> Result<()> {
                     timeout_seconds,
                     // #8031: single-agent run — no `delegate_to_agent`.
                     no_delegate,
+                    pm_model,
+                    max_turns,
                 )
                 .await
                 {

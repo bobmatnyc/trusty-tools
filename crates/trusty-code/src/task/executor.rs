@@ -50,6 +50,7 @@ use crate::project_context::load_project_context;
 use crate::prompt::assemble_system_prompt_for_mode;
 use crate::provider::{
     resolve_context_window, resolve_deadline_secs, resolve_max_tokens, resolve_model,
+    resolve_model_with_override,
 };
 use crate::run_task::{
     RecordingLlmClient, SharedTranscript, aggregate_usage_per_role, resolve_agent_model_slug,
@@ -102,6 +103,22 @@ pub struct TaskRunParams {
     pub binding: ProjectBinding,
     pub agents_dir: PathBuf,
     pub model_override: Option<String>,
+    /// (#8030) Per-run override for the TOP-LEVEL agent's own model, carried
+    /// from `task.run`'s `pm_model` field (which the CLI's `--pm-model` flag
+    /// and `TCODE_PM_MODEL` feed). `None` leaves
+    /// [`crate::provider::resolve_model`]'s own ladder — the agent's front
+    /// matter, then `DEFAULT_MODEL` — exactly as it was before #8030. A short
+    /// alias (`opus`/`sonnet`/`haiku`) is normalised at the point of use.
+    /// Test: `task::executor::tests::pm_model_override_pins_the_top_level_model`,
+    /// `task::executor::tests::absent_pm_model_override_uses_the_agent_config_model_on_the_daemon_path`.
+    pub pm_model: Option<String>,
+    /// (#8128) Per-run override for this PM loop's turn cap, carried from
+    /// `task.run`'s `max_turns` field. `None` keeps
+    /// [`crate::agent_loop::AgentLoopConfig`]'s built-in 8, so an omitted
+    /// field is byte-for-byte the pre-#8128 behaviour. Rejected as
+    /// `invalid_argument` at the protocol layer when zero.
+    /// Test: `task::executor::tests::max_turns_override_reaches_the_pm_loop`.
+    pub max_turns: Option<u32>,
     pub mode: HarnessMode,
     /// Per-run wall-clock deadline override, in seconds (#2207). `None`
     /// falls through to `crate::provider::resolve_deadline_secs`'s env-var
@@ -369,7 +386,9 @@ async fn run_and_record(
     };
 
     let project_context = load_project_context(&work_root);
-    let pm_model = resolve_model(&pm_config, None);
+    // #8030: the top-level agent's model, with `task.run`'s `pm_model`
+    // (`--pm-model`/`TCODE_PM_MODEL`) ahead of its front matter.
+    let pm_model = resolve_model_with_override(&pm_config, params.pm_model.as_deref());
     let engineer_model = resolve_engineer_model(&params);
 
     // #2207: resolve the run's wall-clock deadline once, applied to BOTH the
@@ -507,69 +526,73 @@ async fn run_and_record(
         Arc::clone(&transcript),
     ));
 
-    let pm_loop = AgentLoop::new(
-        AgentLoopConfig {
-            model: pm_model.clone(),
-            max_tokens: resolve_max_tokens(&pm_config),
-            mode: params.mode,
-            timeout_secs: deadline_secs,
-            // #2308: model-aware compaction threshold — see
-            // `CompactionConfig::for_context_window`'s doc for why the
-            // struct-update `..AgentLoopConfig::default()` below must not be
-            // allowed to silently supply the flat, model-blind default here.
-            compaction: CompactionConfig::for_context_window(resolve_context_window(&pm_model)),
-            // #2346: the cadence compressor is opt-in per `AgentLoopConfig`
-            // (defaults to `None`) — this daemon-driven, persistent-session
-            // PM loop is the ONE call site that enables it, resolved from
-            // this project's `.claude/settings.json`/env-var precedence
-            // chain (`resolve_cadence_config`). The delegated engineer's own
-            // loop (`build_engineer_runner` below) and `run_task`'s legacy
-            // one-shot/bake-off path both keep the default `None` — zero
-            // behaviour change there, per #2346's explicit scope.
-            cadence: Some(resolve_cadence_config(&work_root)),
-            // #3902: test-only DI, see `TaskRunParams::telemetry_data_dir`'s
-            // docs. `None` (every production call site) falls through to
-            // `telemetry::default_data_dir()` unchanged.
-            telemetry_data_dir: params.telemetry_data_dir.clone(),
-            ..AgentLoopConfig::default()
-        },
-        pm_llm,
-        Arc::new(pm_registry),
-    )
-    .with_tool_event_sink(Arc::clone(&sink))
-    // (UI Phase 1) Attribute this loop's tool events to the PM. `sink` is the
-    // SAME `Arc` handed to `build_engineer_runner` above, so without this the
-    // PM's and the engineer's tool calls arrive on one stream indistinguishable
-    // from each other. `params.agent_name` (default `"pm"`) is the name the
-    // rest of the taxonomy already uses for this agent.
-    .with_agent(params.agent_name.clone())
-    // (DOC-39 AC-13) The PM/root agent also needs a STABLE id so its
-    // root-attributed events correlate — unlike a delegated engineer (a
-    // fresh UUID per `delegate_to_agent` spawn, see
-    // `runner::in_process::InProcessAgentRunner::run_pipeline`), the PM's
-    // loop is re-entered on EVERY `task.run` against this same session
-    // (`AgentLoop::run_with_transcript` against the persistent
-    // `pm_transcript`), so its id must be SESSION-scoped, not re-minted per
-    // call — otherwise the PM's own tool events would spuriously look like a
-    // new "spawn" on every run. Namespaced with a `pm-` prefix so it reads
-    // distinctly from an engineer's bare UUID in a raw event dump.
-    .with_agent_id(format!("pm-{session_id}"))
-    // (#3867) Stamps this session's real id onto every durable
-    // compression-telemetry JSONL record this loop's cadence/threshold
-    // instrumentation emits — see `AgentLoop::with_session_id`'s docs.
-    .with_session_id(session_id.clone())
-    // #7948: the PM's own calls are gated by the PM agent's `permissions:`
-    // block, under the same session-scoped context as its delegations.
-    .with_permission_gate(Arc::new(
-        permission_ctx.gate_for(Arc::new(pm_config.clone()), format!("pm-{session_id}")),
-    ))
-    .with_cancel_flag(Arc::clone(&cancel))
-    // #2279: mirrors `run_task::execute_run_task`'s own wiring — the PM
-    // never calls `bash` itself, so its verify-before-finish gate scans the
-    // delegated engineer's turns via the SAME shared `transcript` the
-    // engineer's `RecordingLlmClient` records into (`build_engineer_runner`
-    // above), rather than the PM's own (bash-less) transcript.
-    .with_finish_gate(crate::verify_gate::pm_finish_gate(Arc::clone(&transcript)));
+    let mut pm_loop_config = AgentLoopConfig {
+        model: pm_model.clone(),
+        max_tokens: resolve_max_tokens(&pm_config),
+        mode: params.mode,
+        timeout_secs: deadline_secs,
+        // #2308: model-aware compaction threshold — see
+        // `CompactionConfig::for_context_window`'s doc for why the
+        // struct-update `..AgentLoopConfig::default()` below must not be
+        // allowed to silently supply the flat, model-blind default here.
+        compaction: CompactionConfig::for_context_window(resolve_context_window(&pm_model)),
+        // #2346: the cadence compressor is opt-in per `AgentLoopConfig`
+        // (defaults to `None`) — this daemon-driven, persistent-session
+        // PM loop is the ONE call site that enables it, resolved from
+        // this project's `.claude/settings.json`/env-var precedence
+        // chain (`resolve_cadence_config`). The delegated engineer's own
+        // loop (`build_engineer_runner` below) and `run_task`'s legacy
+        // one-shot/bake-off path both keep the default `None` — zero
+        // behaviour change there, per #2346's explicit scope.
+        cadence: Some(resolve_cadence_config(&work_root)),
+        // #3902: test-only DI, see `TaskRunParams::telemetry_data_dir`'s
+        // docs. `None` (every production call site) falls through to
+        // `telemetry::default_data_dir()` unchanged.
+        telemetry_data_dir: params.telemetry_data_dir.clone(),
+        ..AgentLoopConfig::default()
+    };
+    // #8128: `task.run`'s `max_turns` (`--max-turns`/`TCODE_MAX_TURNS`).
+    // Applied after the literal so an ABSENT override leaves
+    // `AgentLoopConfig::default()`'s own cap of 8 untouched.
+    if let Some(turns) = params.max_turns {
+        pm_loop_config.max_turns = turns;
+    }
+
+    let pm_loop = AgentLoop::new(pm_loop_config, pm_llm, Arc::new(pm_registry))
+        .with_tool_event_sink(Arc::clone(&sink))
+        // (UI Phase 1) Attribute this loop's tool events to the PM. `sink` is the
+        // SAME `Arc` handed to `build_engineer_runner` above, so without this the
+        // PM's and the engineer's tool calls arrive on one stream indistinguishable
+        // from each other. `params.agent_name` (default `"pm"`) is the name the
+        // rest of the taxonomy already uses for this agent.
+        .with_agent(params.agent_name.clone())
+        // (DOC-39 AC-13) The PM/root agent also needs a STABLE id so its
+        // root-attributed events correlate — unlike a delegated engineer (a
+        // fresh UUID per `delegate_to_agent` spawn, see
+        // `runner::in_process::InProcessAgentRunner::run_pipeline`), the PM's
+        // loop is re-entered on EVERY `task.run` against this same session
+        // (`AgentLoop::run_with_transcript` against the persistent
+        // `pm_transcript`), so its id must be SESSION-scoped, not re-minted per
+        // call — otherwise the PM's own tool events would spuriously look like a
+        // new "spawn" on every run. Namespaced with a `pm-` prefix so it reads
+        // distinctly from an engineer's bare UUID in a raw event dump.
+        .with_agent_id(format!("pm-{session_id}"))
+        // (#3867) Stamps this session's real id onto every durable
+        // compression-telemetry JSONL record this loop's cadence/threshold
+        // instrumentation emits — see `AgentLoop::with_session_id`'s docs.
+        .with_session_id(session_id.clone())
+        // #7948: the PM's own calls are gated by the PM agent's `permissions:`
+        // block, under the same session-scoped context as its delegations.
+        .with_permission_gate(Arc::new(
+            permission_ctx.gate_for(Arc::new(pm_config.clone()), format!("pm-{session_id}")),
+        ))
+        .with_cancel_flag(Arc::clone(&cancel))
+        // #2279: mirrors `run_task::execute_run_task`'s own wiring — the PM
+        // never calls `bash` itself, so its verify-before-finish gate scans the
+        // delegated engineer's turns via the SAME shared `transcript` the
+        // engineer's `RecordingLlmClient` records into (`build_engineer_runner`
+        // above), rather than the PM's own (bash-less) transcript.
+        .with_finish_gate(crate::verify_gate::pm_finish_gate(Arc::clone(&transcript)));
 
     // #2345: mark "how much assistant text exists before this run" so the
     // turn recorder can later scope its durable dual-write to just THIS
