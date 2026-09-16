@@ -76,28 +76,13 @@ impl CodexSession {
     async fn spawn() -> Self {
         let data_dir = tempfile::tempdir().expect("tempdir");
 
-        // #7085: `DaemonGuard` only reaps in `Drop`, which a SIGKILL of this
-        // test binary skips — the stamp makes the daemon watch us instead.
-        let daemon = trusty_common::parent_death::exit_with_parent(
-            std::process::Command::new(binary())
-                .args(["serve", "--foreground"])
-                .env("TRUSTY_DATA_DIR_OVERRIDE", data_dir.path())
-                .env("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1")
-                .env("RUST_LOG", "warn")
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::inherit()),
-        )
-        .spawn()
-        .expect("spawn daemon");
-        // #5188: own the child BEFORE the readiness poll — that poll asserts,
-        // and an unguarded child would outlive the panic.
-        let daemon = DaemonGuard::new(daemon);
+        // #5188: the guard owns the child from the moment it exists, so the
+        // asserting readiness poll below cannot orphan it. #7085: the guard
+        // also applies the parent-death stamp, which is the only teardown that
+        // survives a SIGKILL of this test binary.
+        let daemon = DaemonGuard::spawn(data_dir.path());
 
-        let readiness_file = data_dir
-            .path()
-            .join("trusty-memory")
-            .join("trusty-memory.sock");
+        let readiness_file = common::socket_path(data_dir.path());
         let deadline = Instant::now() + DAEMON_BOOT_TIMEOUT;
         while !readiness_file.exists() {
             assert!(

@@ -17,6 +17,12 @@
 //! line. Nothing a stub writes may therefore be read directly — go through
 //! [`SleepingStub::argv`] / [`SleepingStub::pid`], which poll (#6231, #5073).
 //!
+//! The spawn cases need the reverse ordering too: the socket must be UNBOUND
+//! when the call is entered, or it attaches instead of spawning and the stub
+//! never runs. That is arranged by [`bind_socket_after_spawn`], which keys off
+//! the stub's own argv record rather than a wall clock — a timer raced the
+//! fixture's own setup and lost under compile load (#5073).
+//!
 //! The `TCODE_DAEMON_URL` isolation the old `EnvGuard` needed is gone with the
 //! env var itself. `TRUSTY_DATA_DIR_OVERRIDE` is still set, for the
 //! spawned-daemon log path alone.
@@ -224,6 +230,33 @@ async fn wait_for_record(path: &Path, label: &str) -> String {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("the spawned stub never recorded its {label} at {path:?}");
+}
+
+/// Bind the stub daemon socket only once `stub` has ACTUALLY been spawned.
+///
+/// Why (#5073): every spawn test needs the socket UNBOUND when
+/// [`ensure_daemon_with`] is entered. A socket already answering sends the call
+/// down the attach branch, which never executes the stub at all — and the argv
+/// wait afterwards then fails with "the spawned stub never recorded its argv",
+/// which is exactly the flake reported. These tests used to arrange the
+/// ordering with a 150 ms wall-clock delay, and that is a race against the
+/// test's OWN setup: writing the `sh` stub, `chmod`-ing it and entering
+/// `ensure_daemon_with` can outlast 150 ms on a machine that is also compiling,
+/// at which point the socket is live before the call starts and the attach
+/// branch wins. No shared file and no clobbered temp dir — one wall clock
+/// standing in for an ordering.
+/// What: waits for the stub's own argv record, which can only exist AFTER the
+/// spawn, and binds the socket only then. The ordering is causal, so no amount
+/// of load can invert it.
+/// Test: `a_stalled_setup_still_reaches_the_spawn_branch`, plus the three spawn
+/// tests that depend on it.
+fn bind_socket_after_spawn(stub: &SleepingStub, dir: &Path, binding: serde_json::Value) {
+    let argv_log = stub.argv_log.clone();
+    let dir = dir.to_path_buf();
+    tokio::spawn(async move {
+        wait_for_record(&argv_log, "argv").await;
+        stub_daemon_socket(&dir, Some(binding));
+    });
 }
 
 /// A stub that touches `marker` — used to PROVE a branch never spawned it.
@@ -454,17 +487,12 @@ async fn spawns_a_daemon_when_none_is_running() {
 
     let sock_dir = tempfile::tempdir().expect("socket dir");
     let socket = sock_dir.path().join("tcode.sock");
-    // Bound shortly AFTER the call starts, so the attach branch cannot win
-    // and the readiness wait is genuinely exercised.
-    let late = sock_dir.path().to_path_buf();
-    let binding = binding_json(Some(&canonical));
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(150)).await;
-        stub_daemon_socket(&late, Some(binding));
-    });
 
     let dir = tempfile::tempdir().expect("tempdir");
     let stub = SleepingStub::new(dir.path());
+    // Bound only once the stub has RUN, so the attach branch cannot win and
+    // the readiness wait is genuinely exercised (#5073).
+    bind_socket_after_spawn(&stub, sock_dir.path(), binding_json(Some(&canonical)));
 
     let resolved = ensure_daemon_with(Some(&canonical), &stub.path, &socket)
         .await
@@ -493,14 +521,10 @@ async fn spawns_projectless_when_the_tui_is_projectless() {
 
     let sock_dir = tempfile::tempdir().expect("socket dir");
     let socket = sock_dir.path().join("tcode.sock");
-    let late = sock_dir.path().to_path_buf();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(150)).await;
-        stub_daemon_socket(&late, Some(binding_json(None)));
-    });
 
     let dir = tempfile::tempdir().expect("tempdir");
     let stub = SleepingStub::new(dir.path());
+    bind_socket_after_spawn(&stub, sock_dir.path(), binding_json(None));
 
     ensure_daemon_with(None, &stub.path, &socket)
         .await
@@ -512,6 +536,49 @@ async fn spawns_projectless_when_the_tui_is_projectless() {
     assert!(
         !argv.contains("--project"),
         "a projectless TUI must not bind the daemon to a project: {argv}"
+    );
+}
+
+/// **The #5073 regression.** A setup slow enough to outlast the old 150 ms
+/// wall-clock bind must still exercise the SPAWN branch.
+///
+/// Why: the flake was never in `ensure_daemon_with` — a live socket really
+/// should be attached to. It was in the fixture: a socket bound on a timer
+/// races the test's own setup, and on a loaded machine it wins, so the call
+/// attaches, the stub never runs, and the argv wait dies with "the spawned
+/// stub never recorded its argv". Stalling here for well past 150 ms makes
+/// that losing order deterministic rather than load-dependent.
+/// What: arranges the late bind, sleeps far longer than the retired timer, and
+/// then requires the stub to have been executed.
+#[tokio::test]
+async fn a_stalled_setup_still_reaches_the_spawn_branch() {
+    let _lock = ENV_LOCK.lock().await;
+    let _env = EnvGuard::isolated();
+
+    let sock_dir = tempfile::tempdir().expect("socket dir");
+    let socket = sock_dir.path().join("tcode.sock");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let stub = SleepingStub::new(dir.path());
+    bind_socket_after_spawn(&stub, sock_dir.path(), binding_json(None));
+
+    // A saturated machine stalls between fixture setup and the call itself.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(
+        !socket_is_serving(&socket, Duration::from_millis(200)).await,
+        "nothing may answer {socket:?} before the stub has been spawned — a \
+         live socket here sends the call down the attach branch and the stub \
+         is never executed"
+    );
+
+    ensure_daemon_with(None, &stub.path, &socket)
+        .await
+        .expect("must spawn a daemon");
+
+    let argv = stub.argv().await;
+    assert!(
+        argv.contains("serve"),
+        "the spawn branch must have run the stub: {argv}"
     );
 }
 
@@ -588,11 +655,7 @@ async fn the_tui_never_signals_the_daemon_on_exit() {
     let our_pid = {
         let _env = EnvGuard::isolated();
         let socket = sock_dir.path().join("tcode.sock");
-        let late = sock_dir.path().to_path_buf();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(150)).await;
-            stub_daemon_socket(&late, Some(binding_json(None)));
-        });
+        bind_socket_after_spawn(&stub, sock_dir.path(), binding_json(None));
         let resolved = ensure_daemon_with(None, &stub.path, &socket)
             .await
             .expect("must spawn a daemon");
