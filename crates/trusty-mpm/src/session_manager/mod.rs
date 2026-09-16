@@ -51,6 +51,9 @@ pub mod store_health;
 // #5007: corruption detection and the offline truncate-to-last-valid-document
 // repair behind `tm repair session-store`.
 pub mod store_integrity;
+// #5699: the post-send submit probe — what a pane read can actually establish
+// about a `session_send` that tmux accepted.
+pub mod submit_probe;
 pub mod task_inject;
 pub mod workspace_guard;
 // #6497: the explicit ownership transfer for a tree whose owner is provably
@@ -222,6 +225,7 @@ pub use retention::{
 pub use session_guard::TmuxSessionGuard;
 pub use slots::{NumberedSlot, SlotRegistry};
 pub use store::{SessionStore, StoreDegradation, StoreError};
+pub use submit_probe::{SubmitState, classify_submit};
 pub use task_inject::should_inject_task;
 pub use worktree_safety::{DirtyWorktree, DirtyWorktreePolicy};
 

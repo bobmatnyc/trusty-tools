@@ -91,6 +91,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use trusty_mpm::client::ManagedSessionSummary;
+// #6118: one spelling of the unresolved-workdir sentinel, shared with the
+// daemon-side readers of it.
+use trusty_mpm::session_manager::record::UNRESOLVED_PATH_SENTINEL;
 
 /// Maximum number of CONFIRMED dead records one call may decommission (critic
 /// HIGH finding #1, owner request 2026-07-29).
@@ -489,8 +492,17 @@ fn workdir_candidates(s: &ManagedSessionSummary) -> [Option<&str>; 2] {
 /// `auto_prune_keeps_stopped_record_whose_workspace_still_exists`,
 /// `auto_prune_keeps_record_whose_parent_directory_is_unreachable`,
 /// `auto_prune_clears_record_whose_worktree_root_survived_the_removal`,
-/// `auto_prune_keeps_record_when_the_worktree_root_itself_is_gone`.
+/// `auto_prune_keeps_record_when_the_worktree_root_itself_is_gone`,
+/// `auto_prune_clears_an_adopted_record_that_names_no_workspace_at_all`.
 async fn workspace_verified_gone(s: &ManagedSessionSummary) -> bool {
+    // #6118: a record that names NOTHING has nothing to probe, so the loop
+    // below falls through to `false` and keeps it forever. That is the right
+    // answer for a legacy record whose daemon simply omitted the fields, and
+    // the wrong one for an adoption ghost, which names nothing BECAUSE its
+    // workspace could not be resolved — the one thing it is certain of.
+    if adopted_with_unresolvable_workspace(s) {
+        return true;
+    }
     let mut probed_any = false;
     for candidate in workdir_candidates(s).into_iter().flatten() {
         probed_any = true;
@@ -508,6 +520,53 @@ async fn workspace_verified_gone(s: &ManagedSessionSummary) -> bool {
         }
     }
     probed_any
+}
+
+/// The `task` text a pre-#6126 external-adopt wrote when it could not resolve
+/// the pane's working directory (#6118).
+///
+/// Why: such a record is the ONLY shape that legitimately reaches the picker
+/// naming no workdir at all. Matched as a substring of `task` because that
+/// string is the only distinguishing signal on the wire — the summary carries
+/// no adoption flag, and adding one would need a daemon change, which this
+/// client-side fix deliberately avoids so it works against an already-running
+/// older daemon (the same constraint `workspace_verified_gone` was written
+/// under).
+const UNRESOLVED_ADOPTION_TASK_MARKER: &str = "workspace path could not be resolved";
+
+/// Whether this row is an adoption ghost with no resolvable workspace (#6118).
+///
+/// 🔴 This is a RECORD-SHAPE test with no filesystem probe, deliberately — the
+/// client-side mirror of `session_manager::SessionRecord::workspace_unresolvable`,
+/// and for the same reason. `try_exists` answers `Ok(false)` for every path on
+/// an unmounted volume, so any probe-based widening of "unresolvable" would
+/// select a whole unplugged drive's sessions at once, which is the
+/// mass-tombstone hazard [`workspace_verified_gone`] documents at length. A
+/// record that still NAMES a directory is never unresolvable by this rule,
+/// however unreachable that directory currently is; it falls through to the
+/// corroborated probe unchanged.
+///
+/// What: `true` only when no workdir candidate names anything other than
+/// [`UNRESOLVED_PATH_SENTINEL`], AND `task` carries
+/// [`UNRESOLVED_ADOPTION_TASK_MARKER`]. The task marker is what separates an
+/// adoption ghost (names nothing because resolution FAILED) from a legacy
+/// record whose older daemon omitted the fields (names nothing because they
+/// were never serialized) — the latter stays unverifiable, and unverifiable is
+/// not dead.
+/// Test: `auto_prune_clears_an_adopted_record_that_names_no_workspace_at_all`,
+/// `auto_prune_keeps_an_adopted_record_whose_workspace_is_merely_unreachable`,
+/// `auto_prune_keeps_a_legacy_record_that_names_no_workspace_and_no_adoption`.
+fn adopted_with_unresolvable_workspace(s: &ManagedSessionSummary) -> bool {
+    let names_a_real_path = workdir_candidates(s)
+        .into_iter()
+        .flatten()
+        .any(|p| p != UNRESOLVED_PATH_SENTINEL);
+    if names_a_real_path {
+        return false;
+    }
+    s.task
+        .as_deref()
+        .is_some_and(|t| t.contains(UNRESOLVED_ADOPTION_TASK_MARKER))
 }
 
 /// Directory-name pairs naming a git-worktree CONTAINER — the stable root under

@@ -1011,7 +1011,6 @@ crates/trusty-mpm/src/daemon/tmux.rs	send_keys_literal_argv
 crates/trusty-mpm/src/daemon/tmux.rs	set_environment_argv
 crates/trusty-mpm/src/runtime/claude_code.rs	prepare_managed_config_writes_no_mcp_approval
 crates/trusty-mpm/src/runtime/claude_code.rs	prepare_managed_config_writes_no_mcp_json
-crates/trusty-mpm/src/services/discoverer/tests.rs	debug_assertions
 crates/trusty-mpm/src/session_manager/naming_tests.rs	reconcile_flags_unresolvable_adopted_session_as_unmanaged
 crates/trusty-mpm/src/session_manager/task_inject.rs	inject_when_ready_waits_out_blocking_modal_then_succeeds
 crates/trusty-mpm/src/tui/health/probes.rs	project_index_rows

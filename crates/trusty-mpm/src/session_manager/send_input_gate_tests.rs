@@ -180,3 +180,108 @@ async fn manager_send_input_skips_modal_probe_for_tcode() {
     let calls = fake.send_calls.lock().unwrap();
     assert!(calls.iter().any(|(_, text)| text == "hello tcode"));
 }
+
+/// `send_input_observed` must report the UNSUBMITTED state when the pane still
+/// shows a collapsed bracketed paste after the send (#5699).
+///
+/// Why: this is the defect. `send_input` succeeds the moment the two tmux
+/// subprocesses exit 0, and the `session_send` MCP tool turned that into
+/// `{"sent": true}` — while the message sat in Claude Code's input buffer as a
+/// `[Pasted text #1]` placeholder that the trailing Enter never committed.
+/// Against PRE-FIX code there is no `send_input_observed` at all and `sent` is
+/// a hardcoded literal, so no post-send pane read happens and this assertion
+/// cannot hold. Asserting the send ALSO fired proves the verdict describes a
+/// real dispatch rather than a refusal.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn send_input_observed_reports_unsubmitted_paste() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, fake) = make_manager(&dir).await;
+
+    let record = mgr
+        .create(
+            "task".into(),
+            Some(PathBuf::from("/tmp/x")),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create");
+    {
+        let mut store = mgr.store.write().await;
+        let mut r = store.get(&record.id).await.unwrap();
+        r.state = ManagedSessionState::Active;
+        store.upsert(r).await.unwrap();
+    }
+    // The exact prompt line issue #5699 recorded on the live session.
+    fake.capture_responses.lock().unwrap().insert(
+        record.tmux_name.clone(),
+        "❯ [Pasted text #1][Pasted text #2]".into(),
+    );
+
+    let state = mgr
+        .send_input_observed(&record.id, "a very long coordination message")
+        .await
+        .expect("the send itself succeeds — only the SUBMIT is in question");
+    assert_eq!(
+        state,
+        crate::session_manager::SubmitState::UnsubmittedPaste,
+        "a pane still showing a collapsed paste proves the Enter did not commit"
+    );
+    assert!(
+        !state.delivered(),
+        "`sent` must be false for an observed unsubmitted paste (pre-fix: hardcoded true)"
+    );
+    assert!(
+        fake.send_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, text)| text == "a very long coordination message"),
+        "the text was typed — the verdict is about submission, not dispatch"
+    );
+}
+
+/// A pane back at its ready prompt after the send reports `Submitted` (#5699).
+///
+/// Why: the healthy-path guard on the same probe — the fix must not start
+/// reporting a delivery problem for every ordinary send. Paired with
+/// `send_input_observed_reports_unsubmitted_paste`, this proves the verdict
+/// tracks the pane content rather than being constant in either direction.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn send_input_observed_reports_submitted_on_a_clean_prompt() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, fake) = make_manager(&dir).await;
+
+    let record = mgr
+        .create(
+            "task".into(),
+            Some(PathBuf::from("/tmp/x")),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create");
+    {
+        let mut store = mgr.store.write().await;
+        let mut r = store.get(&record.id).await.unwrap();
+        r.state = ManagedSessionState::Active;
+        store.upsert(r).await.unwrap();
+    }
+    fake.capture_responses
+        .lock()
+        .unwrap()
+        .insert(record.tmux_name.clone(), "● Working…\n❯ ".into());
+
+    let state = mgr
+        .send_input_observed(&record.id, "short message")
+        .await
+        .expect("send");
+    assert_eq!(state, crate::session_manager::SubmitState::Submitted);
+    assert!(state.delivered());
+}

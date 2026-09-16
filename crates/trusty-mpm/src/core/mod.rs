@@ -134,6 +134,10 @@ pub mod external_session;
 pub mod frontmatter;
 pub mod gh_account;
 pub mod gh_identity;
+// #7059: the in-process stand-in for the scoped `gh` subprocesses — a test
+// seam, compiled out of every `--release` build (see the module docs).
+#[cfg(any(test, debug_assertions))]
+pub mod gh_scoped_stub;
 pub mod git_identity;
 pub mod harness_root;
 pub mod home_trust_seed;
