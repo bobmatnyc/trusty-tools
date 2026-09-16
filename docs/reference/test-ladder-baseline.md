@@ -193,6 +193,17 @@ job on every PR built off `main` until fixed. Also flagged on #7351.
 matches zero tests and exits 0 — the #4307 class of a green run that proved
 nothing.
 
+### A `--test` selector does not build the crate's examples (#7951)
+
+`cargo test --test <stem>` builds that one target. A fixture binary living in
+`examples/` is therefore whatever copy was compiled last: `cargo test -p
+<crate>` builds examples, the `--test` selector does not, so a source change to
+the fixture is invisible — a wrong-reason failure or a silent false green.
+`crates/trusty-code/tests/mcp_loader_e2e.rs` ran against a stale
+`examples/mcp_fixture_server` this way; its `fixture_binary()` now runs `cargo
+build --example` into the running test's own target dir and profile before use.
+A test that shells out to an example fixture owes the same rebuild.
+
 ### A `--path`-included module filters by module path, not source basename (#7866)
 
 `crates/trusty-mpm/src/test_support.rs` pulls in `test_tmux_session.rs` via

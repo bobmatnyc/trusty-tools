@@ -2229,3 +2229,24 @@ fn version_control_gate_requires_a_clean_tree_before_push_7739() {
         "tm-workflow.md is missing the #7739 clean-tree-before-gate rule"
     );
 }
+
+/// #7871: the ticketing agent reported that a repository carried no `done`
+/// lifecycle label without listing the repository's labels first —
+/// adaptive-crm carried `unicorn:done` the whole time. The asset must send the
+/// agent to the live list before any absence claim, and say what to do with
+/// each answer the list can give.
+#[test]
+fn ticketing_reads_the_live_label_list_before_claiming_a_label_is_absent_7871() {
+    for needle in [
+        "#7871",
+        "never call a label absent without `gh label list` in front of you",
+        "gh label list -R <owner>/<repo> --limit 200",
+        "`gh label create <name>` and report what you created",
+    ] {
+        assert!(
+            TICKETING_AGENT.contains(needle),
+            "ticketing.md is missing the #7871 list-before-asserting-absence \
+             rule: {needle:?}"
+        );
+    }
+}
