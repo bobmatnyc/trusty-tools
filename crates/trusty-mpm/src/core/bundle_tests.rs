@@ -2250,3 +2250,87 @@ fn ticketing_reads_the_live_label_list_before_claiming_a_label_is_absent_7871() 
         );
     }
 }
+
+/// #8013: a 5xx or timeout from a mutating `gh` call is not proof the call
+/// failed — `version-control` retried `gh pr merge` after a 502 without
+/// checking whether the merge had already landed, and the retry's side
+/// effects (a dropped `--delete-branch`, a missed webhook) went unnoticed.
+#[test]
+fn version_control_verifies_before_retrying_a_5xx_8013() {
+    assert!(
+        VERSION_CONTROL_AGENT.contains("5xx") && VERSION_CONTROL_AGENT.contains("#8013"),
+        "version-control.md is missing the #8013 verify-before-retry rule"
+    );
+    assert!(
+        VERSION_CONTROL_AGENT.contains("gh pr view --json state,mergeCommit"),
+        "version-control.md must name the state-read command that gates a retry (#8013)"
+    );
+}
+
+/// #8014: `version-control` took a PM brief's `e.g.` example commit subject
+/// literally instead of deriving the real subject from the change, so the
+/// squash-merge commit subject didn't match its own PR's title.
+#[test]
+fn version_control_treats_brief_examples_as_shapes_8014() {
+    assert!(
+        VERSION_CONTROL_AGENT.contains("is a shape, not a literal")
+            && VERSION_CONTROL_AGENT.contains("#8014"),
+        "version-control.md is missing the #8014 brief-example-is-a-shape rule"
+    );
+}
+
+/// #8015: asked to store findings AND report them, the research agent's final
+/// report was only a memory-drawer pointer, so the PM had to load
+/// `memory_recall` to read the actual conclusion.
+#[test]
+fn research_report_carries_findings_not_just_a_memory_pointer_8015() {
+    assert!(
+        RESEARCH_AGENT.contains("never replaces the report") && RESEARCH_AGENT.contains("#8015"),
+        "research.md is missing the #8015 report-carries-findings rule"
+    );
+}
+
+/// #8022: closing a sibling tab dropped the web-qa agent's MCP tab group,
+/// and the agent had no recovery step — a `computer` call on a still-open
+/// tab in that group then failed with a stale cross-extension error.
+#[test]
+fn web_qa_recovers_a_dropped_tab_group_8022() {
+    assert!(
+        WEB_QA_AGENT.contains("Never close the last other tab") && WEB_QA_AGENT.contains("#8022"),
+        "web-qa.md is missing the #8022 tab-group-recovery rule"
+    );
+    assert!(
+        WEB_QA_AGENT.contains("tabs_context_mcp"),
+        "web-qa.md must name `tabs_context_mcp` as the recovery check (#8022)"
+    );
+}
+
+/// #8023: vercel-ops guidance named no source of truth for confirming which
+/// commit a deployment serves, and no recovery path for a dropped webhook —
+/// the agent lost a round-trip re-deriving both by hand.
+#[test]
+fn vercel_ops_names_commit_verification_and_webhook_recovery_8023() {
+    assert!(
+        VERCEL_OPS_AGENT.contains("meta.githubCommitSha") && VERCEL_OPS_AGENT.contains("#8023"),
+        "vercel-ops.md is missing the #8023 commit-verification source"
+    );
+    assert!(
+        VERCEL_OPS_AGENT.contains("POST /v13/deployments"),
+        "vercel-ops.md must name the git-sourced redeploy path for a dropped webhook (#8023)"
+    );
+}
+
+/// #8027: local-ops ignored a diagnose-only brief's restrictions and cited a
+/// stale log (last written before the incident window) as root cause.
+#[test]
+fn local_ops_honours_diagnose_only_briefs_8027() {
+    assert!(
+        LOCAL_OPS_AGENT.contains("A diagnose-only brief overrides this playbook")
+            && LOCAL_OPS_AGENT.contains("#8027"),
+        "local-ops.md is missing the #8027 diagnose-only-overrides-playbook rule"
+    );
+    assert!(
+        LOCAL_OPS_AGENT.contains("check its mtime against"),
+        "local-ops.md must state the log-mtime check before citing root cause (#8027)"
+    );
+}
