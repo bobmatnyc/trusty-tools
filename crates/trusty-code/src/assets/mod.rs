@@ -152,6 +152,7 @@
 //! and every skill's frontmatter `name:` matches its table key.
 //!
 //! [`EmbeddedAgent`]: crate::assets::EmbeddedAgent
+//! [`EmbeddedAgent::Direct`]: crate::assets::EmbeddedAgent::Direct
 //! [`DEFAULT_AGENTS`]: crate::assets::DEFAULT_AGENTS
 //! [`EMBEDDED_TM_AGENT_SOURCES`]: crate::assets::EMBEDDED_TM_AGENT_SOURCES
 //! [`EmbeddedSkill`]: crate::assets::EmbeddedSkill

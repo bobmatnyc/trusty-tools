@@ -1,7 +1,8 @@
 //! Pinned, symlink-refusing write handles beneath `<project>/.trusty-code/`
 //! (#7779).
 //!
-//! Why: [`check_native_write_target`] answers "is this a legal write target?"
+//! Why: [`super::check_native_write_target`] answers "is this a legal write
+//! target?"
 //! against the filesystem as it looked when it was called. Every caller then
 //! wrote through the same path STRING, so a directory swapped for a symlink at
 //! any component between the two was followed and the write landed outside the
