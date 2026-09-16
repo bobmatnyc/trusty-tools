@@ -300,12 +300,14 @@ pub fn current_rss_mb() -> Option<u64> {
 /// sample), or if the platform call fails.
 ///
 /// Test: `tests::test_rss_for_self_pid` calls this with `std::process::id()`
-/// and checks the result is sane, loosely agrees with `current_rss_mb()`
+/// and checks the result is sane and loosely agrees with `current_rss_mb()`
 /// (trivially true now that both delegate to this function, modulo
 /// concurrent-allocation drift between the two calls — see that test's doc
-/// for why the bound is relative rather than a fixed MB count), and that RSS
-/// visibly grows after a deliberate allocation (issue #3702). Negative
-/// cases (pid=0, bogus pid) assert `None`.
+/// for why the bound is relative rather than a fixed MB count).
+/// `tests::test_rss_for_pid_tracks_live_growth` proves the reading is live
+/// rather than cached, by sampling a quiet child process across a deliberate
+/// allocation (issue #3702, made deterministic by #7926). Negative cases
+/// (pid=0, bogus pid) assert `None`.
 pub fn current_rss_mb_for_pid(pid: u32) -> Option<u64> {
     if pid == 0 {
         return None;
@@ -599,17 +601,17 @@ mod tests {
     ///      enough to absorb the CI-observed concurrent-churn diffs above,
     ///      while still failing if the two sampling paths genuinely
     ///      diverge;
-    ///   3. after deliberately committing and touching a fresh 128 MB
-    ///      buffer, a re-measurement must show RSS grew by at least a
-    ///      quarter of that (32 MB) — this is the check that actually
-    ///      proves the sampler tracks *live* memory rather than a
-    ///      stale/cached number, a bug class the peer-agreement check alone
-    ///      cannot catch (a frozen value could coincidentally agree with a
-    ///      fresh one). The margin (32 MB required vs. 128 MB committed)
-    ///      comfortably absorbs the largest concurrent-churn diff CI has
-    ///      observed (30 MB) even in the adversarial case where sibling
-    ///      tests are simultaneously freeing memory elsewhere in the
-    ///      process.
+    ///
+    /// Why the growth check moved out (issue #7926): a third assertion used
+    /// to commit a 128 MB buffer here and require the next sample to be at
+    /// least 32 MB higher. Both samples read the WHOLE test binary, whose
+    /// RSS every sibling test moves, so a sibling freeing more than it
+    /// allocated inside the window made RSS *fall* across a 128 MB
+    /// allocation — observed as `before=402MB, after=203MB`, reported as a
+    /// stale sampler. Widening the margin cannot fix it: there is no bound
+    /// on how much concurrent memory a sibling can release. The liveness
+    /// property is real and still proven, against a process nothing else
+    /// perturbs — see `test_rss_for_pid_tracks_live_growth`.
     ///
     /// Test: this test.
     #[test]
@@ -643,31 +645,180 @@ mod tests {
             "current_rss_mb()={a}MB and current_rss_mb_for_pid({self_pid})={b}MB differ by \
              {diff}MB, more than 60% of {baseline}MB - suspect the two sampling paths diverged"
         );
+    }
 
-        // Deliberately grow RSS and confirm the sampler notices. Unlike the
-        // peer-agreement check above, this catches a sampler that returns a
-        // plausible-looking but *stale* value (e.g. cached at process
-        // start), since a frozen reading would show ~0 growth here
-        // regardless of what it happens to agree with above.
-        const GROW_MB: u64 = 128;
-        const MIN_EXPECTED_GROWTH_MB: u64 = GROW_MB / 4;
-        let mut buf = vec![0u8; (GROW_MB * 1024 * 1024) as usize];
-        // Touch every page so it's actually resident, not just reserved
-        // address space (a zeroed Vec's pages can otherwise be lazily
-        // backed by the OS until first write).
+    /// Env var that turns [`rss_probe_child`] into the probe child.
+    ///
+    /// Why: the helper is a `#[test]`, so `--include-ignored` can reach it on
+    /// its own. Without this marker it would block on a handshake nobody is
+    /// driving; with it absent the helper returns immediately.
+    const PROBE_CHILD_ENV: &str = "TRUSTY_RSS_PROBE_CHILD";
+
+    /// Handshake markers the probe child writes on stdout.
+    const PROBE_READY: &str = "trusty-rss-probe: ready";
+    const PROBE_GROWN: &str = "trusty-rss-probe: grown";
+
+    /// How much the probe child commits, and the growth the parent demands.
+    ///
+    /// The child is quiet — nothing but this allocation moves its RSS — so
+    /// the observed growth is ~128 MB. The 4x margin absorbs page-size and
+    /// MB-rounding effects, not concurrency noise; there is none to absorb.
+    const PROBE_GROW_MB: u64 = 128;
+    const PROBE_MIN_GROWTH_MB: u64 = PROBE_GROW_MB / 4;
+
+    /// Read `out` until a line CONTAINS `marker`. `false` on EOF/error.
+    ///
+    /// Substring, not equality: libtest writes `test <name> ... ` with no
+    /// trailing newline before the test runs, so the child's first marker
+    /// shares that line. Its other `--nocapture` lines are skipped rather
+    /// than treated as a protocol violation.
+    fn wait_for_line(out: &mut impl std::io::BufRead, marker: &str) -> bool {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match out.read_line(&mut line) {
+                Ok(0) | Err(_) => return false,
+                Ok(_) if line.contains(marker) => return true,
+                Ok(_) => {}
+            }
+        }
+    }
+
+    /// `current_rss_mb_for_pid` must track a process's LIVE memory, not a
+    /// value cached at first call.
+    ///
+    /// Why (issue #3702, made deterministic by issue #7926): the sanity band
+    /// and peer-agreement checks in `test_rss_for_self_pid` cannot catch a
+    /// frozen reading — a stale value can be plausible and can agree with
+    /// another stale value. Only a sample taken across a known allocation
+    /// can. Taking that pair against our OWN pid is what made the old check
+    /// flaky: both samples read the whole test binary, so a sibling test
+    /// freeing memory inside the window could drive RSS DOWN across a
+    /// 128 MB allocation (`before=402MB, after=203MB` on 2026-09-14).
+    /// What: re-execs this test binary as the ignored [`rss_probe_child`]
+    /// helper, which allocates only when told to. The parent samples the
+    /// CHILD's pid either side of that allocation — a process no sibling
+    /// test can perturb — and requires the reading to rise. This also
+    /// exercises the arbitrary-pid path the function exists for (sampling
+    /// the embedderd sidecar) rather than the self-pid shortcut.
+    /// Test: this test, with `rss_probe_child` as its fixture.
+    // #7926: the growth pair is sampled on a quiet child, not on this
+    // process, because sibling tests move this process's RSS in both
+    // directions.
+    #[test]
+    fn test_rss_for_pid_tracks_live_growth() {
+        use std::io::{BufReader, Write};
+        use std::process::{Command, Stdio};
+
+        let exe = std::env::current_exe().expect("the running test binary has a path");
+        let mut child = Command::new(exe)
+            .args([
+                "--exact",
+                "--ignored",
+                "--nocapture",
+                "--test-threads",
+                "1",
+                "core::memguard::tests::rss_probe_child",
+            ])
+            .env(PROBE_CHILD_ENV, "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("re-exec this test binary as the RSS probe child");
+        let child_pid = child.id();
+        let stdout = child.stdout.take().expect("child stdout is piped");
+        let mut to_child = child.stdin.take().expect("child stdin is piped");
+
+        // The handshake runs on a worker so the main thread keeps a deadline:
+        // a child that never answers must fail this test, never hang the run.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let probe = std::thread::spawn(move || {
+            let mut out = BufReader::new(stdout);
+            if !wait_for_line(&mut out, PROBE_READY) {
+                let _ = tx.send(Err("probe child exited before it was ready"));
+                return;
+            }
+            let before = current_rss_mb_for_pid(child_pid);
+            if writeln!(to_child, "grow")
+                .and_then(|()| to_child.flush())
+                .is_err()
+            {
+                let _ = tx.send(Err("could not release the probe child"));
+                return;
+            }
+            if !wait_for_line(&mut out, PROBE_GROWN) {
+                let _ = tx.send(Err("probe child exited before it committed its buffer"));
+                return;
+            }
+            let _ = tx.send(Ok((before, current_rss_mb_for_pid(child_pid))));
+            // `to_child` drops here: EOF is the child's exit signal.
+        });
+
+        let outcome = rx.recv_timeout(std::time::Duration::from_secs(60));
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = probe.join();
+
+        let sampled = match outcome {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(why)) => panic!("{why}"),
+            Err(_) => panic!("probe child did not complete the handshake within 60s"),
+        };
+        let (Some(before), Some(after)) = sampled else {
+            // Neither sampling path could resolve a live child pid — the same
+            // platform tolerance the other RSS tests grant.
+            return;
+        };
+        let grown = after.saturating_sub(before);
+        assert!(
+            grown >= PROBE_MIN_GROWTH_MB,
+            "expected the probe child's RSS to grow by at least {PROBE_MIN_GROWTH_MB}MB after \
+             it committed a fresh {PROBE_GROW_MB}MB buffer, but it grew by {grown}MB \
+             (before={before}MB, after={after}MB) - sampler may be returning a stale reading"
+        );
+    }
+
+    /// Fixture for [`test_rss_for_pid_tracks_live_growth`]: a process whose
+    /// RSS moves only when the parent says so.
+    ///
+    /// Why: the parent needs a quiet process to sample. Re-executing this
+    /// test binary is the only one a unit test can obtain.
+    /// What: prints `PROBE_READY`, waits for a line, commits and touches
+    /// `PROBE_GROW_MB`, prints `PROBE_GROWN`, then holds the buffer until
+    /// stdin reaches EOF. Returns immediately unless `PROBE_CHILD_ENV` is
+    /// set, so an `--include-ignored` run never blocks on it.
+    /// Test: driven by `test_rss_for_pid_tracks_live_growth`.
+    #[test]
+    #[ignore = "fixture process for test_rss_for_pid_tracks_live_growth"]
+    fn rss_probe_child() {
+        use std::io::{BufRead, Write};
+
+        if std::env::var_os(PROBE_CHILD_ENV).is_none() {
+            return;
+        }
+        let stdin = std::io::stdin();
+        let mut input = stdin.lock();
+        let mut line = String::new();
+
+        println!("{PROBE_READY}");
+        let _ = std::io::stdout().flush();
+        if input.read_line(&mut line).unwrap_or(0) == 0 {
+            return;
+        }
+
+        let mut buf = vec![0u8; (PROBE_GROW_MB * 1024 * 1024) as usize];
+        // Touch every page so it is actually resident, not just reserved
+        // address space (a zeroed Vec's pages can otherwise be lazily backed
+        // by the OS until first write).
         for chunk in buf.chunks_mut(4096) {
             chunk[0] = 1;
         }
         std::hint::black_box(&buf);
-        if let Some(after) = current_rss_mb_for_pid(self_pid) {
-            let grown = after.saturating_sub(b);
-            assert!(
-                grown >= MIN_EXPECTED_GROWTH_MB,
-                "expected RSS to grow by at least {MIN_EXPECTED_GROWTH_MB}MB after committing \
-                 a fresh {GROW_MB}MB buffer, but it only grew by {grown}MB (before={b}MB, \
-                 after={after}MB) - sampler may be returning a stale reading"
-            );
-        }
+
+        println!("{PROBE_GROWN}");
+        let _ = std::io::stdout().flush();
+        line.clear();
+        let _ = input.read_line(&mut line);
         drop(buf);
     }
 
