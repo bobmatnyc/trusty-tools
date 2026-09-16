@@ -402,6 +402,73 @@ pub enum WriteTargetError {
     },
 }
 
+/// The one resolution of `<project>/.trusty-code` a pinned write is anchored on.
+///
+/// Why: #7779 round 2. `check_native_write_target` resolved `.trusty-code` and
+/// `write_dir::pin_native_root` resolved it AGAIN, and the descriptor came from
+/// the second resolution — so a swap between them pinned a directory the
+/// membership rule had never approved. Handing the resolved root back to the
+/// caller is what makes "the path validated is the path pinned" literal: there
+/// is no second resolution to disagree with the first.
+/// What: `Existing` carries the canonical `.trusty-code`, already proven to sit
+/// inside the canonical project root; `Absent` means nothing resolves there yet,
+/// so the caller creates it under the project root it canonicalises itself.
+/// Test: `paths::write_dir_tests::native_root_swapped_between_check_and_pin_never_reaches_victim`.
+pub(crate) enum AnchoredRoot {
+    /// `.trusty-code` resolves, and resolves inside the project. Pin THIS path.
+    Existing(PathBuf),
+    /// `.trusty-code` does not resolve; it has to be created.
+    Absent,
+}
+
+/// Decide membership and resolve the config root, in one pass.
+///
+/// Why: the anchoring rule ("a `.trusty-code` that is itself a symlink must
+/// still land inside the project", PR #6980's code-critic BLOCK) has exactly one
+/// implementation, and both the plan-only [`check_native_write_target`] and the
+/// pinning [`write_dir::NativeWriteDir::open`] read it from here.
+/// What: the lexical [`WriteTargetError::CrossProduct`] test, then a SINGLE
+/// `canonicalize` of `.trusty-code` whose result is both compared against the
+/// canonical project root and returned for the caller to pin. A `project_root`
+/// that cannot be canonicalised while `.trusty-code` does resolve fails CLOSED
+/// as [`WriteTargetError::SymlinkEscape`] — containment cannot be established.
+/// Test: `paths::tests::write_to_claude_dir_is_refused`,
+/// `paths::tests::symlinked_native_root_escape_is_refused`,
+/// `paths::write_dir_tests::symlinked_native_root_escape_is_refused_at_open`.
+pub(crate) fn anchor_native_root(
+    project_root: &Path,
+    path: &Path,
+) -> Result<AnchoredRoot, WriteTargetError> {
+    let native_root = native_config_dir(project_root);
+    if !path.starts_with(&native_root) {
+        return Err(WriteTargetError::CrossProduct {
+            path: path.to_path_buf(),
+            native_root,
+        });
+    }
+
+    let escape = |resolved: PathBuf| WriteTargetError::SymlinkEscape {
+        path: path.to_path_buf(),
+        resolved,
+        native_root: native_root.clone(),
+    };
+
+    // #5426: anchor the config root to the project before trusting it. Without
+    // this, a symlinked `.trusty-code` makes every later comparison vacuous.
+    // #7779: this is the ONLY place `.trusty-code` is resolved on the write
+    // path, so nothing can swap it between the check and the pin.
+    let Ok(canon_root) = native_root.canonicalize() else {
+        return Ok(AnchoredRoot::Absent);
+    };
+    let canon_project = project_root
+        .canonicalize()
+        .map_err(|_| escape(canon_root.clone()))?;
+    if !canon_root.starts_with(&canon_project) {
+        return Err(escape(canon_root));
+    }
+    Ok(AnchoredRoot::Existing(canon_root))
+}
+
 /// Refuse any write target that is not genuinely beneath `<project>/.trusty-code/`.
 ///
 /// Why: "native project writes stay beneath `<project>/.trusty-code/`" is only a
@@ -419,11 +486,12 @@ pub enum WriteTargetError {
 /// What: three checks, in order.
 /// 1. Lexical — `path` must start with [`native_config_dir`], else
 ///    [`WriteTargetError::CrossProduct`].
-/// 2. Root anchoring — when `<project>/.trusty-code` exists, it must
+/// 2. Root anchoring — when `<project>/.trusty-code` resolves, it must
 ///    canonicalise to somewhere inside the canonicalised `project_root`, else
 ///    [`WriteTargetError::SymlinkEscape`]. A `project_root` that cannot itself be
 ///    canonicalised fails CLOSED here: containment cannot be established, so the
-///    write is refused rather than assumed safe.
+///    write is refused rather than assumed safe. Checks 1 and 2 live in
+///    [`anchor_native_root`], shared with the pinning path.
 /// 3. Target containment — the target's nearest EXISTING ancestor (the target
 ///    itself is usually absent, since we are about to create it) must resolve
 ///    inside that same anchored root.
@@ -431,12 +499,13 @@ pub enum WriteTargetError {
 /// With nothing on the path existing yet, no symlink can be redirecting it and
 /// check 1 is the whole answer.
 ///
-/// **This decides MEMBERSHIP, not the write.** Its answer describes the tree as
-/// it was when it ran, so a caller that then writes through the same path string
-/// can be overtaken by a rename (#7779). Every write target is therefore opened
-/// through [`write_dir::NativeWriteDir`], which runs this check and then pins the
-/// directory to a descriptor nothing can redirect. Call this function directly
-/// only to classify a path without writing to it — the import PLAN does.
+/// **This decides MEMBERSHIP, and it is not how a write is authorised.** Its
+/// answer describes the tree as it was when it ran, so a caller that then writes
+/// through the same path string can be overtaken by a rename (#7779). Writers do
+/// not call this at all: [`write_dir::NativeWriteDir::open`] goes to
+/// [`anchor_native_root`] directly and pins the very path it returned, so there
+/// is no second resolution to be raced. Call this function only to classify a
+/// path without writing to it — the import PLAN does.
 /// Test: `paths::tests::write_to_native_dir_is_allowed`,
 /// `paths::tests::write_to_claude_dir_is_refused`,
 /// `paths::tests::write_outside_project_is_refused`,
@@ -446,43 +515,25 @@ pub fn check_native_write_target(
     project_root: &Path,
     path: &Path,
 ) -> Result<PathBuf, WriteTargetError> {
-    let native_root = native_config_dir(project_root);
-    if !path.starts_with(&native_root) {
-        return Err(WriteTargetError::CrossProduct {
-            path: path.to_path_buf(),
-            native_root,
-        });
-    }
-
-    let escape = |resolved: PathBuf| WriteTargetError::SymlinkEscape {
-        path: path.to_path_buf(),
-        resolved,
-        native_root: native_root.clone(),
+    // #7779: checks 1 and 2 are `anchor_native_root`'s, so the plan and the pin
+    // cannot drift apart on what "inside the project" means.
+    let canon_root = match anchor_native_root(project_root, path)? {
+        AnchoredRoot::Existing(canon_root) => canon_root,
+        // Nothing resolves on this path yet, so no symlink can be escaping
+        // through it; the lexical check is the whole answer.
+        AnchoredRoot::Absent => return Ok(path.to_path_buf()),
     };
-
-    // #5426: anchor the config root to the project before trusting it. Without
-    // this, a symlinked `.trusty-code` makes every later comparison vacuous.
-    if native_root.exists() {
-        let canon_root = native_root
-            .canonicalize()
-            .map_err(|_| escape(native_root.clone()))?;
-        let canon_project = project_root
-            .canonicalize()
-            .map_err(|_| escape(canon_root.clone()))?;
-        if !canon_root.starts_with(&canon_project) {
-            return Err(escape(canon_root));
-        }
-    }
 
     // The target itself is typically absent, so containment is judged on the
     // deepest ancestor that DOES exist.
-    let Some(canon_root) = canonicalize_existing(&native_root) else {
-        // Nothing on this path exists yet, so no symlink can be escaping through
-        // it; the lexical check above is the whole answer.
-        return Ok(path.to_path_buf());
-    };
     match canonicalize_existing(path) {
-        Some(resolved) if !resolved.starts_with(&canon_root) => Err(escape(resolved)),
+        Some(resolved) if !resolved.starts_with(&canon_root) => {
+            Err(WriteTargetError::SymlinkEscape {
+                path: path.to_path_buf(),
+                resolved,
+                native_root: native_config_dir(project_root),
+            })
+        }
         _ => Ok(path.to_path_buf()),
     }
 }

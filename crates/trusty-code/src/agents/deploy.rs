@@ -35,7 +35,10 @@
 //! longer matches its recorded checksum is deselected, so the deployer never
 //! composes or writes it. Pristine files still refresh, and an UNTRACKED file is
 //! left to the deployer's own adopt-or-skip branch. No deployer change was
-//! needed for either policy.
+//! needed for either policy. Since #7779 the policy covers REAL files only: a
+//! symlinked entry in the agents directory refuses the deploy instead of being
+//! read through, because the pinned handle opens every entry `O_NOFOLLOW` (the
+//! `write_dir` module header states why that is uniform rather than per-tree).
 //!
 //! **Every write reaches the project through a pinned directory handle.** The
 //! shared deployer writes through plain paths — correct for trusty-mpm's
@@ -100,6 +103,20 @@ pub enum RosterDeployError {
     /// Staging the compiled-in sources into a scratch directory failed.
     #[error("staging the embedded agent roster failed: {0}")]
     Stage(#[source] std::io::Error),
+    /// A file the deploy produced could not be read back out of the scratch
+    /// directory, so it could not be published (#7779).
+    #[error(
+        "the deployed agent roster could not be published: {name} was not readable in the \
+         scratch directory ({source}); refusing to publish, because a ledger recording a \
+         file that was never written reports a deploy that did not happen."
+    )]
+    Publish {
+        /// The scratch file that could not be read.
+        name: String,
+        /// The underlying I/O failure.
+        #[source]
+        source: std::io::Error,
+    },
     /// The shared deployer itself failed.
     #[error("deploying the embedded agent roster failed: {0}")]
     Deploy(#[source] AgentBuildError),
@@ -225,25 +242,31 @@ pub fn roster_target(project_root: &Path) -> PathBuf {
 /// What, in order:
 /// 1. Skip when `.claude/agents/` or `.open-mpm/agents/` currently wins
 ///    discovery — see this module's docs.
-/// 2. PIN both write targets — the agents directory and the skill-refs tree —
-///    with [`crate::paths::write_dir::NativeWriteDir`], which applies the
-///    unchanged ADR-0044 membership rule and then holds each directory open on a
-///    descriptor. Every write below is `openat`-relative to those handles, so a
-///    symlink swapped in afterwards cannot redirect one (#7779).
+/// 2. PIN the agents directory with [`crate::paths::write_dir::NativeWriteDir`],
+///    which applies the unchanged ADR-0044 membership rule and then holds the
+///    directory open on a descriptor. Every write below is `openat`-relative to
+///    it, so a symlink swapped in afterwards cannot redirect one (#7779).
 /// 3. Take the project's ledger lock through the pinned handle, so concurrent
 ///    `tcode` daemons still serialise on the same sidecar the shared deployer
-///    would have used.
+///    would have used. It is a blocking `LOCK_EX` held across the whole
+///    mirror/stage/compose/publish sequence — wider than the shared deployer's,
+///    which takes it around the compose only, and deliberately so: the mirror
+///    that decides "hand-edited" and the publish that acts on that decision have
+///    to see the same directory.
 /// 4. Refuse to proceed on a corrupt ledger, naming the file. Never reset it.
 /// 5. Stage every compiled-in source into a scratch directory, including the
 ///    five `BASE-*` templates so the deployer's own `extends:` composer resolves
 ///    the chains from disk exactly as it does for trusty-mpm.
-/// 6. Deploy into a second scratch directory seeded from the pinned handle,
+/// 6. PIN the skill-refs tree — after step 4, so a refused deploy leaves no
+///    empty directory behind — and materialize the roster's skill pointers.
+/// 7. Deploy into a second scratch directory seeded from the pinned handle,
 ///    selecting the dispatchable roster only and deselecting any tracked file
 ///    the user has since edited, then publish the result back through the handle.
 ///
 /// Test: `fresh_project_materializes_the_whole_roster`,
 /// `hand_edited_agent_survives_a_second_deploy`,
 /// `corrupt_manifest_is_reported_and_nothing_is_written`,
+/// `symlinked_roster_file_is_refused_before_any_write`,
 /// `deploy_is_skipped_when_claude_agents_dir_wins`,
 /// `base_templates_are_never_deployed`,
 /// `symlinked_skill_refs_dir_is_refused_before_any_write`,
@@ -262,7 +285,6 @@ pub fn ensure_roster_deployed(project_root: &Path) -> Result<RosterDeploy, Roste
     // `create_dir_all` a racing writer used to beat is gone and every write
     // below resolves against the descriptor rather than the path.
     let agents = NativeWriteDir::open(project_root, Path::new(AGENTS_DIRNAME))?;
-    let skill_refs = NativeWriteDir::open(project_root, Path::new(SKILL_REFS_DIRNAME))?;
     let target = agents.path().to_path_buf();
 
     // #7779: the shared deployer serialises writers on this sidecar. It now runs
@@ -294,6 +316,12 @@ pub fn ensure_roster_deployed(project_root: &Path) -> Result<RosterDeploy, Roste
     let staged = stage_embedded_sources()?;
     let roster: HashSet<&str> = DEFAULT_AGENTS.iter().map(EmbeddedAgent::name).collect();
 
+    // #7779: pinned only now. Opening a handle CREATES its directory, so pinning
+    // this one beside the agents dir left an empty `skill-refs/` behind whenever
+    // the corrupt-ledger refusal above fired — and `paths::resolve_project_entry`
+    // reads an empty readable directory as Usable.
+    let skill_refs = NativeWriteDir::open(project_root, Path::new(SKILL_REFS_DIRNAME))?;
+
     // #7727: the roster's skill pointers resolve to files this project holds.
     super::skill_refs::materialize_skill_refs(&skill_refs)?;
     let result = deploy_agents_filtered(staged.path(), shadow.path(), skill_refs.path(), |stem| {
@@ -317,7 +345,12 @@ pub fn ensure_roster_deployed(project_root: &Path) -> Result<RosterDeploy, Roste
 /// the PINNED handle — the same descriptor the publish writes back through, so
 /// the snapshot and the publish cannot disagree about which directory they mean.
 /// Absent entries are simply not copied.
-/// Test: `agents::deploy::deploy_tests::hand_edited_agent_survives_a_second_deploy`.
+///
+/// A SYMLINKED entry refuses the whole deploy rather than being followed, which
+/// narrows this module's "a hand-edited deployed file is authoritative" policy
+/// to real files (#7779 round 2; rationale in the `write_dir` module header).
+/// Test: `agents::deploy::deploy_tests::hand_edited_agent_survives_a_second_deploy`,
+/// `agents::deploy::deploy_tests::symlinked_roster_file_is_refused_before_any_write`.
 fn mirror_into_scratch(agents: &NativeWriteDir, scratch: &Path) -> Result<(), RosterDeployError> {
     let mut names = vec![MANIFEST_FILE.to_string()];
     names.extend(DEFAULT_AGENTS.iter().map(|a| format!("{}.md", a.name())));
@@ -339,8 +372,15 @@ fn mirror_into_scratch(agents: &NativeWriteDir, scratch: &Path) -> Result<(), Ro
 /// not republished, so a preserved hand-edit is not even rewritten with its own
 /// bytes. A swap detected mid-publish aborts with
 /// [`WriteTargetError::Unpinned`]; nothing was written outside the directory.
+///
+/// Every file is READ before any is written. #7779: a `continue` on an
+/// unreadable scratch file dropped that file while the ledger published its
+/// checksum anyway, so [`ensure_roster_deployed`] returned `Deployed` and
+/// [`deploy_and_log`] logged a file that is not on disk — fail-open. Reading
+/// first makes the run all-or-nothing up to the first `atomic_write`.
 /// Test: `agents::deploy::deploy_tests::fresh_project_materializes_the_whole_roster`,
-/// `agents::deploy::deploy_tests::swapped_agents_dir_never_reaches_the_victim`.
+/// `agents::deploy::deploy_tests::swapped_agents_dir_never_reaches_the_victim`,
+/// `agents::deploy::deploy_tests::unreadable_scratch_file_fails_the_publish`.
 fn publish_from_scratch(
     agents: &NativeWriteDir,
     scratch: &Path,
@@ -348,10 +388,16 @@ fn publish_from_scratch(
 ) -> Result<(), RosterDeployError> {
     let mut names: Vec<&str> = result.deployed.iter().map(String::as_str).collect();
     names.push(MANIFEST_FILE);
+    let mut pending = Vec::with_capacity(names.len());
     for name in names {
-        let Ok(bytes) = std::fs::read(scratch.join(name)) else {
-            continue;
-        };
+        let bytes =
+            std::fs::read(scratch.join(name)).map_err(|source| RosterDeployError::Publish {
+                name: name.to_string(),
+                source,
+            })?;
+        pending.push((name, bytes));
+    }
+    for (name, bytes) in pending {
         agents.atomic_write(name, &bytes)?;
     }
     Ok(())

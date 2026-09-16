@@ -89,26 +89,42 @@ fn missing_claude_dir_yields_empty_plan() {
 /// Applying a plan creates exactly its `Copy` targets and nothing else.
 ///
 /// Why: reversibility means the report is a complete inventory — anything
-/// created but unreported could not be undone.
-/// What: applies a staged plan and asserts the on-disk `.trusty-code/` tree
-/// equals the reported `created` list, with identical file contents.
+/// created but unreported could not be undone. #7779 adds the second reason: a
+/// target landing DIRECTLY under `.trusty-code/` takes `copy_one`'s empty-parent
+/// branch, which pins the config root itself rather than a subdirectory, and
+/// `settings.json` is the only file that reaches it.
+/// What: applies a staged plan covering a nested target, a doubly-nested one and
+/// `settings.json`, then asserts the on-disk `.trusty-code/` tree equals the
+/// reported `created` list, with identical file contents.
 /// Test: this function IS the test.
 #[test]
 fn apply_creates_only_the_planned_files() {
     let tmp = tempfile::tempdir().expect("tempdir");
     write_claude(tmp.path(), "agents/pm.md", "# pm");
     write_claude(tmp.path(), "skills/demo/SKILL.md", "# demo");
+    let settings = r#"{"code_harness":{"mode":"parity"}}"#;
+    write_claude(tmp.path(), crate::paths::SETTINGS_FILENAME, settings);
 
     let plan = plan_import(tmp.path());
     let report = apply_import(tmp.path(), &plan);
 
     assert!(report.refused.is_empty(), "refused: {:?}", report.refused);
     assert_eq!(report.created, native_tree(tmp.path()));
-    assert_eq!(report.created.len(), 2);
+    assert_eq!(report.created.len(), 3);
     assert_eq!(
         std::fs::read_to_string(tmp.path().join(TRUSTY_CODE_DIRNAME).join("agents/pm.md"))
             .expect("read"),
         "# pm"
+    );
+    // The empty-parent branch: straight into `.trusty-code/`, no subdirectory.
+    assert_eq!(
+        std::fs::read_to_string(
+            tmp.path()
+                .join(TRUSTY_CODE_DIRNAME)
+                .join(crate::paths::SETTINGS_FILENAME)
+        )
+        .expect("read the imported settings"),
+        settings
     );
 }
 

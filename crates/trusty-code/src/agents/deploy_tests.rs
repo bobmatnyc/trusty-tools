@@ -3,7 +3,8 @@
 //! Why: split out of `deploy.rs` so the production file stays inside the
 //! 500-SLOC cap while #7779 adds the pinned-handle deploy path.
 //! What: the deploy's skip, corrupt-ledger, hand-edit and symlink-refusal
-//! branches, plus the two post-validation swap regressions #7779 closes.
+//! branches, the two post-validation swap regressions #7779 closes, and round
+//! 2's publish fail-open arm plus the symlinked-roster-file policy it pins.
 //! Test: this file IS the test module.
 
 use super::*;
@@ -12,6 +13,28 @@ use trusty_agents_common::agents::manifest::Origin;
 /// Every dispatchable roster name, for the count assertions below.
 fn roster_names() -> Vec<&'static str> {
     DEFAULT_AGENTS.iter().map(EmbeddedAgent::name).collect()
+}
+
+/// Every entry beneath `<project>/.trusty-code`, relative and sorted —
+/// directories included, since #7779 pinning CREATES them.
+fn native_subtree(project_root: &Path) -> Vec<PathBuf> {
+    fn walk(dir: &Path, root: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            out.push(path.strip_prefix(root).unwrap_or(&path).to_path_buf());
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                walk(&path, root, out);
+            }
+        }
+    }
+    let root = paths::native_config_dir(project_root);
+    let mut out = Vec::new();
+    walk(&root, &root, &mut out);
+    out.sort();
+    out
 }
 
 /// `.md` filenames actually present in a deployed target directory.
@@ -130,6 +153,97 @@ fn symlinked_skill_ref_file_is_refused_before_any_write() {
     std::os::unix::fs::symlink(&victim, &link).expect("symlink");
 
     assert_skill_ref_symlink_refused(project.path(), &victim, "USER FILE");
+}
+
+/// A symlinked roster file refuses the deploy instead of being read through.
+///
+/// Why: #7779 round 2 pins a policy decision rather than closing a hole. The
+/// pinned handle opens every entry `O_NOFOLLOW`, READS included, so a symlinked
+/// `<roster>.md` now fails the whole deploy where main followed it and preserved
+/// it as hand-edited. Keeping the refusal narrows this module's "a hand-edited
+/// deployed file is authoritative" policy to REAL files, for the reason stated
+/// in the `write_dir` module header; this test is what stops that from drifting
+/// back silently.
+/// What: symlinks `.trusty-code/agents/engineer.md` at a file outside the
+/// project, then asserts the deploy reports `Unpinned`, the link's target is
+/// byte-identical, and the only `.md` in the target is the link itself.
+/// Test: this function IS the test.
+#[cfg(unix)]
+#[test]
+fn symlinked_roster_file_is_refused_before_any_write() {
+    let project = tempfile::tempdir().expect("project tempdir");
+    let outside = tempfile::tempdir().expect("outside tempdir");
+    let hand_written = outside.path().join("engineer.md");
+    let original = "---\nname: engineer\n---\n\nMy own copy.\n";
+    std::fs::write(&hand_written, original).expect("write the user's file");
+    let target = roster_target(project.path());
+    std::fs::create_dir_all(&target).expect("mkdir target");
+    std::os::unix::fs::symlink(&hand_written, target.join("engineer.md")).expect("symlink");
+
+    let err =
+        ensure_roster_deployed(project.path()).expect_err("a symlinked roster file is refused");
+
+    assert!(
+        matches!(
+            err,
+            RosterDeployError::WriteTarget(WriteTargetError::Unpinned { .. })
+        ),
+        "expected Unpinned, got {err:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&hand_written).expect("read the link's target"),
+        original,
+        "the link's target must be untouched"
+    );
+    assert_eq!(
+        deployed_md_files(&target),
+        vec!["engineer.md".to_string()],
+        "the refusal must fire before any other agent is written"
+    );
+}
+
+/// An unreadable scratch file fails the publish instead of dropping the file.
+///
+/// Why: #7779 round 2. `publish_from_scratch` used to `continue` past a scratch
+/// read failure while still publishing the ledger, whose checksum named the file
+/// that was never written — so `ensure_roster_deployed` returned `Deployed` and
+/// `deploy_and_log` logged a deploy that had not happened. Fail-open.
+/// What: hands the publish a `DeployResult` naming a file the scratch directory
+/// does not hold, and asserts it errors and publishes NOTHING — not even the
+/// ledger that was readable.
+/// Test: this function IS the test.
+#[test]
+fn unreadable_scratch_file_fails_the_publish() {
+    let project = tempfile::tempdir().expect("project tempdir");
+    let agents = NativeWriteDir::open(project.path(), Path::new(AGENTS_DIRNAME))
+        .expect("pin the agents dir");
+    let scratch = tempfile::tempdir().expect("scratch tempdir");
+    std::fs::write(scratch.path().join(MANIFEST_FILE), b"{\"managed\":{}}")
+        .expect("scratch ledger");
+
+    let result = DeployResult {
+        deployed: vec!["engineer.md".to_string()],
+        ..Default::default()
+    };
+    let err = publish_from_scratch(&agents, scratch.path(), &result)
+        .expect_err("an unreadable scratch file must fail the publish");
+
+    assert!(
+        err.to_string().contains("engineer.md"),
+        "the failure must name the file it could not read: {err}"
+    );
+    assert!(
+        !agents.path().join(MANIFEST_FILE).exists(),
+        "no ledger may be published for a run that could not publish its files"
+    );
+    assert!(
+        deployed_md_files(agents.path()).is_empty(),
+        "nothing may be published once the read fails"
+    );
+    assert!(
+        matches!(&err, RosterDeployError::Publish { name, .. } if name == "engineer.md"),
+        "expected Publish, got {err:?}"
+    );
 }
 
 #[test]
@@ -271,6 +385,20 @@ fn corrupt_manifest_is_reported_and_nothing_is_written() {
     assert!(
         err.to_string().contains("refusing to deploy"),
         "the message must say nothing was written: {err}"
+    );
+    // #7779: "nothing is written" covers DIRECTORIES too. Pinning a write target
+    // creates it, so opening the skill-refs handle beside the agents one left an
+    // empty `skill-refs/` behind after this refusal — which
+    // `paths::resolve_project_entry` then reads as a usable native root.
+    assert_eq!(
+        native_subtree(project.path()),
+        vec![
+            PathBuf::from(AGENTS_DIRNAME),
+            PathBuf::from(AGENTS_DIRNAME).join(MANIFEST_FILE),
+            PathBuf::from(AGENTS_DIRNAME).join(format!("{MANIFEST_FILE}.lock")),
+        ],
+        "a corrupt ledger may leave only the directory it was found in, its \
+         ledger, and the lock sidecar taken to read it"
     );
     assert!(
         deployed_md_files(&target).is_empty(),

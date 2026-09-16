@@ -4,13 +4,16 @@
 //! validation cannot redirect the write — and that property is only believable
 //! against a real filesystem with a real swap performed between the two steps.
 //! What: the happy path (so the fix is not proven by refusing everything), the
-//! post-validation swap, a symlink present at open time, the nested-child
-//! descent, `create_new`'s refusal, and the ledger lock.
+//! post-validation swap, the config-root swap raced against the pin itself, a
+//! symlink present at open time, the nested-child descent, `create_new`'s
+//! refusal, the single-component name rule, and the ledger lock.
 //! Test: this file IS the test module.
 
 use super::*;
 
 use std::os::unix::fs::symlink;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// A project root with an empty `.trusty-code/` already in place.
 fn project() -> tempfile::TempDir {
@@ -23,6 +26,28 @@ fn project() -> tempfile::TempDir {
 fn swap_for_symlink(dir: &Path, victim: &Path) {
     std::fs::remove_dir_all(dir).expect("remove the real directory");
     symlink(victim, dir).expect("symlink the victim in its place");
+}
+
+/// Every file anywhere beneath `root` — "the victim received nothing" has to
+/// mean the whole tree, not just its top level.
+fn descendants(root: &Path) -> Vec<PathBuf> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                walk(&path, out);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, &mut out);
+    out.sort();
+    out
 }
 
 /// A pinned handle writes, and reads back, at the path it validated.
@@ -91,6 +116,137 @@ fn component_swapped_after_open_never_reaches_victim() {
     assert!(
         leaked.is_empty(),
         "the victim directory must receive nothing, found {leaked:?}"
+    );
+}
+
+/// A `.trusty-code` swapped between the membership check and the pin never
+/// becomes the pinned directory.
+///
+/// Why: #7779 round 2, and a different window from the test above. The
+/// membership rule resolved `.trusty-code` and `pin_native_root` resolved it
+/// AGAIN, with the descriptor coming from the second resolution — so a rename
+/// landing between the two pinned a directory nothing had approved. A
+/// code-critic race model of that exact call sequence put 1419 of 20138
+/// completed writes in the victim, 152 of them with `verify_pinned` still
+/// reporting healthy.
+/// What: a swapper thread parks the real `.trusty-code` and links a victim in
+/// its place, over and over, while this thread opens the agents directory and
+/// writes through it. Asserts the victim tree receives nothing, and that at
+/// least one write DID complete — a run that refused everything must not pass.
+/// Test: this function IS the test.
+#[test]
+fn native_root_swapped_between_check_and_pin_never_reaches_victim() {
+    let tmp = project();
+    let victim = tempfile::tempdir().expect("victim tempdir");
+    let link_at = native_config_dir(tmp.path());
+    let parked = tmp.path().join(".trusty-code-parked");
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let swapper = {
+        let stop = Arc::clone(&stop);
+        let victim_path = victim.path().to_path_buf();
+        let (link_at, parked) = (link_at.clone(), parked.clone());
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                let _ = std::fs::rename(&link_at, &parked);
+                let _ = symlink(&victim_path, &link_at);
+                std::thread::sleep(std::time::Duration::from_micros(50));
+                if std::fs::remove_file(&link_at).is_err() {
+                    // The writer created a fresh real `.trusty-code` while the
+                    // original was parked — legal, and not a symlink, so clear
+                    // it the other way round and keep the loop swapping.
+                    let _ = std::fs::remove_dir_all(&link_at);
+                }
+                let _ = std::fs::rename(&parked, &link_at);
+            }
+            let _ = std::fs::remove_file(&link_at);
+            let _ = std::fs::rename(&parked, &link_at);
+        })
+    };
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let (mut attempts, mut written) = (0u32, 0u32);
+    while std::time::Instant::now() < deadline && (attempts < 3000 || written == 0) {
+        attempts += 1;
+        if let Ok(dir) = NativeWriteDir::open(tmp.path(), Path::new("agents"))
+            && dir
+                .atomic_write(&format!("pm-{attempts}.md"), b"AGENT BODY")
+                .is_ok()
+        {
+            written += 1;
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    swapper.join().expect("swapper thread");
+
+    assert!(
+        written > 0,
+        "the harness proves nothing if every attempt was refused ({attempts} attempts)"
+    );
+    let leaked = descendants(victim.path());
+    assert!(
+        leaked.is_empty(),
+        "the victim tree must receive nothing across {attempts} attempts, found {leaked:?}"
+    );
+}
+
+/// A file name carrying a path separator is refused by every entry point.
+///
+/// Why: `O_NOFOLLOW` guards only an `openat` name's LAST component, so a name
+/// like `link/escaped.md` would have `link` resolved with symlinks followed —
+/// straight back out of the pinned directory. No caller passes one today, and
+/// [`NativeWriteDir`] is `pub`, so the type refuses it rather than trusting that
+/// (#7779 round 2).
+/// What: plants a symlink to a victim directory INSIDE the pinned directory,
+/// then asserts every name-taking method refuses a separator, `..`, `.` and the
+/// empty name, and that the victim stays empty.
+/// Test: this function IS the test.
+#[test]
+fn a_name_with_a_path_separator_is_refused() {
+    let tmp = project();
+    let victim = tempfile::tempdir().expect("victim tempdir");
+    let dir = NativeWriteDir::open(tmp.path(), Path::new("agents")).expect("pin");
+    symlink(victim.path(), dir.path().join("link")).expect("symlink inside the pinned dir");
+
+    for name in [
+        "link/escaped.md",
+        "../escaped.md",
+        "sub/escaped.md",
+        "",
+        ".",
+        "..",
+    ] {
+        assert!(
+            matches!(
+                dir.atomic_write(name, b"secret"),
+                Err(WriteTargetError::Unpinnable { .. })
+            ),
+            "atomic_write must refuse `{name}`"
+        );
+        assert!(
+            matches!(
+                dir.create_new(name, b"secret"),
+                Err(WriteTargetError::Unpinnable { .. })
+            ),
+            "create_new must refuse `{name}`"
+        );
+        assert!(
+            matches!(dir.read(name), Err(WriteTargetError::Unpinnable { .. })),
+            "read must refuse `{name}`"
+        );
+        assert!(
+            matches!(
+                dir.lock_exclusive(name),
+                Err(WriteTargetError::Unpinnable { .. })
+            ),
+            "lock_exclusive must refuse `{name}`"
+        );
+    }
+
+    let leaked = descendants(victim.path());
+    assert!(
+        leaked.is_empty(),
+        "nothing may reach a symlink's target, found {leaked:?}"
     );
 }
 

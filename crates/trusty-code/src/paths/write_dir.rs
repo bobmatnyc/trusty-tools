@@ -20,9 +20,25 @@
 //! silently wrote into a directory nothing will ever read.
 //!
 //! The write-boundary contract itself is unchanged: ADR-0044 restricts writes to
-//! the product's own configuration directory, and [`check_native_write_target`]
-//! still decides membership. This module only removes the window between that
-//! decision and the write it authorises.
+//! the product's own configuration directory, and [`super::anchor_native_root`]
+//! still decides membership. It decides it ONCE, and the path it returns is the
+//! path pinned — a writer never re-resolves `.trusty-code`, so there is no
+//! second answer for a rename to substitute (#7779 round 2).
+//!
+//! ## Symlinks beneath the config root are refused, never followed
+//!
+//! Every entry this handle touches is opened `O_NOFOLLOW`, READS included. A
+//! symlinked `agents/pm.md`, `skill-refs/<skill>/SKILL.md` or ledger is a typed
+//! [`WriteTargetError::Unpinned`] that fails the whole deploy, where the
+//! pre-#7779 code followed it and treated the target's bytes as the deployed
+//! file's. This is deliberate, and it narrows `deploy`'s "a hand-edited deployed
+//! file is authoritative" policy to REAL files: a link's bytes cannot be bounded
+//! by the handle that is supposed to bound them, and publishing over it with
+//! `renameat` would silently replace the link rather than write where it points
+//! — so the two would disagree about what the deploy just did. Point the link
+//! the other way (keep the real file under `.trusty-code/` and link to it from
+//! elsewhere) or drop it. PR #7773's review asked for this on the skill-refs
+//! tree; it holds uniformly rather than per-directory.
 //!
 //! Unix only, like the rest of this crate's daemon transport — `openat`,
 //! `renameat` and `O_NOFOLLOW` are what close the window and have no portable
@@ -38,7 +54,9 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
-use super::{TRUSTY_CODE_DIRNAME, WriteTargetError, check_native_write_target, native_config_dir};
+use super::{
+    AnchoredRoot, TRUSTY_CODE_DIRNAME, WriteTargetError, anchor_native_root, native_config_dir,
+};
 
 /// A directory beneath `<project>/.trusty-code/`, pinned to an open descriptor.
 ///
@@ -62,14 +80,15 @@ impl NativeWriteDir {
     /// Why: every trusty-code write target is reached through this one
     /// constructor so the boundary check and the descent cannot drift apart.
     /// What, in order:
-    /// 1. [`check_native_write_target`] — the unchanged ADR-0044 membership
-    ///    rule, so a cross-product or escaping target keeps its existing error.
-    /// 2. The `.trusty-code` root is resolved once (`canonicalize`) and then
-    ///    pinned by descending its ABSOLUTE canonical path from `/` with
-    ///    `O_NOFOLLOW` at every component. Resolving first is what keeps a
-    ///    `.trusty-code` symlink that stays inside the project working — step 1
-    ///    already proved it does — while the `O_NOFOLLOW` descent refuses
-    ///    anything swapped in during the descent itself.
+    /// 1. [`anchor_native_root`] — the unchanged ADR-0044 membership rule (a
+    ///    cross-product or escaping target keeps its existing error), which
+    ///    hands back the ONE canonical `.trusty-code` it approved.
+    /// 2. That exact path — not a fresh resolution of it — is pinned by
+    ///    descending from `/` with `O_NOFOLLOW` at every component. Resolving
+    ///    once is what keeps a `.trusty-code` symlink that stays inside the
+    ///    project working while leaving nothing for a swap to redirect: a
+    ///    `.trusty-code` replaced after step 1 cannot move the descent, because
+    ///    the descent never reads that name again (#7779 round 2).
     /// 3. Each component of `relative` is created with `mkdirat` and opened with
     ///    `O_NOFOLLOW`, so a symlink at any of them fails CLOSED with
     ///    [`WriteTargetError::Unpinned`] rather than being followed.
@@ -78,11 +97,10 @@ impl NativeWriteDir {
     /// project root that cannot be canonicalised is refused, never assumed safe.
     /// Test: `paths::write_dir_tests::pinned_write_lands_at_the_validated_path`,
     /// `paths::write_dir_tests::symlinked_component_is_refused_at_open`,
-    /// `paths::write_dir_tests::symlinked_native_root_escape_is_refused_at_open`.
+    /// `paths::write_dir_tests::symlinked_native_root_escape_is_refused_at_open`,
+    /// `paths::write_dir_tests::native_root_swapped_between_check_and_pin_never_reaches_victim`.
     pub fn open(project_root: &Path, relative: &Path) -> Result<Self, WriteTargetError> {
         let path = native_config_dir(project_root).join(relative);
-        check_native_write_target(project_root, &path)?;
-
         let mut fd = pin_native_root(project_root, &path)?;
         for component in relative.components() {
             let Component::Normal(name) = component else {
@@ -278,7 +296,17 @@ impl NativeWriteDir {
     /// What: compares the handle's `(dev, ino)` with the path's. Any mismatch,
     /// including a path that no longer resolves, is
     /// [`WriteTargetError::Unpinned`].
-    /// Test: `paths::write_dir_tests::component_swapped_after_open_never_reaches_victim`.
+    ///
+    /// This is a REPORT, never the boundary — it re-resolves `path` and so can
+    /// only be trusted because [`NativeWriteDir::open`] guarantees the pinned
+    /// side is a directory the membership rule approved. While that held only
+    /// for the first of two resolutions, a swap could make both sides name the
+    /// same victim and this function called it healthy (152 times in the
+    /// code-critic race model, #7779 round 2). It cannot now: the pinned inode
+    /// is inside the project, so a live swap makes the two differ and a reverted
+    /// one makes them agree about a write that did land correctly.
+    /// Test: `paths::write_dir_tests::component_swapped_after_open_never_reaches_victim`,
+    /// `paths::write_dir_tests::native_root_swapped_between_check_and_pin_never_reaches_victim`.
     pub fn verify_pinned(&self) -> Result<(), WriteTargetError> {
         let unpinned = || WriteTargetError::Unpinned {
             path: self.path.clone(),
@@ -355,24 +383,35 @@ impl NativeWriteDir {
 
 /// Pin `<project>/.trusty-code`, creating it when absent.
 ///
-/// Why: the anchoring rule [`check_native_write_target`] enforces has to survive
-/// into the handle, or the descent below it would start from a root a swap
-/// could already have moved.
-/// What: an existing root is canonicalised and its absolute path is descended
-/// from `/` with `O_NOFOLLOW`; an absent one is created under the canonical
-/// project root, itself descended the same way. A project root that cannot be
-/// canonicalised is refused.
-/// Test: `paths::write_dir_tests::symlinked_native_root_escape_is_refused_at_open`.
+/// Why: #7779 round 2. The membership rule and the descent used to resolve
+/// `.trusty-code` independently, and the descriptor came from the SECOND
+/// resolution — a swap landed between them in 1419 of 20138 completed writes in
+/// a code-critic race model, 152 of which `verify_pinned` then called healthy.
+/// The pinned directory is now the one [`anchor_native_root`] approved, by
+/// construction: this function never resolves that name itself.
+/// What: [`AnchoredRoot::Existing`]'s canonical path is descended from `/` with
+/// `O_NOFOLLOW`; [`AnchoredRoot::Absent`] means the root is created under the
+/// canonical project root, itself descended the same way. A project root that
+/// cannot be canonicalised is refused.
+///
+/// What remains possible, precisely: a directory swapped in AT that approved
+/// canonical path — a rename, not a symlink, since every component is opened
+/// `O_NOFOLLOW`. Such a directory is still at a path the membership rule
+/// authorises, which is the property ADR-0044 asks for. No path outside it can
+/// be pinned.
+/// Test: `paths::write_dir_tests::symlinked_native_root_escape_is_refused_at_open`,
+/// `paths::write_dir_tests::native_root_swapped_between_check_and_pin_never_reaches_victim`.
 fn pin_native_root(project_root: &Path, target: &Path) -> Result<OwnedFd, WriteTargetError> {
-    let native_root = native_config_dir(project_root);
-    if let Ok(canon) = native_root.canonicalize() {
-        return pin_absolute(&canon, target);
+    match anchor_native_root(project_root, target)? {
+        AnchoredRoot::Existing(canon) => pin_absolute(&canon, target),
+        AnchoredRoot::Absent => {
+            let project = project_root
+                .canonicalize()
+                .map_err(|e| unpinnable(target, &e))?;
+            let root = pin_absolute(&project, target)?;
+            create_dir_at(root.as_fd(), OsStr::new(TRUSTY_CODE_DIRNAME), target)
+        }
     }
-    let project = project_root
-        .canonicalize()
-        .map_err(|e| unpinnable(target, &e))?;
-    let root = pin_absolute(&project, target)?;
-    create_dir_at(root.as_fd(), OsStr::new(TRUSTY_CODE_DIRNAME), target)
 }
 
 /// Descend an already-canonical absolute path, refusing every symlink.
@@ -460,11 +499,27 @@ fn unpinnable(target: &Path, err: &std::io::Error) -> WriteTargetError {
     }
 }
 
+/// A NUL-free name that is exactly ONE path component.
+///
+/// Why: `O_NOFOLLOW` guards only the LAST component of an `openat` name, so a
+/// `name` carrying a separator would have its leading components resolved with
+/// symlinks followed — the very thing this module exists to stop. No caller
+/// passes one today; [`NativeWriteDir`] is `pub`, so the type has to refuse it
+/// rather than rely on that (#7779 round 2).
+/// What: rejects an empty name, `.`, `..`, anything absolute, anything with a
+/// separator, and anything with an interior NUL.
+/// Test: `paths::write_dir_tests::a_name_with_a_path_separator_is_refused`.
 fn cstring(name: &str, target: &Path) -> Result<CString, WriteTargetError> {
-    CString::new(name).map_err(|_| WriteTargetError::Unpinnable {
+    let unusable = || WriteTargetError::Unpinnable {
         path: target.to_path_buf(),
         detail: format!("`{name}` is not a usable file name"),
-    })
+    };
+    let mut components = Path::new(name).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(one)), None) if one == OsStr::new(name) => {}
+        _ => return Err(unusable()),
+    }
+    CString::new(name).map_err(|_| unusable())
 }
 
 fn cstring_os(name: &OsStr, target: &Path) -> Result<CString, WriteTargetError> {
