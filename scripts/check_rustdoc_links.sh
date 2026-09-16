@@ -143,7 +143,8 @@
 # Exit codes: 0 = at or below baseline for every crate. 1 = a crate regressed,
 #   or an unbaselined crate has findings. 3 = the gate could not compute a
 #   verdict (build failure, vacuous scan, unattributable span, missing crate,
-#   an uncovered or unbuildable feature lane, an unreadable doc-unit inventory)
+#   an uncovered or unbuildable feature lane, an unreadable doc-unit inventory,
+#   a scorer that died before printing a failure row)
 #   — distinguished from 1 so a caller can tell "your links got worse" from
 #   "nothing was checked", the distinction #5289 added to the semver gate.
 #   4 = the doc-unit census came up SHORT (#7537): every lane ran and every
@@ -1122,6 +1123,15 @@ cat "$REPORT"
 FAIL_COUNT="$(awk -F'\t' '$1 == "FAIL"' "$REPORT" | wc -l | tr -d ' ')"
 FAIL_CODES="$(awk -F'\t' '$1 == "FAIL" { print $2 }' "$REPORT" | LC_ALL=C sort -u \
   | tr '\n' ',' | sed 's/,$//; s/,/, /g')"
+# A scorer that DIED exits 1, and so does a genuine link regression. They are
+# not the same answer: rc 1 is defined as "at least one FAIL row was printed",
+# so rc 1 with none means the traceback on stderr is the whole story, and that
+# is a 3 — the gate could not compute a verdict.
+if [ "$REPORT_RC" -eq 1 ] && [ "$FAIL_COUNT" -eq 0 ]; then
+  echo "check_rustdoc_links: the scorer exited 1 having printed no failure row" >&2
+  echo "       — it died before reporting; its traceback is above" >&2
+  die 3 "1 failure(s): SCORER-DIED"
+fi
 if [ "$REPORT_RC" -eq 0 ]; then
   emit_verdict 0 "${FAIL_COUNT} failure(s)"
 else
