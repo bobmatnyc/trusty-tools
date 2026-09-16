@@ -130,18 +130,28 @@ pub struct TaskRunParams {
     pub permission_broker: Option<Arc<crate::permissions::PermissionBroker>>,
     /// (#7948) What this run does with an `ask` it cannot put to a client.
     pub permission_mode: crate::permissions::PermissionMode,
-    /// (#8031) Run `agent_name` ALONE: `true` skips [`DelegateToAgentTool`]
-    /// registration on this run's PM registry, so the agent cannot hand the
-    /// task to `python-engineer`.
+    /// (#8031) Run `agent_name` ALONE: `true` swaps [`DelegateToAgentTool`]
+    /// on this run's registry for `agent_name`'s own tcode tools.
     ///
     /// Why: `tcode run-task engineer <task>` still advertised
     /// `delegate_to_agent`, and the model self-delegated read/write work
     /// instead of doing it — a guaranteed single-agent run was not
-    /// expressible. Carried from `task.run`'s own `no_delegate` request
-    /// field, which the CLI's `--no-delegate` flag sets.
-    /// What: `false` (the default every pre-#8031 caller and every omitted
-    /// request field gets) registers the tool exactly as before.
+    /// expressible. Dropping the tool alone is not enough: `read_file`,
+    /// `write_file`, `edit` and `bash` only ever existed on the DELEGATED
+    /// agent's per-delegation registry, so the top-level loop would have had
+    /// nothing to do the work with. Carried from `task.run`'s own
+    /// `no_delegate` request field, which the CLI's `--no-delegate` flag sets.
+    /// What: `true` skips the delegate tool and merges in the set
+    /// [`crate::runner::agent_registry`] builds for `agent_name` — the SAME
+    /// `ProjectToolFactory` output, narrowed by the SAME `tools.allowed` gate,
+    /// a delegation of that agent would get; the loop's existing
+    /// `PermissionGate` (already minted from this agent's config) then decides
+    /// each call. `false` (the default every pre-#8031 caller and every
+    /// omitted request field gets) registers the delegate tool exactly as
+    /// before and merges nothing.
     /// Test: `task::executor::tests::no_delegate_run_omits_delegate_tool`,
+    /// `task::executor::tests::no_delegate_run_writes_the_file_without_delegating`,
+    /// `task::executor::tests::no_delegate_run_respects_the_agents_tools_allowlist`,
     /// `task::executor::tests::session_path_registers_delegate_tool_by_default`.
     pub no_delegate: bool,
 }
@@ -473,6 +483,23 @@ async fn run_and_record(
             sink.palace().to_string(),
         )));
     }
+    // #8031: with no engineer to delegate to, the named agent must carry its
+    // OWN tcode tools or the run has nothing to work with. Merged AFTER the
+    // harness tools above so they win the `finish_task`/`use_skill` overlap.
+    if params.no_delegate {
+        let factory = project_tool_factory(
+            &params,
+            &work_root,
+            skills_catalog
+                .as_ref()
+                .map(|(_, resolver)| Arc::clone(resolver)),
+        );
+        pm_registry.merge_missing(
+            crate::runner::agent_registry(&factory, &pm_config, &RunContext::default())
+                .await
+                .as_ref(),
+        );
+    }
 
     let pm_llm: Arc<dyn InferenceAdapter> = Arc::new(RecordingLlmClient::new(
         wrap_with_debug_capture(Arc::clone(&llm), "pm", debug_sink.as_ref()),
@@ -696,12 +723,8 @@ fn build_engineer_runner(
         transcript,
     ));
 
-    let factory: Arc<dyn RegistryFactory> = Arc::new(ProjectToolFactory {
-        project: work_root.to_path_buf(),
-        mode: params.mode,
-        skill_resolver,
-        mcp: tokio::sync::OnceCell::new(),
-    });
+    let factory: Arc<dyn RegistryFactory> =
+        Arc::new(project_tool_factory(params, work_root, skill_resolver));
 
     let mut runner = InProcessAgentRunner::new(engineer_llm, factory, params.agents_dir.clone())
         .with_tool_event_sink(sink)
@@ -785,6 +808,28 @@ fn daily_driver_skills_catalog(
         None
     } else {
         Some((catalog, resolver))
+    }
+}
+
+/// The project-scoped tool factory for this run.
+///
+/// Why (#8031): two call sites now need the identical factory — the delegated
+/// engineer's runner, and a `--no-delegate` run assembling the top-level
+/// agent's own tools — so its four fields are constructed in one place rather
+/// than transcribed twice.
+/// What: binds `work_root` as the fs/bash scope, the run's `HarnessMode`, the
+/// shared skill resolver, and a fresh per-factory MCP `OnceCell`.
+/// Test: `task::executor::tests::no_delegate_run_writes_the_file_without_delegating`.
+fn project_tool_factory(
+    params: &TaskRunParams,
+    work_root: &Path,
+    skill_resolver: Option<Arc<dyn SkillResolver>>,
+) -> ProjectToolFactory {
+    ProjectToolFactory {
+        project: work_root.to_path_buf(),
+        mode: params.mode,
+        skill_resolver,
+        mcp: tokio::sync::OnceCell::new(),
     }
 }
 

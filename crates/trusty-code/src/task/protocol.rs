@@ -189,13 +189,17 @@ struct TaskRunRequestParams {
     #[serde(default)]
     workstream_id: Option<String>,
     /// (#8031) Run `agent_name` ALONE — skip `delegate_to_agent` registration
-    /// for this run, so the agent cannot hand the task to `python-engineer`.
+    /// for this run and give `agent_name` its own tcode tools instead, so it
+    /// does the work rather than handing it to `python-engineer`.
     ///
     /// Why: the API surface has to express the same run shape the CLI's
     /// `--no-delegate` flag does, or a non-CLI caller (the GUI, an MCP
     /// client) cannot request a guaranteed single-agent run at all.
     /// What: `#[serde(default)]` — an omitted field is `false`, which is
-    /// exactly the pre-#8031 behaviour, so no existing caller changes.
+    /// exactly the pre-#8031 behaviour, so no existing caller changes. `true`
+    /// registers the same tool set, under the same `tools.allowed` and
+    /// `permissions:` gating, a delegation of `agent_name` would get — see
+    /// [`crate::task::executor::TaskRunParams::no_delegate`].
     /// Test: `task::protocol::tests::task_run_params_default_no_delegate_to_false`,
     /// `task::protocol::tests::task_run_params_parse_no_delegate_true`.
     #[serde(default)]

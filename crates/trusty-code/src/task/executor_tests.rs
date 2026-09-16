@@ -718,6 +718,9 @@ fn set_goal_tool_call_response(call_id: &str) -> Value {
 struct ScriptedLlm {
     responses: Vec<ChatResponse>,
     cursor: AtomicUsize,
+    /// (#8031) Tool-schema names from the FIRST request, so one fixture can
+    /// prove both what the loop advertised and what it then did.
+    tool_names: Mutex<Vec<String>>,
 }
 
 impl ScriptedLlm {
@@ -729,7 +732,13 @@ impl ScriptedLlm {
         Self {
             responses,
             cursor: AtomicUsize::new(0),
+            tool_names: Mutex::new(Vec::new()),
         }
+    }
+
+    /// The tool names advertised on the first request (#8031).
+    fn first_tool_names(&self) -> Vec<String> {
+        self.tool_names.lock().expect("tool_names lock").clone()
     }
 }
 
@@ -737,8 +746,15 @@ impl ScriptedLlm {
 impl InferenceAdapter for ScriptedLlm {
     crate::llm::mock_adapter_identity!("mock-scripted");
 
-    async fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse, InferenceError> {
+    async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, InferenceError> {
         let idx = self.cursor.fetch_add(1, Ordering::SeqCst);
+        if idx == 0 {
+            *self.tool_names.lock().expect("tool_names lock") = req
+                .tools
+                .as_ref()
+                .map(|tools| tools.iter().map(|t| t.function.name.clone()).collect())
+                .unwrap_or_default();
+        }
         match self.responses.get(idx) {
             Some(resp) => Ok(resp.clone()),
             None => Err(InferenceError::MissingConfig(format!(
@@ -1101,4 +1117,183 @@ async fn session_path_registers_delegate_tool_by_default() {
         names.contains(&"delegate_to_agent".to_string()),
         "the default run must keep advertising delegate_to_agent; got {names:?}"
     );
+}
+
+// ── #8031: a `--no-delegate` run carries the NAMED agent's own tools ──────────
+
+/// Agents-dir fixture naming a top-level `engineer` a run can target directly.
+///
+/// Why (#8031): the issue's closure command is `tcode run-task engineer
+/// --no-delegate ...`, so the tests below need a real on-disk `engineer.md`
+/// whose `tcode_tools:` allowlist they control — that allowlist is the gate a
+/// single-agent run must honour exactly as a delegated run does.
+/// What: [`agents_dir`]'s `pm.md`/`python-engineer.md` plus an `engineer.md`
+/// carrying `tcode_tools`.
+/// Test: `no_delegate_run_writes_the_file_without_delegating`,
+/// `no_delegate_run_respects_the_agents_tools_allowlist`.
+fn engineer_agents_dir(tcode_tools: &str) -> TempDir {
+    let tmp = agents_dir();
+    std::fs::write(
+        tmp.path().join("engineer.md"),
+        format!(
+            "---\nname: engineer\nmodel: openai/gpt-4o-mini\ntcode_tools: [{tcode_tools}]\n---\n\nYou are the engineer.\n"
+        ),
+    )
+    .expect("write engineer.md");
+    tmp
+}
+
+/// A single `write_file` tool call (#8031).
+fn write_file_tool_call_response(call_id: &str, path: &str, content: &str) -> Value {
+    json!({
+        "id": "mock-write-file",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": "write_file",
+                        "arguments": json!({"path": path, "content": content}).to_string()
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+    })
+}
+
+/// #8031 CLOSURE TEST: `run-task engineer --no-delegate "create hello.txt
+/// containing hello"` writes the file with ZERO `delegate_to_agent` calls,
+/// attributed to `engineer`.
+///
+/// Why: round 1 dropped `delegate_to_agent` but left the top-level loop with
+/// only `finish_task`/`set_goal`/`clear_goal`/`use_skill`/`recall_session` —
+/// every file tool lived on the DELEGATED agent's per-delegation registry, so
+/// a `--no-delegate` run had nothing to do the work with. This is the issue's
+/// stated closure condition driven through the real daemon entry point
+/// (`spawn_task_run`, what `task.run` calls), not a registry unit test.
+/// What: scripts one `write_file` call then a natural stop, and asserts (a)
+/// `hello.txt` exists in the bound project with the requested content, (b)
+/// neither the advertised schema set nor any emitted tool event names
+/// `delegate_to_agent`, and (c) every tool event is attributed to `engineer`.
+/// FAILS at 7cdc3b562: `write_file` is not registered, so the call errors and
+/// the file is never created.
+/// Test: this test.
+#[tokio::test]
+async fn no_delegate_run_writes_the_file_without_delegating() {
+    let registry = Arc::new(SessionRegistry::new());
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let agents = engineer_agents_dir("read_file, write_file, edit, bash, finish_task");
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    let mock = Arc::new(ScriptedLlm::from_json(&[
+        write_file_tool_call_response("call_1", "hello.txt", "hello"),
+        stop_response("engineer: wrote hello.txt"),
+    ]));
+    let llm: Arc<dyn InferenceAdapter> = Arc::clone(&mock) as Arc<dyn InferenceAdapter>;
+    let p = TaskRunParams {
+        no_delegate: true,
+        agent_name: "engineer".to_string(),
+        task: "create hello.txt containing hello".to_string(),
+        ..params(&agents, &project, &session.id)
+    };
+
+    spawn_task_run(Arc::clone(&registry), llm, p).expect("run must start");
+    wait_for_terminal(&registry, &session.id).await;
+
+    // (a) the deliverable actually landed on disk.
+    let written = std::fs::read_to_string(project.path().join("hello.txt"))
+        .expect("#8031: a --no-delegate run must be able to write the file itself");
+    assert_eq!(
+        written, "hello",
+        "the file must carry the requested content"
+    );
+
+    // (b) the delegate tool was neither advertised nor called.
+    let advertised = mock.first_tool_names();
+    assert!(
+        advertised.contains(&"write_file".to_string()),
+        "the named agent's own write_file must be advertised; got {advertised:?}"
+    );
+    assert!(
+        !advertised.contains(&"delegate_to_agent".to_string()),
+        "a --no-delegate run must not advertise delegate_to_agent; got {advertised:?}"
+    );
+
+    let calls: Vec<(String, String)> = registry
+        .replay(&session.id)
+        .expect("session must exist")
+        .iter()
+        .filter_map(|e| match &e.event {
+            crate::events::Event::ToolStarted { agent, tool, .. } => {
+                Some((agent.clone(), tool.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        calls.iter().any(|(_, tool)| tool == "write_file"),
+        "the run must have emitted a write_file tool event; got {calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|(_, tool)| tool == "delegate_to_agent"),
+        "a --no-delegate run must emit ZERO delegate_to_agent calls; got {calls:?}"
+    );
+    // (c) attribution names the top-level agent, not `pm` or the engineer.
+    assert!(
+        calls.iter().all(|(agent, _)| agent == "engineer"),
+        "every tool event must be attributed to the named agent; got {calls:?}"
+    );
+}
+
+/// #8031 PERMISSION GATE: a `--no-delegate` run honours the named agent's own
+/// `tcode_tools` allowlist, exactly as a delegated run of that agent does.
+///
+/// Why: the single-agent tool set must come through the SAME gate the
+/// delegated runner uses (`runner::agent_registry` -> `gate_registry`). An
+/// implementation that merged the factory's full output straight onto the
+/// top-level registry would advertise `bash`/`edit` to an agent whose author
+/// denied them — a silent privilege widening this test is the differential
+/// for.
+/// What: an `engineer` whose allowlist is `read_file, write_file, finish_task`
+/// only. Asserts `write_file` is advertised (an allowlist entry, so the merge
+/// really happened) while `bash`, `edit`, `glob` and `grep` — all built by
+/// `ProjectToolFactory` — are absent.
+/// Test: this test.
+#[tokio::test]
+async fn no_delegate_run_respects_the_agents_tools_allowlist() {
+    let registry = Arc::new(SessionRegistry::new());
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let agents = engineer_agents_dir("read_file, write_file, finish_task");
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    let mock = Arc::new(ScriptedLlm::from_json(&[stop_response(
+        "engineer: nothing to do",
+    )]));
+    let llm: Arc<dyn InferenceAdapter> = Arc::clone(&mock) as Arc<dyn InferenceAdapter>;
+    let p = TaskRunParams {
+        no_delegate: true,
+        agent_name: "engineer".to_string(),
+        ..params(&agents, &project, &session.id)
+    };
+
+    spawn_task_run(Arc::clone(&registry), llm, p).expect("run must start");
+    wait_for_terminal(&registry, &session.id).await;
+
+    let advertised = mock.first_tool_names();
+    assert!(
+        advertised.contains(&"write_file".to_string()),
+        "an allowlisted tool must reach the single-agent registry; got {advertised:?}"
+    );
+    for denied in ["bash", "edit", "glob", "grep"] {
+        assert!(
+            !advertised.contains(&denied.to_string()),
+            "{denied} is outside the agent's tcode_tools allowlist and must not be \
+             advertised on a --no-delegate run; got {advertised:?}"
+        );
+    }
 }

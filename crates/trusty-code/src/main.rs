@@ -219,11 +219,13 @@ enum Command {
         #[arg(long, value_name = "MODE")]
         permission_mode: Option<String>,
 
-        /// Run AGENT alone: do not register `delegate_to_agent`, so it
-        /// cannot hand the task to `python-engineer` (#8031). Applies to
-        /// both execution paths — the default thin-client path sends it as
-        /// `task.run`'s `no_delegate` param, and `--legacy-in-process`
-        /// passes it as `RunTaskParams.no_delegate`.
+        /// Run AGENT alone (#8031): `delegate_to_agent` is not registered, so
+        /// AGENT cannot hand the task to `python-engineer`; instead AGENT gets
+        /// its own tcode tools (`read_file`, `write_file`, `edit`, `bash`, …),
+        /// exactly the set and permission gating a delegated run of AGENT
+        /// would get. Applies to both execution paths — the default
+        /// thin-client path sends it as `task.run`'s `no_delegate` param, and
+        /// `--legacy-in-process` passes it as `RunTaskParams.no_delegate`.
         #[arg(long)]
         no_delegate: bool,
     },

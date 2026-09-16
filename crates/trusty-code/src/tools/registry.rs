@@ -58,6 +58,26 @@ impl ToolRegistry {
         self.tools.insert(name, tool);
     }
 
+    /// Copy in every tool from `other` this registry does not already hold.
+    ///
+    /// Why (#8031): a `--no-delegate` run merges the NAMED agent's own tool set
+    /// (built by the same `RegistryFactory` a delegation of that agent would
+    /// use) into a top-level registry that already carries the harness tools —
+    /// `finish_task`, `use_skill` — the factory also builds. [`Self::register`]
+    /// asserts on a duplicate name, so the overlap needs a first-wins merge
+    /// rather than a loop of `register` calls.
+    /// What: for each of `other`'s entries, inserts a cloned `Arc` only when
+    /// this registry has no tool of that name; an existing registration always
+    /// wins. Order-independent.
+    /// Test: `merge_missing_adds_new_tools`, `merge_missing_keeps_the_existing_tool`.
+    pub fn merge_missing(&mut self, other: &ToolRegistry) {
+        for (name, tool) in &other.tools {
+            self.tools
+                .entry(name.clone())
+                .or_insert_with(|| Arc::clone(tool));
+        }
+    }
+
     /// Whether a tool with the given name is registered.
     ///
     /// Why: Lets callers skip registration when a tool already exists.
@@ -474,5 +494,50 @@ mod tests {
         let filtered = reg.filter_tools_for_user(&user);
         assert_eq!(filtered.len(), 1, "only the open tool should survive");
         assert_eq!(filtered[0].name(), "open");
+    }
+
+    /// `merge_missing` copies in tools the target does not already hold.
+    ///
+    /// Why (#8031): the `--no-delegate` merge would be a no-op if new names
+    /// were dropped.
+    /// What: merge a registry holding `write_file` into one holding
+    /// `finish_task`; both must be present afterwards.
+    /// Test: This test.
+    #[test]
+    fn merge_missing_adds_new_tools() {
+        let mut target = ToolRegistry::new();
+        target.register(Arc::new(MockTool::new("finish_task")));
+        let mut source = ToolRegistry::new();
+        source.register(Arc::new(MockTool::new("write_file")));
+
+        target.merge_missing(&source);
+        assert!(target.contains("finish_task"));
+        assert!(target.contains("write_file"));
+    }
+
+    /// `merge_missing` never overwrites an existing registration.
+    ///
+    /// Why (#8031): the harness tools are registered first and the agent's
+    /// factory builds its own `finish_task`/`use_skill`; the already-wired
+    /// instance must win rather than be silently replaced.
+    /// What: both registries hold `finish_task`; after the merge, dispatching
+    /// it still reaches the target's own instance.
+    /// Test: This test.
+    #[tokio::test]
+    async fn merge_missing_keeps_the_existing_tool() {
+        let mut target = ToolRegistry::new();
+        target.register(Arc::new(MockTool::new("finish_task")));
+        let kept = Arc::as_ptr(target.tools.get("finish_task").expect("registered"));
+
+        let mut source = ToolRegistry::new();
+        source.register(Arc::new(MockTool::new("finish_task")));
+        target.merge_missing(&source);
+
+        let after = Arc::as_ptr(target.tools.get("finish_task").expect("still registered"));
+        assert!(
+            std::ptr::addr_eq(kept, after),
+            "merge_missing must leave the pre-existing registration in place"
+        );
+        assert_eq!(target.schemas().len(), 1, "no duplicate entry is created");
     }
 }

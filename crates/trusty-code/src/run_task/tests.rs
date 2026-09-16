@@ -1889,6 +1889,67 @@ async fn no_delegate_run_omits_delegate_tool() {
     );
 }
 
+/// #8031: on the legacy in-process path a `no_delegate` run must register the
+/// NAMED agent's own tcode tools and be able to write a file with them.
+///
+/// Why: round 1 dropped `delegate_to_agent` here too, leaving this path's
+/// `pm_registry` as `finish_task` (+ `use_skill`) — no file tools at all, so
+/// `--legacy-in-process --no-delegate` could not do the work either. The
+/// closure condition must hold on BOTH execution paths.
+/// What: an on-disk `engineer.md` whose `tcode_tools` allows `write_file` but
+/// NOT `bash`/`edit`; scripts one `write_file` call then a stop. Asserts the
+/// file landed in the project, the advertised set carries `write_file` but not
+/// `delegate_to_agent`, and the denied tools never reached the wire — the same
+/// `tools.allowed` gate a delegated run of that agent goes through.
+/// FAILS at 7cdc3b562: `write_file` is unregistered, so nothing is written.
+/// Test: this test.
+#[tokio::test]
+async fn no_delegate_run_registers_the_agents_own_tools() {
+    let agents = agents_dir("openai/gpt-4o-mini");
+    std::fs::write(
+        agents.path().join("engineer.md"),
+        "---\nname: engineer\nmodel: openai/gpt-4o-mini\ntcode_tools: [read_file, write_file, finish_task]\n---\n\nYou are the engineer.\n",
+    )
+    .expect("write engineer.md");
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        write_file_response("hello.txt", "hello"),
+        stop_response("engineer: wrote hello.txt"),
+    ]));
+    let p = RunTaskParams {
+        no_delegate: true,
+        agent: "engineer".into(),
+        task: "create hello.txt containing hello".into(),
+        ..params(&agents, &project, None)
+    };
+    let _report = execute_run_task(p, llm.clone()).await;
+
+    let written = std::fs::read_to_string(project.path().join("hello.txt"))
+        .expect("#8031: the legacy-path single-agent run must write the file itself");
+    assert_eq!(
+        written, "hello",
+        "the file must carry the requested content"
+    );
+
+    let names = llm.first_tool_names();
+    assert!(
+        names.contains(&"write_file".to_string()),
+        "the named agent's own write_file must be advertised; got {names:?}"
+    );
+    assert!(
+        !names.contains(&"delegate_to_agent".to_string()),
+        "a no_delegate run must not advertise delegate_to_agent; got {names:?}"
+    );
+    for denied in ["bash", "edit", "glob", "grep"] {
+        assert!(
+            !names.contains(&denied.to_string()),
+            "{denied} is outside the agent's tcode_tools allowlist and must not be \
+             advertised on a no_delegate run; got {names:?}"
+        );
+    }
+}
+
 /// #8031 companion: the DEFAULT run still advertises `delegate_to_agent`.
 ///
 /// Why: without this, `no_delegate_run_omits_delegate_tool` would also pass
