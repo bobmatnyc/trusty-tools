@@ -31,7 +31,15 @@
 //! names one pid this test spawned. Nothing is shared with a sibling test
 //! binary, so serialising would cost wall-clock for no isolation.
 //!
+//! A third shape covers the fixture the ordinary suites actually use:
+//! [`common::DaemonGuard`] now owns the spawn rather than wrapping a `Child`
+//! somebody else spawned, so the stamp cannot be left off at a call site. That
+//! is what the 2026-09-14 recurrence turned on — the linkage was a convention
+//! three files hand-copied, not a property of the guard.
+//!
 //! Test: `cargo test -p trusty-memory --test orphan_reap_7085`.
+
+mod common;
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -46,6 +54,10 @@ const ENV_DATA_DIR: &str = "TRUSTY_7085_DATA_DIR";
 /// Set on the spawner to make it reach the daemon through a bridge level, which
 /// is what makes the daemon a detached grandchild rather than a direct child.
 const ENV_VIA_BRIDGE: &str = "TRUSTY_7085_VIA_BRIDGE";
+
+/// Set on the spawner to make it start the daemon through [`common::DaemonGuard`]
+/// — the fixture the ordinary daemon suites use — rather than by hand.
+const ENV_VIA_GUARD: &str = "TRUSTY_7085_VIA_GUARD";
 
 /// Where [`bridge_child_mode`] writes the detached daemon's pid.
 const ENV_BRIDGE_PIDFILE: &str = "TRUSTY_7085_BRIDGE_PIDFILE";
@@ -154,6 +166,10 @@ fn spawner_child_mode() {
         run_via_bridge(&pidfile, &data_dir);
         return;
     }
+    if std::env::var(ENV_VIA_GUARD).is_ok() {
+        run_via_guard(&pidfile, &data_dir);
+        return;
+    }
 
     let mut child = trusty_common::parent_death::exit_with_parent(
         std::process::Command::new(binary())
@@ -175,6 +191,25 @@ fn spawner_child_mode() {
     // returns; waiting rather than sleeping also reaps the daemon in the
     // uninteresting case where it exits on its own first.
     let _ = child.wait();
+}
+
+/// Spawner-mode variant that starts the daemon through [`common::DaemonGuard`].
+///
+/// Why: the two shapes above prove the MECHANISM, each against a hand-written
+/// spawn. Neither touches the fixture the ordinary daemon suites actually call,
+/// and that is where the linkage regressed — the stamp was a block each call
+/// site copied beside `DaemonGuard::new(child)`, so any site that dropped it
+/// leaked silently. Running the real guard is what makes this a property of the
+/// fixture rather than of three hand-copies.
+/// What: spawns through `DaemonGuard::spawn`, records the daemon's pid, and
+/// blocks forever holding the guard. The caller SIGKILLs this process, so the
+/// guard's `Drop` never runs and only the stamp can reap the daemon.
+fn run_via_guard(pidfile: &str, data_dir: &str) {
+    let guard = common::DaemonGuard::spawn(Path::new(data_dir));
+    std::fs::write(pidfile, guard.pid().to_string()).expect("record daemon pid");
+    loop {
+        std::thread::sleep(Duration::from_secs(60));
+    }
 }
 
 /// Spawner-mode variant that puts a short-lived bridge between it and the daemon.
@@ -255,7 +290,7 @@ fn bridge_child_mode() {
 /// leave behind the very orphan it is about.
 #[test]
 fn foreground_daemon_exits_when_its_spawner_is_sigkilled() {
-    assert_daemon_dies_with_its_spawner(false);
+    assert_daemon_dies_with_its_spawner(Shape::Direct);
 }
 
 /// The same proof for the DETACHED grandchild, which is where most of the
@@ -271,16 +306,40 @@ fn foreground_daemon_exits_when_its_spawner_is_sigkilled() {
 /// the daemon through `spawn_detached_forwarding_parent_link` and exits.
 #[test]
 fn detached_grandchild_daemon_exits_when_its_spawner_is_sigkilled() {
-    assert_daemon_dies_with_its_spawner(true);
+    assert_daemon_dies_with_its_spawner(Shape::Bridge);
+}
+
+/// The same proof for the fixture the ordinary daemon suites use.
+///
+/// Why (#7085 recurrence, 2026-09-14): the two tests above each prove the
+/// mechanism against a spawn written for them. `DaemonGuard` used to take an
+/// already-spawned `Child`, so whether a real suite's daemon carried the stamp
+/// depended on a block copied into three separate files — and a copy that goes
+/// missing leaks exactly the orphans this issue is about, with every test still
+/// green. `DaemonGuard::spawn` owns the stamp; this test is what says so.
+/// What: as the tests above, except the helper starts the daemon through
+/// `common::DaemonGuard::spawn` and then blocks with the guard held, so the
+/// SIGKILL skips its `Drop` and the stamp is the only thing left.
+#[test]
+fn guard_spawned_daemon_exits_when_its_spawner_is_sigkilled() {
+    assert_daemon_dies_with_its_spawner(Shape::Guard);
+}
+
+/// Which spawn path the killable helper takes to reach the daemon.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    /// The daemon is the spawner's direct child.
+    Direct,
+    /// A short-lived bridge starts the daemon detached, so it is a grandchild
+    /// already reparented to init before the spawner dies.
+    Bridge,
+    /// The daemon comes from `common::DaemonGuard::spawn`, the real fixture.
+    Guard,
 }
 
 /// Drive one scenario end to end: start a killable spawner, let it produce a
 /// daemon, SIGKILL it, and require the daemon to be gone inside [`REAP_TIMEOUT`].
-///
-/// `via_bridge` selects the shape: `false` spawns the daemon as the spawner's
-/// direct child, `true` routes it through a short-lived bridge so the daemon is
-/// a detached grandchild.
-fn assert_daemon_dies_with_its_spawner(via_bridge: bool) {
+fn assert_daemon_dies_with_its_spawner(shape: Shape) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let pidfile = tmp.path().join("daemon.pid");
 
@@ -298,8 +357,14 @@ fn assert_daemon_dies_with_its_spawner(via_bridge: bool) {
     .stdin(std::process::Stdio::null())
     .stdout(std::process::Stdio::null())
     .stderr(std::process::Stdio::null());
-    if via_bridge {
-        cmd.env(ENV_VIA_BRIDGE, "1");
+    match shape {
+        Shape::Direct => {}
+        Shape::Bridge => {
+            cmd.env(ENV_VIA_BRIDGE, "1");
+        }
+        Shape::Guard => {
+            cmd.env(ENV_VIA_GUARD, "1");
+        }
     }
     let mut spawner = cmd.spawn().expect("spawn the re-entry helper");
 
@@ -317,7 +382,7 @@ fn assert_daemon_dies_with_its_spawner(via_bridge: bool) {
     // Wait for the daemon to bind its socket, so we know startup ran far enough
     // to arm the watchdog. Without this the test could kill the spawner during
     // the daemon's first few milliseconds and prove nothing.
-    let socket = tmp.path().join("trusty-memory").join("trusty-memory.sock");
+    let socket = common::socket_path(tmp.path());
     if !wait_for_path(&socket, BOOT_TIMEOUT) {
         hard_kill(daemon_pid);
         let _ = spawner.kill();
@@ -332,7 +397,7 @@ fn assert_daemon_dies_with_its_spawner(via_bridge: bool) {
     // parentage before the spawner dies. If it were still a descendant of the
     // spawner, the reparent prong would carry this test and the identity prong —
     // the only thing a real detached daemon has — would go unproven.
-    if via_bridge {
+    if shape == Shape::Bridge {
         let ppid = ppid_of(daemon_pid);
         assert!(
             wait_for_reparent_to_init(daemon_pid, BOOT_TIMEOUT),

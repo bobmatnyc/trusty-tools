@@ -140,27 +140,14 @@ async fn spawn_raw_bridge(data_path: &std::path::Path) -> RawChild {
 /// assertion here or in the caller cannot orphan it (#5188).
 /// Test: used by `stdio_serve_concurrent_two_bridges_both_work`.
 fn spawn_daemon(data_path: &std::path::Path) -> DaemonGuard {
-    // #7085: `DaemonGuard` only reaps in `Drop`, which a SIGKILL of this test
-    // binary skips — the stamp makes the daemon watch us and self-exit instead.
-    let child = trusty_common::parent_death::exit_with_parent(
-        std::process::Command::new(binary())
-            .arg("serve")
-            .arg("--foreground")
-            .env("TRUSTY_DATA_DIR_OVERRIDE", data_path)
-            .env("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1")
-            .env("RUST_LOG", "warn")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit()),
-    )
-    .spawn()
-    .expect("spawn daemon");
-    // #5188: own the child BEFORE the readiness poll — that poll asserts, and
-    // an unguarded child would outlive the panic.
-    let guard = DaemonGuard::new(child);
+    // #5188: the guard owns the child from the moment it exists, so the
+    // asserting readiness poll below cannot orphan it. #7085: the guard also
+    // applies the parent-death stamp, which a SIGKILL of this test binary —
+    // where no `Drop` runs at all — is the only thing that survives.
+    let guard = DaemonGuard::spawn(data_path);
 
     // Poll for the readiness file.
-    let readiness_file = data_path.join("trusty-memory").join("trusty-memory.sock");
+    let readiness_file = common::socket_path(data_path);
     let deadline = std::time::Instant::now() + DAEMON_BOOT_TIMEOUT;
     loop {
         if readiness_file.exists() {
