@@ -579,7 +579,16 @@ jobs:
       # itself, under `-D rustdoc::broken_intra_doc_links`, and deletes the
       # `doc-*` fingerprints first so a warm cache cannot produce a pass over a
       # build rustdoc never ran. Exit 3 means it could not compute a verdict at
-      # all, which is a failure here exactly as it is at publish time.
+      # all, and exit 4 (#7537) that the run examined fewer doc units than the
+      # workspace declares — `rust-cache` restores a warm target dir here, so a
+      # unit cargo serves from cache is exactly the shape that reaches CI. Both
+      # are failures here exactly as they are at publish time, and this step
+      # needs no code-specific handling to make them so: the script is invoked
+      # bare, so every non-zero exit fails the step.
+      #
+      # The LAST line of its output is a `VERDICT PASS|FAIL exit <n>` row
+      # (#7633). Read that line, not the SUMMARY above it, when triaging a run
+      # from the log.
       - name: cargo doc + broken-link ratchet
         if: needs.changes.outputs.docs_only != 'true'
         run: bash scripts/check_rustdoc_links.sh

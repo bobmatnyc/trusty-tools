@@ -326,7 +326,10 @@ jobs:
 
       # The script runs `cargo doc --workspace --no-deps --locked --keep-going`
       # itself; --locked is inside it so the gate proves the committed lockfile
-      # is the one documented.
+      # is the one documented. Invoked bare, so its exit codes need no handling
+      # here — 1 (a link regressed), 3 (no verdict computable) and 4 (#7537: the
+      # run examined fewer doc units than the workspace declares) all fail the
+      # step. The last line of the output names which, as a `VERDICT` row.
       - name: cargo doc + broken-link ratchet
         run: bash scripts/check_rustdoc_links.sh
 
