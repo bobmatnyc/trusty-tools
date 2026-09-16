@@ -11933,7 +11933,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mpm"
-version = "1.5.37"
+version = "1.5.38"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12065,7 +12065,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-search"
-version = "0.54.1"
+version = "0.54.2"
 dependencies = [
  "anyhow",
  "arc-swap",
