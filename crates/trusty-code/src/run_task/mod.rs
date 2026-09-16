@@ -17,6 +17,8 @@ pub(crate) mod diff;
 mod recorder;
 mod redelegation;
 mod report;
+// #8155: the usage/cost block BOTH report surfaces emit.
+pub mod usage_summary;
 
 #[cfg(test)]
 mod tests;
@@ -50,6 +52,9 @@ use crate::tools::{
 pub use recorder::{RecordingLlmClient, SharedTranscript, TurnRecord};
 pub use redelegation::{MAX_REDELEGATIONS, RedelegationCapSignal};
 pub use report::{ExitCode, RunReport, aggregate_usage_per_role};
+// #8155: re-exported so `cli::run_task` (the thin client) builds the same
+// block `RunReport::render_json` does, rather than a look-alike of its own.
+pub use usage_summary::{RoleUsage, RunUsageReport, TokenCounts, usage_by_role};
 
 /// Default bash timeout for the engineer's tools, in seconds.
 const ENGINEER_BASH_TIMEOUT_SECS: u64 = 120;

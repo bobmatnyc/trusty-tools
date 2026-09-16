@@ -134,9 +134,20 @@ impl RunReport {
     /// string derived from `exit`, a `cost_usd` that is `null` when pricing is
     /// unavailable, and (#2823) a `build` object naming the binary that produced
     /// the run. Pretty-printed for readability without affecting parseability.
+    /// (#8155) `turns` and `usage_by_role` come from
+    /// [`crate::run_task::RunUsageReport`] — the SAME block the daemon path's
+    /// `--json` output now carries, so one parser reads either document; the
+    /// `usage` object it emits is the same four keys this report has always
+    /// had.
     /// Test: `run_task::tests::report_renders_json`,
-    /// `report::tests::report_json_carries_build_provenance`.
+    /// `report::tests::report_json_carries_build_provenance`,
+    /// `report::tests::report_json_carries_the_shared_usage_block`.
     pub fn render_json(&self) -> String {
+        let usage_report = crate::run_task::RunUsageReport::from_record(
+            &self.transcript,
+            &self.usage,
+            self.cost_usd,
+        );
         let value = json!({
             "status": self.status_str(),
             // Build provenance is read from compile-time constants rather than
@@ -150,13 +161,10 @@ impl RunReport {
             "task": self.task,
             "diff": self.diff,
             "transcript": self.transcript,
-            "usage": {
-                "prompt_tokens": self.usage.prompt_tokens,
-                "completion_tokens": self.usage.completion_tokens,
-                "cache_read_tokens": self.usage.cache_read_tokens,
-                "cache_creation_tokens": self.usage.cache_creation_tokens,
-            },
-            "cost_usd": self.cost_usd,
+            "turns": usage_report.turns,
+            "usage": usage_report.usage,
+            "cost_usd": usage_report.cost_usd,
+            "usage_by_role": usage_report.usage_by_role,
         });
         serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".to_string())
     }
@@ -453,6 +461,47 @@ mod tests {
                 .as_str()
                 .is_some_and(|s| !s.is_empty()),
             "build.commit must be a non-empty string"
+        );
+    }
+
+    /// (#8155) The legacy JSON report carries the SAME `turns`/`usage`/
+    /// `cost_usd`/`usage_by_role` block the daemon path emits, so one parser
+    /// reads both documents.
+    ///
+    /// Why: #8155 was reported as "the daemon path is missing fields the
+    /// legacy path has", but the per-role split was missing from BOTH. Adding
+    /// it to only the new path would have re-created the divergence in the
+    /// other direction.
+    /// What: asserts the turn count, the four unchanged `usage` keys, and a
+    /// per-role row for each of the fixture's two roles.
+    /// Test: this test.
+    #[test]
+    fn report_json_carries_the_shared_usage_block() {
+        let report = sample_report(ExitCode::Success, "+++ added: x.py\n");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&report.render_json()).expect("valid JSON");
+
+        assert_eq!(parsed["turns"], 2);
+        assert_eq!(parsed["usage"]["prompt_tokens"], 100);
+        assert_eq!(parsed["usage"]["completion_tokens"], 40);
+        assert_eq!(parsed["usage"]["cache_read_tokens"], 0);
+        assert_eq!(parsed["usage"]["cache_creation_tokens"], 0);
+        assert_eq!(parsed["cost_usd"], 0.001);
+
+        let roles: Vec<&str> = parsed["usage_by_role"]
+            .as_array()
+            .expect("usage_by_role must be an array")
+            .iter()
+            .map(|r| r["role"].as_str().expect("role is a string"))
+            .collect();
+        assert_eq!(roles, vec!["pm", "python-engineer"]);
+        assert_eq!(parsed["usage_by_role"][0]["turns"], 1);
+        assert!(
+            parsed["usage_by_role"][1]["cost_usd"]
+                .as_f64()
+                .is_some_and(|c| c > 0.0),
+            "each role's turns must price: {}",
+            parsed["usage_by_role"]
         );
     }
 

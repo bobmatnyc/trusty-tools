@@ -25,6 +25,12 @@
 //! `HarnessMode` precedence — env var > `--mode` flag > `.claude/settings.json`
 //! > default — end to end via the REAL CLI binary and its `--json` response.
 //!
+//! (#8155) `run_task_json_report_carries_turns_usage_and_cost` and
+//! `run_task_human_output_reports_turns_usage_and_cost` prove the DEFAULT
+//! daemon path reports what the run spent — turn count, token usage, cost and
+//! the per-role split — rather than only the bare `Session` snapshot it used
+//! to print, which left the #8127 parity runner with no cost figure at all.
+//!
 //! `session_list_on_fresh_project_reports_no_sessions`,
 //! `transcript_unknown_session_errors_cleanly`,
 //! `attach_unknown_session_errors_cleanly`, and
@@ -141,6 +147,143 @@ fn run_task_json_mode_prints_only_the_final_session() {
     let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
         .unwrap_or_else(|e| panic!("stdout must be valid JSON: {e}: {stdout}"));
     assert_eq!(parsed["status"], "finished");
+}
+
+/// (#8155) The DEFAULT (daemon) path's `--json` document must carry the run
+/// record — `turns`, `usage`, `cost_usd`, `usage_by_role` and `transcript` —
+/// beside the session snapshot it already printed.
+///
+/// Why: this is the regression. Before #8155 the daemon path printed only
+/// `agent, binding, created_at, id, mode, result, status, task,
+/// workstream_id`, so a caller had no per-run cost unless it fell back to
+/// `--legacy-in-process`; and the ephemeral daemon exits with the run, so
+/// nothing could recover the figures afterwards either.
+/// What: drives the real binary with `TCODE_MOCK_LLM=echo` (whose scripted
+/// fixtures carry non-zero token counts on every turn), then asserts the
+/// added keys AND that the pre-existing session keys survived.
+/// Test: this test.
+#[test]
+fn run_task_json_report_carries_turns_usage_and_cost() {
+    let project = project_with_agents();
+    let output = support::tcode_command()
+        .args([
+            "run-task",
+            "pm",
+            "say hi",
+            "--project",
+            &project.path().display().to_string(),
+            "--json",
+        ])
+        .env("TCODE_MOCK_LLM", "echo")
+        .output()
+        .expect("spawn tcode run-task --json");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "tcode run-task --json must exit 0, got {:?}\nstdout: {stdout}\nstderr: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("stdout must be valid JSON: {e}: {stdout}"));
+
+    // The snapshot this path always printed is still there.
+    assert_eq!(parsed["status"], "finished");
+    assert!(
+        parsed["id"].as_str().is_some_and(|id| !id.is_empty()),
+        "the session id must survive the merge: {parsed}"
+    );
+
+    assert!(
+        parsed["turns"].as_u64().is_some_and(|t| t > 0),
+        "expected a non-zero turn count: {parsed}"
+    );
+    assert!(
+        parsed["usage"]["prompt_tokens"]
+            .as_u64()
+            .is_some_and(|t| t > 0),
+        "expected non-zero prompt_tokens: {}",
+        parsed["usage"]
+    );
+    assert!(
+        parsed["usage"]["completion_tokens"]
+            .as_u64()
+            .is_some_and(|t| t > 0),
+        "expected non-zero completion_tokens: {}",
+        parsed["usage"]
+    );
+    assert!(
+        parsed["cost_usd"].as_f64().is_some_and(|c| c > 0.0),
+        "expected a priced, non-null cost_usd: {}",
+        parsed["cost_usd"]
+    );
+
+    let roles: Vec<&str> = parsed["usage_by_role"]
+        .as_array()
+        .unwrap_or_else(|| panic!("usage_by_role must be an array: {parsed}"))
+        .iter()
+        .map(|r| r["role"].as_str().expect("role must be a string"))
+        .collect();
+    assert!(
+        roles.contains(&"pm") && roles.contains(&"python-engineer"),
+        "expected the pm/delegated-agent split: {roles:?}"
+    );
+
+    let transcript = parsed["transcript"]
+        .as_array()
+        .unwrap_or_else(|| panic!("transcript must be an array: {parsed}"));
+    assert!(
+        !transcript.is_empty(),
+        "the embedded transcript is what survives the ephemeral daemon: {parsed}"
+    );
+}
+
+/// (#8155) The human (non-`--json`) render reports the same figures.
+///
+/// Why: an operator watching a real run saw `session=... status=... mode=...`
+/// and nothing about what it cost. Fixing only the machine-readable form
+/// would have left that gap open.
+/// What: asserts the footer's turn count, the token counters, a `cost=$...`
+/// figure, and a per-role line for the delegated engineer.
+/// Test: this test.
+#[test]
+fn run_task_human_output_reports_turns_usage_and_cost() {
+    let project = project_with_agents();
+    let output = support::tcode_command()
+        .args([
+            "run-task",
+            "pm",
+            "say hi",
+            "--project",
+            &project.path().display().to_string(),
+        ])
+        .env("TCODE_MOCK_LLM", "echo")
+        .output()
+        .expect("spawn tcode run-task");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "tcode run-task must exit 0, got {:?}\nstdout: {stdout}",
+        output.status.code()
+    );
+    assert!(
+        stdout.contains("status=finished"),
+        "expected the existing final status line: {stdout}"
+    );
+    assert!(
+        stdout.contains("turns=") && stdout.contains("prompt="),
+        "expected a usage footer: {stdout}"
+    );
+    assert!(
+        stdout.contains("cost=$"),
+        "expected a priced cost in the footer, not the unavailable placeholder: {stdout}"
+    );
+    assert!(
+        stdout.contains("python-engineer: turns="),
+        "expected a per-role line for the delegated engineer: {stdout}"
+    );
 }
 
 /// Run `tcode run-task ... --json`, optionally with `--mode`, a

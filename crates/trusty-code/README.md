@@ -111,6 +111,32 @@ workstream, and TUI flows. `run-workflow` remains the incomplete surface.
 | `tcode paths show\|import` | Report which config root wins; import a `.claude/` catalog |
 | `tcode run-workflow <name>` | Reserved workflow runner; not yet implemented |
 
+## What a `run-task` report carries
+
+Both `run-task` paths — the default daemon path and `--legacy-in-process` —
+report what the run spent, under the same field names, so one parser reads
+either document (#8155).
+
+| Field | Meaning |
+|--------|---------|
+| `turns` | How many PM + delegated-agent turns were recorded |
+| `usage` | `prompt_tokens`, `completion_tokens`, `cache_read_tokens`, `cache_creation_tokens`, summed over the run |
+| `cost_usd` | Total USD cost — the provider's own per-turn figure where it reported one, local pricing otherwise; `null` only when nothing priced |
+| `usage_by_role` | The same counters and cost per role (`pm`, `python-engineer`, …), in first-appearance order |
+| `transcript` | Every recorded turn: `role`, `model`, `text`, `tool_calls`, `usage` |
+
+The daemon path prints these beside the session snapshot it already emitted
+(`id`, `status`, `mode`, `binding`, `result`, …); the legacy path prints them
+beside its own `diff` and `exit_code`. Without `--json`, both print the same
+figures as a human footer.
+
+**The transcript rides in the report, not on disk.** `tcode run-task` spawns an
+ephemeral `tcode serve --stdio` daemon that exits with the run, and sessions
+live in that daemon's memory — so a later `tcode transcript <id>` or `tcode
+session list` from a NEW process reports `session not found`, and nothing under
+`~/.trusty-code/` holds a per-session transcript. Keep the run's own `--json`
+document if you need the record afterwards.
+
 ## Credential storage
 
 `tcode` stores inference-provider API keys through `trusty-common`'s shared
@@ -201,9 +227,11 @@ Run `tcode paths show [--json]` to see which root won for each entry.
 
 ### Private state — `~/.trusty-code/`
 
-Transcripts, logs, compression telemetry, daemon discovery files, and the
-workstream store are per-user runtime state, not project configuration. They
-live in `~/.trusty-code/`, which is created at mode `0700`; an existing
+Logs, compression telemetry, daemon discovery files, and the workstream store
+are per-user runtime state, not project configuration. (A finished run's
+transcript is NOT among them — it rides in the `run-task` report; see "What a
+`run-task` report carries" above.) They live in `~/.trusty-code/`, which is
+created at mode `0700`; an existing
 directory with a permissive mode is tightened on the next run. Every `tcode`
 run that resolves the directory applies both — not only `tcode paths import`
 (#6999). `tcode paths show` reports whether the mode is currently owner-only,

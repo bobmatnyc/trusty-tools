@@ -6,12 +6,21 @@
 //! `cli::session` — see its module docs), calls `session.get_transcript`,
 //! and prints either the pretty-printed raw JSON (`--json`) or
 //! `cli_client::render::render_transcript_human`'s readable view.
+//!
+//! (#8155) A standalone invocation therefore cannot inspect a run that
+//! `tcode run-task` already finished — that run's daemon is gone and took the
+//! session with it. `cli::run_task` closes the gap at the source instead of
+//! here: it reads the record over this same method inside its own daemon's
+//! lifetime and EMBEDS turns/usage/cost in the report it prints, so the run's
+//! own output is the record. This subcommand stays useful against a
+//! long-lived daemon (`tcode serve --http`), where the session outlives the
+//! call.
 //! Test: `tests/cli_e2e.rs::transcript_unknown_session_errors_cleanly`;
 //! the meaningful "real turns" case is exercised end-to-end via
-//! `run_task::run`, which calls the SAME `session.get_transcript` method
-//! from within one daemon's lifetime (see that module's docs for why a
-//! standalone `transcript` invocation cannot see another process's
-//! session).
+//! `run_task::run`
+//! (`tests/cli_e2e.rs::run_task_json_report_carries_turns_usage_and_cost`),
+//! and over the wire in
+//! `tests/task_e2e.rs::task_run_then_get_transcript_exposes_turns_usage_and_cost`.
 
 use std::path::Path;
 use std::time::Duration;

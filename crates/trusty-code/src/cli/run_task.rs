@@ -17,7 +17,22 @@
 //! and `cli_client::render::exit_code_for_status` for the process exit code.
 //! `--json` suppresses the live per-event lines and prints only the final
 //! `Session` snapshot as pretty JSON, matching the legacy path's `--json`
-//! contract (a single JSON document on stdout). `--mode` (#2059) is passed
+//! contract (a single JSON document on stdout).
+//!
+//! (#8155) That snapshot alone carried no `turns`, `usage`, `cost_usd` or
+//! `transcript`, so the default path reported no per-run cost at all while
+//! `--legacy-in-process` reported a full `RunReport` — and once the ephemeral
+//! daemon exited with the run, a later `tcode transcript <id>` could not
+//! recover them either (the registry is in-memory; see `cli::transcript`'s
+//! module docs). [`run`] now makes ONE extra `session.get_transcript` call
+//! inside the same daemon's lifetime and merges the stored run record —
+//! `turns`, `usage`, `cost_usd`, the `usage_by_role` split, and the full
+//! `transcript` — into the printed document via
+//! `run_task::RunUsageReport::merge_into_snapshot`. Embedding was chosen over
+//! persisting the session to `~/.trusty-code`: it needs no new durability
+//! contract, and the run's own output is the one place a caller is
+//! guaranteed to be looking. The human render gains the same figures as a
+//! footer. `--mode` (#2059) is passed
 //! straight through as `task.run`'s own `mode` param — this function does
 //! NOT resolve or validate it; the daemon's `crate::mode::resolve_mode`
 //! (highest to lowest: `TRUSTY_CODE_MODE` > this param >
@@ -26,7 +41,9 @@
 //! include `Session.mode`).
 //! Test: `tests/cli_e2e.rs::run_task_streams_live_events_and_reports_final_status`
 //! (the required black-box "replay via thin CLI" case, driven with
-//! `TCODE_MOCK_LLM=echo`).
+//! `TCODE_MOCK_LLM=echo`),
+//! `tests/cli_e2e.rs::run_task_json_report_carries_turns_usage_and_cost`,
+//! `tests/cli_e2e.rs::run_task_human_output_reports_turns_usage_and_cost`.
 
 use std::path::Path;
 use std::time::Duration;
@@ -37,7 +54,8 @@ use serde_json::json;
 use trusty_code::cli_client::StdioRpcClient;
 use trusty_code::cli_client::render::{exit_code_for_status, render_event_line};
 use trusty_code::events::Event;
-use trusty_code::session::Session;
+use trusty_code::run_task::RunUsageReport;
+use trusty_code::session::{Session, TranscriptRecord};
 
 use super::tcode_exe;
 
@@ -142,15 +160,30 @@ pub async fn run(
     let status_result = client
         .call("session.status", json!({"session_id": session_id}))
         .await?;
+    // #8155: the run record lives on the session, and this daemon dies with
+    // the invocation — so it must be read HERE, before the shutdown below,
+    // or it is gone.
+    let record = fetch_run_record(&mut client, &session_id).await;
     client.shutdown(Duration::from_secs(5)).await?;
 
     let session: Session = serde_json::from_value(status_result.clone())
         .map_err(|e| anyhow::anyhow!("tcode run-task: malformed daemon response: {e}"))?;
 
+    let usage_report = record
+        .as_ref()
+        .map(|record| RunUsageReport::from_record(&record.turns, &record.usage, record.cost_usd));
+
     if json_output {
+        let mut document = status_result;
+        let snapshot = document.as_object_mut().ok_or_else(|| {
+            anyhow::anyhow!("tcode run-task: session.status did not return a JSON object")
+        })?;
+        if let (Some(usage_report), Some(record)) = (&usage_report, &record) {
+            usage_report.merge_into_snapshot(snapshot, &record.turns);
+        }
         println!(
             "{}",
-            serde_json::to_string_pretty(&status_result)
+            serde_json::to_string_pretty(&document)
                 .map_err(|e| anyhow::anyhow!("tcode run-task: failed to render JSON: {e}"))?
         );
     } else {
@@ -165,9 +198,49 @@ pub async fn run(
             session.status.as_str(),
             session.mode.map(|m| m.as_str()).unwrap_or("unknown")
         );
+        if let Some(usage_report) = &usage_report {
+            println!("{}", usage_report.render_human());
+        }
     }
 
     Ok(exit_code_for_status(session.status).code())
+}
+
+/// Read the finished run's stored turns/usage/cost off the session (#8155).
+///
+/// Why: `session.status` reports the session's lifecycle, not what the run
+/// spent. The daemon has already aggregated both (`task::executor::
+/// run_and_record` -> `SessionRegistry::set_run_outcome`), so one extra
+/// in-lifetime call is the whole fix — no recomputation, and no second costing
+/// implementation to drift from `run_task::aggregate_usage_per_role`.
+/// What: calls `session.get_transcript` and parses the result into a
+/// [`TranscriptRecord`]. Fails OPEN — a failed or unparseable call warns on
+/// stderr and returns `None`, leaving the report exactly as it was before
+/// #8155 rather than turning a successful run into a non-zero exit. The
+/// warning goes to stderr specifically so `--json`'s "stdout carries only the
+/// JSON document" contract still holds.
+/// Test: `tests/cli_e2e.rs::run_task_json_report_carries_turns_usage_and_cost`.
+async fn fetch_run_record(
+    client: &mut StdioRpcClient,
+    session_id: &str,
+) -> Option<TranscriptRecord> {
+    let result = client
+        .call("session.get_transcript", json!({"session_id": session_id}))
+        .await
+        .map_err(|e| format!("{e}"))
+        .and_then(|value| {
+            serde_json::from_value::<TranscriptRecord>(value).map_err(|e| format!("{e}"))
+        });
+    match result {
+        Ok(record) => Some(record),
+        Err(e) => {
+            eprintln!(
+                "tcode run-task: could not read this run's usage/cost record \
+                 (session {session_id}): {e}"
+            );
+            None
+        }
+    }
 }
 
 /// Build the `task.run` request body this subcommand sends.
