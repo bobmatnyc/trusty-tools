@@ -357,3 +357,30 @@ Surfaced on [#7749](https://github.com/bobmatnyc/trusty-tools/issues/7749) and
 | a `grep` whose pattern contains the literal token `stdout` (e.g. searching a test log for `---- <test> stdout ----`) — refused as "too complex to verify that it stays inside the worktree" | `sed -n '/^failures:/,/^test result/p' <file>` |
 | `cd <own-worktree-root> && <cmd>` — refused even when the target is the agent's own worktree | run the bare command; cwd is already the worktree, `cd` is unnecessary |
 | read-only `grep`/`find` against the scratchpad path, run from inside a worktree | `cd` into the scratchpad first, then run the bare command |
+
+### The refusal is NONDETERMINISTIC, and it is not `tm` — 2026-09-16
+
+[#7477](https://github.com/bobmatnyc/trusty-tools/issues/7477). Re-reproduced
+live while fixing it: `ls`, `ls -1 <dir>`, `find <dir> -maxdepth 1 -type f`,
+`cargo --version`, `git log --oneline -5` and `cd <own worktree> && <cmd>` were
+each refused as "too complex to verify", in the same minutes `echo hello`,
+`pwd`, `wc -l <four paths>` and `cat <abs path>` ran — and `cargo --version`
+ran on a later retry with no change to the command. Three of the refused shapes
+name no path at all, so no path-verification heuristic explains them.
+
+**Do not look for the fix in this repository.** The string "too complex to
+verify that it stays inside the worktree" is absent from every `trusty-*`
+binary and present in the Claude Code harness. `tm hook --pm-guard` ALLOWS all
+of these deterministically, which
+`false_positive_tests::harness_refusals_are_not_this_guard` pins at 50 rounds
+per shape, with the write-shaped deny rows beside them. First established by
+[#6982](https://github.com/bobmatnyc/trusty-tools/issues/6982); re-confirmed on
+[#7436](https://github.com/bobmatnyc/trusty-tools/issues/7436) and #7477. Route
+a fourth report to the harness, not here.
+
+| Refused | Works instead |
+|---|---|
+| `ls`, `ls -la`, `ls -1 <dir>` | `find <dir> -maxdepth 1` — and when that is refused too, retry the same command verbatim, or use the Read/Glob tools |
+| `find <dir> -name '<glob>'` | `find <dir> -maxdepth N -type f` with no `-name`, then filter with `grep` |
+| `cargo --version`, `git log --oneline -5` — no path argument at all | retry verbatim; the refusal is not a property of the command |
+| `cd <own worktree> && <cmd>` | drop the `cd`; the cwd is already the worktree (also recorded above for #7762) |

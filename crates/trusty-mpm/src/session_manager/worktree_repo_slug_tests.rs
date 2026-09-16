@@ -214,7 +214,7 @@ fn a_directory_with_no_origin_falls_back_to_its_owning_checkout() {
     git_ok(&wt, &["config", "extensions.worktreeConfig", "true"]);
     git_ok(&wt, &["config", "--worktree", "remote.origin.url", ""]);
     assert!(
-        origin_url(&wt).is_none(),
+        remote_url(&wt, DEFAULT_REMOTE).is_none(),
         "fixture must leave the worktree without an origin"
     );
     assert_eq!(
@@ -519,4 +519,128 @@ fn an_unresolvable_repository_blocks_instead_of_answering() {
         panic!("the per-branch fallback must block too; got {per_branch:?}");
     };
     assert!(reason.contains("#7057"), "{reason}");
+}
+
+/// 🔴 #7850: a branch pushed to a FORK is searched in the fork's repository,
+/// not in `origin`.
+///
+/// Why: the reported case verbatim. In `breezeblue-ai/breeze-tts` local `main`
+/// tracks `fork` (`bobmatnyc/breeze-tts`) because `origin` 403s for the
+/// operator's account; `fix/matsuoka-respelling` merged as
+/// `bobmatnyc/breeze-tts#5`, and the ADR-0057 removal gate still refused the
+/// worktree because it asked `origin` for a pull request never opened there.
+/// The assertion is on the SLUG for the same reason as every test in this file:
+/// a lookup aimed at the wrong repository answers "no pull request" exactly as
+/// a correct lookup against a branch with none.
+/// What: asserts the branch's push remote picks the fork's repository, while
+/// `repo_slug_with`'s unchanged `origin` answer still names the upstream.
+/// Test: itself.
+#[test]
+fn a_fork_branch_is_searched_in_the_repository_it_was_pushed_to() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = checkout_with_origin(
+        tmp.path(),
+        "breeze-tts",
+        "https://github.com/breezeblue-ai/breeze-tts.git",
+    );
+    git_ok(
+        &repo,
+        &[
+            "remote",
+            "add",
+            "fork",
+            "https://github.com/bobmatnyc/breeze-tts.git",
+        ],
+    );
+    git_ok(&repo, &["checkout", "-b", "fix/matsuoka-respelling"]);
+    git_ok(
+        &repo,
+        &[
+            "config",
+            "branch.fix/matsuoka-respelling.pushRemote",
+            "fork",
+        ],
+    );
+
+    let remote = push_remote_for_branch(&repo, "fix/matsuoka-respelling")
+        .expect("the branch names its push remote");
+    assert_eq!(remote, "fork");
+    assert_eq!(
+        repo_slug_with_remote(&repo, &remote, &no_aliases()).expect("the fork resolves"),
+        "bobmatnyc/breeze-tts",
+        "the merged pull request lives in the repository the branch was pushed to"
+    );
+    // The unchanged `origin` answer, which is what refused the removal.
+    assert_eq!(
+        repo_slug_with(&repo, &no_aliases()).expect("origin resolves"),
+        "breezeblue-ai/breeze-tts"
+    );
+}
+
+/// #7850: git's own three push keys, in git's own precedence.
+///
+/// Why: the resolution must not invent an order. `branch.<name>.pushRemote`
+/// beats `remote.pushDefault`, which beats `branch.<name>.remote` — and a
+/// repository that sets none of them answers `None`, which is what keeps every
+/// ordinary worktree on the pre-#7850 `origin` path.
+/// Test: itself.
+#[test]
+fn push_remote_follows_gits_own_precedence_and_is_none_when_unset() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = checkout_with_origin(
+        tmp.path(),
+        "precedence",
+        "https://github.com/acme/widgets.git",
+    );
+    git_ok(&repo, &["checkout", "-b", "feat/x"]);
+
+    assert_eq!(
+        push_remote_for_branch(&repo, "feat/x"),
+        None,
+        "nothing configured must answer None, so the caller uses origin"
+    );
+
+    git_ok(&repo, &["config", "branch.feat/x.remote", "tracked"]);
+    assert_eq!(
+        push_remote_for_branch(&repo, "feat/x").as_deref(),
+        Some("tracked"),
+        "the tracking remote is the last resort"
+    );
+
+    git_ok(&repo, &["config", "remote.pushDefault", "pushdefault"]);
+    assert_eq!(
+        push_remote_for_branch(&repo, "feat/x").as_deref(),
+        Some("pushdefault"),
+        "remote.pushDefault outranks the tracking remote"
+    );
+
+    git_ok(&repo, &["config", "branch.feat/x.pushRemote", "branchpush"]);
+    assert_eq!(
+        push_remote_for_branch(&repo, "feat/x").as_deref(),
+        Some("branchpush"),
+        "the branch's own pushRemote outranks both"
+    );
+}
+
+/// 🔴 #7850 fail-closed: naming a remote that does not exist never silently
+/// falls back to `origin`.
+///
+/// Why: the relaxation must be a CORRECTION of which repository is asked, never
+/// a second chance at a different one. A remote git has no URL for has no
+/// owning checkout to fall back to either here, so the lookup refuses — which
+/// denies the removal, the direction ADR-0057 decision 6 requires.
+/// Test: itself.
+#[test]
+fn an_unknown_named_remote_refuses_rather_than_answering_for_origin() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = checkout_with_origin(tmp.path(), "unknown", "https://github.com/acme/widgets.git");
+    let reason = repo_slug_with_remote(&repo, "nosuchremote", &no_aliases())
+        .expect_err("an unknown remote must refuse");
+    assert!(reason.contains("cannot be established"), "{reason}");
+    // And `origin` still answers for itself, so the refusal is about the named
+    // remote rather than about the repository.
+    assert_eq!(
+        repo_slug_with(&repo, &no_aliases()).expect("origin resolves"),
+        "acme/widgets"
+    );
 }
