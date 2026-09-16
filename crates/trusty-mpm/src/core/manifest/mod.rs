@@ -32,7 +32,7 @@ pub use framework::{
 };
 pub use resolve::{MANIFEST_FILE, ManifestSources, resolve_manifest};
 pub use schema::{
-    AgentCategories, AgentSet, ContentSource, CustomMcpServer, DivertConfig, GatedAgent,
-    HarnessManifest, InstructionLayers, MANIFEST_VERSION, McpServers, ModelTiers, SkillCategories,
-    SkillSet, StyleSelection, matches_any, selection_matches,
+    AgentCategories, AgentSet, ContentSource, DivertConfig, GatedAgent, HarnessManifest,
+    InstructionLayers, MANIFEST_VERSION, McpServers, ModelTiers, SkillCategories, SkillSet,
+    StyleSelection, matches_any, selection_matches,
 };

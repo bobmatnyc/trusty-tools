@@ -1,11 +1,23 @@
 //! `tm doctor` legacy-instruction-source probe (issue #2876).
 //!
-//! Why: leftover GLOBAL instruction sources (bundled skill copies in
-//! `~/.claude/skills` from the pre-project-local deploy model, and the legacy
-//! `~/.trusty-mpm/claude-config` managed-config dir) shadow the current
-//! framework and keep serving stale guidance — one of the two silent drift
-//! modes behind the PR #2825 attribution bypass. Neither is caught by the
-//! narrower agents/skills/deployment probes.
+//! Why: leftover GLOBAL instruction sources — bundled skill copies in
+//! `~/.claude/skills` from the pre-project-local deploy model — shadow the
+//! current framework and keep serving stale guidance, one of the two silent
+//! drift modes behind the PR #2825 attribution bypass. The narrower
+//! agents/skills/deployment probes do not catch them.
+//!
+//! **`~/.trusty-mpm/claude-config` is NOT one of them (#7797).** This probe
+//! also warned whenever that directory merely existed, calling it superseded
+//! and safe to delete. It is the standalone driver's LIVE `CLAUDE_CONFIG_DIR`:
+//! `ensure_global_config_dir` creates and populates it on every `tm run`,
+//! `tm load` and `tm update`, and `tm reinstall`'s `standalone` target
+//! (`core::reinstall::reinstall_targets`) redeploys into it. So the sub-check
+//! warned on every environment that had ever launched a standalone session,
+//! and its remediation was undone by the next launch. Nothing distinguishes a
+//! pre-migration leftover there from the live tier — the driver deploys the
+//! same agents and skills into it today — so the sub-check is gone rather than
+//! narrowed. The tm-owned `~/.trusty-tools/trusty-mpm/claude-config` that
+//! DAEMON-managed sessions use is a different directory and is unaffected.
 //!
 //! The OTHER drift mode — deployed skill content diverging from the installed
 //! binary's assets — used to live here too. Issue #4604 moved it to
@@ -14,35 +26,28 @@
 //! the binary, making every skill it covered report clean) to the binary's own
 //! embedded assets.
 //!
-//! What: [`check_legacy_instruction_sources`] `Warn`s when legacy global
-//! instruction sources exist — advisory-only, since a leftover directory
-//! shadows rather than silently drops a convention. It never blocks session
-//! start and never writes.
+//! What: [`check_legacy_instruction_sources`] `Warn`s when bundled skill
+//! copies are left in `~/.claude/skills` — advisory-only, since a leftover
+//! copy shadows rather than silently drops a convention. It never blocks
+//! session start and never writes.
 //! Test: the `tests` module below covers the present/absent branches.
 
 use std::path::Path;
 
 use crate::core::doctor::{CheckStatus, DoctorCheck};
 
-/// Probe for legacy GLOBAL instruction sources that can serve stale guidance.
+/// Probe for legacy GLOBAL skill copies that can serve stale guidance.
 ///
 /// Why: before managed sessions went project-local, skills deployed into the
-/// global `~/.claude/skills/` and managed config lived at
-/// `~/.trusty-mpm/claude-config`. Both are superseded (project-local
-/// `.claude/skills/` and the tm-owned `~/.trusty-tools/…/claude-config`
-/// respectively), but leftover copies keep being read by Claude Code and can
-/// serve outdated conventions — e.g. an old attribution footer — to any session
-/// (issue #2876). This probe makes those leftovers visible.
-/// What: `Warn` (advisory — never `Fail`) when EITHER `~/.claude/skills` holds
-/// bundled skill copies OR the legacy `~/.trusty-mpm/claude-config` directory
-/// exists, naming what was found and the one-line remediation; `Ok` when
-/// neither is present. `home` is the base to resolve both paths under (the real
-/// home in production, a temp dir in tests).
-///
-/// #7610: the `claude-config` finding names only that child as safe to
-/// delete and calls out its live siblings under the same `~/.trusty-mpm`
-/// parent (`usage/`, `session-manager/`, `statusline/`) — the parent itself
-/// is never superseded, only the one child directory is.
+/// global `~/.claude/skills/`. That tier is superseded (project-local
+/// `.claude/skills/` and the tm-managed `CLAUDE_CONFIG_DIR`), but leftover
+/// copies keep being read by Claude Code and can serve outdated conventions —
+/// e.g. an old attribution footer — to any session (issue #2876). This probe
+/// makes those leftovers visible.
+/// What: `Warn` (advisory — never `Fail`) when `~/.claude/skills` holds bundled
+/// skill copies, naming the count and the one-line remediation; `Ok` when it
+/// holds none. `home` is the base to resolve that path under (the real home in
+/// production, a temp dir in tests).
 ///
 /// #7102: the remediation it prints must be one that actually clears it. It
 /// used to offer `tm install`, whose skill step wrote this same directory, so
@@ -50,11 +55,15 @@ use crate::core::doctor::{CheckStatus, DoctorCheck};
 /// bundled skills to the managed tier only
 /// ([`crate::core::skill_install_tiers::deploy_install_skill_tiers`]) and the
 /// text says to delete the copies. #7783 closed the last writer that refilled
-/// it ([`crate::core::reinstall`]) and widened the count past the `tm-` prefix
-/// — see [`count_legacy_bundled_skills`].
+/// `~/.claude/skills` ([`crate::core::reinstall`]) and widened the count past
+/// the `tm-` prefix — see [`count_legacy_bundled_skills`].
+///
+/// #7797: `~/.trusty-mpm/claude-config` is no longer a finding here. See the
+/// module doc — it is the standalone driver's live config home, not a
+/// leftover, so its mere existence warned on every environment.
 /// Test: `legacy_sources_ok_when_absent`, `legacy_sources_warns_on_tm_skills`,
 /// `legacy_sources_counts_an_unprefixed_bundled_skill`,
-/// `legacy_sources_warns_on_claude_config`,
+/// `legacy_sources_ok_when_the_standalone_config_dir_exists`,
 /// `legacy_sources_ok_after_the_install_deploy`.
 pub(super) fn check_legacy_instruction_sources(home: &Path) -> DoctorCheck {
     let mut findings: Vec<String> = Vec::new();
@@ -74,22 +83,9 @@ pub(super) fn check_legacy_instruction_sources(home: &Path) -> DoctorCheck {
         ));
     }
 
-    let legacy_config = home.join(".trusty-mpm").join("claude-config");
-    if legacy_config.is_dir() {
-        // #7610: name only the `claude-config` child as safe to delete — its
-        // parent `~/.trusty-mpm` also holds `usage/` (savings ledger),
-        // `session-manager/` (session store), and `statusline/`, all live and
-        // read by `tm repair savings-ledger` / `tm statusline` today. A reader
-        // acting on "safe to delete" against the parent directory would take
-        // those out with it.
-        findings.push(
-            "legacy ~/.trusty-mpm/claude-config directory only (superseded by the tm-owned \
-             ~/.trusty-tools config home — safe to delete; sibling directories \
-             ~/.trusty-mpm/usage, ~/.trusty-mpm/session-manager, and ~/.trusty-mpm/statusline \
-             are live and not covered by this advice — do not delete the ~/.trusty-mpm parent)"
-                .to_string(),
-        );
-    }
+    // #7797: no `~/.trusty-mpm/claude-config` sub-check — that directory is the
+    // standalone driver's live CLAUDE_CONFIG_DIR, recreated by the next
+    // `tm run`/`tm load`/`tm update` and redeployed into by `tm reinstall`.
 
     if findings.is_empty() {
         DoctorCheck::new(
@@ -198,25 +194,34 @@ mod tests {
     }
 
     #[test]
-    fn legacy_sources_warns_on_claude_config() {
-        // The legacy managed-config dir must be flagged, scoped to the
-        // `claude-config` child — never worded as though the `~/.trusty-mpm`
-        // parent itself is safe to delete (#7610).
+    fn legacy_sources_ok_when_the_standalone_config_dir_exists() {
+        // #7797: `~/.trusty-mpm/claude-config` used to `Warn` on mere
+        // existence. It is the standalone driver's live CLAUDE_CONFIG_DIR —
+        // `ensure_global_config_dir` creates it on every `tm run`/`tm load`/
+        // `tm update` and `tm reinstall`'s `standalone` target deploys agents
+        // and skills into it — so the warning fired on every environment that
+        // had ever launched one, and advised deleting a directory tm recreates.
+        // Populate it the way the driver does, not as a bare directory: the
+        // verdict must be Ok either way.
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join(".trusty-mpm").join("claude-config")).unwrap();
+        let cfg = tmp.path().join(".trusty-mpm").join("claude-config");
+        std::fs::create_dir_all(cfg.join("agents")).unwrap();
+        std::fs::create_dir_all(cfg.join("skills").join("documentation-style")).unwrap();
+        std::fs::write(
+            cfg.join("skills")
+                .join("documentation-style")
+                .join("SKILL.md"),
+            "deployed by the standalone driver",
+        )
+        .unwrap();
 
         let check = check_legacy_instruction_sources(tmp.path());
-        assert_eq!(check.status, CheckStatus::Warn);
-        assert!(check.message.contains("claude-config"));
-        // #7610: the message must name the live siblings under the same
-        // parent so a reader does not delete the ledger or session store.
-        assert!(check.message.contains("usage"), "{}", check.message);
+        assert_eq!(check.status, CheckStatus::Ok, "{}", check.message);
         assert!(
-            check.message.contains("session-manager"),
+            !check.message.contains("claude-config"),
             "{}",
             check.message
         );
-        assert!(check.message.contains("statusline"), "{}", check.message);
     }
 
     #[test]

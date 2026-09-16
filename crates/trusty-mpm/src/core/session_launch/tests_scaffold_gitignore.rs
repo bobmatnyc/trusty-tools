@@ -1,8 +1,10 @@
 //! `prepare_session` scaffolding-gitignore wiring tests (issue #3427).
 //!
-//! Why: split out of `tests.rs` to keep it under the 1500-SLOC test-file cap,
-//! mirroring the existing `tests_roster.rs` / `native_mcp_tests.rs` /
-//! `custom_mcp_tests.rs` sibling-test-module convention for this directory.
+//! Why: split out of `tests.rs` to keep it under the test-file SLOC cap,
+//! mirroring the sibling-test-module convention this directory uses —
+//! `tests_roster.rs`, `tests_launch_trust_3926.rs`. (#7894: the
+//! `native_mcp_tests.rs` / `custom_mcp_tests.rs` this used to name went with
+//! their modules under ADR-0042.)
 //! What: covers the `prepare_session_inner` call into
 //! `core::scaffold_gitignore::ensure_scaffold_gitignored` — a git-repo
 //! `project_dir` gets the managed `.gitignore` block, a non-git one does not.

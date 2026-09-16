@@ -15,8 +15,6 @@
 //! Test: `manifest_roundtrip`, `manifest_partial_parse`,
 //! `manifest_merge_overrides`, `selection_matches` in this module's tests.
 
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Serialize};
 
 /// The manifest schema version this build understands.
@@ -331,19 +329,20 @@ pub struct StyleSelection {
 /// Why: DOC-17 lists "MCP servers (static and dynamic)" as part of provisioning.
 /// Today `prepare_session` unconditionally injects `trusty-memory` and
 /// `trusty-search`; the manifest makes those toggleable so a harness can opt out.
-/// `custom` (issue #2739 follow-up) is the PROJECT-scope half of custom MCP
-/// bridging: a project's `<project>/.trusty-mpm/manifest.toml` is trusty-mpm's
-/// established per-project override file (the same layer `[agents]`/`[skills]`
-/// already use), so declaring `[mcp.custom.<name>]` there is the natural project
-/// config surface — no new config file invented. This is DISTINCT from the
-/// USER-scope custom registry (`tm mcp add`, the managed `.claude.json`
-/// `mcpServers` map): that registry is read directly by
-/// `session_launch::custom_mcp`, not through this manifest.
-/// What: boolean toggles for the two built-in servers (Absent → inherit; the
-/// default enables both, reproducing today's behavior), plus `custom` — a map of
-/// server name to its full [`CustomMcpServer`] definition.
+///
+/// #7894: this also carried `custom` — a `[mcp.custom.<name>]` project-scope
+/// server map (issue #2739 follow-up). Its only reader was
+/// `session_launch::custom_mcp`, which ADR-0042 deleted along with every other
+/// workspace `.mcp.json` injector, so the map resolved through three merge
+/// layers into a plan field nothing read. The supported route for a custom
+/// server is the USER-scope registry (`tm mcp add`, the managed `.claude.json`
+/// `mcpServers` map), which every session reads directly. A manifest still
+/// carrying `[mcp.custom]` keeps parsing — serde ignores the unknown table —
+/// and, as before, has no effect.
+/// What: boolean toggles for the two built-in servers. Absent → inherit; the
+/// default enables both, reproducing today's behavior.
 /// Test: `mcp_servers_roundtrip`, `default_manifest_enables_both_mcp`,
-/// `custom_mcp_server_stdio_roundtrip`, `custom_mcp_server_remote_roundtrip`.
+/// `a_custom_mcp_table_parses_and_is_dropped`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct McpServers {
     /// Inject the `trusty-memory` MCP server.
@@ -352,36 +351,24 @@ pub struct McpServers {
     /// Inject the `trusty-search` MCP server (pinned to the project index).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trusty_search: Option<bool>,
-    /// `[mcp.custom.<name>]` — project-scope custom MCP server definitions.
-    /// Empty when the layer declares none.
-    #[serde(default)]
-    pub custom: BTreeMap<String, CustomMcpServer>,
 }
 
 impl McpServers {
-    /// Field-by-field merge: each `Some` toggle in `higher` wins, `None` inherits;
-    /// `custom` unions by name with `higher` winning a name collision.
+    /// Field-by-field merge: each `Some` toggle in `higher` wins, `None` inherits.
     ///
-    /// Why: `[mcp]` is a struct of independent toggles plus a name-keyed map. The
-    /// old whole-section replacement meant a partial override like `[mcp]
-    /// trusty_search = false` reset `trusty_memory` back to `None` (losing a
-    /// lower layer's explicit `true`). Merging per field keeps the unmentioned
-    /// toggle's lower-layer value; unioning `custom` by key means a higher layer
-    /// can add or override one named server without having to repeat every
-    /// server a lower layer already declared.
+    /// Why: `[mcp]` is a struct of independent toggles. The old whole-section
+    /// replacement meant a partial override like `[mcp] trusty_search = false`
+    /// reset `trusty_memory` back to `None` (losing a lower layer's explicit
+    /// `true`). Merging per field keeps the unmentioned toggle's lower-layer
+    /// value. #7894 removed the `custom` map this also unioned by name.
     /// What: for each of `trusty_memory`/`trusty_search`, takes `higher`'s value
-    /// when it is `Some`, else falls through to `self`'s value. `custom` starts
-    /// from `self`'s map and applies `higher`'s entries on top, so a shared name
-    /// takes `higher`'s definition.
-    /// Test: `manifest_merge_mcp_field_level`, `mcp_servers_merge_unions_custom`.
+    /// when it is `Some`, else falls through to `self`'s value.
+    /// Test: `manifest_merge_mcp_field_level`.
     #[must_use]
     pub fn merge(self, higher: McpServers) -> McpServers {
-        let mut custom = self.custom;
-        custom.extend(higher.custom);
         McpServers {
             trusty_memory: higher.trusty_memory.or(self.trusty_memory),
             trusty_search: higher.trusty_search.or(self.trusty_search),
-            custom,
         }
     }
 }
@@ -434,56 +421,6 @@ impl DivertConfig {
             worker_model: higher.worker_model.or(self.worker_model),
         }
     }
-}
-
-/// A single project-scope custom MCP server definition (issue #2739 follow-up).
-///
-/// Why: `tm mcp add` (the USER-scope registry) already models a stdio-vs-remote
-/// server as `{type, command/url, args/headers, env}` JSON
-/// (see [`crate::core::mcp_config`]); this is the TOML-native equivalent for the
-/// project-scope manifest layer, using an internally-tagged enum (`type =
-/// "stdio"|"http"|"sse"`) so the two representations stay conceptually aligned
-/// even though one is JSON and the other TOML.
-/// What: `Stdio` (local subprocess: `command`, optional `args`/`env`) or `Http`
-/// / `Sse` (remote endpoint: `url`, optional `headers`). `session_launch::custom_mcp`
-/// converts this into the same `.mcp.json`-entry shape `tm mcp add` produces
-/// before applying the SAME secret-routing/validation rules (stdio `env` routed
-/// to `.env.local`; a remote entry carrying `headers` is rejected — see that
-/// module's docs for the full security rationale).
-/// Test: `custom_mcp_server_stdio_roundtrip`, `custom_mcp_server_remote_roundtrip`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-pub enum CustomMcpServer {
-    /// A local subprocess speaking MCP over stdio.
-    Stdio {
-        /// The binary to spawn.
-        command: String,
-        /// Command-line arguments.
-        #[serde(default)]
-        args: Vec<String>,
-        /// Environment variables — routed to the workspace `.env.local`, NEVER
-        /// written into the git-tracked `.mcp.json` (see `session_launch::custom_mcp`).
-        #[serde(default)]
-        env: BTreeMap<String, String>,
-    },
-    /// A remote streamable-HTTP endpoint.
-    Http {
-        /// The server URL.
-        url: String,
-        /// HTTP headers. Non-empty `headers` are REJECTED at injection time —
-        /// see `session_launch::custom_mcp::validate_custom_remote_server`.
-        #[serde(default)]
-        headers: BTreeMap<String, String>,
-    },
-    /// A remote SSE endpoint.
-    Sse {
-        /// The server URL.
-        url: String,
-        /// HTTP headers. Non-empty `headers` are REJECTED at injection time —
-        /// see `session_launch::custom_mcp::validate_custom_remote_server`.
-        #[serde(default)]
-        headers: BTreeMap<String, String>,
-    },
 }
 
 /// `[models]` — model-tier defaults for the harness.

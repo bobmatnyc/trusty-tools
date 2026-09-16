@@ -759,8 +759,7 @@ fn repair_output_style_tier(
 ///
 /// Why (#4948, #4409): this is the check whose "obvious" repair is the one
 /// that must not ship. `legacy_sources` counts bundled skill copies in
-/// `~/.claude/skills`
-/// and the legacy `~/.trusty-mpm/claude-config` directory; the repair that
+/// `~/.claude/skills`; the repair that
 /// would clear the warning is deletion, inside the operator's real Claude Code
 /// config. Some of those copies are hand-edited — a checksum mismatch is
 /// ownership, not rot — and tm cannot tell a stale duplicate from somebody's
@@ -777,15 +776,16 @@ fn repair_output_style_tier(
 /// repair, which consults tm's own ownership ledger first.
 /// What: one [`StepStatus::Refused`] step per entry directly under
 /// `<home>/.claude/skills` whose name is a bundled skill stem
-/// ([`crate::core::manifest::framework::bundled_skill_stems`]), plus one for
-/// the legacy managed-config directory if present. #7783 widened that test
-/// from a `tm-` prefix to the roster so this listing names exactly the set
-/// `legacy_sources` counted — a `--fix` run that named 23 of 37 findings reads
-/// as though the other 14 were resolved. Reads directory names only; opens
-/// nothing; writes nothing.
+/// ([`crate::core::manifest::framework::bundled_skill_stems`]). #7783 widened
+/// that test from a `tm-` prefix to the roster so this listing names exactly
+/// the set `legacy_sources` counted — a `--fix` run that named 23 of 37
+/// findings reads as though the other 14 were resolved; #7797 dropped the
+/// `~/.trusty-mpm/claude-config` step for the same reason, from the other
+/// side. Reads directory names only; opens nothing; writes nothing.
 /// Test: `legacy_sources_are_refused_never_deleted`,
 /// `legacy_sources_refuse_names_an_unprefixed_bundled_skill`,
-/// `legacy_sources_ignores_a_foreign_skill`.
+/// `legacy_sources_ignores_a_foreign_skill`,
+/// `legacy_sources_refuse_skips_the_standalone_config_dir`.
 pub fn refuse_legacy_sources(home: &Path) -> Vec<RepairStep> {
     const REASON: &str = "tm never deletes inside ~/.claude — a copy here may be hand-edited, \
                           and a directory name cannot prove otherwise. Remove it by hand once \
@@ -815,20 +815,10 @@ pub fn refuse_legacy_sources(home: &Path) -> Vec<RepairStep> {
         }));
     }
 
-    let legacy_config = home.join(".trusty-mpm").join("claude-config");
-    if legacy_config.is_dir() {
-        steps.push(RepairStep {
-            check: "legacy_sources",
-            path: legacy_config,
-            what: "legacy managed-config directory".to_string(),
-            status: StepStatus::Refused(
-                "superseded by the tm-owned ~/.trusty-tools config home, but tm does not \
-                 delete a directory it can no longer attribute. Remove it by hand once no \
-                 session references it"
-                    .to_string(),
-            ),
-        });
-    }
+    // #7797: no `~/.trusty-mpm/claude-config` step — `legacy_sources` stopped
+    // reporting that directory (it is the standalone driver's live config
+    // home), and a `--fix` listing naming a finding the check never made is
+    // the same mismatch #7783 closed from the other side.
     steps
 }
 

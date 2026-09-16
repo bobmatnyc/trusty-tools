@@ -398,7 +398,8 @@ fn skill_skip_summary(skipped: &[String]) -> Option<String> {
 /// `enabledMcpjsonServers` approval they gated. So is the derivation difference
 /// this doc used to warn about — that this path applied no `project_scope_mcp_names`
 /// subtraction (#2739) and so pre-approved a repo `[mcp.custom]` name that
-/// collided with an operator registry name. Nothing is pre-approved now.
+/// collided with an operator registry name. Nothing is pre-approved now, and
+/// #7894 removed the `[mcp.custom]` table itself.
 /// What: `Some(dir)` when
 /// [`crate::core::trusty_tools_config::managed_claude_config_dir`] resolves —
 /// having provisioned it via [`ensure_managed_config_dir`] and seeded trust via

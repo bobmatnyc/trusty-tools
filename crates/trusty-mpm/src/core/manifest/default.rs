@@ -59,7 +59,6 @@ pub fn default_manifest() -> HarnessManifest {
         mcp: Some(McpServers {
             trusty_memory: Some(true),
             trusty_search: Some(true),
-            ..McpServers::default()
         }),
         models: Some(ModelTiers::default()),
         // #6887: OPT-IN — the floor layer states the feature off explicitly, so

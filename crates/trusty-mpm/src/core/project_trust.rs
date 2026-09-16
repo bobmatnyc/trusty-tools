@@ -273,9 +273,10 @@ pub fn trust_store_root() -> Option<PathBuf> {
 /// `warn!`) returns `false`. Otherwise delegates to
 /// [`ProjectTrustStore::is_trusted`].
 /// Test: `is_project_trusted_at_reflects_store`,
-/// `is_project_trusted_at_fails_closed_when_root_missing` (via the hermetic
-/// [`is_project_trusted_at`] used by tests; production wiring is exercised in
-/// `custom_mcp_tests.rs`).
+/// `is_project_trusted_at_fails_closed_when_root_missing` — both via the
+/// hermetic [`is_project_trusted_at`]. #7894: the production-wiring pointer
+/// named `custom_mcp_tests.rs`, deleted with its module under ADR-0042; the
+/// live reader is now `core::session_mcp_scope::granted_plugins`.
 pub fn is_project_trusted(project_path: &Path) -> bool {
     match trust_store_root() {
         Some(root) => is_project_trusted_at(project_path, &root),
