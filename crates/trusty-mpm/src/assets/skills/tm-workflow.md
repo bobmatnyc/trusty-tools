@@ -487,6 +487,11 @@ same pane injection as `session_send` and carries the same defect.
 
 Before any `git push`, delegate a credential scan to the `security` agent.
 
+🔴 **`git status --porcelain` must read empty before you run any gate below
+(#7739).** A gate run against a dirty tree proves the working copy, not the
+ref a push actually ships; commit every post-rebase edit first, so the ref
+gated is the ref pushed.
+
 0. **Verify the base ref before anything diffs it (#7748).** Every range below
    reads the LOCAL `refs/remotes/origin/main`, which a checkout that has not
    fetched can carry hundreds of commits behind — twice on 2026-09-13, and one

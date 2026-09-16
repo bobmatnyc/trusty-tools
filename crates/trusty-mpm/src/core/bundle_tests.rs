@@ -2211,3 +2211,21 @@ fn verification_skill_reads_128_plus_signal_as_terminated_not_failed_7561() {
         );
     }
 }
+
+/// #7739: a local gate proves only the tree it ran against. `version-control`
+/// reproduced this on an external repo (adaptive-crm PR #393) — the gate
+/// passed against a working tree that held an uncommitted edit, the pushed
+/// ref lacked it, and CI failed a `2 !== 3` assertion the gate never saw.
+/// Both the agent and the workflow skill must state the clean-tree check.
+#[test]
+fn version_control_gate_requires_a_clean_tree_before_push_7739() {
+    assert!(
+        VERSION_CONTROL_AGENT.contains("git status --porcelain")
+            && VERSION_CONTROL_AGENT.contains("#7739"),
+        "version-control.md is missing the #7739 clean-tree-before-gate rule"
+    );
+    assert!(
+        TM_WORKFLOW.contains("git status --porcelain") && TM_WORKFLOW.contains("#7739"),
+        "tm-workflow.md is missing the #7739 clean-tree-before-gate rule"
+    );
+}
