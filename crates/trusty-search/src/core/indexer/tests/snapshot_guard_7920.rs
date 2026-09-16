@@ -170,6 +170,281 @@ async fn corrupt_snapshot_does_not_block_the_owning_writer() {
     assert_eq!(owner.refused_snapshot_overwrites(), 0);
 }
 
+/// Sidecar copies of an unreadable snapshot left beside `path` (#7980).
+fn preserved_sidecars(path: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let prefix = format!(
+        "{}{}",
+        path.file_name().unwrap().to_string_lossy(),
+        crate::core::indexer::snapshot_guard::CORRUPT_SUFFIX
+    );
+    let mut found: Vec<std::path::PathBuf> = std::fs::read_dir(path.parent().unwrap())
+        .expect("read dir")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with(&prefix))
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+/// #7980 admit arm: a store-less writer holding a real corpus must not be
+/// wedged out of persisting by an unreadable file on an unowned path.
+///
+/// Why: the pre-#7920 reindex self-healed this — it simply rewrote the file.
+/// The guard turned it into a permanent refusal, so a legacy index whose
+/// `chunks.json` rotted could never persist again, and the bytes it was
+/// protecting were ones no reader (including the migration) can recover.
+/// What: writes an unparseable file at a path this indexer never loaded, adds
+/// chunks, flushes, and asserts the write landed AND the unreadable bytes were
+/// preserved under a sidecar rather than destroyed.
+/// Test: this IS the test.
+#[tokio::test]
+async fn unreadable_snapshot_no_longer_wedges_a_store_less_writer() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("chunks.json");
+    let rotted = b"{\"version\":1,\"chunks\":[{\"id\":".to_vec();
+    std::fs::write(&path, &rotted).unwrap();
+
+    // Store-less, never quarantined, holds a real corpus it never loaded from
+    // this file — the shape `refuse_durable_write` lets through.
+    let writer = make_indexer();
+    assert!(!writer.is_write_quarantined());
+    writer
+        .add_chunk(raw("a", "src/a.rs", "fn fresh() {}"))
+        .await
+        .unwrap();
+
+    writer
+        .flush_corpus_to_disk(&path)
+        .await
+        .expect("#7980: an unreadable file must not refuse a store-less writer forever");
+
+    assert_eq!(
+        snapshot_ids(&path),
+        HashSet::from(["a".to_string()]),
+        "the writer's own corpus must be on disk now"
+    );
+    assert_eq!(
+        writer.refused_snapshot_overwrites(),
+        0,
+        "#7980: this shape must not be counted as a refusal"
+    );
+    let kept = preserved_sidecars(&path);
+    assert_eq!(kept.len(), 1, "the unreadable bytes must be preserved once");
+    assert_eq!(
+        std::fs::read(&kept[0]).unwrap(),
+        rotted,
+        "#7923: the preserved copy must be byte-identical"
+    );
+}
+
+/// #7980 refuse arm: a stand-in corpus must never move the file aside.
+///
+/// Why: the self-heal is admissible only because the writer's corpus IS the
+/// index's durable state. A write-quarantined indexer's corpus is empty because
+/// redb never opened, so moving the snapshot aside would remove the one
+/// recovery source #4226 exists to protect. `refuse_durable_write` stops it
+/// before the guard, and the guard refuses it again if it ever arrives.
+/// What: asserts both — the quarantined flush leaves the file byte-identical
+/// with no sidecar, and the guard itself refuses the stand-in shape directly.
+/// Test: this IS the test.
+#[tokio::test]
+async fn a_quarantined_writer_never_reaches_the_unreadable_self_heal() {
+    use crate::core::corpus::CorpusOpenFailure;
+    use crate::core::indexer::snapshot_guard::{SnapshotGuard, WriterShape};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("chunks.json");
+    let rotted = b"{\"version\":1,\"chunks\":[{\"id\":".to_vec();
+    std::fs::write(&path, &rotted).unwrap();
+
+    let mut quarantined = make_indexer();
+    quarantined
+        .add_chunk(raw("a", "src/a.rs", "fn fresh() {}"))
+        .await
+        .unwrap();
+    quarantined.quarantine_detached_corpus(CorpusOpenFailure::Unclassified, "#7980 test");
+    assert!(quarantined.is_write_quarantined());
+    assert_eq!(
+        quarantined.snapshot_writer_shape(),
+        WriterShape::CorpusMayBeStandIn,
+        "a quarantined indexer's corpus is never authoritative"
+    );
+
+    quarantined
+        .flush_corpus_to_disk(&path)
+        .await
+        .expect("the quarantine guard abandons the write without erroring");
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        rotted,
+        "#4226: the snapshot must be byte-identical"
+    );
+    assert!(
+        preserved_sidecars(&path).is_empty(),
+        "#7980: a stand-in corpus must never move the snapshot aside"
+    );
+
+    // The guard's own arm, reached directly: the stand-in shape is refused
+    // even with chunks in hand, and still nothing is moved.
+    let guard = SnapshotGuard::default();
+    guard
+        .check_overwrite("direct", &path, 1, WriterShape::CorpusMayBeStandIn)
+        .expect_err("#7980: the stand-in shape must still be refused");
+    assert_eq!(guard.refused(), 1, "the refusal must be counted");
+    assert!(preserved_sidecars(&path).is_empty());
+}
+
+/// LOW #7980: a second rotten snapshot must never clobber the first sidecar.
+#[tokio::test]
+async fn a_second_unreadable_snapshot_never_clobbers_the_first_sidecar() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("chunks.json");
+
+    for (n, marker) in [(1usize, "first"), (2, "second")] {
+        std::fs::write(&path, format!("{{\"chunks\":[{{\"{marker}\"")).unwrap();
+        let writer = make_indexer();
+        writer
+            .add_chunk(raw("a", "src/a.rs", "fn fresh() {}"))
+            .await
+            .unwrap();
+        writer.flush_corpus_to_disk(&path).await.expect("must land");
+        assert_eq!(
+            preserved_sidecars(&path).len(),
+            n,
+            "#7980: occurrence {n} must add its own sidecar, never overwrite one"
+        );
+    }
+    let kept = preserved_sidecars(&path);
+    assert!(
+        String::from_utf8_lossy(&std::fs::read(&kept[0]).unwrap()).contains("first"),
+        "the earliest bytes must survive the later occurrence"
+    );
+}
+
+/// MEDIUM #7980: two callers that both probe first must not pick one slot.
+///
+/// Why: choosing the sidecar name with `exists()` and renaming afterwards is a
+/// TOCTOU. Two writers preserving the same snapshot both probe, both see the
+/// same free name, and `rename(2)` replaces its destination WITHOUT error — so
+/// the second rename destroys the copy the first had just preserved, which is
+/// the one thing this module promises never happens. A thread race cannot be
+/// asserted deterministically, so this drives the seam directly: two claims
+/// with NO rename in between is exactly "both callers observed the same probe
+/// result", and the atomic `create_new` claim is what makes them differ.
+/// What: claims twice, asserts the slots are distinct, then completes both
+/// renames and asserts both payloads survive.
+/// Test: this IS the test.
+#[test]
+fn two_slot_claims_without_an_intervening_rename_never_collide() {
+    use crate::core::indexer::snapshot_guard::{claim_sidecar_slot, CORRUPT_SUFFIX};
+
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join(format!("chunks.json{CORRUPT_SUFFIX}"));
+
+    let first = claim_sidecar_slot(&base).expect("first claim");
+    let second = claim_sidecar_slot(&base).expect("second claim");
+    assert_ne!(
+        first, second,
+        "#7980: a claim that does not reserve its slot hands the same name to \
+         the next caller, whose rename then destroys the first preserved copy"
+    );
+
+    // Both renames land, because each caller owns its own destination.
+    let a = dir.path().join("a.json");
+    let b = dir.path().join("b.json");
+    std::fs::write(&a, b"first").unwrap();
+    std::fs::write(&b, b"second").unwrap();
+    std::fs::rename(&a, &first).unwrap();
+    std::fs::rename(&b, &second).unwrap();
+    assert_eq!(std::fs::read(&first).unwrap(), b"first");
+    assert_eq!(std::fs::read(&second).unwrap(), b"second");
+}
+
+/// MEDIUM #7980: a preservation that cannot run must refuse, not overwrite.
+///
+/// Why: the self-heal is admissible only because the unreadable bytes are kept.
+/// If the rename fails there is nothing keeping them, so the write must fall
+/// back to the refusal rather than destroy what it failed to preserve.
+/// What: a read-only parent directory makes `rename` fail portably; asserts the
+/// refusal, the counter, and that the file is byte-identical.
+/// Test: this IS the test.
+#[tokio::test]
+async fn a_failed_preservation_refuses_the_write_and_keeps_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let parent = dir.path().join("locked");
+    std::fs::create_dir(&parent).unwrap();
+    let path = parent.join("chunks.json");
+    let rotted = b"{\"version\":1,\"chunks\":[{\"id\":".to_vec();
+    std::fs::write(&path, &rotted).unwrap();
+
+    let writer = make_indexer();
+    writer
+        .add_chunk(raw("a", "src/a.rs", "fn fresh() {}"))
+        .await
+        .unwrap();
+
+    // A read-only directory refuses the rename (and the write) on macOS and
+    // Linux alike. Restored before the assertions so the tempdir can be removed.
+    let original = std::fs::metadata(&parent).unwrap().permissions();
+    let mut readonly = original.clone();
+    readonly.set_readonly(true);
+    std::fs::set_permissions(&parent, readonly).unwrap();
+    let result = writer.flush_corpus_to_disk(&path).await;
+    std::fs::set_permissions(&parent, original).unwrap();
+
+    let err = result.expect_err("#7980: a failed preservation must not report success");
+    assert!(
+        err.downcast_ref::<SnapshotOverwriteRefused>().is_some(),
+        "it must fall back to the REFUSAL, not an I/O error that already wrote: {err:#}"
+    );
+    assert_eq!(
+        writer.refused_snapshot_overwrites(),
+        1,
+        "the fallback refusal must be counted"
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        rotted,
+        "#7923: bytes that could not be preserved must not be destroyed"
+    );
+    assert!(preserved_sidecars(&path).is_empty());
+}
+
+/// MEDIUM #7980: a quarantine landing mid-persist-loop must be seen.
+///
+/// Why: the detached incremental persister's dirty loop outlives one decision.
+/// A `WriterShape` captured once at spawn stays `CorpusIsAuthoritative` after a
+/// staged swap quarantines the index, which would let a stand-in corpus move an
+/// unreadable snapshot aside — the exact widening the shape gate prevents.
+/// What: the persister reads the shape from the shared `SnapshotGuard`, so
+/// asserts that quarantining republishes it to every later reader.
+/// Test: this IS the test.
+#[tokio::test]
+async fn a_quarantine_mid_persist_loop_is_seen_by_the_detached_writer() {
+    use crate::core::corpus::CorpusOpenFailure;
+    use crate::core::indexer::snapshot_guard::WriterShape;
+
+    let mut idx = make_indexer();
+    // What the spawn-time seed publishes for a legacy, store-less indexer.
+    assert_eq!(
+        idx.snapshot_writer_shape(),
+        WriterShape::CorpusIsAuthoritative
+    );
+    let guard = idx.snapshot_guard.clone();
+    assert_eq!(guard.shape(), WriterShape::CorpusIsAuthoritative);
+
+    // The swap quarantines the index while the detached loop is still running.
+    idx.quarantine_detached_corpus(CorpusOpenFailure::Unclassified, "#7980 mid-loop");
+    assert_eq!(
+        guard.shape(),
+        WriterShape::CorpusMayBeStandIn,
+        "#7980: the detached writer holds only this Arc — it must see the quarantine"
+    );
+}
+
 /// Error arm: a failed write surfaces as `Err` and leaves the source intact.
 #[tokio::test]
 async fn snapshot_write_failure_surfaces_error_and_keeps_source() {

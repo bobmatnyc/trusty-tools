@@ -347,6 +347,63 @@ async fn search_health_does_not_report_an_unreadable_chunk_count_as_empty() {
     );
 }
 
+/// #7979: a failed migration must not be rendered as an empty index.
+///
+/// Why: a failed `chunks.json` → `index.redb` migration leaves the index at 0
+/// chunks, and the `index_empty` verdict prescribes exactly the reindex that
+/// cannot repair a corrupt legacy snapshot — it overwrites nothing useful and
+/// destroys the operator's one copy of the evidence. Putting `migration_error`
+/// only into the report's `detail` block left `healthy` true-shaped and the
+/// remediation wrong.
+/// What: serves a 200 status body with `chunk_count: 0` beside a
+/// `migration_error` entry, and asserts the verdict names the migration, is not
+/// healthy, and steers away from the reindex.
+/// Test: this IS the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn search_health_reports_a_failed_migration_instead_of_prescribing_a_reindex() {
+    let base = spawn_health_daemon(
+        (200, healthy_body(1, 0)),
+        (
+            200,
+            json!({
+                "index_id": "mine",
+                "chunk_count": 0,
+                "root_path": "/x",
+                "migration_error": [{
+                    "stage": "json_to_redb",
+                    "detail": "chunk snapshot at /x/chunks.json is corrupt (#7923)",
+                    "at": "2026-09-16T00:00:00Z",
+                }],
+            }),
+        ),
+    )
+    .await;
+    let server = McpServer::new(base).with_pinned_index("mine");
+
+    let report = health_report(&server, json!({})).await;
+
+    assert_eq!(
+        report["status"],
+        crate::mcp::tools::health::HEALTH_INDEX_MIGRATION_FAILED,
+        "#7979: a failed migration must outrank the chunk-count arms: {report}"
+    );
+    assert_eq!(report["healthy"], Value::Bool(false));
+    let message = report["message"].as_str().expect("message");
+    assert!(
+        message.contains("json_to_redb"),
+        "the message must name the failed stage: {message}"
+    );
+    let remediation = report["remediation"].as_str().expect("remediation");
+    assert!(
+        remediation.contains("Do NOT reindex"),
+        "#7979: a reindex cannot repair a corrupt snapshot: {remediation}"
+    );
+    assert!(
+        !remediation.contains("doctor --fix"),
+        "doctor --fix reindexes every zero-chunk index — exactly wrong here: {remediation}"
+    );
+}
+
 /// A 200 status body that simply omits `chunk_count` is also unknown, not zero.
 ///
 /// Why (#5633): the same `unwrap_or(0)` swallowed an absent key exactly as it

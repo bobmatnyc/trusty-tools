@@ -396,7 +396,38 @@ pub(crate) async fn run_migrations_exclusive(
     run_migrations(index, registry).await
 }
 
+/// Run the chain and record its outcome where `status` can report it (#7979).
+///
+/// Why: a failed chain used to leave one `warn!` line and nothing else — the
+/// index kept serving at its old (often empty) schema while
+/// `GET /indexes/:id/status` and `search_health` reported no fault at all.
+/// Recording here rather than at the `spawn_index_migrations` call site covers
+/// `run_migrations_exclusive` and every test caller by the same code.
+/// What: delegates to [`run_migration_chain`], then records the failure on the
+/// index's [`crate::core::indexer::MigrationFault`] record, or clears any
+/// earlier one on success. The read lock is taken after the chain returns, so
+/// it cannot deadlock against the write locks the migrations themselves take.
+/// Test: `failed_schema_chain_is_reported_as_migration_error_in_status`,
+/// `a_succeeding_chain_clears_an_earlier_recorded_fault`.
 pub async fn run_migrations(
+    index: &IndexHandle,
+    registry: &MigrationRegistry,
+) -> Result<(), MigrationError> {
+    let outcome = run_migration_chain(index, registry).await;
+    let indexer = index.indexer.read().await;
+    let stage = crate::core::indexer::MIGRATION_STAGE_SCHEMA_CHAIN;
+    match &outcome {
+        // Clears ONLY this stage. The boot order is `restore_indexes` (which
+        // can record a `json_to_redb` fault) then `spawn_index_migrations`, and
+        // a chain with nothing to do returns `Ok` here — an unkeyed clear would
+        // erase a JSON fault this run says nothing about.
+        Ok(()) => indexer.clear_migration_failure(stage),
+        Err(e) => indexer.record_migration_failure(stage, format!("{e:#}")),
+    }
+    outcome
+}
+
+async fn run_migration_chain(
     index: &IndexHandle,
     registry: &MigrationRegistry,
 ) -> Result<(), MigrationError> {
@@ -602,6 +633,10 @@ impl IndexHandle {
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
+
+/// #7979: a failed migration is reported by `GET /indexes/:id/status`.
+#[cfg(test)]
+mod status_fault_7979_tests;
 
 #[cfg(test)]
 mod tests {

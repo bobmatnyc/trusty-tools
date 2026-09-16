@@ -351,6 +351,35 @@ pub(crate) async fn index_status_report(
             "reason": k.stage_reason(),
         })
     });
+    // #7979: a migration that failed at boot advances no schema stamp and
+    // leaves the index serving whatever it already held — usually nothing. It
+    // was visible only as a WARN, so this endpoint reported a broken index as
+    // an ordinary empty one. `null` means no migration has failed.
+    // The two runners are independent and both can be outstanding at once, so
+    // this is the SET of faults, stage-ordered — not the most recent one.
+    let faults = indexer.migration_faults();
+    let migration_error = (!faults.is_empty()).then(|| {
+        serde_json::Value::Array(
+            faults
+                .iter()
+                .map(|f| {
+                    serde_json::json!({
+                        "stage": f.stage,
+                        "detail": f.detail,
+                        "at": f.at,
+                    })
+                })
+                .collect(),
+        )
+    });
+    // #7991: a staged reindex that ran to completion and could not promote.
+    // The live corpus is at its PRE-reindex state; nothing else says so.
+    let promotion_deferred = indexer.promotion_deferred().map(|d| {
+        serde_json::json!({
+            "reason": d.reason,
+            "at": d.at,
+        })
+    });
     // Issue #3408: surface the watcher's live/degraded state per-index. A
     // network-mounted root never gets a live watcher (inotify/FSEvents can't
     // observe another host's writes there); `network_mount_degraded` plus
@@ -389,6 +418,10 @@ pub(crate) async fn index_status_report(
         "root_path": handle.root_path,
         "chunk_count": chunk_count,
         "corpus_open_failure": corpus_open_failure,
+        // #7979: every outstanding migration fault, or null.
+        "migration_error": migration_error,
+        // #7991: the last refused staged-corpus promotion, or null.
+        "promotion_deferred": promotion_deferred,
         "status": legacy_status,
         "stages": stages_snapshot,
         // #4787: cumulative semantic coverage, beside the per-boot delta.

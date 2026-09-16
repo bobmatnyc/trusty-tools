@@ -49,6 +49,17 @@ pub const HEALTH_INDEX_EMPTY: &str = "index_empty";
 /// status; the remediation differs and is set per shape.
 pub const HEALTH_INDEX_UNKNOWN: &str = "index_unknown";
 
+/// A migration this index needs failed, so its contents are not what they
+/// should be (#7979).
+///
+/// Why: this is not `ok` and it is not `index_empty`. A failed
+/// `chunks.json` → `index.redb` migration leaves the index serving 0 chunks
+/// that a reindex CANNOT repair — the source of truth is a snapshot the daemon
+/// refuses to parse, and reindexing overwrites nothing useful while destroying
+/// the operator's chance to look at it. The empty-index verdict prescribes
+/// exactly that reindex, so the migration fault has to be checked first.
+pub const HEALTH_INDEX_MIGRATION_FAILED: &str = "index_migration_failed";
+
 /// Longest response-body excerpt echoed back in a diagnostic.
 const BODY_EXCERPT_CHARS: usize = 400;
 
@@ -215,12 +226,35 @@ pub(super) async fn report_health(
                 // is the REASON the count is unknown, and it was arriving in
                 // the response body and being dropped here.
                 "corpus_open_failure",
+                // #7979: a migration that failed at boot is why an index can
+                // read as empty; dropping it here left `search_health` silent
+                // about the one fact that explains the count.
+                "migration_error",
             ] {
                 if let Some(v) = body.get(key) {
                     detail.insert(key.to_string(), v.clone());
                 }
             }
             let index = index_scope(&index_id, source, Value::Object(detail));
+            // #7979: checked BEFORE the chunk-count arms. A migration fault is
+            // why the count is what it is, and the `index_empty` arm below
+            // prescribes the one action — reindex — that cannot fix it.
+            if let Some(stages) = failed_migration_stages(&body) {
+                return report(
+                    HEALTH_INDEX_MIGRATION_FAILED,
+                    daemon,
+                    index,
+                    format!(
+                        "{answered} Index '{index_id}' ({source}) has a FAILED migration \
+                         ({stages}), so whatever it reports holding is not what it should \
+                         hold. This is NOT an empty index and NOT a healthy one."
+                    ),
+                    "Read `migration_error` on `index_status` for the failure text. Do NOT \
+                     reindex on this verdict — a reindex cannot repair a corrupt legacy \
+                     snapshot and destroys the evidence. Fix or move aside the file the \
+                     error names, then restart the daemon so the migration retries.",
+                );
+            }
             // #5633: the daemon's `chunk_count` is `Option<usize>` and a null
             // one rides a 200, so `unwrap_or(0)` turned "I could not read this"
             // into "it holds nothing" — and prescribed the reindex that is
@@ -262,6 +296,23 @@ pub(super) async fn report_health(
             }
         }
     }
+}
+
+/// The failed migration stages the daemon reported, comma-joined (#7979).
+///
+/// Why: `search_health`'s verdict has to branch on whether a migration failed,
+/// and the branch must not depend on the field's exact shape drifting — an
+/// absent key, `null`, and an empty array all mean "no fault".
+/// What: reads `migration_error` from the status body and joins each entry's
+/// `stage`. Returns `None` when there is nothing outstanding.
+/// Test: `search_health_reports_a_failed_migration_instead_of_prescribing_a_reindex`.
+fn failed_migration_stages(body: &Value) -> Option<String> {
+    let entries = body.get("migration_error")?.as_array()?;
+    let stages: Vec<&str> = entries
+        .iter()
+        .filter_map(|e| e.get("stage").and_then(Value::as_str))
+        .collect();
+    (!stages.is_empty()).then(|| stages.join(", "))
 }
 
 /// Why the daemon could not state a chunk count, and what to do about it.

@@ -800,3 +800,71 @@ async fn distinct_roots_open_independent_corpora() {
         "distinct roots resolve to distinct redb files and must both survive dedup"
     );
 }
+
+// ── Issue #7979: a failed JSON → redb migration must be observable ─────────
+
+/// #7979 regression: a corrupt `chunks.json` fails the warm-boot JSON → redb
+/// migration, and that failure must land on the indexer where
+/// `GET /indexes/:id/status` reads it — not only in a WARN log line.
+///
+/// Why: the migration correctly refuses a corrupt snapshot (#7923) and leaves
+/// the schema stamp where it was, so the index serves 0 chunks. Before this
+/// fix nothing outside the daemon log said why, and `status` rendered the
+/// index as ordinarily empty — the verdict that sends an operator to a reindex
+/// which cannot repair a corrupt snapshot.
+/// What: points `TRUSTY_DATA_DIR` at a fresh tempdir (so the schema stamp is
+/// UNVERSIONED and the runner actually runs), writes a truncated `chunks.json`
+/// at the legacy path the migration reads, builds the indexer through the real
+/// warm-boot entry point, and asserts the recorded fault names the JSON stage.
+/// Test: this IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn failed_json_to_redb_migration_is_recorded_on_the_indexer() {
+    let tmp = tempdir().unwrap();
+    let data_dir = tmp.path().join("data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    // SAFETY: test-only; #[serial_test::serial] (default group) excludes every
+    // other TRUSTY_DATA_DIR-mutating test in this binary.
+    unsafe { std::env::set_var("TRUSTY_DATA_DIR", &data_dir) };
+
+    let index_id = "test-idx-7979-json-migration";
+    let chunks_path = crate::service::persistence::chunks_path(index_id).expect("chunks path");
+    std::fs::create_dir_all(chunks_path.parent().unwrap()).unwrap();
+    // Truncated JSON: readable as bytes, not parseable as a snapshot.
+    let corrupt = br#"{"version":1,"chunks":[{"id":"#.to_vec();
+    std::fs::write(&chunks_path, &corrupt).unwrap();
+
+    let embedder = mock_embedder();
+    let entry = PersistedIndex {
+        id: index_id.to_string(),
+        root_path: tmp.path().to_path_buf(),
+        colocated: false,
+        ..Default::default()
+    };
+    let indexer = build_indexer_from_entry(&entry, &embedder).await.unwrap();
+    // SAFETY: as above; removed before any assertion can panic.
+    unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
+
+    let faults = indexer.migration_faults();
+    assert_eq!(
+        faults.len(),
+        1,
+        "#7979: a failed JSON → redb migration must be recorded where status can report it"
+    );
+    let fault = &faults[0];
+    assert_eq!(
+        fault.stage,
+        crate::core::indexer::MIGRATION_STAGE_JSON_TO_REDB,
+        "the record must name the JSON → redb stage"
+    );
+    assert!(
+        fault.detail.contains("corrupt"),
+        "the detail must carry the underlying cause, got: {}",
+        fault.detail
+    );
+    assert_eq!(
+        std::fs::read(&chunks_path).unwrap(),
+        corrupt,
+        "#7923: the snapshot must still be on disk, byte-identical"
+    );
+}
