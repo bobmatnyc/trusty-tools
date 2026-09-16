@@ -487,10 +487,8 @@ fn legacy_sources_are_refused_never_deleted() {
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("SKILL.md"), "hand-edited by the operator").unwrap();
     }
-    fs::create_dir_all(tmp.path().join(".trusty-mpm").join("claude-config")).unwrap();
-
     let steps = refuse_legacy_sources(tmp.path());
-    assert_eq!(steps.len(), 3, "{steps:?}");
+    assert_eq!(steps.len(), 2, "{steps:?}");
     for step in &steps {
         assert_eq!(step.check, "legacy_sources");
         assert!(
@@ -523,6 +521,19 @@ fn legacy_sources_refuse_names_an_unprefixed_bundled_skill() {
     assert_eq!(steps[0].path, dir);
     assert!(matches!(steps[0].status, StepStatus::Refused(_)));
     assert!(dir.exists(), "a refused finding is never deleted");
+}
+
+#[test]
+fn legacy_sources_refuse_skips_the_standalone_config_dir() {
+    // #7797: this listed `~/.trusty-mpm/claude-config` as a refused finding,
+    // but `legacy_sources` no longer reports it — it is the standalone
+    // driver's live CLAUDE_CONFIG_DIR, not a leftover. A `--fix` step for a
+    // finding the check never made is the #7783 mismatch in reverse.
+    let tmp = tempfile::tempdir().unwrap();
+    fs::create_dir_all(tmp.path().join(".trusty-mpm").join("claude-config")).unwrap();
+
+    let steps = refuse_legacy_sources(tmp.path());
+    assert!(steps.is_empty(), "{steps:?}");
 }
 
 #[test]
