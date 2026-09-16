@@ -1158,8 +1158,10 @@ fn submit_line_is_noop_while_a_permission_prompt_is_pending() {
     assert_eq!(app.pending_permission, before, "prompt state unchanged");
 }
 
-/// Enter must not smuggle a typed line past the prompt either — it answers
-/// allow-once instead, and the buffer is left alone.
+/// Enter is INERT while a prompt is open (#3422): it neither submits the
+/// typed line nor answers the prompt. An Enter bound to allow-once would
+/// grant a permission the footer never advertises — an operator reaches for
+/// Enter to send the line they were typing, not to approve `rm -rf build`.
 #[test]
 fn enter_while_a_permission_prompt_is_pending_does_not_submit() {
     let mut app = app_with_prompt();
@@ -1167,10 +1169,18 @@ fn enter_while_a_permission_prompt_is_pending_does_not_submit() {
 
     apply(&mut app, key(KeyCode::Enter));
 
-    assert_eq!(app.pending_submit, None);
+    assert_eq!(app.pending_submit, None, "no turn may be staged");
     assert_eq!(
         app.input_buf, "run the thing",
         "the typed line is preserved"
+    );
+    assert!(
+        app.pending_permission.is_some(),
+        "Enter answers nothing — the prompt must still be open"
+    );
+    assert_eq!(
+        app.pending_permission_response, None,
+        "Enter must stage no answer at all"
     );
 }
 

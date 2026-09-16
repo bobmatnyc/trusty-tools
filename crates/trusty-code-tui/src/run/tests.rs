@@ -354,6 +354,10 @@ struct MockEngine {
     /// Every `(request_id, answer)` pair `respond_permission` was handed
     /// (#3422), in call order.
     permission_answers: StdMutex<Vec<(String, crate::model::PermissionAnswer)>>,
+    /// When set, `respond_permission` records the call and then returns
+    /// `Err(...)` — the wedged/disconnected-backend shape (#3422), where the
+    /// answer never reaches the suspended call.
+    respond_permission_returns_err: AtomicBool,
 }
 
 #[async_trait]
@@ -401,6 +405,9 @@ impl TuiEngine for MockEngine {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push((request_id, answer));
+        if self.respond_permission_returns_err.load(Ordering::SeqCst) {
+            return Err(anyhow::anyhow!("mock respond_permission failure"));
+        }
         Ok(())
     }
 }
@@ -530,6 +537,81 @@ async fn dispatch_pending_permission_answer_reaches_respond_permission() {
             crate::model::PermissionAnswer::AllowForSession { pattern: None }
         )],
         "the answer must reach the engine verbatim, exactly once"
+    );
+}
+
+/// #3422: a `respond_permission` RPC that FAILS must reopen the prompt. The
+/// prompt closes optimistically the moment a key is pressed (the keyboard
+/// must not freeze on a slow backend), so a failed relay otherwise leaves
+/// the operator with no prompt while the tool call stays suspended on the
+/// backend until it times out — the answer becomes unreachable. Drives the
+/// real reducer over the event the dispatch layer publishes, so this proves
+/// the whole failure path rather than the spawned task in isolation.
+#[tokio::test]
+async fn dispatch_pending_permission_answer_failure_reopens_the_prompt() {
+    let engine = Arc::new(MockEngine::default());
+    engine
+        .respond_permission_returns_err
+        .store(true, Ordering::SeqCst);
+    let mut app = ReplApp::new("demo", "u");
+    app_apply(
+        &mut app,
+        ReplEvent::PermissionRequested {
+            request_id: "req-1".to_string(),
+            agent: "python-engineer".to_string(),
+            agent_id: "spawn-1".to_string(),
+            tool: "bash".to_string(),
+            subject: "rm -rf build".to_string(),
+            rule: "bash[rm *]".to_string(),
+        },
+    );
+    app_apply(
+        &mut app,
+        ReplEvent::Key(KeyInput {
+            code: KeyCode::Char('y'),
+            modifiers: KeyModifiers::default(),
+        }),
+    );
+    assert!(
+        app.pending_permission.is_none(),
+        "answering closes the prompt optimistically"
+    );
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<ReplEvent>();
+    let current_task: CurrentTask = Arc::new(StdMutex::new(None));
+    let generation = new_generation();
+    dispatch_pending(&mut app, &engine, &tx, &current_task, &generation);
+
+    // Poll the real condition (the relay task publishing its failure), not a
+    // fixed sleep — same shape as the success test above.
+    let mut published = None;
+    for _ in 0..200 {
+        if let Ok(ev) = rx.try_recv() {
+            published = Some(ev);
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    let published = published.expect("a failed respond_permission must publish an event");
+    app_apply(&mut app, published);
+
+    assert_eq!(
+        app.pending_permission
+            .as_ref()
+            .expect("the prompt must reopen so the answer can be retried")
+            .request_id,
+        "req-1",
+        "the reopened prompt must be the one that failed to send"
+    );
+    let transcript = app
+        .chat
+        .iter()
+        .map(|l| l.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        transcript.contains("mock respond_permission failure"),
+        "the status line must name the failure: {transcript}"
     );
 }
 
