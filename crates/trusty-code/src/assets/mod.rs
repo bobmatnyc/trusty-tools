@@ -9,12 +9,13 @@
 //! disk-based `.claude/agents/` and `.claude/skills/` always take precedence
 //! when present (see `agents::load_all_agents` and
 //! `skills::discover_skill_metadata`'s embedded-fallback branches).
-//! What: [`EmbeddedAgent`]/[`DEFAULT_AGENTS`] — the 33-agent dispatchable
-//! roster (Slice E3, #2958, plus `pm` added for #3437 and `ticketing` for
-//! #4027): tcode's own 4 defaults (`engineer`, `qa-agent`, `code-reviewer`,
-//! `pm`, no `extends:` chain — projected via
-//! `agents::md_loader::project_embedded_md`) plus the 29 tm agents (the 28
-//! coding-relevant ones Bob selected in #2958, plus `ticketing`) (`extends:`-chained
+//! What: [`EmbeddedAgent`]/[`DEFAULT_AGENTS`] — the 34-agent dispatchable
+//! roster (Slice E3, #2958, plus `pm` added for #3437, `ticketing` for
+//! #4027, and the four delivery-workflow agents for #8129): tcode's own 8
+//! `Direct` defaults (`engineer`, `qa-agent`, `code-reviewer`, `pm`,
+//! `ticketing`, `version-control`, `local-ops`, `documentation` — no
+//! `extends:` chain, projected via
+//! `agents::md_loader::project_embedded_md`) plus the 26 tm agents (`extends:`-chained
 //! through the 5 `BASE-*` templates — projected via
 //! `agents::md_loader::project_embedded_md_with_extends`, which resolves
 //! against [`EMBEDDED_TM_AGENT_SOURCES`]). Authored as Markdown+frontmatter
@@ -96,6 +97,31 @@
 //! `NON_CODING_TARGETS` floor in
 //! `crates/trusty-agents/src/tools/cross_product.rs` — not by an asset-level
 //! allowlist that a direct `tcode run-task` invocation would bypass anyway.
+//!
+//! ## Delivery-workflow agents (#8129, epic #8127)
+//!
+//! `ticketing`, `version-control`, `local-ops` and `documentation` are the
+//! four roles trusty-mpm's PM delegates the issue -> branch -> build -> PR
+//! -> changelog steps to. tcode's PM could not reach any of them: three
+//! (`ticketing`, `local-ops`, `documentation`) were `Composed` entries
+//! sourced byte-identically from the shared crate, and `version-control` was
+//! absent from the roster entirely. The shared bodies are written for
+//! trusty-mpm's harness (`Skill(...)`, `tm` CLI verbs, MCP servers tcode does
+//! not host) and their `tools:` frontmatter names Claude Code's vocabulary,
+//! which this runtime ignores (#7683) — so each one projected to
+//! `tools.allowed == None`, i.e. EVERY tool allowed, the opposite of the
+//! grant its author wrote.
+//!
+//! All four are therefore tcode-NATIVE [`EmbeddedAgent::Direct`] agents in
+//! `assets/agents/`, authored the way `pm.md`/`engineer.md` are: a short body
+//! scoped to tcode's actual tool surface, with an explicit `tcode_tools:`
+//! allowlist that carries `bash` (for `git`/`gh`/`cargo`) and `finish_task`.
+//! They are NOT forks of the same-named shared assets and are NOT pinned
+//! deviations — there is no upstream content to reconcile against, only an
+//! upstream ROLE. `scripts/check_agent_assets.sh` therefore lists them in
+//! `$TCODE_ONLY`, never in `$DEVIATED_FILES`. The three shared sources they
+//! replace were removed from [`EMBEDDED_TM_AGENT_SOURCES`] in the same change
+//! so no caller can compose the trusty-mpm body under the same dispatch name.
 //!
 //! ## E4 guard (issue #2958, `scripts/check_agent_assets.sh`)
 //!
@@ -199,10 +225,18 @@ const ENGINEER_MD: &str = include_str!("agents/engineer.md");
 const QA_AGENT_MD: &str = include_str!("agents/qa-agent.md");
 const CODE_REVIEWER_MD: &str = include_str!("agents/code-reviewer.md");
 const PM_MD: &str = include_str!("agents/pm.md");
+// #8129: the four delivery-workflow agents. tcode-NATIVE, not forks of the
+// shared roster's same-named files — see this module's "Delivery-workflow
+// agents" doc section.
+const TICKETING_MD: &str = include_str!("agents/ticketing.md");
+const VERSION_CONTROL_MD: &str = include_str!("agents/version-control.md");
+const LOCAL_OPS_MD: &str = include_str!("agents/local-ops.md");
+const DOCUMENTATION_MD: &str = include_str!("agents/documentation.md");
 
-/// The 33-agent dispatchable default roster, embedded at compile time
-/// (Slice E3, #2958, plus `pm` added for #3437 and `ticketing` for #4027):
-/// tcode's original 3 defaults plus `pm` plus the 29 tm roster agents. The 5
+/// The 34-agent dispatchable default roster, embedded at compile time
+/// (Slice E3, #2958, plus `pm` added for #3437, `ticketing` for #4027, and
+/// the four #8129 delivery-workflow agents):
+/// tcode's 8 own `Direct` defaults plus the 26 tm roster agents. The 5
 /// `BASE-*` extends templates in [`EMBEDDED_TM_AGENT_SOURCES`] are
 /// deliberately NOT entries here — they are extends-sources only, never
 /// dispatchable — and trusty-mpm's own `engineer` agent is excluded from the
@@ -224,18 +258,23 @@ const PM_MD: &str = include_str!("agents/pm.md");
 /// hands bugs back to the engineer rather than fixing them), `code-reviewer`
 /// (adversarial, read-only review, no `bash`), `pm` (orchestrator/default —
 /// delegates when `delegate_to_agent` is available, executes directly
-/// otherwise; see `assets/agents/pm.md`) — all four [`EmbeddedAgent::Direct`].
-/// Then the 29 [`EmbeddedAgent::Composed`] roster agents, alphabetical,
-/// matching [`EMBEDDED_TM_AGENT_SOURCES`]'s roster ordering. Four of them
-/// (`qa`, `code-critic`, `code-analyzer`, `web-qa`) carry a tcode-only
-/// restrictive `tools:` override in their `.md` source — see this module's
-/// "Tools-restriction deviation" doc section above.
+/// otherwise; see `assets/agents/pm.md`), plus the four #8129
+/// delivery-workflow agents `ticketing` (issues via `gh`), `version-control`
+/// (branch/commit/push/PR via `git`+`gh`), `local-ops` (build, test, version
+/// bump, changelog) and `documentation` (prose) — all eight
+/// [`EmbeddedAgent::Direct`], interleaved alphabetically from
+/// `documentation` onward. Then the 26 [`EmbeddedAgent::Composed`] roster
+/// agents, alphabetical, matching [`EMBEDDED_TM_AGENT_SOURCES`]'s roster
+/// ordering. Four of them (`qa`, `code-critic`, `code-analyzer`, `web-qa`)
+/// carry a tcode-only restrictive `tcode_tools:` override in their `.md`
+/// source — see this module's "Tools-restriction deviation" doc section above.
 /// Test: `assets::tests::default_agents_parse_and_names_match`,
 /// `assets::tests::base_templates_are_never_dispatchable`,
-/// `assets::tests::no_name_collisions_across_the_33_agent_roster`,
+/// `assets::tests::no_name_collisions_across_the_34_agent_roster`,
 /// `assets::tests::ticketing_is_dispatchable_for_cross_product_delegation`,
 /// `assets::tests::restricted_reviewer_agents_carry_read_only_tools`,
-/// `assets::tests::documentation_and_research_remain_unrestricted`,
+/// `assets::tests::delivery_workflow_agents_are_dispatchable_with_bash`,
+/// `assets::tests::research_remains_unrestricted`,
 /// `assets::tests::default_task_run_agent_resolves_against_default_agents`,
 /// `assets::tests::every_embedded_agent_model_normalizes_to_a_valid_slug`.
 pub const DEFAULT_AGENTS: &[EmbeddedAgent] = &[
@@ -268,8 +307,10 @@ pub const DEFAULT_AGENTS: &[EmbeddedAgent] = &[
     EmbeddedAgent::Composed {
         name: "data-engineer",
     },
-    EmbeddedAgent::Composed {
+    // #8129: tcode-native, not the shared roster's `documentation.md`.
+    EmbeddedAgent::Direct {
         name: "documentation",
+        md: DOCUMENTATION_MD,
     },
     EmbeddedAgent::Composed {
         name: "golang-engineer",
@@ -280,7 +321,11 @@ pub const DEFAULT_AGENTS: &[EmbeddedAgent] = &[
     EmbeddedAgent::Composed {
         name: "javascript-engineer",
     },
-    EmbeddedAgent::Composed { name: "local-ops" },
+    // #8129: tcode-native build/test/version-bump/changelog agent.
+    EmbeddedAgent::Direct {
+        name: "local-ops",
+        md: LOCAL_OPS_MD,
+    },
     EmbeddedAgent::Composed {
         name: "nextjs-engineer",
     },
@@ -322,10 +367,19 @@ pub const DEFAULT_AGENTS: &[EmbeddedAgent] = &[
     },
     // #4027: non-coding ticketing specialist, reachable from trusty-agents'
     // widened cross-product bridge (#4026). See this module's "Non-coding
-    // cross-product roster addition" doc section.
-    EmbeddedAgent::Composed { name: "ticketing" },
+    // cross-product roster addition" doc section. #8129 replaced the shared
+    // copy with a tcode-native one carrying a `tcode_tools:` allowlist.
+    EmbeddedAgent::Direct {
+        name: "ticketing",
+        md: TICKETING_MD,
+    },
     EmbeddedAgent::Composed {
         name: "typescript-engineer",
+    },
+    // #8129: the branch/commit/push/PR half of the delivery workflow.
+    EmbeddedAgent::Direct {
+        name: "version-control",
+        md: VERSION_CONTROL_MD,
     },
     EmbeddedAgent::Composed { name: "web-qa" },
     EmbeddedAgent::Composed {
@@ -376,11 +430,9 @@ const CODE_ANALYZER_MD: &str = include_str!("agents/code-analyzer.md");
 const CODE_CRITIC_MD: &str = include_str!("agents/code-critic.md");
 const DART_ENGINEER_MD: &str = trusty_agents_common::agent_assets::DART_ENGINEER;
 const DATA_ENGINEER_MD: &str = trusty_agents_common::agent_assets::DATA_ENGINEER;
-const DOCUMENTATION_MD: &str = trusty_agents_common::agent_assets::DOCUMENTATION;
 const GOLANG_ENGINEER_MD: &str = trusty_agents_common::agent_assets::GOLANG_ENGINEER;
 const JAVA_ENGINEER_MD: &str = trusty_agents_common::agent_assets::JAVA_ENGINEER;
 const JAVASCRIPT_ENGINEER_MD: &str = trusty_agents_common::agent_assets::JAVASCRIPT_ENGINEER;
-const LOCAL_OPS_MD: &str = trusty_agents_common::agent_assets::LOCAL_OPS;
 const NEXTJS_ENGINEER_MD: &str = trusty_agents_common::agent_assets::NEXTJS_ENGINEER;
 const ELIXIR_ENGINEER_MD: &str = trusty_agents_common::agent_assets::ELIXIR_ENGINEER;
 const PHOENIX_ENGINEER_MD: &str = trusty_agents_common::agent_assets::PHOENIX_ENGINEER;
@@ -396,16 +448,17 @@ const RUST_ENGINEER_MD: &str = trusty_agents_common::agent_assets::RUST_ENGINEER
 const SECURITY_MD: &str = trusty_agents_common::agent_assets::SECURITY;
 const SVELTE_ENGINEER_MD: &str = trusty_agents_common::agent_assets::SVELTE_ENGINEER;
 const TAURI_ENGINEER_MD: &str = trusty_agents_common::agent_assets::TAURI_ENGINEER;
-// #4027: byte-parity copy of trusty-mpm's ticketing agent.
-const TICKETING_MD: &str = trusty_agents_common::agent_assets::TICKETING;
 const TYPESCRIPT_ENGINEER_MD: &str = trusty_agents_common::agent_assets::TYPESCRIPT_ENGINEER;
 const WEB_QA_MD: &str = include_str!("agents/web-qa.md");
 const WEB_UI_ENGINEER_MD: &str = trusty_agents_common::agent_assets::WEB_UI_ENGINEER;
 
 /// The embedded tm agent catalog's raw sources (Slice E2, #2958): the 5
-/// `BASE-*` extends templates plus the 29 roster agents (the 28
-/// coding-relevant ones Bob selected in #2958, plus `ticketing` from #4027) (mpm/memory/cloud-vendor agents excluded -- see the
-/// issue's roster decision). Keyed by each asset's ORIGINAL embedded
+/// `BASE-*` extends templates plus the 26 `Composed` roster agents
+/// (mpm/memory/cloud-vendor agents excluded -- see the issue's roster
+/// decision; `ticketing`, `local-ops` and `documentation` left this table in
+/// #8129, when tcode-native `Direct` agents took over those three dispatch
+/// names -- see this module's "Delivery-workflow agents" doc section).
+/// Keyed by each asset's ORIGINAL embedded
 /// filename (`"BASE-QA.md"`, `"rust-engineer.md"`, ...) rather than a
 /// pre-lowercased bare name, because
 /// `trusty_agents_common::agents::builder_in_memory::InMemorySources::insert`
@@ -414,18 +467,18 @@ const WEB_UI_ENGINEER_MD: &str = trusty_agents_common::agent_assets::WEB_UI_ENGI
 /// `extends: base-qa` reference with no extra normalisation needed here.
 ///
 /// Why: `agents::md_loader::project_embedded_md_with_extends` needs a single
-/// batch source for `build_in_memory_source_map` instead of 34 individual
+/// batch source for `build_in_memory_source_map` instead of 31 individual
 /// `insert` calls; this table is that source. Kept separate from
 /// [`DEFAULT_AGENTS`] (rather than folded into it) because this table's key
 /// space includes the 5 `BASE-*` templates, which must remain resolvable as
 /// `extends:` targets while staying permanently non-dispatchable -- merging
 /// the two tables would require a third state ("resolvable but not listed")
 /// that the current `Direct`/`Composed` enum has no need to express.
-/// What: 34 `(original_filename, raw_md_content)` pairs: 5 `BASE-*` templates
-/// (never dispatchable) plus the 29 roster agents (dispatchable as of Slice
+/// What: 31 `(original_filename, raw_md_content)` pairs: 5 `BASE-*` templates
+/// (never dispatchable) plus the 26 roster agents (dispatchable as of Slice
 /// E3 via [`DEFAULT_AGENTS`]'s `EmbeddedAgent::Composed` entries, which
 /// resolve against this table at load time).
-/// Test: `assets::tests::embedded_tm_agent_sources_has_34_entries_and_unique_keys`,
+/// Test: `assets::tests::embedded_tm_agent_sources_has_31_entries_and_unique_keys`,
 /// `assets::tests::base_templates_are_never_dispatchable`,
 /// `md_loader::tests::project_embedded_md_with_extends_resolves_rust_engineer_from_base_engineer`.
 pub const EMBEDDED_TM_AGENT_SOURCES: &[(&str, &str)] = &[
@@ -439,11 +492,9 @@ pub const EMBEDDED_TM_AGENT_SOURCES: &[(&str, &str)] = &[
     ("code-critic.md", CODE_CRITIC_MD),
     ("dart-engineer.md", DART_ENGINEER_MD),
     ("data-engineer.md", DATA_ENGINEER_MD),
-    ("documentation.md", DOCUMENTATION_MD),
     ("golang-engineer.md", GOLANG_ENGINEER_MD),
     ("java-engineer.md", JAVA_ENGINEER_MD),
     ("javascript-engineer.md", JAVASCRIPT_ENGINEER_MD),
-    ("local-ops.md", LOCAL_OPS_MD),
     ("nextjs-engineer.md", NEXTJS_ENGINEER_MD),
     ("elixir-engineer.md", ELIXIR_ENGINEER_MD),
     ("phoenix-engineer.md", PHOENIX_ENGINEER_MD),
@@ -459,7 +510,6 @@ pub const EMBEDDED_TM_AGENT_SOURCES: &[(&str, &str)] = &[
     ("security.md", SECURITY_MD),
     ("svelte-engineer.md", SVELTE_ENGINEER_MD),
     ("tauri-engineer.md", TAURI_ENGINEER_MD),
-    ("ticketing.md", TICKETING_MD),
     ("typescript-engineer.md", TYPESCRIPT_ENGINEER_MD),
     ("web-qa.md", WEB_QA_MD),
     ("web-ui-engineer.md", WEB_UI_ENGINEER_MD),

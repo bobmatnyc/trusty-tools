@@ -66,6 +66,39 @@ async fn list_returns_embedded_when_disk_empty() {
     assert!(agents.iter().all(|a| a["tier"] == "embedded"));
 }
 
+/// #8129: the agent catalog that backs `tcode agents.describe` surfaces all
+/// four delivery-workflow agents, each from the embedded tier.
+///
+/// Why: `assets::tests::delivery_workflow_agents_are_dispatchable_with_bash`
+/// pins the TABLE; this pins the wire surface an operator actually reads.
+/// Three of the four were roster entries before this change but the fourth,
+/// `version-control`, was absent entirely — a regression that removed any one
+/// of them would leave the PM's delegation guidance pointing at a name the
+/// catalog does not list.
+/// What: lists against an empty disk dir so the embedded tier answers, and
+/// asserts each name appears exactly once with `tier == "embedded"` and a
+/// non-empty description.
+/// Test: this test.
+#[tokio::test]
+async fn list_surfaces_the_four_delivery_workflow_agents() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let s = state(tmp.path(), false);
+    let result = agents_list(&s, Value::Null, ctx()).await.expect("list");
+    let agents = result["agents"].as_array().expect("array");
+
+    for name in ["ticketing", "version-control", "local-ops", "documentation"] {
+        let entries: Vec<_> = agents.iter().filter(|a| a["name"] == name).collect();
+        assert_eq!(entries.len(), 1, "'{name}' must be listed exactly once");
+        assert_eq!(entries[0]["tier"], "embedded");
+        assert!(
+            entries[0]["description"]
+                .as_str()
+                .is_some_and(|d| !d.is_empty()),
+            "'{name}' must carry a description for the catalog listing"
+        );
+    }
+}
+
 #[tokio::test]
 async fn list_disk_override_wins_and_suppresses_embedded() {
     let tmp = tempfile::tempdir().expect("tempdir");
