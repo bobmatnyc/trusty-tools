@@ -35,11 +35,14 @@ cargo fmt --check                                     # no formatting drift
 🔴 Run `cargo fmt` before the FIRST edit too — an end-only run rewraps files
 already read and can invalidate line numbers still in use (#7635).
 
-🔴 **Renamed/moved a test? Run `check_test_pointers.sh` right after, before
-`cargo test`** — a stale `Test:` pointer otherwise surfaces only once the
-full suite has already paid its runtime. Example: `test_foo` → `test_foo_v2`,
-call sites updated, still passes `cargo test`, but a doc pointer naming
-`test_foo` is now wrong; catch it before the suite runs.
+🔴 **Renamed/moved a test? Run the project's own doc-pointer lint right
+after, before `cargo test`** — find it via CLAUDE.md or `scripts/`, never
+assume a filename. A stale `Test:` pointer otherwise surfaces only once the
+full suite has paid its runtime: `test_foo` → `test_foo_v2`, call sites
+updated, `cargo test` still green, but a doc pointer naming `test_foo` is now
+wrong.
+<!-- #8107: name the gate by role, never by a filename only this repo has
+     (#7247, #7270) — these assets deploy unchanged into every project. -->
 
 🔴 **`--no-fail-fast` is not optional** — cargo stops issuing further test
 targets after one fails, hiding every target behind it (#5324, PR #5904).

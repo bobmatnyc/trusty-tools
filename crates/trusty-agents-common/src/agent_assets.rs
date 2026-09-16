@@ -475,6 +475,11 @@ mod tests {
     /// wait") but no resident way to reconstruct the compliance mechanism. A
     /// Skill-less agent must be able to emit a correct `tm wait` retry and a
     /// correctly-headed closing report from `BASE_AGENT` alone.
+    ///
+    /// #8107: the retry rule is pinned by the command it names and by the word
+    /// `verbatim` case-insensitively. The earlier `VERBATIM` needle pinned the
+    /// emphasis casing, so #8075's rewrite to prose case reddened the test
+    /// without weakening the rule it guards.
     #[test]
     fn wait_exit_codes_and_improvement_block_headings_are_resident() {
         let flat = BASE_AGENT.replace('\n', " ");
@@ -483,10 +488,7 @@ mod tests {
             ("exit 75 (pending) is documented", "`75`"),
             ("exit 1 (timeout) is documented", "`1`"),
             ("exit 2 (error) is documented", "`2`"),
-            (
-                "re-issuing the rerun command verbatim is required",
-                "VERBATIM",
-            ),
+            ("the command to re-issue on exit 75 is named", "`rerun=`"),
             (
                 "the Improvement recommendations heading is named",
                 "Improvement recommendations",
@@ -505,6 +507,12 @@ mod tests {
                 "`BASE-AGENT.md` must state that {fact} (#7723 fix round)"
             );
         }
+        // #8107: the rule, not its capitalization.
+        assert!(
+            flat.to_lowercase().contains("verbatim"),
+            "`BASE-AGENT.md` must require the `rerun=` command to be re-issued \
+             verbatim (#7723 fix round)"
+        );
     }
 
     /// An engineer's shipped prompt must not name a doc-gate script that only

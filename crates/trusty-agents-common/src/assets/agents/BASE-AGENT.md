@@ -66,8 +66,10 @@ timer — exit `0` is done; `75` means re-issue the printed `rerun=` command
 verbatim, since the `--timeout` budget spans invocations; `1`/`2` are
 terminal (timeout / bad invocation). The full exit-code table, the
 scratchpad-naming rule (`#7238`, `#7287`), and the backgrounded-wait sentinel
-recipe live in `{{TM_SKILLS}}/condition-based-waiting/SKILL.md` (#7723) —
-Read it before any wait longer than one tool call.
+recipe live in one skill (#7723) — before any wait longer than one tool call,
+Read `{{TM_SKILLS}}/condition-based-waiting/SKILL.md`.
+<!-- #8107: keep the `Read `<path>`` form; it is the instruction an agent acts
+     on, and `embedded_agent_skill_pointers_open_with_read_file` pins it. -->
 
 ## Git Workflow
 
