@@ -327,7 +327,12 @@ function prose_fallback(f, ln, s,    rest, a, b, span) {
     if (b == 0) return
     span = substr(rest, 1, b - 1)
     rest = substr(rest, b + 1)
-    if (span ~ /^[A-Za-z_][A-Za-z0-9_]*(::[A-Za-z_*][A-Za-z0-9_*]*)*$/) classify_one(f, ln, span, 1)
+    # #8006: `*` is legal in the FIRST segment too. The gate used to spell the
+    # first segment `[A-Za-z0-9_]*` — no `*` — so a prose pointer naming a bare
+    # glob ("covered by `rebuild_deployment_failures_*`") matched nothing,
+    # emitted no citation row, and left the total unmoved and the pointer
+    # unchecked. A `::`-qualified glob (`tests::foo_*`) already got through.
+    if (span ~ /^[A-Za-z_][A-Za-z0-9_*]*(::[A-Za-z_*][A-Za-z0-9_*]*)*$/) classify_one(f, ln, span, 1)
   }
 }
 
@@ -1435,6 +1440,14 @@ SHFIX
     echo "self-test FAIL: expected a dangling NAME violation citing disclaimed_combo_native_missing_test — the second citation after a parenthetical aside (blind spot 2: pre-fix the '(' broke the scan before this citation was ever reached), got:" >&2
     cat "$viol" >&2
     ok=0
+  elif ! grep -qF "$(printf 'PGLOB\twidget_*')" "$checked"; then
+    echo "self-test FAIL: the prose BARE glob \`widget_*\` produced no citation row — a prose pointer naming an unqualified glob is dropped again, so it neither moves the citation total nor gets checked (issue #8006), got:" >&2
+    cat "$checked" >&2
+    ok=0
+  elif grep -qF 'widget_*' "$viol"; then
+    echo "self-test FAIL: the prose bare glob \`widget_*\` resolves to widget_count and must not be flagged dangling (issue #8006), got:" >&2
+    cat "$viol" >&2
+    ok=0
   elif grep -qE 'real_test_exists|field_name|Widget|hint_|self_referential|unrelated_field|other_symbol|module_style_tests|glob_matches_real_test_\*' "$viol"; then
     echo "self-test FAIL: a trailing-prose symbol, the valid module_style_tests citation, or the resolvable glob_matches_real_test_* was incorrectly flagged as dangling:" >&2
     cat "$viol" >&2
@@ -1447,6 +1460,10 @@ SHFIX
     cat "$err" >&2
     ok=0
   fi
+  # #8006: the baseline for the citation-total delta asserted at the end of
+  # this function. Captured before the file is removed.
+  local base_citations
+  base_citations="$(wc -l < "$checked" | tr -d ' ')"
   rm -f "$viol" "$stale" "$err" "$checked" "$shchecked"
 
   # --- allowlist ratchet: both properties, keyed on (path, name) only -----
@@ -1505,8 +1522,33 @@ SHFIX
   fi
   rm -f "$viol2" "$stale2" "$err2" "$checked2" "$shchecked2"
 
+  # --- #8006: the citation total must MOVE when a pointer is added --------
+  # The symptom this closes is a total that reads identical across two runs
+  # bracketing new `Test:` pointers, which is indistinguishable from "the new
+  # files never entered the scan". Nothing asserted the count was a function of
+  # the corpus at all, so the #7710 span filter could silently drop a whole
+  # citation shape and the number stayed put. Append ONE resolvable pointer to
+  # a fixture file, rescan, and require exactly one more resolved citation.
   if [ "$ok" -eq 1 ]; then
-    echo "check_test_pointers self-test: OK (valid pointer passes, dangling pointer caught, module citations resolve, prose-only/module-ref citations ignored, glob citations resolved by pattern match, brace sets expand per member, an unrecognised brace shape fails closed, parenthetical asides no longer break multi-citation scanning, unterminated backticks fail loudly, prose pointers resolved, untracked test modules define names, shell Test: pointers resolved as file paths, allowlist ratchet suppresses/prunes correctly by (path,name))."
+    local viol3 stale3 err3 checked3 shchecked3 after_citations
+    printf '\n/// Test: `real_test_exists` covers this too.\npub fn count_delta_probe() {}\n' \
+      >> "$tmp/crates/fixture/src/lib.rs"
+    viol3="$(mktemp "${TMPDIR:-/tmp}/tpself.viol3.XXXXXX")"
+    stale3="$(mktemp "${TMPDIR:-/tmp}/tpself.stale3.XXXXXX")"
+    err3="$(mktemp "${TMPDIR:-/tmp}/tpself.err3.XXXXXX")"
+    checked3="$(mktemp "${TMPDIR:-/tmp}/tpself.checked3.XXXXXX")"
+    shchecked3="$(mktemp "${TMPDIR:-/tmp}/tpself.shchecked3.XXXXXX")"
+    ( cd "$tmp" && scan "$viol3" "$stale3" "$err3" "$checked3" "$shchecked3" )
+    after_citations="$(wc -l < "$checked3" | tr -d ' ')"
+    if [ "$after_citations" != "$((base_citations + 1))" ]; then
+      echo "self-test FAIL: adding one resolvable Test: pointer moved the citation total from ${base_citations} to ${after_citations}; expected $((base_citations + 1)) (issue #8006)." >&2
+      ok=0
+    fi
+    rm -f "$viol3" "$stale3" "$err3" "$checked3" "$shchecked3"
+  fi
+
+  if [ "$ok" -eq 1 ]; then
+    echo "check_test_pointers self-test: OK (valid pointer passes, dangling pointer caught, module citations resolve, prose-only/module-ref citations ignored, glob citations resolved by pattern match, brace sets expand per member, an unrecognised brace shape fails closed, parenthetical asides no longer break multi-citation scanning, unterminated backticks fail loudly, prose pointers resolved, untracked test modules define names, shell Test: pointers resolved as file paths, allowlist ratchet suppresses/prunes correctly by (path,name), prose BARE globs are counted and resolved, and the citation total rises by one when a pointer is added)."
     return 0
   fi
   return 1

@@ -143,6 +143,17 @@ fn dispatch<S: TicketSystem>(
             let (model, source) = load_model_with_source(config.as_deref(), lifecycle)?;
             let report = ops::transition(backend, &model, issue, &to_state, note.as_deref())
                 .map_err(|e| with_source(e, &source))?;
+            // #8003: a no-op is stdout-silent and says so on stderr, so a
+            // script piping stdout still reads only real transitions while the
+            // operator is told why nothing moved.
+            if report.no_op {
+                eprintln!(
+                    "#{issue} is already `{}` — no change made (no label, assignee or comment \
+                     was written)",
+                    report.to
+                );
+                return Ok(());
+            }
             let from = report.from.as_deref().unwrap_or("(none)");
             println!("transitioned #{issue}: {from} → {}", report.to);
             if report.assignee_changed {

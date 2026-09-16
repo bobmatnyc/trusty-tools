@@ -135,6 +135,81 @@ fn adoption_handles_a_session_owned_tree_by_the_same_rule() {
     ));
 }
 
+/// #7974: the reported case — the registry cannot answer after a daemon
+/// restart, and the worktree lock still names a pid the kernel does not have.
+/// That is positive evidence the agent ended, so adoption proceeds and says
+/// what made it proceed.
+/// Test: this function IS the test.
+#[test]
+fn lock_fallback_takes_a_dead_pids_tree() {
+    let (liveness, evidence) = liveness_with_lock_fallback(
+        OwnerLiveness::Undeterminable,
+        LockEvidence::HolderPidGone(17167),
+    );
+    assert_eq!(liveness, OwnerLiveness::Dead);
+    let reason = evidence.expect("an adoption on this path must carry its evidence");
+    assert!(reason.contains("17167"), "{reason}");
+    assert!(reason.contains("#7974"), "{reason}");
+}
+
+/// #7974: a lock whose pid is RUNNING is not evidence of death, and pid reuse
+/// means it is not proof of the agent's life either — the refusal stands
+/// unchanged, with no evidence line to log.
+/// Test: this function IS the test.
+#[test]
+fn lock_fallback_refuses_a_running_pid() {
+    let (liveness, evidence) = liveness_with_lock_fallback(
+        OwnerLiveness::Undeterminable,
+        LockEvidence::HolderPidRunning(std::process::id()),
+    );
+    assert_eq!(liveness, OwnerLiveness::Undeterminable);
+    assert_eq!(evidence, None);
+}
+
+/// #7974, FAIL-OPEN CHECK: a lock that says nothing leaves the ADR-0045
+/// refusal exactly where it was. Every way the probe can decline — no git, no
+/// lock, an operator lock, no pid, an unrecognised errno — arrives here.
+/// Test: this function IS the test.
+#[test]
+fn lock_fallback_refuses_when_the_lock_says_nothing() {
+    let (liveness, evidence) =
+        liveness_with_lock_fallback(OwnerLiveness::Undeterminable, LockEvidence::Silent);
+    assert_eq!(liveness, OwnerLiveness::Undeterminable);
+    assert_eq!(evidence, None);
+}
+
+/// #7974, the non-weakening claim: a registry answer of `Alive` survives every
+/// lock state, including a lock naming a pid that is gone. A live agent whose
+/// dispatched process was replaced — or whose lock is stale — must not lose its
+/// tree to this fallback.
+/// Test: this function IS the test.
+#[test]
+fn lock_fallback_never_revives_a_live_owner() {
+    for lock in [
+        LockEvidence::HolderPidGone(17167),
+        LockEvidence::HolderPidRunning(std::process::id()),
+        LockEvidence::Silent,
+    ] {
+        assert_eq!(
+            liveness_with_lock_fallback(OwnerLiveness::Alive, lock),
+            (OwnerLiveness::Alive, None),
+            "a live owner must survive {lock:?}"
+        );
+    }
+}
+
+/// #7974: a registry answer of `Dead` is already sufficient, so the fallback
+/// adds nothing — and in particular does not attach an evidence line claiming
+/// the lock is what permitted the transfer.
+/// Test: this function IS the test.
+#[test]
+fn lock_fallback_leaves_a_dead_owner_dead() {
+    assert_eq!(
+        liveness_with_lock_fallback(OwnerLiveness::Dead, LockEvidence::HolderPidRunning(1)),
+        (OwnerLiveness::Dead, None)
+    );
+}
+
 /// The write: after adoption the sentinel names the ADOPTING session, so every
 /// gate that reads it now protects the tree for its new owner.
 #[test]
