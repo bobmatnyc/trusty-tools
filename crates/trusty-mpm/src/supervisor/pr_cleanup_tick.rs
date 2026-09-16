@@ -23,7 +23,9 @@ use std::time::{Duration, Instant};
 
 use tracing::warn;
 
-use crate::core::pr_cleanup::{ClaimEnder, CleanupRegistry, RealGh, RealGit, RealLanding, sweep};
+use crate::core::pr_cleanup::{
+    ClaimEnder, CleanupRegistry, RealGh, RealGit, RealLanding, auth_backoff, sweep,
+};
 use crate::session_manager::SessionManager;
 use crate::session_manager::worktree_safety::inspect_dirt;
 
@@ -101,8 +103,11 @@ pub fn due(interval: Option<Duration>, last: Option<Instant>, now: Instant) -> b
 /// sweep's own logic stays testable against fakes.
 /// What: builds a [`RealGh`] with the ambient GitHub identity, runs
 /// [`sweep::run_sweep`] over the production registry, and returns how many pull
-/// requests it cleaned up.
-/// Test: the loop is `sweep_stamps_only_a_fully_successful_run`.
+/// requests it cleaned up. The backoff gate is the process-wide
+/// [`auth_backoff::shared`] one (#8058) — the strike count has to outlive a
+/// single tick, and `/health` reads that same instance.
+/// Test: the loop is `sweep_stamps_only_a_fully_successful_run`; the gate is
+/// `sweep_stops_calling_gh_after_repeated_auth_failures`.
 pub async fn run_sweep(mgr: &SessionManager) -> usize {
     let (env, unset) = match crate::core::gh_identity::resolve_gh_env(None) {
         Ok(e) => (e.vars().to_vec(), e.unset_vars().to_vec()),
@@ -126,6 +131,7 @@ pub async fn run_sweep(mgr: &SessionManager) -> usize {
         &RealLanding,
         &inspect_dirt,
         &CleanupRegistry::production(),
+        auth_backoff::shared(),
     )
     .await
 }

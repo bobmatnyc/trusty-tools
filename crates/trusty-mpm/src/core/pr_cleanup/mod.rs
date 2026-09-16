@@ -79,6 +79,9 @@
 //!
 //! Test: the sibling `tests.rs`.
 
+// #8058: the sweep's `gh`-authentication backoff — see its module doc for the
+// loop it stops.
+pub mod auth_backoff;
 pub mod driver;
 mod landed;
 pub mod plan;

@@ -90,7 +90,22 @@ pub(crate) fn group_by_git_root<'a>(
 /// daemon; Telegram token resolution is tested in `trusty-mpm-telegram`.
 pub(crate) async fn print_status(client: &reqwest::Client, url: &str) -> anyhow::Result<()> {
     println!("daemon: ok");
+    print_sessions(client, url).await
+}
 
+/// Print the session listing and Telegram-bot note, with no health line.
+///
+/// Why (#8025): `tm status` now derives the daemon line from the SAME `/health`
+/// probe `tm doctor` uses, so it must print the listing without a second,
+/// possibly contradictory health verdict of its own. Splitting the listing out
+/// leaves `print_status` — and therefore `tm start` — byte-identical.
+/// What: `GET /sessions`, grouped by git repository root (CWD's repo first,
+/// with a `*` annotation), then `Telegram bot active` when a bot token is
+/// resolvable. `Err` on any transport or non-2xx, which the caller reports as
+/// an unavailable LISTING rather than as an unreachable daemon.
+/// Test: `status_reports_the_live_daemon_when_the_listing_fails` in
+/// `status_daemon_tests.rs` drives the failing-listing half.
+pub(crate) async fn print_sessions(client: &reqwest::Client, url: &str) -> anyhow::Result<()> {
     #[derive(Deserialize)]
     struct Body {
         sessions: Vec<SessionRow>,

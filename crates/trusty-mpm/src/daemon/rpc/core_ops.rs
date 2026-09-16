@@ -72,6 +72,13 @@ pub async fn health(state: &Arc<DaemonState>) -> HealthResponse {
         // against the PID launchd owns instead of trusting `supervised` alone.
         pid: std::process::id(),
         unsupervised_forced: state.unsupervised_forced(),
+        // #8058: the pr-cleanup sweep's backoff gate is process-wide, so the
+        // reason it parked itself is readable here without threading state
+        // through the supervisor. Empty is the healthy answer.
+        degraded: crate::core::pr_cleanup::auth_backoff::shared()
+            .degraded_reason()
+            .into_iter()
+            .collect(),
     }
 }
 

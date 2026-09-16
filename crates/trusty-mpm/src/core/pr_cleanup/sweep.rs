@@ -22,9 +22,12 @@
 //!
 //! Test: the sibling `sweep_tests.rs`.
 
+use std::time::Instant;
+
 use chrono::Utc;
 use tracing::{info, warn};
 
+use super::auth_backoff::{AuthBackoff, is_auth_failure};
 use super::driver::{ClaimEnder, Gh, Git, Landing};
 use super::registry::{CleanupRegistry, OpenedPr};
 use super::{CleanupRequest, DirtProbe, plan};
@@ -77,8 +80,19 @@ pub fn sweep_decision(entry: &OpenedPr, view: &plan::PrView) -> SweepDecision {
 /// `warn`, so a refused dirty worktree is retried after the operator saves
 /// their work rather than being silently forgotten.
 /// Returns the number of entries cleaned this sweep.
+///
+/// #8058: every `gh` call passes `backoff` first. An authentication failure is
+/// not a per-entry problem the next entry can succeed at — it is host-wide — so
+/// without the gate one tick spawned one doomed `gh` per pending entry, every
+/// tick, and logged one `warn!` per doomed call. The gate suspends the calls and
+/// caps the log at a constant per backoff window; `/health` reads the same
+/// gate's [`AuthBackoff::degraded_reason`]. Only an auth failure is gated — a
+/// per-entry error still `continue`s untouched, or one stale registry row would
+/// stop the whole sweep.
 /// Test: `sweep_stamps_only_a_fully_successful_run`,
-/// `sweep_leaves_a_dirty_worktree_pending`.
+/// `sweep_leaves_a_dirty_worktree_pending`,
+/// `sweep_stops_calling_gh_after_repeated_auth_failures`,
+/// `a_non_auth_failure_never_suspends_the_sweep`.
 pub async fn run_sweep<G: Gh, T: Git, C: ClaimEnder>(
     gh: &G,
     git: &T,
@@ -86,9 +100,15 @@ pub async fn run_sweep<G: Gh, T: Git, C: ClaimEnder>(
     landing: &dyn Landing,
     probe_dirt: DirtProbe<'_>,
     registry: &CleanupRegistry,
+    backoff: &AuthBackoff,
 ) -> usize {
     let mut cleaned = 0usize;
     for entry in registry.pending() {
+        if !backoff.may_poll(Instant::now()) {
+            // Suspended: the reason was logged once when the window opened and
+            // is published on /health for as long as it stays open.
+            break;
+        }
         let req = CleanupRequest {
             pr: entry.pr,
             repo: Some(entry.repo.clone()),
@@ -96,8 +116,23 @@ pub async fn run_sweep<G: Gh, T: Git, C: ClaimEnder>(
             dry_run: false,
         };
         let view = match super::view_pr(gh, &req) {
-            Ok(v) => v,
+            Ok(v) => {
+                backoff.record_answer();
+                v
+            }
             Err(e) => {
+                let detail = format!("{e:#}");
+                if is_auth_failure(&detail) {
+                    if backoff.record_auth_failure(Instant::now(), &detail) {
+                        warn!(
+                            pr = entry.pr,
+                            repo = %entry.repo,
+                            "pr cleanup sweep: `gh` authentication failed: {detail}"
+                        );
+                    }
+                    continue;
+                }
+                backoff.record_answer();
                 warn!(pr = entry.pr, repo = %entry.repo, "pr cleanup sweep: cannot read PR: {e:#}");
                 continue;
             }

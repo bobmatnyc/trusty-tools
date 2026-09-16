@@ -167,6 +167,9 @@ pub(crate) mod slack;
 pub(crate) mod sm_serve;
 pub(crate) mod spawn_disclaimed;
 pub(crate) mod standalone;
+// #8025: `tm status`'s daemon line, derived from the SAME `/health` probe
+// `tm doctor` uses — see its module doc for why the two disagreed.
+pub(crate) mod status_daemon;
 pub(crate) mod statusline;
 pub(crate) mod supervisor;
 pub(crate) mod sync_assets;

@@ -9,7 +9,6 @@
 //! Test: `cli_parses_*` parse tests for each command in `tests.rs`.
 
 use crate::cli::{CliCompressionLevel, OptimizerAction, OverseerAction};
-use crate::commands::daemon::{daemon_healthy, print_status};
 use crate::commands::hook_rewrite::{
     build_pretooluse_rewrite_response, rewrite_bash_command_for_compression,
 };
@@ -91,15 +90,14 @@ pub(crate) const SUBAGENT_STOP_EVENT: &str = "SubagentStop";
 
 /// `status` subcommand — probe daemon health and list sessions.
 ///
-/// Why: the first thing an operator runs to see if the daemon is alive.
-/// What: `GET /health` then `GET /sessions`, printing one line per session.
-/// Test: run against a live daemon; "daemon: unreachable" when it is down.
+/// Why: the first thing an operator runs to see if the daemon is alive. #8025
+/// moved the body to [`super::status_daemon`] so the verdict comes from the
+/// probe `tm doctor` already uses, and because this file sits three SLOC under
+/// the 500-line production cap.
+/// What: delegates to [`super::status_daemon::run`].
+/// Test: `src/bin/tm/commands/status_daemon_tests.rs`.
 pub(crate) async fn status(client: &reqwest::Client, url: &str) -> anyhow::Result<()> {
-    if !daemon_healthy(client, url).await {
-        println!("daemon: unreachable");
-        return Ok(());
-    }
-    print_status(client, url).await
+    super::status_daemon::run(client, url).await
 }
 
 /// `events` subcommand — print the recent hook-event feed.

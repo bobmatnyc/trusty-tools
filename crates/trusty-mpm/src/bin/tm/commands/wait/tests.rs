@@ -808,11 +808,58 @@ fn rerun_command_reproduces_the_selector() {
     a.path = Some("/tmp/gate.txt".into());
     a.contains = Some("EXIT=".into());
     a.timeout = 600;
-    let cmd = rerun_command(&a);
+    let plan = resolve_plan(&a).expect("plan");
+    let cmd = rerun_command(&a, &plan);
     assert_eq!(
         cmd,
         r#"tm wait --for file --path /tmp/gate.txt --contains "EXIT=" --timeout 600 --slice 100"#
     );
+}
+
+/// Why (#8120): the rerun line is the ONLY place a caller reads its own slice
+/// back, and an agent that re-issues it verbatim inherits whatever it says. A
+/// line that always said `--slice 100` would cost a nine-minute wait nine round
+/// trips instead of two. `540` is the value the reporting agent passed.
+#[test]
+fn rerun_command_echoes_a_non_default_slice() {
+    let mut a = args_for(WaitFor::File);
+    a.path = Some("/tmp/gate.txt".into());
+    a.slice = 400;
+    let plan = resolve_plan(&a).expect("plan");
+    let cmd = rerun_command(&a, &plan);
+    assert!(cmd.contains("--slice 400"), "{cmd}");
+    assert!(!cmd.contains("--slice 100"), "{cmd}");
+}
+
+/// Why (#8120): `resolve_plan` clamps the slice to `SLICE_MAX` and the timeout
+/// to `TIMEOUT_MAX`, so echoing the RAW args printed a command that does not
+/// reproduce the invocation that printed it — `--slice 540` ran as 500 and
+/// `--timeout 200000` ran as 86400, with nothing saying so.
+#[test]
+fn rerun_command_echoes_the_clamped_slice_and_timeout() {
+    let mut a = args_for(WaitFor::File);
+    a.path = Some("/tmp/gate.txt".into());
+    a.slice = 540;
+    a.timeout = 200_000;
+    let plan = resolve_plan(&a).expect("plan");
+    let cmd = rerun_command(&a, &plan);
+    assert!(cmd.contains("--slice 500"), "{cmd}");
+    assert!(cmd.contains("--timeout 86400"), "{cmd}");
+    assert!(!cmd.contains("540"), "{cmd}");
+    assert!(!cmd.contains("200000"), "{cmd}");
+}
+
+/// Why (#8120): `--interval` is floored per verb, so the same clamp applies —
+/// and the flag stays absent when the caller passed none, keeping the default
+/// line unchanged.
+#[test]
+fn rerun_command_echoes_the_floored_interval_only_when_given() {
+    let mut a = args_for(WaitFor::Check);
+    a.pr = Some(1);
+    assert!(!rerun_command(&a, &resolve_plan(&a).expect("plan")).contains("--interval"));
+    a.interval = Some(2);
+    let cmd = rerun_command(&a, &resolve_plan(&a).expect("plan"));
+    assert!(cmd.contains("--interval 10"), "{cmd}");
 }
 
 /// Why: re-running with `--reset` would wipe the very budget the pending line
@@ -822,8 +869,9 @@ fn rerun_command_never_repeats_reset() {
     let mut a = args_for(WaitFor::Run);
     a.pid = Some(4242);
     a.reset = true;
-    assert!(!rerun_command(&a).contains("--reset"));
-    assert!(rerun_command(&a).contains("--pid 4242"));
+    let plan = resolve_plan(&a).expect("plan");
+    assert!(!rerun_command(&a, &plan).contains("--reset"));
+    assert!(rerun_command(&a, &plan).contains("--pid 4242"));
 }
 
 /// Why: the four exit codes ARE the contract; a change to one is a breaking

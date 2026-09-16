@@ -9,10 +9,10 @@ crates/trusty-mpm/src/assets/instructions/sections/core.md	7534
 crates/trusty-mpm/src/assets/instructions/sections/enforcement.md	3916
 crates/trusty-mpm/src/assets/instructions/sections/framework-guaranteed-conventions.md	829
 crates/trusty-mpm/src/assets/instructions/sections/identity.md	466
-crates/trusty-mpm/src/assets/instructions/sections/memory.md	308
+crates/trusty-mpm/src/assets/instructions/sections/memory.md	1052
 crates/trusty-mpm/src/assets/instructions/sections/non-overridable-rules.md	3614
 crates/trusty-mpm/src/assets/instructions/sections/prompt-self-improvement.md	264
 crates/trusty-mpm/src/assets/instructions/sections/search.md	202
-crates/trusty-mpm/src/assets/instructions/sections/workflow.md	4023
-crates/trusty-mpm/src/assets/output-styles/trusty-mpm.md	7961
-TOTAL	53887
+crates/trusty-mpm/src/assets/instructions/sections/workflow.md	4341
+crates/trusty-mpm/src/assets/output-styles/trusty-mpm.md	7988
+TOTAL	54976

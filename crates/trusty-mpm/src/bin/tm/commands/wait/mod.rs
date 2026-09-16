@@ -385,12 +385,24 @@ pub(crate) fn status_line(
 /// Why: "re-run the identical command" is the contract, and an agent that
 /// retypes it from memory will drift — dropping `--timeout` silently restarts
 /// the deadline. Printing the canonical form removes the guesswork.
+///
+/// #8120: the budget knobs come from the RESOLVED [`Plan`], not from the raw
+/// `args`. [`resolve_plan`] clamps `--slice` to `SLICE_MIN..=SLICE_MAX` and
+/// `--timeout` to `TIMEOUT_MAX`, so echoing the raw value printed a command
+/// that does not reproduce the invocation that printed it — the caller who
+/// asked for `--slice 540` was told to re-run `--slice 540` while the run
+/// itself used 500, and nothing said the value had been clamped. The selector
+/// flags still come from `args`: they ARE what the caller passed, and the plan
+/// does not carry them.
 /// What: the flags this invocation actually used, in a fixed order. `--reset`
 /// is deliberately NOT reproduced: re-running with it would wipe the budget the
-/// pending line just reported.
+/// pending line just reported. `--interval` is emitted only when the caller
+/// passed one, so the default path's line is unchanged.
 /// Test: `rerun_command_reproduces_the_selector`,
-/// `rerun_command_never_repeats_reset`.
-pub(crate) fn rerun_command(args: &WaitArgs) -> String {
+/// `rerun_command_never_repeats_reset`,
+/// `rerun_command_echoes_a_non_default_slice`,
+/// `rerun_command_echoes_the_clamped_slice_and_timeout`.
+pub(crate) fn rerun_command(args: &WaitArgs, plan: &Plan) -> String {
     let mut parts = vec![
         "tm wait".to_string(),
         format!("--for {}", args.condition.as_str()),
@@ -416,11 +428,11 @@ pub(crate) fn rerun_command(args: &WaitArgs) -> String {
     if args.allow_empty_checks {
         parts.push("--allow-empty-checks".to_string());
     }
-    parts.push(format!("--timeout {}", args.timeout));
-    if let Some(i) = args.interval {
-        parts.push(format!("--interval {i}"));
+    parts.push(format!("--timeout {}", plan.timeout_s));
+    if args.interval.is_some() {
+        parts.push(format!("--interval {}", plan.interval_s));
     }
-    parts.push(format!("--slice {}", args.slice));
+    parts.push(format!("--slice {}", plan.slice_s));
     if let Some(d) = &args.state_dir {
         parts.push(format!("--state-dir {}", d.display()));
     }
@@ -493,7 +505,13 @@ fn run_inner(args: &WaitArgs) -> anyhow::Result<i32> {
 
     println!(
         "{}",
-        status_line(&outcome, args.condition, &budget, end, &rerun_command(args))
+        status_line(
+            &outcome,
+            args.condition,
+            &budget,
+            end,
+            &rerun_command(args, &plan)
+        )
     );
     Ok(outcome.status.exit_code())
 }

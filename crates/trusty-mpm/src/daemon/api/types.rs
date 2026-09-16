@@ -155,6 +155,22 @@ pub struct HealthResponse {
     /// Test: `health_response_serializes_forced_field`.
     #[serde(default)]
     pub unsupervised_forced: bool,
+    /// Background work this daemon has suspended, and why (issue #8058).
+    ///
+    /// Why: `status: "ok"` describes the HTTP surface, not the daemon's
+    /// periodic work. In #8058 `core::pr_cleanup::sweep` retried `gh pr view`
+    /// against a host with no credential on every tick, for every pending pull
+    /// request, and the resulting process churn was the only visible symptom —
+    /// `/health` said `ok` throughout, so nothing named the sweep. A daemon that
+    /// has deliberately parked a subsystem has to say so, or the backoff that
+    /// stops the loop also hides it.
+    /// What: one operator-facing sentence per suspended subsystem, each naming
+    /// the reason and the remedy. EMPTY is the healthy state — the field is a
+    /// list rather than a flag so a second subsystem needs no new field.
+    /// `#[serde(default)]` → empty for a daemon predating it.
+    /// Test: `health_publishes_no_degraded_subsystem_when_idle`.
+    #[serde(default)]
+    pub degraded: Vec<String>,
 }
 
 /// Default for [`HealthResponse::supervised`] on deserialize — matches the
