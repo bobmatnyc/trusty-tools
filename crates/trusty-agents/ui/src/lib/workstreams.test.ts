@@ -3,7 +3,12 @@
 // branches on the body's shape, not only on the response status.
 
 import { afterEach, describe, it, expect, vi } from 'vitest';
-import { fetchWorkstreams, groupByAgent, type WorkstreamSummary } from './workstreams';
+import {
+  fetchWorkstreamHistory,
+  fetchWorkstreams,
+  groupByAgent,
+  type WorkstreamSummary,
+} from './workstreams';
 
 const AGENTS = [
   { id: 'izzie', label: 'Izzie' },
@@ -78,5 +83,48 @@ describe('fetchWorkstreams body-shape fail-soft (#7456)', () => {
   it('returns [] on a non-2xx response', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 503, json: async () => ({}) })));
     expect(await fetchWorkstreams()).toEqual([]);
+  });
+
+  it('warns rather than throwing, so the smoke suite stays green', async () => {
+    const warn = vi.fn();
+    vi.stubGlobal('console', { ...console, warn });
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({}) })));
+    await fetchWorkstreams();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain('GET /api/workstreams');
+  });
+});
+
+// #7456: the sharper half of the same defect. `Sidebar.svelte`'s
+// `resumeWorkstream` gates on `history.length` and then calls `.map`, inside a
+// `try`/`finally` with no `catch` — so a truthy-`length` non-array turned a
+// click on a task row into an unhandled rejection.
+describe('fetchWorkstreamHistory body-shape fail-soft (#7456)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('returns the array a well-formed 200 carries', async () => {
+    const item = { content: 'first line\nsecond', created_at: '2026-07-24T00:00:00Z', tags: [] };
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => [item] })));
+    expect(await fetchWorkstreamHistory('feat-izzie-a')).toEqual([item]);
+  });
+
+  it('returns [] for a truthy-length non-array body', async () => {
+    // The exact shape that cleared `history.length` and then threw on `.map`.
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ length: 3 }) })));
+    const rows = await fetchWorkstreamHistory('feat-izzie-a');
+    expect(rows).toEqual([]);
+    expect(() => rows.map((h) => h.content)).not.toThrow();
+  });
+
+  it('returns [] when a 200 carries an object body', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({}) })));
+    expect(await fetchWorkstreamHistory('feat-izzie-a')).toEqual([]);
+  });
+
+  it('returns [] on a non-2xx response', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 503, json: async () => ({}) })));
+    expect(await fetchWorkstreamHistory('feat-izzie-a')).toEqual([]);
   });
 });

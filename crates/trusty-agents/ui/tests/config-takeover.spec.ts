@@ -89,8 +89,21 @@ test.beforeEach(async ({ page }) => {
     // this whole file was failing on.
     else if (path.startsWith('/api/models')) json({ providers: [], local: LOCAL_MODEL });
     else if (path.startsWith('/api/workstreams')) json([]);
+    // #7456: `palace` and `session_id` are not optional on the wire — see the
+    // response builder in `src/api/server/chat_history.rs:294-303`. A stub
+    // that omits a field the server always sends is a stub that can go green
+    // on a body the app will never actually receive.
     else if (path.endsWith('/chat-history'))
-      json({ available: true, messages: [], start: 0, total: 0, has_more: false, updated_at: null });
+      json({
+        available: true,
+        palace: 'test-palace',
+        session_id: `persona-${path.split('/')[3]}`,
+        messages: [],
+        start: 0,
+        total: 0,
+        has_more: false,
+        updated_at: null,
+      });
     // #7456: `{}` here failed `request()`'s "belongs to another assistant"
     // check, and `KnowledgeProjectSync` rendered its 33px `role="alert"` strip
     // ABOVE the content row — asynchronously, so every measurement in this file
@@ -100,8 +113,12 @@ test.beforeEach(async ({ page }) => {
         assistant: path.split('/')[3],
         pipeline: null,
         sources: [],
-        index: { connected: false },
+        index: { connected: false, reason: 'Initialize this Assistant to provision its store' },
         store_issue: null,
+        // Always present on the wire, even with a null pipeline — see the
+        // handler at `src/api/server/knowledge_pipeline.rs:300-305`.
+        assistant_projects_status: [],
+        extraction: {},
       });
     else if (path.match(/^\/api\/agents\/[^/]+$/))
       json({ name: 'ctrl', display_name: 'Concierge', tools_allow: [], scopes: [] });
@@ -240,6 +257,12 @@ test.describe('agent configuration takeover (#3894)', () => {
       };
       return { chat: rect('[data-chat-surface]'), overlay: rect('[data-config-takeover]') };
     });
+    // #7456: measuring both at the same instant makes them equal even if BOTH
+    // collapsed, so pin the chat surface itself against the 900px viewport
+    // first. The 80px header is the only chrome above it, so anything under
+    // half the viewport means the content area is gone, not merely covered.
+    expect(box.chat.height).toBeGreaterThan(450);
+    expect(box.chat.width).toBeGreaterThan(720);
     // Covers the chat column AND the recap rail — the whole content area.
     expect(Math.round(box.overlay.width)).toBe(Math.round(box.chat.width));
     expect(Math.round(box.overlay.height)).toBe(Math.round(box.chat.height));

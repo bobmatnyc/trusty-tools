@@ -311,8 +311,9 @@ export const modelCatalog = writable<ModelsCatalogResponse | null>(null);
  * non-2xx response or network failure; callers (mirroring `fetchAgentCatalog`
  * call sites) catch around it so an unreachable API doesn't crash the input
  * area — the picker just falls back to showing only "Default".
- * Test: Mount the model switcher, observe a network call to `/api/models`
- * and the store populated.
+ * Test: `app.modelCatalog.test.ts` — `fetchModelCatalog (#7456)`, covering the
+ * well-formed body, a body with no `providers` array, a body with no `local`
+ * entry, and that a bad body clears a previously good catalog.
  */
 export async function fetchModelCatalog(): Promise<void> {
   const base = apiBase();

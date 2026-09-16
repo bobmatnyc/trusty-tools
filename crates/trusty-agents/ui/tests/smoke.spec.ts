@@ -187,8 +187,12 @@ test.describe('Trusty Agents web UI smoke tests', () => {
     }
 
     // Ready means the shell is mounted, not just that a flag flipped: the
-    // `<aside>` sidebar renders only in `App.svelte`'s post-spinner branch.
-    await expect(page.locator('aside')).toBeVisible();
+    // sidebar rail renders only in `App.svelte`'s post-spinner branch. Anchored
+    // on `data-app-sidebar` because RecapPanel, SlackMirror and
+    // KnowledgeGraphBrowser each render an `<aside>` too, and a bare `aside`
+    // locator would become a strict-mode violation the moment a second one
+    // mounts.
+    await expect(page.locator('[data-app-sidebar]')).toBeVisible();
   });
 
   test('all JS bundle assets load (no 404s)', async ({ page }) => {

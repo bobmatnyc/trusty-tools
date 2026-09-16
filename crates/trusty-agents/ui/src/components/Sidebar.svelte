@@ -152,7 +152,12 @@
   });
 </script>
 
-<aside class="flex h-full w-72 shrink-0 flex-col border-r border-foundry-light-border dark:border-foundry-border bg-foundry-light-surface dark:bg-foundry-surface">
+<!-- #7456: four components render an `<aside>` (this one, RecapPanel,
+     SlackMirror, KnowledgeGraphBrowser), so a bare `aside` locator is a
+     strict-mode violation waiting to happen. This hook names the app shell's
+     own rail, which mounts only past `App.svelte`'s spinner branch — which is
+     what makes it the readiness signal `smoke.spec.ts` asserts. -->
+<aside data-app-sidebar class="flex h-full w-72 shrink-0 flex-col border-r border-foundry-light-border dark:border-foundry-border bg-foundry-light-surface dark:bg-foundry-surface">
 
   <div class="flex shrink-0 gap-1 border-b border-foundry-light-border dark:border-foundry-border p-2" role="group" aria-label="Sidebar mode">
     <button type="button" aria-pressed={$sidebarMode === 'history'} on:click={() => { sidebarMode.set('history'); openedFile.set(null); }} class="flex-1 rounded-md px-2 py-1.5 text-xs {$sidebarMode === 'history' ? 'bg-foundry-light-primary/10 dark:bg-foundry-primary/15 text-foundry-light-primary dark:text-foundry-primary' : 'text-foundry-light-muted dark:text-foundry-text/60'}">Chat History</button>

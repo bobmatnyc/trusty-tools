@@ -12,7 +12,9 @@
 // accurate.
 // What: `fetchWorkstreams`/`fetchWorkstreamHistory` — thin REST wrappers.
 // `groupByAgent` — pure, testable grouping.
-// Test: `workstreams.test.ts` covers `groupByAgent`.
+// Test: `workstreams.test.ts` — `groupByAgent`, plus the body-shape fail-soft
+// of both fetch wrappers under `fetchWorkstreams body-shape fail-soft (#7456)`
+// and `fetchWorkstreamHistory body-shape fail-soft (#7456)`.
 
 import { apiBase } from './api-config';
 import { getCurrentApiToken } from '../stores/app';
@@ -37,18 +39,29 @@ function authHeaders(): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
+/**
+ * #7456: both wrappers below promise `[]` on failure, and an unchecked cast
+ * broke that promise for a 200 carrying the wrong shape. Neither endpoint is
+ * allowed to fail loudly, so a rejected body is WARNED rather than thrown —
+ * `smoke.spec.ts`'s "no JavaScript errors on load" counts `msg.type() ===
+ * 'error'`, so a `warn` keeps a malformed response visible in the console
+ * without turning a degraded panel into a red suite.
+ */
+function arrayOrWarn<T>(body: unknown, endpoint: string): T[] {
+  if (Array.isArray(body)) return body as T[];
+  console.warn(`[workstreams] ${endpoint} returned a non-array body; treating it as empty`);
+  return [];
+}
+
 /** `GET /api/workstreams`. Returns `[]` on any failure — a sidebar
  * convenience panel must never surface a network error as a crash. */
 export async function fetchWorkstreams(): Promise<WorkstreamSummary[]> {
   try {
     const r = await fetch(`${apiBase()}/api/workstreams`, { headers: authHeaders() });
     if (!r.ok) return [];
-    // #7456: "never surface a network error as a crash" has to cover a 200
-    // whose body is not an array too — the unchecked cast let a non-array
-    // reach `groupByAgent`, whose spread threw "is not iterable" out of the
-    // sidebar's mount.
-    const body = await r.json();
-    return Array.isArray(body) ? (body as WorkstreamSummary[]) : [];
+    // #7456: the unchecked cast let a non-array reach `groupByAgent`, whose
+    // `for…of` threw "is not iterable" out of the sidebar's mount.
+    return arrayOrWarn(await r.json(), 'GET /api/workstreams');
   } catch {
     return [];
   }
@@ -65,7 +78,12 @@ export async function fetchWorkstreamHistory(
       { headers: authHeaders() },
     );
     if (!r.ok) return [];
-    return (await r.json()) as WorkstreamHistoryItem[];
+    // #7456: the same guard as its twin above, for a sharper failure. A
+    // truthy-`length` non-array clears `Sidebar.svelte`'s `history.length`
+    // test and then throws on `.map` inside `resumeWorkstream`'s `try`/
+    // `finally`, which has no `catch` — so a user's click on a task row
+    // becomes an unhandled rejection.
+    return arrayOrWarn(await r.json(), 'GET /api/workstreams/:name/history');
   } catch {
     return [];
   }

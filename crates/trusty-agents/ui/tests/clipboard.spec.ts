@@ -1,5 +1,13 @@
 import { test, expect } from '@playwright/test';
 
+/** The `local` half of `GET /api/models`, which `buildPicker` dereferences. */
+const LOCAL_MODEL = {
+  provider_id: 'ollama',
+  default_model: 'qwen2.5',
+  available: false,
+  reachable_today: false,
+};
+
 // #7370: real browser clipboard event, decoder and bundled spreadsheet worker; backend is intercepted.
 test('pastes image and quoted spreadsheet cells into a typed task payload', async ({ page }) => {
   let submitted: Record<string, unknown> | undefined;
@@ -20,7 +28,10 @@ test('pastes image and quoted spreadsheet cells into a typed task payload', asyn
     if (path === '/api/config') return json({auth_required:false});
     if (path === '/api/tasks' || path === '/api/projects') return json([]);
     if (path.endsWith('/chat-history')) return json({available:true,messages:[],start:0,total:0,has_more:false,updated_at:null});
-    if (path.includes('models')) return json({providers:[],local:{available:false}});
+    // #7456: `buildPicker` dereferences `local.provider_id` and
+    // `local.default_model`; a `local` carrying only `available` is not a shape
+    // `GET /api/models` ever returns.
+    if (path.includes('models')) return json({providers:[],local:LOCAL_MODEL});
     if (path.includes('agents')) return json({agents:[]});
     return json({});
   });
