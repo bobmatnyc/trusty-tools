@@ -446,15 +446,11 @@ pub fn merge_extends(base: AgentConfig, child: AgentConfig) -> AgentConfig {
         union_opt_vec(merged.system_prompt.skills, child.system_prompt.skills);
     merged.agent.capabilities =
         merge_capabilities(merged.agent.capabilities, child.agent.capabilities);
-    // `listeners` (#3820): base-first union keyed by binding `name`; a child
-    // that re-declares the same listener name overrides the base's filter
-    // for it (matches the child-wins-on-override intent of the scalar rules
-    // above), rather than appending a shadowing duplicate.
-    merged.legacy_listeners =
-        union_listener_bindings(merged.legacy_listeners, child.legacy_listeners);
-    // #7609: `channels` is the merged spelling of the same idea, so it unions
-    // by `id` exactly the way `listeners` unioned by `name` — and it is the
-    // one the derived `AgentConfig::listeners()` view reads.
+    // #7609: `channels` unions by `id` exactly the way the retired
+    // `[[listeners]]` table unioned by `name` (#3820) — a child that
+    // re-declares one REPLACES the base's entry rather than appending a
+    // shadowing duplicate — and it is the one the derived
+    // `AgentConfig::listeners()` view reads.
     merged.channels = union_channels_by_id(merged.channels, child.channels);
 
     // `stores` (#3816): child REPLACES rather than unions. Unlike listeners
@@ -511,9 +507,9 @@ fn union_opt_vec(base: Option<Vec<String>>, child: Option<Vec<String>>) -> Optio
 /// that re-declares the same channel REPLACES the base's entry in place rather
 /// than appending a shadowing duplicate. `id` is the channel's stable storage
 /// key, which is what a listener binding's `name` became.
-/// What: the same body as [`union_listener_bindings`], keyed on `id`.
+/// What: base-first; a child entry with a known `id` replaces it in place.
 /// Test: `extends_unions_channels_by_id`,
-/// `extends_unions_listener_bindings_by_name` (`extends/tests.rs`).
+/// `extends_channel_child_override_replaces_base_filter` (`extends/tests.rs`).
 fn union_channels_by_id(
     base: Vec<crate::channels::Channel>,
     child: Vec<crate::channels::Channel>,
@@ -529,40 +525,11 @@ fn union_channels_by_id(
     merged
 }
 
-/// Union two `[[listeners]]` binding lists, base-first, keyed by `name` —
-/// a child binding with the same `name` as a base binding REPLACES it
-/// in-place (rather than appending a second, shadowing entry); a child
-/// binding with a new `name` is appended.
-///
-/// Why: `AgentListenerBinding` doesn't implement `PartialEq`-driven
-/// `contains` semantics the way `union_opt_vec`'s `String` union does — two
-/// bindings are "the same listener" iff their `name` matches, even if the
-/// child changed the `filter`. Mirrors DOC-54's binding semantics: an
-/// overlay agent may want to re-filter (not merely add to) an inherited
-/// listener binding.
-/// Test: `extends_unions_listener_bindings_by_name`,
-/// `extends_listener_binding_child_override_replaces_base_filter`
-/// (`extends/tests.rs`).
-fn union_listener_bindings(
-    base: Vec<crate::listeners::config::AgentListenerBinding>,
-    child: Vec<crate::listeners::config::AgentListenerBinding>,
-) -> Vec<crate::listeners::config::AgentListenerBinding> {
-    let mut merged = base;
-    for child_binding in child {
-        if let Some(existing) = merged.iter_mut().find(|b| b.name == child_binding.name) {
-            *existing = child_binding;
-        } else {
-            merged.push(child_binding);
-        }
-    }
-    merged
-}
-
 /// Union two `[[permissions.grants]]` lists, base-first, keyed by `skill` —
 /// a child grant for a skill already named by the base REPLACES the base's
 /// mode for it (#3936, DOC-57 §2.3 "grants union-by-skill").
 ///
-/// Why: Mirrors [`union_listener_bindings`]'s keyed-replace semantics exactly
+/// Why: Mirrors [`union_channels_by_id`]'s keyed-replace semantics exactly
 /// — a grant is identified by WHICH skill it governs, not by its `mode`, so
 /// two grants for the same skill are the same declaration with the child's
 /// value winning, not two independent entries.

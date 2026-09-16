@@ -265,7 +265,7 @@ impl ChannelWriter {
 /// Why: the tool has no `ChannelWriter` — it never saw a request — but it owes
 /// the same record, and two `tracing::info!` sites would drift.
 /// Test: `crate::api::server::tests::global_channels::a_credentialed_channel_write_is_admitted_and_audited`,
-/// `crate::api::server::tests::global_channels::the_listener_alias_audits_an_accepted_write`.
+/// `crate::api::server::tests::global_channels::an_unreadable_before_count_audits_as_unknown`.
 pub(crate) fn audit_write(
     route: &str,
     scope: &str,

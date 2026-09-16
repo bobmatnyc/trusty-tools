@@ -195,7 +195,7 @@ pub async fn run_pm_task_with_persona(
         .try_with(|_| ())
         .is_ok()
         || user_input.starts_with(crate::listeners::wake::ASK_FIRST_PREAMBLE);
-    let effective_patterns = crate::tools::listener_config::self_configuration_patterns(
+    let effective_patterns = crate::tools::channel::self_configuration_patterns(
         effective_patterns,
         &persona_cfg.agent.kind,
         listener_event_turn,
@@ -240,11 +240,6 @@ pub async fn run_pm_task_with_persona(
                 registry.register(Arc::new(
                     crate::skills::project::ProjectSkillTool::new(project_path)
                         .with_granted(skill_granted.clone()),
-                ));
-            }
-            if persona_cfg.agent.kind == "assistant" && !listener_event_turn {
-                registry.register(Arc::new(
-                    crate::tools::listener_config::ListenerConfigTool::new(persona_name),
                 ));
             }
             // #7454: all three MCP surfaces are registered together, from ONE
@@ -456,7 +451,7 @@ pub async fn run_pm_task_with_persona(
             // decided by `filter_persona_tool_names` against its
             // `[tools].allow` globs — izzie opts in, other personas don't.
             for tool in crate::tools::izzie::izzie_tools() {
-                crate::tools::listener_config::register_external(&mut registry, tool);
+                crate::tools::channel::register_external(&mut registry, tool);
             }
 
             // OKG builder tools — same posture as the izzie block above: added
@@ -466,7 +461,7 @@ pub async fn run_pm_task_with_persona(
             // `runtime::tool_registry::build_assistant_tier_registry`) in sync
             // is what #3745 item C fixed for izzie; do not register in only one.
             for tool in crate::tools::okg::okg_tools() {
-                crate::tools::listener_config::register_external(&mut registry, tool);
+                crate::tools::channel::register_external(&mut registry, tool);
             }
 
             // #4171 (epic #4167): L0-only read-only session-state tools, kept
@@ -485,12 +480,12 @@ pub async fn run_pm_task_with_persona(
                 project_path,
                 persona_cfg.agent.tier(),
             ) {
-                crate::tools::listener_config::register_external(&mut registry, tool);
+                crate::tools::channel::register_external(&mut registry, tool);
             }
 
             for plugin in crate::tools::agent_plugin::plugins_for_persona(persona_name) {
                 for tool in &plugin.tools {
-                    crate::tools::listener_config::register_external(
+                    crate::tools::channel::register_external(
                         &mut registry,
                         std::sync::Arc::clone(tool),
                     );
@@ -544,7 +539,7 @@ pub async fn run_pm_task_with_persona(
                 )
                 .await
                 {
-                    crate::tools::listener_config::register_external(&mut registry, tool);
+                    crate::tools::channel::register_external(&mut registry, tool);
                 }
             }
 
@@ -649,7 +644,9 @@ pub async fn run_pm_task_with_persona(
             );
             let kept: Vec<String> = kept
                 .into_iter()
-                .filter(|name| !listener_event_turn || name != "listener_config")
+                // #7609 slice 7: the surviving tool name. `listener_config`
+                // was the deprecated alias, deleted with this slice.
+                .filter(|name| !listener_event_turn || name != "channel")
                 .collect();
             tracing::info!(
                 persona = %persona_name,

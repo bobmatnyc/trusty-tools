@@ -35,10 +35,17 @@ mod gworkspace;
 // storage migrations, the global-vs-assistant precedence rule, and the
 // exactly-one-wake selector every inbound provider runs through (slice 4).
 pub(crate) mod dispatch;
+// #7609 slice 7: comment-preserving edits of the two channel tables, after a
+// live `PUT /api/channels` deleted an unrelated comment block with the legacy
+// `[[listeners]]` table it sat above.
+pub(crate) mod document;
 pub mod migrate;
 pub mod model;
 mod registry;
 pub mod resolve;
+// #7609 slice 7: taking the retired `[[listeners]]` table out of an
+// `agent.toml` once the assistant's channels file covers it.
+pub(crate) mod retire;
 mod slack;
 pub(crate) mod status;
 mod telegram;

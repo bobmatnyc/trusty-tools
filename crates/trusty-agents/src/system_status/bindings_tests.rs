@@ -21,16 +21,24 @@ max_tokens = 64
 content = "x"
 [tools]
 search_indexes = ["present-index", "ghost-index"]
-[[listeners]]
+[[channels]]
+id = "gmail-personal"
 name = "gmail-personal"
-[[listeners]]
+provider = ""
+enabled = true
+[[channels]]
+id = "ghost-listener"
 name = "ghost-listener"
+provider = ""
+enabled = true
 [[stores]]
 name = "dead-kb"
 "#,
     )
     .expect("fixture parses");
-    cfg.absorb_legacy_listeners();
+    // #7609 slice 7: `[[channels]]` is the only spelling a parse reads now, and
+    // `scope` is set from the file the record came from.
+    cfg.scope_channels();
     cfg
 }
 

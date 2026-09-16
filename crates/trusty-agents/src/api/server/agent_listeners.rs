@@ -229,9 +229,9 @@ pub(crate) async fn write(name: &str, update: ListenerUpdate) -> Result<Value, C
 /// Why (#7609): the merged `channel` tool's `set` action reaches this write,
 /// and a model-driven change to which events wake an assistant is the same
 /// class of change the HTTP channel routes are gated on — `instructions` reach
-/// the wake prompt as TRUSTED text. The deprecated
-/// `PUT /api/agents/{name}/listeners` route takes the same gate, through
-/// `ChannelWriter`; see `super::deprecated_aliases::put_listeners_alias`.
+/// the wake prompt as TRUSTED text. Since #7609 slice 7 this is the ONLY way a
+/// turn reaches the wake filters — the deprecated
+/// `PUT /api/agents/{name}/listeners` route is deleted.
 /// What: 401 when this daemon serves no authenticated API; otherwise [`write`].
 /// Test: `crate::tools::channel::channel_tests::the_tool_refuses_a_write_on_a_tokenless_daemon`.
 pub(crate) async fn write_from_turn(
@@ -247,10 +247,9 @@ pub(crate) async fn write_from_turn(
     write(name, update).await
 }
 
-// #7609: the two axum handlers that used to live here are gone. The listener
-// routes are now deprecated aliases that forward through
-// `super::deprecated_aliases` into `super::agent_channels`, which is the
-// surviving implementation; `read` and `write` above are what both reach.
+// #7609: the two axum handlers that used to live here are gone, and so are the
+// deprecated aliases that replaced them (slice 7). `PUT /api/agents/{name}/channels`
+// is the surviving route; `read` and `write` above are what it reaches.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,7 +327,9 @@ mod tests {
     async fn listener_inheritance_is_effective_revisioned_and_removed_with_disabled_override() {
         let dir = tempfile::tempdir().unwrap();
         let base_path = dir.path().join("base.toml");
-        let base = "[agent]\nname='base'\nrole='assistant'\nmodel='m'\ndescription='fixture'\n[llm]\ntemperature=0.0\nmax_tokens=1024\n[system_prompt]\ncontent='fixture'\n[[listeners]]\nname='mail'\ninstructions='original'\n";
+        // #7609 slice 7: inheritance reads `[[channels]]`; the retired
+        // `[[listeners]]` spelling is no longer parsed into a binding.
+        let base = "[agent]\nname='base'\nrole='assistant'\nmodel='m'\ndescription='fixture'\n[llm]\ntemperature=0.0\nmax_tokens=1024\n[system_prompt]\ncontent='fixture'\n[[channels]]\nid='mail'\nname='mail'\nprovider=''\ninstructions='original'\n";
         tokio::fs::write(&base_path, base).await.unwrap();
         tokio::fs::write(
             dir.path().join("child.toml"),

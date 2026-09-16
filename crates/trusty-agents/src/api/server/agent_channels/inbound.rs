@@ -352,12 +352,19 @@ fn roster_or_warn(names: anyhow::Result<Vec<String>>, provider: &str) -> Option<
 /// Add any overlay that is still only in `agent.toml` to this assistant's
 /// bindings.
 ///
-/// Why (#7609): a `[[listeners]]` binding absorbed at parse time lives in
+/// Why (#7609): a `[[channels]]` binding declared in `agent.toml` lives in
 /// `AgentConfig::channels`, not in `<name>.channels.json` — and the one-shot
 /// that would store it only runs when that file is ABSENT, so an assistant
-/// which already has a saved channel keeps its legacy binding in `agent.toml`
-/// indefinitely. The `[[listeners]]` wake read it from there; source (3) has to
-/// see exactly the same list or the deprecation window drops a live wake.
+/// which already has a saved channel keeps its manifest binding in `agent.toml`
+/// indefinitely. Source (3) has to see exactly the same list the stored half
+/// sees, or an overlay-only binding drops a live wake.
+///
+/// #7609 slice 7: `[[channels]]` is the ONLY source this reads. `agent.toml`'s
+/// retired `[[listeners]]` table is no longer absorbed at parse time, so a
+/// binding [`crate::channels::migrate::migrate_agent_channels_if_absent`]
+/// skipped — unstorable, or skipped because `<name>.channels.json` already
+/// existed — reaches nothing here and nothing anywhere else; it is inert until
+/// an operator rewrites it as `[[channels]]` by hand.
 /// What: appends every Assistant-scope channel with no destination whose `id`
 /// the stored bindings do not already carry. The stored record wins, because it
 /// is the migrated form of the same thing — which is what lets the UI DISABLE
@@ -1341,7 +1348,7 @@ mod receive_tests {
     }
 
     /// An `agent.toml` that will not parse is LOGGED and absorbs nothing; a
-    /// healthy one still hands its legacy overlay to the inbound loop, and a
+    /// healthy one still hands its manifest overlay to the inbound loop, and a
     /// stored record of the same id wins over it.
     ///
     /// Why (#7609 review HIGH-2): the silent `let Ok(cfg) = … else { return }`
@@ -1358,10 +1365,12 @@ mod receive_tests {
             .expect("fixture write");
         std::fs::write(
             dir.path().join("fixture-legacy.toml"),
+            // #7609 slice 7: the manifest overlay is `[[channels]]`; the retired
+            // `[[listeners]]` spelling is no longer read at all.
             "[agent]\nname = \"fixture-legacy\"\nrole = \"assistant\"\nmodel = \"\"\n\
              description = \"\"\n\n[llm]\ntemperature = 0.0\nmax_tokens = 1024\n\n\
-             [system_prompt]\ncontent = \"x\"\n\n[[listeners]]\n\
-             name = \"gmail-personal\"\nenabled = true\n",
+             [system_prompt]\ncontent = \"x\"\n\n[[channels]]\nid = \"gmail-personal\"\n\
+             name = \"gmail-personal\"\nprovider = \"\"\nenabled = true\n",
         )
         .expect("fixture write");
 

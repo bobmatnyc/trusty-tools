@@ -82,14 +82,9 @@ impl TrustyAgentsRepl {
         let arg = arg.trim();
         match arg {
             "on" => {
-                let mut cfg = crate::mcp::GlobalConfig::load_or_create()
-                    .await
-                    .unwrap_or_default();
-                cfg.local_inference.enabled = true;
-                if let Err(e) = cfg.save().await {
-                    let _ = writeln!(out, "failed to persist config: {e:#}");
+                let Some(cfg) = persist_local_inference(true, out).await else {
                     return;
-                }
+                };
                 let _ = writeln!(out, "Local inference: ENABLED");
                 let _ = writeln!(out, "Model: {}", cfg.local_inference.model);
                 let _ = writeln!(out, "Probing {}...", cfg.local_inference.ollama_host);
@@ -103,15 +98,9 @@ impl TrustyAgentsRepl {
                 return;
             }
             "off" => {
-                let mut cfg = crate::mcp::GlobalConfig::load_or_create()
-                    .await
-                    .unwrap_or_default();
-                cfg.local_inference.enabled = false;
-                if let Err(e) = cfg.save().await {
-                    let _ = writeln!(out, "failed to persist config: {e:#}");
-                    return;
+                if persist_local_inference(false, out).await.is_some() {
+                    let _ = writeln!(out, "Local inference: DISABLED");
                 }
-                let _ = writeln!(out, "Local inference: DISABLED");
                 return;
             }
             "test" => {
@@ -278,3 +267,43 @@ impl TrustyAgentsRepl {
         let _ = writeln!(out, "Focused on task: {arg}");
     }
 }
+
+/// Set `local_inference.enabled` in the global config and persist it.
+///
+/// Why (#7609 slice 7): both `/local` arms used
+/// `load_or_create().await.unwrap_or_default()` and then SAVED. A config that
+/// will not load — a hand-edited file that no longer parses, a retired
+/// `[[listeners]]` table the startup drain could not move, an unwritable
+/// `~/.trusty-agents` — therefore became the documented DEFAULTS, and the save
+/// published those defaults over the operator's real `[mcp]`, `[github]` and
+/// `[[channels]]`. The load failure is now the whole outcome.
+/// What: `Some(cfg)` once the toggle is on disk; `None` after writing the
+/// reason to `out`, with nothing written on either failure arm.
+/// Test: `routing_tests::a_failed_config_load_writes_no_default_config`,
+/// `routing_tests::a_config_that_will_not_parse_is_never_replaced_by_defaults`.
+pub(crate) async fn persist_local_inference(
+    enabled: bool,
+    out: &mut String,
+) -> Option<crate::mcp::GlobalConfig> {
+    let mut cfg = match crate::mcp::GlobalConfig::load_or_create().await {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            let _ = writeln!(out, "failed to read config: {e:#}");
+            let _ = writeln!(
+                out,
+                "Local inference is unchanged and nothing was written; fix the config and retry."
+            );
+            return None;
+        }
+    };
+    cfg.local_inference.enabled = enabled;
+    if let Err(e) = cfg.save().await {
+        let _ = writeln!(out, "failed to persist config: {e:#}");
+        return None;
+    }
+    Some(cfg)
+}
+
+#[cfg(test)]
+#[path = "routing_tests.rs"]
+mod routing_tests;

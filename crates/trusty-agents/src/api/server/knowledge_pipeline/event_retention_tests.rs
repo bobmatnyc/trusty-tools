@@ -28,7 +28,9 @@ async fn published_event_survives_unrelated_event_batch_rollover() {
     let raw = std::fs::read_to_string(&manifest).unwrap();
     std::fs::write(
         &manifest,
-        format!("{raw}\n[[listeners]]\nname='mail'\nenabled=true\n"),
+        // #7609 slice 7: the manifest binding is `[[channels]]`; the retired
+        // `[[listeners]]` spelling is no longer parsed into one.
+        format!("{raw}\n[[channels]]\nid='mail'\nname='mail'\nprovider=''\nenabled=true\n"),
     )
     .unwrap();
     let mut ctx = context(&dirs, &homes, vec![]).await;

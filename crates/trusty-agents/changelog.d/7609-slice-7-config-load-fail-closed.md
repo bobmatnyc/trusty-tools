@@ -1,0 +1,3 @@
+Fixed
+- `/local on` and `/local off` no longer replace an unreadable `config.toml` with the defaults. The toggle used to fall back to a default config on any load failure and then save it, publishing those defaults over the operator's real `[mcp]`, `[github]` and `[[channels]]`. The failure is now reported and nothing is written.
+- A write to `PUT /api/channels`, and the startup drain that removes the legacy `[[listeners]]` table, both keep the comment block above every table they edit. Live verification of slice 5 found the write deleting an operator's note because it sat above the table being removed.

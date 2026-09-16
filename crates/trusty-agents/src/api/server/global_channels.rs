@@ -18,14 +18,13 @@
 //!
 //! What: the write goes through [`crate::state_writer::atomic_update`] on
 //! `config.toml`, taking the same `config.toml.lock` every other writer of that
-//! file takes, and edits the document with `toml_edit` so unrelated tables,
-//! their key order and their comments survive. The one thing it does NOT
-//! preserve is a comment written INSIDE a `[[channels]]` table — the array is
-//! replaced wholesale, because the list the client sends is authoritative and
-//! there is no key-level correspondence to merge against. The deprecated
-//! `[[listeners]]` table is dropped by the same write: leaving it would let
-//! `GlobalConfig::absorb_legacy_listeners` re-add a channel the operator just
-//! deleted.
+//! file takes, and edits the document through [`crate::channels::document`] so
+//! unrelated tables, their key order and their comments survive. The one thing
+//! it does NOT preserve is a comment written INSIDE a `[[channels]]` table —
+//! the array is replaced wholesale, because the list the client sends is
+//! authoritative and there is no key-level correspondence to merge against. The
+//! deprecated `[[listeners]]` table is dropped by the same write: leaving it
+//! would let the startup drain re-add a channel the operator just deleted.
 //! Test: `crate::api::server::tests::global_channels` — the whole module.
 
 use std::path::{Path, PathBuf};
@@ -88,9 +87,10 @@ pub(super) fn revision(channels: &[Channel]) -> Result<String, Error> {
 
 /// The global channel list as `config.toml` currently declares it.
 ///
-/// Why: `GlobalConfig::from_toml_str` is the one parser that also absorbs the
-/// deprecated `[[listeners]]` table, so reading through it is what makes a
-/// legacy entry visible on this route without an operator migrating anything.
+/// Why through `GlobalConfig::from_toml_str` rather than a local `[[channels]]`
+/// parse: it applies the same field defaults, scope stamping and retired-table
+/// reporting (#7609 slice 7) every other reader of this file gets, so this route
+/// cannot disagree with what the daemon itself loaded.
 /// What: an absent file is an empty list; a file that will not parse is a 500
 /// naming the problem, NEVER an empty list — reading a broken file as "no
 /// channels declared" would let a write publish that emptiness.
@@ -132,12 +132,25 @@ fn config_path() -> Result<PathBuf, Error> {
 }
 
 /// The payload both routes answer with.
-fn view(channels: &[Channel]) -> Result<Value, Error> {
+///
+/// Why `routable_assistants` is here (#7609 slice 7): `route_to` is the only
+/// field whose legal values are not in the payload, so a client had to guess
+/// them or keep its own roster — and a guess that disagrees with this host is a
+/// 400 the operator cannot explain. It is served from
+/// [`known_assistants`], the SAME enumeration
+/// [`crate::channels::dispatch::unknown_routes`] measures `route_to` against on
+/// the inbound path, so the list a client may choose from and the list that
+/// actually wakes are one list.
+/// What: the stored channels, their revision, the provider capability table,
+/// and the routable roster in enumeration order.
+/// Test: `global_channels_serve_the_dispatchable_assistant_roster`.
+fn view(channels: &[Channel], routable: &[String]) -> Result<Value, Error> {
     Ok(json!({
         "scope": "global",
         "revision": revision(channels)?,
         "channels": channels,
         "providers": crate::channels::providers_json(),
+        "routable_assistants": routable,
     }))
 }
 
@@ -287,13 +300,15 @@ pub(super) enum Persisted {
 /// What: [`crate::state_writer::atomic_update`] holds `config.toml.lock` across
 /// read, decide and publish. The decision is taken again from the LOCKED bytes,
 /// so a change that lands between the client's `GET` and this call is a
-/// [`Persisted::Conflict`], never an overwrite. Editing through `toml_edit`
-/// preserves unrelated tables and comments; see the module doc for the one
-/// thing it does not preserve.
+/// [`Persisted::Conflict`], never an overwrite. Editing through
+/// [`crate::channels::document`] preserves unrelated tables and the comment
+/// block above each table it touches; see the module doc for the one thing it
+/// does not preserve.
 ///
 /// Blocking: the caller runs this on a blocking thread.
 /// Test: `global_channels_round_trip_preserves_config_and_rejects_a_stale_revision`,
-/// `a_malformed_config_is_reported_not_read_as_empty`.
+/// `a_malformed_config_is_reported_not_read_as_empty`,
+/// `a_global_write_keeps_a_comment_block_unrelated_to_channels`.
 pub(super) fn persist(
     path: &Path,
     expected_revision: &str,
@@ -318,16 +333,24 @@ pub(super) fn persist(
         let mut document = current_raw
             .parse::<toml_edit::DocumentMut>()
             .context("config.toml is not an editable document; nothing was written")?;
+        // #7609 slice 7: both edits go through `channels::document`, which
+        // keeps the comment block above each table. Live verification of slice
+        // 5 found this write deleting an operator's `tickets-mcp`/ADR-0014 note
+        // because it sat above the `[[listeners]]` table being removed.
         match &rendered {
-            Some(item) => document["channels"] = item.clone(),
+            Some(item) => crate::channels::document::replace_array_of_tables(
+                &mut document,
+                "channels",
+                item.clone(),
+            ),
             None => {
-                document.remove("channels");
+                crate::channels::document::remove_preserving_comments(&mut document, "channels");
             }
         }
         // #7609: the write publishes the canonical table, so the deprecated
-        // spelling goes with it — left behind, `absorb_legacy_listeners` would
-        // re-add a channel this write just deleted.
-        document.remove("listeners");
+        // spelling goes with it — left behind, the startup drain would re-add a
+        // channel this write just deleted.
+        crate::channels::document::remove_preserving_comments(&mut document, "listeners");
         outcome = Persisted::Written {
             before: current.len(),
             after: channels.len(),
@@ -360,14 +383,19 @@ fn render(channels: &[Channel]) -> anyhow::Result<Option<toml_edit::Item>> {
 }
 
 /// Every assistant name this host can route to.
+///
+/// What: the failure arm is neutral to the caller's verb (#7609 review) —
+/// [`get_route`] and [`read_view`] need this roster to RENDER the `route_to`
+/// choices, so a read failure answering "the write was refused" named an
+/// operation the caller never attempted.
 async fn known_assistants() -> Result<Vec<String>, Error> {
     crate::listeners::wake::candidate_agent_names()
         .await
         .map_err(|e| {
-            tracing::warn!(error = %e, "channel config: the assistant roster could not be read; refusing the write (#7609)");
+            tracing::warn!(error = %e, "channel config: the assistant roster could not be read; the request could not be served (#7609)");
             err(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "The assistant roster could not be read; the write was refused",
+                "The assistant roster could not be read",
             )
         })
 }
@@ -376,14 +404,16 @@ async fn known_assistants() -> Result<Vec<String>, Error> {
 ///
 /// Why: the read half of the global surface, and the only way a client learns
 /// the revision a write must carry.
-/// What: the absorbed list (so a deprecated `[[listeners]]` entry shows up as
-/// the channel it is), its revision, and the provider capability table the
-/// per-assistant view already publishes. Open to any caller the router admits —
-/// the write gate does not apply to reads.
-/// Test: `global_channels_round_trip_preserves_config_and_rejects_a_stale_revision`.
+/// What: the stored list, its revision, the provider capability table the
+/// per-assistant view already publishes, and the assistant roster `route_to`
+/// may name. Open to any caller the router admits — the write gate does not
+/// apply to reads.
+/// Test: `global_channels_round_trip_preserves_config_and_rejects_a_stale_revision`,
+/// `global_channels_serve_the_dispatchable_assistant_roster`.
 pub(super) async fn get_route() -> Result<Json<Value>, Error> {
     let channels = load(&config_path()?).await?;
-    view(&channels).map(Json)
+    let routable = known_assistants().await?;
+    view(&channels, &routable).map(Json)
 }
 
 /// `PUT /api/channels` — replace the harness-wide channel list.
@@ -436,7 +466,8 @@ pub(crate) async fn write_from_turn(update: GlobalUpdate) -> Result<Value, Error
 /// The read half, for a caller with no request of its own.
 pub(crate) async fn read_view() -> Result<Value, Error> {
     let channels = load(&config_path()?).await?;
-    view(&channels)
+    let routable = known_assistants().await?;
+    view(&channels, &routable)
 }
 
 /// Validate, swap and answer — everything both write entry points share.
@@ -471,6 +502,6 @@ async fn apply(update: GlobalUpdate) -> Result<(Value, usize, usize), Error> {
             StatusCode::CONFLICT,
             "Channel settings changed. Reload before saving.",
         )),
-        Persisted::Written { before, after } => Ok((view(&channels)?, before, after)),
+        Persisted::Written { before, after } => Ok((view(&channels, &known)?, before, after)),
     }
 }

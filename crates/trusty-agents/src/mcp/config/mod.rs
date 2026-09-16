@@ -128,36 +128,39 @@ pub struct GlobalConfig {
     #[serde(default)]
     pub providers: ProvidersSection,
 
-    /// `[[listeners]]` — harness-level eventstream listener definitions
-    /// (#3820, DOC-54 SPEC-AGENTS-06 §7.5), stage-one (ingestion) filter.
+    /// A `[[listeners]]` table still on disk — the RETIRED spelling of
+    /// `[[channels]]`, held only so its presence can be reported (#7609 slice 7).
     ///
-    /// Why: Listeners are opt-in, account-specific, and never written by
-    /// this codebase — a listener declared here with `enabled = false`
-    /// (the field's default) is inert until an operator flips it on by hand.
-    /// Defaults to empty so every existing `config.toml` (which predates
-    /// this field) keeps parsing unchanged.
-    /// What: See `crate::listeners::config::ListenerConfig`.
-    ///
-    /// DEPRECATED (#7609): this is the legacy spelling of `[[channels]]`, kept
-    /// parsing for one release and never dropped from disk. Read
-    /// [`GlobalConfig::listeners`] instead of this field — it answers from
-    /// `channels`, which is where a migrated entry lands.
-    /// Test: `listeners_section_defaults_empty`,
-    /// `listeners_section_round_trips`.
-    #[serde(default, rename = "listeners")]
-    pub legacy_listeners: Vec<crate::listeners::config::ListenerConfig>,
+    /// Why this is not a parsed listener list any more: `[[listeners]]` was
+    /// absorbed into `channels` in memory on every load for one release, and
+    /// the startup drain
+    /// ([`crate::channels::migrate::migrate_global_if_absent`]) now moves it on
+    /// disk and deletes it. Keeping the in-memory absorb as well meant two
+    /// sources for one concept. The field survives as an OPAQUE value for two
+    /// reasons: a table the drain could not migrate must produce an error that
+    /// names the file rather than being silently ignored, and an unrelated
+    /// `save()` must not delete data this struct declined to model — the same
+    /// rule `[providers]` above exists for.
+    /// What: `None` on every migrated or new file. `Some` means the drain has
+    /// not run or could not finish; [`GlobalConfig::load_or_create`] refuses,
+    /// and the read-only paths log once and leave the entries inert.
+    /// Test: `a_residual_listeners_table_is_reported_not_absorbed`,
+    /// `a_residual_listeners_table_survives_an_unrelated_save`.
+    #[serde(default, rename = "listeners", skip_serializing_if = "Option::is_none")]
+    pub residual_listeners: Option<toml::value::Array>,
 
     /// `[[channels]]` — harness-level channels (#7609), the merge of the
     /// listener and channel-binding models.
     ///
     /// Why: one concept, one table. A `[[listeners]]` entry from before the
-    /// merge is absorbed into this list on every load, and persisted here once
-    /// by [`crate::channels::migrate::migrate_global_if_absent`], so an
-    /// operator never hand-edits anything to keep a listener working.
+    /// merge is moved here on disk — once, by
+    /// [`crate::channels::migrate::migrate_global_if_absent`], which then
+    /// deletes the legacy table — so an operator never hand-edits anything to
+    /// keep a listener working.
     /// What: [`crate::channels::Channel`] with
     /// [`crate::channels::ChannelScope::Global`]. Empty by default, so every
     /// config that predates this field parses unchanged.
-    /// Test: `a_legacy_listeners_table_is_absorbed_into_channels`,
+    /// Test: `a_global_channel_is_scoped_from_the_file_it_was_read_from`,
     /// `listeners_section_round_trips`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub channels: Vec<crate::channels::Channel>,
@@ -187,7 +190,7 @@ impl GlobalConfig {
     /// `listeners` field held, so nothing about polling changed.
     /// What: every `Global`-scope channel as a `ListenerConfig`, in stored
     /// order.
-    /// Test: `a_legacy_listeners_table_is_absorbed_into_channels`,
+    /// Test: `a_global_channel_is_scoped_from_the_file_it_was_read_from`,
     /// `listeners_section_round_trips`.
     pub fn listeners(&self) -> Vec<crate::listeners::config::ListenerConfig> {
         crate::channels::model::project(
@@ -197,31 +200,73 @@ impl GlobalConfig {
         )
     }
 
-    /// Fold any legacy `[[listeners]]` entry into `channels`, in memory.
+    /// Stamp every parsed channel with the scope this file implies.
     ///
-    /// Why (#7609): the on-disk migration only runs on the write path
-    /// (`load_or_create`), and `load` has no side effects by design. Absorbing
-    /// on every parse is what makes the deprecated table keep working
-    /// everywhere, whether or not this process ever wrote the file.
-    /// What: scope is set from this file's location, then each legacy listener
-    /// with no channel of the same `id` is appended. An entry the operator has
-    /// already migrated is NOT duplicated. Warns once per process.
-    /// Test: `a_legacy_listeners_table_is_absorbed_into_channels`,
-    /// `an_already_migrated_listener_is_not_absorbed_twice`.
-    fn absorb_legacy_listeners(&mut self) {
+    /// Why: `Channel::scope` is `#[serde(skip)]` — it is a fact about WHERE the
+    /// record was read, not a field an operator writes — so every parse of this
+    /// file has to set it. Splitting it out of the retired absorb (#7609 slice
+    /// 7) keeps it running now that nothing is absorbed.
+    /// Test: `a_global_channel_is_scoped_from_the_file_it_was_read_from`.
+    fn scope_channels(&mut self) {
         for channel in &mut self.channels {
             channel.scope = crate::channels::ChannelScope::Global;
         }
-        if self.legacy_listeners.is_empty() {
+    }
+
+    /// Whether a retired `[[listeners]]` table is still on disk.
+    fn has_residual_listeners(&self) -> bool {
+        self.residual_listeners
+            .as_ref()
+            .is_some_and(|table| !table.is_empty())
+    }
+
+    /// Refuse a config whose retired `[[listeners]]` table the drain left behind.
+    ///
+    /// Why (#7609 slice 7): the in-memory absorb is gone, so a `[[listeners]]`
+    /// entry no longer becomes a channel. Ignoring it would leave an operator
+    /// with a listener that silently stopped working and a file that looks
+    /// correct. This is the arm taken where an error can be acted on —
+    /// [`GlobalConfig::load_or_create`] runs the drain IMMEDIATELY before its
+    /// read, so a table still present there is exactly "the drain could not
+    /// migrate it".
+    /// What: an error naming the file and the fix. The read-only paths take
+    /// [`GlobalConfig::report_residual_listeners`] instead, because returning
+    /// the documented defaults in place of the operator's real configuration
+    /// would be a worse failure than an inert legacy table.
+    /// Test: `a_residual_listeners_table_is_reported_not_absorbed`.
+    fn reject_residual_listeners(&self, path: &std::path::Path) -> Result<()> {
+        if !self.has_residual_listeners() {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "{}: still declares the retired `[[listeners]]` table, which this build no longer \
+             reads. Its entries belong in `[[channels]]`; the startup drain moves them and \
+             deletes the table, so a table still here means the drain could not finish — check \
+             the file is writable and that `[[channels]]` does not disagree with it (#7609)",
+            path.display()
+        );
+    }
+
+    /// Say once per process that a retired `[[listeners]]` table is inert.
+    ///
+    /// Why once: `load` runs on every prompt build, so a per-load line would be
+    /// a flood. Why `error` rather than `warn`: the entries are not being
+    /// honoured, which is a configuration fault an operator has to fix, not a
+    /// deprecation they can defer.
+    /// Test: `a_residual_listeners_table_is_reported_not_absorbed`.
+    fn report_residual_listeners(&self) {
+        if !self.has_residual_listeners() {
             return;
         }
-        crate::channels::migrate::warn_global_listeners_deprecated();
-        for listener in self.legacy_listeners.clone() {
-            if self.channels.iter().any(|c| c.id == listener.name) {
-                continue;
-            }
-            self.channels.push(crate::channels::Channel::from(listener));
-        }
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            tracing::error!(
+                file = "~/.trusty-agents/config.toml",
+                replacement = "[[channels]]",
+                "`[[listeners]]` is retired and its entries are INERT; move them to \
+                 `[[channels]]` (#7609)"
+            );
+        });
     }
 
     /// Resolve a GitHub identity for ticketing.
@@ -293,7 +338,10 @@ impl GlobalConfig {
             .with_context(|| format!("failed to read config {}", path.display()))?;
         let mut cfg: Self = toml::from_str(&raw)
             .with_context(|| format!("failed to parse config {}", path.display()))?;
-        cfg.absorb_legacy_listeners();
+        cfg.scope_channels();
+        // #7609 slice 7: the drain ran three statements above, so a legacy
+        // table still here is one it could not migrate.
+        cfg.reject_residual_listeners(&path)?;
         Ok(cfg)
     }
 
@@ -301,8 +349,11 @@ impl GlobalConfig {
     /// config is provided via env var or programmatic construction.
     pub fn from_toml_str(s: &str) -> Result<Self> {
         let mut cfg: Self = toml::from_str(s).context("failed to parse mcp config TOML")?;
-        // #7609: the deprecated `[[listeners]]` table keeps working.
-        cfg.absorb_legacy_listeners();
+        cfg.scope_channels();
+        // #7609 slice 7: this is a read, and the global channel routes that use
+        // it REMOVE the retired table on their next write — so it reports and
+        // carries on rather than refusing.
+        cfg.report_residual_listeners();
         Ok(cfg)
     }
 
@@ -323,7 +374,7 @@ impl GlobalConfig {
     fn default_config() -> Self {
         toml::from_str::<Self>(DEFAULT_CONFIG_TOML)
             .map(|mut cfg| {
-                cfg.absorb_legacy_listeners();
+                cfg.scope_channels();
                 cfg
             })
             .unwrap_or_else(|e| {
@@ -363,8 +414,12 @@ impl GlobalConfig {
         };
         toml::from_str::<Self>(&content)
             .map(|mut cfg| {
-                // #7609: absorb the deprecated table on the read-only path too.
-                cfg.absorb_legacy_listeners();
+                cfg.scope_channels();
+                // #7609 slice 7: the hot read-only path. A retired table is
+                // reported once and left inert; falling back to the documented
+                // defaults here would discard the operator's real `[mcp]`,
+                // `[github]` and `[[channels]]` over a legacy table.
+                cfg.report_residual_listeners();
                 cfg
             })
             .unwrap_or_else(|e| {

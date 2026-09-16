@@ -359,6 +359,45 @@ pub async fn spawn_script(path: &std::path::Path) -> std::io::Result<tokio::proc
     .await
 }
 
+/// A `tracing` writer that keeps every emitted line in memory.
+///
+/// Why: a warn/info arm is sometimes the ONLY observable of a decision — the
+/// channel-migration alarms (#7609) log and then drop, so the formatted output
+/// is the assertion surface. Install it with
+/// `tracing::subscriber::set_default`, which is thread-local, so a test using
+/// it stays independent of its siblings.
+/// What: `contents()` returns everything written so far. `Clone` shares one
+/// buffer, which is what `MakeWriter` needs.
+/// Test: `crate::channels::migrate_tests::a_daemon_start_survives_a_malformed_global_config`.
+#[derive(Clone, Default)]
+pub struct CaptureWriter(std::sync::Arc<Mutex<Vec<u8>>>);
+
+impl CaptureWriter {
+    pub fn contents(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap_or_else(|e| e.into_inner())).into_owned()
+    }
+}
+
+impl std::io::Write for CaptureWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+    type Writer = Self;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
 /// Tests for this module's own #3957 durability guards.
 ///
 /// Why: `lock_home`'s thread-local ownership model is only sound under a

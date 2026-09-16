@@ -3,15 +3,15 @@
 //!
 //! Why: an operator who already configured listeners must not have to
 //! hand-edit anything to keep them working after the merge. Both drains follow
-//! the precedent `crate::mcp::shared::migrate` set for #7454: the guard is the
-//! TARGET's absence (a fact the operator can see on disk, with no hidden
-//! "migrated" marker to disagree with it), that absence is re-read INSIDE the
-//! write lock, the legacy table is left on disk untouched, and a legacy table
-//! that will not parse writes NOTHING rather than publishing a silently empty
-//! list.
-//! What: [`migrate_global_if_absent`] appends `[[channels]]` to
-//! `~/.trusty-agents/config.toml` when that key is absent and `[[listeners]]`
-//! is present. [`migrate_agent_channels_if_absent`] writes one assistant's
+//! the precedent `crate::mcp::shared::migrate` set for #7454: the decision is
+//! taken from what is on disk, with no hidden "migrated" marker to disagree
+//! with it, it is re-taken INSIDE the write lock, and a legacy table that will
+//! not parse writes NOTHING rather than publishing a silently empty list.
+//! What: [`migrate_global_if_absent`] merges `~/.trusty-agents/config.toml`'s
+//! `[[listeners]]` into `[[channels]]` and DELETES the legacy table — the
+//! in-memory absorb that made leaving it harmless is gone (#7609 slice 7), so a
+//! table left behind would be an inert listener.
+//! [`migrate_agent_channels_if_absent`] writes one assistant's
 //! `agent.toml` `[[listeners]]` bindings into its `*.channels.json` when that
 //! file is absent — only the ones that resolve to a storage record the
 //! existing channel loader accepts, because writing a record it would reject
@@ -81,36 +81,21 @@ impl ChannelMigrationReport {
     }
 }
 
-/// Say once per process that `[[listeners]]` in `config.toml` is deprecated.
+/// Say once per process that an `agent.toml` `[[listeners]]` table is retired.
 ///
-/// Why: the alias keeps parsing for one release, and an operator who never
-/// reads a release note should still learn the new key from their own logs.
-/// Once per process, not once per load, because the config is re-read on every
-/// prompt build — a per-load warning would be a log flood.
-/// Test: `the_deprecation_warnings_fire_at_most_once`.
-pub fn warn_global_listeners_deprecated() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        tracing::warn!(
-            file = "~/.trusty-agents/config.toml",
-            replacement = "[[channels]]",
-            "`[[listeners]]` is deprecated and will be removed after this release (#7609)"
-        );
-    });
-}
-
-/// Say once per process that `[[listeners]]` in an `agent.toml` is deprecated.
-///
-/// Why/What: see [`warn_global_listeners_deprecated`]; separate counter so one
-/// file's warning does not suppress the other's.
-/// Test: `the_deprecation_warnings_fire_at_most_once`.
+/// Why once, and why `error` (#7609 slice 7): the entries are no longer folded
+/// into `channels`, so they are INERT — a configuration fault the operator has
+/// to fix, not a deprecation they can defer. Once per process because every
+/// dispatch re-reads every manifest.
+/// Test: `the_retirement_notice_fires_at_most_once`.
 pub fn warn_agent_listeners_deprecated() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        tracing::warn!(
+        tracing::error!(
             file = "agent.toml",
             replacement = "<assistant>.channels.json",
-            "`[[listeners]]` is deprecated and will be removed after this release (#7609)"
+            "`[[listeners]]` is retired and its entries are INERT; the startup sweep moves them \
+             into the assistant's channels file and deletes the table (#7609)"
         );
     });
 }
@@ -153,21 +138,28 @@ fn read_key<T: serde::de::DeserializeOwned>(
         })
 }
 
-/// Drain `config.toml`'s `[[listeners]]` into `[[channels]]`, exactly once.
+/// Drain `config.toml`'s `[[listeners]]` into `[[channels]]` and delete it.
 ///
-/// Why: see the module doc. Appending rather than rewriting the document keeps
-/// every comment, key order and unmodelled table in the operator's file
-/// exactly as they were — `GlobalConfig::save` re-serializes only what it
-/// models, which is precisely the loss this migration must not cause.
-/// What: returns `Ok(None)` when the file is absent, when `[[channels]]` is
-/// already present, or when `[[listeners]]` declares nothing. Otherwise
-/// appends the rendered `[[channels]]` array at end of file through
-/// [`crate::state_writer::atomic_update`] and leaves `[[listeners]]` in place.
-/// The unlocked read only decides whether there is work to do and reports a
-/// malformed table by key; what is written is derived again from the LOCKED
-/// bytes, so neither table can change between the decision and the write.
+/// Why the table is now DELETED (#7609 slice 7): for one release the drain left
+/// it on disk and `GlobalConfig` absorbed it in memory on every load, so the
+/// file having both tables was a normal, working state. The absorb is gone, so
+/// a `[[listeners]]` table left behind would be inert — a listener that
+/// silently stopped polling. Moving it and removing it in the same locked write
+/// makes the drain idempotent and the legacy spelling genuinely absent
+/// afterwards, which is what lets `GlobalConfig::load_or_create` treat a
+/// surviving table as an error.
+/// What: returns `Ok(None)` when the file is absent or declares no
+/// `[[listeners]]`. Otherwise every legacy entry with no `[[channels]]` entry
+/// of the same id is appended — a channel already there WINS, matching the
+/// precedence the retired in-memory absorb applied — the legacy table is
+/// removed through [`crate::channels::document`] so the comment block above it
+/// survives, and the result is published by
+/// [`crate::state_writer::atomic_update`]. The unlocked read only decides
+/// whether there is work to do and reports a malformed table by key; what is
+/// written is derived again from the LOCKED bytes, so neither table can change
+/// between the decision and the write.
 /// Test: `a_global_listener_migrates_once_and_never_again`,
-/// `migration_leaves_the_legacy_listeners_table_intact`,
+/// `the_drain_removes_the_legacy_listeners_table_and_keeps_its_comment`,
 /// `a_malformed_channels_table_is_reported_and_writes_nothing`.
 pub fn migrate_global_if_absent(
     path: &Path,
@@ -196,24 +188,21 @@ pub fn migrate_global_if_absent(
             return Ok(None);
         };
         let current = String::from_utf8_lossy(bytes).into_owned();
-        // #7609: the whole decision is re-taken under the lock — whether
-        // `[[channels]]` has appeared, and what `[[listeners]]` now says.
+        // #7609: the whole decision is re-taken under the lock — what
+        // `[[channels]]` and `[[listeners]]` now say.
         let Some(channels) =
             global_channels_to_write(&current, path).map_err(anyhow::Error::new)?
         else {
             return Ok(None);
         };
-        let rendered = toml::to_string_pretty(&ChannelsDocument {
-            channels: &channels,
-        })?;
-        moved = channels.iter().map(|c| c.id.clone()).collect();
-        let mut out = current;
-        if !out.ends_with('\n') {
-            out.push('\n');
-        }
-        out.push('\n');
-        out.push_str(&rendered);
-        Ok(Some(out.into_bytes()))
+        moved = channels
+            .appended
+            .iter()
+            .map(|channel| channel.id.clone())
+            .collect();
+        Ok(Some(
+            render_drained(&current, &channels.merged)?.into_bytes(),
+        ))
     })
     .map_err(|source| ChannelMigrationError::Write {
         path: path.display().to_string(),
@@ -222,22 +211,65 @@ pub fn migrate_global_if_absent(
     Ok(wrote.then_some(ChannelMigrationReport { channels: moved }))
 }
 
+/// `current` with `[[channels]]` set to `merged` and `[[listeners]]` removed.
+///
+/// Why `toml_edit` rather than the text append this used to do: the legacy table
+/// has to come OUT now, and removing it with a plain `DocumentMut::remove`
+/// deletes the comment block above its header — the defect live verification
+/// found on `PUT /api/channels` (#7609 slice 5 finding 1).
+fn render_drained(current: &str, merged: &[Channel]) -> anyhow::Result<String> {
+    use anyhow::Context as _;
+    let rendered = toml::to_string_pretty(&ChannelsDocument { channels: merged })?;
+    let mut document = current
+        .parse::<toml_edit::DocumentMut>()
+        .context("config.toml is not an editable document; nothing was migrated")?;
+    let item = rendered
+        .parse::<toml_edit::DocumentMut>()
+        .context("re-reading the encoded [[channels]]")?
+        .get("channels")
+        .cloned()
+        .context("the encoded document declared no [[channels]]")?;
+    crate::channels::document::replace_array_of_tables(&mut document, "channels", item);
+    crate::channels::document::remove_preserving_comments(&mut document, "listeners");
+    Ok(document.to_string())
+}
+
+/// What a global drain would write: the whole merged list, and the subset the
+/// legacy table contributed.
+struct DrainedChannels {
+    /// The complete `[[channels]]` array to publish.
+    merged: Vec<Channel>,
+    /// Only the entries this drain added, for the report.
+    appended: Vec<Channel>,
+}
+
 /// The channels a global migration would write, or `None` when it must not.
+///
+/// What: `None` when `[[listeners]]` is absent or empty — there is nothing to
+/// move and nothing to delete. A `[[channels]]` entry of the same id WINS, so a
+/// file the operator has already migrated by hand merges to itself and the
+/// drain's only effect is removing the legacy table.
 fn global_channels_to_write(
     raw: &str,
     path: &Path,
-) -> Result<Option<Vec<Channel>>, ChannelMigrationError> {
+) -> Result<Option<DrainedChannels>, ChannelMigrationError> {
     let table = parse_table(raw, path)?;
-    // A present `[[channels]]` ends the migration, but it is still parsed so a
+    // `[[channels]]` is parsed even when the migration will add nothing, so a
     // malformed one is reported rather than read as "already migrated, fine".
-    if read_key::<Channel>(&table, "channels", path)?.is_some() {
+    let mut merged = read_key::<Channel>(&table, "channels", path)?.unwrap_or_default();
+    let listeners = read_key::<ListenerConfig>(&table, "listeners", path)?;
+    let Some(listeners) = listeners.filter(|entries| !entries.is_empty()) else {
         return Ok(None);
+    };
+    let mut appended = Vec::new();
+    for listener in listeners {
+        if merged.iter().any(|channel| channel.id == listener.name) {
+            continue;
+        }
+        appended.push(Channel::from(listener));
     }
-    let listeners = read_key::<ListenerConfig>(&table, "listeners", path)?.unwrap_or_default();
-    if listeners.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(listeners.into_iter().map(Channel::from).collect()))
+    merged.extend(appended.iter().cloned());
+    Ok(Some(DrainedChannels { merged, appended }))
 }
 
 /// Drain one assistant's `agent.toml` `[[listeners]]` into its channels file.
@@ -323,16 +355,17 @@ pub struct StartupMigrationReport {
 /// Why (#7609): [`migrate_global_if_absent`] was reachable only from
 /// `GlobalConfig::load_or_create`, which only the REPL routing command calls.
 /// Every daemon entry point reads the config through `GlobalConfig::load`,
-/// which absorbs the legacy table in memory and never persists — so a
+/// which absorbed the legacy table in memory and never persisted — so a
 /// supervised `tagent --api` or `tagent --slack` left `config.toml` unchanged
 /// across every restart. This is the one entry point those starts call, and it
 /// keeps the hot `load` path read-only.
 /// What: drains `config_path` FIRST, so the assistant sweep's `route_to`
 /// backfill finds the `[[channels]]` entry it appends to; then sweeps `dirs`.
-/// A drain failure is logged and does NOT stop the sweep — the in-memory
-/// absorb keeps the legacy listener working either way, so nothing here is
-/// worth failing a daemon start over. An empty `dirs` runs the global drain
-/// alone, which is what [`spawn_global_migration`] wants.
+/// A drain failure is logged and does NOT stop the sweep: the assistant half
+/// migrates files the global half never touches, and taking it down too would
+/// widen one unwritable `config.toml` into a whole host's worth of inert
+/// bindings. An empty `dirs` runs the global drain alone, which is what
+/// [`spawn_global_migration`] wants.
 /// Test: `a_daemon_start_drains_the_global_config_once`,
 /// `a_daemon_start_survives_a_malformed_global_config`.
 pub fn run_startup_migration(
@@ -347,19 +380,59 @@ pub fn run_startup_migration(
         Some(path) => drain_global(path),
         None => Ok(None),
     };
+    // #7609 slice 7: re-read the globals the drain just published rather than
+    // trusting the caller's boot-time snapshot. Before the in-memory absorb was
+    // retired that snapshot already carried the legacy listener, so a pre-drain
+    // list was good enough; now an undrained file yields NO channel and the
+    // backfill would find nothing to name the bound assistant in on the very
+    // start that needs it.
+    let drained = match (config_path, &global) {
+        (Some(path), Ok(Some(_))) => published_globals(path),
+        _ => None,
+    };
+    let globals = drained.as_deref().unwrap_or(globals);
     StartupMigrationReport {
         global,
         assistants: migrate_assistant_channels(dirs, globals, config_path),
     }
 }
 
+/// The global channels `config_path` declares, after a drain wrote it.
+///
+/// What: `None` when the file cannot be read or parsed, which leaves the caller
+/// on its own snapshot rather than on an empty list — a failure here must not
+/// make the sweep look like a host with no channels.
+fn published_globals(config_path: &Path) -> Option<Vec<Channel>> {
+    let raw = std::fs::read_to_string(config_path)
+        .inspect_err(|error| {
+            tracing::warn!(
+                path = %config_path.display(),
+                %error,
+                "channel migration: the drained config could not be re-read (#7609)",
+            );
+        })
+        .ok()?;
+    crate::mcp::config::GlobalConfig::from_toml_str(&raw)
+        .inspect_err(|error| {
+            tracing::warn!(
+                path = %config_path.display(),
+                %error,
+                "channel migration: the drained config could not be re-parsed (#7609)",
+            );
+        })
+        .ok()
+        .map(|config| config.channels)
+}
+
 /// The global drain plus its log arms, so the sweep above reads as two steps.
 ///
 /// Why: a drain failure is an operator-visible problem — a read-only or
 /// hand-broken `config.toml` — that must name its path and its cause in the
-/// daemon's own log, and must then be dropped rather than propagated: the
-/// legacy in-memory absorb in `GlobalConfig::load` keeps the listener working,
-/// so refusing to start would trade a working daemon for a cosmetic one.
+/// daemon's own log. Nothing absorbs `[[listeners]]` at parse time any more
+/// (#7609 slice 7), so a failed drain is not a recoverable state the daemon
+/// papers over: the legacy table stays on disk and every entry in it is INERT
+/// until an operator moves it to `[[channels]]` by hand. The warn arm says
+/// exactly that, because it is the only notice the operator gets.
 /// Test: `a_daemon_start_survives_a_malformed_global_config`.
 fn drain_global(path: &Path) -> Result<Option<ChannelMigrationReport>, ChannelMigrationError> {
     let outcome = migrate_global_if_absent(path);
@@ -373,8 +446,9 @@ fn drain_global(path: &Path) -> Result<Option<ChannelMigrationReport>, ChannelMi
         Err(error) => tracing::warn!(
             path = %path.display(),
             %error,
-            "channel migration: the global drain wrote nothing; the daemon starts on the \
-             in-memory absorb instead (#7609)",
+            "channel migration: the global drain wrote nothing; the legacy [[listeners]] table \
+             stays on disk and its entries are INERT — move them to [[channels]] by hand \
+             (#7609)",
         ),
     }
     outcome
@@ -479,7 +553,11 @@ pub fn migrate_assistant_channels(
             backfill_assistant_routes(config_path, &manifest, globals, id.as_str());
         }
         let channels_json = manifest.with_extension("channels.json");
-        match migrate_agent_channels_if_absent(&manifest, &channels_json, globals) {
+        // #7609 slice 7: seed first, then take the retired table out — the
+        // retirement only fires once every binding is in the channels file.
+        let outcome = migrate_agent_channels_if_absent(&manifest, &channels_json, globals);
+        super::retire::retire_agent_listeners(&manifest, &channels_json);
+        match outcome {
             Ok(Some(report)) => {
                 tracing::info!(
                     assistant = %id.as_str(),

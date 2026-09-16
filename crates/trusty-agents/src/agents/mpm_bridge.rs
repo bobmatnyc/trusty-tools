@@ -392,7 +392,7 @@ fn project_mpm_agent(default_name: &str, meta: AgentMetadata, body: String) -> A
         workstreams: crate::agents::WorkstreamContextConfig::default(),
         declared: Default::default(),
         adapter,
-        legacy_listeners: Vec::new(),
+        residual_listeners: None,
         channels: Vec::new(),
         stores: crate::stores::StoresConfig::default(),
         // Dependency list, NOT a permission grant: see this function's doc.
