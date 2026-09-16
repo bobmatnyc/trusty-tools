@@ -329,6 +329,7 @@ async fn an_unquoted_phrase_earns_no_literal_even_when_it_occurs_verbatim() {
             40,
             crate::core::indexer::SearchMode::All,
             None,
+            None,
         )
         .await;
     assert_eq!(
@@ -479,7 +480,14 @@ async fn a_filename_query_floors_the_chunks_of_that_file() {
     let lit = extract_exact_literal("session_mcp_scope.rs").expect("filename");
     let re = literal_regex(&lit).expect("regex");
     let lane = idx
-        .exact_match_lane(&lit, &re, 10, crate::core::indexer::SearchMode::All, None)
+        .exact_match_lane(
+            &lit,
+            &re,
+            10,
+            crate::core::indexer::SearchMode::All,
+            None,
+            None,
+        )
         .await;
     assert_eq!(
         lane.hits.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
@@ -536,6 +544,7 @@ async fn a_common_basename_is_capped_and_does_not_bury_the_relevant_file() {
             &re,
             flood + 10,
             crate::core::indexer::SearchMode::All,
+            None,
             None,
         )
         .await;
@@ -598,7 +607,14 @@ async fn a_path_shaped_query_returns_its_file_first() {
     );
     let re = literal_regex(&lit).expect("regex");
     let lane = idx
-        .exact_match_lane(&lit, &re, 10, crate::core::indexer::SearchMode::All, None)
+        .exact_match_lane(
+            &lit,
+            &re,
+            10,
+            crate::core::indexer::SearchMode::All,
+            None,
+            None,
+        )
         .await;
     assert_eq!(
         lane.hits.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
@@ -642,7 +658,14 @@ async fn an_issue_reference_floors_its_verbatim_occurrence() {
     let lit = extract_exact_literal("#7675").expect("issue ref");
     let re = literal_regex(&lit).expect("regex");
     let lane = idx
-        .exact_match_lane(&lit, &re, 10, crate::core::indexer::SearchMode::All, None)
+        .exact_match_lane(
+            &lit,
+            &re,
+            10,
+            crate::core::indexer::SearchMode::All,
+            None,
+            None,
+        )
         .await;
     assert_eq!(
         lane.hits.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
@@ -701,7 +724,14 @@ async fn the_postings_candidate_path_and_the_full_scan_agree() {
     let lit = extract_exact_literal(L3_IDENT).expect("identifier");
     let re = literal_regex(&lit).expect("regex");
     let lane = idx
-        .exact_match_lane(&lit, &re, 40, crate::core::indexer::SearchMode::All, None)
+        .exact_match_lane(
+            &lit,
+            &re,
+            40,
+            crate::core::indexer::SearchMode::All,
+            None,
+            None,
+        )
         .await;
     assert!(
         !lane.full_scan,
@@ -739,4 +769,97 @@ fn literal_regex_anchors_an_identifier_at_word_boundaries() {
     let phrase = extract_exact_literal(&format!("\"{L1_LITERAL}\"")).expect("quoted");
     let pre = literal_regex(&phrase).expect("regex");
     assert!(pre.is_match("total is not smaller than\n         the instruction sources; refusing"));
+}
+
+#[tokio::test]
+async fn tied_filename_hits_are_ordered_by_lane_score_not_chunk_id() {
+    // Why: #7775 HIGH. A `Filename` hit's only ordering signals are the
+    // path-suffix tier and an occurrence count that is always 1, so every file
+    // sharing a basename tied and the key fell through to chunk id.
+    // `FILENAME_HIT_CAP` then floored the alphabetically-first 8 above the whole
+    // semantic page — in this repo a `src/lib.rs` query surfaced the
+    // alphabetically-first 8 crates and dropped the one the other lanes ranked.
+    // What: plant more same-basename files than the cap, with the best-scored
+    // member deliberately LAST in chunk-id order so the pre-fix cap truncates it
+    // away. Then re-query with a path-shaped literal to prove the score
+    // tie-break sits strictly BELOW the tier: a worse-scored exact suffix match
+    // still outranks a better-scored basename-only one.
+    // Test: this test.
+    let idx = make_indexer();
+    let flood = FILENAME_HIT_CAP + 4;
+    for i in 0..flood {
+        idx.add_chunk(raw(
+            &format!("lib:{i:02}"),
+            &format!("crates/decoy_{i}/src/lib.rs"),
+            &format!("fn decoy_{i}() {{}}"),
+        ))
+        .await
+        .unwrap();
+    }
+    // `lib:zz` sorts after every `lib:NN`, so chunk-id order puts it past the cap.
+    idx.add_chunk(raw(
+        "lib:zz",
+        "crates/target/src/lib.rs",
+        "fn the_one_the_other_lanes_ranked() {}",
+    ))
+    .await
+    .unwrap();
+
+    // Only `lib:zz` carries a fused score — the shape of a query whose semantic
+    // and BM25 lanes agree on one file among many that share a basename.
+    let prefers_zz: &(dyn Fn(&str) -> f32 + Send + Sync) =
+        &|id: &str| if id == "lib:zz" { 9.0 } else { 0.0 };
+    let bare = extract_exact_literal("lib.rs").expect("filename");
+    let re = literal_regex(&bare).expect("regex");
+    let lane = idx
+        .exact_match_lane(
+            &bare,
+            &re,
+            flood + 10,
+            crate::core::indexer::SearchMode::All,
+            None,
+            Some(prefers_zz),
+        )
+        .await;
+    assert!(
+        lane.hits.len() <= FILENAME_HIT_CAP,
+        "the cap still bounds an ambiguous basename, got {}",
+        lane.hits.len()
+    );
+    assert_eq!(
+        lane.hits.first().map(|h| h.id.as_str()),
+        Some("lib:zz"),
+        "the best-scored member of a basename tie must rank first, not the \
+         alphabetically-first chunk id; got {:?}",
+        lane.hits.iter().map(|h| h.id.as_str()).collect::<Vec<_>>()
+    );
+
+    // A strictly better suffix match outranks a worse one whatever the scores
+    // say: `lib:00` is given the only fused score and still loses to the one
+    // chunk whose whole path ends with the queried multi-segment suffix.
+    let prefers_decoy: &(dyn Fn(&str) -> f32 + Send + Sync) =
+        &|id: &str| if id == "lib:00" { 99.0 } else { 0.0 };
+    let path_shaped = extract_exact_literal("target/src/lib.rs").expect("path-shaped filename");
+    let path_re = literal_regex(&path_shaped).expect("regex");
+    let tiered = idx
+        .exact_match_lane(
+            &path_shaped,
+            &path_re,
+            flood + 10,
+            crate::core::indexer::SearchMode::All,
+            None,
+            Some(prefers_decoy),
+        )
+        .await;
+    assert_eq!(
+        tiered.hits.first().map(|h| h.id.as_str()),
+        Some("lib:zz"),
+        "an exact path-suffix match outranks a better-scored basename-only one; \
+         got {:?}",
+        tiered
+            .hits
+            .iter()
+            .map(|h| h.id.as_str())
+            .collect::<Vec<_>>()
+    );
 }

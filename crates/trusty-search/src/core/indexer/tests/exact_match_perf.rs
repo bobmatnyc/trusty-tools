@@ -98,7 +98,14 @@ async fn exact_match_lane_p50_at_100k() {
         let re = literal_regex(&lit).expect("regex compiles");
         for _ in 0..WARMUP_RUNS {
             let _ = idx
-                .exact_match_lane(&lit, &re, 10, crate::core::indexer::SearchMode::All, None)
+                .exact_match_lane(
+                    &lit,
+                    &re,
+                    10,
+                    crate::core::indexer::SearchMode::All,
+                    None,
+                    None,
+                )
                 .await;
         }
         let mut samples = Vec::with_capacity(TIMED_RUNS);
@@ -106,7 +113,14 @@ async fn exact_match_lane_p50_at_100k() {
         for _ in 0..TIMED_RUNS {
             let started = std::time::Instant::now();
             let lane = idx
-                .exact_match_lane(&lit, &re, 10, crate::core::indexer::SearchMode::All, None)
+                .exact_match_lane(
+                    &lit,
+                    &re,
+                    10,
+                    crate::core::indexer::SearchMode::All,
+                    None,
+                    None,
+                )
                 .await;
             samples.push(started.elapsed());
             hits = lane.hits.len();
