@@ -1,0 +1,60 @@
+{
+  "_comment": [
+    "Fixture doc-unit inventory for the #7537 census cases in",
+    "check_rustdoc_links_selftest.sh. Same feature set as metadata-mini.json, so",
+    "lanes-mini.tsv covers it exactly and the coverage arms stay quiet; what this",
+    "one adds is `targets`, which is what the census reads.",
+    "Expected doc units: demo (lib) and demo-cli (bin). The other three are the",
+    "gate's three drop rules, one fixture row each: `demo` the BIN collides with",
+    "`demo` the lib and cargo documents the lib instead; `demo-heavy` needs a",
+    "feature `default` does not reach; a test target is no doc unit at all.",
+    "`demo-cli` needs `config`, which `default` reaches only through `nogate` —",
+    "the transitive walk `tm`'s own required-features made necessary."
+  ],
+  "packages": [
+    {
+      "name": "demo",
+      "manifest_path": "scripts/test-data/rustdoc-links/demo/Cargo.toml",
+      "features": {
+        "default": ["nogate"],
+        "nogate": ["config"],
+        "config": [],
+        "heavy": []
+      },
+      "targets": [
+        {
+          "kind": ["lib"],
+          "name": "demo",
+          "src_path": "crates/demo/src/lib.rs",
+          "doc": true
+        },
+        {
+          "kind": ["bin"],
+          "name": "demo-cli",
+          "src_path": "crates/demo/src/bin/demo-cli.rs",
+          "doc": true,
+          "required-features": ["config"]
+        },
+        {
+          "kind": ["bin"],
+          "name": "demo",
+          "src_path": "crates/demo/src/main.rs",
+          "doc": true
+        },
+        {
+          "kind": ["bin"],
+          "name": "demo-heavy",
+          "src_path": "crates/demo/src/bin/demo-heavy.rs",
+          "doc": true,
+          "required-features": ["heavy"]
+        },
+        {
+          "kind": ["test"],
+          "name": "integration",
+          "src_path": "crates/demo/tests/integration.rs",
+          "doc": false
+        }
+      ]
+    }
+  ]
+}

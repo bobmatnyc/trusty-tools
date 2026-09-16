@@ -38,7 +38,7 @@
 #   every diagnostic to a span with no heuristics; the checker below asserts
 #   that it accounted for every one it saw.
 #
-# FAIL-CLOSED BEHAVIOUR. Six distinct ways this refuses to report success:
+# FAIL-CLOSED BEHAVIOUR. Seven distinct ways this refuses to report success:
 #   1. A non-lint compile error (the crate does not build) FAILS, and says so
 #      separately from a link count — "your docs are fine" is not a thing to say
 #      about a crate that did not compile.
@@ -53,6 +53,8 @@
 #   5. A diagnostic whose span this script cannot attribute to a crate FAILS
 #      rather than being dropped.
 #   6. A crate with findings but no baseline row FAILS.
+#   7. A run that examined FEWER doc units than the workspace declares FAILS,
+#      by unit name, with its own exit code 4. See "THE DOC-UNIT CENSUS" below.
 #
 # WHAT COUNTS AS EXAMINED — the #5620 shape, third instance.
 #   Two things had to be true for a broken link to be counted, and the gate
@@ -75,6 +77,48 @@
 #   workspace member is COMPILED as well as documented, and the rlib artifacts
 #   outnumber the rustdoc ones. Scoring those is how a run in which rustdoc
 #   executed for 3 crates reported "25 crate(s) documented".
+#
+# THE DOC-UNIT CENSUS — the gap #7537 closed.
+#   "WHAT COUNTS AS EXAMINED" above compares the examined set against the
+#   BASELINE, which only lists crates with a history of findings. A doc unit
+#   with a clean history has no row, so nothing was ever compared for it: when
+#   cargo served it from cache, the run reported one fewer unit and said so
+#   nowhere. #7506 shipped that way — CI and the first local run both examined
+#   24 crates and reported 3 broken links, the `tm` BIN unit having been cached
+#   out while the trusty-mpm LIB unit was re-documented in the same crate
+#   directory. That hides from the per-crate cache check (FAIL CLOSED 2b)
+#   precisely because the directory WAS examined; a rerun that busted the cache
+#   found a fourth broken link inside the bin.
+#
+#   So the census is per DOC UNIT — (crate directory, target name, lib|bin) —
+#   not per crate directory, and the expected set is derived from
+#   `cargo metadata --no-deps --format-version 1` rather than hand-copied
+#   (CLAUDE.md: derive the package count, never restate it). A unit is expected
+#   when cargo would document it on the default lane: `doc: true`, kind lib or
+#   bin, its `required-features` all reachable from the package's own `default`
+#   feature, and — matching `cargo doc`'s own rule — a bin whose crate name
+#   collides with its package's lib is dropped, because cargo documents the lib
+#   instead. Measured against a real run at 9547c5ee: 37 expected, 38 examined,
+#   nothing missing. The surplus is a bin whose `required-features` another
+#   workspace member turns on through feature unification; a unit examined but
+#   not expected is never a failure, only the reverse is.
+#
+#   A unit counts as examined when rustdoc produced its doc artifact OR emitted
+#   a diagnostic against it, in ANY lane — the second arm for the same reason
+#   FAIL CLOSED 3 has one: a unit whose doc build fails emits no artifact at
+#   all, and reporting it as un-examined would be exactly backwards.
+#
+# THE VERDICT LINE — the gap #7633 closed.
+#   The report printed SUMMARY before the failure rows, so a run could print
+#   `SUMMARY … 0 broken link(s), baseline 0` — a fully clean-looking line — and
+#   then exit 3 on a FEATURE-UNCOVERED lane further down. Nothing in the output
+#   tracked the exit code, so a reader grepping the SUMMARY concluded green.
+#
+#   Now every exit path, this script's early refusals included, ends with a
+#   terminal `VERDICT PASS|FAIL exit <n> <n> failure(s): <codes>` line, and
+#   SUMMARY carries the failure count so it can never read clean over a failing
+#   run. The last line of output alone predicts the exit code; an exit that
+#   reached no verdict at all is itself reported as a failure by the EXIT trap.
 #
 # FEATURE LANES — the gap #7466 closed.
 #   `cargo doc` resolves DEFAULT features only, so a module behind a non-default
@@ -99,9 +143,18 @@
 # Exit codes: 0 = at or below baseline for every crate. 1 = a crate regressed,
 #   or an unbaselined crate has findings. 3 = the gate could not compute a
 #   verdict (build failure, vacuous scan, unattributable span, missing crate,
-#   an uncovered or unbuildable feature lane) — distinguished from 1 so a caller
-#   can tell "your links got worse" from "nothing was checked", the distinction
-#   #5289 added to the semver gate. 2 = usage error.
+#   an uncovered or unbuildable feature lane, an unreadable doc-unit inventory,
+#   a scorer that died before printing a failure row)
+#   — distinguished from 1 so a caller can tell "your links got worse" from
+#   "nothing was checked", the distinction #5289 added to the semver gate.
+#   4 = the doc-unit census came up SHORT (#7537): every lane ran and every
+#   diagnostic was attributable, but the workspace declares a doc unit no lane
+#   examined, so the verdict covers less than the workspace. Its own code
+#   because the remedy differs from both neighbours — a short census is neither
+#   a link regression to fix nor a build to repair, it is usually a cached unit
+#   to bust or a target that left the workspace. 3 outranks 4 when both fire:
+#   a run that could not compute a verdict at all has nothing to be short of.
+#   2 = usage error. EVERY one of them prints a terminal VERDICT line.
 #
 # Test: `scripts/check_rustdoc_links_selftest.sh` drives every fail-closed
 #   branch through the `--json` entry point with synthetic cargo streams, so it
@@ -118,8 +171,57 @@
 #   that same pair through `--update-baseline`, which scores lanes with its own
 #   loop, and assert the baseline FILE as well as the exit: a refusal that had
 #   already rewritten the ratchet would still have burned it.
+#
+#   #7537's `units-short` case is the doc-unit census: a stream whose bin unit
+#   is `fresh: true` while its lib unit in the SAME crate directory is
+#   re-documented — the #7506 shape every per-crate check passes — must exit 4,
+#   and its `units-complete` twin must still exit 0. #7633's contract is
+#   asserted on EVERY case rather than in one of them: `assert_verdict` reads
+#   the last line of each case's output and fails unless it names that case's
+#   actual exit status.
 
 set -euo pipefail
+
+# ---- The terminal VERDICT line (#7633) ----------------------------------
+# One writer for every exit path, so the LAST line of output always names the
+# exit status. It goes to stdout, beside the report it summarises, because a
+# reader who greps one line greps the report's stream.
+VERDICT_EMITTED=0
+WORK=""
+emit_verdict() {   # <exit-code> <reason>
+  VERDICT_EMITTED=1
+  if [ "$1" -eq 0 ]; then
+    printf 'VERDICT\tPASS\texit 0\t%s\n' "$2"
+  else
+    printf 'VERDICT\tFAIL\texit %s\t%s\n' "$1" "$2"
+  fi
+}
+
+# Armed BEFORE the first refusal below, so an early exit is covered too. A
+# non-zero exit that reached no verdict gets one here; a ZERO exit that reached
+# none is a bug in this script, and printing PASS over it would be the fail-open
+# this gate exists to refuse — it becomes exit 3.
+# shellcheck disable=SC2329   # invoked by the EXIT trap two lines down
+on_exit() {
+  rc=$?
+  # `if`, never `[ … ] && …`: under `set -e` a false test as the last command
+  # of this function would return from the trap before the verdict is written.
+  if [ -n "$WORK" ]; then rm -rf "$WORK"; fi
+  if [ "$VERDICT_EMITTED" -eq 0 ]; then
+    if [ "$rc" -eq 0 ]; then
+      emit_verdict 3 "the gate exited 0 without reaching a verdict"
+      exit 3
+    fi
+    emit_verdict "$rc" "the gate exited before reaching a verdict"
+  fi
+}
+trap on_exit EXIT
+
+# Refuse with a code and a reason, both of which reach the VERDICT line.
+die() {   # <exit-code> <reason>
+  emit_verdict "$1" "$2"
+  exit "$1"
+}
 
 usage() {
   echo "usage: scripts/check_rustdoc_links.sh [--update-baseline]" >&2
@@ -140,7 +242,7 @@ usage() {
   echo "       METADATA_OVERRIDE=<file> read the feature inventory from a" >&2
   echo "                                captured 'cargo metadata' JSON" >&2
   echo "       BASELINE_OVERRIDE=<file> score against <file> as the baseline" >&2
-  exit 2
+  die 2 "usage error"
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -213,8 +315,9 @@ done
 # not score until #7577.
 EXCLUDES=(--exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --exclude trusty-audit-ui)
 
+# Cleanup is the EXIT trap armed at the top of this script, which also writes
+# the terminal VERDICT line (#7633).
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/rustdoc-links.XXXXXX")"
-trap 'rm -rf "$WORK"' EXIT
 
 # The scorer's whole input: one row per lane, <lane-id> <json> <cargo-rc> <features>.
 DESC="$WORK/lanes.tsv"
@@ -224,7 +327,7 @@ DESC="$WORK/lanes.tsv"
 [ -f "$LANES_FILE" ] || {
   echo "check_rustdoc_links: no lane file at ${LANES_FILE} — the declared" >&2
   echo "       feature coverage is unknown, so this gate cannot report a verdict" >&2
-  exit 3
+  die 3 "1 failure(s): LANES-FILE"
 }
 LANE_IDS="$(awk -F'\t' '$1 == "LANE" { print $2 }' "$LANES_FILE" | LC_ALL=C sort -u)"
 
@@ -246,7 +349,7 @@ if [ -z "$META_FILE" ]; then
     echo "check_rustdoc_links: 'cargo metadata' failed — the declared feature" >&2
     echo "       inventory is unknown, so feature coverage cannot be checked:" >&2
     sed 's/^/       /' "$WORK/metadata.err" >&2
-    exit 3
+    die 3 "1 failure(s): METADATA"
   fi
 fi
 
@@ -254,7 +357,7 @@ if [ "${#JSON_FILES[@]}" -gt 0 ]; then
   i=0
   while [ "$i" -lt "${#JSON_FILES[@]}" ]; do
     f="${JSON_FILES[$i]}"
-    [ -f "$f" ] || { echo "check_rustdoc_links: no such file: $f" >&2; exit 2; }
+    [ -f "$f" ] || { echo "check_rustdoc_links: no such file: $f" >&2; die 2 "usage error"; }
     printf '%s\t%s\t%s\t%s\n' \
       "${JSON_LANES[$i]}" "$f" "${JSON_RCS[$i]}" "${JSON_FEATS[$i]}" >> "$DESC"
     i=$((i + 1))
@@ -287,7 +390,7 @@ else
     case "$lane" in
       *[!A-Za-z0-9_-]*|"")
         echo "check_rustdoc_links: lane id '${lane}' is not [A-Za-z0-9_-]+" >&2
-        exit 3
+        die 3 "1 failure(s): LANES-FILE"
         ;;
     esac
     out="$WORK/${lane}.json"
@@ -326,12 +429,26 @@ else
 fi
 
 # Every decision below is made by this Python block over the captured streams.
-# It prints a machine-readable report on stdout that the shell then renders.
-python3 - "$DESC" "$BASELINE" "$UPDATE" "$LANES_FILE" "$META_FILE" <<'PY'
+# It writes a machine-readable report that the shell renders below, then turns
+# into the terminal VERDICT line (#7633).
+#
+# CAPTURED, not streamed straight to stdout: the verdict is computed from the
+# report, so the report has to exist before the last line is written. `|| rc=$?`
+# because the exit status IS the verdict.
+REPORT="$WORK/report.tsv"
+# The sixth argument says whether cargo ran here. In `--json` mode the doc-unit
+# inventory is whatever the fixture declares, so its emptiness is not evidence
+# of a broken metadata read (#7537).
+FIXTURE_MODE=0
+if [ "${#JSON_FILES[@]}" -gt 0 ]; then FIXTURE_MODE=1; fi
+REPORT_RC=0
+python3 - "$DESC" "$BASELINE" "$UPDATE" "$LANES_FILE" "$META_FILE" "$FIXTURE_MODE" \
+  > "$REPORT" <<'PY' || REPORT_RC=$?
 import json, sys, collections, os, re
 
 desc_path, baseline_path, update = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
 lanes_path, meta_path = sys.argv[4], sys.argv[5]
+fixture_mode = sys.argv[6] == "1"
 
 HEADER = """# Per-crate broken intra-doc link baseline (scripts/check_rustdoc_links.sh).
 #
@@ -355,6 +472,12 @@ HEADER = """# Per-crate broken intra-doc link baseline (scripts/check_rustdoc_li
 counts = collections.Counter()
 documented = set()     # rustdoc RAN for these crates (fresh=false doc artifact)
 cached = set()         # rustdoc was SKIPPED for these (fresh=true doc artifact)
+# The same three facts one level finer, per DOC UNIT (#7537). A crate directory
+# holds more than one: trusty-mpm ships a lib and the `tm` bin, and #7506 cached
+# the bin out while re-documenting the lib, which every per-CRATE check passes.
+documented_units = set()   # (crate dir, target name, lib|bin) rustdoc ran for
+cached_units = set()       # ... was served from cache for
+diag_units = set()         # ... emitted an error diagnostic against
 findings = []          # (crate, file:line, message) for every broken link
 seen_findings = set()  # #7466 dedup key: the same link is re-reported per lane
 hard_errors = []       # non-lint errors: the crate did not build
@@ -371,6 +494,33 @@ def crate_of(path):
     if path.startswith("crates/") and len(parts) > 2:
         return parts[1]
     return None
+
+LIB_KINDS = ("lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro")
+
+
+def unit_kind(kinds):
+    """lib|bin, the two kinds `cargo doc` produces a doc unit for.
+
+    Every lib crate-type collapses to "lib": cargo metadata reports an rlib
+    member as `rlib` and the artifact stream as whatever the manifest says, and
+    a census keyed on the spelling rather than the unit would report a phantom
+    shortfall the day a crate changes crate-type.
+    """
+    for k in kinds:
+        if k in LIB_KINDS:
+            return "lib"
+    return kinds[0] if kinds else ""
+
+
+def unit_of(target):
+    """The doc-unit key for a cargo `target` object, or None when unplaceable."""
+    src = target.get("src_path") or ""
+    rel = os.path.relpath(src, os.getcwd()) if src.startswith("/") else src
+    crate = crate_of(rel)
+    if crate is None:
+        return None
+    return (crate, target.get("name") or "", unit_kind(target.get("kind") or []))
+
 
 def is_doc_artifact(filenames):
     """A rustdoc output, as opposed to a compiled rlib for a dependency.
@@ -413,11 +563,16 @@ for lane_id, json_path, lane_rc, _lane_feats in lanes:
             tgt = (m.get("target") or {})
             src = tgt.get("src_path") or ""
             c = crate_of(os.path.relpath(src, os.getcwd())) if src.startswith("/") else crate_of(src)
+            unit = unit_of(tgt)
             if c:
                 if m.get("fresh"):
                     cached.add(c)
+                    if unit:
+                        cached_units.add(unit)
                 else:
                     documented.add(c)
+                    if unit:
+                        documented_units.add(unit)
                     # Per lane, because a lane proves nothing about a feature
                     # whose crate that lane did not re-document (#7466).
                     lane_documented[lane_id].add(c)
@@ -436,6 +591,13 @@ for lane_id, json_path, lane_rc, _lane_feats in lanes:
             continue
 
         parsed_messages += 1
+        # A unit whose doc build FAILS emits no artifact, so the census credits
+        # the diagnostic instead (#7537). cargo names the target on every
+        # `compiler-message`; a stream that does not is simply not counted here,
+        # which can only under-credit and therefore never fails open.
+        diag_unit = unit_of(m.get("target") or {})
+        if diag_unit:
+            diag_units.add(diag_unit)
         # Recorded BEFORE the dedup below, so a lane whose only findings were
         # already seen in an earlier lane still counts as having spoken. This
         # is what keeps LANE-ERROR from firing on the ordinary "cargo exited
@@ -549,6 +711,30 @@ with open(lanes_path) as fh:
 inventory = {}     # package name -> {declared non-default features}
 pkg_src = {}       # package name -> its own src/ directory
 pkg_dir = {}       # package name -> crate directory the baseline is keyed on
+expected_units = {}   # #7537: doc-unit key -> "<package>/<target> (<kind>)"
+
+
+def default_features(featmap):
+    """Every feature reachable from `default`, transitively.
+
+    `required-features` is satisfied against THIS set, not against the literal
+    `default` list: the `tm` bin requires trusty-mpm's `cli`, which `default`
+    turns on, and a check that read only the top level would drop the very unit
+    #7537 is about. A `dep:x` or `x/y` entry terminates the walk — it turns on a
+    DEPENDENCY's feature, not another of this package's.
+    """
+    out, stack = set(), list(featmap.get("default") or [])
+    while stack:
+        f = stack.pop()
+        if f in out:
+            continue
+        out.add(f)
+        if f.startswith("dep:") or "/" in f:
+            continue
+        stack.extend(featmap.get(f) or [])
+    return out
+
+
 with open(meta_path) as fh:
     meta = json.load(fh)
 for pkg in meta.get("packages") or []:
@@ -558,6 +744,37 @@ for pkg in meta.get("packages") or []:
     manifest = pkg.get("manifest_path") or ""
     rel = os.path.relpath(manifest, os.getcwd()) if manifest.startswith("/") else manifest
     pkg_dir[name] = crate_of(rel) or name
+
+    # ---- The doc units this package declares (#7537) ----
+    # Reproduces `cargo doc`'s own selection, so the census measures what cargo
+    # would do rather than what the manifest merely lists. A unit dropped here
+    # is a unit never demanded: under-demanding can only miss a shortfall, while
+    # over-demanding would turn the gate red over a unit cargo never builds.
+    targets = pkg.get("targets") or []
+    defaults = default_features(pkg.get("features") or {})
+    lib_crate_names = {
+        (t.get("name") or "").replace("-", "_")
+        for t in targets
+        if unit_kind(t.get("kind") or []) == "lib" and t.get("doc")
+    }
+    for t in targets:
+        kind = unit_kind(t.get("kind") or [])
+        if kind not in ("lib", "bin") or not t.get("doc"):
+            continue
+        # A bin cargo does not BUILD under default features is not documented
+        # either. Another member may still turn its feature on through feature
+        # unification, in which case the unit comes back examined-but-not-
+        # expected, which is never a failure.
+        if any(f not in defaults for f in (t.get("required-features") or [])):
+            continue
+        # cargo doc skips a bin whose crate name collides with its package's
+        # lib: the lib's documentation is what lands at that path.
+        if kind == "bin" and (t.get("name") or "").replace("-", "_") in lib_crate_names:
+            continue
+        expected_units[(pkg_dir[name], t.get("name") or "", kind)] = (
+            f"{name}/{t.get('name')} ({kind})"
+        )
+
     feats = {f for f in (pkg.get("features") or {}) if f != "default"}
     if not feats:
         continue
@@ -615,6 +832,18 @@ if update:
                   "with no attributable error — refusing to write a baseline "
                   "from a run whose failure is unexplained")
             sys.exit(3)
+    # #7537: and refuse when the run examined fewer doc units than the
+    # workspace declares. Same reasoning as the two refusals above — a baseline
+    # written from a short census records the counts of the units that happened
+    # to run as the whole truth, and it outlives the run that wrote it.
+    short = sorted(set(expected_units) - (documented_units | diag_units))
+    if short:
+        print("FAIL\tUNITS-SHORT\t"
+              + ", ".join(expected_units[k] for k in short[:20])
+              + f" ({len(short)} doc unit(s) declared but not examined) — "
+              "refusing to write a baseline from a run that examined less than "
+              "the workspace")
+        sys.exit(4)
     with open(baseline_path, "w") as fh:
         fh.write(HEADER)
         for crate in sorted(counts):
@@ -774,6 +1003,44 @@ for crate in sorted(baseline):
             "documented it — its zero findings are not evidence"
         )
 
+# ---- FAIL CLOSED 10: the doc-unit census (#7537) -----------------------
+# `examined` above is a set of crate DIRECTORIES and the baseline only lists
+# crates with a history of findings, so a clean-history unit that cargo served
+# from cache was compared against nothing. #7506 merged red that way: the `tm`
+# bin's doc unit was cached out while the trusty-mpm lib in the same directory
+# was re-documented, and the fourth broken link surfaced only on a cache-busting
+# rerun. The census is the comparison that was missing — the units the workspace
+# DECLARES against the units this run actually examined.
+examined_units = documented_units | diag_units
+if not expected_units and not fixture_mode:
+    failures.append(
+        "UNITS-INVENTORY\t`cargo metadata` named ZERO doc units for this "
+        "workspace — the expected set could not be derived, so the examined set "
+        "cannot be checked against it and this run proves nothing"
+    )
+# Silent over a VACUOUS-SCAN, which has already failed at the higher-ranked
+# exit 3: every unit is short there, and pasting the whole workspace under a
+# run in which rustdoc never executed buries the one row that explains it.
+short_units = [] if not examined_units else sorted(set(expected_units) - examined_units)
+# Bounded like every other arm here: a run that examined half the workspace
+# names 20 units and a count, not one row per unit.
+for key in short_units[:20]:
+    why = ("rustdoc was served from cache for it"
+           if key in cached_units
+           else "no lane's stream mentions it at all")
+    failures.append(
+        f"UNITS-SHORT\t{expected_units[key]}: the workspace declares this doc "
+        f"unit but no lane examined it — {why}. Delete "
+        "target/**/.fingerprint/**/doc-* and rerun; if the target is gone for "
+        "good it is gone from `cargo metadata` too, and this row goes with it"
+    )
+if len(short_units) > 20:
+    failures.append(
+        f"UNITS-SHORT\t… and {len(short_units) - 20} further declared doc "
+        f"unit(s) no lane examined ({len(short_units)} of "
+        f"{len(expected_units)} short in total)"
+    )
+
 # ---- FAIL CLOSED 5 + the ratchet itself --------------------------------
 for crate in sorted(counts):
     have = counts[crate]
@@ -807,16 +1074,30 @@ base_total = sum(baseline.values())
 # the default feature set only is the claim #7466 was filed about.
 feature_lanes = sorted(lane_members)
 covered = sum(len(v) for v in inventory.values())
+# Each lane's own cargo status rides along (#7633): a lane that died is part of
+# what this run found, and the summary above the failure rows used to say
+# nothing about it.
 print(f"LANES\t{len(lanes)} pass(es): "
-      + ", ".join(f"{lid}({len(lane_documented.get(lid, set()))} examined)"
-                  for lid, _p, _rc, _f in lanes)
+      + ", ".join(f"{lid}({len(lane_documented.get(lid, set()))} examined, "
+                  f"cargo {rc})" for lid, _p, rc, _f in lanes)
       + f"; {covered} declared feature(s) across {len(inventory)} crate(s), "
       + f"{sum(len(v) for v in no_cfg.values())} NO-CFG, "
       + f"{sum(len(v) for v in skipped.values())} SKIP"
       + (f"; feature lane(s): {', '.join(feature_lanes)}" if feature_lanes else ""))
-print(f"SUMMARY\t{len(documented)} crate(s) examined by rustdoc, {total} broken "
+# The failure count is IN the summary (#7633). A SUMMARY that can read
+# `0 broken link(s), baseline 0` above two FAIL rows is how a reader grepping
+# one line concluded a run was green that exited 3.
+print(f"SUMMARY\t{len(documented)} crate(s) examined by rustdoc, "
+      f"{len(examined_units & set(expected_units))} of {len(expected_units)} "
+      f"declared doc unit(s), {total} broken "
       f"link(s), baseline {base_total}, {parsed_messages} diagnostic(s) examined"
-      + (f", {len(cached)} crate(s) SERVED FROM CACHE" if cached else ""))
+      + (f", {len(cached)} crate(s) SERVED FROM CACHE" if cached else "")
+      + f", {len(failures)} failure(s)")
+# Named, not just counted (#7537): a diff against the declared set is what tells
+# an engineer WHICH unit went missing, and re-running the gate to find out costs
+# a full doc build.
+print("EXAMINED\t" + (", ".join(f"{c}/{n} ({k})" for c, n, k
+                                in sorted(examined_units)) or "nothing"))
 for crate, loc, text in findings:
     print(f"LINK\t{crate}\t{loc}\t{text}")
 for n in notes:
@@ -824,10 +1105,39 @@ for n in notes:
 for f in failures:
     print(f"FAIL\t{f}")
 
+# 3 outranks 4: a run that could not compute a verdict at all has nothing to be
+# short of, and reporting the census over it would name units as missing when
+# the real fault is that nothing ran.
 if any(f.startswith(("BUILD-ERROR", "VACUOUS-SCAN", "NOT-EXAMINED", "UNATTRIBUTABLE",
                      "NOT-DOCUMENTED", "LANES-FILE", "FEATURE-UNCOVERED",
-                     "NO-CFG-STALE", "LANE-NOT-EXAMINED", "LANE-ERROR"))
+                     "NO-CFG-STALE", "LANE-NOT-EXAMINED", "LANE-ERROR",
+                     "UNITS-INVENTORY"))
        for f in failures):
     sys.exit(3)
+if any(f.startswith("UNITS-SHORT") for f in failures):
+    sys.exit(4)
 sys.exit(1 if failures else 0)
 PY
+
+# ---- Render the report, then the terminal VERDICT line (#7633) ----------
+# The verdict is READ OFF the report rather than restated, so the two cannot
+# drift: the codes it names are the FAIL rows that were actually printed.
+cat "$REPORT"
+FAIL_COUNT="$(awk -F'\t' '$1 == "FAIL"' "$REPORT" | wc -l | tr -d ' ')"
+FAIL_CODES="$(awk -F'\t' '$1 == "FAIL" { print $2 }' "$REPORT" | LC_ALL=C sort -u \
+  | tr '\n' ',' | sed 's/,$//; s/,/, /g')"
+# A scorer that DIED exits 1, and so does a genuine link regression. They are
+# not the same answer: rc 1 is defined as "at least one FAIL row was printed",
+# so rc 1 with none means the traceback on stderr is the whole story, and that
+# is a 3 — the gate could not compute a verdict.
+if [ "$REPORT_RC" -eq 1 ] && [ "$FAIL_COUNT" -eq 0 ]; then
+  echo "check_rustdoc_links: the scorer exited 1 having printed no failure row" >&2
+  echo "       — it died before reporting; its traceback is above" >&2
+  die 3 "1 failure(s): SCORER-DIED"
+fi
+if [ "$REPORT_RC" -eq 0 ]; then
+  emit_verdict 0 "${FAIL_COUNT} failure(s)"
+else
+  emit_verdict "$REPORT_RC" "${FAIL_COUNT} failure(s): ${FAIL_CODES:-unreported}"
+fi
+exit "$REPORT_RC"

@@ -58,6 +58,19 @@
 #   lane must FAIL rather than skip, an unplaced feature must fail, a NO-CFG
 #   exemption is re-verified, and one link counts once across lanes.
 #
+#   #7537 added the doc-unit census cases, and made every case hermetic to get
+#   them: the pre-#7537 loop scored its fixtures against the LIVE workspace's
+#   `cargo metadata`, so a two-crate stream now measures short against 37 real
+#   doc units. Every case therefore names a METADATA_OVERRIDE — metadata-mini
+#   (no targets, so the census demands nothing) for the arms that predate it,
+#   metadata-units (a lib and a bin) for the census's own three.
+#
+#   #7633 is asserted differently from all of the above: as an invariant on
+#   EVERY case rather than a case of its own. `assert_verdict` reads the last
+#   line of each case's output and fails unless it names that case's actual exit
+#   status, which is the closure condition the issue states — grepping one line
+#   predicts the exit code. Against the pre-#7633 gate all 22 cases fail there.
+#
 # Test: this IS the test. Run directly:
 #   bash scripts/check_rustdoc_links_selftest.sh
 #   bash scripts/check_rustdoc_links_selftest.sh --gate /path/to/gate.sh
@@ -99,6 +112,25 @@ printf '# empty baseline for the self-test\n' > "$EMPTY_BASELINE"
 
 TAB="$(printf '\t')"
 
+# THE #7633 INVARIANT, asserted on EVERY case below rather than in one of its
+# own. The gate printed a clean-looking SUMMARY above two FAIL rows and exited
+# 3, so the closure condition is that the LAST LINE alone predicts the exit
+# status — which is worth something only if every case is held to it.
+assert_verdict() {   # <name> <output file> <actual exit>
+  verdict_line="$(tail -n 1 "$2")"
+  case "$3" in
+    0) want="VERDICT${TAB}PASS${TAB}exit 0${TAB}" ;;
+    *) want="VERDICT${TAB}FAIL${TAB}exit $3${TAB}" ;;
+  esac
+  case "$verdict_line" in
+    "$want"*) return 0 ;;
+  esac
+  echo "FAIL  $1: exit $3, but the last line of output does not name it:"
+  echo "        last line: ${verdict_line}"
+  fail=1
+  return 1
+}
+
 # fixture<TAB>cargo_rc<TAB>expected_exit<TAB>expected_code ("-" when exit 0)
 CASES="cached-no-op.json${TAB}0${TAB}3${TAB}VACUOUS-SCAN
 cached-no-op.json${TAB}101${TAB}3${TAB}VACUOUS-SCAN
@@ -125,7 +157,14 @@ while IFS="$TAB" read -r fixture cargo_rc expected_exit expected_code; do
 
   out="$WORK/out.txt"
   actual_exit=0
+  # #7537: the fixture world, not the real workspace. These cases pin arms with
+  # nothing to do with the live inventory, and scoring a two-crate stream against
+  # a real `cargo metadata` would fail every one of them on the doc-unit census
+  # instead of the arm each is named for. metadata-mini declares no targets, so
+  # the census demands nothing here; its own cases carry metadata-units.json.
   BASELINE_OVERRIDE="$EMPTY_BASELINE" \
+    LANES_OVERRIDE="$FIXTURE_DIR/lanes-mini.tsv" \
+    METADATA_OVERRIDE="$FIXTURE_DIR/metadata-mini.json" \
     bash "$GATE" --json "$fixture_path" --cargo-rc "$cargo_rc" \
     > "$out" 2>&1 || actual_exit=$?
 
@@ -144,6 +183,8 @@ while IFS="$TAB" read -r fixture cargo_rc expected_exit expected_code; do
       continue
     fi
   fi
+
+  assert_verdict "$fixture (cargo_rc=$cargo_rc)" "$out" "$actual_exit" || continue
 
   echo "ok    $fixture (cargo_rc=$cargo_rc) -> exit $actual_exit ${expected_code}"
 done <<EOF
@@ -186,6 +227,7 @@ lane_case() {
     fail=1
     return
   fi
+  assert_verdict "$name" "$out" "$actual_exit" || return 0
   echo "ok    $name -> exit $actual_exit ${expected_code}"
 }
 
@@ -231,6 +273,61 @@ LANE_BASELINE="$DEMO_BASELINE" \
   --json "$FIXTURE_DIR/lane-feature-link.json" --lane features --cargo-rc 101
 
 # ===========================================================================
+# THE DOC-UNIT CENSUS (#7537). The gate compared the examined set against the
+# BASELINE, which lists only crates with a history of findings, so a clean doc
+# unit that cargo served from cache was compared against nothing at all.
+#
+# `units_case` is `lane_case` with the doc-unit inventory pointed at
+# metadata-units.json, which — unlike metadata-mini — declares targets: a `demo`
+# lib and a `demo-cli` bin, both in the crates/demo directory.
+# ===========================================================================
+units_case() {
+  name="$1"; expected_exit="$2"; expected_code="$3"
+  shift 3
+  run=$((run + 1))
+  out="$WORK/out-$name.txt"
+  actual_exit=0
+  BASELINE_OVERRIDE="$EMPTY_BASELINE" \
+    LANES_OVERRIDE="$FIXTURE_DIR/lanes-mini.tsv" \
+    METADATA_OVERRIDE="$FIXTURE_DIR/metadata-units.json" \
+    bash "$GATE" "$@" > "$out" 2>&1 || actual_exit=$?
+
+  if [ "$actual_exit" != "$expected_exit" ]; then
+    echo "FAIL  $name: expected exit $expected_exit, got $actual_exit"
+    sed 's/^/        /' "$out"
+    fail=1
+    return
+  fi
+  if [ "$expected_code" != "-" ] && ! grep -q "$expected_code" "$out"; then
+    echo "FAIL  $name: exit $actual_exit correct, but '$expected_code' not reported"
+    sed 's/^/        /' "$out"
+    fail=1
+    return
+  fi
+  assert_verdict "$name" "$out" "$actual_exit" || return 0
+  echo "ok    $name -> exit $actual_exit ${expected_code}"
+}
+
+# THE REGRESSION CASE — the #7506 shape. The crate DIRECTORY is examined (its
+# lib unit was re-documented), so every per-crate arm passes: `documented` holds
+# `demo`, `cached - documented` is empty, and the baseline has no row to miss.
+# Only the census sees that the `demo-cli` BIN unit was served from cache, which
+# is how a fourth broken link inside `tm` reached main behind a green gate.
+units_case units-short 4 'demo/demo-cli (bin)' \
+  --json "$FIXTURE_DIR/units-bin-cached.json"
+
+# The counterweight: the same two units, both freshly documented, is a pass. A
+# census that could never go green would be switched off rather than fixed.
+units_case units-complete 0 - \
+  --json "$FIXTURE_DIR/units-both.json"
+
+# A unit whose doc build FAILED emits no artifact at all. Crediting only
+# artifacts would report it as un-examined — exactly backwards, and it would
+# bury a real link regression under a census failure it caused itself.
+units_case units-diagnostic-counts-as-examined 1 UNBASELINED \
+  --json "$FIXTURE_DIR/units-bin-broken.json" --cargo-rc 101
+
+# ===========================================================================
 # --update-baseline (#7598). The write path scores lanes with its own loop, so
 # it needs its own cases: a fail-closed arm proven on the VERDICT path says
 # nothing about the path that REWRITES the ratchet, and a bad baseline outlives
@@ -255,7 +352,7 @@ update_case() {
   actual_exit=0
   BASELINE_OVERRIDE="$target" \
     LANES_OVERRIDE="$FIXTURE_DIR/$lanes" \
-    METADATA_OVERRIDE="$FIXTURE_DIR/metadata-mini.json" \
+    METADATA_OVERRIDE="${UPDATE_METADATA:-$FIXTURE_DIR/metadata-mini.json}" \
     bash "$GATE" --update-baseline "$@" > "$out" 2>&1 || actual_exit=$?
 
   if [ "$actual_exit" != "$expected_exit" ]; then
@@ -284,6 +381,7 @@ update_case() {
       return
     fi
   fi
+  assert_verdict "$name" "$out" "$actual_exit" || return 0
   echo "ok    $name -> exit $actual_exit ${expected_code} (baseline ${baseline_want})"
 }
 
@@ -314,6 +412,13 @@ update_case update-lane-unbuildable lanes-mini.tsv 3 LANE-NOT-EXAMINED keep \
 update_case update-lane-diag-writes lanes-mini.tsv 0 BASELINE-UPDATED written \
   --json "$FIXTURE_DIR/lane-documented.json" --lane default \
   --json "$FIXTURE_DIR/lane-feature-link.json" --lane features --cargo-rc 101
+
+# #7537 on the WRITE path, for the reason this whole section exists: the census
+# refusal is a second copy of the verdict-path arm, and the counts a short run
+# records become the ratchet every later run is scored against.
+UPDATE_METADATA="$FIXTURE_DIR/metadata-units.json" \
+  update_case update-units-short lanes-mini.tsv 4 UNITS-SHORT keep \
+  --json "$FIXTURE_DIR/units-bin-cached.json"
 
 echo
 if [ "$fail" -ne 0 ]; then
