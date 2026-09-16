@@ -127,7 +127,11 @@ fn seeded_state_renders_live_project_and_its_session() {
         .iter()
         .map(|s| s.content.as_ref())
         .collect();
-    assert!(text.contains("a1b2c3d4"), "missing short id: {text}");
+    // #8163: the row labels itself with the session name, not the short id.
+    assert!(
+        text.contains("s-a1b2c3d4e5f6"),
+        "missing session name: {text}"
+    );
     assert!(text.contains("ship it"), "missing task: {text}");
 }
 
