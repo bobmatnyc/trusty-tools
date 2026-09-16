@@ -182,8 +182,10 @@ fn roster_source_bytes_from(dirs: &[std::path::PathBuf]) -> usize {
         .unwrap_or(0)
 }
 
-/// [`record_instruction_compression_in`] against an explicit framework root,
-/// session id and price.
+// #8019: the entry point this names was renamed by #7514/#7584; the link
+// still pointed at the pre-split `record_instruction_compression_in`.
+/// [`record_instruction_compression_in_with`] against an explicit framework
+/// root, session id and price.
 ///
 /// Why: the three ambient reads the entry point makes — the framework root under
 /// the operator's home, the harness's session-id variable, and the configured
