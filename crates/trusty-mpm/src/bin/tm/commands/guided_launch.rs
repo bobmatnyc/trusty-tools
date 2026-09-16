@@ -128,9 +128,9 @@ fn provisioning_message(label: Option<&str>, detail: Option<&str>) -> String {
 /// What that path does with a LOCAL `repo_url` changed under this comment and
 /// the old wording — "never write framework files into the live checkout" — is
 /// no longer true of it. ADR-0037 made a local working-tree root run on that
-/// checkout by default, and `spawn_managed_on_main` deploys `.claude/`, the
-/// bundled skills, and `TASK.md` into it. That is permitted configuration
-/// under ADR-0044, which restricts the same checkout to documents and
+/// checkout by default, and `spawn_managed_on_main` deploys `.claude/` and the
+/// bundled skills into it — but never `TASK.md`, which #7879 confined to a
+/// provisioned worktree. That is permitted configuration under ADR-0044, which restricts the same checkout to documents and
 /// configuration and nothing else. #1724's actual guarantee — that the
 /// daemon-unreachable FALLBACK never deploys into a checkout it was not told
 /// it could — lives in `provision_for_fallback` and is unchanged.

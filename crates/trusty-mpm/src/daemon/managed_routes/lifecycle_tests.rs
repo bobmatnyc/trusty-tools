@@ -792,6 +792,87 @@ async fn spawn_managed_on_main_creates_record_without_worktree() {
     );
 }
 
+/// A launch-on-main spawn leaves the operator's checkout byte-for-byte clean.
+///
+/// Why (#7879): this path's workspace IS the live checkout, and it used to drop
+/// the session's brief into it as `TASK.md` — a 32-byte untracked file that
+/// dirtied a tracked-file guard, and which the session could not clean up. The
+/// observable the issue reports is `git status --porcelain`, so that is what
+/// this asserts, over a real repo with a real (non-empty) task.
+/// What: drives the real `spawn_managed_on_main` with a non-empty task and
+/// requires `git status --porcelain` to name no `TASK.md` and the file itself to
+/// be absent. Fails on pre-#7879 code, where the write happens before
+/// `prepare_inproject_session`.
+/// Test: itself.
+#[tokio::test]
+#[serial_test::serial]
+async fn spawn_managed_on_main_never_writes_task_md_into_the_checkout() {
+    let tmp_home = tempfile::TempDir::new().expect("tmp home");
+    let _home = set_home(tmp_home.path());
+    let data_root = tempfile::TempDir::new().expect("tmp data root");
+    let state = std::sync::Arc::new(
+        crate::daemon::state::DaemonState::with_root_isolated_managed(
+            data_root.path().to_path_buf(),
+        )
+        .await,
+    );
+
+    let checkout = tempfile::TempDir::new().expect("tmp checkout dir");
+    let local_path = checkout.path();
+    assert!(
+        std::process::Command::new("git")
+            .arg("init")
+            .current_dir(local_path)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false),
+        "git init must succeed in this test fixture"
+    );
+
+    let session_id = ManagedSessionId::new();
+    let params = SpawnParams {
+        repo_url: local_path.to_string_lossy().into_owned(),
+        git_ref: "main".into(),
+        // The exact brief the #7879 report found stranded in the checkout.
+        task: "qa-8066 verification throwaway".into(),
+        name_hint: None,
+        runtime: None,
+        ephemeral: Some(true),
+        mcp_initiated: false,
+        inject_task: None,
+        deliverable_id: None,
+        force_new: false,
+        worktree: false,
+    };
+
+    spawn_managed_on_main(
+        &state,
+        &session_id,
+        &params,
+        crate::runtime::RuntimeKind::ClaudeCode,
+        local_path,
+        "acme",
+        "writing",
+    )
+    .await
+    .expect("spawn_managed_on_main must succeed against a real git repo");
+
+    assert!(
+        !local_path.join("TASK.md").exists(),
+        "TASK.md must never be written into a live checkout (#7879)"
+    );
+    let porcelain = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(local_path)
+        .output()
+        .expect("git status must run");
+    let porcelain = String::from_utf8_lossy(&porcelain.stdout);
+    assert!(
+        !porcelain.contains("TASK.md"),
+        "the checkout's `git status --porcelain` must not gain a TASK.md entry, got:\n{porcelain}"
+    );
+}
+
 /// `tm connect`'s launch-on-main spawn hands the adapter the prepared reachability (#7685).
 ///
 /// Why: preparation resolves reachability, and the runtime adapter used to be

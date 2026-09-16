@@ -8,8 +8,9 @@
 //! in one small sibling module, matching the existing `inproject.rs` split.
 //! The functions are `pub(super)` so `lifecycle::spawn_managed_routed` (the
 //! only caller) can route to them; the shared spawn helpers they reuse
-//! (`write_task_md`/`prepare_inproject_session`/`front_gate_or_escalate`/
-//! `resolve_gh_env`) stay owned by `lifecycle` and are called back into.
+//! (`prepare_inproject_session`/`front_gate_or_escalate`/`resolve_gh_env`)
+//! stay owned by `lifecycle` and are called back into. `write_task_md` is
+//! deliberately NOT among them (#7879) — see [`spawn_managed_on_main`].
 //! What: [`has_concurrent_main_checkout_session`] (pure collision detector)
 //! and [`spawn_managed_on_main`] (the no-worktree spawn flow).
 //!
@@ -36,7 +37,7 @@ use tracing::{info, warn};
 
 use super::deployment_check::ensure_deployment_complete;
 use super::lifecycle::{
-    SpawnParams, front_gate_or_escalate, prepare_inproject_session, resolve_gh_env, write_task_md,
+    SpawnParams, front_gate_or_escalate, prepare_inproject_session, resolve_gh_env,
 };
 use crate::daemon::state::DaemonState;
 use crate::runtime::RuntimeKind;
@@ -85,7 +86,11 @@ pub(super) fn has_concurrent_main_checkout_session<'a>(
 /// operations), so this is the collision caveat #3455 asks to surface; (2)
 /// resolves the semantic tmux name via `SessionManager::resolve_session_name`
 /// with no worktree-collision predicate (there is no worktree to collide
-/// with); (3) writes `TASK.md`; (4) runs `prepare_inproject_session` directly
+/// with); (3) writes NO `TASK.md` — #7879: this path's workspace IS the
+/// operator's live checkout, and a brief file dropped there is an untracked
+/// file the session never cleans up; the task reaches the runtime through
+/// `adapter.spawn` and is persisted on the record; (4) runs
+/// `prepare_inproject_session` directly
 /// against `local_path` (mirrors `spawn_managed_inproject`'s #1913 fix — no
 /// clone step wraps this path either); (5) creates the session record with
 /// `workspace_owned = false` — the operator's own checkout must NEVER be
@@ -95,7 +100,8 @@ pub(super) fn has_concurrent_main_checkout_session<'a>(
 /// `local_path` never does); (6) sets `source_id`; (7) front gates; (8)
 /// marks `Active`; (9) spawns the runtime.
 /// Test: `spawn_managed_on_main_creates_record_without_worktree`,
-/// `spawn_managed_on_main_warns_on_concurrent_main_checkout_session` in
+/// `spawn_managed_on_main_warns_on_concurrent_main_checkout_session`,
+/// `spawn_managed_on_main_never_writes_task_md_into_the_checkout` in
 /// `lifecycle_tests.rs`.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn spawn_managed_on_main(
@@ -149,8 +155,14 @@ pub(super) async fn spawn_managed_on_main(
         .await
         .map_err(|e| format!("name resolution failed for session {session_id}: {e}"))?;
 
-    write_task_md(local_path, &params.task, session_id);
-
+    // #7879: NO `write_task_md` here. `TASK.md` belongs in a workspace tm
+    // provisioned — a per-session worktree — never in the operator's live
+    // checkout, which this path runs directly in. Writing it there dirtied a
+    // tracked-file guard and left a stray, untracked `TASK.md` behind that the
+    // session could not clean up (the record was then undecommissionable under
+    // the #3764 guard). Nothing is lost: `params.task` is persisted on the
+    // record below and handed to `adapter.spawn` as the runtime's opening
+    // brief, which is how this path has always delivered it.
     let synthetic_repo_url = format!("https://github.com/{owner}/{repo}");
     let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(local_path);
     // #7685: keep the reachability preparation resolved; the adapter reuses it.
