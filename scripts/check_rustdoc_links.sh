@@ -1018,9 +1018,12 @@ if not expected_units and not fixture_mode:
         "workspace — the expected set could not be derived, so the examined set "
         "cannot be checked against it and this run proves nothing"
     )
-short_units = sorted(set(expected_units) - examined_units)
-# Bounded like every other arm here: a run that examined nothing names 20 units
-# and a count, not the whole workspace one row at a time.
+# Silent over a VACUOUS-SCAN, which has already failed at the higher-ranked
+# exit 3: every unit is short there, and pasting the whole workspace under a
+# run in which rustdoc never executed buries the one row that explains it.
+short_units = [] if not examined_units else sorted(set(expected_units) - examined_units)
+# Bounded like every other arm here: a run that examined half the workspace
+# names 20 units and a count, not one row per unit.
 for key in short_units[:20]:
     why = ("rustdoc was served from cache for it"
            if key in cached_units
