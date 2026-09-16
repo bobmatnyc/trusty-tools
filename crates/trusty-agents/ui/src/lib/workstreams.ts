@@ -43,7 +43,12 @@ export async function fetchWorkstreams(): Promise<WorkstreamSummary[]> {
   try {
     const r = await fetch(`${apiBase()}/api/workstreams`, { headers: authHeaders() });
     if (!r.ok) return [];
-    return (await r.json()) as WorkstreamSummary[];
+    // #7456: "never surface a network error as a crash" has to cover a 200
+    // whose body is not an array too — the unchecked cast let a non-array
+    // reach `groupByAgent`, whose spread threw "is not iterable" out of the
+    // sidebar's mount.
+    const body = await r.json();
+    return Array.isArray(body) ? (body as WorkstreamSummary[]) : [];
   } catch {
     return [];
   }

@@ -324,6 +324,17 @@ export async function fetchModelCatalog(): Promise<void> {
     throw new Error(`GET /api/models failed: ${r.status}`);
   }
   const data = (await r.json()) as ModelsCatalogResponse;
+  // #7456: a 200 carrying a body that is not a catalog used to be stored
+  // verbatim, and `buildPicker`'s `catalog.providers.filter(…)` then threw
+  // during render — which aborts the whole ChatPane mount, not just the
+  // switcher. The `null` store value already has a rendering branch
+  // (`ModelSwitcher.svelte:31` falls back to "Default" only), so rejecting a
+  // malformed body here is what makes this function's documented fallback
+  // real for a bad body as well as a bad status.
+  if (!data || !Array.isArray(data.providers) || !data.local) {
+    modelCatalog.set(null);
+    throw new Error('GET /api/models returned a body without a providers/local catalog');
+  }
   modelCatalog.set(data);
 }
 

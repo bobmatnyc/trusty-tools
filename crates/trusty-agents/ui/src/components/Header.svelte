@@ -128,7 +128,13 @@
       {desktop ? 'Desktop' : 'Web'}
     </span>
 
+    <!-- #7456: the machine-readable twin of the "API Ready" / "Connecting"
+         label. `smoke.spec.ts` used to infer readiness from the set of startup
+         endpoints the app hit, which silently decayed when one of them stopped
+         being called; this attribute IS the state the pill renders, so it
+         cannot drift from it. -->
     <span
+      data-api-status={apiReady ? 'ready' : 'connecting'}
       class="inline-flex h-8 items-center gap-1.5 rounded-md border border-foundry-light-border dark:border-foundry-border px-2 font-mono text-[10px] font-semibold uppercase tracking-wide {apiReady
         ? 'bg-green-500/15 text-green-600 dark:text-green-400'
         : 'bg-foundry-light-surface dark:bg-foundry-surface text-foundry-light-muted dark:text-foundry-text/50'}"

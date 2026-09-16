@@ -55,7 +55,12 @@ test('pastes image and quoted spreadsheet cells into a typed task payload', asyn
   await expect(page.getByRole('button',{name:'Remove cells.csv',exact:true})).toBeVisible();
   await page.getByRole('button',{name:'Send message',exact:true}).click();
   await expect.poll(() => submitted).toBeTruthy();
-  const attachments = submitted!.attachments as Array<Record<string, any>>;
+  // #7456: the composer sends PREPARED BODIES, whose wire name is
+  // `inline_attachments` (`lib/transport.ts:130`, and `TaskRequest` in
+  // `src/api/server/handlers.rs:37-42` spells out why it is not `attachments`
+  // — that key carries ids). Reading `attachments` here got `undefined` and
+  // the spec died on `attachments[0]` before asserting anything.
+  const attachments = submitted!.inline_attachments as Array<Record<string, any>>;
   expect(attachments[0]).toMatchObject({kind:'image',name:'red-square.png',mime_type:'image/png'});
   expect(attachments[0].data_base64).toMatch(/^iVBOR/);
   expect(attachments[1].sheets[0].rows).toEqual([['name','notes','empty'],['Alice','one,two\nthree','']]);
