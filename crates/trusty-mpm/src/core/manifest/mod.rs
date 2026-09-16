@@ -17,6 +17,7 @@
 
 mod apply;
 mod default;
+mod detect_memo;
 pub mod framework;
 mod nested;
 pub(crate) mod project_lang;
@@ -26,6 +27,7 @@ mod workspace;
 
 pub use apply::HarnessPlan;
 pub use default::{DEFAULT_DIVERT_MIN_LINES, DEFAULT_DIVERT_WORKER_MODEL, default_manifest};
+pub use detect_memo::invalidate_stack_detection;
 pub use framework::{
     FRAMEWORK_MANIFEST_FILE, FrameworkManifestError, framework_agent_categories,
     framework_skill_categories,

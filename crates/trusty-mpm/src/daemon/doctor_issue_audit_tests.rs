@@ -70,6 +70,28 @@ fn issue_audit_violations_warn_with_the_numbers() {
     );
 }
 
+/// The warning's remediation names the attach that works (#7952).
+///
+/// Why: `gh issue edit <N> --add-project "<title>"` exits 0 without attaching
+/// when the title does not resolve in the scope gh derives from the repository,
+/// so a doctor row that offers it sends the operator back to the same no-op.
+/// What: the `Warn` message carries the owner-scoped, number-keyed form only.
+#[test]
+fn issue_audit_warning_names_the_owner_scoped_attach() {
+    let check = build_issue_audit_check(Ok(vec![broken(7945, "project")]));
+    assert_eq!(check.status, CheckStatus::Warn);
+    assert!(
+        check.message.contains("gh project item-add"),
+        "{}",
+        check.message
+    );
+    assert!(
+        !check.message.contains("--add-project"),
+        "the silent form must not be offered: {}",
+        check.message
+    );
+}
+
 #[test]
 fn issue_audit_gh_failure_is_not_a_pass() {
     // #7097, the Fail-Open Check: an audit that could not run must never report

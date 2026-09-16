@@ -138,6 +138,9 @@ pub fn sync_session_assets(
     fw: &FrameworkPaths,
     project_dir: &Path,
 ) -> Result<SyncAssetsReport, SyncAssetsError> {
+    // #7806: a sync is a top-level operation, so it opens its own
+    // stack-detection scope rather than inheriting the last launch's.
+    crate::core::manifest::invalidate_stack_detection(project_dir);
     let catalog_root = crate::content::catalog_root_for(&fw.root);
     let sources = crate::core::manifest::ManifestSources::resolve(project_dir, &catalog_root);
     let manifest = crate::core::manifest::resolve_manifest(&sources);
