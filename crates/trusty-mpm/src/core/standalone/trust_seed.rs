@@ -169,7 +169,8 @@ fn prune_stale_project_entries(
 /// understanding that this change removes the mechanism: this seeder applied no
 /// `project_scope_mcp_names` subtraction (#2739), so a repo `[mcp.custom]` name
 /// colliding with an operator registry name was pre-approved on `tm launch` /
-/// `tm connect`. With no approval written, there is nothing to collide with.
+/// `tm connect`. With no approval written, there is nothing to collide with —
+/// and #7894 removed the `[mcp.custom]` table itself.
 ///
 /// What: reads `<claude_config_dir>/.claude.json` (starts from `{}` when absent;
 /// a malformed file is quarantined to a timestamped path — #4206 — and seeding

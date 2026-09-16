@@ -92,16 +92,13 @@ Claude Code's approval decision, not tm's (#7892).
   server you `tm mcp add` reaches EVERY fleet session, in every project. Proof:
   `prepare_session_reaches_an_operator_registered_server_through_user_scope`,
   `resolve_scope_never_filters_the_user_scope`.
-- **Project scope**: a project's own `<project>/.trusty-mpm/manifest.toml`
-  `[mcp.custom.<name>]` table (the same per-project override file
-  `[agents]`/`[skills]` already use) declares servers scoped to THAT project's
-  fleet sessions only, and — on a name collision — OVERRIDES the user-scope
-  registry entry of the same name. Its `env` values route to the workspace
-  `.env.local`, never the git-tracked `.mcp.json`, and a remote entry carrying
-  `headers` is rejected outright rather than leaked into a tracked file. A
-  reserved name (`trusty-memory`, `trusty-mpm`, `trusty-review`,
-  `trusty-search`) declared here is always REJECTED — a project manifest can
-  never override one (issue #3033).
+- **Project scope: there is none (#7894).** A project manifest's
+  `[mcp.custom.<name>]` table was designed as the per-project half of this,
+  but its only consumer — the injector that wrote the workspace `.mcp.json` —
+  was deleted by ADR-0042, so the table resolved through three merge layers and
+  was read by nothing. #7894 removed it. A manifest still carrying one parses
+  and has no effect. Declare a custom server once, in user scope, with
+  `tm mcp add`.
 - **Consent gate (issue #3033, narrowed by #7892):** `tm project trust
   [--dir <path>]` now grants exactly one thing — the project's
   `[session] plugins` opt-ins. A plugin ships its own skills, commands and hooks

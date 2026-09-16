@@ -56,10 +56,11 @@ pub const MCP_JSON: &str = ".mcp.json";
 /// `trusty-mpm`'s launch command is FRAMEWORK-CONTROLLED — the `trusty-mpm`
 /// binary itself, run via [`builtin_server_entry`] — never sourced from a
 /// cloned repo's `.mcp.json` content, so it is safe to trust unconditionally
-/// exactly like the other three. It is also a reserved name (see
-/// `session_launch::custom_mcp::is_reserved_name`, which already checks
-/// membership in this list), so no `[mcp.custom]` manifest or `tm mcp add`
-/// entry can shadow it.
+/// exactly like the other three. It is also a reserved name — the list below
+/// IS that set. (This sentence used to name
+/// `session_launch::custom_mcp::is_reserved_name` as the checker and the
+/// `[mcp.custom]` manifest table as the other thing it kept out; ADR-0042
+/// deleted that module and #7894 the table.)
 ///
 /// **This is the full RESERVED-NAME set (issue #3934 preserved this
 /// unchanged) — do NOT use it to derive an approval/trust list.** For that,
@@ -121,8 +122,8 @@ pub const CONDITIONAL_BUILTIN_TRUSTY_SEARCH: &str = "trusty-search";
 /// and the PROJECT layer (`<project>/.trusty-mpm/manifest.toml`) is
 /// git-tracked, cloned-with-the-repo content — content a hostile or
 /// compromised repo controls directly, exactly like the `.mcp.json` entry
-/// itself. Unlike `[mcp.custom]` (gated by `core::project_trust::is_project_trusted`
-/// since issue #2739), this toggle has NO trust gate: an untrusted repo can
+/// itself. Unlike the `[mcp.custom]` table (trust-gated since issue #2739, and
+/// removed outright by #7894), this toggle has NO trust gate: an untrusted repo can
 /// set `[mcp] trusty_memory = false` and disable the force-overwrite that
 /// [`managed_mcp_server_names`]'s content-blind approval assumed always ran.
 /// Combined with a spoofed `.mcp.json` entry under the same name, this let an

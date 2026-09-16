@@ -52,13 +52,6 @@ fn manifest_roundtrip() {
         mcp: Some(McpServers {
             trusty_memory: Some(true),
             trusty_search: Some(false),
-            custom: BTreeMap::from([(
-                "duetto-memory".to_string(),
-                CustomMcpServer::Http {
-                    url: "https://mcp.example/memory".to_string(),
-                    headers: BTreeMap::new(),
-                },
-            )]),
         }),
         models: Some(ModelTiers {
             lightweight: Some("haiku".into()),
@@ -115,7 +108,6 @@ fn manifest_merge_overrides() {
         mcp: Some(McpServers {
             trusty_memory: Some(true),
             trusty_search: Some(true),
-            ..McpServers::default()
         }),
         ..HarnessManifest::default()
     };
@@ -165,7 +157,6 @@ fn manifest_merge_mcp_field_level() {
         mcp: Some(McpServers {
             trusty_memory: Some(true),
             trusty_search: Some(true),
-            ..McpServers::default()
         }),
         ..HarnessManifest::default()
     };
@@ -173,7 +164,6 @@ fn manifest_merge_mcp_field_level() {
         mcp: Some(McpServers {
             trusty_memory: None,
             trusty_search: Some(false),
-            ..McpServers::default()
         }),
         ..HarnessManifest::default()
     };
@@ -318,126 +308,29 @@ fn agent_set_source_default_is_bundled() {
 }
 
 #[test]
-fn custom_mcp_server_stdio_roundtrip() {
-    // A project-scope `[mcp.custom.<name>]` stdio table must round-trip and
-    // parse from the exact TOML shape an operator would hand-write.
+fn a_custom_mcp_table_parses_and_is_dropped() {
+    // #7894: `[mcp.custom.<name>]` used to deserialize into `McpServers.custom`,
+    // merge by name across layers, and land in `HarnessPlan.custom_mcp_servers`
+    // — where it stopped. ADR-0042 deleted its only reader,
+    // `session_launch::custom_mcp`, with every other workspace `.mcp.json`
+    // injector, so the field is gone. A manifest still carrying the table must
+    // keep PARSING (serde ignores the unknown key) and must leave the `[mcp]`
+    // toggles it declares alongside intact.
     let toml = r#"
+[mcp]
+trusty_search = false
+
 [mcp.custom.my-local-tool]
 type = "stdio"
 command = "my-tool"
 args = ["serve"]
-
-[mcp.custom.my-local-tool.env]
-API_KEY = "secret"
 "#;
+
     let parsed = HarnessManifest::from_toml(toml).expect("parse");
-    let custom = &parsed.mcp.expect("mcp section present").custom;
-    let entry = custom.get("my-local-tool").expect("entry present");
-    match entry {
-        CustomMcpServer::Stdio { command, args, env } => {
-            assert_eq!(command, "my-tool");
-            assert_eq!(args, &vec!["serve".to_string()]);
-            assert_eq!(env.get("API_KEY").map(String::as_str), Some("secret"));
-        }
-        other => panic!("expected Stdio, got {other:?}"),
-    }
-}
 
-#[test]
-fn custom_mcp_server_remote_roundtrip() {
-    // The http/sse shapes must round-trip too, matching the acceptance
-    // example (a clean URL, no headers).
-    let toml = r#"
-[mcp.custom.duetto-memory]
-type = "http"
-url = "https://mcp-services.dev.duettosystems.com/memory/mcp"
-"#;
-    let parsed = HarnessManifest::from_toml(toml).expect("parse");
-    let custom = parsed.mcp.expect("mcp section present").custom;
-    match custom.get("duetto-memory").expect("entry present") {
-        CustomMcpServer::Http { url, headers } => {
-            assert_eq!(url, "https://mcp-services.dev.duettosystems.com/memory/mcp");
-            assert!(headers.is_empty());
-        }
-        other => panic!("expected Http, got {other:?}"),
-    }
-
-    // Full struct round-trip (serialize → parse) for both remote variants.
-    let manifest = HarnessManifest {
-        mcp: Some(McpServers {
-            custom: BTreeMap::from([
-                (
-                    "a".to_string(),
-                    CustomMcpServer::Http {
-                        url: "https://a.example/mcp".to_string(),
-                        headers: BTreeMap::new(),
-                    },
-                ),
-                (
-                    "b".to_string(),
-                    CustomMcpServer::Sse {
-                        url: "https://b.example/sse".to_string(),
-                        headers: BTreeMap::new(),
-                    },
-                ),
-            ]),
-            ..McpServers::default()
-        }),
-        ..HarnessManifest::default()
-    };
-    let toml = manifest.to_toml().expect("serialize");
-    let parsed = HarnessManifest::from_toml(&toml).expect("parse");
-    assert_eq!(manifest, parsed);
-}
-
-#[test]
-fn mcp_servers_merge_unions_custom() {
-    // Two layers each declaring a DIFFERENT custom server must both survive
-    // the merge (union by name); a SHARED name must take the higher layer's
-    // definition (project-overrides-user precedent extended to multi-layer
-    // manifest merging too).
-    let lower = McpServers {
-        custom: BTreeMap::from([
-            (
-                "shared".to_string(),
-                CustomMcpServer::Stdio {
-                    command: "lower-cmd".to_string(),
-                    args: vec![],
-                    env: BTreeMap::new(),
-                },
-            ),
-            (
-                "lower-only".to_string(),
-                CustomMcpServer::Stdio {
-                    command: "lower-only-cmd".to_string(),
-                    args: vec![],
-                    env: BTreeMap::new(),
-                },
-            ),
-        ]),
-        ..McpServers::default()
-    };
-    let higher = McpServers {
-        custom: BTreeMap::from([(
-            "shared".to_string(),
-            CustomMcpServer::Stdio {
-                command: "higher-cmd".to_string(),
-                args: vec![],
-                env: BTreeMap::new(),
-            },
-        )]),
-        ..McpServers::default()
-    };
-
-    let merged = lower.merge(higher);
-    assert_eq!(merged.custom.len(), 2, "both names survive the union");
-    match &merged.custom["shared"] {
-        CustomMcpServer::Stdio { command, .. } => {
-            assert_eq!(command, "higher-cmd", "higher layer wins the shared name");
-        }
-        other => panic!("expected Stdio, got {other:?}"),
-    }
-    assert!(merged.custom.contains_key("lower-only"));
+    let mcp = parsed.mcp.expect("mcp section present");
+    assert_eq!(mcp.trusty_search, Some(false));
+    assert_eq!(mcp.trusty_memory, None);
 }
 
 #[test]
