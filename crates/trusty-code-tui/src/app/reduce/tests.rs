@@ -117,66 +117,159 @@ fn apply_submit_event_is_noop_while_busy() {
     assert!(app.chat.is_empty(), "must not echo while busy");
 }
 
-/// Direct port of tagent's `repl_app_up_arrow_recalls_last_prompt`
-/// (`crates/trusty-agents/src/repl/tui/tests_input.rs`).
-#[test]
-fn apply_up_recalls_last_prompt_when_idle() {
-    let mut app = ReplApp::new("demo", "u");
-    app.last_prompt = "hello world".to_string();
+/// Submit `line` through the real Enter path, clearing the `busy` flag the
+/// forward sets so the next submission is accepted (#8181).
+fn submit(app: &mut ReplApp, line: &str) {
+    for c in line.chars() {
+        apply(app, key(KeyCode::Char(c)));
+    }
+    apply(app, key(KeyCode::Enter));
+    app.pending_submit.take();
     app.busy = false;
+}
+
+/// #8181, the headline behavior: Up walks back through EVERY submitted
+/// prompt, not just the most recent one. Against the pre-fix `last_prompt`
+/// recall the second press returned "second" again.
+#[test]
+fn apply_up_walks_back_through_submitted_prompts() {
+    let mut app = ReplApp::new("demo", "u");
+    submit(&mut app, "first");
+    submit(&mut app, "second");
+    submit(&mut app, "third");
+
     apply(&mut app, key(KeyCode::Up));
-    assert_eq!(app.input_buf, "hello world");
-    assert_eq!(app.cursor_pos, "hello world".len());
+    assert_eq!(app.input_buf, "third");
+    assert_eq!(app.cursor_pos, "third".len(), "cursor lands at end");
+    apply(&mut app, key(KeyCode::Up));
+    assert_eq!(app.input_buf, "second");
+    apply(&mut app, key(KeyCode::Up));
+    assert_eq!(app.input_buf, "first");
     assert!(!app.pending_cancel, "idle Up must NOT signal cancel");
 }
 
-/// Direct port of tagent's `repl_app_up_arrow_when_busy_signals_cancel`.
+/// #8181: Down walks forward and, one step past the newest entry, hands the
+/// user back the draft they were typing. Pre-fix, Down was inert (nothing
+/// ever set `history_idx`) and the draft was simply overwritten by Up.
+#[test]
+fn apply_down_walks_forward_and_restores_the_draft() {
+    let mut app = ReplApp::new("demo", "u");
+    submit(&mut app, "alpha");
+    submit(&mut app, "beta");
+    for c in "draft in progress".chars() {
+        apply(&mut app, key(KeyCode::Char(c)));
+    }
+
+    apply(&mut app, key(KeyCode::Up));
+    assert_eq!(app.input_buf, "beta");
+    apply(&mut app, key(KeyCode::Up));
+    assert_eq!(app.input_buf, "alpha");
+    apply(&mut app, key(KeyCode::Down));
+    assert_eq!(app.input_buf, "beta");
+    apply(&mut app, key(KeyCode::Down));
+    assert_eq!(
+        app.input_buf, "draft in progress",
+        "walking past the newest entry must restore the draft"
+    );
+    assert!(app.history_idx.is_none(), "no longer navigating");
+    assert_eq!(app.cursor_pos, "draft in progress".len());
+}
+
+/// The oldest entry is a floor, not a wrap point — a fourth Up on a
+/// two-entry history must not jump back to the newest.
+#[test]
+fn apply_up_clamps_at_the_oldest_entry() {
+    let mut app = ReplApp::new("demo", "u");
+    submit(&mut app, "oldest");
+    submit(&mut app, "newest");
+    for _ in 0..4 {
+        apply(&mut app, key(KeyCode::Up));
+    }
+    assert_eq!(app.input_buf, "oldest");
+}
+
+/// Down on a line the user is still typing (never walked history) must
+/// leave it alone rather than blanking it.
+#[test]
+fn apply_down_is_noop_when_not_navigating_history() {
+    let mut app = ReplApp::new("demo", "u");
+    submit(&mut app, "earlier");
+    app.insert_char('x');
+    apply(&mut app, key(KeyCode::Down));
+    assert_eq!(app.input_buf, "x", "Down must not clobber input_buf");
+    assert!(app.history_idx.is_none());
+}
+
+/// Direct port of tagent's `repl_app_up_arrow_when_busy_signals_cancel` —
+/// the busy-cancel half of Up survives #8181's change to what Up recalls.
 #[test]
 fn apply_up_signals_cancel_and_recalls_when_busy() {
     let mut app = ReplApp::new("demo", "u");
-    app.last_prompt = "long task".to_string();
+    submit(&mut app, "long task");
     app.busy = true;
     apply(&mut app, key(KeyCode::Up));
     assert!(app.pending_cancel, "busy Up must signal cancel");
-    assert_eq!(app.input_buf, "long task", "must restore last_prompt");
+    assert_eq!(app.input_buf, "long task", "must recall the newest entry");
 }
 
 /// tagent's cancel signal fires unconditionally on `thinking`, ahead of
-/// (and independent of) the `last_prompt` recall — pins that ordering
-/// isn't accidentally coupled to `last_prompt` being non-empty.
+/// (and independent of) the recall — pins that the ordering isn't
+/// accidentally coupled to history being non-empty.
 #[test]
-fn apply_up_signals_cancel_even_with_no_last_prompt() {
+fn apply_up_signals_cancel_even_with_no_history() {
     let mut app = ReplApp::new("demo", "u");
     app.busy = true;
-    assert!(app.last_prompt.is_empty());
+    assert!(app.history.is_empty());
     apply(&mut app, key(KeyCode::Up));
     assert!(app.pending_cancel);
     assert!(app.input_buf.is_empty());
 }
 
-/// Direct port of tagent's `repl_app_up_arrow_noop_when_no_last_prompt`.
+/// Direct port of tagent's `repl_app_up_arrow_noop_when_no_last_prompt`,
+/// restated against history: with nothing submitted yet, Up leaves the
+/// typed line untouched.
 #[test]
-fn apply_up_is_noop_when_idle_and_no_last_prompt() {
+fn apply_up_is_noop_when_idle_and_history_is_empty() {
     let mut app = ReplApp::new("demo", "u");
     app.insert_char('a');
     app.insert_char('b');
-    app.last_prompt.clear();
     app.busy = false;
     apply(&mut app, key(KeyCode::Up));
     assert_eq!(app.input_buf, "ab");
     assert!(!app.pending_cancel);
 }
 
-/// Direct port of tagent's real `KeyCode::Down` arm — a functional
-/// no-op today (nothing sets `history_idx`), kept for fidelity per
-/// `crate::app`'s disclosure list.
+/// Readline's `ignoredups` convention (#8181): submitting the same prompt
+/// twice in a row costs one Up press to recall, not two.
 #[test]
-fn apply_down_calls_history_next_and_is_currently_inert() {
+fn consecutive_duplicate_submissions_are_stored_once() {
     let mut app = ReplApp::new("demo", "u");
-    app.insert_char('x');
-    apply(&mut app, key(KeyCode::Down));
-    assert_eq!(app.input_buf, "x", "Down must not clobber input_buf");
+    submit(&mut app, "same");
+    submit(&mut app, "same");
+    submit(&mut app, "other");
+    assert_eq!(app.history, vec!["same".to_string(), "other".to_string()]);
+
+    apply(&mut app, key(KeyCode::Up));
+    assert_eq!(app.input_buf, "other");
+    apply(&mut app, key(KeyCode::Up));
+    assert_eq!(app.input_buf, "same", "one Up reaches past the duplicate");
+}
+
+/// Submitting appends to history and resets the editor — cursor at 0, no
+/// navigation index, no stale saved draft (#8181).
+#[test]
+fn submitting_appends_to_history_and_resets_the_cursor() {
+    let mut app = ReplApp::new("demo", "u");
+    submit(&mut app, "one");
+    apply(&mut app, key(KeyCode::Up));
+    assert_eq!(app.input_buf, "one");
+    apply(&mut app, ctrl_key('u')); // clear the recalled line
+
+    submit(&mut app, "two");
+    assert_eq!(app.history, vec!["one".to_string(), "two".to_string()]);
+    assert_eq!(app.cursor_pos, 0);
     assert!(app.history_idx.is_none());
+    assert!(app.saved_input.is_none());
 }
 
 /// Direct port of tagent's `ctrl_e_pastes_last_bash_block_when_input_empty`.

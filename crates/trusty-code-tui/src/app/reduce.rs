@@ -600,12 +600,9 @@ fn apply_key(app: &mut ReplApp, key: KeyInput) {
         KeyCode::Home => app.cursor_pos = 0,
         KeyCode::End => app.cursor_pos = app.input_buf.len(),
         KeyCode::Up => apply_up(app),
-        // Direct port of tagent's real `KeyCode::Down` arm
-        // (`crates/trusty-agents/src/repl/tui/keys.rs`), which calls
-        // `history_next()` even though nothing (including `apply_up` below)
-        // ever sets `history_idx` — a functional no-op today in tagent too.
-        // Kept for fidelity per `crate::app`'s disclosure list, not because
-        // it currently does anything observable.
+        // #8181: live since `apply_up` walks `history` rather than recalling
+        // the single-level `last_prompt`. Down steps forward through the
+        // same list and restores the in-progress draft at the newest end.
         KeyCode::Down => app.history_next(),
         KeyCode::PageUp => app.scroll(-PAGE_SCROLL),
         KeyCode::PageDown => app.scroll(PAGE_SCROLL),
@@ -628,31 +625,39 @@ fn apply_key(app: &mut ReplApp, key: KeyInput) {
     }
 }
 
-/// Up-arrow: recall [`ReplApp::last_prompt`], and — while
+/// Up-arrow: walk one step back through [`ReplApp::history`], and — while
 /// [`ReplApp::busy`] — ALSO signal [`ReplApp::pending_cancel`].
 ///
-/// Why: direct port of tagent's real `KeyCode::Up` arm
-/// (`crates/trusty-agents/src/repl/tui/keys.rs`): a busy in-flight request
-/// gets cancelled so the user can edit and resubmit, and the cancel signal
-/// fires independent of whether `last_prompt` happens to be set (matching
-/// tagent's unconditional `if app.thinking { app.pending_cancel = true; }`
-/// ahead of the recall). This is NOT the multi-level `history_prev` browser
-/// — see `crate::app`'s module doc comment for why that helper stays
-/// unwired, exactly as it is in tagent.
-/// What: no-ops the recall half when `last_prompt` is empty (nothing to
-/// recall); the cancel signal is unconditional on `busy`.
-/// Test: [`tests::apply_up_recalls_last_prompt_when_idle`],
+/// Why: #8181. This used to recall [`ReplApp::last_prompt`], a single
+/// snapshot overwritten on every submit, so a second press repeated the
+/// first and `KeyCode::Down` (which calls [`ReplApp::history_next`]) never
+/// had an index to walk forward from. Walking [`ReplApp::history`] is the
+/// readline behavior the owner asked for and is what makes the already-wired
+/// Down arm live. The busy-cancel half is unchanged tagent parity
+/// (`crates/trusty-agents/src/repl/tui/keys.rs`): it fires independent of
+/// whether anything is recallable, and the composer's `↑ to cancel` hint
+/// depends on it.
+/// What: the input is a single line — [`crate::widgets::input_composer`]
+/// renders `input_buf` on one row and no binding inserts a newline — so
+/// readline's "history only when the cursor is on the first/last line" rule
+/// is satisfied unconditionally here and Up is always history.
+/// [`ReplApp::history_prev`] saves the in-progress draft on the first step
+/// (so Down can restore it), clamps at the oldest entry, and no-ops on an
+/// empty history.
+/// Test: [`tests::apply_up_walks_back_through_submitted_prompts`],
+/// [`tests::apply_down_walks_forward_and_restores_the_draft`],
+/// [`tests::apply_up_clamps_at_the_oldest_entry`],
+/// [`tests::apply_down_is_noop_when_not_navigating_history`],
 /// [`tests::apply_up_signals_cancel_and_recalls_when_busy`],
-/// [`tests::apply_up_signals_cancel_even_with_no_last_prompt`],
-/// [`tests::apply_up_is_noop_when_idle_and_no_last_prompt`].
+/// [`tests::apply_up_signals_cancel_even_with_no_history`],
+/// [`tests::apply_up_is_noop_when_idle_and_history_is_empty`].
 fn apply_up(app: &mut ReplApp) {
     if app.busy {
         app.pending_cancel = true;
     }
-    if !app.last_prompt.is_empty() {
-        let lp = app.last_prompt.clone();
-        app.set_input(lp);
-    }
+    // #8181: was a single-level `last_prompt` recall; `history_prev` walks
+    // the whole session's submissions and is what gives Down an index.
+    app.history_prev();
 }
 
 /// Ctrl-E: with an empty input buffer and a cached

@@ -33,18 +33,9 @@
 //! tagent's actual `keys.rs`/`app.rs`, not just its doc comments — one round
 //! of review on this slice caught a doc/reality drift in tagent itself, see
 //! history below):
-//! - Up-arrow recalls `Self::last_prompt` (the single most recent
-//!   submission) and, when `Self::busy`, ALSO sets
-//!   `Self::pending_cancel` — mirrors
-//!   `crates/trusty-agents/src/repl/tui/keys.rs`'s real `KeyCode::Up` arm,
-//!   not the multi-level `history_prev`/`history_next` `#[allow(dead_code)]`
-//!   helpers tagent's own doc comment (misleadingly) attributes to
-//!   production Up-handling.
-//! - Down-arrow calls `Self::history_next` — tagent's real `KeyCode::Down`
-//!   arm does exactly this, even though nothing (including this crate's Up
-//!   handler) ever sets `history_idx`, making it a functional no-op today in
-//!   both tagent and here. Ported for fidelity, not because it currently
-//!   does anything.
+//! - Up-arrow, when `Self::busy`, sets `Self::pending_cancel` — mirrors
+//!   `crates/trusty-agents/src/repl/tui/keys.rs`'s real `KeyCode::Up` arm.
+//!   What Up RECALLS diverges (#8181, see the divergence list below).
 //! - Ctrl-E, with an empty input buffer and a non-`None`
 //!   `Self::last_bash_block`, pastes only that block's first non-blank
 //!   line (not the whole block) — matches
@@ -102,6 +93,14 @@
 //!   (the conventional terminal interrupt), which this crate implements as
 //!   written; Up-arrow-while-busy ALSO still signals cancel here (ported
 //!   faithfully from tagent, see above), so both triggers work.
+//! - **Up/Down walk the whole session's prompt history** (#8181). Tagent's
+//!   real `KeyCode::Up` arm recalls only `last_prompt` — one snapshot,
+//!   overwritten every submit — and its `KeyCode::Down` arm calls
+//!   `history_next` against a `history_idx` nothing ever sets, so Down is a
+//!   no-op there. This crate wires Up to `Self::history_prev` instead, which
+//!   makes both arms live: Up steps older through `Self::history`, Down
+//!   steps newer and restores the in-progress draft at the end. The
+//!   busy-cancel half of Up is unchanged.
 //!
 //! # Spec References
 //! - [`SPEC-TTUI-03~draft`](docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-03~draft) — §3.2, the generalization layer.
@@ -232,11 +231,22 @@ pub struct ReplApp {
     /// snapshot and the authoritative instance behind a caller's mutex (if
     /// any) share the same cell — mirrors tagent's `last_max_scroll`.
     pub last_max_scroll: Arc<AtomicUsize>,
-    /// In-memory input history (Up-arrow recall).
+    /// Every prompt submitted this session, oldest first, with adjacent
+    /// duplicates collapsed ([`Self::remember_input`]). Up/Down walk it
+    /// (#8181).
+    ///
+    /// Why: scoped to one TUI process deliberately. Persisting across
+    /// launches would need a store this crate cannot reach — it must not
+    /// depend on `trusty_common` (see the crate-level doc comment's
+    /// dependency-direction constraint) and has no product-specific state
+    /// directory of its own — so cross-launch history stays with whichever
+    /// product wants it, seeding this field at construction.
     pub history: Vec<String>,
     /// Index into `history` while navigating. `None` when not navigating.
     pub history_idx: Option<usize>,
-    /// Saved current input while navigating history.
+    /// The in-progress draft stashed by [`Self::history_prev`]'s first step
+    /// and restored by [`Self::history_next`] at the newest end (#8181).
+    /// `None` when not navigating.
     pub saved_input: Option<String>,
     /// Whether to show the welcome banner in the scrollback.
     pub show_banner: bool,
@@ -348,11 +358,12 @@ pub struct ReplApp {
     /// call `TuiEngine::cancel_session` (thin-client axiom C-2 — cancellation
     /// is the backend's job, not just clearing local UI state).
     pub pending_cancel: bool,
-    /// The most recently submitted line, restored to `input_buf` on
-    /// Up-arrow. Direct port of tagent's `last_prompt` (single-level recall,
-    /// not the multi-level `history`/`history_idx` browser — see the module
-    /// doc comment's disclosure list for why Up uses this field and not
-    /// `history_prev`).
+    /// The most recently submitted line. Direct port of tagent's
+    /// `last_prompt`, kept as a plain snapshot a product can read.
+    ///
+    /// Why: Up-arrow no longer reads it (#8181 moved recall to
+    /// [`Self::history`]/[`Self::history_idx`]); the field stays because it
+    /// is published API and costs one `String` clone per submit.
     pub last_prompt: String,
     /// The most recently seen executable-shell (bash/sh/zsh/fish) fenced
     /// code block across all assistant messages, updated by
@@ -670,7 +681,16 @@ impl ReplApp {
         self.pending_permission_response = Some(PermissionResponse { pending, answer });
     }
 
-    /// Push a line onto `history`, deduping an immediate repeat.
+    /// Push a line onto [`Self::history`], deduping an immediate repeat
+    /// (readline's `ignoredups` convention, #8181).
+    ///
+    /// Why: submitting the same prompt twice in a row should cost one Up
+    /// press to recall, not two.
+    /// What: blank/whitespace-only lines are never recorded; a line equal to
+    /// the current newest entry is dropped. A repeat that is NOT adjacent is
+    /// kept, so the walk order still reflects what was actually run.
+    /// Test: `reduce::tests::consecutive_duplicate_submissions_are_stored_once`,
+    /// `reduce::tests::submitting_appends_to_history_and_resets_the_cursor`.
     pub fn remember_input(&mut self, line: &str) {
         if line.trim().is_empty() {
             return;
@@ -731,7 +751,21 @@ impl ReplApp {
         self.cursor_pos = next;
     }
 
-    /// Up-arrow history navigation.
+    /// Up-arrow history navigation: step one entry older, saving the
+    /// in-progress draft on the first step (#8181).
+    ///
+    /// Why: the draft the user was typing must survive a walk through
+    /// history and come back when they walk forward past the newest entry —
+    /// losing it is the failure readline's `saved_input` slot exists to
+    /// prevent.
+    /// What: no-op on an empty history. The first step (`history_idx ==
+    /// None`) stashes `input_buf` into [`Self::saved_input`] and lands on the
+    /// newest entry; later steps move one older and clamp at index 0 rather
+    /// than wrapping. The cursor moves to the end of the recalled line
+    /// ([`Self::set_input`]).
+    /// Test: `reduce::tests::apply_up_walks_back_through_submitted_prompts`,
+    /// `reduce::tests::apply_down_walks_forward_and_restores_the_draft`,
+    /// `reduce::tests::apply_up_clamps_at_the_oldest_entry`.
     pub fn history_prev(&mut self) {
         if self.history.is_empty() {
             return;
@@ -748,7 +782,18 @@ impl ReplApp {
         self.set_input(entry);
     }
 
-    /// Down-arrow history navigation.
+    /// Down-arrow history navigation: step one entry newer, restoring the
+    /// saved draft once past the newest entry (#8181).
+    ///
+    /// Why: the other half of [`Self::history_prev`]'s contract — walking
+    /// forward off the newest entry returns the user to what they were
+    /// typing, not to an empty line.
+    /// What: no-op when not navigating (`history_idx == None`), so Down on a
+    /// freshly typed line never clobbers it. Stepping past the newest entry
+    /// clears `history_idx` and restores [`Self::saved_input`] (empty string
+    /// when the draft was empty).
+    /// Test: `reduce::tests::apply_down_walks_forward_and_restores_the_draft`,
+    /// `reduce::tests::apply_down_is_noop_when_not_navigating_history`.
     pub fn history_next(&mut self) {
         let Some(i) = self.history_idx else { return };
         if i + 1 >= self.history.len() {
