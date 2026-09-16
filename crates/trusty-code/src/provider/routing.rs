@@ -177,7 +177,7 @@ pub fn resolve_model(agent_config: &AgentConfig, run_context: Option<&RunContext
 
 /// Environment variable overriding the TOP-LEVEL (PM) agent's model (#8030).
 ///
-/// Why: `--engineer-model`/[`ENGINEER_MODEL_ENV_VAR`] only rewire the
+/// Why: `--engineer-model`/`TCODE_ENGINEER_MODEL` only rewire the
 /// DELEGATED runner, so the top-level agent's own calls could be repointed
 /// only by hand-editing the deployed `.trusty-code/agents/<agent>.md` — the
 /// concrete failure #8030 records is `--engineer-model` set to a ZDR-safe

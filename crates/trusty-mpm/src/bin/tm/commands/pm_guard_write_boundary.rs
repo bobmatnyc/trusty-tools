@@ -132,7 +132,8 @@ use super::pm_guard_bash::shell_write_target;
 /// What: `Some(reason)` when the call names a write target, that target
 /// [`is_source_code_path`], and the directory it resolves into
 /// [`main_checkout_root`] — except when that checkout is rooted under the
-/// session scratchpad ([`root_is_scratchpad_rooted`], #7778). The target comes from
+/// session scratchpad ([`write_lands_in_a_scratchpad_clone`], #7778). The
+/// target comes from
 /// [`edit_tool_target_path`] for an [`EDIT_TOOLS`] member and from
 /// [`shell_write_target`] for `Bash` (#7399). `None` (ALLOW) in every other
 /// case.
