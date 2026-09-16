@@ -13,9 +13,29 @@
 use serde_json::Value;
 
 use super::{
-    types::{require_str, DispatchError},
+    types::{optional_bool, require_str, DispatchError},
     McpServer,
 };
+
+/// `grep`'s ripgrep-parity boolean switches, each with what `true` does.
+///
+/// Why (#7927): the six were six copies of the same lenient read, so a
+/// wrong-typed value reached the daemon as an absent one. A table plus one
+/// strict reader ([`optional_bool`]) makes the rule uniform and keeps a
+/// seventh switch from arriving with the old shape.
+/// What: `(argument key, hint)`; the key doubles as the daemon body key, so a
+/// present flag forwards verbatim and an absent one leaves the daemon's own
+/// default in place.
+/// Test: `every_boolean_flag_rejects_a_wrong_typed_value` in
+/// `tests_bool_flags.rs`.
+pub(super) const GREP_BOOL_FLAGS: [(&str, &str); 6] = [
+    ("case_insensitive", "-i / --ignore-case"),
+    ("multiline", "true lets `.` span newlines"),
+    ("fixed_strings", "-F: treat the pattern as a literal"),
+    ("files_with_matches", "-l: one path per matching file"),
+    ("invert_match", "-v: return lines that do NOT match"),
+    ("word_regexp", "-w: require word boundaries"),
+];
 
 /// Route one of the five miscellaneous tool names to the correct daemon call.
 ///
@@ -99,8 +119,15 @@ pub(super) async fn dispatch_misc_tool(
             if let Some(d) = args.get("max_depth").and_then(Value::as_u64) {
                 query.push(("max_depth", d.to_string()));
             }
-            if let Some(inc) = args.get("include_source").and_then(Value::as_bool) {
-                query.push(("include_source", inc.to_string()));
+            // #7927: a wrong-typed flag is rejected, not read as absent.
+            match optional_bool(
+                args,
+                "include_source",
+                "true embeds full source at depth <= 1",
+            ) {
+                Ok(Some(inc)) => query.push(("include_source", inc.to_string())),
+                Ok(None) => {}
+                Err(e) => return Some(Err(e)),
             }
             Some(
                 server
@@ -122,8 +149,15 @@ pub(super) async fn dispatch_misc_tool(
                 Err(e) => return Some(Err(e)),
             };
             let mut body = serde_json::json!({ "pattern": pattern });
-            if let Some(v) = args.get("case_insensitive").and_then(Value::as_bool) {
-                body["case_insensitive"] = Value::Bool(v);
+            // #7927: every ripgrep-parity switch goes through one strict
+            // reader, so `files_with_matches: "true"` errors instead of
+            // returning whole matching lines the caller never asked for.
+            for (key, hint) in GREP_BOOL_FLAGS {
+                match optional_bool(args, key, hint) {
+                    Ok(Some(v)) => body[key] = Value::Bool(v),
+                    Ok(None) => {}
+                    Err(e) => return Some(Err(e)),
+                }
             }
             if let Some(v) = args.get("context").and_then(Value::as_u64) {
                 body["context"] = Value::from(v);
@@ -136,21 +170,6 @@ pub(super) async fn dispatch_misc_tool(
             }
             if let Some(v) = args.get("glob").and_then(Value::as_str) {
                 body["glob"] = Value::String(v.to_string());
-            }
-            if let Some(v) = args.get("multiline").and_then(Value::as_bool) {
-                body["multiline"] = Value::Bool(v);
-            }
-            if let Some(v) = args.get("fixed_strings").and_then(Value::as_bool) {
-                body["fixed_strings"] = Value::Bool(v);
-            }
-            if let Some(v) = args.get("files_with_matches").and_then(Value::as_bool) {
-                body["files_with_matches"] = Value::Bool(v);
-            }
-            if let Some(v) = args.get("invert_match").and_then(Value::as_bool) {
-                body["invert_match"] = Value::Bool(v);
-            }
-            if let Some(v) = args.get("word_regexp").and_then(Value::as_bool) {
-                body["word_regexp"] = Value::Bool(v);
             }
             // Issue #447: accept `max_count` as a ripgrep-parity alias for
             // `max_results`. `max_results` wins when both are supplied.
@@ -179,11 +198,22 @@ pub(super) async fn dispatch_misc_tool(
         "upgrade" => {
             // Route to the daemon's /upgrade HTTP endpoint. The body mirrors
             // the MCP schema: check (default true) and confirm (default false).
-            let check = args.get("check").and_then(Value::as_bool).unwrap_or(true);
-            let confirm = args
-                .get("confirm")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
+            // #7927: `confirm` installs a new binary — a coerced `"true"`
+            // would be read as `false` and silently report versions instead,
+            // and a coerced `"false"` would install. Both are rejected.
+            let check = match optional_bool(args, "check", "true reports versions only, no install")
+            {
+                Ok(v) => v.unwrap_or(true),
+                Err(e) => return Some(Err(e)),
+            };
+            let confirm = match optional_bool(
+                args,
+                "confirm",
+                "true installs the new version; must be explicit",
+            ) {
+                Ok(v) => v.unwrap_or(false),
+                Err(e) => return Some(Err(e)),
+            };
             let body = serde_json::json!({ "check": check, "confirm": confirm });
             Some(server.post("/upgrade", &body).await)
         }

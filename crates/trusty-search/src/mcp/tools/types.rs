@@ -89,6 +89,39 @@ pub(super) fn require_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, Dis
         .ok_or_else(|| DispatchError::InvalidParams(format!("missing or non-string '{key}'")))
 }
 
+/// Extract an OPTIONAL boolean flag from a JSON args object, rejecting a
+/// wrong-typed value instead of reading it as the default.
+///
+/// Why (issue #7927): every flag used to be read with
+/// `args.get(key).and_then(Value::as_bool)`, which maps `"true"` — the
+/// spelling a hand-written client or an LLM sends most often — onto `None`,
+/// i.e. onto the default. A dropped `exclude_archived` returns archived hits
+/// byte-identical to a call that never asked to exclude them, with nothing in
+/// the response to say the flag was ignored; live verification on 2026-09-14
+/// saw exactly that for `compact: "true"`. `max_bytes`, `full`, `compact`
+/// and `delete_data` already rejected; this is the same rule for the rest,
+/// in one place so the surface cannot drift apart again.
+/// What: absent or `null` ⇒ `Ok(None)`, so each caller keeps applying its own
+/// documented default (`false` for most, `true` for `upgrade`'s `check` and
+/// `delete_index`'s `delete_data`) and a forwarding arm can still omit the
+/// key entirely. A boolean ⇒ `Ok(Some(b))`. Anything else ⇒ `InvalidParams`
+/// naming the parameter, the expected type, `hint` (what `true` does) and the
+/// offending value.
+/// Test: `tests_bool_flags.rs`.
+pub(super) fn optional_bool(
+    args: &Value,
+    key: &str,
+    hint: &str,
+) -> Result<Option<bool>, DispatchError> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(b)) => Ok(Some(*b)),
+        Some(other) => Err(DispatchError::InvalidParams(format!(
+            "{key} must be a boolean ({hint}); got {other}"
+        ))),
+    }
+}
+
 /// Wrap a structured JSON result in MCP's `content[]` envelope (bare-method
 /// form).
 ///
