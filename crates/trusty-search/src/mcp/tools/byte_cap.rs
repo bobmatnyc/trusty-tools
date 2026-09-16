@@ -199,16 +199,13 @@ impl Bounds {
         };
         // #7493: same treatment as `max_bytes` above. Coercing `"true"` to
         // `false` would silently re-impose a ceiling the caller just disabled.
-        let full = match args.get("full") {
-            None | Some(Value::Null) => false,
-            Some(Value::Bool(b)) => *b,
-            Some(other) => {
-                return Err(DispatchError::InvalidParams(format!(
-                    "full must be a boolean (true returns every item with no byte \
-                     ceiling); got {other}"
-                )))
-            }
-        };
+        // #7927: shared with every other boolean flag.
+        let full = super::types::optional_bool(
+            args,
+            "full",
+            "true returns every item with no byte ceiling",
+        )?
+        .unwrap_or(false);
         Ok(Self {
             ceiling: requested.unwrap_or(DEFAULT_MAX_BYTES).min(HARD_MAX_BYTES),
             // `full` removes the ceiling, so there is no clamp to report.

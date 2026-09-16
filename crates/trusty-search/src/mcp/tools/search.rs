@@ -16,9 +16,16 @@ use serde_json::Value;
 
 use super::{
     compact,
-    types::{require_str, DispatchError},
+    types::{optional_bool, require_str, DispatchError},
     McpServer,
 };
+
+/// What `exclude_archived: true` does, for the rejection message (#7927).
+///
+/// Shared by the `search` arm and [`McpServer::run_lane_search`] so the two
+/// spellings of the same flag cannot describe themselves differently.
+const EXCLUDE_ARCHIVED_HINT: &str =
+    "true drops archived/deprecated/legacy chunks instead of downranking them";
 
 /// Route one of the six search-related tool names to the correct daemon call.
 ///
@@ -65,11 +72,18 @@ pub(super) async fn dispatch_search_tool(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let full_content = !want_compact
-                && args
-                    .get("full_content")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
+            // #7927: a wrong-typed `full_content` is rejected, not read as
+            // `false` — a dropped `true` returns snippets where the caller
+            // asked for whole chunks.
+            let asked_full_content = match optional_bool(
+                args,
+                "full_content",
+                "true includes full chunk content in each fan-out hit",
+            ) {
+                Ok(v) => v.unwrap_or(false),
+                Err(e) => return Some(Err(e)),
+            };
+            let full_content = !want_compact && asked_full_content;
             let mut body = serde_json::json!({
                 "query": query,
                 "top_k": top_k,
@@ -78,8 +92,15 @@ pub(super) async fn dispatch_search_tool(
             // Issue #2845: forward the optional fan-out bounding overrides so
             // a caller can request serial / a custom cap per call without
             // restarting the daemon.
-            if let Some(serial) = args.get("serial").and_then(Value::as_bool) {
-                body["serial"] = Value::Bool(serial);
+            // #7927: same strict read as every other flag.
+            match optional_bool(
+                args,
+                "serial",
+                "true runs the per-index fan-out searches one at a time",
+            ) {
+                Ok(Some(serial)) => body["serial"] = Value::Bool(serial),
+                Ok(None) => {}
+                Err(e) => return Some(Err(e)),
             }
             if let Some(n) = args.get("max_fanout_concurrency").and_then(Value::as_u64) {
                 body["max_fanout_concurrency"] = Value::from(n);
@@ -146,8 +167,12 @@ pub(super) async fn dispatch_search_tool(
                     // (default false) so callers can hard-filter archived
                     // / deprecated / legacy chunks instead of only
                     // downranking them.
-                    if let Some(ea) = args.get("exclude_archived").and_then(Value::as_bool) {
-                        b["exclude_archived"] = Value::Bool(ea);
+                    // #7927: rejected when wrong-typed — a dropped `true`
+                    // returns archived hits the caller asked to exclude.
+                    match optional_bool(args, "exclude_archived", EXCLUDE_ARCHIVED_HINT) {
+                        Ok(Some(ea)) => b["exclude_archived"] = Value::Bool(ea),
+                        Ok(None) => {}
+                        Err(e) => return Some(Err(e)),
                     }
                     // Issue #3401: forward optional path/repo scoping —
                     // applied server-side BEFORE top_k truncation in every
@@ -281,6 +306,10 @@ impl McpServer {
             return super::index_directory::index_directory(self, lane.tool_name()).await;
         };
         let query_text = require_str(args, "query")?;
+        // #7927: validate the caller's flags before the pre-flight probe
+        // below, so a wrong-typed argument answers as a parameter error
+        // instead of costing a daemon round trip first.
+        let exclude_archived = optional_bool(args, "exclude_archived", EXCLUDE_ARCHIVED_HINT)?;
 
         // Pre-flight stage check for lanes that need Stage 2 or Stage 3.
         // The lexical and `search_all` tools always work — they degrade
@@ -361,7 +390,8 @@ impl McpServer {
         if let Some(m) = args.get("mode").and_then(Value::as_str) {
             body["mode"] = Value::String(m.to_string());
         }
-        if let Some(ea) = args.get("exclude_archived").and_then(Value::as_bool) {
+        // #7927: read (and rejected when wrong-typed) above, before the probe.
+        if let Some(ea) = exclude_archived {
             body["exclude_archived"] = Value::Bool(ea);
         }
         // Issue #147: pass refine_query through to the search body for the

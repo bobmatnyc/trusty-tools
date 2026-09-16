@@ -59,15 +59,15 @@ pub(super) const DROPPED_FIELDS: [&str; 10] = [
 ///
 /// Test: `a_non_boolean_compact_is_rejected`.
 // #7676: a silently ignored `compact` is indistinguishable from no `compact`.
+// #7927: the rejection itself now lives in `types::optional_bool`, shared with
+// every other boolean flag.
 pub(super) fn wants_compact(args: &Value) -> Result<bool, DispatchError> {
-    match args.get("compact") {
-        None | Some(Value::Null) => Ok(false),
-        Some(Value::Bool(b)) => Ok(*b),
-        Some(other) => Err(DispatchError::InvalidParams(format!(
-            "compact must be a boolean (true drops `content` and the KG/ranking \
-             metadata from every hit); got {other}"
-        ))),
-    }
+    Ok(super::types::optional_bool(
+        args,
+        "compact",
+        "true drops `content` and the KG/ranking metadata from every hit",
+    )?
+    .unwrap_or(false))
 }
 
 /// Drop [`DROPPED_FIELDS`] from every hit in `resp["results"]`.

@@ -405,6 +405,9 @@ mod tests_compact;
 // #7493: the serialized-response byte ceiling and its truncation notice.
 #[cfg(test)]
 mod tests_byte_cap;
+
+#[cfg(test)]
+mod tests_bool_flags;
 #[cfg(test)]
 mod tests_lane;
 // Issue #138: tools/list completeness and per-lane dispatch validation.

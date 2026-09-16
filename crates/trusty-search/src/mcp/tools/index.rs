@@ -13,7 +13,7 @@
 use serde_json::Value;
 
 use super::{
-    types::{require_str, DispatchError},
+    types::{optional_bool, require_str, DispatchError},
     McpServer,
 };
 
@@ -75,15 +75,15 @@ fn string_array(args: &Value, key: &str) -> Option<Vec<Value>> {
 /// Test: `delete_index_purges_data_by_default`,
 /// `delete_index_honours_the_deregister_only_opt_out`,
 /// `delete_index_rejects_a_non_boolean_delete_data`.
+// #7927: the rejection is `types::optional_bool`, shared with every other
+// boolean flag; only the `true` default is local to this tool.
 fn delete_data_arg(args: &Value) -> Result<bool, DispatchError> {
-    match args.get("delete_data") {
-        None | Some(Value::Null) => Ok(true),
-        Some(Value::Bool(b)) => Ok(*b),
-        Some(other) => Err(DispatchError::InvalidParams(format!(
-            "delete_data must be a boolean (true deletes the on-disk data, \
-             false deregisters only); got {other}"
-        ))),
-    }
+    Ok(optional_bool(
+        args,
+        "delete_data",
+        "true deletes the on-disk data, false deregisters only",
+    )?
+    .unwrap_or(true))
 }
 
 /// Route one of the eight index-management tool names to the correct daemon
@@ -159,8 +159,17 @@ pub(super) async fn dispatch_index_tool(
             // do NOT follow symlinks — the safe default for new indexes). Pass
             // `follow_links: true` to index vendored / monorepo-aliased subtrees
             // reached through a symlink.
-            if let Some(follow) = args.get("follow_links").and_then(Value::as_bool) {
-                body["follow_links"] = Value::Bool(follow);
+            // #7927: a wrong-typed `follow_links` is rejected, not read as
+            // absent — a dropped `true` silently indexes nothing behind the
+            // symlink the caller registered the index for.
+            match optional_bool(
+                args,
+                "follow_links",
+                "true dereferences symlinks during the index walk",
+            ) {
+                Ok(Some(follow)) => body["follow_links"] = Value::Bool(follow),
+                Ok(None) => {}
+                Err(e) => return Some(Err(e)),
             }
             // #4356: `POST /indexes` has accepted `exclude_globs` since the
             // repo-config work, but this tool never forwarded it, so an MCP
