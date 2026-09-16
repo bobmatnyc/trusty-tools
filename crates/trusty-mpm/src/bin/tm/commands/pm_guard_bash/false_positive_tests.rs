@@ -430,6 +430,15 @@ mod harness_refusals_are_not_this_guard {
     /// value: `None` from both bands, every round, for every shape the harness
     /// refused — including the ones refused live on 2026-09-16 in the very
     /// worktree this fix was written in.
+    ///
+    /// The 50 rounds are deliberate and are NOT a claim about these two
+    /// functions as they stand today — both are pure, so one round decides the
+    /// answer (#7905 review, LOW). The loop is #7477's stated closure condition
+    /// ("the same classification 50 times with no refusal"), kept as a guard
+    /// against the regression the issue actually reports: a classifier that
+    /// grows a cache, a `HashMap` iteration order, or any other per-call state
+    /// would flip a verdict between rounds, and this row is what would catch it
+    /// the round it appeared. Delete the loop only together with that risk.
     /// Test: itself.
     #[test]
     fn every_reported_shape_is_admitted_on_all_fifty_rounds() {

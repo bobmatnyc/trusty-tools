@@ -14,6 +14,7 @@ use tempfile::TempDir;
 
 use super::{
     PROJECT_CONFIG_FILE, ProjectConfigError, ProjectLevelConfig, documents_only_at, load_or_report,
+    staged_declaration_changes_documents_only,
 };
 
 /// Write a project config into a fresh temp project directory.
@@ -273,65 +274,235 @@ fn project_config_parses_documents_only() {
     assert_eq!(absent.documents_only, None);
 }
 
-/// 🔴 #7905: only a parseable file saying `true` widens the write boundary.
+/// Run `git -C <dir> <args>`, panicking with git's own stderr on failure.
+///
+/// Why: a fixture step that silently no-ops produces a test that passes for the
+/// wrong reason — and every #7905 row below turns on whether a blob really
+/// reached `HEAD` or the index.
+fn git_ok(dir: &Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("fixture: `git {}` could not be run: {e}", args.join(" ")));
+    assert!(
+        out.status.success(),
+        "fixture: `git {}` failed in {}: {}",
+        args.join(" "),
+        dir.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A real, committed git checkout — the only shape #7905 can be tested in.
+///
+/// Why (#7905 review, CRITICAL 1): [`documents_only_at`] reads
+/// `HEAD:.trusty-mpm.toml`, so a bare `tempdir` with a file written into it
+/// answers `false` no matter what the file says. Every row below needs a
+/// repository with a real commit in it, or it would be asserting that git is
+/// absent rather than that the declaration is.
+fn committed_repo() -> TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    git_ok(dir.path(), &["init", "--initial-branch=main"]);
+    git_ok(dir.path(), &["config", "user.email", "t@example.com"]);
+    git_ok(dir.path(), &["config", "user.name", "t"]);
+    std::fs::write(dir.path().join("README.md"), "# t\n").expect("seed");
+    git_ok(dir.path(), &["add", "README.md"]);
+    git_ok(dir.path(), &["commit", "-m", "seed"]);
+    dir
+}
+
+/// Write `raw` to the declaration, then stage and commit it.
+fn commit_declaration(dir: &Path, raw: &str) {
+    std::fs::write(dir.join(PROJECT_CONFIG_FILE), raw).expect("write the declaration");
+    git_ok(dir, &["add", PROJECT_CONFIG_FILE]);
+    git_ok(dir, &["commit", "-m", "declare"]);
+}
+
+/// 🔴 #7905: only a COMMITTED, parseable declaration saying `true` widens the
+/// write boundary.
 ///
 /// Why: [`documents_only_at`] is the single reader both ADR-0044 rules consult,
 /// and its `true` REMOVES a deny. So every way of not-saying-true has to answer
-/// `false`: an absent file, a `false` value, a file that fails
-/// `deny_unknown_fields`, and one that is not TOML at all. A single wrong
-/// `true` here would open a shared checkout to source writes.
+/// `false`: no declaration at all, a `false` value, and another key entirely. A
+/// single wrong `true` here would open a shared checkout to source writes.
 #[test]
-fn documents_only_at_reads_a_declared_checkout() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join(PROJECT_CONFIG_FILE);
+fn documents_only_at_reads_a_committed_declaration() {
+    let dir = committed_repo();
 
-    assert!(!documents_only_at(dir.path()), "no file declares nothing");
-
-    std::fs::write(&path, "documents_only = true\n").expect("write");
     assert!(
-        documents_only_at(dir.path()),
-        "a declared repository says so"
+        !documents_only_at(dir.path()),
+        "no declaration declares nothing"
     );
 
-    std::fs::write(&path, "documents_only = false\n").expect("write");
+    commit_declaration(dir.path(), "documents_only = true\n");
+    assert!(
+        documents_only_at(dir.path()),
+        "a committed declaration says so"
+    );
+
+    commit_declaration(dir.path(), "documents_only = false\n");
     assert!(!documents_only_at(dir.path()), "`false` is not a grant");
 
-    std::fs::write(&path, "worktree = false\n").expect("write");
+    commit_declaration(dir.path(), "worktree = false\n");
     assert!(
         !documents_only_at(dir.path()),
         "another project key is not this one"
     );
 }
 
+/// 🔴 #7905 review, CRITICAL 1: an UNCOMMITTED declaration grants nothing.
+///
+/// Why: the reported escalation verbatim. `.trusty-mpm.toml` is not source
+/// under `is_source_code_path`, so ADR-0044 admits a write to it — which means
+/// an agent refused a source write could simply write the declaration and
+/// retry. Two tool calls, and the boundary was off. The three rows here are the
+/// three uncommitted spellings that attack reaches for: untracked, staged but
+/// not committed, and an uncommitted edit to a tracked file that did not carry
+/// the key.
+/// Test: itself.
+#[test]
+fn documents_only_at_ignores_an_uncommitted_declaration() {
+    // 1. Untracked — the critic's exact sequence.
+    let dir = committed_repo();
+    std::fs::write(
+        dir.path().join(PROJECT_CONFIG_FILE),
+        "documents_only = true\n",
+    )
+    .expect("write");
+    assert!(
+        !documents_only_at(dir.path()),
+        "an untracked declaration is not the repository's word"
+    );
+
+    // 2. Staged but not committed.
+    git_ok(dir.path(), &["add", PROJECT_CONFIG_FILE]);
+    assert!(
+        !documents_only_at(dir.path()),
+        "staging is not committing; `HEAD` still carries no declaration"
+    );
+
+    // 3. An uncommitted EDIT to a tracked declaration that lacked the key.
+    let dir = committed_repo();
+    commit_declaration(dir.path(), "worktree = false\n");
+    std::fs::write(
+        dir.path().join(PROJECT_CONFIG_FILE),
+        "worktree = false\ndocuments_only = true\n",
+    )
+    .expect("write");
+    assert!(
+        !documents_only_at(dir.path()),
+        "an uncommitted edit to a tracked file is not the repository's word"
+    );
+}
+
 /// 🔴 #7905 fail-closed: a declaration that cannot be TRUSTED is not a
 /// declaration.
 ///
-/// Why: `load_or_report` rejects a file wholesale when any key fails
+/// Why: `from_toml` rejects a file wholesale when any key fails
 /// `deny_unknown_fields` — a typo means the author's intent is unknown, not
 /// partially known. A relaxation read out of such a file would be a grant
-/// nobody wrote.
+/// nobody wrote. The last row is the one only the committed-blob read can
+/// answer: a directory git cannot be asked about at all.
 #[test]
 fn documents_only_at_is_false_for_an_undeclared_or_unreadable_checkout() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join(PROJECT_CONFIG_FILE);
-
     // A real `documents_only = true` sitting beside a misspelled key: the file
     // is rejected as a whole, so the grant does not survive.
-    std::fs::write(&path, "documents_only = true\nwrktree = false\n").expect("write");
+    for raw in [
+        "documents_only = true\nwrktree = false\n",
+        "documents_only = \"yes\"\n",
+        "this is not toml = = =\n",
+    ] {
+        let dir = committed_repo();
+        commit_declaration(dir.path(), raw);
+        assert!(
+            !documents_only_at(dir.path()),
+            "a blob that does not parse grants nothing: {raw:?}"
+        );
+    }
+
+    // Not a repository at all: git cannot be asked, so nothing is declared.
+    let bare = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        bare.path().join(PROJECT_CONFIG_FILE),
+        "documents_only = true\n",
+    )
+    .expect("write");
     assert!(
-        !documents_only_at(dir.path()),
-        "a file that fails deny_unknown_fields grants nothing"
+        !documents_only_at(bare.path()),
+        "a directory git cannot answer for declares nothing"
+    );
+}
+
+/// 🔴 #7905 review, CRITICAL 2: staging the declaration is detected, in both
+/// directions.
+///
+/// Why: closing CRITICAL 1 alone leaves the other half of the loop open — the
+/// declaration would simply be committed, from the main checkout, as an
+/// ordinary documents commit. This is the predicate the ADR-0049 commit gate
+/// uses to refuse that commit, so it has to fire on introducing the key, on
+/// flipping it, and on retracting it: each changes a security-relevant
+/// declaration and each belongs in a reviewed pull request.
+/// Test: itself.
+#[test]
+fn staged_declaration_change_is_detected_in_both_directions() {
+    // Introducing it, with nothing at HEAD.
+    let dir = committed_repo();
+    std::fs::write(
+        dir.path().join(PROJECT_CONFIG_FILE),
+        "documents_only = true\n",
+    )
+    .expect("write");
+    git_ok(dir.path(), &["add", PROJECT_CONFIG_FILE]);
+    assert!(
+        staged_declaration_changes_documents_only(dir.path()),
+        "introducing the key is a change"
     );
 
-    std::fs::write(&path, "documents_only = \"yes\"\n").expect("write");
+    // Flipping it, and then retracting it, against a HEAD that carries `true`.
+    for raw in ["documents_only = false\n", "worktree = false\n"] {
+        let dir = committed_repo();
+        commit_declaration(dir.path(), "documents_only = true\n");
+        std::fs::write(dir.path().join(PROJECT_CONFIG_FILE), raw).expect("write");
+        git_ok(dir.path(), &["add", PROJECT_CONFIG_FILE]);
+        assert!(
+            staged_declaration_changes_documents_only(dir.path()),
+            "flipping or retracting the key is a change: {raw:?}"
+        );
+    }
+}
+
+/// #7905 review, CRITICAL 2's bound: an edit that spares the key is not a
+/// declaration change.
+///
+/// Why: the rule has to be about the KEY, not about the file. A project editing
+/// an unrelated setting in its `.trusty-mpm.toml` is doing ordinary
+/// configuration work, and refusing that from the main checkout would be a new
+/// deny #7905 never asked for.
+/// Test: itself.
+#[test]
+fn staged_declaration_edit_that_leaves_the_key_alone_is_not_a_change() {
+    let dir = committed_repo();
+    commit_declaration(dir.path(), "documents_only = true\nworktree = false\n");
+    std::fs::write(
+        dir.path().join(PROJECT_CONFIG_FILE),
+        "documents_only = true\nworktree = true\n",
+    )
+    .expect("write");
+    git_ok(dir.path(), &["add", PROJECT_CONFIG_FILE]);
     assert!(
-        !documents_only_at(dir.path()),
-        "a wrong type grants nothing"
+        !staged_declaration_changes_documents_only(dir.path()),
+        "editing a neighbouring key leaves the declaration where it was"
     );
 
-    std::fs::write(&path, "this is not toml = = =\n").expect("write");
+    // And the same in a project that never declared: a brand-new config file
+    // carrying no `documents_only` key changes nothing either.
+    let dir = committed_repo();
+    std::fs::write(dir.path().join(PROJECT_CONFIG_FILE), "worktree = false\n").expect("write");
+    git_ok(dir.path(), &["add", PROJECT_CONFIG_FILE]);
     assert!(
-        !documents_only_at(dir.path()),
-        "an unparseable file grants nothing"
+        !staged_declaration_changes_documents_only(dir.path()),
+        "a new config file that does not declare is an ordinary documents commit"
     );
 }

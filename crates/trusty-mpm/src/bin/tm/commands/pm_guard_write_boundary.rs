@@ -515,6 +515,53 @@ mod tests {
         serde_json::json!({"file_path": path.to_string_lossy(), "content": "fn main() {}"})
     }
 
+    /// Run `git -C <dir> <args>`, panicking with git's own stderr on failure.
+    fn git_ok(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("fixture: `git {}` could not be run: {e}", args.join(" ")));
+        assert!(
+            out.status.success(),
+            "fixture: `git {}` failed in {}: {}",
+            args.join(" "),
+            dir.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A REAL main checkout with one commit — the only shape #7905 can be
+    /// tested in.
+    ///
+    /// Why (#7905 review, CRITICAL 1): [`documents_only_at`] reads
+    /// `HEAD:.trusty-mpm.toml`, so [`main_checkout`]'s empty `.git` directory
+    /// answers `false` however the working-tree file reads. A row that used it
+    /// would assert that git is absent, not that the declaration is.
+    /// Test: `allows_a_source_write_in_a_documents_only_checkout`.
+    fn git_main_checkout() -> TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        git_ok(dir.path(), &["init", "--initial-branch=main"]);
+        git_ok(dir.path(), &["config", "user.email", "t@example.com"]);
+        git_ok(dir.path(), &["config", "user.name", "t"]);
+        std::fs::write(dir.path().join("README.md"), "# t\n").expect("seed");
+        git_ok(dir.path(), &["add", "README.md"]);
+        git_ok(dir.path(), &["commit", "-m", "seed"]);
+        dir
+    }
+
+    /// Commit `raw` as the declaration at `dir`, creating parents as needed.
+    fn commit_declaration_at(repo: &Path, relative: &Path, raw: &str) {
+        let path = repo.join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("mkdir for the declaration");
+        }
+        std::fs::write(&path, raw).expect("write the declaration");
+        git_ok(repo, &["add", &relative.to_string_lossy()]);
+        git_ok(repo, &["commit", "-m", "declare"]);
+    }
+
     #[test]
     fn denies_a_source_write_in_a_main_checkout() {
         let dir = main_checkout();
@@ -564,18 +611,17 @@ mod tests {
     /// written and no route to being committed — the boundary refused the only
     /// tree the project has. The declaration is what tells the guard the source
     /// class is empty here.
-    /// What: the same fixture as `denies_a_source_write_in_a_main_checkout`,
-    /// plus one committed `.trusty-mpm.toml`.
+    /// What: the same question as `denies_a_source_write_in_a_main_checkout`,
+    /// against a real checkout carrying one COMMITTED `.trusty-mpm.toml`.
     /// Test: itself.
     #[test]
     fn allows_a_source_write_in_a_documents_only_checkout() {
-        let dir = main_checkout();
-        std::fs::write(
-            dir.path()
-                .join(trusty_mpm::core::project_config::PROJECT_CONFIG_FILE),
+        let dir = git_main_checkout();
+        commit_declaration_at(
+            dir.path(),
+            Path::new(trusty_mpm::core::project_config::PROJECT_CONFIG_FILE),
             "documents_only = true\n",
-        )
-        .expect("write the declaration");
+        );
         for name in ["make-graphics.py", "src/lib.rs", "scripts/build.sh"] {
             assert_eq!(
                 evaluate_main_checkout_write(
@@ -594,7 +640,9 @@ mod tests {
     /// Why: the relaxation is worth nothing unless it is confined to the
     /// projects that asked for it. Each spelling here is a way of not declaring
     /// — no file, the key set to `false`, and a file whose typo makes it
-    /// untrusted — and each must leave ADR-0044's deny exactly as it was.
+    /// untrusted — and each must leave ADR-0044's deny exactly as it was. Each
+    /// is COMMITTED, so the row fails for the reason it names rather than
+    /// incidentally through #7905's CRITICAL 1 fix.
     /// Test: itself.
     #[test]
     fn denies_a_source_write_when_the_project_did_not_declare_documents_only() {
@@ -605,14 +653,13 @@ mod tests {
             // A real grant beside a misspelled key: rejected wholesale.
             Some("documents_only = true\nwrktree = false\n"),
         ] {
-            let dir = main_checkout();
+            let dir = git_main_checkout();
             if let Some(raw) = declaration {
-                std::fs::write(
-                    dir.path()
-                        .join(trusty_mpm::core::project_config::PROJECT_CONFIG_FILE),
+                commit_declaration_at(
+                    dir.path(),
+                    Path::new(trusty_mpm::core::project_config::PROJECT_CONFIG_FILE),
                     raw,
-                )
-                .expect("write the declaration");
+                );
             }
             let reason = evaluate_main_checkout_write(
                 "Write",
@@ -650,24 +697,23 @@ mod tests {
     /// Test: itself.
     #[test]
     fn documents_only_is_not_borrowed_by_a_checkout_that_never_declared_it() {
-        let declared = main_checkout();
-        std::fs::write(
-            declared
-                .path()
-                .join(trusty_mpm::core::project_config::PROJECT_CONFIG_FILE),
+        let declared = git_main_checkout();
+        commit_declaration_at(
+            declared.path(),
+            Path::new(trusty_mpm::core::project_config::PROJECT_CONFIG_FILE),
             "documents_only = true\n",
-        )
-        .expect("write the declaration");
-        let undeclared = main_checkout();
+        );
+        let undeclared = git_main_checkout();
 
         // 1. Root spoofing: a declaration one level down answers for nothing.
-        let spoofed = undeclared.path().join("articles");
-        std::fs::create_dir(&spoofed).expect("mkdir articles");
-        std::fs::write(
-            spoofed.join(trusty_mpm::core::project_config::PROJECT_CONFIG_FILE),
+        // COMMITTED, so this row still tests root resolution after #7905's
+        // CRITICAL 1 fix rather than passing because it is uncommitted.
+        commit_declaration_at(
+            undeclared.path(),
+            &Path::new("articles").join(trusty_mpm::core::project_config::PROJECT_CONFIG_FILE),
             "documents_only = true\n",
-        )
-        .expect("write the spoofed declaration");
+        );
+        let spoofed = undeclared.path().join("articles");
         let reason = evaluate_main_checkout_write(
             "Write",
             Some(&write_input(&spoofed.join("make-graphics.py"))),

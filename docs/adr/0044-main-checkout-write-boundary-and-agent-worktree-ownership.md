@@ -68,6 +68,25 @@ worktree creation.
    through ONE function so they cannot disagree about whether a file may be
    written but not committed.
 
+   **The declaration counts only when it is COMMITTED AT `HEAD`, and landing it
+   is itself a source-class commit.** Both halves are required; each closes the
+   other's gap, and the first cut of this decision shipped neither. A
+   `.trusty-mpm.toml` is not source under `is_source_code_path`, so writing it is
+   admitted by the very boundary it switches off — on the built binary, `Write
+   .trusty-mpm.toml` followed by `Write src/lib.rs` defeated this ADR in two tool
+   calls. So the grant is read from the blob at `HEAD:.trusty-mpm.toml`, never
+   from the working tree: an untracked declaration, a staged-but-uncommitted one,
+   and an uncommitted edit to a tracked one all grant nothing. That alone would
+   not have been enough either, because `.trusty-mpm.toml` is configuration and
+   ADR-0049's commit gate read `git add .trusty-mpm.toml && git commit` as an
+   ordinary documents commit — one command, from the main checkout, and the
+   declaration was at `HEAD`. So a staged change that INTRODUCES, FLIPS or
+   RETRACTS `documents_only` is classified as source at that gate and refused
+   there, which leaves exactly one route for a project to declare itself: a
+   worktree branch and a reviewed pull request, the same route as any other
+   source change. A staged edit to that file that leaves the key alone stays an
+   ordinary documents commit.
+
    The declaration empties the SOURCE CLASS for that checkout and relaxes
    nothing else. ADR-0049 decision 3's live-writer check, decision 5's
    empty/unreadable-index denies, decision 8's lone-command rule, ADR-0048's

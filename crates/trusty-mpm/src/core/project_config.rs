@@ -247,9 +247,11 @@ pub struct ProjectLevelConfig {
     /// rule (decision 8), the destructive-git rules and every secret-file rule
     /// are untouched.
     /// Test: `project_config_parses_documents_only`,
-    /// `documents_only_at_reads_a_declared_checkout`,
+    /// `documents_only_at_reads_a_committed_declaration`,
+    /// `documents_only_at_ignores_an_uncommitted_declaration`,
     /// `allows_a_source_write_in_a_documents_only_checkout`,
-    /// `classify_staged_commit_permits_a_rename_in_a_documents_only_project`.
+    /// `classify_staged_commit_permits_a_rename_in_a_documents_only_project`,
+    /// `classify_staged_commit_denies_landing_a_documents_only_declaration`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub documents_only: Option<bool>,
 }
@@ -379,25 +381,94 @@ pub fn load_or_report(project_dir: &Path) -> Option<ProjectLevelConfig> {
 /// file may be written but not committed — the exact incoherence ADR-0049
 /// decision 2 exists to remove.
 ///
-/// What: `true` only for a `<root>/.trusty-mpm.toml` that PARSES and carries
+/// What: `true` only when the blob at `HEAD:.trusty-mpm.toml` PARSES and carries
 /// `documents_only = true`. Every other outcome is `false`, and `false` leaves
-/// the caller's deny exactly as it was: an absent file, an unreadable one, one
-/// that fails `deny_unknown_fields`, and an absent or `false` key all keep the
-/// boundary. That direction is the whole safety case for the key — a
-/// declaration that cannot be read never widens anything, which is
+/// the caller's deny exactly as it was: no such path at `HEAD`, an unborn `HEAD`,
+/// git unavailable, a blob that fails `deny_unknown_fields`, and an absent or
+/// `false` key all keep the boundary. That direction is the whole safety case
+/// for the key — a declaration that cannot be read never widens anything, which
+/// is
 /// [ADR-0045](../../../docs/adr/0045-distinguish-absent-from-undeterminable-on-destructive-paths.md)
 /// applied to a relaxation rather than to a destructive path. Callers ask it
-/// only once a deny is otherwise certain, so ordinary traffic pays no file read.
+/// only once a deny is otherwise certain, so ordinary traffic pays no
+/// subprocess.
+///
+/// #7905 review, CRITICAL 1: it reads `HEAD`, never the WORKING TREE. The
+/// working-tree file is not source under `is_source_code_path`, so writing it
+/// is admitted by the very boundary it would then switch off — `Write
+/// .trusty-mpm.toml` followed by `Write src/lib.rs` defeated ADR-0044 in two
+/// tool calls on the built binary. Reading the committed blob is what makes the
+/// declaration cost a review: an untracked file, a staged-but-uncommitted one,
+/// and an uncommitted edit to a tracked one all grant nothing, and the only way
+/// to move `HEAD` in a main checkout is the ADR-0044 route through a worktree
+/// branch and a pull request — which
+/// [`staged_declaration_changes_documents_only`] is what enforces.
 ///
 /// `root` is the checkout root the caller already resolved
 /// ([`crate::core::project_aliases::main_checkout_root`]), never the `cwd`: the
 /// declaration belongs to the repository, and reading it from a subdirectory
 /// would let a nested directory answer for a project that never declared
 /// anything.
-/// Test: `documents_only_at_reads_a_declared_checkout`,
+/// Test: `documents_only_at_reads_a_committed_declaration`,
+/// `documents_only_at_ignores_an_uncommitted_declaration`,
 /// `documents_only_at_is_false_for_an_undeclared_or_unreadable_checkout`.
 pub fn documents_only_at(root: &Path) -> bool {
-    load_or_report(root).and_then(|cfg| cfg.documents_only) == Some(true)
+    declared_documents_only_at_rev(root, "HEAD") == Some(true)
+}
+
+/// Would committing the staged index CHANGE the `documents_only` declaration
+/// (#7905)?
+///
+/// Why (#7905 review, CRITICAL 2): `.trusty-mpm.toml` is configuration, so the
+/// ADR-0049 commit gate read `git add .trusty-mpm.toml && git commit` as an
+/// ordinary documents commit. That landed the declaration at `HEAD` from the
+/// main checkout in one command, after which [`documents_only_at`] answered
+/// `true` and every source commit in that tree read as documents. Closing
+/// CRITICAL 1 alone would not have helped: the two holes each reopen the other,
+/// so the declaration has to be BOTH committed to count and source-class to
+/// commit.
+///
+/// What: compares the `documents_only` value the index would land against the
+/// one `HEAD` already carries, both read through
+/// [`declared_documents_only_at_rev`] — the same lens [`documents_only_at`]
+/// uses, so the gate cannot disagree with the grant about what a revision
+/// declares. `true` when they differ, in EITHER direction: introducing the key,
+/// flipping it, and retracting it are all changes to a security-relevant
+/// declaration and all belong in a reviewed pull request.
+///
+/// It fails CLOSED by construction rather than by a carve-out. A blob that will
+/// not parse, a path absent at a revision, and git being unavailable each read
+/// as `None` — "this revision grants nothing" — so the only way to answer
+/// "unchanged" is for both sides to be readable and equal. A staged edit that
+/// leaves the key alone is therefore still an ordinary documents commit.
+/// Test: `staged_declaration_change_is_detected_in_both_directions`,
+/// `staged_declaration_edit_that_leaves_the_key_alone_is_not_a_change`.
+pub fn staged_declaration_changes_documents_only(root: &Path) -> bool {
+    // `:<path>` is the INDEX copy — what this commit would actually land.
+    declared_documents_only_at_rev(root, "") != declared_documents_only_at_rev(root, "HEAD")
+}
+
+/// The `documents_only` value the project declares at one git revision (#7905).
+///
+/// Why: the single lens both #7905 rules look through, so "what does this
+/// revision declare" has one answer built one way.
+/// What: `git show <rev>:.trusty-mpm.toml` at `root`, parsed with the same
+/// `deny_unknown_fields` reader every other caller uses. `rev` is `"HEAD"` for
+/// the committed declaration and `""` for the index copy (`git show
+/// :.trusty-mpm.toml`). `None` for every failure — no such path, unborn `HEAD`,
+/// git unavailable, a blob that does not parse — and `None` for a file that
+/// parses without the key, which are the same thing to both callers: this
+/// revision grants nothing.
+/// Test: `documents_only_at_reads_a_committed_declaration`,
+/// `staged_declaration_change_is_detected_in_both_directions`.
+fn declared_documents_only_at_rev(root: &Path, rev: &str) -> Option<bool> {
+    let spec = format!("{rev}:{PROJECT_CONFIG_FILE}");
+    // The hardened `git` invocation every guard path shares: ambient config
+    // cannot steer which blob a security boundary reads.
+    let raw = crate::session_manager::worktree_safety::git_stdout(root, &["show", &spec]).ok()?;
+    ProjectLevelConfig::from_toml(&raw, &root.join(PROJECT_CONFIG_FILE))
+        .ok()?
+        .documents_only
 }
 
 #[cfg(test)]

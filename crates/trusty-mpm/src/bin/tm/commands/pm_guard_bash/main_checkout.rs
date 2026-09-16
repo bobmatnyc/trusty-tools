@@ -153,6 +153,18 @@ use crate::commands::hook_rewrite::first_command_token;
 use crate::commands::pm_guard::is_source_code_path;
 use crate::commands::pm_guard_bash::shell_lex;
 
+/// The one staged path that can carry a `documents_only` declaration (#7905).
+///
+/// Why: [`staged_paths`] reports repository-relative paths, and only a
+/// declaration at the repository ROOT is ever read
+/// ([`trusty_mpm::core::project_config::documents_only_at`] is asked of the
+/// checkout root). Matching exactly is what keeps a nested
+/// `articles/.trusty-mpm.toml` — which grants nothing — from being refused as
+/// though it were the real declaration.
+/// Test: `classify_staged_commit_denies_landing_a_documents_only_declaration`,
+/// `classify_staged_commit_permits_a_declaration_edit_that_spares_the_key`.
+const PROJECT_DECLARATION_PATH: &str = trusty_mpm::core::project_config::PROJECT_CONFIG_FILE;
+
 /// Deny a whole-tree-destructive git command aimed at a main checkout.
 ///
 /// Why: the one entry point `pm_guard` calls. It is kept to the wrapper shape
@@ -420,7 +432,9 @@ fn command_is_a_lone_commit(command: &str) -> bool {
 /// `classify_staged_commit_denies_the_forms_the_index_does_not_describe`,
 /// `classify_staged_commit_permits_a_rename_in_a_documents_only_project`,
 /// `classify_staged_commit_denies_a_rename_without_the_declaration`,
-/// `classify_staged_commit_still_denies_an_empty_index_in_a_documents_only_project`.
+/// `classify_staged_commit_still_denies_an_empty_index_in_a_documents_only_project`,
+/// `classify_staged_commit_denies_landing_a_documents_only_declaration`,
+/// `classify_staged_commit_permits_a_declaration_edit_that_spares_the_key`.
 fn classify_staged_commit(
     tail: &[String],
     staged: Option<Vec<String>>,
@@ -433,12 +447,23 @@ fn classify_staged_commit(
     let Some(staged) = staged.filter(|s| !s.is_empty()) else {
         return CommitVerdict::Deny(commit_deny_reason(&root));
     };
-    // #7905: read once, and only after the index is known non-empty.
-    let documents_only = trusty_mpm::core::project_config::documents_only_at(&root);
+    // #7905 review, CRITICAL 2: declaring `documents_only` is itself a
+    // source-class change, so it can only land the way source lands — through a
+    // worktree branch and a pull request. Without this, `git add
+    // .trusty-mpm.toml && git commit` was an ordinary documents commit that
+    // switched the rule below off for every commit after it.
+    let declaring = staged.iter().any(|p| p == PROJECT_DECLARATION_PATH)
+        && trusty_mpm::core::project_config::staged_declaration_changes_documents_only(&root);
+    // #7905: read once, and only after the index is known non-empty. A commit
+    // that is CHANGING the declaration cannot also be licensed by it.
+    let documents_only = !declaring && trusty_mpm::core::project_config::documents_only_at(&root);
     let source: Vec<&str> = staged
         .iter()
         .map(String::as_str)
-        .filter(|p| !documents_only && is_source_code_path(p))
+        .filter(|p| {
+            (declaring && p == &PROJECT_DECLARATION_PATH)
+                || (!documents_only && is_source_code_path(p))
+        })
         .collect();
     if source.is_empty() {
         CommitVerdict::DocsOnly {
@@ -1512,9 +1537,38 @@ mod tests {
         classify_staged_commit(&tail, Some(staged), root, root.to_path_buf())
     }
 
-    /// A checkout root that has (or has not) declared itself documents-only.
+    /// Run `git -C <dir> <args>`, panicking with git's own stderr on failure.
+    fn git_ok(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("fixture: `git {}` could not be run: {e}", args.join(" ")));
+        assert!(
+            out.status.success(),
+            "fixture: `git {}` failed in {}: {}",
+            args.join(" "),
+            dir.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A REAL checkout root that has (or has not) COMMITTED a declaration.
+    ///
+    /// Why (#7905 review, CRITICAL 1): the grant is read from
+    /// `HEAD:.trusty-mpm.toml`, so a file merely written into a temp dir
+    /// declares nothing. Every row that expects the documents-only behaviour
+    /// needs the declaration at `HEAD`.
+    /// Test: `classify_staged_commit_permits_a_rename_in_a_documents_only_project`.
     fn root_declaring(documents_only: Option<&str>) -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tempdir");
+        git_ok(dir.path(), &["init", "--initial-branch=main"]);
+        git_ok(dir.path(), &["config", "user.email", "t@example.com"]);
+        git_ok(dir.path(), &["config", "user.name", "t"]);
+        std::fs::write(dir.path().join("README.md"), "# t\n").expect("seed");
+        git_ok(dir.path(), &["add", "README.md"]);
+        git_ok(dir.path(), &["commit", "-m", "seed"]);
         if let Some(raw) = documents_only {
             std::fs::write(
                 dir.path()
@@ -1522,8 +1576,93 @@ mod tests {
                 raw,
             )
             .expect("write the declaration");
+            git_ok(dir.path(), &["add", PROJECT_DECLARATION_PATH]);
+            git_ok(dir.path(), &["commit", "-m", "declare"]);
         }
         dir
+    }
+
+    /// Stage `raw` as the declaration without committing it.
+    fn stage_declaration(repo: &Path, raw: &str) {
+        std::fs::write(repo.join(PROJECT_DECLARATION_PATH), raw).expect("write the declaration");
+        git_ok(repo, &["add", PROJECT_DECLARATION_PATH]);
+    }
+
+    /// 🔴 #7905 review, CRITICAL 2: landing the declaration is a SOURCE commit.
+    ///
+    /// Why: the second half of the self-granting loop. `.trusty-mpm.toml` is
+    /// configuration, so `git add .trusty-mpm.toml && git commit` read as an
+    /// ordinary documents commit and put the declaration at `HEAD` from the
+    /// main checkout in one command — after which every source commit in that
+    /// tree read as documents. Refusing it here is what forces the declaration
+    /// through a worktree branch and a pull request, the same route as source,
+    /// and it is what keeps CRITICAL 1's committed-blob read from being trivial
+    /// to satisfy.
+    /// What: the three shapes that move the key — introducing it, flipping it,
+    /// and retracting it — each denied with the ADR-0044 reason naming the file.
+    /// Test: itself.
+    #[test]
+    fn classify_staged_commit_denies_landing_a_documents_only_declaration() {
+        // Introducing it in a project that never declared.
+        let root = root_declaring(None);
+        stage_declaration(root.path(), "documents_only = true\n");
+        let reason = deny_text(&classify_at(
+            root.path(),
+            &["-m", "chore: declare"],
+            &[PROJECT_DECLARATION_PATH],
+        ))
+        .to_string();
+        assert!(reason.contains("ADR-0044"), "{reason}");
+        assert!(reason.contains(PROJECT_DECLARATION_PATH), "{reason}");
+
+        // Flipping and retracting it, against a HEAD that already declares.
+        for raw in ["documents_only = false\n", "worktree = false\n"] {
+            let root = root_declaring(Some("documents_only = true\n"));
+            stage_declaration(root.path(), raw);
+            let verdict = classify_at(
+                root.path(),
+                &["-m", "chore: undeclare"],
+                &[PROJECT_DECLARATION_PATH],
+            );
+            assert!(
+                !is_docs_only(&verdict),
+                "moving the key is a source-class commit: {raw:?}"
+            );
+        }
+    }
+
+    /// 🔴 #7905 review, CRITICAL 2's bound: a declaration edit that spares the
+    /// key stays an ordinary documents commit.
+    ///
+    /// Why: the rule is about the KEY, not the file. A project editing an
+    /// unrelated setting in its `.trusty-mpm.toml` is doing ordinary
+    /// configuration work, and refusing it from the main checkout would be a
+    /// new deny #7905 never asked for. The second row is the one that shows the
+    /// grant still works while this rule is in force: a declared project whose
+    /// commit does not touch the key keeps its documents-only treatment for the
+    /// `.py` beside it.
+    /// Test: itself.
+    #[test]
+    fn classify_staged_commit_permits_a_declaration_edit_that_spares_the_key() {
+        let root = root_declaring(Some("documents_only = true\nworktree = false\n"));
+        stage_declaration(root.path(), "documents_only = true\nworktree = true\n");
+        assert!(
+            is_docs_only(&classify_at(
+                root.path(),
+                &["-m", "chore: flip worktree"],
+                &[PROJECT_DECLARATION_PATH],
+            )),
+            "editing a neighbouring key is ordinary configuration work"
+        );
+
+        assert!(
+            is_docs_only(&classify_at(
+                root.path(),
+                &["-m", "chore: archive"],
+                &[PROJECT_DECLARATION_PATH, "video/make-graphics.py"],
+            )),
+            "the grant still stands for a commit that does not move the key"
+        );
     }
 
     /// 🔴 #7905 arm 3: a RENAME commit in a documents-only repository is
