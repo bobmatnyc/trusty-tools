@@ -466,6 +466,10 @@ impl CodeIndexer {
         // behaviour for test / BM25-only indexers.
         let persist_chunks_json = self.corpus.is_none();
         let snapshot_guard = self.snapshot_guard.clone();
+        // #7980: read the writer shape here, beside the `refuse_durable_write`
+        // gate above that evaluated the same flags — the detached task holds no
+        // reference to the indexer.
+        let writer_shape = self.snapshot_writer_shape();
         tokio::spawn(async move {
             // Issue #403: route HNSW path to colocated or legacy storage.
             let is_colocated = crate::service::colocated_storage::has_colocated_storage(&root_path);
@@ -603,6 +607,7 @@ impl CodeIndexer {
                                 &index_id_inner,
                                 &chunks_path_inner,
                                 snapshot.chunks.len(),
+                                writer_shape,
                             )
                             .map_err(std::io::Error::other)?;
                         let bytes = match serde_json::to_vec(&snapshot) {

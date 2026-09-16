@@ -568,6 +568,13 @@ async fn clear_checkpoint_on_released_file(tmp_path: &Path, index_id: &IndexId) 
 /// attached, so it quarantines the index (#7920) — a botched swap must not
 /// crash the daemon, and must not leave the snapshot writers unguarded.
 ///
+/// #7991: before any of that, [`super::live_corpus_lock::acquire_for_promotion`]
+/// takes redb's own advisory lock on the live file and holds it across the
+/// rename. Without it, a second daemon on a shared filesystem could open the
+/// live corpus inside the reindex window and be left reading an unlinked inode.
+/// A refusal returns `false` with staging still attached and the checkpoint
+/// intact, so the staged corpus survives for the next run to adopt.
+///
 /// #7004: returns `true` only when the promoted corpus is INSTALLED on the
 /// indexer. Every failure arm below returns `false`, which is what gates the
 /// force path's warm-state reconciliation — that pass drops warm chunks against
@@ -609,12 +616,24 @@ pub(super) async fn commit_staged_corpus_swap(
             }
         }
     };
+    // #7991: take redb's own advisory lock on the live corpus and HOLD it
+    // across the rename, so no opener can arrive on the inode about to be
+    // unlinked. Deliberately before the release below: a refusal here leaves
+    // staging attached and the checkpoint intact, so the run defers rather than
+    // landing in the no-corpus state the post-release arms quarantine.
+    let Some(live_lock) =
+        super::live_corpus_lock::acquire_for_promotion(&live_path, index_id).await
+    else {
+        return false;
+    };
     // #4721: one call performs the checkpoint clear AND the handle release, in
     // the only order in which both can work, and yields the token
     // `rename_staging_over_live` demands. Reordering is not expressible.
     let release = release_staging_for_promotion(handle, index_id, tmp_path).await;
     let live = live_path.clone();
     let rename_result = rename_staging_over_live(&release, tmp_path, &live, index_id).await;
+    // The descriptor now names the replaced inode; nothing still reads it.
+    drop(live_lock);
     // Re-open the swapped-in live corpus, serialized + panic-safe (issue
     // #3659) against any other concurrent opener of this SAME path (e.g. a
     // lazy-load or another handler racing this reindex's swap) — this used

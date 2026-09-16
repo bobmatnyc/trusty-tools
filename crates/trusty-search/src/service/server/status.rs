@@ -351,6 +351,17 @@ pub(crate) async fn index_status_report(
             "reason": k.stage_reason(),
         })
     });
+    // #7979: a migration that failed at boot advances no schema stamp and
+    // leaves the index serving whatever it already held — usually nothing. It
+    // was visible only as a WARN, so this endpoint reported a broken index as
+    // an ordinary empty one. `null` means no migration has failed.
+    let migration_error = indexer.migration_fault().map(|f| {
+        serde_json::json!({
+            "stage": f.stage,
+            "detail": f.detail,
+            "at": f.at,
+        })
+    });
     // Issue #3408: surface the watcher's live/degraded state per-index. A
     // network-mounted root never gets a live watcher (inotify/FSEvents can't
     // observe another host's writes there); `network_mount_degraded` plus
@@ -389,6 +400,8 @@ pub(crate) async fn index_status_report(
         "root_path": handle.root_path,
         "chunk_count": chunk_count,
         "corpus_open_failure": corpus_open_failure,
+        // #7979: the last failed migration, or null.
+        "migration_error": migration_error,
         "status": legacy_status,
         "stages": stages_snapshot,
         // #4787: cumulative semantic coverage, beside the per-boot delta.

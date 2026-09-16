@@ -103,8 +103,15 @@ impl CodeIndexer {
         };
         // #7920: refuse an empty or foreign corpus over a populated snapshot —
         // the shutdown flush resolves `path` at shutdown, not at load.
-        self.snapshot_guard
-            .check_overwrite(&self.index_id, path, snapshot.chunks.len())?;
+        // #7980: the writer shape decides whether an UNREADABLE file may be
+        // moved aside — a legacy index's own corpus may self-heal one, a
+        // stand-in's may not.
+        self.snapshot_guard.check_overwrite(
+            &self.index_id,
+            path,
+            snapshot.chunks.len(),
+            self.snapshot_writer_shape(),
+        )?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create parent of {}", path.display()))?;

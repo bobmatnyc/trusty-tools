@@ -96,6 +96,10 @@ pub(crate) use helpers::{
 // Re-export types so callers outside this module see the same paths.
 pub use corpus_fault::CorpusReadUnavailable;
 pub use migration_state::{IndexMigrationInProgress, MigrationWindow};
+// #7979: the failed-migration record `GET /indexes/:id/status` reports.
+pub use migration_state::{
+    MigrationFault, MIGRATION_STAGE_JSON_TO_REDB, MIGRATION_STAGE_SCHEMA_CHAIN,
+};
 pub use search::drops::SearchDrops;
 pub use search::exact::ExactMatchReport;
 pub use search::SearchOutcome;
@@ -563,6 +567,11 @@ pub struct CodeIndexer {
     /// many snapshot overwrites it refused. `Arc` so the detached incremental
     /// persister applies the same guard as the shutdown flush.
     pub(super) snapshot_guard: Arc<snapshot_guard::SnapshotGuard>,
+
+    /// #7979: the last migration that failed on this index, reported by
+    /// `GET /indexes/:id/status` as `migration_error`. `Arc` because the
+    /// schema-chain runner records it while holding only a read lock.
+    pub(super) migration_fault: Arc<migration_state::MigrationFaultRecord>,
 }
 
 /// Coalescing state for `spawn_incremental_persist`.
@@ -687,6 +696,7 @@ impl CodeIndexer {
             // #6369: resolve the cap once here, not on every insert.
             chunk_cap: max_chunks_per_index(),
             snapshot_guard: Arc::new(snapshot_guard::SnapshotGuard::default()),
+            migration_fault: Arc::new(migration_state::MigrationFaultRecord::default()),
         }
     }
 

@@ -54,6 +54,10 @@ mod guard;
 // #6570: `watch_rescan` reuses the content-hash cache to skip unchanged files.
 pub(crate) mod hash;
 mod hnsw_swap;
+// #7991: the promotion never renames over a live corpus another opener holds.
+mod live_corpus_lock;
+#[cfg(test)]
+mod live_corpus_lock_tests;
 mod orchestrator;
 mod pollers;
 mod progress;

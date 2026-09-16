@@ -57,6 +57,49 @@ enum OnDisk {
     Unreadable(u64),
 }
 
+/// Whether the writer's in-memory corpus is the authoritative one (#7980).
+///
+/// Why: the guard's empty/foreign refusal was written for an indexer whose
+/// in-memory corpus is NOT authoritative — a write-quarantined one, whose
+/// corpus is empty because redb never opened, or one a staged swap detached.
+/// `refuse_durable_write` stops both before the guard runs, so the shape that
+/// actually reaches it is a legacy, store-less, non-quarantined indexer, whose
+/// `chunks.json` IS its durable corpus. Treating those two the same is what
+/// made an unreadable file on an unowned path a permanent refusal — the writer
+/// held real chunks and no reader could recover the bytes it was protecting.
+/// What: a two-state marker the caller derives from the indexer, passed rather
+/// than re-derived here so the guard stays a pure decision over its inputs.
+/// Test: `unreadable_snapshot_no_longer_wedges_a_store_less_writer`,
+/// `a_quarantined_writer_never_reaches_the_unreadable_self_heal`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WriterShape {
+    /// Store-less and not quarantined: `chunks.json` is this indexer's corpus.
+    CorpusIsAuthoritative,
+    /// Anything else — the in-memory corpus may describe nothing at all.
+    CorpusMayBeStandIn,
+}
+
+/// Move an unreadable snapshot aside instead of destroying it (#7980).
+///
+/// Why: #7923 ruled that bytes this process cannot parse are bytes it must not
+/// destroy, and that ruling is what makes admitting the write safe — the file
+/// is preserved under a name nothing reads, so a later forensic pass still has
+/// it while the live path is free for a corpus that is actually readable.
+/// What: renames `path` to `<path>.corrupt-<unix-millis>`, unique per attempt
+/// so a second occurrence never clobbers the first. Returns the new path.
+/// Test: `unreadable_snapshot_no_longer_wedges_a_store_less_writer`.
+fn preserve_unreadable(path: &Path) -> std::io::Result<PathBuf> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".corrupt-{stamp}"));
+    let kept = path.with_file_name(name);
+    std::fs::rename(path, &kept)?;
+    Ok(kept)
+}
+
 /// Minimal parse shape: counts chunk entries without materialising them.
 #[derive(serde::Deserialize)]
 struct CountedSnapshot {
@@ -115,9 +158,12 @@ impl SnapshotGuard {
     ///
     /// Why: see the module doc.
     /// What: allows the write when this indexer owns `path` and holds at least
-    /// one chunk, or when the file holds nothing. Otherwise counts the refusal,
-    /// logs it at ERROR, and returns [`SnapshotOverwriteRefused`]. Reads the
-    /// file only on the refusal-candidate path.
+    /// one chunk, or when the file holds nothing. #7980: also allows it when
+    /// the file is UNREADABLE, the writer holds at least one chunk, and
+    /// `writer` says its corpus is authoritative — the unreadable bytes are
+    /// renamed aside first, so nothing is destroyed. Otherwise counts the
+    /// refusal, logs it at ERROR, and returns [`SnapshotOverwriteRefused`].
+    /// Reads the file only on the refusal-candidate path.
     ///
     /// The read and the caller's rename are not atomic, which narrows the #7920
     /// window rather than closing it. What passes through the remaining window
@@ -131,12 +177,15 @@ impl SnapshotGuard {
     /// Test: `shutdown_flush_refuses_empty_corpus_over_populated_chunks_json`,
     /// `shutdown_flush_refuses_foreign_partial_corpus`,
     /// `chunks_added_after_load_are_persisted`,
-    /// `corrupt_snapshot_does_not_block_the_owning_writer`.
+    /// `corrupt_snapshot_does_not_block_the_owning_writer`,
+    /// `unreadable_snapshot_no_longer_wedges_a_store_less_writer`,
+    /// `a_quarantined_writer_never_reaches_the_unreadable_self_heal`.
     pub(crate) fn check_overwrite(
         &self,
         index_id: &str,
         path: &Path,
         in_memory: usize,
+        writer: WriterShape,
     ) -> Result<(), SnapshotOverwriteRefused> {
         let owned = self.owns(path);
         if owned && in_memory > 0 {
@@ -145,7 +194,37 @@ impl SnapshotGuard {
         let on_disk = match inspect(path) {
             OnDisk::Empty => return Ok(()),
             OnDisk::Chunks(n) => format!("{n} chunk(s) on disk"),
-            OnDisk::Unreadable(bytes) => format!("unreadable, {bytes} bytes on disk"),
+            // #7980: an unreadable file has no chunks any reader can recover —
+            // not the migration, not this daemon. Refusing it forever wedged a
+            // store-less indexer that holds a real corpus out of ever
+            // persisting, a self-heal the pre-#7920 reindex had. Preserve the
+            // bytes under a sidecar name and let the write land.
+            OnDisk::Unreadable(bytes) => {
+                if in_memory > 0 && writer == WriterShape::CorpusIsAuthoritative {
+                    match preserve_unreadable(path) {
+                        Ok(kept) => {
+                            tracing::warn!(
+                                index_id = %index_id,
+                                "index '{index_id}': {} held {bytes} unreadable byte(s); moved \
+                                 it to {} so this indexer's {in_memory} in-memory chunk(s) can \
+                                 be persisted (#7980). Nothing was destroyed.",
+                                path.display(),
+                                kept.display(),
+                            );
+                            return Ok(());
+                        }
+                        // Could not move it aside — fall through to the refusal
+                        // rather than write over bytes we failed to preserve.
+                        Err(e) => tracing::error!(
+                            index_id = %index_id,
+                            "index '{index_id}': could not preserve the unreadable snapshot at \
+                             {} ({e}) — refusing the write instead (#7980)",
+                            path.display(),
+                        ),
+                    }
+                }
+                format!("unreadable, {bytes} bytes on disk")
+            }
         };
         let reason = if in_memory == 0 {
             "the in-memory corpus is empty"
@@ -177,5 +256,22 @@ impl CodeIndexer {
     /// Number of `chunks.json` writes refused by the #7920 overwrite guard.
     pub fn refused_snapshot_overwrites(&self) -> u64 {
         self.snapshot_guard.refused()
+    }
+
+    /// Whether this indexer's in-memory corpus is its own durable state (#7980).
+    ///
+    /// Why: see [`WriterShape`]. Derived here rather than inside the guard
+    /// because these three flags are the indexer's, not the guard's.
+    /// What: authoritative only for a store-less indexer that never had a
+    /// corpus wired and is not write-quarantined — a legacy `chunks.json`
+    /// index. A quarantined indexer, or one whose corpus a staged swap
+    /// detached, is a stand-in whose empty corpus proves nothing.
+    /// Test: `a_quarantined_writer_never_reaches_the_unreadable_self_heal`.
+    pub(crate) fn snapshot_writer_shape(&self) -> WriterShape {
+        if !self.corpus_open_failed && !self.corpus_ever_wired && self.corpus.is_none() {
+            WriterShape::CorpusIsAuthoritative
+        } else {
+            WriterShape::CorpusMayBeStandIn
+        }
     }
 }

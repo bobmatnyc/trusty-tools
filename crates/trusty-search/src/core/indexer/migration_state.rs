@@ -27,7 +27,9 @@
 //! Test: `core::migration::m005::tests::a_search_during_the_migration_window_is_refused_not_empty`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+use super::CodeIndexer;
 
 /// A query arrived while this index was being migrated (#6581).
 ///
@@ -74,5 +76,83 @@ impl MigrationWindow {
 impl Drop for MigrationWindow {
     fn drop(&mut self) {
         self.flag.store(false, Ordering::Relaxed);
+    }
+}
+
+// ── Failed-migration record (#7979) ──────────────────────────────────────────
+
+/// Stage label for a failed legacy `chunks.json` → `index.redb` migration.
+pub const MIGRATION_STAGE_JSON_TO_REDB: &str = "json_to_redb";
+
+/// Stage label for a failed schema-version migration chain (M001–M005).
+pub const MIGRATION_STAGE_SCHEMA_CHAIN: &str = "schema_chain";
+
+/// The most recent migration failure for one index, as status reports it.
+///
+/// Why (#7979): a migration that fails does not advance the schema stamp and
+/// leaves the index serving whatever it already held — frequently nothing. The
+/// only signal was one `warn!` line, so `GET /indexes/:id/status` and
+/// `search_health` both answered as if the index were merely empty, and an
+/// operator diagnosing a zero-chunk index was steered toward a reindex that
+/// cannot repair a corrupt snapshot.
+/// What: the failing stage ([`MIGRATION_STAGE_JSON_TO_REDB`] or
+/// [`MIGRATION_STAGE_SCHEMA_CHAIN`]), the error chain rendered as text, and the
+/// RFC 3339 instant it was recorded.
+/// Test: `failed_schema_chain_is_reported_as_migration_error_in_status`.
+#[derive(Debug, Clone)]
+pub struct MigrationFault {
+    /// Which migration stage failed.
+    pub stage: &'static str,
+    /// The failure, rendered as `{err:#}`.
+    pub detail: String,
+    /// When the failure was recorded, RFC 3339.
+    pub at: String,
+}
+
+/// Shared cell holding the last [`MigrationFault`] for one index.
+///
+/// Why: both runners record through `&CodeIndexer` — the schema chain holds
+/// only a read lock on the indexer, and taking a write lock to record would
+/// invert the lock order that chain already established. Interior mutability is
+/// the shape `CorpusReadFault` uses for the same reason.
+/// What: a `Mutex<Option<MigrationFault>>`; every critical section is a single
+/// move, never held across an await.
+/// Test: `failed_schema_chain_is_reported_as_migration_error_in_status`,
+/// `a_succeeding_chain_clears_an_earlier_recorded_fault`.
+#[derive(Debug, Default)]
+pub(crate) struct MigrationFaultRecord {
+    last: Mutex<Option<MigrationFault>>,
+}
+
+impl MigrationFaultRecord {
+    /// Poison-tolerant lock: the critical sections are single moves, so a
+    /// poisoned mutex must not turn a migration fault into a daemon-wide one.
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<MigrationFault>> {
+        self.last.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl CodeIndexer {
+    /// Record a failed migration, replacing any earlier one (#7979).
+    pub(crate) fn record_migration_failure(&self, stage: &'static str, detail: impl Into<String>) {
+        *self.migration_fault.lock() = Some(MigrationFault {
+            stage,
+            detail: detail.into(),
+            at: chrono::Utc::now().to_rfc3339(),
+        });
+    }
+
+    /// Clear the record after a migration run succeeded (#7979).
+    ///
+    /// Why: without this a single failure would mark the index broken in
+    /// `status` for the rest of the process's life, outliving the condition
+    /// that caused it. A completed run is proof the chain applies again.
+    pub(crate) fn clear_migration_failure(&self) {
+        *self.migration_fault.lock() = None;
+    }
+
+    /// The last recorded migration failure, or `None` when none is outstanding.
+    pub fn migration_fault(&self) -> Option<MigrationFault> {
+        self.migration_fault.lock().clone()
     }
 }

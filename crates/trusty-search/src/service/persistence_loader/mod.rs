@@ -279,11 +279,20 @@ fn run_migrations_for_entry(indexer: &mut CodeIndexer, entry: &PersistedIndex) {
         }
     };
     let runner = MigrationRunner::new(vec![Box::new(JsonCorpusToRedbMigration)]);
-    if let Err(e) = runner.run(indexer, current, |v| write_version_to_file(&stamp_path, v)) {
-        tracing::warn!(
-            "warm-boot: migration runner failed for '{index_id}' ({e}) — \
-             starting with whatever state was restored"
-        );
+    match runner.run(indexer, current, |v| write_version_to_file(&stamp_path, v)) {
+        // #7979: a failed JSON → redb migration leaves the index serving 0
+        // chunks; the WARN alone left `status` and `search_health` silent.
+        Err(e) => {
+            tracing::warn!(
+                "warm-boot: migration runner failed for '{index_id}' ({e}) — \
+                 starting with whatever state was restored"
+            );
+            indexer.record_migration_failure(
+                crate::core::indexer::MIGRATION_STAGE_JSON_TO_REDB,
+                format!("{e:#}"),
+            );
+        }
+        Ok(_) => indexer.clear_migration_failure(),
     }
 }
 

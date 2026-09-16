@@ -170,6 +170,129 @@ async fn corrupt_snapshot_does_not_block_the_owning_writer() {
     assert_eq!(owner.refused_snapshot_overwrites(), 0);
 }
 
+/// Sidecar copies of an unreadable snapshot left beside `path` (#7980).
+fn preserved_sidecars(path: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let prefix = format!("{}.corrupt-", path.file_name().unwrap().to_string_lossy());
+    let mut found: Vec<std::path::PathBuf> = std::fs::read_dir(path.parent().unwrap())
+        .expect("read dir")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with(&prefix))
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+/// #7980 admit arm: a store-less writer holding a real corpus must not be
+/// wedged out of persisting by an unreadable file on an unowned path.
+///
+/// Why: the pre-#7920 reindex self-healed this — it simply rewrote the file.
+/// The guard turned it into a permanent refusal, so a legacy index whose
+/// `chunks.json` rotted could never persist again, and the bytes it was
+/// protecting were ones no reader (including the migration) can recover.
+/// What: writes an unparseable file at a path this indexer never loaded, adds
+/// chunks, flushes, and asserts the write landed AND the unreadable bytes were
+/// preserved under a sidecar rather than destroyed.
+/// Test: this IS the test.
+#[tokio::test]
+async fn unreadable_snapshot_no_longer_wedges_a_store_less_writer() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("chunks.json");
+    let rotted = b"{\"version\":1,\"chunks\":[{\"id\":".to_vec();
+    std::fs::write(&path, &rotted).unwrap();
+
+    // Store-less, never quarantined, holds a real corpus it never loaded from
+    // this file — the shape `refuse_durable_write` lets through.
+    let writer = make_indexer();
+    assert!(!writer.is_write_quarantined());
+    writer
+        .add_chunk(raw("a", "src/a.rs", "fn fresh() {}"))
+        .await
+        .unwrap();
+
+    writer
+        .flush_corpus_to_disk(&path)
+        .await
+        .expect("#7980: an unreadable file must not refuse a store-less writer forever");
+
+    assert_eq!(
+        snapshot_ids(&path),
+        HashSet::from(["a".to_string()]),
+        "the writer's own corpus must be on disk now"
+    );
+    assert_eq!(
+        writer.refused_snapshot_overwrites(),
+        0,
+        "#7980: this shape must not be counted as a refusal"
+    );
+    let kept = preserved_sidecars(&path);
+    assert_eq!(kept.len(), 1, "the unreadable bytes must be preserved once");
+    assert_eq!(
+        std::fs::read(&kept[0]).unwrap(),
+        rotted,
+        "#7923: the preserved copy must be byte-identical"
+    );
+}
+
+/// #7980 refuse arm: a stand-in corpus must never move the file aside.
+///
+/// Why: the self-heal is admissible only because the writer's corpus IS the
+/// index's durable state. A write-quarantined indexer's corpus is empty because
+/// redb never opened, so moving the snapshot aside would remove the one
+/// recovery source #4226 exists to protect. `refuse_durable_write` stops it
+/// before the guard, and the guard refuses it again if it ever arrives.
+/// What: asserts both — the quarantined flush leaves the file byte-identical
+/// with no sidecar, and the guard itself refuses the stand-in shape directly.
+/// Test: this IS the test.
+#[tokio::test]
+async fn a_quarantined_writer_never_reaches_the_unreadable_self_heal() {
+    use crate::core::corpus::CorpusOpenFailure;
+    use crate::core::indexer::snapshot_guard::{SnapshotGuard, WriterShape};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("chunks.json");
+    let rotted = b"{\"version\":1,\"chunks\":[{\"id\":".to_vec();
+    std::fs::write(&path, &rotted).unwrap();
+
+    let mut quarantined = make_indexer();
+    quarantined
+        .add_chunk(raw("a", "src/a.rs", "fn fresh() {}"))
+        .await
+        .unwrap();
+    quarantined.quarantine_detached_corpus(CorpusOpenFailure::Unclassified, "#7980 test");
+    assert!(quarantined.is_write_quarantined());
+    assert_eq!(
+        quarantined.snapshot_writer_shape(),
+        WriterShape::CorpusMayBeStandIn,
+        "a quarantined indexer's corpus is never authoritative"
+    );
+
+    quarantined
+        .flush_corpus_to_disk(&path)
+        .await
+        .expect("the quarantine guard abandons the write without erroring");
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        rotted,
+        "#4226: the snapshot must be byte-identical"
+    );
+    assert!(
+        preserved_sidecars(&path).is_empty(),
+        "#7980: a stand-in corpus must never move the snapshot aside"
+    );
+
+    // The guard's own arm, reached directly: the stand-in shape is refused
+    // even with chunks in hand, and still nothing is moved.
+    let guard = SnapshotGuard::default();
+    guard
+        .check_overwrite("direct", &path, 1, WriterShape::CorpusMayBeStandIn)
+        .expect_err("#7980: the stand-in shape must still be refused");
+    assert_eq!(guard.refused(), 1, "the refusal must be counted");
+    assert!(preserved_sidecars(&path).is_empty());
+}
+
 /// Error arm: a failed write surfaces as `Err` and leaves the source intact.
 #[tokio::test]
 async fn snapshot_write_failure_surfaces_error_and_keeps_source() {

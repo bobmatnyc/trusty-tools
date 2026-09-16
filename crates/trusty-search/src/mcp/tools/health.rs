@@ -215,6 +215,10 @@ pub(super) async fn report_health(
                 // is the REASON the count is unknown, and it was arriving in
                 // the response body and being dropped here.
                 "corpus_open_failure",
+                // #7979: a migration that failed at boot is why an index can
+                // read as empty; dropping it here left `search_health` silent
+                // about the one fact that explains the count.
+                "migration_error",
             ] {
                 if let Some(v) = body.get(key) {
                     detail.insert(key.to_string(), v.clone());
