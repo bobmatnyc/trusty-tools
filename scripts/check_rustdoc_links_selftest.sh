@@ -352,7 +352,7 @@ update_case() {
   actual_exit=0
   BASELINE_OVERRIDE="$target" \
     LANES_OVERRIDE="$FIXTURE_DIR/$lanes" \
-    METADATA_OVERRIDE="$FIXTURE_DIR/metadata-mini.json" \
+    METADATA_OVERRIDE="${UPDATE_METADATA:-$FIXTURE_DIR/metadata-mini.json}" \
     bash "$GATE" --update-baseline "$@" > "$out" 2>&1 || actual_exit=$?
 
   if [ "$actual_exit" != "$expected_exit" ]; then
@@ -412,6 +412,13 @@ update_case update-lane-unbuildable lanes-mini.tsv 3 LANE-NOT-EXAMINED keep \
 update_case update-lane-diag-writes lanes-mini.tsv 0 BASELINE-UPDATED written \
   --json "$FIXTURE_DIR/lane-documented.json" --lane default \
   --json "$FIXTURE_DIR/lane-feature-link.json" --lane features --cargo-rc 101
+
+# #7537 on the WRITE path, for the reason this whole section exists: the census
+# refusal is a second copy of the verdict-path arm, and the counts a short run
+# records become the ratchet every later run is scored against.
+UPDATE_METADATA="$FIXTURE_DIR/metadata-units.json" \
+  update_case update-units-short lanes-mini.tsv 4 UNITS-SHORT keep \
+  --json "$FIXTURE_DIR/units-bin-cached.json"
 
 echo
 if [ "$fail" -ne 0 ]; then
