@@ -1471,17 +1471,17 @@ async fn max_turns_override_reaches_the_pm_loop() {
     );
 }
 
-/// Every discovery tool name this daemon path's top-level prompt mentions.
+/// Every tool name a registry-gated prompt section instructs a call to.
 ///
 /// Why: the two #4602 tests below assert opposite sides of one contract and
-/// must range over the same name set the assembler gates on.
-/// What: chains the two exported tool-name lists.
+/// must range over the same name set the assembler gates on — reading it from
+/// `GATED_SECTIONS` means a section added there cannot escape these tests.
+/// What: flattens every declared name list in `prompt::GATED_SECTIONS`.
 /// Test: used by the two tests below.
-fn discovery_tool_names() -> Vec<&'static str> {
-    crate::prompt::FILE_DISCOVERY_TOOLS
+fn gated_tool_names() -> Vec<&'static str> {
+    crate::prompt::GATED_SECTIONS
         .iter()
-        .chain(crate::prompt::DISCOVERY_GUIDANCE_TOOLS.iter())
-        .copied()
+        .flat_map(|(_, names, _)| names.iter().copied())
         .collect()
 }
 
@@ -1489,16 +1489,19 @@ fn discovery_tool_names() -> Vec<&'static str> {
 /// its registry lacks (#4602).
 ///
 /// Why: this path registers `delegate_to_agent`/`finish_task`/the goal tools
-/// and nothing that touches the filesystem, yet its prompt used to carry the
-/// BASE `## File discovery` block; the PM obeyed it and every `list_dir`/`glob`
-/// call came back as `ToolCallExtractError::UnknownTool`, rendered in the TUI
-/// as `<name>(<invalid-arguments>)`.
+/// and nothing that touches the filesystem, yet its prompt used to carry BASE's
+/// `## File discovery` block AND its batch-write instructions; the PM obeyed
+/// them and every `list_dir`/`glob`/`write_files` call came back as
+/// `ToolCallExtractError::UnknownTool`, rendered in the TUI as
+/// `<name>(<invalid-arguments>)`.
 /// What: resolves the PM config this path loads, asserts `pm_prompt_tools`
 /// yields no registry for a delegating run, and asserts the prompt assembled
-/// from it names none of the discovery tools.
+/// from it names none of the gated tools. `BASE_PREAMBLE` is excised first —
+/// it still names `write_file` as an `e.g.` illustration of batching, which
+/// `prompt::tests::base_preamble_instructs_no_registry_specific_tool` covers.
 /// Test: this test.
 #[tokio::test]
-async fn delegating_pm_prompt_names_no_discovery_tool() {
+async fn delegating_pm_prompt_names_no_gated_tool() {
     let agents = agents_dir();
     let project = tempfile::tempdir().expect("project tempdir");
     let p = params(&agents, &project, "s-4602-delegating");
@@ -1511,26 +1514,32 @@ async fn delegating_pm_prompt_names_no_discovery_tool() {
     );
 
     let prompt = assemble_system_prompt_for_mode(p.mode, &pm, None, None, None, tools.as_deref());
-    for name in discovery_tool_names() {
+    let appended = prompt.replace(crate::prompt::BASE_PREAMBLE, "");
+    for name in gated_tool_names() {
         assert!(
-            !prompt.contains(&format!("`{name}`")),
+            !appended.contains(&format!("`{name}`")),
             "the delegating PM's prompt must not name `{name}`:\n{prompt}"
         );
     }
+    assert!(
+        !prompt.contains("`write_files`"),
+        "the delegating PM holds no write tool and must never be told to batch \
+         into `write_files`:\n{prompt}"
+    );
 }
 
-/// A `--no-delegate` run's top-level agent DOES carry the discovery tools, and
-/// its prompt still says so (#4602).
+/// A `--no-delegate` run's top-level agent DOES carry the gated tools, and its
+/// prompt still says so (#4602).
 ///
 /// Why: scoping the guidance must not silence it for the agent that can act on
 /// it — this is the other half of the contract, and it runs through the same
 /// helper, so prompt and registry cannot drift apart.
 /// What: resolves an agent with no `tcode_tools` allowlist, asserts
-/// `pm_prompt_tools` yields a registry carrying every discovery tool, and
-/// asserts the assembled prompt carries both discovery sections.
+/// `pm_prompt_tools` yields a registry carrying every gated tool, and asserts
+/// the assembled prompt carries all three gated sections.
 /// Test: this test.
 #[tokio::test]
-async fn no_delegate_pm_prompt_names_its_discovery_tools() {
+async fn no_delegate_pm_prompt_names_its_gated_tools() {
     let agents = agents_dir();
     let project = tempfile::tempdir().expect("project tempdir");
     let p = TaskRunParams {
@@ -1544,18 +1553,16 @@ async fn no_delegate_pm_prompt_names_its_discovery_tools() {
     let tools = pm_prompt_tools(&p, project.path(), &agent, None)
         .await
         .expect("a --no-delegate run builds the agent's own registry");
-    for name in discovery_tool_names() {
+    for name in gated_tool_names() {
         assert!(tools.contains(name), "registry must carry `{name}`");
     }
 
     let prompt =
         assemble_system_prompt_for_mode(p.mode, &agent, None, None, None, Some(tools.as_ref()));
-    assert!(
-        prompt.contains("## File discovery"),
-        "an agent holding glob/grep/list_dir must still be told about them"
-    );
-    assert!(
-        prompt.contains("## Code discovery"),
-        "an agent holding search_code must still be told about it"
-    );
+    for (section, _, _) in crate::prompt::GATED_SECTIONS {
+        assert!(
+            prompt.contains(section),
+            "an agent holding every gated tool must still get every gated section"
+        );
+    }
 }

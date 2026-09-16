@@ -14,7 +14,7 @@
 //! empty-section skipping, and fallback-guidance ordering.
 
 use crate::agents::AgentConfig;
-use crate::prompt::preamble::{BASE_PREAMBLE, FILE_DISCOVERY_GUIDANCE};
+use crate::prompt::preamble::{BASE_PREAMBLE, BATCH_WRITE_GUIDANCE, FILE_DISCOVERY_GUIDANCE};
 use crate::tools::ToolRegistry;
 
 /// Section separator between assembled prompt blocks (parity-spec §2).
@@ -60,13 +60,37 @@ to `grep`/`glob` for the same query — do not retry `search_code`.";
 /// is what lets [`assemble_system_prompt_for_mode`] check them and lets the
 /// regression test check every name the guidance actually mentions.
 /// What: the exact backtick-quoted tool names appearing in the section text.
-/// Test: `prompt::tests::discovery_guidance_never_names_an_unregistered_tool`.
+/// Test: `prompt::tests::guidance_never_names_an_unregistered_tool`,
+/// `prompt::tests::every_gated_section_declares_the_tools_it_names`.
 pub const FILE_DISCOVERY_TOOLS: &[&str] = &["glob", "grep", "list_dir"];
 
 /// Tool names [`DISCOVERY_GUIDANCE`] instructs the model to call (#4602).
 ///
 /// Why/What/Test: as [`FILE_DISCOVERY_TOOLS`], for the `search_code` section.
 pub const DISCOVERY_GUIDANCE_TOOLS: &[&str] = &["search_code", "grep", "glob"];
+
+/// Tool names [`BATCH_WRITE_GUIDANCE`] instructs the model to call (#4602).
+///
+/// Why/What/Test: as [`FILE_DISCOVERY_TOOLS`], for the batch-write section.
+pub const BATCH_WRITE_TOOLS: &[&str] = &["write_file", "write_files"];
+
+/// Every registry-gated section paired with the tool names it declares (#4602).
+///
+/// Why: the gate and its tests must range over the SAME set — a section added
+/// to the assembler but missing here would silently escape both. Pairing the
+/// text with its list in one table is what lets
+/// `every_gated_section_declares_the_tools_it_names` check the hand-maintained
+/// lists against the prose they describe.
+/// What: `(section text, declared tool names, DailyDriver-only)` for all three
+/// gated sections, in the order [`assemble_system_prompt_for_mode`] appends
+/// them. Only [`DISCOVERY_GUIDANCE`] is DailyDriver-only: `search_code` is
+/// itself registered only in that mode.
+/// Test: `prompt::tests::every_gated_section_declares_the_tools_it_names`.
+pub const GATED_SECTIONS: &[(&str, &[&str], bool)] = &[
+    (FILE_DISCOVERY_GUIDANCE, FILE_DISCOVERY_TOOLS, false),
+    (BATCH_WRITE_GUIDANCE, BATCH_WRITE_TOOLS, false),
+    (DISCOVERY_GUIDANCE, DISCOVERY_GUIDANCE_TOOLS, true),
+];
 
 /// Whether `tools` carries every name a guidance section mentions (#4602).
 ///
@@ -76,7 +100,7 @@ pub const DISCOVERY_GUIDANCE_TOOLS: &[&str] = &["search_code", "grep", "glob"];
 /// model cannot call.
 /// What: `false` when `tools` is `None` (the caller knows of no registry, so no
 /// tool name is safe to emit), else every name in `names` must be registered.
-/// Test: `prompt::tests::discovery_guidance_never_names_an_unregistered_tool`.
+/// Test: `prompt::tests::guidance_never_names_an_unregistered_tool`.
 fn registry_carries_all(tools: Option<&ToolRegistry>, names: &[&str]) -> bool {
     tools.is_some_and(|reg| names.iter().all(|name| reg.contains(name)))
 }
@@ -176,26 +200,27 @@ pub fn assemble_system_prompt(
 /// since parity-spec D2 requires byte-identical schemas/prompts for
 /// benchmark fairness and must never progressively disclose (#2069's own
 /// scope note: "Parity mode should NOT progressively disclose").
-/// Both modes then append [`FILE_DISCOVERY_GUIDANCE`], and `DailyDriver`
-/// appends two further trailing sections via the same [`SECTION_SEPARATOR`]
-/// every other section uses: (1) [`DISCOVERY_GUIDANCE`] (PR A, #2689),
-/// steering the model to the `search_code` tool for conceptual discovery; then
-/// (2) `skills_catalog` (the cheap, always-cached
-/// `skills::format_skill_catalog` output — NOT any skill's full body) when
-/// non-empty. `Parity` appends neither of those two, keeping its
-/// schema/prompt byte-identical for benchmark fairness.
+/// Both modes then append [`FILE_DISCOVERY_GUIDANCE`] and
+/// [`BATCH_WRITE_GUIDANCE`], and `DailyDriver` appends two further trailing
+/// sections via the same [`SECTION_SEPARATOR`] every other section uses:
+/// (1) [`DISCOVERY_GUIDANCE`] (PR A, #2689), steering the model to the
+/// `search_code` tool for conceptual discovery; then (2) `skills_catalog` (the
+/// cheap, always-cached `skills::format_skill_catalog` output — NOT any skill's
+/// full body) when non-empty. `Parity` appends neither of those two, keeping
+/// its schema/prompt byte-identical for benchmark fairness.
 ///
-/// #4602: each discovery section is emitted ONLY when `tools` carries every
-/// tool that section names, so the top-level PM — whose registry holds harness
-/// tools only — is never told to call `glob`/`grep`/`list_dir`/`search_code`.
-/// `None` means the caller knows of no registry and no tool-naming section is
-/// emitted. This gates on the registry, never on the model, so a parity run's
-/// prompt stays byte-identical across models.
+/// #4602: every section in [`GATED_SECTIONS`] is emitted ONLY when `tools`
+/// carries every tool that section names, so the top-level PM — whose registry
+/// holds harness tools only — is never told to call
+/// `glob`/`grep`/`list_dir`/`search_code`/`write_files`. `None` means the
+/// caller knows of no registry and no tool-instructing section is emitted. This
+/// gates on the registry, never on the model, so a parity run's prompt stays
+/// byte-identical across models.
 /// Test: `prompt::tests::daily_driver_appends_discovery_guidance`,
 /// `prompt::tests::daily_driver_appends_skills_catalog`,
 /// `prompt::tests::parity_ignores_skills_catalog`,
 /// `prompt::tests::parity_omits_discovery_guidance`,
-/// `prompt::tests::discovery_guidance_never_names_an_unregistered_tool`.
+/// `prompt::tests::guidance_never_names_an_unregistered_tool`.
 pub fn assemble_system_prompt_for_mode(
     mode: crate::mode::HarnessMode,
     config: &AgentConfig,
@@ -204,26 +229,23 @@ pub fn assemble_system_prompt_for_mode(
     skills_catalog: Option<&str>,
     tools: Option<&ToolRegistry>,
 ) -> String {
+    let daily_driver = mode == crate::mode::HarnessMode::DailyDriver;
     let mut out = assemble_system_prompt(config, project_context, fallback_guidance);
-    // #4602: registry-gated, in BOTH modes — a Parity engineer carries the
-    // discovery tools and still needs this block.
-    if registry_carries_all(tools, FILE_DISCOVERY_TOOLS) {
-        push_section(&mut out, FILE_DISCOVERY_GUIDANCE);
-    }
-    match mode {
-        crate::mode::HarnessMode::Parity => out,
-        crate::mode::HarnessMode::DailyDriver => {
-            if registry_carries_all(tools, DISCOVERY_GUIDANCE_TOOLS) {
-                push_section(&mut out, DISCOVERY_GUIDANCE);
-            }
-            // The skills catalog names no tcode tool, so it is appended
-            // whenever it is non-empty.
-            if let Some(catalog) = skills_catalog.map(str::trim).filter(|s| !s.is_empty()) {
-                push_section(&mut out, catalog);
-            }
-            out
+    // #4602: every tool-instructing section is registry-gated. Most apply in
+    // BOTH modes — a Parity engineer carries those tools and still needs the
+    // blocks that tell it to use them.
+    for (section, names, daily_driver_only) in GATED_SECTIONS {
+        if (*daily_driver_only && !daily_driver) || !registry_carries_all(tools, names) {
+            continue;
         }
+        push_section(&mut out, section);
     }
+    // The skills catalog instructs no tcode tool call, so it is appended
+    // whenever DailyDriver supplies a non-empty one.
+    if daily_driver && let Some(catalog) = skills_catalog.map(str::trim).filter(|s| !s.is_empty()) {
+        push_section(&mut out, catalog);
+    }
+    out
 }
 
 #[cfg(test)]

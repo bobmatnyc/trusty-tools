@@ -13,12 +13,13 @@ use std::sync::Arc;
 use crate::agents::AgentConfig;
 use crate::mode::HarnessMode;
 use crate::prompt::{
-    BASE_PREAMBLE, BASE_PREAMBLE_VERSION, DISCOVERY_GUIDANCE, DISCOVERY_GUIDANCE_TOOLS,
-    FILE_DISCOVERY_GUIDANCE, FILE_DISCOVERY_TOOLS, PromptAssembler, assemble_system_prompt,
+    BASE_PREAMBLE, BASE_PREAMBLE_VERSION, BATCH_WRITE_GUIDANCE, DISCOVERY_GUIDANCE,
+    FILE_DISCOVERY_GUIDANCE, GATED_SECTIONS, PromptAssembler, assemble_system_prompt,
     assemble_system_prompt_for_mode,
 };
 use crate::tools::{
-    FinishTaskTool, GlobTool, GrepTool, ListDirTool, ToolRegistry, TrustySearchTool,
+    FinishTaskTool, GlobTool, GrepTool, ListDirTool, ToolRegistry, TrustySearchTool, WriteFileTool,
+    WriteFilesTool,
 };
 
 /// Build an `AgentConfig` whose `system_prompt.content` is the given string.
@@ -38,19 +39,21 @@ fn config_with_prompt(content: &str) -> AgentConfig {
 /// `finish_task` and the goal tools and NOTHING that touches the filesystem;
 /// `finish_task` alone reproduces the property the prompt must respect.
 /// What: a `ToolRegistry` holding only `finish_task`.
-/// Test: `discovery_guidance_never_names_an_unregistered_tool`.
+/// Test: `guidance_never_names_an_unregistered_tool`.
 fn pm_like_registry() -> ToolRegistry {
     let mut reg = ToolRegistry::new();
     reg.register(Arc::new(FinishTaskTool::new()));
     reg
 }
 
-/// A registry shaped like the delegated engineer's — every discovery tool.
+/// A registry shaped like the delegated engineer's — every gated tool.
 ///
 /// Why: the counterpart to [`pm_like_registry`]: the agent that DOES receive
-/// `glob`/`grep`/`list_dir`/`search_code` must still be told about them.
-/// What: a `ToolRegistry` holding the four discovery tools plus `finish_task`.
-/// Test: `discovery_guidance_never_names_an_unregistered_tool`.
+/// `glob`/`grep`/`list_dir`/`search_code`/`write_file`/`write_files` must still
+/// be told about them.
+/// What: a `ToolRegistry` holding every tool named in [`GATED_SECTIONS`], plus
+/// `finish_task`.
+/// Test: `guidance_never_names_an_unregistered_tool`.
 fn engineer_like_registry() -> ToolRegistry {
     let project = std::path::Path::new(".");
     let mut reg = ToolRegistry::new();
@@ -58,8 +61,23 @@ fn engineer_like_registry() -> ToolRegistry {
     reg.register(Arc::new(GrepTool::new(project)));
     reg.register(Arc::new(ListDirTool::new(project)));
     reg.register(Arc::new(TrustySearchTool::new(project)));
+    reg.register(Arc::new(WriteFileTool::new(project)));
+    reg.register(Arc::new(WriteFilesTool::new(project)));
     reg.register(Arc::new(FinishTaskTool::new()));
     reg
+}
+
+/// Every tool name any gated section instructs a call to.
+///
+/// Why: reading the set from [`GATED_SECTIONS`] rather than restating it means
+/// a section added to the assembler cannot escape the tests below.
+/// What: flattens each entry's declared name list.
+/// Test: `guidance_never_names_an_unregistered_tool`.
+fn gated_tool_names() -> Vec<&'static str> {
+    GATED_SECTIONS
+        .iter()
+        .flat_map(|(_, names, _)| names.iter().copied())
+        .collect()
 }
 
 /// With all four sections present, the assembled order is 1→2→3→4 (spec §2).
@@ -429,25 +447,26 @@ fn base_preamble_requires_tracking_the_deliverable_set() {
 /// tool-use block already recommending batching. Repeating the pointer at the
 /// point of use — the doc tail, which is where the budget actually ran out —
 /// targets the specific waste the transcript shows.
-/// What: Asserts the block names `write_files` and the one-call framing.
+/// What: Asserts the guidance names `write_files` and the one-call framing.
+///
+/// #4602: the bullet moved out of BASE's deliverable block into the
+/// registry-gated [`BATCH_WRITE_GUIDANCE`], because a PM that holds no write
+/// tool cannot obey it; the wording itself is unchanged, so this test now reads
+/// the constant instead of splitting BASE.
 /// Test: this test.
 #[test]
 fn base_preamble_batches_remaining_deliverables() {
-    let block = BASE_PREAMBLE
-        .split("## Deliverable completeness")
-        .nth(1)
-        .expect("deliverable-completeness block present");
-    let block = block
-        .split("## Verification before finishing")
-        .next()
-        .expect("block is delimited by the following section");
     assert!(
-        block.contains("ONE `write_files` call"),
-        "the deliverable block must point at the batch-write tool"
+        BATCH_WRITE_GUIDANCE.contains("ONE `write_files` call"),
+        "the deliverable pointer must point at the batch-write tool"
     );
     assert!(
-        block.contains("rather than one per turn"),
+        BATCH_WRITE_GUIDANCE.contains("rather than one per turn"),
         "must contrast batching against one-file-per-turn writes"
+    );
+    assert!(
+        BATCH_WRITE_GUIDANCE.contains("an N-file scaffold should cost ONE turn, not N"),
+        "the tool-use protocol's scaffolding bullet (#2681) must survive the move"
     );
 }
 
@@ -467,24 +486,82 @@ fn base_preamble_is_model_agnostic() {
     }
 }
 
-/// `BASE_PREAMBLE` names no discovery tool (#4602).
+/// `BASE_PREAMBLE` instructs no registry-specific tool call (#4602).
 ///
 /// Why: BASE reaches EVERY agent, including the interactive PM whose registry
-/// holds harness tools only. A tool name here is therefore an instruction some
-/// agent cannot obey — the `## File discovery` block was exactly that, and now
-/// lives in [`FILE_DISCOVERY_GUIDANCE`], gated on the run's registry.
-/// What: asserts none of the discovery tool names appears in the preamble.
+/// holds harness tools only. An INSTRUCTION to call a named tool here is one
+/// some agent cannot obey — the `## File discovery` block and the two
+/// batch-write bullets were exactly that, and now live in
+/// [`FILE_DISCOVERY_GUIDANCE`] and [`BATCH_WRITE_GUIDANCE`], gated on the run's
+/// registry.
+/// What: asserts no gated tool name survives in the preamble, except
+/// `write_file`, which BASE still MENTIONS twice as an `e.g.` illustration of
+/// what batching is — the surrounding sentences instruct batching, not a
+/// `write_file` call, so they apply to every agent.
 /// Test: this test.
 #[test]
-fn base_preamble_names_no_discovery_tool() {
-    for name in FILE_DISCOVERY_TOOLS
-        .iter()
-        .chain(DISCOVERY_GUIDANCE_TOOLS.iter())
-    {
+fn base_preamble_instructs_no_registry_specific_tool() {
+    for name in gated_tool_names() {
+        if name == "write_file" {
+            continue;
+        }
         assert!(
             !BASE_PREAMBLE.contains(&format!("`{name}`")),
             "BASE_PREAMBLE must not name the registry-specific tool `{name}`"
         );
+    }
+    for imperative in ["use the `write_files` tool", "ONE `write_files` call"] {
+        assert!(
+            !BASE_PREAMBLE.contains(imperative),
+            "BASE_PREAMBLE must not carry the batch-write instruction {imperative:?}"
+        );
+    }
+}
+
+/// Each gated section's hand-maintained name list matches its own prose
+/// (#4602, critic round 1).
+///
+/// Why: the lists in `assembler.rs` are the ONLY input to the gate and to
+/// `guidance_never_names_an_unregistered_tool`, so a tool name added to a
+/// section's text but not to its list would escape both silently.
+/// What: extracts every backtick-quoted `[a-z_]+` token from each gated
+/// section and asserts the extracted set equals the declared list, both ways.
+/// Non-identifier backtick spans (`**/*.py`, `src/*.rs`) are skipped.
+/// Test: this test.
+#[test]
+fn every_gated_section_declares_the_tools_it_names() {
+    for (section, declared, _) in GATED_SECTIONS {
+        let spans: Vec<&str> = section.split('`').collect();
+        assert!(
+            spans.len() % 2 == 1,
+            "unbalanced backticks in gated section: {section:?}"
+        );
+        let named: Vec<&str> = spans
+            .iter()
+            .skip(1)
+            .step_by(2)
+            .copied()
+            .filter(|token| {
+                !token.is_empty() && token.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+            })
+            .collect();
+        assert!(
+            !named.is_empty(),
+            "gated section names no tool: {section:?}"
+        );
+
+        for name in &named {
+            assert!(
+                declared.contains(name),
+                "section names `{name}` but its list does not declare it"
+            );
+        }
+        for name in *declared {
+            assert!(
+                named.contains(name),
+                "list declares `{name}` but the section text never names it"
+            );
+        }
     }
 }
 
@@ -509,10 +586,11 @@ fn base_preamble_version_is_semver_shaped() {
 /// Expected FNV-1a-style fold of [`BASE_PREAMBLE`]'s bytes, folded with its
 /// byte length. Regenerate this whenever the preamble legitimately changes
 /// (see [`base_preamble_hash_tripwire`] for the contributor instructions).
-// #4602: refreshed because the `## File discovery` block left BASE for the
-// registry-gated `FILE_DISCOVERY_GUIDANCE`; `BASE_PREAMBLE_VERSION` 1.8.0 →
-// 1.9.0 in the same change.
-const EXPECTED_PREAMBLE_HASH: u64 = 0x31c4_38bc_b6cf_fb08;
+// #4602: refreshed twice — the `## File discovery` block left BASE for
+// `FILE_DISCOVERY_GUIDANCE`, then (critic round 1) the two batch-write bullets
+// left it for `BATCH_WRITE_GUIDANCE`. `BASE_PREAMBLE_VERSION` 1.8.0 → 1.10.0
+// across the same two changes.
+const EXPECTED_PREAMBLE_HASH: u64 = 0xb1d0_41f0_a152_88ff;
 
 /// Test-time guard coupling `BASE_PREAMBLE` *content* to its version constant.
 ///
@@ -597,13 +675,13 @@ fn all_sections_present_when_supplied() {
 /// What: asserts `Parity` with `skills_catalog: None` returns the exact same
 /// string as `assemble_system_prompt`, and `DailyDriver` differs only by the
 /// [`DISCOVERY_GUIDANCE`] trailing section (PR A, #2689) the engineer's
-/// registry earns (#4602).
+/// registry earns (#4602) on top of the two mode-independent gated sections.
 /// Test: this test.
 #[test]
 fn assemble_system_prompt_for_mode_identical_when_no_skills() {
     let cfg = config_with_prompt("AGENT");
     let baseline = assemble_system_prompt(&cfg, Some("PROJECT"), Some("FALLBACK"));
-    // #4602: the discovery sections are registry-gated, so this baseline
+    // #4602: the tool-instructing sections are registry-gated, so this baseline
     // comparison uses a registry that earns them.
     let tools = engineer_like_registry();
 
@@ -615,10 +693,11 @@ fn assemble_system_prompt_for_mode_identical_when_no_skills() {
         None,
         Some(&tools),
     );
+    let mode_independent =
+        format!("{baseline}\n\n---\n\n{FILE_DISCOVERY_GUIDANCE}\n\n---\n\n{BATCH_WRITE_GUIDANCE}");
     assert_eq!(
-        parity,
-        format!("{baseline}\n\n---\n\n{FILE_DISCOVERY_GUIDANCE}"),
-        "Parity = baseline + file-discovery guidance"
+        parity, mode_independent,
+        "Parity = baseline + the two mode-independent gated sections"
     );
 
     let daily = assemble_system_prompt_for_mode(
@@ -631,26 +710,29 @@ fn assemble_system_prompt_for_mode_identical_when_no_skills() {
     );
     assert_eq!(
         daily,
-        format!("{baseline}\n\n---\n\n{FILE_DISCOVERY_GUIDANCE}\n\n---\n\n{DISCOVERY_GUIDANCE}"),
-        "DailyDriver with no skills = baseline + both discovery sections"
+        format!("{mode_independent}\n\n---\n\n{DISCOVERY_GUIDANCE}"),
+        "DailyDriver with no skills = Parity + the code-discovery section"
     );
 }
 
-/// A prompt never names a discovery tool the run's registry does not carry —
-/// the #4602 regression: the interactive PM was told to call `list_dir`/`glob`
-/// while its registry held harness tools only, so every such call came back
-/// as `ToolCallExtractError::UnknownTool`.
+/// A prompt never names a gated tool the run's registry does not carry — the
+/// #4602 regression: the interactive PM was told to call `list_dir`/`glob` and
+/// to batch into `write_files` while its registry held harness tools only, so
+/// every such call came back as `ToolCallExtractError::UnknownTool`.
 ///
 /// Why: this is the contract the fix exists to hold, checked across every
 /// prompt the assembler can produce for a given registry — both modes, both
 /// registry shapes — rather than at one call site.
-/// What: for each (registry, mode) pair, asserts that any backtick-quoted
-/// discovery-tool name appearing in the assembled prompt is registered in that
-/// registry. The final assertion rejects a vacuous pass: the engineer registry
-/// must still see its tools named.
+/// What: for each (registry, mode) pair, asserts that any backtick-quoted gated
+/// tool name appearing in the assembled prompt is registered in that registry.
+/// `BASE_PREAMBLE` is excised first: it names `write_file` twice as an `e.g.`
+/// illustration of batching rather than an instruction to call it, and it has
+/// its own check in `base_preamble_instructs_no_registry_specific_tool`. The
+/// final assertion rejects a vacuous pass: the engineer registry must still see
+/// its tools named.
 /// Test: this test.
 #[test]
-fn discovery_guidance_never_names_an_unregistered_tool() {
+fn guidance_never_names_an_unregistered_tool() {
     let cfg = config_with_prompt("AGENT");
     let registries = [
         ("pm (harness tools only)", pm_like_registry()),
@@ -668,11 +750,9 @@ fn discovery_guidance_never_names_an_unregistered_tool() {
                 Some("Available skills:\n- demo-skill: Does demo things"),
                 Some(registry),
             );
-            for name in FILE_DISCOVERY_TOOLS
-                .iter()
-                .chain(DISCOVERY_GUIDANCE_TOOLS.iter())
-            {
-                if !out.contains(&format!("`{name}`")) {
+            let appended = out.replace(BASE_PREAMBLE, "");
+            for name in gated_tool_names() {
+                if !appended.contains(&format!("`{name}`")) {
                     continue;
                 }
                 mentions += 1;
@@ -687,18 +767,19 @@ fn discovery_guidance_never_names_an_unregistered_tool() {
 
     assert!(
         mentions > 0,
-        "no prompt named any discovery tool — the engineer must still be told \
+        "no prompt named any gated tool — the engineer must still be told \
          about the tools it does carry"
     );
 }
 
-/// The file-discovery section follows the registry, not the mode (#4602).
+/// The mode-independent gated sections follow the registry, not the mode
+/// (#4602).
 ///
-/// Why: the engineer needs this block in BOTH modes (it long predates the
-/// DailyDriver split, having lived inside `BASE_PREAMBLE`), and the PM needs it
-/// in neither.
-/// What: asserts the engineer registry earns the section under `Parity` and
-/// `DailyDriver`, and the PM-shaped registry earns it under neither.
+/// Why: the engineer needs file discovery AND the batch-write instructions in
+/// BOTH modes (both long predate the DailyDriver split, having lived inside
+/// `BASE_PREAMBLE`), and the PM needs neither.
+/// What: asserts the engineer registry earns both sections under `Parity` and
+/// `DailyDriver`, and the PM-shaped registry earns neither under either.
 /// Test: this test.
 #[test]
 fn file_discovery_guidance_follows_the_registry() {
@@ -709,31 +790,77 @@ fn file_discovery_guidance_follows_the_registry() {
     for mode in [HarnessMode::Parity, HarnessMode::DailyDriver] {
         let with_tools =
             assemble_system_prompt_for_mode(mode, &cfg, None, None, None, Some(&engineer));
-        assert!(
-            with_tools.contains(FILE_DISCOVERY_GUIDANCE),
-            "{mode:?}: an agent holding glob/grep/list_dir must be told about them"
-        );
-
         let without_tools =
             assemble_system_prompt_for_mode(mode, &cfg, None, None, None, Some(&pm));
-        assert!(
-            !without_tools.contains("## File discovery"),
-            "{mode:?}: an agent without those tools must not be told to use them"
-        );
+
+        for section in [FILE_DISCOVERY_GUIDANCE, BATCH_WRITE_GUIDANCE] {
+            assert!(
+                with_tools.contains(section),
+                "{mode:?}: an agent holding the tools must be told about them"
+            );
+            assert!(
+                !without_tools.contains(section),
+                "{mode:?}: an agent without those tools must not be told to use them"
+            );
+        }
     }
 }
 
-/// An unknown registry (`tools: None`) emits no tool-naming section (#4602).
+/// The batch-write section follows the registry (#4602, critic round 1).
+///
+/// Why: this is the HIGH the critic found — BASE instructed every agent to
+/// "use the `write_files` tool", including the delegating PM, which holds
+/// neither `write_file` nor `write_files`.
+/// What: asserts a PM-shaped registry earns neither the section nor the
+/// `write_files` name, and that a registry holding both write tools does.
+/// Test: this test.
+#[test]
+fn batch_write_guidance_follows_the_registry() {
+    let cfg = config_with_prompt("AGENT");
+
+    let pm = assemble_system_prompt_for_mode(
+        HarnessMode::DailyDriver,
+        &cfg,
+        None,
+        None,
+        None,
+        Some(&pm_like_registry()),
+    );
+    assert!(!pm.contains("## Batching file writes"));
+    assert!(
+        !pm.contains("`write_files`"),
+        "the delegating PM must never be told to call `write_files`"
+    );
+
+    let engineer = assemble_system_prompt_for_mode(
+        HarnessMode::DailyDriver,
+        &cfg,
+        None,
+        None,
+        None,
+        Some(&engineer_like_registry()),
+    );
+    assert!(engineer.contains(BATCH_WRITE_GUIDANCE));
+    assert!(
+        engineer.contains("ONE `write_files` call"),
+        "the bake-off-tuned deliverable-tail pointer (#2824) must survive the move"
+    );
+}
+
+/// An unknown registry (`tools: None`) emits no gated section (#4602).
 ///
 /// Why: "I do not know what this agent can call" must fail closed — naming a
 /// tool on a guess is exactly the failure #4602 reports.
-/// What: asserts neither discovery section appears when `tools` is `None`.
+/// What: asserts no gated section appears when `tools` is `None`.
 /// Test: this test.
 #[test]
 fn unknown_registry_omits_every_discovery_section() {
     let cfg = config_with_prompt("AGENT");
     let out =
         assemble_system_prompt_for_mode(HarnessMode::DailyDriver, &cfg, None, None, None, None);
+    for (section, _, _) in GATED_SECTIONS {
+        assert!(!out.contains(section));
+    }
     assert!(!out.contains("## File discovery"));
     assert!(!out.contains("## Code discovery"));
 }

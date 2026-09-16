@@ -842,21 +842,12 @@ fn daily_driver_skills_catalog(
     }
 }
 
-/// The project-scoped tool factory for this run.
-///
-/// Why (#8031): two call sites now need the identical factory — the delegated
-/// engineer's runner, and a `--no-delegate` run assembling the top-level
-/// agent's own tools — so its four fields are constructed in one place rather
-/// than transcribed twice.
-/// What: binds `work_root` as the fs/bash scope, the run's `HarnessMode`, the
-/// shared skill resolver, and a fresh per-factory MCP `OnceCell`.
-/// Test: `task::executor::tests::no_delegate_run_writes_the_file_without_delegating`.
 /// The registry that scopes the top-level agent's own system prompt (#4602).
 ///
 /// Why: the delegating PM's registry carries harness tools only — no `glob`,
-/// `grep`, `list_dir` or `search_code` — so a prompt naming them makes the
-/// model emit a call `ToolCallExtractor::validate` rejects as
-/// `ToolCallExtractError::UnknownTool`, which `tcode tui` renders as
+/// `grep`, `list_dir`, `search_code` or `write_files` — so a prompt instructing
+/// it to call them makes the model emit a call `ToolCallExtractor::validate`
+/// rejects as `ToolCallExtractError::UnknownTool`, which `tcode tui` renders as
 /// `<name>(<invalid-arguments>)`. Those tools reach this agent only on the
 /// `--no-delegate` branch, and resolving that branch's registry BEFORE the
 /// prompt is assembled is what lets prompt and registry agree.
@@ -864,8 +855,8 @@ fn daily_driver_skills_catalog(
 /// tcode registry, built through the same [`crate::runner::agent_registry`]
 /// helper the caller then merges, so the factory (and its one-shot MCP load)
 /// runs exactly once per run.
-/// Test: `task::executor_tests::delegating_pm_prompt_names_no_discovery_tool`,
-/// `task::executor_tests::no_delegate_pm_prompt_names_its_discovery_tools`.
+/// Test: `task::executor::tests::delegating_pm_prompt_names_no_gated_tool`,
+/// `task::executor::tests::no_delegate_pm_prompt_names_its_gated_tools`.
 async fn pm_prompt_tools(
     params: &TaskRunParams,
     work_root: &Path,
@@ -879,6 +870,15 @@ async fn pm_prompt_tools(
     Some(crate::runner::agent_registry(&factory, pm_config, &RunContext::default()).await)
 }
 
+/// The project-scoped tool factory for this run.
+///
+/// Why (#8031): two call sites now need the identical factory — the delegated
+/// engineer's runner, and a `--no-delegate` run assembling the top-level
+/// agent's own tools — so its four fields are constructed in one place rather
+/// than transcribed twice.
+/// What: binds `work_root` as the fs/bash scope, the run's `HarnessMode`, the
+/// shared skill resolver, and a fresh per-factory MCP `OnceCell`.
+/// Test: `task::executor::tests::no_delegate_run_writes_the_file_without_delegating`.
 fn project_tool_factory(
     params: &TaskRunParams,
     work_root: &Path,

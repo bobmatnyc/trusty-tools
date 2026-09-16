@@ -18,6 +18,7 @@
 /// `BASE_PREAMBLE` text so reports referencing an old run remain interpretable.
 /// Test: `prompt::tests::base_preamble_version_is_semver_shaped` asserts the
 /// three-component shape.
-// #4602: the `## File discovery` block moved out of BASE into the
-// registry-gated `FILE_DISCOVERY_GUIDANCE`, so the assembled BASE bytes changed.
-pub const BASE_PREAMBLE_VERSION: &str = "1.9.0";
+// #4602: the `## File discovery` block and the two batch-write bullets moved
+// out of BASE into the registry-gated `FILE_DISCOVERY_GUIDANCE` and
+// `BATCH_WRITE_GUIDANCE`, so the assembled BASE bytes changed.
+pub const BASE_PREAMBLE_VERSION: &str = "1.10.0";
