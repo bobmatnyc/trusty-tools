@@ -144,10 +144,11 @@ Every reference to an issue, PR, ticket, or commit renders as a clickable markdo
 
 ## Memory Protocol (Context-First)
 
-The `UserPromptSubmit` hook already injects a baseline palace-context block into
-every prompt — do NOT re-fetch it per delegation. Call `memory_recall` only for
-targeted or deep recall that block did not surface, and then BEFORE any research
-or delegation, never after.
+Palace context arrives ONCE per session, as the catch-up seed block injected at
+session start. Never assume a per-prompt hook refreshes it; that seed predates
+everything this session has learned. Call `memory_recall` for targeted recall
+BEFORE any research or delegation, never after. `session_context_catchup`
+re-reads the same launch digest on demand.
 
 ## Code Search Protocol (Context-First)
 

@@ -163,3 +163,61 @@ fn golden_claude_md_override_prompt() {
     let (prompt, _) = resolve_pm_prompt_with_roster(tmp.path(), || Some(FIXED_ROSTER.to_string()));
     assert_golden("pm-prompt-claude-md-override.md", &prompt);
 }
+
+/// The memory section as DELIVERED, or `None` when the heading is absent.
+///
+/// Why: the claim under test is about one section, not the whole prompt, and a
+/// whole-prompt assertion would also fire on an unrelated section that
+/// legitimately names a hook event.
+/// What: the slice from the memory heading up to the next `## ` heading.
+/// Test: used by `the_memory_section_claims_no_per_prompt_context_hook`.
+fn memory_section(prompt: &str) -> Option<&str> {
+    let start = prompt.find("## Memory Protocol (Context-First)")?;
+    let rest = &prompt[start..];
+    let end = rest[1..]
+        .find("\n## ")
+        .map(|at| at + 1)
+        .unwrap_or(rest.len());
+    Some(&rest[..end])
+}
+
+#[test]
+fn the_memory_section_claims_no_per_prompt_context_hook() {
+    // #7835: the section told the PM that a `UserPromptSubmit` hook injects a
+    // palace-context block into EVERY prompt, and on that basis told it not to
+    // re-fetch. No such hook was registered in any settings tier, so the PM
+    // skipped `memory_recall` waiting on a block that never arrived. Palace
+    // context in fact arrives once, as the launch-time catch-up seed
+    // (`core::session_launch`, `catchup_context`), re-readable on demand through
+    // the `session_context_catchup` MCP tool.
+    //
+    // Asserted over all three compositions because the two composers deliver
+    // this section independently; one of them silently keeping the old claim is
+    // exactly the split-brain the goldens above exist to catch.
+    let bundled = compose_bundled_fallback_with_overrides(FIXED_STACK, FIXED_ROSTER, None, &[])
+        .0
+        .expect("package composes");
+    let tmp = TempDir::new().expect("tempdir");
+    let (roster_absent, _) = resolve_pm_prompt_with_roster(tmp.path(), || None);
+    let (with_roster, _) =
+        resolve_pm_prompt_with_roster(tmp.path(), || Some(FIXED_ROSTER.to_string()));
+
+    for (label, prompt) in [
+        ("bundled fallback", &bundled),
+        ("roster absent", &roster_absent),
+        ("roster present", &with_roster),
+    ] {
+        let section = memory_section(prompt)
+            .unwrap_or_else(|| panic!("{label}: the memory section is missing from the prompt"));
+        assert!(
+            !section.contains("UserPromptSubmit"),
+            "{label}: the memory section still promises a per-prompt hook \
+             injection that nothing registers (#7835):\n{section}"
+        );
+        assert!(
+            section.contains("session_context_catchup"),
+            "{label}: the memory section must name the mechanism that really \
+             delivers palace context (#7835):\n{section}"
+        );
+    }
+}
