@@ -232,6 +232,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - The daemon's pr-cleanup sweep now backs off instead of spawning one doomed `gh pr view` per pending pull request on every tick when `gh` has no usable credential. Two consecutive authentication failures suspend the sweep's `gh` calls for five minutes, doubling per further failure to a one-hour ceiling, and any answer at all clears the strikes. `/health` gains a `degraded` list naming the suspended subsystem and the `gh auth login` remedy, which `tm status` prints (refs [#8058](https://github.com/bobmatnyc/trusty-tools/issues/8058))
 - `tm doctor`'s `background_sweeps` row reports a sweep that is actually running. Doctor runs daemonless, so the row's in-memory timings were always the CLI's own empty ones and every sweep read "ON, idle, no pass yet" while the daemon's reclaim pass had live `git`/`gh` children. Each sweep now also writes a marker under `~/.trusty-mpm/sweeps/` at both edges of a pass, and the row folds it with the daemon's atomics. A marker whose writing daemon is gone reads as idle, never as a pass stuck in flight (#8059).
 - `tm wait`'s printed rerun command now echoes the slice, timeout and interval the run actually used instead of a hard-coded `--slice 100`. A caller who passed `--slice 540` is told to re-run with the clamped `--slice 500` the invocation really used, so re-issuing the line reproduces the wait rather than silently restarting it at the default budget (refs [#8120](https://github.com/bobmatnyc/trusty-tools/issues/8120))
+- **`tm tui` sessions-pane rows show the session name.** Each row labelled
+  itself with an 8-char UUID prefix while the Activity header, the kill and
+  decommission prompts and `tm sessions ls` all showed the name; `short_id` is
+  now only the fallback for a nameless row.
+- **A task-less row shows its state word again.** The daemon emits
+  `task: Some("")` rather than `None`, so the detail column's state-word
+  fallback never fired and the column rendered blank.
 
 ### Changed
 
@@ -357,6 +364,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   so the rustdoc gate resolves them
   (refs [#8009](https://github.com/bobmatnyc/trusty-tools/issues/8009))
 - Two doc comments under `core/savings*` still named `record_instruction_compression_in`, the pre-#7514/#7584 entry point: an intra-doc link on `record_instruction_compression_to` and the producer table in `core/savings.rs`. Both now name `record_instruction_compression_in_with`. The module-level links the `Rustdoc intra-doc links` gate reported were already retargeted by #8098; these two sat on a private item and a code span, so the gate never saw them (Refs [#8019](https://github.com/bobmatnyc/trusty-tools/issues/8019)).
+- **`evaluate_main_checkout_write`'s doc links a function that exists.** The
+  scratchpad exemption was cited as `root_is_scratchpad_rooted`, which is not a
+  symbol in this crate; the predicate it actually calls is
+  `write_lands_in_a_scratchpad_clone`. The stale name failed the pre-publish
+  rustdoc-links gate.
 
 ## [1.5.36] — 2026-09-13
 
