@@ -2175,11 +2175,34 @@ fn new_session_entry_rejects_malformed_text() {
     }
 }
 
-/// An unregistered entry carries the register leg AND the clone URL.
+/// Where an unregistered project's clone URL is checked out (#7898).
+///
+/// Why: the production resolver (`local_checkout_for_url`) reads this host's
+/// projects root — the same env sibling tests `set_var` (#7989). `acme/widgets`
+/// stands for a project already cloned; any other URL stands for one that is
+/// not on this host at all.
+fn stub_checkout_for_url(repo_url: &str) -> Option<PathBuf> {
+    if repo_url == "https://github.com/acme/widgets" {
+        return Some(fixture_checkout("widgets"));
+    }
+    Some(PathBuf::from("/nonexistent/acme/missing"))
+}
+
+/// An unregistered entry carries the register leg AND the LOCAL CHECKOUT.
+///
+/// Why (#7898): the create leg used to carry `entry.repo_url` — a clone URL.
+/// Since ADR-0055 the daemon takes only a directory that already exists, so
+/// that request registered the project and was then refused by the spawn. This
+/// asserts the create argument is the checkout, and asserts against the URL by
+/// name so the pre-#7898 request cannot satisfy it.
 #[test]
 fn new_session_entry_builds_a_clone_and_register_request() {
-    let request = super::new_session_entry::request_for_entry("acme/widgets", &targets())
-        .expect("owner/repo is a project");
+    let request = super::new_session_entry::request_for_entry_with(
+        "acme/widgets",
+        &targets(),
+        stub_checkout_for_url,
+    )
+    .expect("owner/repo is a project");
     assert_eq!(
         request,
         NewSessionRequest {
@@ -2187,10 +2210,31 @@ fn new_session_entry_builds_a_clone_and_register_request() {
                 name: "widgets".to_string(),
                 repo_url: "https://github.com/acme/widgets".to_string(),
             }),
-            // The daemon clones this, exactly as `tm session new <url>` does.
-            repo: "https://github.com/acme/widgets".to_string(),
+            // The directory the daemon can actually start a session in.
+            repo: fixture_checkout("widgets").display().to_string(),
             label: "widgets".to_string(),
         }
+    );
+    assert_ne!(request.repo, "https://github.com/acme/widgets");
+}
+
+/// A project that is not cloned yet is refused BEFORE anything is registered.
+///
+/// Why (#7898): registering first and failing at the spawn left a registration
+/// behind for a session that never existed. The refusal names the same
+/// `git clone <url> <path>` step the registered-row path prints (#7887), so
+/// both ways in say the same thing.
+#[test]
+fn new_session_entry_without_a_checkout_names_the_clone_step() {
+    let err = super::new_session_entry::request_for_entry_with(
+        "acme/missing",
+        &targets(),
+        stub_checkout_for_url,
+    )
+    .expect_err("a project with no checkout cannot be started");
+    assert!(
+        err.contains("git clone https://github.com/acme/missing /nonexistent/acme/missing"),
+        "{err}"
     );
 }
 
@@ -2213,11 +2257,17 @@ fn new_session_entry_reuses_a_registered_project() {
     assert_eq!(request.label, "trusty-tools");
 }
 
-/// Typing a project the registry lacks and pressing Enter clones it.
+/// Typing an uncloned project in the filter is refused with the clone step.
 ///
 /// Why (#7488 acceptance 2): the filter box is where the operator already types
 /// a project's name; before this, a name matching nothing emptied the list and
 /// Enter only opened a blank path prompt.
+/// #7898: `acme/widgets` is not cloned under this host's projects root, and the
+/// create leg needs a directory that exists — so Enter now refuses inline with
+/// the `git clone` step rather than registering the project and failing at the
+/// spawn. That the text is RECOGNISED (not "is not a project") is the half this
+/// pins; the payload of a recognised, cloned project is
+/// `new_session_entry_builds_a_clone_and_register_request`.
 #[test]
 fn new_session_entry_from_the_filter_creates_a_clone_request() {
     let mut flow = NewSessionFlow::with_resolver(targets(), stub_identity);
@@ -2225,17 +2275,11 @@ fn new_session_entry_from_the_filter_creates_a_clone_request() {
         assert_eq!(flow.apply(Input::Char(c)), Step::Redraw);
     }
     match flow.apply(Input::Enter) {
-        Step::Create(request) => {
-            assert_eq!(
-                request.register,
-                Some(NewProject {
-                    name: "widgets".to_string(),
-                    repo_url: "https://github.com/acme/widgets".to_string(),
-                })
-            );
-            assert_eq!(request.repo, "https://github.com/acme/widgets");
-        }
-        other => panic!("the typed project was not confirmed, got {other:?}"),
+        Step::Reject(msg) => assert!(
+            msg.contains("git clone https://github.com/acme/widgets"),
+            "{msg}"
+        ),
+        other => panic!("an uncloned project must be refused, got {other:?}"),
     }
 }
 
@@ -2282,17 +2326,20 @@ fn new_session_entry_from_the_filter_rejects_malformed_text() {
 }
 
 /// The typed-path entry takes a clone URL too, not only a checkout path.
+///
+/// #7898: a clone URL for a project that is not on this host is RECOGNISED and
+/// answered with the clone step. The generic "is not a git checkout, a clone
+/// URL, or an owner/repo project" wording is reserved for text the recogniser
+/// actually refused — overwriting the actionable message with it would send the
+/// operator hunting for a typo that is not there.
 #[test]
 fn new_session_entry_path_step_accepts_a_clone_url() {
-    let request =
+    let err =
         new_session::request_for_path("https://github.com/acme/widgets", &targets(), stub_identity)
-            .expect("a clone URL is a project");
-    assert_eq!(
-        request.register,
-        Some(NewProject {
-            name: "widgets".to_string(),
-            repo_url: "https://github.com/acme/widgets".to_string(),
-        })
+            .expect_err("the project is not cloned on this host");
+    assert!(
+        err.contains("git clone https://github.com/acme/widgets"),
+        "{err}"
     );
-    assert_eq!(request.repo, "https://github.com/acme/widgets");
+    assert!(!err.contains("is not a git checkout"), "{err}");
 }

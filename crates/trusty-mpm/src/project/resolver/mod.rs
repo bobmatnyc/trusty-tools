@@ -434,7 +434,22 @@ pub fn fleet_by_project(sessions: &[SessionRecord], projects: &[Project]) -> Vec
 /// `local_checkout_for_keeps_an_absolute_repo_url`,
 /// `local_checkout_for_refuses_what_names_no_project`.
 pub fn local_checkout_for(project: &Project) -> Option<PathBuf> {
-    let trimmed = project.repo_url.trim();
+    local_checkout_for_url(&project.repo_url)
+}
+
+/// [`local_checkout_for`] for a URL no registry row holds yet (#7898).
+///
+/// Why: the `tm ls` free-text entry names a project the registry has never
+/// seen, so it has a clone URL and no [`Project`] to ask about. Building a
+/// throwaway record just to read one field would be a second spelling of this
+/// derivation; `repo_url` was always the only input.
+/// What: identical to [`local_checkout_for`], which is now this function
+/// applied to `project.repo_url`.
+/// Test: `local_checkout_for_derives_the_managed_clone_path`,
+/// `local_checkout_for_keeps_an_absolute_repo_url`,
+/// `local_checkout_for_refuses_what_names_no_project`.
+pub fn local_checkout_for_url(repo_url: &str) -> Option<PathBuf> {
+    let trimmed = repo_url.trim();
     if trimmed.is_empty() {
         return None;
     }
