@@ -77,9 +77,19 @@ pub(super) async fn stop_pollers(
 /// reconciliation — the force path skips the prune pass, so this is the only
 /// place obsolete warm chunks are dropped. Incremental runs are unchanged:
 /// their prune pass already removed deleted files from every store.
+/// #7991: returns `true` when the promotion gate REFUSED — every stage
+/// succeeded but the live corpus is held, so the run's staged work was
+/// discarded and `finish_reindex` must report `PromotionDeferred` rather than
+/// `Complete`. Distinguished from the other `promoted == false` arms by the
+/// deferral record the gate writes, so a path-resolution or re-open failure
+/// (which quarantine already covers) does not borrow this status.
 /// Test: `reindex_walks_directory_and_emits_events` exercises the commit path;
 /// `super::prune_tests::force_rebuild_drops_chunks_for_a_deleted_file` covers
-/// the reconciliation.
+/// the reconciliation;
+/// `super::live_corpus_lock_tests::a_deferred_promotion_is_reported_in_status_and_is_not_complete`
+/// covers the refusal and
+/// `super::live_corpus_lock_tests::a_rename_failure_quarantines_and_is_not_reported_as_a_deferral`
+/// covers the rename arm that must NOT borrow that status.
 // #7004 pushed this to 8 parameters; `rebuild_kg` below carries the same allow.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn resolve_corpus_swap(
@@ -91,10 +101,16 @@ pub(super) async fn resolve_corpus_swap(
     reindex_outcome: &validate::ReindexOutcome,
     memory_aborted: bool,
     force: bool,
-) {
+) -> bool {
+    let mut promotion_deferred = false;
     if let Some(tmp_path) = corpus_swap_tmp {
         if staging_resolution.is_commit() {
             let promoted = commit_staged_corpus_swap(handle, index_id, tmp_path).await;
+            // #7991: `promoted == false` covers several arms; only the gate's
+            // refusal records a deferral, and only that one must change the
+            // run's terminal status.
+            promotion_deferred =
+                !promoted && handle.indexer.read().await.promotion_deferred().is_some();
             // #7004: force stages an EMPTY corpus and skips the prune pass, so
             // the warm map, BM25 and vector store still hold the rebuild's
             // obsolete chunks.
@@ -126,6 +142,7 @@ pub(super) async fn resolve_corpus_swap(
             );
         }
     }
+    promotion_deferred
 }
 
 /// Resolve the staged HNSW swap: commit or roll back (issue #3970).

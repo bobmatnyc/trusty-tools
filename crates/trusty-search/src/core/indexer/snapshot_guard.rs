@@ -15,6 +15,14 @@
 //! and one whose corpus a staged swap detached (#7920), so this guard sees
 //! only indexers that never held a corpus. It inspects the one path the
 //! caller names; it cannot see a snapshot at any other location.
+//!
+//! Residual, #7980: the UNREADABLE self-heal does not consult ownership. A
+//! store-less writer whose corpus describes a different tree will still move an
+//! unreadable file aside and write over it. That is deliberate — the bytes are
+//! unrecoverable by every reader including the migration, and the alternative
+//! is the permanent refusal #7980 exists to remove — but it is a real widening
+//! of the foreign-write refusal, bounded to files nothing can parse and logged
+//! with `owned = false` so the case is greppable.
 //! Test: `shutdown_flush_refuses_empty_corpus_over_populated_chunks_json`,
 //! `incremental_persist_refuses_empty_corpus_over_populated_chunks_json`.
 
@@ -85,20 +93,49 @@ pub(crate) enum WriterShape {
 /// destroy, and that ruling is what makes admitting the write safe — the file
 /// is preserved under a name nothing reads, so a later forensic pass still has
 /// it while the live path is free for a corpus that is actually readable.
-/// What: renames `path` to `<path>.corrupt-<unix-millis>`, unique per attempt
-/// so a second occurrence never clobbers the first. Returns the new path.
-/// Test: `unreadable_snapshot_no_longer_wedges_a_store_less_writer`.
+/// What: renames `path` to `<path>.corrupt`, and on collision appends `.1`,
+/// `.2`, … — the numbered anti-clobber rule
+/// [`trusty_common::redb_open::incompatible_backup_path`] already uses for the
+/// same job, rather than a timestamp. A millisecond stamp is not a uniqueness
+/// guarantee (two writers inside one tick collide, and a coarse-resolution
+/// clock makes that likely), and it sorts by digits rather than by age.
+/// Returns the new path.
+/// Test: `unreadable_snapshot_no_longer_wedges_a_store_less_writer`,
+/// `a_second_unreadable_snapshot_never_clobbers_the_first_sidecar`,
+/// `a_failed_preservation_refuses_the_write_and_keeps_the_file`.
 fn preserve_unreadable(path: &Path) -> std::io::Result<PathBuf> {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(".corrupt-{stamp}"));
-    let kept = path.with_file_name(name);
+    let base = {
+        let mut name = path.file_name().unwrap_or_default().to_os_string();
+        name.push(CORRUPT_SUFFIX);
+        path.with_file_name(name)
+    };
+    let kept = if base.exists() {
+        // An earlier occurrence already set one aside — never clobber it.
+        (1..u32::MAX)
+            .map(|n| {
+                let mut s = base.as_os_str().to_os_string();
+                s.push(format!(".{n}"));
+                PathBuf::from(s)
+            })
+            .find(|p| !p.exists())
+            .unwrap_or(base)
+    } else {
+        base
+    };
     std::fs::rename(path, &kept)?;
     Ok(kept)
 }
+
+/// Suffix for a `chunks.json` this daemon could not parse (#7980).
+///
+/// Why: one well-known suffix keeps the recovery greppable, the same reason
+/// `trusty_common::redb_open::INCOMPATIBLE_SUFFIX` exists for redb files.
+///
+/// Retention is deliberately the operator's: nothing prunes these. They are
+/// produced only when a snapshot rots, which is rare and is evidence; a
+/// self-pruning quarantine would delete the one copy of the bytes a diagnosis
+/// needs. The numbered rule above bounds a burst to one file per occurrence.
+pub(crate) const CORRUPT_SUFFIX: &str = ".corrupt";
 
 /// Minimal parse shape: counts chunk entries without materialising them.
 #[derive(serde::Deserialize)]
@@ -136,6 +173,16 @@ fn inspect(path: &Path) -> OnDisk {
 pub(crate) struct SnapshotGuard {
     owned: Mutex<HashSet<PathBuf>>,
     refused: AtomicU64,
+    /// #7980: the live [`WriterShape`], readable by the detached incremental
+    /// persister. `true` means the in-memory corpus may be a stand-in.
+    ///
+    /// Why it lives here rather than being captured at spawn: the persister's
+    /// dirty loop outlives one decision, and a quarantine landing mid-loop
+    /// would leave a captured `CorpusIsAuthoritative` stale — the task holds
+    /// only `Arc` clones and cannot re-read the indexer's plain `bool` fields.
+    /// The guard is already one of those clones, so it is the one place both
+    /// sides can see.
+    stand_in: std::sync::atomic::AtomicBool,
 }
 
 impl SnapshotGuard {
@@ -145,6 +192,25 @@ impl SnapshotGuard {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(path.to_path_buf());
+    }
+
+    /// Publish the writer's current shape for every later `check_overwrite`.
+    ///
+    /// Why: see [`Self::stand_in`]. Called from `&self` sites that CAN read the
+    /// indexer's fields, so the detached persister never has to.
+    /// Test: `a_quarantine_mid_persist_loop_is_seen_by_the_detached_writer`.
+    pub(crate) fn set_shape(&self, shape: WriterShape) {
+        self.stand_in
+            .store(shape == WriterShape::CorpusMayBeStandIn, Ordering::Release);
+    }
+
+    /// The shape last published by [`Self::set_shape`].
+    pub(crate) fn shape(&self) -> WriterShape {
+        if self.stand_in.load(Ordering::Acquire) {
+            WriterShape::CorpusMayBeStandIn
+        } else {
+            WriterShape::CorpusIsAuthoritative
+        }
     }
 
     fn owns(&self, path: &Path) -> bool {
@@ -203,11 +269,25 @@ impl SnapshotGuard {
                 if in_memory > 0 && writer == WriterShape::CorpusIsAuthoritative {
                     match preserve_unreadable(path) {
                         Ok(kept) => {
+                            // #7980: the unowned case is the one with residual
+                            // risk — this indexer never read that path, so its
+                            // corpus may describe a different tree. It is still
+                            // admitted (the bytes are unreadable by anyone, and
+                            // the alternative is a permanent refusal), but it is
+                            // logged as its own shape rather than folded in.
+                            let provenance = if owned {
+                                "a file this indexer owns"
+                            } else {
+                                "a file this indexer never loaded — its corpus may describe a \
+                                 different location, so verify the replacement"
+                            };
                             tracing::warn!(
                                 index_id = %index_id,
-                                "index '{index_id}': {} held {bytes} unreadable byte(s); moved \
-                                 it to {} so this indexer's {in_memory} in-memory chunk(s) can \
-                                 be persisted (#7980). Nothing was destroyed.",
+                                owned = owned,
+                                "index '{index_id}': {} held {bytes} unreadable byte(s) in \
+                                 {provenance}; moved it to {} so this indexer's {in_memory} \
+                                 in-memory chunk(s) can be persisted (#7980). Nothing was \
+                                 destroyed.",
                                 path.display(),
                                 kept.display(),
                             );
@@ -268,10 +348,15 @@ impl CodeIndexer {
     /// detached, is a stand-in whose empty corpus proves nothing.
     /// Test: `a_quarantined_writer_never_reaches_the_unreadable_self_heal`.
     pub(crate) fn snapshot_writer_shape(&self) -> WriterShape {
-        if !self.corpus_open_failed && !self.corpus_ever_wired && self.corpus.is_none() {
+        let shape = if !self.corpus_open_failed && !self.corpus_ever_wired && self.corpus.is_none()
+        {
             WriterShape::CorpusIsAuthoritative
         } else {
             WriterShape::CorpusMayBeStandIn
-        }
+        };
+        // #7980: publish on every read so the detached persister, which cannot
+        // see these fields, decides on the same value this call just computed.
+        self.snapshot_guard.set_shape(shape);
+        shape
     }
 }

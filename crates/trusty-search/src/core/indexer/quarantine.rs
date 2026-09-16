@@ -382,6 +382,10 @@ impl CodeIndexer {
         }
         self.corpus_open_failed = true;
         self.corpus_open_failure = Some(kind);
+        // #7980: republish for the detached incremental persister, whose dirty
+        // loop may be running right now and cannot read the field above.
+        self.snapshot_guard
+            .set_shape(super::snapshot_guard::WriterShape::CorpusMayBeStandIn);
         tracing::error!(
             index_id = %self.index_id,
             failure_kind = ?kind,

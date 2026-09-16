@@ -415,12 +415,14 @@ pub async fn run_migrations(
 ) -> Result<(), MigrationError> {
     let outcome = run_migration_chain(index, registry).await;
     let indexer = index.indexer.read().await;
+    let stage = crate::core::indexer::MIGRATION_STAGE_SCHEMA_CHAIN;
     match &outcome {
-        Ok(()) => indexer.clear_migration_failure(),
-        Err(e) => indexer.record_migration_failure(
-            crate::core::indexer::MIGRATION_STAGE_SCHEMA_CHAIN,
-            format!("{e:#}"),
-        ),
+        // Clears ONLY this stage. The boot order is `restore_indexes` (which
+        // can record a `json_to_redb` fault) then `spawn_index_migrations`, and
+        // a chain with nothing to do returns `Ok` here — an unkeyed clear would
+        // erase a JSON fault this run says nothing about.
+        Ok(()) => indexer.clear_migration_failure(stage),
+        Err(e) => indexer.record_migration_failure(stage, format!("{e:#}")),
     }
     outcome
 }

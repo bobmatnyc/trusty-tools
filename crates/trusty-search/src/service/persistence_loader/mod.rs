@@ -292,7 +292,9 @@ fn run_migrations_for_entry(indexer: &mut CodeIndexer, entry: &PersistedIndex) {
                 format!("{e:#}"),
             );
         }
-        Ok(_) => indexer.clear_migration_failure(),
+        Ok(_) => {
+            indexer.clear_migration_failure(crate::core::indexer::MIGRATION_STAGE_JSON_TO_REDB)
+        }
     }
 }
 

@@ -26,6 +26,7 @@
 //!
 //! Test: `core::migration::m005::tests::a_search_during_the_migration_window_is_refused_not_empty`.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -109,50 +110,62 @@ pub struct MigrationFault {
     pub at: String,
 }
 
-/// Shared cell holding the last [`MigrationFault`] for one index.
+/// Outstanding migration faults for one index, keyed by stage.
 ///
 /// Why: both runners record through `&CodeIndexer` — the schema chain holds
 /// only a read lock on the indexer, and taking a write lock to record would
 /// invert the lock order that chain already established. Interior mutability is
 /// the shape `CorpusReadFault` uses for the same reason.
-/// What: a `Mutex<Option<MigrationFault>>`; every critical section is a single
-/// move, never held across an await.
-/// Test: `failed_schema_chain_is_reported_as_migration_error_in_status`,
-/// `a_succeeding_chain_clears_an_earlier_recorded_fault`.
+///
+/// Keyed by stage rather than a single cell because the two runners are
+/// sequential at boot and do NOT describe each other: `restore_indexes` records
+/// a `json_to_redb` fault, and `spawn_index_migrations` then runs the schema
+/// chain for the same index. A chain with nothing to do returns `Ok` at its
+/// `current >= target` no-op, and an un-keyed cell let that success erase the
+/// JSON fault that was still true — the exact wipe #7979 exists to prevent.
+/// What: a `Mutex<BTreeMap<&'static str, MigrationFault>>`. `BTreeMap` so the
+/// reported order is stable across calls rather than hash-random.
+/// Test: `a_no_op_schema_chain_does_not_clear_a_json_to_redb_fault`,
+/// `failed_schema_chain_is_reported_as_migration_error_in_status`.
 #[derive(Debug, Default)]
 pub(crate) struct MigrationFaultRecord {
-    last: Mutex<Option<MigrationFault>>,
+    by_stage: Mutex<BTreeMap<&'static str, MigrationFault>>,
 }
 
 impl MigrationFaultRecord {
-    /// Poison-tolerant lock: the critical sections are single moves, so a
-    /// poisoned mutex must not turn a migration fault into a daemon-wide one.
-    fn lock(&self) -> std::sync::MutexGuard<'_, Option<MigrationFault>> {
-        self.last.lock().unwrap_or_else(|e| e.into_inner())
+    /// Poison-tolerant lock: the critical sections are single map operations,
+    /// so a poisoned mutex must not turn a migration fault into a daemon-wide
+    /// one.
+    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<&'static str, MigrationFault>> {
+        self.by_stage.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
 impl CodeIndexer {
-    /// Record a failed migration, replacing any earlier one (#7979).
+    /// Record a failed migration under its own stage (#7979).
     pub(crate) fn record_migration_failure(&self, stage: &'static str, detail: impl Into<String>) {
-        *self.migration_fault.lock() = Some(MigrationFault {
+        self.migration_fault.lock().insert(
             stage,
-            detail: detail.into(),
-            at: chrono::Utc::now().to_rfc3339(),
-        });
+            MigrationFault {
+                stage,
+                detail: detail.into(),
+                at: chrono::Utc::now().to_rfc3339(),
+            },
+        );
     }
 
-    /// Clear the record after a migration run succeeded (#7979).
+    /// Clear ONLY `stage` after that stage's run succeeded (#7979).
     ///
-    /// Why: without this a single failure would mark the index broken in
+    /// Why: without any clear, a single failure would mark the index broken in
     /// `status` for the rest of the process's life, outliving the condition
-    /// that caused it. A completed run is proof the chain applies again.
-    pub(crate) fn clear_migration_failure(&self) {
-        *self.migration_fault.lock() = None;
+    /// that caused it. Without the stage key, one runner's success would erase
+    /// the other runner's still-true fault — see [`MigrationFaultRecord`].
+    pub(crate) fn clear_migration_failure(&self, stage: &'static str) {
+        self.migration_fault.lock().remove(stage);
     }
 
-    /// The last recorded migration failure, or `None` when none is outstanding.
-    pub fn migration_fault(&self) -> Option<MigrationFault> {
-        self.migration_fault.lock().clone()
+    /// Every outstanding migration fault, stage-ordered; empty when none.
+    pub fn migration_faults(&self) -> Vec<MigrationFault> {
+        self.migration_fault.lock().values().cloned().collect()
     }
 }

@@ -845,9 +845,13 @@ async fn failed_json_to_redb_migration_is_recorded_on_the_indexer() {
     // SAFETY: as above; removed before any assertion can panic.
     unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
 
-    let fault = indexer.migration_fault().expect(
-        "#7979: a failed JSON → redb migration must be recorded where status can report it",
+    let faults = indexer.migration_faults();
+    assert_eq!(
+        faults.len(),
+        1,
+        "#7979: a failed JSON → redb migration must be recorded where status can report it"
     );
+    let fault = &faults[0];
     assert_eq!(
         fault.stage,
         crate::core::indexer::MIGRATION_STAGE_JSON_TO_REDB,

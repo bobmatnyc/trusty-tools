@@ -277,7 +277,7 @@ pub(super) async fn finish_reindex(
 
     // Issue #603: resolve the atomic corpus swap.
     let corpus_commit_started = Instant::now();
-    resolve_corpus_swap(
+    let promotion_deferred = resolve_corpus_swap(
         &handle,
         &index_id,
         &canonical_root,
@@ -415,6 +415,13 @@ pub(super) async fn finish_reindex(
             map.insert(index_id.clone(), Instant::now());
         }
         ReindexStatus::AbortedMemory
+    } else if promotion_deferred {
+        // #7991: every stage succeeded, but the staged corpus was never
+        // promoted — the live `index.redb` is still at its pre-reindex state.
+        // Reporting Complete here is what let a deferred run look healthy.
+        // No `last_indexed_at` stamp and no HEAD-SHA marker: nothing landed, so
+        // a stamp would claim the live corpus is current when it is not.
+        ReindexStatus::PromotionDeferred
     } else {
         // Issue #75: refresh the captured HEAD SHA.
         let new_sha = crate::core::git::head_sha(&handle.root_path);

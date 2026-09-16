@@ -40,6 +40,14 @@ pub enum ReindexStatus {
     /// immediately would just hit the limit again, producing an infinite
     /// reindex loop.
     AbortedMemory,
+    /// #7991: every stage succeeded but the staged corpus could not be promoted
+    /// — the live `index.redb` is held by another opener, or this filesystem
+    /// cannot prove it is not. Distinguished from `Complete` because the live
+    /// corpus is still at its PRE-reindex state and this run's work was
+    /// discarded, and from `Failed` because nothing went wrong and nothing was
+    /// damaged. `GET /indexes/:id/status` carries the matching
+    /// `promotion_deferred` object.
+    PromotionDeferred,
     Failed,
 }
 

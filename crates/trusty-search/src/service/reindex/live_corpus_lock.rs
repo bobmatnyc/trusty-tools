@@ -26,12 +26,19 @@
 //! descriptor closes or the process dies, so a crashed host leaves no stale
 //! lock to clear by hand, which a PID lock file would.
 //!
-//! Known limit, stated rather than papered over: flock is advisory and, over
-//! NFS, is local-to-the-client on Linux kernels that do not map it onto a POSIX
-//! lock. Where the filesystem cannot lock at all, `try_lock` reports
-//! `Unsupported` and this module REFUSES the promotion — the reindex keeps its
-//! staged corpus and the live one is untouched, which is the safe answer when
-//! the hazard cannot be excluded.
+//! Known limit, stated rather than papered over, because the dangerous shape is
+//! NOT the one that errors. A filesystem that cannot lock at all reports
+//! `Unsupported`, and this module refuses — that case is safe. The case this
+//! gate does NOT catch is flock SUCCEEDING client-locally: an NFS mount with
+//! `-o nolock` (or `local_lock=flock`, or `local_lock=all`), and some FUSE
+//! layers (sshfs without `-o workaround`, several S3/object-storage mounts),
+//! satisfy the lock against the local kernel only. Two hosts then each take the
+//! "exclusive" lock, `try_lock` returns `Ok` on both, and the gate ADMITS the
+//! promotion that #7991 is about. There is no local test that distinguishes
+//! that mount from a healthy one, so it is an accepted, documented residual:
+//! run a shared-FS deployment with `local_lock=none` (the NFSv4 default, which
+//! maps flock onto a server-side POSIX lock) for this gate to mean anything
+//! across hosts.
 //!
 //! Test: `super::live_corpus_lock_tests`.
 
@@ -100,6 +107,24 @@ pub(super) async fn acquire_for_promotion(
     }
 }
 
+/// One-line operator-facing reason for a refused promotion (#7991).
+///
+/// Why: `commit_staged_corpus_swap` records the refusal on the indexer so
+/// `GET /indexes/:id/status` can report it, and the text a caller reads must
+/// not drift from the ERROR line the arms above log.
+/// What: names the live path and what a reader should do. Deliberately does not
+/// re-probe — the probe already ran and its arms logged the specific cause.
+/// Test: `a_deferred_promotion_is_reported_in_status_and_is_not_complete`.
+pub(super) fn deferral_reason(live_path: &Path) -> String {
+    format!(
+        "the live corpus {} could not be exclusively locked for promotion — another opener \
+         holds it, or this filesystem cannot prove otherwise. The live corpus is unchanged \
+         and still serves; this reindex's staged work was discarded and must be re-run once \
+         the other opener is gone (#7991). The daemon log names the specific arm.",
+        live_path.display()
+    )
+}
+
 /// The blocking half of [`acquire_for_promotion`]; see its doc for the arms.
 fn acquire_blocking(live_path: &Path, index_id: &str) -> Option<LiveCorpusLock> {
     let file = match OpenOptions::new().read(true).write(true).open(live_path) {
@@ -128,8 +153,9 @@ fn acquire_blocking(live_path: &Path, index_id: &str) -> Option<LiveCorpusLock> 
                 "index '{index_id}': REFUSING to promote the staged corpus over {} — another \
                  process still holds that file open (redb's own advisory lock is taken). \
                  Renaming over it would leave that opener reading and writing an unlinked \
-                 inode. The staged corpus is kept and the live corpus is untouched; the next \
-                 reindex resumes from it once the other opener is gone (#7991).",
+                 inode. The LIVE corpus is untouched and still serves; this run's staged \
+                 work is discarded by the next reindex, which must redo it. Reported as \
+                 `promotion_deferred` on GET /indexes/:id/status (#7991).",
                 live_path.display()
             );
             None

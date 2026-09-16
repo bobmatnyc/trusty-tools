@@ -9,7 +9,9 @@
 //! the `migration_error` object in the status body, plus the clear-on-success
 //! arm that keeps the record from outliving the condition.
 //! Test: `failed_schema_chain_is_reported_as_migration_error_in_status`,
-//! `a_succeeding_chain_clears_an_earlier_recorded_fault`.
+//! `a_succeeding_chain_clears_an_earlier_recorded_fault`,
+//! `a_no_op_schema_chain_does_not_clear_a_json_to_redb_fault`,
+//! `both_stages_are_reported_when_both_are_outstanding`.
 
 use super::*;
 use crate::core::indexer::CodeIndexer;
@@ -96,12 +98,16 @@ async fn failed_schema_chain_is_reported_as_migration_error_in_status() {
     let after = index_status_report(&state, "migration-error-7979")
         .await
         .expect("status 200");
+    let faults = after["migration_error"]
+        .as_array()
+        .expect("#7979: migration_error is the SET of outstanding faults");
+    assert_eq!(faults.len(), 1, "one stage failed, got: {faults:?}");
     assert_eq!(
-        after["migration_error"]["stage"],
+        faults[0]["stage"],
         crate::core::indexer::MIGRATION_STAGE_SCHEMA_CHAIN,
         "#7979: the status body must name which stage failed"
     );
-    let detail = after["migration_error"]["detail"]
+    let detail = faults[0]["detail"]
         .as_str()
         .expect("#7979: migration_error must carry the failure text");
     assert!(
@@ -109,8 +115,91 @@ async fn failed_schema_chain_is_reported_as_migration_error_in_status() {
         "the detail must carry the underlying cause, got: {detail}"
     );
     assert!(
-        after["migration_error"]["at"].is_string(),
+        faults[0]["at"].is_string(),
         "the record must say when it was taken"
+    );
+}
+
+/// #7979 round 2: one runner's success must not erase the other's live fault.
+///
+/// Why: the boot order is `restore_indexes` — which records a `json_to_redb`
+/// fault — then `spawn_index_migrations` for every index. A schema chain with
+/// nothing to do returns `Ok` at its `current >= target` no-op, and an
+/// un-stage-keyed record let that success wipe a JSON fault that was still
+/// true. The index then served 0 chunks with `migration_error: null` again,
+/// which is the exact silence this issue is about.
+/// What: records the JSON fault the way `run_migrations_for_entry` does, runs a
+/// chain that has nothing to apply, and asserts the JSON fault survives in the
+/// status body.
+/// Test: this IS the test.
+#[tokio::test]
+async fn a_no_op_schema_chain_does_not_clear_a_json_to_redb_fault() {
+    let (state, handle) = state_with_index("migration-keyed-7979");
+    handle.indexer.read().await.record_migration_failure(
+        crate::core::indexer::MIGRATION_STAGE_JSON_TO_REDB,
+        "corrupt legacy snapshot (#7979)",
+    );
+
+    // `current_version() == 0` for this registry and a no-corpus handle reads
+    // schema 0, so the chain takes its `current >= target` no-op return.
+    let no_op = MigrationRegistry {
+        migrations: vec![Arc::new(NoopMigration)],
+    };
+    run_migrations(&handle, &no_op)
+        .await
+        .expect("a no-op chain must succeed");
+
+    let after = index_status_report(&state, "migration-keyed-7979")
+        .await
+        .expect("status 200");
+    let faults = after["migration_error"]
+        .as_array()
+        .expect("#7979: the JSON fault must survive an unrelated chain's success");
+    assert_eq!(
+        faults.len(),
+        1,
+        "exactly the JSON fault must remain, got: {faults:?}"
+    );
+    assert_eq!(
+        faults[0]["stage"],
+        crate::core::indexer::MIGRATION_STAGE_JSON_TO_REDB,
+        "#7979: a schema chain with nothing to do must not clear another stage"
+    );
+}
+
+/// Both stages outstanding at once are both reported.
+#[tokio::test]
+async fn both_stages_are_reported_when_both_are_outstanding() {
+    let (state, handle) = state_with_index("migration-both-7979");
+    handle
+        .indexer
+        .read()
+        .await
+        .record_migration_failure(crate::core::indexer::MIGRATION_STAGE_JSON_TO_REDB, "json");
+
+    let failing = MigrationRegistry {
+        migrations: vec![Arc::new(FailingMigration)],
+    };
+    run_migrations(&handle, &failing)
+        .await
+        .expect_err("must fail");
+
+    let after = index_status_report(&state, "migration-both-7979")
+        .await
+        .expect("status 200");
+    let stages: Vec<&str> = after["migration_error"]
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(|f| f["stage"].as_str().expect("stage"))
+        .collect();
+    assert_eq!(
+        stages,
+        vec![
+            crate::core::indexer::MIGRATION_STAGE_JSON_TO_REDB,
+            crate::core::indexer::MIGRATION_STAGE_SCHEMA_CHAIN,
+        ],
+        "both outstanding faults must be reported, stage-ordered"
     );
 }
 

@@ -46,6 +46,9 @@ pub(crate) mod migration_state;
 pub(crate) mod migrations;
 mod persist;
 pub use persist::SnapshotRestore;
+// #7991: why the last staged promotion was refused rather than attempted.
+pub(crate) mod promotion_state;
+pub use promotion_state::PromotionDeferred;
 mod persist_hnsw;
 mod quarantine;
 mod search;
@@ -572,6 +575,10 @@ pub struct CodeIndexer {
     /// `GET /indexes/:id/status` as `migration_error`. `Arc` because the
     /// schema-chain runner records it while holding only a read lock.
     pub(super) migration_fault: Arc<migration_state::MigrationFaultRecord>,
+
+    /// #7991: why the last staged reindex promotion was refused, reported by
+    /// `GET /indexes/:id/status` as `promotion_deferred`.
+    pub(super) promotion_deferral: Arc<promotion_state::PromotionDeferralRecord>,
 }
 
 /// Coalescing state for `spawn_incremental_persist`.
@@ -697,6 +704,7 @@ impl CodeIndexer {
             chunk_cap: max_chunks_per_index(),
             snapshot_guard: Arc::new(snapshot_guard::SnapshotGuard::default()),
             migration_fault: Arc::new(migration_state::MigrationFaultRecord::default()),
+            promotion_deferral: Arc::new(promotion_state::PromotionDeferralRecord::default()),
         }
     }
 

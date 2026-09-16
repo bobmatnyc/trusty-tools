@@ -573,7 +573,15 @@ async fn clear_checkpoint_on_released_file(tmp_path: &Path, index_id: &IndexId) 
 /// rename. Without it, a second daemon on a shared filesystem could open the
 /// live corpus inside the reindex window and be left reading an unlinked inode.
 /// A refusal returns `false` with staging still attached and the checkpoint
-/// intact, so the staged corpus survives for the next run to adopt.
+/// intact, so nothing is released into a half-promoted state and the live
+/// corpus keeps serving. It does NOT survive for the next run to adopt: this
+/// process still holds `index.redb.tmp`, so the next run's `probe_resume`
+/// (`runner.rs`) hits `DatabaseAlreadyOpen` and `checkpoint::probe_resume`
+/// discards the staging file. Detaching it here to make it adoptable would put
+/// the index in the no-corpus state the post-release arms quarantine, for a
+/// saving the deferral makes visible anyway — the refusal is recorded as
+/// `promotion_deferred` and the run's terminal status is
+/// `ReindexStatus::PromotionDeferred`, not `Complete`.
 ///
 /// #7004: returns `true` only when the promoted corpus is INSTALLED on the
 /// indexer. Every failure arm below returns `false`, which is what gates the
@@ -624,6 +632,13 @@ pub(super) async fn commit_staged_corpus_swap(
     let Some(live_lock) =
         super::live_corpus_lock::acquire_for_promotion(&live_path, index_id).await
     else {
+        // #7991: a refusal that is only a `false` return is invisible — the run
+        // still reported Complete and the indexer kept serving staging.
+        handle
+            .indexer
+            .read()
+            .await
+            .record_promotion_deferred(super::live_corpus_lock::deferral_reason(&live_path));
         return false;
     };
     // #4721: one call performs the checkpoint clear AND the handle release, in
@@ -653,11 +668,11 @@ pub(super) async fn commit_staged_corpus_swap(
     };
     match reopened {
         Ok(store) => {
-            handle
-                .indexer
-                .write()
-                .await
-                .set_corpus_store(std::sync::Arc::new(store));
+            let mut indexer = handle.indexer.write().await;
+            // #7991: this promotion landed, so any earlier deferral is stale.
+            indexer.clear_promotion_deferred();
+            indexer.set_corpus_store(std::sync::Arc::new(store));
+            drop(indexer);
             tracing::info!(
                 "force reindex: atomically swapped rebuilt corpus into {} for '{}'",
                 live_path.display(),
@@ -685,7 +700,9 @@ pub(super) async fn commit_staged_corpus_swap(
 /// the types rather than of the order statements happen to appear in.
 /// What: `std::fs::rename` on a blocking worker (filesystem sync call), with a
 /// panicked worker rendered as an `Err` rather than a lost result.
-/// Test: `super::resume_tests::completed_reindex_leaves_no_checkpoint`.
+/// Test: `super::resume_tests::completed_reindex_leaves_no_checkpoint`;
+/// `super::live_corpus_lock_tests::a_rename_failure_quarantines_and_is_not_reported_as_a_deferral`
+/// covers the error arm.
 async fn rename_staging_over_live(
     _release: &PromotionRelease,
     tmp_path: &Path,
