@@ -35,6 +35,7 @@
 
 use super::{ChatLine, ChatRole, Delegation, ReplApp, ToolCard};
 use crate::event::{DelegationOutcome, KeyCode, KeyInput, ReplEvent};
+use crate::model::{PendingPermission, PermissionAnswer};
 use crate::text::{strip_interior_blank_lines, trim_surrounding_blank_lines};
 
 /// How many lines a Page-Up/Page-Down key press scrolls.
@@ -114,6 +115,34 @@ pub fn apply(app: &mut ReplApp, ev: ReplEvent) {
             agent,
             outcome,
         } => apply_delegation_finished(app, agent_id, agent, outcome),
+        ReplEvent::PermissionRequested {
+            request_id,
+            agent,
+            agent_id,
+            tool,
+            subject,
+            rule,
+        } => apply_permission_requested(
+            app,
+            PendingPermission {
+                request_id,
+                agent,
+                agent_id,
+                tool,
+                subject,
+                rule,
+            },
+        ),
+        ReplEvent::PermissionResolved {
+            request_id,
+            agent,
+            decision,
+            source,
+            ..
+        } => apply_permission_resolved(app, &request_id, &agent, &decision, &source),
+        ReplEvent::PermissionAnswerFailed { pending, error } => {
+            apply_permission_answer_failed(app, pending, &error)
+        }
         ReplEvent::StatusMessage(msg) => app.push_status(msg),
         ReplEvent::ClearScrollback => app.clear_scrollback(),
         ReplEvent::StatuslineUpdate(segments) => app.statusline = segments,
@@ -393,6 +422,130 @@ fn apply_delegation_finished(
     push_delegated(app, ChatRole::Delegation, text);
 }
 
+/// Open the modal permission prompt and record the request in the
+/// scrollback (#3422).
+///
+/// Why: the request has to survive in the transcript even after the prompt
+/// closes — an operator reading back needs to see what was asked, not only
+/// what was answered. The prompt itself is separate state because it is
+/// re-rendered every frame and addressed by `request_id`.
+/// What: pushes one [`ChatRole::Status`] line naming the tool, the
+/// already-redacted subject and the matched rule, then stores the request.
+/// A second request arriving while one is open REPLACES it: the backend
+/// suspends one call per agent loop, so an overlap means the first is
+/// already resolved (its `PermissionResolved` may simply not have landed
+/// yet) and stacking prompts would block on a request nobody can answer.
+/// Test: [`tests::permission_requested_opens_a_prompt_and_records_it`],
+/// [`tests::permission_requested_twice_keeps_only_the_newest_prompt`].
+fn apply_permission_requested(app: &mut ReplApp, pending: PendingPermission) {
+    let mut text = format!("permission: {} wants {}", pending.agent, pending.tool);
+    if !pending.subject.trim().is_empty() {
+        text.push_str(&format!(" — {}", pending.subject));
+    }
+    text.push_str(&format!(" (rule: {})", pending.rule));
+    app.push_status(text);
+    // #3422: a fresh request carries no failed answer — never inherit the
+    // retry line from the prompt this one replaces.
+    app.permission_error = None;
+    app.pending_permission = Some(pending);
+}
+
+/// Record a permission decision and close the prompt it answers (#3422).
+///
+/// Why: the backend is the only authority on how a request resolved — it may
+/// have timed out, been answered by another client, or been covered by a
+/// grant this client never saw. Recording ITS word (rather than the local key
+/// press) is what keeps the scrollback honest.
+/// What: pushes one [`ChatRole::Status`] line carrying the producer's own
+/// `decision`/`source` words verbatim, and clears
+/// [`ReplApp::pending_permission`] only when the ids match — a resolution for
+/// some other request must not unblock the prompt the user is looking at.
+/// Test: [`tests::permission_resolved_clears_the_prompt_and_records_the_decision`],
+/// [`tests::permission_resolved_for_another_request_leaves_the_prompt_pending`].
+fn apply_permission_resolved(
+    app: &mut ReplApp,
+    request_id: &str,
+    agent: &str,
+    decision: &str,
+    source: &str,
+) {
+    app.push_status(format!("permission: {agent} — {decision} (by {source})"));
+    if app
+        .pending_permission
+        .as_ref()
+        .is_some_and(|p| p.request_id == request_id)
+    {
+        app.pending_permission = None;
+        app.permission_error = None;
+    }
+}
+
+/// Reopen the prompt whose answer never reached the backend (#3422).
+///
+/// Why: [`ReplApp::answer_permission`] clears the prompt the instant a key is
+/// pressed, ahead of the RPC, so a slow backend can never freeze the
+/// keyboard. A failed relay makes that optimism wrong: the call is still
+/// suspended on the backend, and with the modal gone the operator has no way
+/// to answer it again. This restores the question.
+/// What: records the engine's own error text in the scrollback and, unless
+/// some OTHER prompt is already open, puts the request back with
+/// [`ReplApp::permission_error`] set so the prompt draws its retry line. A
+/// newer prompt wins: the backend suspends one call per agent loop, so an
+/// open prompt means this request is already moot.
+/// Test: [`tests::permission_answer_failed_reopens_the_prompt_with_a_retry_line`],
+/// [`tests::permission_answer_failed_never_clobbers_a_newer_prompt`],
+/// `crate::run::tests::dispatch_pending_permission_answer_failure_reopens_the_prompt`.
+fn apply_permission_answer_failed(app: &mut ReplApp, pending: PendingPermission, error: &str) {
+    app.push_status(format!(
+        "permission answer failed: {error} — {} is still waiting; answer again",
+        pending.tool
+    ));
+    if app.pending_permission.is_some() {
+        return;
+    }
+    app.permission_error = Some(format!("answer failed ({error}) — retry"));
+    app.pending_permission = Some(pending);
+}
+
+/// The answer bound to `key` while a permission prompt is open (#3422), or
+/// `None` for a key that is not one of the three bindings.
+///
+/// Why: kept pure so the whole keymap is testable without driving a frame,
+/// and so "which keys answer" is one readable list rather than arms scattered
+/// through [`apply_key`]. The bindings extend #3422's original y/n proposal
+/// with the third answer #7948's wire protocol added — a prompt offering only
+/// allow-once and deny would nag on every repeat of the same call.
+/// What: `y`/`Y` allow once, `a`/`A` allow for the session, `n`/`N`/Esc deny
+/// — exactly the keys [`crate::widgets::permission_prompt`]'s footer
+/// advertises, and nothing else. Enter is deliberately UNBOUND; see the
+/// inline note on the match below. `AllowForSession` carries `pattern: None`
+/// deliberately: choosing a grant width is policy, and policy is the
+/// backend's (ADR-0063).
+/// Test: [`tests::permission_key_y_answers_allow_once`],
+/// [`tests::permission_key_a_answers_allow_for_session`],
+/// [`tests::permission_key_n_answers_deny`],
+/// [`tests::permission_key_escape_answers_deny`],
+/// [`tests::permission_unbound_key_leaves_the_prompt_pending`],
+/// [`tests::enter_while_a_permission_prompt_is_pending_does_not_submit`].
+fn permission_answer_for_key(key: KeyInput) -> Option<PermissionAnswer> {
+    if key.modifiers.ctrl || key.modifiers.alt {
+        return None;
+    }
+    // #3422: no `KeyCode::Enter` arm. A prior revision mapped Enter to
+    // `AllowOnce`, a grant the footer never advertises — an operator pressing
+    // Enter to send the line they were typing would silently approve the
+    // suspended call. An unadvertised key must never answer; Enter falls
+    // through to `_ => None` with every other key.
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => Some(PermissionAnswer::AllowOnce),
+        KeyCode::Char('a') | KeyCode::Char('A') => {
+            Some(PermissionAnswer::AllowForSession { pattern: None })
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Some(PermissionAnswer::Deny),
+        _ => None,
+    }
+}
+
 /// Dispatch one translated key press to the appropriate `ReplApp` mutator.
 ///
 /// Why: split out of [`apply`] so the (long, mechanical) key-by-key match
@@ -409,6 +562,18 @@ fn apply_delegation_finished(
 /// navigation concerns this slice doesn't own.
 /// Test: [`tests`] below, one per binding.
 fn apply_key(app: &mut ReplApp, key: KeyInput) {
+    // #3422: the prompt is modal. While a tool call is suspended on the
+    // backend, every key either answers it or does nothing — routing a
+    // keystroke to the line editor would let the user compose a turn the
+    // backend cannot start, and Enter would look like a submit that silently
+    // vanished. Deny is always one key away (`n` or Esc), so this can never
+    // trap the keyboard.
+    if app.pending_permission.is_some() {
+        if let Some(answer) = permission_answer_for_key(key) {
+            app.answer_permission(answer);
+        }
+        return;
+    }
     let ctrl = key.modifiers.ctrl;
     match key.code {
         KeyCode::Char(c) if ctrl => match c {

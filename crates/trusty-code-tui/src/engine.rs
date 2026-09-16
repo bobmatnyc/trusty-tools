@@ -26,7 +26,7 @@
 //! - [`SPEC-TTUI-03~draft`](docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-03~draft) — Slice 1 trait shape; §3.2, Slice 1.5 generalization layer.
 
 use crate::event::ReplEvent;
-use crate::model::{CommandDescriptor, PickerRequest};
+use crate::model::{CommandDescriptor, PermissionAnswer, PickerRequest};
 use anyhow::Result;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -116,6 +116,28 @@ pub trait TuiEngine: Send + Sync {
     /// exactly once per Ctrl-C while a request is in flight.
     /// Test: see `handle_input`.
     async fn cancel_session(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Answer one suspended permission request (#3422).
+    ///
+    /// Why: a [`ReplEvent::PermissionRequested`] leaves a tool call stopped
+    /// on the backend; only the backend can release it, so the key press has
+    /// to become a real backend call — the same thin-client reasoning as
+    /// [`Self::cancel_session`] (ADR-0063, DOC-50 §2.1 C-2). The TUI applies
+    /// no local policy: it does not pre-approve, does not remember grants,
+    /// and does not decide what a session-wide grant covers.
+    /// What: `request_id` comes off the event that opened the prompt;
+    /// `answer` names which of the three the user chose. Implementations
+    /// translate `answer` into their own backend's decision type — this
+    /// crate deliberately carries no wire words. The shared event loop calls
+    /// this exactly once per answered prompt. Default no-op, for engines
+    /// (and test doubles) with no permission surface.
+    /// Test: `respond_permission_defaults_to_ok` (this module);
+    /// `crate::run::tests::dispatch_pending_permission_answer_reaches_respond_permission`
+    /// covers the dispatch wiring.
+    async fn respond_permission(&self, request_id: String, answer: PermissionAnswer) -> Result<()> {
+        let _ = (request_id, answer);
         Ok(())
     }
 
@@ -312,6 +334,20 @@ mod tests {
         let engine = BareEngine;
         assert!(engine.picker("model").is_none());
         assert!(engine.picker("anything").is_none());
+    }
+
+    /// An engine with no permission surface must still compile and report
+    /// success — the "nothing to do, no panic" contract every defaulted
+    /// method here shares. Cited by `respond_permission`'s `Test:` pointer.
+    #[tokio::test]
+    async fn respond_permission_defaults_to_ok() {
+        let engine = BareEngine;
+        assert!(
+            engine
+                .respond_permission("req-1".to_string(), PermissionAnswer::Deny)
+                .await
+                .is_ok()
+        );
     }
 
     /// An engine that DOES override `commands`/`picker` must have its

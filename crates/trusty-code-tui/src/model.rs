@@ -202,6 +202,85 @@ pub struct PickerRequest {
     pub dispatch_command: String,
 }
 
+/// The permission request currently blocking the turn (#3422).
+///
+/// Why: [`crate::event::ReplEvent::PermissionRequested`]'s payload has to
+/// outlive the event so the prompt widget can redraw it every frame and the
+/// answer can be addressed back to the right `request_id`. Held in
+/// [`crate::app::ReplApp::pending_permission`].
+/// What: every field is the producer's own text, stored verbatim — `subject`
+/// arrives already redacted and bounded, and this crate never re-derives,
+/// re-redacts, or re-interprets any of them.
+/// Test: `crate::app::reduce::tests::permission_requested_opens_a_prompt_and_records_it`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingPermission {
+    /// The correlation key the answer is sent back on.
+    pub request_id: String,
+    /// The agent whose call is suspended.
+    pub agent: String,
+    /// That agent's opaque per-spawn id; empty when unattributed.
+    pub agent_id: String,
+    /// The tool that would run.
+    pub tool: String,
+    /// What the tool would act on, already redacted by the producer.
+    pub subject: String,
+    /// The policy pattern that matched.
+    pub rule: String,
+}
+
+/// The user's answer to a [`PendingPermission`] (#3422).
+///
+/// Why: the TUI must offer all three answers the backend understands, and
+/// must compute none of them — per the thin-client axiom (ADR-0063) this
+/// enum only NAMES which button was pressed; the engine adapter translates
+/// it into its own backend's decision type and the backend applies the
+/// policy. Nothing here knows what a grant covers or how long it lasts.
+/// What: `AllowForSession.pattern` is the optional grant width. This crate
+/// never invents one — the key binding sends `None`, which asks the backend
+/// for whatever its own default width is for the subject it asked about.
+/// Test: `crate::app::reduce::tests::permission_key_y_answers_allow_once`
+/// and its siblings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PermissionAnswer {
+    /// Permit this one call.
+    AllowOnce,
+    /// Permit this call and stop asking for the rest of the session.
+    AllowForSession { pattern: Option<String> },
+    /// Refuse this call.
+    Deny,
+}
+
+/// An answer staged for the outer driver to relay to
+/// [`crate::engine::TuiEngine::respond_permission`] (#3422).
+///
+/// Why: the reducer holds only `&mut ReplApp` and cannot call an `async`
+/// engine method, so it stages the answer here — the same pattern
+/// [`crate::app::ReplApp::pending_submit`] and `pending_cancel` use.
+/// What: drained by [`crate::run::TuiModel::take_pending_permission_response`]
+/// after every `apply` call. It carries the whole [`PendingPermission`],
+/// not just its `request_id` (#3422): the prompt is cleared optimistically
+/// when the key is pressed, so the request would be unrecoverable if the
+/// `respond_permission` RPC failed — the dispatch layer hands this value
+/// back through [`crate::event::ReplEvent::PermissionAnswerFailed`] to
+/// reopen the prompt.
+/// Test: `crate::run::tests::dispatch_pending_permission_answer_reaches_respond_permission`,
+/// `crate::run::tests::dispatch_pending_permission_answer_failure_reopens_the_prompt`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionResponse {
+    /// The request this answers, kept whole so a failed relay can reopen it.
+    pub pending: PendingPermission,
+    /// What the user chose.
+    pub answer: PermissionAnswer,
+}
+
+impl PermissionResponse {
+    /// The correlation key [`crate::engine::TuiEngine::respond_permission`]
+    /// sends this answer back on.
+    pub fn request_id(&self) -> &str {
+        &self.pending.request_id
+    }
+}
+
 /// One entry in an engine-supplied slash-command registry.
 ///
 /// Why: DOC-50 §5 Slice 7 / Q4 splits slash commands into client-side

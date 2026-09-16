@@ -59,6 +59,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use crate::engine::TuiEngine;
 use crate::event::ReplEvent;
 use crate::keys::translate_key_event;
+use crate::model::PermissionResponse;
 use crate::terminal::TerminalGuard;
 
 /// How often [`event_loop`] redraws when no event arrives.
@@ -131,6 +132,19 @@ pub trait TuiModel {
     /// override.
     fn take_pending_cancel(&mut self) -> bool {
         false
+    }
+
+    /// Take the permission answer staged by `apply` for
+    /// [`TuiEngine::respond_permission`], if any (#3422).
+    ///
+    /// Why: same shape and same reason as [`Self::take_pending_submit`] — a
+    /// synchronous reducer cannot call an `async` engine method, and the
+    /// answer must reach the backend because only the backend can release the
+    /// suspended tool call.
+    /// What: default `None` — a model with no permission surface needs no
+    /// override.
+    fn take_pending_permission_response(&mut self) -> Option<PermissionResponse> {
+        None
     }
 
     /// Called by [`run`]'s dispatch step immediately after a drained cancel
@@ -569,7 +583,9 @@ async fn forward_while_current_generation(
 /// [`tests::dispatch_pending_second_submit_while_busy_does_not_start_second_task`],
 /// [`tests::dispatch_pending_ok_true_with_no_terminal_output_still_clears_busy`],
 /// [`tests::dispatch_pending_ok_true_with_only_status_message_still_clears_busy`],
-/// [`tests::dispatch_pending_err_clears_busy_and_surfaces_visible_error`].
+/// [`tests::dispatch_pending_err_clears_busy_and_surfaces_visible_error`],
+/// [`tests::dispatch_pending_permission_answer_reaches_respond_permission`],
+/// [`tests::dispatch_pending_permission_answer_failure_reopens_the_prompt`].
 fn dispatch_pending<E, M>(
     model: &mut M,
     engine: &Arc<E>,
@@ -601,6 +617,32 @@ fn dispatch_pending<E, M>(
         tokio::spawn(async move {
             if let Err(e) = engine.cancel_session().await {
                 let _ = tx.send(ReplEvent::StatusMessage(format!("cancel failed: {e:#}")));
+            }
+        });
+    }
+
+    // #3422: relay a permission answer on its own spawned task, for the same
+    // reason the cancel above is spawned — a slow or wedged backend must not
+    // freeze the render loop. Deliberately NOT part of the submit path: an
+    // answer releases a call the backend already holds, it does not start a
+    // turn, so it carries no generation and never touches `busy`.
+    if let Some(response) = model.take_pending_permission_response() {
+        let engine = Arc::clone(engine);
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let PermissionResponse { pending, answer } = response;
+            let request_id = pending.request_id.clone();
+            // #3422: on failure the answer never reached the suspended call,
+            // so hand the whole request back rather than only reporting it —
+            // the reducer already cleared the modal, and a status line alone
+            // would leave the operator with a backend that is still waiting
+            // and no prompt to answer with. `StatusMessage` was exactly that
+            // dead end before this.
+            if let Err(e) = engine.respond_permission(request_id, answer).await {
+                let _ = tx.send(ReplEvent::PermissionAnswerFailed {
+                    pending,
+                    error: format!("{e:#}"),
+                });
             }
         });
     }

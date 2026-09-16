@@ -58,6 +58,8 @@ pub(super) fn terminal_stream_failure_event(reason: String) -> ReplEvent {
 /// keyed by the SAME `call_id` so the (future) tool-card renderer can pair
 /// them; `PmDelegating`/`AgentSpawned` -> `DelegationStarted` and
 /// `AgentDone`/`AgentFailed` -> `DelegationFinished` (#7940);
+/// `PermissionRequested`/`PermissionResolved` -> the matching `ReplEvent`
+/// halves of the TUI's permission prompt (#3422), field for field;
 /// `SessionDone` -> a final `AssistantOutput{done: true}` (`is_error` iff
 /// `status == "failed"`); `SessionCancelled` -> a status message. Every
 /// other event kind (progress/telemetry this client doesn't render) is
@@ -80,6 +82,8 @@ pub(super) fn terminal_stream_failure_event(reason: String) -> ReplEvent {
 /// `engine_tests::forward_pm_delegating_opens_a_delegation_without_an_id`,
 /// `engine_tests::forward_agent_done_closes_the_delegation`,
 /// `engine_tests::forward_agent_failed_closes_with_the_error`,
+/// `engine_tests::forward_permission_requested_opens_the_prompt`,
+/// `engine_tests::forward_permission_resolved_closes_the_prompt`,
 /// `engine_tests::every_agent_attributed_event_maps_or_is_explicitly_ignored`.
 pub(super) fn forward_session_event(
     envelope: SessionEventEnvelope,
@@ -227,6 +231,46 @@ pub(super) fn forward_session_event(
                 tool_name: tool,
                 args: Value::Null,
                 result: Some(format!("ERROR: {error}")),
+            });
+            false
+        }
+        // #3422: the two halves of a permission prompt. `PermissionRequested`
+        // leaves a tool call suspended on the daemon, so dropping it into the
+        // catch-all (as this arm's absence did until now) made the TUI look
+        // hung until the daemon's own timeout denied the call.
+        Event::PermissionRequested {
+            request_id,
+            agent,
+            agent_id,
+            tool,
+            subject,
+            rule,
+            ..
+        } => {
+            let _ = tx.send(ReplEvent::PermissionRequested {
+                request_id,
+                agent,
+                agent_id,
+                tool,
+                subject,
+                rule,
+            });
+            false
+        }
+        Event::PermissionResolved {
+            request_id,
+            agent,
+            agent_id,
+            decision,
+            source,
+            ..
+        } => {
+            let _ = tx.send(ReplEvent::PermissionResolved {
+                request_id,
+                agent,
+                agent_id,
+                decision,
+                source,
             });
             false
         }
