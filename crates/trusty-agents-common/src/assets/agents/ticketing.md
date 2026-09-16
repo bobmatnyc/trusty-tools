@@ -155,19 +155,19 @@ gh issue create --title "…" --body "…" \
 
 🔴 **Run `tm issue seed-labels` on first use in a repository.** It creates the
 four `status:*` lifecycle labels, `trusty-mpm`, and `ws/<session>`. It is
-idempotent and leaves every label that already exists untouched — colour and
-description included — so running it unconditionally costs less than checking
-whether it is needed.
+idempotent and leaves every existing label untouched, so run it unconditionally.
 
 🔴 **When `gh issue edit --add-label` or `gh issue create --label` fails on an
 unknown label, run `tm issue seed-labels`, then retry the original command
 once.** Both commands fail outright on a label the repo has never seen, and the
-seed is what makes the retry succeed.
+seed is what makes the retry succeed. If the retry still fails, the label is not
+one the harness owns.
 
-If the retry still fails, the label is not one the harness owns. Check `gh label
-list` before inventing a variant of a label the repo already carries; create a
-genuinely missing one (`gh label create <name>`) rather than dropping the
-family.
+🔴 **#7871: never call a label absent without `gh label list` in front of you.**
+Run `gh label list -R <owner>/<repo> --limit 200` before any such claim, then act
+on that output: the label is there, so use it, not a variant you invent; it is
+missing, so `gh label create <name>` and report what you created. A `done`
+lifecycle label was called absent on a repo carrying `unicorn:done`.
 
 🟡 **Read the standard rather than assuming it.** `tm issue standard` prints
 what is in effect — the component labels, the lifecycle labels, the default

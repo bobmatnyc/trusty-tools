@@ -3,14 +3,14 @@
 //! Why: the loader's whole contract is transport — spawn a subprocess, run the
 //! JSON-RPC handshake, register what it advertises, dispatch a call back to
 //! it. A mocked client would prove none of that. `examples/mcp_fixture_server.rs`
-//! is the counterpart server; `cargo test` builds it, `cargo install` does not
-//! ship it.
+//! is the counterpart server; `fixture_binary` builds it, `cargo install` does
+//! not ship it.
 //! What: config written into a tempdir, never the developer's real
 //! `~/.trusty-tools/mcp/servers.toml`.
 //! Test: this file.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -20,27 +20,72 @@ use trusty_code::mcp::{McpToolSet, register_configured_tools};
 use trusty_code::tools::registry::ToolRegistry;
 use trusty_code::tools::traits::{ToolExecutor, ToolResult};
 
-/// The fixture server's built path.
+/// The fixture server's freshly-built path.
 ///
-/// Why: `CARGO_BIN_EXE_*` covers `[[bin]]` targets only, and this fixture is
-/// deliberately an example so it never ships. The path is derived from the
-/// test binary's own location, so it follows a custom `CARGO_TARGET_DIR` too.
-/// An absent binary FAILS rather than skipping: a gate that silently does not
-/// run is not a gate.
+/// Why (#7951): `CARGO_BIN_EXE_*` covers `[[bin]]` targets only, and this
+/// fixture is deliberately an example so it never ships — so nothing kept it
+/// current. `cargo test --test mcp_loader_e2e` builds this target alone and
+/// NOT the crate's examples, so the suite ran against whatever copy of
+/// `examples/mcp_fixture_server.rs` was compiled last. The crate's other
+/// fixtures use `env!("CARGO_BIN_EXE_tcode")`, which cargo rebuilds for every
+/// test run; an example has no such variable, so this builds it instead.
+/// What: runs `cargo build --example mcp_fixture_server` once per test
+/// process, into the same target directory and profile the running test binary
+/// came from — so it follows a custom `CARGO_TARGET_DIR` and a `--release` run
+/// alike. An absent or unbuildable binary FAILS rather than skipping: a gate
+/// that silently does not run is not a gate.
+/// Test: `the_fixture_binary_is_never_stale_relative_to_its_source_7951`.
 fn fixture_binary() -> String {
-    let mut path: PathBuf = std::env::current_exe().expect("the test binary has a path");
-    path.pop();
-    if path.ends_with("deps") {
-        path.pop();
+    static BUILT: OnceLock<String> = OnceLock::new();
+    BUILT.get_or_init(build_fixture_binary).clone()
+}
+
+/// Build the fixture example into this run's own target dir, once.
+///
+/// Why: the one-time half of [`fixture_binary`], kept separate so the
+/// `OnceLock` body stays a single call.
+/// What: `target/debug` is the `dev` profile's directory and every other
+/// profile directory is named after the profile itself, so the directory the
+/// test binary lives in names both the target dir and the profile to rebuild
+/// under. Cargo's own build lock serialises this against a concurrent build.
+/// Test: `the_fixture_binary_is_never_stale_relative_to_its_source_7951`.
+fn build_fixture_binary() -> String {
+    let mut profile_dir: PathBuf = std::env::current_exe().expect("the test binary has a path");
+    profile_dir.pop();
+    if profile_dir.ends_with("deps") {
+        profile_dir.pop();
     }
-    path.push("examples");
-    path.push(format!(
+    let target_dir = profile_dir
+        .parent()
+        .expect("a profile directory has a parent");
+    let profile = match profile_dir.file_name().and_then(|n| n.to_str()) {
+        Some("debug") | None => "dev",
+        Some(other) => other,
+    };
+
+    let output = std::process::Command::new(env!("CARGO"))
+        .args(["build", "--example", "mcp_fixture_server", "--profile"])
+        .arg(profile)
+        .arg("--manifest-path")
+        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
+        .arg("--target-dir")
+        .arg(target_dir)
+        .output()
+        .expect("`cargo build --example mcp_fixture_server` must run");
+    assert!(
+        output.status.success(),
+        "rebuilding the fixture example failed ({}):\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let path = profile_dir.join("examples").join(format!(
         "mcp_fixture_server{}",
         std::env::consts::EXE_SUFFIX
     ));
     assert!(
         path.exists(),
-        "the fixture example is not built at {}; `cargo test` builds examples",
+        "the fixture example is not built at {} even after `cargo build --example`",
         path.display(),
     );
     path.display().to_string()
@@ -330,5 +375,37 @@ async fn a_project_set_with_a_new_command_never_spawns() {
             .any(|i| i.detail.contains("fixture")),
         "the refusal is reported: {:?}",
         diagnostics.issues,
+    );
+}
+
+/// Why (#7951): every other assertion in this file reads the fixture's
+/// behaviour — its tool list, its schema, its env echo — so all of them are
+/// only as true as the binary is current. `cargo test --test mcp_loader_e2e`
+/// builds this target and NOT the crate's examples, so the suite ran against
+/// whatever copy of `examples/mcp_fixture_server.rs` happened to be compiled
+/// last: a source change was invisible, which is a wrong-reason failure or a
+/// silent false green. This is the freshness check the rest of the file rests
+/// on, and it fails if [`fixture_binary`] ever stops rebuilding.
+#[test]
+fn the_fixture_binary_is_never_stale_relative_to_its_source_7951() {
+    let binary = PathBuf::from(fixture_binary());
+    let source = PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/examples/mcp_fixture_server.rs"
+    ));
+
+    let built = std::fs::metadata(&binary)
+        .and_then(|m| m.modified())
+        .expect("the built fixture has an mtime");
+    let edited = std::fs::metadata(&source)
+        .and_then(|m| m.modified())
+        .expect("the fixture source has an mtime");
+
+    assert!(
+        built >= edited,
+        "the fixture binary at {} is older than {} — this suite is running \
+         against a stale fixture (#7951)",
+        binary.display(),
+        source.display(),
     );
 }

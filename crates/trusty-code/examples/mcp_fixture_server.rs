@@ -15,10 +15,11 @@
 //! answers NOTHING, which is the wedged server the concurrency test needs —
 //! a server that fails fast would prove nothing about the per-server bound.
 //!
-//! Run the e2e through `cargo test -p trusty-code`, never
-//! `cargo test --test mcp_loader_e2e`: an explicit `--test` selector builds
-//! that target alone and NOT the examples, so the suite silently runs against
-//! whatever copy of this file was compiled last.
+//! #7951: an explicit `cargo test --test mcp_loader_e2e` selector builds that
+//! target alone and NOT the examples, so the suite used to run against
+//! whatever copy of this file was compiled last. `fixture_binary()` in that
+//! test now builds this example itself before using it, so either invocation
+//! reflects an edit here.
 //!
 //! Test: `crates/trusty-code/tests/mcp_loader_e2e.rs`.
 
