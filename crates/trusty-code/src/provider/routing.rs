@@ -14,11 +14,17 @@ use crate::tools::RunContext;
 
 /// Default model slug when nothing else is specified.
 ///
-/// Why: A run must always resolve to *some* model; this is the cheap, broadly
-/// available fallback used across trusty-code.
-/// What: The OpenRouter slug for GPT-4o-mini.
+/// Why (#7955): the former default, `openai/gpt-4o-mini`, is rejected with a
+/// `404 zdr-violation-by-guardrail` by any OpenRouter account with the
+/// zero-data-retention (ZDR) guardrail enabled — every unpinned `run-task`
+/// and the ignored `agent_loop_live` smoke failed identically at the first
+/// chat call. `anthropic/claude-sonnet-4.5` is the same concrete slug
+/// [`normalize_model_alias`]'s `"sonnet"` alias already resolves to and is
+/// proven live against OpenRouter elsewhere in this repo, so it carries no
+/// new provider risk.
+/// What: The OpenRouter slug for Claude Sonnet 4.5.
 /// Test: `routing::tests::resolve_model_falls_back_to_default`.
-pub const DEFAULT_MODEL: &str = "openai/gpt-4o-mini";
+pub const DEFAULT_MODEL: &str = "anthropic/claude-sonnet-4.5";
 
 /// Default per-turn completion token cap when `[llm].max_tokens` is unset.
 ///
