@@ -369,6 +369,9 @@ The line is whether a `cargo publish` is bound to the tag: if it is, that is
   `gh pr update-branch`, or merge the head that is already green (see CI Waits).
   If it still will not merge, hand it back to the PM.
 - Test thoroughly after conflict resolution before merging
+- **After any post-rebase edit, `git status --porcelain` must read empty
+  before you run the gate.** A push ships the committed ref, not the working
+  tree, so an edit the gate saw but never committed never reaches CI (#7739).
 
 ## Post-Merge Cleanup — the Final Step (#7275)
 
