@@ -747,6 +747,56 @@ fn pid_liveness_separates_running_gone_and_undeterminable() {
     );
 }
 
+/// #7974: `EPERM` means the kernel FOUND the process and refused the signal, so
+/// it is evidence of life — folding it into "gone" would let adoption take a
+/// tree from an agent running under another uid.
+/// Test: this function IS the test.
+#[test]
+fn classify_kill_probe_reads_eperm_as_running() {
+    assert_eq!(
+        classify_kill_probe(Err(nix::errno::Errno::EPERM)),
+        Some(true),
+        "a permission refusal is an answer about a process that exists"
+    );
+}
+
+/// #7974, the fail-closed arm (ADR-0045): an errno this probe does not
+/// recognise has proven nothing, so it must answer `None` and leave the
+/// adoption gate refusing — never `Some(false)`.
+/// Test: this function IS the test.
+#[test]
+fn classify_kill_probe_reads_an_unrecognised_errno_as_undeterminable() {
+    assert_eq!(
+        classify_kill_probe(Err(nix::errno::Errno::EINVAL)),
+        None,
+        "an unrecognised errno must not be coerced into death"
+    );
+}
+
+/// #7974: the extracted classifier is the SAME classification the live probe
+/// makes, so the two errno tests above are about `pid_liveness`'s behaviour and
+/// not about a parallel function that has drifted from it.
+/// Test: this function IS the test.
+#[test]
+fn classify_kill_probe_agrees_with_the_live_probe_on_ok_and_esrch() {
+    assert_eq!(
+        classify_kill_probe(Ok(())),
+        pid_liveness(std::process::id()),
+        "the Ok arm must agree with a live probe of this process"
+    );
+
+    let mut child = std::process::Command::new("true")
+        .spawn()
+        .expect("spawn a process that exits immediately");
+    let dead = child.id();
+    child.wait().expect("reap the child");
+    assert_eq!(
+        classify_kill_probe(Err(nix::errno::Errno::ESRCH)),
+        pid_liveness(dead),
+        "the ESRCH arm must agree with a live probe of a reaped pid"
+    );
+}
+
 /// The scan reports the harness's agent lock as its OWN admission verdict
 /// (#6561).
 ///

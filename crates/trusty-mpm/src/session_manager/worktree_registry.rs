@@ -249,9 +249,10 @@ pub(crate) fn harness_agent_lock_pid(path: &Path) -> Option<u32> {
 /// (`EPERM` included: it exists, under another user); `Some(false)` only on
 /// `ESRCH`; `None` for a pid outside the positive `pid_t` range (`0` and
 /// negatives are process groups, never one process) and for any other errno.
-/// Test: `pid_liveness_separates_running_gone_and_undeterminable`.
+/// Test: `pid_liveness_separates_running_gone_and_undeterminable` covers the
+/// `Ok`, `ESRCH` and out-of-range arms against the live kernel;
+/// `classify_kill_probe_*` cover every errno arm.
 pub(crate) fn pid_liveness(pid: u32) -> Option<bool> {
-    use nix::errno::Errno;
     use nix::sys::signal::kill;
     use nix::unistd::Pid;
 
@@ -259,7 +260,31 @@ pub(crate) fn pid_liveness(pid: u32) -> Option<bool> {
     if raw <= 0 {
         return None;
     }
-    match kill(Pid::from_raw(raw), None) {
+    // #7974: the classification is a separate pure function so the errno arms
+    // are reachable from a test — no live process can be made to answer EPERM
+    // or an unrecognised errno on demand.
+    classify_kill_probe(kill(Pid::from_raw(raw), None))
+}
+
+/// What one `kill(pid, 0)` outcome says about the process (#7974).
+///
+/// Why separate from [`pid_liveness`]: the `EPERM` and unrecognised-errno arms
+/// decide whether adoption refuses, and neither can be provoked hermetically
+/// through the real syscall — `EPERM` needs a process owned by another uid that
+/// is guaranteed to outlive the test, and no pid produces an arbitrary errno on
+/// demand. Splitting the classification out makes both arms testable without a
+/// trait seam or an injectable syscall.
+/// What: `Some(true)` when the process exists — `EPERM` included, since the
+/// kernel checked permission on a process it found; `Some(false)` only on
+/// `ESRCH`; `None` for every other errno, which is the fail-closed direction
+/// ADR-0045 requires of a probe feeding a mutation.
+/// Test: `classify_kill_probe_reads_eperm_as_running`,
+/// `classify_kill_probe_reads_an_unrecognised_errno_as_undeterminable`,
+/// `classify_kill_probe_agrees_with_the_live_probe_on_ok_and_esrch`.
+fn classify_kill_probe(probe: Result<(), nix::errno::Errno>) -> Option<bool> {
+    use nix::errno::Errno;
+
+    match probe {
         Ok(()) | Err(Errno::EPERM) => Some(true),
         Err(Errno::ESRCH) => Some(false),
         // intentional fail-closed (ADR-0045): an errno this probe does not
