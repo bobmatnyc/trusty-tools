@@ -56,20 +56,24 @@
 //! `git clone --local` under the session scratchpad has no other session in it
 //! and is reaped with the session. Treating it as a main checkout refused two
 //! read-only reviews their probe file and blocks #7628's revert-experiment
-//! recipe, so [`root_is_scratchpad_rooted`] lifts the deny for it — decided
-//! on the CHECKOUT ROOT, so a `scratchpad` directory inside a real checkout
-//! exempts nothing, and fail-closed, so a scratchpad root that cannot be
-//! determined leaves the refusal exactly as it was. It is the ONE question in
-//! this module answered on a CANONICALIZED path, because it is the one whose
-//! "yes" removes a deny; see that function for the two shapes that bought an
+//! recipe, so [`write_lands_in_a_scratchpad_clone`] lifts the deny for it —
+//! keyed on the CHECKOUT ROOT, so a `scratchpad` directory inside a real
+//! checkout exempts nothing, and fail-closed, so a scratchpad root that cannot
+//! be determined leaves the refusal exactly as it was. It is the ONE question in
+//! this module answered on CANONICALIZED paths, because it is the one whose
+//! "yes" removes a deny; see that function for the three shapes that bought an
 //! exemption from a lexical answer.
 //!
 //! Residual bypasses, stated rather than hidden. The deny half resolves the
 //! path lexically, so a symlink into a checkout is not followed — the same
 //! limit [`main_checkout_root`] carries and documents, and a fail-OPEN one: it
 //! costs a missed refusal, never a wrong one. The exemption half is the
-//! exception and resolves the root, so neither a symlink nor a `..` chain can
-//! manufacture a `scratchpad` segment that is not there. The `Bash` half sees only the
+//! exception and resolves BOTH the root and the write target, so neither a
+//! symlink nor a `..` chain can manufacture a `scratchpad` segment that is not
+//! there, and neither can carry a write out of an exempt clone. Only the
+//! nearest EXISTING ancestor of the target is resolved, which is as deep as the
+//! filesystem can answer; a component created between this check and the write
+//! is not seen, the TOCTOU window every `PreToolUse` path check has. The `Bash` half sees only the
 //! two shapes that NAME their target unambiguously — a redirect, and a git
 //! write option — so everything else keeps only the `SHELL_EDIT_REASON`
 //! treatment and gets no WHERE dimension:
@@ -185,7 +189,7 @@ fn evaluate_main_checkout_write_with(
     let root = main_checkout_root(&resolved)?;
     // #7778: a disposable clone under the session scratchpad is nobody's shared
     // tree, so ADR-0044 has no other session's work to protect there.
-    if root_is_scratchpad_rooted(&root) {
+    if write_lands_in_a_scratchpad_clone(&resolved, &root) {
         return None;
     }
     // The message quotes the spelling the caller used, not the expansion.
@@ -199,7 +203,8 @@ fn evaluate_main_checkout_write_with(
 /// this trust boundary may err in.
 const SCRATCHPAD_SEGMENT: &str = "scratchpad";
 
-/// Is this checkout ROOT under the session scratchpad?
+/// Does this write BOTH belong to a scratchpad-rooted checkout and land inside
+/// it?
 ///
 /// Why (#7778): two read-only reviews were refused a probe file (`.rs`, `.py`)
 /// inside a disposable `git clone --local` placed in the scratchpad, and
@@ -219,20 +224,52 @@ const SCRATCHPAD_SEGMENT: &str = "scratchpad";
 /// out of the scratchpad — because [`main_checkout_root`] compares strings while
 /// `find_git_root` `stat`s through both. Resolving the root first is what makes
 /// the segment mean the directory rather than the spelling.
-/// What: [`Path::canonicalize`] on `root`, then [`scratchpad_root`] on the
-/// canonical form. The `.git` under `root` was just `stat`ed, so the directory
-/// exists and canonicalization is expected to succeed; an `Err` all the same
-/// returns `false` and the deny stands — the same fail-closed rule as a root
-/// [`scratchpad_root`] cannot name. Called only once a deny is otherwise
-/// certain, so ordinary traffic never pays for the syscall.
+/// Canonicalizing the ROOT alone was not enough (#7778 review round 2,
+/// MEDIUM): a symlink placed BELOW an exempt root — `<clone>/srclink ->
+/// <real checkout>/crates/trusty-mpm/src` — left the root scratchpad-rooted
+/// while the bytes landed in the real checkout, and both spellings ALLOWed on a
+/// live binary. The root says which checkout the guard is reasoning about; only
+/// the target says where the write goes. Both have to answer.
+/// What: three conditions, all required. `root` canonicalizes; its canonical
+/// form has a [`scratchpad_root`]; and the canonical form of `resolved`'s
+/// nearest existing ancestor ([`canonical_existing_ancestor`] — the target
+/// directory of a `Write` need not exist yet) is under that canonical root.
+/// Every `Err` and every `None` returns `false` and the deny stands, so no
+/// unresolvable path can widen the exemption. Called only once a deny is
+/// otherwise certain, so ordinary traffic never pays for the syscalls.
 /// Test: `allows_a_source_write_in_a_scratchpad_rooted_clone`,
+/// `allows_a_dotdot_that_lands_back_inside_the_exempt_clone`,
+/// `denies_a_symlink_below_an_exempt_root`,
 /// `denies_a_checkout_reached_through_a_symlink_in_the_scratchpad`,
 /// `denies_a_dotdot_escape_from_the_scratchpad`,
 /// `denies_a_checkout_whose_path_merely_contains_the_scratchpad_name`,
 /// `denies_when_no_scratchpad_root_can_be_determined`.
-fn root_is_scratchpad_rooted(root: &Path) -> bool {
-    root.canonicalize()
-        .is_ok_and(|real| scratchpad_root(&real).is_some())
+fn write_lands_in_a_scratchpad_clone(resolved: &Path, root: &Path) -> bool {
+    let Ok(real_root) = root.canonicalize() else {
+        return false;
+    };
+    if scratchpad_root(&real_root).is_none() {
+        return false;
+    }
+    canonical_existing_ancestor(resolved).is_some_and(|dir| dir.starts_with(&real_root))
+}
+
+/// The canonical form of the nearest ancestor of `path` that exists on disk.
+///
+/// Why: a `Write` routinely names a directory that does not exist yet, so
+/// canonicalizing `path` itself would `Err` on the ordinary case and — under
+/// [`write_lands_in_a_scratchpad_clone`]'s fail-closed rule — refuse every new
+/// file in an exempt clone. The nearest EXISTING ancestor is the deepest point
+/// the filesystem can actually answer about, and it is enough: a symlink can
+/// only redirect a component that exists, so any redirection is already
+/// resolved by the time the walk stops.
+/// What: the first of [`Path::ancestors`] that [`Path::canonicalize`] accepts.
+/// `None` only when no ancestor resolves at all.
+/// Test: `denies_a_symlink_below_an_exempt_root`,
+/// `allows_a_source_write_in_a_scratchpad_rooted_clone` (whose target directory
+/// does not exist).
+fn canonical_existing_ancestor(path: &Path) -> Option<PathBuf> {
+    path.ancestors().find_map(|dir| dir.canonicalize().ok())
 }
 
 /// The session scratchpad directory `path` sits under, when it sits under one.
@@ -1009,6 +1046,47 @@ mod tests {
         let reason = evaluate_main_checkout_write("Write", Some(&write_input(&target)), dir.path())
             .expect("a `..` escape into a real checkout must not buy an exemption");
         assert!(reason.contains("ADR-0044"), "{reason}");
+    }
+
+    // #7778 review round 2, MEDIUM: canonicalizing the ROOT alone left a
+    // symlink BELOW an exempt root free to route the write into a real
+    // checkout — the root stayed scratchpad-rooted, the bytes did not.
+    #[test]
+    fn denies_a_symlink_below_an_exempt_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("realrepo");
+        std::fs::create_dir_all(real.join(".git")).expect("mkdir .git");
+        let real_src = real.join("crates/trusty-mpm/src");
+        std::fs::create_dir_all(&real_src).expect("mkdir src");
+        let clone = dir.path().join("scratchpad").join("revert-probe");
+        std::fs::create_dir_all(clone.join(".git")).expect("mkdir .git");
+        let link = clone.join("srclink");
+        std::os::unix::fs::symlink(&real_src, &link).expect("symlink");
+
+        let target = link.join("zzz_probe.rs");
+        let reason = evaluate_main_checkout_write("Write", Some(&write_input(&target)), &clone)
+            .expect("a symlink below an exempt root must not carry the write out");
+        assert!(reason.contains("ADR-0044"), "{reason}");
+
+        let command = format!("echo 'fn main() {{}}' > {}", target.display());
+        assert!(
+            evaluate_main_checkout_write("Bash", Some(&bash_input(&command)), &clone).is_some(),
+            "the shell half must answer the same way"
+        );
+    }
+
+    // The other side of the same rule: a `..` that leaves and RE-ENTERS the
+    // exempt clone still lands inside it, so it must stay allowed.
+    #[test]
+    fn allows_a_dotdot_that_lands_back_inside_the_exempt_clone() {
+        let (_dir, clone) = scratchpad_clone("revert-probe");
+        std::fs::create_dir_all(clone.join("crates")).expect("mkdir crates");
+        let target = clone.join("crates/../src/lib.rs");
+        assert_eq!(
+            evaluate_main_checkout_write("Write", Some(&write_input(&target)), &clone),
+            None,
+            "the write lands inside the exempt clone"
+        );
     }
 
     // #7778 condition 3: the exemption is decided on the CHECKOUT ROOT, so a
