@@ -49,6 +49,11 @@
 // sibling rules ask, replacing the per-guard lexing and redirect/program-text
 // splitting that disagreed with the shell four different ways.
 mod bash_tokens;
+// #7905 review round 2: the declaration may only move through a reviewed pull
+// request, which means every verb that can move HEAD has to be gated on it —
+// independently of the ADR-0048 decision 10 live-writer rule, which covers two
+// verbs and only when a daemon answers.
+mod declaration_head_move;
 mod destructive_delete;
 // #7497: the disk-usage half of the worktree-add gate, beside the temp-root
 // half it shares a target resolver with.
@@ -63,6 +68,7 @@ mod shell_lex;
 mod worktree_remove;
 mod worktree_remove_rechecks;
 
+pub(crate) use declaration_head_move::evaluate_declaration_head_move;
 pub(crate) use destructive_delete::evaluate_destructive_delete_command;
 pub(crate) use main_checkout::{
     CommitVerdict, docs_commit_deny_reason, evaluate_main_checkout_commit_command,

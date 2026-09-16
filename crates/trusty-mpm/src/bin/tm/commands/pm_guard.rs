@@ -214,8 +214,7 @@ use crate::commands::pm_guard_bash::{
     docs_commit_deny_reason, evaluate_bash_command, evaluate_destructive_delete_command,
     evaluate_main_checkout_commit_command, evaluate_main_checkout_destructive_command,
     evaluate_removal_rechecks, evaluate_secret_file_copy_command, evaluate_worktree_add,
-    evaluate_worktree_remove_command, extract_shell_edit_target, head_move_deny_reason,
-    main_checkout_head_move, unclassifiable_command,
+    evaluate_worktree_remove_command, extract_shell_edit_target, unclassifiable_command,
 };
 use crate::commands::pm_guard_budget::{self, BudgetDecision, DEFAULT_FILE_CHANGE_BUDGET};
 use crate::commands::pm_guard_builder_cap;
@@ -224,6 +223,7 @@ use crate::commands::pm_guard_deny_by_default::{self, PERSONA_DENY_REASON};
 use crate::commands::pm_guard_dispatch;
 use crate::commands::pm_guard_enter_worktree;
 use crate::commands::pm_guard_fanout;
+use crate::commands::pm_guard_head_moves;
 // #7172: split out of this file to keep it under the 500-SLOC cap; re-exported
 // so every existing `pm_guard::build_pretooluse_*` path still resolves.
 pub(crate) use crate::commands::pm_guard_response::{
@@ -517,35 +517,20 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
             }
             None => {}
         }
-        // ABSOLUTE guard (ADR-0048 decision 10, narrowed by ADR-0053) — the
-        // same placement and the same reason as the three above. `git merge`
-        // and `git rebase` move
-        // the shared HEAD under whoever else is standing on it. Unlike its
-        // neighbours the verb alone is not the whole decision: the directory
-        // must be a main checkout AND the daemon must report another live
-        // writer in it, so a solo session updating its own checkout is never
-        // denied and a daemon that cannot answer allows. The query is made only
-        // after both lexical halves match, so ordinary Bash traffic never pays
-        // for it.
-        if let Some((verb, target, root)) = main_checkout_head_move(command, &hook_cwd) {
-            // Two keys, not one (#5769): `tm hook` stamps a delegation's `cwd`
-            // from its own process directory, while `target` is resolved through
-            // `cd` and `git -C`. They name the same HEAD but need not be the
-            // same string, and a query on one alone matched nothing for a
-            // command run from a subdirectory of the checkout.
-            let live = pm_guard_dispatch::live_shared_tree_writers_in(
-                url,
-                session_id,
-                &[root.as_path(), target.as_path()],
-                &payload,
-            )
-            .await;
-            if !live.is_empty() {
-                let reason = head_move_deny_reason(&verb, &root, &live);
-                audit_denied_tool(url, session_id, tool_name, &reason).await;
-                println!("{}", build_pretooluse_deny_response(&reason));
-                return Ok(());
-            }
+        // ABSOLUTE guards (ADR-0044 decision 7 and ADR-0048 decision 10) — the
+        // same placement and the same reason as the three above: both bind the
+        // dispatched agents Guards 1 and 4 early-return ALLOW for. They ask
+        // different questions and neither substitutes for the other, which is
+        // why they now sit together in one module rather than inline here; see
+        // `pm_guard_head_moves`.
+        if let Some(reason) = pm_guard_head_moves::evaluate_head_move_guards(
+            url, session_id, command, &hook_cwd, &payload,
+        )
+        .await
+        {
+            audit_denied_tool(url, session_id, tool_name, &reason).await;
+            println!("{}", build_pretooluse_deny_response(&reason));
+            return Ok(());
         }
     }
 

@@ -109,6 +109,10 @@ pub(crate) mod pm_guard_builder_cap;
 pub(crate) mod pm_guard_cost;
 pub(crate) mod pm_guard_deny_by_default;
 pub(crate) mod pm_guard_dispatch;
+// #7905 review round 2: the two rules that gate a HEAD move in a main checkout,
+// lifted out of `pm_guard`'s Bash block when the second one took that file past
+// the 500-SLOC cap. They ask different questions; see the module doc.
+pub(crate) mod pm_guard_head_moves;
 // #7172: a worktree-pinned agent's `EnterWorktree` switch, refused rather than
 // left to succeed and wedge the agent — see its module doc for why the pin it
 // names belongs to the harness and cannot be moved from here.

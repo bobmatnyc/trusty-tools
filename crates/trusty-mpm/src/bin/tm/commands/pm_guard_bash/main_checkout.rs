@@ -1631,6 +1631,28 @@ mod tests {
         }
     }
 
+    /// #7905 review round 2, LOW: a mixed commit names BOTH source paths.
+    ///
+    /// Why: the declaration-is-source rule and the extension rule feed one
+    /// list, and a caller who staged both needs to be told about both — being
+    /// told only about the `.py`, fixing that, and being refused again for the
+    /// `.trusty-mpm.toml` is the retried-differently-and-worse loop ADR-0048
+    /// decision 6 exists to prevent.
+    /// Test: itself.
+    #[test]
+    fn classify_staged_commit_names_both_the_declaration_and_the_source_beside_it() {
+        let root = root_declaring(None);
+        stage_declaration(root.path(), "documents_only = true\n");
+        let reason = deny_text(&classify_at(
+            root.path(),
+            &["-m", "chore: declare and ship"],
+            &[PROJECT_DECLARATION_PATH, "src/lib.rs"],
+        ))
+        .to_string();
+        assert!(reason.contains(PROJECT_DECLARATION_PATH), "{reason}");
+        assert!(reason.contains("src/lib.rs"), "{reason}");
+    }
+
     /// 🔴 #7905 review, CRITICAL 2's bound: a declaration edit that spares the
     /// key stays an ordinary documents commit.
     ///

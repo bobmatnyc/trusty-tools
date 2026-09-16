@@ -399,10 +399,20 @@ pub fn load_or_report(project_dir: &Path) -> Option<ProjectLevelConfig> {
 /// .trusty-mpm.toml` followed by `Write src/lib.rs` defeated ADR-0044 in two
 /// tool calls on the built binary. Reading the committed blob is what makes the
 /// declaration cost a review: an untracked file, a staged-but-uncommitted one,
-/// and an uncommitted edit to a tracked one all grant nothing, and the only way
-/// to move `HEAD` in a main checkout is the ADR-0044 route through a worktree
-/// branch and a pull request — which
-/// [`staged_declaration_changes_documents_only`] is what enforces.
+/// and an uncommitted edit to a tracked one all grant nothing.
+///
+/// What makes "committed" mean "reviewed" is TWO other rules, and neither may
+/// be dropped (#7905 review round 2). [`staged_declaration_changes_documents_only`]
+/// makes landing the declaration a source-class COMMIT.
+/// `pm_guard_bash::declaration_head_move` gates every verb that can move `HEAD`
+/// onto a commit made somewhere else — `merge`, `rebase`, `cherry-pick`,
+/// `revert`, `reset`, `checkout -B`, `switch -C`, `update-ref`, `symbolic-ref`,
+/// `am`, `apply --index` — on the declaration not changing. An earlier cut of
+/// this doc claimed `HEAD` moves in a main checkout only through a pull
+/// request, and that was FALSE on the built binary: the commit gate never saw
+/// `git merge other/declare-branch`, because the declaring commit was made in
+/// another checkout entirely. Verbs that cannot move `HEAD` — `fetch`, `log`,
+/// `show`, `status`, `diff` — are ungated.
 ///
 /// `root` is the checkout root the caller already resolved
 /// ([`crate::core::project_aliases::main_checkout_root`]), never the `cwd`: the
@@ -459,9 +469,16 @@ pub fn staged_declaration_changes_documents_only(root: &Path) -> bool {
 /// git unavailable, a blob that does not parse — and `None` for a file that
 /// parses without the key, which are the same thing to both callers: this
 /// revision grants nothing.
+/// #7905 review round 2: `pub` so the HEAD-move rule
+/// ([`crate::core::project_config`]'s consumer,
+/// `pm_guard_bash::declaration_head_move`) reads a MERGE TARGET's declaration
+/// through this same lens rather than growing a second one. `git merge
+/// other/declaring-branch` moved HEAD onto a declaring commit without passing
+/// the commit gate at all.
 /// Test: `documents_only_at_reads_a_committed_declaration`,
-/// `staged_declaration_change_is_detected_in_both_directions`.
-fn declared_documents_only_at_rev(root: &Path, rev: &str) -> Option<bool> {
+/// `staged_declaration_change_is_detected_in_both_directions`,
+/// `a_merge_of_a_declaring_ref_is_denied`.
+pub fn declared_documents_only_at_rev(root: &Path, rev: &str) -> Option<bool> {
     let spec = format!("{rev}:{PROJECT_CONFIG_FILE}");
     // The hardened `git` invocation every guard path shares: ambient config
     // cannot steer which blob a security boundary reads.
@@ -469,6 +486,47 @@ fn declared_documents_only_at_rev(root: &Path, rev: &str) -> Option<bool> {
     ProjectLevelConfig::from_toml(&raw, &root.join(PROJECT_CONFIG_FILE))
         .ok()?
         .documents_only
+}
+
+/// Does `rev` name a commit this repository actually has (#7905)?
+///
+/// Why: [`declared_documents_only_at_rev`] answers `None` both for "this commit
+/// carries no declaration" and for "this revision could not be read at all",
+/// which are the same thing to a GRANT and opposite things to the HEAD-move
+/// rule. A ref that resolves and carries nothing changes nothing; a ref that
+/// does not resolve is a revision the guard cannot vouch for, and the rule
+/// denies it. Splitting the question here keeps that distinction out of the
+/// policy module.
+/// What: `git rev-parse --verify <rev>^{commit}` at `root`. `false` for an
+/// unknown ref, a non-commit object, and git being unavailable.
+/// Test: `a_merge_of_an_unresolvable_ref_is_denied`.
+pub fn rev_is_resolvable(root: &Path, rev: &str) -> bool {
+    let spec = format!("{rev}^{{commit}}");
+    crate::session_manager::worktree_safety::git_stdout(root, &["rev-parse", "--verify", &spec])
+        .is_ok()
+}
+
+/// Do the commits `rev` would REPLAY touch the declaration (#7905)?
+///
+/// Why: `cherry-pick` and `revert` do not land a target tree, they replay a
+/// diff onto the current one, so the resulting `HEAD:.trusty-mpm.toml` is not
+/// knowable before the command runs. The answerable question is narrower and
+/// sufficient: does the patch being replayed touch that file at all? If it does
+/// not, the declaration cannot move.
+/// What: `git diff-tree --no-commit-id --name-only -r <rev>` at `root`, matched
+/// against [`PROJECT_CONFIG_FILE`] at the repository root. `true` — treat as a
+/// declaration change — whenever git cannot be asked, which is the fail-closed
+/// direction for a rule whose `false` admits a HEAD move.
+/// Test: `a_cherry_pick_of_a_declaring_commit_is_denied`,
+/// `a_cherry_pick_that_leaves_the_declaration_alone_is_allowed`.
+pub fn rev_touches_declaration(root: &Path, rev: &str) -> bool {
+    let Ok(out) = crate::session_manager::worktree_safety::git_stdout(
+        root,
+        &["diff-tree", "--no-commit-id", "--name-only", "-r", rev],
+    ) else {
+        return true;
+    };
+    out.lines().any(|line| line.trim() == PROJECT_CONFIG_FILE)
 }
 
 #[cfg(test)]

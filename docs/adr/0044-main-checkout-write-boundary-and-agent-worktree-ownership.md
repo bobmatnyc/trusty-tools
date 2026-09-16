@@ -82,10 +82,33 @@ worktree creation.
    ordinary documents commit — one command, from the main checkout, and the
    declaration was at `HEAD`. So a staged change that INTRODUCES, FLIPS or
    RETRACTS `documents_only` is classified as source at that gate and refused
-   there, which leaves exactly one route for a project to declare itself: a
-   worktree branch and a reviewed pull request, the same route as any other
-   source change. A staged edit to that file that leaves the key alone stays an
-   ordinary documents commit.
+   there. A staged edit to that file that leaves the key alone stays an ordinary
+   documents commit.
+
+   **Committing is not the only way `HEAD` moves, so every verb that moves it is
+   gated too.** The first cut of this decision claimed the two rules above left
+   exactly one route to declare a project, and that claim was false on the built
+   binary. The declaring commit does not have to be MADE in the main checkout —
+   it only has to ARRIVE there. `git merge other/declare-branch` was allowed, no
+   commit gate saw it, and `git show HEAD:.trusty-mpm.toml` read `documents_only
+   = true` immediately afterwards. The ADR-0048 decision 10 head-move rule did
+   not catch it either: that rule asks the daemon whether another session is
+   standing in the tree, so a solo session or an unreachable daemon always
+   allowed, and it covers `merge` and `rebase` only. So a third rule, with no
+   daemon round-trip and no live-writer condition, denies any of `merge`,
+   `rebase`, `cherry-pick`, `revert`, `reset` (any mode), `checkout -B`/`-b`/
+   `--orphan`, `switch -C`, `update-ref` on `HEAD` or `refs/heads/*`,
+   `symbolic-ref HEAD`, `am`, and `apply --index` in a main checkout when the
+   revision it would land carries a different `documents_only` value than `HEAD`
+   does. It proves UNCHANGED rather than detecting CHANGED: a named revision
+   that does not resolve denies, and `am`/`apply --index` name no revision at
+   all and therefore always deny there. Verbs that cannot move `HEAD` — `fetch`,
+   `log`, `show`, `status`, `diff` — are untouched, so the declaring commit may
+   still be fetched and read.
+
+   With all three in force the invariant holds as stated: a project's
+   `documents_only` value can only change in a main checkout by way of a
+   worktree branch and a reviewed pull request.
 
    The declaration empties the SOURCE CLASS for that checkout and relaxes
    nothing else. ADR-0049 decision 3's live-writer check, decision 5's
