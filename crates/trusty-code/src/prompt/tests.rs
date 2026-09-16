@@ -18,8 +18,8 @@ use crate::prompt::{
     assemble_system_prompt_for_mode,
 };
 use crate::tools::{
-    FinishTaskTool, GlobTool, GrepTool, ListDirTool, ToolRegistry, TrustySearchTool, WriteFileTool,
-    WriteFilesTool,
+    EditTool, FinishTaskTool, GlobTool, GrepTool, ListDirTool, ReadFileTool, ToolRegistry,
+    TrustySearchTool, WriteFileTool, WriteFilesTool,
 };
 
 /// Build an `AgentConfig` whose `system_prompt.content` is the given string.
@@ -486,34 +486,135 @@ fn base_preamble_is_model_agnostic() {
     }
 }
 
-/// `BASE_PREAMBLE` instructs no registry-specific tool call (#4602).
+/// The only spans of [`BASE_PREAMBLE`] permitted to name a tcode tool (#4602,
+/// critic round 2).
+///
+/// Why: BASE reaches EVERY agent, so a tool name in it is only safe when the
+/// sentence around it illustrates a PROTOCOL rule rather than instructing a
+/// call. Pinning the exact spans — not the bare names — is what makes a NEW
+/// imperative sentence naming an already-listed tool fail: the allowlist
+/// excuses these two sentences, nothing else.
+/// What: verbatim substrings of `BASE_PREAMBLE`; both are `e.g.` illustrations
+/// of what batching means, inside the tool-use protocol.
+/// Test: `base_preamble_instructs_no_registry_specific_tool`.
+const ILLUSTRATION_MENTIONS: &[&str] = &[
+    "(e.g. `write_file` then a `bash` that runs or verifies it",
+    "e.g. you cannot `write_file` content derived from a `read_file`",
+];
+
+/// Every tool name the tcode harness can register, read from the tools
+/// themselves (#4602, critic round 2).
+///
+/// Why: `base_preamble_instructs_no_registry_specific_tool` must close the
+/// CLASS — any tool BASE could name — not just today's gated three. Deriving
+/// the candidate set from each tool's own `name()` and from the exported
+/// `*_TOOL_NAME` constants means a tool renamed or added in `src/tools` is
+/// carried into the check without anyone editing this list.
+/// What: `ToolExecutor::name()` for every cheaply-constructible tool, plus the
+/// name constants of those needing a runner, resolver or session to build.
+/// Test: `base_preamble_instructs_no_registry_specific_tool`.
+fn known_tool_names() -> Vec<String> {
+    let project = std::path::Path::new(".");
+    let constructible: Vec<Box<dyn crate::tools::ToolExecutor>> = vec![
+        Box::new(ReadFileTool::new(project)),
+        Box::new(WriteFileTool::new(project)),
+        Box::new(WriteFilesTool::new(project)),
+        Box::new(EditTool::new(project)),
+        Box::new(GlobTool::new(project)),
+        Box::new(GrepTool::new(project)),
+        Box::new(ListDirTool::new(project)),
+        Box::new(TrustySearchTool::new(project)),
+        Box::new(FinishTaskTool::new()),
+    ];
+    let mut names: Vec<String> = constructible
+        .iter()
+        .map(|tool| tool.name().to_string())
+        .collect();
+    // Tools whose constructors need a runner, resolver or live session expose
+    // their name as a constant instead.
+    names.extend(
+        [
+            crate::tools::BASH_TOOL_NAME,
+            crate::tools::DELEGATE_TO_AGENT_TOOL_NAME,
+            crate::tools::USE_SKILL_TOOL_NAME,
+            crate::tools::RECALL_SESSION_TOOL_NAME,
+            crate::tools::SET_GOAL_TOOL_NAME,
+            crate::tools::CLEAR_GOAL_TOOL_NAME,
+        ]
+        .iter()
+        .map(|name| (*name).to_string()),
+    );
+    names
+}
+
+/// Every backtick-quoted `[a-z_]+` span in `text`, in order.
+///
+/// Why: the two checks below both need "which tools does this prose name", and
+/// a shared extractor keeps them agreeing on what counts. Non-identifier spans
+/// (`**/*.py`, `src/*.rs`, `## Summary`) are not tool names and are dropped.
+/// What: splits on the backtick, keeps the odd-indexed (inside) spans, filters
+/// to non-empty lowercase-and-underscore tokens. Panics on unbalanced
+/// backticks, which would silently invert inside and outside.
+/// Test: `base_preamble_instructs_no_registry_specific_tool`,
+/// `every_gated_section_declares_the_tools_it_names`.
+fn backticked_identifiers(text: &str) -> Vec<&str> {
+    let spans: Vec<&str> = text.split('`').collect();
+    assert!(spans.len() % 2 == 1, "unbalanced backticks in: {text:?}");
+    spans
+        .iter()
+        .skip(1)
+        .step_by(2)
+        .copied()
+        .filter(|token| {
+            !token.is_empty() && token.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+        })
+        .collect()
+}
+
+/// `BASE_PREAMBLE` instructs no tcode tool call at all (#4602, critic round 2).
 ///
 /// Why: BASE reaches EVERY agent, including the interactive PM whose registry
 /// holds harness tools only. An INSTRUCTION to call a named tool here is one
 /// some agent cannot obey — the `## File discovery` block and the two
 /// batch-write bullets were exactly that, and now live in
 /// [`FILE_DISCOVERY_GUIDANCE`] and [`BATCH_WRITE_GUIDANCE`], gated on the run's
-/// registry.
-/// What: asserts no gated tool name survives in the preamble, except
-/// `write_file`, which BASE still MENTIONS twice as an `e.g.` illustration of
-/// what batching is — the surrounding sentences instruct batching, not a
-/// `write_file` call, so they apply to every agent.
+/// registry. An allowlist closes the whole class: a future BASE edit naming
+/// ANY tool — `edit`, `bash`, `use_skill`, `delegate_to_agent` — fails here,
+/// not just the three tools gated today.
+/// What: excises the [`ILLUSTRATION_MENTIONS`] spans, then asserts no
+/// backtick-quoted name in what remains is a tool from [`known_tool_names`].
+/// Guards against vacuity at both ends: each allowlisted span must still be
+/// present and must itself name a tool.
 /// Test: this test.
 #[test]
 fn base_preamble_instructs_no_registry_specific_tool() {
-    for name in gated_tool_names() {
-        if name == "write_file" {
-            continue;
-        }
+    let known = known_tool_names();
+    let names_a_tool = |text: &str| {
+        backticked_identifiers(text)
+            .iter()
+            .any(|span| known.iter().any(|name| name == span))
+    };
+
+    let mut remainder = BASE_PREAMBLE.to_string();
+    for span in ILLUSTRATION_MENTIONS {
         assert!(
-            !BASE_PREAMBLE.contains(&format!("`{name}`")),
-            "BASE_PREAMBLE must not name the registry-specific tool `{name}`"
+            remainder.contains(span),
+            "allowlisted illustration span is no longer in BASE_PREAMBLE: {span:?}"
         );
-    }
-    for imperative in ["use the `write_files` tool", "ONE `write_files` call"] {
         assert!(
-            !BASE_PREAMBLE.contains(imperative),
-            "BASE_PREAMBLE must not carry the batch-write instruction {imperative:?}"
+            names_a_tool(span),
+            "allowlisted span names no tool, so it excuses nothing: {span:?}"
+        );
+        remainder = remainder.replace(span, "");
+    }
+
+    for span in backticked_identifiers(&remainder) {
+        assert!(
+            !known.iter().any(|name| name == span),
+            "BASE_PREAMBLE names the tool `{span}` outside ILLUSTRATION_MENTIONS. \
+             Every agent reads BASE, so either move the sentence into a \
+             registry-gated section (#4602) or, if it only illustrates the \
+             protocol, add its exact span to ILLUSTRATION_MENTIONS"
         );
     }
 }
@@ -531,20 +632,7 @@ fn base_preamble_instructs_no_registry_specific_tool() {
 #[test]
 fn every_gated_section_declares_the_tools_it_names() {
     for (section, declared, _) in GATED_SECTIONS {
-        let spans: Vec<&str> = section.split('`').collect();
-        assert!(
-            spans.len() % 2 == 1,
-            "unbalanced backticks in gated section: {section:?}"
-        );
-        let named: Vec<&str> = spans
-            .iter()
-            .skip(1)
-            .step_by(2)
-            .copied()
-            .filter(|token| {
-                !token.is_empty() && token.chars().all(|c| c.is_ascii_lowercase() || c == '_')
-            })
-            .collect();
+        let named = backticked_identifiers(section);
         assert!(
             !named.is_empty(),
             "gated section names no tool: {section:?}"
