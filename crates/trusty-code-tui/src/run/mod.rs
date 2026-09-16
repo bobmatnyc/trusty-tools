@@ -583,7 +583,9 @@ async fn forward_while_current_generation(
 /// [`tests::dispatch_pending_second_submit_while_busy_does_not_start_second_task`],
 /// [`tests::dispatch_pending_ok_true_with_no_terminal_output_still_clears_busy`],
 /// [`tests::dispatch_pending_ok_true_with_only_status_message_still_clears_busy`],
-/// [`tests::dispatch_pending_err_clears_busy_and_surfaces_visible_error`].
+/// [`tests::dispatch_pending_err_clears_busy_and_surfaces_visible_error`],
+/// [`tests::dispatch_pending_permission_answer_reaches_respond_permission`],
+/// [`tests::dispatch_pending_permission_answer_failure_reopens_the_prompt`].
 fn dispatch_pending<E, M>(
     model: &mut M,
     engine: &Arc<E>,
@@ -628,13 +630,19 @@ fn dispatch_pending<E, M>(
         let engine = Arc::clone(engine);
         let tx = tx.clone();
         tokio::spawn(async move {
-            if let Err(e) = engine
-                .respond_permission(response.request_id, response.answer)
-                .await
-            {
-                let _ = tx.send(ReplEvent::StatusMessage(format!(
-                    "permission answer failed: {e:#}"
-                )));
+            let PermissionResponse { pending, answer } = response;
+            let request_id = pending.request_id.clone();
+            // #3422: on failure the answer never reached the suspended call,
+            // so hand the whole request back rather than only reporting it —
+            // the reducer already cleared the modal, and a status line alone
+            // would leave the operator with a backend that is still waiting
+            // and no prompt to answer with. `StatusMessage` was exactly that
+            // dead end before this.
+            if let Err(e) = engine.respond_permission(request_id, answer).await {
+                let _ = tx.send(ReplEvent::PermissionAnswerFailed {
+                    pending,
+                    error: format!("{e:#}"),
+                });
             }
         });
     }

@@ -19,7 +19,7 @@
 //! - [`SPEC-TTUI-03~draft`](docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-03~draft) — Slice 1 `ReplEvent` deliverable (§5, Slice 1).
 //! - [`SPEC-TTUI-05~draft`](docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-05~draft) — per-variant slice ownership (Slices 5/6/8/9).
 
-use crate::model::StatuslineSegment;
+use crate::model::{PendingPermission, StatuslineSegment};
 use serde::{Deserialize, Serialize};
 
 /// Every event that can flow through the shared TUI's event channel.
@@ -239,6 +239,23 @@ pub enum ReplEvent {
         agent_id: String,
         decision: String,
         source: String,
+    },
+    /// Relaying an answer to `TuiEngine::respond_permission` FAILED (#3422)
+    /// — the suspended call never heard it.
+    ///
+    /// Why: the prompt closes the moment a key is pressed, before the RPC
+    /// even starts, so the keyboard is never held hostage by a slow backend.
+    /// That optimism is only safe if a failure is reversible: without this
+    /// event the operator loses the modal while the backend keeps holding
+    /// the call until it times out, with no way to answer again. This is the
+    /// undo.
+    /// What: carries the original request verbatim, so the reducer can
+    /// reopen exactly the prompt that was answered, plus the engine's own
+    /// error text for the retry line and the transcript. Emitted ONLY by
+    /// `crate::run::dispatch_pending`'s relay task, never by an engine.
+    PermissionAnswerFailed {
+        pending: PendingPermission,
+        error: String,
     },
     /// A one-line status message (e.g. "cancelled", "Switched to: izzie").
     StatusMessage(String),

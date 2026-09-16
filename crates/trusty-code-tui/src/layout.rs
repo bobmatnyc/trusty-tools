@@ -25,7 +25,7 @@ use ratatui::widgets::Paragraph;
 use crate::app::ReplApp;
 use crate::widgets::banner::banner_lines;
 use crate::widgets::input_composer::draw_input;
-use crate::widgets::permission_prompt::{PROMPT_HEIGHT, draw_permission_prompt};
+use crate::widgets::permission_prompt::{draw_permission_prompt, prompt_height};
 use crate::widgets::scrollback::{chat_line_count, draw_chat};
 use crate::widgets::status_line::draw_statusline;
 
@@ -73,12 +73,10 @@ pub fn draw(f: &mut ratatui::Frame, app: &ReplApp) {
 
     // #3422: the prompt sits directly above the input row, and costs its rows
     // only while a request is actually pending. Given to the chat pane
-    // otherwise, so an idle frame looks exactly as it did before.
-    let prompt_h = if app.pending_permission.is_some() {
-        PROMPT_HEIGHT
-    } else {
-        0
-    };
+    // otherwise, so an idle frame looks exactly as it did before. The height
+    // is asked for rather than assumed, because a reopened prompt carries one
+    // extra retry row — see `prompt_height`.
+    let prompt_h = prompt_height(app);
 
     // Reserved rows below chat: prompt + top_sep(1) + input(1) + bot_sep(1) +
     // statusline(1) + bottom spacer minimum(1).

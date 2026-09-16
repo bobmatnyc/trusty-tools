@@ -140,6 +140,9 @@ pub fn apply(app: &mut ReplApp, ev: ReplEvent) {
             source,
             ..
         } => apply_permission_resolved(app, &request_id, &agent, &decision, &source),
+        ReplEvent::PermissionAnswerFailed { pending, error } => {
+            apply_permission_answer_failed(app, pending, &error)
+        }
         ReplEvent::StatusMessage(msg) => app.push_status(msg),
         ReplEvent::ClearScrollback => app.clear_scrollback(),
         ReplEvent::StatuslineUpdate(segments) => app.statusline = segments,
@@ -441,6 +444,9 @@ fn apply_permission_requested(app: &mut ReplApp, pending: PendingPermission) {
     }
     text.push_str(&format!(" (rule: {})", pending.rule));
     app.push_status(text);
+    // #3422: a fresh request carries no failed answer — never inherit the
+    // retry line from the prompt this one replaces.
+    app.permission_error = None;
     app.pending_permission = Some(pending);
 }
 
@@ -470,7 +476,35 @@ fn apply_permission_resolved(
         .is_some_and(|p| p.request_id == request_id)
     {
         app.pending_permission = None;
+        app.permission_error = None;
     }
+}
+
+/// Reopen the prompt whose answer never reached the backend (#3422).
+///
+/// Why: [`ReplApp::answer_permission`] clears the prompt the instant a key is
+/// pressed, ahead of the RPC, so a slow backend can never freeze the
+/// keyboard. A failed relay makes that optimism wrong: the call is still
+/// suspended on the backend, and with the modal gone the operator has no way
+/// to answer it again. This restores the question.
+/// What: records the engine's own error text in the scrollback and, unless
+/// some OTHER prompt is already open, puts the request back with
+/// [`ReplApp::permission_error`] set so the prompt draws its retry line. A
+/// newer prompt wins: the backend suspends one call per agent loop, so an
+/// open prompt means this request is already moot.
+/// Test: [`tests::permission_answer_failed_reopens_the_prompt_with_a_retry_line`],
+/// [`tests::permission_answer_failed_never_clobbers_a_newer_prompt`],
+/// `crate::run::tests::dispatch_pending_permission_answer_failure_reopens_the_prompt`.
+fn apply_permission_answer_failed(app: &mut ReplApp, pending: PendingPermission, error: &str) {
+    app.push_status(format!(
+        "permission answer failed: {error} — {} is still waiting; answer again",
+        pending.tool
+    ));
+    if app.pending_permission.is_some() {
+        return;
+    }
+    app.permission_error = Some(format!("answer failed ({error}) — retry"));
+    app.pending_permission = Some(pending);
 }
 
 /// The answer bound to `key` while a permission prompt is open (#3422), or
@@ -481,21 +515,29 @@ fn apply_permission_resolved(
 /// through [`apply_key`]. The bindings extend #3422's original y/n proposal
 /// with the third answer #7948's wire protocol added — a prompt offering only
 /// allow-once and deny would nag on every repeat of the same call.
-/// What: `y`/Enter allow once, `a` allow for the session, `n`/Esc deny.
-/// `AllowForSession` carries `pattern: None` deliberately: choosing a grant
-/// width is policy, and policy is the backend's (ADR-0063).
+/// What: `y`/`Y` allow once, `a`/`A` allow for the session, `n`/`N`/Esc deny
+/// — exactly the keys [`crate::widgets::permission_prompt`]'s footer
+/// advertises, and nothing else. Enter is deliberately UNBOUND; see the
+/// inline note on the match below. `AllowForSession` carries `pattern: None`
+/// deliberately: choosing a grant width is policy, and policy is the
+/// backend's (ADR-0063).
 /// Test: [`tests::permission_key_y_answers_allow_once`],
 /// [`tests::permission_key_a_answers_allow_for_session`],
 /// [`tests::permission_key_n_answers_deny`],
-/// [`tests::permission_unbound_key_leaves_the_prompt_pending`].
+/// [`tests::permission_key_escape_answers_deny`],
+/// [`tests::permission_unbound_key_leaves_the_prompt_pending`],
+/// [`tests::enter_while_a_permission_prompt_is_pending_does_not_submit`].
 fn permission_answer_for_key(key: KeyInput) -> Option<PermissionAnswer> {
     if key.modifiers.ctrl || key.modifiers.alt {
         return None;
     }
+    // #3422: no `KeyCode::Enter` arm. A prior revision mapped Enter to
+    // `AllowOnce`, a grant the footer never advertises — an operator pressing
+    // Enter to send the line they were typing would silently approve the
+    // suspended call. An unadvertised key must never answer; Enter falls
+    // through to `_ => None` with every other key.
     match key.code {
-        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-            Some(PermissionAnswer::AllowOnce)
-        }
+        KeyCode::Char('y') | KeyCode::Char('Y') => Some(PermissionAnswer::AllowOnce),
         KeyCode::Char('a') | KeyCode::Char('A') => {
             Some(PermissionAnswer::AllowForSession { pattern: None })
         }

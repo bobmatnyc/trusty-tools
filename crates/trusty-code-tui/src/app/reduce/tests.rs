@@ -1142,6 +1142,98 @@ fn permission_resolved_for_another_request_leaves_the_prompt_pending() {
     assert_eq!(app.chat.len(), 2, "the other decision is still recorded");
 }
 
+/// #3422: the answer never reached the backend, so the question comes back —
+/// with a retry line saying so, and a transcript entry naming the failure.
+#[test]
+fn permission_answer_failed_reopens_the_prompt_with_a_retry_line() {
+    let mut app = app_with_prompt();
+    apply(&mut app, key(KeyCode::Char('y')));
+    let response = app
+        .take_pending_permission_response()
+        .expect("an answer is staged");
+    assert!(app.pending_permission.is_none(), "closed optimistically");
+
+    apply(
+        &mut app,
+        ReplEvent::PermissionAnswerFailed {
+            pending: response.pending,
+            error: "connection reset".to_string(),
+        },
+    );
+
+    assert_eq!(
+        app.pending_permission
+            .as_ref()
+            .expect("the prompt must reopen")
+            .request_id,
+        "req-1"
+    );
+    let retry = app.permission_error.as_deref().expect("a retry line");
+    assert!(retry.contains("connection reset"), "{retry}");
+    assert!(
+        app.chat
+            .last()
+            .expect("a status entry")
+            .text
+            .contains("connection reset"),
+        "{:?}",
+        app.chat.last()
+    );
+
+    // The retry answers cleanly: a second attempt stages a fresh response and
+    // takes the stale retry line down with it.
+    apply(&mut app, key(KeyCode::Char('n')));
+    assert_eq!(
+        app.take_pending_permission_response()
+            .expect("the retry stages an answer")
+            .answer,
+        PermissionAnswer::Deny
+    );
+    assert_eq!(app.permission_error, None, "the retry line is cleared");
+}
+
+/// A newer request wins: the backend suspends one call per agent loop, so a
+/// prompt already on screen means the failed one is moot (#3422). Reopening
+/// over it would ask the wrong question.
+#[test]
+fn permission_answer_failed_never_clobbers_a_newer_prompt() {
+    let mut app = app_with_prompt();
+    apply(&mut app, key(KeyCode::Char('y')));
+    let response = app
+        .take_pending_permission_response()
+        .expect("an answer is staged");
+    apply(&mut app, permission_requested("req-2"));
+
+    apply(
+        &mut app,
+        ReplEvent::PermissionAnswerFailed {
+            pending: response.pending,
+            error: "connection reset".to_string(),
+        },
+    );
+
+    assert_eq!(
+        app.pending_permission
+            .as_ref()
+            .expect("the newer prompt stays")
+            .request_id,
+        "req-2"
+    );
+    assert_eq!(
+        app.permission_error, None,
+        "no retry line on a prompt that was never answered"
+    );
+    assert!(
+        app.chat
+            .last()
+            .expect("a status entry")
+            .text
+            .contains("connection reset"),
+        "the failure is still recorded: {:?}",
+        app.chat.last()
+    );
+}
+
 /// Criterion 1: a submitted line is a no-op while a prompt is pending, and
 /// the prompt is untouched by the attempt.
 #[test]
@@ -1192,7 +1284,7 @@ fn permission_key_y_answers_allow_once() {
     let response = app
         .take_pending_permission_response()
         .expect("an answer is staged");
-    assert_eq!(response.request_id, "req-1");
+    assert_eq!(response.request_id(), "req-1");
     assert_eq!(response.answer, PermissionAnswer::AllowOnce);
     assert!(
         app.pending_permission.is_none(),
@@ -1209,7 +1301,7 @@ fn permission_key_a_answers_allow_for_session() {
     let response = app
         .take_pending_permission_response()
         .expect("an answer is staged");
-    assert_eq!(response.request_id, "req-1");
+    assert_eq!(response.request_id(), "req-1");
     assert_eq!(
         response.answer,
         PermissionAnswer::AllowForSession { pattern: None }
@@ -1224,7 +1316,7 @@ fn permission_key_n_answers_deny() {
     let response = app
         .take_pending_permission_response()
         .expect("an answer is staged");
-    assert_eq!(response.request_id, "req-1");
+    assert_eq!(response.request_id(), "req-1");
     assert_eq!(response.answer, PermissionAnswer::Deny);
 }
 

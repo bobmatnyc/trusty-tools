@@ -257,14 +257,28 @@ pub enum PermissionAnswer {
 /// engine method, so it stages the answer here — the same pattern
 /// [`crate::app::ReplApp::pending_submit`] and `pending_cancel` use.
 /// What: drained by [`crate::run::TuiModel::take_pending_permission_response`]
-/// after every `apply` call.
-/// Test: `crate::run::tests::dispatch_pending_permission_answer_reaches_respond_permission`.
+/// after every `apply` call. It carries the whole [`PendingPermission`],
+/// not just its `request_id` (#3422): the prompt is cleared optimistically
+/// when the key is pressed, so the request would be unrecoverable if the
+/// `respond_permission` RPC failed — the dispatch layer hands this value
+/// back through [`crate::event::ReplEvent::PermissionAnswerFailed`] to
+/// reopen the prompt.
+/// Test: `crate::run::tests::dispatch_pending_permission_answer_reaches_respond_permission`,
+/// `crate::run::tests::dispatch_pending_permission_answer_failure_reopens_the_prompt`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PermissionResponse {
-    /// The request this answers.
-    pub request_id: String,
+    /// The request this answers, kept whole so a failed relay can reopen it.
+    pub pending: PendingPermission,
     /// What the user chose.
     pub answer: PermissionAnswer,
+}
+
+impl PermissionResponse {
+    /// The correlation key [`crate::engine::TuiEngine::respond_permission`]
+    /// sends this answer back on.
+    pub fn request_id(&self) -> &str {
+        &self.pending.request_id
+    }
 }
 
 /// One entry in an engine-supplied slash-command registry.

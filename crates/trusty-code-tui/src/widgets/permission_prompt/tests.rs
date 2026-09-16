@@ -5,7 +5,9 @@
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
-use super::{ANSWER_HINTS, PROMPT_HEIGHT, draw_permission_prompt, permission_prompt_lines};
+use super::{
+    ANSWER_HINTS, PROMPT_HEIGHT, draw_permission_prompt, permission_prompt_lines, prompt_height,
+};
 use crate::app::{ReplApp, apply};
 use crate::event::ReplEvent;
 use crate::model::PendingPermission;
@@ -23,16 +25,18 @@ fn pending(subject: &str) -> PendingPermission {
     }
 }
 
-/// Render the prompt into a `WIDTH`x[`PROMPT_HEIGHT`] buffer and return its
-/// rows, trailing blanks trimmed.
+/// Render the prompt into a `WIDTH`x`prompt_height(app)` buffer and return
+/// its rows, trailing blanks trimmed. Sizes the backend the way
+/// `crate::layout::draw` sizes the real chunk, so a row the layout would clip
+/// is a row this helper cannot see either.
 fn rows(app: &ReplApp) -> Vec<String> {
-    let mut terminal =
-        Terminal::new(TestBackend::new(WIDTH, PROMPT_HEIGHT)).expect("construct terminal");
+    let height = prompt_height(app).max(PROMPT_HEIGHT);
+    let mut terminal = Terminal::new(TestBackend::new(WIDTH, height)).expect("construct terminal");
     terminal
         .draw(|f| draw_permission_prompt(f, app, f.area()))
         .expect("draw prompt");
     let buf = terminal.backend().buffer();
-    (0..PROMPT_HEIGHT)
+    (0..height)
         .map(|y| {
             (0..WIDTH)
                 .map(|x| buf[(x, y)].symbol())
@@ -91,12 +95,48 @@ fn prompt_advertises_every_answer_key() {
 #[test]
 fn prompt_with_an_empty_subject_keeps_its_height() {
     assert_eq!(
-        permission_prompt_lines(&pending("")).len(),
+        permission_prompt_lines(&pending(""), None).len(),
         PROMPT_HEIGHT as usize
     );
     assert_eq!(
-        permission_prompt_lines(&pending("a\nb\nc")).len(),
+        permission_prompt_lines(&pending("a\nb\nc"), None).len(),
         PROMPT_HEIGHT as usize
+    );
+}
+
+/// #3422: a prompt reopened by a failed answer leads with the retry line, so
+/// the operator sees their answer was LOST rather than re-asked.
+#[test]
+fn prompt_shows_the_retry_line_after_a_failed_answer() {
+    let mut app = app_with_prompt("rm -rf build");
+    app.permission_error = Some("answer failed (connection reset) — retry".to_string());
+    let rendered = rows(&app);
+    assert!(
+        rendered[0].contains("answer failed (connection reset) — retry"),
+        "{rendered:?}"
+    );
+    assert!(
+        rendered.join("\n").contains("rm -rf build"),
+        "the question itself must still be readable: {rendered:?}"
+    );
+}
+
+/// The layout must reserve the retry row, or it renders into cells the
+/// prompt's chunk never got (#3422).
+#[test]
+fn prompt_height_grows_by_one_row_for_a_retry_line() {
+    let no_prompt = ReplApp::new("tcode", "bob");
+    assert_eq!(prompt_height(&no_prompt), 0);
+
+    let mut app = app_with_prompt("rm -rf build");
+    assert_eq!(prompt_height(&app), PROMPT_HEIGHT);
+
+    app.permission_error = Some("answer failed (timed out) — retry".to_string());
+    assert_eq!(prompt_height(&app), PROMPT_HEIGHT + 1);
+    assert_eq!(
+        permission_prompt_lines(&pending("rm -rf build"), app.permission_error.as_deref()).len(),
+        prompt_height(&app) as usize,
+        "reserved rows must match rendered rows"
     );
 }
 

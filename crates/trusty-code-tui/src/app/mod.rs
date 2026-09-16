@@ -296,6 +296,16 @@ pub struct ReplApp {
     /// [`TuiModel::take_pending_permission_response`], same as
     /// [`Self::pending_submit`].
     pub pending_permission_response: Option<PermissionResponse>,
+    /// Why the last answer to [`Self::pending_permission`] never reached the
+    /// backend (#3422), rendered as an inline retry line on the reopened
+    /// prompt; `None` on a prompt that has not been answered yet.
+    ///
+    /// Why: reopening the prompt alone would look like the backend asked
+    /// twice. The operator needs to know their answer was lost, not
+    /// re-asked, before choosing again.
+    /// What: set by [`crate::event::ReplEvent::PermissionAnswerFailed`],
+    /// cleared whenever the prompt is opened, answered, or resolved.
+    pub permission_error: Option<String>,
     /// Whether a response is currently streaming in. Drives the input
     /// composer's placeholder text.
     pub busy: bool,
@@ -399,6 +409,7 @@ impl ReplApp {
             active_picker: None,
             pending_permission: None,
             pending_permission_response: None,
+            permission_error: None,
             busy: false,
             streaming_idx: None,
             delegations: Vec::new(),
@@ -641,20 +652,22 @@ impl ReplApp {
     /// outcome in the scrollback; this method records nothing, because the
     /// TUI's belief about the decision is not evidence that it was applied.
     /// What: no-op when no prompt is open. Otherwise takes the prompt and
-    /// stages [`Self::pending_permission_response`] addressed to its
-    /// `request_id`.
+    /// stages [`Self::pending_permission_response`] carrying it whole, so a
+    /// relay that fails can hand the same request back (#3422 — see
+    /// [`crate::event::ReplEvent::PermissionAnswerFailed`]). Also clears
+    /// [`Self::permission_error`]: this attempt has not failed yet, and a
+    /// stale retry line must not survive onto it.
     /// Test: `reduce::tests::permission_key_y_answers_allow_once`,
     /// `reduce::tests::permission_key_a_answers_allow_for_session`,
     /// `reduce::tests::permission_key_n_answers_deny`,
-    /// `reduce::tests::permission_unbound_key_leaves_the_prompt_pending`.
+    /// `reduce::tests::permission_unbound_key_leaves_the_prompt_pending`,
+    /// `crate::run::tests::dispatch_pending_permission_answer_failure_reopens_the_prompt`.
     pub fn answer_permission(&mut self, answer: PermissionAnswer) {
         let Some(pending) = self.pending_permission.take() else {
             return;
         };
-        self.pending_permission_response = Some(PermissionResponse {
-            request_id: pending.request_id,
-            answer,
-        });
+        self.permission_error = None;
+        self.pending_permission_response = Some(PermissionResponse { pending, answer });
     }
 
     /// Push a line onto `history`, deduping an immediate repeat.
