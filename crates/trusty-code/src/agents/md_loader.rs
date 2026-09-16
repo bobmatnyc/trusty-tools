@@ -51,8 +51,13 @@ use super::config::{AgentConfig, AgentInfo, LlmParams, SystemPrompt, ToolsConfig
 /// A missing parent directory, an unreadable file stem, or any
 /// `AgentBuildError` (not found, cycle, depth exceeded, malformed
 /// frontmatter) is surfaced as a descriptive `anyhow::Error` — never a panic.
+/// #8129: a disk document declaring only Claude Code's `tools:` vocabulary
+/// additionally gets that grant translated into a tcode allowlist by
+/// `agents::claude_tools::apply_claude_tools_fallback`, which the embedded
+/// projection paths below deliberately do not call.
 /// Test: `load_md_agent_base_case`, `load_md_agent_missing_file_errors`,
-/// `load_md_agent_with_extends_resolves_chain`.
+/// `load_md_agent_with_extends_resolves_chain`,
+/// `agents::claude_tools::tests::translates_the_shared_version_control_grant`.
 pub fn load_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
     let source_dir = path
         .parent()
@@ -75,7 +80,14 @@ pub fn load_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
     let metadata = agent_metadata_from_str(&composed);
     let body = extract_body(&composed);
 
-    let mut config = project_to_agent_config(name, metadata, body);
+    let mut config = project_to_agent_config(name, metadata.clone(), body);
+    // #8129: a DISK agent authored for Claude Code declares its grant as
+    // `tools: [Read, Bash, ...]`. `project_to_agent_config` ignores that
+    // vocabulary (#7683), leaving `allowed: None` — every tool allowed, the
+    // opposite of the author's grant. Translate it when, and only when, the
+    // document declared no `tcode_tools:`. Embedded agents never take this
+    // path, so the roster's #7683 behaviour is unchanged.
+    super::claude_tools::apply_claude_tools_fallback(&mut config, &metadata);
     // #7948: parse the file's OWN bytes — `compose_agent` does not re-emit
     // `permissions:`, so a block is not inherited through `extends:`. A
     // malformed block fails the load; it never degrades to "no permissions".
@@ -126,7 +138,7 @@ pub(crate) fn project_embedded_md(default_name: &str, raw: &str) -> anyhow::Resu
 ///
 /// Why: [`project_embedded_md`] handles tcode's own 3 defaults, none of
 /// which declare `extends:`. The bundled tm agent catalog (5 `BASE-*`
-/// templates + 28 coding-relevant roster agents) DOES use `extends:`
+/// templates + 26 coding-relevant roster agents) DOES use `extends:`
 /// chains -- e.g. `rust-engineer` extends `base-engineer` extends
 /// `base-agent` -- and [`compose_agent`] can't resolve those because it
 /// requires a real `source_dir` to scan, which embedded `&'static str`
@@ -146,7 +158,7 @@ pub(crate) fn project_embedded_md(default_name: &str, raw: &str) -> anyhow::Resu
 /// `anyhow::Error`, never a panic. Called from
 /// `crate::agents::load_embedded_default_agents` for every
 /// `crate::assets::EmbeddedAgent::Composed` entry in `DEFAULT_AGENTS` (Slice
-/// E3, #2958) -- the 28 roster agents are dispatchable defaults as of this
+/// E3, #2958; 26 since #8129) -- the roster agents are dispatchable defaults as of this
 /// slice.
 /// Test: `project_embedded_md_with_extends_resolves_rust_engineer_from_base_engineer`,
 /// `project_embedded_md_with_extends_unknown_name_errors`,
@@ -299,7 +311,9 @@ pub(crate) fn extract_body(composed: &str) -> String {
 ///   t.allowed.as_ref())` consumer, which treats an absent `[tools]` section
 ///   (outer `None`) and a present-but-unset `allowed` identically — so always
 ///   wrapping in `Some(ToolsConfig { allowed })` is safe and matches the
-///   instructed direct-map).
+///   instructed direct-map). #8129 narrowed the "IGNORED" half to the EMBEDDED
+///   paths only: [`load_md_agent`] now translates a disk document's `tools:`
+///   through `agents::claude_tools` when it declared no `tcode_tools:`.
 /// - composed prose body -> `system_prompt.content`.
 /// - `skills:` -> `system_prompt.append_skills` (direct map, #2074). This was
 ///   deliberately DROPPED until `crate::agents::describe` gave it a consumer:

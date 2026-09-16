@@ -14,7 +14,7 @@
 //! only — a coexisting `*.toml` is warned about and skipped, never parsed),
 //! and `load_all_agents` for loading every discovered `.md` config.
 //! `load_all_agents` falls back to `crate::assets::DEFAULT_AGENTS` (#2895;
-//! expanded from 3 to 31 agents in Slice E3, #2958) when the *parsed* result
+//! expanded from 3 to 34 agents by Slice E3 (#2958) and #8129) when the *parsed* result
 //! is empty — not merely when no paths were discovered — so a
 //! `.claude/agents/` dir that exists but holds only unparseable (or
 //! exclusively orphaned-`.toml`) configs still yields a usable roster instead
@@ -30,6 +30,10 @@
 //!
 //! [`discover_agents`]: crate::agents::discover_agents
 
+// #8129: Claude Code `tools:` -> tcode allowlist translation, applied only on
+// the disk load path so an imported Claude Code agent carries an enforced
+// grant instead of an ignored one.
+pub(crate) mod claude_tools;
 pub mod config;
 // #2074: materialize the embedded roster to `<project>/.trusty-code/agents/`
 // with a manifest and recorded provenance, reusing trusty-agents-common's
@@ -286,7 +290,7 @@ pub enum ResolveAgentError {
 /// `run_task::resolve_agent_model_slug`, and
 /// `tools::delegate::DelegateToAgentTool`'s pre-flight check — read
 /// `<dir>/<name>.md` directly by single-agent name, with no embedded
-/// consultation at all, so the 31-agent roster was unreachable from a real
+/// consultation at all, so the 34-agent roster was unreachable from a real
 /// CLI run on a fresh project with no `.claude/agents/`. This is the ONE
 /// shared resolution helper all of them now route through, so the
 /// disk-wins/embedded-fallback precedence is written and tested exactly
@@ -440,19 +444,19 @@ pub fn available_agent_names(dir: &Path) -> Vec<String> {
 mod tests {
     use super::*;
 
-    /// The 33-name default embedded roster, in `crate::assets::DEFAULT_AGENTS`'s
+    /// The 34-name default embedded roster, in `crate::assets::DEFAULT_AGENTS`'s
     /// declared order (Slice E3, #2958; `pm` added for #3437, `ticketing` for
-    /// #4027) — shared by
+    /// #4027, `version-control` for #8129) — shared by
     /// every fallback test in this module so the expected list is written
     /// once, not duplicated per-test with the risk of one copy drifting from
     /// another.
     ///
     /// Why: three separate fallback scenarios (empty dir, all-invalid dir,
-    /// only-orphaned-toml dir) all assert the identical 33-name outcome; a
+    /// only-orphaned-toml dir) all assert the identical 34-name outcome; a
     /// single source avoids a silent typo in one copy passing review
     /// unnoticed.
     /// What: tcode's original 4 (`engineer`, `qa-agent`, `code-reviewer`,
-    /// `pm`) followed by the 29 roster names, alphabetical, matching
+    /// `pm`) followed by the 30 remaining roster names, alphabetical, matching
     /// `DEFAULT_AGENTS`'s literal declaration order.
     /// Test: every `load_all_agents_falls_back_*` test below.
     fn expected_default_agent_names() -> Vec<&'static str> {
@@ -487,8 +491,11 @@ mod tests {
             "svelte-engineer",
             "tauri-engineer",
             // #4027: non-coding ticketing specialist for the cross-product bridge.
+            // #8129 replaced the shared body with a tcode-native one.
             "ticketing",
             "typescript-engineer",
+            // #8129: the branch/commit/push/PR half of the delivery workflow.
+            "version-control",
             "web-qa",
             "web-ui-engineer",
         ]
@@ -638,10 +645,10 @@ mod tests {
     ///
     /// Why: This is the whole point of #2895 — a fresh project must not
     /// start with zero agents. As of Slice E3 (#2958) the bundled roster is
-    /// 31 agents, not 3.
-    /// What: Load from a nonexistent dir; expect exactly the 31-agent
+    /// 34 agents, not 3.
+    /// What: Load from a nonexistent dir; expect exactly the 34-agent
     /// embedded roster, in `crate::assets::DEFAULT_AGENTS`'s declared order —
-    /// the original 3 defaults intact, followed by the 28 roster agents.
+    /// the original 4 defaults intact, followed by the other 30.
     /// Test: this test.
     #[test]
     fn load_all_agents_falls_back_to_embedded_when_disk_empty() {
@@ -661,7 +668,7 @@ mod tests {
     /// exists but is entirely malformed.
     /// What: One `broken.md` (an `extends:` cycle — a real `compose_agent`
     /// failure) on disk, nothing else; `load_all_agents` returns the
-    /// 31-agent bundled roster, not `[]`.
+    /// 34-agent bundled roster, not `[]`.
     /// Test: this test.
     #[test]
     fn load_all_agents_falls_back_to_embedded_when_disk_all_invalid() {
@@ -686,7 +693,7 @@ mod tests {
     /// fallback compose correctly: warning is a side effect, not a
     /// substitute for a real agent.
     /// What: one `legacy.toml` on disk, no `.md`; `load_all_agents` returns
-    /// the 31-agent bundled roster.
+    /// the 34-agent bundled roster.
     /// Test: this test.
     #[test]
     fn load_all_agents_falls_back_when_disk_has_only_orphaned_toml() {

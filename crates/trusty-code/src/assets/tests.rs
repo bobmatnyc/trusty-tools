@@ -13,14 +13,15 @@
 use super::*;
 use crate::agents::md_loader::{project_embedded_md, project_embedded_md_with_extends};
 
-/// Every embedded agent `.md` parses (directly for the 3 originals, via the
-/// in-memory extends composer for the 28 roster agents), and its frontmatter
-/// `name:` matches the table key it is filed under.
+/// Every embedded agent `.md` parses (directly for the 8 tcode-native
+/// `Direct` agents, via the in-memory extends composer for the 26 roster
+/// agents), and its frontmatter `name:` matches the table key it is filed
+/// under.
 ///
 /// Why: A typo in either the `.md` frontmatter or the table entry would
 /// silently break `agents::load_all_agents`'s embedded-fallback at runtime
 /// instead of failing fast in CI. This is also the acceptance test for Slice
-/// E3 (#2958): every one of the 33 entries must actually compose (a `Composed`
+/// E3 (#2958): every one of the 34 entries must actually compose (a `Composed`
 /// variant that panics here rather than resolving would otherwise only be
 /// caught at runtime by `load_embedded_default_agents`'s log-and-skip path).
 /// Test: this test.
@@ -28,9 +29,9 @@ use crate::agents::md_loader::{project_embedded_md, project_embedded_md_with_ext
 fn default_agents_parse_and_names_match() {
     assert_eq!(
         DEFAULT_AGENTS.len(),
-        33,
-        "4 originals (engineer, qa-agent, code-reviewer, pm) + 28 roster agents \
-         + ticketing (#4027)"
+        34,
+        "4 originals (engineer, qa-agent, code-reviewer, pm) + 26 roster agents \
+         + the 4 delivery-workflow agents (#8129, which absorbed #4027's ticketing)"
     );
     for agent in DEFAULT_AGENTS {
         let cfg = match agent {
@@ -145,7 +146,7 @@ fn default_agents_field_identical_to_retired_toml() {
 }
 
 /// The embedded fallback still fires when the disk `.claude/agents` dir is
-/// empty, and yields the full 33-agent roster with the original 4 defaults
+/// empty, and yields the full 34-agent roster with the original 4 defaults
 /// intact as the first four entries — proving Slice E3's roster expansion
 /// (and #3437's `pm` addition) did not disturb the original fallback wiring
 /// `.md` (#2897 Slice C) established.
@@ -154,22 +155,23 @@ fn default_agents_field_identical_to_retired_toml() {
 /// with no `.claude/agents/` must still boot with `engineer`/`qa-agent`/
 /// `code-reviewer`/`pm` available, exactly as it did when the defaults were
 /// TOML — Slice E3 only ADDS the roster agents after them (28, plus
-/// `ticketing` from #4027), never replaces or reorders the originals.
+/// `ticketing` from #4027; #8129 made four of them tcode-native `Direct`
+/// agents), never replaces or reorders the originals.
 /// What: calls `crate::agents::load_all_agents` on a nonexistent directory;
 /// asserts the returned names' first four entries are exactly
-/// `["engineer", "qa-agent", "code-reviewer", "pm"]` and the full 33-name
+/// `["engineer", "qa-agent", "code-reviewer", "pm"]` and the full 34-name
 /// list matches `crate::assets::DEFAULT_AGENTS`'s declared order with no
 /// duplicates.
 /// Test: this test.
 #[test]
-fn embedded_fallback_still_fires_and_yields_33_agents_with_original_4_intact() {
+fn embedded_fallback_still_fires_and_yields_34_agents_with_original_4_intact() {
     let agents = crate::agents::load_all_agents(std::path::Path::new("/nonexistent/agents/dir"));
     let names: Vec<&str> = agents.iter().map(|a| a.agent.name.as_str()).collect();
 
     assert_eq!(
         names.len(),
-        33,
-        "33-agent roster: 4 originals + 28 roster + ticketing (#4027)"
+        34,
+        "34-agent roster: 4 originals + 26 roster + 4 delivery-workflow (#8129)"
     );
     assert_eq!(
         &names[..4],
@@ -197,7 +199,7 @@ fn embedded_fallback_still_fires_and_yields_33_agents_with_original_4_intact() {
 /// `BASE-*` entry leaking into the dispatchable roster would let a caller
 /// invoke a template fragment (no concrete role, designed to be composed
 /// into a leaf agent, not run standalone) as if it were a real agent.
-/// What: asserts none of the 33 `DEFAULT_AGENTS` names matches any of the 5
+/// What: asserts none of the 34 `DEFAULT_AGENTS` names matches any of the 5
 /// base template names (case-insensitive, since the source table keys them
 /// `BASE-QA.md` while `extends:` references use `base-qa`).
 /// Test: this test.
@@ -213,7 +215,7 @@ fn base_templates_are_never_dispatchable() {
     }
 }
 
-/// No two entries in the 33-agent `DEFAULT_AGENTS` roster share a dispatch
+/// No two entries in the 34-agent `DEFAULT_AGENTS` roster share a dispatch
 /// name — in particular, trusty-mpm's own `engineer` agent (excluded from
 /// the roster upstream specifically because it collides with tcode's
 /// `engineer` default) does not sneak back in under any composed entry.
@@ -223,13 +225,13 @@ fn base_templates_are_never_dispatchable() {
 /// default)" — this test is the regression pin for that exclusion, and a
 /// general guard against any future roster addition silently shadowing an
 /// existing dispatch name.
-/// What: collects all 33 names, dedupes, asserts the length is unchanged;
+/// What: collects all 34 names, dedupes, asserts the length is unchanged;
 /// separately asserts `"engineer"` appears exactly once.
 /// Test: this test.
 #[test]
-fn no_name_collisions_across_the_33_agent_roster() {
+fn no_name_collisions_across_the_34_agent_roster() {
     let names: Vec<&str> = DEFAULT_AGENTS.iter().map(|a| a.name()).collect();
-    assert_eq!(names.len(), 33);
+    assert_eq!(names.len(), 34);
 
     let mut deduped = names.clone();
     deduped.sort_unstable();
@@ -237,7 +239,7 @@ fn no_name_collisions_across_the_33_agent_roster() {
     assert_eq!(
         deduped.len(),
         names.len(),
-        "no name collisions across the 33-agent roster: {names:?}"
+        "no name collisions across the 34-agent roster: {names:?}"
     );
 
     assert_eq!(
@@ -296,29 +298,126 @@ fn restricted_reviewer_agents_carry_read_only_tools() {
     }
 }
 
-/// `documentation` and `research` are embedded straight from the shared asset
-/// crate and stay unrestricted (`tools: None` — all tools allowed), per Bob's
-/// explicit 2026-07-18 ruling that they build docs and research reports
-/// rather than issue verdicts.
+/// `research` is embedded straight from the shared asset crate and stays
+/// unrestricted (`tools.allowed: None` — all tools allowed), per Bob's
+/// explicit 2026-07-18 ruling that it builds research reports rather than
+/// issuing verdicts.
 ///
 /// Why: distinguishes "no override was accidentally added" from "an override
 /// was added but with the wrong value" — the previous test only pins the
-/// four restricted agents; this one pins that the two agents Bob explicitly
-/// exempted were NOT swept up by the same change.
-/// What: composes both via `project_embedded_md_with_extends` and asserts
-/// `cfg.tools.allowed` is `None`.
+/// four restricted agents; this one pins that the agent Bob explicitly
+/// exempted was NOT swept up by the same change. `documentation` shared this
+/// test until #8129 replaced the shared body with a tcode-native one that
+/// DOES declare `tcode_tools:`; its allowlist is pinned by
+/// `delivery_workflow_agents_are_dispatchable_with_bash` instead, and that
+/// is a change of agent SOURCE, not a reversal of the 2026-07-18 ruling —
+/// the tcode-native body grants read/write/edit/bash, strictly more than the
+/// reviewer-intent four get.
+/// What: composes `research` via `project_embedded_md_with_extends` and
+/// asserts `cfg.tools.allowed` is `None`.
 /// Test: this test.
 #[test]
-fn documentation_and_research_remain_unrestricted() {
-    for name in ["documentation", "research"] {
-        let cfg = project_embedded_md_with_extends(name)
-            .unwrap_or_else(|e| panic!("failed to compose '{name}': {e}"));
+fn research_remains_unrestricted() {
+    let cfg = project_embedded_md_with_extends("research")
+        .unwrap_or_else(|e| panic!("failed to compose 'research': {e}"));
+    assert_eq!(
+        cfg.tools.and_then(|t| t.allowed),
+        None,
+        "'research' must remain unrestricted (no tcode_tools: override)"
+    );
+}
+
+/// The four #8129 delivery-workflow agents are dispatchable `Direct` roster
+/// entries whose `tcode_tools:` allowlist grants `bash` and `finish_task`.
+///
+/// Why: this is the acceptance test for #8129. `bash` is the ONLY tool that
+/// reaches `git`, `gh` and `cargo`, so an agent that lost it could not do
+/// the job its body describes; `finish_task` is how any agent returns a
+/// result at all. Before #8129 three of these four were `Composed` entries
+/// carrying only Claude Code's `tools:` vocabulary, which #7683 makes this
+/// runtime ignore — they projected to `None` (every tool allowed), the
+/// opposite of an explicit grant, and `version-control` was absent entirely.
+/// What: asserts each name is a `Direct` entry in `DEFAULT_AGENTS`, projects
+/// it through the SAME path `load_embedded_default_agents` uses, and asserts
+/// the projected allowlist is a non-empty `Some(_)` containing `bash` and
+/// `finish_task`. Also pins each one's declared model, since the dispatch
+/// cost of `documentation` riding on `haiku` is a deliberate choice.
+/// Test: this test.
+#[test]
+fn delivery_workflow_agents_are_dispatchable_with_bash() {
+    let expected_models = [
+        ("ticketing", "sonnet"),
+        ("version-control", "sonnet"),
+        ("local-ops", "sonnet"),
+        ("documentation", "haiku"),
+    ];
+
+    for (name, model) in expected_models {
+        let md = DEFAULT_AGENTS
+            .iter()
+            .find_map(|a| match a {
+                EmbeddedAgent::Direct { name: n, md } if *n == name => Some(*md),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                panic!("'{name}' must be a tcode-native Direct entry in DEFAULT_AGENTS")
+            });
+
+        let cfg = project_embedded_md(name, md)
+            .unwrap_or_else(|e| panic!("delivery-workflow agent '{name}' failed to load: {e}"));
+
         assert_eq!(
-            cfg.tools.and_then(|t| t.allowed),
-            None,
-            "'{name}' must remain unrestricted (no tools: override)"
+            cfg.agent.model.as_deref(),
+            Some(model),
+            "'{name}' must declare model: {model}"
+        );
+
+        let allowed = cfg
+            .tools
+            .and_then(|t| t.allowed)
+            .unwrap_or_else(|| panic!("'{name}' must declare an explicit tcode_tools allowlist"));
+        assert!(
+            allowed.iter().any(|t| t == "bash"),
+            "'{name}' must be able to run git/gh/cargo: {allowed:?}"
+        );
+        assert!(
+            allowed.iter().any(|t| t == "finish_task"),
+            "'{name}' must be able to return a result: {allowed:?}"
         );
     }
+}
+
+/// `ticketing` and `version-control` each instruct the agent to report its
+/// artifact URL on a line prefixed `ISSUE:` / `PR:`.
+///
+/// Why: the PM's #8129 delegation guidance tells it to carry those URLs
+/// forward into the next brief. That contract lives in two places — the
+/// producing agent's body and `pm.md`'s instruction to parse it — and a
+/// silent edit to either half leaves the PM parsing for a prefix no agent
+/// emits.
+/// What: asserts the literal prefix appears in each producing agent's body
+/// and that `pm.md` names both.
+/// Test: this test.
+#[test]
+fn workflow_agents_declare_the_prefixes_the_pm_parses() {
+    assert!(
+        TICKETING_MD.contains("ISSUE:"),
+        "ticketing must report its issue URL on an `ISSUE:` line"
+    );
+    assert!(
+        VERSION_CONTROL_MD.contains("PR:"),
+        "version-control must report its PR URL on a `PR:` line"
+    );
+    for token in ["ticketing", "version-control", "local-ops", "documentation"] {
+        assert!(
+            PM_MD.contains(token),
+            "pm.md's delegation guidance must name '{token}'"
+        );
+    }
+    assert!(
+        PM_MD.contains("ISSUE:") && PM_MD.contains("PR:"),
+        "pm.md must name both parseable result prefixes"
+    );
 }
 
 /// `crate::assets::DEFAULT_AGENTS`'s 28 `EmbeddedAgent::Composed` entries
@@ -476,8 +575,10 @@ fn default_skills_names_are_unique() {
     }
 }
 
-/// `EMBEDDED_TM_AGENT_SOURCES` (Slice E2, #2958) has exactly 34 entries (5
-/// `BASE-*` templates + 28 roster agents), every key is unique, and every
+/// `EMBEDDED_TM_AGENT_SOURCES` (Slice E2, #2958) has exactly 31 entries (5
+/// `BASE-*` templates + 26 roster agents — #8129 removed `ticketing.md`,
+/// `local-ops.md` and `documentation.md`, whose dispatch names tcode-native
+/// `Direct` agents took over), every key is unique, and every
 /// entry's raw content opens with a frontmatter fence.
 ///
 /// Why: `agents::md_loader::project_embedded_md_with_extends` builds an
@@ -490,8 +591,8 @@ fn default_skills_names_are_unique() {
 /// content string opens with `---`.
 /// Test: this test.
 #[test]
-fn embedded_tm_agent_sources_has_34_entries_and_unique_keys() {
-    assert_eq!(EMBEDDED_TM_AGENT_SOURCES.len(), 34);
+fn embedded_tm_agent_sources_has_31_entries_and_unique_keys() {
+    assert_eq!(EMBEDDED_TM_AGENT_SOURCES.len(), 31);
     let mut keys: Vec<String> = EMBEDDED_TM_AGENT_SOURCES
         .iter()
         .map(|(name, _)| name.to_lowercase())
@@ -536,28 +637,37 @@ fn ticketing_is_dispatchable_for_cross_product_delegation() {
     assert_ne!(cfg.agent.name, "pm", "must not silently fall back to pm");
 }
 
-/// #4027: `ticketing` is embedded from the shared asset unmodified, the same
-/// treatment `research` gets — never a pinned deviation.
+/// #8129: no delivery-workflow dispatch name is ALSO resolvable from
+/// [`EMBEDDED_TM_AGENT_SOURCES`], so there is exactly one body behind each.
 ///
-/// Why: makes the intent visible at the point of use — the ticketing persona
-/// has no tcode-specific restriction, because its non-coding property is
-/// enforced at the trusty-agents bridge (#4026's `NON_CODING_TARGETS` floor),
-/// not here. Since consolidation there is no copy to compare, so this is what
-/// catches a `tcode_tools:` line being added to the shared asset by mistake.
-/// What: asserts the embedded source carries no `tcode_tools:` frontmatter
-/// override (which is what the four deliberately-forked files add). Its plain
-/// `tools:` key is NOT that override — since #7683 every roster agent carries
-/// one, and it names Claude Code's vocabulary, which this runtime ignores.
+/// Why: #8129 replaced three shared bodies with tcode-native ones under the
+/// same dispatch names. Leaving the shared entry in the source table would
+/// make `project_embedded_md_with_extends("ticketing")` and
+/// `project_embedded_md("ticketing", TICKETING_MD)` return DIFFERENT prompts
+/// and different tool grants for the same name — which one a caller got
+/// would depend on which projection path it happened to take. This replaces
+/// #4027's `ticketing_copy_carries_no_tcode_only_tools_restriction`, whose
+/// premise (ticketing is a byte-parity copy of the shared asset) #8129
+/// retired.
+/// What: asserts each of the four names is absent from the source table and
+/// present as an `EmbeddedAgent::Direct` entry.
 /// Test: this test.
 #[test]
-fn ticketing_copy_carries_no_tcode_only_tools_restriction() {
-    let (_, md) = EMBEDDED_TM_AGENT_SOURCES
-        .iter()
-        .find(|(k, _)| *k == "ticketing.md")
-        .expect("ticketing.md must be in the embedded source table");
-    let frontmatter = md.split("---").nth(1).expect("frontmatter fence");
-    assert!(
-        !frontmatter.contains("tcode_tools:"),
-        "ticketing is a byte-parity copy, not a pinned deviation"
-    );
+fn delivery_workflow_names_resolve_to_exactly_one_body() {
+    for name in ["ticketing", "version-control", "local-ops", "documentation"] {
+        let key = format!("{name}.md");
+        assert!(
+            !EMBEDDED_TM_AGENT_SOURCES
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case(&key)),
+            "'{key}' must not stay in the shared source table — a tcode-native \
+             Direct agent owns that dispatch name"
+        );
+        assert!(
+            DEFAULT_AGENTS
+                .iter()
+                .any(|a| matches!(a, EmbeddedAgent::Direct { name: n, .. } if *n == name)),
+            "'{name}' must be a Direct roster entry"
+        );
+    }
 }

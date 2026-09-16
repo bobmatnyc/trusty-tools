@@ -28,11 +28,14 @@
 #
 #   2. NO RE-COPY — the successor to the parity check. Consolidation is only
 #      durable if nobody re-adds a local copy of a shared agent. trusty-code's
-#      agents directory must therefore contain EXACTLY the 8 accounted files:
-#      the 4 pinned deviations above plus 4 tcode-only defaults ($TCODE_ONLY)
+#      agents directory must therefore contain EXACTLY the 12 accounted files:
+#      the 4 pinned deviations above plus 8 tcode-only defaults ($TCODE_ONLY)
 #      that have no shared counterpart. Any other `.md` appearing there is a
 #      reintroduced duplicate — the precise regression the one-copy ruling
-#      forbids — and fails here.
+#      forbids — and fails here. A tcode-only file may SHARE a basename with a
+#      shared asset without being a copy of it (#8129's four delivery-workflow
+#      agents do): what makes it tcode-only is that it was authored here for
+#      tcode's tool surface, with no upstream body to reconcile against.
 #
 # What: two checks, plus a floor. Neither walks the shared roster looking for
 #   drift, because a single file cannot drift from itself; both are about
@@ -86,17 +89,26 @@ PINS="scripts/agent-asset-pins.tsv"
 # `engineer.md` deliberately does NOT track the shared `engineer.md`, which is
 # excluded from tcode's roster specifically to avoid that name collision;
 # `pm.md` was added for #3437 as tcode's own orchestrator default.
-TCODE_ONLY="engineer.md qa-agent.md code-reviewer.md pm.md"
+# #8129 added four more: the delivery-workflow agents. They share a BASENAME
+# with a shared asset but not a body — each is a short, tcode-authored persona
+# scoped to tcode's tool surface (`tcode_tools:` including `bash`), not a fork
+# of the trusty-mpm file, which is written for a harness tcode does not run.
+# There is no upstream content to reconcile against, so they are TCODE_ONLY and
+# carry no pin. See the "Delivery-workflow agents" doc block in
+# crates/trusty-code/src/assets/mod.rs.
+TCODE_ONLY="engineer.md qa-agent.md code-reviewer.md pm.md \
+ticketing.md version-control.md local-ops.md documentation.md"
 
 # The 4 files with a Bob-approved deliberate deviation from the shared source
 # (Slice E3, PR #3041). Pinned by SHARED source hash, never byte-compared.
 DEVIATED_FILES="code-analyzer.md code-critic.md qa.md web-qa.md"
 
-# The exact number of `.md` files trusty-code may carry: 4 deviated + 4
-# tcode-only. A gate that examined nothing must never report OK (#4618), and
-# after consolidation this count IS the scan floor — it is exact, not a
-# minimum, because any additional file is by definition a re-copied duplicate.
-EXPECTED_TCODE_FILES=8
+# The exact number of `.md` files trusty-code may carry: 4 deviated + 8
+# tcode-only (#8129 raised the tcode-only half from 4). A gate that examined
+# nothing must never report OK (#4618), and after consolidation this count IS
+# the scan floor — it is exact, not a minimum, because any additional file is by
+# definition a re-copied duplicate.
+EXPECTED_TCODE_FILES=12
 
 # ---------------------------------------------------------------------------
 # Mode parsing
@@ -266,7 +278,7 @@ for base in "${DEVIATED_ARR[@]}"; do
   fi
 done
 
-# --- 2. No re-copy. trusty-code's agents dir must hold ONLY the 8 accounted
+# --- 2. No re-copy. trusty-code's agents dir must hold ONLY the 12 accounted
 #        files; anything else is a shared asset copied back in. ---
 #
 # #4618: the enumeration is materialised into a temp file rather than consumed
@@ -310,7 +322,7 @@ done < "$TCODE_LIST"
 # --- 3. Exact-count floor (#4618). Assert we examined what we expected to. ---
 if [ "$SEEN_COUNT" -ne "$EXPECTED_TCODE_FILES" ]; then
   echo "FAIL: FILE COUNT — examined ${SEEN_COUNT} trusty-code agent file(s), expected" >&2
-  echo "      exactly ${EXPECTED_TCODE_FILES} (4 pinned deviations + 4 tcode-only defaults)." >&2
+  echo "      exactly ${EXPECTED_TCODE_FILES} (4 pinned deviations + 8 tcode-only defaults)." >&2
   echo "      Fewer means a fork or default was deleted, or the enumeration broke;" >&2
   echo "      more means a shared asset was copied back in. A gate that scans" >&2
   echo "      nothing cannot fail, so this is a failure, not an OK (issue #4618)." >&2

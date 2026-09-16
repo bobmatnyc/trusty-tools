@@ -244,6 +244,56 @@ target already exists, so every entry is refused.
 Plugins are deliberately not copied: their provenance cannot be vouched for, so
 `.claude/plugins/` stays discoverable in place through the compatibility root.
 
+#### How an imported agent's frontmatter maps onto `tcode`
+
+An agent `.md` written for Claude Code — trusty-mpm's whole catalog, and most
+of what a user already has in `.claude/agents/` — uses a frontmatter dialect
+`tcode` reads directly. The mapping:
+
+| Frontmatter key | Becomes |
+|---|---|
+| `name:`, `role:`, `description:` | the agent's identity, as declared |
+| `model:` | the agent's model, normalised to a full slug |
+| `max_tokens:` | the LLM output budget |
+| `extends:` | resolved against the sibling `BASE-*.md` files in the same directory |
+| `skills:` | the agent's declared skills, reported by `agents.describe` |
+| `tcode_tools:` | the tool allowlist, verbatim — `tcode`'s own vocabulary |
+| `tools:` | translated from Claude Code's vocabulary into the allowlist, when `tcode_tools:` is absent |
+| anything else | ignored, not an error |
+
+`tools:` and `tcode_tools:` name different vocabularies, so they cannot be read
+as one list. `tcode_tools:` always wins when both are present. When only
+`tools:` is present, each Claude Code name maps onto the `tcode` tools serving
+the same capability:
+
+| Claude Code | `tcode` |
+|---|---|
+| `Read` | `read_file`, `list_dir` |
+| `Write` | `write_file`, `write_files` |
+| `Edit` | `edit` |
+| `Grep` / `Glob` | `grep` / `glob` |
+| `Bash`, `BashOutput`, `KillShell` | `bash` |
+| `Skill` | `use_skill` |
+| `Task` | `delegate_to_agent` |
+| `mcp__trusty-search` | `search_code` |
+
+A name with no `tcode` equivalent (`WebFetch`, `WebSearch`, every other
+`mcp__*` server) is dropped rather than refused — a Claude Code catalog names
+tools this runtime does not host, and rejecting the document over one of them
+would make the import unusable. `finish_task` is always granted: it has no
+Claude Code spelling, and without it an agent cannot return a result.
+
+Two consequences worth knowing before you import:
+
+- **Bring the `BASE-*.md` templates.** An agent declaring `extends: base-ops`
+  composes against the sibling files in the same directory. Import the whole
+  `.claude/agents/` tree, not a hand-picked pair of files.
+- **An imported agent is narrower than an embedded one.** The embedded roster
+  ignores `tools:` entirely (it is composed in-memory, not loaded from disk),
+  so a roster agent declaring no `tcode_tools:` may call anything. The same
+  file imported to disk is gated to its translated grant. That is the intended
+  direction: the author wrote a grant, and on disk it is enforced.
+
 **What counts as a secret-bearing key.** The key is split into words on
 separators and camelCase boundaries, each word is de-pluralised, then matched
 word-exactly against `token`, `secret`, `password`, `passphrase`, `credential`,
@@ -269,6 +319,15 @@ repository itself.
 tier, description, model, and a `has_warnings` flag. `agents.describe` answers
 the question after it — which definition actually runs under a name, and whether
 anything about it needs attention.
+
+The embedded roster covers a full delivery workflow. Besides `pm`, `engineer`
+and the review/QA agents, it lists four workflow specialists the PM delegates
+to in turn: `ticketing` (search, file, label and transition GitHub issues via
+`gh`), `version-control` (branch, commit, push, open the PR via `git` and
+`gh`), `local-ops` (build, test, lint, version bump, changelog) and
+`documentation` (README and reference prose). `ticketing` and `version-control`
+report their artifact URL on an `ISSUE:` / `PR:` line so the PM can carry it
+into the next brief.
 
 ```json
 {"method": "agents.describe", "params": {"name": "engineer"}}
