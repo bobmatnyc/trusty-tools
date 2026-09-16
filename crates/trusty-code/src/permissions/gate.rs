@@ -246,11 +246,16 @@ pub trait PermissionEvents: Send + Sync {
     /// sat out the full [`DEFAULT_ASK_TIMEOUT_SECS`] per `ask` rule and then
     /// denied anyway. This is the question that distinguishes the two, asked of
     /// the same object that publishes the prompt.
-    /// What: no default — an implementor must answer deliberately, because
-    /// answering `true` wrongly restores the 300 s stall and answering `false`
-    /// wrongly denies an operator who was watching. A sink that cannot tell
-    /// must answer `false`: an event nobody consumes is a prompt nobody sees.
+    /// What: the answer is about `session_id` and no other — a process-wide
+    /// reading is wrong, because one watched PM session dispatching headless
+    /// `task.run` sub-agents would then mark every sub-agent as watched and
+    /// restore the stall for all of them. No default: an implementor must
+    /// answer deliberately, since `true` wrongly restores the 300 s stall and
+    /// `false` wrongly denies an operator who was watching. A sink that cannot
+    /// tell must answer `false` — an event nobody consumes is a prompt nobody
+    /// sees.
     /// Test: `ask_without_an_attached_prompter_denies_immediately`,
+    /// `an_ask_on_an_unwatched_session_is_headless_while_a_sibling_is_watched`,
     /// `ask_emits_requested_then_resolved`.
     fn prompter_attached(&self, session_id: &str) -> bool;
 }
@@ -404,6 +409,7 @@ impl PermissionGate {
     ///
     /// Test: `headless_ask_is_denied`, `allow_asks_mode_permits_an_ask`,
     /// `ask_without_an_attached_prompter_denies_immediately`,
+    /// `an_ask_on_an_unwatched_session_is_headless_while_a_sibling_is_watched`,
     /// `an_ask_with_no_event_sink_is_headless`,
     /// `allow_asks_mode_emits_an_audit_event`,
     /// `timed_out_ask_is_denied`, `client_deny_is_denied`,

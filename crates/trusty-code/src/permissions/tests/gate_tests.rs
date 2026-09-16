@@ -402,6 +402,71 @@ async fn an_ask_with_no_event_sink_is_headless() {
     );
 }
 
+/// (#8100) The cross-session regression, against the REAL `SessionRegistry`
+/// sink: one attached session and one headless sibling. The sibling's `ask`
+/// denies at once; the watched session's still suspends for its client.
+///
+/// Why this shape: the first cut read `crate::events::bus().receiver_count()`,
+/// which is daemon-global, so the sibling read as watched and went back to the
+/// 300 s stall. Both contexts carry the real [`DEFAULT_ASK_TIMEOUT_SECS`]
+/// budget, so a daemon-global reading fails here in 200 ms rather than hanging.
+#[tokio::test]
+async fn an_ask_on_an_unwatched_session_is_headless_while_a_sibling_is_watched() {
+    use crate::binding::ProjectBinding;
+    use crate::permissions::DEFAULT_ASK_TIMEOUT_SECS;
+    use crate::session::registry::SessionRegistry;
+    use uuid::Uuid;
+
+    let registry = Arc::new(SessionRegistry::new());
+    let watched = registry.create("watched".to_string(), None, ProjectBinding::None);
+    let headless = registry.create("headless".to_string(), None, ProjectBinding::None);
+    let broker = PermissionBroker::new();
+    let (notify, _held) = tokio::sync::mpsc::unbounded_channel();
+    registry
+        .attach(&watched.id, Uuid::new_v4(), notify)
+        .expect("attach must succeed");
+
+    let ctx_for = |session_id: &str| PermissionContext {
+        mode: PermissionMode::Default,
+        timeout: Duration::from_secs(DEFAULT_ASK_TIMEOUT_SECS),
+        session_id: session_id.to_string(),
+        ask: Some(broker.session(session_id)),
+        events: Some(Arc::clone(&registry) as Arc<dyn PermissionEvents>),
+        root: None,
+    };
+    let agent = Arc::new(ask_bash());
+
+    let denied = tokio::time::timeout(
+        Duration::from_millis(200),
+        ctx_for(&headless.id)
+            .gate_for(Arc::clone(&agent), "agent-1")
+            .resolve("bash", &json!({"command": "ls"})),
+    )
+    .await
+    .expect("an unwatched session must not wait out the ask timeout");
+    assert_eq!(
+        denied,
+        Outcome::Denied {
+            rule: "bash".to_string(),
+            source: DenySource::Headless
+        }
+    );
+
+    // The watched session still suspends: it reaches the 200 ms boundary
+    // unresolved, which is what "waiting for its client" looks like.
+    let pending = tokio::time::timeout(
+        Duration::from_millis(200),
+        ctx_for(&watched.id)
+            .gate_for(agent, "agent-2")
+            .resolve("bash", &json!({"command": "ls"})),
+    )
+    .await;
+    assert!(
+        pending.is_err(),
+        "the watched session's ask must still be waiting for its client: {pending:?}"
+    );
+}
+
 /// `allow-asks` permits an `ask` a headless run could not put to anyone.
 #[tokio::test]
 async fn allow_asks_mode_permits_an_ask() {

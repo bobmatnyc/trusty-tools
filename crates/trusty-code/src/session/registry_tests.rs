@@ -804,23 +804,100 @@ async fn record_permission_requested_publishes_event() {
     ));
 }
 
-/// (#8100) A live event consumer is what the registry reports as an attached
-/// prompter — the same receiver `session.attach`, `session.events` and the SSE
-/// route each hold for as long as their client is connected.
+/// (#8100) A `session.attach` is what the registry reports as an attached
+/// prompter, and ONLY for the session it attached to.
 ///
-/// Only this direction is asserted: the bus is process-global, so a test
-/// binary running in parallel cannot prove the count is zero. The gate covers
-/// the no-prompter arm with its own sink.
+/// This replaces `prompter_attached_while_an_event_consumer_lives`, which
+/// asserted the daemon-global `crate::events::bus().receiver_count()` reading
+/// that shipped first: a bare bus subscriber is not a prompter for any
+/// particular session, and treating it as one marked every headless
+/// `task.run` sub-agent as watched whenever one console was attached anywhere.
 #[tokio::test]
-async fn prompter_attached_while_an_event_consumer_lives() {
+async fn prompter_attached_while_a_session_attachment_lives() {
     use crate::permissions::PermissionEvents;
 
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, ProjectBinding::None);
-    let consumer = crate::events::subscribe();
+    let watched = registry.create("watched".to_string(), None, ProjectBinding::None);
+    let headless = registry.create("headless".to_string(), None, ProjectBinding::None);
+    let (tx, _rx) = notify_channel();
 
-    assert!(registry.prompter_attached(&session.id));
+    // A bare bus consumer is NOT a prompter — the bug this replaced.
+    let consumer = crate::events::subscribe();
+    assert!(!registry.prompter_attached(&watched.id));
+
+    registry
+        .attach(&watched.id, Uuid::new_v4(), tx)
+        .expect("attach must succeed");
+
+    assert!(registry.prompter_attached(&watched.id));
+    assert!(
+        !registry.prompter_attached(&headless.id),
+        "a sibling session nobody attached to must stay headless"
+    );
     drop(consumer);
+}
+
+/// (#8100) The claim is released by its guard's `Drop`, so a client that dies
+/// without calling `session.detach` stops counting on its own.
+#[tokio::test]
+async fn prompter_claim_is_released_when_its_guard_drops() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, ProjectBinding::None);
+
+    let claim = registry.claim_prompter(&session.id);
+    assert!(claim.is_some(), "a live session must be claimable");
+    assert_eq!(registry.prompter_count(&session.id), 1);
+
+    // A second, overlapping prompter — the two must not mask each other.
+    let second = registry.claim_prompter(&session.id);
+    assert_eq!(registry.prompter_count(&session.id), 2);
+    drop(second);
+    assert_eq!(registry.prompter_count(&session.id), 1);
+
+    drop(claim);
+    assert_eq!(registry.prompter_count(&session.id), 0);
+}
+
+/// (#8100) FAIL-SAFE: a session the registry cannot find has no prompter, so
+/// its `ask` denies instead of waiting for an answer nobody can give.
+#[tokio::test]
+async fn prompter_attached_for_an_unknown_session_is_false() {
+    use crate::permissions::PermissionEvents;
+
+    let registry = SessionRegistry::new();
+
+    assert_eq!(registry.prompter_count("no-such-session"), 0);
+    assert!(!registry.prompter_attached("no-such-session"));
+    assert!(
+        registry.claim_prompter("no-such-session").is_none(),
+        "nothing may be claimed on a session that does not exist"
+    );
+}
+
+/// (#8100) FAIL-SAFE: the count stays readable after an unrelated panic
+/// poisons the registry mutex, so a poisoned lock never fabricates a prompter.
+#[tokio::test]
+async fn prompter_count_survives_a_poisoned_registry_lock() {
+    let registry = Arc::new(SessionRegistry::new());
+    let session = registry.create("t".to_string(), None, ProjectBinding::None);
+    let claim = registry.claim_prompter(&session.id);
+
+    let poisoner = Arc::clone(&registry);
+    let panicked = std::thread::spawn(move || {
+        let _held = poisoner.sessions.lock();
+        panic!("poison the registry mutex");
+    })
+    .join();
+    assert!(panicked.is_err(), "the helper thread must have panicked");
+    assert!(
+        registry.sessions.is_poisoned(),
+        "the mutex must actually be poisoned for this test to mean anything"
+    );
+
+    assert_eq!(registry.prompter_count(&session.id), 1);
+    assert_eq!(registry.prompter_count("no-such-session"), 0);
+    drop(claim);
+    assert_eq!(registry.prompter_count(&session.id), 0);
 }
 
 /// (#7948) The resolution half reaches the stream too, naming its source.
