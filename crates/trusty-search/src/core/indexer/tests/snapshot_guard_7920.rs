@@ -324,6 +324,45 @@ async fn a_second_unreadable_snapshot_never_clobbers_the_first_sidecar() {
     );
 }
 
+/// MEDIUM #7980: two callers that both probe first must not pick one slot.
+///
+/// Why: choosing the sidecar name with `exists()` and renaming afterwards is a
+/// TOCTOU. Two writers preserving the same snapshot both probe, both see the
+/// same free name, and `rename(2)` replaces its destination WITHOUT error — so
+/// the second rename destroys the copy the first had just preserved, which is
+/// the one thing this module promises never happens. A thread race cannot be
+/// asserted deterministically, so this drives the seam directly: two claims
+/// with NO rename in between is exactly "both callers observed the same probe
+/// result", and the atomic `create_new` claim is what makes them differ.
+/// What: claims twice, asserts the slots are distinct, then completes both
+/// renames and asserts both payloads survive.
+/// Test: this IS the test.
+#[test]
+fn two_slot_claims_without_an_intervening_rename_never_collide() {
+    use crate::core::indexer::snapshot_guard::{claim_sidecar_slot, CORRUPT_SUFFIX};
+
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join(format!("chunks.json{CORRUPT_SUFFIX}"));
+
+    let first = claim_sidecar_slot(&base).expect("first claim");
+    let second = claim_sidecar_slot(&base).expect("second claim");
+    assert_ne!(
+        first, second,
+        "#7980: a claim that does not reserve its slot hands the same name to \
+         the next caller, whose rename then destroys the first preserved copy"
+    );
+
+    // Both renames land, because each caller owns its own destination.
+    let a = dir.path().join("a.json");
+    let b = dir.path().join("b.json");
+    std::fs::write(&a, b"first").unwrap();
+    std::fs::write(&b, b"second").unwrap();
+    std::fs::rename(&a, &first).unwrap();
+    std::fs::rename(&b, &second).unwrap();
+    assert_eq!(std::fs::read(&first).unwrap(), b"first");
+    assert_eq!(std::fs::read(&second).unwrap(), b"second");
+}
+
 /// MEDIUM #7980: a preservation that cannot run must refuse, not overwrite.
 ///
 /// Why: the self-heal is admissible only because the unreadable bytes are kept.

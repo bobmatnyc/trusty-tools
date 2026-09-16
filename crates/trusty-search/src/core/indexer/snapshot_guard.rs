@@ -93,8 +93,9 @@ pub(crate) enum WriterShape {
 /// destroy, and that ruling is what makes admitting the write safe — the file
 /// is preserved under a name nothing reads, so a later forensic pass still has
 /// it while the live path is free for a corpus that is actually readable.
-/// What: renames `path` to `<path>.corrupt`, and on collision appends `.1`,
-/// `.2`, … — the numbered anti-clobber rule
+/// What: CLAIMS a free `<path>.corrupt[.N]` slot with
+/// [`claim_sidecar_slot`], then renames `path` onto the slot it created.
+/// The numbered form is the anti-clobber rule
 /// [`trusty_common::redb_open::incompatible_backup_path`] already uses for the
 /// same job, rather than a timestamp. A millisecond stamp is not a uniqueness
 /// guarantee (two writers inside one tick collide, and a coarse-resolution
@@ -109,21 +110,61 @@ fn preserve_unreadable(path: &Path) -> std::io::Result<PathBuf> {
         name.push(CORRUPT_SUFFIX);
         path.with_file_name(name)
     };
-    let kept = if base.exists() {
-        // An earlier occurrence already set one aside — never clobber it.
-        (1..u32::MAX)
-            .map(|n| {
-                let mut s = base.as_os_str().to_os_string();
-                s.push(format!(".{n}"));
-                PathBuf::from(s)
-            })
-            .find(|p| !p.exists())
-            .unwrap_or(base)
-    } else {
-        base
-    };
+    let kept = claim_sidecar_slot(&base)?;
+    // The destination is the empty file this call just created, so the rename
+    // replaces only our own claim.
     std::fs::rename(path, &kept)?;
     Ok(kept)
+}
+
+/// Most numbered sidecar slots tried before the preservation gives up.
+///
+/// Why: the loop must terminate. Exhaustion returns `Err`, which puts the
+/// caller on the refusal — never on a clobbering fallback, which is what the
+/// old `unwrap_or(base)` was.
+const MAX_SIDECAR_SLOTS: u32 = 1_000;
+
+/// Atomically claim a free `<base>[.N]` slot by creating it (#7980).
+///
+/// Why: choosing the name with `exists()` and renaming afterwards is a TOCTOU.
+/// Two writers preserving the same snapshot both probe, both see the SAME free
+/// name, and `rename(2)` replaces its destination without error — so the second
+/// rename silently destroys the copy the first had just preserved, defeating the
+/// "nothing is ever destroyed" guarantee this module exists to keep.
+/// What: tries `base`, then `base.1`, `base.2`, … up to [`MAX_SIDECAR_SLOTS`],
+/// returning the first one `create_new` actually created. `create_new` is the
+/// atomic claim: the kernel picks the winner and every loser sees
+/// `AlreadyExists` and advances. Any other I/O error — and exhaustion — returns
+/// `Err`, so the caller refuses the write rather than destroying bytes it could
+/// not preserve.
+/// Test: `two_slot_claims_without_an_intervening_rename_never_collide`,
+/// `a_second_unreadable_snapshot_never_clobbers_the_first_sidecar`.
+pub(super) fn claim_sidecar_slot(base: &Path) -> std::io::Result<PathBuf> {
+    for n in 0..MAX_SIDECAR_SLOTS {
+        let candidate = if n == 0 {
+            base.to_path_buf()
+        } else {
+            let mut s = base.as_os_str().to_os_string();
+            s.push(format!(".{n}"));
+            PathBuf::from(s)
+        };
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(_) => return Ok(candidate),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!(
+            "every sidecar slot up to {MAX_SIDECAR_SLOTS} beside {} is taken",
+            base.display()
+        ),
+    ))
 }
 
 /// Suffix for a `chunks.json` this daemon could not parse (#7980).

@@ -81,8 +81,12 @@ pub(super) async fn stop_pollers(
 /// succeeded but the live corpus is held, so the run's staged work was
 /// discarded and `finish_reindex` must report `PromotionDeferred` rather than
 /// `Complete`. Distinguished from the other `promoted == false` arms by the
-/// deferral record the gate writes, so a path-resolution or re-open failure
-/// (which quarantine already covers) does not borrow this status.
+/// deferral record the gate writes, so a path-resolution or rename/re-open
+/// failure does not borrow this status. Quarantine does NOT cover those arms
+/// here: it makes them visible on `GET /indexes/:id/status` and `search_health`
+/// and says nothing about the run's terminal status, which is why
+/// `finish_reindex` re-reads `is_write_quarantined` after this call and routes
+/// both through `finish::settled_promotion_status` (#7920).
 /// Test: `reindex_walks_directory_and_emits_events` exercises the commit path;
 /// `super::prune_tests::force_rebuild_drops_chunks_for_a_deleted_file` covers
 /// the reconciliation;

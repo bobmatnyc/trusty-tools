@@ -42,6 +42,35 @@ use super::stages::{
 use super::staging;
 use super::validate;
 
+/// The terminal status a run owes when its staged corpus did NOT land, or
+/// `None` when the promotion settled and `Complete` is earned (#7991, #7920).
+///
+/// Why: `finish_reindex` is two hundred lines of teardown wrapped around this
+/// one decision, and the decision has been wrong twice. First a refused
+/// promotion reported `Complete` (#7991); then the fix for that excluded ONLY
+/// the refusal, leaving the rename / re-open failure arm — which ends with the
+/// index quarantined and holding no corpus at all — still reporting `Complete`.
+/// Pulling the three-way choice out makes it assertable without standing up a
+/// whole reindex, and makes "Complete means the corpus landed" one function's
+/// property rather than a shape the `if` chain happens to have.
+/// What: `Failed` when the promotion quarantined the index (nothing is
+/// attached, so the run damaged state and must be re-run), else
+/// `PromotionDeferred` when the gate refused (the live corpus is intact and
+/// still serving), else `None`. Quarantine outranks deferral because it is the
+/// more severe state; in practice the two are mutually exclusive, since the
+/// refusal returns before the staging release a quarantine follows.
+/// Test: `super::live_corpus_lock_tests::a_rename_failure_is_not_a_completed_reindex`,
+/// `super::live_corpus_lock_tests::a_deferred_promotion_is_reported_in_status_and_is_not_complete`.
+pub(super) fn settled_promotion_status(deferred: bool, quarantined: bool) -> Option<ReindexStatus> {
+    if quarantined {
+        Some(ReindexStatus::Failed)
+    } else if deferred {
+        Some(ReindexStatus::PromotionDeferred)
+    } else {
+        None
+    }
+}
+
 /// The hash-cache type used by the reindex pipeline.
 ///
 /// Why: avoids repeating the verbose `Arc<DashMap<PathBuf, String>>` across
@@ -276,6 +305,11 @@ pub(super) async fn finish_reindex(
     stage_timings.hnsw_commit_ms = hnsw_commit_started.elapsed().as_millis() as u64;
 
     // Issue #603: resolve the atomic corpus swap.
+    // #7920: captured BEFORE the swap so only a quarantine the PROMOTION caused
+    // changes this run's terminal status. An index already quarantined at boot
+    // can still be reindexed — `service::reconcile` fires one automatically —
+    // and that run never stages, so it is not this failure and is unaffected.
+    let quarantined_before_swap = handle.indexer.read().await.is_write_quarantined();
     let corpus_commit_started = Instant::now();
     let promotion_deferred = resolve_corpus_swap(
         &handle,
@@ -289,6 +323,12 @@ pub(super) async fn finish_reindex(
         force,
     )
     .await;
+    // #7920: the promotion's rename / re-open failure arm releases the staging
+    // store and quarantines the index, so it ends the run holding NO corpus.
+    // `reindex_outcome` above is computed before the swap runs and nothing
+    // re-read this afterwards, so that run still reported `Complete`.
+    let promotion_quarantined =
+        !quarantined_before_swap && handle.indexer.read().await.is_write_quarantined();
     stage_timings.corpus_commit_ms = corpus_commit_started.elapsed().as_millis() as u64;
 
     // Issue #601: a zero-vector embed failure on a full-pipeline index is a HARD
@@ -415,13 +455,12 @@ pub(super) async fn finish_reindex(
             map.insert(index_id.clone(), Instant::now());
         }
         ReindexStatus::AbortedMemory
-    } else if promotion_deferred {
-        // #7991: every stage succeeded, but the staged corpus was never
-        // promoted — the live `index.redb` is still at its pre-reindex state.
-        // Reporting Complete here is what let a deferred run look healthy.
-        // No `last_indexed_at` stamp and no HEAD-SHA marker: nothing landed, so
-        // a stamp would claim the live corpus is current when it is not.
-        ReindexStatus::PromotionDeferred
+    } else if let Some(unsettled) =
+        settled_promotion_status(promotion_deferred, promotion_quarantined)
+    {
+        // #7991 / #7920: nothing landed, so no `last_indexed_at` stamp and no
+        // HEAD-SHA marker — either would claim the live corpus is current.
+        unsettled
     } else {
         // Issue #75: refresh the captured HEAD SHA.
         let new_sha = crate::core::git::head_sha(&handle.root_path);

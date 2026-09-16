@@ -16,6 +16,7 @@
 //! `a_deferred_promotion_is_reported_in_status_and_is_not_complete`,
 //! `a_landed_promotion_clears_an_earlier_deferral`,
 //! `a_rename_failure_quarantines_and_is_not_reported_as_a_deferral`,
+//! `a_rename_failure_is_not_a_completed_reindex`,
 //! `the_next_runs_probe_discards_a_deferred_runs_staging_corpus`.
 
 use super::live_corpus_lock::acquire_for_promotion;
@@ -259,36 +260,11 @@ async fn a_landed_promotion_clears_an_earlier_deferral() {
 /// Test: this IS the test.
 #[tokio::test]
 async fn a_rename_failure_quarantines_and_is_not_reported_as_a_deferral() {
-    use super::finish_teardown::resolve_corpus_swap;
-    use super::{staging::StagingResolution, validate::ReindexOutcome};
-
-    let (_dir, handle, live, tmp) = staged_index("rename-fail-7991");
-    let colocated = live.parent().expect("colocated dir").to_path_buf();
-    let live_before = std::fs::read(&live).unwrap();
-
-    // A read-only parent refuses `rename` on macOS and Linux alike while
-    // leaving the already-created files openable — so the lock gate admits the
-    // promotion and the rename is what fails. Restored before any assertion can
-    // panic, so the tempdir is still removable.
-    let original = std::fs::metadata(&colocated).unwrap().permissions();
-    let mut readonly = original.clone();
-    readonly.set_readonly(true);
-    std::fs::set_permissions(&colocated, readonly).unwrap();
-    let deferred = resolve_corpus_swap(
-        &handle,
-        &handle.id,
-        handle.root_path.as_path(),
-        Some(tmp.as_path()),
-        &StagingResolution::Commit,
-        &ReindexOutcome::Ready,
-        false,
-        true,
-    )
-    .await;
-    std::fs::set_permissions(&colocated, original).unwrap();
+    let (_dir, handle, live, tmp, live_before, outcome) =
+        drive_promotion_over_a_readonly_parent("rename-fail-7991").await;
 
     assert!(
-        !deferred,
+        !outcome.deferred,
         "#7991: a failed rename is a damaged run, not a clean deferral — it must \
          not be reported as PromotionDeferred"
     );
@@ -312,6 +288,117 @@ async fn a_rename_failure_quarantines_and_is_not_reported_as_a_deferral() {
         tmp.exists(),
         "the staging file is still on disk — nothing renamed it away"
     );
+    assert!(
+        outcome.quarantined,
+        "#7920: the promotion is what quarantined this index"
+    );
+}
+
+/// #7920: a rename failure must not report the run as a completed reindex.
+///
+/// Why: `reindex_outcome` is computed BEFORE `resolve_corpus_swap` runs, and
+/// nothing re-read the quarantine afterwards — so the rename/re-open failure
+/// arm released the staging store, quarantined the index, and the run still
+/// pushed `ReindexStatus::Complete` with a fresh `last_indexed_at` stamp and a
+/// HEAD-SHA marker claiming the live corpus was current. Excluding only
+/// `promotion_deferred` fixed half the problem.
+/// What: drives the real promotion into a rename failure, then feeds the two
+/// values `finish_reindex` computes into the real decision function and asserts
+/// the verdict is neither `Complete` nor the deferral's status.
+/// Test: this IS the test.
+#[tokio::test]
+async fn a_rename_failure_is_not_a_completed_reindex() {
+    use super::finish::settled_promotion_status;
+    use super::progress::ReindexStatus;
+
+    let (_dir, _handle, _live, _tmp, _before, outcome) =
+        drive_promotion_over_a_readonly_parent("rename-status-7920").await;
+
+    assert_eq!(
+        settled_promotion_status(outcome.deferred, outcome.quarantined),
+        Some(ReindexStatus::Failed),
+        "#7920: a promotion that quarantined the index cannot report Complete"
+    );
+    assert_eq!(
+        settled_promotion_status(false, false),
+        None,
+        "a settled promotion still earns Complete — the gate must not fire always"
+    );
+}
+
+/// What `finish_reindex` observes around `resolve_corpus_swap`.
+///
+/// Why: the terminal-status decision reads exactly these two values, so a test
+/// that asserts on them is asserting on the real inputs rather than on a
+/// restatement of them.
+struct PromotionOutcome {
+    /// `resolve_corpus_swap`'s return — the gate refused.
+    deferred: bool,
+    /// The index was NOT quarantined before the swap and IS after it.
+    quarantined: bool,
+}
+
+/// Drive a real staged promotion whose rename cannot run (#7920, #7991).
+///
+/// Why: a read-only colocated parent refuses `rename(2)` on macOS and Linux
+/// alike while leaving the already-created live and staging FILES openable, so
+/// the lock gate admits the promotion and the rename is what fails. Two tests
+/// assert on different halves of the same drive; duplicating the permission
+/// dance would risk them drifting apart.
+/// What: returns the tempdir (kept alive by the caller), the handle, the live
+/// and staging paths, the live corpus's bytes from before the attempt, and the
+/// two values `finish_reindex` reads. Permissions are restored before returning
+/// so no assertion can leave an unremovable tempdir.
+/// Test: `a_rename_failure_quarantines_and_is_not_reported_as_a_deferral`,
+/// `a_rename_failure_is_not_a_completed_reindex`.
+async fn drive_promotion_over_a_readonly_parent(
+    index_id: &str,
+) -> (
+    tempfile::TempDir,
+    std::sync::Arc<crate::core::registry::IndexHandle>,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    Vec<u8>,
+    PromotionOutcome,
+) {
+    use super::finish_teardown::resolve_corpus_swap;
+    use super::{staging::StagingResolution, validate::ReindexOutcome};
+
+    let (dir, handle, live, tmp) = staged_index(index_id);
+    let colocated = live.parent().expect("colocated dir").to_path_buf();
+    let live_before = std::fs::read(&live).unwrap();
+    let quarantined_before = handle.indexer.read().await.is_write_quarantined();
+
+    let original = std::fs::metadata(&colocated).unwrap().permissions();
+    let mut readonly = original.clone();
+    readonly.set_readonly(true);
+    std::fs::set_permissions(&colocated, readonly).unwrap();
+    let deferred = resolve_corpus_swap(
+        &handle,
+        &handle.id,
+        handle.root_path.as_path(),
+        Some(tmp.as_path()),
+        &StagingResolution::Commit,
+        &ReindexOutcome::Ready,
+        false,
+        true,
+    )
+    .await;
+    std::fs::set_permissions(&colocated, original).unwrap();
+
+    // #7920: computed exactly as `finish_reindex` computes it.
+    let quarantined = !quarantined_before && handle.indexer.read().await.is_write_quarantined();
+    (
+        dir,
+        handle,
+        live,
+        tmp,
+        live_before,
+        PromotionOutcome {
+            deferred,
+            quarantined,
+        },
+    )
 }
 
 /// #7991: the doc's claim that a deferred run's staging is NOT adoptable.
