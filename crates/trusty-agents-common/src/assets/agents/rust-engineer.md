@@ -35,34 +35,29 @@ cargo fmt --check                                     # no formatting drift
 🔴 Run `cargo fmt` before the FIRST edit too — an end-only run rewraps files
 already read and can invalidate line numbers still in use (#7635).
 
-🔴 **Renamed/moved a test? Run the project's own doc-pointer lint right
-after, before `cargo test`** — find it via CLAUDE.md or `scripts/`, never
-assume a filename. A stale `Test:` pointer otherwise surfaces only once the
-full suite has paid its runtime: `test_foo` → `test_foo_v2`, call sites
-updated, `cargo test` still green, but a doc pointer naming `test_foo` is now
-wrong.
+🔴 **Renamed/moved a test? Run the project's doc-pointer lint before
+`cargo test`** — find it via CLAUDE.md or `scripts/`, never assume a
+filename. A stale `Test:` pointer survives a green suite: `test_foo` →
+`test_foo_v2` updates call sites but leaves the doc pointer wrong.
 <!-- #8107: name the gate by role, never by a filename only this repo has
      (#7247, #7270) — these assets deploy unchanged into every project. -->
 
 🔴 **`--no-fail-fast` is not optional** — cargo stops issuing further test
 targets after one fails, hiding every target behind it (#5324, PR #5904).
-**An empty-default-feature crate needs `--features` on every test run** —
-read `Cargo.toml` first, name the features that cover your change. Reproduce
-a feature-gated break with `cargo check -p <crate> --all-targets --features
-<set>`; in a cold worktree, `cargo test --no-run --features <set>` first
-keeps the feature-union run inside one invocation (#7552).
+A crate with empty default features needs `--features <set>` named from its
+`Cargo.toml` on every test run; reproduce a feature-gated break with `cargo
+check -p <crate> --all-targets --features <set>` (#7552).
 
 Widen the scope when the change is wider, not by default:
 
 | Change class | Gate before returning |
 |---|---|
-| Docs/comments/changelog only | No Cargo test required |
+| Docs/comments/changelog only | No Cargo test |
 | Localized crate behavior | Targeted regression test + the four commands above |
-| Public API or shared library | The above, plus `cargo check --workspace` and `cargo test -p <consumer> --no-fail-fast` for each directly affected consumer |
-| Cross-crate contract, persistence, security, process lifecycle, release tooling | The above, plus dependent suites and failure-path/concurrency tests |
+| Public API or shared library | The above, plus `cargo check --workspace` and `cargo test -p <consumer> --no-fail-fast` per consumer |
+| Cross-crate contract, persistence, security, release tooling | The above, plus dependent suites and failure-path tests |
 
-`cargo test --workspace` belongs at hardening and release boundaries, not
-every narrow change.
+Reserve `cargo test --workspace` for hardening and release, not routine work.
 
 🔴 A crate with its own multi-lane test script runs that instead — find it
 via CLAUDE.md/`scripts/`, never assume a filename. Same for doc comments; no
@@ -78,6 +73,14 @@ disappear is not — no `#[ignore]`, `cfg`-gating, `--exclude`, or
 When a gate fails, establish whether your branch caused it. If so, fix it
 here; if pre-existing, report "change-specific gates pass; `<gate>` blocked
 by `<canonical issue>`" — never "all tests pass".
+
+### Same-crate batch: gate once
+
+🔴 Several small fixes in one crate land on one branch before the gate runs
+once, not once per fix. Each keeps its own regression test, attribution
+comment, changelog fragment, and `Refs #N` line. Cap a batch at ~5 fixes; a
+fix needing a different crate, or a cross-crate contract change, is reported
+back, not absorbed. (owner ruling 2026-09-16)
 
 ## Workflow
 

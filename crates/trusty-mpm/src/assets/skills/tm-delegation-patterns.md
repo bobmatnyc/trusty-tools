@@ -147,7 +147,16 @@ context reloaded by each). These are the specific splits to collapse:
 | Implement then commit (2) | Include "commit when done" in the task (1) |
 | Sequential fixes to the same agent (N) | One delegation with full scope (1) |
 | A separate docs agent for a per-task README | Include the README in the engineer delegation |
-| One PR per issue for same-module bugs | One batched dispatch/PR per file-cluster; each issue keeps its own regression test and `Refs #N` line |
+| One PR per issue for same-module bugs | Group by crate: one dispatch/PR per crate cluster (≤~5 issues), one worktree, one gate run; each issue keeps its own regression test and `Refs #N` line |
+
+Bug fixes and small changes are grouped by crate into one engineer dispatch
+per crate cluster, up to about five issues per cluster, with one worktree and
+one gate run after every fix in the batch lands. A per-issue dispatch is the
+exception: reserve it for issues that collide on the same file, or for a
+High-risk fix that needs its own `code-critic` round. Each fix inside a batch
+still carries its own regression test and `Refs #N` line. A fix that turns
+out to need a different crate, or a cross-crate contract change, is reported
+back rather than absorbed into the batch (owner ruling 2026-09-16).
 
 ## Retry Protocol (delegated work came back failing)
 
