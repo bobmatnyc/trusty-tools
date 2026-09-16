@@ -62,7 +62,7 @@ const ENGINEER_MODEL_ENV: &str = "TCODE_ENGINEER_MODEL";
 /// (#2207) through as `RunTaskParams.deadline_secs` — final flag/env/default
 /// resolution happens inside `execute_run_task` via `resolve_deadline_secs`;
 /// and `--no-delegate` (#8031) through as `RunTaskParams.no_delegate`, which
-/// drops `delegate_to_agent` from the agent's registry for this run),
+/// swaps `delegate_to_agent` for the named agent's own tools for this run),
 /// prints the human or JSON report, and exits with the report's `ExitCode`. A
 /// missing OpenRouter key is only a config error (exit 2) when the resolved
 /// model actually needs OpenRouter; a pure-Bedrock model needs only AWS
@@ -147,8 +147,8 @@ pub async fn run(
         permission_mode: trusty_code::permissions::PermissionMode::resolve(
             permission_mode_flag.as_deref(),
         ),
-        // #8031: `--no-delegate` — run the named agent alone, no
-        // `delegate_to_agent` tool at all.
+        // #8031: `--no-delegate` — run the named agent alone, with its own
+        // tcode tools in place of `delegate_to_agent`.
         no_delegate,
     };
 

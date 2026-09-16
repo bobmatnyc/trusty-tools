@@ -55,7 +55,8 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// `task::executor` resolve it the same way the legacy path's
 /// `crate::provider::resolve_deadline_secs` does. `no_delegate` (#8031) is
 /// likewise passed straight through as `task.run`'s own `no_delegate` param;
-/// the daemon is what drops the tool from the registry.
+/// the daemon is what swaps `delegate_to_agent` for the named agent's own
+/// tools.
 /// Test: `cli::run_task::tests::run_params_carry_no_delegate`.
 // #8031: the 8th argument crosses clippy's arity gate. Every argument is one
 // `Command::RunTask` clap field passed straight through, so a bundling struct
